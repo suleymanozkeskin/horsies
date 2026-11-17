@@ -204,6 +204,13 @@ const CLAIM_PASS_REQUEST_PARAMETERS: &[StubParameter] = &[
     keyword("lock_keys", "list[int]"),
 ];
 const CLAIM_PASS_PARAMETERS: &[StubParameter] = &[positional("request", "ClaimPassRequest")];
+const QUEUE_STARTS_REQUEST_PARAMETERS: &[StubParameter] = &[
+    keyword("worker_id", "str"),
+    keyword("queues", "list[str]"),
+    keyword("started", "list[tuple[uuid.UUID, datetime.datetime]]"),
+];
+const COUNT_QUEUE_STARTS_PARAMETERS: &[StubParameter] =
+    &[positional("request", "QueueStartsRequest")];
 const MARK_STALE_RUNNING_PARAMETERS: &[StubParameter] = &[
     positional("stale_after_ms", "int"),
     positional("finalizing_stale_after_ms", "int"),
@@ -244,7 +251,7 @@ const MARK_STALE_RUNNING_OUTCOME: &str =
 const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
      CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
 
-const CORE_HANDLE_METHODS: [StubFunction; 21] = [
+const CORE_HANDLE_METHODS: [StubFunction; 22] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -348,6 +355,12 @@ const CORE_HANDLE_METHODS: [StubFunction; 21] = [
         doc: "One claim pass. Writes, in one statement; the dispatch stays with the caller.",
     },
     StubFunction {
+        name: "count_queue_starts_async",
+        parameters: COUNT_QUEUE_STARTS_PARAMETERS,
+        returns: TypeText::FutureOf("QueueStartsRecord | QueueStartsFailed"),
+        doc: "Count the capped queues of one soft-cap start check. Reads only, in one statement; a\ncheck with no queue sends nothing.",
+    },
+    StubFunction {
         name: "release_claims_async",
         parameters: RELEASE_CLAIMS_PARAMETERS,
         returns: TypeText::FutureOf(RELEASE_CLAIMS_OUTCOME),
@@ -426,7 +439,7 @@ const EXCEPTIONS: &[StubException] = &[
     },
 ];
 
-const ARGUMENT_CLASSES: [StubClass; 13] = [
+const ARGUMENT_CLASSES: [StubClass; 14] = [
     StubClass {
         name: "StartNow",
         doc: "Start the task as soon as a worker can claim it.",
@@ -512,6 +525,13 @@ const ARGUMENT_CLASSES: [StubClass; 13] = [
         methods: &[],
     },
     StubClass {
+        name: "QueueStartsRequest",
+        doc: "One frozen soft-cap start check: the capped queues that have held rows, and the started\nclaims (task id, claim generation) whose outcome write has not ended. A naive datetime\nraises TypeError.",
+        constructor: Constructor::Parameters(QUEUE_STARTS_REQUEST_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
         name: "ReleaseClaimsRequest",
         doc: "One frozen release: the claims of one worker, at most 1000, each task once, each with\nthe claim generation of its dispatch. A naive datetime raises TypeError; more claims, a\nrepeated task id or another placement raises ValueError.",
         constructor: Constructor::Parameters(RELEASE_CLAIMS_REQUEST_PARAMETERS),
@@ -520,7 +540,7 @@ const ARGUMENT_CLASSES: [StubClass; 13] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 53] = [
+const RECORD_CLASSES: [StubClass; 55] = [
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -987,6 +1007,20 @@ const RECORD_CLASSES: [StubClass; 53] = [
         methods: &[],
     },
     StubClass {
+        name: "QueueStartsRecord",
+        doc: "The count of each queue of the check: its RUNNING rows plus the started claims still\nCLAIMED. A queue with no counted row is absent: its count is 0.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("starts", "dict[str, int]")],
+        methods: &[],
+    },
+    StubClass {
+        name: "QueueStartsFailed",
+        doc: "The count failed. It wrote nothing.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
         name: "ClaimsReleased",
         doc: "The release statement ran: one row outcome per claim, in the request order.",
         constructor: Constructor::NoConstructor,
@@ -1088,8 +1122,8 @@ const HANDLE_CLASSES: [StubClass; 1] = [StubClass {
     methods: &CORE_HANDLE_METHODS,
 }];
 
-const CLASSES: [StubClass; 67] = {
-    let mut classes = [HANDLE_CLASSES[0]; 67];
+const CLASSES: [StubClass; 70] = {
+    let mut classes = [HANDLE_CLASSES[0]; 70];
     let mut position = 0;
     while position < ARGUMENT_CLASSES.len() {
         classes[1 + position] = ARGUMENT_CLASSES[position];
