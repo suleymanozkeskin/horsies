@@ -11,4 +11,5 @@ pub mod release;
 pub mod schema;
 pub mod stale_claims;
 pub mod stale_running;
+pub mod success;
 pub mod task_info;

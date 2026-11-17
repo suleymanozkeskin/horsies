@@ -179,6 +179,12 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::stale_running::StaleRunningRecovered>()?;
     module.add_class::<operations::stale_running::StaleRunningScanFull>()?;
     module.add_class::<operations::stale_running::StaleRunningScanFailed>()?;
+    module.add_class::<operations::success::SuccessBatchRequest>()?;
+    module.add_class::<operations::success::SuccessApplied>()?;
+    module.add_class::<operations::success::SuccessesWritten>()?;
+    module.add_class::<operations::success::BatchRolledBack>()?;
+    module.add_class::<operations::success::BatchCommitUnknown>()?;
+    module.add_class::<operations::success::WorkflowSuccessApplied>()?;
     module.add_class::<operations::task_info::TaskInfoRecord>()?;
     module.add_class::<operations::task_info::TaskAttemptRecord>()?;
     module.add_class::<operations::task_info::TaskInfoNotFound>()?;
