@@ -10,6 +10,14 @@ LANGUAGE sql AS $$
     SELECT NULL::uuid, NULL::text, NULL::timestamptz, NULL::text, NULL::boolean WHERE FALSE
 $$;
 
+-- The move's duplicate identity guard is a published reader too. This stand-in answers TRUE when the provenance
+-- stand-in finds the id (never) or a clock exception records it.
+CREATE FUNCTION horsies_task_history_duplicate_staged(p_task_id uuid)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (SELECT 1 FROM horsies_task_provenance_staged(p_task_id))
+        OR EXISTS (SELECT 1 FROM horsies_task_history_clock_exceptions AS e WHERE e.task_id = p_task_id)
+$$;
+
 CREATE FUNCTION wft_check(p_condition boolean, p_case text) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
     IF p_condition IS NOT TRUE THEN
