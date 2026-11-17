@@ -217,7 +217,9 @@ pub fn worker_failure_write(
 /// The failed attempt of a child the worker killed or lost: the code of
 /// the end, the retry the policy admits for it, at `placement`, with
 /// Python's error `data`: `task_id` and `worker_id` (Python
-/// `_recover_worker_future_failure`). Pure.
+/// `_recover_worker_future_failure`). The attempt records `message` as its
+/// message and its failed reason; the task's failed reason is not written
+/// (Python `_write_ended_attempt`). Pure.
 pub fn killed_child_write(
     task: &ClaimedTask,
     worker_id: &str,
@@ -240,15 +242,17 @@ pub fn killed_child_write(
         failed_reason: None,
         attempt: AttemptFailure {
             kind: AttemptFailureKind::Failed,
-            error_message: Some(message),
-            failed_reason: None,
+            error_message: Some(message.clone()),
+            failed_reason: Some(message),
         },
     }
 }
 
 /// The `TASK_TIMEOUT` write of an attempt that reached `timeout`, with
 /// Python's error `data`: `task_id`, `timeout_ms`, and, for a shared async
-/// run, `cancel_end` (Python `_settle_timed_out_row`). Pure.
+/// run, `cancel_end` (Python `_settle_timed_out_row`). The attempt records
+/// the timeout text as its message and its failed reason; the task's
+/// failed reason is not written (Python `_write_ended_attempt`). Pure.
 pub fn timeout_write(
     task: &ClaimedTask,
     worker_id: &str,
@@ -270,8 +274,8 @@ pub fn timeout_write(
         failed_reason: None,
         attempt: AttemptFailure {
             kind: AttemptFailureKind::Failed,
-            error_message: Some(message),
-            failed_reason: None,
+            error_message: Some(message.clone()),
+            failed_reason: Some(message),
         },
     }
 }

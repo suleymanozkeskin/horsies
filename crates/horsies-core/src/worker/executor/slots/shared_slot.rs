@@ -38,9 +38,7 @@ use super::seat_runs::{
     RunStopReport, RunWork, SeatRun, SeatRuns, StopReportFrame, StopStep, SHARED_STUCK_BACKSTOP,
 };
 use super::shared::{Accepting, QueuedSeatRun, SharedPoolShared, Take};
-use crate::worker::executor::protocol::{
-    ChildFrame, FailureDetail, ParentFrame, RunRef, SharedResultFrame,
-};
+use crate::worker::executor::protocol::{ChildFrame, ParentFrame, RunRef, SharedResultFrame};
 use crate::worker::executor::supervisor::{
     ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, LossCause, MailboxBound, SendFailure,
 };
@@ -843,9 +841,7 @@ async fn answer_after_exit(
             KillSent::Sent(KillReason::Backstop { run }) if run == seat.run => {
                 end_at_late_backstop_exit(seat.work, seat.run, loss)
             }
-            KillSent::Sent(_) | KillSent::NotSent => AttemptEnd::Crashed {
-                reason: FailureDetail::cut(&late.to_string()),
-            },
+            KillSent::Sent(_) | KillSent::NotSent => AttemptEnd::of_lost_child(&late),
         };
         finish(seat, end);
     }

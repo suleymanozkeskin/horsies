@@ -1277,7 +1277,9 @@ async fn a_fail_closed_kill_reads_as_a_kill_by_the_worker() {
     match answer(receiver).await {
         AttemptEnd::Crashed { reason } => {
             assert!(
-                reason.as_str().starts_with("killed by the worker"),
+                reason
+                    .as_str()
+                    .starts_with("Worker child lost: killed by the worker"),
                 "{reason}"
             );
         }
