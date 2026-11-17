@@ -47,11 +47,24 @@ pub(super) const WORKER: &str = "workflow-port-worker";
 /// where it is.
 pub(super) const PORT_QUEUE: &str = "port_workflow_q";
 
-/// Task options that the core refuses each time it builds a task from them:
-/// a JSON array where the core reads an object (`InvalidTaskOptions`). A node
-/// that stores them raises on every promotion, in the same way as Python's
-/// `BAD_GOOD_UNTIL` row and `PoisonOptionsChild` (`[]` there too).
+/// Task options that are not a JSON object (Python's `PoisonOptionsChild`
+/// uses `[]` too):
+/// - stored on a promoted task node, they fail that node alone with
+///   `WORKER_SERIALIZATION_ERROR` (Python `_build_enqueued_task_params`,
+///   `horsies/core/workflows/engine.py:798-805`; the baseline
+///   `horsies_workflow_task_options_refusal`);
+/// - on the task of a child node that has a `good_until`, the merge of the
+///   deadline into them raises at each child start (Python
+///   `_child_task_options_json`, `horsies/core/workflows/engine.py:425-475`).
 pub(super) const POISON_TASK_OPTIONS: &str = "[]";
+
+/// The process facts that the start write (`horsies_start_attempt`) records
+/// on a RUNNING task row that [`seed_node_task`] seeds. Every write that
+/// moves a row to RUNNING sets them, and the attempt row of a failure copies
+/// them into its NOT NULL columns (`horsies_task_attempts`).
+const SEEDED_WORKER_PID: i32 = 4242;
+const SEEDED_WORKER_HOSTNAME: &str = "port-seed-host";
+const SEEDED_WORKER_PROCESS_NAME: &str = "port-seed-process";
 
 /// A stored success policy that does not parse: a case is a number, not an
 /// object (Python's `BAD_POLICY`).
@@ -609,7 +622,10 @@ impl LiveStatus {
 
 /// Inserts the live task row of a workflow node: an engine-minted row with no
 /// fingerprint, key or retained input. A CLAIMED or RUNNING row is held by
-/// [`WORKER`] since `NOW()`; a CLAIMED row's claim runs one more minute.
+/// [`WORKER`] since `NOW()`; a CLAIMED row's claim runs one more minute; a
+/// RUNNING row carries the process facts of the start write
+/// ([`SEEDED_WORKER_PID`], [`SEEDED_WORKER_HOSTNAME`],
+/// [`SEEDED_WORKER_PROCESS_NAME`]).
 /// Returns the claim generation (`claimed_at`), `None` for a PENDING row.
 pub(super) async fn seed_node_task(
     pool: &PgPool,
@@ -633,13 +649,20 @@ pub(super) async fn seed_node_task(
              CASE WHEN $2 = 'PENDING' THEN NULL ELSE $3 END,
              CASE WHEN $2 = 'CLAIMED' THEN NOW() + INTERVAL '1 minute' END,
              CASE WHEN $2 = 'RUNNING' THEN NOW() END,
-             NULL, NULL, NULL, NULL, NULL, 0, 0, NULL, NULL, TRUE, NOW(), FALSE, NULL, NULL
+             NULL, NULL,
+             CASE WHEN $2 = 'RUNNING' THEN $4 END,
+             CASE WHEN $2 = 'RUNNING' THEN $5 END,
+             CASE WHEN $2 = 'RUNNING' THEN $6 END,
+             0, 0, NULL, NULL, TRUE, NOW(), FALSE, NULL, NULL
          )
          RETURNING claimed_at",
     )
     .bind(task_id)
     .bind(status.as_sql())
     .bind(WORKER)
+    .bind(SEEDED_WORKER_PID)
+    .bind(SEEDED_WORKER_HOSTNAME)
+    .bind(SEEDED_WORKER_PROCESS_NAME)
     .fetch_one(pool)
     .await
     .expect("seed the workflow task row")

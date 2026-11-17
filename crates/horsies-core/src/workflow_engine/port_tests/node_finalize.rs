@@ -22,7 +22,7 @@ use super::support::{
 use crate::broker::attempt_writes::{finish_workflow_success, FinishWorkflowSuccess};
 use crate::broker::core_rows::StatementLog;
 use crate::broker::lifecycle_tests::support::{
-    database_options, unpinged_single_connection_pool, wait_until_idle, WireProxy,
+    database_options, unpinged_single_connection_pool, WireProxy,
 };
 use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
@@ -147,20 +147,28 @@ fn ok_json() -> String {
 }
 
 /// The worker's finalize of node A's success under claim generation
-/// `claimed_at`, on `pool` (Python's `_finalize`). Returns the outcome of
-/// phase 1, or the error of the phase that failed.
+/// `claimed_at`, on a broker of `pool` (Python's `_finalize`). Returns the
+/// outcome of phase 1, or the error of the phase that failed.
 async fn finalize(
     pool: &PgPool,
     node_a: &RunningNode,
     claimed_at: DateTime<Utc>,
 ) -> Result<FinalizeOutcome, FinalizeError> {
-    let broker = PostgresBroker::from_pool(pool.clone());
+    finalize_on(&PostgresBroker::from_pool(pool.clone()), node_a, claimed_at).await
+}
+
+/// [`finalize`] on `broker`: phase 1 and phase 2 run on its core pools.
+async fn finalize_on(
+    broker: &PostgresBroker,
+    node_a: &RunningNode,
+    claimed_at: DateTime<Utc>,
+) -> Result<FinalizeOutcome, FinalizeError> {
     let claimed = ClaimedTaskRow {
         claimed_at,
         ..node_a.claimed.clone()
     };
     let outcome = persist_terminal_state(
-        &broker,
+        broker,
         claimed.id,
         TaskResult::Ok(ok_bytes()),
         &claimed,
@@ -180,7 +188,7 @@ async fn finalize(
     };
     if let Some((capacity_notified, form)) = owed {
         finalize_workflow_phase(
-            &broker,
+            broker,
             &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             claimed.id,
             &claimed.queue_name,
@@ -306,6 +314,14 @@ async fn a_replay_of_a_committed_success_runs_phase_two() {
 /// the success commits and its reply never reaches the worker. Phase 1 is a
 /// retryable error; its retry, the same statement on a new connection, is
 /// `AlreadyApplied` and runs phase 2.
+///
+/// The proxy drops the reply to the next request of any connection. A broker
+/// opens its own core pool from the URL of its sqlx pool, so the first
+/// finalize runs on the broker whose main core pool the warm-up used: its one
+/// connection is open and the success statement is prepared on it, and the
+/// success write is the next request, with one reply (Python's
+/// `_one_pooled_connection`). The warm-up returns the connection to the pool
+/// at once, so the finalize takes it within the idle ping limit.
 #[tokio::test]
 #[serial]
 async fn a_lost_reply_is_retried_and_the_replay_runs_phase_two() {
@@ -313,22 +329,27 @@ async fn a_lost_reply_is_retried_and_the_replay_runs_phase_two() {
     let upstream = database_options(&pool);
     let proxy = WireProxy::start(&upstream).await;
     let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-    // Prepare the success statement on the proxied connection, so the write
-    // is one request with one reply.
-    let warm_up = finish_workflow_success(
-        &core_pool_for_test_pool(&proxied),
-        StatementLog::Off,
-        &FinishWorkflowSuccess {
-            task_id: Uuid::new_v4(),
-            fence: OwnedClaim {
-                worker_id: WORKER.to_owned(),
-                claimed_at: Utc::now(),
+    let node_a = run_node_a(&pool, start_chain(&pool, "finalize_lost_reply").await).await;
+    let proxied_broker = PostgresBroker::from_pool(proxied.clone());
+    let warm_up = {
+        let (open, _write) = proxied_broker
+            .core_pools_for_write()
+            .expect("the core pools of the proxied broker");
+        finish_workflow_success(
+            open.main(),
+            proxied_broker.statement_log(),
+            &FinishWorkflowSuccess {
+                task_id: Uuid::new_v4(),
+                fence: OwnedClaim {
+                    worker_id: WORKER.to_owned(),
+                    claimed_at: Utc::now(),
+                },
+                result_json: ok_json(),
             },
-            result_json: ok_json(),
-        },
-    )
-    .await
-    .expect("warm up");
+        )
+        .await
+        .expect("warm up")
+    };
     assert!(
         matches!(
             warm_up,
@@ -336,11 +357,9 @@ async fn a_lost_reply_is_retried_and_the_replay_runs_phase_two() {
         ),
         "{warm_up:?}"
     );
-    wait_until_idle(&proxied).await;
-    let node_a = run_node_a(&pool, start_chain(&pool, "finalize_lost_reply").await).await;
 
     proxy.drop_next_reply();
-    let first = finalize(&proxied, &node_a, node_a.claimed_at()).await;
+    let first = finalize_on(&proxied_broker, &node_a, node_a.claimed_at()).await;
 
     assert!(proxy.reply_was_dropped(), "the proxy relayed the reply");
     match &first {
@@ -676,7 +695,11 @@ enum WakeCase {
 
 /// `test_worker_finalize_workflow_phase.py::test_phase_two_wakes_the_queue_of_the_task_once`
 /// (`node`, `no_node`): phase 2 sends one capacity wake on the channel of
-/// the task's queue, whether or not the task has a node.
+/// the task's queue, whether or not the task has a node. As in Python, the
+/// node and its task are on the queue that phase 2 is given: the node finish
+/// wakes the queue of the node row (`horsies_workflow_node_apply`). The wake
+/// is channel `task_queue_<queue>` with payload `capacity`, as every baseline
+/// write sends it; no receiver reads the payload on a queue channel.
 #[tokio::test]
 #[serial]
 async fn phase_two_wakes_the_queue_of_the_task_once() {
@@ -684,9 +707,11 @@ async fn phase_two_wakes_the_queue_of_the_task_once() {
     for case in [WakeCase::Node, WakeCase::NoNode] {
         let (task_id, is_workflow_task) = match case {
             WakeCase::Node => {
+                let mut wake_node = task_node(0, "finalize_wake_task");
+                wake_node.queue = Some(WAKE_QUEUE.to_owned());
                 let workflow_id = start(
                     &pool,
-                    &spec("finalize_wake", vec![task_node(0, "finalize_wake_task")]),
+                    &spec("finalize_wake", vec![wake_node]),
                     &WorkflowSpecRegistry::new(
                         crate::core::registry::BuilderHookName::SPEC_BUILDER,
                     ),
@@ -708,8 +733,8 @@ async fn phase_two_wakes_the_queue_of_the_task_once() {
         assert!(result.is_ok(), "{case:?}: {result:?}");
         assert_eq!(
             listener.received().await,
-            vec![(WAKE_CHANNEL.to_owned(), format!("capacity:{task_id}"))],
-            "{case:?}"
+            vec![(WAKE_CHANNEL.to_owned(), "capacity".to_owned())],
+            "{case:?}: task {task_id}"
         );
     }
 }
