@@ -5,21 +5,20 @@
 //! Building a handle parses the manifest and starts nothing: no runtime, no
 //! connection. The first operation starts the core of the process and
 //! connects the handle's broker; a failed connect is not kept, so the next
-//! operation connects again.
+//! operation connects again. The lazy handle is the core's
+//! ([`horsies_core::handle::CoreHandle`]), with the client family
+//! `PYTHON`.
 
 use std::future::Future;
 use std::sync::Arc;
 
 use horsies_core::core::lifecycle::OwnedClaim;
+use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
-use horsies_core::{
-    BrokerError, BrokerErrorCode, ClientFamily, PoolProfile, PostgresBroker,
-    SchemaInitializationMode,
-};
+use horsies_core::{BrokerError, BrokerErrorCode, ClientFamily, PoolProfile, PostgresBroker};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
-use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use crate::bridge::blocking::{call_blocking, call_blocking_within};
@@ -64,13 +63,12 @@ use crate::operations::workflow_retention::delete_expired_workflows_operation;
 use crate::process_core::{core_for_call, Core};
 use crate::records::{BrokerFailure, DatabasePingRecord, HandleClosed, Outcome};
 
-/// The manifest of a handle, the pool profile of its process, and its
-/// broker, connected at first use.
+/// The core's lazy handle of a Python process: a manifest, the pool
+/// profile of the process, the client family `PYTHON`, and the broker,
+/// connected at first use. Clones share one handle.
 #[derive(Clone)]
 pub struct BrokerConnection {
-    manifest: Arc<ProducerManifest>,
-    profile: PoolProfile,
-    broker: Arc<OnceCell<Arc<PostgresBroker>>>,
+    handle: Arc<LazyHandle>,
 }
 
 impl BrokerConnection {
@@ -78,79 +76,38 @@ impl BrokerConnection {
     /// nothing: the first operation connects.
     pub fn new(manifest: ProducerManifest, profile: PoolProfile) -> Self {
         Self {
-            manifest: Arc::new(manifest),
-            profile,
-            broker: Arc::new(OnceCell::new()),
+            handle: Arc::new(LazyHandle::new(manifest, profile, ClientFamily::Python)),
         }
     }
 
     /// The connected broker. Connects at the first call; a failure is
-    /// returned and not kept.
+    /// returned and not kept ([`LazyHandle::broker`]).
     pub async fn broker(&self) -> Result<Arc<PostgresBroker>, BrokerError> {
-        self.broker
-            .get_or_try_init(|| connect(&self.manifest, self.profile))
-            .await
-            .map(Arc::clone)
+        self.handle.broker().await
     }
 
     /// The connected broker, with the schema installed once per handle
-    /// first ([`PostgresBroker::ensure_schema_initialized`]: nothing in an
-    /// `OBSERVE_ONLY` or `ASSUME_INITIALIZED` handle), as Python's broker
-    /// installs at its first enqueue or read. A failure of the connect or
-    /// of the install is returned and not kept, so the next call runs it
-    /// again.
+    /// first ([`LazyHandle::initialized_broker`]).
     pub async fn initialized_broker(&self) -> Result<Arc<PostgresBroker>, BrokerError> {
-        let broker = self.broker().await?;
-        broker.ensure_schema_initialized().await?;
-        Ok(broker)
+        self.handle.initialized_broker().await
     }
 
     /// The schema mode of the handle's manifest.
     pub fn schema_mode(&self) -> SchemaMode {
-        self.manifest.schema
+        self.handle.schema_mode()
+    }
+
+    /// The manifest of the handle.
+    fn manifest(&self) -> &ProducerManifest {
+        self.handle.manifest()
     }
 
     /// Whether a connect succeeded on this handle. Starts nothing and waits
-    /// for nothing: a connect still in flight is `NeverConnected`.
-    fn connect_state(&self) -> ConnectState {
-        match self.broker.get() {
-            Some(broker) => ConnectState::Connected(Arc::clone(broker)),
-            None => ConnectState::NeverConnected,
-        }
+    /// for nothing: a connect still in flight is `NeverConnected`, and the
+    /// core of the process may not have started then.
+    fn connect_state(&self) -> HandleConnection {
+        self.handle.connection()
     }
-}
-
-/// Whether a handle holds a connected broker.
-enum ConnectState {
-    /// No connect succeeded: the handle holds no pool, and the core of the
-    /// process may not have started.
-    NeverConnected,
-    Connected(Arc<PostgresBroker>),
-}
-
-async fn connect(
-    manifest: &ProducerManifest,
-    profile: PoolProfile,
-) -> Result<Arc<PostgresBroker>, BrokerError> {
-    let config = manifest
-        .database
-        .to_postgres_config(manifest.send.retain_rerun_input_default);
-    // `AssumeInitialized` runs no schema step, as `ObserveOnly`, and has no
-    // listener (Python's `assume_initialized=True`): a result wait polls.
-    let mode = match manifest.schema {
-        SchemaMode::MigrateAndValidate => SchemaInitializationMode::MigrateAndValidate,
-        SchemaMode::ObserveOnly | SchemaMode::AssumeInitialized => {
-            SchemaInitializationMode::ObserveOnly
-        }
-    };
-    let window = manifest.send.idempotency_reservation_window.as_duration();
-    let broker = PostgresBroker::connect_with_policies(&config, mode, window, profile)
-        .await?
-        .with_client_family(ClientFamily::Python);
-    Ok(Arc::new(match manifest.schema {
-        SchemaMode::AssumeInitialized => broker.without_listener(),
-        SchemaMode::MigrateAndValidate | SchemaMode::ObserveOnly => broker,
-    }))
 }
 
 /// The pool profile of a `CoreHandle`'s process: `PRODUCER` or `WORKER`.
@@ -201,7 +158,7 @@ impl CoreHandle {
     /// The version of the manifest this handle was built from.
     #[getter]
     fn manifest_version(&self) -> u32 {
-        self.connection.manifest.manifest_version.get()
+        self.connection.manifest().manifest_version.get()
     }
 
     /// Close the handle's core pools: `HandleClosed`. No new operation takes
@@ -212,8 +169,8 @@ impl CoreHandle {
     /// opens new core pools. Runs on to its end when the caller leaves.
     fn close(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let broker = match self.connection.connect_state() {
-            ConnectState::NeverConnected => return HandleClosed {}.into_py_any(py),
-            ConnectState::Connected(broker) => broker,
+            HandleConnection::NeverConnected => return HandleClosed {}.into_py_any(py),
+            HandleConnection::Connected(broker) => broker,
         };
         let core = checked_core(py)?;
         call_blocking(
@@ -229,8 +186,8 @@ impl CoreHandle {
     /// a future that is already done, and starts nothing.
     fn close_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let broker = match self.connection.connect_state() {
-            ConnectState::NeverConnected => return done_future(py, HandleClosed {}),
-            ConnectState::Connected(broker) => broker,
+            HandleConnection::NeverConnected => return done_future(py, HandleClosed {}),
+            HandleConnection::Connected(broker) => broker,
         };
         let core = checked_core(py)?;
         call_async(
@@ -1156,10 +1113,11 @@ mod tests {
     #[test]
     fn a_worker_process_handle_keeps_its_profile_and_starts_nothing() {
         let handle = CoreHandle::new(MANIFEST, "WORKER").expect("the manifest is complete");
-        assert_eq!(handle.connection.profile, PoolProfile::Worker);
+        assert_eq!(handle.connection.handle.profile(), PoolProfile::Worker);
+        assert_eq!(handle.connection.handle.family(), ClientFamily::Python);
         assert!(matches!(
             handle.connection.connect_state(),
-            ConnectState::NeverConnected
+            HandleConnection::NeverConnected
         ));
     }
 
@@ -1168,7 +1126,7 @@ mod tests {
         let handle = CoreHandle::new(MANIFEST, "PRODUCER").expect("the manifest is complete");
         assert!(matches!(
             handle.connection.connect_state(),
-            ConnectState::NeverConnected
+            HandleConnection::NeverConnected
         ));
         Python::initialize();
         Python::attach(|py| {
@@ -1179,7 +1137,7 @@ mod tests {
         });
         assert!(matches!(
             handle.connection.connect_state(),
-            ConnectState::NeverConnected
+            HandleConnection::NeverConnected
         ));
     }
 }
