@@ -2,7 +2,7 @@
 //! ([`PostgresBroker::get_class_coverage`]) and the class report
 //! ([`PostgresBroker::get_class_report`]).
 //!
-//! Python reference: `horsies/core/brokers/class_coverage_reads.py`. Python
+//! Python reference: `python/horsies/core/brokers/class_coverage_reads.py`. Python
 //! runs each read as several statements in one transaction. Here each read is
 //! one autocommit statement, so its parts read one snapshot and one `now()`.
 //! The broker's reads run on the main core pool; the reaper's fleet check
@@ -240,7 +240,7 @@ struct LiveEntry {
 impl PostgresBroker {
     /// The fleet check: for each (queue, class) with `PENDING` rows, whether
     /// a live worker serves it (Python `get_class_coverage_async`,
-    /// `horsies/core/brokers/postgres.py:3102-3133`).
+    /// `python/horsies/core/brokers/postgres.py:3102-3133`).
     ///
     /// A worker is live while its latest snapshot is at most
     /// `WORKER_STATE_LIVE_WINDOW_S` old. It serves a (queue, class) when the
@@ -267,7 +267,7 @@ impl PostgresBroker {
     /// The class report: pending streams with the wait of their oldest due
     /// row and their coverage, and the budget load of each live worker
     /// (Python `get_class_report_async`,
-    /// `horsies/core/brokers/postgres.py:3135-3162`).
+    /// `python/horsies/core/brokers/postgres.py:3135-3162`).
     ///
     /// One autocommit statement on the main core pool; reads only.
     ///
@@ -489,7 +489,7 @@ fn stored_execution(value: &str) -> Execution {
 #[cfg(test)]
 mod tests {
     //! The named bounds and the part decoding, without a database. Python
-    //! reference: `horsies/core/brokers/class_coverage_reads.py:52-63`, `:163-229`
+    //! reference: `python/horsies/core/brokers/class_coverage_reads.py:52-63`, `:163-229`
     //! (a part at its bound answers; one row past it refuses the read).
     use super::*;
     use serde_json::json;

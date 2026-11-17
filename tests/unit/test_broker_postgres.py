@@ -1,4 +1,4 @@
-"""Tests for PostgresBroker (horsies/core/brokers/postgres.py).
+"""Tests for PostgresBroker (python/horsies/core/brokers/postgres.py).
 
 Strategy: mock DB layer entirely (create_async_engine, async_sessionmaker,
 PostgresListener) to avoid real PostgreSQL. Tests verify logic, branching,
@@ -61,7 +61,11 @@ from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.history.archive.attempts import AttemptRecord
 from horsies.core.history.archive.versions import archive_digest
 from horsies.core.utils.url import sqlalchemy_url
-from horsies.core.history.reads.detail import HistoryTaskDetail
+from horsies.core.history.reads.detail import (
+    HistoryTaskDetail,
+    TaskAbsenceReason,
+    TaskDetailAbsent,
+)
 from horsies.core.types.error_detail import NoCause
 from horsies.core.models.tasks import (
     Execution,
@@ -2742,13 +2746,18 @@ class TestGetTaskInfoAsync:
 
     @pytest.mark.asyncio
     async def test_task_not_found_returns_none(self) -> None:
-        """No live row and no staged history read: Ok(None)."""
+        """No live row and no history row: Ok(None)."""
         broker = _make_broker()
         self._setup_task_info_session(broker, row=None)
 
         with patch(
-            'horsies.core.history.reads.detail.staged_detail_published',
-            AsyncMock(return_value=False),
+            'horsies.core.history.reads.detail.read_task_detail',
+            AsyncMock(
+                return_value=TaskDetailAbsent(
+                    task_id=TASK_INFO_ID,
+                    reason=TaskAbsenceReason.WITHIN_RETAINED_HISTORY,
+                )
+            ),
         ):
             result = await broker.get_task_info_async(TASK_INFO_ID)
 
@@ -3522,10 +3531,6 @@ class TestHistoryTaskInfoResultDecode:
 
         with (
             patch(
-                'horsies.core.history.reads.detail.staged_detail_published',
-                AsyncMock(return_value=True),
-            ),
-            patch(
                 'horsies.core.history.reads.detail.read_task_detail',
                 AsyncMock(return_value=detail),
             ),
@@ -3579,10 +3584,6 @@ class TestHistoryTaskInfoAttemptOrder:
         detail.attempts = tuple(_attempt_record(n) for n in (1, 2, 3))
 
         with (
-            patch(
-                'horsies.core.history.reads.detail.staged_detail_published',
-                AsyncMock(return_value=True),
-            ),
             patch(
                 'horsies.core.history.reads.detail.read_task_detail',
                 AsyncMock(return_value=detail),

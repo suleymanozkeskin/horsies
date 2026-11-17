@@ -11,6 +11,7 @@ use crate::core::app::{PreparedSchedules, ScheduleSendFacts};
 use crate::core::config::{AppConfig, ScheduleConfig, TaskSchedule};
 
 use super::calculator::{next_run_at, should_run_now};
+use super::config_digest::config_digest;
 use super::state;
 
 /// The prefix of the hash input of a slot task id. It names the layout, so
@@ -336,7 +337,7 @@ fn scheduler_lock_pool(runtime_pool: &sqlx::PgPool) -> sqlx::PgPool {
 
 /// Store the state row of each enabled schedule that is new or whose pattern
 /// or timezone changed, in two statements (Python `_initialize_schedules`,
-/// `horsies/core/scheduler/service.py`):
+/// `python/horsies/core/scheduler/service.py`):
 ///
 /// 1. One read of every row's name and digest, with the database time.
 /// 2. One write of the new and changed rows, each with its first run computed
@@ -1047,30 +1048,11 @@ async fn enqueue_scheduled_task(
         })
 }
 
-/// The part of a schedule that decides its slots: pattern and timezone.
-#[derive(serde::Serialize)]
-struct ScheduleTiming<'a> {
-    pattern: &'a crate::core::config::SchedulePattern,
-    timezone: &'a str,
-}
-
-/// SHA-256 of the schedule's pattern and timezone, for change detection
-/// (Python `_compute_config_hash`). A change of input, queue or catch-up
-/// settings does not move `next_run_at`.
-///
-/// Stable across toolchain upgrades (C20): SHA-256 over serde_json text of a
-/// struct with a fixed field order.
+/// SHA-256 of the schedule's pattern and timezone in Python's digest text
+/// (`config_digest`), for change detection. A change of input, queue or
+/// catch-up settings does not move `next_run_at`.
 fn compute_config_hash(schedule: &TaskSchedule) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-
-    let timing = ScheduleTiming {
-        pattern: &schedule.pattern,
-        timezone: &schedule.timezone,
-    };
-    // The pattern types hold only strings, integers, enums and times: they
-    // always serialize. A failure here is a defect, not an operational error.
-    let text = serde_json::to_vec(&timing).expect("schedule pattern serializes to JSON");
-    Sha256::digest(&text).into()
+    config_digest(&schedule.pattern, &schedule.timezone)
 }
 
 #[cfg(test)]
@@ -1224,10 +1206,9 @@ mod tests {
 
     #[test]
     fn compute_config_hash_is_stable_sha256() {
-        // C20: the config hash must use a stable algorithm (SHA-256), not the
-        // toolchain-dependent DefaultHasher. SHA-256 hex is 64 lowercase chars;
-        // the old u64 DefaultHasher output was 16 — pinning the length and a
-        // golden value guards against a regression to an unstable hasher.
+        // The config hash is SHA-256 of Python's digest text, not a
+        // toolchain-dependent hasher; the golden value is the digest that
+        // Python's `_compute_config_hash` stores for the same schedule.
         let schedule = TaskSchedule {
             name: "test".to_owned(),
             task_name: "my_task".to_owned(),
@@ -1245,12 +1226,12 @@ mod tests {
             max_catch_up_runs: 100,
         };
         let hash = compute_config_hash(&schedule);
-        // Golden value pins the exact algorithm + serialization basis:
-        // SHA-256 of {"pattern":{"type":"interval","seconds":60},"timezone":"UTC"}.
+        // SHA-256 of
+        // {"pattern":{"type":"interval","seconds":60,"minutes":null,"hours":null,"days":null},"timezone":"UTC"}.
         let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
         assert_eq!(
             hex,
-            "b896b67f1120471246f798d1f83ba3b4601931e97069ae773d2bf0c1880f705f",
+            "a7bba31d521252fd1fb6e910224d2c9a13daa9d45b4c3a1c4569f7b76a2e92e1",
         );
     }
 

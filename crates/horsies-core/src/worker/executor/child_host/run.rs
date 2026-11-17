@@ -208,7 +208,7 @@ async fn stop_for_workflow(
 
 /// The stop of a workflow task start whose node is not linked to the task.
 /// Logs an error and writes nothing (Python
-/// `horsies/core/worker/child_runner.py:1233-1247`, the node check of
+/// `python/horsies/core/worker/child_runner.py:1233-1247`, the node check of
 /// `_confirm_ownership_and_set_running`). The worker's outcome writer
 /// cancels the owned orphan when the app's
 /// `auto_terminate_orphaned_workflow_tasks` is on

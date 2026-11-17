@@ -5,7 +5,7 @@
 //! database of its own family; a database of the other family, or one with
 //! no family row, is refused with [`BrokerError::ClientFamilyMismatch`], not
 //! retryable. Reads are not checked. Python reference:
-//! `horsies/core/baseline/install.py` (`ClientFamily`, `RecordedFamily`,
+//! `python/horsies/core/baseline/install.py` (`ClientFamily`, `RecordedFamily`,
 //! `_INSERT_FAMILY_SQL`).
 
 use crate::broker::core_rows::RowDecodeError;

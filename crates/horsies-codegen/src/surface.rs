@@ -114,9 +114,10 @@ const START_AFTER_DELAY_PARAMETERS: &[StubParameter] = &[positional("seconds", "
 
 const START_AT_PARAMETERS: &[StubParameter] = &[positional("at", "datetime.datetime")];
 
-const RETENTION_PERIOD_PARAMETERS: &[StubParameter] = &[positional("days", "int")];
-
-const CORE_HANDLE_PARAMETERS: &[StubParameter] = &[positional("manifest_json", "str")];
+const CORE_HANDLE_PARAMETERS: &[StubParameter] = &[
+    positional("manifest_json", "str"),
+    keyword("pool_profile", "Literal['PRODUCER', 'WORKER']"),
+];
 
 const SET_PANIC_RULE_PARAMETERS: &[StubParameter] =
     &[positional("rule", "Literal['STOP_CORE', 'ABORT_PROCESS']")];
@@ -132,10 +133,7 @@ const ENQUEUE_REQUEST_PARAMETERS: &[StubParameter] = &[
     keyword("good_until", "datetime.datetime | None"),
     keyword("task_options_json", "str | None"),
     keyword("idempotency_key", "str | None"),
-    keyword(
-        "retention",
-        "RetentionDefault | RetentionForever | RetentionPeriod",
-    ),
+    keyword("retention_class_key", "str"),
     keyword("rerun_input", "Literal['APP_DEFAULT', 'KEEP', 'DROP']"),
     keyword("send_kind", "Literal['FIRST', 'REPEAT']"),
 ];
@@ -304,7 +302,7 @@ const CORE_HANDLE_METHODS: [StubFunction; 22] = [
         name: "enqueue",
         parameters: ENQUEUE_PARAMETERS,
         returns: TypeText::Plain(SEND_OUTCOME),
-        doc: "Enqueue one task, in one statement. Writes; a resend with send_kind REPEAT is safe.",
+        doc: "Enqueue one task, in one statement. Installs the schema once per handle first. Writes; a\nresend with send_kind REPEAT is safe.",
     },
     StubFunction {
         name: "enqueue_async",
@@ -376,7 +374,7 @@ const CORE_HANDLE_METHODS: [StubFunction; 22] = [
         name: "task_info",
         parameters: TASK_INFO_PARAMETERS,
         returns: TypeText::Plain(TASK_INFO_OUTCOME),
-        doc: "The info of one task. Reads only.",
+        doc: "The info of one task. Installs the schema once per handle first; then reads only.",
     },
     StubFunction {
         name: "task_info_async",
@@ -433,13 +431,18 @@ const EXCEPTIONS: &[StubException] = &[
         doc: "The panic rule of this process was set to another rule before, or fixed when the core\nstarted. args: (current_rule,).",
     },
     StubException {
+        name: "NotMainThread",
+        base: "CoreDefect",
+        doc: "A run form was called off the main thread, where Python runs signal handlers.\n\nThe run did not start. args: (subject,).",
+    },
+    StubException {
         name: "PanicException",
         base: "BaseException",
         doc: "Rust code called from Python panicked.",
     },
 ];
 
-const ARGUMENT_CLASSES: [StubClass; 14] = [
+const ARGUMENT_CLASSES: [StubClass; 11] = [
     StubClass {
         name: "StartNow",
         doc: "Start the task as soon as a worker can claim it.",
@@ -462,29 +465,8 @@ const ARGUMENT_CLASSES: [StubClass; 14] = [
         methods: &[],
     },
     StubClass {
-        name: "RetentionDefault",
-        doc: "Keep the history record for the default period.",
-        constructor: Constructor::Parameters(&[]),
-        properties: &[],
-        methods: &[],
-    },
-    StubClass {
-        name: "RetentionForever",
-        doc: "Keep the history record forever.",
-        constructor: Constructor::Parameters(&[]),
-        properties: &[],
-        methods: &[],
-    },
-    StubClass {
-        name: "RetentionPeriod",
-        doc: "Keep the history record for a period of whole days (1 to 1825).",
-        constructor: Constructor::Parameters(RETENTION_PERIOD_PARAMETERS),
-        properties: &[property("days", "int")],
-        methods: &[],
-    },
-    StubClass {
         name: "EnqueueRequest",
-        doc: "One frozen send. None for good_until, task_options_json or idempotency_key\nmeans no deadline, no options, no key. send_kind is FIRST for the first send of the task\nid and REPEAT for a send retry: a task that finished then answers from history.",
+        doc: "One frozen send. None for good_until, task_options_json or idempotency_key\nmeans no deadline, no options, no key. retention_class_key is 'forever' or\n'standard_<days>d'; the core checks it at the send. send_kind is FIRST for the first send\nof the task id and REPEAT for a send retry: a task that finished then answers from history.",
         constructor: Constructor::Parameters(ENQUEUE_REQUEST_PARAMETERS),
         properties: &[property("task_id", "uuid.UUID")],
         methods: &[],
@@ -620,9 +602,13 @@ const RECORD_CLASSES: [StubClass; 55] = [
     },
     StubClass {
         name: "SendValidationFailed",
-        doc: "The input or the options were refused. Nothing was written.",
+        doc: "The core refused the send before any statement. Nothing was written. cause_text is the\nJSON reader's error when the refused text does not read.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str")],
+        properties: &[
+            property("code", "Literal['INVALID_INPUT', 'INVALID_TASK_OPTIONS']"),
+            property("message", "str"),
+            property("cause_text", "str | None"),
+        ],
         methods: &[],
     },
     StubClass {
@@ -691,7 +677,7 @@ const RECORD_CLASSES: [StubClass; 55] = [
     },
     StubClass {
         name: "TaskInfoRecord",
-        doc: "The metadata of one task, with the fields of TaskInfo. result_json is the\nstored result envelope as JSON text.",
+        doc: "The metadata of one task, with the fields of TaskInfo. result_json is the\nstored result envelope as JSON text; execution is None for a task read from history.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("task_id", "uuid.UUID"),
@@ -718,6 +704,10 @@ const RECORD_CLASSES: [StubClass; 55] = [
             property("failed_reason", "str | None"),
             property("result_json", "str | None"),
             property("attempts", "list[TaskAttemptRecord] | None"),
+            property(
+                "execution",
+                "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'] | None",
+            ),
         ],
         methods: &[],
     },
@@ -1112,14 +1102,14 @@ const RECORD_CLASSES: [StubClass; 55] = [
 
 const HANDLE_CLASSES: [StubClass; 1] = [StubClass {
     name: "CoreHandle",
-    doc: "The core handle of one producer manifest. Building it starts nothing.",
+    doc: "The core handle of one producer manifest and the pool profile of its process: PRODUCER,\nor WORKER (the main core pool keeps 2 connections free from batch checkouts for the\nper-task writes). Building it starts nothing.",
     constructor: Constructor::Parameters(CORE_HANDLE_PARAMETERS),
     properties: &[property("manifest_version", "int")],
     methods: &CORE_HANDLE_METHODS,
 }];
 
-const CLASSES: [StubClass; 70] = {
-    let mut classes = [HANDLE_CLASSES[0]; 70];
+const CLASSES: [StubClass; 67] = {
+    let mut classes = [HANDLE_CLASSES[0]; 67];
     let mut position = 0;
     while position < ARGUMENT_CLASSES.len() {
         classes[1 + position] = ARGUMENT_CLASSES[position];
@@ -1134,6 +1124,12 @@ const CLASSES: [StubClass; 70] = {
 };
 
 const FUNCTIONS: &[StubFunction] = &[
+    StubFunction {
+        name: "baseline_sql_files",
+        parameters: &[],
+        returns: TypeText::Plain("list[tuple[str, str]]"),
+        doc: "The baseline SQL files as (file name, text) pairs, in run order. Starts nothing.",
+    },
     StubFunction {
         name: "core_state",
         parameters: &[],

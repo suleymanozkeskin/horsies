@@ -1,8 +1,17 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, SecondsFormat, Utc};
-use sqlx::PgPool;
 use sysinfo::{Pid, System};
 use tokio::task::JoinHandle;
+use tokio_postgres::types::Json;
 use tokio_util::sync::CancellationToken;
+
+use crate::broker::core_rows::{column, one_row, query_on, StatementLog};
+use crate::broker::{BrokerError, PostgresBroker};
+use crate::db::{
+    CheckoutClass, CorePool, NotSentCause, ParameterType, PooledConnection, StatementBound,
+    StatementFailure, TypedStatement,
+};
 
 use crate::core::config::app::AppConfig;
 use crate::core::config::worker_profile::{TaskLimitSetting, WorkerProfile};
@@ -210,23 +219,231 @@ struct HeldRows {
     claimed: i32,
 }
 
+/// The count of the RUNNING and the CLAIMED rows of a worker: `$1` the
+/// worker id.
+static HELD_ROWS: TypedStatement = TypedStatement::new(
+    "worker_held_rows",
+    "SELECT COUNT(*) FILTER (WHERE status = 'RUNNING') AS running,
+            COUNT(*) FILTER (WHERE status = 'CLAIMED') AS claimed
+     FROM horsies_tasks
+     WHERE claimed_by_worker_id = $1 AND status IN ('RUNNING', 'CLAIMED')",
+    &[ParameterType::Text],
+);
+
+/// [`INSERT_WORKER_STATE_SQL`] with its parameter types, in column order.
+static INSERT_WORKER_STATE: TypedStatement = TypedStatement::new(
+    "insert_worker_state",
+    INSERT_WORKER_STATE_SQL,
+    &[
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Int4,
+        ParameterType::Int4,
+        ParameterType::Int4,
+        ParameterType::Int4,
+        ParameterType::Int4,
+        ParameterType::TextArray,
+        ParameterType::Jsonb,
+        ParameterType::Jsonb,
+        ParameterType::Jsonb,
+        ParameterType::Int4,
+        ParameterType::Int4,
+        ParameterType::Float8,
+        ParameterType::Float8,
+        ParameterType::Float8,
+        ParameterType::Timestamptz,
+        ParameterType::Jsonb,
+        ParameterType::Jsonb,
+    ],
+);
+
 /// Count the RUNNING and the CLAIMED rows of this worker in one statement
-/// (Python `_count_only_running_for_worker` and `_count_claimed_for_worker`,
-/// two statements on one session).
-async fn query_held_rows(pool: &PgPool, worker_id: &str) -> Result<HeldRows, sqlx::Error> {
-    let (running, claimed): (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*) FILTER (WHERE status = 'RUNNING'),
-                COUNT(*) FILTER (WHERE status = 'CLAIMED')
-         FROM horsies_tasks
-         WHERE claimed_by_worker_id = $1 AND status IN ('RUNNING', 'CLAIMED')",
-    )
-    .bind(worker_id)
-    .fetch_one(pool)
-    .await?;
+/// on `connection` (Python `_count_only_running_for_worker` and
+/// `_count_claimed_for_worker`, two statements on one session).
+///
+/// Errors: [`BrokerError::Statement`] for a failed statement;
+/// [`BrokerError::RowDecode`] when the row does not read.
+async fn query_held_rows(
+    connection: &mut PooledConnection,
+    log: StatementLog,
+    worker_id: &str,
+) -> Result<HeldRows, BrokerError> {
+    let statement = &HELD_ROWS;
+    let bound = statement.bind().value(&worker_id).finish();
+    let rows = query_on(connection, log, &bound).await?;
+    let row = one_row(rows, statement)?;
+    let running: i64 = column(&row, statement, "running")?;
+    let claimed: i64 = column(&row, statement, "claimed")?;
     Ok(HeldRows {
         running: i32::try_from(running).unwrap_or(i32::MAX),
         claimed: i32::try_from(claimed).unwrap_or(i32::MAX),
     })
+}
+
+/// What a worker snapshot is built from. The resource reader keeps its
+/// state between snapshots (the CPU usage is a difference of two reads).
+pub(crate) struct SnapshotSource {
+    pub worker_id: String,
+    pub hostname: String,
+    pub pid: i32,
+    pub worker_config: WorkerConfig,
+    pub app_config: AppConfig,
+    pub reaper_health: ReaperHealth,
+    pub children: ChildrenView,
+    pub claim_columns: ClaimColumns,
+    pub worker_started_at: DateTime<Utc>,
+    sys: System,
+    sys_pid: Pid,
+}
+
+impl SnapshotSource {
+    /// A source whose resource reader has read the process once.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        worker_id: String,
+        hostname: String,
+        pid: i32,
+        worker_config: WorkerConfig,
+        app_config: AppConfig,
+        reaper_health: ReaperHealth,
+        children: ChildrenView,
+        claim_columns: ClaimColumns,
+        worker_started_at: DateTime<Utc>,
+    ) -> Self {
+        let sys_pid = Pid::from(pid as usize);
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[sys_pid]),
+            true,
+            sysinfo::ProcessRefreshKind::new().with_cpu().with_memory(),
+        );
+        sys.refresh_memory();
+        Self {
+            worker_id,
+            hostname,
+            pid,
+            worker_config,
+            app_config,
+            reaper_health,
+            children,
+            claim_columns,
+            worker_started_at,
+            sys,
+            sys_pid,
+        }
+    }
+
+    /// The `recovery_config` column: the recovery config, the two retention
+    /// values and the health of each reaper step.
+    async fn recovery_value(&self) -> serde_json::Value {
+        let health = self.reaper_health.read().await.clone();
+        let mut recovery_value = serde_json::to_value(&self.app_config.recovery)
+            .unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(object) = recovery_value.as_object_mut() {
+            object.insert(
+                "worker_state_retention_hours".to_owned(),
+                serde_json::to_value(self.app_config.retention.worker_state_retention_hours)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            object.insert(
+                "terminal_record_retention_hours".to_owned(),
+                serde_json::to_value(self.app_config.retention.terminal_record_retention_hours)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            object.insert(
+                "partition_coverage".to_owned(),
+                health.partition_coverage.unwrap_or(serde_json::Value::Null),
+            );
+            object.insert(
+                "partition_pruning".to_owned(),
+                health.partition_pruning.unwrap_or(serde_json::Value::Null),
+            );
+            object.insert(
+                "workflow_recovery".to_owned(),
+                health.workflow_recovery.unwrap_or(serde_json::Value::Null),
+            );
+            object.insert(
+                "phase2_recovery".to_owned(),
+                health.phase2_recovery.unwrap_or(serde_json::Value::Null),
+            );
+        }
+        recovery_value
+    }
+}
+
+/// Why no snapshot row was written.
+#[derive(Debug)]
+pub(crate) enum SnapshotFailure {
+    /// The checkout or the count of the held rows failed, so no snapshot
+    /// was built: storing 0 would record "no claimed row" for a count that
+    /// was not taken.
+    NotCounted(BrokerError),
+    /// The insert of the snapshot failed; nothing was written, or the
+    /// outcome is unknown.
+    InsertFailed(BrokerError),
+}
+
+/// Count the held rows and insert one snapshot, on one connection of `pool`
+/// that passes the reserve gate ([`CheckoutClass::Batch`]): the snapshot is
+/// monitoring, not a per-task write (Python `_update_worker_state`: the
+/// counts and the insert on one session, under one `try`).
+///
+/// Errors: [`SnapshotFailure`].
+pub(crate) async fn write_snapshot(
+    pool: &CorePool,
+    log: StatementLog,
+    source: &mut SnapshotSource,
+) -> Result<(), SnapshotFailure> {
+    let mut connection = pool.checkout(CheckoutClass::Batch).await.map_err(|cause| {
+        SnapshotFailure::NotCounted(BrokerError::Statement(StatementFailure::NotSent {
+            statement: HELD_ROWS.name(),
+            cause: NotSentCause::Checkout(cause),
+        }))
+    })?;
+    let held = query_held_rows(&mut connection, log, &source.worker_id)
+        .await
+        .map_err(SnapshotFailure::NotCounted)?;
+
+    let slots_down = slots_down_json(&source.children.down_slots());
+    let class_capacity = class_capacity_of(&source.children.service());
+    let metrics = collect_resource_metrics(&mut source.sys, source.sys_pid);
+    let recovery_value = source.recovery_value().await;
+    let processes = source.claim_columns.processes as i32;
+    let max_claim_batch = source.claim_columns.max_claim_batch as i32;
+    let max_claim_per_worker = source.claim_columns.max_claim_per_worker as i32;
+    let cluster_wide_cap = source.app_config.cluster_wide_cap.map(|cap| cap as i32);
+    // The queue maps are stored as they are: an empty map is `{}`, never
+    // NULL (both columns are NOT NULL on the baseline).
+    let queue_priorities = Json(&source.worker_config.queue_priorities);
+    let queue_max_concurrency = Json(&source.worker_config.queue_max_concurrency);
+    let bound = INSERT_WORKER_STATE
+        .bind()
+        .value(&source.worker_id)
+        .value(&source.hostname)
+        .value(&source.pid)
+        .value(&processes)
+        .value(&max_claim_batch)
+        .value(&max_claim_per_worker)
+        .value(&cluster_wide_cap)
+        .value(&source.worker_config.queues)
+        .value(&queue_priorities)
+        .value(&queue_max_concurrency)
+        .value(&recovery_value)
+        .value(&held.running)
+        .value(&held.claimed)
+        .value(&metrics.memory_usage_mb)
+        .value(&metrics.memory_percent)
+        .value(&metrics.cpu_percent)
+        .value(&source.worker_started_at)
+        .value(&slots_down)
+        .value(&class_capacity)
+        .finish();
+    log.log(&INSERT_WORKER_STATE);
+    let _inserted = connection
+        .execute(&bound, StatementBound::ConnectionTimeouts)
+        .await
+        .map_err(|failure| SnapshotFailure::InsertFailed(BrokerError::Statement(failure)))?;
+    Ok(())
 }
 
 /// Spawn a background loop that inserts worker state snapshots on
@@ -234,7 +451,9 @@ async fn query_held_rows(pool: &PgPool, worker_id: &str) -> Result<HeldRows, sql
 ///
 /// Tracks the worker's liveness, task counts, and resource metrics
 /// (memory/CPU via sysinfo) in `horsies_worker_states` as a timeseries.
-/// Each snapshot is a new row (INSERT), enabling historical analysis.
+/// Each snapshot is a new row (INSERT), enabling historical analysis. Each
+/// snapshot runs on the main core pool of `broker` ([`write_snapshot`]); a
+/// close of the broker waits for a snapshot in flight.
 ///
 /// `children` gives the slots of the worker at each snapshot: the down
 /// slots (`slots_down`) and the capacity in service of each budget
@@ -242,7 +461,7 @@ async fn query_held_rows(pool: &PgPool, worker_id: &str) -> Result<HeldRows, sql
 /// ([`ClaimColumns::of_profile`]).
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_worker_state_loop(
-    pool: PgPool,
+    broker: Arc<PostgresBroker>,
     worker_id: String,
     hostname: String,
     pid: i32,
@@ -257,105 +476,40 @@ pub fn spawn_worker_state_loop(
     tokio::spawn(async move {
         let snapshot_interval =
             std::time::Duration::from_millis(app_config.recovery.worker_state_snapshot_interval_ms);
-
-        // The queue maps are stored as they are: an empty map is `{}`, never
-        // NULL (both columns are NOT NULL on the baseline).
-        let queue_priorities = sqlx::types::Json(&worker_config.queue_priorities);
-        let queue_max_concurrency = sqlx::types::Json(&worker_config.queue_max_concurrency);
-
-        // Initialize sysinfo System for resource metrics.
-        let sys_pid = Pid::from(pid as usize);
-        let mut sys = System::new();
-        sys.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::Some(&[sys_pid]),
-            true,
-            sysinfo::ProcessRefreshKind::new().with_cpu().with_memory(),
+        let mut source = SnapshotSource::new(
+            worker_id,
+            hostname,
+            pid,
+            worker_config,
+            app_config,
+            reaper_health,
+            children,
+            claim_columns,
+            worker_started_at,
         );
-        sys.refresh_memory();
 
         // The first snapshot is written at start, then one per interval
         // (Python `_worker_state_heartbeat_loop`: write, then wait), so the
         // fleet check sees a starting worker at once.
         while !cancel.is_cancelled() {
-            // Python counts and inserts under one `try`, so a failed count
-            // writes no snapshot (`core/worker/health.py`,
-            // `_update_worker_state`). Storing 0 would record "no claimed
-            // row" for a count that was not taken.
-            let held = match query_held_rows(&pool, &worker_id).await {
-                Ok(held) => held,
-                Err(error) => {
+            let written = match broker.core_pools_for_write() {
+                Ok((open, _write)) => {
+                    write_snapshot(open.main(), broker.statement_log(), &mut source).await
+                }
+                Err(error) => Err(SnapshotFailure::NotCounted(error)),
+            };
+            match written {
+                Ok(()) => {}
+                Err(SnapshotFailure::NotCounted(error)) => {
                     tracing::error!(
-                        worker_id = %worker_id,
+                        worker_id = %source.worker_id,
                         %error,
                         "failed to count claimed tasks; no worker snapshot this interval",
                     );
-                    tokio::select! {
-                        _ = cancel.cancelled() => break,
-                        _ = tokio::time::sleep(snapshot_interval) => {}
-                    }
-                    continue;
                 }
-            };
-
-            let slots_down = slots_down_json(&children.down_slots());
-            let class_capacity = class_capacity_of(&children.service());
-            let metrics = collect_resource_metrics(&mut sys, sys_pid);
-            let health = reaper_health.read().await.clone();
-            let mut recovery_value = serde_json::to_value(&app_config.recovery)
-                .unwrap_or_else(|_| serde_json::json!({}));
-            if let Some(object) = recovery_value.as_object_mut() {
-                object.insert(
-                    "worker_state_retention_hours".to_owned(),
-                    serde_json::to_value(app_config.retention.worker_state_retention_hours)
-                        .unwrap_or(serde_json::Value::Null),
-                );
-                object.insert(
-                    "terminal_record_retention_hours".to_owned(),
-                    serde_json::to_value(app_config.retention.terminal_record_retention_hours)
-                        .unwrap_or(serde_json::Value::Null),
-                );
-                object.insert(
-                    "partition_coverage".to_owned(),
-                    health.partition_coverage.unwrap_or(serde_json::Value::Null),
-                );
-                object.insert(
-                    "partition_pruning".to_owned(),
-                    health.partition_pruning.unwrap_or(serde_json::Value::Null),
-                );
-                object.insert(
-                    "workflow_recovery".to_owned(),
-                    health.workflow_recovery.unwrap_or(serde_json::Value::Null),
-                );
-                object.insert(
-                    "phase2_recovery".to_owned(),
-                    health.phase2_recovery.unwrap_or(serde_json::Value::Null),
-                );
-            }
-
-            if let Err(e) = sqlx::query(INSERT_WORKER_STATE_SQL)
-                .bind(&worker_id)
-                .bind(&hostname)
-                .bind(pid)
-                .bind(claim_columns.processes as i32)
-                .bind(claim_columns.max_claim_batch as i32)
-                .bind(claim_columns.max_claim_per_worker as i32)
-                .bind(app_config.cluster_wide_cap.map(|c| c as i32))
-                .bind(&worker_config.queues)
-                .bind(queue_priorities)
-                .bind(queue_max_concurrency)
-                .bind(&recovery_value)
-                .bind(held.running)
-                .bind(held.claimed)
-                .bind(metrics.memory_usage_mb)
-                .bind(metrics.memory_percent)
-                .bind(metrics.cpu_percent)
-                .bind(worker_started_at)
-                .bind(&slots_down)
-                .bind(&class_capacity)
-                .execute(&pool)
-                .await
-            {
-                tracing::warn!(error = %e, "failed to insert worker state");
+                Err(SnapshotFailure::InsertFailed(error)) => {
+                    tracing::warn!(error = %error, "failed to insert worker state");
+                }
             }
 
             tokio::select! {
@@ -364,13 +518,13 @@ pub fn spawn_worker_state_loop(
             }
         }
 
-        tracing::debug!(worker_id = %worker_id, "worker state loop stopped");
+        tracing::debug!(worker_id = %source.worker_id, "worker state loop stopped");
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use sqlx::PgPool;
 
     use super::*;
     use crate::worker::children::SeatsPerChild;
@@ -419,7 +573,7 @@ mod tests {
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
-            pool.clone(),
+            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
             worker_id.clone(),
             "snapshot-test".to_owned(),
             std::process::id() as i32,
@@ -653,7 +807,7 @@ mod tests {
         assert!(worker_config.queue_max_concurrency.is_empty());
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
-            pool.clone(),
+            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
             worker_id.clone(),
             "baseline-columns-test".to_owned(),
             std::process::id() as i32,
@@ -716,34 +870,26 @@ mod tests {
         assert_eq!(max_claim_per_worker, 2);
     }
 
-    /// Run the snapshot loop on `pool` for `window` with a 10 ms interval,
-    /// then stop it and return the number of snapshot rows of `worker_id`.
-    async fn snapshots_written_in(
-        pool: &PgPool,
-        worker_id: &str,
-        window: std::time::Duration,
-    ) -> i64 {
+    /// A snapshot source of one isolated child with no claim limit, for
+    /// `worker_id`.
+    fn one_child_source(worker_id: &str) -> SnapshotSource {
         use crate::worker::recovery::new_reaper_health;
 
-        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
-        app_config.recovery.worker_state_snapshot_interval_ms = 10;
-        let cancel = CancellationToken::new();
-        let task = spawn_worker_state_loop(
-            pool.clone(),
+        SnapshotSource::new(
             worker_id.to_owned(),
             "claimed-count-test".to_owned(),
             std::process::id() as i32,
             WorkerConfig::default(),
-            app_config,
+            AppConfig::for_database_url("postgresql://unused/test"),
             new_reaper_health(),
             isolated_children(1),
             isolated_claim_columns(1),
             Utc::now(),
-            cancel.clone(),
-        );
-        tokio::time::sleep(window).await;
-        cancel.cancel();
-        task.await.expect("the snapshot loop joins");
+        )
+    }
+
+    /// The snapshot rows of `worker_id`.
+    async fn snapshot_rows(pool: &PgPool, worker_id: &str) -> i64 {
         sqlx::query_scalar("SELECT count(*) FROM horsies_worker_states WHERE worker_id = $1")
             .bind(worker_id)
             .fetch_one(pool)
@@ -751,45 +897,75 @@ mod tests {
             .expect("count the snapshots")
     }
 
+    /// A temporary `horsies_tasks` without the counted columns: on the one
+    /// connection of a pool, it hides the table of that name.
+    static SHADOW_TASKS_TABLE: TypedStatement = TypedStatement::new(
+        "shadow_tasks_table",
+        "CREATE TEMP TABLE horsies_tasks (id integer)",
+        &[],
+    );
+
     /// A failed count of claimed rows writes no snapshot (Python counts and
     /// inserts under one `try`, `core/worker/health.py:201-291`). The old
     /// loop wrote the snapshot with `tasks_claimed = 0`.
     #[tokio::test]
     #[serial_test::serial]
     async fn a_failed_claimed_count_writes_no_snapshot() {
-        /// About 100 intervals of the loop.
-        const LOOP_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
-
         let migrated = crate::broker::terminalization_matrix::migrated_pool().await;
-        // On this pool a temporary `horsies_tasks` without the counted
-        // columns hides the table of that name, so the count fails; the
-        // snapshot table is untouched, so the insert alone would succeed.
-        let shadowed = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .after_connect(|connection, _| {
-                Box::pin(async move {
-                    sqlx::query("CREATE TEMP TABLE horsies_tasks (id integer)")
-                        .execute(connection)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect_with((*migrated.connect_options()).clone())
-            .await
-            .expect("connect the shadowed pool");
+        // On the one connection of this pool a temporary `horsies_tasks`
+        // without the counted columns hides the table of that name, so the
+        // count fails; the snapshot table is untouched, so the insert alone
+        // would succeed.
+        let shadowed =
+            crate::broker::pools::unpinged_single_connection_core_pool(&migrated.connect_options());
+        {
+            let mut connection = shadowed
+                .checkout(CheckoutClass::Batch)
+                .await
+                .expect("check out the one connection");
+            let _created = connection
+                .execute(
+                    &SHADOW_TASKS_TABLE.bind().finish(),
+                    StatementBound::ConnectionTimeouts,
+                )
+                .await
+                .expect("create the shadow table");
+        }
+        let control = crate::broker::pools::core_pool_for_test_pool(&migrated);
         let control_worker = uuid::Uuid::new_v4().to_string();
         let failing_worker = uuid::Uuid::new_v4().to_string();
 
-        let control = snapshots_written_in(&migrated, &control_worker, LOOP_WINDOW).await;
-        let written = snapshots_written_in(&shadowed, &failing_worker, LOOP_WINDOW).await;
+        let control_written = write_snapshot(
+            &control,
+            StatementLog::Off,
+            &mut one_child_source(&control_worker),
+        )
+        .await;
+        let failed = write_snapshot(
+            &shadowed,
+            StatementLog::Off,
+            &mut one_child_source(&failing_worker),
+        )
+        .await;
+        let control_rows = snapshot_rows(&migrated, &control_worker).await;
+        let written = snapshot_rows(&migrated, &failing_worker).await;
 
         sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = ANY($1)")
             .bind(vec![control_worker, failing_worker])
             .execute(&migrated)
             .await
             .expect("delete the snapshots");
-        shadowed.close().await;
-        assert!(control > 0, "the loop writes when the count works");
+        shadowed.close();
+        control.close();
+        assert!(control_written.is_ok(), "{control_written:?}");
+        assert_eq!(
+            control_rows, 1,
+            "the snapshot is written when the count works"
+        );
+        assert!(
+            matches!(failed, Err(SnapshotFailure::NotCounted(_))),
+            "{failed:?}"
+        );
         assert_eq!(written, 0, "a failed count must write no snapshot");
     }
 
@@ -826,7 +1002,7 @@ mod tests {
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
-            pool.clone(),
+            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
             worker_id.clone(),
             "first-snapshot-test".to_owned(),
             std::process::id() as i32,

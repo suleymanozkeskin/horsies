@@ -1,6 +1,6 @@
 """The pruning pass, before the 0006 pruning functions.
 
-``prune_expired_partitions`` (``horsies/core/history/maintenance/pruning.py``)
+``prune_expired_partitions`` (``python/horsies/core/history/maintenance/pruning.py``)
 and the manager operations it called (``partitions/manager.py``:
 ``detach_expired_leaf``, ``finalize_interrupted_detach``,
 ``drop_detached_leaf`` under ``RETENTION``) sent, per pass:

@@ -3328,7 +3328,7 @@ mod cap_tests {
     /// not read, or stored options that are not a JSON object, fail that node alone with
     /// `WORKER_SERIALIZATION_ERROR` with Python's message (`horsies_workflow_task_options_refusal`), the node
     /// index and the workflow id in `data`, and no task row (Python's case 1 through `enqueue_workflow_task`,
-    /// `horsies/core/workflows/engine.py:634-705`, `:798-818`); the
+    /// `python/horsies/core/workflows/engine.py:634-705`, `:798-818`); the
     /// workflow, with `on_error = fail` and no other node, ends FAILED. A reader that guesses a limit
     /// enqueues the node instead.
     #[tokio::test]
@@ -3417,7 +3417,7 @@ mod cap_tests {
     /// casts the text and raises (22007), the transaction rolls back, and the node stays READY with no task
     /// while the workflow stays RUNNING. The error is persistent, so the recovery pass counts it toward the
     /// failure limit (Python `_build_enqueued_task_params` passes `str()` of the member to its insert,
-    /// `horsies/core/workflows/engine.py:831-835`).
+    /// `python/horsies/core/workflows/engine.py:831-835`).
     #[tokio::test]
     #[serial]
     async fn a_stored_deadline_that_does_not_read_raises_and_keeps_the_ready_node() {
@@ -3477,7 +3477,7 @@ mod cap_tests {
     /// Recovery case 0 marks a PENDING node READY with its task row, in one transaction: a task insert that
     /// raises (a stored `good_until` that the database cannot read) rolls the READY mark back, and the node
     /// stays PENDING with no task. Python runs each case 0 candidate in a savepoint
-    /// (`horsies/core/workflows/recovery.py:93-94`, `:712-760`). A READY node left behind would be selected
+    /// (`python/horsies/core/workflows/recovery.py:93-94`, `:712-760`). A READY node left behind would be selected
     /// again by case 1 in the same pass.
     #[tokio::test]
     #[serial]
