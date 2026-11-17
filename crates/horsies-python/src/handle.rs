@@ -27,6 +27,7 @@ use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
 use crate::operations::release::{release_claims_operation, ReleaseClaimsRequest};
 use crate::operations::schema::{install_operation, schema_status_operation};
 use crate::operations::stale_claims::requeue_stale_claimed_operation;
+use crate::operations::stale_running::mark_stale_running_operation;
 use crate::operations::task_info::{task_info_operation, TaskInfoParts};
 use crate::process_core::{core_for_call, Core};
 use crate::records::{BrokerFailure, DatabasePingRecord, HandleClosed, Outcome};
@@ -285,6 +286,33 @@ impl CoreHandle {
             "CoreHandle.requeue_stale_claimed_async",
             CallKind::Write,
             requeue_stale_claimed_operation(self.connection(), stale_after_ms),
+        )
+    }
+
+    /// One stale RUNNING recovery pass with the thresholds `stale_after_ms`
+    /// and `finalizing_stale_after_ms`: `StaleRunningRecovered`,
+    /// `StaleRunningScanFull`, or `StaleRunningScanFailed`. Writes; each
+    /// candidate's statement commits alone, and a candidate whose statement
+    /// fails is logged and skipped. Awaitable only: its caller,
+    /// `PostgresBroker.mark_stale_tasks_as_failed`, runs on an event loop. A
+    /// threshold that does not fit in 64 bits raises `OverflowError`.
+    fn mark_stale_running_async<'py>(
+        &self,
+        py: Python<'py>,
+        stale_after_ms: i64,
+        finalizing_stale_after_ms: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.mark_stale_running_async",
+            CallKind::Write,
+            mark_stale_running_operation(
+                self.connection(),
+                stale_after_ms,
+                finalizing_stale_after_ms,
+            ),
         )
     }
 

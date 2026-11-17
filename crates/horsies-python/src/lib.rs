@@ -161,6 +161,9 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::stale_claims::StaleClaimsDrained>()?;
     module.add_class::<operations::stale_claims::StaleClaimsBoundReached>()?;
     module.add_class::<operations::stale_claims::StaleClaimsRequeueFailed>()?;
+    module.add_class::<operations::stale_running::StaleRunningRecovered>()?;
+    module.add_class::<operations::stale_running::StaleRunningScanFull>()?;
+    module.add_class::<operations::stale_running::StaleRunningScanFailed>()?;
     module.add_class::<operations::task_info::TaskInfoRecord>()?;
     module.add_class::<operations::task_info::TaskAttemptRecord>()?;
     module.add_class::<operations::task_info::TaskInfoNotFound>()?;
