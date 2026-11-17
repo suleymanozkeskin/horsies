@@ -46,10 +46,6 @@ class KeptFile:
 
 KEPT_FILES: Final = (
     KeptFile(
-        'crates/horsies/**',
-        'the frozen Rust client; CI refuses a change under crates/horsies/',
-    ),
-    KeptFile(
         'crates/horsies-core/baseline/*.sql',
         'the baseline migration text; a changed byte changes its stored checksum',
     ),

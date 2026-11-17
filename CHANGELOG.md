@@ -10,6 +10,31 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **The monitoring window counts elapsed time.** `resolve_monitoring_window`
+  and every read that takes `since` and `until` convert each bound to a UTC
+  instant first, so the 24-hour default and the 30-day maximum are
+  durations. Before, two bounds with one `ZoneInfo` tzinfo were subtracted
+  as wall-clock times: across a daylight saving change, a lone
+  `until = 2026-11-01 12:00 America/New_York` gave a window of 25 hours,
+  and `since = 2026-10-10 12:00`, `until = 2026-11-09 11:30` in that zone
+  passed the 30-day check with 30 days and 30 minutes of history. That pair
+  is now refused. Bounds with a fixed offset, and every web request, give
+  the same windows as before.
+
+- **A workflow node index that the node index column cannot hold names no
+  node.** `horsies.monitoring.get_workflow_node` answers `Ok(None)` for an
+  index outside the 32-bit range, with no read; it answered
+  `MonitoringQueryDbOperationFailed`. The web route
+  `GET /api/workflows/{workflow_id}/tasks/{task_index}` answers 404 for such
+  an index; it answered 503.
+
+- **The web workflow actions refuse a workflow id that is not a UUID with
+  400 `INVALID_INPUT`.** `POST /api/workflows/{workflow_id}/pause`,
+  `/resume` and `/cancel` answer `{"code": "INVALID_INPUT", "detail":
+  "Path parameter workflow_id: ..."}` before any statement, as the task
+  cancel route does; they answered 503 with the driver's text. A
+  `urn:uuid:` or braced id is read as its UUID.
+
 - **The `TASK_TIMEOUT` error of a `SHARED_ASYNC` task tells how the task
   ended.** Its `data` gets the key `cancel_end`: `RETURNED_AFTER_SIGNAL`
   when the task and its work ended within `cancel_grace_ms` after the

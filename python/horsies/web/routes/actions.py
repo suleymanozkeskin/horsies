@@ -220,7 +220,12 @@ def build_router(broker: PostgresBroker) -> APIRouter:
 
     @router.post('/workflows/{workflow_id}/pause')
     async def pause_workflow_route(workflow_id: str) -> JSONResponse:
-        """Stop scheduling new nodes. Executing nodes finish."""
+        """Stop scheduling new nodes. Executing nodes finish.
+
+        A path id that is not a UUID answers 400 ``INVALID_INPUT``; nothing
+        is read or changed.
+        """
+        workflow_id = str(require_path_uuid('workflow_id', workflow_id))
         result = await pause_workflow(broker, workflow_id)
         if is_err(result):
             return _respond(
@@ -246,7 +251,11 @@ def build_router(broker: PostgresBroker) -> APIRouter:
         the recovery pass, which runs in its own transaction after the state
         change, failed. The run was resumed, so the response says so and
         carries a warning.
+
+        A path id that is not a UUID answers 400 ``INVALID_INPUT``; nothing
+        is read or changed.
         """
+        workflow_id = str(require_path_uuid('workflow_id', workflow_id))
         result = await resume_workflow(broker, workflow_id)
         if is_err(result):
             error = result.err_value
@@ -279,7 +288,11 @@ def build_router(broker: PostgresBroker) -> APIRouter:
 
         ``cancel_async`` reports success even when it was a no-op on a run
         that had already finished, so the run's status decides the response.
+
+        A path id that is not a UUID answers 400 ``INVALID_INPUT``; nothing
+        is read or changed.
         """
+        workflow_id = str(require_path_uuid('workflow_id', workflow_id))
         handle: WorkflowHandle[Any] = WorkflowHandle(
             workflow_id=workflow_id, broker=broker
         )

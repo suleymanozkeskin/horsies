@@ -2129,7 +2129,7 @@ class TaskResult:
 @final
 class StoppedBeforeRunning:
     """The child stopped before it set the row RUNNING; no task code ran."""
-    def __init__(self, *, reason: Literal['CLAIM_LOST', 'OWNERSHIP_UNCONFIRMED', 'WORKFLOW_STOPPED', 'TASK_EXPIRED', 'NODE_NOT_LINKED']) -> None: ...
+    def __init__(self, *, reason: Literal['CLAIM_LOST', 'OWNERSHIP_UNCONFIRMED', 'WORKFLOW_STOPPED', 'TASK_EXPIRED', 'NODE_NOT_LINKED', 'ORPHAN_CANCELLED']) -> None: ...
 
 
 @final

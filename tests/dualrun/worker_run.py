@@ -257,6 +257,7 @@ def compared_part(snapshot: NormalizedSnapshot) -> NormalizedSnapshot:
             for group in snapshot.ambiguities
             if group.table not in UNCOMPARED_TABLES
         ),
+        partition_tree=snapshot.partition_tree,
     )
 
 

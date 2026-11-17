@@ -2525,7 +2525,7 @@ const FRAME_CLASSES: [StubClass; 41] = [
     StubClass {
         name: "StoppedBeforeRunning",
         doc: "The child stopped before it set the row RUNNING; no task code ran.",
-        constructor: Constructor::Parameters(&[keyword("reason", "Literal['CLAIM_LOST', 'OWNERSHIP_UNCONFIRMED', 'WORKFLOW_STOPPED', 'TASK_EXPIRED', 'NODE_NOT_LINKED']")]),
+        constructor: Constructor::Parameters(&[keyword("reason", "Literal['CLAIM_LOST', 'OWNERSHIP_UNCONFIRMED', 'WORKFLOW_STOPPED', 'TASK_EXPIRED', 'NODE_NOT_LINKED', 'ORPHAN_CANCELLED']")]),
         properties: &[],
         methods: &[],
     },
