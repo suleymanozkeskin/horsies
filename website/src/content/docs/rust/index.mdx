@@ -13,6 +13,7 @@ The `horsies` crate is the Rust client of the horsies core. The Python package a
 A database belongs to one client: the core refuses a database that the Python client installed.
 
 <CardGrid>
+  <LinkCard title="Getting Started" href="/horsies/rust/quick-start/getting-started/" description="Add the crate, define a task, run a worker, send the task" />
   <LinkCard title="App Config" href="/horsies/rust/configuration/app-config/" description="Horsies::new, AppConfig, schema modes, queues, state" />
   <LinkCard title="Defining Tasks" href="/horsies/rust/tasks/defining-tasks/" description="#[horsies::task], execution classes, retry codes, TaskRuntime" />
   <LinkCard title="Task Errors" href="/horsies/rust/tasks/errors/" description="TaskError<E>, the UserErrorCode derive, library codes" />
@@ -31,6 +32,7 @@ A database belongs to one client: the core refuses a database that the Python cl
   <LinkCard title="Async Frameworks" href="/horsies/rust/guides/async-frameworks/" description="Sends and reads from an axum or other tokio service" />
   <LinkCard title="Testing" href="/horsies/rust/operations/testing/" description="Direct calls, runtime, context, check, suppressed sends" />
   <LinkCard title="CLI Reference" href="/horsies/rust/cli/" description="horsies::cli::run: worker, scheduler and check from the app's binary" />
+  <LinkCard title="Switching to 0.8.0" href="/horsies/rust/migrations/switching-to-0-8-0/" description="From horsies-rust 0.1.0-alpha: a new database and the API changes" />
 </CardGrid>
 
 ## The Crate
@@ -42,7 +44,7 @@ A database belongs to one client: the core refuses a database that the Python cl
 | Default features | `cli`: the CLI runner and the `horsies` binary, with clap, tracing-subscriber, toml, owo-colors and tempfile |
 | Other features | `web` (the axum mount), `tokio-postgres`, `sqlx` |
 
-The sidebar lists every page of the Rust API. A page marked "not written" has no page yet; the GitHub issue it links to tracks it.
+The sidebar lists every page of the Rust API.
 
 ## Where the Behaviour Is
 

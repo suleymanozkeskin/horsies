@@ -10,6 +10,7 @@ The Python client and the Rust client run on one core (horsies-core). Behaviour 
 
 ## Rust API pages
 - Overview -> /horsies/rust/
+- Getting Started -- cargo add horsies; one binary is the producer, the worker and each child; build_app, a worker profile with ChildPreload::NoPreload, main hands the command line to horsies::cli::run; worker --profile default; send and read a result -> /horsies/rust/quick-start/getting-started/
 - App Config -- Horsies::new, with_schema_mode (MigrateAndValidate, ObserveOnly, AssumeInitialized), with_handle, AppConfig fields, Rust-only refusals (pool size bounds, preload), queues, register, provide, discover, AppRole, suppress_sends / HORSIES_SUPPRESS_SENDS -> /horsies/rust/configuration/app-config/
 - Defining Tasks -- #[horsies::task], #[horsies::blocking_task], execution = isolated | shared_async | shared_thread, timeout_ms, cancel_grace_ms, retry_policy + auto_retry_for, the generated module, TaskRuntime (state, cancelled, is_cancelled, spawn, task_handle), async_task_fn!, blocking_task_fn! -> /horsies/rust/tasks/defining-tasks/
 - Task Errors -- TaskError<E>, TaskErrorCode<E> (Library, User), #[derive(horsies::UserErrorCode)], with_data (never fails; data_refused), ExceptionRecord, SubWorkflowFailure, WORKER_SERIALIZATION_ERROR for input and return read-back -> /horsies/rust/tasks/errors/
@@ -28,8 +29,7 @@ The Python client and the Rust client run on one core (horsies-core). Behaviour 
 - Async Frameworks -- a tokio web service (axum): build the app once, the async forms in handlers, task_name::send without state, TaskFunction in router state, the service apart from the worker's child mode, ASYNC_CONTEXT -> /horsies/rust/guides/async-frameworks/
 - Testing -- direct calls of task functions, app.task_runtime(), TaskOutcome parameters, a WorkflowContext from its stored form, the generated Input, app.check() with no database, suppress_sends and HORSIES_SUPPRESS_SENDS -> /horsies/rust/operations/testing/
 - CLI Reference -- horsies::cli::run(app) in the app's fn main; <binary> worker --profile <name>, scheduler, check [--live]; --loglevel, RUST_LOG; child mode (--horsies-child); removed 0.1.0-alpha flags exit 2; exit codes 0, 1, 2, 77 and the ChildHostExit codes -> /horsies/rust/cli/
-
-Not written yet (tracked in https://github.com/suleymanozkeskin/horsies/issues/1696): quick start, switching to 0.8.0.
+- Switching to 0.8.0 -- for horsies-rust 0.1.0-alpha apps: the core refuses an alpha database (ForeignMigrations), drain it and start 0.8.0 on a new database; the API changes: app, binary and CLI, tasks and errors, sends and reads, workflows, monitoring, rerun, stored forms -> /horsies/rust/migrations/switching-to-0-8-0/
 
 ## Shared pages (behaviour, both clients)
 - Architecture -> /horsies/concepts/architecture/
