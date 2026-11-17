@@ -103,9 +103,23 @@ pub struct Facets {
     pub error_category_totals: BTreeMap<String, i64>,
 }
 
+/// What one breakdown group holds, tagged by `kind` (Python
+/// `BreakdownGroup`, `horsies/monitoring/models.py`): `value`, the tasks
+/// whose group column holds `value` (a worker id, a task name or a queue
+/// name); or `unclaimed`, the tasks that no worker claimed, which only the
+/// `worker` grouping has. A worker whose id is the text `unknown` is a
+/// `value` group of its own, never the `unclaimed` group.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BreakdownGroup {
+    Value { value: String },
+    Unclaimed,
+}
+
+/// Task counts per status, the task total, and the tasks retried at least
+/// once (Python `BreakdownCounts`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GroupRow {
-    pub group: String,
+pub struct BreakdownCounts {
     pub total: i64,
     pub pending: i64,
     pub claimed: i64,
@@ -117,28 +131,27 @@ pub struct GroupRow {
     pub retried: i64,
 }
 
-impl GroupRow {
-    pub(crate) fn empty(group: impl Into<String>) -> Self {
-        Self {
-            group: group.into(),
-            total: 0,
-            pending: 0,
-            claimed: 0,
-            running: 0,
-            completed: 0,
-            failed: 0,
-            cancelled: 0,
-            expired: 0,
-            retried: 0,
-        }
-    }
+/// One group's per-status task counts (Python `GroupRow`): the counts, then
+/// the group, in one JSON object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupRow {
+    #[serde(flatten)]
+    pub counts: BreakdownCounts,
+    pub group: BreakdownGroup,
 }
 
+/// Per-group status pivot plus the counts of every group (Python
+/// `Breakdown`). `groups` holds at most the query's limit of groups, by
+/// total, highest first, then by the group text in code-point order (the
+/// unclaimed group sorts as the text `unknown`, after a value group
+/// `unknown` with the same total). `group_count` is the number of distinct
+/// groups, and `total` covers every matching task, not only the groups
+/// shown.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Breakdown {
     pub group_by: String,
     pub groups: Vec<GroupRow>,
-    pub total: GroupRow,
+    pub total: BreakdownCounts,
     pub group_count: i64,
 }
 
@@ -397,7 +410,7 @@ pub struct WorkerHistoryPoint {
 /// as a task id (a task id is a UUID in the public API); it serializes as the
 /// hyphenated lowercase text, as Python's `str` of the id. `next_run_at` is
 /// NOT NULL in the baseline, so every row has one.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScheduleStateInfo {
     pub schedule_name: String,
     pub last_run_at: Option<DateTime<Utc>>,
