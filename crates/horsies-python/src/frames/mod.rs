@@ -29,8 +29,9 @@ use horsies_core::frame_protocol::{
     encode_preload_frame as core_encode_preload_frame, EncodedFrame, FrameEncodeError,
     FrameOverBound, FrameReader, ParentFrame, ParentFrameRefusal, BAD_ARGUMENTS_EXIT_CODE,
     BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE, CHILD_HOOK_FAILED_EXIT_CODE, MAX_BODY_BYTES,
-    MAX_META_BYTES, PARENT_GONE_EXIT_CODE, PROTOCOL_MISMATCH_EXIT_CODE, PROTOCOL_VERSION,
-    REPARENT_FAILED_EXIT_CODE, SPAWN_REQUEST_BYTE, STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
+    MAX_LEFTOVER_TASK_NAMES, MAX_META_BYTES, PARENT_GONE_EXIT_CODE, PROTOCOL_MISMATCH_EXIT_CODE,
+    PROTOCOL_VERSION, REPARENT_FAILED_EXIT_CODE, SPAWN_REQUEST_BYTE,
+    STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -44,8 +45,9 @@ use parent::{parent_frame_object, parent_refusal_object};
 use preload::PreloadFrameArgument;
 
 /// The numbers that the child, the preload process and the worker parent
-/// share: the protocol version, the exit codes of a child, and the byte of a
-/// spawn request.
+/// share: the protocol version, the exit codes of a child, the byte of a
+/// spawn request, and the two bounds that the child applies before it builds
+/// a frame (the names of a report of left work, the bytes of a body).
 #[pyclass(module = "horsies._core", frozen, get_all)]
 pub struct ProtocolNumbers {
     protocol_version: u32,
@@ -58,6 +60,11 @@ pub struct ProtocolNumbers {
     protocol_mismatch_exit_code: i32,
     child_hook_failed_exit_code: i32,
     spawn_request_byte: u8,
+    /// A report of left work names `min(count, max_leftover_task_names)`
+    /// tasks.
+    max_leftover_task_names: usize,
+    /// The largest body of a frame, in bytes: the largest result envelope.
+    max_body_bytes: u64,
 }
 
 /// A header over the bounds: nothing was allocated for its frame, and the
@@ -140,6 +147,8 @@ fn protocol_numbers() -> ProtocolNumbers {
         protocol_mismatch_exit_code: PROTOCOL_MISMATCH_EXIT_CODE,
         child_hook_failed_exit_code: CHILD_HOOK_FAILED_EXIT_CODE,
         spawn_request_byte: SPAWN_REQUEST_BYTE,
+        max_leftover_task_names: MAX_LEFTOVER_TASK_NAMES,
+        max_body_bytes: MAX_BODY_BYTES,
     }
 }
 

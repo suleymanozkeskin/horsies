@@ -2828,7 +2828,10 @@ class FrameTooLarge:
 
 @final
 class ProtocolNumbers:
-    """The protocol version, the exit codes of a child and the spawn request byte."""
+    """The protocol version, the exit codes of a child, the spawn request byte, and the bounds
+    that a child applies before it builds a frame: the names of a report of left work, and the
+    bytes of a body.
+    """
     @property
     def protocol_version(self) -> int: ...
     @property
@@ -2849,6 +2852,10 @@ class ProtocolNumbers:
     def child_hook_failed_exit_code(self) -> int: ...
     @property
     def spawn_request_byte(self) -> int: ...
+    @property
+    def max_leftover_task_names(self) -> int: ...
+    @property
+    def max_body_bytes(self) -> int: ...
 
 
 @final
