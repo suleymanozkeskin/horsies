@@ -74,6 +74,7 @@ from tests.integration.autocommit_support import (
     proxied_url,
     psycopg_url,
     upstream_of,
+    warm_core_handle,
 )
 from tests.integration.history_seeding import read_attempts
 from tests.integration.round_trip_proxy import RoundTripProxy
@@ -354,7 +355,7 @@ async def test_a_lost_reply_is_retried_and_classified_on_the_replay(
     """The completion commits, and its reply never reaches the worker."""
     opened = await open_proxied_worker(proxied_url(db_url, proxy))
     try:
-        await _one_pooled_connection(opened)
+        await warm_core_handle(opened)
         task_id, claimed_at = await insert_task(session, status='RUNNING')
         proxy.drop_next_execute_reply()
 
