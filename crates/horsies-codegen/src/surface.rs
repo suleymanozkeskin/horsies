@@ -662,7 +662,7 @@ const RECORD_CLASSES: [StubClass; 61] = [
     },
     StubClass {
         name: "SendEnqueueFailed",
-        doc: "The database failed during the enqueue; the row may or may not exist.",
+        doc: "The enqueue failed; the row may or may not exist. A retention class key that no class\nderives is this record too, built before any statement: nothing was written, and\nretryable is False.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("task_id", "uuid.UUID"),

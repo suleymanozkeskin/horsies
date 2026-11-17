@@ -829,8 +829,9 @@ async def _detach_retention_leaf(
     and a 2 s lock timeout; ``horsies_record_leaf_detached`` records it.
     The prior session timeouts are restored and the lock released after;
     a cancel, or a failure whose lock state is unknown, closes the
-    connection instead. A leaf that `FINALIZE` finds already detached gets
-    its detach recorded, without the lock.
+    connection instead. A leaf that ``horsies_begin_leaf_detach`` finds
+    already detached is returned as its state (`LeafDetached`): that call
+    records the detach itself, and this function sends no record of its own.
     """
     async with database.autocommit() as connection:
         try:
@@ -838,11 +839,9 @@ async def _detach_retention_leaf(
         except BaseException as error:
             await connection.invalidate(error)
             raise
-        match begun, step:
-            case DetachLocked(), _:
+        match begun:
+            case DetachLocked():
                 pass
-            case LeafDetached(), _DetachStep.FINALIZE:
-                return await _record_detached(connection, leaf, begun, publisher)
             case _:
                 return begun
         prior_timeouts: _SessionTimeouts | None = None
@@ -888,11 +887,11 @@ async def _detach_retention_leaf(
 async def _record_detached(
     connection: AsyncConnection,
     leaf: LeafRef,
-    detached: LeafDetachable | LeafDetachInterrupted | LeafDetached,
+    detached: LeafDetachable | LeafDetachInterrupted,
     publisher: LoaderPublication,
 ) -> LeafDetached | LeafMissing:
-    """Record a detach that the leaf's state shows, in one transaction on the
-    autocommit connection.
+    """Record the detach that this connection's detach statement completed,
+    in one transaction on the autocommit connection.
 
     ``horsies_record_leaf_detached`` and, when the published manifest names
     the leaf, the reader publication commit together. A leaf whose relation
@@ -1004,7 +1003,8 @@ async def finalize_interrupted_detach(
     """Complete a concurrent detach that a crash left pending.
 
     Acts only on `LeafDetachInterrupted`; a leaf found already fully
-    detached has its catalog record reconciled. Every other classification
+    detached has its catalog record reconciled by
+    ``horsies_begin_leaf_detach``. Every other classification
     is returned unchanged — in particular a blocked interrupted detach stays
     pending until its recovery evidence drains or is quarantined.
 
