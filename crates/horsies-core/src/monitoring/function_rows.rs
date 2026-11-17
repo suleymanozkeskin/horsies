@@ -24,6 +24,7 @@ use crate::core::history::reads::aggregates::plan_rows_from_explain_text;
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::task::error::{ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode};
 use crate::core::task::result::TaskResult;
+use crate::core::task::Execution;
 use crate::core::types::status::TaskStatus;
 use crate::db::{ParameterType, Row, TypedStatement};
 
@@ -91,7 +92,7 @@ pub(super) static MONITORING_TASK_DETAIL: TypedStatement = TypedStatement::new(
     "monitoring_task_detail",
     "SELECT location, task_id, task_name, queue_name, priority, status, is_workflow_task,
             retry_count, max_retries, enqueued_at, started_at, good_until, worker_hostname,
-            terminal_at, error_code, final_failed_reason, attempt_archive_version,
+            execution, terminal_at, error_code, final_failed_reason, attempt_archive_version,
             attempt_snapshot, attempt_snapshot_digest, workflow_id, workflow_task_index,
             absence_reason
      FROM horsies_monitoring_task_detail($1, $2, $3)",
@@ -200,7 +201,7 @@ pub(super) static MONITORING_WORKFLOW_NODE: TypedStatement = TypedStatement::new
     "SELECT row_kind, node_task_index, node_id, node_task_name, node_status,
             node_is_subworkflow, node_result, location, task_id, task_name, queue_name,
             priority, status, is_workflow_task, retry_count, max_retries, enqueued_at,
-            started_at, good_until, worker_hostname, terminal_at, error_code,
+            started_at, good_until, worker_hostname, execution, terminal_at, error_code,
             final_failed_reason, attempt_archive_version, attempt_snapshot,
             attempt_snapshot_digest, workflow_id, workflow_task_index, absence_reason
      FROM horsies_monitoring_workflow_node($1, $2)",
@@ -558,6 +559,19 @@ pub(super) fn task_detail_row(
             )))
         }
     };
+    let execution = match location {
+        Location::Live => {
+            let stored: String = column(row, statement, "execution")?;
+            let class = Execution::from_stored(&stored).ok_or_else(|| {
+                DetailRowError::Row(shape(
+                    statement,
+                    format!("live task {task_id} has the execution class {stored:?}"),
+                ))
+            })?;
+            Some(class)
+        }
+        Location::History => None,
+    };
     let leaf = LeafTaskInfo {
         task_id,
         status,
@@ -573,6 +587,7 @@ pub(super) fn task_detail_row(
         exec_s,
         worker_hostname: column(row, statement, "worker_hostname")?,
         good_until: column(row, statement, "good_until")?,
+        execution,
     };
     Ok(TaskDetailRead::Found(TaskDetail {
         leaf,

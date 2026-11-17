@@ -5,6 +5,12 @@ The read sends one statement; a double answers it with the function's rows
 three total kinds, a history estimate that does not decode, the mapping of
 a live and of a history row, the arguments of the statement, a database
 error and the event-loop limit.
+
+Since the monitoring switch the production read runs in the core; this file
+tests Python's body before the switch, the dual-run reference
+(``tests/dualrun/reference/monitoring_queries.py``), which specifies the
+answers that the dual-run pairs hold the core to. The production facade is
+tested on a mocked core handle in ``tests/unit/test_monitoring_reads_in_core.py``.
 """
 
 from __future__ import annotations
@@ -28,11 +34,11 @@ from horsies.monitoring import (
     MonitoringWindow,
     TaskListPage,
     TaskPage,
-    list_tasks,
 )
 from horsies.monitoring.errors import MonitoringResult
 from horsies.monitoring.queries import SortDirection
 from tests.broker_resources_support import attach_loop_limit
+from tests.dualrun.reference.monitoring_queries import list_tasks
 from tests.monitoring_function_support import (
     DETAIL_TIME,
     FunctionRow,

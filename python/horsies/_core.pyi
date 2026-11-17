@@ -146,6 +146,18 @@ class CoreHandle:
         """
     def raw_result_record_async(self, task_id: uuid.UUID, *, timeout_ms: int | None) -> asyncio.Future[RawResultRecordRecord | RawResultAbsent | BrokerFailure]:
         """The awaitable form of the method above. A cancelled await drops the wait."""
+    def monitoring_list_tasks_async(self, query: TaskListQuery) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+        """One page of the task list: the JSON text of the core's TaskListPage. Reads only, in one
+        statement. A cancelled await drops the read.
+        """
+    def monitoring_task_detail_async(self, task_id: uuid.UUID) -> asyncio.Future[MonitoringJson | TaskDetailAbsent | MonitoringFailed]:
+        """One task with its attempts: the JSON text of the core's TaskDetail, or the reason it is
+        absent. Reads only, in one statement. A cancelled await drops the read.
+        """
+    def monitoring_task_facets_async(self, query: TaskFacetsQuery) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+        """The facets of one scope: the JSON text of the core's Facets. Reads only, in one
+        statement. A cancelled await drops the read.
+        """
 
 
 @final
@@ -1096,6 +1108,50 @@ class WindowRefusedRecord:
     """The requested window is not servable; reason names why."""
     @property
     def reason(self) -> str: ...
+
+
+@final
+class TaskListQuery:
+    """One frozen task list read: the window, the filters, the sort and the page. A value
+    outside its rule raises ValueError; a naive bound raises TypeError.
+    """
+    def __init__(self, *, window_lower: datetime.datetime, window_upper: datetime.datetime, statuses: list[str], task_names: list[str], queues: list[str], workers: list[str], error_codes: list[str], error_categories: list[str], retried_only: bool, sort_by: str, sort_dir: str, offset: int, limit: int) -> None: ...
+
+
+@final
+class TaskFacetsQuery:
+    """One frozen task facets read: the window, the statuses, the error categories that narrow
+    the code list, and the retried filter. A value outside its rule raises ValueError; a naive
+    bound raises TypeError.
+    """
+    def __init__(self, *, window_lower: datetime.datetime, window_upper: datetime.datetime, statuses: list[str], error_categories: list[str], retried_only: bool) -> None: ...
+
+
+@final
+class MonitoringJson:
+    """The JSON text of the core model of one monitoring read."""
+    @property
+    def json(self) -> str: ...
+
+
+@final
+class MonitoringFailed:
+    """An expected failure of a monitoring read. Nothing changed: a read writes nothing."""
+    @property
+    def code(self) -> Literal['DB_OPERATION_FAILED', 'EVENT_LOOP_LIMIT', 'HISTORY_CONTRACT_VIOLATION']: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class TaskDetailAbsent:
+    """Neither the live table nor the history holds the task."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def reason(self) -> Literal['PREDATES_RETAINED_HISTORY', 'WITHIN_RETAINED_HISTORY', 'NOT_CLASSIFIED']: ...
 
 
 def baseline_sql_files() -> list[tuple[str, str]]:

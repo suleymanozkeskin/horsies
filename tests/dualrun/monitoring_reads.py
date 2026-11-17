@@ -9,18 +9,25 @@ are equal when neither side wrote.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+import typing
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, LiteralString
 
 import psycopg
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.db import register_identity_text_reads
+from horsies.monitoring.errors import (
+    MonitoringQueryDbOperationFailed,
+    MonitoringQueryEventLoopLimit,
+    MonitoringQueryHistoryContractViolation,
+)
+from horsies.monitoring.models import TaskDetailNotFound
 from tests.dualrun.capture import RawSnapshot, read_raw_snapshot
 from tests.dualrun.catalog import BASELINE_CATALOG
 from tests.dualrun.databases import DualRunDatabase
@@ -138,3 +145,119 @@ def read_dual_run[A](
 def differing[A](answers: Sequence[ReadAnswers[A]]) -> list[str]:
     """The names of the reads whose two answers differ."""
     return [each.name for each in answers if each.reference != each.candidate]
+
+
+COUNTING_SPAN_TOLERANCE_S: Final = 2
+"""How many seconds an open span may grow between the reference read and the
+candidate read that follows it."""
+
+_REPORT_DEPTH_BOUND: Final = 32
+"""The deepest nesting of a monitoring answer report."""
+
+
+def report(answer: object) -> object:
+    """The report of one monitoring answer, as JSON values.
+
+    ``Ok`` holds the ``model_dump(mode='json')`` of each model (a list item by
+    item; a ``TaskDetailNotFound`` by its id and reason; ``None`` as it is);
+    ``Err`` holds the error by its code and ``retryable`` (the messages name
+    each implementation's cause in its own words).
+    """
+    whole: object = answer
+    match answer:
+        case Ok(ok_value=BaseModel() as model):
+            return {'ok': model.model_dump(mode='json')}
+        case Ok(ok_value=list()):
+            items: list[object] = getattr(whole, 'ok_value')
+            return {'ok': [_item_report(item) for item in items]}
+        case Ok(ok_value=TaskDetailNotFound(task_id=task_id, reason=reason)):
+            return {'ok': {'not_found': str(task_id), 'reason': reason.value}}
+        case Ok(ok_value=None):
+            return {'ok': None}
+        case Err(
+            err_value=MonitoringQueryDbOperationFailed()
+            | MonitoringQueryEventLoopLimit()
+            | MonitoringQueryHistoryContractViolation() as error
+        ):
+            return {'err': {'code': error.code.value, 'retryable': error.retryable}}
+        case _:
+            raise AssertionError(f'no report rule for the answer {answer!r}')
+
+
+def _item_report(item: object) -> object:
+    match item:
+        case BaseModel():
+            return item.model_dump(mode='json')
+        case str() | int():
+            return item
+        case _:
+            raise AssertionError(f'no report rule for the list item {item!r}')
+
+
+def _open_spans(item: Mapping[str, object]) -> frozenset[str]:
+    """The span fields of one report object that count up to the read time.
+
+    A task with no end time (a live task) has open ``queue_s`` and
+    ``exec_s``; a run with no ``completed_at`` has an open ``wall_s``; a
+    RUNNING node has an open ``exec_s``; a worker's ``snapshot_age_s`` and
+    ``uptime_s`` count up. Every other value is exact.
+    """
+    open_fields: set[str] = {'snapshot_age_s', 'uptime_s'}
+    if 'failed_at' in item and item.get('completed_at') is None and item.get('failed_at') is None:
+        open_fields |= {'queue_s', 'exec_s'}
+    if 'wall_s' in item and item.get('completed_at') is None:
+        open_fields.add('wall_s')
+    if item.get('node_status') == 'RUNNING':
+        open_fields.add('exec_s')
+    return frozenset(open_fields)
+
+
+def report_difference(reference: object, candidate: object) -> list[str]:
+    """The paths where two reports differ. An open span of the candidate may
+    be up to ``COUNTING_SPAN_TOLERANCE_S`` seconds longer than the
+    reference's: the candidate reads after the reference."""
+    differences: list[str] = []
+    _difference('$', reference, candidate, differences, depth=0)
+    return differences
+
+
+def _difference(
+    path: str, reference: object, candidate: object, differences: list[str], *, depth: int,
+) -> None:
+    assert depth <= _REPORT_DEPTH_BOUND, f'{path}: a report nests deeper than {_REPORT_DEPTH_BOUND}'
+    match (reference, candidate):
+        case (dict(), dict()):
+            left = typing.cast(dict[str, object], reference)
+            right = typing.cast(dict[str, object], candidate)
+            if left.keys() != right.keys():
+                differences.append(f'{path}: keys {sorted(left)} != {sorted(right)}')
+                return
+            open_fields = _open_spans(left)
+            for key, left_value in left.items():
+                right_value = right[key]
+                match (key in open_fields, left_value, right_value):
+                    case (True, int(), int()) if 0 <= right_value - left_value <= COUNTING_SPAN_TOLERANCE_S:
+                        continue
+                    case _:
+                        _difference(f'{path}.{key}', left_value, right_value, differences, depth=depth + 1)
+        case (list(), list()):
+            left_items = typing.cast(list[object], reference)
+            right_items = typing.cast(list[object], candidate)
+            if len(left_items) != len(right_items):
+                differences.append(f'{path}: {len(left_items)} items != {len(right_items)}')
+                return
+            for index, (left_item, right_item) in enumerate(zip(left_items, right_items, strict=True)):
+                _difference(f'{path}[{index}]', left_item, right_item, differences, depth=depth + 1)
+        case _:
+            if reference != candidate or type(reference) is not type(candidate):
+                differences.append(f'{path}: {reference!r} != {candidate!r}')
+
+
+def differing_reports[A](answers: Sequence[ReadAnswers[A]]) -> dict[str, list[str]]:
+    """The reads whose two answers differ by report, with the differing paths."""
+    found: dict[str, list[str]] = {}
+    for each in answers:
+        differences = report_difference(report(each.reference), report(each.candidate))
+        if differences:
+            found[each.name] = differences
+    return found

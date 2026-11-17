@@ -58,6 +58,9 @@ pub struct TaskAttemptInfo {
     pub finished_at: Option<DateTime<Utc>>,
 }
 
+/// The task row behind a task detail or a workflow node (Python
+/// `LeafTaskInfo`). `execution` is the stored class of a live task, and
+/// `None` for a task read from history, which does not keep the class.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LeafTaskInfo {
     pub task_id: Uuid,
@@ -74,6 +77,7 @@ pub struct LeafTaskInfo {
     pub exec_s: Option<i64>,
     pub worker_hostname: Option<String>,
     pub good_until: Option<DateTime<Utc>>,
+    pub execution: Option<Execution>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -64,7 +64,7 @@ from horsies.monitoring.errors import MonitoringResult
 from horsies.monitoring.history_window import MonitoringWindow
 from horsies.monitoring.models import ErrorCategory, TaskListPage, TaskSummary
 from horsies.monitoring.pages import TaskPage
-from horsies.monitoring.queries import (
+from tests.dualrun.reference.monitoring_queries import (
     _CODE_TO_CATEGORY,
     SortDirection,
     TaskSortField,
