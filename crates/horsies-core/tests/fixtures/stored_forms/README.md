@@ -186,9 +186,14 @@ Decoders:
   (`crates/horsies-core/src/core/task/error.rs:665`). A result read keeps the
   stored text (`StoredEnvelopeText::parse`,
   `crates/horsies-core/src/broker/result_types.rs:146`).
-- Rust client: `outcome_of_record` (`crates/horsies/src/handle.rs:327`) and
-  `stored_result` (`crates/horsies/src/reads/by_task_id.rs:114`), on the
-  core's typed read.
+- Rust client: `outcome_of_record` (`crates/horsies/src/handle.rs:360`) and
+  `stored_result` (`crates/horsies/src/reads/by_task_id.rs:115`), on the
+  core's typed read. A dependency result (`TaskOutcome`'s `Deserialize`,
+  `crates/horsies/src/workflow/dependency.rs`) and
+  `WorkflowContext::result_for` (`crates/horsies/src/workflow/context.rs`)
+  read the envelope's text with `read_stored_result`
+  (`crates/horsies/src/handle.rs:422`), as `outcome_of_record` does; the
+  Rust test reads each `ok` vector through all three.
 
 The Rust client builds an error from a code, a message and `data`. The
 exception record and the sub-workflow failure are written by the library, and

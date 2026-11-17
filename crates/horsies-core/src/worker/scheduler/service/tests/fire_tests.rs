@@ -38,7 +38,7 @@ fn one_connection_pool(pool: &PgPool, checkout_wait: Duration) -> CorePool {
 }
 
 /// A schedule of its own task name and a 60 s interval.
-fn own_schedule(prefix: &str) -> TaskSchedule {
+fn own_schedule(prefix: &str) -> TestSchedule {
     let name = format!("{prefix}_{}", Uuid::new_v4().simple());
     let mut schedule = interval_schedule_secs(&name, SCHEDULE_INTERVAL_SECONDS);
     schedule.task_name = name;
@@ -46,21 +46,14 @@ fn own_schedule(prefix: &str) -> TaskSchedule {
 }
 
 /// The send commands of `schedules`, as the start builds them.
-fn commands_for(pool: &PgPool, schedules: &[TaskSchedule]) -> HashMap<String, SendCommand> {
-    let broker = PostgresBroker::from_pool(pool.clone());
-    build_commands(
-        &broker,
-        &ScheduleConfig::new(schedules.to_vec()),
-        &default_app_config(),
-        &prepared_for(schedules),
-    )
-    .expect("the send commands build")
+fn commands_for(schedules: &[TestSchedule]) -> HashMap<String, SendCommand> {
+    active_plan(manifest_for(schedules)).commands
 }
 
 /// One tick on `core` with the existence heal not due.
 async fn tick_on(
     core: &CorePool,
-    schedules: &[TaskSchedule],
+    schedules: &[TestSchedule],
     commands: &HashMap<String, SendCommand>,
 ) -> Result<(), BrokerError> {
     let mut cadence = ExistenceCheckCadence::new(1);
@@ -68,7 +61,7 @@ async fn tick_on(
     check_and_enqueue(
         core,
         StatementLog::Off,
-        &enabled_schedules(schedules),
+        &active_plan(manifest_for(schedules)).schedules,
         commands,
         &mut cadence,
     )
@@ -108,7 +101,7 @@ async fn a_due_slot_fires_and_records_its_run_at_the_database_time() {
     let schedules = vec![schedule.clone()];
 
     let before = database_time(&pool).await;
-    tick_on(&core, &schedules, &commands_for(&pool, &schedules))
+    tick_on(&core, &schedules, &commands_for(&schedules))
         .await
         .expect("the tick");
     let after = database_time(&pool).await;
@@ -147,16 +140,9 @@ async fn a_fire_that_finds_no_state_row_creates_it_and_writes_no_task() {
     let database_now = whole_second_database_time(&pool).await;
     let first_due = database_now - chrono::Duration::seconds(1);
 
-    fire_once(
-        &pool,
-        &schedule,
-        facts_for(&schedule),
-        &default_app_config(),
-        first_due,
-        database_now,
-    )
-    .await
-    .expect("the fire heals the row");
+    fire_once(&pool, &schedule, first_due, database_now)
+        .await
+        .expect("the fire heals the row");
 
     let row = state::test_rows::state_row(&pool, &schedule.name)
         .await
@@ -192,16 +178,9 @@ async fn concurrent_fires_of_one_slot_write_one_task_and_one_run() {
             let pool = pool.clone();
             let schedule = schedule.clone();
             tokio::spawn(async move {
-                fire_once(
-                    &pool,
-                    &schedule,
-                    facts_for(&schedule),
-                    &default_app_config(),
-                    slot,
-                    database_now,
-                )
-                .await
-                .expect("each fire answers");
+                fire_once(&pool, &schedule, slot, database_now)
+                    .await
+                    .expect("each fire answers");
             })
         })
         .collect();
@@ -236,17 +215,7 @@ async fn a_fire_repeated_after_its_commit_writes_nothing_once_the_task_left_the_
     let database_now = whole_second_database_time(&pool).await;
     let slot = database_now - chrono::Duration::seconds(1);
     state::test_rows::seed_state(&pool, &schedule.name, slot).await;
-    let app_config = default_app_config();
-    let fire = || {
-        fire_once(
-            &pool,
-            &schedule,
-            facts_for(&schedule),
-            &app_config,
-            slot,
-            database_now,
-        )
-    };
+    let fire = || fire_once(&pool, &schedule, slot, database_now);
 
     fire().await.expect("the first fire");
     let task_id = slot_task_id(&pool, &schedule.name, slot).await;
@@ -259,7 +228,7 @@ async fn a_fire_repeated_after_its_commit_writes_nothing_once_the_task_left_the_
     fire().await.expect("the repeated fire");
     let core = core_pool_of(&pool);
     let schedules = vec![schedule.clone()];
-    tick_on(&core, &schedules, &commands_for(&pool, &schedules))
+    tick_on(&core, &schedules, &commands_for(&schedules))
         .await
         .expect("the next tick");
     core.close();
@@ -319,7 +288,7 @@ async fn a_catch_up_whose_fire_fails_commits_nothing_and_the_next_tick_fires_eac
         whole_second_database_time(&pool).await - interval * 2 - chrono::Duration::seconds(1);
     state::test_rows::seed_state(&pool, &schedule.name, first).await;
     let schedules = vec![schedule.clone()];
-    let commands = commands_for(&pool, &schedules);
+    let commands = commands_for(&schedules);
     let core = Arc::new(core_pool_of(&pool));
 
     let mut holder = pool.begin().await.expect("begin the holder");
@@ -381,7 +350,7 @@ async fn a_tick_fires_a_due_slot_on_a_pool_of_one_connection() {
     state::test_rows::seed_state(&pool, &schedule.name, slot).await;
     let schedules = vec![schedule.clone()];
 
-    tick_on(&core, &schedules, &commands_for(&pool, &schedules))
+    tick_on(&core, &schedules, &commands_for(&schedules))
         .await
         .expect("the tick on one connection");
 
@@ -406,7 +375,7 @@ async fn a_tick_with_no_free_connection_fails_at_the_due_read_and_writes_nothing
     let slot = whole_second_database_time(&pool).await - chrono::Duration::seconds(1);
     state::test_rows::seed_state(&pool, &schedule.name, slot).await;
     let schedules = vec![schedule.clone()];
-    let commands = commands_for(&pool, &schedules);
+    let commands = commands_for(&schedules);
 
     let held = core
         .checkout(CheckoutClass::Batch)
@@ -448,7 +417,7 @@ async fn a_fire_whose_state_move_fails_writes_no_task_and_the_next_tick_fires_on
     let slot = whole_second_database_time(&pool).await - chrono::Duration::seconds(1);
     state::test_rows::seed_state(&pool, &schedule.name, slot).await;
     let schedules = vec![schedule.clone()];
-    let commands = commands_for(&pool, &schedules);
+    let commands = commands_for(&schedules);
     let core = core_pool_of(&pool);
     let _created = sqlx::raw_sql(
         "CREATE FUNCTION test_fail_schedule_state() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -490,28 +459,18 @@ async fn a_fire_whose_state_move_fails_writes_no_task_and_the_next_tick_fires_on
     cleanup(&pool, &schedule.task_name, &schedule.name).await;
 }
 
-/// The spawned scheduler starts, fires a slot that comes due on the main
-/// core pool of its broker, and ends at its stop request with no start
-/// error.
+/// A running scheduler of a manifest starts, fires a slot that comes due on
+/// the main core pool of its broker, and ends at its stop request with no
+/// start error.
 #[tokio::test]
 #[serial]
-async fn a_spawned_scheduler_fires_a_due_slot_and_stops() {
+async fn a_running_scheduler_fires_a_due_slot_and_stops() {
     let pool = test_pool().await;
     let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
     let schedule = own_schedule("spawned");
-    let prepared = prepared_for(std::slice::from_ref(&schedule));
-    let cancel = CancellationToken::new();
-    let service = spawn_scheduler(
-        broker,
-        ScheduleConfig {
-            enabled: true,
-            schedules: vec![schedule.clone()],
-            check_interval_seconds: 1,
-        },
-        default_app_config(),
-        prepared,
-        cancel.clone(),
-    );
+    let manifest = manifest_for(std::slice::from_ref(&schedule));
+    let stop = SchedulerStop::new();
+    let service = tokio::spawn(SchedulerService::from_manifest(broker, manifest, &stop).run());
     tokio::time::timeout(Duration::from_secs(5), async {
         while state::test_rows::state_row(&pool, &schedule.name)
             .await
@@ -545,7 +504,7 @@ async fn a_spawned_scheduler_fires_a_due_slot_and_stops() {
     .await
     .expect("a tick fires the due slot");
     assert_eq!(task_count(&pool, &schedule.task_name).await, 1);
-    cancel.cancel();
+    stop.request_stop();
     tokio::time::timeout(Duration::from_secs(5), service)
         .await
         .expect("the scheduler stops at its stop request")
