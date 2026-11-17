@@ -9,6 +9,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from horsies._catalog.manifest import (
+    KEEPALIVE_PROBES_MAX,
+    KEEPALIVE_SECONDS_MAX,
+    TCP_USER_TIMEOUT_MS_MAX,
+)
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -459,6 +464,32 @@ class TestPostgresConfigTcpUserTimeout:
         assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
         assert refused.value.message == 'invalid tcp_user_timeout_ms'
 
+    def test_the_core_bound_is_accepted(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr(self._LOCAL_URL),
+            tcp_user_timeout_ms=TCP_USER_TIMEOUT_MS_MAX,
+        )
+
+        assert config.pooled_connect_args['tcp_user_timeout'] == TCP_USER_TIMEOUT_MS_MAX
+
+    def test_a_value_above_the_core_bound_is_refused_with_the_bound(self) -> None:
+        above = TCP_USER_TIMEOUT_MS_MAX + 1
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig(
+                database_url=SecretStr(self._LOCAL_URL), tcp_user_timeout_ms=above,
+            )
+
+        assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert refused.value.message == 'invalid tcp_user_timeout_ms'
+        assert refused.value.notes == [
+            f'got: tcp_user_timeout_ms={above}',
+            'tcp_user_timeout_ms is 0 (the operating system default) or '
+            f'1 to {TCP_USER_TIMEOUT_MS_MAX} milliseconds',
+        ]
+        assert refused.value.help_text == (
+            f'give 0 or a number of milliseconds from 1 to {TCP_USER_TIMEOUT_MS_MAX}'
+        )
+
     def test_not_passed_to_the_sqlalchemy_engine(self) -> None:
         config = PostgresConfig(database_url=SecretStr(self._LOCAL_URL))
 
@@ -556,6 +587,65 @@ class TestPostgresConfigKeepalives:
 
         # tcp_user_timeout does not depend on keepalives.
         assert config.pooled_connect_args == {'tcp_user_timeout': 30_000}
+
+    @pytest.mark.parametrize(
+        ('field_name', 'bound'),
+        [
+            ('tcp_keepalives_idle', KEEPALIVE_SECONDS_MAX),
+            ('tcp_keepalives_interval', KEEPALIVE_SECONDS_MAX),
+            ('tcp_keepalives_count', KEEPALIVE_PROBES_MAX),
+        ],
+    )
+    def test_keepalive_value_at_the_core_bound_is_accepted(
+        self, field_name: str, bound: int,
+    ) -> None:
+        config = PostgresConfig.model_validate(
+            {'database_url': self._LOCAL_URL, field_name: bound},
+        )
+
+        connect_arg = field_name.removeprefix('tcp_')
+        assert config.keepalive_connect_args()[connect_arg] == bound
+
+    @pytest.mark.parametrize(
+        ('field_name', 'bound'),
+        [
+            ('tcp_keepalives_idle', KEEPALIVE_SECONDS_MAX),
+            ('tcp_keepalives_interval', KEEPALIVE_SECONDS_MAX),
+            ('tcp_keepalives_count', KEEPALIVE_PROBES_MAX),
+        ],
+    )
+    def test_keepalive_value_above_the_core_bound_is_refused_with_the_bound(
+        self, field_name: str, bound: int,
+    ) -> None:
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig.model_validate(
+                {'database_url': self._LOCAL_URL, field_name: bound + 1},
+            )
+
+        assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert refused.value.message == f'invalid {field_name}'
+        assert refused.value.notes == [
+            f'got: {field_name}={bound + 1}',
+            f'{field_name} is from 1 to {bound} when tcp_keepalives is True',
+        ]
+        assert refused.value.help_text == (
+            f'give a number from 1 to {bound}, or set tcp_keepalives=False '
+            'to turn keepalives off'
+        )
+
+    def test_values_above_the_core_bounds_allowed_when_keepalives_disabled(
+        self,
+    ) -> None:
+        # Disabled keepalives ignore the interval/idle/count values entirely.
+        config = PostgresConfig(
+            database_url=SecretStr(self._LOCAL_URL),
+            tcp_keepalives=False,
+            tcp_keepalives_idle=KEEPALIVE_SECONDS_MAX + 1,
+            tcp_keepalives_interval=KEEPALIVE_SECONDS_MAX + 1,
+            tcp_keepalives_count=KEEPALIVE_PROBES_MAX + 1,
+        )
+
+        assert config.keepalive_connect_args() == {}
 
     def test_keepalive_fields_excluded_from_engine_kwargs(self) -> None:
         config = PostgresConfig(database_url=self._LOCAL_URL)
