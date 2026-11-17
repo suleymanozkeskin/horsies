@@ -1605,6 +1605,17 @@ mod tests {
         app_config: AppConfig,
         worker_config: WorkerConfig,
     ) -> Worker {
+        worker_of_idle_children(broker, app_config, worker_config, 1)
+    }
+
+    /// A worker on `broker` of `count` isolated children, each of which
+    /// boots, then exits at the next frame it reads.
+    fn worker_of_idle_children(
+        broker: Arc<PostgresBroker>,
+        app_config: AppConfig,
+        worker_config: WorkerConfig,
+        count: u32,
+    ) -> Worker {
         use crate::worker::executor::protocol::{
             ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
         };
@@ -1619,7 +1630,7 @@ mod tests {
             SelectedProfile {
                 name: "default".to_owned(),
                 profile: serde_json::from_value(serde_json::json!({
-                    "isolated": {"kind": "isolated_children", "count": 1}
+                    "isolated": {"kind": "isolated_children", "count": count}
                 }))
                 .expect("a valid test profile"),
             },
@@ -4251,7 +4262,15 @@ mod tests {
             PostgresBroker::connect_worker_with(&test_app_config(worker_url.clone()).broker)
                 .await
                 .expect("connect the broker of a worker");
-        let worker = start_test_worker(broker, worker_url);
+        // Two isolated children: the held claim counts in the isolated
+        // budget (`horsies_claim_in_flight`) and fills one slot; the claim
+        // of the pending task takes the other.
+        let worker = worker_of_idle_children(
+            Arc::new(broker),
+            test_app_config(worker_url),
+            WorkerConfig::default(),
+            2,
+        );
         let pending = insert_pending_task(&database.pool).await;
         let held = insert_task_claimed_by(&database.pool, worker.worker_id()).await;
         let cancel = worker.cancel_token();
