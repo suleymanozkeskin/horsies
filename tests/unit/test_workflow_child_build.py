@@ -108,6 +108,21 @@ class NestingChild(WorkflowDefinition[int]):
         return app.workflow(cls.name, [inner], output=inner, definition_key=cls.definition_key)
 
 
+class SurrogateNameChild(WorkflowDefinition[int]):
+    """A child whose built spec has a name with a lone surrogate."""
+
+    name = 'child_build.surrogate_name_child'
+    definition_key = 'child_build.surrogate_name_child.v1'
+
+    @classmethod
+    def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
+        _ = (args, params)
+        node = TaskNode(fn=value_task, kwargs={'value': 1})
+        return app.workflow(
+            'child_build.\ud800', [node], output=node, definition_key=cls.definition_key,
+        )
+
+
 class BrokenChild(WorkflowDefinition[int]):
     """A child whose build raises."""
 
@@ -124,7 +139,7 @@ class BrokenChild(WorkflowDefinition[int]):
 def registered_definitions() -> None:
     """The definitions of this module, registered again: other tests clear
     the definition registry."""
-    for definition in (ValueChild, ResultChild, NestingChild, BrokenChild):
+    for definition in (ValueChild, ResultChild, NestingChild, BrokenChild, SurrogateNameChild):
         register_workflow_definition(definition)
 
 
@@ -412,6 +427,20 @@ class TestBuildChildSpec:
 
         assert isinstance(answer, ChildSpecRefused)
         assert answer.message.startswith('Subworkflow build failed: RuntimeError: cannot build')
+
+    def test_a_child_whose_spec_data_does_not_encode_answers_the_node_failure(self) -> None:
+        answer = build_child_spec(
+            cast(Any, _broker()), _request(definition_key=SurrogateNameChild.definition_key),
+        )
+
+        assert isinstance(answer, ChildSpecRefused)
+        assert 'does not encode as spec data' in answer.message
+        envelope = json.loads(answer.failure_result)
+        assert envelope['err']['error_code'] == 'WORKFLOW_ENQUEUE_FAILED'
+        assert envelope['err']['data'] == {
+            'workflow_id': str(_request().parent_workflow_id),
+            'task_index': 3,
+        }
 
     def test_a_source_row_reaches_build_with_as_the_dependency_result(self) -> None:
         source = SimpleNamespace(

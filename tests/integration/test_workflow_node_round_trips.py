@@ -69,8 +69,6 @@ pinged every reused connection with these tests' idle limit of 0. The core
 pings a connection that waited in its pool past its own idle limit (1 s), so
 it sends the ping or not."""
 
-CORE_PING: Final = 'SELECT 1'
-"""The simple query of the core's ping."""
 
 
 @pytest.fixture(autouse=True)
@@ -255,12 +253,11 @@ def _simple_query(turn: Turn) -> str:
 def _assert_turns(turns: tuple[Turn, ...], expected: tuple[str, ...], *, pre_ping: bool) -> None:
     """One Bind/Execute turn per statement of ``expected``, its transaction
     control as simple queries in its order, and with the pre-ping on at most
-    ``PING`` more turns, each the core's ping."""
+    ``PING`` more turns, each a ping (``Turn.is_ping``): the core's in the
+    core run, the engine's in the Python run of a dual-run."""
     executed = [turn for turn in turns if turn.executes()]
-    pings = [turn for turn in turns if turn.has_simple_query(CORE_PING)]
-    control = [
-        turn for turn in turns if not turn.executes() and not turn.has_simple_query(CORE_PING)
-    ]
+    pings = [turn for turn in turns if turn.is_ping()]
+    control = [turn for turn in turns if not turn.executes() and not turn.is_ping()]
     assert len(executed) == len([each for each in expected if each not in TRANSACTION_CONTROL]), turns
     assert [_simple_query(turn) for turn in control] == [
         each for each in expected if each in TRANSACTION_CONTROL

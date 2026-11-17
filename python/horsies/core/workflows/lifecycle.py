@@ -273,7 +273,8 @@ async def start_workflow_async(
     Returns:
         ``Ok(WorkflowHandle)`` on success.
         ``Err(WorkflowStartError)`` on failure; match on the variant. A
-        ``WorkflowValidationError`` from prevalidation is
+        ``WorkflowValidationError`` from prevalidation, and spec data that
+        does not encode (a text with a lone surrogate), are
         ``WorkflowStartValidationFailed``. A failure of the schema install,
         the statement, an owed child start, a child build that did not run,
         or a core boundary error is ``WorkflowStartEnqueueFailed``; nothing
@@ -364,8 +365,20 @@ async def start_workflow_async(
         ))
 
     # ── Zone 2: the spec as data (no I/O) ────────────────────────────
+    match workflow_spec_json(spec, top_node_rows(broker, spec)):
+        case Ok(ok_value=spec_json):
+            pass
+        case Err(err_value=refused):
+            return Err(WorkflowStartValidationFailed(
+                message=f'the spec data of workflow {spec.name!r} does not encode: {refused}',
+                workflow_name=spec.name,
+                workflow_id=wf_id,
+                exception=refused,
+            ))
+        case _ as unreachable:
+            assert_never(unreachable)
     request = WorkflowStartRequest(
-        spec_json=workflow_spec_json(spec, top_node_rows(broker, spec)),
+        spec_json=spec_json,
         workflow_id=uuid.UUID(wf_id),
         sent_at=workflow_sent_at,
         resend_on_transient_err=resend_on_transient_err,

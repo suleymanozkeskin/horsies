@@ -6,7 +6,7 @@
 //! sub-workflow node) is read by the core's test; the DSL writes those
 //! members with the same keys in the same order (`spec_data.rs`).
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::node::tests::{task_node, ChargeInput};
 use super::spec_data::spec_data_text;
@@ -47,6 +47,13 @@ fn charge() -> crate::TaskNode<f64, ChargeInput> {
             amount: 9.5,
         })
         .unwrap()
+}
+
+/// The input of a task that takes one text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoteInput {
+    note: String,
 }
 
 /// The client's text of `spec` against the vector `name`.
@@ -113,4 +120,24 @@ fn queues_in_first_seen_order() {
     let _second_seen = builder.task(charge().node_id("b").queue("alpha"));
     let spec = builder.build().unwrap();
     assert_vector("queues_in_first_seen_order", &spec, &custom);
+}
+
+/// Text outside ASCII in the name, the definition key, the task name and
+/// the node input is written as the characters, as Python's `dumps_json`
+/// writes them.
+#[test]
+fn non_ascii_text() {
+    let mut builder = WorkflowSpecBuilder::new("Ünïcode ✓ 🐎");
+    builder.definition_key("tests.ünïcode.v1");
+    let node = builder.task(
+        task_node::<f64, NoteInput>("app.Ünïcode")
+            .set_input(NoteInput {
+                note: "Ünïcode ✓ 🐎".to_owned(),
+            })
+            .unwrap()
+            .node_id("note"),
+    );
+    builder.output(node);
+    let spec = builder.build().unwrap();
+    assert_vector("non_ascii_text", &spec, &config());
 }

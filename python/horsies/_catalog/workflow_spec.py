@@ -9,9 +9,10 @@ the core's spec data parser (`parse_workflow_spec_data`) takes.
 from __future__ import annotations
 
 import dataclasses
-import json
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import Final, Literal, cast
+
+from horsies.core.codec.json_io import SerdeResult, dumps_json
 
 __all__ = [
     'SpecDefinitionKeyKeyed',
@@ -310,6 +311,24 @@ class WorkflowSpecData:
     """The nodes, each at its index."""
 
 
-def dump_workflow_spec_data(manifest: WorkflowSpecData) -> str:
-    """The JSON text of `manifest`, in the form that `parse_workflow_spec_data` takes."""
-    return json.dumps(dataclasses.asdict(manifest), separators=(',', ':'), allow_nan=False)
+def _json_object(members: list[tuple[str, object]]) -> dict[str, object]:
+    """A dataclass as a JSON object for `dumps_json`: a tuple field as a list."""
+    return {name: _json_member(value) for name, value in members}
+
+
+def _json_member(value: object) -> object:
+    match value:
+        case tuple():
+            return list(cast('tuple[object, ...]', value))
+        case _:
+            return value
+
+
+def dump_workflow_spec_data(manifest: WorkflowSpecData) -> SerdeResult[str]:
+    """The JSON text of `manifest`, in the form that `parse_workflow_spec_data` takes.
+
+    The encoder is `dumps_json`, as for every stored form: a character
+    outside ASCII is written as it is. Err when a text of `manifest` holds
+    a lone surrogate, which UTF-8 cannot encode.
+    """
+    return dumps_json(dataclasses.asdict(manifest, dict_factory=_json_object))
