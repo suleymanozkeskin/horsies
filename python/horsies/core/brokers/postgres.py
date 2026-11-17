@@ -875,8 +875,19 @@ def _strict_result_envelope(
 
     A text that does not read (malformed, a non-finite number) or a value
     that is neither an object nor null is ``INVALID_JSON_PAYLOAD``, as the
-    Python read of a stored result before the switch.
+    Python read of a stored result before the switch. An empty text is
+    ``INVALID_JSON_PAYLOAD`` too: a task with no result stores NULL, which
+    the caller reads before this call.
     """
+    match result_json:
+        case '':
+            # loads_json reads an empty text as None, so it is refused here.
+            return Err(BrokerInvalidJsonPayload(
+                message=f'Result JSON parse failed for task {task_id}: the stored text is empty',
+                exception=SerializationError('JSON parse failed: the stored text is empty'),
+            ))
+        case _:
+            pass
     loaded = loads_json(result_json)
     if is_err(loaded):
         return Err(BrokerInvalidJsonPayload(
