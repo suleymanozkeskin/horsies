@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Annotated, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
+from horsies._catalog.worker_manifest import PAYLOAD_BYTES_MAX
+
 
 class PayloadPolicy(BaseModel):
     """Size guardrail for serialized task payloads.
@@ -20,11 +22,14 @@ class PayloadPolicy(BaseModel):
       payloads only — results are never rejected (completed work
       is never destroyed over size; results warn only). None (default)
       disables rejection.
+
+    Each threshold is at most ``PAYLOAD_BYTES_MAX``, the bound of its field in
+    the worker manifest.
     """
 
     model_config = ConfigDict(extra='forbid')
 
-    warn_bytes: Annotated[Optional[int], Field(ge=1)] = Field(
+    warn_bytes: Annotated[Optional[int], Field(ge=1, le=PAYLOAD_BYTES_MAX)] = Field(
         default=1_048_576,  # 1 MiB
         description=(
             'Warn when the UTF-8 text of a serialized payload exceeds this many bytes '
@@ -33,7 +38,7 @@ class PayloadPolicy(BaseModel):
         ),
     )
 
-    reject_bytes: Annotated[Optional[int], Field(ge=1)] = Field(
+    reject_bytes: Annotated[Optional[int], Field(ge=1, le=PAYLOAD_BYTES_MAX)] = Field(
         default=None,
         description=(
             'Reject an enqueue whose serialized payload exceeds this many '

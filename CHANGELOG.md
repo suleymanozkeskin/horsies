@@ -221,6 +221,17 @@ written in Rust, on a new baseline schema.
   timestamp (4714-11-24 BC). 0.7.0 accepted any positive `timedelta`, and
   such an age failed every sweep with `timestamp out of range`.
 
+- **The claim values and the payload thresholds are within the bounds of
+  the worker.** `prefetch_buffer`, `cluster_wide_cap` and a custom queue's
+  `max_concurrency` are at most 2,147,483,647; `claim_lease_ms` and
+  `max_claim_renew_age_ms` at most 4,294,967,295; `PayloadPolicy.warn_bytes`
+  and `reject_bytes` at most 2^64 - 1. A larger value is refused when the
+  config is built: `AppConfig` raises `ConfigurationError` with the code of
+  the field (`CONFIG_INVALID_PREFETCH` HRS-202, `CONFIG_INVALID_CLUSTER_CAP`
+  HRS-201, `CONFIG_INVALID_QUEUE_MODE` HRS-200), and `PayloadPolicy` raises
+  `ValidationError`. The bounds are those of the worker manifest of the
+  core. 0.7.0 accepted these values.
+
 - **`check(live=True)` runs the core's connectivity check.** The check
   builds a core handle of its own (observe-only, producer pools) and calls
   `CoreHandle.check_connectivity`, the rule of the Python and Rust clients:
