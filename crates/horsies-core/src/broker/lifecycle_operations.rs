@@ -15,6 +15,8 @@
 //!   the plain successes of one worker (1 to 64 rows) in one statement.
 //! - [`PostgresBroker::finish_workflow_success`]:
 //!   `horsies_finish_workflow_success`, phase 1 of a workflow task's success.
+//! - [`PostgresBroker::claim_pass`]: `horsies_claim`, one claim pass of one
+//!   worker.
 //! - [`PostgresBroker::cancel_task`]: `horsies_cancel_task`, the
 //!   administrative cancel of one plain task (Python
 //!   `horsies.monitoring.task_actions.cancel_task`, and the core's monitoring
@@ -32,7 +34,9 @@
 use uuid::Uuid;
 
 use crate::broker::attempt_writes::{self, FinishFailedAttempt, FinishWorkflowSuccess};
-use crate::broker::claims::{release_claims, ReleaseClaims, ReleaseOutcome};
+use crate::broker::claims::{
+    claim_pass, release_claims, ClaimPass, ClaimPassRequest, ReleaseClaims, ReleaseOutcome,
+};
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::stale_recovery::{
@@ -281,6 +285,27 @@ impl PostgresBroker {
         self.ensure_client_family_for_write().await?;
         let (open, _write) = self.core_pools_for_write()?;
         attempt_writes::finish_workflow_success(open.main(), self.statement_log(), command).await
+    }
+
+    /// One claim pass of one worker (Python `ClaimMixin._claim_and_dispatch_all`,
+    /// the claim statement only): `horsies_claim`, one statement in
+    /// autocommit on the main core pool, checked out as batch work, so its
+    /// cap locks end with the statement. It claims rows (CLAIMED, a new claim
+    /// generation, a lease) within the class budgets, the per-worker limit,
+    /// the queue caps and the cluster cap, and writes nothing else. The
+    /// dispatch of the claimed rows is the caller's.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); [`BrokerError::InvalidClaimArgument`] for a
+    /// count above the function's integer range (nothing sent);
+    /// [`BrokerError::Statement`] (after `OutcomeUnknown` the pass may have
+    /// claimed rows; they return to the queue when their lease expires);
+    /// [`BrokerError::RowDecode`] and [`BrokerError::ClaimContract`] for rows
+    /// outside the function's contract.
+    pub async fn claim_pass(&self, request: &ClaimPassRequest) -> Result<ClaimPass, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        claim_pass(open.main(), self.statement_log(), request).await
     }
 
     /// Cancel one plain task (Python `horsies.monitoring.task_actions.cancel_task`):

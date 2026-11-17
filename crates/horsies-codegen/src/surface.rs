@@ -181,6 +181,29 @@ const FINISH_WORKFLOW_SUCCESS_PARAMETERS: &[StubParameter] = &[
     keyword("claimed_at", "datetime.datetime"),
     keyword("result_json", "str"),
 ];
+const CLAIM_PASS_REQUEST_PARAMETERS: &[StubParameter] = &[
+    keyword("worker_id", "str"),
+    keyword("queues", "list[str]"),
+    keyword("queue_priority", "dict[str, int]"),
+    keyword("queue_max_concurrency", "dict[str, int]"),
+    keyword("hard_cap_mode", "bool"),
+    keyword(
+        "budgets",
+        "dict[Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'], int]",
+    ),
+    keyword(
+        "routes",
+        "dict[Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'], \
+         Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']]",
+    ),
+    keyword("prefetch_buffer", "int"),
+    keyword("max_claim_per_worker", "int"),
+    keyword("max_claim_batch", "int"),
+    keyword("cluster_wide_cap", "int | None"),
+    keyword("claim_lease_ms", "int"),
+    keyword("lock_keys", "list[int]"),
+];
+const CLAIM_PASS_PARAMETERS: &[StubParameter] = &[positional("request", "ClaimPassRequest")];
 const MARK_STALE_RUNNING_PARAMETERS: &[StubParameter] = &[
     positional("stale_after_ms", "int"),
     positional("finalizing_stale_after_ms", "int"),
@@ -221,7 +244,7 @@ const MARK_STALE_RUNNING_OUTCOME: &str =
 const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
      CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
 
-const CORE_HANDLE_METHODS: [StubFunction; 20] = [
+const CORE_HANDLE_METHODS: [StubFunction; 21] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -319,6 +342,12 @@ const CORE_HANDLE_METHODS: [StubFunction; 20] = [
         doc: "Write phase 1 of a workflow task's success. Writes, in one statement. A naive\nclaimed_at raises TypeError.",
     },
     StubFunction {
+        name: "claim_pass_async",
+        parameters: CLAIM_PASS_PARAMETERS,
+        returns: TypeText::FutureOf("ClaimPassRecord | ClaimPassFailed"),
+        doc: "One claim pass. Writes, in one statement; the dispatch stays with the caller.",
+    },
+    StubFunction {
         name: "release_claims_async",
         parameters: RELEASE_CLAIMS_PARAMETERS,
         returns: TypeText::FutureOf(RELEASE_CLAIMS_OUTCOME),
@@ -397,7 +426,7 @@ const EXCEPTIONS: &[StubException] = &[
     },
 ];
 
-const ARGUMENT_CLASSES: [StubClass; 12] = [
+const ARGUMENT_CLASSES: [StubClass; 13] = [
     StubClass {
         name: "StartNow",
         doc: "Start the task as soon as a worker can claim it.",
@@ -476,6 +505,13 @@ const ARGUMENT_CLASSES: [StubClass; 12] = [
         methods: &[],
     },
     StubClass {
+        name: "ClaimPassRequest",
+        doc: "One frozen claim pass. A negative count or one above 32 bits raises OverflowError; an\nunknown class name, a route to a budget the pass does not hold or a lease of 0 raises\nValueError.",
+        constructor: Constructor::Parameters(CLAIM_PASS_REQUEST_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
         name: "ReleaseClaimsRequest",
         doc: "One frozen release: the claims of one worker, at most 1000, each task once, each with\nthe claim generation of its dispatch. A naive datetime raises TypeError; more claims, a\nrepeated task id or another placement raises ValueError.",
         constructor: Constructor::Parameters(RELEASE_CLAIMS_REQUEST_PARAMETERS),
@@ -484,7 +520,7 @@ const ARGUMENT_CLASSES: [StubClass; 12] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 50] = [
+const RECORD_CLASSES: [StubClass; 53] = [
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -909,6 +945,44 @@ const RECORD_CLASSES: [StubClass; 50] = [
         methods: &[],
     },
     StubClass {
+        name: "ClaimedRowRecord",
+        doc: "One row the claim pass took; claimed_at is the claim generation of this claim.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("id", "uuid.UUID"),
+            property("task_name", "str"),
+            property("queue_name", "str"),
+            property("input", "str"),
+            property("task_options", "str | None"),
+            property(
+                "execution",
+                "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']",
+            ),
+            property("is_workflow_task", "bool"),
+            property("claimed_at", "datetime.datetime"),
+            property("retry_count", "int"),
+            property("max_retries", "int"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ClaimPassRecord",
+        doc: "The claim pass ran: the claimed rows in dispatch order, and the rows its plan chose and\nits take did not get.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("claimed", "list[ClaimedRowRecord]"),
+            property("short_of_plan", "int"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ClaimPassFailed",
+        doc: "The claim pass failed. It wrote nothing, or it committed and its reply was lost; claimed\nrows then return to the queue when their lease expires.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
         name: "ClaimsReleased",
         doc: "The release statement ran: one row outcome per claim, in the request order.",
         constructor: Constructor::NoConstructor,
@@ -1010,8 +1084,8 @@ const HANDLE_CLASSES: [StubClass; 1] = [StubClass {
     methods: &CORE_HANDLE_METHODS,
 }];
 
-const CLASSES: [StubClass; 63] = {
-    let mut classes = [HANDLE_CLASSES[0]; 63];
+const CLASSES: [StubClass; 67] = {
+    let mut classes = [HANDLE_CLASSES[0]; 67];
     let mut position = 0;
     while position < ARGUMENT_CLASSES.len() {
         classes[1 + position] = ARGUMENT_CLASSES[position];

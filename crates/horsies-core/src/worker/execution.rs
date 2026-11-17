@@ -42,7 +42,7 @@ use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
 use crate::core::workflow::context::{WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
-use crate::db::CheckoutClass;
+use crate::db::{CheckoutClass, ParameterType, StatementBound, TypedStatement};
 use crate::workflow_engine::args_merge::unwrap_args_from_entries;
 use crate::workflow_engine::phase2_recovery::{send_phase2_wake, Phase2Wake};
 use crate::workflow_engine::steps::{
@@ -1032,21 +1032,50 @@ FROM target
 WHERE t.id = target.id
   AND target.fenced";
 
+/// [`MARK_FINALIZING_SQL`] with its parameter types: task id, worker id,
+/// claim generation.
+static MARK_FINALIZING: TypedStatement = TypedStatement::new(
+    "mark_finalizing",
+    MARK_FINALIZING_SQL,
+    &[
+        ParameterType::Uuid,
+        ParameterType::Text,
+        ParameterType::Timestamptz,
+    ],
+);
+
 /// Stamp the finalization handoff only for the current owner and claim
-/// generation. One statement in autocommit: its row lock ends with it.
+/// generation. One statement in autocommit on the main core pool of
+/// `broker`, a per-task write ([`CheckoutClass::Reserved`]): its row lock
+/// ends with it. A close of the broker waits for it.
+///
+/// Errors: [`crate::broker::BrokerError::PoolSettings`] when a closed
+/// handle cannot open its pools again; [`crate::broker::BrokerError::Statement`]
+/// for a failed statement (nothing was written, or the outcome is unknown).
 pub(crate) async fn mark_task_finalizing(
-    pool: &sqlx::PgPool,
+    broker: &PostgresBroker,
     task_id: Uuid,
     worker_id: &str,
     claimed_at: chrono::DateTime<Utc>,
-) -> Result<FinalizingMark, sqlx::Error> {
-    let result = sqlx::query(MARK_FINALIZING_SQL)
-        .bind(task_id)
-        .bind(worker_id)
-        .bind(claimed_at)
-        .execute(pool)
+) -> Result<FinalizingMark, crate::broker::BrokerError> {
+    let (open, _write) = broker.core_pools_for_write()?;
+    let statement = &MARK_FINALIZING;
+    let bound = statement
+        .bind()
+        .value(&task_id)
+        .value(&worker_id)
+        .value(&claimed_at)
+        .finish();
+    broker.statement_log().log(statement);
+    let changed = open
+        .main()
+        .execute(
+            CheckoutClass::Reserved,
+            &bound,
+            StatementBound::ConnectionTimeouts,
+        )
         .await?;
-    match result.rows_affected() {
+    match changed {
         0 => Ok(FinalizingMark::NotHeld),
         1 => Ok(FinalizingMark::Marked),
         changed => unreachable!(

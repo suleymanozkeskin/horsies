@@ -11,7 +11,6 @@ use super::support::{
     start_claimed_task, task_node, workflow, workflow_status, IsolatedDatabase, LiveStatus,
     NodeSeed, ParentLink, WorkflowSeed,
 };
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::{TaskError, WorkflowSpec, WorkflowSpecRegistry};
 use crate::workflow_engine::recovery::{recover_stuck_workflows, RecoveryReport};
@@ -21,11 +20,9 @@ const LIMIT: u32 = 3;
 
 async fn pass(pool: &PgPool, registry: &WorkflowSpecRegistry) -> RecoveryReport {
     recover_stuck_workflows(
-        pool,
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         registry,
-        0,
         LIMIT,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await

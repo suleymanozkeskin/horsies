@@ -281,7 +281,7 @@ async fn release_after_start_error(context: &HostContext, facts: &RunFacts) {
 /// is logged: the parent's write is fenced on its own.
 pub(super) async fn mark_finalizing(context: &HostContext, facts: &RunFacts) {
     match mark_task_finalizing(
-        context.broker.pool(),
+        &context.broker,
         facts.task_id,
         &facts.worker_id,
         facts.claimed_at,

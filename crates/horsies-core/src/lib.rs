@@ -86,7 +86,8 @@ pub use crate::broker::attempt_writes::{
     RetryRequest,
 };
 pub use crate::broker::claims::{
-    ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement,
+    ClaimClasses, ClaimPass, ClaimPassRequest, ClaimTake, ClaimedRow, ReleaseBatch,
+    ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement, UnheldBudget,
     MAX_RELEASED_CLAIMS,
 };
 pub use crate::broker::stale_recovery::{

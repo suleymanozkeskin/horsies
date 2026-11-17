@@ -34,8 +34,8 @@ use crate::core::history::maintenance::coverage::{
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::db::{
-    ChannelName, PayloadEvent, PayloadFilter, PayloadSubscription, Reserve, WakeEvent,
-    WakeSubscription,
+    ChannelName, CheckoutClass, ParameterType, PayloadEvent, PayloadFilter, PayloadSubscription,
+    Reserve, StatementBound, TypedStatement, WakeEvent, WakeSubscription,
 };
 use crate::worker::backoff::RetryBackoff;
 use crate::worker::children::{
@@ -214,8 +214,25 @@ fn compute_claim_lock_keys(
     keys
 }
 
+/// The pong of a ping: `$1` the reply channel of the request, `$2` the pong
+/// JSON.
+static NOTIFY_WORKER_PONG: TypedStatement = TypedStatement::new(
+    "notify_worker_pong",
+    "SELECT pg_notify($1, $2)",
+    &[ParameterType::Text, ParameterType::Text],
+);
+
+/// Answer one ping addressed to this worker (or to every worker) with one
+/// `pg_notify` on the main core pool of `broker`, in autocommit. A payload
+/// that does not parse, or a ping for another worker, is answered with
+/// nothing.
+///
+/// Errors: `BrokerError::Serialization` for a pong that does not encode;
+/// `BrokerError::PoolSettings` when a closed handle cannot open its pools
+/// again; `BrokerError::Statement` for a failed `pg_notify`. The sender of
+/// an unanswered ping times out.
 async fn handle_worker_ping(
-    pool: &sqlx::PgPool,
+    broker: &PostgresBroker,
     worker_id: &str,
     hostname: &str,
     pid: i32,
@@ -245,12 +262,22 @@ async fn handle_worker_ping(
     let payload =
         serde_json::to_string(&pong).map_err(crate::broker::BrokerError::Serialization)?;
 
-    sqlx::query("SELECT pg_notify($1, $2)")
-        .bind(&request.reply_channel)
-        .bind(&payload)
-        .execute(pool)
-        .await
-        .map_err(crate::broker::BrokerError::Database)?;
+    let (open, _write) = broker.core_pools_for_write()?;
+    let statement = &NOTIFY_WORKER_PONG;
+    let bound = statement
+        .bind()
+        .value(&request.reply_channel)
+        .value(&payload)
+        .finish();
+    broker.statement_log().log(statement);
+    let _notified = open
+        .main()
+        .execute(
+            CheckoutClass::Batch,
+            &bound,
+            StatementBound::ConnectionTimeouts,
+        )
+        .await?;
     Ok(())
 }
 
@@ -578,7 +605,7 @@ fn return_held_rows(
 /// What the ping responder needs to answer a ping.
 #[derive(Clone)]
 struct PingResponder {
-    pool: sqlx::PgPool,
+    broker: Arc<PostgresBroker>,
     worker_id: String,
     hostname: String,
     pid: i32,
@@ -605,7 +632,7 @@ fn spawn_ping_responder(
                     let responder = responder.clone();
                     let _reply = tokio::spawn(async move {
                         if let Err(error) = handle_worker_ping(
-                            &responder.pool,
+                            &responder.broker,
                             &responder.worker_id,
                             &responder.hostname,
                             responder.pid,
@@ -1294,7 +1321,7 @@ impl Worker {
         let ping_responder = spawn_ping_responder(
             pings,
             PingResponder {
-                pool: self.broker.pool().clone(),
+                broker: Arc::clone(&self.broker),
                 worker_id: self.worker_id.clone(),
                 hostname: self.hostname.clone(),
                 pid: std::process::id() as i32,
@@ -1842,7 +1869,7 @@ mod tests {
         let responder = spawn_ping_responder(
             pings,
             PingResponder {
-                pool: broker.pool().clone(),
+                broker: Arc::clone(&broker),
                 worker_id: worker.worker_id().to_owned(),
                 hostname: "listener-boot-host".to_owned(),
                 pid: 1,
