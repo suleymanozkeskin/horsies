@@ -9,6 +9,7 @@
 //! Times that the engine compares with the database clock are set with
 //! `NOW()` in SQL, so the test clock never enters a comparison.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -16,6 +17,12 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::broker::attempt_writes::{
+    AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryRequest,
+};
+use crate::broker::lifecycle_tests::support::{
+    database_options, unpinged_single_connection_pool, WireProxy,
+};
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
@@ -24,7 +31,9 @@ use crate::core::history::maintenance::coverage::{
     ensure_partition_coverage_in_pool, CoverageOutcome,
 };
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
-use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
+use crate::core::lifecycle::{
+    OwnedClaim, PriorLockedRead, TerminalizationCommand, TerminalizationOutcome,
+};
 use crate::core::registry::workflow::RegisteredWorkflowSpec;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
@@ -32,6 +41,10 @@ use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::{AnyNode, OnError, TaskError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
 use crate::db::CheckoutClass;
 use crate::test_support::{server_url, with_database, TestDatabase};
+use crate::worker::execution::{
+    finalize_workflow_phase, persist_failed_attempt, persist_ok_result, FinalizeOutcome,
+    PhaseTwoForm,
+};
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::engine::{
     on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
@@ -964,6 +977,207 @@ pub(super) fn err(error_code: &str, message: &str) -> TaskResult<serde_json::Val
 /// A success outcome with `value`.
 pub(super) fn ok(value: serde_json::Value) -> TaskResult<serde_json::Value> {
     TaskResult::Ok(value)
+}
+
+// ---------------------------------------------------------------------------
+// The worker's finalize
+// ---------------------------------------------------------------------------
+
+/// A node task that runs under [`WORKER`]: what the worker holds for its
+/// finalize.
+#[derive(Debug, Clone)]
+pub(super) struct RunningNodeTask {
+    pub(super) task_id: Uuid,
+    pub(super) queue_name: String,
+    /// The claim generation of the fence.
+    pub(super) claimed_at: DateTime<Utc>,
+}
+
+/// Takes the PENDING task of node `task_index` of `workflow_id` to RUNNING
+/// under [`WORKER`], with the process facts of the start write
+/// ([`SEEDED_WORKER_PID`], [`SEEDED_WORKER_HOSTNAME`],
+/// [`SEEDED_WORKER_PROCESS_NAME`]), and the node to RUNNING, as the claim and
+/// the start write leave them (Python's `_run_node_a`).
+pub(super) async fn run_node_task(
+    pool: &PgPool,
+    workflow_id: Uuid,
+    task_index: i32,
+) -> RunningNodeTask {
+    let (task_id, queue_name, claimed_at): (Uuid, String, DateTime<Utc>) = sqlx::query_as(
+        "UPDATE horsies_tasks t
+         SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $3,
+             claim_expires_at = NULL, started_at = NOW(), worker_pid = $4,
+             worker_hostname = $5, worker_process_name = $6, updated_at = NOW()
+         FROM horsies_workflow_tasks n
+         WHERE n.workflow_id = $1 AND n.task_index = $2 AND t.id = n.task_id
+           AND t.status = 'PENDING'
+         RETURNING t.id, t.queue_name::text, t.claimed_at",
+    )
+    .bind(workflow_id)
+    .bind(task_index)
+    .bind(WORKER)
+    .bind(SEEDED_WORKER_PID)
+    .bind(SEEDED_WORKER_HOSTNAME)
+    .bind(SEEDED_WORKER_PROCESS_NAME)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|error| {
+        panic!("node {task_index} of {workflow_id} has no PENDING task: {error}")
+    });
+    let started = sqlx::query(
+        "UPDATE horsies_workflow_tasks SET status = 'RUNNING', started_at = NOW()
+         WHERE workflow_id = $1 AND task_index = $2 AND status = 'ENQUEUED'",
+    )
+    .bind(workflow_id)
+    .bind(task_index)
+    .execute(pool)
+    .await
+    .expect("hand the node to its running task");
+    assert_eq!(
+        started.rows_affected(),
+        1,
+        "node {task_index} of {workflow_id} is not ENQUEUED"
+    );
+    RunningNodeTask {
+        task_id,
+        queue_name,
+        claimed_at,
+    }
+}
+
+/// What the task of a node reports to the worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NodeReport {
+    /// The value `1`.
+    Success,
+    /// A task error `BOOM`, not retried.
+    Failure,
+}
+
+/// What phase 1 of the worker's finalize owes to phase 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PhaseOneDone {
+    /// Phase 1 sent the capacity wake of the task's queue.
+    pub(super) capacity_notified: bool,
+    /// The form of the phase-2 statement, from the node facts of phase 1.
+    pub(super) phase_two: PhaseTwoForm,
+}
+
+/// Phase 1 of the worker's finalize of `task` on `broker`: one statement,
+/// `horsies_finish_workflow_success` for a success,
+/// `horsies_finish_failed_attempt` with no retry for a failure (the worker's
+/// `persist_ok_result` and `persist_failed_attempt`).
+///
+/// Panics when the write fails or owes no phase 2.
+pub(super) async fn worker_phase_one(
+    broker: &PostgresBroker,
+    task: &RunningNodeTask,
+    report: NodeReport,
+) -> PhaseOneDone {
+    let fence = OwnedClaim {
+        worker_id: WORKER.to_owned(),
+        claimed_at: task.claimed_at,
+    };
+    let written = match report {
+        NodeReport::Success => persist_ok_result(broker, task.task_id, b"1", fence, true).await,
+        NodeReport::Failure => {
+            let failure = FinishFailedAttempt {
+                task_id: task.task_id,
+                fence,
+                retry: RetryRequest::NoRetry,
+                result_json: serde_json::to_string(&err("BOOM", "boom"))
+                    .expect("encode the failure"),
+                error_code: Some("BOOM".to_owned()),
+                failed_reason: None,
+                attempt: AttemptFailure {
+                    kind: AttemptFailureKind::Failed,
+                    error_message: Some("boom".to_owned()),
+                    failed_reason: None,
+                },
+            };
+            persist_failed_attempt(broker, &failure, true).await
+        }
+    };
+    match written {
+        Ok(FinalizeOutcome::Terminal {
+            capacity_notified,
+            phase_two,
+        }) => PhaseOneDone {
+            capacity_notified,
+            phase_two,
+        },
+        Ok(FinalizeOutcome::Retried | FinalizeOutcome::Finalized | FinalizeOutcome::Refused) => {
+            panic!("phase 1 of task {} owes no phase 2", task.task_id)
+        }
+        Err(error) => panic!("phase 1 of task {}: {error}", task.task_id),
+    }
+}
+
+/// Phase 2 of the worker's finalize of `task` on `broker`, in the form that
+/// phase 1 named (`worker::execution::finalize_workflow_phase`).
+///
+/// Panics when phase 2 fails or owes a parent advance (the callers run
+/// top-level workflows).
+pub(super) async fn worker_phase_two(
+    broker: &PostgresBroker,
+    registry: &WorkflowSpecRegistry,
+    task: &RunningNodeTask,
+    done: PhaseOneDone,
+) {
+    let owed = finalize_workflow_phase(
+        broker,
+        registry,
+        task.task_id,
+        &task.queue_name,
+        true,
+        done.capacity_notified,
+        done.phase_two,
+        &RetentionConfig::default(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("phase 2 of task {}: {error}", task.task_id));
+    assert!(
+        owed.is_empty(),
+        "phase 2 of task {} owes a parent advance",
+        task.task_id
+    );
+}
+
+/// A broker whose core pools connect through a proxy that counts round
+/// trips (`WireProxy`). The proxy counts the requests of every connection
+/// that the broker opens.
+pub(super) struct CountedBroker {
+    proxy: WireProxy,
+    proxied: PgPool,
+    pub(super) broker: Arc<PostgresBroker>,
+}
+
+impl CountedBroker {
+    /// A broker on the database of `pool`, through a new proxy.
+    pub(super) async fn open(pool: &PgPool) -> Self {
+        let upstream = database_options(pool);
+        let proxy = WireProxy::start(&upstream).await;
+        let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
+        let broker = Arc::new(PostgresBroker::from_pool(proxied.clone()));
+        Self {
+            proxy,
+            proxied,
+            broker,
+        }
+    }
+
+    /// The round trips that `operation` sends through the proxy, with its
+    /// output.
+    pub(super) async fn count<T>(&self, operation: impl Future<Output = T>) -> (u32, T) {
+        self.proxy.reset_round_trips();
+        let output = operation.await;
+        (self.proxy.round_trips(), output)
+    }
+
+    /// Closes the sqlx pool that the broker was built from.
+    pub(super) async fn close(self) {
+        self.proxied.close().await;
+    }
 }
 
 // ---------------------------------------------------------------------------
