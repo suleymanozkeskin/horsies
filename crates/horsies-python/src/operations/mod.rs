@@ -24,5 +24,6 @@ pub mod start;
 pub mod success;
 pub mod task_info;
 pub mod task_lists;
+pub mod worker_reads;
 pub mod workflow_lifecycle;
 pub mod workflow_retention;

@@ -113,6 +113,7 @@ from horsies.core.baseline.install import (
 )
 from horsies.core.types.status import TaskAttemptOutcome, TaskStatus
 from horsies.core.utils.loop_runner import LoopRunnerError
+from tests.dualrun.reference import broker_monitoring as reference
 from tests.dualrun.reference import enqueue_caller, result_caller
 from tests.broker_resources_support import (
     attach_loop_limit,
@@ -2083,7 +2084,13 @@ class TestPingDatabase:
 
 @pytest.mark.unit
 class TestWorkerStateReads:
-    """list/get worker-state reads map rows to typed snapshots."""
+    """list/get worker-state reads map rows to typed snapshots.
+
+    Since the monitoring switch the broker methods run in the core; these
+    tests run Python's bodies before the switch, the dual-run reference
+    (``tests/dualrun/reference/broker_monitoring.py``). The broker facade is
+    tested in ``tests/unit/test_broker_worker_reads_in_core.py``.
+    """
 
     @pytest.mark.asyncio
     async def test_list_maps_rows_to_snapshots(self) -> None:
@@ -2096,7 +2103,7 @@ class TestWorkerStateReads:
             ],
         )
 
-        result = await broker.list_worker_states_async()
+        result = await reference.list_worker_states_async(broker)
 
         assert is_ok(result)
         snaps = result.ok_value
@@ -2109,7 +2116,7 @@ class TestWorkerStateReads:
         broker = _make_broker()
         _setup_session_returning(broker, fetchone=None)
 
-        result = await broker.get_worker_state_async('missing')
+        result = await reference.get_worker_state_async(broker, 'missing')
 
         assert is_ok(result)
         assert result.ok_value is None
@@ -2119,7 +2126,7 @@ class TestWorkerStateReads:
         broker = _make_broker()
         _setup_session_returning(broker, fetchone=_worker_state_row(worker_id='w9'))
 
-        result = await broker.get_worker_state_async('w9')
+        result = await reference.get_worker_state_async(broker, 'w9')
 
         assert is_ok(result)
         assert result.ok_value is not None
@@ -2129,7 +2136,7 @@ class TestWorkerStateReads:
     async def test_history_rejects_nonpositive_limit(self) -> None:
         broker = _make_broker()
 
-        result = await broker.get_worker_state_history_async('w1', limit=0)
+        result = await reference.get_worker_state_history_async(broker, 'w1', limit=0)
 
         assert is_err(result)
         assert isinstance(result.err_value, BrokerInvalidInput)
@@ -2142,7 +2149,7 @@ class TestWorkerStateReads:
             broker, fetchall=[_worker_state_row(), _worker_state_row()]
         )
 
-        result = await broker.get_worker_state_history_async('worker-1', limit=10)
+        result = await reference.get_worker_state_history_async(broker, 'worker-1', limit=10)
 
         assert is_ok(result)
         assert len(result.ok_value) == 2
@@ -2185,7 +2192,7 @@ class TestWorkerStateReads:
         broker = _make_broker()
         _setup_session_returning(broker, fetchone=_worker_state_row(slots_down=stored))
 
-        result = await broker.get_worker_state_async('worker-1')
+        result = await reference.get_worker_state_async(broker, 'worker-1')
 
         assert is_ok(result)
         assert result.ok_value is not None
@@ -2199,7 +2206,7 @@ class TestWorkerStateReads:
             fetchone=_worker_state_row(slots_down=[{'slot': 9}]),
         )
 
-        result = await broker.get_worker_state_async('worker-1')
+        result = await reference.get_worker_state_async(broker, 'worker-1')
 
         assert is_err(result)
         assert 'slots_down is unreadable' in result.err_value.message
@@ -2230,7 +2237,7 @@ class TestWorkerStateReads:
             fetchone=_worker_state_row(class_capacity=stored),
         )
 
-        result = await broker.get_worker_state_async('worker-1')
+        result = await reference.get_worker_state_async(broker, 'worker-1')
 
         assert is_ok(result)
         assert result.ok_value is not None
@@ -2244,7 +2251,7 @@ class TestWorkerStateReads:
             fetchone=_worker_state_row(class_capacity={'ISOLATED': {'capacity': -1}}),
         )
 
-        result = await broker.get_worker_state_async('worker-1')
+        result = await reference.get_worker_state_async(broker, 'worker-1')
 
         assert is_err(result)
         assert 'class_capacity is unreadable' in result.err_value.message
@@ -2254,8 +2261,9 @@ class TestWorkerStateReads:
 @pytest.mark.unit
 class TestClassReadOutcomes:
     """The error side of ``get_class_coverage_async`` and
-    ``get_class_report_async``. The Ok side and the refusals run against a
-    real database in ``tests/integration/test_class_coverage.py``."""
+    ``get_class_report_async``, on Python's bodies before the monitoring
+    switch (the dual-run reference). The Ok side and the refusals run
+    against a real database in ``tests/integration/test_class_coverage.py``."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize('method', ['get_class_coverage_async', 'get_class_report_async'])
@@ -2272,7 +2280,7 @@ class TestClassReadOutcomes:
         )
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
-        result = await getattr(broker, method)()
+        result = await getattr(reference, method)(broker)
 
         assert is_err(result)
         assert result.err_value.code == BrokerErrorCode.MONITORING_QUERY_FAILED
@@ -2284,7 +2292,7 @@ class TestClassReadOutcomes:
         broker = _make_broker()
         attach_loop_limit(broker)
 
-        result = await getattr(broker, method)()
+        result = await getattr(reference, method)(broker)
 
         assert is_err(result)
         assert result.err_value.code == BrokerErrorCode.EVENT_LOOP_LIMIT
@@ -2299,7 +2307,7 @@ class TestClassReadOutcomes:
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         with pytest.raises(AssertionError):
-            await broker.get_class_coverage_async()
+            await reference.get_class_coverage_async(broker)
 
 
 @pytest.mark.unit

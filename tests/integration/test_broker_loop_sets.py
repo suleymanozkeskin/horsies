@@ -27,8 +27,10 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.resources import BrokerResources, ListenerEnabled
+from horsies.core.brokers.result_types import BrokerResult
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.health import WorkerPong
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.task_decorator import TaskFunction
@@ -130,6 +132,12 @@ async def _pids_on_this_loop(broker: PostgresBroker) -> list[int]:
         assert connection is not None
         pids.append(connection.info.backend_pid)
     return pids
+
+
+async def _ping_no_worker(broker: PostgresBroker) -> BrokerResult[list[WorkerPong]]:
+    """A worker ping on this loop's SQLAlchemy set, with no worker to answer:
+    ``Ok([])`` after a short window."""
+    return await broker.ping_workers_async(timeout_seconds=0.05)
 
 
 def _alive(pids: list[int]) -> set[int]:
@@ -250,14 +258,14 @@ class TestClosedLoopRelease:
         broker = PostgresBroker(_one_connection_config())
         paused = asyncio.new_event_loop()
         try:
-            # list_worker_states_async reads on the loop's SQLAlchemy set; the
-            # database ping and the task lists run on the core pool and
-            # select no set.
-            assert is_ok(paused.run_until_complete(broker.list_worker_states_async()))
+            # ping_workers_async sends its ping on the loop's SQLAlchemy set;
+            # the database ping, the task lists and the worker state and
+            # class reads run on the core pool and select no set.
+            assert is_ok(paused.run_until_complete(_ping_no_worker(broker)))
             for _ in range(3):
-                assert is_ok(asyncio.run(broker.list_worker_states_async()))
+                assert is_ok(asyncio.run(_ping_no_worker(broker)))
                 assert len(broker._loop_sets) == 2  # pyright: ignore[reportPrivateUsage]
-            assert is_ok(paused.run_until_complete(broker.list_worker_states_async()))
+            assert is_ok(paused.run_until_complete(_ping_no_worker(broker)))
         finally:
             closed = paused.run_until_complete(broker.close_async())
             paused.close()

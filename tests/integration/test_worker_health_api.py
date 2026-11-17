@@ -133,9 +133,11 @@ async def test_list_worker_states_covers_all_workers_including_stale(
 ) -> None:
     """Every distinct worker appears exactly once with its newest snapshot.
 
-    Regression for the recursive skip-scan form of ``LIST_WORKER_STATES_SQL``:
-    the walk must visit all worker_ids (not stop after the first), and a
-    worker whose snapshots are all old must still be listed.
+    Regression for the recursive skip-scan form of the worker list statement
+    (the core's ``LIST_WORKER_STATES``; Python's ``LIST_WORKER_STATES_SQL``
+    before the monitoring switch): the walk must visit all worker_ids (not
+    stop after the first), and a worker whose snapshots are all old must
+    still be listed.
     """
     prefix = f'itest-{uuid.uuid4().hex}'
     now = datetime.now(timezone.utc)

@@ -339,6 +339,11 @@ const MONITORING_WORKFLOW_NODE_PARAMETERS: &[StubParameter] = &[
 const MONITORING_LIST_TASKS_PARAMETERS: &[StubParameter] = &[positional("query", "TaskListQuery")];
 const MONITORING_TASK_DETAIL_PARAMETERS: &[StubParameter] = &[positional("task_id", "uuid.UUID")];
 const STALE_TASKS_PARAMETERS: &[StubParameter] = &[positional("threshold_minutes", "object")];
+const WORKER_STATE_PARAMETERS: &[StubParameter] = &[positional("worker_id", "str")];
+const WORKER_STATE_HISTORY_PARAMETERS: &[StubParameter] = &[
+    positional("worker_id", "str"),
+    keyword("limit", "int | None"),
+];
 const MONITORING_TASK_FACETS_PARAMETERS: &[StubParameter] =
     &[positional("query", "TaskFacetsQuery")];
 
@@ -669,7 +674,7 @@ const TASK_LIST_OUTCOME: &str = "TaskListComplete | TaskListTruncated | BrokerFa
 const MONITORING_DETAIL_OUTCOME: &str = "MonitoringJson | TaskDetailAbsent | MonitoringFailed";
 
 /// The monitoring methods of `CoreHandle`.
-const MONITORING_HANDLE_METHODS: [StubFunction; 12] = [
+const MONITORING_HANDLE_METHODS: [StubFunction; 17] = [
     StubFunction {
         name: "monitoring_list_tasks_async",
         parameters: MONITORING_LIST_TASKS_PARAMETERS,
@@ -741,6 +746,36 @@ const MONITORING_HANDLE_METHODS: [StubFunction; 12] = [
         parameters: &[],
         returns: TypeText::FutureOf(TASK_LIST_OUTCOME),
         doc: "The PENDING tasks whose good_until passed before a worker took them. Reads only, in\none statement.",
+    },
+    StubFunction {
+        name: "worker_states_async",
+        parameters: &[],
+        returns: TypeText::FutureOf("WorkerStatesRecord | BrokerFailure"),
+        doc: "The latest state snapshot per worker, idle workers included. Reads only, in one\nstatement. A cancelled await drops the read.",
+    },
+    StubFunction {
+        name: "worker_state_async",
+        parameters: WORKER_STATE_PARAMETERS,
+        returns: TypeText::FutureOf("WorkerStateRecord | WorkerStateAbsent | BrokerFailure"),
+        doc: "The latest state snapshot of one worker, or WorkerStateAbsent when it wrote none. Reads\nonly, in one statement.",
+    },
+    StubFunction {
+        name: "worker_state_history_async",
+        parameters: WORKER_STATE_HISTORY_PARAMETERS,
+        returns: TypeText::FutureOf("WorkerStatesRecord | BrokerFailure"),
+        doc: "The state snapshots of one worker, newest first: at most limit, or every retained one for\nNone. A limit of 0 or less is INVALID_INPUT; a limit that PostgreSQL refuses as a bigint\nis MONITORING_QUERY_FAILED, not retryable; both before any core call. Reads only, in one\nstatement.",
+    },
+    StubFunction {
+        name: "class_coverage_async",
+        parameters: &[],
+        returns: TypeText::FutureOf("ClassCoverageRecord | BrokerFailure"),
+        doc: "The fleet check: for each (queue, class) with PENDING rows, whether a live worker serves\nit. Reads only, in one statement.",
+    },
+    StubFunction {
+        name: "class_report_async",
+        parameters: &[],
+        returns: TypeText::FutureOf("ClassReportRecord | BrokerFailure"),
+        doc: "The pending streams with their oldest wait and coverage, and the budget load of each\nlive worker. Reads only, in one statement.",
     },
 ];
 
@@ -1707,7 +1742,7 @@ const HANDLE_CLASSES: [StubClass; 3] = [
 ];
 
 /// The classes of the monitoring reads and the web handler.
-const MONITORING_CLASSES: [StubClass; 12] = [
+const MONITORING_CLASSES: [StubClass; 31] = [
     StubClass {
         name: "MonitoringWindowRecord",
         doc: "The window of one monitoring request: UTC bounds, increasing, at most the core's maximum\napart.",
@@ -1808,6 +1843,215 @@ const MONITORING_CLASSES: [StubClass; 12] = [
         properties: &[
             property("rows", "list[dict[str, object]]"),
             property("bound", "int"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ResourceShortageRecord",
+        doc: "The cause of a down slot that ran short of an OS resource.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("errno", "Literal['EMFILE', 'ENFILE', 'ENOMEM', 'EAGAIN']"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "DownSlotRecord",
+        doc: "A worker slot whose last child boot failed for a cause that can clear.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("slot", "int"),
+            property("cause", "ResourceShortageRecord | Literal['THREAD_START_REFUSED']"),
+            property("detail", "str"),
+            property("down_since", "datetime.datetime"),
+            property("failed_boots", "int"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "AllSlotsServingRecord",
+        doc: "No slot of the worker was down when it wrote the snapshot.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "SlotsDownRecord",
+        doc: "The worker was degraded: these slots were down, in slot order. Never empty.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("slots", "list[DownSlotRecord]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ClassBudgetRecord",
+        doc: "One claim budget of a worker, as its snapshot recorded it; serves is in Execution order.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("budget", "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']"),
+            property("capacity", "int"),
+            property("serves", "list[Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkerStateRecord",
+        doc: "One horsies_worker_states row. recovery_config_json is the JSON text of the stored object.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("worker_id", "str"),
+            property("snapshot_at", "datetime.datetime"),
+            property("hostname", "str"),
+            property("pid", "int"),
+            property("processes", "int"),
+            property("max_claim_batch", "int"),
+            property("max_claim_per_worker", "int"),
+            property("cluster_wide_cap", "int | None"),
+            property("queues", "list[str]"),
+            property("queue_priorities", "dict[str, int]"),
+            property("queue_max_concurrency", "dict[str, int]"),
+            property("recovery_config_json", "str"),
+            property("tasks_running", "int"),
+            property("tasks_claimed", "int"),
+            property("memory_usage_mb", "float | None"),
+            property("memory_percent", "float | None"),
+            property("cpu_percent", "float | None"),
+            property("children_memory_mb", "float | None"),
+            property("worker_started_at", "datetime.datetime"),
+            property("slot_health", "AllSlotsServingRecord | SlotsDownRecord"),
+            property("class_capacity", "list[ClassBudgetRecord]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkerStatesRecord",
+        doc: "The snapshots of a worker state read: the latest per worker, or the history of one worker,\nnewest first.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("states", "list[WorkerStateRecord]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkerStateAbsent",
+        doc: "The worker has written no snapshot.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("worker_id", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "StreamServedRecord",
+        doc: "Live workers serve the stream with capacity in service.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workers", "int"),
+            property("capacity", "int"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "StreamWithoutCapacityRecord",
+        doc: "Live workers serve the stream, and none has capacity in service.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workers", "int"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "StreamUnservedRecord",
+        doc: "No live worker serves the stream.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "StreamCoverageRecord",
+        doc: "The coverage of one pending stream.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("queue_name", "str"),
+            property("execution", "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']"),
+            property("state", "StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ClassCoverageRecord",
+        doc: "The fleet check, read at checked_at (database time).",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("checked_at", "datetime.datetime"),
+            property("live_workers", "int"),
+            property("streams", "list[StreamCoverageRecord]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "OldestWaitingRecord",
+        doc: "At least one row of the stream is due; wait is how long the oldest due row waited.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("enqueued_at", "datetime.datetime"),
+            property("wait", "datetime.timedelta"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "NoneDueRecord",
+        doc: "Every row of the stream is due later.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("next_due_at", "datetime.datetime"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "PendingStreamRecord",
+        doc: "One pending stream of the class report.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("queue_name", "str"),
+            property("execution", "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']"),
+            property("wait", "OldestWaitingRecord | NoneDueRecord"),
+            property("state", "StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "BudgetLoadRecord",
+        doc: "One claim budget of a live worker, with the rows it holds.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("budget", "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']"),
+            property("capacity", "int"),
+            property("serves", "list[Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']]"),
+            property("in_flight", "int"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkerClassLoadRecord",
+        doc: "The claim budgets of one live worker, in Execution order.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("worker_id", "str"),
+            property("snapshot_at", "datetime.datetime"),
+            property("budgets", "list[BudgetLoadRecord]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ClassReportRecord",
+        doc: "The class report, read at checked_at (database time); workers by worker id.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("checked_at", "datetime.datetime"),
+            property("streams", "list[PendingStreamRecord]"),
+            property("workers", "list[WorkerClassLoadRecord]"),
         ],
         methods: &[],
     },
