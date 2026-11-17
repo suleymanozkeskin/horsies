@@ -41,7 +41,7 @@ from horsies.core.worker.runtime import (
     _TimeoutWriteFailed,
 )
 from horsies.core.worker.shared_finalize import timeout_retry_write
-from horsies.core.worker.shared_stop import RetryPlacement
+from horsies.core.worker.shared_stop import NoCancelSignal, RetryPlacement
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.claiming import (
@@ -1516,6 +1516,7 @@ class TestAwaitSlotOutcome:
                     1500,
                     RetryPlacement.SAME_CLASS,
                     replace(CLAIM, claimed_at=claimed_at),
+                    NoCancelSignal(),
                 )
             case Ok():
                 raise AssertionError(result)
@@ -3918,7 +3919,7 @@ class TestStartupRegistersEveryClassItRuns:
             )
 
         monkeypatch.setattr(
-            coverage_module, 'ensure_startup_coverage_in_database', _ensured
+            coverage_module, 'ensure_startup_coverage_in_core', _ensured
         )
         worker.broker = MagicMock()
         attach_resources(worker.broker, fake_resources())
@@ -3970,7 +3971,7 @@ class TestStartGuardsKindsDownAtTheFirstStart:
             )
 
         monkeypatch.setattr(
-            coverage_module, 'ensure_startup_coverage_in_database', _ensured
+            coverage_module, 'ensure_startup_coverage_in_core', _ensured
         )
         worker = _make_worker()
         worker.broker = MagicMock()
@@ -4016,7 +4017,7 @@ class TestWorkerStartupCoverageOutcome:
         )
         monkeypatch.setattr(
             coverage_module,
-            'ensure_startup_coverage_in_database',
+            'ensure_startup_coverage_in_core',
             AsyncMock(return_value=failure),
         )
         worker.broker = MagicMock()
@@ -4050,7 +4051,7 @@ class TestWorkerStartupCoverageOutcome:
         worker = _make_worker()
         monkeypatch.setattr(
             coverage_module,
-            'ensure_startup_coverage_in_database',
+            'ensure_startup_coverage_in_core',
             AsyncMock(
                 return_value=coverage_module.CoverageEnsureFailed(
                     stage='ensure_leaf_coverage',
@@ -4118,7 +4119,7 @@ class TestWorkerStartConnectionOrdering:
             )
 
         monkeypatch.setattr(
-            coverage_module, 'ensure_startup_coverage_in_database', _ensured
+            coverage_module, 'ensure_startup_coverage_in_core', _ensured
         )
         worker.broker = MagicMock()
         attach_resources(worker.broker, fake_resources())
@@ -4180,7 +4181,7 @@ class TestWorkerStartConnectionOrdering:
             )
 
         monkeypatch.setattr(
-            coverage_module, 'ensure_startup_coverage_in_database', _ensured
+            coverage_module, 'ensure_startup_coverage_in_core', _ensured
         )
         worker.broker = MagicMock()
         attach_resources(worker.broker, fake_resources())

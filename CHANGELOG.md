@@ -8,6 +8,17 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Changed
+
+- **The `TASK_TIMEOUT` error of a `SHARED_ASYNC` task tells how the task
+  ended.** Its `data` gets the key `cancel_end`: `RETURNED_AFTER_SIGNAL`
+  when the task and its work ended within `cancel_grace_ms` after the
+  cancel at the deadline, `DROPPED_AFTER_GRACE` when the child sent the
+  second cancel. The Python worker and the core worker write the same key.
+  An isolated or `SHARED_THREAD` timeout, and a task whose child the
+  worker killed, have no `cancel_end`. The `data` keeps `task_id` and
+  `timeout_ms`.
+
 ### Rust client (crate `horsies`)
 
 The crate `horsies` is rebuilt on `horsies-core`, the engine that the

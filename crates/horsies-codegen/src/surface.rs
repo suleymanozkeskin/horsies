@@ -232,6 +232,10 @@ const DELETE_EXPIRED_WORKFLOWS_PARAMETERS: &[StubParameter] = &[
     positional("batch_size", "int"),
     positional("budget_ms", "int"),
 ];
+const EXPIRE_PAUSED_WORKFLOWS_PARAMETERS: &[StubParameter] = &[
+    positional("older_than_us", "int"),
+    positional("batch_size", "int"),
+];
 const RAW_RESULT_RECORD_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("timeout_ms", "int | None"),
@@ -425,7 +429,7 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
     },
 ];
 
-const CORE_HANDLE_METHODS: [StubFunction; 31] = [
+const CORE_HANDLE_METHODS: [StubFunction; 32] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -587,6 +591,12 @@ const CORE_HANDLE_METHODS: [StubFunction; 31] = [
         parameters: DELETE_EXPIRED_WORKFLOWS_PARAMETERS,
         returns: TypeText::FutureOf("WorkflowsDeleted | WorkflowDeleteFailed"),
         doc: "One workflow retention pass of the reaper, in batches until one deletes nothing or the\nbudget has passed. Writes; each batch commits alone. A negative value raises\nOverflowError.",
+    },
+    StubFunction {
+        name: "expire_paused_workflows_async",
+        parameters: EXPIRE_PAUSED_WORKFLOWS_PARAMETERS,
+        returns: TypeText::FutureOf("PausedExpired | PausedExpiryFailed"),
+        doc: "Expire the PAUSED workflows older than older_than_us microseconds, at most batch_size,\noldest first. Writes; each candidate commits alone.",
     },
     StubFunction {
         name: "task_info",
@@ -1670,7 +1680,7 @@ const MONITORING_CLASSES: [StubClass; 7] = [
     },
 ];
 
-const WORKFLOW_CLASSES: [StubClass; 8] = [
+const WORKFLOW_CLASSES: [StubClass; 10] = [
     StubClass {
         name: "WorkflowPaused",
         doc: "The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed\ntasks of the paused tree are abandoned.",
@@ -1734,6 +1744,20 @@ const WORKFLOW_CLASSES: [StubClass; 8] = [
             property("message", "str"),
             property("retryable", "bool"),
         ],
+        methods: &[],
+    },
+    StubClass {
+        name: "PausedExpired",
+        doc: "The paused expiry call ended; expired counts the workflows it expired.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("expired", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "PausedExpiryFailed",
+        doc: "The paused expiry call failed. The candidates before a failed one are expired; a\nstatement whose reply was lost may have committed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
         methods: &[],
     },
 ];

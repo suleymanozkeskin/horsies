@@ -5,6 +5,8 @@
 //!   a RUNNING workflow and its RUNNING descendants.
 //! - [`PostgresBroker::cancel_workflow`]: `horsies_workflow_cancel`, the cancel
 //!   of a workflow tree.
+//! - [`PostgresBroker::expire_paused_workflows`]: `horsies_workflow_expire_paused`
+//!   per candidate, the paused expiry of the reaper.
 //! - [`PostgresBroker::delete_expired_workflows`]: the workflow retention
 //!   delete of the reaper, in bounded batches (not a 0005 function: one
 //!   statement, `crate::worker::recovery::DELETE_EXPIRED_WORKFLOWS_SQL`).
@@ -22,9 +24,11 @@ use uuid::Uuid;
 
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
+use crate::core::config::retention::PausedWorkflowAge;
 use crate::core::workflow::handle_types::HandleResult;
 use crate::db::{CheckoutClass, ParameterType, StatementBound, TypedStatement};
 use crate::worker::recovery::DELETE_EXPIRED_WORKFLOWS_SQL;
+use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle;
 
 /// The workflow retention delete: one batch of terminal workflows older than
@@ -96,6 +100,34 @@ impl PostgresBroker {
     /// Panics: a row outside the function's contract (a defect).
     pub async fn cancel_workflow(&self, workflow_id: Uuid) -> HandleResult<bool> {
         lifecycle::cancel_workflow(self, workflow_id).await
+    }
+
+    /// Expire the PAUSED workflows older than `older_than`, at most
+    /// `batch_size` per call (Python `expire_paused_workflows`,
+    /// `python/horsies/core/workflows/lifecycle.py`): one read of the
+    /// candidates, oldest first, then one `horsies_workflow_expire_paused` per
+    /// candidate in autocommit, on the main core pool with the reserve. A
+    /// resume that committed first wins.
+    ///
+    /// The client family is checked once per handle before the first
+    /// statement.
+    ///
+    /// Returns: the count of workflows that this call expired.
+    ///
+    /// Errors: the errors of
+    /// [`crate::workflow_engine::lifecycle::expire_paused_workflows`], and a
+    /// refused or failed client family check as [`WorkflowError::Broker`]. The
+    /// candidates before a failed one are expired; the rest wait for the next
+    /// call.
+    pub async fn expire_paused_workflows(
+        &self,
+        older_than: PausedWorkflowAge,
+        batch_size: NonZeroU32,
+    ) -> Result<u64, WorkflowError> {
+        self.ensure_client_family_for_write()
+            .await
+            .map_err(WorkflowError::Broker)?;
+        lifecycle::expire_paused_workflows(self, older_than, i64::from(batch_size.get())).await
     }
 
     /// One workflow retention pass (Python `ReaperMixin._run_reaper_pass`, the
