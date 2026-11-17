@@ -472,6 +472,33 @@ fn a_node_status_outside_the_enum_is_stored_data_invalid() {
     assert!(refused.message.contains("\"BOGUS\""), "{}", refused.message);
 }
 
+/// A stored NULL is no summary.
+#[test]
+fn a_stored_null_is_no_summary() {
+    let info = node_info(workflow(), stored_node("COMPLETED", None))
+        .expect("a node without a summary reads");
+    assert!(info.sub_workflow_summary.is_none());
+}
+
+/// An empty stored summary is `STORED_DATA_INVALID`, not retryable, and
+/// names its node: NULL is the one stored form of no summary, and the empty
+/// text is corrupt data.
+#[test]
+fn an_empty_stored_summary_is_stored_data_invalid() {
+    let refused = node_info(workflow(), stored_node("COMPLETED", Some("")))
+        .expect_err("an empty summary does not read");
+    assert_eq!(refused.code, HandleErrorCode::StoredDataInvalid);
+    assert!(!refused.retryable);
+    assert_eq!(refused.workflow_id, workflow());
+    assert!(
+        refused
+            .message
+            .starts_with("node 0 has a stored sub-workflow summary that does not read"),
+        "{}",
+        refused.message
+    );
+}
+
 /// A stored summary that is not JSON, that breaks the summary rules (an
 /// unknown status, never read as FAILED), or that is nested past the read's
 /// depth bound is `STORED_DATA_INVALID`, not retryable.
