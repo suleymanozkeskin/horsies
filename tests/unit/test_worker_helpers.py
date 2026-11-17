@@ -6174,9 +6174,10 @@ class TestPersistTerminalStateFusedPath:
 
     @pytest.mark.asyncio
     async def test_workflow_ok_result_returns_persisted_routing_facts(self) -> None:
-        """The success of a workflow task is one statement; the locked row
-        supplies the phase-2 routing facts."""
+        """The success of a workflow task is one statement through the core
+        handle; the locked row supplies the phase-2 routing facts."""
         worker, session = _make_session_worker(fetchone_results=[])
+        worker.broker = MagicMock()
         claimed_at = datetime.now(timezone.utc)
         applied = SuccessApplied(
             task_id='task-1',
@@ -6192,7 +6193,7 @@ class TestPersistTerminalStateFusedPath:
         )
 
         with patch(
-            'horsies.core.worker.finalize.finish_workflow_success',
+            'horsies.core.worker.finalize.finish_workflow_success_in_core',
             AsyncMock(return_value=applied),
         ) as finish:
             result = await worker._persist_task_terminal_state(
@@ -6212,6 +6213,8 @@ class TestPersistTerminalStateFusedPath:
         assert result.ok_value == _NodeFinishOwed(
             queue_name='persisted_queue', facts=PhaseTwoStep.NO_DEPENDENTS,
         )
+        assert finish.await_args is not None
+        assert finish.await_args.args[0] is worker.core_handle
         assert finish.await_args.args[1] == FinishWorkflowSuccess(
             task_id='task-1',
             fence=OwnedClaim(worker_id=worker.worker_instance_id, claimed_at=claimed_at),
@@ -6223,9 +6226,10 @@ class TestPersistTerminalStateFusedPath:
     async def test_workflow_ok_result_refused_owes_nothing(self) -> None:
         """A refused success wrote nothing: no phase 2, no reload."""
         worker, session = _make_session_worker(fetchone_results=[])
+        worker.broker = MagicMock()
 
         with patch(
-            'horsies.core.worker.finalize.finish_workflow_success',
+            'horsies.core.worker.finalize.finish_workflow_success_in_core',
             AsyncMock(return_value=_lost_claim()),
         ):
             result = await worker._persist_task_terminal_state(  # pyright: ignore[reportPrivateUsage]

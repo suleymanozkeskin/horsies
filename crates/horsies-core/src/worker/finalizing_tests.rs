@@ -110,8 +110,8 @@ async fn finalizing_handoff_commits_for_current_claim_and_blocks_stale_recovery(
     assert_eq!(snapshot(&pool, id).await, marked);
 
     let outcome: (String, String) = sqlx::query_as(
-        "SELECT outcome, guard_kind FROM horsies_fail_stale_task(
-            $1, 300000, 300000, '{}', 'WORKER_CRASHED', 'test'
+        "SELECT outcome, guard_kind FROM horsies_finish_stale_attempt(
+            $1, 300000, 300000, 'NONE', NULL, NULL, '{}', 'WORKER_CRASHED', 'test', 'test', 'test'
          )",
     )
     .bind(id)

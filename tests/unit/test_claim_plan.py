@@ -18,7 +18,6 @@ from datetime import datetime, timedelta, timezone
 import json
 import logging
 from itertools import combinations
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -61,7 +60,12 @@ from horsies.core.worker.row_class import (
     registered_task_classes,
 )
 from horsies.core.worker.slots import SlotPool
-from horsies.core.worker.release import RELEASE_CLAIMS_SQL
+from horsies.core.worker.release import (
+    ClaimRelease,
+    HeldClaim,
+    ReleaseOutcome,
+    ReleasePlacement,
+)
 from horsies.core.worker.sql import HORSIES_CLAIM_SQL
 from horsies.core.utils.db import PooledStatements
 from horsies.core.worker.worker import Worker, _log_claim_plan
@@ -416,12 +420,8 @@ def _worker(**cfg: Any) -> Worker:
     return worker
 
 
-def _session(
-    claimed: list[tuple[object, ...]],
-    returned_rowcount: int,
-) -> AsyncMock:
-    """A session whose claim returns ``claimed`` and whose class return
-    releases its first ``returned_rowcount`` rows (the others are NOT_HELD)."""
+def _session(claimed: list[tuple[object, ...]]) -> AsyncMock:
+    """A session whose claim returns ``claimed``."""
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=False)
@@ -431,15 +431,6 @@ def _session(
         if statement is HORSIES_CLAIM_SQL:
             result.keys.return_value = _COLUMNS
             result.fetchall.return_value = claimed
-        elif statement is RELEASE_CLAIMS_SQL:
-            result.fetchall.return_value = [
-                SimpleNamespace(
-                    ordinality=position,
-                    task_id=task_id,
-                    outcome='RELEASED' if position <= returned_rowcount else 'NOT_HELD',
-                )
-                for position, task_id in enumerate(params['task_ids'], start=1)
-            ]
         return result
 
     session.execute = AsyncMock(side_effect=_execute)
@@ -474,11 +465,47 @@ def _statements(session: AsyncMock) -> list[Any]:
     return [call.args[0] for call in session.execute.await_args_list]
 
 
+def _core_release(
+    worker: Worker,
+    monkeypatch: pytest.MonkeyPatch,
+    released_count: int,
+) -> AsyncMock:
+    """Give ``worker`` a broker (its core handle) and stand in for
+    ``release_claims_in_core``: the first ``released_count`` claims of a
+    call are RELEASED, the others NOT_HELD. Returns the stand-in."""
+    worker.broker = MagicMock()
+
+    async def _release(
+        handle: object,
+        *,
+        worker_id: str,
+        claims: Any,
+        placement: ReleasePlacement,
+    ) -> tuple[ClaimRelease, ...]:
+        return tuple(
+            ClaimRelease(
+                claim=claim,
+                outcome=(
+                    ReleaseOutcome.RELEASED
+                    if position <= released_count
+                    else ReleaseOutcome.NOT_HELD
+                ),
+            )
+            for position, claim in enumerate(claims, start=1)
+        )
+
+    release = AsyncMock(side_effect=_release)
+    monkeypatch.setattr(
+        'horsies.core.worker.claiming.release_claims_in_core', release,
+    )
+    return release
+
+
 class TestClaimPassWithClasses:
     @pytest.mark.asyncio
     async def test_the_pass_sends_the_budgets_and_the_routes(self) -> None:
         worker = _worker(processes=1)
-        session = _session([], returned_rowcount=0)
+        session = _session([])
         worker.sf = MagicMock(return_value=session)
         worker._claim_runner = PooledStatements(worker.sf)  # pyright: ignore[reportPrivateUsage]
 
@@ -497,12 +524,13 @@ class TestClaimPassWithClasses:
     async def test_a_mismatched_row_goes_back_as_isolated(
         self,
         caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         worker = _worker()
         worker._registered_classes = {'now_def': ISOLATED, 'iso': ISOLATED}
+        release = _core_release(worker, monkeypatch, released_count=1)
         session = _session(
             [_row('t1', 'now_def', 'SHARED_ASYNC'), _row('t2', 'iso', 'ISOLATED')],
-            returned_rowcount=1,
         )
         worker.sf = MagicMock(return_value=session)
         worker._claim_runner = PooledStatements(worker.sf)  # pyright: ignore[reportPrivateUsage]
@@ -514,20 +542,13 @@ class TestClaimPassWithClasses:
         assert claim_pass == ClaimPass(claimed=2, dropped=1, short_of_plan=0)
         dispatched = [call.args[0] for call in worker._dispatch_one.await_args_list]
         assert dispatched == ['t2']
-        returns = [
-            call.args[1]
-            for call in session.execute.await_args_list
-            if call.args[0] is RELEASE_CLAIMS_SQL
-        ]
-        assert returns == [
-            {
-                'task_ids': ['t1'],
-                'claimed_ats': [_claim_time('t1')],
-                'worker_id': worker.worker_instance_id,
-                'placement': 'ISOLATED',
-            },
-        ]
-        assert _statements(session) == [HORSIES_CLAIM_SQL, RELEASE_CLAIMS_SQL]
+        release.assert_awaited_once_with(
+            worker.core_handle,
+            worker_id=worker.worker_instance_id,
+            claims=(HeldClaim(task_id='t1', claimed_at=_claim_time('t1')),),
+            placement=ReleasePlacement.ISOLATED,
+        )
+        assert _statements(session) == [HORSIES_CLAIM_SQL]
         assert (
             'Task t1 (now_def) stores execution SHARED_ASYNC, and the registered '
             'function is ISOLATED on this worker; wrote ISOLATED on the row and '
@@ -538,13 +559,12 @@ class TestClaimPassWithClasses:
     async def test_a_lost_claim_is_neither_returned_nor_dispatched(
         self,
         caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         worker = _worker()
         worker._registered_classes = {'now_def': ISOLATED}
-        session = _session(
-            [_row('t1', 'now_def', 'SHARED_THREAD')],
-            returned_rowcount=0,
-        )
+        release = _core_release(worker, monkeypatch, released_count=0)
+        session = _session([_row('t1', 'now_def', 'SHARED_THREAD')])
         worker.sf = MagicMock(return_value=session)
         worker._claim_runner = PooledStatements(worker.sf)  # pyright: ignore[reportPrivateUsage]
         worker._dispatch_one = AsyncMock()  # type: ignore[method-assign]
@@ -554,20 +574,24 @@ class TestClaimPassWithClasses:
 
         assert claim_pass == ClaimPass(claimed=1, dropped=1, short_of_plan=0)
         worker._dispatch_one.assert_not_awaited()
-        assert _statements(session) == [HORSIES_CLAIM_SQL, RELEASE_CLAIMS_SQL]
+        release.assert_awaited_once()
+        assert _statements(session) == [HORSIES_CLAIM_SQL]
         assert 'the claim was lost, so the row was left as it is' in caplog.text
 
     @pytest.mark.asyncio
-    async def test_rows_that_fit_or_are_unknown_are_dispatched(self) -> None:
+    async def test_rows_that_fit_or_are_unknown_are_dispatched(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         worker = _worker()
         worker._registered_classes = {'awaited': SHARED_ASYNC}
+        release = _core_release(worker, monkeypatch, released_count=0)
         session = _session(
             [
                 _row('t1', 'awaited', 'SHARED_ASYNC'),
                 _row('t2', 'awaited', 'ISOLATED'),
                 _row('t3', 'not_here', 'SHARED_THREAD'),
             ],
-            returned_rowcount=1,
         )
         worker.sf = MagicMock(return_value=session)
         worker._claim_runner = PooledStatements(worker.sf)  # pyright: ignore[reportPrivateUsage]
@@ -576,7 +600,8 @@ class TestClaimPassWithClasses:
         claim_pass = await worker._claim_and_dispatch_all()
 
         assert claim_pass == ClaimPass(claimed=3, dropped=0, short_of_plan=0)
-        assert RELEASE_CLAIMS_SQL not in _statements(session)
+        release.assert_not_awaited()
+        assert _statements(session) == [HORSIES_CLAIM_SQL]
         dispatched = [call.args[0] for call in worker._dispatch_one.await_args_list]
         assert dispatched == ['t1', 't2', 't3']
 
