@@ -1,17 +1,19 @@
+# pyright: reportPrivateUsage=false
 """Integration tests for Worker._finalize_workflow_phase().
 
-Covers phase-2 of finalization: workflow advancement delegation, the
-capacity wake that the node statement sends on the queue of the task,
-exception handling, a phase 2 that fails (no wake), and a NOTIFY refused by
-the server, which is a phase-2 error.
+Phase 2 of a workflow task is ``horsies_workflow_node_finish``
+(``node_finish.finish_node``) in the form of the node facts. Covers: the
+node write and the promotion, the capacity wake on the queue of the node,
+delivered once at the commit, a task with no phase-2 record (no write, no
+wake), a phase 2 that fails after its wake (no wake), a raise and a kept
+record as phase-2 errors, and a worker with no broker.
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import psycopg
 import psycopg.sql
@@ -19,18 +21,25 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from horsies.core.codec.json_io import dumps_json
+from horsies.core.app import Horsies
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.lifecycle.outcomes import PhaseTwoStep
 from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.models.workflow import TaskNode
+from horsies.core.types.result import Ok, is_err, is_ok
+from horsies.core.worker import finalize as finalize_module
 from horsies.core.worker.config import WorkerConfig
-from horsies.core.worker.worker import (
-    Worker,
-    _FINALIZE_STAGE_PHASE2,
-)
-from tests.integration.conftest import DB_URL, compute_test_command_fingerprint
-from tests.integration.history_seeding import force_terminal
+from horsies.core.worker.finalize import _NodeFinishOwed
+from horsies.core.worker.worker import Worker, _FINALIZE_STAGE_PHASE2
+from horsies.core.workflows import steps as steps_module
+from horsies.core.workflows.node_finish import FactsUnknown
+from tests.integration.conftest import DB_URL, PhaseOneDone, finish_phase_one, start_ok
 
 pytestmark = [pytest.mark.integration]
+
+_QUEUE = 'default'
+_WAKE_WAIT_S = 0.5
+"""How long a test listens for wakes after phase 2 returned."""
 
 
 # ---------------------------------------------------------------------------
@@ -38,379 +47,267 @@ pytestmark = [pytest.mark.integration]
 # ---------------------------------------------------------------------------
 
 
-def _make_worker(engine: AsyncEngine) -> Worker:
-    """Construct a Worker wired to the test DB."""
+def _make_worker(engine: AsyncEngine, broker: PostgresBroker | None) -> Worker:
+    """A Worker wired to the test DB, with ``broker`` (``None``: a worker
+    built without one)."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
         dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
-        queues=['default'],
+        queues=[_QUEUE],
     )
-    return Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
+    return Worker(session_factory=sf, listener=MagicMock(), cfg=cfg, broker=broker)
 
 
-async def _insert_task(
-    session: AsyncSession,
-    *,
-    queue_name: str = 'default',
-    status: str = 'COMPLETED',
-) -> str:
-    """Seed a task in the given status and return its id.
+async def _chain_after_phase_one(
+    app: Horsies, broker: PostgresBroker, session: AsyncSession,
+) -> tuple[str, PhaseOneDone]:
+    """A -> B started, and phase 1 of A's success committed. Returns the
+    workflow and what phase 2 of A takes."""
 
-    A terminal status arrives through terminalization's move: the row is
-    born running, then forced terminal into history.
-    """
-    task_id = str(uuid.uuid4())
-    sent_at, fingerprint = compute_test_command_fingerprint(
-        task_name='wf_phase_test',
-        queue_name=queue_name,
+    @app.task(task_name=f'wf_phase_{uuid.uuid4().hex[:8]}')
+    def fn(*, value: int) -> TaskResult[int, TaskError]:
+        return TaskResult(ok=value)
+
+    a = TaskNode(fn=fn, kwargs={'value': 1})
+    b = TaskNode(fn=fn, kwargs={'value': 2}, waits_for=[a])
+    spec = app.workflow(
+        f'wf_phase_{uuid.uuid4().hex[:6]}', [a, b],
+        definition_key=f'wf-phase-{uuid.uuid4().hex[:6]}',
     )
-    is_terminal = status in ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-    await session.execute(
-        text("""
-            INSERT INTO horsies_tasks
-                (
-                    id, task_name, queue_name, priority, input, status, sent_at,
-                    created_at, updated_at, retry_count, max_retries, started_at,
-                    retention_class_key, command_fingerprint_version,
-                    command_fingerprint, retain_rerun_input, execution, enqueued_at,
-                    is_workflow_task, claim_expires_at, worker_pid, worker_hostname,
-                    worker_process_name
-                ) VALUES (
-                    :id, 'wf_phase_test', :queue, 100, '{}', :status, :sent_at, NOW(),
-                    NOW(), 0, 0, NOW(), 'standard_30d', 1, :command_fingerprint, FALSE,
-                    'ISOLATED', NOW(), FALSE,
-                    CASE WHEN CAST(:status AS varchar) = 'CLAIMED' THEN NOW() + INTERVAL '5 minutes' END,
-                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 4242 END,
-                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'host-1' END,
-                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'child-1' END
-                )
-        """),
-        {
-            'id': task_id,
-            'queue': queue_name,
-            'status': 'RUNNING' if is_terminal else status,
-            'sent_at': sent_at,
-            'command_fingerprint': fingerprint,
-        },
-    )
-    if is_terminal:
-        await force_terminal(session, task_id, status=status)
+    handle = await start_ok(spec, broker)
+    done = await finish_phase_one(session, broker, handle.workflow_id, 0, TaskResult(ok=1))
+    assert done.facts is PhaseTwoStep.DEPENDENTS_WITHOUT_SUBWORKFLOW
+    return handle.workflow_id, done
+
+
+def _owed(done: PhaseOneDone) -> _NodeFinishOwed:
+    return _NodeFinishOwed(queue_name=_QUEUE, facts=done.facts)
+
+
+async def _node_statuses(session: AsyncSession, workflow_id: str) -> dict[int, str]:
     await session.commit()
-    return task_id
-
-
-async def _link_task_to_workflow(session: AsyncSession, task_id: str) -> str:
-    """Create minimal workflow + workflow_task rows linking task_id to a workflow.
-
-    Returns the workflow_id.
-    """
-    wf_id = str(uuid.uuid4())
-    wt_id = str(uuid.uuid4())
-
-    await session.execute(
-        text("""
-            INSERT INTO horsies_workflows
-                (id, name, status, on_error, depth, root_workflow_id,
-                 sent_at, created_at, started_at, updated_at)
-            VALUES
-                (:id, 'test_wf', 'RUNNING', 'fail', 0, :id,
-                 NOW(), NOW(), NOW(), NOW())
-        """),
-        {'id': wf_id},
-    )
-    await session.execute(
-        text("""
-            INSERT INTO horsies_workflow_tasks
-                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
-                 queue_name, priority, dependencies, args_from, workflow_ctx_from,
-                 allow_failed_deps, join_type, min_success, task_options, status,
-                 is_subworkflow, task_id, created_at,
-                 max_retries, execution, retention_class_key)
-            VALUES
-                ('NONE', :id, :wf_id, 0, 'node_0', 'wf_phase_test', '{}',
-                 'default', 100, '{}', NULL, NULL,
-                 FALSE, 'all', NULL, NULL, 'ENQUEUED',
-                 FALSE, :task_id, NOW(),
-                 0, 'ISOLATED', 'standard_30d')
-        """),
-        {'id': wt_id, 'wf_id': wf_id, 'task_id': task_id},
-    )
-    await session.commit()
-    return wf_id
-
-
-def _make_ok_task_result() -> TaskResult[str, TaskError]:
-    """Create a simple ok TaskResult for passing to phase-2."""
-    return TaskResult(ok='test-value')
-
-
-# ---------------------------------------------------------------------------
-# Test 1: Non-workflow task — NOTIFY fires, returns Ok(None)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_non_workflow_task_notifies_and_returns_ok(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """Task not in a workflow → _handle_workflow_task_if_needed is a no-op,
-    NOTIFY fires for capacity wake, returns Ok(None)."""
-    task_id = await _insert_task(session)
-    worker = _make_worker(engine)
-    tr = _make_ok_task_result()
-
-    result = await worker._finalize_workflow_phase(
-        task_id,
-        tr,
-        queue_name='high-priority',
-        task_name='wf_phase_test',
-    )
-
-    assert is_ok(result)
-    assert result.ok_value is None
-
-
-# ---------------------------------------------------------------------------
-# Test 2: Workflow-linked task — delegates to on_workflow_task_complete
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_workflow_task_delegates_to_engine(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """Task linked to a workflow → on_workflow_task_complete is called."""
-    task_id = await _insert_task(session)
-    await _link_task_to_workflow(session, task_id)
-    worker = _make_worker(engine)
-    tr = _make_ok_task_result()
-
-    # _handle_workflow_task_if_needed does a lazy import:
-    #   from horsies.core.workflows.engine import on_workflow_task_complete
-    # Patch at the source module where the name is resolved.
-    with patch(
-        'horsies.core.workflows.engine.on_workflow_task_complete',
-        new_callable=AsyncMock,
-    ) as mock_complete:
-        result = await worker._finalize_workflow_phase(
-            task_id, tr, task_name='wf_phase_test',
+    rows = (
+        await session.execute(
+            text("""
+                SELECT task_index, status FROM horsies_workflow_tasks
+                WHERE workflow_id = :wf ORDER BY task_index
+            """),
+            {'wf': workflow_id},
         )
-
-    assert is_ok(result)
-    mock_complete.assert_awaited_once()
-    # Verify task_id was passed (session, task_id, result, broker)
-    call_args = mock_complete.call_args
-    assert call_args[0][1] == task_id
+    ).fetchall()
+    return {row.task_index: row.status for row in rows}
 
 
-# ---------------------------------------------------------------------------
-# Test 3: a NOTIFY that fails on the server is a phase-2 error
-# ---------------------------------------------------------------------------
-
-# A channel name of 64 bytes or more is refused by the server ("channel name
-# too long"), after the node write of the same transaction ran.
-_TOO_LONG_QUEUE = 'q' * 60
-
-
-async def _insert_running_node(session: AsyncSession) -> str:
-    """A RUNNING workflow node and the id of the task that backs it."""
-    task_id = str(uuid.uuid4())
-    workflow_id = str(uuid.uuid4())
-    await session.execute(
-        text("""
-            INSERT INTO horsies_workflows
-                (id, name, status, on_error, depth, root_workflow_id,
-                 sent_at, created_at, started_at, updated_at)
-            VALUES (:wf, 'wf_phase_notify', 'RUNNING', 'fail', 0, :wf,
-                    NOW(), NOW(), NOW(), NOW())
-        """),
-        {'wf': workflow_id},
-    )
-    await session.execute(
-        text("""
-            INSERT INTO horsies_workflow_tasks
-                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
-                 queue_name, priority, dependencies,
-                 allow_failed_deps, join_type, is_subworkflow, status,
-                 task_id, created_at,
-                 max_retries, execution, retention_class_key)
-            VALUES ('NONE', :id, :wf, 0, 'node-0', 'wf_phase_test', '{}',
-                    'default', 100, '{}', FALSE, 'all', FALSE, 'RUNNING',
-                    CAST(:task_id AS uuid), NOW(),
-                    0, 'ISOLATED', 'standard_30d')
-        """),
-        {'id': str(uuid.uuid4()), 'wf': workflow_id, 'task_id': task_id},
-    )
+async def _records(session: AsyncSession, task_id: str) -> int:
     await session.commit()
-    return task_id
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_a_notify_that_fails_on_the_server_is_a_phase2_error(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """The node write and the wake share one transaction. A wake refused by
-    the server aborts it, so the writes are either committed or reported:
-    never a silent rollback behind Ok(None)."""
-    task_id = await _insert_running_node(session)
-    worker = _make_worker(engine)
-
-    result = await worker._finalize_workflow_phase(
-        task_id,
-        _make_ok_task_result(),
-        queue_name=_TOO_LONG_QUEUE,
-        task_name='wf_phase_test',
-    )
-
-    node_status = (
+    return (
         await session.execute(
             text(
-                'SELECT status FROM horsies_workflow_tasks '
+                'SELECT count(*) FROM horsies_workflow_phase2_pending '
                 'WHERE task_id = CAST(:id AS uuid)'
             ),
             {'id': task_id},
         )
     ).scalar_one()
-    match result:
-        case Ok():
-            assert (
-                node_status == 'COMPLETED'
-            ), 'phase 2 returned Ok but its node write did not commit'
-        case Err(err_value=error):
-            assert error.stage == _FINALIZE_STAGE_PHASE2
-            assert node_status == 'RUNNING'
-    assert is_err(result), 'a NOTIFY refused by the server is a phase-2 error'
-    assert result.err_value.data is not None
-    assert 'channel name too long' in result.err_value.data['exception']
-
-
-# ---------------------------------------------------------------------------
-# Test 4: _handle_workflow_task_if_needed raises → Err with stage=phase2
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_workflow_handler_exception_returns_err(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """Exception in _handle_workflow_task_if_needed → Err(_FinalizeError)."""
-    task_id = await _insert_task(session)
-    worker = _make_worker(engine)
-    tr = _make_ok_task_result()
-
-    worker._handle_workflow_task_if_needed = AsyncMock(  # type: ignore[method-assign]
-        side_effect=RuntimeError('workflow engine exploded'),
-    )
-
-    result = await worker._finalize_workflow_phase(
-        task_id,
-        tr,
-        queue_name='high-priority',
-        task_name='wf_phase_test',
-    )
-
-    assert is_err(result)
-    err = result.err_value
-    assert err.stage == _FINALIZE_STAGE_PHASE2
-    assert err.retryable is False  # RuntimeError is not a retryable connection error
-    assert 'workflow engine exploded' in err.data['exception']
-
-
-# ---------------------------------------------------------------------------
-# Test 5: Queue name is used in NOTIFY channel
-# ---------------------------------------------------------------------------
-
-
-_WAKE_WAIT_S = 0.5
-"""How long a test listens for wakes after phase 2 returned."""
 
 
 async def _listen(channel: str) -> psycopg.AsyncConnection[Any]:
-    connection = await psycopg.AsyncConnection.connect(
-        DB_URL,
-        autocommit=True,
-    )
+    connection = await psycopg.AsyncConnection.connect(DB_URL, autocommit=True)
     await connection.execute(
         psycopg.sql.SQL('LISTEN {}').format(psycopg.sql.Identifier(channel)),
     )
     return connection
 
 
-@pytest.mark.parametrize('linked', [True, False], ids=['node', 'no_node'])
-@pytest.mark.asyncio(loop_scope='function')
-async def test_phase_two_wakes_the_queue_of_the_task_once(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-    linked: bool,
-) -> None:
-    """The node statement sends one capacity wake on ``task_queue_<queue>``,
-    delivered at COMMIT, whether or not the task has a node."""
-    task_id = await _insert_task(session, queue_name='high-priority')
-    if linked:
-        await _link_task_to_workflow(session, task_id)
-    worker = _make_worker(engine)
-    listener = await _listen('task_queue_high-priority')
+async def _wakes(listener: psycopg.AsyncConnection[Any]) -> list[str]:
     try:
-        result = await worker._finalize_workflow_phase(
-            task_id,
-            _make_ok_task_result(),
-            queue_name='high-priority',
-            task_name='wf_phase_test',
-        )
-        payloads = [
-            notify.payload async for notify in listener.notifies(timeout=_WAKE_WAIT_S)
-        ]
+        return [notify.payload async for notify in listener.notifies(timeout=_WAKE_WAIT_S)]
     finally:
         await listener.close()
 
-    assert is_ok(result)
-    assert payloads == ['capacity']
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_phase_two_that_fails_sends_no_wake(
+async def test_phase_two_writes_the_node_and_promotes_the_dependent(
     engine: AsyncEngine,
+    app: Horsies,
+    broker: PostgresBroker,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The node is written from the phase-2 record, the record is gone, and
+    the dependent is enqueued."""
+    workflow_id, done = await _chain_after_phase_one(app, broker, session)
+    worker = _make_worker(engine, broker)
+
+    result = await worker._finalize_workflow_phase(done.task_id, _owed(done))
+
+    assert result == Ok(None)
+    assert await _node_statuses(session, workflow_id) == {0: 'COMPLETED', 1: 'ENQUEUED'}
+    assert await _records(session, done.task_id) == 0
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_phase_two_wakes_the_queue_of_the_node_once(
+    engine: AsyncEngine,
+    app: Horsies,
+    broker: PostgresBroker,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """One capacity wake on ``task_queue_<queue of the node>``, delivered at
+    the commit. The insert of B's task row sends ``new`` on the same
+    channel."""
+    _, done = await _chain_after_phase_one(app, broker, session)
+    worker = _make_worker(engine, broker)
+    listener = await _listen(f'task_queue_{_QUEUE}')
+
+    result = await worker._finalize_workflow_phase(done.task_id, _owed(done))
+    payloads = await _wakes(listener)
+
+    assert is_ok(result)
+    assert sorted(payloads) == ['capacity', 'new']
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_task_with_no_phase_two_record_writes_nothing_and_sends_no_wake(
+    engine: AsyncEngine,
+    broker: PostgresBroker,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """No node links the task and no record names it: PENDING_ABSENT, Ok,
+    no wake."""
+    worker = _make_worker(engine, broker)
+    listener = await _listen(f'task_queue_{_QUEUE}')
+
+    result = await worker._finalize_workflow_phase(
+        str(uuid.uuid4()), _NodeFinishOwed(queue_name=_QUEUE, facts=FactsUnknown()),
+    )
+    payloads = await _wakes(listener)
+
+    assert result == Ok(None)
+    assert payloads == []
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_phase_two_that_fails_after_its_wake_sends_no_wake(
+    engine: AsyncEngine,
+    app: Horsies,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The wake is queued by the first statement and delivered at COMMIT: a
-    phase 2 that fails after it rolls back the wake with the node write."""
-    task_id = await _insert_running_node(session)
-    worker = _make_worker(engine)
-    import horsies.core.workflows.engine as engine_module
+    """In the transaction form the step queues the wake and the COMMIT
+    delivers it: a phase 2 that fails after the step rolls back the wake
+    with the node write and keeps the record."""
+    workflow_id, done = await _chain_after_phase_one(app, broker, session)
+    worker = _make_worker(engine, broker)
 
-    async def _fail_after_the_node_write(*args: Any, **kwargs: Any) -> None:
+    async def _fail_after_the_step(*args: Any, **kwargs: Any) -> tuple[str, ...]:
         del args, kwargs
-        raise RuntimeError('progression failed after the node write')
+        raise RuntimeError('failed after the node step')
 
-    monkeypatch.setattr(
-        engine_module, 'apply_node_progression', _fail_after_the_node_write
+    monkeypatch.setattr(steps_module, 'run_child_starts', _fail_after_the_step)
+    listener = await _listen(f'task_queue_{_QUEUE}')
+
+    result = await worker._finalize_workflow_phase(
+        done.task_id, _NodeFinishOwed(queue_name=_QUEUE, facts=FactsUnknown()),
     )
-    listener = await _listen('task_queue_default')
-    try:
-        result = await worker._finalize_workflow_phase(
-            task_id,
-            _make_ok_task_result(),
-            queue_name='default',
-            task_name='wf_phase_test',
-        )
-        payloads = [
-            notify.payload async for notify in listener.notifies(timeout=_WAKE_WAIT_S)
-        ]
-    finally:
-        await listener.close()
+    payloads = await _wakes(listener)
 
     assert is_err(result)
     assert result.err_value.stage == _FINALIZE_STAGE_PHASE2
     assert payloads == []
+    assert await _node_statuses(session, workflow_id) == {0: 'ENQUEUED', 1: 'PENDING'}
+    assert await _records(session, done.task_id) == 1
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_raise_in_phase_two_is_a_phase2_error(
+    engine: AsyncEngine,
+    broker: PostgresBroker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raise of the phase-2 call → Err(_FinalizeError), stage phase 2,
+    retryable only for a transient connection error."""
+    worker = _make_worker(engine, broker)
+    monkeypatch.setattr(
+        finalize_module,
+        'finish_node',
+        AsyncMock(side_effect=RuntimeError('workflow engine exploded')),
+    )
+
+    result = await worker._finalize_workflow_phase(
+        str(uuid.uuid4()),
+        _NodeFinishOwed(queue_name=_QUEUE, facts=PhaseTwoStep.NO_DEPENDENTS),
+    )
+
+    assert is_err(result)
+    err = result.err_value
+    assert err.stage == _FINALIZE_STAGE_PHASE2
+    assert err.retryable is False  # RuntimeError is not a retryable connection error
+    assert err.data is not None
+    assert 'workflow engine exploded' in err.data['exception']
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_kept_record_is_a_phase2_error_that_is_not_retried(
+    engine: AsyncEngine,
+    app: Horsies,
+    broker: PostgresBroker,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A record whose stored result fails its digest check is kept, the node
+    is not written, and phase 2 reports the disposition: phase-2 recovery
+    counts the record."""
+    workflow_id, done = await _chain_after_phase_one(app, broker, session)
+    await session.execute(
+        text("""
+            UPDATE horsies_workflow_phase2_pending
+            SET result_digest = sha256(convert_to('another result', 'UTF8'))
+            WHERE task_id = CAST(:id AS uuid)
+        """),
+        {'id': done.task_id},
+    )
+    await session.commit()
+    worker = _make_worker(engine, broker)
+
+    result = await worker._finalize_workflow_phase(done.task_id, _owed(done))
+
+    assert is_err(result)
+    err = result.err_value
+    assert err.stage == _FINALIZE_STAGE_PHASE2
+    assert err.retryable is False
+    assert err.data is not None
+    assert err.data['disposition'] == 'SOURCE_DIGEST_MISMATCH'
+    assert await _node_statuses(session, workflow_id) == {0: 'ENQUEUED', 1: 'PENDING'}
+    assert await _records(session, done.task_id) == 1
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_worker_without_a_broker_runs_no_phase_two(
+    engine: AsyncEngine,
+    app: Horsies,
+    broker: PostgresBroker,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """Phase 2 builds child starts through the broker: a worker without one
+    reports a phase-2 error that is not retryable and writes nothing."""
+    workflow_id, done = await _chain_after_phase_one(app, broker, session)
+    worker = _make_worker(engine, None)
+
+    result = await worker._finalize_workflow_phase(done.task_id, _owed(done))
+
+    assert is_err(result)
+    assert result.err_value.stage == _FINALIZE_STAGE_PHASE2
+    assert result.err_value.retryable is False
+    assert await _records(session, done.task_id) == 1
+    assert await _node_statuses(session, workflow_id) == {0: 'ENQUEUED', 1: 'PENDING'}

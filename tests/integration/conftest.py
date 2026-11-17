@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, AsyncGenerator, Generator
 import pytest
 import pytest_asyncio
@@ -22,6 +24,14 @@ from tests.session_database import suite_database_url
 # Rebuild AppConfig to resolve forward references
 AppConfig.model_rebuild()
 from horsies.core.codec.json_value import JsonValue
+from horsies.core.lifecycle.outcomes import PhaseTwoStep
+from horsies.core.workflows.node_finish import (
+    CapacityWake,
+    FactsUnknown,
+    NodeFinishFacts,
+    finish_node,
+)
+from horsies.core.workflows.steps import advance_parents
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import (
     TaskNode,
@@ -309,29 +319,183 @@ async def task_name_for(session: AsyncSession, task_id: str) -> str:
     return str(row[0]) if row else ''
 
 
-async def complete_task(
+FINISH_WORKER_ID = 'worker-integration-finish'
+"""The worker that ``finish_task`` claims a node's task for."""
+
+_RUN_NODE_TASK_SQL = text("""
+    UPDATE horsies_tasks
+    SET status = 'RUNNING', claimed_at = now(), claimed_by_worker_id = :worker,
+        claim_expires_at = NULL, started_at = now(), worker_pid = 4242,
+        worker_hostname = 'integration-host', worker_process_name = 'integration-worker',
+        updated_at = now()
+    WHERE id = CAST(:task AS uuid) AND status IN ('PENDING', 'CLAIMED')
+    RETURNING claimed_at
+""")
+
+
+def _error_code_text(error: TaskError) -> str:
+    code = error.error_code
+    match code:
+        case Enum():
+            return str(code.value)
+        case str():
+            return code
+
+
+async def _phase_one(
+    broker: PostgresBroker,
+    task_id: str,
+    task_name: str,
+    claimed_at: datetime,
+    result: TaskResult[Any, TaskError],
+) -> PhaseTwoStep:
+    """Phase 1 of the RUNNING task through the production functions: the
+    success, or the failure with no retry. Returns the node facts it read."""
+    from horsies.core.codec.json_io import dumps_json
+    from horsies.core.codec.typed import encode_task_result
+    from horsies.core.lifecycle.fences import OwnedClaim
+    from horsies.core.lifecycle.outcomes import FailureApplied, PhaseTwoOwed, SuccessApplied
+    from horsies.core.models.workflow.typing_utils import resolve_source_ok_type
+    from horsies.core.utils.db import autocommit_connection
+    from horsies.core.worker.failed_attempt import (
+        AttemptFailure,
+        AttemptFailureKind,
+        FinishFailedAttempt,
+        NoRetry,
+        finish_failed_attempt,
+    )
+    from horsies.core.worker.workflow_success import (
+        FinishWorkflowSuccess,
+        finish_workflow_success,
+    )
+
+    session_factory = current_resources(broker).session_factory
+    ok_type = resolve_source_ok_type(broker.app, task_name)
+    encoded = dumps_json(encode_task_result(result, Any if ok_type is None else ok_type))
+    if is_err(encoded):
+        pytest.fail(f'the result of task {task_id} does not encode: {encoded.err_value}')
+    fence = OwnedClaim(worker_id=FINISH_WORKER_ID, claimed_at=claimed_at)
+    match result.err:
+        case None:
+            outcome = await finish_workflow_success(
+                session_factory,
+                FinishWorkflowSuccess(
+                    task_id=task_id, fence=fence, result_json=encoded.ok_value,
+                ),
+            )
+            match outcome:
+                case SuccessApplied(phase_two=PhaseTwoOwed(step=step)):
+                    return step
+                case _:
+                    pytest.fail(f'phase 1 of the success of task {task_id}: {outcome!r}')
+        case error:
+            async with session_factory() as phase_one_session:
+                failed = await finish_failed_attempt(
+                    await autocommit_connection(phase_one_session),
+                    FinishFailedAttempt(
+                        task_id=task_id,
+                        fence=fence,
+                        retry=NoRetry(),
+                        result_json=encoded.ok_value,
+                        error_code=_error_code_text(error),
+                        failed_reason=None,
+                        attempt=AttemptFailure(
+                            kind=AttemptFailureKind.FAILED,
+                            error_message=error.message,
+                            failed_reason=None,
+                        ),
+                    ),
+                )
+            match failed:
+                case FailureApplied(after=PhaseTwoOwed(step=step)):
+                    return step
+                case _:
+                    pytest.fail(f'phase 1 of the failure of task {task_id}: {failed!r}')
+
+
+@dataclass(frozen=True, slots=True)
+class PhaseOneDone:
+    """Phase 1 of a node's task committed (or had committed earlier): the
+    task and the node facts that phase 2 takes."""
+
+    task_id: str
+    facts: NodeFinishFacts
+
+
+async def finish_phase_one(
+    session: AsyncSession,
+    broker: PostgresBroker,
+    workflow_id: str,
+    task_index: int,
+    result: TaskResult[Any, TaskError],
+) -> PhaseOneDone:
+    """Phase 1 of the task of node ``task_index``, as a worker writes it.
+
+    Commits ``session`` first. A PENDING or CLAIMED task is claimed and run
+    by ``FINISH_WORKER_ID``; then phase 1 writes the success, or the failure
+    of an error result with no retry (``horsies_finish_workflow_success``,
+    ``horsies_finish_failed_attempt``), and returns the node facts it read.
+    A task that is no longer live (its phase 1 committed earlier) returns
+    ``FactsUnknown``: phase 2 replays in the transaction form. Fails the test
+    for a node with no task and for any other phase-1 outcome.
+    """
+    await session.commit()
+    node = (
+        await session.execute(
+            text("""
+                SELECT task_id, task_name FROM horsies_workflow_tasks
+                WHERE workflow_id = :wf_id AND task_index = :idx
+            """),
+            {'wf_id': workflow_id, 'idx': task_index},
+        )
+    ).fetchone()
+    if node is None or node.task_id is None:
+        pytest.fail(f'node {task_index} of workflow {workflow_id} has no task')
+    task_id = str(node.task_id)
+    claimed_at = (
+        await session.execute(
+            _RUN_NODE_TASK_SQL, {'task': task_id, 'worker': FINISH_WORKER_ID},
+        )
+    ).scalar_one_or_none()
+    await session.commit()
+    match claimed_at:
+        case datetime():
+            return PhaseOneDone(
+                task_id=task_id,
+                facts=await _phase_one(
+                    broker, task_id, str(node.task_name), claimed_at, result,
+                ),
+            )
+        case _:
+            return PhaseOneDone(task_id=task_id, facts=FactsUnknown())
+
+
+async def finish_phase_two(broker: PostgresBroker, done: PhaseOneDone) -> None:
+    """Phase 2 as the worker runs it: ``horsies_workflow_node_finish`` in the
+    form of the node facts, with the child starts it owes and the capacity
+    wake, then the parent advances after the commit. Fails the test for a
+    failed parent advance."""
+    session_factory = current_resources(broker).session_factory
+    committed = await finish_node(
+        session_factory, broker, done.task_id, done.facts, CapacityWake.SEND,
+    )
+    failure = await advance_parents(broker, session_factory, committed.parent_advances)
+    if failure is not None:
+        pytest.fail(f'parent advance after task {done.task_id}: {failure!r}')
+
+
+async def finish_task(
     session: AsyncSession,
     broker: PostgresBroker,
     workflow_id: str,
     task_index: int,
     result: TaskResult[Any, TaskError],
 ) -> None:
-    """Simulate task completion by looking up task_id and calling on_workflow_task_complete."""
-    from horsies.core.workflows.engine import on_workflow_task_complete
-
-    res = await session.execute(
-        text("""
-            SELECT task_id, task_name FROM horsies_workflow_tasks
-            WHERE workflow_id = :wf_id AND task_index = :idx
-        """),
-        {'wf_id': workflow_id, 'idx': task_index},
+    """End the task of node ``task_index`` as a worker does: phase 1
+    (``finish_phase_one``), then phase 2 (``finish_phase_two``)."""
+    await finish_phase_two(
+        broker, await finish_phase_one(session, broker, workflow_id, task_index, result),
     )
-    row = res.fetchone()
-    if row and row[0]:
-        await on_workflow_task_complete(
-            session, row[0], result, broker, task_name=str(row[1]),
-        )
-        await session.commit()
 
 
 async def get_task_status(

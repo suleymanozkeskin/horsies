@@ -25,7 +25,7 @@ from horsies.core.models.workflow import SubWorkflowNode, TaskNode, WorkflowDefi
 from horsies.core.types.result import is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
 
-from tests.integration.conftest import complete_task
+from tests.integration.conftest import finish_task
 
 pytestmark = [pytest.mark.integration]
 
@@ -92,13 +92,12 @@ class TestEngineTaskSentAt:
         assert await _workflow_sent_at(session, workflow_id) == START_CALL_TIME
         assert await _task_sent_at(session, workflow_id) == {0: START_CALL_TIME}
 
-        await complete_task(session, broker, workflow_id, 0, TaskResult(ok=0))
+        await finish_task(session, broker, workflow_id, 0, TaskResult(ok=0))
         await session.commit()
 
-        assert await _task_sent_at(session, workflow_id) == {
-            0: START_CALL_TIME,
-            1: START_CALL_TIME,
-        }
+        # Phase 1 moved the root's task to history; the live table holds the
+        # promoted dependent.
+        assert await _task_sent_at(session, workflow_id) == {1: START_CALL_TIME}
 
     async def test_the_child_of_a_subworkflow_root_stores_the_start_call_time(
         self,

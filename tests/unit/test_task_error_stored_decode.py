@@ -454,31 +454,6 @@ class TestErrorWithNoMessage:
             case parsed:
                 pytest.fail(f'unexpected variant: {parsed!r}')
 
-    @_NO_MESSAGE
-    @pytest.mark.asyncio
-    async def test_phase2_replay_loads_the_error(
-        self, err_slot: dict[str, Json],
-    ) -> None:
-        worker = _make_worker()
-        with patch.object(
-            worker,
-            '_read_persisted_task_row',
-            AsyncMock(
-                return_value=SimpleNamespace(
-                    status='FAILED',
-                    task_name='t',
-                    queue_name='default',
-                    is_workflow_task=True,
-                    result=_stored(err_slot),
-                ),
-            ),
-        ):
-            outcome = await worker._read_persisted_task_result(  # pyright: ignore[reportPrivateUsage]
-                'task-1', MagicMock(),
-            )
-
-        _assert_code_without_message(outcome.unwrap().result)
-
 
 class TestDecodeTaskError:
     """The decode of one err slot."""
@@ -828,33 +803,6 @@ class TestRecoveryReaders:
                 assert cause in detail
             case _:
                 pytest.fail(f'unexpected reports: {reports!r}')
-
-    @_REFUSED
-    @pytest.mark.asyncio
-    async def test_phase2_replay_ends_without_a_retry(
-        self, err_slot: dict[str, Json], cause: str,
-    ) -> None:
-        worker = _make_worker()
-        with patch.object(
-            worker,
-            '_read_persisted_task_row',
-            AsyncMock(
-                return_value=SimpleNamespace(
-                    status='FAILED',
-                    task_name='t',
-                    queue_name='default',
-                    is_workflow_task=True,
-                    result=_stored(err_slot),
-                ),
-            ),
-        ):
-            outcome = await worker._read_persisted_task_result(  # pyright: ignore[reportPrivateUsage]
-                'task-1', MagicMock(),
-            )
-
-        assert is_err(outcome)
-        assert outcome.err_value.retryable is False
-        assert cause in outcome.err_value.message
 
 
 class TestStoredWorkflowStoppedCode:

@@ -3,8 +3,10 @@
 ``COMPLETE_WORKFLOW_TASK_SQL`` returns whether a node of the same workflow
 lists the node in its dependencies. The dependencies of a workflow are
 written with its nodes, in the transaction that starts the workflow, and no
-statement changes them, so the value is a fact of the DAG. Phase 2 of a node
-that has no dependents does not read its dependents.
+statement changes them, so the value is a fact of the DAG. Phase 1 reads
+the same fact (``node_has_dependents``), and the worker's phase 2 of a node
+that has no dependents calls ``horsies_workflow_node_finish`` with
+dependents ``'NONE'``: the function does not read them.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import event, text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
@@ -23,12 +25,13 @@ from horsies.core.models.workflow import WF_TASK_TERMINAL_VALUES, TaskNode
 from horsies.core.types.result import is_ok
 from horsies.core.workflows.lifecycle import start_workflow_async
 from horsies.core.workflows.sql import COMPLETE_WORKFLOW_TASK_SQL
-from tests.integration.conftest import complete_task
+from tests.broker_resources_support import current_resources
+from tests.integration.conftest import finish_task
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
-DEPENDENTS_READ = 'SELECT d.task_index, d.dependencies'
-"""The start of the dependents read, ``GET_DEPENDENTS_EVAL_SQL``."""
+NODE_FINISH_CALL = 'horsies_workflow_node_finish('
+"""The phase-2 function, in the text of the step statement."""
 
 
 def _make_task(app: Horsies) -> Any:
@@ -157,43 +160,43 @@ async def test_a_node_whose_dependent_is_terminal_still_has_dependents(
     assert await _has_dependents(session, workflow_id, 1) is True
 
 
-async def test_phase_two_of_a_leaf_sends_no_dependents_read(
+async def test_phase_two_of_a_leaf_does_not_read_dependents(
     clean_workflow_tables: None,  # noqa: ARG001
     app: Horsies,
     broker: PostgresBroker,
-    engine: AsyncEngine,
     session: AsyncSession,
 ) -> None:
     """A -> B: phase 2 of A reads its dependents and enqueues B; phase 2 of
-    B, a leaf, sends no dependents read and completes the workflow.
+    B, a leaf, passes dependents ``'NONE'`` and completes the workflow.
 
-    ``complete_task`` runs phase 2 on ``session``, so the statements are
-    recorded on its engine."""
+    ``finish_task`` runs phase 2 on the broker's engine, so the statements
+    are recorded there."""
     fn = _make_task(app)
     a = TaskNode(fn=fn, kwargs={'value': 0})
     b = TaskNode(fn=fn, kwargs={'value': 1}, waits_for=[a])
     workflow_id = await _start(app, broker, [a, b])
-    sent: list[str] = []
+    dependents: list[object] = []
 
     def _record(
         conn: Any, cursor: Any, statement: str, params: Any, context: Any, many: Any
     ) -> None:
-        del conn, cursor, params, context, many
-        sent.append(' '.join(statement.split()))
+        del conn, cursor, context, many
+        if NODE_FINISH_CALL in statement:
+            dependents.append(params['dependents'])
 
-    sync_engine = engine.sync_engine
+    sync_engine = current_resources(broker).engine.sync_engine
     event.listen(sync_engine, 'before_cursor_execute', _record)
     try:
-        await complete_task(session, broker, workflow_id, 0, TaskResult(ok=0))
-        reads_of_a = [s for s in sent if s.startswith(DEPENDENTS_READ)]
-        sent.clear()
-        await complete_task(session, broker, workflow_id, 1, TaskResult(ok=1))
-        reads_of_b = [s for s in sent if s.startswith(DEPENDENTS_READ)]
+        await finish_task(session, broker, workflow_id, 0, TaskResult(ok=0))
+        of_a = list(dependents)
+        dependents.clear()
+        await finish_task(session, broker, workflow_id, 1, TaskResult(ok=1))
+        of_b = list(dependents)
     finally:
         event.remove(sync_engine, 'before_cursor_execute', _record)
 
-    assert len(reads_of_a) == 1, reads_of_a
-    assert reads_of_b == []
+    assert of_a == ['READ']
+    assert of_b == ['NONE']
     status = (
         await session.execute(
             text('SELECT status FROM horsies_workflows WHERE id = :wf'),
