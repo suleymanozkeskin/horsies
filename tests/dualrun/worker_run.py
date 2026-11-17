@@ -6,14 +6,26 @@ One side of a pair:
 
 1. Write the sends: the task ids and the ``sent_at`` of the scenario, which
    both sides share, and the stored options of each registered task
-   (``enqueue_async``, the write of every send).
+   (``enqueue_async``, the write of every send). Start the workflows of the
+   scenario with their fixed ids (``start_workflow_async``). Apply the row
+   edits of the scenario (stored options without a key, a stored class that
+   does not fit the registered task).
 2. Read the database clock, then start the worker of the side with the
-   profile of the scenario.
-3. Wait until every sent task has its history row (it is terminal), at most
-   ``TERMINAL_WAIT``.
+   profile of the scenario and a new marker directory.
+3. Wait for the stop point of the scenario, at most ``TERMINAL_WAIT``:
+   - ``StopWhenTerminal``: every sent task and every task of the started
+     workflows has its history row, and every started workflow is
+     COMPLETED, FAILED, CANCELLED, EXPIRED or PAUSED;
+   - ``StopWhenRunning``: every sent task is RUNNING, so the stop arrives
+     while they run;
+   - ``PauseWhenRunning``: the first node writes its marker; the runner
+     pauses the workflow and writes the release marker, then waits as
+     ``StopWhenTerminal``.
 4. Stop the worker with ``SIGTERM`` and wait at most ``STOP_WAIT`` for its
    exit. A worker that does not exit is killed with its process group.
-5. Read the clock again, then capture the snapshot and the task report.
+5. Read the clock again, then capture the snapshot and the report: each
+   sent task, each node of each started workflow, and the status of each
+   started workflow. Every sent task must be terminal at this point.
 
 The snapshot compares by ``WHOLE_RUN_CATALOG``: the baseline rules, with the
 process ids of a run ignored. The heartbeat and worker-state tables are left
@@ -31,16 +43,17 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import Final, LiteralString
+from typing import Any, Final, LiteralString
 from uuid import UUID
 
 import psycopg
@@ -48,7 +61,9 @@ import psycopg
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.task_decorator import effective_priority
+from horsies.core.models.workflow import WorkflowSpec
 from horsies.core.types.result import Err, Ok, Result
+from horsies.core.workflows.lifecycle import pause_workflow, start_workflow_async
 from tests.dualrun.apps import whole_run_app
 from tests.dualrun.capture import (
     CaptureError,
@@ -123,24 +138,86 @@ class Send:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkflowStart:
+    """One workflow start with its fixed id, after the sends. The ``n``-th
+    start has ``sent_at`` ``first_sent_at + (sends + n) ms``."""
+
+    spec: WorkflowSpec[Any]
+    workflow_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class DropOptionKey:
+    """Remove ``key`` from the stored options of send ``send``, after the
+    send: options that the worker cannot use."""
+
+    send: int
+    key: str
+
+
+@dataclass(frozen=True, slots=True)
+class SetStoredClass:
+    """Set the stored execution class of send ``send`` to ``execution``,
+    after the send: a class that the registered task does not have."""
+
+    send: int
+    execution: str
+
+
+type RowEdit = DropOptionKey | SetStoredClass
+
+
+@dataclass(frozen=True, slots=True)
+class StopWhenTerminal:
+    """Stop once every task is terminal and every workflow has ended or
+    paused."""
+
+
+@dataclass(frozen=True, slots=True)
+class StopWhenRunning:
+    """Stop once every sent task is RUNNING; the drain ends them."""
+
+
+@dataclass(frozen=True, slots=True)
+class PauseWhenRunning:
+    """Pause ``workflow_id`` once marker ``running`` exists, then write
+    marker ``release``; stop as ``StopWhenTerminal``."""
+
+    workflow_id: UUID
+    running: str
+    release: str
+
+
+type StopRule = StopWhenTerminal | StopWhenRunning | PauseWhenRunning
+
+
+@dataclass(frozen=True, slots=True)
 class Scenario:
-    """The profile and the sends of one pair. The ``n``-th send has
-    ``sent_at`` ``first_sent_at + n ms`` on both sides."""
+    """The profile, the sends, the workflow starts, the row edits and the
+    stop rule of one pair. The ``n``-th send has ``sent_at``
+    ``first_sent_at + n ms`` on both sides."""
 
     name: str
     profile: str
     sends: tuple[Send, ...]
     first_sent_at: datetime
+    workflows: tuple[WorkflowStart, ...]
+    row_edits: tuple[RowEdit, ...]
+    stop: StopRule
 
 
 def build_scenario(
     name: str,
     profile: str,
     sends: Sequence[tuple[object, str | None]],
+    *,
+    workflows: Sequence[WorkflowSpec[Any]] = (),
+    row_edits: Sequence[RowEdit] = (),
+    stop: StopRule = StopWhenTerminal(),
 ) -> Scenario:
     """A scenario of ``(registered task, input JSON)`` sends: each gets a
-    task id minted now, and the first ``sent_at`` is now. Both sides of the
-    pair use these values."""
+    task id minted now, each workflow a workflow id minted now, and the
+    first ``sent_at`` is now. Both sides of the pair use these values."""
     return Scenario(
         name=name,
         profile=profile,
@@ -148,6 +225,11 @@ def build_scenario(
             send_of(task, mint_task_id(), input_json) for task, input_json in sends
         ),
         first_sent_at=datetime.now(UTC),
+        workflows=tuple(
+            WorkflowStart(spec=spec, workflow_id=mint_task_id()) for spec in workflows
+        ),
+        row_edits=tuple(row_edits),
+        stop=stop,
     )
 
 
@@ -193,25 +275,59 @@ class TaskReport:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeKey:
+    """A node of a started workflow: its workflow id and task index."""
+
+    workflow_id: UUID
+    task_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowKey:
+    """The workflow row of a started workflow."""
+
+    workflow_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class NoTaskRow:
+    """The node has no task: a sub-workflow node, or a node that never
+    became ready."""
+
+
+@dataclass(frozen=True, slots=True)
+class NodeReport:
+    status: str
+    task: TaskReport | NoTaskRow
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowReport:
+    status: str
+
+
+type ReportKey = UUID | NodeKey | WorkflowKey
+type ReportEntry = TaskReport | NodeReport | WorkflowReport
+
+
+@dataclass(frozen=True, slots=True)
 class ReportDifference:
-    task_id: UUID
-    reference: TaskReport
-    candidate: TaskReport
+    key: ReportKey
+    reference: ReportEntry
+    candidate: ReportEntry
 
 
 def compare_reports(
-    reference: dict[UUID, TaskReport],
-    candidate: dict[UUID, TaskReport],
+    reference: dict[ReportKey, ReportEntry],
+    candidate: dict[ReportKey, ReportEntry],
 ) -> tuple[ReportDifference, ...]:
-    """Every task whose report differs, in task id order. Both reports cover
-    the same sends (asserted). Pure."""
-    assert reference.keys() == candidate.keys(), 'the two reports cover other tasks'
+    """Every entry whose report differs, in key text order. Both reports
+    cover the same sends and workflows (asserted). Pure."""
+    assert reference.keys() == candidate.keys(), 'the two reports cover other entries'
     return tuple(
-        ReportDifference(
-            task_id=task_id, reference=reference[task_id], candidate=candidate[task_id]
-        )
-        for task_id in sorted(reference)
-        if reference[task_id] != candidate[task_id]
+        ReportDifference(key=key, reference=reference[key], candidate=candidate[key])
+        for key in sorted(reference, key=str)
+        if reference[key] != candidate[key]
     )
 
 
@@ -299,6 +415,45 @@ async def _write_sends(database: DualRunDatabase, scenario: Scenario) -> None:
                     raise AssertionError(
                         f'the send of {send.task_id} was refused: {refused}'
                     )
+        for position, start in enumerate(scenario.workflows, start=len(scenario.sends)):
+            started = await start_workflow_async(
+                start.spec,
+                broker,
+                str(start.workflow_id),
+                scenario.first_sent_at + timedelta(milliseconds=position),
+            )
+            match started:
+                case Ok(_handle):
+                    pass
+                case Err(refused):
+                    raise AssertionError(
+                        f'the start of workflow {start.workflow_id} was refused: {refused}'
+                    )
+
+
+_DROP_OPTION_KEY_SQL: Final[LiteralString] = (
+    'UPDATE horsies_tasks SET task_options = (task_options::jsonb - %s)::text '
+    'WHERE id = %s'
+)
+_SET_STORED_CLASS_SQL: Final[LiteralString] = (
+    'UPDATE horsies_tasks SET execution = %s WHERE id = %s'
+)
+
+
+def _apply_row_edits(connection: Connection, scenario: Scenario) -> None:
+    """Apply the row edits of ``scenario`` to its sent rows, before any
+    worker runs. Each edit changes exactly one row (asserted)."""
+    for edit in scenario.row_edits:
+        match edit:
+            case DropOptionKey(send=send, key=key):
+                changed = connection.execute(
+                    _DROP_OPTION_KEY_SQL, (key, scenario.sends[send].task_id)
+                ).rowcount
+            case SetStoredClass(send=send, execution=execution):
+                changed = connection.execute(
+                    _SET_STORED_CLASS_SQL, (execution, scenario.sends[send].task_id)
+                ).rowcount
+        assert changed == 1, f'{edit!r} changed {changed} rows'
 
 
 # ---- One side ----
@@ -324,7 +479,7 @@ class SideRun:
     its worker ended."""
 
     snapshot: NormalizedSnapshot
-    report: dict[UUID, TaskReport]
+    report: dict[ReportKey, ReportEntry]
     worker: WorkerEnd
 
 
@@ -346,12 +501,21 @@ class WorkerExitedEarly:
 
 
 @dataclass(frozen=True, slots=True)
+class PauseRefused:
+    """The pause of a ``PauseWhenRunning`` scenario did not pause."""
+
+    side: str
+    detail: str
+    worker: WorkerEnd
+
+
+@dataclass(frozen=True, slots=True)
 class CaptureFailed:
     side: str
     cause: CaptureError | ClockReadFailed | RunWindowInvalid
 
 
-type SideFailure = TasksNotTerminal | WorkerExitedEarly | CaptureFailed
+type SideFailure = TasksNotTerminal | WorkerExitedEarly | PauseRefused | CaptureFailed
 
 
 _HISTORY_SQL: Final[LiteralString] = (
@@ -449,10 +613,12 @@ def _start_worker(
     database: DualRunDatabase,
     profile: str,
     log_path: str,
+    marker_dir: str,
 ) -> subprocess.Popen[bytes]:
     env = os.environ.copy()
     env['PYTHONPATH'] = REPO_ROOT
     env[whole_run_app.DATABASE_URL_ENV] = sqlalchemy_url(database)
+    env[whole_run_app.MARKER_DIR_ENV] = marker_dir
     with open(log_path, 'wb') as log:
         return subprocess.Popen(
             [*command.argv, APP_LOCATOR, f'--profile={profile}', '--loglevel=info'],
@@ -497,21 +663,182 @@ def _stop_worker(process: subprocess.Popen[bytes], log_path: str) -> WorkerEnd:
         )
 
 
-def _wait_terminal(
+_WORKFLOW_TASK_IDS_SQL: Final[LiteralString] = (
+    'SELECT wt.task_id FROM horsies_workflow_tasks wt '
+    'JOIN horsies_workflows w ON w.id = wt.workflow_id '
+    'WHERE (w.id = ANY(%s) OR w.root_workflow_id = ANY(%s)) AND wt.task_id IS NOT NULL'
+)
+_OPEN_WORKFLOWS_SQL: Final[LiteralString] = (
+    'SELECT count(*) FROM horsies_workflows '
+    'WHERE (id = ANY(%s) OR root_workflow_id = ANY(%s)) '
+    "AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED', 'PAUSED')"
+)
+_RUNNING_SQL: Final[LiteralString] = (
+    "SELECT count(*) FROM horsies_tasks WHERE id = ANY(%s) AND status = 'RUNNING'"
+)
+_NODES_SQL: Final[LiteralString] = (
+    'SELECT workflow_id, task_index, status, task_id FROM horsies_workflow_tasks '
+    'WHERE workflow_id = ANY(%s) ORDER BY workflow_id, task_index'
+)
+_WORKFLOWS_SQL: Final[LiteralString] = (
+    'SELECT id, status FROM horsies_workflows WHERE id = ANY(%s)'
+)
+
+
+def _count(connection: Connection, sql: LiteralString, parameters: tuple[object, ...]) -> int:
+    row = connection.execute(sql, parameters).fetchone()
+    match row:
+        case (int() as count,):
+            return count
+        case other:
+            raise AssertionError(f'a count of the runner is {other!r}')
+
+
+def _task_id_row(row: tuple[object, ...]) -> UUID:
+    match row:
+        case (UUID() as task_id,):
+            return task_id
+        case other:
+            raise AssertionError(f'a workflow task id row is {other!r}')
+
+
+def _workflow_ids(scenario: Scenario) -> list[UUID]:
+    return [start.workflow_id for start in scenario.workflows]
+
+
+def _all_ended(connection: Connection, scenario: Scenario) -> bool:
+    """Every sent task and every task of the started workflows is terminal,
+    and every started workflow (and child) ended or paused."""
+    workflow_ids = _workflow_ids(scenario)
+    workflow_tasks = [
+        _task_id_row(row)
+        for row in connection.execute(
+            _WORKFLOW_TASK_IDS_SQL, (workflow_ids, workflow_ids)
+        ).fetchall()
+    ]
+    task_ids = [send.task_id for send in scenario.sends] + workflow_tasks
+    return (
+        not _open_tasks(connection, task_ids)
+        and _count(connection, _OPEN_WORKFLOWS_SQL, (workflow_ids, workflow_ids)) == 0
+    )
+
+
+def _all_running(connection: Connection, scenario: Scenario) -> bool:
+    task_ids = [send.task_id for send in scenario.sends]
+    return _count(connection, _RUNNING_SQL, (task_ids,)) == len(task_ids)
+
+
+class WaitEnd(Enum):
+    """How a wait of the runner ended."""
+
+    REACHED = 'reached'
+    BOUND_PASSED = 'bound passed'
+    WORKER_EXITED = 'worker exited'
+
+
+@dataclass(frozen=True, slots=True)
+class PauseNotApplied:
+    """The pause of a ``PauseWhenRunning`` scenario answered ``outcome``."""
+
+    outcome: str
+
+
+def _wait_until(
+    process: subprocess.Popen[bytes],
+    reached: Callable[[], bool],
+    deadline: float,
+) -> WaitEnd:
+    """Poll ``reached`` until it holds, the monotonic ``deadline`` passes, or
+    the worker exits."""
+    while not reached():
+        if process.poll() is not None:
+            return WaitEnd.WORKER_EXITED
+        if time.monotonic() > deadline:
+            return WaitEnd.BOUND_PASSED
+        time.sleep(TERMINAL_POLL.total_seconds())
+    return WaitEnd.REACHED
+
+
+async def _pause(database: DualRunDatabase, workflow_id: UUID) -> str:
+    """Pause ``workflow_id``; the text of the outcome, ``Ok(True)`` when it
+    paused."""
+    async with open_broker(database) as broker:
+        return repr(await pause_workflow(broker, str(workflow_id)))
+
+
+def _wait_for_stop_point(
     connection: Connection,
     process: subprocess.Popen[bytes],
-    task_ids: list[UUID],
-) -> tuple[UUID, ...] | None:
-    """Poll until no sent task is open (``()``), the bound runs out (the open
-    tasks), or the worker exits (``None``). Bounded by ``TERMINAL_WAIT``."""
+    scenario: Scenario,
+    database: DualRunDatabase,
+    marker_dir: str,
+) -> WaitEnd | PauseNotApplied:
+    """Wait for the stop point of ``scenario``, at most ``TERMINAL_WAIT``."""
     deadline = time.monotonic() + TERMINAL_WAIT.total_seconds()
-    open_tasks = _open_tasks(connection, task_ids)
-    while open_tasks and time.monotonic() < deadline:
-        if process.poll() is not None:
-            return None
-        time.sleep(TERMINAL_POLL.total_seconds())
-        open_tasks = _open_tasks(connection, task_ids)
-    return open_tasks
+    match scenario.stop:
+        case StopWhenTerminal():
+            return _wait_until(process, lambda: _all_ended(connection, scenario), deadline)
+        case StopWhenRunning():
+            return _wait_until(process, lambda: _all_running(connection, scenario), deadline)
+        case PauseWhenRunning(workflow_id=workflow_id, running=running, release=release):
+            running_path = os.path.join(marker_dir, running)
+            waited = _wait_until(process, lambda: os.path.exists(running_path), deadline)
+            if waited is not WaitEnd.REACHED:
+                return waited
+            paused = asyncio.run(_pause(database, workflow_id))
+            if paused != repr(Ok(True)):
+                return PauseNotApplied(outcome=paused)
+            with open(os.path.join(marker_dir, release), 'w', encoding='ascii') as marker:
+                marker.write('released')
+            return _wait_until(process, lambda: _all_ended(connection, scenario), deadline)
+
+
+def _node_row(row: tuple[object, ...]) -> tuple[UUID, int, str, UUID | None]:
+    match row:
+        case (UUID() as workflow_id, int() as index, str() as status, UUID() | None as task_id):
+            return workflow_id, index, status, task_id
+        case other:
+            raise AssertionError(f'a node row of the report is {other!r}')
+
+
+def _workflow_row(row: tuple[object, ...]) -> tuple[UUID, str]:
+    match row:
+        case (UUID() as workflow_id, str() as status):
+            return workflow_id, status
+        case other:
+            raise AssertionError(f'a workflow row of the report is {other!r}')
+
+
+def read_report(
+    connection: Connection,
+    scenario: Scenario,
+) -> dict[ReportKey, ReportEntry]:
+    """The report of every send, every node of every started workflow, and
+    every started workflow. Raises ``psycopg.Error`` on a database error."""
+    report: dict[ReportKey, ReportEntry] = {}
+    for task_id, entry in read_task_report(
+        connection, [send.task_id for send in scenario.sends]
+    ).items():
+        report[task_id] = entry
+    workflow_ids = _workflow_ids(scenario)
+    nodes = [
+        _node_row(row)
+        for row in connection.execute(_NODES_SQL, (workflow_ids,)).fetchall()
+    ]
+    node_tasks = read_task_report(
+        connection, [task_id for _w, _i, _s, task_id in nodes if task_id is not None]
+    )
+    for workflow_id, index, status, task_id in nodes:
+        task: TaskReport | NoTaskRow = (
+            NoTaskRow() if task_id is None else node_tasks[task_id]
+        )
+        report[NodeKey(workflow_id=workflow_id, task_index=index)] = NodeReport(
+            status=status, task=task
+        )
+    for row in connection.execute(_WORKFLOWS_SQL, (workflow_ids,)).fetchall():
+        workflow_id, status = _workflow_row(row)
+        report[WorkflowKey(workflow_id=workflow_id)] = WorkflowReport(status=status)
+    return report
 
 
 def run_side(
@@ -520,35 +847,64 @@ def run_side(
     scenario: Scenario,
 ) -> Result[SideRun, SideFailure]:
     """Run one side of ``scenario`` on ``database``, whose baseline is
-    installed. Leaves no worker process behind."""
+    installed. Leaves no worker process and no marker directory behind."""
     asyncio.run(_write_sends(database, scenario))
     task_ids = [send.task_id for send in scenario.sends]
     log_fd, log_path = tempfile.mkstemp(
         prefix=f'whole-run-{command.name}-', suffix='.log'
     )
     os.close(log_fd)
+    marker_dir = tempfile.mkdtemp(prefix=f'whole-run-{command.name}-markers-')
+    try:
+        return _run_side_in(command, database, scenario, task_ids, log_path, marker_dir)
+    finally:
+        shutil.rmtree(marker_dir)
+
+
+def _run_side_in(
+    command: WorkerCommand,
+    database: DualRunDatabase,
+    scenario: Scenario,
+    task_ids: list[UUID],
+    log_path: str,
+    marker_dir: str,
+) -> Result[SideRun, SideFailure]:
     with psycopg.connect(database.url, autocommit=True) as connection:
+        _apply_row_edits(connection, scenario)
         match read_database_clock(connection):
             case Ok(started):
                 pass
             case Err(clock_failed):
                 return Err(CaptureFailed(side=command.name, cause=clock_failed))
-        process = _start_worker(command, database, scenario.profile, log_path)
+        process = _start_worker(
+            command, database, scenario.profile, log_path, marker_dir
+        )
         try:
-            open_tasks = _wait_terminal(connection, process, task_ids)
+            waited = _wait_for_stop_point(
+                connection, process, scenario, database, marker_dir
+            )
         finally:
             worker = _stop_worker(process, log_path)
-        match open_tasks:
-            case None:
-                return Err(WorkerExitedEarly(side=command.name, worker=worker))
-            case ():
+        match waited:
+            case WaitEnd.REACHED:
                 pass
-            case still_open:
+            case WaitEnd.WORKER_EXITED:
+                return Err(WorkerExitedEarly(side=command.name, worker=worker))
+            case WaitEnd.BOUND_PASSED:
                 return Err(
                     TasksNotTerminal(
-                        side=command.name, open_tasks=still_open, worker=worker
+                        side=command.name,
+                        open_tasks=_open_tasks(connection, task_ids),
+                        worker=worker,
                     )
                 )
+            case PauseNotApplied(outcome=outcome):
+                return Err(PauseRefused(side=command.name, detail=outcome, worker=worker))
+        still_open = _open_tasks(connection, task_ids)
+        if still_open:
+            return Err(
+                TasksNotTerminal(side=command.name, open_tasks=still_open, worker=worker)
+            )
         match read_database_clock(connection):
             case Ok(ended):
                 pass
@@ -564,7 +920,7 @@ def run_side(
                 pass
             case Err(capture_error):
                 return Err(CaptureFailed(side=command.name, cause=capture_error))
-        report = read_task_report(connection, task_ids)
+        report = read_report(connection, scenario)
     return Ok(SideRun(snapshot=compared_part(snapshot), report=report, worker=worker))
 
 
