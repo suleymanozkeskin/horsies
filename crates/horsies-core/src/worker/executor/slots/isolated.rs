@@ -39,6 +39,7 @@ use super::pool::{Answer, ExitNotSeen, MemoryLimit, PoolShared, QueuedRun, TaskL
 use super::route::IsolatedDeadline;
 use super::seat_runs::SHARED_BACKSTOP_MARGIN;
 use crate::broker::attempt_writes::RetryPlacement;
+use crate::broker::child_writes::{longer, FINALIZING_MARKER_END};
 use crate::db::CANCEL_REQUEST_BOUND;
 use crate::worker::executor::protocol::{
     BodyEnd, ChildFrame, FailureDetail, ParentFrame, ProcessId, RssReading, RunEnd, RunFrame,
@@ -65,19 +66,37 @@ pub const LEFT_WORK_MARKER_END: Duration = LEFT_WORK_MARKER_CONNECTION_WAIT
     .saturating_add(LEFT_WORK_MARKER_STATEMENTS)
     .saturating_add(CANCEL_REQUEST_BOUND);
 
-/// After a body returned with work left on its loop, the child reports how
-/// that work ended within this time, or it is killed: the grace
+/// After a body returned with work left on its loop, the longest time until
+/// a Python isolated child reports how that work ended: the grace
 /// ([`ISOLATED_LEFTOVER_GRACE`], 1 s), the cancel rounds
-/// ([`STUCK_REPORT_DELAY`], 0.3 s), the marker of a Python child
-/// ([`LEFT_WORK_MARKER_END`], 15 s), and the margin
-/// ([`SHARED_BACKSTOP_MARGIN`], 10 s) (Python
-/// `ISOLATED_LEFTOVER_BACKSTOP_S`). The marker of a core child ends within
-/// [`crate::broker::child_writes::FINALIZING_MARKER_END`] (20 s), which the
-/// margin covers.
-pub const ISOLATED_LEFTOVER_BACKSTOP: Duration = ISOLATED_LEFTOVER_GRACE
+/// ([`STUCK_REPORT_DELAY`], 0.3 s) and its marker
+/// ([`LEFT_WORK_MARKER_END`], 15 s): 16.3 s.
+pub const PYTHON_CHILD_LEFTOVER_END: Duration = ISOLATED_LEFTOVER_GRACE
     .saturating_add(STUCK_REPORT_DELAY)
-    .saturating_add(LEFT_WORK_MARKER_END)
-    .saturating_add(SHARED_BACKSTOP_MARGIN);
+    .saturating_add(LEFT_WORK_MARKER_END);
+
+/// After a body returned with work left on its loop, the longest time until
+/// a core child reports how that work ended: the grace, the cancel rounds
+/// and its finalizing marker ([`FINALIZING_MARKER_END`], 20 s): 21.3 s.
+pub const CORE_CHILD_LEFTOVER_END: Duration = ISOLATED_LEFTOVER_GRACE
+    .saturating_add(STUCK_REPORT_DELAY)
+    .saturating_add(FINALIZING_MARKER_END);
+
+/// The longest time until a child of any kind reports how the work left
+/// after a return ended: the longer of [`PYTHON_CHILD_LEFTOVER_END`] and
+/// [`CORE_CHILD_LEFTOVER_END`].
+pub const LONGEST_LEFTOVER_END: Duration =
+    longer(PYTHON_CHILD_LEFTOVER_END, CORE_CHILD_LEFTOVER_END);
+
+/// After a body returned with work left on its loop, the child reports how
+/// that work ended within this time, or it is killed: the longest end of a
+/// child of any kind ([`LONGEST_LEFTOVER_END`], 21.3 s) and the margin
+/// ([`SHARED_BACKSTOP_MARGIN`], 10 s): 31.3 s. The backstop never fires
+/// before a child's own report, as the refusal backstop never fires before
+/// a child's own refusal. Python `ISOLATED_LEFTOVER_BACKSTOP_S` (26.3 s)
+/// counts only the Python child, the one kind that a Python parent runs.
+pub const ISOLATED_LEFTOVER_BACKSTOP: Duration =
+    LONGEST_LEFTOVER_END.saturating_add(SHARED_BACKSTOP_MARGIN);
 
 /// What the slot does after one task.
 enum AfterRun {
