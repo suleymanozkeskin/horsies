@@ -157,6 +157,16 @@ fn action_request(uri: &str) -> Request<Body> {
         .expect("action request")
 }
 
+/// The 400 body of a task path id that is not a UUID: Python's
+/// `PathIdNotUuid.detail` with pydantic's message.
+fn task_path_id_refusal(raw: &str) -> serde_json::Value {
+    let reason = Uuid::parse_str(raw).expect_err("the text is not a UUID");
+    serde_json::json!({
+        "code": "INVALID_INPUT",
+        "detail": format!("Path parameter task_id: Input should be a valid UUID, {reason}."),
+    })
+}
+
 async fn json(response: axum::response::Response) -> serde_json::Value {
     let bytes = to_bytes(response.into_body(), usize::MAX)
         .await
@@ -312,10 +322,10 @@ async fn task_action_body_defaults_when_absent_and_malformed_json_is_422() {
         .unwrap();
     // The absent body is accepted; the refusal is the path id's.
     let absent_response = router.clone().oneshot(absent).await.unwrap();
-    assert_eq!(absent_response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(absent_response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
-        json(absent_response).await["detail"][0]["loc"],
-        serde_json::json!(["path", "task_id"])
+        json(absent_response).await,
+        task_path_id_refusal("not-a-uuid")
     );
 
     let task_id = Uuid::new_v4();
@@ -410,12 +420,6 @@ async fn query_and_path_validation_preserve_location_input_and_window_refusals()
             "int_parsing",
         ),
         (
-            "/api/tasks/not-a-uuid",
-            serde_json::json!(["path", "task_id"]),
-            serde_json::json!("not-a-uuid"),
-            "uuid_parsing",
-        ),
-        (
             "/api/workflows/not-a-uuid",
             serde_json::json!(["path", "workflow_id"]),
             serde_json::json!("not-a-uuid"),
@@ -499,7 +503,7 @@ async fn schema_state_matrix_controls_meta_and_actions_without_blocking_reads() 
             .await
             .unwrap();
         if compatible {
-            assert_eq!(action.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(action.status(), StatusCode::BAD_REQUEST);
         } else {
             assert_eq!(action.status(), StatusCode::CONFLICT);
             assert_eq!(json(action).await["code"], reason.unwrap());
@@ -509,7 +513,7 @@ async fn schema_state_matrix_controls_meta_and_actions_without_blocking_reads() 
             .oneshot(request(Method::GET, "/api/tasks/not-a-uuid"))
             .await
             .unwrap();
-        assert_eq!(read.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(read.status(), StatusCode::BAD_REQUEST);
     }
 }
 
@@ -1492,11 +1496,38 @@ async fn default_broker_mode_still_migrates_and_validates() {
     );
 }
 
-/// A path id that is not a UUID answers FastAPI's 422 `uuid_parsing` body,
-/// as a `uuid.UUID` path parameter does, with no database call (the router's
-/// pool is lazy and unreachable).
+/// A task path id that is not a UUID answers 400 `INVALID_INPUT`, as the
+/// Python web app does (`require_path_uuid`), with no database call (the
+/// router's pool is lazy and unreachable). The detail names the parameter
+/// and carries pydantic's message.
 #[tokio::test]
-async fn a_path_id_that_is_not_a_uuid_is_fastapi_uuid_parsing() {
+async fn a_task_path_id_that_is_not_a_uuid_is_invalid_input() {
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        true,
+    );
+    let read = router
+        .clone()
+        .oneshot(request(Method::GET, "/api/tasks/not-a-uuid"))
+        .await
+        .unwrap();
+    assert_eq!(read.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json(read).await, task_path_id_refusal("not-a-uuid"));
+
+    let cancel = router
+        .oneshot(action_request("/api/tasks/not-a-uuid/cancel"))
+        .await
+        .unwrap();
+    assert_eq!(cancel.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json(cancel).await, task_path_id_refusal("not-a-uuid"));
+}
+
+/// A workflow path id that is not a UUID answers FastAPI's 422
+/// `uuid_parsing` body, as a `uuid.UUID` path parameter does, with no
+/// database call (the router's pool is lazy and unreachable).
+#[tokio::test]
+async fn a_workflow_path_id_that_is_not_a_uuid_is_fastapi_uuid_parsing() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
@@ -1504,14 +1535,14 @@ async fn a_path_id_that_is_not_a_uuid_is_fastapi_uuid_parsing() {
     );
     let response = router
         .clone()
-        .oneshot(request(Method::GET, "/api/tasks/not-a-uuid"))
+        .oneshot(request(Method::GET, "/api/workflows/not-a-uuid"))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = json(response).await;
     let issue = &body["detail"][0];
     assert_eq!(issue["type"], "uuid_parsing");
-    assert_eq!(issue["loc"], serde_json::json!(["path", "task_id"]));
+    assert_eq!(issue["loc"], serde_json::json!(["path", "workflow_id"]));
     assert_eq!(issue["input"], "not-a-uuid");
     let reason = issue["ctx"]["error"]
         .as_str()

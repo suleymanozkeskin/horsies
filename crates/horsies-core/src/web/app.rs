@@ -20,7 +20,7 @@ use crate::core::Horsies;
 use super::auth::{
     MonitoringAuthPolicy, MonitoringRequest, INTENT_HEADER, INTENT_VALUE, NOT_AUTHORIZED,
 };
-use super::common::{ApiError, DetailBody, SchemaBody};
+use super::common::{ApiError, CodeBody, DetailBody};
 use super::events::EventBroadcaster;
 use super::events::HEARTBEAT;
 use super::routes;
@@ -160,7 +160,7 @@ async fn action_guard(State(state): State<WebState>, request: Request, next: Nex
         let incompatible = SchemaIncompatible::from_status(status);
         return (
             StatusCode::CONFLICT,
-            Json(SchemaBody {
+            Json(CodeBody {
                 code: incompatible.code,
                 detail: incompatible.detail,
             }),
