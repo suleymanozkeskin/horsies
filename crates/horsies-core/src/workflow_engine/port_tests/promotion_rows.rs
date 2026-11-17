@@ -417,12 +417,15 @@ async fn a_pause_during_the_case_zero_step_applies_after_its_commit() {
     let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let retention = RetentionConfig::default();
 
-    let recovery = recover_stuck_workflows(
+    // On the heap. In a debug build, with the pass future inline in the join
+    // and the timeout below, the test needed 2.125 to 2.25 MiB of stack (the
+    // test thread has 2 MiB); boxed, it needs 1.75 to 1.875 MiB.
+    let recovery = Box::pin(recover_stuck_workflows(
         &recovery_broker,
         &registry,
         RECOVERY_FAILURE_LIMIT,
         &retention,
-    );
+    ));
     let pause_during_the_step = async {
         let step_pid = sole_waiter_on(&db.pool, holder_pid).await;
         let release_once_the_pause_waits = async {

@@ -12,12 +12,20 @@
 //! is timed under its run ([`RunPolls`]), so the poll watch reports a poll
 //! that holds a runtime thread with that run as the culprit (Python: the
 //! loop watchdog names the run of the mark that the blocking code carries).
+//!
+//! Each run has one cancel signal ([`run_cancel_signal`]). In a shared async
+//! child it fires at the run's deadline; the body and its work then have the
+//! run's cancel grace to end before the child drops them (Python: the cancel
+//! of the task at its deadline, then the second cancel after the grace). In
+//! an isolated child it never fires: the parent holds the deadline and kills
+//! the child.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -78,6 +86,87 @@ where
         .map_err(|_| RunSpawnRefused::NotInARun)?;
     let id = scope.register(name)?;
     Ok(scope.spawn_registered(id, name, future))
+}
+
+/// Why [`run_cancel_signal`] gave no signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RunSignalRefused {
+    /// The caller is not the async body of a run in a Rust child, nor work
+    /// that such a body started with `spawn_in_run`.
+    #[error("run_cancel_signal was called outside the async body of a task run in a Rust child")]
+    NotInARun,
+}
+
+/// The cancel signal of the current run, read by its async body or by work
+/// that the body started with [`spawn_in_run`]. Every read in one run gives
+/// the same signal.
+///
+/// Errors: [`RunSignalRefused::NotInARun`].
+pub fn run_cancel_signal() -> Result<RunCancelSignal, RunSignalRefused> {
+    RUN_SCOPE
+        .try_with(|scope| scope.cancel.clone())
+        .map_err(|_| RunSignalRefused::NotInARun)
+}
+
+/// The state that every copy of one run's cancel signal shares.
+struct CancelShared {
+    fired: AtomicBool,
+    /// Woken once, when the signal fires.
+    woken: Notify,
+}
+
+/// The cancel signal of one run. It fires at most once: in a shared async
+/// child at the run's deadline, never in an isolated child. Once it fired,
+/// the run ends as a timeout whatever its body returns, and the child drops
+/// the body and its work when they are alive after the run's cancel grace.
+#[derive(Clone)]
+pub struct RunCancelSignal {
+    shared: Arc<CancelShared>,
+}
+
+impl RunCancelSignal {
+    fn new() -> Self {
+        Self {
+            shared: Arc::new(CancelShared {
+                fired: AtomicBool::new(false),
+                woken: Notify::new(),
+            }),
+        }
+    }
+
+    /// Whether the signal fired.
+    pub fn is_cancelled(&self) -> bool {
+        self.shared.fired.load(Ordering::Acquire)
+    }
+
+    /// Complete when the signal fires; at once when it fired already.
+    pub async fn cancelled(&self) {
+        loop {
+            let woken = self.shared.woken.notified();
+            tokio::pin!(woken);
+            // Registered before the check, so a fire between the check and
+            // the wait still wakes it.
+            woken.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            woken.await;
+        }
+    }
+
+    /// Fire the signal and wake every waiter. A second fire changes nothing.
+    fn fire(&self) {
+        self.shared.fired.store(true, Ordering::Release);
+        self.shared.woken.notify_waiters();
+    }
+}
+
+impl fmt::Debug for RunCancelSignal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RunCancelSignal")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
 }
 
 /// Milliseconds from `epoch` to now, saturated.
@@ -315,6 +404,7 @@ pub(super) enum RoundsEnd {
 pub(super) struct RunScope {
     shared: Arc<ScopeShared>,
     timing: PollTiming,
+    cancel: RunCancelSignal,
 }
 
 impl RunScope {
@@ -340,7 +430,13 @@ impl RunScope {
                 ended: Notify::new(),
             }),
             timing,
+            cancel: RunCancelSignal::new(),
         }
+    }
+
+    /// Fire the run's cancel signal: its body and its work see it.
+    pub(super) fn fire_cancel(&self) {
+        self.cancel.fire();
     }
 
     fn register(&self, name: &str) -> Result<u64, RunSpawnRefused> {
@@ -552,6 +648,76 @@ mod tests {
             scope.wait_done(Duration::from_millis(10)).await,
             WorkWait::Done
         );
+    }
+
+    #[tokio::test]
+    async fn a_signal_read_outside_a_run_is_refused() {
+        assert!(matches!(
+            run_cancel_signal(),
+            Err(RunSignalRefused::NotInARun)
+        ));
+    }
+
+    /// #657: the cancel signal of a run reaches its body and the work the
+    /// body started; a run that ends within its grace leaves nothing alive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_cancel_signal_reaches_the_body_and_its_work() {
+        let scope = RunScope::new();
+        let body = scope.spawn_body("app.tasks.body", async {
+            let signal = run_cancel_signal().expect("a body reads the signal of its run");
+            let work = spawn_in_run("watcher", async {
+                let signal = run_cancel_signal().expect("work of a run reads its signal");
+                signal.cancelled().await;
+                signal.is_cancelled()
+            })
+            .expect("a body may start work");
+            let before = signal.is_cancelled();
+            signal.cancelled().await;
+            let seen_by_work = work.await.expect("the work ends");
+            (before, signal.is_cancelled(), seen_by_work)
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(matches!(scope.alive(), Alive::Work { .. }));
+        scope.fire_cancel();
+        assert_eq!(body.await.expect("the body ends"), (false, true, true));
+        assert_eq!(
+            scope.wait_done(Duration::from_secs(1)).await,
+            WorkWait::Done
+        );
+    }
+
+    /// #657: a signal that fired before the read completes at once, and a
+    /// second fire changes nothing.
+    #[tokio::test]
+    async fn a_fired_signal_completes_at_once() {
+        let scope = RunScope::new();
+        scope.fire_cancel();
+        scope.fire_cancel();
+        let body = scope.spawn_body("app.tasks.body", async {
+            let signal = run_cancel_signal().expect("a body reads the signal of its run");
+            signal.cancelled().await;
+            signal.is_cancelled()
+        });
+        assert!(body.await.expect("the body ends"));
+    }
+
+    /// #657: a body that does not end within the grace after the signal is
+    /// dropped by the cancel rounds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_body_that_ignores_the_signal_is_dropped_after_the_grace() {
+        let scope = RunScope::new();
+        let _body = scope.spawn_body(
+            "app.tasks.body",
+            tokio::time::sleep(Duration::from_secs(60)),
+        );
+        scope.fire_cancel();
+        assert_eq!(
+            scope.wait_done(Duration::from_millis(100)).await,
+            WorkWait::StillAlive
+        );
+        scope.close();
+        assert_eq!(scope.end_in_rounds().await, RoundsEnd::Ended);
+        assert_eq!(scope.alive(), Alive::Nothing);
     }
 
     #[tokio::test]
