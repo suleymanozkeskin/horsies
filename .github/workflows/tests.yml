@@ -183,10 +183,12 @@ jobs:
             base='${{ github.event.before }}'
           fi
           # An unknown base (first push to a branch) runs the job rather than
-          # skipping it: a missed check is worse than a redundant one.
+          # skipping it: a missed check is worse than a redundant one. A change
+          # to the core's committed build alone also runs it, for the check of
+          # that build below.
           if [ -z "$base" ] || [ "$base" = '0000000000000000000000000000000000000000' ]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$base" HEAD -- webui/; then
+          elif git diff --quiet "$base" HEAD -- webui/ crates/horsies-core/webui-dist/; then
             echo 'run=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run=true' >> "$GITHUB_OUTPUT"
@@ -220,6 +222,13 @@ jobs:
         if: steps.changed.outputs.run == 'true'
         working-directory: webui
         run: bun run build
+
+      # Builds into crates/horsies-core/webui-dist/, which horsies-core embeds,
+      # and fails if the committed build differs (webui/scripts/check-core-dist.sh).
+      - name: Check the core's committed build
+        if: steps.changed.outputs.run == 'true'
+        working-directory: webui
+        run: bun run check:core-dist
 
   # PRs into program/0.8.0 change the core and the Python package while the
   # core is merged without compiling (it is built once the Python bridge
