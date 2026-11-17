@@ -2,9 +2,9 @@
 ///
 /// Mirrors Python's `python/horsies/core/brokers/result_types.py`.
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use crate::core::codec::{check_json_text, StrictJsonError};
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::{TaskInfo, TaskStatus};
 
@@ -107,15 +107,61 @@ pub type BrokerResult<T> = Result<T, BrokerOperationError>;
 
 /// Raw broker-level snapshot of a task's stored result envelope.
 ///
-/// The broker verifies history envelopes and parses the outer JSON object but
-/// deliberately performs no task-specific `Ok` decoding. Typed handles layer
-/// their task result type on top of this record.
+/// The broker verifies history envelopes and checks that the stored text is
+/// a JSON object, but deliberately performs no task-specific `Ok` decoding.
+/// Typed handles layer their task result type on top of this record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawResultRecord {
     pub task_id: Uuid,
     pub task_name: String,
     pub status: TaskStatus,
-    pub raw_result: Option<Map<String, Value>>,
+    pub raw_result: Option<StoredEnvelopeText>,
+}
+
+/// The stored result envelope of a task, as the text that the row stores.
+///
+/// The text passed the strict read rule and is one JSON object. It is not
+/// parsed into a value: a `serde_json::Value` holds an integer outside the
+/// `i64` and `u64` range as an `f64`, so Python's text of `2**64` would read
+/// back as a float (`tests/fixtures/stored_forms/README.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredEnvelopeText(String);
+
+/// Why a stored result text is not a result envelope text.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StoredEnvelopeRefused {
+    /// The text breaks the strict read rule.
+    #[error("result JSON is refused: {0}")]
+    NotStrictJson(#[from] StrictJsonError),
+    /// The text is another JSON value than an object or `null`; the kind is
+    /// named.
+    #[error("result JSON must be an object, got {0}")]
+    NotAnObject(&'static str),
+}
+
+impl StoredEnvelopeText {
+    /// Read a stored result text: `None` for the JSON `null`, which is no
+    /// result; the text for a JSON object; a refusal for a text that breaks
+    /// the strict read rule or holds another JSON value. Pure.
+    pub fn parse(text: String) -> Result<Option<Self>, StoredEnvelopeRefused> {
+        check_json_text(&text)?;
+        // The strict read passed, so the first byte after the whitespace
+        // starts the one JSON value of the text.
+        match text.trim_start().as_bytes().first() {
+            Some(b'{') => Ok(Some(Self(text))),
+            Some(b'n') => Ok(None),
+            Some(b't' | b'f') => Err(StoredEnvelopeRefused::NotAnObject("boolean")),
+            Some(b'"') => Err(StoredEnvelopeRefused::NotAnObject("string")),
+            Some(b'[') => Err(StoredEnvelopeRefused::NotAnObject("array")),
+            Some(_) => Err(StoredEnvelopeRefused::NotAnObject("number")),
+            None => unreachable!("the strict read refuses a text that holds no value"),
+        }
+    }
+
+    /// The envelope text, as stored.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// What a raw result read found: the record of the task, or why neither
@@ -240,5 +286,54 @@ mod tests {
             let back: BrokerErrorCode = serde_json::from_str(&json).unwrap();
             assert_eq!(back, code);
         }
+    }
+}
+
+#[cfg(test)]
+mod stored_envelope_tests {
+    use super::*;
+
+    /// The text is kept as stored: an integer above `u128::MAX` keeps every
+    /// digit, and the member order and spacing stay.
+    #[test]
+    fn an_object_is_kept_as_its_stored_text() {
+        let text = r#"{"__h_task_result__":true, "ok":340282366920938463463374607431768211456,"err":null}"#;
+        let envelope = StoredEnvelopeText::parse(text.to_owned())
+            .unwrap()
+            .expect("an object is an envelope");
+        assert_eq!(envelope.as_str(), text);
+    }
+
+    #[test]
+    fn the_json_null_is_no_result() {
+        assert_eq!(StoredEnvelopeText::parse(" null".to_owned()), Ok(None));
+    }
+
+    #[test]
+    fn another_json_value_is_refused_with_its_kind() {
+        for (text, kind) in [
+            ("3", "number"),
+            ("-1.5", "number"),
+            (r#""x""#, "string"),
+            ("[]", "array"),
+            ("true", "boolean"),
+            (" false", "boolean"),
+        ] {
+            assert_eq!(
+                StoredEnvelopeText::parse(text.to_owned()),
+                Err(StoredEnvelopeRefused::NotAnObject(kind)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_text_that_breaks_the_strict_rule_is_refused() {
+        assert!(matches!(
+            StoredEnvelopeText::parse(r#"{"ok":1,"ok":2}"#.to_owned()),
+            Err(StoredEnvelopeRefused::NotStrictJson(
+                StrictJsonError::DuplicateKey { .. }
+            ))
+        ));
     }
 }
