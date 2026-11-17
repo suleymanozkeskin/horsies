@@ -350,12 +350,18 @@ fn registered_task(
         ::horsies::__private::TaskMeta::for_input::<#input>()
             .in_module(::horsies::__private::parent_module(::std::module_path!()))
     };
+    let validate_call = match &signature.input {
+        InputShape::Unit => quote! { ::horsies::__private::decode_unit_input(input) },
+        InputShape::Direct(_) | InputShape::Wrapped(_) => quote! {
+            ::horsies::__private::decode_input::<#input>(input).map(|_decoded| ())
+        },
+    };
     let validate = quote! {
         fn validate_input(
             &self,
             input: &[u8],
         ) -> ::std::result::Result<(), ::horsies::__private::StoredTaskError> {
-            ::horsies::__private::decode_input::<#input>(input).map(|_decoded| ())
+            #validate_call
         }
     };
     match kind {
@@ -416,7 +422,8 @@ fn registered_task(
 }
 
 /// The decode of `input` (a byte slice or a vector in scope) into the
-/// bindings that the call takes. A refusal returns the stored error.
+/// bindings that the call takes. A refusal returns the stored error. A task
+/// with no parameters reads `null` (a send) and `{}` (a workflow node).
 fn decode_statement(signature: &Signature, input_type: &Type) -> TokenStream {
     let pattern = match &signature.input {
         InputShape::Unit => quote! { () },
@@ -426,8 +433,14 @@ fn decode_statement(signature: &Signature, input_type: &Type) -> TokenStream {
             quote! { Input { #(#names),* } }
         }
     };
+    let decode = match &signature.input {
+        InputShape::Unit => quote! { ::horsies::__private::decode_unit_input(&input) },
+        InputShape::Direct(_) | InputShape::Wrapped(_) => {
+            quote! { ::horsies::__private::decode_input::<#input_type>(&input) }
+        }
+    };
     quote! {
-        let #pattern = match ::horsies::__private::decode_input::<#input_type>(&input) {
+        let #pattern = match #decode {
             ::std::result::Result::Ok(decoded) => decoded,
             ::std::result::Result::Err(refused) => {
                 return ::horsies::__private::TaskResult::Err(refused);
@@ -647,10 +660,12 @@ fn is_task_runtime(ty: &Type) -> bool {
     last_segment_is(ty, "TaskRuntime")
 }
 
-/// A single parameter that a workflow fills from a dependency result is
-/// wrapped, so that the node can bind it by name.
+/// A single parameter that a workflow fills is wrapped, so that the node
+/// binds it by name: a dependency's result (`TaskOutcome<S, E>`, the
+/// receiving type of `arg_from`) or the workflow context (`WorkflowContext`,
+/// the member `workflow_ctx`).
 fn is_dependency_result(ty: &Type) -> bool {
-    last_segment_is(ty, "TaskResult")
+    last_segment_is(ty, "TaskOutcome") || last_segment_is(ty, "WorkflowContext")
 }
 
 fn last_segment_is(ty: &Type, name: &str) -> bool {

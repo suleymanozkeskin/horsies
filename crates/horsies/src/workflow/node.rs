@@ -1,0 +1,796 @@
+//! Workflow nodes: the references between nodes, the field tokens of a
+//! node's input, the join rule, and the task node.
+//!
+//! A [`TaskNode`] comes from the typed function of a registered task
+//! ([`TaskFunction::node`]), with the task's queue and options. Its input
+//! type `I` and output type `T` are the task's: `set` and `arg_from` take
+//! field tokens of `I` only, and `arg_from` takes a source whose output
+//! type is the field's, checked at compile time.
+
+use std::any::TypeId;
+use std::collections::BTreeMap;
+use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use chrono::{DateTime, Utc};
+use horsies_core::core::codec::to_json_bytes_strict;
+use horsies_core::TaskOptions;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use serde_json::value::RawValue;
+
+use super::input::{InputRefused, NodeInput};
+use crate::task::body::{decode_checked, decode_unit, encode_read_back, DecodeFailure};
+use crate::{ErrorCode, HorsiesError, TaskFunction, TaskOutcome, UserErrorCode};
+
+// ---------------------------------------------------------------------------
+// Types and references
+// ---------------------------------------------------------------------------
+
+/// The output type of a node, compared when a spec names its output and
+/// when a workflow is registered with an output type.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OutputType {
+    id: TypeId,
+    name: &'static str,
+}
+
+impl OutputType {
+    pub(crate) fn of<T: 'static>() -> Self {
+        Self {
+            id: TypeId::of::<T>(),
+            name: std::any::type_name::<T>(),
+        }
+    }
+
+    /// The type name, for messages.
+    pub(crate) fn name(self) -> &'static str {
+        self.name
+    }
+}
+
+impl PartialEq for OutputType {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for OutputType {}
+
+/// The identity of one [`WorkflowSpecBuilder`](super::WorkflowSpecBuilder):
+/// a reference that one builder returns names a node of that builder only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct BuilderId(u64);
+
+impl BuilderId {
+    /// A new identity, distinct from every earlier one in this process.
+    pub(crate) fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// A reference to a node of one workflow builder, with no output type.
+///
+/// Only a builder makes one, when a node is added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeRef {
+    builder: BuilderId,
+    index: usize,
+}
+
+impl NodeRef {
+    pub(crate) fn new(builder: BuilderId, index: usize) -> Self {
+        Self { builder, index }
+    }
+
+    /// The position of the node in its spec.
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    pub(crate) fn builder(&self) -> BuilderId {
+        self.builder
+    }
+}
+
+/// A reference to a node of one workflow builder whose output type is `T`.
+///
+/// Only a builder makes one, when a node is added. `arg_from` takes it with
+/// a field token of the same output type.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TypedNodeRef<T> {
+    node: NodeRef,
+    types: PhantomData<fn() -> T>,
+}
+
+impl<T> TypedNodeRef<T> {
+    pub(crate) fn new(node: NodeRef) -> Self {
+        Self {
+            node,
+            types: PhantomData,
+        }
+    }
+
+    /// The position of the node in its spec.
+    pub fn index(&self) -> usize {
+        self.node.index
+    }
+
+    /// The reference without its output type.
+    pub fn untyped(self) -> NodeRef {
+        self.node
+    }
+}
+
+impl<T> Clone for TypedNodeRef<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for TypedNodeRef<T> {}
+
+impl<T> From<TypedNodeRef<T>> for NodeRef {
+    fn from(value: TypedNodeRef<T>) -> Self {
+        value.node
+    }
+}
+
+impl<T> From<&TypedNodeRef<T>> for NodeRef {
+    fn from(value: &TypedNodeRef<T>) -> Self {
+        value.node
+    }
+}
+
+impl From<&NodeRef> for NodeRef {
+    fn from(value: &NodeRef) -> Self {
+        *value
+    }
+}
+
+/// The key of a node's result in a workflow, with its output type `T`
+/// (Python `NodeKey`): the node id.
+#[derive(Debug)]
+pub struct NodeKey<T> {
+    node_id: String,
+    types: PhantomData<fn() -> T>,
+}
+
+impl<T> NodeKey<T> {
+    /// The key of the node with id `node_id`.
+    pub fn new(node_id: impl Into<String>) -> Self {
+        Self {
+            node_id: node_id.into(),
+            types: PhantomData,
+        }
+    }
+
+    /// The node id.
+    pub fn node_id(&self) -> &str {
+        &self.node_id
+    }
+}
+
+impl<T> Clone for NodeKey<T> {
+    fn clone(&self) -> Self {
+        Self::new(self.node_id.clone())
+    }
+}
+
+impl<T> PartialEq for NodeKey<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.node_id == other.node_id
+    }
+}
+
+impl<T> Eq for NodeKey<T> {}
+
+/// The token of one field `F` of the input type `I` of a task or a child
+/// workflow: the member name that serde reads.
+///
+/// `#[horsies::task]` generates one per parameter (`name::params::field()`),
+/// and `#[derive(WorkflowInput)]` one per field (`Input::field_name()`).
+#[derive(Debug, PartialEq, Eq)]
+pub struct InputField<I, F> {
+    name: &'static str,
+    types: PhantomData<fn() -> (I, F)>,
+}
+
+impl<I, F> InputField<I, F> {
+    /// The token of the member `name`. The macros call it through
+    /// `horsies::__private::input_field`.
+    pub(crate) const fn raw(name: &'static str) -> Self {
+        Self {
+            name,
+            types: PhantomData,
+        }
+    }
+
+    /// The member name.
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+impl<I, F> Clone for InputField<I, F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<I, F> Copy for InputField<I, F> {}
+
+/// When a node with dependencies becomes ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinType {
+    /// Every dependency is terminal (the default).
+    All,
+    /// One dependency is COMPLETED.
+    Any,
+    /// `min_success` dependencies are COMPLETED: at least 1, and at most the
+    /// node's dependencies (checked when the spec is built).
+    Quorum { min_success: u32 },
+}
+
+// ---------------------------------------------------------------------------
+// The parts every node has
+// ---------------------------------------------------------------------------
+
+/// The node id of a node: given, or made when the spec is built
+/// (`<workflow name slug>:<index>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NodeIdChoice {
+    Auto,
+    Given(String),
+}
+
+/// The links of a node to the other nodes of its spec, and its join rule.
+#[derive(Debug, Clone)]
+pub(crate) struct NodeLinks {
+    /// The nodes that this node waits for, in the order added, no repeat.
+    pub(crate) dependencies: Vec<NodeRef>,
+    /// The input members that take a dependency's result, by member name.
+    pub(crate) args_from: BTreeMap<String, NodeRef>,
+    /// The dependencies whose results the workflow context takes.
+    pub(crate) workflow_ctx_from: Vec<NodeRef>,
+    pub(crate) allow_failed_deps: bool,
+    pub(crate) join: JoinType,
+    pub(crate) node_id: NodeIdChoice,
+}
+
+impl NodeLinks {
+    pub(crate) fn new() -> Self {
+        Self {
+            dependencies: Vec::new(),
+            args_from: BTreeMap::new(),
+            workflow_ctx_from: Vec::new(),
+            allow_failed_deps: false,
+            join: JoinType::All,
+            node_id: NodeIdChoice::Auto,
+        }
+    }
+
+    pub(crate) fn wait_for(&mut self, dependency: NodeRef) {
+        if !self.dependencies.contains(&dependency) {
+            self.dependencies.push(dependency);
+        }
+    }
+
+    pub(crate) fn take_result(&mut self, member: &str, source: NodeRef) {
+        self.wait_for(source);
+        let _previous = self.args_from.insert(member.to_owned(), source);
+    }
+}
+
+/// How a node's input is checked when the spec is built: the decode of the
+/// input type of its task or child workflow.
+pub(crate) type InputCheck = fn(&[u8]) -> Result<(), DecodeFailure>;
+
+/// The [`InputCheck`] of the input type `A`. A task with no parameters
+/// (`()`) reads `null` and `{}`, as its body does.
+pub(crate) fn decode_check<A: DeserializeOwned + 'static>(
+    bytes: &[u8],
+) -> Result<(), DecodeFailure> {
+    match TypeId::of::<A>() == TypeId::of::<()>() {
+        true => decode_unit(bytes),
+        false => decode_checked::<A>(bytes).map(|_decoded| ()),
+    }
+}
+
+/// The input of a node from a whole value `value` of its input type: the
+/// encode that a send makes, with its read-back (encode, decode, encode
+/// again, compare). Pure.
+///
+/// Errors: `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (HRS-031) for a value that
+/// does not encode or read back; `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED`
+/// (HRS-026) for a value that is not a JSON object.
+pub(crate) fn whole_input<V>(owner: &str, value: &V) -> Result<NodeInput, HorsiesError>
+where
+    V: Serialize + DeserializeOwned,
+{
+    let bytes = encode_read_back(value).map_err(|cause| {
+        not_serializable(
+            owner,
+            format!("input {}: {cause}", std::any::type_name::<V>()),
+        )
+    })?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| not_serializable(owner, "the encoded input is not UTF-8".to_owned()))?;
+    NodeInput::from_object_text(&text).map_err(|refused| input_refused(owner, &refused))
+}
+
+/// `input` with member `field` set to `value`, encoded with the read-back of
+/// a send. Pure.
+///
+/// Errors: `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (HRS-031) for a value that
+/// does not encode or read back, or breaks a rule of a user value;
+/// `WORKFLOW_INVALID_KWARG_KEY` (HRS-019) for a member name of the engine.
+pub(crate) fn input_with_member<F>(
+    owner: &str,
+    mut input: NodeInput,
+    field: &str,
+    value: &F,
+) -> Result<NodeInput, HorsiesError>
+where
+    F: Serialize + DeserializeOwned,
+{
+    let bytes = encode_read_back(value)
+        .map_err(|cause| not_serializable(owner, format!("field '{field}': {cause}")))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| not_serializable(owner, format!("field '{field}': the text is not UTF-8")))?;
+    let raw = RawValue::from_string(text).map_err(|error| {
+        not_serializable(owner, format!("field '{field}': {}", error.classify_text()))
+    })?;
+    input
+        .set_member(field, raw)
+        .map_err(|refused| input_refused(owner, &refused))?;
+    Ok(input)
+}
+
+/// The input of a node from the text of one JSON object. Pure.
+///
+/// Errors: as [`whole_input`], with `WORKFLOW_INVALID_KWARG_KEY` (HRS-019)
+/// for a member name of the engine.
+pub(crate) fn text_input(owner: &str, text: &str) -> Result<NodeInput, HorsiesError> {
+    NodeInput::from_object_text(text).map_err(|refused| input_refused(owner, &refused))
+}
+
+/// The refusal of a node input, with Python's code for each cause.
+pub(crate) fn input_refused(owner: &str, refused: &InputRefused) -> HorsiesError {
+    match refused {
+        InputRefused::NotAnObject => HorsiesError::new(format!(
+            "the input of node {owner} is not a JSON object"
+        ))
+        .with_code(ErrorCode::WorkflowPositionalArgsNotSupported)
+        .with_help(
+            "a workflow node takes its input as named members: give the task a struct input or \
+             several parameters",
+        ),
+        InputRefused::Unreadable(cause) => not_serializable(owner, cause.clone()),
+        InputRefused::EngineKey(name) => HorsiesError::new(format!(
+            "the input of node {owner} has the member '{name}', a name that only the engine \
+             writes"
+        ))
+        .with_code(ErrorCode::WorkflowInvalidKwargKey)
+        .with_help("keys that start with __h_ or __horsies_, and __builtin_task_code__, belong to the engine"),
+    }
+}
+
+fn not_serializable(owner: &str, cause: String) -> HorsiesError {
+    HorsiesError::new(format!(
+        "the input of node {owner} does not serialize: {cause}"
+    ))
+    .with_code(ErrorCode::WorkflowKwargsNotSerializable)
+}
+
+/// A serde_json error kind as text, with no value and no position.
+trait ClassifyText {
+    fn classify_text(&self) -> &'static str;
+}
+
+impl ClassifyText for serde_json::Error {
+    fn classify_text(&self) -> &'static str {
+        match self.classify() {
+            serde_json::error::Category::Io => "an I/O failure",
+            serde_json::error::Category::Syntax => "the text is not JSON",
+            serde_json::error::Category::Data => "the value does not fit",
+            serde_json::error::Category::Eof => "the text ends inside a value",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TaskNode
+// ---------------------------------------------------------------------------
+
+/// The priority of a task node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodePriority {
+    /// The configured priority of the node's queue.
+    OfQueue,
+    /// The priority that the node names: checked to be 1 to 100 when the
+    /// spec is built.
+    Given(u32),
+}
+
+/// The deadline of a task node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeDeadline {
+    NoDeadline,
+    At(DateTime<Utc>),
+}
+
+/// The parts of a task node that the registration of its task gives.
+pub(crate) struct TaskNodeParts {
+    pub(crate) task_name: String,
+    pub(crate) queue: String,
+    /// The task's stored options text (its retry options and class).
+    pub(crate) task_options: Option<String>,
+    pub(crate) accepts_workflow_ctx: bool,
+    pub(crate) input_check: InputCheck,
+}
+
+/// A workflow node that runs a task with input `I` and output `T` (Python
+/// `TaskNode`).
+///
+/// [`TaskFunction::node`] makes one with the task's queue and options and an
+/// empty input `{}`; set the input with [`Self::set_input`], [`Self::set`]
+/// and [`Self::arg_from`], then add it with `WorkflowSpecBuilder::task`.
+pub struct TaskNode<T, I> {
+    pub(crate) task_name: String,
+    pub(crate) input: NodeInput,
+    pub(crate) queue: String,
+    pub(crate) priority: NodePriority,
+    pub(crate) task_options: Option<String>,
+    pub(crate) accepts_workflow_ctx: bool,
+    pub(crate) deadline: NodeDeadline,
+    pub(crate) input_check: InputCheck,
+    pub(crate) links: NodeLinks,
+    types: PhantomData<fn() -> (T, I)>,
+}
+
+impl<T, I> std::fmt::Debug for TaskNode<T, I> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TaskNode")
+            .field("task_name", &self.task_name)
+            .field("node_id", &self.links.node_id)
+            .field("queue", &self.queue)
+            .field("join", &self.links.join)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T, I> TaskNode<T, I> {
+    pub(crate) fn new(parts: TaskNodeParts) -> Self {
+        Self {
+            task_name: parts.task_name,
+            input: NodeInput::empty(),
+            queue: parts.queue,
+            priority: NodePriority::OfQueue,
+            task_options: parts.task_options,
+            accepts_workflow_ctx: parts.accepts_workflow_ctx,
+            deadline: NodeDeadline::NoDeadline,
+            input_check: parts.input_check,
+            links: NodeLinks::new(),
+            types: PhantomData,
+        }
+    }
+
+    fn owner(&self) -> String {
+        format!("'{}'", self.task_name)
+    }
+
+    /// Set the whole input of the task: the value is encoded and read back
+    /// as a send does, and replaces every member set before.
+    ///
+    /// Errors: `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (HRS-031) for a value that
+    /// does not encode or read back as `I` (a non-finite float, a key that
+    /// only the engine writes); `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED`
+    /// (HRS-026) for an input type that does not encode as a JSON object.
+    pub fn set_input(mut self, value: I) -> Result<Self, HorsiesError>
+    where
+        I: Serialize + DeserializeOwned,
+    {
+        self.input = whole_input(&self.owner(), &value)?;
+        Ok(self)
+    }
+
+    /// Set one field of the input, encoded and read back as a send does.
+    ///
+    /// Errors: `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (HRS-031) for a value that
+    /// does not encode or read back as `F`, a non-finite float included.
+    pub fn set<F>(mut self, field: InputField<I, F>, value: F) -> Result<Self, HorsiesError>
+    where
+        F: Serialize + DeserializeOwned,
+    {
+        self.input = input_with_member(&self.owner(), self.input, field.name(), &value)?;
+        Ok(self)
+    }
+
+    /// Set the whole input from the text of one JSON object, as written.
+    /// The spec build decodes it with `I`.
+    ///
+    /// Errors: `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED` (HRS-026) for a text
+    /// that is not an object; `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (HRS-031)
+    /// for a text that breaks the strict read rule or the rules of a user
+    /// value; `WORKFLOW_INVALID_KWARG_KEY` (HRS-019) for a member name of
+    /// the engine.
+    pub fn input_json(mut self, text: &str) -> Result<Self, HorsiesError> {
+        self.input = text_input(&self.owner(), text)?;
+        Ok(self)
+    }
+
+    /// Take the result of `source` as the field `field` (Python
+    /// `args_from`). The field's type is the receiving type
+    /// `TaskOutcome<S, E>`, with `S` the source's output type; `E` reads the
+    /// source's user codes (`UserCode` takes any). The node waits for
+    /// `source`.
+    pub fn arg_from<S, E>(
+        mut self,
+        field: InputField<I, TaskOutcome<S, E>>,
+        source: TypedNodeRef<S>,
+    ) -> Self {
+        self.links.take_result(field.name(), source.untyped());
+        self
+    }
+
+    /// Wait for `dependency`.
+    pub fn waits_for<R: Into<NodeRef>>(mut self, dependency: R) -> Self {
+        self.links.wait_for(dependency.into());
+        self
+    }
+
+    /// Wait for each of `dependencies`.
+    pub fn waits_for_all<D, R>(mut self, dependencies: D) -> Self
+    where
+        D: IntoIterator<Item = R>,
+        R: Into<NodeRef>,
+    {
+        for dependency in dependencies {
+            self.links.wait_for(dependency.into());
+        }
+        self
+    }
+
+    /// Give the task the results of `sources` in its workflow context. Each
+    /// source must be a dependency of the node, and the task must take the
+    /// context (`workflow_ctx` on the task attribute).
+    pub fn workflow_ctx_from<D, R>(mut self, sources: D) -> Self
+    where
+        D: IntoIterator<Item = R>,
+        R: Into<NodeRef>,
+    {
+        for source in sources {
+            let source = source.into();
+            if !self.links.workflow_ctx_from.contains(&source) {
+                self.links.workflow_ctx_from.push(source);
+            }
+        }
+        self
+    }
+
+    /// Set the node id: unique in the spec, `[A-Za-z0-9_\-:.]`, at most 128
+    /// characters. Without one the spec build gives the node
+    /// `<workflow name>:<index>`.
+    pub fn node_id(mut self, id: impl Into<String>) -> Self {
+        self.links.node_id = NodeIdChoice::Given(id.into());
+        self
+    }
+
+    /// Run the task on `queue` in place of the task's queue. The app checks
+    /// the queue when the workflow is registered or started.
+    pub fn queue(mut self, queue: impl Into<String>) -> Self {
+        self.queue = queue.into();
+        self
+    }
+
+    /// Claim the task with `priority`, 1 (first) to 100 (last), in place of
+    /// the priority of its queue.
+    pub fn priority(mut self, priority: u32) -> Self {
+        self.priority = NodePriority::Given(priority);
+        self
+    }
+
+    /// Run the node even when a dependency failed.
+    pub fn allow_failed_deps(mut self, allow: bool) -> Self {
+        self.links.allow_failed_deps = allow;
+        self
+    }
+
+    /// Start when every dependency is terminal (the default).
+    pub fn join_all(mut self) -> Self {
+        self.links.join = JoinType::All;
+        self
+    }
+
+    /// Start when one dependency is COMPLETED.
+    pub fn join_any(mut self) -> Self {
+        self.links.join = JoinType::Any;
+        self
+    }
+
+    /// Start when `min_success` dependencies are COMPLETED.
+    pub fn join_quorum(mut self, min_success: u32) -> Self {
+        self.links.join = JoinType::Quorum { min_success };
+        self
+    }
+
+    /// The deadline of the task: it expires when it has not started by then.
+    pub fn good_until(mut self, deadline: DateTime<Utc>) -> Self {
+        self.deadline = NodeDeadline::At(deadline);
+        self
+    }
+
+    /// The key of the node's result, when the node has a given node id.
+    /// A spec gives the key of every node: `WorkflowSpec::key`.
+    pub fn key(&self) -> Option<NodeKey<T>> {
+        match &self.links.node_id {
+            NodeIdChoice::Given(id) => Some(NodeKey::new(id.clone())),
+            NodeIdChoice::Auto => None,
+        }
+    }
+
+    /// The task name.
+    pub fn task_name(&self) -> &str {
+        &self.task_name
+    }
+}
+
+impl<A, T, E> TaskFunction<A, T, E>
+where
+    A: Serialize + DeserializeOwned + 'static,
+    T: Serialize + DeserializeOwned + 'static,
+    E: UserErrorCode,
+{
+    /// A workflow node of the task, with the queue and the options of its
+    /// registration and an empty input `{}` (Python `TaskNode(fn=task)`).
+    /// The generated `name::node()` calls it.
+    pub fn node(&self) -> TaskNode<T, A> {
+        TaskNode::new(TaskNodeParts {
+            task_name: self.task_name().to_owned(),
+            queue: self.queue_name().to_owned(),
+            task_options: self
+                .task_options()
+                .and_then(TaskOptions::serialize_retry_options),
+            accepts_workflow_ctx: self.accepts_workflow_ctx(),
+            input_check: decode_check::<A>,
+        })
+    }
+}
+
+/// The JSON text of `value` with the strict encoder, for an engine member of
+/// the check of a node's input. Panics for a value that does not encode: the
+/// callers pass values that the library builds.
+pub(crate) fn engine_member_text<V: Serialize>(value: &V) -> String {
+    let bytes = to_json_bytes_strict(value).unwrap_or_else(|error| {
+        panic!("an engine member of a node input check does not encode: {error}")
+    });
+    String::from_utf8(bytes).unwrap_or_else(|_| unreachable!("serde_json writes UTF-8 text"))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use serde::Deserialize;
+
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(crate) struct ChargeInput {
+        pub(crate) order_id: u32,
+        pub(crate) amount: f64,
+    }
+
+    /// A task node of `task_name` with input `I` and output `T`, as the
+    /// node of a registered task on queue `default`.
+    pub(crate) fn task_node<T, I>(task_name: &str) -> TaskNode<T, I>
+    where
+        I: DeserializeOwned + 'static,
+    {
+        TaskNode::new(TaskNodeParts {
+            task_name: task_name.to_owned(),
+            queue: "default".to_owned(),
+            task_options: None,
+            accepts_workflow_ctx: false,
+            input_check: decode_check::<I>,
+        })
+    }
+
+    fn amount() -> InputField<ChargeInput, f64> {
+        InputField::raw("amount")
+    }
+
+    #[test]
+    fn set_input_stores_the_encoded_object_in_field_order() {
+        let node = task_node::<u32, ChargeInput>("charge")
+            .set_input(ChargeInput {
+                order_id: 7,
+                amount: 1.5,
+            })
+            .unwrap();
+        assert_eq!(node.input.to_text(), r#"{"order_id":7,"amount":1.5}"#);
+    }
+
+    #[test]
+    fn a_non_finite_float_is_refused_by_set() {
+        let refused = task_node::<u32, ChargeInput>("charge")
+            .set(amount(), f64::NAN)
+            .unwrap_err();
+        assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
+        assert!(refused.message.contains("'charge'"), "{refused}");
+    }
+
+    #[test]
+    fn set_adds_a_member_to_the_input() {
+        let node = task_node::<u32, ChargeInput>("charge")
+            .set(amount(), 2.25)
+            .unwrap();
+        assert_eq!(node.input.to_text(), r#"{"amount":2.25}"#);
+    }
+
+    #[test]
+    fn an_input_that_is_not_an_object_is_refused() {
+        let refused = task_node::<u32, u64>("double").set_input(5).unwrap_err();
+        assert_eq!(
+            refused.code,
+            Some(ErrorCode::WorkflowPositionalArgsNotSupported)
+        );
+        let refused = task_node::<u32, u64>("double")
+            .input_json("[1, 2]")
+            .unwrap_err();
+        assert_eq!(
+            refused.code,
+            Some(ErrorCode::WorkflowPositionalArgsNotSupported)
+        );
+    }
+
+    #[test]
+    fn an_engine_member_name_is_refused() {
+        let refused = task_node::<u32, ChargeInput>("charge")
+            .input_json(r#"{"__h_workflow_meta__": {}}"#)
+            .unwrap_err();
+        assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+    }
+
+    #[test]
+    fn a_dependency_is_kept_once_and_arg_from_waits_for_its_source() {
+        let builder = BuilderId::next();
+        let first = TypedNodeRef::<u32>::new(NodeRef::new(builder, 0));
+        let node = task_node::<u32, ChargeInput>("charge")
+            .waits_for(first)
+            .waits_for_all([first, first]);
+        assert_eq!(node.links.dependencies, vec![first.untyped()]);
+        let source = TypedNodeRef::<f64>::new(NodeRef::new(builder, 1));
+        let field: InputField<ChargeInput, TaskOutcome<f64, std::convert::Infallible>> =
+            InputField::raw("total");
+        let node = node.arg_from(field, source);
+        assert_eq!(
+            node.links.dependencies,
+            vec![first.untyped(), source.untyped()]
+        );
+        assert_eq!(node.links.args_from.get("total"), Some(&source.untyped()));
+    }
+
+    #[test]
+    fn a_key_needs_a_given_node_id() {
+        let node = task_node::<u32, ChargeInput>("charge");
+        assert_eq!(node.key(), None);
+        let node = node.node_id("charge-1");
+        assert_eq!(node.key().unwrap().node_id(), "charge-1");
+    }
+
+    #[test]
+    fn the_unit_check_reads_null_and_an_empty_object() {
+        assert!(decode_check::<()>(b"{}").is_ok());
+        assert!(decode_check::<()>(b"null").is_ok());
+        assert!(decode_check::<()>(br#"{"a": 1}"#).is_err());
+        assert!(decode_check::<ChargeInput>(br#"{"order_id": 1, "amount": 2}"#).is_ok());
+    }
+
+    #[test]
+    fn builders_have_distinct_identities() {
+        assert_ne!(BuilderId::next(), BuilderId::next());
+    }
+}

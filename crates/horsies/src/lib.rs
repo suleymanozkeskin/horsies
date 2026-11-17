@@ -65,7 +65,7 @@ pub use horsies_macros::{blocking_task, task, WorkflowInput};
 /// Paths that the expansions of the `horsies` macros name. Not API.
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::task::body::{body_result, decode_input, StoredTaskError};
+    pub use crate::task::body::{body_result, decode_input, decode_unit_input, StoredTaskError};
     pub use horsies_core::core::task::fn_trait::TaskMeta;
     pub use horsies_core::core::task::{AsyncTaskFn, BlockingTaskFn, RawTaskResult};
     pub use horsies_core::{RegisteredTask, TaskResult};
