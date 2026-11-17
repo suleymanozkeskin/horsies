@@ -433,6 +433,11 @@ const EXCEPTIONS: &[StubException] = &[
         doc: "The panic rule of this process was set to another rule before, or fixed when the core\nstarted. args: (current_rule,).",
     },
     StubException {
+        name: "NotMainThread",
+        base: "CoreDefect",
+        doc: "A run form was called off the main thread, where Python runs signal handlers.\n\nThe run did not start. args: (subject,).",
+    },
+    StubException {
         name: "PanicException",
         base: "BaseException",
         doc: "Rust code called from Python panicked.",
@@ -1138,6 +1143,12 @@ const CLASSES: [StubClass; 70] = {
 };
 
 const FUNCTIONS: &[StubFunction] = &[
+    StubFunction {
+        name: "baseline_sql_files",
+        parameters: &[],
+        returns: TypeText::Plain("list[tuple[str, str]]"),
+        doc: "The baseline SQL files as (file name, text) pairs, in run order. Starts nothing.",
+    },
     StubFunction {
         name: "core_state",
         parameters: &[],

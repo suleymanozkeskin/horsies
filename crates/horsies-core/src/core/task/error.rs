@@ -13,7 +13,7 @@ use crate::core::workflow::summary::SubWorkflowSummary;
 ///
 /// Typical caller behavior: log, retry conditionally, inspect infra/runtime failure.
 ///
-/// Members, wire values and order are Python's (`horsies/core/models/tasks.py`), plus
+/// Members, wire values and order are Python's (`python/horsies/core/models/tasks.py`), plus
 /// `WORKFLOW_START_INCOMPLETE`, which both catalogs hold.
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
@@ -1277,7 +1277,7 @@ mod tests {
     #[test]
     fn names_that_python_does_not_have_are_not_built_in() {
         // The core's former names and members; Python's catalogs
-        // (`horsies/core/models/tasks.py`) hold none of them.
+        // (`python/horsies/core/models/tasks.py`) hold none of them.
         for text in [
             "UNHANDLED_ERROR",
             "TASK_ERROR",

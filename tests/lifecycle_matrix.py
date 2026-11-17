@@ -146,7 +146,7 @@ class TerminalWriter:
 MATRIX: tuple[TerminalWriter, ...] = (
     TerminalWriter(
         writer_id='T01',
-        module='horsies/monitoring/task_actions.py',
+        module='python/horsies/monitoring/task_actions.py',
         statement='_CANCEL_TASK_SQL',
         source_statuses=(),
         target_status='CANCELLED',
@@ -162,7 +162,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T02',
-        module='horsies/core/worker/sql.py',
+        module='python/horsies/core/worker/sql.py',
         statement='UNCLAIM_PAUSED_TASKS_SQL',
         source_statuses=('CLAIMED',),
         target_status='CANCELLED',
@@ -178,7 +178,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T03',
-        module='horsies/core/worker/sql.py',
+        module='python/horsies/core/worker/sql.py',
         statement='CANCEL_CANCELLED_WORKFLOW_TASKS_SQL',
         source_statuses=('CLAIMED',),
         target_status='CANCELLED',
@@ -194,7 +194,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T04',
-        module='horsies/core/worker/sql.py',
+        module='python/horsies/core/worker/sql.py',
         statement='MARK_TASK_FAILED_WORKER_SQL',
         source_statuses=('RUNNING',),
         target_status='FAILED',
@@ -210,7 +210,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T05',
-        module='horsies/core/worker/sql.py',
+        module='python/horsies/core/worker/sql.py',
         statement='MARK_TASK_FAILED_SQL',
         source_statuses=('RUNNING',),
         target_status='FAILED',
@@ -226,7 +226,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T06',
-        module='horsies/core/worker/sql.py',
+        module='python/horsies/core/worker/sql.py',
         statement='MARK_TASK_COMPLETED_SQL',
         source_statuses=('RUNNING',),
         target_status='COMPLETED',
@@ -242,7 +242,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T07',
-        module='horsies/core/worker/sql.py',
+        module='python/horsies/core/worker/sql.py',
         statement='FINALIZE_TASK_COMPLETED_SQL',
         source_statuses=('RUNNING',),
         target_status='COMPLETED',
@@ -258,7 +258,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T08',
-        module='horsies/core/worker/sql.py',
+        module='python/horsies/core/worker/sql.py',
         statement='TERMINATE_ORPHANED_WORKFLOW_TASK_SQL',
         source_statuses=('CLAIMED',),
         target_status='CANCELLED',
@@ -274,7 +274,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T09',
-        module='horsies/core/workflows/sql.py',
+        module='python/horsies/core/workflows/sql.py',
         statement='CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL',
         source_statuses=('CLAIMED',),
         target_status='CANCELLED',
@@ -290,7 +290,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T10',
-        module='horsies/core/worker/child_runner.py',
+        module='python/horsies/core/worker/child_runner.py',
         statement='_handle_workflow_stop_before_start',
         source_statuses=('CLAIMED',),
         target_status='CANCELLED',
@@ -306,7 +306,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T11',
-        module='horsies/core/worker/child_runner.py',
+        module='python/horsies/core/worker/child_runner.py',
         statement='_handle_workflow_stop_before_start',
         source_statuses=('CLAIMED', 'PENDING'),
         target_status='CANCELLED',
@@ -322,7 +322,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T12',
-        module='horsies/core/worker/child_runner.py',
+        module='python/horsies/core/worker/child_runner.py',
         statement='_EXPIRE_CLAIMED_TASK_BEFORE_START_SQL',
         source_statuses=('CLAIMED',),
         target_status='EXPIRED',
@@ -338,7 +338,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T13',
-        module='horsies/core/brokers/postgres.py',
+        module='python/horsies/core/brokers/postgres.py',
         statement='MARK_STALE_TASK_FAILED_SQL',
         source_statuses=('RUNNING',),
         target_status='FAILED',
@@ -354,7 +354,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T14',
-        module='horsies/core/brokers/postgres.py',
+        module='python/horsies/core/brokers/postgres.py',
         statement='EXPIRE_PENDING_TASKS_SQL',
         source_statuses=('PENDING',),
         target_status='EXPIRED',
@@ -370,7 +370,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T15',
-        module='horsies/core/brokers/postgres.py',
+        module='python/horsies/core/brokers/postgres.py',
         statement='TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL',
         source_statuses=('CLAIMED', 'PENDING'),
         target_status='CANCELLED',
@@ -386,7 +386,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T16',
-        module='horsies/core/models/workflow/handle.py',
+        module='python/horsies/core/models/workflow/handle.py',
         statement='MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL',
         source_statuses=('PENDING', 'CLAIMED', 'RUNNING'),
         target_status='CANCELLED',

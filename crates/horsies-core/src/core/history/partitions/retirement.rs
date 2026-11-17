@@ -17,7 +17,7 @@
 //! a function. A row outside the documented values is
 //! `HistoryError::Contract`.
 //!
-//! Python: `horsies/core/history/partitions/retirement.py`.
+//! Python: `python/horsies/core/history/partitions/retirement.py`.
 
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgConnection};

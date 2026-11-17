@@ -726,7 +726,7 @@ mod p7_maintenance_tests {
 
 // The baseline table has no id column: (worker_id, snapshot_at) is its
 // identity (unique index horsies_worker_states_identity). Python
-// `DELETE_EXPIRED_WORKER_STATES_SQL`, `horsies/core/worker/sql.py:310-318`.
+// `DELETE_EXPIRED_WORKER_STATES_SQL`, `python/horsies/core/worker/sql.py:310-318`.
 const DELETE_EXPIRED_WORKER_STATES_SQL: &str = "\
 DELETE FROM horsies_worker_states
 WHERE (worker_id, snapshot_at) IN (
