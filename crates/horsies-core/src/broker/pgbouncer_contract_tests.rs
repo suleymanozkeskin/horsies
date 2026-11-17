@@ -283,7 +283,7 @@ async fn a_transaction_pool_with_a_direct_session_installs_checks_locks_and_enqu
 /// the refusal is not retryable.
 #[tokio::test]
 #[serial]
-#[ignore = "needs the PgBouncer fixture of tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1; waits on #676"]
+#[ignore = "needs the PgBouncer fixture of tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
 async fn a_session_url_on_the_transaction_pool_fails_the_worker_session_check() {
     let urls = PgbouncerUrls::create("bad_session").await;
     let session_url = with_query_parameter(
@@ -350,7 +350,7 @@ async fn a_session_pooled_url_installs_enqueues_and_delivers_a_notify() {
 /// decisions": a statement-pooled URL answers `retryable = false`).
 #[tokio::test]
 #[serial]
-#[ignore = "needs the PgBouncer fixture of tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1; waits on #676"]
+#[ignore = "needs the PgBouncer fixture of tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
 async fn a_statement_pooled_runtime_url_fails_the_send_as_not_retryable() {
     let urls = PgbouncerUrls::create("statement").await;
     let broker = PostgresBroker::connect_with(&sized(PostgresConfig::from_pgbouncer_urls(

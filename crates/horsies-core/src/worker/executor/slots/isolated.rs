@@ -285,16 +285,18 @@ fn recycle_reason(shared: &PoolShared, tasks_done: u64, rss: RssReading) -> Opti
     }
 }
 
-/// Wait for work. `None`: this child must not take any.
+/// Wait for work. `None`: this child must not take any. While it waits,
+/// the slot counts as idle in the free slots of its pool.
 async fn next_run(shared: &PoolShared, channel: &ChildChannel) -> Option<QueuedRun> {
     let mut exit = channel.exit_watch();
+    let mut idle = shared.idle_slot();
     loop {
         let cannot_serve =
             shared.board.not_serving() || channel.has_exited() || channel.channel_closed();
         if cannot_serve {
             return None;
         }
-        if let Some(run) = shared.pop() {
+        if let Some(run) = idle.take() {
             return Some(run);
         }
         tokio::select! {
@@ -425,6 +427,7 @@ async fn run_one(
         }
         FirstAnswer::DrainDeadline => {
             drop(held);
+            shared.drain_kills.note([task_id]);
             let crashed = AttemptEnd::Crashed {
                 reason: FailureDetail::cut("the worker killed the child at the drain deadline"),
             };
@@ -566,8 +569,16 @@ async fn end_after_return(
             answer.send(end_after_kill(shared, channel, returned_end).await);
             AfterRun::ChildGone(TasksFinished::AtLeastOne)
         }
-        FirstAnswer::Wait(FrameWait::Expired) | FirstAnswer::DrainDeadline => {
+        FirstAnswer::Wait(FrameWait::Expired) => {
             drop(held);
+            answer.send(end_after_kill(shared, channel, returned_end).await);
+            AfterRun::ChildGone(TasksFinished::AtLeastOne)
+        }
+        FirstAnswer::DrainDeadline => {
+            drop(held);
+            // The child still holds the work the task left on its loop
+            // (Python `_kill_at_deadline`: the handle still has its child).
+            shared.drain_kills.note([task_id]);
             answer.send(end_after_kill(shared, channel, returned_end).await);
             AfterRun::ChildGone(TasksFinished::AtLeastOne)
         }

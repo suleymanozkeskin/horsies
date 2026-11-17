@@ -3,7 +3,7 @@ use std::time::Duration;
 use chrono::{DateTime, Timelike, Utc};
 use serde::de::DeserializeOwned;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
-use sqlx::{ConnectOptions, Postgres, Transaction};
+use sqlx::ConnectOptions;
 use std::str::FromStr;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -45,8 +45,9 @@ use crate::broker::result_types::{
 };
 use crate::broker::row::task::{
     ClaimedId, ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow,
-    TaskResultRow, TaskRunningContextRow,
+    TaskResultRow,
 };
+use crate::broker::workflow_claim_settle::{settle_claimed_workflow_tasks, ClaimDisposition};
 
 use crate::broker::client_family::{
     admit_family, recorded_family_from, ClientFamily, FamilyCheckError, FamilyCheckFailure,
@@ -135,62 +136,6 @@ fn test_uuid(value: &str) -> Uuid {
 // ---------------------------------------------------------------------------
 // SQL constants
 // ---------------------------------------------------------------------------
-
-// Eligibility split into two CTE arms — PENDING and expired-CLAIMED — each with
-// its own ORDER BY + FOR UPDATE SKIP LOCKED + LIMIT, merged and re-limited. The
-// selected set is provably identical to a single OR-predicate scan: any row in
-// the global top-N is within the top-N of its own arm, so merging both arms'
-// top-N and re-limiting yields the same N rows. The arms let the planner use a
-// dedicated partial index per status instead of a filtered scan over both. The
-// one behavioral delta (matching Python) is that up to $2 extra candidate rows
-// of the losing arm stay row-locked for the short claim transaction.
-const CLAIM_SQL: &str = "\
-WITH pending AS (
-    SELECT id, priority, enqueued_at
-    FROM horsies_tasks
-    WHERE queue_name = $1
-      AND status = 'PENDING'
-      AND enqueued_at <= now()
-      AND (next_retry_at IS NULL OR next_retry_at <= now())
-      AND (good_until IS NULL OR good_until > now())
-    ORDER BY priority ASC, enqueued_at ASC, id ASC
-    FOR UPDATE SKIP LOCKED
-    LIMIT $2
-),
-expired AS (
-    SELECT id, priority, enqueued_at
-    FROM horsies_tasks
-    WHERE queue_name = $1
-      AND status = 'CLAIMED' AND claim_expires_at IS NOT NULL AND claim_expires_at < now()
-      AND enqueued_at <= now()
-      AND (next_retry_at IS NULL OR next_retry_at <= now())
-      AND (good_until IS NULL OR good_until > now())
-    ORDER BY priority ASC, enqueued_at ASC, id ASC
-    FOR UPDATE SKIP LOCKED
-    LIMIT $2
-),
-next AS (
-    SELECT id
-    FROM (
-        SELECT id, priority, enqueued_at FROM pending
-        UNION ALL
-        SELECT id, priority, enqueued_at FROM expired
-    ) candidates
-    ORDER BY priority ASC, enqueued_at ASC, id ASC
-    LIMIT $2
-)
-UPDATE horsies_tasks t
-SET status = 'CLAIMED',
-    claimed = TRUE,
-    claimed_at = now(),
-    claimed_by_worker_id = $3,
-    claim_expires_at = $4,
-    finalizing_at = NULL,
-    finalizing_by_worker_id = NULL,
-    updated_at = now()
-FROM next
-WHERE t.id = next.id
-RETURNING t.id, t.task_name, t.input, t.queue_name, t.is_workflow_task, t.task_options, t.claimed_at";
 
 // One server-side call performs advisory-lock acquisition + cap counts + the
 // windowed claim (see horsies_claim, migrations/0027_claim_function_v12.sql;
@@ -361,41 +306,11 @@ WHERE status = 'RUNNING' \
    OR (status = 'CLAIMED' \
        AND (claim_expires_at IS NULL OR claim_expires_at > now()))";
 
-/// Count only RUNNING tasks for a specific worker.
-const COUNT_RUNNING_FOR_WORKER_SQL: &str = "\
-SELECT COUNT(*) FROM horsies_tasks \
-WHERE claimed_by_worker_id = $1 AND status = 'RUNNING'";
-
-/// Cluster-wide RUNNING count per queue, for the given queues. Mirrors the
-/// soft-mode per-queue cap accounting in `horsies_claim` (RUNNING only), so a
-/// buffered-dispatch re-check against these counts matches the claim function's
-/// view of a queue's `max_concurrency` cap (C17).
-const COUNT_RUNNING_BY_QUEUE_SQL: &str = "\
-SELECT queue_name, COUNT(*) FROM horsies_tasks \
-WHERE queue_name = ANY($1) AND status = 'RUNNING' \
-GROUP BY queue_name";
-
-/// Load CLAIMED tasks owned by a specific worker (for prefetch buffer dispatch).
-/// `$2` bounds the fetch to at most the available semaphore permits, since no
-/// more than that can be dispatched this pass (P7). `claimed_at` rides along so
-/// the buffered dispatch fences on the claim generation it acts for.
-const LOAD_BUFFERED_CLAIMED_SQL: &str = "\
-SELECT id, task_name, input, queue_name, is_workflow_task, task_options, claimed_at \
-FROM horsies_tasks \
-WHERE claimed_by_worker_id = $1 AND status = 'CLAIMED' \
-ORDER BY priority ASC, enqueued_at ASC, id ASC \
-LIMIT $2";
-
 /// Get the workflow status for a task (if it belongs to a workflow).
 const GET_WORKFLOW_STATUS_FOR_TASK_SQL: &str = "\
 SELECT w.status FROM horsies_workflows w \
 JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id \
 WHERE wt.task_id = $1";
-
-/// Find tasks from a batch that belong to PAUSED or CANCELLED workflows.
-/// Returns (task_id, workflow_status) to allow split handling.
-const FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL: &str =
-    "SELECT id, status FROM horsies_find_non_runnable_workflow_tasks($1)";
 
 /// Skip workflow_tasks for tasks belonging to CANCELLED workflows.
 const SKIP_CANCELLED_WORKFLOW_TASKS_SQL: &str = "\
@@ -453,45 +368,9 @@ SET status = 'READY', task_id = NULL, started_at = NULL \
 WHERE task_id = ANY($1) \
   AND status IN ('ENQUEUED', 'RUNNING')";
 
-/// Count active CLAIMED tasks for a specific worker (excludes expired leases).
-const COUNT_CLAIMED_FOR_WORKER_SQL: &str = "\
-SELECT COUNT(*) FROM horsies_tasks \
-WHERE claimed_by_worker_id = $1 AND status = 'CLAIMED' \
-  AND (claim_expires_at IS NULL OR claim_expires_at > now())";
-
 // ---------------------------------------------------------------------------
 // Task attempt SQL
 // ---------------------------------------------------------------------------
-
-/// Lock the RUNNING task row and extract context for attempt recording.
-const SELECT_RUNNING_TASK_CONTEXT_SQL: &str = "\
-SELECT retry_count, started_at, claimed_by_worker_id,
-       worker_hostname, worker_pid, worker_process_name
-FROM horsies_tasks
-WHERE id = $1 AND status = 'RUNNING'
-FOR UPDATE";
-
-/// Upsert a task attempt row (idempotent via ON CONFLICT). Public so recovery can reuse it.
-pub const UPSERT_TASK_ATTEMPT_SQL: &str = "\
-INSERT INTO horsies_task_attempts (
-    task_id, attempt, outcome, will_retry,
-    started_at, finished_at,
-    error_code, error_message, failed_reason,
-    worker_id, worker_hostname, worker_pid, worker_process_name
-)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-ON CONFLICT (task_id, attempt) DO UPDATE SET
-    outcome = EXCLUDED.outcome,
-    will_retry = EXCLUDED.will_retry,
-    started_at = EXCLUDED.started_at,
-    finished_at = EXCLUDED.finished_at,
-    error_code = EXCLUDED.error_code,
-    error_message = EXCLUDED.error_message,
-    failed_reason = EXCLUDED.failed_reason,
-    worker_id = EXCLUDED.worker_id,
-    worker_hostname = EXCLUDED.worker_hostname,
-    worker_pid = EXCLUDED.worker_pid,
-    worker_process_name = EXCLUDED.worker_process_name";
 
 /// Query task attempts for a specific task (most recent first).
 const SELECT_TASK_ATTEMPTS_SQL: &str = "\
@@ -1627,30 +1506,6 @@ impl PostgresBroker {
         enqueue_result(outcome, task_id, task_name)
     }
 
-    /// Claim up to `limit` tasks from the given queue.
-    ///
-    /// Uses `SELECT FOR UPDATE SKIP LOCKED` to avoid contention.
-    /// Already-claimed tasks with expired `claim_expires_at` are reclaimed.
-    pub async fn claim(
-        &self,
-        queue_name: &str,
-        limit: i32,
-        worker_id: &str,
-        claim_expires_at: Option<DateTime<Utc>>,
-    ) -> Result<Vec<ClaimedTaskRow>, BrokerError> {
-        let rows: Vec<ClaimedTaskRow> = sqlx::query_as(CLAIM_SQL)
-            .bind(queue_name)
-            .bind(limit)
-            .bind(worker_id)
-            .bind(claim_expires_at)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-
-        tracing::debug!(count = rows.len(), queue = queue_name, "tasks claimed");
-        Ok(rows)
-    }
-
     /// Run one collapsed claim pass via `horsies_claim` (parity with horsies
     /// PR #160).
     ///
@@ -1803,40 +1658,6 @@ impl PostgresBroker {
         })
     }
 
-    /// Requeue a task for retry (transactional variant).
-    ///
-    /// `retry_count` is incremented from the CAS-locked row itself, so the
-    /// caller supplies no count. `started_at` fences the CAS to a specific claim
-    /// generation (`Some` from the attempt's `set_running`); `None` disables the
-    /// fence (C10).
-    pub async fn requeue_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        task_id: Uuid,
-        next_retry_at: Option<DateTime<Utc>>,
-        worker_id: &str,
-        started_at: Option<DateTime<Utc>>,
-    ) -> Result<bool, BrokerError> {
-        let row: Option<ClaimedId> = sqlx::query_as(REQUEUE_SQL)
-            .bind(task_id)
-            .bind(next_retry_at)
-            .bind(worker_id)
-            .bind(started_at)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(BrokerError::Database)?;
-
-        if row.is_some() {
-            tracing::debug!(task_id = %task_id, "task requeued");
-        } else {
-            tracing::warn!(
-                task_id = %task_id,
-                "task requeue skipped: task no longer RUNNING or not owned by this worker"
-            );
-        }
-        Ok(row.is_some())
-    }
-
     /// Requeue a task for retry with an optional delay.
     ///
     /// `retry_count` is incremented from the CAS-locked row itself.
@@ -1868,65 +1689,6 @@ impl PostgresBroker {
             );
         }
         Ok(row.is_some())
-    }
-
-    // -----------------------------------------------------------------------
-    // Task attempt recording
-    // -----------------------------------------------------------------------
-
-    /// Lock the RUNNING task row and extract context for attempt recording.
-    ///
-    /// Returns None if the task is no longer RUNNING (reaper reclaimed it).
-    pub async fn get_running_task_context(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        task_id: Uuid,
-    ) -> Result<Option<TaskRunningContextRow>, BrokerError> {
-        let row: Option<TaskRunningContextRow> = sqlx::query_as(SELECT_RUNNING_TASK_CONTEXT_SQL)
-            .bind(task_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(row)
-    }
-
-    /// Record a task attempt (upsert, idempotent).
-    #[allow(clippy::too_many_arguments)]
-    pub async fn upsert_task_attempt(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        task_id: Uuid,
-        attempt: i32,
-        outcome: &str,
-        will_retry: bool,
-        started_at: DateTime<Utc>,
-        finished_at: DateTime<Utc>,
-        error_code: Option<&str>,
-        error_message: Option<&str>,
-        failed_reason: Option<&str>,
-        worker_id: Option<&str>,
-        worker_hostname: Option<&str>,
-        worker_pid: Option<i32>,
-        worker_process_name: Option<&str>,
-    ) -> Result<(), BrokerError> {
-        sqlx::query(UPSERT_TASK_ATTEMPT_SQL)
-            .bind(task_id)
-            .bind(attempt)
-            .bind(outcome)
-            .bind(will_retry)
-            .bind(started_at)
-            .bind(finished_at)
-            .bind(error_code)
-            .bind(error_message)
-            .bind(failed_reason)
-            .bind(worker_id)
-            .bind(worker_hostname)
-            .bind(worker_pid)
-            .bind(worker_process_name)
-            .execute(tx.as_mut())
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(())
     }
 
     /// Get task attempts for a specific task (most recent first).
@@ -2225,59 +1987,6 @@ impl PostgresBroker {
         Ok(count.0)
     }
 
-    /// Count only RUNNING tasks for a specific worker.
-    ///
-    /// Used in soft-cap / prefetch mode where budget is based on running
-    /// tasks only (claimed-but-not-yet-running tasks are intentionally
-    /// excluded to allow prefetch buffering).
-    pub async fn count_running_for_worker(&self, worker_id: &str) -> Result<i64, BrokerError> {
-        let count: (i64,) = sqlx::query_as(COUNT_RUNNING_FOR_WORKER_SQL)
-            .bind(worker_id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(count.0)
-    }
-
-    /// Cluster-wide RUNNING count per queue, for the given queues.
-    ///
-    /// Backs the soft-cap buffered-dispatch cap re-check: queues with no RUNNING
-    /// task are simply absent from the map (count 0). Returns an empty map when
-    /// `queues` is empty (no query issued).
-    pub async fn count_running_by_queue(
-        &self,
-        queues: &[String],
-    ) -> Result<std::collections::HashMap<String, i64>, BrokerError> {
-        if queues.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-        let rows: Vec<(String, i64)> = sqlx::query_as(COUNT_RUNNING_BY_QUEUE_SQL)
-            .bind(queues)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(rows.into_iter().collect())
-    }
-
-    /// Load CLAIMED tasks owned by a specific worker that are ready to dispatch.
-    ///
-    /// In prefetch/soft-cap mode, a worker may have CLAIMED tasks buffered
-    /// in the database. When a semaphore permit becomes available, these
-    /// buffered tasks can be dispatched without a new claim round-trip.
-    pub async fn load_buffered_claimed(
-        &self,
-        worker_id: &str,
-        limit: i64,
-    ) -> Result<Vec<ClaimedTaskRow>, BrokerError> {
-        let rows: Vec<ClaimedTaskRow> = sqlx::query_as(LOAD_BUFFERED_CLAIMED_SQL)
-            .bind(worker_id)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(rows)
-    }
-
     /// Get the workflow status for a task if it belongs to a workflow.
     ///
     /// Returns `None` if the task does not belong to any workflow.
@@ -2429,18 +2138,34 @@ impl PostgresBroker {
         Ok(WorkflowStopBeforeStart::Stopped)
     }
 
-    /// Filter out CLAIMED tasks belonging to non-runnable (PAUSED/CANCELLED) workflows.
+    /// The claimed tasks of a claim pass that must not be dispatched because
+    /// their workflow is PAUSED or CANCELLED, after the settle wrote what
+    /// each of them needs (Python `_filter_nonrunnable_workflow_tasks`,
+    /// `core/worker/claiming.py:649-760`), through
+    /// `horsies_workflow_claimed_tasks_settle`
+    /// ([`crate::broker::workflow_claim_settle`]):
+    /// - PAUSED: this worker's claim at its claim generation is abandoned,
+    ///   and the node of an abandoned task goes back to READY with no task;
+    /// - CANCELLED: the claim is cancelled, and the node of a cancelled task
+    ///   is skipped.
     ///
-    /// Post-claim guard that handles two cases:
-    /// - PAUSED: unclaim task → PENDING, reset workflow_task → READY
-    /// - CANCELLED: cancel task → CANCELLED, skip workflow_task → SKIPPED
+    /// The workflow status is read under the workflow row lock, so the
+    /// tasks of a workflow that a resume made RUNNING first are dispatched.
+    /// A blocked task is never dispatched, whether its move applied or found
+    /// the row moved on: that row belongs to its current owner. The moves are
+    /// fenced to `worker_id` and each claim's generation, so one worker never
+    /// ends another worker's claim, or a later claim of its own.
     ///
-    /// Returns the IDs of all filtered tasks (both paused and cancelled) so the
-    /// caller can exclude them from dispatch. The cleanup mutations (unclaim /
-    /// cancel + workflow_task reset / skip) are scoped to rows this worker
-    /// actually owns, so one worker cannot clear or cancel another worker's
-    /// claimed rows (mirrors Python's `_filter_non_runnable_workflow_tasks()` /
-    /// PR #51).
+    /// Returns the blocked task ids, in input order. One statement per
+    /// [`crate::broker::workflow_claim_settle::MAX_SETTLED_CLAIMS`] claims,
+    /// each its own transaction, on the main core pool. No claim sends no
+    /// statement.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] when a closed handle cannot open
+    /// its pools again; [`BrokerError::Statement`];
+    /// [`BrokerError::RowDecode`]; [`BrokerError::ClaimContract`] for rows
+    /// that do not answer each claim once, in order. The statements before a
+    /// failed one stay committed.
     pub async fn filter_non_runnable_workflow_tasks(
         &self,
         claims: &[(Uuid, DateTime<Utc>)],
@@ -2449,141 +2174,17 @@ impl PostgresBroker {
         if claims.is_empty() {
             return Ok(Vec::new());
         }
-        let task_ids: Vec<Uuid> = claims.iter().map(|(id, _)| *id).collect();
-
-        // Find which claimed tasks belong to PAUSED or CANCELLED workflows.
-        let rows: Vec<(Uuid, String)> = sqlx::query_as(FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL)
-            .bind(&task_ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-
-        let mut paused_ids: Vec<Uuid> = Vec::new();
-        let mut cancelled_ids: Vec<Uuid> = Vec::new();
-        for (task_id, wf_status) in &rows {
-            match wf_status.as_str() {
-                "PAUSED" => paused_ids.push(*task_id),
-                "CANCELLED" => cancelled_ids.push(*task_id),
-                _ => {}
-            }
-        }
-
-        // Each batch fences pairwise on (task_id, claimed_at): the batch came
-        // from claim rows that can span claim transactions, so generations
-        // travel with their ids. The coupled node writes commit in the same
-        // transaction as the transitions they prove (C15): a crash between
-        // the task-cancel and the node write would otherwise leave a terminal
-        // CANCELLED task linked to a live node, which outbox recovery would
-        // then complete as a node failure.
-        //
-        // A batch is built from the claim list itself, filtered by the ids
-        // the lookup named, so every fenced id carries the generation its
-        // claim returned: no id can enter a batch without one.
-        let claims_in = |ids: &[Uuid]| -> Vec<(Uuid, DateTime<Utc>)> {
-            claims
-                .iter()
-                .filter(|(claim_id, _)| ids.contains(claim_id))
-                .copied()
-                .collect()
-        };
-
-        // PAUSED: abandon this worker's own claimed-but-not-started rows
-        // (terminal), then reset the nodes of applied rows to READY so resume
-        // enqueues a fresh row. The cancelled row is never re-claimable, so
-        // it can't run as a duplicate of the node after resume.
-        if !paused_ids.is_empty() {
-            let fence = crate::core::lifecycle::OwnedClaimBatch::new(
-                worker_id.to_owned(),
-                claims_in(paused_ids.as_slice()),
-            )
-            .map_err(|e| BrokerError::TerminalizationContract(e.to_string()))?;
-            let mut tx = self.pool.begin().await.map_err(BrokerError::Database)?;
-            let outcomes = crate::broker::terminalization::terminalize_in_tx(
-                &mut tx,
-                &crate::core::lifecycle::TerminalizationCommand::AbandonOwnedNodes { fence },
-            )
-            .await?;
-            let owned: Vec<Uuid> = outcomes
-                .iter()
-                .filter(|o| {
-                    matches!(
-                        o,
-                        crate::core::lifecycle::TerminalizationOutcome::Applied { .. }
-                    )
-                })
-                .map(|o| o.task_id())
-                .collect();
-
-            if !owned.is_empty() {
-                sqlx::query(RESET_WORKFLOW_TASKS_SQL)
-                    .bind(&owned)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(BrokerError::Database)?;
-            }
-            tx.commit().await.map_err(BrokerError::Database)?;
-
-            tracing::debug!(
-                count = owned.len(),
-                "abandoned own claimed-but-not-started tasks belonging to PAUSED workflows",
-            );
-        }
-
-        // CANCELLED: cancel this worker's own claimed rows and skip only the
-        // nodes of rows whose transition applied.
-        if !cancelled_ids.is_empty() {
-            let fence = crate::core::lifecycle::OwnedClaimBatch::new(
-                worker_id.to_owned(),
-                claims_in(cancelled_ids.as_slice()),
-            )
-            .map_err(|e| BrokerError::TerminalizationContract(e.to_string()))?;
-            let mut tx = self.pool.begin().await.map_err(BrokerError::Database)?;
-            let outcomes = crate::broker::terminalization::terminalize_in_tx(
-                &mut tx,
-                &crate::core::lifecycle::TerminalizationCommand::CancelOwnedNodes { fence },
-            )
-            .await?;
-            let owned: Vec<Uuid> = outcomes
-                .iter()
-                .filter(|o| {
-                    matches!(
-                        o,
-                        crate::core::lifecycle::TerminalizationOutcome::Applied { .. }
-                    )
-                })
-                .map(|o| o.task_id())
-                .collect();
-
-            if !owned.is_empty() {
-                sqlx::query(SKIP_CANCELLED_WORKFLOW_TASKS_SQL)
-                    .bind(&owned)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(BrokerError::Database)?;
-            }
-            tx.commit().await.map_err(BrokerError::Database)?;
-
-            tracing::debug!(
-                count = owned.len(),
-                "cancelled own tasks belonging to CANCELLED workflows",
-            );
-        }
-
-        let mut all_filtered: Vec<Uuid> = paused_ids;
-        all_filtered.extend(cancelled_ids);
-        Ok(all_filtered)
-    }
-
-    /// Count CLAIMED tasks for a specific worker (not yet RUNNING).
-    ///
-    /// Used for `max_claim_per_worker` guard to prevent over-claiming.
-    pub async fn count_claimed_for_worker(&self, worker_id: &str) -> Result<i64, BrokerError> {
-        let count: (i64,) = sqlx::query_as(COUNT_CLAIMED_FOR_WORKER_SQL)
-            .bind(worker_id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(count.0)
+        let (open, _write) = self.core_pools_for_write()?;
+        let settled =
+            settle_claimed_workflow_tasks(open.main(), self.statement_log, worker_id, claims)
+                .await?;
+        Ok(settled
+            .into_iter()
+            .filter_map(|(task_id, disposition)| match disposition {
+                ClaimDisposition::Blocked => Some(task_id),
+                ClaimDisposition::Dispatch => None,
+            })
+            .collect())
     }
 
     /// Unclaim a single task, resetting it from CLAIMED back to PENDING.
@@ -5005,33 +4606,6 @@ mod fused_finalize_tests {
 
         cleanup(&pool, &id).await;
     }
-
-    /// P7: `load_buffered_claimed` bounds its fetch to the requested limit, since
-    /// no more than the available permits can be dispatched in one pass.
-    #[tokio::test]
-    #[serial]
-    async fn load_buffered_claimed_respects_limit() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
-        broker.ensure_schema_initialized().await.expect("schema");
-        let pool = broker.pool().clone();
-        let mut ids = Vec::new();
-        for _ in 0..5 {
-            let id = Uuid::new_v4().to_string();
-            seed(&pool, &id, "CLAIMED", Some("p7_worker"), 0).await;
-            ids.push(id);
-        }
-
-        let rows = broker
-            .load_buffered_claimed("p7_worker", 2)
-            .await
-            .expect("load buffered");
-        assert_eq!(rows.len(), 2, "fetch must be bounded by the limit");
-
-        for id in &ids {
-            cleanup(&pool, id).await;
-        }
-    }
 }
 
 #[cfg(test)]
@@ -5468,6 +5042,11 @@ mod filter_non_runnable_tests {
     use super::*;
     use serial_test::serial;
     use uuid::Uuid;
+
+    /// The bounded lookup of the interim function, which Python's claim
+    /// filter calls (`core/worker/sql.py:234-239`).
+    const FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL: &str =
+        "SELECT id, status FROM horsies_find_non_runnable_workflow_tasks($1)";
 
     #[tokio::test]
     #[serial]

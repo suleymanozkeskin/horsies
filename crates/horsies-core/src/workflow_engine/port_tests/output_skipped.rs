@@ -25,7 +25,9 @@ use super::support::{
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::workflow::node::JoinType;
-use crate::core::{OnError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
+use crate::core::{
+    OnError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowSpecRegistry, WorkflowStatus,
+};
 use crate::workflow_engine::engine::on_subworkflow_complete;
 
 /// The code of the failure that the driver gives a child node.
@@ -216,7 +218,7 @@ async fn an_err_output_fails_the_node_and_skips_a_default_dependent() {
                 .expect("the node stores its child's summary"),
         )
         .expect("the summary decodes");
-        assert_eq!(summary.status, "COMPLETED");
+        assert_eq!(summary.status, WorkflowStatus::Completed);
         assert_eq!(summary.output, None);
         let skipped = node(&pool, workflow_id, 1).await;
         assert_eq!(skipped.status, "SKIPPED");

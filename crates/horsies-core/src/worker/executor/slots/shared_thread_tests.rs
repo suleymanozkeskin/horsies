@@ -620,7 +620,12 @@ async fn a_child_that_reported_the_deadline_survives_the_backstop_and_the_drain_
     assert!(not_answered(&mut closer_answer));
     assert!(not_answered(&mut neighbour_answer));
     let report = pool.stop(Duration::from_millis(500)).await;
-    assert_eq!(report, PoolStopReport::KilledAtDrainDeadline);
+    assert_eq!(
+        report,
+        PoolStopReport::KilledAtDrainDeadline {
+            killed: vec![closer.task_id, neighbour.task_id]
+        }
+    );
     assert_eq!(
         answer_of(closer_answer).await,
         timed_out(SHORT_MS, RetryPlacement::Isolated)
@@ -805,7 +810,12 @@ async fn the_drain_deadline_kills_a_thread_child_and_its_runs_take_the_crash_pat
 
     let report = pool.stop(Duration::from_millis(300)).await;
 
-    assert_eq!(report, PoolStopReport::KilledAtDrainDeadline);
+    assert_eq!(
+        report,
+        PoolStopReport::KilledAtDrainDeadline {
+            killed: tasks.iter().map(|task| task.task_id).collect()
+        }
+    );
     for receiver in receivers {
         let _ = crash_reason(answer_of(receiver).await);
     }

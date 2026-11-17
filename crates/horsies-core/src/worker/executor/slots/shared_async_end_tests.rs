@@ -554,7 +554,12 @@ async fn the_drain_deadline_kills_a_shared_child_and_its_runs_take_the_crash_pat
 
     let report = pool.stop(Duration::from_millis(300)).await;
 
-    assert_eq!(report, PoolStopReport::KilledAtDrainDeadline);
+    assert_eq!(
+        report,
+        PoolStopReport::KilledAtDrainDeadline {
+            killed: tasks.iter().map(|task| task.task_id).collect()
+        }
+    );
     for receiver in receivers {
         let _ = crash_reason(answer_of(receiver).await);
     }
@@ -715,7 +720,12 @@ async fn a_stuck_run_keeps_its_seat_at_the_stuck_backstop() {
     assert!(not_answered(&mut stuck_answer));
     assert!(not_answered(&mut neighbour_answer));
     let report = pool.stop(Duration::from_millis(500)).await;
-    assert_eq!(report, PoolStopReport::KilledAtDrainDeadline);
+    assert_eq!(
+        report,
+        PoolStopReport::KilledAtDrainDeadline {
+            killed: vec![stuck.task_id, neighbour.task_id]
+        }
+    );
     assert_eq!(
         answer_of(stuck_answer).await,
         timed_out(RetryPlacement::Isolated)
