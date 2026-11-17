@@ -9,17 +9,17 @@
 //! type; the record, the two-parameter and the no-parameter vectors use tasks
 //! of the attribute itself.
 
-use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fmt::Debug;
 
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use uuid::Uuid;
 
-use super::{notation_text, vector_file, RustCase, RustDrift};
+use super::{
+    check_typed, notation_text, order, parsed, vector_file, Color, Order, RustCase, RustDrift,
+    TypedCheck,
+};
 use crate::task::body::{decode_input, decode_unit_input, encode_read_back};
 use crate::TaskError;
 
@@ -100,22 +100,6 @@ struct Input<T> {
     value: T,
 }
 
-/// The enum with text values of the vectors (Python `Color`).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Color {
-    Red,
-    Green,
-}
-
-/// The record of the vectors (Python `Order`): two fields, in this order.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Order {
-    id: i64,
-    amount: f64,
-}
-
 #[horsies::task("stored_form_record_parameter")]
 async fn record_parameter(order: Order) -> Result<i64, TaskError<Infallible>> {
     Ok(order.id)
@@ -152,61 +136,6 @@ fn expected(vector: &Vector) -> &str {
         .unwrap_or_else(|| panic!("{}: the vector is not expressible in Rust", vector.name))
 }
 
-fn parsed<T>(name: &str, notation: &Value) -> T
-where
-    T: std::str::FromStr,
-    T::Err: std::fmt::Display,
-{
-    let text = notation_text(name, notation);
-    text.parse()
-        .unwrap_or_else(|error| panic!("{name}: {text} does not parse: {error}"))
-}
-
-fn offset_datetime(name: &str, notation: &Value) -> DateTime<FixedOffset> {
-    let text = notation_text(name, notation);
-    DateTime::parse_from_rfc3339(text)
-        .unwrap_or_else(|error| panic!("{name}: {text} does not parse: {error}"))
-}
-
-fn naive_datetime(name: &str, notation: &Value) -> NaiveDateTime {
-    let text = notation_text(name, notation);
-    NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f")
-        .unwrap_or_else(|error| panic!("{name}: {text} does not parse: {error}"))
-}
-
-fn color(name: &str, notation: &Value) -> Color {
-    match notation_text(name, notation) {
-        "red" => Color::Red,
-        "green" => Color::Green,
-        other => panic!("{name}: {other} is not a Color"),
-    }
-}
-
-fn order(name: &str, notation: &Value) -> Order {
-    Order {
-        id: parsed(name, &notation["id"]),
-        amount: parsed(name, &notation["amount"]),
-    }
-}
-
-fn list(name: &str, notation: &Value) -> Vec<i64> {
-    notation
-        .as_array()
-        .unwrap_or_else(|| panic!("{name}: expected a list"))
-        .iter()
-        .map(|item| parsed(name, item))
-        .collect()
-}
-
-fn sorted_map(name: &str, notation: &Value) -> BTreeMap<String, i64> {
-    notation
-        .as_object()
-        .unwrap_or_else(|| panic!("{name}: expected an object"))
-        .iter()
-        .map(|(key, item)| (key.clone(), parsed(name, item)))
-        .collect()
-}
-
 /// `Input { value }` encodes to the client's text of the vector, and
 /// Python's text reads back to it.
 fn check_value<T>(vector: &Vector, value: T)
@@ -228,41 +157,17 @@ where
     );
 }
 
-/// A one-parameter vector, by the type of its parameter.
-fn check_one_parameter(vector: &Vector, parameter: &Parameter) {
-    let name = vector.name.as_str();
-    let notation = &parameter.value;
-    match parameter.type_name.as_str() {
-        "bool" => check_value(
-            vector,
-            notation
-                .as_bool()
-                .unwrap_or_else(|| panic!("{name}: expected a bool")),
-        ),
-        "i64" => check_value(vector, parsed::<i64>(name, notation)),
-        "u64" => check_value(vector, parsed::<u64>(name, notation)),
-        "i128" => check_value(vector, parsed::<i128>(name, notation)),
-        "u128" => check_value(vector, parsed::<u128>(name, notation)),
-        "f64" => check_value(vector, parsed::<f64>(name, notation)),
-        "str" => check_value(vector, notation_text(name, notation).to_owned()),
-        "datetime_utc" => check_value(vector, offset_datetime(name, notation).with_timezone(&Utc)),
-        "datetime_offset" => check_value(vector, offset_datetime(name, notation)),
-        "datetime_naive" => check_value(vector, naive_datetime(name, notation)),
-        "date" => check_value(vector, parsed::<NaiveDate>(name, notation)),
-        "uuid" => check_value(vector, parsed::<Uuid>(name, notation)),
-        "str_enum" => check_value(vector, color(name, notation)),
-        "optional_i64" => check_value(
-            vector,
-            match notation {
-                Value::Null => None,
-                given => Some(parsed::<i64>(name, given)),
-            },
-        ),
-        "list_i64" => check_value(vector, list(name, notation)),
-        "map_str_i64" => check_value(vector, sorted_map(name, notation)),
-        "json" => check_value(vector, notation.clone()),
-        "record_order" => check_value(vector, order(name, notation)),
-        other => panic!("{name}: the vector type {other} has no Rust type here"),
+/// The check of a one-parameter vector: [`check_value`] on its value.
+struct OneParameter<'a> {
+    vector: &'a Vector,
+}
+
+impl TypedCheck for OneParameter<'_> {
+    fn check<T>(&mut self, value: T)
+    where
+        T: Serialize + DeserializeOwned + PartialEq + Debug,
+    {
+        check_value(self.vector, value);
     }
 }
 
@@ -317,7 +222,12 @@ fn each_value_encodes_to_its_text_and_reads_back() {
             continue;
         }
         match vector.parameters.as_slice() {
-            [parameter] if parameter.name == "value" => check_one_parameter(&vector, parameter),
+            [parameter] if parameter.name == "value" => check_typed(
+                &vector.name,
+                &parameter.type_name,
+                &parameter.value,
+                &mut OneParameter { vector: &vector },
+            ),
             _ => check_attribute_task(&vector),
         }
     }

@@ -25,6 +25,7 @@ encoder, and the Python tests check that it still does.
 | File | Form |
 |---|---|
 | `task_input.json` | Task input (`input_json`) |
+| `result_envelope.json` | Result envelope (`{"__h_task_result__": true, "ok": ..., "err": ...}`) |
 
 ## Rows
 
@@ -37,7 +38,12 @@ encoder, and the Python tests check that it still does.
     Rust tests still read Python's text back to the value.
 - `refused_values`: values that every encoder refuses.
 - `refused_texts`: texts that every reader refuses. `core_refusal` names the
-  core's `StrictJsonError` variant.
+  core's `StrictJsonError` variant. In `result_envelope.json`, `refusal` is
+  `envelope` (the shape is refused) or `ok value` (the decode of the `ok` slot
+  is refused; the core's `read_task_result_text` keeps that slot as text, as
+  Python's `validate_task_result_envelope` does).
+- `stored_data`: the `data` that a writer stores in place of a value that it
+  refuses (`{"data_refused": "<cause>"}`); the read gives it back.
 - `typed_refused_texts`: texts that read as JSON and do not decode under the
   given parameter types.
 
@@ -107,6 +113,59 @@ Decoders:
 - Rust client: `decode_input` (`crates/horsies/src/task/body.rs:48`);
   `decode_unit_input` for a task with no parameters.
 
+## Result envelope (`result_envelope.json`)
+
+`{"__h_task_result__":true,"ok":<value>,"err":null}` or
+`{"__h_task_result__":true,"ok":null,"err":<error>}`. An error object has the
+keys `exception`, `error_code`, `data`, `message`, in this order, nulls kept;
+a sub-workflow error adds `sub_workflow_id` and `sub_workflow_summary`. A
+built-in code is `{"__builtin_task_code__": "<NAME>"}`, a user code its text.
+A vector holds an `ok` typed value (the notation above) or an `err` task error
+(`{"error_code": {"built_in" | "user": ...}, "message", "data", "exception",
+"sub_workflow"?}`).
+
+The history storage envelope of a result (`result_envelope_version` 1, codec
+`json-utf8`, a SHA-256 digest) wraps this text byte for byte. Its vectors are
+`task_history/python-v052-codec-vectors.json` (`result_envelopes`), tested by
+`crates/horsies-core/src/core/history/tests.rs`
+(`result_vectors_match_python_bytes`).
+
+Encoders:
+
+- Python: `encode_returned_result` for a task body's return
+  (`python/horsies/core/codec/typed.py:862`), `encode_task_result` for a
+  library error (`:798`), the error object by `encode_task_error` (`:1053`),
+  then `dumps_json`.
+- Core: `TaskResult`'s `Serialize` (`crates/horsies-core/src/core/task/result.rs:42`)
+  and `TaskError`'s (`crates/horsies-core/src/core/task/error.rs:781`), written
+  through `task_result_to_json_string`
+  (`crates/horsies-core/src/core/codec/mod.rs:99`). The child host puts the
+  text of a task body's ok value in the envelope as it is (`result_end`,
+  `crates/horsies-core/src/worker/executor/child_host/run.rs:380`) and writes a
+  task error with `error_envelope` (`:325`).
+- Rust client: `encode_output` (`crates/horsies/src/task/body.rs:169`) for an
+  ok value; `body_result` (`:152`) and `TaskError::into_stored`
+  (`crates/horsies/src/task/error.rs:155`) for an error.
+
+Decoders:
+
+- Python: `loads_json`, `validate_task_result_envelope`
+  (`python/horsies/core/codec/typed.py:1133`), `decode_task_result` (`:1183`),
+  `decode_task_error` (`:1078`).
+- Core: `TaskResult`'s `Deserialize` (`crates/horsies-core/src/core/task/result.rs:63`),
+  `read_task_result_text` (`:158`), `TaskError::from_stored_value`
+  (`crates/horsies-core/src/core/task/error.rs:665`). A result read keeps the
+  stored text (`StoredEnvelopeText::parse`,
+  `crates/horsies-core/src/broker/result_types.rs:146`).
+- Rust client: `outcome_of_record` (`crates/horsies/src/handle.rs:327`) and
+  `stored_result` (`crates/horsies/src/reads/by_task_id.rs:114`), on the
+  core's typed read.
+
+The Rust client builds an error from a code, a message and `data`. The
+exception record and the sub-workflow failure are written by the library, and
+`TaskError::user` and `TaskError::library` take a message: the Rust tests only
+read those vectors.
+
 ## Findings
 
 Differences that the vectors found. A fixed one names its PR; an open one is a
@@ -116,6 +175,7 @@ Differences that the vectors found. A fixed one names its PR; an open one is a
 |---|---|---|---|
 | member order | every form | serde_json without `preserve_order` wrote each object with sorted keys; Python writes insertion order (`TASK_TIMEOUT` data: `task_id`, `timeout_ms`, `cancel_end`) | fixed, #1610 |
 | float notation | every form | serde_json wrote `0.00001` and `1.5e-7`; Python writes `1e-05` and `1.5e-07` | fixed in the codec encoders, #1613 |
+| result read of a big integer | result envelope | the core's result read parsed the envelope into a `serde_json::Map`: `2**64` came back as `1.8446744073709552e+19`, which Python's and the Rust client's typed reads refuse | fixed, #1617 |
 | `no-parameter-input` | task input | a task with no parameters: Python stores `{}`, the Rust client stores `null` (its input is `()`) | open |
 | `datetime-milliseconds` | task input, result | chrono writes a fraction of whole milliseconds with 3 digits (`.500Z`); Python writes 6 (`.500000Z`). Microseconds and whole seconds agree | open |
 | not expressible in Rust | task input, result | `big_int`, `decimal`, `bytes`, `int_enum`, a typed map in insertion order: the client depends on no type that writes Python's text | listed per row |
