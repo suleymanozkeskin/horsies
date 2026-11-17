@@ -158,13 +158,20 @@ mod p7_maintenance_tests {
         let heartbeat_task_id = Uuid::new_v4();
         let worker_id = format!("p7-retention-{}", Uuid::new_v4());
         seed_terminal_workflow_with_pending(&pool, workflow_id, task_id).await;
+        // Every NOT NULL column of the baseline table is named: it has no
+        // column defaults.
         sqlx::query(
             "INSERT INTO horsies_worker_states (
                 worker_id, snapshot_at, hostname, pid, processes,
                 max_claim_batch, max_claim_per_worker, queues,
-                tasks_running, tasks_claimed, worker_started_at
+                queue_priorities, queue_max_concurrency, recovery_config,
+                tasks_running, tasks_claimed, worker_started_at,
+                slots_down, class_capacity
              ) VALUES ($1, NOW() - INTERVAL '48 hours', 'host', 1, 1,
-                       1, 1, '{default}', 0, 0, NOW() - INTERVAL '48 hours')",
+                       1, 1, '{default}',
+                       '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+                       0, 0, NOW() - INTERVAL '48 hours',
+                       '[]'::jsonb, '{}'::jsonb)",
         )
         .bind(&worker_id)
         .execute(&pool)
@@ -543,6 +550,8 @@ mod p7_maintenance_tests {
         .execute(&mut *setup)
         .await
         .unwrap();
+        // A record at the attempt bound has a last attempt and its failure
+        // class (baseline CHECK horsies_workflow_phase2_pending_attempts).
         sqlx::query(
             "INSERT INTO horsies_workflow_phase2_pending (
                  task_id, workflow_id, workflow_node_row_id, terminalization_kind,
@@ -551,7 +560,8 @@ mod p7_maintenance_tests {
                  last_attempt_at, last_failure_class
              ) VALUES ($1, $2, $3, 'COMPLETE_LOCKED',
                        'HISTORY', $5, $4, 1, $6, NULL,
-                       NOW() - INTERVAL '2 hours', $7, NULL, NULL)",
+                       NOW() - INTERVAL '2 hours', $7,
+                       NOW() - INTERVAL '1 hour', 'RAISED')",
         )
         .bind(blocker_task_id)
         .bind(workflow_id)
@@ -726,10 +736,13 @@ const STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS: u32 = 200;
 // Retention cleanup SQL
 // ---------------------------------------------------------------------------
 
+// The baseline table has no id column: (worker_id, snapshot_at) is its
+// identity (unique index horsies_worker_states_identity). Python
+// `DELETE_EXPIRED_WORKER_STATES_SQL`, `horsies/core/worker/sql.py:310-318`.
 const DELETE_EXPIRED_WORKER_STATES_SQL: &str = "\
 DELETE FROM horsies_worker_states
-WHERE id IN (
-    SELECT id FROM horsies_worker_states
+WHERE (worker_id, snapshot_at) IN (
+    SELECT worker_id, snapshot_at FROM horsies_worker_states
     WHERE snapshot_at < NOW() - CAST($1 || ' hours' AS INTERVAL)
     LIMIT $2
     FOR UPDATE SKIP LOCKED
