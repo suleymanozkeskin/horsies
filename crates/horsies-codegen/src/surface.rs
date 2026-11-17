@@ -247,6 +247,12 @@ const MARK_FINALIZING_PARAMETERS: &[StubParameter] = &[
     keyword("claimed_at", "datetime.datetime"),
 ];
 
+const RESOLVE_MONITORING_WINDOW_PARAMETERS: &[StubParameter] = &[
+    keyword("since", "datetime.datetime | None"),
+    keyword("until", "datetime.datetime | None"),
+    keyword("now", "datetime.datetime | None"),
+];
+
 const CORE_SCHEDULER_PARAMETERS: &[StubParameter] = &[
     positional("handle", "CoreHandle"),
     positional("manifest_json", "str"),
@@ -1368,8 +1374,32 @@ const HANDLE_CLASSES: [StubClass; 3] = [
     },
 ];
 
-const CLASSES: [StubClass; 85] = {
-    let mut classes = [HANDLE_CLASSES[0]; 85];
+/// The classes of the monitoring reads and the web handler.
+const MONITORING_CLASSES: [StubClass; 2] = [
+    StubClass {
+        name: "MonitoringWindowRecord",
+        doc: "The window of one monitoring request: UTC bounds, increasing, at most the core's maximum\napart.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("lower", "datetime.datetime"),
+            property("upper", "datetime.datetime"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WindowRefusedRecord",
+        doc: "The requested window is not servable; reason names why.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("reason", "str")],
+        methods: &[],
+    },
+];
+
+const CLASS_COUNT: usize =
+    HANDLE_CLASSES.len() + ARGUMENT_CLASSES.len() + RECORD_CLASSES.len() + MONITORING_CLASSES.len();
+
+const CLASSES: [StubClass; CLASS_COUNT] = {
+    let mut classes = [HANDLE_CLASSES[0]; CLASS_COUNT];
     let mut handle_position = 0;
     while handle_position < HANDLE_CLASSES.len() {
         classes[handle_position] = HANDLE_CLASSES[handle_position];
@@ -1385,6 +1415,12 @@ const CLASSES: [StubClass; 85] = {
         classes[HANDLE_CLASSES.len() + ARGUMENT_CLASSES.len() + record_position] =
             RECORD_CLASSES[record_position];
         record_position += 1;
+    }
+    let monitoring_start = HANDLE_CLASSES.len() + ARGUMENT_CLASSES.len() + RECORD_CLASSES.len();
+    let mut monitoring_position = 0;
+    while monitoring_position < MONITORING_CLASSES.len() {
+        classes[monitoring_start + monitoring_position] = MONITORING_CLASSES[monitoring_position];
+        monitoring_position += 1;
     }
     classes
 };
@@ -1413,6 +1449,12 @@ const FUNCTIONS: &[StubFunction] = &[
         parameters: &[],
         returns: TypeText::Plain("None"),
         doc: "Read the effective level of every horsies logger again.",
+    },
+    StubFunction {
+        name: "resolve_monitoring_window",
+        parameters: RESOLVE_MONITORING_WINDOW_PARAMETERS,
+        returns: TypeText::Plain("MonitoringWindowRecord | WindowRefusedRecord"),
+        doc: "Resolve the terminal-history window of one monitoring request. Absent bounds take the\ndefault: the last 24 hours ending at until, or at now (the clock of this process when\nNone). A naive since or until is refused; a naive now raises TypeError. Starts no runtime.",
     },
     StubFunction {
         name: "set_panic_rule",
