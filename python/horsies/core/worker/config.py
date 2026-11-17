@@ -93,9 +93,8 @@ class WorkerConfig:
     # The most connections of the pool of the worker process: the resolved
     # WorkerProfile.pool. The pool has no overflow.
     parent_pool_size: int = PARENT_POOL_CONNECTIONS_FLOOR
-    # The pool_recycle of that pool: the claim loop and the steady flushers
-    # of the batched success write give their held connection back at this
-    # age (HeldConnection).
+    # The pool_recycle of that pool: the claim loop gives its held connection
+    # back at this age (HeldConnection).
     parent_pool_recycle: HeldRecycle = field(
         default_factory=_default_parent_pool_recycle
     )

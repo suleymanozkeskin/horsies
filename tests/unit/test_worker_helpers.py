@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from collections.abc import Coroutine
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 from uuid import UUID
 
 import pytest
@@ -5917,11 +5917,16 @@ from horsies.core.lifecycle.outcomes import (
     SuccessApplied,
 )
 from horsies.core.lifecycle.persistence import (
+    COMPLETE_SUCCESSES_SUBJECT,
     BatchCommitUnknown,
     BatchRolledBack,
     BatchWriteError,
+    CoreNotSent,
+    CoreOutcomeUnknown,
+    CoreStatementRefused,
     FusedCompletionBatch,
 )
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Result
 from horsies.core.worker.workflow_success import FinishWorkflowSuccess
 from horsies.core.types.status import TaskStatus
@@ -5987,6 +5992,22 @@ def _lost_claim() -> LostClaim:
     )
 
 
+_CORE_HANDLE = MagicMock(name='core_handle')
+"""The core handle that the fused-path tests give the worker."""
+
+
+def _with_core_handle() -> Any:
+    """``Worker.core_handle`` as ``_CORE_HANDLE``: the test worker has no
+    broker."""
+    return patch.object(
+        Worker, 'core_handle', new_callable=PropertyMock, return_value=_CORE_HANDLE,
+    )
+
+
+def _core_failure(message: str, retryable: bool) -> CoreOperationFailed:
+    return CoreOperationFailed(COMPLETE_SUCCESSES_SUBJECT, message, retryable)
+
+
 @pytest.mark.unit
 class TestPersistTerminalStateFusedPath:
     """Plain-task ok results take the one-statement fused path."""
@@ -6008,11 +6029,12 @@ class TestPersistTerminalStateFusedPath:
     @pytest.mark.asyncio
     async def test_plain_ok_result_uses_fused_statement(self) -> None:
         """Plain task + ok result → the fused command, written by the batch
-        write of the finalize batcher on a held connection, Ok(None)."""
+        write of the finalize batcher through the worker's core handle,
+        Ok(None)."""
         worker, session = _make_session_worker(fetchone_results=[])
 
-        with patch(
-            'horsies.core.worker.finalize.apply_fused_batch',
+        with _with_core_handle(), patch(
+            'horsies.core.worker.finalize.complete_fused_batch_in_core',
             AsyncMock(
                 return_value=Ok((_applied(TerminalizationKind.COMPLETE_FUSED),)),
             ),
@@ -6022,8 +6044,7 @@ class TestPersistTerminalStateFusedPath:
         assert result.ok_value is None
         apply.assert_awaited_once()
         assert apply.await_args is not None
-        # A steady flusher writes on its held connection.
-        assert apply.await_args.args[0] in worker._batch_connections  # pyright: ignore[reportPrivateUsage]
+        assert apply.await_args.args[0] is _CORE_HANDLE
         batch = apply.await_args.args[1]
         assert isinstance(batch, FusedCompletionBatch)
         (command,) = batch.commands
@@ -6045,8 +6066,8 @@ class TestPersistTerminalStateFusedPath:
         nothing, so no transaction ends."""
         worker, session = _make_session_worker(fetchone_results=[])
 
-        with patch(
-            'horsies.core.worker.finalize.apply_fused_batch',
+        with _with_core_handle(), patch(
+            'horsies.core.worker.finalize.complete_fused_batch_in_core',
             AsyncMock(return_value=Ok((_lost_claim(),))),
         ):
             result = await self._persist_plain_ok(worker)
@@ -6091,8 +6112,36 @@ class TestPersistTerminalStateFusedPath:
                 True,
                 'COMMIT_UNKNOWN',
             ),
+            (
+                BatchRolledBack(
+                    cause=CoreNotSent(error=_core_failure('pool timed out', True)),
+                ),
+                True,
+                'ROLLED_BACK',
+            ),
+            (
+                BatchRolledBack(
+                    cause=CoreStatementRefused(error=_core_failure('23514', False)),
+                ),
+                False,
+                'ROLLED_BACK',
+            ),
+            (
+                BatchCommitUnknown(
+                    cause=CoreOutcomeUnknown(error=_core_failure('connection lost', True)),
+                ),
+                True,
+                'COMMIT_UNKNOWN',
+            ),
         ],
-        ids=['not_sent', 'refused', 'commit_unknown'],
+        ids=[
+            'not_sent',
+            'refused',
+            'commit_unknown',
+            'core_not_sent',
+            'core_refused',
+            'core_commit_unknown',
+        ],
     )
     async def test_a_failed_batch_write_is_a_phase1_error_with_the_outcome(
         self,
@@ -6103,8 +6152,8 @@ class TestPersistTerminalStateFusedPath:
         """The error keeps the child outcome, so the phase-1 retry replays it."""
         worker, _session = _make_session_worker(fetchone_results=[])
 
-        with patch(
-            'horsies.core.worker.finalize.apply_fused_batch',
+        with _with_core_handle(), patch(
+            'horsies.core.worker.finalize.complete_fused_batch_in_core',
             AsyncMock(return_value=Err(error)),
         ):
             result = await self._persist_plain_ok(worker)

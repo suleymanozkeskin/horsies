@@ -74,8 +74,8 @@ from horsies.core.lifecycle.persistence import (
     BatchRolledBack,
     BatchWriteError,
     FusedCompletionBatch,
-    apply_fused_batch,
     apply_in_autocommit,
+    complete_fused_batch_in_core,
 )
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import (
@@ -115,10 +115,7 @@ from horsies.core.worker.slots import (
     SlotOutcome,
     TaskFinished,
 )
-from horsies.core.utils.db import (
-    StatementRunner,
-    is_retryable_connection_error,
-)
+from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.worker.runtime import (
     CrashRecoveryCode,
     FinalizeStage,
@@ -1396,11 +1393,13 @@ class FinalizeMixin:
     async def _write_fused_batch(
         self,
         batch: FusedCompletionBatch,
-        runner: StatementRunner,
     ) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
-        """Write ``batch`` on ``runner``: a held connection of a steady
-        flusher, or a checkout per statement. The write of the batcher."""
-        return await apply_fused_batch(runner, batch)
+        """Write ``batch`` through the core: one
+        ``horsies_complete_tasks_fused`` statement on the core pool of
+        ``core_handle`` (``complete_fused_batch_in_core``). The write of the
+        batcher. A ``CoreError`` of the call propagates: the batcher fails
+        every row of the batch with it."""
+        return await complete_fused_batch_in_core(self.core_handle, batch)
 
     async def _complete_plain_success(
         self,

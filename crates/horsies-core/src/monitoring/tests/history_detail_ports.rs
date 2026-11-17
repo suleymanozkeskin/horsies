@@ -23,16 +23,9 @@ async fn a_moved_task_detail_carries_the_end_stamp_of_its_status() {
     complete_task(&pool, completed.id).await;
     let cancelled = scope.pending("cancelled");
     seed_task(&pool, &cancelled).await;
-    let outcomes = terminalize(
-        &pool,
-        &TerminalizationCommand::CancelLockedTask {
-            task_id: cancelled.id,
-            fence: CallerHoldsRowLock,
-            permitted_source_statuses: vec![TaskStatus::Pending],
-        },
-    )
-    .await
-    .expect("cancel the pending task");
+    let outcomes = terminal_writes::cancel_live_task(&pool, cancelled.id, false)
+        .await
+        .expect("cancel the pending task");
     assert!(
         matches!(
             outcomes.as_slice(),

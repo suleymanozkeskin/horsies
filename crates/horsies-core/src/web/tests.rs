@@ -1792,7 +1792,7 @@ async fn a_cancel_of_stored_data_that_does_not_parse_is_a_server_error() {
             1, decode(repeat('0e', 32), 'hex'), NULL,
             'RUNNING', NOW() - interval '60 seconds', NOW(), 'web-stored-worker', NULL,
             NOW() - interval '30 seconds', NULL, NULL,
-            NULL, NULL, NULL,
+            4242, 'web-stored-host', 'web-stored-process',
             0, 0, NULL, NULL, FALSE,
             NOW(), FALSE, NULL, NULL
         )",
@@ -1801,17 +1801,15 @@ async fn a_cancel_of_stored_data_that_does_not_parse_is_a_server_error() {
     .execute(&pool)
     .await
     .unwrap();
-    let failed = crate::broker::terminalization::on_test_pool::terminalize(
+    let failed = crate::test_support::terminal_writes::fail_running_task(
         &pool,
-        &crate::core::lifecycle::TerminalizationCommand::FailLockedTask {
-            task_id,
-            fence: crate::core::lifecycle::PriorLockedRead {
-                worker_id: "web-stored-worker".to_owned(),
-            },
-            result_json: r#"{"err": {"error_code": "TASK_EXCEPTION"}}"#.to_owned(),
-            error_code: Some("TASK_EXCEPTION".to_owned()),
-            failed_reason: None,
-        },
+        task_id,
+        "web-stored-worker",
+        &crate::test_support::terminal_writes::TerminalFailure::of_task(
+            r#"{"err": {"error_code": "TASK_EXCEPTION"}}"#,
+            Some("TASK_EXCEPTION"),
+            None,
+        ),
     )
     .await
     .unwrap();
