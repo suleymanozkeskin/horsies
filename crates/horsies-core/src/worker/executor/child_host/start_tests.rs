@@ -381,7 +381,10 @@ async fn a_workflow_task_whose_node_is_not_linked_stops_and_writes_nothing() {
 
     let started = start_attempt(&context, &workflow_facts(task_id, generation)).await;
 
-    assert!(matches!(started, Started::Stopped(StopReason::NodeNotLinked)));
+    assert!(matches!(
+        started,
+        Started::Stopped(StopReason::NodeNotLinked)
+    ));
     assert_eq!(live_row(&pool, task_id).await, before);
     remove_task(&pool, task_id).await;
 }
@@ -398,7 +401,10 @@ async fn a_start_that_cannot_reach_the_database_is_ownership_unconfirmed() {
         .await
         .expect("the start ends although the database cannot be reached");
 
-    assert!(matches!(started, Started::Stopped(StopReason::OwnershipUnconfirmed)));
+    assert!(matches!(
+        started,
+        Started::Stopped(StopReason::OwnershipUnconfirmed)
+    ));
 }
 
 /// Python `TestMissedStart::test_a_claim_that_is_not_held_or_expired_is_lost_with_no_write`,
@@ -526,7 +532,10 @@ async fn a_resume_on_every_attempt_leaves_the_claim_to_its_lease() {
             .checkout(CheckoutClass::Reserved)
             .await
             .expect("hold the connection of the child's core pool");
-        first_resume.commit().await.expect("commit the first resume");
+        first_resume
+            .commit()
+            .await
+            .expect("commit the first resume");
         until_a_checkout_waits(pools.main()).await;
         let mut pause = pool.acquire().await.expect("acquire a connection");
         set_workflow_status(&mut pause, workflow_id, "PAUSED").await;
@@ -535,12 +544,18 @@ async fn a_resume_on_every_attempt_leaves_the_claim_to_its_lease() {
         set_workflow_status(&mut second_resume, workflow_id, "RUNNING").await;
         drop(held);
         until_a_backend_waits_in(&pool, ABANDON_FUNCTION).await;
-        second_resume.commit().await.expect("commit the second resume");
+        second_resume
+            .commit()
+            .await
+            .expect("commit the second resume");
     };
 
     let (started, ()) = tokio::join!(start_attempt(&context, &run), driver);
 
-    assert!(matches!(started, Started::Stopped(StopReason::OwnershipUnconfirmed)));
+    assert!(matches!(
+        started,
+        Started::Stopped(StopReason::OwnershipUnconfirmed)
+    ));
     let row = live_row(&pool, task_id).await.expect("the row stays live");
     assert_eq!(row["status"], "CLAIMED");
     assert_eq!(row["claimed_by_worker_id"], WORKER_ID);
@@ -693,7 +708,10 @@ async fn a_start_that_waits_on_a_row_lock_ends_at_its_bound() {
         .expect("the start ends at its bound while the row lock is held");
     lock_holder.rollback().await.expect("end the row lock");
 
-    assert!(matches!(started, Started::Stopped(StopReason::OwnershipUnconfirmed)));
+    assert!(matches!(
+        started,
+        Started::Stopped(StopReason::OwnershipUnconfirmed)
+    ));
     let (status, _finalizing_at) = row_after_lock_waiters(&pool, task_id).await;
     assert_ne!(status, "RUNNING");
     remove_task(&pool, task_id).await;
@@ -710,7 +728,10 @@ async fn a_marker_that_waits_on_a_row_lock_ends_at_its_bound() {
     let (task_id, generation) = seed_claimed(&pool, false).await;
     let (context, _peer) = context(pool.clone());
     let run = facts(task_id, generation);
-    assert!(matches!(start_attempt(&context, &run).await, Started::Running));
+    assert!(matches!(
+        start_attempt(&context, &run).await,
+        Started::Running
+    ));
     let mut lock_holder = pool.begin().await.expect("begin the lock holder");
     lock_the_row(&mut lock_holder, task_id).await;
 
