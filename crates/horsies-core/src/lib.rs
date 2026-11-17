@@ -225,6 +225,9 @@ pub use crate::workflow_engine::query::{
     TerminalErrorStatus, WorkflowEnd, WorkflowWait,
 };
 pub use crate::workflow_engine::recovery::recover_stuck_workflows;
+pub use crate::workflow_engine::recovery::{
+    RecoveryCaseMetrics, RecoveryMetrics, RecoveryPassFailure, RecoveryReport,
+};
 pub use crate::workflow_engine::spec_data::{
     parse_workflow_spec_data, SpecDataRefused, WorkflowSpecData, WORKFLOW_SPEC_DATA_VERSION,
 };

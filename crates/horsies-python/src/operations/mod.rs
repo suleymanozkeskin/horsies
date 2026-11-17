@@ -32,6 +32,7 @@ pub mod workflow_lifecycle;
 pub mod workflow_phase2;
 pub mod workflow_phase2_recovery;
 pub mod workflow_reads;
+pub mod workflow_recovery;
 pub mod workflow_resume;
 pub mod workflow_retention;
 pub mod workflow_start;
