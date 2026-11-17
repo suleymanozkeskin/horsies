@@ -8,6 +8,7 @@
 pub(crate) mod error_data;
 pub(crate) mod result_envelope;
 mod task_input;
+mod task_options;
 
 use serde_json::Value;
 use uuid::Uuid;

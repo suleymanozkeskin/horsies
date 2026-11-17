@@ -12,6 +12,7 @@
 mod error_data;
 mod result_envelope;
 mod task_input;
+mod task_options;
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;

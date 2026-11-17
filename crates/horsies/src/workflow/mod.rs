@@ -43,6 +43,12 @@ pub(crate) mod tests_support {
     }
 }
 pub(crate) use start::{new_workflow_id, WorkflowStarter};
+// The stored options text of a node with its deadline, for the stored-form
+// vectors (`crate::stored_form_vectors::task_options`).
+#[cfg(test)]
+pub(crate) use node::NodeDeadline;
+#[cfg(test)]
+pub(crate) use spec_data::task_options_text;
 
 /// The start errors and the handle errors of the core's catalogs, with
 /// Python's codes.

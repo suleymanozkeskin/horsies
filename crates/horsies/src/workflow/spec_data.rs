@@ -165,7 +165,7 @@ fn node_document(
 /// a task with no options and a node with no deadline. Pure.
 ///
 /// Errors: the cause, for an options text that is not a JSON object.
-fn task_options_text(
+pub(crate) fn task_options_text(
     options: Option<&str>,
     deadline: NodeDeadline,
 ) -> Result<Option<String>, String> {
