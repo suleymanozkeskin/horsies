@@ -27,6 +27,29 @@ pub enum HandleConnection {
     Connected(Arc<PostgresBroker>),
 }
 
+/// Whether the broker of a handle has a process listener. The schema mode of
+/// the manifest decides it, so it is known before any connect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleListener {
+    /// The broker listens on its session connection, which opens at the
+    /// first subscription.
+    Process,
+    /// The broker has no listener (`AssumeInitialized`, Python's
+    /// `assume_initialized=True`): a result wait polls, and an operation that
+    /// needs the listener answers `LISTENER_DISABLED`.
+    Disabled,
+}
+
+impl HandleListener {
+    /// The listener of a handle of schema mode `mode`. Pure.
+    pub const fn of(mode: SchemaMode) -> Self {
+        match mode {
+            SchemaMode::AssumeInitialized => Self::Disabled,
+            SchemaMode::MigrateAndValidate | SchemaMode::ObserveOnly => Self::Process,
+        }
+    }
+}
+
 /// How [`CoreHandle::close`] ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandleClose {
@@ -76,6 +99,11 @@ impl CoreHandle {
     /// The schema mode of the handle's manifest.
     pub fn schema_mode(&self) -> SchemaMode {
         self.manifest.schema
+    }
+
+    /// Whether the handle's broker has a process listener. Starts nothing.
+    pub fn listener(&self) -> HandleListener {
+        HandleListener::of(self.manifest.schema)
     }
 
     /// The connected broker. Connects at the first call; a failure is
@@ -150,9 +178,9 @@ async fn connect(
     let broker = PostgresBroker::connect_with_policies(&config, mode, window, profile)
         .await?
         .with_client_family(family);
-    Ok(Arc::new(match manifest.schema {
-        SchemaMode::AssumeInitialized => broker.without_listener(),
-        SchemaMode::MigrateAndValidate | SchemaMode::ObserveOnly => broker,
+    Ok(Arc::new(match HandleListener::of(manifest.schema) {
+        HandleListener::Disabled => broker.without_listener(),
+        HandleListener::Process => broker,
     }))
 }
 
@@ -206,6 +234,28 @@ mod tests {
             HandleConnection::NeverConnected
         ));
         assert_eq!(handle(ClientFamily::Python).family(), ClientFamily::Python);
+    }
+
+    /// Only an `AssumeInitialized` handle has no listener; the rule needs no
+    /// connect.
+    #[test]
+    fn only_an_assume_initialized_handle_has_no_listener() {
+        assert_eq!(
+            HandleListener::of(SchemaMode::AssumeInitialized),
+            HandleListener::Disabled
+        );
+        assert_eq!(
+            HandleListener::of(SchemaMode::ObserveOnly),
+            HandleListener::Process
+        );
+        assert_eq!(
+            HandleListener::of(SchemaMode::MigrateAndValidate),
+            HandleListener::Process
+        );
+        assert_eq!(
+            handle(ClientFamily::Python).listener(),
+            HandleListener::Process
+        );
     }
 
     /// A handle that never connected closes without a connect.

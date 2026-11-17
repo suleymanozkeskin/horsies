@@ -3,9 +3,10 @@
 //! The Python client builds one frozen `EnqueueRequest` per send attempt: a
 //! resend of the same task id passes the same values with the send kind
 //! `REPEAT`, so a task that finished answers from history and does not run
-//! again. The first send of a handle installs the schema once first, as
-//! Python's broker does. The outcome is `Enqueued`, `SendValidationFailed`
-//! (the core refused the input or the options before any statement),
+//! again. The core's refusals that need no connection run first, then the
+//! first send of a handle installs the schema once, as Python's broker does.
+//! The outcome is `Enqueued`, `SendValidationFailed` (the core refused the
+//! input, the options or the idempotency key, before any connect),
 //! `SendEnqueueFailed` for a retention class key that no class derives (as
 //! Python's broker answers it), or one class per other variant of the core's
 //! send error catalog (`TaskSendError`), each with only the facts of its
@@ -16,8 +17,8 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use horsies_core::core::task::send_types::send_error_from_enqueue;
 use horsies_core::{
-    BrokerError, BrokerErrorCode, EnqueueRefusal, EnqueueRefusalCause, EnqueueRetention,
-    RetentionClassKeyRefused, SendKind, SendPart, TaskSendError, TaskSendPayload,
+    BrokerError, BrokerErrorCode, CheckedSend, EnqueueRefusal, EnqueueRefusalCause,
+    EnqueueRetention, RetentionClassKeyRefused, SendKind, SendPart, TaskSendError, TaskSendPayload,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -342,10 +343,14 @@ fn refusal_record(py: Python<'_>, error: TaskSendError) -> PyResult<Bound<'_, Py
     }
 }
 
-/// Enqueue one task. Installs the schema once per handle first; a failed
-/// connect or install is `SendEnqueueFailed`, as Python's enqueue reports
-/// it. Writes; a caller that leaves early sees the outcome as unknown, and a
-/// resend of the same request with the send kind `REPEAT` is safe.
+/// Enqueue one task. The core's refusals that need no connection run first
+/// (`CheckedSend::check`), as Python's `_prepare_enqueue` ran before its
+/// schema install: a refused send answers `SendValidationFailed` with no
+/// connect and no statement. Then the schema is installed once per handle; a
+/// failed connect or install is `SendEnqueueFailed`, as Python's enqueue
+/// reports it. Writes; a caller that leaves early sees the outcome as
+/// unknown, and a resend of the same request with the send kind `REPEAT` is
+/// safe.
 pub async fn enqueue_operation(
     connection: BrokerConnection,
     command: Arc<EnqueueCommand>,
@@ -360,34 +365,38 @@ pub async fn enqueue_operation(
             ));
         }
     };
-    let broker = match connection.initialized_broker().await {
-        Ok(broker) => broker,
-        Err(error) => return refused(&command, retention, &error),
-    };
     let (enqueued_at, enqueue_delay_seconds) = match command.start {
         StartRule::Now => (None, None),
         StartRule::AfterDelay { seconds } => (None, Some(seconds)),
         StartRule::At(at) => (Some(at), None),
     };
-    let enqueued = broker
-        .enqueue(
-            &command.task_name,
-            &command.input_json,
-            &command.queue_name,
-            command.priority,
-            Some(command.sent_at),
-            enqueued_at,
-            command.good_until,
-            command.task_options_json.as_deref(),
-            Some(command.task_id),
-            enqueue_delay_seconds,
-            command.idempotency_key.as_deref(),
-            retention,
-            command.rerun_input.keep(),
-            command.send_kind,
-        )
-        .await;
-    match enqueued {
+    let retain_rerun_input = command
+        .rerun_input
+        .keep()
+        .unwrap_or_else(|| connection.retain_rerun_input_default());
+    let send = match CheckedSend::check(
+        &command.task_name,
+        &command.input_json,
+        &command.queue_name,
+        command.priority,
+        Some(command.sent_at),
+        enqueued_at,
+        command.good_until,
+        command.task_options_json.as_deref(),
+        Some(command.task_id),
+        enqueue_delay_seconds,
+        command.idempotency_key.as_deref(),
+        retention,
+        retain_rerun_input,
+    ) {
+        Ok(send) => send,
+        Err(error) => return refused(&command, retention, &error),
+    };
+    let broker = match connection.initialized_broker().await {
+        Ok(broker) => broker,
+        Err(error) => return refused(&command, retention, &error),
+    };
+    match broker.enqueue_checked(&send, command.send_kind).await {
         Ok(task_id) => SendOutcome::Enqueued(task_id),
         Err(error) => refused(&command, retention, &error),
     }

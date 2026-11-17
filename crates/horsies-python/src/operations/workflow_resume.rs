@@ -7,9 +7,14 @@
 //! `WorkflowNotPaused`, `WorkflowResumeRecoveryFailed`, `WorkflowAbsent` or
 //! `HandleFailed`. The Python client maps them to the `HandleResult` of
 //! `resume_workflow`. A child build that raised `KeyboardInterrupt` or
-//! `SystemExit` rolls the resume back and the same object is raised again; a
-//! row outside a function's contract raises `PanicException`, as Python
-//! raises `OutcomeDecodeError`.
+//! `SystemExit` rolls the resume back and the same object is raised again. A
+//! child build that raised an `Exception` (such as `SerializationError`) is
+//! raised again when the resume failed with it, as Python's resume lets
+//! every exception other than a database error propagate; one that the
+//! recovery pass of the tree after the commit logged as a failed candidate
+//! leaves the answer as it is, as Python's pass logs it. A row outside a
+//! function's contract raises `PanicException`, as Python raises
+//! `OutcomeDecodeError`.
 
 use horsies_core::catalog::CodeEnum;
 use horsies_core::{HandleErrorCode, HandleOperationError, HandleResult};
@@ -53,8 +58,9 @@ pub enum WorkflowResumeOutcome {
     RecoveryFailed(WorkflowResumeRecoveryFailed),
     Absent(WorkflowAbsent),
     Failed(HandleFailed),
-    /// A child build raised this `BaseException`; the resume rolled back.
-    Interrupted(PyErr),
+    /// A child build raised this `BaseException` (an interrupt, or an
+    /// `Exception` that failed the resume).
+    BuildRaised(PyErr),
 }
 
 impl<'py> IntoPyObject<'py> for WorkflowResumeOutcome {
@@ -69,7 +75,7 @@ impl<'py> IntoPyObject<'py> for WorkflowResumeOutcome {
             Self::RecoveryFailed(failed) => failed.into_bound_py_any(py),
             Self::Absent(absent) => absent.into_bound_py_any(py),
             Self::Failed(failed) => failed.into_bound_py_any(py),
-            Self::Interrupted(exception) => Err(exception),
+            Self::BuildRaised(exception) => Err(exception),
         }
     }
 }
@@ -107,18 +113,24 @@ fn failed_record(workflow_id: Uuid, error: &HandleOperationError) -> WorkflowRes
 }
 
 /// The outcome of a resume's answer. An interrupt that a child build raised
-/// comes first: the resume rolled back, whatever the record says. Pure apart
-/// from `interrupt`.
+/// comes first, whatever the record says. An `Exception` that a child build
+/// raised comes next when the resume failed: the step that the build failed
+/// rolled back. With a resume that succeeded, the build raised in the
+/// recovery pass of the tree after the commit, which logged it as a failed
+/// candidate; the exception is dropped. Pure apart from `interrupt` and
+/// `exception`.
 fn resume_outcome(
     workflow_id: Uuid,
     answer: HandleResult<bool>,
     interrupt: Option<PyErr>,
+    exception: Option<PyErr>,
 ) -> WorkflowResumeOutcome {
-    match (interrupt, answer) {
-        (Some(exception), _) => WorkflowResumeOutcome::Interrupted(exception),
-        (None, Ok(true)) => WorkflowResumeOutcome::Resumed(WorkflowResumed { workflow_id }),
-        (None, Ok(false)) => WorkflowResumeOutcome::NotPaused(WorkflowNotPaused { workflow_id }),
-        (None, Err(error)) => failed_record(workflow_id, &error),
+    match (interrupt, exception, answer) {
+        (Some(raised), _, _) => WorkflowResumeOutcome::BuildRaised(raised),
+        (None, Some(raised), Err(_)) => WorkflowResumeOutcome::BuildRaised(raised),
+        (None, _, Ok(true)) => WorkflowResumeOutcome::Resumed(WorkflowResumed { workflow_id }),
+        (None, _, Ok(false)) => WorkflowResumeOutcome::NotPaused(WorkflowNotPaused { workflow_id }),
+        (None, None, Err(error)) => failed_record(workflow_id, &error),
     }
 }
 
@@ -141,7 +153,12 @@ pub async fn resume_workflow_operation(
         }
     };
     let answer = broker.resume_client_workflow(workflow_id, &source).await;
-    resume_outcome(workflow_id, answer, source.take_interrupt())
+    resume_outcome(
+        workflow_id,
+        answer,
+        source.take_interrupt(),
+        source.take_exception(),
+    )
 }
 
 #[cfg(test)]
@@ -161,17 +178,18 @@ mod tests {
     fn each_answer_has_its_record() {
         let id = Uuid::nil();
         assert!(matches!(
-            resume_outcome(id, Ok(true), None),
+            resume_outcome(id, Ok(true), None, None),
             WorkflowResumeOutcome::Resumed(_)
         ));
         assert!(matches!(
-            resume_outcome(id, Ok(false), None),
+            resume_outcome(id, Ok(false), None, None),
             WorkflowResumeOutcome::NotPaused(_)
         ));
         assert!(matches!(
             resume_outcome(
                 id,
                 Err(handle_error(HandleErrorCode::WorkflowNotFound, false)),
+                None,
                 None
             ),
             WorkflowResumeOutcome::Absent(_)
@@ -179,6 +197,7 @@ mod tests {
         match resume_outcome(
             id,
             Err(handle_error(HandleErrorCode::DbOperationFailed, true)),
+            None,
             None,
         ) {
             WorkflowResumeOutcome::Failed(failed) => {
@@ -191,6 +210,7 @@ mod tests {
             resume_outcome(
                 id,
                 Err(handle_error(HandleErrorCode::ResumeRecoveryFailed, false)),
+                None,
                 None
             ),
             WorkflowResumeOutcome::RecoveryFailed(_)
@@ -205,8 +225,38 @@ mod tests {
             Uuid::nil(),
             Err(handle_error(HandleErrorCode::DbOperationFailed, false)),
             interrupt,
+            None,
         );
-        assert!(matches!(outcome, WorkflowResumeOutcome::Interrupted(_)));
+        assert!(matches!(outcome, WorkflowResumeOutcome::BuildRaised(_)));
+    }
+
+    /// Python's resume lets the exception of a child build propagate: a
+    /// resume that failed with it raises the same object again.
+    #[test]
+    fn an_exception_of_a_failed_resume_comes_before_the_record() {
+        Python::initialize();
+        let exception = Some(pyo3::exceptions::PyValueError::new_err(
+            "Corrupt task_options",
+        ));
+        let outcome = resume_outcome(
+            Uuid::nil(),
+            Err(handle_error(HandleErrorCode::DbOperationFailed, false)),
+            None,
+            exception,
+        );
+        assert!(matches!(outcome, WorkflowResumeOutcome::BuildRaised(_)));
+    }
+
+    /// A resume that succeeded keeps its record: the exception came from a
+    /// candidate of the recovery pass of the tree, which logged it.
+    #[test]
+    fn an_exception_of_a_resume_that_succeeded_is_dropped() {
+        Python::initialize();
+        let exception = Some(pyo3::exceptions::PyValueError::new_err(
+            "Corrupt task_options",
+        ));
+        let outcome = resume_outcome(Uuid::nil(), Ok(true), None, exception);
+        assert!(matches!(outcome, WorkflowResumeOutcome::Resumed(_)));
     }
 
     #[test]
@@ -215,6 +265,7 @@ mod tests {
         let _outcome = resume_outcome(
             Uuid::nil(),
             Err(handle_error(HandleErrorCode::EventLoopLimit, false)),
+            None,
             None,
         );
     }

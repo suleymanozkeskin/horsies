@@ -15,7 +15,9 @@
 //! connection. The resume route builds the sub-workflow children that a
 //! resume owes through the handle's child spec source (the Python client's
 //! `build_with`); a build that raised `KeyboardInterrupt` or `SystemExit`
-//! is raised again by the action call that ends after it.
+//! is raised again by the action call that ends after it. A build that
+//! raised an `Exception` fails the resume, and the response carries its type
+//! and text.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,7 +37,7 @@ use tokio::sync::{watch, Mutex, OnceCell};
 
 use crate::bridge::completion_queue::call_async;
 use crate::bridge::CallKind;
-use crate::child_spec::{PythonChildSpecSource, RegisteredSource};
+use crate::child_spec::{PythonChildSpecSource, RaisedExceptions, RegisteredSource};
 use crate::handle::{checked_core, BrokerConnection, CoreHandle};
 use crate::process_core::Core;
 
@@ -374,6 +376,7 @@ impl HandlerState {
                 let child_source = Arc::new(PythonChildSpecSource::new(
                     core,
                     Arc::clone(&self.plan.child_source),
+                    RaisedExceptions::InRecord,
                 ));
                 let source = Arc::clone(&child_source) as Arc<dyn ChildSpecSource>;
                 let handler = CoreHandler::new(

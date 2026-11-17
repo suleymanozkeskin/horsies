@@ -20,6 +20,7 @@
 //!   outcome is discarded with a DEBUG record.
 //! - Every failure has a name and carries the subject of the callback:
 //!   - [`CallbackFailure::RaisedException`]: the call raised an `Exception`;
+//!     the raised object comes with it, for a caller that raises it again;
 //!   - [`CallbackFailure::RaisedBaseException`]: the call raised a
 //!     `BaseException` that is not an `Exception`, such as
 //!     `KeyboardInterrupt` or `SystemExit`. It is not a refusal of user
@@ -91,8 +92,13 @@ pub enum CallbackFailure {
     /// The callback thread could not start; this callback did not run. The
     /// next callback tries the start again. Transient.
     ThreadStartFailed { subject: String, cause: String },
-    /// The call raised an `Exception`.
-    RaisedException { subject: String, cause: RaisedCause },
+    /// The call raised an `Exception`. `exception` is the raised object, for
+    /// a caller that raises it again.
+    RaisedException {
+        subject: String,
+        cause: RaisedCause,
+        exception: PyErr,
+    },
     /// The call raised a `BaseException` that is not an `Exception`.
     /// `exception` is the raised object, for the caller to raise again.
     RaisedBaseException {
@@ -117,7 +123,7 @@ impl fmt::Display for CallbackFailure {
                 formatter,
                 "{subject} did not run: the callback thread could not start: {cause}"
             ),
-            Self::RaisedException { subject, cause }
+            Self::RaisedException { subject, cause, .. }
             | Self::RaisedBaseException { subject, cause, .. } => {
                 write!(formatter, "{subject} raised {cause}")
             }
@@ -230,7 +236,11 @@ fn classify(py: Python<'_>, subject: String, raised: PyErr) -> CallbackFailure {
             subject,
             cause: cause.to_string(),
         },
-        (false, true) => CallbackFailure::RaisedException { subject, cause },
+        (false, true) => CallbackFailure::RaisedException {
+            subject,
+            cause,
+            exception: raised,
+        },
         (false, false) => CallbackFailure::RaisedBaseException {
             subject,
             cause,
@@ -452,7 +462,11 @@ mod tests {
             python_call(|py| py.run(c"raise ValueError('bad input')", None, None)),
         ));
         match outcome {
-            Err(CallbackFailure::RaisedException { subject, cause }) => {
+            Err(CallbackFailure::RaisedException {
+                subject,
+                cause,
+                exception,
+            }) => {
                 assert_eq!(subject, "test callback");
                 assert_eq!(
                     cause,
@@ -461,6 +475,9 @@ mod tests {
                         message: "bad input".to_owned(),
                     }
                 );
+                Python::attach(|py| {
+                    assert!(exception.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                });
             }
             other => panic!("an Exception is RaisedException, got {other:?}"),
         }
@@ -594,6 +611,7 @@ mod tests {
                 exception_type: "KeyError".to_owned(),
                 message: "'day'".to_owned(),
             },
+            exception: pyo3::exceptions::PyKeyError::new_err("'day'"),
         };
         assert_eq!(
             failure.to_string(),

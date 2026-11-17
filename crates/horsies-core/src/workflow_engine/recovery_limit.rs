@@ -186,6 +186,12 @@ impl CandidateFailure {
             Self::Error(WorkflowError::ChildSpecSource(
                 ChildSpecUnavailable::NotRun { .. } | ChildSpecUnavailable::Interrupted { .. },
             )) => FailureClass::Transient,
+            // A build that raised raises again on the next pass: it counts, as
+            // Python counts every exception of a candidate that is not a
+            // connection error.
+            Self::Error(WorkflowError::ChildSpecSource(ChildSpecUnavailable::Raised {
+                ..
+            })) => FailureClass::Persistent,
             Self::Error(
                 WorkflowError::Serialization(_)
                 | WorkflowError::WorkflowNotFound { .. }
@@ -767,11 +773,18 @@ mod tests {
             validation("bad stored data"),
             CandidateFailure::Error(WorkflowError::InvalidStatus("BOGUS".to_owned())),
             CandidateFailure::Panic("index out of bounds".to_owned()),
+            CandidateFailure::Error(WorkflowError::ChildSpecSource(
+                ChildSpecUnavailable::Raised {
+                    subject: "build of the child of nightly:0 (definition report.v1)".to_owned(),
+                    cause: "SerializationError: Corrupt task_options".to_owned(),
+                },
+            )),
         ];
         for failure in &failures {
             assert_eq!(failure.class(), FailureClass::Persistent);
         }
         assert_eq!(failures[3].error_type(), "Panic");
+        assert_eq!(failures[4].error_type(), "ChildSpecSource");
     }
 
     #[test]

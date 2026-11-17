@@ -265,6 +265,20 @@ fn json_object(value: &Value) -> Result<Map<String, Value>, String> {
     }
 }
 
+/// The refusal of a worker ping on a handle with no listener (Python's
+/// `PostgresBroker(assume_initialized=True)`, the core's `AssumeInitialized`
+/// schema mode): `LISTENER_DISABLED`, not retryable, with Python's text
+/// (`ping_workers_async`). Nothing ran.
+pub fn ping_listener_disabled() -> BrokerOperationError {
+    BrokerOperationError {
+        code: BrokerErrorCode::ListenerDisabled,
+        message: "ping_workers listener unavailable: this broker was built with \
+                  assume_initialized=True and has no listener"
+            .to_owned(),
+        retryable: false,
+    }
+}
+
 /// The refusal of a worker ping window of 0 seconds or less:
 /// `INVALID_INPUT`, not retryable, with Python's text
 /// (`ping_workers_async`). `timeout_seconds` is the given value as the

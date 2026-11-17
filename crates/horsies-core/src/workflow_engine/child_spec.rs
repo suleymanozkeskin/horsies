@@ -168,6 +168,14 @@ pub enum ChildSpecUnavailable {
     /// `SystemExit`). Not retryable: the caller raises the interrupt again.
     #[error("{subject} was interrupted: {cause}")]
     Interrupted { subject: String, cause: String },
+    /// The build raised an exception of the client that is not an interrupt
+    /// (the Python client's `Exception`, such as `SerializationError` for task
+    /// options of a child root that do not parse). It is not a defect of the
+    /// core. Not retryable: the same build raises again. `cause` is the type
+    /// and the text of the exception; a client that keeps the exception
+    /// raises it again to the caller of the operation.
+    #[error("{subject} raised {cause}")]
+    Raised { subject: String, cause: String },
 }
 
 impl ChildSpecUnavailable {
@@ -175,7 +183,7 @@ impl ChildSpecUnavailable {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::NotRun { .. } => true,
-            Self::Interrupted { .. } => false,
+            Self::Interrupted { .. } | Self::Raised { .. } => false,
         }
     }
 }
@@ -266,6 +274,20 @@ mod tests {
             not_run.to_string(),
             "build_with of definition 'report.v1' did not run: the callback queue holds 1024 \
              callbacks"
+        );
+    }
+
+    #[test]
+    fn a_build_that_raised_is_not_retryable_and_names_the_exception() {
+        let raised = ChildSpecUnavailable::Raised {
+            subject: "build of the child of nightly:0 (definition report.v1)".to_owned(),
+            cause: "SerializationError: Corrupt task_options".to_owned(),
+        };
+        assert!(!raised.is_retryable());
+        assert_eq!(
+            raised.to_string(),
+            "build of the child of nightly:0 (definition report.v1) raised SerializationError: \
+             Corrupt task_options"
         );
     }
 

@@ -18,10 +18,17 @@
 //! - The callable raised `KeyboardInterrupt`, `SystemExit` or another
 //!   `BaseException` that is not an `Exception`: `Interrupted`; the step
 //!   rolls back, and the operation raises the same object again.
-//! - The callable raised an `Exception`, gave another type, gave spec data
-//!   that the core refuses, or panicked: a defect of the client. The step
-//!   panics with the subject and the cause (`PanicException` for the
-//!   caller).
+//! - The callable raised an `Exception`, such as `SerializationError` for
+//!   task options of a child root that do not parse, or gave another type
+//!   (`TypeError`): `Raised`, not retryable; the step rolls back. It is not
+//!   a defect of the core. Where it goes is the operation's
+//!   [`RaisedExceptions`]: a start or a resume raises the same object again
+//!   to its caller, as Python lets the exception of a child build propagate
+//!   there; every other operation keeps its type and text in its record, as
+//!   Python's finalize and recovery catch it.
+//! - The callable gave spec data that the core refuses, or panicked: a
+//!   defect of the client. The step panics with the subject and the cause
+//!   (`PanicException` for the caller).
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -157,7 +164,7 @@ enum PythonAnswer {
 }
 
 /// Read the answer of the callable. Another type raises `TypeError`, which
-/// the source treats as a defect.
+/// the source answers as a build that raised.
 fn python_answer(answer: &Bound<'_, PyAny>) -> PyResult<PythonAnswer> {
     if let Ok(built) = answer.cast::<ChildSpecBuilt>() {
         return Ok(PythonAnswer::Built {
@@ -180,48 +187,88 @@ fn python_answer(answer: &Bound<'_, PyAny>) -> PyResult<PythonAnswer> {
 /// The callable that a `CoreHandle` registered as its child spec source.
 pub type RegisteredSource = Arc<Py<PyAny>>;
 
-/// The child spec source of one operation: the registered callable, run on
-/// the callback thread of `core`. It keeps the first interrupt that a build
-/// raised, so that the operation raises it again.
-pub struct PythonChildSpecSource {
-    core: &'static Core,
-    callable: RegisteredSource,
-    interrupt: Mutex<Option<PyErr>>,
+/// Where an operation sends an `Exception` that a child build raised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RaisedExceptions {
+    /// The source keeps the first one, and the operation raises it again to
+    /// its caller once the step rolled back: a start and a resume, where
+    /// Python lets the exception of a child build propagate.
+    ToCaller,
+    /// The source keeps none: the step's record carries the type and the
+    /// text (`ChildSpecUnavailable::Raised`). Phase 2, the parent advance,
+    /// the recovery passes, the worker and the web handler, where Python's
+    /// finalize and recovery catch the exception of a step.
+    InRecord,
 }
 
-impl PythonChildSpecSource {
-    /// The source of one operation. Starts nothing.
-    pub fn new(core: &'static Core, callable: RegisteredSource) -> Self {
+/// What the builds of one operation raised, kept for the operation to raise
+/// again: the first interrupt, and, when the operation's exceptions go
+/// [`RaisedExceptions::ToCaller`], the first `Exception`. Holds no core, so
+/// its rules are tested on their own.
+struct KeptRaises {
+    raised_exceptions: RaisedExceptions,
+    interrupt: Mutex<Option<PyErr>>,
+    exception: Mutex<Option<PyErr>>,
+}
+
+impl KeptRaises {
+    /// Nothing kept yet. Pure.
+    fn new(raised_exceptions: RaisedExceptions) -> Self {
         Self {
-            core,
-            callable,
+            raised_exceptions,
             interrupt: Mutex::new(None),
+            exception: Mutex::new(None),
         }
     }
 
-    /// The interrupt that a build of this source raised, taken once.
-    pub fn take_interrupt(&self) -> Option<PyErr> {
+    /// The kept interrupt, taken once.
+    fn take_interrupt(&self) -> Option<PyErr> {
         self.interrupt
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
     }
 
-    /// Keep `exception` when no interrupt is kept yet.
-    fn keep_interrupt(&self, exception: PyErr) {
+    /// The kept `Exception`, taken once.
+    fn take_exception(&self) -> Option<PyErr> {
+        self.exception
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+
+    /// Keep `interrupt` when no interrupt is kept yet.
+    fn keep_interrupt(&self, interrupt: PyErr) {
         let mut kept = self
             .interrupt
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if kept.is_none() {
-            *kept = Some(exception);
+            *kept = Some(interrupt);
         }
     }
 
-    /// The failure of a call as the answer of the source.
+    /// Keep `exception` when the exceptions go to the caller and none is kept
+    /// yet; drop it when they go in the record.
+    fn keep_exception(&self, exception: PyErr) {
+        match self.raised_exceptions {
+            RaisedExceptions::ToCaller => {
+                let mut kept = self
+                    .exception
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if kept.is_none() {
+                    *kept = Some(exception);
+                }
+            }
+            RaisedExceptions::InRecord => drop(exception),
+        }
+    }
+
+    /// The failure of a call as the answer of the source; keeps what the
+    /// call raised.
     ///
-    /// Panics: a raised `Exception` or a panic of the call (a defect of the
-    /// client).
+    /// Panics: a panic of the call (a defect of the client).
     fn unavailable(&self, failure: CallbackFailure) -> ChildSpecUnavailable {
         match failure {
             CallbackFailure::QueueFull { ref subject, .. }
@@ -243,10 +290,58 @@ impl PythonChildSpecSource {
                     cause: cause.to_string(),
                 }
             }
-            CallbackFailure::RaisedException { .. } | CallbackFailure::Panicked { .. } => {
+            CallbackFailure::RaisedException {
+                subject,
+                cause,
+                exception,
+            } => {
+                self.keep_exception(exception);
+                ChildSpecUnavailable::Raised {
+                    subject,
+                    cause: cause.to_string(),
+                }
+            }
+            CallbackFailure::Panicked { .. } => {
                 panic!("{failure} (a defect of the Python client's child spec source)")
             }
         }
+    }
+}
+
+/// The child spec source of one operation: the registered callable, run on
+/// the callback thread of `core`. It keeps what a build raised
+/// ([`KeptRaises`]), so that the operation raises it again.
+pub struct PythonChildSpecSource {
+    core: &'static Core,
+    callable: RegisteredSource,
+    kept: KeptRaises,
+}
+
+impl PythonChildSpecSource {
+    /// The source of one operation; `raised_exceptions` says where an
+    /// `Exception` of a build goes. Starts nothing.
+    pub fn new(
+        core: &'static Core,
+        callable: RegisteredSource,
+        raised_exceptions: RaisedExceptions,
+    ) -> Self {
+        Self {
+            core,
+            callable,
+            kept: KeptRaises::new(raised_exceptions),
+        }
+    }
+
+    /// The interrupt that a build of this source raised, taken once.
+    pub fn take_interrupt(&self) -> Option<PyErr> {
+        self.kept.take_interrupt()
+    }
+
+    /// The `Exception` that a build of this source raised, taken once.
+    /// Always `None` for a source whose exceptions go
+    /// [`RaisedExceptions::InRecord`].
+    pub fn take_exception(&self) -> Option<PyErr> {
+        self.kept.take_exception()
     }
 }
 
@@ -283,7 +378,7 @@ impl ChildSpecSource for PythonChildSpecSource {
                     message: refused.message,
                     failure_result: refused.failure_result,
                 }),
-                Err(failure) => Err(self.unavailable(failure)),
+                Err(failure) => Err(self.kept.unavailable(failure)),
             }
         })
     }
@@ -335,6 +430,74 @@ mod tests {
             subject_of(&request()),
             "build of the child of nightly:2 (definition tests.report.v1)"
         );
+    }
+
+    fn raised_exception() -> CallbackFailure {
+        CallbackFailure::RaisedException {
+            subject: "build of the child of bulk_parent:0 (definition bulk-child)".to_owned(),
+            cause: crate::bridge::callback_thread::RaisedCause {
+                exception_type: "SerializationError".to_owned(),
+                message: "Corrupt task_options for root node".to_owned(),
+            },
+            exception: pyo3::exceptions::PyValueError::new_err("Corrupt task_options"),
+        }
+    }
+
+    /// An `Exception` of a build is no defect: the source answers `Raised`
+    /// with its type and text, and keeps the object for an operation that
+    /// raises it again to its caller.
+    #[test]
+    fn an_exception_of_a_build_is_kept_for_the_caller() {
+        Python::initialize();
+        let kept = KeptRaises::new(RaisedExceptions::ToCaller);
+
+        let answer = kept.unavailable(raised_exception());
+
+        assert_eq!(
+            answer,
+            ChildSpecUnavailable::Raised {
+                subject: "build of the child of bulk_parent:0 (definition bulk-child)".to_owned(),
+                cause: "SerializationError: Corrupt task_options for root node".to_owned(),
+            }
+        );
+        assert!(!answer.is_retryable());
+        assert!(kept.take_interrupt().is_none());
+        let exception = kept.take_exception().expect("the exception is kept");
+        Python::attach(|py| {
+            assert!(exception.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+        });
+        assert!(kept.take_exception().is_none(), "taken once");
+    }
+
+    /// An operation whose exceptions go in its record keeps none: the answer
+    /// carries the type and the text.
+    #[test]
+    fn an_exception_for_the_record_is_not_kept() {
+        let kept = KeptRaises::new(RaisedExceptions::InRecord);
+
+        let answer = kept.unavailable(raised_exception());
+
+        assert!(matches!(answer, ChildSpecUnavailable::Raised { .. }));
+        assert!(kept.take_exception().is_none());
+    }
+
+    /// An interrupt is kept for every operation, apart from the exceptions.
+    #[test]
+    fn an_interrupt_is_kept_apart_from_the_exceptions() {
+        let kept = KeptRaises::new(RaisedExceptions::InRecord);
+
+        let answer = kept.unavailable(CallbackFailure::RaisedBaseException {
+            subject: "build".to_owned(),
+            cause: crate::bridge::callback_thread::RaisedCause {
+                exception_type: "KeyboardInterrupt".to_owned(),
+                message: String::new(),
+            },
+            exception: pyo3::exceptions::PyKeyboardInterrupt::new_err(()),
+        });
+
+        assert!(matches!(answer, ChildSpecUnavailable::Interrupted { .. }));
+        assert!(kept.take_interrupt().is_some());
+        assert!(kept.take_exception().is_none());
     }
 
     #[test]

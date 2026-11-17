@@ -75,16 +75,16 @@ pub use error::{
     EnqueueRefusalCause,
 };
 pub use health::{
-    checked_history_limit, ping_min_responses_refused, ping_timeout_refused,
-    worker_history_limit_refused, DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload,
-    WorkerStateSnapshot, WORKER_PING_CHANNEL,
+    checked_history_limit, ping_listener_disabled, ping_min_responses_refused,
+    ping_timeout_refused, worker_history_limit_refused, DatabasePing, WorkerPingRequest,
+    WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
 };
 pub use lifecycle_operations::{CancelAnswer, CancelTaskError};
 pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};
 pub use partition_maintenance::{CoveragePassError, PrunePassError};
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
-    ConnectivityRefusal, ListenProbeFailure, PostgresBroker, PrestartExpiry,
+    CheckedSend, ConnectivityRefusal, ListenProbeFailure, PostgresBroker, PrestartExpiry,
     SchemaInitializationMode,
 };
 pub use process_listener::{

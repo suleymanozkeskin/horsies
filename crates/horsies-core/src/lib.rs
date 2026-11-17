@@ -75,9 +75,9 @@ pub use crate::core::{AppConfig, HorsiesError};
 // broker re-exports
 pub use crate::broker::{
     expected_schema_version, BrokerError, BrokerErrorCode, BrokerOperationError, BrokerResult,
-    CheckInterruption, ConnectivityRefusal, DatabasePing, ExpiredTaskRow, HeartbeatRow,
-    ListenError, ListenProbeFailure, ListenerPlanError, PostgresBroker, RawResultRead,
-    RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow,
+    CheckInterruption, CheckedSend, ConnectivityRefusal, DatabasePing, ExpiredTaskRow,
+    HeartbeatRow, ListenError, ListenProbeFailure, ListenerPlanError, PostgresBroker,
+    RawResultRead, RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow,
     StoredEnvelopeRefused, StoredEnvelopeText, TaskAttemptRow, TaskHandle, TaskInfoRead,
     TaskInfoRow, TaskResultRow, WorkerPingRequest, WorkerPong, WorkerPongPayload,
     WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
@@ -176,9 +176,10 @@ pub use crate::worker::{
 
 // worker state snapshot values
 pub use crate::broker::{
-    checked_history_limit, ping_min_responses_refused, ping_timeout_refused,
-    worker_history_limit_refused, ClassBudget, ClassBudgets, ClearableBootCause, DownSlot,
-    DownSlots, ShortageErrno, SlotHealth, MAX_BOOT_FAILURE_DETAIL_CHARS,
+    checked_history_limit, ping_listener_disabled, ping_min_responses_refused,
+    ping_timeout_refused, worker_history_limit_refused, ClassBudget, ClassBudgets,
+    ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
+    MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
 
 // fleet check and class report

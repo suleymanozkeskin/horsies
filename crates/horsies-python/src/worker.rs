@@ -41,7 +41,7 @@ use pyo3::IntoPyObjectExt;
 
 use crate::bridge::callback_thread::python_call;
 use crate::bridge::service_run::{refuse_off_main_thread, run_blocking, StopSignal};
-use crate::child_spec::{PythonChildSpecSource, RegisteredSource};
+use crate::child_spec::{PythonChildSpecSource, RaisedExceptions, RegisteredSource};
 use crate::errors::{refusal_error, ManifestRefused};
 use crate::handle::checked_core;
 use crate::logging::RecordLevel;
@@ -252,7 +252,7 @@ async fn run_operation(
     stop: WorkerStop,
 ) -> RunOutcome {
     let source = Arc::new(StopOnInterrupt {
-        source: PythonChildSpecSource::new(core, host.build_child_spec),
+        source: PythonChildSpecSource::new(core, host.build_child_spec, RaisedExceptions::InRecord),
         stop: stop.clone(),
     });
     let shared = Arc::clone(&source);
@@ -281,7 +281,9 @@ async fn run_operation(
 /// The child spec source of the worker: the host's `build_child_spec` on
 /// the callback thread. A build that raised an interrupt asks the worker to
 /// stop, as an interrupt in Python's worker ends its event loop; the run
-/// raises the interrupt again after the drain.
+/// raises the interrupt again after the drain. A build that raised an
+/// `Exception` fails its step, whose record carries the type and the text,
+/// and the worker runs on, as Python's finalize and recovery catch it.
 struct StopOnInterrupt {
     source: PythonChildSpecSource,
     stop: WorkerStop,
@@ -293,7 +295,9 @@ impl ChildSpecSource for StopOnInterrupt {
             let answer = self.source.child_spec(request).await;
             match &answer {
                 Err(ChildSpecUnavailable::Interrupted { .. }) => self.stop.request_stop(),
-                Ok(_) | Err(ChildSpecUnavailable::NotRun { .. }) => {}
+                Ok(_)
+                | Err(ChildSpecUnavailable::NotRun { .. })
+                | Err(ChildSpecUnavailable::Raised { .. }) => {}
             }
             answer
         })

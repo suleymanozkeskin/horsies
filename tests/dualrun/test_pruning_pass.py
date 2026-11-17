@@ -34,12 +34,16 @@ seeds: reference = the Python caller before the switch
 resources' ``partition_maintenance``, summarized); candidate =
 ``ReaperMixin._run_partition_pruning``, the pass in the core
 (``CoreHandle.prune_expired_partitions_async``). The snapshots, the partition
-tree included, and the summaries must be equal.
+tree included, and the summaries must be equal. An error entry of a
+summary compares by its subject, its kind and its SQLSTATE, not by the
+driver's message text: psycopg and the core's driver write different texts
+for one refusal, and the text is not part of the contract.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
@@ -47,6 +51,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Final, LiteralString
 
 import psycopg
+import psycopg.errors
 import pytest
 from psycopg import sql
 from pydantic import SecretStr
@@ -563,6 +568,108 @@ def test_a_leaf_detached_out_of_band_is_recorded_and_dropped(
 WORKER_CONNECTIONS: Final = 4
 """The pool size of the worker broker of a caller pair."""
 
+OBJECT_NOT_IN_PREREQUISITE_STATE: Final = '55000'
+"""The SQLSTATE of a concurrent detach on a parent that already has a detach
+pending: with the interrupted detach blocked, the next expired leaf of the
+parent meets it."""
+
+_DRIVER_REFUSAL: Final = re.compile(r'^\(psycopg\.errors\.(?P<error_class>\w+)\) ')
+"""A statement that the server refused, as SQLAlchemy writes psycopg's error."""
+_CORE_REFUSAL: Final = re.compile(
+    r'statement `?\w+`? was refused: (?:cancelled after the bound of [^:]*: )?'
+    r'ERROR (?P<sqlstate>[0-9A-Z]{5}): '
+)
+"""A statement that the server refused, as the core writes it."""
+
+
+@dataclass(frozen=True, slots=True)
+class RefusedStatement:
+    """An error entry of a statement that the server refused."""
+
+    subject: str
+    """The text before the cause: the leaf, with ``finalize`` or
+    ``heartbeat`` in front for those phases."""
+    sqlstate: str
+
+
+@dataclass(frozen=True, slots=True)
+class UnreadError:
+    """An error entry in neither refusal form. It compares by its whole text."""
+
+    text: str
+
+
+type ErrorKind = RefusedStatement | UnreadError
+
+
+@dataclass(frozen=True, slots=True)
+class ComparedSummary:
+    """A ``PrunePassSummary`` whose errors compare by their kind and code."""
+
+    finalized_leaves: tuple[str, ...]
+    detached_count: int
+    dropped_count: int
+    refusals: tuple[str, ...]
+    errors: tuple[ErrorKind, ...]
+    reach: PruneReach
+
+
+def _driver_sqlstate(error_class: str) -> str | None:
+    """The SQLSTATE of a psycopg error class name, or None for a name that
+    psycopg does not define with one."""
+    found: object = getattr(psycopg.errors, error_class, None)
+    match found:
+        case type() if issubclass(found, psycopg.Error):
+            return found.sqlstate
+        case _:
+            return None
+
+
+def _error_kind(entry: str) -> ErrorKind:
+    """The kind of one error entry of a summary: ``<subject>: <cause>``."""
+    match entry.split(': ', 1):
+        case [subject, cause]:
+            pass
+        case _:
+            return UnreadError(text=entry)
+    driver = _DRIVER_REFUSAL.match(cause)
+    if driver is not None:
+        match _driver_sqlstate(driver.group('error_class')):
+            case str() as sqlstate:
+                return RefusedStatement(subject=subject, sqlstate=sqlstate)
+            case None:
+                return UnreadError(text=entry)
+    core = _CORE_REFUSAL.search(cause)
+    if core is not None:
+        return RefusedStatement(subject=subject, sqlstate=core.group('sqlstate'))
+    return UnreadError(text=entry)
+
+
+def _compared(summary: PrunePassSummary) -> ComparedSummary:
+    return ComparedSummary(
+        finalized_leaves=summary.finalized_leaves,
+        detached_count=summary.detached_count,
+        dropped_count=summary.dropped_count,
+        refusals=summary.refusals,
+        errors=tuple(_error_kind(entry) for entry in summary.errors),
+        reach=summary.reach,
+    )
+
+
+def _expected_errors(seeds: Seeds) -> tuple[ErrorKind, ...]:
+    """The errors of a caller pass on ``seeds``: none, or with the blocked
+    interrupted detach the refused detach of the 40-day leaf."""
+    match seeds.blocked_interrupted:
+        case True:
+            return (
+                RefusedStatement(
+                    subject=_leaf_name(_anchors().history(40)),
+                    sqlstate=OBJECT_NOT_IN_PREREQUISITE_STATE,
+                ),
+            )
+        case False:
+            return ()
+
 
 async def _caller_pass(database: DualRunDatabase, python_caller: bool) -> PrunePassSummary:
     broker = PostgresBroker(
@@ -632,9 +739,9 @@ def test_the_core_reaper_pass_prunes_as_the_python_reaper_pass(
     diff = compare_snapshots(reference.run.snapshot, candidate.run.snapshot)
 
     assert diff.entries == (), render_diff(diff)
-    assert candidate.report == reference.report
+    assert _compared(candidate.report) == _compared(reference.report)
     assert candidate.unrecorded_after_pass == reference.unrecorded_after_pass == ()
-    assert candidate.report.errors == ()
+    assert _compared(reference.report).errors == _expected_errors(seeds)
 
 
 def test_the_core_reaper_pass_reports_the_standard_seeds(

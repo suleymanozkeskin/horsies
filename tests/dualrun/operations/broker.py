@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from tests.dualrun.operations.table import DualRunOperation, PoolMode
+from tests.dualrun.operations.table import DualRunOperation, PoolMode, ReferenceOnlyTest
 
 BROKER_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
     DualRunOperation(
@@ -90,3 +90,25 @@ BROKER_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         core_methods=('count_queue_starts_async',),
     ),
 )
+
+BROKER_REFERENCE_ONLY_TESTS: Final[tuple[ReferenceOnlyTest, ...]] = (
+    ReferenceOnlyTest(
+        node_id=(
+            'tests/integration/test_task_result_history_fallback.py::TestStagedResultReader::test_a_history_result_is_one_statement'
+        ),
+        reason=(
+            "warms up through result_caller.get_raw_result_record_async and counts the statements "
+            "of the reference's _probe_result_row on the SQLAlchemy engine"
+        ),
+    ),
+    ReferenceOnlyTest(
+        node_id=(
+            'tests/integration/test_task_result_history_fallback.py::TestStagedResultReader::test_a_live_task_is_one_statement'
+        ),
+        reason=(
+            "warms up through result_caller.get_raw_result_record_async and counts the statements "
+            "of the reference's _probe_result_row on the SQLAlchemy engine"
+        ),
+    ),
+)
+"""The tests that run once, on the Python reference, in the dual-run of this module."""
