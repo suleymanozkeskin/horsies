@@ -784,6 +784,7 @@ fn task_send_pool_of_the_init_frame(profile: &WorkerProfile) -> u64 {
     };
     let facts = PoolFacts {
         worker_id: "worker-1".to_owned(),
+        orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         pending_limit: NonZeroUsize::new(8).expect("a test pending limit above 0"),
         exit_not_seen: ExitNotSeen::LeaveToRecovery,
         placement: CpuPlacement::SharedCpus,

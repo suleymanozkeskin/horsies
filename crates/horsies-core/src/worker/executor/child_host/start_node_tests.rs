@@ -2,12 +2,14 @@
 //! database: `horsies_start_attempt` hands the node over to RUNNING with the
 //! row, keeps a node start that a replay finds, does not touch a workflow
 //! for a plain task, and misses with `NODE_NOT_LINKED` when the node is not
-//! open; the worker's outcome writer then cancels the owned orphan (Python
-//! `test_workflow_node_handoff.py`, `child_runner.py`
-//! `_confirm_ownership_and_set_running`, `_after_missed_start`).
+//! open; the child's stop before start then cancels the owned orphan when
+//! the orphan self-heal of the run is on, and leaves the row CLAIMED when it
+//! is off (Python `test_workflow_node_handoff.py`, `child_runner.py`
+//! `_confirm_ownership_and_set_running`, `_after_missed_start`,
+//! `test_lifecycle_classification.py::TestOrphanedWorkflowTask`).
 //!
 //! These tests drove the worker's in-process start before it was removed
-//! (#764); they now drive the start of the child and the outcome writer.
+//! (#764); they now drive the start of the child.
 
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -20,15 +22,9 @@ use uuid::Uuid;
 use super::host::{ChildApp, ChildLogSetup, ChildStartHook};
 use super::link::FrameWriter;
 use super::run::{start_attempt, HostContext, RunFacts, Started};
-use crate::broker::PostgresBroker;
+use crate::broker::{OrphanSelfHeal, PostgresBroker};
 use crate::core::registry::task::TaskRegistry;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::worker::executor::protocol::{RunEnd, StopReason};
-use crate::worker::executor::slots::{
-    test_successes, AttemptEnd, ClaimedTask, ExecutionClass, OrphanSelfHeal, OutcomeWriter,
-    RetryFacts, Settlement, TaskKind,
-};
-use crate::worker::retry::read_stored_options;
+use crate::worker::executor::protocol::StopReason;
 
 const WORKER_ID: &str = "w1";
 const TASK_NAME: &str = "p1_task";
@@ -129,53 +125,22 @@ async fn seed_node(
     .expect("insert the node");
 }
 
-fn facts(task_id: Uuid, claimed_at: DateTime<Utc>) -> RunFacts {
+/// The facts of a run of the seeded row with the orphan self-heal
+/// `self_heal`.
+fn facts_with(task_id: Uuid, claimed_at: DateTime<Utc>, self_heal: OrphanSelfHeal) -> RunFacts {
     RunFacts {
         task_id,
         task_name: TASK_NAME.to_owned(),
         worker_id: WORKER_ID.to_owned(),
         claimed_at,
+        orphan_self_heal: self_heal,
     }
 }
 
-/// The dispatch of the seeded workflow row, as the claim returns it.
-fn claimed_workflow_task(task_id: Uuid, claimed_at: DateTime<Utc>) -> ClaimedTask {
-    ClaimedTask {
-        task_id,
-        task_name: TASK_NAME.to_owned(),
-        queue_name: "default".to_owned(),
-        claimed_at,
-        execution: ExecutionClass::Isolated,
-        kind: TaskKind::WorkflowTask,
-        retry: RetryFacts {
-            retry_count: 0,
-            max_retries: 3,
-        },
-        options: read_stored_options(None),
-    }
-}
-
-/// The worker's settlement of a start that stopped with `reason`, with the
-/// orphan self-heal on (the default recovery config).
-async fn settle_stop(pool: &PgPool, task: &ClaimedTask, reason: StopReason) -> Settlement {
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
-    let writer = OutcomeWriter::new(
-        Arc::clone(&broker),
-        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        )),
-        WORKER_ID.to_owned(),
-        crate::core::config::payload::PayloadPolicy::default(),
-        crate::core::RetentionConfig::default(),
-        test_successes(&broker, WORKER_ID),
-        OrphanSelfHeal::On,
-    );
-    writer
-        .settle(
-            task,
-            AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(reason)),
-        )
-        .await
+/// [`facts_with`] with the orphan self-heal on (the default recovery
+/// config).
+fn facts(task_id: Uuid, claimed_at: DateTime<Utc>) -> RunFacts {
+    facts_with(task_id, claimed_at, OrphanSelfHeal::On)
 }
 
 async fn remove_case(pool: &PgPool, workflow_id: Option<Uuid>, task_id: Uuid) {
@@ -325,9 +290,9 @@ async fn plain_task_starts_running_without_workflow_update() {
 /// The handoff of each node state: an open node (`ENQUEUED`, `READY`,
 /// `PENDING`, `RUNNING`) goes RUNNING with the row; a terminal node, or no
 /// node, is a missed start (`NODE_NOT_LINKED`) that leaves the node as it
-/// is, and the worker cancels the owned orphan. A node update that holds
-/// the node's lock makes the start wait, and the start then sees the new
-/// state.
+/// is, and the stop before start cancels the owned orphan. A node update
+/// that holds the node's lock makes the start wait, and the start then sees
+/// the new state.
 #[tokio::test]
 #[serial]
 async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
@@ -356,16 +321,7 @@ async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
         let started = start_attempt(&context, &facts(task_id, claimed_at)).await;
         let outcome = match started {
             Started::Running => "running",
-            Started::Stopped(StopReason::NodeNotLinked) => {
-                let settled = settle_stop(
-                    &pool,
-                    &claimed_workflow_task(task_id, claimed_at),
-                    StopReason::NodeNotLinked,
-                )
-                .await;
-                assert_eq!(settled, Settlement::Written);
-                "aborted"
-            }
+            Started::Stopped(StopReason::OrphanCancelled) => "aborted",
             Started::Stopped(other) => panic!("unexpected stop of the start: {other:?}"),
         };
 
@@ -439,7 +395,7 @@ async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
     let started = handoff.await.expect("the start ends");
     assert!(matches!(
         started,
-        Started::Stopped(StopReason::NodeNotLinked)
+        Started::Stopped(StopReason::OrphanCancelled)
     ));
     let node_status: String =
         sqlx::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE id = $1")
@@ -449,4 +405,80 @@ async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
             .expect("read the node");
     assert_eq!(node_status, "FAILED");
     remove_case(&pool, Some(workflow_id), task_id).await;
+}
+
+/// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_self_heal_enabled_cancels_the_orphan`:
+/// with the orphan self-heal of the run on, the start of a workflow task
+/// that no node links ends `ORPHAN_CANCELLED`, and the stop before start
+/// moved the row to history as CANCELLED with `WORKFLOW_CHECK_FAILED`, in
+/// the child.
+#[tokio::test]
+#[serial]
+async fn an_unlinked_task_is_cancelled_in_the_child_when_the_self_heal_is_on() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let task_id = Uuid::new_v4();
+    let claimed_at = seed_claimed(&pool, task_id, true).await;
+    let (context, _peer) = context(pool.clone());
+
+    let started = start_attempt(
+        &context,
+        &facts_with(task_id, claimed_at, OrphanSelfHeal::On),
+    )
+    .await;
+
+    assert!(matches!(
+        started,
+        Started::Stopped(StopReason::OrphanCancelled)
+    ));
+    let (status, error_code): (String, Option<String>) = sqlx::query_as(
+        "SELECT status::text, error_code FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read the history row");
+    assert_eq!(status, "CANCELLED");
+    assert_eq!(error_code.as_deref(), Some("WORKFLOW_CHECK_FAILED"));
+    remove_case(&pool, None, task_id).await;
+}
+
+/// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_self_heal_disabled_leaves_it_claimed`:
+/// with the orphan self-heal of the run off, the start ends
+/// `NODE_NOT_LINKED`, and the row stays CLAIMED by this claim with no
+/// history row.
+#[tokio::test]
+#[serial]
+async fn an_unlinked_task_stays_claimed_when_the_self_heal_is_off() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let task_id = Uuid::new_v4();
+    let claimed_at = seed_claimed(&pool, task_id, true).await;
+    let (context, _peer) = context(pool.clone());
+
+    let started = start_attempt(
+        &context,
+        &facts_with(task_id, claimed_at, OrphanSelfHeal::Off),
+    )
+    .await;
+
+    assert!(matches!(
+        started,
+        Started::Stopped(StopReason::NodeNotLinked)
+    ));
+    let (status, holder): (String, Option<String>) = sqlx::query_as(
+        "SELECT status::text, claimed_by_worker_id FROM horsies_tasks WHERE id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read the row");
+    assert_eq!(status, "CLAIMED");
+    assert_eq!(holder.as_deref(), Some(WORKER_ID));
+    let history: Option<String> =
+        sqlx::query_scalar("SELECT status::text FROM horsies_task_history WHERE task_id = $1")
+            .bind(task_id)
+            .fetch_optional(&pool)
+            .await
+            .expect("read the history row");
+    assert_eq!(history, None);
+    remove_case(&pool, None, task_id).await;
 }
