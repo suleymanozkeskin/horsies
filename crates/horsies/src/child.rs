@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use horsies_core::{
     run_child_host, ChildApp, ChildHookFailure, ChildLogSetup, ChildStartFuture, ChildStartHook,
+    NamedChildStartHook,
 };
 
 pub use horsies_core::{
@@ -38,11 +39,13 @@ impl Horsies {
     /// - It runs on the child's runtime, after the child connected its pool
     ///   and before it takes its first task. Hooks run in registration
     ///   order, and the first failure ends the rest.
-    /// - The hooks of one child run for at most [`CHILD_START_HOOK_BOUND`]
-    ///   (10 s) together.
-    /// - A hook that returns an error, panics or runs past the bound ends
+    /// - Each hook runs for at most [`CHILD_START_HOOK_BOUND`] (10 s), as
+    ///   each Python hook does.
+    /// - A hook that returns an error, panics or runs past its bound ends
     ///   the child with exit code 173, and the worker stops with
-    ///   `CHILD_HOOK_FAILED`. The error's text is the logged cause.
+    ///   `CHILD_HOOK_FAILED`. The logged cause names the hook by its
+    ///   position and the type name of `hook` (for a closure, the path of
+    ///   the function that defines it), and gives the error's text.
     /// - Work that a hook starts and leaves running belongs to no task.
     ///
     /// Only children run the hooks: the worker process, the scheduler and a
@@ -53,13 +56,16 @@ impl Horsies {
         Fut: Future<Output = Result<(), E>> + Send + 'static,
         E: std::fmt::Display,
     {
-        self.add_child_start_hook(Box::new(move || -> ChildStartFuture {
-            Box::pin(async move {
-                hook().await.map_err(|error| ChildHookFailure {
-                    cause: error.to_string(),
+        self.add_child_start_hook(NamedChildStartHook {
+            name: std::any::type_name::<F>().to_owned(),
+            start: Box::new(move || -> ChildStartFuture {
+                Box::pin(async move {
+                    hook().await.map_err(|error| ChildHookFailure {
+                        cause: error.to_string(),
+                    })
                 })
-            })
-        }));
+            }),
+        });
     }
 
     /// Serve as a worker child until the worker's stop frame or the end of
@@ -94,19 +100,12 @@ impl Horsies {
     }
 }
 
-/// The core's one start hook: `hooks` in registration order; the first
-/// failure ends it. No hook is `NoHook`. Pure.
+/// The core's start hooks: `hooks` in registration order, each bounded by
+/// the core alone. No hook is `NoHook`. Pure.
 fn start_hook_of(hooks: Vec<ChildStartFn>) -> ChildStartHook {
     match hooks.is_empty() {
         true => ChildStartHook::NoHook,
-        false => ChildStartHook::Run(Box::new(move || -> ChildStartFuture {
-            Box::pin(async move {
-                for hook in hooks {
-                    hook().await?;
-                }
-                Ok(())
-            })
-        })),
+        false => ChildStartHook::Run(hooks),
     }
 }
 
@@ -136,31 +135,25 @@ mod tests {
         .unwrap()
     }
 
-    /// Runs the core hook that `hooks` give, with the calls in `calls`.
-    async fn run_hooks(hooks: Vec<ChildStartFn>) -> Result<(), ChildHookFailure> {
+    /// The hooks that the core gets from `hooks`, in its order.
+    fn core_hooks(hooks: Vec<ChildStartFn>) -> Vec<NamedChildStartHook> {
         match start_hook_of(hooks) {
-            ChildStartHook::NoHook => Ok(()),
-            ChildStartHook::Run(hook) => hook().await,
+            ChildStartHook::NoHook => Vec::new(),
+            ChildStartHook::Run(hooks) => hooks,
         }
     }
 
-    fn recording_hook(
-        calls: &Arc<Mutex<Vec<&'static str>>>,
-        name: &'static str,
-        fails: bool,
-    ) -> ChildStartFn {
+    fn recording_hook(calls: &Arc<Mutex<Vec<&'static str>>>, name: &'static str) -> ChildStartFn {
         let calls = Arc::clone(calls);
-        Box::new(move || -> ChildStartFuture {
-            Box::pin(async move {
-                calls.lock().unwrap().push(name);
-                match fails {
-                    true => Err(ChildHookFailure {
-                        cause: format!("{name} failed"),
-                    }),
-                    false => Ok(()),
-                }
-            })
-        })
+        NamedChildStartHook {
+            name: name.to_owned(),
+            start: Box::new(move || -> ChildStartFuture {
+                Box::pin(async move {
+                    calls.lock().unwrap().push(name);
+                    Ok(())
+                })
+            }),
+        }
     }
 
     #[test]
@@ -169,28 +162,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hooks_run_in_registration_order_and_the_first_failure_ends_the_rest() {
+    async fn the_core_gets_each_hook_in_registration_order() {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let failure = run_hooks(vec![
-            recording_hook(&calls, "first", false),
-            recording_hook(&calls, "second", true),
-            recording_hook(&calls, "third", false),
-        ])
-        .await
-        .unwrap_err();
-        assert_eq!(failure.cause, "second failed");
+        let hooks = core_hooks(vec![
+            recording_hook(&calls, "first"),
+            recording_hook(&calls, "second"),
+        ]);
+        let names: Vec<&str> = hooks.iter().map(|hook| hook.name.as_str()).collect();
+        assert_eq!(names, vec!["first", "second"]);
+        for hook in hooks {
+            (hook.start)().await.unwrap();
+        }
         assert_eq!(*calls.lock().unwrap(), vec!["first", "second"]);
     }
 
+    async fn cache_hook() -> Result<(), &'static str> {
+        Err("the cache did not open")
+    }
+
     #[tokio::test]
-    async fn on_child_start_keeps_the_text_of_the_hook_error() {
+    async fn on_child_start_names_the_hook_and_keeps_the_text_of_its_error() {
         let mut app = app();
-        app.on_child_start(|| async { Err::<(), _>("the cache did not open") });
+        app.on_child_start(cache_hook);
         app.on_child_start(|| async { Ok::<(), std::convert::Infallible>(()) });
         assert_eq!(app.child_start_hook_count(), 2);
-        let parts = app.into_child_parts();
-        let failure = run_hooks(parts.start_hooks).await.unwrap_err();
+        let mut hooks = core_hooks(app.into_child_parts().start_hooks).into_iter();
+        let first = hooks.next().unwrap();
+        assert!(first.name.ends_with("::cache_hook"), "{}", first.name);
+        let failure = (first.start)().await.unwrap_err();
         assert_eq!(failure.cause, "the cache did not open");
+        let second = hooks.next().unwrap();
+        assert!(second.name.contains("{{closure}}"), "{}", second.name);
+        (second.start)().await.unwrap();
     }
 
     #[test]

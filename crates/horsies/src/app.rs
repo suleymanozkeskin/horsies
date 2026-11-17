@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use horsies_core::handle::CoreHandle;
 use horsies_core::manifest::ProducerManifest;
-use horsies_core::{ChildStartFuture, ClientFamily, PoolProfile, RegisteredTask, TaskRegistry};
+use horsies_core::{ClientFamily, NamedChildStartHook, PoolProfile, RegisteredTask, TaskRegistry};
 
 pub use horsies_core::manifest::SchemaMode;
 
@@ -71,8 +71,9 @@ pub struct Horsies {
     child_start_hooks: Vec<ChildStartFn>,
 }
 
-/// One start hook of a worker child, called once in the child.
-pub(crate) type ChildStartFn = Box<dyn FnOnce() -> ChildStartFuture + Send + Sync>;
+/// One start hook of a worker child, with its name, called once in the
+/// child.
+pub(crate) type ChildStartFn = NamedChildStartHook;
 
 /// What child mode takes from the app: the tasks, the start hooks in
 /// registration order, and the producer manifest of the app's handle.
