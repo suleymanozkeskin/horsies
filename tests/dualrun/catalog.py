@@ -39,6 +39,7 @@ from tests.dualrun.rules import (
     FormatVersion,
     GeneratedName,
     IdFamily,
+    IdsInText,
     Ignored,
     Index,
     JsonPath,
@@ -103,15 +104,22 @@ TASK_INPUT: Final = StoredJson(
 """A task's input. The input of an engine-minted workflow task names its
 workflow in ``__h_workflow_meta__``."""
 
+WORKFLOW_IDS_IN_TEXT: Final = IdsInText(family=IdFamily.WORKFLOW)
+"""A message that can name a workflow by its id."""
+
 WORKFLOW_ERROR: Final = StoredJson(
     storage=JsonStorage.TEXT,
     format=Unversioned(),
     paths=(
         JsonPath(steps=(Key(name='data'), Key(name='workflow_id')), rule=WORKFLOW_ID),
+        JsonPath(steps=(Key(name='sub_workflow_id'),), rule=WORKFLOW_ID),
+        JsonPath(steps=(Key(name='message'),), rule=WORKFLOW_IDS_IN_TEXT),
     ),
 )
 """A stored workflow error. The recovery limit error names its workflow in
-``data.workflow_id``."""
+``data.workflow_id``. The error of a workflow that a failed child paused
+names the child in ``sub_workflow_id`` and in ``message`` (``Subworkflow
+<id> failed``)."""
 
 NODE_RESULT: Final = StoredJson(
     storage=JsonStorage.TEXT,
@@ -121,10 +129,18 @@ NODE_RESULT: Final = StoredJson(
             steps=(Key(name='err'), Key(name='data'), Key(name='workflow_id')),
             rule=WORKFLOW_ID,
         ),
+        JsonPath(
+            steps=(Key(name='err'), Key(name='sub_workflow_id')), rule=WORKFLOW_ID
+        ),
+        JsonPath(
+            steps=(Key(name='err'), Key(name='message')), rule=WORKFLOW_IDS_IN_TEXT
+        ),
     ),
 )
 """A stored node result. The recovery limit result names its workflow in
-``err.data.workflow_id``."""
+``err.data.workflow_id``. The result of a sub-workflow node whose child
+failed names the child in ``err.sub_workflow_id`` and in ``err.message``
+(``Subworkflow <id> failed with status <status>``)."""
 
 TASK_OPTIONS: Final = StoredJson(
     storage=JsonStorage.TEXT,
