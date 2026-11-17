@@ -977,7 +977,10 @@ async fn acquire_gate(pool: &PgPool, key: i64) -> GatePass {
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
-            tracing::warn!(error = %e, "periodic-pass gate connection unavailable; skipping interval");
+            tracing::warn!(
+                error = %e,
+                "periodic-pass gate connection unavailable: {e}; skipping interval",
+            );
             return GatePass::Skip;
         }
     };
@@ -988,7 +991,10 @@ async fn acquire_gate(pool: &PgPool, key: i64) -> GatePass {
     {
         Ok(acquired) => acquired,
         Err(error) => {
-            tracing::warn!(%error, "periodic-pass advisory gate failed; skipping interval");
+            tracing::warn!(
+                %error,
+                "periodic-pass advisory gate failed: {error}; skipping interval",
+            );
             return GatePass::Skip;
         }
     };
@@ -1003,7 +1009,10 @@ async fn acquire_gate(pool: &PgPool, key: i64) -> GatePass {
 /// xact-scoped lock frees on commit; on error it frees via rollback-on-drop).
 async fn release_gate(tx: sqlx::Transaction<'static, sqlx::Postgres>) {
     if let Err(e) = tx.commit().await {
-        tracing::warn!(error = %e, "periodic-pass gate commit failed; lock frees when the connection closes");
+        tracing::warn!(
+            error = %e,
+            "periodic-pass gate commit failed: {e}; lock frees when the connection closes",
+        );
     }
 }
 
@@ -1042,13 +1051,20 @@ async fn run_reaper_pass(
                         tracing::info!(count, "reaper requeued stale CLAIMED tasks");
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "reaper: failed to requeue stale claimed tasks");
+                        tracing::error!(
+                            error = %e,
+                            "Reaper requeue_stale_claimed failed and runs again on the next \
+                             pass: {e}",
+                        );
                     }
                     _ => {}
                 }
             }
             Err(error) => {
-                tracing::error!(%error, "reaper: the stale CLAIMED threshold is out of range");
+                tracing::error!(
+                    %error,
+                    "reaper: the stale CLAIMED threshold is out of range: {error}",
+                );
             }
         }
     }
@@ -1094,14 +1110,16 @@ async fn run_reaper_pass(
                             orphan_state.permanent_failures = 0;
                             tracing::warn!(
                                 %error,
-                                "reaper orphan audit lock was refused and will retry on its next schedule",
+                                "Reaper orphan workflow-task audit lock was busy: {error}; the \
+                                 next scheduled audit will retry",
                             );
                         }
                         OrphanAuditFailureKind::Transient => {
                             orphan_state.permanent_failures = 0;
                             tracing::error!(
                                 %error,
-                                "reaper orphan audit failed transiently and will retry on its next schedule",
+                                "Reaper orphan workflow-task audit failed transiently and will \
+                                 retry on its next schedule: {error}",
                             );
                         }
                         OrphanAuditFailureKind::Permanent => {
@@ -1113,7 +1131,8 @@ async fn run_reaper_pass(
                             tracing::error!(
                                 %error,
                                 consecutive_failures = orphan_state.permanent_failures,
-                                "reaper orphan audit failed and will run again on its next schedule",
+                                "Reaper orphan workflow-task audit failed and runs again on its \
+                                 next schedule: {error}",
                             );
                         }
                     }
@@ -1144,13 +1163,20 @@ async fn run_reaper_pass(
                         tracing::warn!(count, "reaper marked stale RUNNING tasks as FAILED");
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "reaper: failed to mark stale running tasks");
+                        tracing::error!(
+                            error = %e,
+                            "Reaper mark_stale_tasks_as_failed failed and runs again on the \
+                             next pass: {e}",
+                        );
                     }
                     _ => {}
                 }
             }
             Err(error) => {
-                tracing::error!(%error, "reaper: the stale RUNNING thresholds are out of range");
+                tracing::error!(
+                    %error,
+                    "reaper: the stale RUNNING thresholds are out of range: {error}",
+                );
             }
         }
     }
@@ -1177,7 +1203,7 @@ async fn run_reaper_pass(
             );
         }
         Err(failed) => {
-            tracing::warn!(error = %failed, "reaper: failed to expire pending tasks");
+            tracing::warn!(error = %failed, "Reaper expire_pending_tasks failed: {failed}");
         }
     }
 
@@ -1197,7 +1223,11 @@ async fn run_reaper_pass(
             |error| serde_json::json!({"state": "error", "error": error.to_string()}),
         ),
         Err(failure) => {
-            tracing::error!(error = %failure.error, "workflow recovery pass failed");
+            tracing::error!(
+                error = %failure.error,
+                "Workflow recovery error: {}",
+                failure.error,
+            );
             failure.into_health_snapshot()
         }
     });
@@ -1221,7 +1251,7 @@ async fn run_reaper_pass(
             )
         }
         Err(error) => {
-            tracing::error!(%error, "phase-2 recovery pass failed");
+            tracing::error!(%error, "Phase-2 recovery error: {error}");
             serde_json::json!({"state": "error", "error": error.to_string()})
         }
     });
@@ -1242,7 +1272,7 @@ async fn run_reaper_pass(
                 );
             }
             Err(error) => {
-                tracing::error!(%error, "paused-workflow expiry sweep failed");
+                tracing::error!(%error, "Paused-workflow expiry sweep error: {error}");
             }
             _ => {}
         }
@@ -1287,7 +1317,7 @@ async fn run_reaper_pass(
                 Some(encoded)
             }
             Err(error) => {
-                tracing::error!(%error, "partition coverage ensure failed");
+                tracing::error!(%error, "Partition coverage ensure error: {error}");
                 Some(serde_json::json!({"state": "error", "error": error.to_string()}))
             }
         };
@@ -1312,7 +1342,7 @@ async fn run_reaper_pass(
                 serde_json::json!({"state": "truncated", "deleted": deleted})
             }
             Err(error) => {
-                tracing::error!(%error, "expired key reservation cleanup failed");
+                tracing::error!(%error, "expired key reservation cleanup failed: {error}");
                 serde_json::json!({"state": "error", "error": error.to_string()})
             }
         };
@@ -1330,7 +1360,7 @@ async fn run_reaper_pass(
                 "key_reservations": key_reservations,
             }),
             Err(error) => {
-                tracing::error!(%error, "partition pruning failed");
+                tracing::error!(%error, "Partition pruning error: {error}");
                 serde_json::json!({
                     "state": "error",
                     "error": error.to_string(),
@@ -1408,7 +1438,8 @@ pub(crate) async fn stale_running_pass(
                     target: STALE_RUNNING_PASS,
                     task_id = %candidate.task_id,
                     %error,
-                    "failed to serialize the crash result of a stale RUNNING task",
+                    "Failed to serialize crash result for task {}: {error}",
+                    candidate.task_id,
                 );
                 continue;
             }
@@ -1423,7 +1454,8 @@ pub(crate) async fn stale_running_pass(
                     target: STALE_RUNNING_PASS,
                     task_id = %candidate.task_id,
                     %error,
-                    "failed to recover a stale RUNNING task",
+                    "Reaper failed to process stale task {}: {error}",
+                    candidate.task_id,
                 );
             }
         }
@@ -1556,7 +1588,8 @@ async fn after_stale_attempt(
                     task_id = %command.task_id,
                     queue = %queue_name,
                     %error,
-                    "the wake of a stale retry failed; the queue's poll finds the row",
+                    "Wake of stale retry {} failed: {error}",
+                    command.task_id,
                 );
             }
             StaleRecovery::Recovered
@@ -1921,7 +1954,7 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RetentionConfig) {
             }
         }
         Err(e) => {
-            tracing::error!(error = %e, "retention cleanup failed");
+            tracing::error!(error = %e, "Retention cleanup error: {e}");
         }
     }
 }

@@ -776,7 +776,11 @@ async fn beat_once(
             if failures == 1 {
                 failure_log.reset();
             }
-            if failure_log.due(Instant::now()) {
+            let now = Instant::now();
+            if failure_log.due(now) {
+                let uncovered_s = now
+                    .saturating_duration_since(coverage.read().covered_at)
+                    .as_secs_f64();
                 let consequence = match stale_running {
                     StaleRunningRecovery::On { threshold } => format!(
                         "the worker stops at {:.1}s without a landed beat",
@@ -790,7 +794,8 @@ async fn beat_once(
                     attempt = failures,
                     held_tasks = task_ids.len(),
                     %error,
-                    "runner heartbeat write failed; {consequence}",
+                    "Runner heartbeat write failed (attempt {failures}, {uncovered_s:.1}s since \
+                     the last beat; {consequence}): {error}",
                 );
             }
             retry_delay(failures, interval)

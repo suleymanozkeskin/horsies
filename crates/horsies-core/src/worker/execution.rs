@@ -626,7 +626,7 @@ fn wake_when_retry_due(broker: &PostgresBroker, command: &FinishFailedAttempt, q
                 task_id = %task_id,
                 queue = %queue_name,
                 error = %error,
-                "delayed retry NOTIFY not scheduled; worker polling fallback will recover",
+                "delayed retry NOTIFY not scheduled: {error}; worker polling fallback will recover",
             );
             return;
         }
@@ -641,7 +641,7 @@ fn wake_when_retry_due(broker: &PostgresBroker, command: &FinishFailedAttempt, q
                 task_id = %task_id,
                 queue = %queue_name,
                 error = %error,
-                "delayed retry NOTIFY failed; worker polling fallback will recover",
+                "Error sending delayed notification for retry:{task_id}: {error}",
             );
         }
     });
@@ -1142,7 +1142,8 @@ async fn retry_phase2(
                     task_id = %work.task_id,
                     error = %error,
                     attempt,
-                    "Phase 2 finalize failed (non-retryable)",
+                    "Finalize stage will not be re-attempted ({}) stage=phase2_workflow: {error}",
+                    work.task_id,
                 );
                 return Err(error);
             }
@@ -1151,7 +1152,9 @@ async fn retry_phase2(
                     task_id = %work.task_id,
                     error = %error,
                     attempts = PHASE2_MAX_RETRIES,
-                    "Phase 2 finalize retries exhausted — workflow recovery will handle",
+                    "Finalize retries exhausted for task {} stage=phase2_workflow after \
+                     {PHASE2_MAX_RETRIES} attempts: {error}",
+                    work.task_id,
                 );
                 return Err(error);
             }
@@ -1160,7 +1163,11 @@ async fn retry_phase2(
                     task_id = %work.task_id,
                     error = %error,
                     attempt,
-                    "Phase 2 finalize failed (retryable)",
+                    "Finalize retry scheduled for task {} stage=phase2_workflow \
+                     ({}/{PHASE2_MAX_RETRIES}) in {:.1}s: {error}",
+                    work.task_id,
+                    attempt + 1,
+                    phase_retry_delay(attempt + 1),
                 );
             }
         }
@@ -1197,7 +1204,8 @@ async fn retry_parent_advances(
                 child_workflow_id = %failure.failed_child_workflow_id,
                 attempt,
                 error = %failure.error,
-                "parent advance failed (retryable)",
+                "parent advance failed (retryable): {}",
+                failure.error,
             ),
             false => {
                 tracing::error!(
@@ -1205,7 +1213,8 @@ async fn retry_parent_advances(
                     child_workflow_id = %failure.failed_child_workflow_id,
                     owed_after = failure.owed_after.child_workflow_ids().len(),
                     error = %failure.error,
-                    "parent advance failed (non-retryable) — workflow recovery will handle",
+                    "parent advance failed (non-retryable): {} — workflow recovery will handle",
+                    failure.error,
                 );
                 return;
             }
