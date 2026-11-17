@@ -2195,7 +2195,7 @@ BEGIN
     PERFORM horsies_workflow_pause(v_wf);
     UPDATE horsies_workflows SET updated_at = now() - interval '2 hours' WHERE id IN (v_wf, v_child);
 
-    SELECT * INTO v_row FROM horsies_workflow_expire_paused(v_wf, 3600000, v_error);
+    SELECT * INTO v_row FROM horsies_workflow_expire_paused(v_wf, 3600000000, v_error);
     PERFORM wft_check(v_row.outcome = 'EXPIRED' AND v_row.expired_task_ids = ARRAY[v_pending_task],
                       'expire paused: EXPIRED, the task behind an ENQUEUED node moved');
     PERFORM wft_check((wft_workflow(v_wf)).status = 'EXPIRED' AND (wft_workflow(v_wf)).error = v_error
@@ -2209,13 +2209,13 @@ BEGIN
                       AND EXISTS (SELECT 1 FROM horsies_tasks WHERE id = v_running_task),
                       'expire paused: a started task keeps its RUNNING node');
     PERFORM wft_check((wft_workflow(v_child)).status = 'PAUSED', 'expire paused: no cascade to a paused child');
-    SELECT * INTO v_row FROM horsies_workflow_expire_paused(v_wf, 3600000, v_error);
+    SELECT * INTO v_row FROM horsies_workflow_expire_paused(v_wf, 3600000000, v_error);
     PERFORM wft_check(v_row.outcome = 'NOT_EXPIRED' AND v_row.observed_status = 'EXPIRED',
                       'expire paused: a terminal workflow is NOT_EXPIRED');
 
     PERFORM * FROM wft_start1(v_young, 'fail', '[{"idx":0}]');
     PERFORM horsies_workflow_pause(v_young);
-    SELECT * INTO v_row FROM horsies_workflow_expire_paused(v_young, 3600000, v_error);
+    SELECT * INTO v_row FROM horsies_workflow_expire_paused(v_young, 3600000000, v_error);
     PERFORM wft_check(v_row.outcome = 'NOT_EXPIRED' AND v_row.observed_status = 'PAUSED'
                       AND (wft_workflow(v_young)).status = 'PAUSED' AND wft_task_of(v_young, 0) IS NOT NULL,
                       'expire paused: a workflow paused for less than the age is NOT_EXPIRED, nothing written');
@@ -2229,6 +2229,68 @@ BEGIN
                         'expire paused refuses a negative age');
     PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_expire_paused(%L, 0, NULL)$q$, v_young), '22023',
                         'expire paused refuses a NULL error');
+END $$;
+
+-- The age is exact to the microsecond: 500 us expires a workflow paused 600 us before now() and keeps one paused 400 us
+-- before now(). now() is the start of this transaction, so the distances hold for every statement of the block.
+DO $$
+DECLARE
+    v_older uuid := '00000000-0000-7000-8000-000000000c04';
+    v_younger uuid := '00000000-0000-7000-8000-000000000c05';
+    v_error text := horsies_task_error_object('WORKFLOW_ENQUEUE_FAILED', 'stands in for WORKFLOW_EXPIRED', NULL);
+    v_row record;
+BEGIN
+    PERFORM * FROM wft_start1(v_older, 'fail', '[{"idx":0}]');
+    PERFORM * FROM wft_start1(v_younger, 'fail', '[{"idx":0}]');
+    PERFORM horsies_workflow_pause(v_older);
+    PERFORM horsies_workflow_pause(v_younger);
+    UPDATE horsies_workflows SET updated_at = now() - interval '600 microseconds' WHERE id = v_older;
+    UPDATE horsies_workflows SET updated_at = now() - interval '400 microseconds' WHERE id = v_younger;
+
+    SELECT * INTO v_row FROM horsies_workflow_expire_paused(v_older, 500, v_error);
+    PERFORM wft_check(v_row.outcome = 'EXPIRED' AND (wft_workflow(v_older)).status = 'EXPIRED',
+                      'expire paused: an age of 500 us expires a workflow paused 600 us ago');
+    SELECT * INTO v_row FROM horsies_workflow_expire_paused(v_younger, 500, v_error);
+    PERFORM wft_check(v_row.outcome = 'NOT_EXPIRED' AND v_row.observed_status = 'PAUSED'
+                      AND (wft_workflow(v_younger)).status = 'PAUSED',
+                      'expire paused: an age of 500 us keeps a workflow paused 400 us ago');
+END $$;
+
+-- An age of one day is 24 hours in a session time zone with a daylight-saving change in the last day. The zone is
+-- built from now(): standard time is UTC, and daylight time (UTC+1) starts 12 hours before now(), so a day of wall
+-- time before now() is 23 hours. A workflow paused 23 h 30 min ago stays PAUSED; one paused 24 h 30 min ago expires.
+DO $$
+DECLARE
+    v_kept uuid := '00000000-0000-7000-8000-000000000c06';
+    v_expired uuid := '00000000-0000-7000-8000-000000000c07';
+    v_error text := horsies_task_error_object('WORKFLOW_ENQUEUE_FAILED', 'stands in for WORKFLOW_EXPIRED', NULL);
+    v_one_day_us constant bigint := 86400000000;
+    v_session_zone text := current_setting('TimeZone');
+    v_change timestamp := (now() - interval '12 hours') AT TIME ZONE 'UTC';
+    v_row record;
+BEGIN
+    PERFORM set_config('TimeZone', format('STD0DST,%s/%s,%s/0',
+                                          extract(doy FROM v_change)::integer - 1,
+                                          to_char(v_change, 'HH24:MI:SS'),
+                                          (extract(doy FROM v_change)::integer - 1 + 180) % 365), true);
+    PERFORM wft_check(now() - interval '1 day' = now() - interval '23 hours',
+                      'expire paused across DST: the session zone has a daylight-saving change in the last day');
+
+    PERFORM * FROM wft_start1(v_kept, 'fail', '[{"idx":0}]');
+    PERFORM * FROM wft_start1(v_expired, 'fail', '[{"idx":0}]');
+    PERFORM horsies_workflow_pause(v_kept);
+    PERFORM horsies_workflow_pause(v_expired);
+    UPDATE horsies_workflows SET updated_at = now() - interval '23 hours 30 minutes' WHERE id = v_kept;
+    UPDATE horsies_workflows SET updated_at = now() - interval '24 hours 30 minutes' WHERE id = v_expired;
+
+    SELECT * INTO v_row FROM horsies_workflow_expire_paused(v_kept, v_one_day_us, v_error);
+    PERFORM wft_check(v_row.outcome = 'NOT_EXPIRED' AND v_row.observed_status = 'PAUSED'
+                      AND (wft_workflow(v_kept)).status = 'PAUSED',
+                      'expire paused across DST: an age of one day keeps a workflow paused 23 h 30 min ago');
+    SELECT * INTO v_row FROM horsies_workflow_expire_paused(v_expired, v_one_day_us, v_error);
+    PERFORM wft_check(v_row.outcome = 'EXPIRED' AND (wft_workflow(v_expired)).status = 'EXPIRED',
+                      'expire paused across DST: an age of one day expires a workflow paused 24 h 30 min ago');
+    PERFORM set_config('TimeZone', v_session_zone, true);
 END $$;
 
 -- Recovery cases 0, 1 and 1.5 ---------------------------------------------------------------------------------------
