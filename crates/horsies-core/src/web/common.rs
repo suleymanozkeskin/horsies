@@ -16,15 +16,23 @@ pub(crate) struct DetailBody {
     pub detail: String,
 }
 
+/// A refusal with a horsies code: `{"code": ..., "detail": ...}`.
 #[derive(Debug, Serialize)]
-pub(crate) struct SchemaBody {
+pub(crate) struct CodeBody {
     pub code: &'static str,
     pub detail: String,
 }
 
+/// The `code` of a 400 body for request text refused before any read
+/// (Python `horsies.web.routes._common.INVALID_INPUT`).
+pub(crate) const INVALID_INPUT: &str = "INVALID_INPUT";
+
 #[derive(Debug)]
 pub(crate) enum ApiError {
     Detail(StatusCode, String),
+    /// Request text refused before any read: 400 and the body
+    /// `{"code": "INVALID_INPUT", "detail": ...}` (Python `InvalidInput`).
+    InvalidInput(String),
     /// FastAPI's 422 body: every refused parameter, in parameter order.
     Validation(Vec<ValidationIssue>),
 }
@@ -123,7 +131,7 @@ impl ApiError {
         ValidationIssue {
             error_type: "uuid_parsing",
             loc: vec!["path", field],
-            msg: format!("Input should be a valid UUID, {error}"),
+            msg: uuid_parsing_message(error),
             input: raw.into(),
             ctx: Some(serde_json::json!({ "error": error.to_string() })),
         }
@@ -144,6 +152,14 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
             Self::Detail(status, detail) => (status, Json(DetailBody { detail })).into_response(),
+            Self::InvalidInput(detail) => (
+                StatusCode::BAD_REQUEST,
+                Json(CodeBody {
+                    code: INVALID_INPUT,
+                    detail,
+                }),
+            )
+                .into_response(),
             Self::Validation(issues) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(serde_json::json!({ "detail": issues })),
@@ -415,11 +431,31 @@ pub(crate) fn pagination_refused(
     }
 }
 
-/// Parse a path id. Text that is not a UUID is refused with FastAPI's 422
-/// `uuid_parsing` body before any database call.
+/// pydantic's message for text that is not a UUID: `Input should be a valid
+/// UUID, ` and the parser's reason.
+fn uuid_parsing_message(error: &uuid::Error) -> String {
+    format!("Input should be a valid UUID, {error}")
+}
+
+/// Parse a task path id (Python `require_path_uuid`). Text that is not a
+/// UUID is refused with 400 `INVALID_INPUT` before any database call. The
+/// detail is `Path parameter <field>: <pydantic's message>.`, the detail of
+/// the Python web app.
 pub(crate) fn parse_path_uuid(field: &'static str, raw: &str) -> Result<uuid::Uuid, ApiError> {
-    uuid::Uuid::parse_str(raw)
-        .map_err(|error| ApiError::Validation(vec![ApiError::path_uuid(field, raw, &error)]))
+    uuid::Uuid::parse_str(raw).map_err(|error| {
+        ApiError::InvalidInput(format!(
+            "Path parameter {field}: {}.",
+            uuid_parsing_message(&error)
+        ))
+    })
+}
+
+/// Parse a workflow path id. Text that is not a UUID is refused with
+/// FastAPI's 422 `uuid_parsing` body before any database call.
+pub(crate) fn parse_workflow_path_uuid(raw: &str) -> Result<uuid::Uuid, ApiError> {
+    uuid::Uuid::parse_str(raw).map_err(|error| {
+        ApiError::Validation(vec![ApiError::path_uuid("workflow_id", raw, &error)])
+    })
 }
 
 #[cfg(test)]
@@ -440,7 +476,9 @@ mod tests {
     fn a_query_failure_maps_to_python_s_status() {
         let status = |code| match query_failed("Task list", query_error(code)) {
             ApiError::Detail(status, _) => status,
-            ApiError::Validation(_) => panic!("a query failure is never a validation body"),
+            ApiError::InvalidInput(_) | ApiError::Validation(_) => {
+                panic!("a query failure is always a detail body")
+            }
         };
         assert_eq!(
             status(MonitoringQueryErrorCode::DbOperationFailed),
