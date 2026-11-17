@@ -9,10 +9,10 @@
 use sha2::{Digest, Sha256};
 
 use super::*;
-use crate::broker::history_reads::{read_history_detail, read_task_result};
+use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::pools::unpinged_single_connection_core_pool;
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::core::history::names::TASK_DETAIL_FUNCTION;
+use crate::core::history::names::{TASK_DETAIL_FUNCTION, TASK_RESULT_FUNCTION};
 use crate::core::history::reads::publisher::rendered_reader_signatures;
 use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
 
@@ -363,13 +363,13 @@ async fn every_rendered_reader_runs_without_sequential_scans() {
 
 /// `TestStagedResultReader.test_a_reader_dropped_after_it_was_seen_fails_once`:
 /// a result reader removed out of band after a read saw it fails the next
-/// call once with an error; the call after it answers from the live and
-/// detail reads (decisions, 13 rule-following rows, row 8). The reads run on
-/// one connection of a core pool, so the second read meets the statement
-/// that the first read prepared.
+/// call once with the `42883` refusal that names the function; the call
+/// after it probes and answers `NotPublished`, so the broker reads the live
+/// and detail readers. The reads share one reader state, as the calls of one
+/// broker do, and run on one connection of a core pool, so the second read
+/// meets the statement that the first read prepared.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1292"]
 async fn a_result_reader_dropped_after_it_was_seen_fails_once() {
     let database = TestDatabase::create().await;
     publish_readers(&database.pool).await;
@@ -382,7 +382,8 @@ async fn a_result_reader_dropped_after_it_was_seen_fails_once() {
     )
     .await;
     let reader = unpinged_single_connection_core_pool(&database.pool.connect_options());
-    let seen = read_task_result(&reader, StatementLog::Off, task_id)
+    let reader_state = ResultReaderSeen::default();
+    let seen = read_task_result(&reader, StatementLog::Off, &reader_state, task_id)
         .await
         .expect("read through the published reader");
     assert!(matches!(seen, TaskResultRead::Live(_)), "{seen:?}");
@@ -390,12 +391,21 @@ async fn a_result_reader_dropped_after_it_was_seen_fails_once() {
         .execute(&database.pool)
         .await
         .expect("drop the result reader out of band");
-    let first = read_task_result(&reader, StatementLog::Off, task_id).await;
+
+    let first = read_task_result(&reader, StatementLog::Off, &reader_state, task_id)
+        .await
+        .expect_err("the first call after the drop fails");
     assert!(
-        first.is_err(),
-        "the first call after the drop fails: {first:?}"
+        matches!(
+            &first,
+            BrokerError::Statement(StatementFailure::StatementRefused { cause, .. })
+                if cause.server_error().code().code() == "42883"
+        ),
+        "{first:?}"
     );
-    let second = read_task_result(&reader, StatementLog::Off, task_id)
+    assert!(first.to_string().contains(TASK_RESULT_FUNCTION), "{first}");
+
+    let second = read_task_result(&reader, StatementLog::Off, &reader_state, task_id)
         .await
         .expect("the next call answers");
     assert!(matches!(second, TaskResultRead::NotPublished), "{second:?}");

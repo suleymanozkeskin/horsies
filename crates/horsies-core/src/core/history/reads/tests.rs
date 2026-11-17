@@ -22,7 +22,9 @@ use crate::core::history::ddl::classes::{
 use crate::core::history::ddl::runtime_names::daily_leaf_name;
 use crate::core::history::errors::HistoryError;
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
-use crate::core::history::names::{LEAF_CATALOG, TASK_DETAIL_FUNCTION, TASK_HISTORY_PARENT};
+use crate::core::history::names::{
+    LEAF_CATALOG, TASK_DETAIL_FUNCTION, TASK_HISTORY_PARENT, TASK_RESULT_FUNCTION,
+};
 use crate::core::history::outcomes::{LeafCreation, LeafDrop};
 use crate::core::history::partitions::catalog::database_now;
 use crate::core::history::partitions::manager::{
@@ -1335,8 +1337,9 @@ fn result_wire_decode_is_typed_and_fail_closed() {
 
 /// Reads one task's result with the broker's statement-layer reader
 /// (`broker::history_reads::read_task_result`) on a core handle of the test
-/// database, then closes the handle. Each call opens new connections, so no
-/// statement prepared before a reader change is reused.
+/// database, then closes the handle. Each call opens new connections and
+/// starts from a reader state that is not seen, as the first call of a new
+/// broker does, so no statement prepared before a reader change is reused.
 async fn core_result_read(
     database: &TestDatabase,
     task_id: Uuid,
@@ -1345,9 +1348,13 @@ async fn core_result_read(
     let open = handle
         .pools()
         .expect("the statement layer accepts the test URL");
-    let read =
-        crate::broker::history_reads::read_task_result(open.main(), StatementLog::Off, task_id)
-            .await;
+    let read = crate::broker::history_reads::read_task_result(
+        open.main(),
+        StatementLog::Off,
+        &crate::broker::history_reads::ResultReaderSeen::default(),
+        task_id,
+    )
+    .await;
     drop(open);
     let _closed = handle.close().await;
     read
@@ -1518,6 +1525,25 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
             .await
             .expect("read with unpublished result function"),
         TaskResultRead::NotPublished
+    );
+    // The broker saw the function, so its first call after the drop fails
+    // once with the refusal that names the function (Python's rule); the
+    // next call falls back to the live and detail reads.
+    let refused = broker
+        .get_result::<i32>(completed_id, None)
+        .await
+        .expect_err("the first broker call after the drop fails");
+    assert!(
+        matches!(
+            &refused,
+            BrokerError::Statement(StatementFailure::StatementRefused { cause, .. })
+                if cause.server_error().code().code() == "42883"
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        refused.to_string().contains(TASK_RESULT_FUNCTION),
+        "{refused}"
     );
     let fallback = broker
         .get_result::<i32>(completed_id, None)
