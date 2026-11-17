@@ -182,6 +182,38 @@ unless it starts with "Added".
   (before: `r#type`). `#[derive(WorkflowInput)]` makes no token for a
   `#[serde(skip)]` or `#[serde(skip_deserializing)]` field, and refuses a
   `#[serde(flatten)]` field at compile time.
+- **`TaskFunction<A, T, E>` sends with Python's rules.** `send`,
+  `schedule`, `send_with_options`, `schedule_with_options` and
+  `with_options` return `Result<TaskHandle<T, E>, TaskSendError>`. A send
+  encodes its input, decodes the text with `A`, encodes it again and
+  refuses the send with `VALIDATION_FAILED` when the two texts differ,
+  before any statement. An input over `payload.reject_bytes` is
+  `PAYLOAD_TOO_LARGE`. In a worker child a send goes through the child's
+  own producer pool.
+- **`TaskSendError` is the closed catalog of Python's send codes:**
+  `SendSuppressed`, `ValidationFailed`, `EnqueueFailed { retryable }` (the
+  row may or may not exist), `PayloadMismatch`, `IdempotencyKeyConflict {
+  owner_task_id }` and `PayloadTooLarge { size_bytes, limit_bytes }`, each
+  with only the facts of its state. `retry_send` and `retry_schedule`
+  accept only `EnqueueFailed` and `IdempotencyKeyConflict`, send the same
+  task id and payload, and refuse the error of another task or of the
+  other method.
+- **A resend is a repeat.** With `resend_on_transient_err`, a retryable
+  `ENQUEUE_FAILED` is sent again up to 3 times after 200, 400 and 800 ms,
+  as `SendKind::Repeat`: a send whose commit reply was lost answers with
+  its task id, and a task that already finished does not run again.
+- **`TaskSendPayload` holds one `input_json`.** `args_json`, `kwargs_json`
+  and `enqueue_sha` are removed; a `null` input stays `null`. The payload
+  holds the retention of the send.
+- **Send retention is a period, `Forever`, or the queue's.**
+  `TaskSendOptions::retention` takes `SendRetention::FromQueueOrDefault`,
+  `Forever` or `Period(RetentionDays)`; a period that this deployment does
+  not register is refused with the allowed periods. `retention_class` is
+  removed.
+- **`schedule` takes `WholeSeconds`** in place of a `Duration`, whose
+  sub-second part was dropped.
+- **`TaskRuntime::task_handle` returns `TaskFunctionNotFound`**
+  (`NotRegistered`, `OtherTypes`) in place of a `TaskError`.
 - **The CLI types and `fetch_docs` are no longer public.** `Cli`, `Command`,
   `LogLevel`, `execute_web`, `WebArgs`, `WebAuthMode`,
   `WebCliError`, `execute_cutover`, `CutoverArgs`, `CutoverCliError`,

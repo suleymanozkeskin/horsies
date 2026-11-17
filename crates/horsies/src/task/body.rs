@@ -86,7 +86,7 @@ pub(crate) fn encode_output<T>(value: &T) -> RawTaskResult
 where
     T: Serialize + DeserializeOwned,
 {
-    match read_back(value) {
+    match encode_read_back(value) {
         Ok(bytes) => TaskResult::Ok(bytes),
         Err(text) => TaskResult::Err(serialization_error::<T>(format!(
             "task returned a value of type {}: {text}",
@@ -96,8 +96,10 @@ where
 }
 
 /// The bytes of `value` when they read back as `T` to the same bytes, else
-/// the value-free cause.
-fn read_back<T>(value: &T) -> Result<Vec<u8>, String>
+/// the value-free cause: the strict encode, the rules of a user value, the
+/// decode with `T`, the second encode and the compare. The return check of
+/// a body and the input check of a send share it. Pure.
+pub(crate) fn encode_read_back<T>(value: &T) -> Result<Vec<u8>, String>
 where
     T: Serialize + DeserializeOwned,
 {
