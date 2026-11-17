@@ -29,7 +29,7 @@ from horsies.core.utils.db import AUTOCOMMIT_EXECUTION_OPTIONS
 from horsies.monitoring.errors import MonitoringQueryHistoryContractViolation
 from horsies.monitoring.models import TaskAbsenceReason, TaskDetailNotFound
 from horsies.core.types.result import Err, Ok, is_err
-from horsies.web.routes import tasks as tasks_routes
+from tests.dualrun.reference.web_routes import tasks as tasks_routes
 from tests.dualrun.reference.monitoring_queries import get_task_detail, get_workflow_node
 from tests.monitoring_function_support import (
     absent_row,

@@ -121,6 +121,33 @@ written in Rust, on a new baseline schema.
   per topic (`tasks`, `workflows`, `workers`). A client that keeps up sees
   no change.
 
+- **The monitoring web app runs in the core.** `create_monitoring_app`
+  keeps its signature and mounts the core's monitoring handler: the routes,
+  the guards, the read caches, the schema gate, the event stream and the page
+  run in `horsies._core`. The app calls the auth policy as 0.7 did: no call
+  for the page and its assets, `can_view` for a read and the event stream,
+  `can_view` then `can_act` for `/api/meta` and each action.
+  `monitoring_app.state.events.close()` ends the open event streams.
+
+- **The web UI is compiled into `horsies._core`.** The core embeds the
+  committed build of `webui/` (`crates/horsies-core/webui-dist`); the wheel
+  no longer carries `horsies/web/static/`, and a build from a clone serves
+  the page with no frontend step. `bun run build` in `webui/` writes the
+  committed build.
+
+- **The web event stream uses the process listener of the broker.** It
+  opens no connection of its own. After the listener reconnects, each stream
+  gets one event with no ids per topic; 0.7 went on with a silent gap. A
+  broker built with `assume_initialized=True` has no listener, so its event
+  stream sends the `degraded` event and closes.
+
+- **The worker list measures ages to the database clock.** `snapshot_age_s`,
+  `stale` and `uptime_s` of `GET /api/workers` are measured to the time of
+  the database read; 0.7 measured them to the clock of the web host.
+
+- **A web request body over 1 MiB is refused with 413.** The task cancel
+  route, the one route that reads a body, takes `{"include_running": bool}`.
+
 - **The pool of the worker process can be as small as 3 connections.**
   `ParentPool(max_size=PoolSize(connections=N))` accepts N of 3 and 4
   (`PARENT_POOL_MIN_CONNECTIONS` is 3, was 5): the flushers of the batched
@@ -194,6 +221,20 @@ written in Rust, on a new baseline schema.
   timestamp (4714-11-24 BC). 0.7.0 accepted any positive `timedelta`, and
   such an age failed every sweep with `timestamp out of range`.
 
+- **`check(live=True)` runs the core's connectivity check.** The check
+  builds a core handle of its own (observe-only, producer pools) and calls
+  `CoreHandle.check_connectivity`, the rule of the Python and Rust clients:
+  `SELECT 1` on `database_url`, then on `session_database_url` when it
+  differs from `database_url`, then, with `pgbouncer_transaction_mode`, a
+  LISTEN on the session URL that must receive a NOTIFY (sent through
+  `database_url`) within 2 s. It opens no SQLAlchemy engine and no psycopg
+  connection of its own. The first checkout of each URL runs the core's
+  statement-pooling check, so a statement-pooled URL is refused here too
+  (before: only at worker start). The refusals keep their codes and texts
+  (`HRS-203`, "broker connectivity check failed" with the cause, "broker
+  listener capability check failed"); the listener refusal adds the core's
+  cause as a second note.
+
 ### Fixed
 
 - **A stored retry policy that does not validate fails the task at claim.**
@@ -232,6 +273,12 @@ written in Rust, on a new baseline schema.
   key of `GET /api/workers/classes`, and the `not_recorded` value of
   `slot_health` (`GET /api/workers`). On the baseline schema every snapshot
   records these facts.
+
+- **The Python route modules of the web app.** `horsies.web.routes`,
+  `horsies.web.events`, `horsies.web.read_cache`,
+  `horsies.web.auth.view_guard`, `horsies.web.auth.act_guard` and
+  `horsies.web.schema.schema_guard` are removed: the core's handler serves
+  every route. The exports of `horsies.web` are unchanged.
 
 ### Rust client (crate `horsies`)
 
@@ -528,18 +575,21 @@ unless it starts with "Added".
 - **A dependency's result is received as `TaskOutcome<S, E>`.** `arg_from`
   takes a field of type `TaskOutcome<S, E>` and a `TypedNodeRef<S>`; `E`
   reads the dependency's user codes, and `UserCode` reads any.
-  `TaskResult<T>` is removed. A task whose one parameter is a
-  `TaskOutcome` or a `WorkflowContext` gets an `Input` struct, so a node
-  binds the parameter by name.
-- **A single task parameter that is not a struct is stored under its
-  name.** The task attribute wraps it in the generated `Input` struct, as
-  Python stores each keyword argument: `fn double(x: i64)` stores the input
-  `{"x": 2}` for a plain send and as a workflow node (before: `2`), and
-  `register` returns `TaskFunction<double::Input, i64, E>` with
-  `double::params::x()`. The attribute reads the type's name: a primitive,
-  a string, a sequence, a set, a map, an `Option`, a tuple, an array, a
-  JSON value, a UUID, a date or time is wrapped, read through `Box`, `Arc`
-  and `Rc`. A single struct parameter, and `()`, stay the input itself.
+  `TaskResult<T>` is removed. A node binds the receiving parameter by its
+  name (`task_name::params::<name>()`).
+- **Every task parameter is stored under its name.** The task attribute
+  wraps the parameters in the generated `Input` struct, one field per
+  parameter, as Python stores keyword arguments, a single parameter of any
+  type included: `fn double(x: i64)` stores the input `{"x": 2}` (before:
+  `2`), and `fn validate_order(order: Order)` stores `{"order": {...}}`
+  (before: the fields of `Order`), for a plain send and as a workflow node.
+  `register` returns `TaskFunction<validate_order::Input, T, E>`, and
+  `validate_order::params::order()` is the field token of a node. A task
+  with no parameters, or with one parameter written `()`, has the input
+  `()`: a send stores `null`, a node `{}`. A parameter whose value is
+  stored needs a name: `_` is a compile error for it.
+  `#[derive(WorkflowInput)]` gives the field tokens of a sub-workflow's
+  params type.
 - **A node's input is one JSON object.** `TaskNode::args_json` and
   `kwargs_json` are replaced by `input_json(text)`, which returns a
   `Result`; `set_input` of a value that does not encode as an object is
@@ -609,6 +659,51 @@ unless it starts with "Added".
   `WorkflowNodeInfo`, `cancel()` returns `HandleResult<()>`.
   `WorkflowFunction::handle` and `Horsies::workflow_handle` return the
   handle with no I/O.
+- **The monitoring functions take the app.** `horsies::monitoring::{
+  task_stats, task_facets, task_breakdown, list_tasks, get_task_detail,
+  list_workflow_names, list_workflow_runs, get_workflow_run,
+  get_workflow_node, list_schedules, cancel_task, cancel_task_action,
+  pause_workflow_action, resume_workflow_action, cancel_workflow_action}`
+  take `&Horsies` in place of a `PostgresBroker`, connect the app's handle,
+  and run the core's queries; none installs the schema. A failed connect is
+  `DB_OPERATION_FAILED` (503 for an action). `get_task_detail` returns
+  `TaskDetailRead`: `Found`, or `NotFound` with its `TaskAbsenceReason`.
+  `resume_workflow_action` builds the children that a resume owes from the
+  workflow definitions registered on the app. The query types take a
+  `HistoryWindow` from `resolve_monitoring_window`; the error catalogs are
+  Python's (`HISTORY_CONTRACT_VIOLATION`, `STORED_DATA_INVALID`).
+- **`web::create_monitoring_router` becomes `web::router(&app,
+  MonitoringConfig, policy)`** (feature `web`), an axum mount of the core's
+  monitoring handler: the core serves every route, the event frames and
+  the embedded UI, so the Python and Rust apps answer alike. The router
+  asks the policy only the verdicts that the route needs. `MonitoringConfig`
+  holds the UI settings and `Actions::{Enabled, Disabled}` (default
+  enabled). The handler is built at the first request; a broker that
+  cannot be built answers 503. `MonitoringAuthPolicy` is a trait of the
+  crate whose methods return `impl Future<Output = bool> + Send` (write them
+  as `async fn`); `MonitoringRequest`, `AllowAll`, `ViewOnly`,
+  `TrustedHeader`, `INTENT_HEADER` and `INTENT_VALUE` stay. The event,
+  schema and SPA types (`EventBroadcaster`, `EventCoalescer`, `TopicEvent`,
+  `SchemaProbe`, `SchemaState`, `MetaResponse`, ...) are no longer public.
+  The crate no longer embeds a UI build of its own (`webui-dist/`), and the
+  frozen UI source `rust/webui/` is removed.
+- **`rerun_task(broker, ...)` becomes `app.rerun_task(command, policy)`**,
+  which runs in a transaction of the app's handle and returns
+  `Result<RerunOutcome, AppRerunError>` (`Connect`, `Rerun(RerunError)`).
+  `RerunOutcome` is Python's catalog: `Enqueued`, `SourceLive`,
+  `SourceAbsent { reason }` (a `TaskAbsenceReason` in place of
+  `predates_retained_floor: Option<bool>`), `SourceCorrupt`, `NotEligible`,
+  `InputUnavailable`, `InputCorrupt`, `KeyConflict`, `KeyReplay`.
+- **Added: `rerun::rerun_task_in(&mut transaction, &command, &policy,
+  sent_at)`**, the rerun in a transaction that the caller owns (Python
+  `rerun_task(connection, ...)`): the core builds each statement and
+  decides the outcome, the caller's driver runs the statements, and the
+  rerun commits or rolls back with the caller's own writes. Nothing commits
+  inside. `transaction` is any `CallerTransaction`; the adapters are
+  `rerun::TokioPostgresCaller` (feature `tokio-postgres`) and
+  `rerun::SqlxCaller` (feature `sqlx`). Errors are `CallerRerunError<E>`:
+  `Driver(E)`, `ClassNotRegistered { key }`, `ClientFamilyMismatch
+  { stored }`, `CallerKeyRefused`, `IdMintRefused`, `Row`.
 
 ## [0.7.0] - 2026-11-15
 

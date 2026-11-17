@@ -12,6 +12,7 @@ from __future__ import annotations
 import functools
 import json
 import uuid
+from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -37,6 +38,13 @@ from horsies.core.worker.worker import Worker
 from tests.dispatch_claim_support import claim_at, row_claim
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import force_terminal, read_attempts
+from tests.integration.autocommit_support import (
+    open_proxied_worker,
+    proxied_url,
+    steady_state_turns,
+    upstream_of,
+)
+from tests.integration.round_trip_proxy import RoundTripProxy
 
 pytestmark = [pytest.mark.integration]
 
@@ -276,39 +284,48 @@ async def test_a_listed_code_schedules_the_retry(
     )
 
 
+@pytest.fixture
+def proxy(db_url: str) -> Generator[RoundTripProxy]:
+    host, port = upstream_of(db_url)
+    started = RoundTripProxy(host, port)
+    started.start()
+    yield started
+    started.stop()
+
+
 @pytest.mark.asyncio(loop_scope='function')
 async def test_the_retry_is_one_statement_with_no_read(
-    engine: AsyncEngine,
+    proxy: RoundTripProxy,
+    db_url: str,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """One write and no read of the row: the retry facts come with the claim."""
+    """One write and no read of the row: the retry facts come with the claim.
+    Counted at the wire, in the steady state of the core's prepared
+    statements: the finalize sends one turn, the Bind/Execute of the write."""
     opts = _make_task_options(auto_retry_for=['ERR'])
-    task_id = await _insert_task(session, task_options=opts)
-    claim = await row_claim(session, task_id)
-    worker = _make_worker(engine)
-    statements: list[str] = []
+    opened = await open_proxied_worker(proxied_url(db_url, proxy))
+    opened.worker.worker_instance_id = TEST_WORKER_ID
+    opened.worker._app = _app()
+    opened.worker._spawn_background = MagicMock()  # type: ignore[method-assign]
 
-    from sqlalchemy import event
+    async def arrange() -> tuple[str, DispatchClaim]:
+        task_id = await _insert_task(session, task_options=opts)
+        return task_id, await row_claim(session, task_id)
 
-    def _record(
-        _conn: object,
-        _cursor: object,
-        statement: str,
-        *_args: object,
-    ) -> None:
-        statements.append(statement)
+    async def act(case: tuple[str, DispatchClaim]) -> None:
+        task_id, claim = case
+        result = await _finalize_error(opened.worker, task_id, claim, 'ERR')
+        assert is_ok(result), result
 
-    event.listen(engine.sync_engine, 'before_cursor_execute', _record)
     try:
-        result = await _finalize_error(worker, task_id, claim, 'ERR')
+        (task_id, _), turns = await steady_state_turns(proxy, arrange, act)
     finally:
-        event.remove(engine.sync_engine, 'before_cursor_execute', _record)
+        await opened.close()
 
-    assert is_ok(result)
-    assert [s for s in statements if 'FROM horsies_tasks' in s] == [], statements
-    assert [s for s in statements if 'horsies_finish_failed_attempt' in s]
-    assert len(statements) == 1, statements
+    assert [turn.executes() for turn in turns] == [True], turns
+    row = await _row(session, task_id)
+    assert (row.status, row.retry_count) == ('PENDING', 1)
 
 
 @pytest.mark.asyncio(loop_scope='function')

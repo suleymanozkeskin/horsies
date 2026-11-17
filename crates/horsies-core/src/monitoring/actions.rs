@@ -150,6 +150,13 @@ fn detail(status_code: u16, message: impl Into<String>) -> ActionOutcome {
     }
 }
 
+/// The answer of an action that did not run because its client could not
+/// connect its broker: 503 with the cause, as a failed statement is
+/// answered (Python `_handle_failed` for `DB_OPERATION_FAILED`). Pure.
+pub fn connect_failed_action(cause: &str) -> ActionOutcome {
+    detail(503, cause)
+}
+
 fn workflow_not_found(workflow_id: Uuid) -> ActionOutcome {
     detail(404, format!("Workflow {workflow_id} not found"))
 }
@@ -171,7 +178,7 @@ fn task_action_failed(error: TaskActionError) -> ActionOutcome {
         // Python answers it with 503 too; the core never produces it.
         TaskActionErrorCode::EventLoopLimit => detail(503, error.message),
         // The request was valid, and a repeat gives the same answer until the
-        // stored row changes (Python `python/horsies/web/routes/actions.py:110-130`).
+        // stored row changes (Python `tests/dualrun/reference/web_routes/actions.py:110-130`).
         TaskActionErrorCode::StoredDataInvalid => detail(500, error.message),
     }
 }
@@ -247,7 +254,7 @@ pub async fn pause_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) -
 }
 
 /// The answer of a failed resume, from the error alone, as Python's resume
-/// route (`python/horsies/web/routes/actions.py:234-258`): `RESUME_RECOVERY_FAILED`
+/// route (`tests/dualrun/reference/web_routes/actions.py:234-258`): `RESUME_RECOVERY_FAILED`
 /// means the resume committed and only its recovery pass failed, so the
 /// workflow was resumed and the answer says so with a warning. Every other
 /// error is answered as for the other workflow actions. No second status read
@@ -335,6 +342,18 @@ mod tests {
                 serde_json::Value::from(code.wire_value())
             );
         }
+    }
+
+    #[test]
+    fn a_connect_failure_is_503_with_its_cause() {
+        let outcome = connect_failed_action("workflow pause failed: connection refused");
+        assert_eq!(outcome.status_code(), 503);
+        assert_eq!(
+            outcome.into_body(),
+            ActionBody::Detail {
+                detail: "workflow pause failed: connection refused".to_owned()
+            }
+        );
     }
 
     #[test]

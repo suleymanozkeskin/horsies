@@ -67,7 +67,7 @@ match my_task.with_options(good_until=deadline).send(name="alice", count=3):
         print(f"Send failed: {err.code}")
 ```
 
-`good_until` must be a timezone-aware `datetime`. Naive datetimes return `Err(VALIDATION_FAILED)`.
+`good_until` must be a timezone-aware `datetime`. Naive datetimes return `Err(VALIDATION_FAILED)`. Compute the deadline at send time, not at module load time.
 
 `with_options()` works with all send methods:
 

@@ -2,8 +2,8 @@
 title: Deploying Code Changes
 section: shared
 summary: What happens to stored task rows and workflows when task signatures, task names, return types or models change, and the order of a safe deploy.
-related: [../workers/worker-architecture, ../tasks/errors, ../internals/serialization, ../concepts/workflows/subworkflows, ../concepts/workflows/workflow-api]
-tags: [operations, deploy, rolling-deploy, rename, model-change, AliasChoices, WORKER_SERIALIZATION_ERROR, WORKER_RESOLUTION_ERROR, SUBWORKFLOW_LOAD_FAILED, RESULT_DESERIALIZATION_ERROR]
+related: [code-change-examples, ../workers/worker-architecture, ../tasks/errors, ../internals/serialization, ../concepts/workflows/subworkflows, ../concepts/workflows/workflow-api]
+tags: [operations, deploy, rolling-deploy, rename, model-change, WORKER_SERIALIZATION_ERROR, WORKER_RESOLUTION_ERROR, SUBWORKFLOW_LOAD_FAILED, RESULT_DESERIALIZATION_ERROR]
 ---
 
 # Deploying Code Changes
@@ -21,6 +21,8 @@ Read this page before a deploy that changes any of these:
 - a workflow definition or a `build_with` signature
 
 Rows that exist before the deploy are not changed by it. They run with the code that is loaded when they are claimed.
+
+The Python code of the steps below is on [Code Change Examples](/horsies/operations/code-change-examples/) (Python).
 
 ## Which Code Reads Which Stored Data
 
@@ -65,23 +67,7 @@ An old worker follows the same rules. During a rolling deploy, a new producer ca
 1. Add the parameter with a default value. Deploy all workers.
 2. Deploy the producers that send the new kwarg.
 
-A default value lets old rows decode and run. A required parameter fails every old row with `UNHANDLED_EXCEPTION`.
-
-```python
-from horsies import TaskError, TaskResult
-
-from myapp.instance import app
-
-
-@app.task('send_email')
-def send_email(
-    *,
-    to: str,
-    subject: str,
-    locale: str = 'en',
-) -> TaskResult[None, TaskError]:
-    return TaskResult(ok=None)
-```
+A default value lets old rows decode and run. A required parameter fails every old row with `UNHANDLED_EXCEPTION`. The Python example is in [Add a Parameter](/horsies/operations/code-change-examples/#add-a-parameter).
 
 ### Remove or Rename a Parameter
 
@@ -93,28 +79,7 @@ A rename is an add and a remove. Add the new parameter with a default, move the 
 
 ### Rename or Remove a Task
 
-Keep the old name registered until no row uses it. Register two tasks that call the same function body.
-
-```python
-from horsies import TaskError, TaskResult
-
-from myapp.instance import app
-
-
-def _deliver_report(*, report_id: str) -> TaskResult[None, TaskError]:
-    return TaskResult(ok=None)
-
-
-@app.task('build_report')
-def build_report(*, report_id: str) -> TaskResult[None, TaskError]:
-    return _deliver_report(report_id=report_id)
-
-
-# Old name. Remove it after no row with this name remains.
-@app.task('make_report')
-def make_report(*, report_id: str) -> TaskResult[None, TaskError]:
-    return _deliver_report(report_id=report_id)
-```
+Keep the old name registered until no row uses it. Register two tasks that call the same function body. The Python example is in [Rename or Remove a Task](/horsies/operations/code-change-examples/#rename-or-remove-a-task).
 
 1. Deploy workers that register both names.
 2. Deploy producers that send the new name.
@@ -135,41 +100,17 @@ Unknown keys are refused when a value is sent. They are ignored when stored data
 
 #### Add a Field
 
-Give the field a default. Deploy all workers, then the producers.
-
-```python
-from pydantic import BaseModel
-
-
-class Car(BaseModel):
-    model: str
-    km: int
-    colour: str = 'unknown'
-```
+Give the field a default. Deploy all workers, then the producers. The Python example is in [Add a Model Field](/horsies/operations/code-change-examples/#add-a-model-field).
 
 A required field fails every old row. Make it required only after no old row remains.
 
 #### Rename a Field
 
-Accept both names on read with `AliasChoices`. New rows are written under the new name, and old rows still read.
-
-```python
-from pydantic import AliasChoices, BaseModel, Field
-
-
-class Car(BaseModel):
-    model: str
-    km: int
-    registration_year: int = Field(
-        validation_alias=AliasChoices('registration_year', 'register_year'),
-    )
-```
+Accept both names on read with an alias of the field. New rows are written under the new name, and old rows still read. The Python example is in [Rename a Model Field](/horsies/operations/code-change-examples/#rename-a-model-field).
 
 1. Add the alias. Deploy all workers, then the producers.
 2. Wait until no live row and no result that you still read holds the old name (see [Check for Remaining Rows](#check-for-remaining-rows)).
-3. Remove the old name from `AliasChoices`.
-
-The new name must be in `AliasChoices`, or `@app.task` refuses the model.
+3. Remove the old name from the alias.
 
 #### Remove a Field
 

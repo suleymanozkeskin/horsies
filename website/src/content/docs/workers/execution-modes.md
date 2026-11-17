@@ -133,72 +133,17 @@ Each mode adds rules to [Defining Tasks](/horsies/tasks/defining-tasks/). The pa
 
 ## Profile Examples
 
-A worker profile sets the children of each mode. A profile can mix the modes.
+A worker profile sets the children of each mode. A profile can mix the modes. For example, an app with three profiles:
 
-```python
-from pydantic import SecretStr
+| Profile | Children | For |
+| ------- | -------- | --- |
+| `default` | 8 isolated | Every task in an isolated child |
+| `io` | 2 isolated; 4 shared async with 25 seats each | Network waits on 4 × 25 = 100 seats; other tasks in the 2 isolated children |
+| `compute` | 2 isolated; 2 shared thread with 4 seats each | C code that releases the GIL, on a machine with 8 CPUs: 2 × 4 = 8 seats |
 
-from horsies import (
-    AppConfig,
-    Horsies,
-    IsolatedChildren,
-    PostgresConfig,
-    SharedAsyncChildren,
-    SharedThreadChildren,
-    WorkerProfile,
-)
+The app has one task of each mode. A worker with the `io` profile runs the `SHARED_ASYNC` task on a shared async seat. It runs the `SHARED_THREAD` task and the `ISOLATED` task in its isolated children, because the profile has no shared thread children. A worker with the `compute` profile runs the `SHARED_THREAD` task on a seat thread, and the `SHARED_ASYNC` task in an isolated child.
 
-app = Horsies(AppConfig(
-    broker=PostgresConfig(
-        database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
-    ),
-    worker_profiles={
-        # Every task in an isolated child
-        'default': WorkerProfile(isolated=IsolatedChildren(count=8)),
-        # Network waits on 4 x 25 = 100 seats; other tasks in 2 isolated children
-        'io': WorkerProfile(
-            isolated=IsolatedChildren(count=2),
-            shared_async=SharedAsyncChildren(count=4, seats=25),
-        ),
-        # C code that releases the GIL, on a machine with 8 CPUs: 2 x 4 = 8 seats
-        'compute': WorkerProfile(
-            isolated=IsolatedChildren(count=2),
-            shared_thread=SharedThreadChildren(count=2, seats=4),
-        ),
-    },
-))
-```
-
-One task of each mode:
-
-```python
-import asyncio
-import zlib
-
-from horsies import Execution, TaskError, TaskResult
-
-
-@app.task('fetch_rate', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
-async def fetch_rate(*, currency: str) -> TaskResult[str, TaskError]:
-    await asyncio.sleep(0.1)  # stands in for an HTTP call with its own timeout
-    return TaskResult(ok=currency)
-
-
-@app.task('compress_report', execution=Execution.SHARED_THREAD, timeout_ms=60_000)
-def compress_report(*, text: str) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=len(zlib.compress(text.encode(), level=6)))
-
-
-@app.task('render_invoice')
-def render_invoice(*, invoice_id: int) -> TaskResult[str, TaskError]:
-    return TaskResult(ok=f'invoice-{invoice_id}.pdf')
-```
-
-```bash
-horsies worker myapp.instance:app --profile io
-```
-
-A worker with the `io` profile runs `fetch_rate` on a shared async seat. It runs `compress_report` and `render_invoice` in its isolated children, because the profile has no shared thread children. A worker with the `compute` profile runs `compress_report` on a seat thread, and `fetch_rate` in an isolated child.
+The Python example is in [Mix the Modes](/horsies/workers/worker-profiles/#mix-the-modes). The Rust worker setup page is not written yet.
 
 A profile can also hold only shared children. Its worker claims no `ISOLATED` rows, so another worker must have isolated children for them. The fleet check reports a class that no live worker serves. See [Does a live worker serve every pending class?](/horsies/monitoring/worker-health/#does-a-live-worker-serve-every-pending-class)
 

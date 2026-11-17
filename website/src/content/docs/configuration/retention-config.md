@@ -17,47 +17,23 @@ Retention is about work that went right and is now history. A knob that
 decides when a record is deleted was never a recovery knob, so as of
 this release it no longer lives on `RecoveryConfig`.
 
-<!-- check: skip elided -- broker=... stands for the broker config shown on other pages -->
-```python
-from datetime import timedelta
-from horsies import AppConfig, RetentionConfig
-
-AppConfig(
-    broker=...,
-    retention=RetentionConfig(
-        queue_retention={
-            'emails': timedelta(days=7),
-            'audit': None,
-        },
-        terminal_record_retention_hours=24 * 90,
-        retention_periods=(timedelta(days=365),),
-    ),
-)
-```
+The API is on the client pages: [Retention Configuration](/horsies/configuration/app-config/#retention-configuration) (Python) and [AppConfig](/horsies/rust/configuration/app-config/#appconfig) (Rust).
 
 ## Retention per queue
 
 `queue_retention` maps a queue name to how long a task sent on it keeps
 its history record, or to `None` to keep it forever. It is the setting
 most deployments want: retention usually varies by what the work *is*,
-and the queue already says that.
-
-```python
-retention=RetentionConfig(
-    queue_retention={
-        'emails': timedelta(days=7),     # noisy, short-lived
-        'reports': timedelta(days=90),
-        'audit': None,                   # keep forever
-    },
-)
-```
+and the queue already says that. For example: `emails` 7 days (noisy,
+short-lived), `reports` 90 days, `audit` forever. The Python example is in
+[Retention per Queue](/horsies/configuration/app-config/#retention-per-queue).
 
 A queue with no entry is unchanged: its tasks take the 30-day default
 class.
 
 A period is **whole days, from 1 to 1825** (five years). The config
 refuses any other value when it loads: a fractional day such as
-`timedelta(hours=36)`, zero, or more than 1825 days. History partitions
+36 hours, zero, or more than 1825 days. History partitions
 are daily, so a finer period would only make another set of partitions
 with the same behaviour. It is refused, never rounded.
 
@@ -75,9 +51,8 @@ A retention class is identified by its period, and its key is
 | 30 days (the default) | `standard_30d` |
 | 365 days | `standard_365d` |
 
-Queues mapped to the same period share one class:
-`{'emails': timedelta(days=7), 'alerts': timedelta(days=7)}` stamps
-`standard_7d` for both. You see the key in monitoring, in the
+Queues mapped to the same period share one class: `emails` and `alerts`,
+both mapped to 7 days, stamp `standard_7d`. You see the key in monitoring, in the
 `retention_class_key` column, and in partition names
 (`horsies_task_history_standard_7d_...`).
 
@@ -89,7 +64,7 @@ change a class that already holds rows.
 
 Highest precedence first:
 
-1. **What the send asks for** — `with_options(retention=...)`. Choosing
+1. **What the send asks for** — the retention option of the send. Choosing
    30 days explicitly is a choice and beats the mapping.
 2. **The queue's mapping**, if it has one.
 3. **`standard_30d`**, the 30-day default.
@@ -97,21 +72,18 @@ Highest precedence first:
 Omitting the argument therefore means "the queue's mapping if there is
 one" — not 30 days unconditionally.
 
-The same precedence applies wherever a task is enqueued: `.send()`,
-`.send_async()`, `.schedule()`, `.schedule_async()`, a `TaskSchedule`
-firing on its cron, and a workflow node's backing task. A cron fire
+The same precedence applies wherever a task is enqueued: a send, a
+delayed send, a schedule firing on its cron, and a workflow node's
+backing task. A cron fire
 resolves from the scheduler process's own configuration, and a workflow
 node from the queue its node runs on. The class is chosen at enqueue in
 every case.
 
-<!-- check: skip partial -- uses names that the page does not define -->
-```python
-# On the mapped 'emails' queue: kept 7 days
-await send_email.send_async(to=...)
-
-# Same queue, this one send opted back to 30 days
-await send_email.with_options(retention=timedelta(days=30)).send_async(to=...)
-```
+For example, a send on the mapped `emails` queue keeps its record 7 days;
+a send on the same queue that asks for 30 days keeps its record 30 days.
+The send API is on the client pages:
+[Send With a Listed Retention Period](/horsies/tasks/sending-tasks/#send-with-a-listed-retention-period)
+(Python) and [Send Options](/horsies/rust/tasks/sending-tasks/#send-options) (Rust).
 
 An explicit finite period must be one this process registers: the
 default, a mapped period, or one in `retention_periods`. Any other period
@@ -124,8 +96,8 @@ A changed period is another class:
 
 | Time | `queue_retention['emails']` | New sends land in | Older records |
 |---|---|---|---|
-| Monday | `timedelta(days=7)` | `standard_7d` | — |
-| Friday | `timedelta(days=14)` | `standard_14d` | still in `standard_7d`, dropped on their 7-day promise |
+| Monday | 7 days | `standard_7d` | — |
+| Friday | 14 days | `standard_14d` | still in `standard_7d`, dropped on their 7-day promise |
 
 The class is decided **when the task is sent** and recorded on the row. A
 retry replays the class its original send chose, so editing the map
@@ -182,13 +154,9 @@ An explicit `None` keeps the record forever. See
 ### Periods a send chooses
 
 A send can choose a finite period that no queue maps. List it in
-`retention_periods`, so that the maintenance owner registers its class:
-
-```python
-RetentionConfig(
-    retention_periods=(timedelta(days=365), timedelta(days=2)),
-)
-```
+`retention_periods`, so that the maintenance owner registers its class,
+for example 365 days and 2 days. The Python example is in
+[Periods a Send Chooses](/horsies/configuration/app-config/#periods-a-send-chooses).
 
 A listed period follows the same rule as a mapped one: whole days from 1
 to 1825. A period listed twice is refused.
@@ -324,7 +292,7 @@ held up by a stalled consumer.
 `None` disables the sweep, so no deployment changes behaviour without
 declaring the rule.
 
-The age is at most 365,000 days (`timedelta(days=365_000)`, 1,000 years of
+The age is at most 365,000 days (1,000 years of
 365 days). The expiry selects the workflows whose last update is before
 `now()` minus the age, and PostgreSQL's lowest timestamp is
 4714-11-24 BC. With this bound, `now()` minus the age stays inside the

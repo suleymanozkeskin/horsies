@@ -45,11 +45,16 @@ pub enum ChildSpecs {
     Client(Arc<dyn ChildSpecSource>),
 }
 
+impl From<Arc<WorkflowSpecRegistry>> for ChildSpecs {
+    /// The registered definitions of the Rust client.
+    fn from(registry: Arc<WorkflowSpecRegistry>) -> Self {
+        Self::Registry(registry)
+    }
+}
+
 impl ChildSpecs {
     /// The build that a step takes: the task queues of a registry child take
     /// their class from `retention`; a client child carries its own classes.
-    // The core worker takes `ChildSpecs` in place of its registry (#1113).
-    #[allow(dead_code)]
     pub(crate) fn build<'a>(&'a self, retention: &'a RetentionConfig) -> ChildBuild<'a> {
         match self {
             Self::Registry(registry) => ChildBuild::Registry {

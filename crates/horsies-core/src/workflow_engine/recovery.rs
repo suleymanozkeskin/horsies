@@ -638,29 +638,8 @@ pub async fn recover_stuck_workflows(
     .await
 }
 
-/// The reaper's global pass. It keeps its partial report when it fails.
-pub(crate) async fn recover_stuck_workflows_observed(
-    broker: &PostgresBroker,
-    registry: &WorkflowSpecRegistry,
-    failure_limit: u32,
-    retention: &RetentionConfig,
-) -> Result<RecoveryReport, RecoveryPassFailure> {
-    recover_stuck_workflows_in_scope(
-        broker,
-        ChildBuild::Registry {
-            registry,
-            retention,
-        },
-        RecoveryScope::Global {
-            max_rows: GLOBAL_SCAN_ROW_CAP,
-        },
-        RecoveryFailurePolicy::Count(CountFailures::new_pass(failure_limit)),
-    )
-    .await
-}
-
-/// The reaper's global pass with the children of its cases built by `build`. Outcomes and errors as
-/// [`recover_stuck_workflows_observed`].
+/// The reaper's global pass, with the children of its cases built by `build`. Outcomes as
+/// [`recover_stuck_workflows`]; a failed pass keeps its partial report ([`RecoveryPassFailure`]).
 pub(crate) async fn recover_stuck_workflows_observed_with(
     broker: &PostgresBroker,
     build: ChildBuild<'_>,
@@ -2103,11 +2082,15 @@ mod cap_tests {
 
     #[tokio::test]
     async fn discovery_query_failure_keeps_case_metrics_in_the_health_snapshot() {
-        let failure = recover_stuck_workflows_observed(
+        let failure = recover_stuck_workflows_observed_with(
             &unreachable_broker(),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            ChildBuild::Registry {
+                registry: &WorkflowSpecRegistry::new(
+                    crate::core::registry::BuilderHookName::SPEC_BUILDER,
+                ),
+                retention: &RetentionConfig::default(),
+            },
             25,
-            &RetentionConfig::default(),
         )
         .await
         .expect_err("candidate discovery failure must keep its partial report");

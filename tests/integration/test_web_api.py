@@ -2,7 +2,9 @@
 
 Runs the real app over httpx's ASGI transport against a real database, so the
 wiring between routes, the query package, and the task/workflow primitives is
-exercised end to end. Coverage:
+exercised end to end. With ``--dual-run=monitoring-and-web`` each test runs on
+the Python app before the switch (``tests/dualrun/reference/web_app.py``) and
+on the app that mounts the core's handler. Coverage:
 
 1. read routes — envelopes, 404 copy, and the vanished-backing-task case
 2. worker routes — snapshots, liveness, schedules, unknown-worker history
@@ -36,12 +38,19 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerOperationFailed
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.types.status import TaskStatus
+from horsies.core.models.app import AppConfig
+from horsies.core.models.broker import PostgresConfig
 from horsies.web import INTENT_HEADER, INTENT_VALUE, AllowAll, create_monitoring_app
-from horsies.web import events as events_module
-from horsies.web.routes import actions as actions_module
-from horsies.web.routes import events as events_route_module
+from horsies.web import app as web_app_module
 from horsies.core.utils.url import to_psycopg_url
 from horsies.web import schema as schema_module
+from pydantic import SecretStr
+from tests.dualrun.operations.plugin import DualRunCase, ImplementationRun, SingleRun
+from tests.dualrun.operations.table import Implementation
+from tests.dualrun.reference import web_app as reference_app_module
+from tests.dualrun.reference import web_events as reference_events_module
+from tests.dualrun.reference.web_routes import actions as reference_actions_module
+from tests.dualrun.reference.web_routes import events as reference_events_route_module
 from tests.integration.conftest import DB_URL
 from tests.integration.history_seeding import stored_history_status
 from tests.integration.monitoring_seeding import (
@@ -54,6 +63,7 @@ from tests.integration.monitoring_seeding import (
     task_row,
 )
 from tests.session_database import database_name_prefix
+from tests.web_event_stream import AsgiEventStream
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -95,110 +105,6 @@ async def api(monitoring: FastAPI) -> AsyncGenerator[AsyncClient, None]:
         transport=ASGITransport(app=monitoring), base_url='http://test'
     ) as client:
         yield client
-
-
-class AsgiEventStream:
-    """Reads a streaming ASGI response while it is still open.
-
-    httpx's ASGI transport accumulates the whole body before returning a
-    response, so an endless event stream deadlocks when read through it.
-    Speaking ASGI directly is what makes the stream observable — and it still
-    exercises the real app: routing, dependencies, and SSE framing.
-    """
-
-    def __init__(
-        self, app: Any, path: str, *, headers: dict[str, str] | None = None
-    ) -> None:
-        self._app = app
-        self._path = path
-        self._headers = headers or {}
-        self._chunks: asyncio.Queue[bytes] = asyncio.Queue()
-        self._disconnect = asyncio.Event()
-        self._task: asyncio.Task[None] | None = None
-        self._start: asyncio.Future[dict[str, Any]] | None = None
-        self._buffer = ''
-
-    async def __aenter__(self) -> AsgiEventStream:
-        self._start = asyncio.get_running_loop().create_future()
-        self._task = asyncio.create_task(self._run())
-        await asyncio.wait_for(asyncio.shield(self._start), timeout=20)
-        return self
-
-    async def __aexit__(self, *_exc: object) -> None:
-        self._disconnect.set()
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-
-    @property
-    def status_code(self) -> int:
-        assert self._start is not None
-        return int(self._start.result()['status'])
-
-    @property
-    def headers(self) -> dict[str, str]:
-        assert self._start is not None
-        return {
-            key.decode().lower(): value.decode()
-            for key, value in self._start.result()['headers']
-        }
-
-    async def _run(self) -> None:
-        scope: dict[str, Any] = {
-            'type': 'http',
-            'asgi': {'version': '3.0', 'spec_version': '2.3'},
-            'http_version': '1.1',
-            'method': 'GET',
-            'scheme': 'http',
-            'path': self._path,
-            'raw_path': self._path.encode(),
-            'query_string': b'',
-            'root_path': '',
-            'headers': [
-                (key.lower().encode(), value.encode())
-                for key, value in self._headers.items()
-            ],
-            'client': ('127.0.0.1', 12345),
-            'server': ('testserver', 80),
-        }
-
-        async def receive() -> dict[str, Any]:
-            await self._disconnect.wait()
-            return {'type': 'http.disconnect'}
-
-        async def send(message: dict[str, Any]) -> None:
-            if message['type'] == 'http.response.start':
-                assert self._start is not None
-                if not self._start.done():
-                    self._start.set_result(message)
-            elif message['type'] == 'http.response.body':
-                await self._chunks.put(bytes(message.get('body', b'')))
-
-        await self._app(scope, receive, send)
-
-    async def next_line(self, *, timeout_s: float) -> str:
-        while '\n' not in self._buffer:
-            chunk = await asyncio.wait_for(self._chunks.get(), timeout=timeout_s)
-            self._buffer += chunk.decode()
-        line, _, rest = self._buffer.partition('\n')
-        self._buffer = rest
-        return line
-
-    async def next_data(self, *, timeout_s: float) -> dict[str, Any]:
-        while True:
-            line = await self.next_line(timeout_s=timeout_s)
-            if line.startswith('data: '):
-                parsed: dict[str, Any] = json.loads(line.removeprefix('data: '))
-                return parsed
-
-    async def next_comment(self, *, timeout_s: float) -> str:
-        while True:
-            line = await self.next_line(timeout_s=timeout_s)
-            if line.startswith(':'):
-                return line
 
 
 def make_task(
@@ -894,6 +800,28 @@ class TestWorkflowActionMapping:
         assert response.status_code == 404
 
 
+def skip_on_the_core(implementation: ImplementationRun, reason: str) -> None:
+    """Skip the core run of ``--dual-run``: the test drives a seam of the
+    Python app before the switch."""
+    match implementation:
+        case DualRunCase(implementation=Implementation.CORE):
+            pytest.skip(reason)
+        case DualRunCase() | SingleRun():
+            pass
+
+
+@pytest_asyncio.fixture
+async def reference_api(app: Horsies) -> AsyncGenerator[AsyncClient, None]:
+    """A client of the Python app before the switch, whose route seams a test
+    replaces."""
+    built = reference_app_module.create_monitoring_app(app, auth_policy=AllowAll())
+    async with AsyncClient(
+        transport=ASGITransport(app=built), base_url='http://test'
+    ) as client:
+        yield client
+    await built.state.events.close()
+
+
 @pytest.mark.usefixtures('clean_tables')
 class TestResumeCommittedThenFailed:
     """Resume's recovery pass runs after the state change commits.
@@ -901,11 +829,21 @@ class TestResumeCommittedThenFailed:
     Resume returns ``HandleResumeRecoveryFailed`` when it committed and only
     the recovery pass failed. The server answers from that variant rather
     than handing the ambiguity to the browser.
+
+    These tests replace the workflow primitives of the Python action routes
+    (the reference of the switch); the core's mapping of the same errors is
+    tested in ``crates/horsies-core/src/monitoring/actions.rs``
+    (``resume_failure_mapping_is_exhaustive``). The core run of
+    ``--dual-run`` is skipped.
     """
+
+    @pytest.fixture(autouse=True)
+    def reference_only(self, implementation: ImplementationRun) -> None:
+        skip_on_the_core(implementation, 'the test replaces a primitive of the Python routes')
 
     async def test_recovery_failure_is_success_plus_a_warning(
         self,
-        api: AsyncClient,
+        reference_api: AsyncClient,
         session: AsyncSession,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -925,9 +863,9 @@ class TestResumeCommittedThenFailed:
                 )
             )
 
-        monkeypatch.setattr(actions_module, 'resume_workflow', failing_resume)
+        monkeypatch.setattr(reference_actions_module, 'resume_workflow', failing_resume)
 
-        response = await api.post(f'/api/workflows/{run.id}/resume', headers=ACT)
+        response = await reference_api.post(f'/api/workflows/{run.id}/resume', headers=ACT)
 
         assert response.status_code == 200
         assert response.json()['outcome'] == 'resumed'
@@ -935,7 +873,7 @@ class TestResumeCommittedThenFailed:
 
     async def test_failure_before_the_commit_is_service_unavailable(
         self,
-        api: AsyncClient,
+        reference_api: AsyncClient,
         session: AsyncSession,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -956,15 +894,15 @@ class TestResumeCommittedThenFailed:
                 )
             )
 
-        monkeypatch.setattr(actions_module, 'resume_workflow', failing_resume)
+        monkeypatch.setattr(reference_actions_module, 'resume_workflow', failing_resume)
 
-        response = await api.post(f'/api/workflows/{run.id}/resume', headers=ACT)
+        response = await reference_api.post(f'/api/workflows/{run.id}/resume', headers=ACT)
 
         assert response.status_code == 503
 
     async def test_pause_infrastructure_failure_is_service_unavailable(
         self,
-        api: AsyncClient,
+        reference_api: AsyncClient,
         session: AsyncSession,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -985,15 +923,15 @@ class TestResumeCommittedThenFailed:
                 )
             )
 
-        monkeypatch.setattr(actions_module, 'pause_workflow', failing_pause)
+        monkeypatch.setattr(reference_actions_module, 'pause_workflow', failing_pause)
 
-        response = await api.post(f'/api/workflows/{run.id}/pause', headers=ACT)
+        response = await reference_api.post(f'/api/workflows/{run.id}/pause', headers=ACT)
 
         assert response.status_code == 503
 
     async def test_pause_state_conflict_reports_the_observed_status(
         self,
-        api: AsyncClient,
+        reference_api: AsyncClient,
         session: AsyncSession,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1004,9 +942,9 @@ class TestResumeCommittedThenFailed:
         async def noop_pause(*_args: Any, **_kwargs: Any) -> Any:
             return Ok(False)
 
-        monkeypatch.setattr(actions_module, 'pause_workflow', noop_pause)
+        monkeypatch.setattr(reference_actions_module, 'pause_workflow', noop_pause)
 
-        response = await api.post(f'/api/workflows/{run.id}/pause', headers=ACT)
+        response = await reference_api.post(f'/api/workflows/{run.id}/pause', headers=ACT)
 
         assert response.status_code == 409
         assert response.json()['current_status'] == 'RUNNING'
@@ -1046,28 +984,42 @@ class TestEventStream:
         assert isinstance(frame['ids'], list)
 
     async def test_an_idle_stream_sends_heartbeats(
-        self, monitoring: FastAPI, monkeypatch: pytest.MonkeyPatch
+        self, app: Horsies, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Comment frames keep a proxy from reaping an idle connection."""
-        monkeypatch.setattr(events_route_module, 'HEARTBEAT_SECONDS', 0.2)
+        monkeypatch.setattr(reference_events_route_module, 'HEARTBEAT_SECONDS', 0.2)
+        monkeypatch.setattr(web_app_module, 'EVENT_HEARTBEAT_MS', 200)
+        built = create_monitoring_app(app, auth_policy=AllowAll())
 
-        async with AsgiEventStream(monitoring, '/api/events') as stream:
+        async with AsgiEventStream(built, '/api/events') as stream:
             comment = await stream.next_comment(timeout_s=15)
 
         assert comment.startswith(': heartbeat')
+        await built.state.events.close()
 
-    async def test_a_failed_listener_degrades_instead_of_pretending(
-        self, app: Horsies, monkeypatch: pytest.MonkeyPatch
+    async def test_a_listener_that_cannot_start_degrades_instead_of_pretending(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The server never fabricates events; the client falls back to polling."""
-        monkeypatch.setattr(events_module, 'PostgresListener', FailingListener)
-        built = create_monitoring_app(app, auth_policy=AllowAll())
+        """The server never fabricates events; the client falls back to polling.
+
+        The app's broker is built with ``assume_initialized=True``, so the
+        core gives it no listener; the Python app's own listener is replaced
+        with one that cannot start."""
+        monkeypatch.setattr(reference_events_module, 'PostgresListener', FailingListener)
+        no_listener = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(DB_URL))))
+        broker = PostgresBroker(
+            PostgresConfig(database_url=SecretStr(DB_URL)), assume_initialized=True,
+        )
+        no_listener._broker = broker  # pyright: ignore[reportPrivateUsage]
+        broker.app = no_listener
+        built = create_monitoring_app(no_listener, auth_policy=AllowAll())
 
         async with AsgiEventStream(built, '/api/events') as stream:
             frame = await stream.next_data(timeout_s=15)
 
         assert frame == {'topic': 'degraded'}
         await built.state.events.close()
+        await broker.close_async()
 
 
 class TestEventStreamAuthorization:
@@ -1365,20 +1317,42 @@ class TestSchemaMatch:
         assert response.status_code == 200
 
 
+LATER_SCHEMA_VERSION = schema_module.EXPECTED_SCHEMA_VERSION + 1
+"""A schema version that a later build records."""
+
+
 @pytest.mark.usefixtures('clean_tables')
 class TestSchemaMismatch:
     """A version step disables writes without disabling the dashboard."""
 
-    @pytest.fixture(autouse=True)
-    def expect_a_different_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Make this build expect a version the database does not carry."""
-        monkeypatch.setattr(schema_module, 'EXPECTED_SCHEMA_VERSION', 9999)
+    @pytest_asyncio.fixture(autouse=True)
+    async def a_later_version_is_recorded(
+        self, session: AsyncSession
+    ) -> AsyncGenerator[None, None]:
+        """Record a successful migration past the version this build expects,
+        as a newer build would; removed after the test."""
+        await session.execute(
+            text(
+                'INSERT INTO horsies_migrations (version, description, installed_on, '
+                'success, checksum, execution_time) VALUES '
+                "(:version, 'a later build', now(), TRUE, '\\x00'::bytea, 1)"
+            ),
+            {'version': LATER_SCHEMA_VERSION},
+        )
+        await session.commit()
+        yield
+        await session.execute(
+            text('DELETE FROM horsies_migrations WHERE version = :version'),
+            {'version': LATER_SCHEMA_VERSION},
+        )
+        await session.commit()
 
     async def test_meta_reports_the_mismatch(self, api: AsyncClient) -> None:
         body = (await api.get('/api/meta')).json()
 
-        assert body['schema_version'] is not None
-        assert body['expected_schema_version'] == 9999
+        assert body['schema_version'] == LATER_SCHEMA_VERSION
+        assert body['expected_schema_version'] == schema_module.EXPECTED_SCHEMA_VERSION
+        assert body['schema_state'] == 'MISMATCH'
         assert body['schema_compatible'] is False
         assert body['actions_enabled'] is False
         assert body['actions_disabled_reason'] == 'SCHEMA_INCOMPATIBLE'

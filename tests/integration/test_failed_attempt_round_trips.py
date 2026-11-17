@@ -38,19 +38,25 @@ from tests.integration.autocommit_support import (
     steady_state_turns,
     upstream_of,
 )
-from tests.integration.round_trip_proxy import RoundTripProxy
+from tests.integration.round_trip_proxy import RoundTripProxy, Turn
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
 PING: Final = 1
-"""The pre-ping of a checkout, when ``worker_pool_pre_ping`` is on. These
-tests set the idle limit to 0, so every reused connection is pinged."""
+"""The pre-ping of a checkout, when ``worker_pool_pre_ping`` is on. Python
+pinged every reused connection with these tests' idle limit of 0, so its
+count was the statement and one ping. The core pings a connection that
+waited in its pool past its own idle limit (1 s), so it sends the ping or
+not; its count is never higher than Python's."""
+
+CORE_PING: Final = 'SELECT 1'
+"""The simple query of the core's ping."""
 
 
 @pytest.fixture(autouse=True)
 def _ping_every_reused_connection(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With ``worker_pool_pre_ping`` on, the count does not depend on how
-    long a connection waited in the pool."""
+    """The worker's own engine pings every reused connection. The measured
+    writes run on the core's pool, which keeps its own idle limit."""
     monkeypatch.setattr(postgres_module, 'PRE_PING_AFTER_IDLE_S', 0.0)
 ERROR_CODE: Final = 'FLAKY'
 TIMEOUT_MS: Final = 1_000
@@ -127,6 +133,20 @@ async def _live_status(session: AsyncSession, task_id: str) -> str | None:
     return None if status is None else str(status)
 
 
+def _assert_one_statement(turns: tuple[Turn, ...], *, pre_ping: bool) -> None:
+    """One Bind/Execute turn, the statement; with the pre-ping on, at most
+    ``PING`` more turns, each the core's ping."""
+    executed = [turn for turn in turns if turn.executes()]
+    others = [turn for turn in turns if not turn.executes()]
+    assert len(executed) == 1, turns
+    match pre_ping:
+        case True:
+            assert len(others) <= PING, turns
+            assert all(turn.has_simple_query(CORE_PING) for turn in others), turns
+        case False:
+            assert others == [], turns
+
+
 async def _measure(
     proxy: RoundTripProxy,
     db_url: str,
@@ -175,7 +195,7 @@ async def test_a_worker_level_failure_is_one_statement(
         )
         assert result == Ok(None)
 
-    task_id, round_trips, turns = await _measure(
+    task_id, _, turns = await _measure(
         proxy,
         db_url,
         session,
@@ -184,7 +204,7 @@ async def test_a_worker_level_failure_is_one_statement(
         act_on=act,
     )
 
-    assert round_trips == 1 + (PING if pre_ping else 0), turns
+    _assert_one_statement(turns, pre_ping=pre_ping)
     assert await _live_status(session, task_id) is None
 
 
@@ -213,7 +233,7 @@ async def test_a_task_error_is_one_statement(
         )
         assert result == Ok(None)
 
-    task_id, round_trips, turns = await _measure(
+    task_id, _, turns = await _measure(
         proxy,
         db_url,
         session,
@@ -222,7 +242,7 @@ async def test_a_task_error_is_one_statement(
         act_on=act,
     )
 
-    assert round_trips == 1 + (PING if pre_ping else 0), turns
+    _assert_one_statement(turns, pre_ping=pre_ping)
     assert await _live_status(session, task_id) == ('PENDING' if retries else None)
 
 
@@ -248,7 +268,7 @@ async def test_a_timeout_is_one_statement(
         )
         assert settled == _TimeoutSettled()
 
-    task_id, round_trips, turns = await _measure(
+    task_id, _, turns = await _measure(
         proxy,
         db_url,
         session,
@@ -257,5 +277,5 @@ async def test_a_timeout_is_one_statement(
         act_on=act,
     )
 
-    assert round_trips == 1 + (PING if pre_ping else 0), turns
+    _assert_one_statement(turns, pre_ping=pre_ping)
     assert await _live_status(session, task_id) == ('PENDING' if retries else None)

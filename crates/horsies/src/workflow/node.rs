@@ -189,8 +189,9 @@ impl<T> Eq for NodeKey<T> {}
 /// The token of one field `F` of the input type `I` of a task or a child
 /// workflow: the member name that serde reads.
 ///
-/// `#[horsies::task]` generates one per parameter (`name::params::field()`),
-/// and `#[derive(WorkflowInput)]` one per field (`Input::field_name()`).
+/// `#[horsies::task]` generates one per parameter of a task
+/// (`name::params::field()`), and `#[derive(WorkflowInput)]` one per field
+/// of a child workflow's params type (`Params::field_name()`).
 #[derive(Debug, PartialEq, Eq)]
 pub struct InputField<I, F> {
     name: &'static str,

@@ -17,7 +17,7 @@ from horsies.core.brokers.result_types import (
     BrokerOperationFailed,
 )
 from horsies.core.types.result import Err, Result
-from horsies.web.events import (
+from tests.dualrun.reference.web_events import (
     CHANNEL_TOPICS,
     SUBSCRIBER_QUEUE_CAPACITY,
     EventBroadcaster,

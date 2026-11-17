@@ -23,6 +23,7 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::{TaskResult, WorkflowSpecRegistry};
 use crate::worker::execution::{run_phase2, Phase2Work, PhaseTwoForm};
 use crate::workflow_engine::recovery::recover_stuck_workflows;
+use crate::workflow_engine::steps::ChildBuild;
 
 /// The definition key that the parent nodes name (the tests resolve no child).
 const CHILD_KEY: &str = "tests.port.denest_child.v1";
@@ -205,7 +206,12 @@ async fn a_transient_failure_of_the_parent_advance_is_retried_and_completes_the_
 
     run_phase2(
         &PostgresBroker::from_pool(db.pool.clone()),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        ChildBuild::Registry {
+            registry: &WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            ),
+            retention: &RetentionConfig::default(),
+        },
         Phase2Work {
             task_id: child_task,
             queue_name: "default".to_owned(),
@@ -213,7 +219,6 @@ async fn a_transient_failure_of_the_parent_advance_is_retried_and_completes_the_
             capacity_notified: false,
             phase_two: PhaseTwoForm::NotKnown,
         },
-        &RetentionConfig::default(),
     )
     .await;
 

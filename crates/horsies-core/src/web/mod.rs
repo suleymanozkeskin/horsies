@@ -18,9 +18,12 @@ pub use auth::{
     AllowAll, MonitoringAuthPolicy, MonitoringRequest, TrustedHeader, ViewOnly, INTENT_HEADER,
     INTENT_VALUE,
 };
+/// The HTTP types of the handler's request and response parts.
+pub use axum::body::Bytes;
+pub use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 pub use events::{
     EventBroadcaster, EventCoalescer, EventFrames, EventStreamItem, TopicEvent, CHANNEL_TOPICS,
-    DEBOUNCE, HEARTBEAT, HEARTBEAT_FRAME, MAX_IDS_PER_EVENT, TOPIC_DEGRADED,
+    DEBOUNCE, DEGRADED_FRAME, HEARTBEAT, HEARTBEAT_FRAME, MAX_IDS_PER_EVENT, TOPIC_DEGRADED,
 };
 pub use handler::{
     route_access, AccessGrant, AccessNeed, MonitoringHandler, MonitoringHandlerConfig,

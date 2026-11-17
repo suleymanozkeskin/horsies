@@ -7,7 +7,7 @@ tags: [rust, send, schedule, TaskFunction, TaskSendError, idempotency, retention
 
 # Sending Tasks
 
-`register` returns the `TaskFunction<A, T, E>` of a task: input `A`, output `T`, code type `E`. Its sends return `Result<TaskHandle<T, E>, TaskSendError>`.
+`register` returns the `TaskFunction<A, T, E>` of a task: input `A`, output `T`, code type `E`. Its sends return `Result<TaskHandle<T, E>, TaskSendError>`. For a task of `#[horsies::task]`, `A` is the generated `Input` struct, one field per parameter (`send_receipt::Input { order_id }`, stored as `{"order_id": "..."}`); the generated `send_receipt::send` takes the parameters themselves.
 
 ## Send a Task
 
@@ -23,8 +23,15 @@ async fn send_receipt(order_id: String) -> Result<(), TaskError<std::convert::In
 async fn send_receipts(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
     let receipt = send_receipt::register(app)?;
 
-    let now = receipt.send("order-1042".to_owned()).await?;
-    let later = receipt.schedule(WholeSeconds::from_secs(300), "order-1043".to_owned()).await?;
+    let now = receipt
+        .send(send_receipt::Input { order_id: "order-1042".to_owned() })
+        .await?;
+    let later = receipt
+        .schedule(
+            WholeSeconds::from_secs(300),
+            send_receipt::Input { order_id: "order-1043".to_owned() },
+        )
+        .await?;
 
     // The generated module sends through the function of the first register.
     let also_now: Result<_, TaskSendError> = send_receipt::send("order-1044".to_owned()).await;
@@ -112,13 +119,19 @@ The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#sen
 ### Retry a Failed Send
 
 ```rust
-use horsies::{TaskFunction, TaskHandle, TaskSendError};
+use horsies::{task, TaskError, TaskFunction, TaskHandle, TaskSendError};
+
+#[task("send_receipt")]
+async fn send_receipt(order_id: String) -> Result<(), TaskError<std::convert::Infallible>> {
+    let _ = order_id;
+    Ok(())
+}
 
 async fn send_with_one_retry(
-    receipt: &TaskFunction<String, (), std::convert::Infallible>,
+    receipt: &TaskFunction<send_receipt::Input, (), std::convert::Infallible>,
     order_id: String,
 ) -> Result<TaskHandle<(), std::convert::Infallible>, TaskSendError> {
-    match receipt.send(order_id).await {
+    match receipt.send(send_receipt::Input { order_id }).await {
         Err(error @ TaskSendError::EnqueueFailed { retryable: true, .. }) => receipt.retry_send(&error).await,
         other => other,
     }

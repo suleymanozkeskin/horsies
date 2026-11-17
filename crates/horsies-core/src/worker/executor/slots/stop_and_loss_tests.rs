@@ -130,8 +130,8 @@ fn unreachable_writer() -> OutcomeWriter {
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
         broker,
-        Arc::new(WorkflowSpecRegistry::new(
-            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         )),
         WORKER_ID.to_owned(),
         PayloadPolicy::default(),
@@ -238,8 +238,8 @@ async fn a_crash_whose_exit_was_seen_fails_the_row_with_worker_crashed() {
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     let writer = OutcomeWriter::new(
         broker,
-        Arc::new(WorkflowSpecRegistry::new(
-            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         )),
         WORKER_ID.to_owned(),
         PayloadPolicy::default(),

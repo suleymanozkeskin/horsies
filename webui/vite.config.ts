@@ -19,11 +19,9 @@ export default defineConfig({
     },
   },
   build: {
-    // The wheel ships this directory as package data; CI builds it before the
-    // wheel build. `bun run build:core` overrides it with
-    // ../crates/horsies-core/webui-dist, the committed build that horsies-core
-    // embeds. Both live outside the Vite root, hence the explicit empty.
-    outDir: '../python/horsies/web/static',
+    // The committed build that horsies-core embeds and serves for both
+    // clients. It lives outside the Vite root, hence the explicit empty.
+    outDir: '../crates/horsies-core/webui-dist',
     emptyOutDir: true,
   },
   server: {

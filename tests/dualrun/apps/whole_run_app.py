@@ -27,7 +27,7 @@ import asyncio
 import os
 import time
 from datetime import timedelta
-from typing import Any, Final
+from typing import Final
 
 from pydantic import SecretStr
 
@@ -354,18 +354,17 @@ def waits_for_release() -> TaskResult[str, TaskError]:
 
 class ChildChain(WorkflowDefinition[int]):
     """The sub-workflow of the chain: one task, built in the worker when its
-    node is ready (`build_with`)."""
+    node is ready (`build_with`). A kwarg of a sub-workflow node binds only
+    to a named, typed parameter of `build_with`, so the override names
+    `value`."""
 
     name = 'whole_run_child_chain'
     definition_key = 'tests.dualrun.whole_run.child_chain.v1'
 
     @classmethod
-    def build_with(cls, app: Horsies, **params: Any) -> WorkflowSpec[int]:
-        match params:
-            case {'value': int() as value}:
-                pass
-            case _:
-                raise TypeError(f'{cls.name} takes value: int, not {params!r}')
+    def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
+        cls, app: Horsies, value: int,
+    ) -> WorkflowSpec[int]:
         child = TaskNode(fn=double, kwargs={'value': value})
         return app.workflow(
             name=cls.name,
@@ -398,6 +397,86 @@ chain_with_subworkflow = app.workflow(
     definition_key='tests.dualrun.whole_run.chain.v1',
 )
 """A task, a sub-workflow whose child the worker builds, then a task."""
+
+class ChildFromResult(WorkflowDefinition[int]):
+    """A sub-workflow built from the result of the node before it
+    (`args_from`). Its one node is a sub-workflow root, `ChildChain` with
+    that value: the start of this child builds the grandchild."""
+
+    name = 'whole_run_child_from_result'
+    definition_key = 'tests.dualrun.whole_run.child_from_result.v1'
+
+    @classmethod
+    def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
+        cls, app: Horsies, doubled: TaskResult[int, TaskError],
+    ) -> WorkflowSpec[int]:
+        match doubled:
+            case TaskResult(ok=int() as value):
+                pass
+            case _:
+                raise ValueError(f'{cls.name} takes a completed result, not {doubled!r}')
+        grandchild = SubWorkflowNode(
+            workflow_def=ChildChain,
+            kwargs={'value': value},
+            node_id='grandchild',
+        )
+        return app.workflow(
+            name=cls.name,
+            tasks=[grandchild],
+            output=grandchild,
+            on_error=OnError.FAIL,
+            definition_key=cls.definition_key,
+            workflow_def_cls=cls,
+        )
+
+
+class RefusedChild(WorkflowDefinition[int]):
+    """A sub-workflow whose `build_with` raises: its node fails with
+    `WORKFLOW_ENQUEUE_FAILED`."""
+
+    name = 'whole_run_refused_child'
+    definition_key = 'tests.dualrun.whole_run.refused_child.v1'
+
+    @classmethod
+    def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
+        cls, app: Horsies, value: int,
+    ) -> WorkflowSpec[int]:
+        raise ValueError(f'{cls.name} refuses value {value}')
+
+
+_from_first = TaskNode(fn=double, kwargs={'value': 5}, node_id='first')
+_from_sub = SubWorkflowNode(
+    workflow_def=ChildFromResult,
+    waits_for=[_from_first],
+    args_from={'doubled': _from_first},
+    node_id='sub',
+)
+chain_from_result = app.workflow(
+    name='whole_run_chain_from_result',
+    tasks=[_from_first, _from_sub],
+    output=_from_sub,
+    on_error=OnError.FAIL,
+    definition_key='tests.dualrun.whole_run.chain_from_result.v1',
+)
+"""A task, then a sub-workflow that the worker builds from the task's
+result; the child's start builds a grandchild."""
+
+_refused_first = TaskNode(fn=double, kwargs={'value': 6}, node_id='first')
+_refused_sub = SubWorkflowNode(
+    workflow_def=RefusedChild,
+    kwargs={'value': 7},
+    waits_for=[_refused_first],
+    node_id='sub',
+)
+chain_with_refused_child = app.workflow(
+    name='whole_run_chain_with_refused_child',
+    tasks=[_refused_first, _refused_sub],
+    output=_refused_sub,
+    on_error=OnError.FAIL,
+    definition_key='tests.dualrun.whole_run.refused_chain.v1',
+)
+"""A task, then a sub-workflow whose build in the worker raises: the node
+and the workflow fail."""
 
 _pause_first = TaskNode(fn=waits_for_release, node_id='first')
 _pause_second = TaskNode(

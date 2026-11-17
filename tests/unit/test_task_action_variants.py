@@ -43,7 +43,7 @@ from horsies.monitoring.task_actions import (
     TaskCancelled,
     cancel_task,
 )
-from horsies.web.routes.actions import (
+from tests.dualrun.reference.web_routes.actions import (
     _succeeded,  # pyright: ignore[reportPrivateUsage]
     _task_action_failed,  # pyright: ignore[reportPrivateUsage]
 )
