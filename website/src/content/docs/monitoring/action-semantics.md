@@ -102,7 +102,7 @@ or no deadline.
 Each refusal is a distinct outcome, so a caller that matches over the
 outcomes cannot miss one.
 
-The API is on the client page [Rerun in Your Transaction](/horsies/operations/rerun-in-your-transaction/) (Python). The Rust rerun page is not written yet.
+The API is on the client pages: [Rerun in Your Transaction](/horsies/operations/rerun-in-your-transaction/) (Python) and [Rerun in Your Transaction](/horsies/rust/operations/rerun-in-your-transaction/) (Rust).
 
 **Settled when:** the call returns the new task id. The source record is
 unchanged: rerun never mutates history.
