@@ -54,10 +54,8 @@ from horsies.core.workflows.engine import (
     enqueue_subworkflow_task,
     get_workflow_failure_error,
     on_subworkflow_complete,
-    on_workflow_task_complete,
 )
 from horsies.core.workflows.sql import (
-    COMPLETE_WORKFLOW_TASK_SQL,
     ENQUEUE_SUBWORKFLOW_TASK_SQL,
     GET_CHILD_WORKFLOW_INFO_SQL,
     GET_FIRST_FAILED_REQUIRED_TASK_SQL,
@@ -90,22 +88,7 @@ STORED_TASK_ERROR = serialize_error_payload(
     TaskResult(err=TaskError(error_code='FIRST_ERROR', message='first')),
 )
 LONE_SURROGATE_TEXT = f'name{chr(0xdc80)}'
-DATABASE_URL = 'postgresql+psycopg://u:p@localhost:5432/db'
-
-
-class _RefusedOk(BaseModel):
-    """A declared result type whose validator raises with a lone surrogate.
-
-    Pydantic does not wrap a `RuntimeError` from a validator, so the text
-    reaches the caller as written.
-    """
-
-    value: int
-
-    @field_validator('value')
-    @classmethod
-    def refuse(cls, value: int) -> int:
-        raise RuntimeError(f'cannot check {LONE_SURROGATE_TEXT}: {value}')
+DATABASE_URL = 'postgresql://u:p@localhost:5432/db'
 
 
 class _EchoingModel(BaseModel):
@@ -181,56 +164,6 @@ class TestSerOrRaise:
             'Failed to serialize the payload: value is not JSON-native: tuple'
         )
         assert raised.value.__cause__ is cause
-
-
-class TestCompletionResult:
-    @pytest.mark.asyncio
-    async def test_raises_before_the_node_write(self) -> None:
-        recorder = _RecordingSession({})
-
-        with patch(DUMPS_JSON, return_value=REFUSED):
-            with pytest.raises(
-                SerializationError,
-                match='Failed to serialize completion result for task task-1',
-            ):
-                await on_workflow_task_complete(
-                    recorder.session, 'task-1', TaskResult(ok='done'), None,
-                    task_name='task-a',
-                )
-
-        assert recorder.executed == []
-
-    @pytest.mark.asyncio
-    async def test_the_text_of_an_encode_failure_is_stored_escaped(self) -> None:
-        """The node fails with a serialization error, and that error is
-        encoded again. A validator can raise an exception that pydantic does
-        not wrap, so its text reaches the error as written. Without the
-        escape, the second encode refuses it and the completion raises on
-        each finalize retry and each recovery pass."""
-        app = _real_app()
-        _ = _register_refused_task(app)
-        broker = MagicMock()
-        broker.app = app
-        recorder = _RecordingSession(
-            {COMPLETE_WORKFLOW_TASK_SQL: SimpleNamespace(workflow_id=None)},
-        )
-
-        await on_workflow_task_complete(
-            recorder.session, 'task-1', TaskResult(ok={'value': 1}), broker,
-            task_name='surrogate.refused',
-        )
-
-        assert recorder.executed == [COMPLETE_WORKFLOW_TASK_SQL]
-        node_write = recorder.session.execute.await_args
-        assert node_write is not None
-        assert node_write.args[1]['status'] == 'FAILED'
-        error = json.loads(node_write.args[1]['result'])['err']
-        assert error['error_code'] == {
-            '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
-        }
-        assert error['message'] == (
-            'Failed to encode completion result: cannot check name\\udc80: 1'
-        )
 
 
 class TestSubworkflowCompletion:
@@ -510,13 +443,6 @@ def _register_note_task(app: Horsies) -> TaskFunction[..., int]:
     def note(*, text: str, labels: dict[str, int]) -> TaskResult[int, TaskError]:
         return TaskResult(ok=len(text) + len(labels))
     return note
-
-
-def _register_refused_task(app: Horsies) -> TaskFunction[..., _RefusedOk]:
-    @app.task('surrogate.refused')
-    def refused() -> TaskResult[_RefusedOk, TaskError]:
-        return TaskResult(ok=_RefusedOk.model_construct(value=1))
-    return refused
 
 
 def _key(label: str) -> str:

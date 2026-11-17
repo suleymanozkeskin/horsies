@@ -3,16 +3,17 @@
 
 The worker reads the timeout, the retry policy, the execution class and the
 cancel grace from the stored ``task_options`` of the row. These tests fire
-slots through ``Scheduler._enqueue_scheduled_task`` (and ``_check_schedule``
-for the state update) against a broker mock, with tasks that a real app
-registers, so the options text is the one the task decorator encodes.
+slots through ``Scheduler._check_schedule`` against a state manager double
+that records the fire, with tasks that a real app registers and a real
+broker that builds the send command (it opens no connection), so the
+options text is the one the task decorator encodes.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,12 +21,10 @@ import pytest
 from pydantic import SecretStr
 
 from horsies.core.app import Horsies
-from horsies.core.brokers.result_types import (
-    BrokerInvalidTaskOptions,
-    BrokerPayloadMismatch,
-)
-from horsies.core.codec.json_io import Json, SerializationError, dumps_json, loads_json
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.codec.json_io import Json, SerializationError, loads_json
 from horsies.core.errors import ErrorCode, RegistryError
+from horsies.core.history.periods import RetentionClassKey
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.schedule import (
@@ -34,15 +33,21 @@ from horsies.core.models.schedule import (
     TaskSchedule,
 )
 from horsies.core.models.tasks import Execution, RetryPolicy, TaskError, TaskResult
-from horsies.core.scheduler.service import ScheduleLockDatabase, Scheduler
-from horsies.core.types.error_detail import NoCause
+from horsies.core.scheduler.service import Scheduler
+from horsies.core.scheduler.state import (
+    DueSchedule,
+    FiredSlot,
+    ScheduleAdvanced,
+    ScheduleFire,
+    SlotOutcome,
+)
 from horsies.core.types.result import Err, Ok
-from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
-from tests.broker_resources_support import attach_resources, fake_resources
+from horsies.core.utils.fingerprint import schedule_slot_task_id
 
 TASK_NAME = 'scheduled_task'
 SCHEDULE_NAME = 'every_five_seconds'
 SLOT = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+URL = 'postgresql://user:pass@localhost/db'
 
 
 def _schedule(*, catch_up_missed: bool = False) -> TaskSchedule:
@@ -60,28 +65,46 @@ def _real_app(schedule: TaskSchedule) -> Horsies:
     return Horsies(
         config=AppConfig(
             broker=PostgresConfig(
-                database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+                database_url=SecretStr('postgresql://user:pass@localhost/db'),
             ),
             schedule=ScheduleConfig(schedules=[schedule]),
         ),
     )
 
 
-def _broker_mock(enqueue_result: object) -> MagicMock:
-    """A broker mock whose enqueue returns ``enqueue_result``."""
-    broker = MagicMock()
-    broker.session_factory = MagicMock()
-    attach_resources(broker, fake_resources(session_factory=broker.session_factory))
-    broker.enqueue_async = AsyncMock(return_value=enqueue_result)
-    return broker
+@dataclass(frozen=True)
+class _Fired:
+    """A started scheduler and the fire that its state manager double records."""
+
+    scheduler: Scheduler
+    state_manager: MagicMock
+
+    def fire(self) -> ScheduleFire:
+        call = self.state_manager.fire_schedule.await_args
+        assert call is not None, 'no fire was sent'
+        fire = call.args[0]
+        assert isinstance(fire, ScheduleFire)
+        return fire
 
 
-def _started_scheduler(app: Horsies, broker: MagicMock) -> Scheduler:
-    """A scheduler with the broker mock and the text that start() prepares."""
-    scheduler = Scheduler(app)
+def _started(app: Horsies | MagicMock, answer: ScheduleAdvanced | None = None) -> _Fired:
+    """A scheduler with a real broker (no connection), the start-time text and
+    commands, and a state manager whose fire answers ``answer``."""
+    scheduler = Scheduler(app)  # pyright: ignore[reportArgumentType]
+    broker = PostgresBroker(PostgresConfig(database_url=SecretStr(URL)))
     scheduler.broker = broker
     scheduler._validate_schedules()
-    return scheduler
+    scheduler._build_commands(broker)
+    state_manager = MagicMock()
+    state_manager.fire_schedule = AsyncMock(return_value=Ok(answer or ScheduleAdvanced(slots=())))
+    scheduler.state_manager = state_manager
+    return _Fired(scheduler=scheduler, state_manager=state_manager)
+
+
+async def _fire_at(fired: _Fired, schedule: TaskSchedule, database_now: datetime) -> ScheduleFire:
+    """Fire ``schedule`` due at SLOT at ``database_now``; return the fire that was sent."""
+    await fired.scheduler._check_schedule(schedule, DueSchedule(schedule.name, SLOT), database_now)
+    return fired.fire()
 
 
 def _register_isolated(app: Horsies) -> str | None:
@@ -127,15 +150,6 @@ def _stored_options(options_json: object) -> dict[str, Json]:
             pytest.fail(f'stored options are not a JSON object: {other!r}')
 
 
-def _json_text(value: Json) -> str:
-    """The JSON text of a value that the strict encoder takes."""
-    match dumps_json(value):
-        case Ok(text):
-            return text
-        case Err(error):
-            pytest.fail(f'value does not encode: {error}')
-
-
 # =============================================================================
 # The stored text
 # =============================================================================
@@ -144,7 +158,7 @@ def _json_text(value: Json) -> str:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestScheduledRunStoresTheTaskOptions:
-    """The enqueue of a slot stores the options text of the task."""
+    """The fire of a slot stores the options text of the task."""
 
     @pytest.mark.parametrize(
         ('register', 'expected'),
@@ -191,15 +205,14 @@ class TestScheduledRunStoresTheTaskOptions:
         schedule = _schedule()
         app = _real_app(schedule)
         task_options_json = register(app)
-        broker = _broker_mock(Ok('task-1'))
-        scheduler = _started_scheduler(app, broker)
+        fired = _started(app)
 
-        result = await scheduler._enqueue_scheduled_task(schedule, slot_time=SLOT)
+        fire = await _fire_at(fired, schedule, SLOT + timedelta(seconds=3))
 
-        assert result == Ok('task-1')
-        stored_text = broker.enqueue_async.await_args.kwargs['task_options']
-        assert stored_text == task_options_json
-        stored = _stored_options(stored_text)
+        assert fire.slot_ats == (SLOT,)
+        assert fire.command.task_options == task_options_json
+        assert fire.command.execution.value == expected['execution']
+        stored = _stored_options(fire.command.task_options)
         for key, value in expected.items():
             assert stored[key] == value, key
 
@@ -207,12 +220,12 @@ class TestScheduledRunStoresTheTaskOptions:
         schedule = _schedule()
         app = _real_app(schedule)
         _ = _register_isolated(app)
-        broker = _broker_mock(Ok('task-1'))
-        scheduler = _started_scheduler(app, broker)
+        fired = _started(app)
 
-        _ = await scheduler._enqueue_scheduled_task(schedule, slot_time=SLOT)
+        fire = await _fire_at(fired, schedule, SLOT + timedelta(seconds=3))
 
-        stored = _stored_options(broker.enqueue_async.await_args.kwargs['task_options'])
+        assert fire.command.max_retries == 2
+        stored = _stored_options(fire.command.task_options)
         retry_policy = stored['retry_policy']
         assert isinstance(retry_policy, dict)
         assert retry_policy['max_retries'] == 2
@@ -226,67 +239,62 @@ class TestScheduledRunStoresTheTaskOptions:
         schedule = _schedule()
         app = _real_app(schedule)
         _ = _register_isolated(app)
-        scheduler_broker = _broker_mock(Ok('slot-task'))
-        scheduler = _started_scheduler(app, scheduler_broker)
-        send_broker = _broker_mock(Ok('sent-task'))
+        fired = _started(app)
+        send_broker = MagicMock()
+        send_broker.enqueue_async = AsyncMock(return_value=Ok('sent-task'))
         monkeypatch.setattr(app, 'get_broker', lambda: send_broker)
 
-        _ = await scheduler._enqueue_scheduled_task(schedule, slot_time=SLOT)
+        fire = await _fire_at(fired, schedule, SLOT + timedelta(seconds=3))
         send_result = await app.tasks[TASK_NAME].send_async(value=1)
 
         assert isinstance(send_result, Ok)
-        slot_kwargs = scheduler_broker.enqueue_async.await_args.kwargs
         send_kwargs = send_broker.enqueue_async.await_args.kwargs
-        assert slot_kwargs['task_options'] is not None
-        assert slot_kwargs['task_options'] == send_kwargs['task_options']
-        assert slot_kwargs['kwargs_json'] == send_kwargs['kwargs_json']
+        assert fire.command.task_options is not None
+        assert fire.command.task_options == send_kwargs['task_options']
+        assert fire.command.stored_input == send_kwargs['kwargs_json']
         assert send_kwargs['good_until'] is None
 
-    async def test_every_slot_sends_the_same_text(self) -> None:
-        schedule = _schedule()
+    async def test_every_slot_of_a_catch_up_sends_one_command(self) -> None:
+        schedule = _schedule(catch_up_missed=True)
         app = _real_app(schedule)
         task_options_json = _register_isolated(app)
-        broker = _broker_mock(Ok('task-1'))
-        scheduler = _started_scheduler(app, broker)
-        later_slot = SLOT.replace(second=5)
+        fired = _started(app)
 
-        _ = await scheduler._enqueue_scheduled_task(schedule, slot_time=SLOT)
-        _ = await scheduler._enqueue_scheduled_task(schedule, slot_time=later_slot)
+        fire = await _fire_at(fired, schedule, SLOT + timedelta(seconds=12))
 
-        first, second = (call.kwargs for call in broker.enqueue_async.await_args_list)
-        assert first['task_id'] != second['task_id']
-        assert first['task_options'] == task_options_json
-        assert second['task_options'] == task_options_json
+        assert fire.slot_ats == (SLOT, SLOT + timedelta(seconds=5), SLOT + timedelta(seconds=10))
+        assert fire.next_run_at == SLOT + timedelta(seconds=15)
+        assert fire.command.task_options == task_options_json
+        fired.state_manager.fire_schedule.assert_awaited_once()
 
     async def test_the_fingerprint_covers_the_options_text(self) -> None:
-        """The slot digest changes: the text that an earlier version
+        """The slot fingerprint changes: the text that an earlier version
         fingerprinted had no options."""
         schedule = _schedule()
         app = _real_app(schedule)
         task_options_json = _register_isolated(app)
-        broker = _broker_mock(Ok('task-1'))
-        scheduler = _started_scheduler(app, broker)
+        fired = _started(app)
 
-        _ = await scheduler._enqueue_scheduled_task(schedule, slot_time=SLOT)
+        fire = await _fire_at(fired, schedule, SLOT + timedelta(seconds=3))
 
-        enqueue_kwargs = broker.enqueue_async.await_args.kwargs
-        fingerprint_inputs: dict[str, Any] = {
-            'task_name': TASK_NAME,
-            'queue_name': enqueue_kwargs['queue_name'],
-            'priority': enqueue_kwargs['priority'],
-            'args_json': None,
-            'kwargs_json': _json_text({'value': 1}),
-            'sent_at': SLOT,
-            'good_until': None,
-            'enqueue_delay_seconds': None,
-        }
-        with_options = enqueue_fingerprint(
-            **fingerprint_inputs,
-            task_options=task_options_json,
-        )
-        without_options = enqueue_fingerprint(**fingerprint_inputs, task_options=None)
-        assert enqueue_kwargs['enqueue_sha'] == with_options
-        assert enqueue_kwargs['enqueue_sha'] != without_options
+        broker = PostgresBroker(PostgresConfig(database_url=SecretStr(URL)))
+
+        def fingerprint(task_options: str | None) -> bytes:
+            match broker.prepare_send_command(
+                task_name=TASK_NAME,
+                queue_name=fire.command.queue_name,
+                priority=fire.command.priority,
+                kwargs_json=fire.command.stored_input,
+                task_options=task_options,
+                retention_class_key=RetentionClassKey(fire.command.retention_class_key),
+            ):
+                case Ok(command):
+                    return command.fingerprint
+                case Err(refused):
+                    pytest.fail(f'the command was refused: {refused}')
+
+        assert fire.command.fingerprint == fingerprint(task_options_json)
+        assert fire.command.fingerprint != fingerprint(None)
 
 
 # =============================================================================
@@ -349,117 +357,55 @@ def _mock_app(schedule: TaskSchedule) -> MagicMock:
     return app
 
 
-@dataclass(frozen=True)
-class _Harness:
-    """A started scheduler and the mocks that it talks to."""
-
-    scheduler: Scheduler
-    broker: MagicMock
-    session: AsyncMock
-    state_manager: MagicMock
-
-
-def _harness(schedule: TaskSchedule, enqueue_results: list[object]) -> _Harness:
-    """A started scheduler whose due state is SLOT; enqueues return the results in order."""
-    session = AsyncMock()
-    broker = MagicMock()
-    broker.session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
-    broker.session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
-    broker.enqueue_async = AsyncMock(side_effect=enqueue_results)
-    scheduler = Scheduler(_mock_app(schedule))
-    scheduler.broker = broker
-    scheduler._lock_database = ScheduleLockDatabase(
-        engine=MagicMock(dispose=AsyncMock()),
-        session_factory=broker.session_factory,
-    )
-    scheduler._validate_schedules()
-
-    state = MagicMock()
-    state.next_run_at = SLOT
-    state_manager = MagicMock()
-    state_manager.get_state = AsyncMock(return_value=state)
-    state_manager.update_after_run = AsyncMock()
-    state_manager.update_next_run = AsyncMock()
-    scheduler.state_manager = state_manager
-    return _Harness(
-        scheduler=scheduler,
-        broker=broker,
-        session=session,
-        state_manager=state_manager,
-    )
-
-
-def _mismatch() -> Err[BrokerPayloadMismatch]:
-    return Err(
-        BrokerPayloadMismatch(
-            message='task_id already exists with different payload (sha mismatch)',
-        ),
-    )
+def _slot(slot_at: datetime, outcome: SlotOutcome) -> FiredSlot:
+    return FiredSlot(slot_at, str(schedule_slot_task_id(SCHEDULE_NAME, slot_at)), outcome)
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestSlotWithAnotherCommand:
-    """PAYLOAD_MISMATCH on a slot means the slot already has its task."""
+    """PAYLOAD_MISMATCH on a slot means the slot already has its task; the fire records it."""
 
     async def test_the_slot_counts_as_fired_and_one_warning_is_logged(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         schedule = _schedule()
-        harness = _harness(schedule, [_mismatch()])
+        fired = _started(
+            _mock_app(schedule),
+            ScheduleAdvanced(slots=(_slot(SLOT, SlotOutcome.PAYLOAD_MISMATCH),)),
+        )
 
         with caplog.at_level(logging.WARNING, logger='horsies.scheduler'):
-            result = await harness.scheduler._enqueue_scheduled_task(
-                schedule,
-                slot_time=SLOT,
-            )
+            fire = await _fire_at(fired, schedule, SLOT + timedelta(seconds=3))
 
-        assert result == Ok(schedule_slot_task_id(SCHEDULE_NAME, SLOT))
+        assert (fire.slot_ats, fire.next_run_at) == ((SLOT,), SLOT + timedelta(seconds=5))
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1
         assert SCHEDULE_NAME in warnings[0].getMessage()
         assert 'counts as fired' in warnings[0].getMessage()
 
-    async def test_another_permanent_error_is_returned_unchanged(self) -> None:
-        schedule = _schedule()
-        refused = Err(
-            BrokerInvalidTaskOptions(
-                message='task_options refused',
-                exception=NoCause(),
+    async def test_catch_up_fires_the_slots_after_the_fired_slot_in_the_same_fire(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        schedule = _schedule(catch_up_missed=True)
+        slots = (SLOT, SLOT + timedelta(seconds=5), SLOT + timedelta(seconds=10))
+        fired = _started(
+            _mock_app(schedule),
+            ScheduleAdvanced(
+                slots=(
+                    _slot(slots[0], SlotOutcome.PAYLOAD_MISMATCH),
+                    _slot(slots[1], SlotOutcome.INSERTED),
+                    _slot(slots[2], SlotOutcome.INSERTED),
+                ),
             ),
         )
-        harness = _harness(schedule, [refused])
 
-        result = await harness.scheduler._enqueue_scheduled_task(
-            schedule,
-            slot_time=SLOT,
-        )
+        with caplog.at_level(logging.INFO, logger='horsies.scheduler'):
+            fire = await _fire_at(fired, schedule, SLOT + timedelta(seconds=12))
 
-        assert result == refused
-
-    async def test_the_fired_slot_is_recorded_and_the_schedule_moves_on(self) -> None:
-        schedule = _schedule()
-        harness = _harness(schedule, [_mismatch()])
-
-        await harness.scheduler._check_schedule(schedule, SLOT.replace(second=3))
-
-        update_kwargs = harness.state_manager.update_after_run.await_args.kwargs
-        assert update_kwargs['task_id'] == schedule_slot_task_id(SCHEDULE_NAME, SLOT)
-        assert update_kwargs['next_run_at'] == SLOT.replace(second=5)
-        harness.state_manager.update_next_run.assert_not_awaited()
-        harness.session.commit.assert_awaited_once()
-        harness.session.rollback.assert_not_awaited()
-
-    async def test_catch_up_enqueues_the_slots_after_the_fired_slot(self) -> None:
-        schedule = _schedule(catch_up_missed=True)
-        harness = _harness(schedule, [_mismatch(), Ok('task-5'), Ok('task-10')])
-
-        await harness.scheduler._check_schedule(schedule, SLOT.replace(second=12))
-
-        assert harness.broker.enqueue_async.await_count == 3
-        update_kwargs = harness.state_manager.update_after_run.await_args.kwargs
-        assert update_kwargs['task_id'] == 'task-10'
-        assert update_kwargs['next_run_at'] == SLOT.replace(second=15)
-        harness.session.commit.assert_awaited_once()
-        harness.session.rollback.assert_not_awaited()
+        assert (fire.slot_ats, fire.next_run_at) == (slots, SLOT + timedelta(seconds=15))
+        messages = [r.getMessage() for r in caplog.records]
+        assert sum('counts as fired' in message for message in messages) == 1
+        assert sum('enqueued task' in message for message in messages) == 2

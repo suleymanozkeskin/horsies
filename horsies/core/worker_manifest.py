@@ -24,9 +24,16 @@ from datetime import timedelta
 from typing import Final, assert_never
 
 from horsies._catalog import worker_manifest as wire
-from horsies.core.manifest import core_database_url, reservation_window_micros
+from horsies.core.manifest import reservation_window_micros
+from horsies.core.manifest_database import (
+    core_database_url,
+    pool_recycle_with,
+    session_database_with,
+    tcp_keepalives_with,
+    tcp_user_timeout_with,
+)
 from horsies.core.models.app import AppConfig
-from horsies.core.models.broker import SQLALCHEMY_NEVER_RECYCLE, PostgresConfig
+from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.tasks import Execution
 from horsies.core.models.worker_profile import (
@@ -163,7 +170,8 @@ def python_child_launch(
 def worker_database_manifest(config: PostgresConfig) -> wire.WorkerDatabaseManifest:
     """The database section of a worker. `pool_size` and `max_overflow` do not
     apply: the pool of the worker process is the resolved pool of its
-    profile with no overflow. Pure.
+    profile with no overflow. The TCP keepalive and user timeout settings
+    apply to every core connection of the worker. Pure.
     """
     return wire.WorkerDatabaseManifest(
         database_url=core_database_url(config.database_url.get_secret_value()),
@@ -174,6 +182,8 @@ def worker_database_manifest(config: PostgresConfig) -> wire.WorkerDatabaseManif
         pool_timeout=config.pool_timeout,
         pool_recycle=_pool_recycle(config.pool_recycle),
         echo=config.echo,
+        tcp_keepalives=tcp_keepalives_of(config),
+        tcp_user_timeout=tcp_user_timeout_of(config.tcp_user_timeout_ms),
     )
 
 
@@ -401,28 +411,38 @@ def _queue_concurrency(
 
 
 def _session_database(config: PostgresConfig) -> wire.SessionDatabase:
-    match config.session_database_url:
-        case None:
-            return wire.SessionDatabaseSameAsDatabaseUrl()
-        case session_url:
-            return wire.SessionDatabaseSeparate(
-                url=core_database_url(session_url.get_secret_value()),
-            )
+    return session_database_with(
+        config,
+        same_as_database_url=wire.SessionDatabaseSameAsDatabaseUrl,
+        separate=wire.SessionDatabaseSeparate,
+    )
 
 
 def _pool_recycle(value: int) -> wire.PoolRecycle:
-    """The typed form of a validated `pool_recycle` (as
-    `horsies.core.manifest.pool_recycle_of`, with the classes of this module).
-    """
-    match value:
-        case _ if value == SQLALCHEMY_NEVER_RECYCLE:
-            return wire.PoolRecycleNever()
-        case _:
-            assert value >= 0, (
-                f'pool_recycle={value} passed the PostgresConfig validator, which '
-                'admits only -1 and a number of seconds'
-            )
-            return wire.PoolRecycleAfterSeconds(seconds=value)
+    """`pool_recycle_with` with the classes of the worker manifest."""
+    return pool_recycle_with(
+        value,
+        never=wire.PoolRecycleNever,
+        after_seconds=wire.PoolRecycleAfterSeconds,
+    )
+
+
+def tcp_keepalives_of(config: PostgresConfig) -> wire.TcpKeepalivesConfig:
+    """`tcp_keepalives_with` with the classes of the worker manifest."""
+    return tcp_keepalives_with(
+        config,
+        off=wire.TcpKeepalivesConfigOff,
+        on=wire.TcpKeepalivesConfigOn,
+    )
+
+
+def tcp_user_timeout_of(milliseconds: int) -> wire.TcpUserTimeoutConfig:
+    """`tcp_user_timeout_with` with the classes of the worker manifest."""
+    return tcp_user_timeout_with(
+        milliseconds,
+        system_default=wire.TcpUserTimeoutConfigSystemDefault,
+        after=wire.TcpUserTimeoutConfigAfter,
+    )
 
 
 def _task_limit(setting: TaskLimit | NoTaskLimit) -> wire.TaskLimit:

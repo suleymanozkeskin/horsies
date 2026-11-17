@@ -165,15 +165,15 @@ class TestBatchedStartShape:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A node whose kwargs fail to encode mid-build is a defect: the
-        SerializationError propagates and no row is left — params are built
-        before any INSERT executes, so the transaction has nothing to
-        keep. (User input cannot reach this state — spec construction
-        already validates — so the encoder is forced to fail.)"""
+        SerializationError propagates and no row is left — the tree is built
+        before the start statement is sent. (User input cannot reach this
+        state — spec construction already validates — so the encoder is
+        forced to fail.)"""
         from horsies.core.codec.json_io import SerializationError
-        from horsies.core.workflows import lifecycle as lifecycle_mod
+        from horsies.core.workflows import child_build as child_build_mod
 
         spec = _fanout_spec(app, 2)
-        real_stored_kwargs = lifecycle_mod.stored_kwargs
+        real_stored_kwargs = child_build_mod.stored_kwargs
         calls = {'n': 0}
 
         def _flaky_encode(task: Any) -> Any:
@@ -183,7 +183,7 @@ class TestBatchedStartShape:
             return real_stored_kwargs(task)
 
         monkeypatch.setattr(
-            lifecycle_mod, 'stored_kwargs', _flaky_encode,
+            child_build_mod, 'stored_kwargs', _flaky_encode,
         )
 
         with pytest.raises(SerializationError, match='node 2'):
@@ -309,7 +309,7 @@ class TestStartPauseGate:
             SubWorkflowNode,
             WorkflowDefinition,
         )
-        from horsies.core.workflows import engine as engine_mod
+        from horsies.core.workflows import child_build as child_build_mod
 
         @app.task(task_name=f'pause_gate_root_{_uuid.uuid4().hex[:8]}')
         def fast_task(*, value: int) -> TaskResult[int, TaskError]:
@@ -338,7 +338,7 @@ class TestStartPauseGate:
 
         # Force the slow root's failure: the child definition cannot load.
         monkeypatch.setattr(
-            engine_mod, '_load_workflow_def_from_key', lambda key: None,
+            child_build_mod, '_load_definition', lambda key: None,
         )
 
         result = await start_workflow_async(spec, broker)

@@ -8,7 +8,7 @@ use super::operations::{
     rerun_task_in_tx, NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
 };
 use super::provenance::RERUN_FIELD_PROVENANCE;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::history::ddl::classes::register_period_class;
 use crate::core::history::identity::fingerprint::EnqueueCommandV1;
@@ -142,12 +142,12 @@ async fn seed_source(
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies,
                  allow_failed_deps, join_type, status, is_subworkflow,
                  max_retries, execution, retention_class_key,
                  task_id, created_at
-             ) VALUES ($1, $2, 0, 'root', 'p8.rerun', $3, 'default',
+             ) VALUES ('NONE', $1, $2, 0, 'root', 'p8.rerun', $3, 'default',
                        50, '{}', FALSE, 'all', 'RUNNING', FALSE,
                        3, 'ISOLATED', 'forever', $4, NOW())",
         )
@@ -225,6 +225,12 @@ async fn cleanup(pool: &PgPool, task_ids: &[Uuid], workflow_ids: &[Uuid]) {
         .await
         .ok();
     sqlx::query("DELETE FROM horsies_key_reservations WHERE task_id = ANY($1)")
+        .bind(task_ids)
+        .execute(pool)
+        .await
+        .ok();
+    // The attempt rows first: their foreign key refuses the task delete.
+    sqlx::query("DELETE FROM horsies_task_attempts WHERE task_id = ANY($1)")
         .bind(task_ids)
         .execute(pool)
         .await
@@ -493,9 +499,12 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     let (completed, _) = seed_source(&pool, TerminalSource::Completed, false, None).await;
     let (workflow_task, workflow_id) = seed_source(&pool, TerminalSource::Failed, true, None).await;
     let mut corrupt_eligibility = pool.begin().await.unwrap();
+    // The baseline keeps the eligibility rule (no INLINE input on a completed
+    // or workflow row) in the shape check (0001_tables.sql,
+    // horsies_task_history_rerun_input_shape).
     sqlx::query(
         "ALTER TABLE horsies_task_history
-         DROP CONSTRAINT horsies_task_history_rerun_input_eligibility",
+         DROP CONSTRAINT horsies_task_history_rerun_input_shape",
     )
     .execute(&mut *corrupt_eligibility)
     .await
@@ -571,13 +580,18 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     assert_eq!(live_snapshot.task_name, "p8.live");
     assert_eq!(live_snapshot.status, TaskStatus::Pending);
     assert!(live_snapshot.raw_result.is_none());
+    // The worker identity columns are NOT NULL in the baseline attempt
+    // table.
     sqlx::query(
         "INSERT INTO horsies_task_attempts (
-             task_id, attempt, outcome, will_retry, started_at, finished_at
+             task_id, attempt, outcome, will_retry, started_at, finished_at,
+             worker_id, worker_hostname, worker_pid, worker_process_name
          ) VALUES ($1, 1, 'WORKER_FAILURE', TRUE,
-                   NOW() - interval '1 second', NOW())",
+                   NOW() - interval '1 second', NOW(),
+                   $2, 'rerun-test-host', 4242, 'rerun-test-process')",
     )
     .bind(live)
+    .bind(WORKER)
     .execute(&pool)
     .await
     .unwrap();
@@ -599,18 +613,28 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         crate::TaskAttemptOutcome::WorkerFailure
     );
 
-    sqlx::query("UPDATE horsies_tasks SET result = '[]' WHERE id = $1")
-        .bind(live)
-        .execute(&pool)
+    // A live row stores no result (0001_tables.sql): the stored result of a
+    // terminal task is in history. A stored result that is not a task result
+    // is INVALID_JSON_PAYLOAD.
+    let non_object = b"[]".to_vec();
+    sqlx::query(
+        "UPDATE horsies_task_history
+         SET result_payload = $2, result_digest = sha256($2)
+         WHERE task_id = $1",
+    )
+    .bind(completed)
+    .bind(&non_object)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let history_error = broker
+        .get_task_info(completed, true, false)
         .await
-        .unwrap();
-    let live_error = broker.get_task_info(live, true, false).await.unwrap_err();
-    assert_eq!(live_error.code, crate::BrokerErrorCode::InvalidJsonPayload);
-    sqlx::query("UPDATE horsies_tasks SET result = NULL WHERE id = $1")
-        .bind(live)
-        .execute(&pool)
-        .await
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(
+        history_error.code,
+        crate::BrokerErrorCode::InvalidJsonPayload
+    );
     let absent = Uuid::new_v4();
     assert!(matches!(
         broker

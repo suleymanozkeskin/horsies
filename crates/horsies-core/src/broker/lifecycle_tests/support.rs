@@ -17,6 +17,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgConnection, PgPool};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_postgres::error::DbError;
 use uuid::Uuid;
 
 use crate::broker::attempt_writes::{
@@ -26,10 +27,11 @@ use crate::broker::attempt_writes::{
 use crate::broker::core_rows::StatementLog;
 use crate::broker::error::BrokerError;
 use crate::broker::pools::core_pool_for_test_pool;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::archive::attempts::{
     decode_attempt_snapshot, encode_attempt_snapshot, AttemptRecord,
 };
+use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
 use crate::core::history::heartbeats::partitioning::{
     create_hourly_heartbeat_leaf, hourly_leaf_ref, CreateHourlyHeartbeatLeaf,
 };
@@ -38,6 +40,7 @@ use crate::core::lifecycle::{
     BatchSize, FailedAttemptOutcome, OwnedClaim, TerminalizationCommand, TerminalizationOutcome,
     UnreportedAttemptOutcome, WorkflowSuccessOutcome,
 };
+use crate::db::{CheckoutClass, CorePool, StatementBound, StatementFailure, TypedStatement};
 
 /// The worker that holds the seeded claims.
 pub(super) const WORKER: &str = "lifecycle-test-worker";
@@ -502,18 +505,8 @@ pub(super) type AttemptSummary = (i32, String, Option<String>);
 
 /// The attempts that the history row archived, in attempt order.
 pub(super) async fn archived_attempts(pool: &PgPool, task_id: Uuid) -> Vec<AttemptSummary> {
-    let (version, codec, content_type, payload, digest): (i16, String, String, Vec<u8>, Vec<u8>) =
-        sqlx::query_as(
-            "SELECT attempt_archive_version, attempt_snapshot_codec,
-                    attempt_snapshot_content_type, attempt_snapshot, attempt_snapshot_digest
-             FROM horsies_task_history WHERE task_id = $1",
-        )
-        .bind(task_id)
-        .fetch_one(pool)
+    archived_attempt_records(pool, task_id)
         .await
-        .expect("read the archived attempt snapshot");
-    decode_attempt_snapshot(version, &codec, &content_type, &payload, &digest)
-        .expect("decode the archived attempt snapshot")
         .iter()
         .map(|record| {
             (
@@ -525,20 +518,27 @@ pub(super) async fn archived_attempts(pool: &PgPool, task_id: Uuid) -> Vec<Attem
         .collect()
 }
 
-/// The attempts that the history row archived, with every field.
+/// The attempts that the history row archived, with every field. The
+/// baseline stores no codec or content type: archive format version 1
+/// implies the json-utf8 codec and the application/json content type, as in
+/// the production read (`core/history/reads/detail.rs`).
 pub(super) async fn archived_attempt_records(pool: &PgPool, task_id: Uuid) -> Vec<AttemptRecord> {
-    let (version, codec, content_type, payload, digest): (i16, String, String, Vec<u8>, Vec<u8>) =
-        sqlx::query_as(
-            "SELECT attempt_archive_version, attempt_snapshot_codec,
-                    attempt_snapshot_content_type, attempt_snapshot, attempt_snapshot_digest
-             FROM horsies_task_history WHERE task_id = $1",
-        )
-        .bind(task_id)
-        .fetch_one(pool)
-        .await
-        .expect("read the archived attempt snapshot");
-    decode_attempt_snapshot(version, &codec, &content_type, &payload, &digest)
-        .expect("decode the archived attempt snapshot")
+    let (version, payload, digest): (i16, Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT attempt_archive_version, attempt_snapshot, attempt_snapshot_digest
+         FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read the archived attempt snapshot");
+    decode_attempt_snapshot(
+        version,
+        JSON_UTF8_CODEC,
+        JSON_CONTENT_TYPE,
+        &payload,
+        &digest,
+    )
+    .expect("decode the archived attempt snapshot")
 }
 
 /// The attempt rows still in the live attempt table.
@@ -600,14 +600,14 @@ pub(super) async fn try_seed_node(
     let node_row_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-            id, workflow_id, task_index, node_id, task_name, input, queue_name,
+            downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
             priority, dependencies, args_from, workflow_ctx_from, allow_failed_deps,
             join_type, min_success, task_options, max_retries, execution, good_until,
             retention_class_key, status, task_id, is_subworkflow, sub_workflow_id,
             sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error,
             created_at, started_at, completed_at
         ) VALUES (
-            $1, $2,
+            'NONE', $1, $2,
             COALESCE((SELECT MAX(task_index) + 1 FROM horsies_workflow_tasks
                       WHERE workflow_id = $2), 0),
             'node_' || $1::text, 'lifecycle.test', '{}', 'default',
@@ -765,6 +765,44 @@ pub(super) fn assert_refused<T: std::fmt::Debug>(
         }
         other => panic!("expected SQLSTATE {sqlstate}, got {other:?}"),
     }
+}
+
+/// The server error of a core statement that the database refused.
+pub(super) fn server_refusal<T: std::fmt::Debug>(result: Result<T, BrokerError>) -> DbError {
+    match result {
+        Err(BrokerError::Statement(StatementFailure::StatementRefused { cause, .. })) => {
+            cause.server_error().clone()
+        }
+        other => panic!("expected a statement that the database refused, got {other:?}"),
+    }
+}
+
+/// Assert that a refusal has `sqlstate` and a message that contains
+/// `fragment`.
+pub(super) fn assert_server_refusal(error: &DbError, sqlstate: &str, fragment: &str) {
+    assert_eq!(error.code().code(), sqlstate, "{error}");
+    assert!(error.message().contains(fragment), "{error}");
+}
+
+/// The backend pid of the connection that runs a statement.
+static BACKEND_PID: TypedStatement =
+    TypedStatement::new("backend_pid", "SELECT pg_backend_pid() AS pid", &[]);
+
+/// Open (or reuse) the one connection of a core pool and return its backend
+/// pid. The connection is back in the pool when this returns.
+pub(super) async fn core_pool_backend_pid(pool: &CorePool) -> i32 {
+    let rows = pool
+        .query(
+            CheckoutClass::Reserved,
+            &BACKEND_PID.bind().finish(),
+            StatementBound::ConnectionTimeouts,
+        )
+        .await
+        .expect("read the pooled backend pid");
+    let [row] = rows.as_slice() else {
+        panic!("expected one row, got {}", rows.len());
+    };
+    row.try_get("pid").expect("the pid column")
 }
 
 /// The backend pid of a connection.
@@ -1343,7 +1381,9 @@ pub(super) fn sha256_of(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Call the internal move of a live task directly, as the deferred guard
-/// of every deferring family sees it.
+/// of every deferring family sees it. The move takes the live row that its
+/// caller locked (`horsies_move_task_to_history(horsies_tasks, ...)`), read
+/// here FOR UPDATE as Python's `baseline_function_calls.sql` reads it.
 pub(super) async fn move_to_history(
     pool: &PgPool,
     task_id: Uuid,
@@ -1351,14 +1391,19 @@ pub(super) async fn move_to_history(
     kind: &str,
     result: Option<&str>,
 ) -> Result<u64, sqlx::Error> {
-    sqlx::query("SELECT horsies_move_task_to_history($1, $2, $3, NOW(), $4, NULL, NULL)")
-        .bind(task_id)
-        .bind(status)
-        .bind(kind)
-        .bind(result)
-        .execute(pool)
-        .await
-        .map(|done| done.rows_affected())
+    sqlx::query(
+        "SELECT horsies_move_task_to_history(
+             (SELECT t FROM horsies_tasks AS t WHERE t.id = $1 FOR UPDATE),
+             $2, $3, NOW(), $4, NULL, NULL
+         )",
+    )
+    .bind(task_id)
+    .bind(status)
+    .bind(kind)
+    .bind(result)
+    .execute(pool)
+    .await
+    .map(|done| done.rows_affected())
 }
 
 /// Assert that the database refused a statement with `sqlstate` and a

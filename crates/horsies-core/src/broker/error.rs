@@ -14,10 +14,6 @@ pub enum BrokerError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 
-    /// Migration error.
-    #[error("migration error: {0}")]
-    Migration(#[from] sqlx::migrate::MigrateError),
-
     /// Existing workflow nodes contain a status outside the typed node enum.
     #[error("migration refused: workflow nodes contain an unsupported status; repair these rows before retrying")]
     InvalidWorkflowNodeStatus,
@@ -30,10 +26,6 @@ pub enum BrokerError {
          this fleet"
     )]
     IncompleteTaskHistoryCutover,
-
-    /// The database migration ledger does not end at this binary's exact schema.
-    #[error("schema version mismatch: binary requires {expected}, database reports {actual:?}")]
-    SchemaVersionMismatch { expected: i64, actual: Option<i64> },
 
     /// JSON serialization/deserialization error.
     #[error("serialization error: {0}")]
@@ -102,6 +94,13 @@ pub enum BrokerError {
         own: crate::broker::client_family::ClientFamily,
     },
 
+    /// The schema install refused the database: it holds something this
+    /// build does not install into (a 0.x schema, unknown horsies tables, a
+    /// newer, foreign, failed or changed migration). Nothing was changed. Not
+    /// retryable: the same database is refused again.
+    #[error("schema install refused: {0}")]
+    SchemaRefused(crate::broker::migrations::SchemaRefusal),
+
     /// The schema install lock could not be used.
     #[error("schema install lock: {0}")]
     InstallLock(InstallLockFailure),
@@ -126,9 +125,10 @@ pub enum BrokerError {
     #[error("invalid claim argument: {0}")]
     InvalidClaimArgument(String),
 
-    /// A row of the claim, the start or the release breaks its function's
-    /// row contract (`broker::claims`). Not retryable: the same call meets
-    /// it again.
+    /// A row of the claim, the start, the release or the stale claim
+    /// requeue breaks its function's row contract (`broker::claims`,
+    /// `broker::stale_recovery`). Not retryable: the same call meets it
+    /// again.
     #[error("claim contract violation: {0}")]
     ClaimContract(String),
 
@@ -177,10 +177,9 @@ impl BrokerError {
             Self::Statement(failure) => is_retryable_statement_failure(failure),
             Self::ConnectionFailed(_) | Self::ListenerClosed => true,
             Self::InstallLock(failure) => failure.is_retryable(),
-            Self::Migration(_)
+            Self::SchemaRefused(_)
             | Self::InvalidWorkflowNodeStatus
             | Self::IncompleteTaskHistoryCutover
-            | Self::SchemaVersionMismatch { .. }
             | Self::InvalidConnectionSettings(_)
             | Self::ClientFamilyMismatch { .. }
             | Self::Serialization(_)

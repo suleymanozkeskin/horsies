@@ -9,17 +9,13 @@
 //! Each test runs on its own database: the reaper pass and the class registry
 //! are global to a database.
 
-use std::str::FromStr;
-
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection};
+use sqlx::postgres::PgPoolOptions;
+use uuid::Uuid;
 
 use super::*;
-use crate::broker::client_family::ClientFamily;
-use crate::broker::migrations::install_schema;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
 use crate::core::history::ddl::classes::{finite_class_parent_name, register_period_class};
 use crate::core::history::ddl::runtime_names::daily_leaf_name;
@@ -34,74 +30,28 @@ use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, Terminaliz
 /// The row retention window of the Python tests.
 const RETENTION_HOURS: u32 = 24;
 
-fn test_database_url() -> String {
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        return url;
-    }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|path| path.join(".env").exists())
-        .expect("workspace .env");
-    let contents = std::fs::read_to_string(root.join(".env")).expect("read workspace .env");
-    let password = contents
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .find_map(|(key, value)| (key.trim() == "DB_PASSWORD").then(|| value.trim().to_owned()))
-        .expect("DB_PASSWORD in workspace .env");
-    format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
-}
-
-/// One database per test, on the baseline schema with the Rust client family.
+/// One database per test, on the baseline schema with the Rust client family:
+/// a copy of the installed test template (`crate::test_support`) with a sqlx
+/// pool for the reaper pass.
 struct RetentionDatabase {
     pool: PgPool,
-    name: String,
-    admin_options: PgConnectOptions,
+    database: crate::test_support::TestDatabase,
 }
 
 impl RetentionDatabase {
     async fn create() -> Self {
-        let base = PgConnectOptions::from_str(&test_database_url()).expect("database URL");
-        let admin_options = base.clone().database("postgres");
-        let name = format!("core_retention_{}", Uuid::new_v4().simple());
-        let mut admin = PgConnection::connect_with(&admin_options)
-            .await
-            .expect("connect admin database");
-        sqlx::query(&format!("CREATE DATABASE \"{name}\""))
-            .execute(&mut admin)
-            .await
-            .expect("create retention database");
+        let database = crate::test_support::TestDatabase::create().await;
         let pool = PgPoolOptions::new()
             .max_connections(4)
-            .connect_with(base.database(&name))
+            .connect(database.url())
             .await
             .expect("connect retention database");
-        install_schema(&pool, ClientFamily::Rust)
-            .await
-            .expect("install the baseline");
-        Self {
-            pool,
-            name,
-            admin_options,
-        }
+        Self { pool, database }
     }
 
     async fn drop(self) {
         self.pool.close().await;
-        let mut admin = PgConnection::connect_with(&self.admin_options)
-            .await
-            .expect("connect admin database");
-        sqlx::query(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-             WHERE datname = $1 AND pid <> pg_backend_pid()",
-        )
-        .bind(&self.name)
-        .execute(&mut admin)
-        .await
-        .expect("end retention database sessions");
-        sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.name))
-            .execute(&mut admin)
-            .await
-            .expect("drop retention database");
+        self.database.drop().await;
     }
 }
 
@@ -121,9 +71,10 @@ async fn run_maintenance_pass(pool: &PgPool, retention: &RetentionConfig) -> Rea
     let mut next_partition_maintenance = tokio::time::Instant::now();
     let mut orphan_state = OrphanSweepState::default();
     run_reaper_pass(
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         pool,
         pool,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &recovery,
         &PayloadPolicy::default(),
         retention,
@@ -345,14 +296,14 @@ async fn seed_workflow(pool: &PgPool, status: &str, age_hours: i32) -> Uuid {
 async fn seed_node(pool: &PgPool, workflow_id: Uuid) {
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
              dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type,
              min_success, task_options, max_retries, execution, good_until,
              retention_class_key, status, task_id, is_subworkflow, sub_workflow_id,
              sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error,
              created_at, started_at, completed_at
          ) VALUES (
-             $1, $2, 0, 'node_0', 'retention_test', '{}', 'default', 100,
+             'NONE', $1, $2, 0, 'node_0', 'retention_test', '{}', 'default', 100,
              '{}', NULL, NULL, FALSE, 'all',
              NULL, NULL, 0, 'ISOLATED', NULL,
              'standard_30d', 'COMPLETED', NULL, FALSE, NULL,

@@ -17,7 +17,7 @@ use crate::core::config::payload::PayloadPolicy;
 use crate::core::lifecycle::FailedAttemptOutcome;
 use crate::core::task::result::TaskResult;
 use crate::worker::execution::{persist_terminal_state, FinalizeOutcome};
-use crate::worker::recovery::mark_stale_running_as_failed;
+use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 use crate::worker::retry::read_stored_options;
 
 /// Stale-scan bound of these tests.

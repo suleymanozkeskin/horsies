@@ -16,7 +16,9 @@
 //! 5. A failure is one of the three outcomes of [`StatementFailure`], each
 //!    with a [`Transience`].
 //! 6. [`PooledConnection::begin`] opens a [`Transaction`]; its `COMMIT` has
-//!    the same three outcomes.
+//!    the same three outcomes. A [`SqlScript`] (a migration text: several
+//!    statements, no parameters) runs in a transaction with
+//!    [`Transaction::run_script`].
 //!
 //! The listener ([`Listener`]) holds one dedicated connection on the session
 //! URL for every LISTEN of the process.
@@ -59,13 +61,14 @@ pub use listener::{
     MAX_SUBSCRIPTIONS,
 };
 pub use pool::{
-    CheckoutClass, ConnectionAge, CorePool, IdlePing, PoolPlan, PoolRole, PoolSizing,
+    CheckoutClass, ConnectionAge, CorePool, IdlePing, KeptOpen, PoolPlan, PoolRole, PoolSizing,
     PoolSizingError, PoolStatus, PooledConnection, Reserve, DEFAULT_IDLE_PING_AFTER,
-    IDLE_PING_BOUND, KEPT_SESSION_SETUP_SQL, POSTGRES_MAX_BACKENDS, WORKER_RESERVED_CONNECTIONS,
+    IDLE_PING_BOUND, KEPT_OPEN_CHECK_INTERVAL, KEPT_SESSION_SETUP_SQL, POSTGRES_MAX_BACKENDS,
+    WORKER_RESERVED_CONNECTIONS,
 };
 pub use pooling_check::STATEMENT_POOLING_CHECK_BOUND;
 pub use statement::{
-    BoundStatement, ParameterBinder, ParameterType, StatementBound, StatementProtocol,
+    BoundStatement, ParameterBinder, ParameterType, SqlScript, StatementBound, StatementProtocol,
     TypedStatement, CANCEL_GRACE,
 };
 pub use tls::{

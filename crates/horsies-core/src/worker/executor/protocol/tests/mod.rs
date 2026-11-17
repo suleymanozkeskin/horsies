@@ -11,6 +11,10 @@ use uuid::Uuid;
 use self::python_vectors::*;
 use super::*;
 use crate::core::codec::StrictJsonError;
+use crate::core::config::socket::{
+    KeepaliveProbes, KeepaliveSeconds, TcpKeepalivesConfig, TcpUserTimeoutConfig, TcpUserTimeoutMs,
+};
+use crate::core::config::{PostgresConfig, PostgresConfigError};
 
 const T1: &str = "0190f5a2-7b1c-7d3e-8f00-000000000001";
 const T2: &str = "0190f5a2-7b1c-7d3e-8f00-000000000002";
@@ -375,13 +379,18 @@ fn the_init_frame_of_a_rust_child() {
             program: ChildProgram::Rust,
             log_level: ChildLogLevel::Info,
             database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+            connection: ChildConnection::default(),
             process_name: "horsies-child".to_owned(),
             child_kind: isolated_kind(),
         }),
         &framed(
             concat!(
                 r#"{"kind":"init","protocol":2,"program":{"kind":"rust"},"log_level":"info","#,
-                r#""database_url":"postgresql://u@h/db","process_name":"horsies-child","#,
+                r#""database_url":"postgresql://u@h/db","#,
+                r#""connection":{"tcp_keepalives":{"kind":"on","idle_seconds":30,"#,
+                r#""interval_seconds":10,"probes":3},"tcp_user_timeout":{"kind":"after","#,
+                r#""milliseconds":30000},"server_sessions":{"kind":"kept"}},"#,
+                r#""process_name":"horsies-child","#,
                 r#""child_kind":{"kind":"isolated","pool":{"min_size":0,"max_size":1,"#,
                 r#""check":true},"task_send_pool":2}}"#,
             ),
@@ -403,6 +412,7 @@ fn the_init_frame_of_a_python_child() {
             }),
             log_level: ChildLogLevel::Warning,
             database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+            connection: ChildConnection::default(),
             process_name: "horsies-child".to_owned(),
             child_kind: ChildKind::SharedAsync(SharedAsyncChild {
                 seats: AsyncSeats::new(100).unwrap(),
@@ -417,12 +427,196 @@ fn the_init_frame_of_a_python_child() {
                 r#""app_locator":"app:app","imports":["app.tasks"],"sys_path_roots":["/srv"],"#,
                 r#""parent_sys_path":["/srv","/usr/lib"],"parent_argv":["horsies","worker"]},"#,
                 r#""log_level":"warning","database_url":"postgresql://u@h/db","#,
+                r#""connection":{"tcp_keepalives":{"kind":"on","idle_seconds":30,"#,
+                r#""interval_seconds":10,"probes":3},"tcp_user_timeout":{"kind":"after","#,
+                r#""milliseconds":30000},"server_sessions":{"kind":"kept"}},"#,
                 r#""process_name":"horsies-child","child_kind":{"kind":"shared_async","#,
                 r#""seats":100,"pool":{"min_size":0,"max_size":1,"check":true},"#,
                 r#""executor_threads":32,"task_send_pool":2}}"#,
             ),
             b"",
         ),
+    );
+}
+
+/// Keepalives off, the system's TCP user timeout and PgBouncer transaction
+/// mode, with the session URL of the parent's config.
+fn transaction_mode_connection() -> ChildConnection {
+    ChildConnection {
+        tcp_keepalives: TcpKeepalivesConfig::Off,
+        tcp_user_timeout: TcpUserTimeoutConfig::SystemDefault,
+        server_sessions: ServerSessions::PgBouncerTransactionMode {
+            session_database_url: DatabaseUrl::new("postgresql://u@direct/db".to_owned()),
+        },
+    }
+}
+
+fn init_with(connection: ChildConnection) -> InitFrame {
+    InitFrame {
+        program: ChildProgram::Rust,
+        log_level: ChildLogLevel::Info,
+        database_url: DatabaseUrl::new("postgresql://u@pooler/db".to_owned()),
+        connection,
+        process_name: "horsies-child".to_owned(),
+        child_kind: isolated_kind(),
+    }
+}
+
+#[test]
+fn the_init_frame_carries_keepalives_off_and_transaction_mode() {
+    assert_parent_bytes(
+        &ParentFrame::Init(init_with(transaction_mode_connection())),
+        &framed(
+            concat!(
+                r#"{"kind":"init","protocol":2,"program":{"kind":"rust"},"log_level":"info","#,
+                r#""database_url":"postgresql://u@pooler/db","#,
+                r#""connection":{"tcp_keepalives":{"kind":"off"},"#,
+                r#""tcp_user_timeout":{"kind":"system_default"},"#,
+                r#""server_sessions":{"kind":"pgbouncer_transaction_mode","#,
+                r#""session_database_url":"postgresql://u@direct/db"}},"#,
+                r#""process_name":"horsies-child","#,
+                r#""child_kind":{"kind":"isolated","pool":{"min_size":0,"max_size":1,"#,
+                r#""check":true},"task_send_pool":2}}"#,
+            ),
+            b"",
+        ),
+    );
+}
+
+#[test]
+fn the_init_frame_carries_keepalive_values_and_a_user_timeout() {
+    let connection = ChildConnection {
+        tcp_keepalives: TcpKeepalivesConfig::On {
+            idle_seconds: KeepaliveSeconds::try_from(45_u32).unwrap(),
+            interval_seconds: KeepaliveSeconds::try_from(7_u32).unwrap(),
+            probes: KeepaliveProbes::try_from(5_u32).unwrap(),
+        },
+        tcp_user_timeout: TcpUserTimeoutConfig::After {
+            milliseconds: TcpUserTimeoutMs::try_from(1500_u32).unwrap(),
+        },
+        server_sessions: ServerSessions::Kept,
+    };
+    let bytes = encode_parent_frame(&ParentFrame::Init(init_with(connection.clone())))
+        .unwrap()
+        .to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains(concat!(
+            r#""connection":{"tcp_keepalives":{"kind":"on","idle_seconds":45,"#,
+            r#""interval_seconds":7,"probes":5},"tcp_user_timeout":{"kind":"after","#,
+            r#""milliseconds":1500},"server_sessions":{"kind":"kept"}}"#,
+        )),
+        "{text}"
+    );
+    match decode_parent_bytes(&bytes) {
+        Ok(ParentFrame::Init(init)) => assert_eq!(init.connection, connection),
+        other => panic!("expected the init frame, got {other:?}"),
+    }
+}
+
+/// An init frame whose `connection` object is `connection`.
+fn init_bytes_with_connection(connection: &str) -> Vec<u8> {
+    framed(
+        &format!(
+            concat!(
+                r#"{{"kind":"init","protocol":2,"program":{{"kind":"rust"}},"#,
+                r#""log_level":"info","database_url":"postgresql://u@h/db","#,
+                r#""connection":{},"process_name":"c","#,
+                r#""child_kind":{{"kind":"isolated","pool":{{"min_size":0,"max_size":1,"#,
+                r#""check":true}},"task_send_pool":2}}}}"#,
+            ),
+            connection
+        ),
+        b"",
+    )
+}
+
+#[test]
+fn a_keepalive_value_outside_its_bounds_is_refused() {
+    for (key, connection) in [
+        (
+            "connection.tcp_keepalives.probes",
+            r#"{"tcp_keepalives":{"kind":"on","idle_seconds":30,"interval_seconds":10,"probes":0},"tcp_user_timeout":{"kind":"system_default"},"server_sessions":{"kind":"kept"}}"#,
+        ),
+        (
+            "connection.tcp_keepalives.idle_seconds",
+            r#"{"tcp_keepalives":{"kind":"on","idle_seconds":32768,"interval_seconds":10,"probes":3},"tcp_user_timeout":{"kind":"system_default"},"server_sessions":{"kind":"kept"}}"#,
+        ),
+        (
+            "connection.tcp_user_timeout.milliseconds",
+            r#"{"tcp_keepalives":{"kind":"off"},"tcp_user_timeout":{"kind":"after","milliseconds":0},"server_sessions":{"kind":"kept"}}"#,
+        ),
+        (
+            "connection.tcp_user_timeout.milliseconds",
+            r#"{"tcp_keepalives":{"kind":"off"},"tcp_user_timeout":{"kind":"after","milliseconds":4294967296},"server_sessions":{"kind":"kept"}}"#,
+        ),
+    ] {
+        assert_eq!(
+            malformed_parent(&init_bytes_with_connection(connection)),
+            MalformedFrame::OutOfBounds {
+                field: key.to_owned(),
+            },
+            "{connection}"
+        );
+    }
+}
+
+#[test]
+fn an_init_frame_without_its_connection_settings_is_refused() {
+    let init = framed(
+        concat!(
+            r#"{"kind":"init","protocol":2,"program":{"kind":"rust"},"log_level":"info","#,
+            r#""database_url":"postgresql://u@h/db","process_name":"c","#,
+            r#""child_kind":{"kind":"isolated","pool":{"min_size":0,"max_size":1,"#,
+            r#""check":true},"task_send_pool":2}}"#,
+        ),
+        b"",
+    );
+    assert_eq!(
+        malformed_parent(&init),
+        MalformedFrame::MissingField {
+            field: "connection".to_owned(),
+        },
+    );
+}
+
+#[test]
+fn transaction_mode_without_its_session_url_is_refused() {
+    let connection = concat!(
+        r#"{"tcp_keepalives":{"kind":"off"},"tcp_user_timeout":{"kind":"system_default"},"#,
+        r#""server_sessions":{"kind":"pgbouncer_transaction_mode"}}"#,
+    );
+    assert_eq!(
+        malformed_parent(&init_bytes_with_connection(connection)),
+        MalformedFrame::MissingField {
+            field: "connection.server_sessions.session_database_url".to_owned(),
+        },
+    );
+}
+
+#[test]
+fn the_connection_of_a_config_is_its_tcp_settings_and_server_sessions() {
+    assert_eq!(
+        ChildConnection::of_config(&PostgresConfig::from_url("postgresql://u@h/db")),
+        Ok(ChildConnection::default()),
+    );
+    let mut config =
+        PostgresConfig::from_pgbouncer_urls("postgresql://u@pooler/db", "postgresql://u@direct/db");
+    config.tcp_keepalives = TcpKeepalivesConfig::Off;
+    config.tcp_user_timeout = TcpUserTimeoutConfig::SystemDefault;
+    assert_eq!(
+        ChildConnection::of_config(&config),
+        Ok(transaction_mode_connection()),
+    );
+}
+
+#[test]
+fn a_config_that_does_not_validate_has_no_child_connection() {
+    let mut config = PostgresConfig::from_url("postgresql://u@pooler/db");
+    config.pgbouncer_transaction_mode = true;
+    assert_eq!(
+        ChildConnection::of_config(&config),
+        Err(PostgresConfigError::MissingSessionDatabaseUrl),
     );
 }
 
@@ -433,7 +627,6 @@ fn the_isolated_run_frame_carries_the_input_as_its_body() {
             task_id: task_id(T5),
             task_name: "app.tasks.add".to_owned(),
             worker_id: "worker-1".to_owned(),
-            task_kind: TaskKind::Plain,
             claimed_at: claim_time(),
             work: IsolatedWork::Run,
             input: TaskInputText::new(r#"{"a":1,"b":2}"#.to_owned()),
@@ -441,7 +634,7 @@ fn the_isolated_run_frame_carries_the_input_as_its_body() {
         &framed(
             concat!(
                 r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.add","worker_id":"worker-1","task_kind":"plain","#,
+                r#""task_name":"app.tasks.add","worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00.123456Z","work":{"kind":"run"}}"#,
             ),
             br#"{"a":1,"b":2}"#,
@@ -456,7 +649,6 @@ fn the_isolated_run_frame_carries_a_refusal_of_stored_options() {
             task_id: task_id(T5),
             task_name: "app.tasks.add".to_owned(),
             worker_id: "worker-1".to_owned(),
-            task_kind: TaskKind::WorkflowTask,
             claimed_at: whole_second_claim_time(),
             work: IsolatedWork::Refusal(StoredOptionsRefusal::TimeoutValueInvalid(
                 RefusalReason::new("timeout_ms is below 1000".to_owned()).unwrap(),
@@ -466,7 +658,7 @@ fn the_isolated_run_frame_carries_a_refusal_of_stored_options() {
         &framed(
             concat!(
                 r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.add","worker_id":"worker-1","task_kind":"workflow_task","#,
+                r#""task_name":"app.tasks.add","worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","work":{"kind":"refusal","#,
                 r#""refusal":{"kind":"value_invalid","reason":"timeout_ms is below 1000"}}}"#,
             ),
@@ -483,7 +675,6 @@ fn the_shared_run_frame_carries_the_seat_work() {
             task_id: task_id(T5),
             task_name: "app.tasks.fetch".to_owned(),
             worker_id: "worker-1".to_owned(),
-            task_kind: TaskKind::Plain,
             claimed_at: whole_second_claim_time(),
             work,
             input: TaskInputText::new("{}".to_owned()),
@@ -494,7 +685,7 @@ fn the_shared_run_frame_carries_the_seat_work() {
             concat!(
                 r#"{{"kind":"shared_run","dispatch":9,"#,
                 r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.fetch","worker_id":"worker-1","task_kind":"plain","#,
+                r#""task_name":"app.tasks.fetch","worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","work":{}}}"#,
             ),
             work
@@ -699,7 +890,6 @@ fn the_claim_generation_round_trips_exactly() {
         task_id: task_id(T5),
         task_name: "t".to_owned(),
         worker_id: "w".to_owned(),
-        task_kind: TaskKind::Plain,
         claimed_at,
         work: IsolatedWork::Run,
         input: TaskInputText::new("{}".to_owned()),
@@ -717,7 +907,7 @@ fn a_claim_generation_with_an_offset_is_read() {
     let run = framed(
         concat!(
             r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-            r#""task_name":"t","worker_id":"w","task_kind":"plain","#,
+            r#""task_name":"t","worker_id":"w","#,
             r#""claimed_at":"2026-11-16T09:30:00.123456+00:00","work":{"kind":"run"}}"#,
         ),
         b"{}",
@@ -817,7 +1007,7 @@ fn a_body_on_a_frame_without_one_is_refused() {
 #[test]
 fn input_that_is_not_utf8_is_refused() {
     let meta = format!(
-        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","worker_id":"w","task_kind":"plain","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"run"}}}}"#
+        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"run"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&meta, &[0x7b, 0xff])),
@@ -893,7 +1083,7 @@ fn a_stuck_report_names_live_work() {
 #[test]
 fn seat_work_outside_its_bounds_is_refused() {
     let meta = format!(
-        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","worker_id":"w","task_kind":"plain","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"task","timeout_ms":999,"cancel_grace_ms":1000}}}}"#
+        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"task","timeout_ms":999,"cancel_grace_ms":1000}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&meta, b"{}")),
@@ -967,6 +1157,7 @@ fn metadata_over_its_bound_is_not_sent() {
         }),
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+        connection: ChildConnection::default(),
         process_name: "c".to_owned(),
         child_kind: isolated_kind(),
     });

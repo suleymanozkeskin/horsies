@@ -106,7 +106,7 @@ impl<const MIN: u64, const MAX: u64> Serialize for BoundedCount<MIN, MAX> {
 const MAX_PROCESS_ID: u32 = i32::MAX as u32;
 
 /// The id of a live process, from 1 to the largest `pid_t`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ProcessId(u32);
 
 impl ProcessId {

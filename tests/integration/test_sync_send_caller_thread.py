@@ -1,8 +1,9 @@
 """A sync send of a producer writes its row on the calling thread.
 
-``PostgresBroker.send_route`` decides. An unkeyed send of a process that
-runs no task bodies, once the schema is initialized, runs the enqueue
-INSERT on the calling thread through the broker's sync send engine. The
+``PostgresBroker.send_route`` decides. A send of a process that runs no
+task bodies, once the schema is initialized, with or without an
+idempotency key, runs ``horsies_enqueue_task`` on the calling thread
+through the broker's sync send engine. The
 tests count the calls of the sync runner (``run_sync``), each of which
 still runs, and the threads of the sync engine's checkouts.
 """
@@ -32,7 +33,11 @@ from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.task_send_types import TaskSendEnqueueFailed, TaskSendResult
+from horsies.core.models.task_send_types import (
+    TaskSendEnqueueFailed,
+    TaskSendIdempotencyKeyConflict,
+    TaskSendResult,
+)
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.process_role import ProcessRole
 from horsies.core.task_decorator import TaskFunction, TaskHandle
@@ -42,7 +47,7 @@ from tests.integration.conftest import DB_URL
 pytestmark = [pytest.mark.integration]
 
 TASK_NAME: Final = 'caller_thread_echo'
-PLAIN_URL: Final = DB_URL.replace('postgresql+psycopg://', 'postgresql://', 1)
+PLAIN_URL: Final = DB_URL
 SENDER_THREADS: Final = 8
 SENDS_PER_THREAD: Final = 25
 THREAD_JOIN_BOUND_S: Final = 60.0
@@ -69,8 +74,7 @@ class EchoApp:
 
 def _echo_app(*, pool_pre_ping: bool) -> EchoApp:
     """An app with one task, after its first send: that send checks the
-    schema on the loop runner, so the next unkeyed sends take the calling
-    thread."""
+    schema on the loop runner, so the next sends take the calling thread."""
     app = Horsies(
         AppConfig(
             queue_mode=QueueMode.DEFAULT,
@@ -124,7 +128,7 @@ def _bridged(broker: PostgresBroker, monkeypatch: pytest.MonkeyPatch) -> list[st
     return calls
 
 
-def _task_id(sent: TaskSendResult[TaskHandle[int]]) -> str:
+def _task_id(sent: TaskSendResult[TaskHandle[int]]) -> uuid.UUID:
     match sent:
         case Ok(handle):
             return handle.task_id
@@ -132,7 +136,7 @@ def _task_id(sent: TaskSendResult[TaskHandle[int]]) -> str:
             raise AssertionError(f'expected a sent task, got {sent!r}')
 
 
-def _rows(task_ids: list[str]) -> int:
+def _rows(task_ids: list[uuid.UUID]) -> int:
     with psycopg.connect(PLAIN_URL, autocommit=True) as connection:
         row = connection.execute(
             'SELECT count(*) FROM horsies_tasks WHERE id = ANY(%s::uuid[])',
@@ -171,7 +175,7 @@ def test_a_producer_send_writes_on_the_calling_thread(
     echo_app: EchoApp,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert echo_app.broker.send_route(None) is SyncSendRoute.CALLER_THREAD
+    assert echo_app.broker.send_route() is SyncSendRoute.CALLER_THREAD
     bridged = _bridged(echo_app.broker, monkeypatch)
     checkout_threads: list[int] = []
     engine = echo_app.broker._sync_send_engine_open()  # pyright: ignore[reportPrivateUsage]
@@ -188,16 +192,35 @@ def test_a_producer_send_writes_on_the_calling_thread(
     assert _rows([task_id]) == 1
 
 
-def test_a_keyed_send_stays_on_the_loop_runner(
+def test_a_keyed_send_writes_on_the_calling_thread(
     echo_app: EchoApp,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The key goes with the row on the calling thread. A second send with
+    the key and the same command answers with the task that holds the key;
+    another command is a key conflict. Neither writes a second row."""
     bridged = _bridged(echo_app.broker, monkeypatch)
-
+    checkout_threads: list[int] = []
+    engine = echo_app.broker._sync_send_engine_open()  # pyright: ignore[reportPrivateUsage]
+    event.listen(
+        engine.pool,
+        'checkout',
+        lambda *_: checkout_threads.append(threading.get_ident()),
+    )
     keyed = echo_app.echo.with_options(idempotency_key=f'key-{uuid.uuid4().hex}')
-    task_id = _task_id(keyed.send(value=2))
 
-    assert bridged == ['enqueue_async']
+    task_id = _task_id(keyed.send(value=2))
+    replay_id = _task_id(keyed.send(value=2))
+    conflict = keyed.send(value=3)
+
+    assert replay_id == task_id
+    match conflict:
+        case Err(TaskSendIdempotencyKeyConflict(owner_task_id=owner)):
+            assert owner == task_id
+        case _:
+            raise AssertionError(f'expected a key conflict, got {conflict!r}')
+    assert bridged == []
+    assert checkout_threads == [threading.get_ident()] * 3
     assert _rows([task_id]) == 1
 
 
@@ -264,9 +287,9 @@ def test_a_taken_task_id_is_answered_on_the_calling_thread(
     assert _rows([task_id]) == 1
 
 
-def _task_id_of(enqueued: object) -> str:
+def _task_id_of(enqueued: object) -> uuid.UUID:
     match enqueued:
-        case Ok(str() as task_id):
+        case Ok(uuid.UUID() as task_id):
             return task_id
         case _:
             raise AssertionError(f'expected an enqueued id, got {enqueued!r}')

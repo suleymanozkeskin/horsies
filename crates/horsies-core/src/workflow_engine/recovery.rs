@@ -1,6 +1,5 @@
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::history::enqueue::prepare_workflow_task_facts;
 use crate::core::{OperationalErrorCode, TaskError, WorkflowSpecRegistry};
 use sqlx::PgPool;
 use std::time::Instant;
@@ -12,10 +11,7 @@ use crate::workflow_engine::recovery_limit::{
     count_over_failure_limit, run_recovery_candidate, CandidateOutcome, CountFailures,
     FailureRecord, RecoveryCase, RecoveryFailurePolicy,
 };
-use crate::workflow_engine::start::{
-    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
-    stored_sub_workflow_params,
-};
+use crate::workflow_engine::start::{child_workflow_depth, start_child_workflow_in_tx};
 
 // ---------------------------------------------------------------------------
 // Recovery report
@@ -476,7 +472,12 @@ WHERE id = $1
 /// Re-enqueue a READY task into horsies_tasks.
 /// An engine-minted task row carries no command fingerprint, no idempotency
 /// key and no retained input (horsies_tasks_command_fingerprint_by_origin).
-/// `sent_at` is the start call time of the node's workflow ($11).
+/// `sent_at` is the start call time of the node's workflow ($10). `good_until`
+/// is the `good_until` member of the node's stored task options ($6), cast as
+/// `horsies_workflow_node_tasks_insert` casts it: a text that the timestamptz
+/// input cannot read raises (22007 or 22008) and nothing is inserted. Python
+/// passes `str()` of the member to its insert
+/// (`horsies/core/workflows/engine.py:831-835`).
 const ENQUEUE_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, input, task_options, execution,
@@ -487,8 +488,9 @@ INSERT INTO horsies_tasks (
     retain_rerun_input, rerun_of_task_id, rerun_root_task_id
 )
 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8,
-        (SELECT w.sent_at FROM horsies_workflows w WHERE w.id = $11::uuid), NOW(), NULL, NULL, NULL,
-        'PENDING', NOW(), 0, $9, $10, TRUE, NOW(), FALSE, NULL, NULL)";
+        (SELECT w.sent_at FROM horsies_workflows w WHERE w.id = $10::uuid), NOW(), NULL, NULL, NULL,
+        'PENDING', NOW(), 0, $9, (nullif($6, '')::jsonb ->> 'good_until')::timestamptz,
+        TRUE, NOW(), FALSE, NULL, NULL)";
 
 /// Link workflow_task to a newly created horsies_task.
 const LINK_ENQUEUED_TASK_SQL: &str = "\
@@ -510,7 +512,7 @@ WHERE workflow_id = $2 AND task_index = $3
 
 /// Get parent depth and root workflow ID.
 const GET_DEPTH_AND_ROOT_SQL: &str = "\
-SELECT depth, root_workflow_id
+SELECT depth, root_workflow_id, name
 FROM horsies_workflows
 WHERE id = $1";
 
@@ -589,6 +591,7 @@ struct GlobalWorkflowAuditRow {
 struct DepthRow {
     depth: Option<i32>,
     root_workflow_id: Option<Uuid>,
+    name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,7 +1003,7 @@ async fn recover_case1(
         };
         let candidate = enqueue_ready_task(pool, &row, registry, payload, retention);
         match run_recovery_candidate(pool, failure_policy, row.workflow_id, case, candidate).await {
-            CandidateOutcome::Finished(true) => {
+            CandidateOutcome::Finished(ReadyNodeRecovery::Enqueued) => {
                 report.case1_ready_enqueued += 1;
                 tracing::debug!(
                     workflow_id = %row.workflow_id,
@@ -1008,10 +1011,19 @@ async fn recover_case1(
                     "recovery case 1: re-enqueued ready task",
                 );
             }
-            CandidateOutcome::Finished(false) => {
+            CandidateOutcome::Finished(ReadyNodeRecovery::NotLinked) => {
                 // LINK matched 0 rows; the inserted row was rolled back, so this
                 // node was not recovered and must not be counted.
                 metrics.refusals += 1;
+            }
+            CandidateOutcome::Finished(ReadyNodeRecovery::FailedNotPrepared) => {
+                // The node failed alone and its failure was applied; nothing was
+                // enqueued, so it is not counted as re-enqueued.
+                tracing::warn!(
+                    workflow_id = %row.workflow_id,
+                    task_index = row.task_index,
+                    "recovery case 1: ready task could not be prepared, node failed",
+                );
             }
             CandidateOutcome::Failed(record) => {
                 report.errors += 1;
@@ -1526,77 +1538,75 @@ fn orphaned_workflow_error(workflow_id: Uuid, name: &str) -> Result<String, serd
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Enqueue a READY task into horsies_tasks and link it.
+/// What recovery case 1 did with one READY task node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadyNodeRecovery {
+    /// The task row was inserted and linked.
+    Enqueued,
+    /// The LINK matched no row (the workflow is not RUNNING, or the node left READY); the insert rolled back.
+    NotLinked,
+    /// The promotion refused the node ([`engine::NodeRefusal`]): its own data does not read
+    /// (`WORKER_SERIALIZATION_ERROR`), or its `args_from` names a member of its static input
+    /// (`WORKFLOW_ENQUEUE_FAILED`). The node failed alone and nothing was enqueued (Python's case 1 through
+    /// `enqueue_workflow_task`, `horsies/core/workflows/engine.py:634-705`).
+    FailedNotPrepared,
+}
+
+/// Enqueue a READY task into horsies_tasks and link it, or fail the node when the promotion refuses it.
 ///
-/// Returns `true` when the node left READY: it was linked to its task row, or its `args_from` names a
-/// member of its static input and it was failed (Python `core/workflows/engine.py:834-839`). Returns
-/// `false` when the LINK matched 0 rows and the inserted row was rolled back.
+/// Errors: an insert that raises (a stored `good_until` that the database cannot read, 22007 or 22008)
+/// rolls back and is returned: the node stays READY with no task, and the recovery pass counts the error
+/// toward the failure limit (Python's case 1 raises from the insert,
+/// `horsies/core/workflows/engine.py:831-835`).
 async fn enqueue_ready_task(
     pool: &PgPool,
     row: &ReadyTaskRow,
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
-) -> Result<bool, WorkflowError> {
+) -> Result<ReadyNodeRecovery, WorkflowError> {
     let task_id = crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
         WorkflowError::Validation(format!("task identity mint failed: {error}"))
     })?;
-    let max_retries = crate::workflow_engine::node_max_retries(
-        row.task_index,
-        &row.task_name,
-        row.task_options.as_deref(),
+    // The input with its `args_from` and workflow context members (without the
+    // context, a READY `workflow_ctx_from` node would run with no upstream
+    // context), the retry limit and the facts. The insert casts the deadline.
+    let prepared = engine::preparation(
+        engine::prepare_ready_task_row(
+            pool,
+            row.workflow_id,
+            engine::ReadyNodeData {
+                task_index: row.task_index,
+                task_name: &row.task_name,
+                input: &row.input,
+                args_from: &row.args_from,
+                dependencies: &row.dependencies,
+                workflow_ctx_from: row.workflow_ctx_from.as_deref(),
+                task_options: row.task_options.as_deref(),
+                queue_name: &row.queue_name,
+            },
+            retention,
+        )
+        .await,
     )?;
-
-    let merged_input = match merge_args_from_for_ready(
-        pool,
-        row.workflow_id,
-        &row.input,
-        &row.args_from,
-        &row.dependencies,
-    )
-    .await?
-    {
-        ArgsFromMerge::Merged(merged_input) => merged_input,
-        ArgsFromMerge::StaticMemberConflict(conflict) => {
-            engine::fail_node_at_enqueue(
+    let prepared = match prepared {
+        engine::Preparation::Built(prepared) => prepared,
+        engine::Preparation::Refused(refusal) => {
+            // Whether the failure paused the workflow changes nothing here: each
+            // case 1 candidate is one node.
+            let _step = engine::fail_workflow_node(
                 pool,
                 row.workflow_id,
                 row.task_index,
-                conflict.node_error(row.workflow_id, row.task_index, MergedNodeKind::Task),
+                refusal.task_node_error(row.workflow_id, row.task_index),
                 registry,
                 payload,
                 retention,
             )
             .await?;
-            return Ok(true);
+            return Ok(ReadyNodeRecovery::FailedNotPrepared);
         }
     };
-
-    // Inject workflow_ctx for ctx-capable nodes, matching the runtime promotion
-    // path. Without this, a READY `workflow_ctx_from` task recovered here would
-    // run with no upstream context and fail or produce a wrong result.
-    let merged_input = engine::inject_workflow_ctx_into_input(
-        pool,
-        row.workflow_id,
-        row.task_index,
-        &row.task_name,
-        row.workflow_ctx_from.as_deref(),
-        merged_input,
-    )
-    .await?;
-
-    let good_until = crate::workflow_engine::node_good_until(
-        row.task_index,
-        &row.task_name,
-        row.task_options.as_deref(),
-    )?;
-    let retention_class_key = retention.resolve_queue_class(&row.queue_name);
-    let facts = prepare_workflow_task_facts(
-        &merged_input,
-        row.task_options.as_deref(),
-        retention_class_key.as_deref(),
-    )
-    .map_err(|error| WorkflowError::Validation(error.to_string()))?;
 
     // INSERT + LINK in a single transaction so a row whose LINK matches 0 rows
     // (workflow no longer RUNNING / task no longer READY, or a concurrent
@@ -1610,12 +1620,11 @@ async fn enqueue_ready_task(
         .bind(&row.task_name)
         .bind(&row.queue_name)
         .bind(row.priority)
-        .bind(&merged_input)
+        .bind(&prepared.input)
         .bind(&row.task_options)
-        .bind(facts.execution.as_str())
-        .bind(&facts.retention_class_key)
-        .bind(max_retries)
-        .bind(good_until)
+        .bind(prepared.facts.execution.as_str())
+        .bind(&prepared.facts.retention_class_key)
+        .bind(prepared.max_retries)
         .bind(row.workflow_id)
         .execute(&mut *tx)
         .await?;
@@ -1634,12 +1643,12 @@ async fn enqueue_ready_task(
             task_index = row.task_index,
             "recovery case 1: ready-task link matched 0 rows (workflow not RUNNING or task not READY), rolled back",
         );
-        return Ok(false);
+        return Ok(ReadyNodeRecovery::NotLinked);
     }
 
     tx.commit().await?;
 
-    Ok(true)
+    Ok(ReadyNodeRecovery::Enqueued)
 }
 
 /// Start a child workflow for a stuck READY sub-workflow task.
@@ -1647,6 +1656,12 @@ async fn enqueue_ready_task(
 /// A child past the depth limit, or a child definition that is not registered under the node's key, fails
 /// the node (`SUBWORKFLOW_DEPTH_LIMIT_REACHED`, `SUBWORKFLOW_LOAD_FAILED`) and applies the parent's
 /// `on_error`, as Python's case 1.5 does through `enqueue_subworkflow_task`.
+///
+/// Errors: a child start that cannot write the built child (task options of the task function that do not
+/// parse or do not merge with the node's deadline, a database error;
+/// [`crate::workflow_engine::start::ChildStartStop::Failed`]) rolls back and is returned: the node stays
+/// READY with no child, and the recovery pass counts the error toward the failure limit (Python
+/// `_child_task_options_json` raises, `horsies/core/workflows/engine.py:425-475`).
 async fn start_stuck_subworkflow(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
@@ -1654,12 +1669,6 @@ async fn start_stuck_subworkflow(
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
-    let spec_name = row
-        .task_name
-        .strip_prefix("__sub_workflow:")
-        .or(row.sub_workflow_name.as_deref())
-        .unwrap_or(&row.task_name);
-
     let depth_row: DepthRow = sqlx::query_as(GET_DEPTH_AND_ROOT_SQL)
         .bind(&row.workflow_id)
         .fetch_one(pool)
@@ -1667,11 +1676,12 @@ async fn start_stuck_subworkflow(
     let child_depth = match child_workflow_depth(
         depth_row.depth.unwrap_or(0),
         row.workflow_id,
+        &depth_row.name,
         row.task_index,
     ) {
         Ok(child_depth) => child_depth,
         Err(error) => {
-            return engine::fail_node_at_enqueue(
+            return engine::fail_workflow_node(
                 pool,
                 row.workflow_id,
                 row.task_index,
@@ -1680,7 +1690,8 @@ async fn start_stuck_subworkflow(
                 payload,
                 retention,
             )
-            .await;
+            .await
+            .map(|_step| ());
         }
     };
     let Some(registered) = row
@@ -1688,60 +1699,88 @@ async fn start_stuck_subworkflow(
         .as_deref()
         .and_then(|key| registry.resolve_child_registration(key))
     else {
-        return engine::fail_node_at_enqueue(
+        return engine::fail_workflow_node(
             pool,
             row.workflow_id,
             row.task_index,
-            engine::subworkflow_load_failed_error(spec_name, row.sub_definition_key.as_deref()),
+            engine::subworkflow_load_failed_error(
+                &depth_row.name,
+                row.task_index,
+                row.sub_definition_key.as_deref(),
+            ),
             registry,
             payload,
             retention,
         )
-        .await;
+        .await
+        .map(|_step| ());
+    };
+    // A child that cannot be built or started, or an `args_from` key that names a member of
+    // the static input, fails its node alone with WORKFLOW_ENQUEUE_FAILED (Python
+    // `horsies/core/workflows/engine.py:1151-1215`).
+    let fail_not_started = |refusal: engine::NodeRefusal| {
+        engine::fail_workflow_node(
+            pool,
+            row.workflow_id,
+            row.task_index,
+            refusal.subworkflow_node_error(row.workflow_id, row.task_index, &depth_row.name),
+            registry,
+            payload,
+            retention,
+        )
     };
 
-    let merged_input = match merge_args_from_for_ready(
+    let merge = merge_args_from_for_ready(
         pool,
         row.workflow_id,
         &row.input,
         &row.args_from,
         &row.dependencies,
     )
-    .await?
-    {
-        ArgsFromMerge::Merged(merged_input) => merged_input,
-        ArgsFromMerge::StaticMemberConflict(conflict) => {
-            return engine::fail_node_at_enqueue(
-                pool,
-                row.workflow_id,
-                row.task_index,
-                conflict.node_error(row.workflow_id, row.task_index, MergedNodeKind::SubWorkflow),
-                registry,
-                payload,
-                retention,
-            )
-            .await;
+    .await;
+    let built = engine::preparation(engine::prepare_child_spec(
+        registered,
+        row.workflow_id,
+        row.task_index,
+        merge,
+        row.args_from.as_ref(),
+        row.sub_workflow_params.as_deref(),
+        registry,
+    ))?;
+    let child_spec = match built {
+        engine::Preparation::Built(child_spec) => child_spec,
+        engine::Preparation::Refused(refusal) => {
+            return fail_not_started(refusal).await.map(|_step| ());
         }
     };
-    let params = stored_sub_workflow_params(row.sub_workflow_params.as_deref())?;
-    let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
 
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(row.workflow_id);
 
-    // Start child workflow + link in a single transaction.
+    // Start child workflow + link in a single transaction. A child start that raises returns
+    // its error here, and the dropped transaction rolls back.
     let mut tx = pool.begin().await?;
 
-    let child_id = start_child_workflow_in_tx(
-        &mut tx,
-        &child_spec,
-        row.workflow_id,
-        row.task_index,
-        child_depth,
-        root_wf_id,
-        registry,
-        retention,
-    )
-    .await?;
+    let started = engine::preparation(
+        start_child_workflow_in_tx(
+            &mut tx,
+            &child_spec,
+            row.workflow_id,
+            row.task_index,
+            child_depth,
+            root_wf_id,
+            registry,
+            retention,
+        )
+        .await,
+    )?;
+    let child_id = match started {
+        engine::Preparation::Built(child_id) => child_id,
+        engine::Preparation::Refused(refusal) => {
+            // No child row stays: the child's writes roll back before the node fails.
+            tx.rollback().await?;
+            return fail_not_started(refusal).await.map(|_step| ());
+        }
+    };
 
     let link_result = sqlx::query(LINK_SUBWORKFLOW_SQL)
         .bind(&child_id)
@@ -1761,7 +1800,6 @@ async fn start_stuck_subworkflow(
 }
 
 use crate::workflow_engine::args_merge::merge_args_from_async as merge_args_from_for_ready;
-use crate::workflow_engine::args_merge::{ArgsFromMerge, MergedNodeKind};
 
 #[cfg(test)]
 mod cap_tests {
@@ -1883,11 +1921,11 @@ mod cap_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'root', 'bounded_recovery_watermark_task', 'null', 'default', 100,
+                'NONE', $1, $2, 0, 'root', 'bounded_recovery_watermark_task', 'null', 'default', 100,
                 '{}'::integer[], FALSE, 'all', 'PENDING', FALSE, $3, 0, 'ISOLATED',
                 'standard_30d'
             )",
@@ -1988,7 +2026,7 @@ mod cap_tests {
         pool.close().await;
         let error = recover_stuck_workflows(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             0,
             25,
             &PayloadPolicy::default(),
@@ -2007,7 +2045,7 @@ mod cap_tests {
         pool.close().await;
         let failure = recover_stuck_workflows_observed(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             0,
             25,
             &PayloadPolicy::default(),
@@ -2034,7 +2072,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         let error = recover_global_workflow_end_states(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             Some(200),
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2059,7 +2097,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         recover_global_workflow_end_states(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             Some(0),
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2096,11 +2134,11 @@ mod cap_tests {
         for (task_index, dependencies) in [(0_i32, vec![]), (1_i32, vec![2_i32])] {
             sqlx::query(
                 "INSERT INTO horsies_workflow_tasks (
-                    id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                    downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                     priority, dependencies, allow_failed_deps, join_type, status,
                     is_subworkflow, created_at, max_retries, execution, retention_class_key
                 ) VALUES (
-                    $1, $2, $3, $4, $5, 'null', 'default', 100, $6, FALSE, 'all', 'PENDING',
+                    'NONE', $1, $2, $3, $4, $5, 'null', 'default', 100, $6, FALSE, 'all', 'PENDING',
                     FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
                 )",
             )
@@ -2116,11 +2154,11 @@ mod cap_tests {
         }
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 2, 'blocker', 'p7_case0_blocker', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 2, 'blocker', 'p7_case0_blocker', 'null', 'default', 100, '{}', FALSE,
                 'all', 'RUNNING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -2132,7 +2170,7 @@ mod cap_tests {
 
         let report = recover_stuck_workflow_tree(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             workflow_id,
             0,
             &PayloadPolicy::default(),
@@ -2192,7 +2230,8 @@ mod cap_tests {
             insert_orphaned_workflow(&pool, *id).await;
         }
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
 
         // Capped at 2: exactly 2 of the 3 orphans are failed this pass.
         let report = recover_stuck_workflows_with_cap(
@@ -2236,8 +2275,8 @@ mod cap_tests {
             INSERT INTO horsies_workflows(id,name,status,on_error,depth,root_workflow_id,sent_at,created_at,updated_at)
                 SELECT md5('partial-'||n)::uuid,'partial_index','RUNNING','fail',0,md5('partial-'||n)::uuid,NOW(),NOW(),NOW()
                 FROM generate_series(1,200) n;
-            INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,input,queue_name,priority,dependencies,allow_failed_deps,join_type,status,is_subworkflow,max_retries,execution,retention_class_key,created_at)
-                SELECT gen_random_uuid(),md5('partial-'||n)::uuid,i,'partial_index','null','default',100,'{}',FALSE,'all','COMPLETED',FALSE,0,'ISOLATED','standard_30d',NOW()
+            INSERT INTO horsies_workflow_tasks(downstream_subworkflow, id,workflow_id,task_index,task_name,input,queue_name,priority,dependencies,allow_failed_deps,join_type,status,is_subworkflow,max_retries,execution,retention_class_key,created_at)
+                SELECT 'NONE', gen_random_uuid(),md5('partial-'||n)::uuid,i,'partial_index','null','default',100,'{}',FALSE,'all','COMPLETED',FALSE,0,'ISOLATED','standard_30d',NOW()
                 FROM generate_series(1,200) n CROSS JOIN LATERAL generate_series(0,CASE WHEN n=200 THEN 1000 ELSE 0 END) i;
             ANALYZE horsies_workflows, horsies_workflow_tasks;
             SET LOCAL plan_cache_mode=force_generic_plan;")
@@ -2362,12 +2401,12 @@ mod cap_tests {
                  FROM generate_series(1, 50000) AS g
              )
              INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps,
                  join_type, status, is_subworkflow, max_retries, execution,
                  retention_class_key, created_at
              )
-             SELECT node_id, workflow_id, 0, 'root', 'bounded_recovery_stable_task', 'null',
+             SELECT 'NONE', node_id, workflow_id, 0, 'root', 'bounded_recovery_stable_task', 'null',
                     'default', 100, '{}'::integer[], FALSE,
                     'all',
                     CASE WHEN g % 4 = 0 THEN 'PENDING' ELSE 'COMPLETED' END,
@@ -2385,7 +2424,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         recover_global_workflow_end_states(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             Some(200),
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2542,12 +2581,12 @@ mod cap_tests {
                  FROM generate_series(1, 201) AS g
              )
              INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps,
                  join_type, status, is_subworkflow, max_retries, execution,
                  retention_class_key, completed_at, created_at
              )
-             SELECT node_id, workflow_id, 0, 'root', 'bounded_recovery_cursor_task', 'null',
+             SELECT 'NONE', node_id, workflow_id, 0, 'root', 'bounded_recovery_cursor_task', 'null',
                     'default', 100, '{}'::integer[], FALSE, 'all',
                     CASE WHEN g = 201 THEN 'COMPLETED' ELSE 'PENDING' END,
                     FALSE, 0, 'ISOLATED', 'standard_30d',
@@ -2559,7 +2598,8 @@ mod cap_tests {
         .await
         .unwrap();
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let mut first = RecoveryReport::default();
         recover_global_workflow_end_states(
             &pool,
@@ -2643,7 +2683,8 @@ mod cap_tests {
             .await;
         }
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let mut first = RecoveryReport::default();
         recover_global_workflow_end_states(
             &pool,
@@ -2774,11 +2815,11 @@ mod cap_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow,
                 completed_at, created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'root', 'bounded_recovery_retry_task', 'null', 'default', 100,
+                'NONE', $1, $2, 0, 'root', 'bounded_recovery_retry_task', 'null', 'default', 100,
                 '{}'::integer[], FALSE, 'all', 'COMPLETED', FALSE, NOW(), NOW(), 0, 'ISOLATED',
                 'standard_30d'
             )",
@@ -2809,7 +2850,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         recover_global_workflow_end_states(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             Some(200),
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2832,7 +2873,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         recover_global_workflow_end_states(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             Some(200),
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2905,11 +2946,11 @@ mod cap_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow,
                 completed_at, created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'root', 'bounded_recovery_fenced_task', 'null', 'default', 100,
+                'NONE', $1, $2, 0, 'root', 'bounded_recovery_fenced_task', 'null', 'default', 100,
                 '{}'::integer[], FALSE, 'all', 'COMPLETED', FALSE, NOW(), NOW(), 0, 'ISOLATED',
                 'standard_30d'
             )",
@@ -2940,7 +2981,7 @@ mod cap_tests {
             engine::check_workflow_completion_with_recovery_claim(
                 &action_pool,
                 workflow_id,
-                &WorkflowSpecRegistry::new(),
+                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
                 &PayloadPolicy::default(),
                 &RetentionConfig::default(),
                 claim_token,
@@ -2985,7 +3026,7 @@ mod cap_tests {
         let mut second = RecoveryReport::default();
         recover_global_workflow_end_states(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             Some(200),
             &mut second,
             RecoveryFailurePolicy::LogOnly,
@@ -3141,7 +3182,7 @@ mod cap_tests {
             std::time::Duration::from_secs(1),
             recover_global_workflow_end_states(
                 &pool,
-                &WorkflowSpecRegistry::new(),
+                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
                 Some(200),
                 &mut report,
                 RecoveryFailurePolicy::LogOnly,
@@ -3168,7 +3209,7 @@ mod cap_tests {
 
         let report = recover_stuck_workflow_tree(
             &pool,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             selected,
             0,
             &PayloadPolicy::default(),
@@ -3199,8 +3240,8 @@ mod cap_tests {
     }
 
     /// Recovery case 1 fails a READY task node whose `args_from` names a member of its static input,
-    /// with Python's conflict error and no task row (`core/workflows/engine.py:834-839`). The node
-    /// left READY, so the candidate counts as recovered.
+    /// with Python's conflict error and no task row (`core/workflows/engine.py:834-839`). Nothing was
+    /// enqueued, so the outcome is `FailedNotPrepared`.
     #[tokio::test]
     #[serial]
     async fn case_1_fails_a_ready_node_whose_args_from_names_a_static_member() {
@@ -3226,11 +3267,11 @@ mod cap_tests {
         ] {
             sqlx::query(
                 "INSERT INTO horsies_workflow_tasks (
-                    id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                    downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                     dependencies, args_from, allow_failed_deps, join_type, status, is_subworkflow,
                     created_at, max_retries, execution, retention_class_key
                 ) VALUES (
-                    $1, $2, $3, $4, 'conflict_task', $5, 'default', 100, $6::int[], $7::jsonb,
+                    'NONE', $1, $2, $3, $4, 'conflict_task', $5, 'default', 100, $6::int[], $7::jsonb,
                     FALSE, 'all', $8, FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
                 )",
             )
@@ -3259,16 +3300,16 @@ mod cap_tests {
             dependencies: vec![0],
         };
 
-        let recovered = enqueue_ready_task(
+        let outcome = enqueue_ready_task(
             &pool,
             &row,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
         .await
         .expect("recovery enqueue path");
-        assert!(recovered);
+        assert_eq!(outcome, ReadyNodeRecovery::FailedNotPrepared);
 
         let (status, task_id, result): (String, Option<Uuid>, Option<String>) = sqlx::query_as(
             "SELECT status, task_id, result FROM horsies_workflow_tasks
@@ -3286,6 +3327,7 @@ mod cap_tests {
         let crate::core::TaskResult::Err(error) = stored else {
             panic!("the failed node must store an error");
         };
+        assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
         assert_eq!(
             error.message.as_deref(),
             Some("args_from key 'x' conflicts with static kwarg (task 1)")
@@ -3298,94 +3340,307 @@ mod cap_tests {
             .ok();
     }
 
-    /// Recovery case 1 reads a READY node's stored options with the reader of a task row: a retry policy that
-    /// does not fit is refused before any statement, so no task row is inserted, and the refusal reaches the
-    /// candidate's failure bound (`run_recovery_candidate`). The test seeds no node: a reader that guesses a
-    /// limit (3 here) runs the insert, the LINK matches 0 rows, and the call answers `Ok(false)`.
-    #[tokio::test]
-    #[serial]
-    async fn a_ready_node_whose_retry_policy_does_not_fit_is_not_enqueued() {
-        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
-        let task_name = "recovery_refused_retry_policy_node";
-        let row = ReadyTaskRow {
-            workflow_id: Uuid::new_v4(),
-            task_index: 3,
-            task_name: task_name.to_owned(),
-            input: "{}".to_owned(),
-            queue_name: "default".to_owned(),
-            priority: 17,
-            task_options: Some(r#"{"retry_policy": {"backoff_strategy": "fixed"}}"#.to_owned()),
-            args_from: None,
-            workflow_ctx_from: None,
-            dependencies: Vec::new(),
-        };
-
-        let outcome = enqueue_ready_task(
-            &pool,
-            &row,
-            &WorkflowSpecRegistry::new(),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
+    /// One RUNNING workflow (`on_error = fail`) with one READY task node whose stored options are `options`.
+    /// Returns the workflow id.
+    async fn seed_ready_node(pool: &PgPool, task_name: &str, options: &str) -> Uuid {
+        let workflow_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at
+             ) VALUES (
+                $1::uuid, 'unprepared_ready_wf', 'RUNNING', 'fail', NULL,
+                'unprepared.ready.v1', 0, $1::uuid, NOW(), NOW(), NOW(), NOW()
+             )",
         )
-        .await;
-
-        match outcome {
-            Err(WorkflowError::Validation(message)) => assert!(
-                message.contains(&format!(
-                    "task_options of workflow node 3 ({task_name}) refused"
-                )),
-                "{message}"
-            ),
-            other => panic!("the recovery enqueue must refuse the node, got {other:?}"),
-        }
-        let task_rows: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
-                .bind(task_name)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(task_rows, 0);
+        .bind(workflow_id)
+        .execute(pool)
+        .await
+        .expect("insert the workflow");
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+                queue_name, priority, dependencies, allow_failed_deps, join_type, status,
+                is_subworkflow, created_at, max_retries, execution, retention_class_key,
+                task_options
+            ) VALUES (
+                'NONE', $1::uuid, $2::uuid, 0, 'unprepared', $3, '{}', 'default', 17,
+                '{}', FALSE, 'all', 'READY', FALSE, NOW(), 0, 'ISOLATED', 'forever', $4
+            )",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workflow_id)
+        .bind(task_name)
+        .bind(options)
+        .execute(pool)
+        .await
+        .expect("insert the READY node");
+        workflow_id
     }
 
-    /// Recovery case 1 reads a READY node's stored deadline before it writes: a `good_until` that is not
-    /// an RFC 3339 text is refused, not read as no deadline. The test seeds no node: a reader that drops the
-    /// deadline runs the insert, the LINK matches 0 rows, and the call answers `Ok(false)`.
-    #[tokio::test]
-    #[serial]
-    async fn a_ready_node_whose_deadline_does_not_read_is_not_enqueued() {
-        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
-        let task_name = "recovery_refused_deadline_node";
-        let row = ReadyTaskRow {
-            workflow_id: Uuid::new_v4(),
-            task_index: 5,
+    fn ready_row(workflow_id: Uuid, task_name: &str, options: &str) -> ReadyTaskRow {
+        ReadyTaskRow {
+            workflow_id,
+            task_index: 0,
             task_name: task_name.to_owned(),
             input: "{}".to_owned(),
             queue_name: "default".to_owned(),
             priority: 17,
-            task_options: Some(r#"{"good_until": 12345}"#.to_owned()),
+            task_options: Some(options.to_owned()),
             args_from: None,
             workflow_ctx_from: None,
             dependencies: Vec::new(),
-        };
+        }
+    }
 
-        let outcome = enqueue_ready_task(
+    /// Recovery case 1 enqueues a READY node with the reader of a task row. A stored retry policy that does
+    /// not read, or stored options that are not a JSON object, fail that node alone with
+    /// `WORKER_SERIALIZATION_ERROR`, the node index and the workflow id in `data`, and no task row (Python's
+    /// case 1 through `enqueue_workflow_task`, `horsies/core/workflows/engine.py:634-705`, `:798-818`); the
+    /// workflow, with `on_error = fail` and no other node, ends FAILED. A reader that guesses a limit
+    /// enqueues the node instead.
+    #[tokio::test]
+    #[serial]
+    async fn a_ready_node_that_cannot_be_prepared_fails_alone() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        for (task_name, options) in [
+            (
+                "recovery_unprepared_retry_policy_node",
+                r#"{"retry_policy": {"backoff_strategy": "fixed"}}"#,
+            ),
+            ("recovery_unprepared_options_node", "[]"),
+        ] {
+            let workflow_id = seed_ready_node(&pool, task_name, options).await;
+            let row = ready_row(workflow_id, task_name, options);
+
+            let outcome = enqueue_ready_task(
+                &pool,
+                &row,
+                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+                &PayloadPolicy::default(),
+                &RetentionConfig::default(),
+            )
+            .await
+            .expect("the node failure is applied");
+
+            assert_eq!(outcome, ReadyNodeRecovery::FailedNotPrepared, "{task_name}");
+            let (status, task_id, result): (String, Option<Uuid>, Option<String>) = sqlx::query_as(
+                "SELECT status, task_id, result FROM horsies_workflow_tasks
+                 WHERE workflow_id = $1 AND task_index = 0",
+            )
+            .bind(workflow_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(status, "FAILED", "{task_name}");
+            assert_eq!(task_id, None, "{task_name}");
+            let stored: crate::core::TaskResult<serde_json::Value> =
+                serde_json::from_str(&result.expect("the node stores its failure")).unwrap();
+            let crate::core::TaskResult::Err(error) = stored else {
+                panic!("{task_name}: the node stores an error");
+            };
+            assert_eq!(
+                error.error_code.to_string(),
+                "WORKER_SERIALIZATION_ERROR",
+                "{task_name}"
+            );
+            assert!(
+                error
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains(&format!(
+                        "task_options of workflow node 0 ({task_name}) refused"
+                    ))),
+                "{task_name}: {error:?}"
+            );
+            assert_eq!(
+                error.data,
+                Some(serde_json::json!({
+                    "workflow_id": workflow_id.to_string(),
+                    "task_index": 0,
+                })),
+                "{task_name}"
+            );
+            let task_rows: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
+                    .bind(task_name)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(task_rows, 0, "{task_name}");
+            let workflow_status: String =
+                sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+                    .bind(workflow_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(workflow_status, "FAILED", "{task_name}");
+            sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+                .bind(workflow_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// A stored `good_until` that the database cannot read is not a refusal of the node: the task insert
+    /// casts the text and raises (22007), the transaction rolls back, and the node stays READY with no task
+    /// while the workflow stays RUNNING. The error is persistent, so the recovery pass counts it toward the
+    /// failure limit (Python `_build_enqueued_task_params` passes `str()` of the member to its insert,
+    /// `horsies/core/workflows/engine.py:831-835`).
+    #[tokio::test]
+    #[serial]
+    async fn a_stored_deadline_that_does_not_read_raises_and_keeps_the_ready_node() {
+        use crate::workflow_engine::recovery_limit::{CandidateFailure, FailureClass};
+
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let task_name = "recovery_unreadable_deadline_node";
+        for options in [
+            r#"{"good_until": "not-a-date"}"#,
+            r#"{"good_until": 12345}"#,
+        ] {
+            let workflow_id = seed_ready_node(&pool, task_name, options).await;
+            let row = ready_row(workflow_id, task_name, options);
+
+            let error = enqueue_ready_task(
+                &pool,
+                &row,
+                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+                &PayloadPolicy::default(),
+                &RetentionConfig::default(),
+            )
+            .await
+            .expect_err("the task insert raises");
+
+            match &error {
+                WorkflowError::Database(database) => assert_eq!(
+                    database
+                        .as_database_error()
+                        .and_then(|database_error| database_error.code())
+                        .as_deref(),
+                    Some("22007"),
+                    "{options}: {error}"
+                ),
+                other => panic!("{options}: expected the database refusal, got {other:?}"),
+            }
+            assert_eq!(
+                CandidateFailure::Error(error).class(),
+                FailureClass::Persistent,
+                "{options}"
+            );
+            let (status, task_id): (String, Option<Uuid>) = sqlx::query_as(
+                "SELECT status, task_id FROM horsies_workflow_tasks
+                 WHERE workflow_id = $1 AND task_index = 0",
+            )
+            .bind(workflow_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(status, "READY", "{options}");
+            assert_eq!(task_id, None, "{options}");
+            let task_rows: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
+                    .bind(task_name)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(task_rows, 0, "{options}");
+            let workflow_status: String =
+                sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+                    .bind(workflow_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(workflow_status, "RUNNING", "{options}");
+            sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+                .bind(workflow_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Recovery case 0 marks a PENDING node READY with its task row, in one transaction: a task insert that
+    /// raises (a stored `good_until` that the database cannot read) rolls the READY mark back, and the node
+    /// stays PENDING with no task. Python runs each case 0 candidate in a savepoint
+    /// (`horsies/core/workflows/recovery.py:93-94`, `:712-760`). A READY node left behind would be selected
+    /// again by case 1 in the same pass.
+    #[tokio::test]
+    #[serial]
+    async fn a_case_0_node_whose_task_insert_raises_stays_pending() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let task_name = "recovery_case0_raise_node";
+        let workflow_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at
+             ) VALUES (
+                $1::uuid, 'case0_raise_wf', 'RUNNING', 'fail', NULL,
+                'case0.raise.v1', 0, $1::uuid, NOW(), NOW(), NOW(), NOW()
+             )",
+        )
+        .bind(workflow_id)
+        .execute(&pool)
+        .await
+        .expect("insert the workflow");
+        for (task_index, status, dependencies, options) in [
+            (0_i32, "COMPLETED", Vec::<i32>::new(), None),
+            (
+                1_i32,
+                "PENDING",
+                vec![0_i32],
+                Some(r#"{"good_until": "not-a-date"}"#),
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO horsies_workflow_tasks (
+                    downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+                    queue_name, priority, dependencies, allow_failed_deps, join_type, status,
+                    is_subworkflow, created_at, max_retries, execution, retention_class_key,
+                    task_options
+                ) VALUES (
+                    'NONE', $1::uuid, $2::uuid, $3, $4, $5, '{}', 'default', 17,
+                    $6, FALSE, 'all', $7, FALSE, NOW(), 0, 'ISOLATED', 'forever', $8
+                )",
+            )
+            .bind(Uuid::new_v4())
+            .bind(workflow_id)
+            .bind(task_index)
+            .bind(format!("node_{task_index}"))
+            .bind(task_name)
+            .bind(dependencies)
+            .bind(status)
+            .bind(options)
+            .execute(&pool)
+            .await
+            .expect("insert a node");
+        }
+
+        let error = engine::recover_pending_workflow_task(
             &pool,
-            &row,
-            &WorkflowSpecRegistry::new(),
+            workflow_id,
+            1,
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
-        .await;
+        .await
+        .expect_err("the task insert raises");
 
-        match outcome {
-            Err(WorkflowError::Validation(message)) => assert!(
-                message.contains(&format!(
-                    "task_options of workflow node 5 ({task_name}) refused"
-                )),
-                "{message}"
-            ),
-            other => panic!("the recovery enqueue must refuse the node, got {other:?}"),
-        }
+        assert!(matches!(error, WorkflowError::Database(_)), "{error:?}");
+        let (status, task_id): (String, Option<Uuid>) = sqlx::query_as(
+            "SELECT status, task_id FROM horsies_workflow_tasks
+             WHERE workflow_id = $1 AND task_index = 1",
+        )
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "PENDING");
+        assert_eq!(task_id, None);
         let task_rows: i64 =
             sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
                 .bind(task_name)
@@ -3393,6 +3648,11 @@ mod cap_tests {
                 .await
                 .unwrap();
         assert_eq!(task_rows, 0);
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -3417,11 +3677,11 @@ mod cap_tests {
         .expect("insert recovery workflow");
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1::uuid, $2::uuid, 0, 'p6_recovery', 'p6_recovery_task', '1', 'bulk', 17,
+                'NONE', $1::uuid, $2::uuid, 0, 'p6_recovery', 'p6_recovery_task', '1', 'bulk', 17,
                 '{}', FALSE, 'all', 'READY', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -3446,15 +3706,18 @@ mod cap_tests {
         retention
             .queue_retention
             .insert("bulk".to_owned(), Some(chrono::Duration::days(7)));
-        assert!(enqueue_ready_task(
-            &pool,
-            &row,
-            &WorkflowSpecRegistry::new(),
-            &PayloadPolicy::default(),
-            &retention
-        )
-        .await
-        .expect("recovery enqueue path"));
+        assert_eq!(
+            enqueue_ready_task(
+                &pool,
+                &row,
+                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+                &PayloadPolicy::default(),
+                &retention,
+            )
+            .await
+            .expect("recovery enqueue path"),
+            ReadyNodeRecovery::Enqueued
+        );
         // The node holds its enqueue time: the node write and the task insert share a transaction.
         let node_holds_enqueue_time: bool = sqlx::query_scalar(
             "SELECT wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at

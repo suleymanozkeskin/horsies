@@ -41,7 +41,7 @@ pytestmark = [pytest.mark.unit]
 
 asyncio_tests = pytest.mark.asyncio(loop_scope='function')
 
-DB_URL = 'postgresql+psycopg://user:pw@127.0.0.1:1/none'
+DB_URL = 'postgresql://user:pw@127.0.0.1:1/none'
 
 
 class StubProbe(SchemaProbe):

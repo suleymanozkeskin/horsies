@@ -2161,6 +2161,22 @@ class TestSendPayloadGuardrail:
         assert err.limit_bytes == 256
         broker.enqueue.assert_not_called()
 
+    def test_send_counts_utf8_bytes_of_the_kwargs(self) -> None:
+        """Kwargs of fewer characters than reject_bytes but more UTF-8 bytes
+        are refused."""
+        wrapper, broker = self._wrapper_with_policy(
+            PayloadPolicy(warn_bytes=None, reject_bytes=256),
+        )
+
+        # 200 characters, 400 bytes of UTF-8 text in the blob alone.
+        result = wrapper.send(blob='\u00e9' * 200)
+
+        assert is_err(result)
+        err = result.err_value
+        assert isinstance(err, TaskSendPayloadTooLarge)
+        assert err.size_bytes > 400
+        broker.enqueue.assert_not_called()
+
     def test_send_over_warn_bytes_warns_once_and_succeeds(
         self, caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -3053,7 +3069,7 @@ def _real_app() -> Any:
     from horsies.core.models.broker import PostgresConfig
 
     return Horsies(AppConfig(broker=PostgresConfig(
-        database_url=SecretStr('postgresql+psycopg://u:p@localhost:5432/db'),
+        database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
     )))
 
 

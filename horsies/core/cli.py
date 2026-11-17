@@ -1581,7 +1581,7 @@ Examples:
   horsies web myapp.tasks:app
 
   # Registry-less: monitor a database directly
-  horsies web --database-url postgresql+psycopg://user:pw@host/db
+  horsies web --database-url postgresql://user:pw@host/db
 
   # Behind a proxy that authenticates callers and sets the header
   horsies web myapp.tasks:app --host 0.0.0.0 \\

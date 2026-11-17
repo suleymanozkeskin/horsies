@@ -8,7 +8,7 @@
 //! | `Reported(result)`, a value | a plain task: its row in the next batch of the finalize batcher; a workflow task: the workflow success |
 //! | `Reported(result)`, a task error | the failed attempt, with the retry the policy admits for its code |
 //! | `Reported(result)` that does not read as the envelope | the failed attempt, `WORKER_SERIALIZATION_ERROR`, no retry |
-//! | `Reported(stopped before running)` | none; an expired workflow task replays phase 2; a task whose node is not linked is cancelled as an owned orphan (`horsies_cancel_owned_orphan`) when the app's `auto_terminate_orphaned_workflow_tasks` is on |
+//! | `Reported(stopped before running)` | none; an expired workflow task replays phase 2; an unconfirmed start releases the claim (`horsies_release_claims` with placement `SAME_CLASS`); a task whose node is not linked is cancelled as an owned orphan (`horsies_cancel_owned_orphan`) when the app's `auto_terminate_orphaned_workflow_tasks` is on |
 //! | `Reported(worker failure)` | the failed attempt, `BROKER_ERROR`, no retry |
 //! | `TimedOut`, `KilledForLoop`, `Crashed` | the failed attempt with `TASK_TIMEOUT`, the loop code or `WORKER_CRASHED`, the retry the policy admits, at the placement of the end, under the claimed-row rule `RELEASE`: a row that is still CLAIMED goes back to the queue in the same statement |
 //! | `EndUnknown` | none: stale recovery or the lease decides the row |
@@ -46,7 +46,7 @@ use crate::db::Transience;
 use crate::worker::execution::{
     persist_failed_attempt, persist_ok_result, persist_undecodable_result,
     persist_unreported_attempt, phase_retry_delay, run_phase2, FinalizeError, FinalizeOutcome,
-    FinalizeStage, Phase2Work, UnreportedAttemptWrite, PHASE1_MAX_RETRIES,
+    FinalizeStage, Phase2Work, PhaseTwoForm, UnreportedAttemptWrite, PHASE1_MAX_RETRIES,
 };
 use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason, TaskTimeoutMs};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
@@ -558,7 +558,6 @@ impl OutcomeWriter {
                         value,
                         fence(task, &self.worker_id),
                         workflow,
-                        &task.queue_name,
                     )
                     .await
                 }
@@ -606,14 +605,18 @@ impl OutcomeWriter {
             task_id: task.task_id,
             fence: fence(task, &self.worker_id),
         };
-        let outcomes = terminalize(self.broker.pool(), &command)
-            .await
-            .map_err(|error| FinalizeError {
-                stage: FinalizeStage::Phase1Persist,
-                task_id: task.task_id,
-                message: format!("Failed to terminate orphaned workflow task: {error}"),
-                retryable: error.is_retryable(),
-            })?;
+        let cancelled = match self.broker.core_pools_for_write() {
+            Ok((open, _write)) => {
+                terminalize(open.main(), self.broker.statement_log(), &command).await
+            }
+            Err(error) => Err(error),
+        };
+        let outcomes = cancelled.map_err(|error| FinalizeError {
+            stage: FinalizeStage::Phase1Persist,
+            task_id: task.task_id,
+            message: format!("Failed to terminate orphaned workflow task: {error}"),
+            retryable: error.is_retryable(),
+        })?;
         match outcomes.first() {
             Some(TerminalizationOutcome::Applied { .. }) => tracing::info!(
                 task_id = %task.task_id,
@@ -699,6 +702,10 @@ impl OutcomeWriter {
 
     /// The write and at most the retries of its `stage`; then phase 2 when
     /// owed.
+    ///
+    /// The write is boxed: its future holds every writer of phase 1, and
+    /// `settle` builds this future at seven call sites. Inline, a debug
+    /// build needs more than a 2 MiB thread stack for one settlement.
     async fn phase_one(
         &self,
         task: &ClaimedTask,
@@ -709,7 +716,7 @@ impl OutcomeWriter {
         let max_retries = stage.max_retries();
         let mut retries_done: u32 = 0;
         let outcome = loop {
-            let error = match self.write_once(task, &write, claimed_row).await {
+            let error = match Box::pin(self.write_once(task, &write, claimed_row)).await {
                 Ok(outcome) => break outcome,
                 Err(error) => error,
             };
@@ -751,10 +758,10 @@ impl OutcomeWriter {
         };
         match outcome {
             PhaseOneOutcome::Finalize(FinalizeOutcome::Terminal {
-                is_success,
                 capacity_notified,
+                phase_two,
             }) => {
-                self.phase_two(task, is_success, capacity_notified).await;
+                self.phase_two(task, capacity_notified, phase_two).await;
                 Settlement::Written
             }
             PhaseOneOutcome::Finalize(FinalizeOutcome::Retried | FinalizeOutcome::Finalized) => {
@@ -771,20 +778,27 @@ impl OutcomeWriter {
         }
     }
 
-    async fn phase_two(&self, task: &ClaimedTask, is_success: bool, capacity_notified: bool) {
-        run_phase2(
-            self.broker.pool(),
+    /// Phase 2 of one task. Boxed: the future of `run_phase2` holds the node
+    /// finish and the parent advances, and `phase_one` and `after_stop`
+    /// would each carry it inline.
+    async fn phase_two(
+        &self,
+        task: &ClaimedTask,
+        capacity_notified: bool,
+        phase_two: PhaseTwoForm,
+    ) {
+        Box::pin(run_phase2(
+            &self.broker,
             &self.workflows,
             Phase2Work {
                 task_id: task.task_id,
-                is_success,
                 queue_name: task.queue_name.clone(),
                 is_workflow_task: task.kind.is_workflow_task(),
                 capacity_notified,
+                phase_two,
             },
-            &self.payload_policy,
             &self.retention,
-        )
+        ))
         .await;
     }
 
@@ -834,16 +848,29 @@ impl OutcomeWriter {
         }
     }
 
-    /// The child stopped before RUNNING and wrote what the case needs (Python
-    /// `horsies/core/lifecycle/classify.py:260-300`, `_classify_abort`). An
-    /// expired workflow task replays phase 2. A task whose node is not
-    /// linked is cancelled as an owned orphan when the app turns the
-    /// self-heal on; with it off the row stays CLAIMED for inspection.
+    /// The child stopped before RUNNING; no task code ran (Python
+    /// `horsies/core/lifecycle/classify.py:260-300`, `_classify_abort`).
+    ///
+    /// - An expired workflow task replays phase 2.
+    /// - An unconfirmed start releases the claim at once with the fenced
+    ///   release (Python `ReleaseUnconfirmedClaim`): the row goes back to the
+    ///   queue with its class only while it is CLAIMED by this worker at this
+    ///   claim generation. A row outside the fence, such as a start that
+    ///   committed before its reply was lost, is left to recovery. A release
+    ///   that fails is logged, and the claim lease returns the row.
+    /// - A task whose node is not linked is cancelled as an owned orphan when
+    ///   the app turns the self-heal on; with it off the row stays CLAIMED
+    ///   for inspection.
+    /// - Every other stop wrote what its case needs in the child.
     async fn after_stop(&self, task: &ClaimedTask, reason: StopReason) -> Settlement {
         match (reason, task.kind.is_workflow_task(), self.orphan_self_heal) {
             (StopReason::TaskExpired, true, _) => {
-                self.phase_two(task, false, false).await;
+                self.phase_two(task, false, PhaseTwoForm::NotKnown).await;
                 Settlement::NothingOwed
+            }
+            (StopReason::OwnershipUnconfirmed, _, _) => {
+                self.release(task, "the start of the attempt was not confirmed")
+                    .await
             }
             (StopReason::NodeNotLinked, _, OrphanSelfHeal::On) => {
                 self.phase_one(
@@ -863,10 +890,7 @@ impl OutcomeWriter {
                 Settlement::NothingOwed
             }
             (
-                StopReason::TaskExpired
-                | StopReason::ClaimLost
-                | StopReason::OwnershipUnconfirmed
-                | StopReason::WorkflowStopped,
+                StopReason::TaskExpired | StopReason::ClaimLost | StopReason::WorkflowStopped,
                 _,
                 _,
             ) => Settlement::NothingOwed,

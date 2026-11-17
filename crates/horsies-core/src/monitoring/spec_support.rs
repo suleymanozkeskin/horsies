@@ -11,15 +11,12 @@
 //! where the move cannot write it (an error code on a COMPLETED row, a
 //! status that is not a task status, an aged terminal time).
 
-use std::str::FromStr;
-
 use chrono::{DateTime, Duration, Utc};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::broker::migrations::run_horsies_migrations;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
 use crate::core::history::reads::pages::HistoryWindow;
@@ -28,67 +25,31 @@ use crate::core::lifecycle::{
     CallerHoldsRowLock, PriorLockedRead, TerminalizationCommand, TerminalizationOutcome,
 };
 use crate::monitoring::resolve_monitoring_window;
+use crate::test_support::TestDatabase;
 use crate::TaskStatus;
-
-/// Every database of these tests has this name prefix, then 32 hex digits.
-const DATABASE_PREFIX: &str = "core_monitoring_spec_";
 
 /// The worker that moves a row when the seed names none: the move fences on
 /// the claim holder, and the history row then drops the worker again.
 const MOVING_WORKER: &str = "monitoring-spec-mover";
 
-fn server_url() -> String {
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        return url;
-    }
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let root = std::path::Path::new(manifest_dir)
-        .ancestors()
-        .find(|path| path.join(".env").exists());
-    let password = root
-        .and_then(|path| std::fs::read_to_string(path.join(".env")).ok())
-        .and_then(|contents| {
-            contents
-                .lines()
-                .filter_map(|line| line.trim().split_once('='))
-                .find(|(key, _)| key.trim() == "DB_PASSWORD")
-                .map(|(_, value)| value.trim().to_owned())
-        })
-        .unwrap_or_else(|| "W0rklane".to_owned());
-    format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
-}
-
-/// A migrated database with history coverage and published readers, for one
-/// test. [`SpecDatabase::drop`] removes it; a test that panics before the
-/// drop leaves it behind under [`DATABASE_PREFIX`].
+/// A copy of the installed test template (`crate::test_support`) with
+/// history coverage and published readers, and a sqlx pool for the seeds and
+/// reads that still take one, for one test. [`SpecDatabase::drop`] removes
+/// it; a test that panics before the drop leaves it to the drop at the
+/// shutdown of its runtime.
 pub(super) struct SpecDatabase {
     pub(super) pool: PgPool,
-    name: String,
-    admin_options: PgConnectOptions,
+    database: TestDatabase,
 }
 
 impl SpecDatabase {
     pub(super) async fn create() -> Self {
-        let base_options =
-            PgConnectOptions::from_str(&server_url()).expect("the test server URL parses");
-        let admin_options = base_options.clone().database("postgres");
-        let name = format!("{DATABASE_PREFIX}{}", Uuid::new_v4().simple());
-        let mut admin = PgConnection::connect_with(&admin_options)
-            .await
-            .expect("connect to the admin database");
-        sqlx::query(&format!("CREATE DATABASE \"{name}\""))
-            .execute(&mut admin)
-            .await
-            .expect("create the test database");
-        admin.close().await.expect("close the admin connection");
+        let database = TestDatabase::create().await;
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect_with(base_options.database(&name))
+            .connect(database.url())
             .await
             .expect("connect to the test database");
-        run_horsies_migrations(&pool)
-            .await
-            .expect("migrate the test database");
         let mut transaction = pool.begin().await.expect("open the coverage transaction");
         let coverage =
             ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
@@ -99,11 +60,7 @@ impl SpecDatabase {
             "{coverage:?}"
         );
         transaction.commit().await.expect("commit the coverage");
-        Self {
-            pool,
-            name,
-            admin_options,
-        }
+        Self { pool, database }
     }
 
     pub(super) fn broker(&self) -> PostgresBroker {
@@ -112,16 +69,7 @@ impl SpecDatabase {
 
     pub(super) async fn drop(self) {
         self.pool.close().await;
-        let mut admin = PgConnection::connect_with(&self.admin_options)
-            .await
-            .expect("connect to the admin database");
-        sqlx::query(&format!(
-            "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
-            self.name
-        ))
-        .execute(&mut admin)
-        .await
-        .expect("drop the test database");
+        self.database.drop().await;
     }
 }
 
@@ -568,7 +516,9 @@ impl NodeSeed {
 }
 
 /// Insert one workflow node of task `alpha_task`. Every baseline column is
-/// named.
+/// named. A sub-workflow node carries `sub_workflow_params = 'NOT_GIVEN'`
+/// and a task node none (`horsies_workflow_tasks_sub_workflow_params_by_kind`;
+/// Python `tests/integration/monitoring_seeding.py:576-600`).
 pub(super) async fn seed_node(pool: &PgPool, node: &NodeSeed) {
     let (is_subworkflow, task_id, child) = match node.kind {
         NodeKind::Task { task_id } => (false, task_id, None),
@@ -576,6 +526,7 @@ pub(super) async fn seed_node(pool: &PgPool, node: &NodeSeed) {
     };
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
+            downstream_subworkflow, sub_workflow_params,
             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
             dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type,
             min_success, task_options, max_retries, execution, good_until,
@@ -583,6 +534,7 @@ pub(super) async fn seed_node(pool: &PgPool, node: &NodeSeed) {
             sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error,
             created_at, started_at, completed_at
         ) VALUES (
+            'NONE', CASE WHEN $8 THEN 'NOT_GIVEN' END,
             $1, $2, $3, $4, 'alpha_task', '{}', 'default', 100,
             $5, NULL, NULL, FALSE, 'all',
             NULL, NULL, CASE WHEN $8 THEN NULL ELSE 0 END,

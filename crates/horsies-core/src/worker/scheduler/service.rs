@@ -105,6 +105,13 @@ pub enum SchedulerStartError {
          Horsies::prepare_schedules from the same config"
     )]
     NotPrepared { schedule: String },
+    /// The client family check before the first schedule-state write
+    /// failed: `BrokerError::ClientFamilyMismatch` when the database records
+    /// another family or none (not retryable), or the error of the family
+    /// read (`BrokerError::is_retryable` tells whether a later start may
+    /// pass).
+    #[error("the client family check before the first schedule write failed: {0}")]
+    ClientFamily(#[source] crate::broker::BrokerError),
 }
 
 /// Why one slot was not enqueued.
@@ -229,7 +236,8 @@ fn check_schedules_at_start(
 ///
 /// The scheduler:
 /// 1. Refuses to start, writing nothing, when the schedule section is invalid
-///    or an enabled pattern has no next slot. The join handle then yields the
+///    or an enabled pattern has no next slot, or when the broker's client
+///    family check fails. The join handle then yields the
 ///    [`SchedulerStartError`]; the host exits non-zero.
 /// 2. Initializes schedule state for all configured schedules; one schedule's
 ///    failure is logged and the others go on (the existence heal retries it).
@@ -262,8 +270,8 @@ pub fn spawn_scheduler(
     ))
 }
 
-/// The body of [`spawn_scheduler`]: start checks, state initialization, then
-/// the tick loop until `cancel` fires.
+/// The body of [`spawn_scheduler`]: start checks, the client family check,
+/// state initialization, then the tick loop until `cancel` fires.
 async fn run_scheduler(
     broker: Arc<PostgresBroker>,
     schedule_config: ScheduleConfig,
@@ -277,6 +285,12 @@ async fn run_scheduler(
     }
 
     check_schedules_at_start(&schedule_config, &prepared, Utc::now())?;
+    // The state initialization is the first schedule-state write. The slot
+    // enqueue checks the family again inside the broker's send.
+    broker
+        .ensure_client_family_for_write()
+        .await
+        .map_err(SchedulerStartError::ClientFamily)?;
     initialize_schedules(broker.pool(), &schedule_config.schedules).await;
 
     let lock_pool = scheduler_lock_pool(broker.pool());
@@ -1340,6 +1354,49 @@ mod tests {
         ));
     }
 
+    /// A broker handle of the other client family is refused before the
+    /// first schedule-state write: the join handle yields
+    /// `SchedulerStartError::ClientFamily` with the mismatch, not retryable,
+    /// and no state row is written.
+    #[tokio::test]
+    #[serial]
+    async fn a_handle_of_the_other_family_starts_no_scheduler_and_writes_no_state() {
+        use crate::broker::client_family::{ClientFamily, RecordedFamily};
+        use crate::broker::BrokerError;
+
+        let pool = test_pool().await;
+        let broker = Arc::new(
+            PostgresBroker::from_pool(pool.clone()).with_client_family(ClientFamily::Python),
+        );
+        let name = format!("scheduler_family_{}", uuid::Uuid::new_v4().simple());
+        let schedule = interval_schedule_secs(&name, 60);
+        let prepared = prepared_for(std::slice::from_ref(&schedule));
+
+        let outcome = spawn_scheduler(
+            broker,
+            ScheduleConfig::new(vec![schedule]),
+            default_app_config(),
+            prepared,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("scheduler task joins");
+
+        let refusal = match outcome {
+            Err(SchedulerStartError::ClientFamily(refusal)) => refusal,
+            other => panic!("expected the client family refusal, got {other:?}"),
+        };
+        assert!(matches!(
+            refusal,
+            BrokerError::ClientFamilyMismatch {
+                stored: RecordedFamily::Recorded(ClientFamily::Rust),
+                own: ClientFamily::Python,
+            }
+        ));
+        assert!(!refusal.is_retryable());
+        assert!(state::get_state(&pool, &name).await.unwrap().is_none());
+    }
+
     #[test]
     fn start_checks_accept_valid_schedules() {
         let config = ScheduleConfig::new(vec![interval_schedule_secs("fine", 60)]);
@@ -1700,7 +1757,9 @@ mod tests {
 
     /// Python `test_scheduler_task_options.py::test_a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task`:
     /// a fired slot stores the task's options text and the retry limit it
-    /// sets, as a send of the task does (#480).
+    /// sets, as a send of the task does (#480). The policy names
+    /// `TASK_EXCEPTION`, as the Python task does: a policy with no code does
+    /// not validate as Python `RetryPolicy`, and the send refuses it.
     #[tokio::test]
     #[serial]
     async fn a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task() {
@@ -1713,7 +1772,9 @@ mod tests {
             task_name: name.clone(),
             queue_name: None,
             good_until: None,
-            auto_retry_for: None,
+            auto_retry_for: Some(vec![crate::core::TaskErrorCode::from(
+                crate::core::OperationalErrorCode::TaskException,
+            )]),
             retry_policy: Some(crate::core::RetryPolicy::fixed(vec![60, 120], true).unwrap()),
             timeout_ms: Some(5_000),
         };
@@ -2060,6 +2121,16 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn private_scheduler_pool_preserves_replay_cancellation_and_connection_hooks() {
+        // The application of the broker whose insert the cancel scenario
+        // blocks, and whether a backend of it in this database waits on a
+        // lock.
+        const INSERT_APPLICATION: &str = "test_scheduler_private_insert";
+        const INSERT_LOCK_WAIT_SQL: &str = "SELECT EXISTS(
+            SELECT 1 FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND application_name = $1
+              AND wait_event_type = 'Lock'
+        )";
         let admin = test_pool().await;
         let runtime = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
@@ -2131,13 +2202,28 @@ mod tests {
                     sqlx::raw_sql("DROP TRIGGER test_fail_schedule_state ON horsies_schedule_state; DROP FUNCTION test_fail_schedule_state();").execute(&admin).await.unwrap();
                 }
                 "cancel_insert" => {
+                    // The send's insert runs on the core pool of the broker.
+                    // That pool opens its connections from a URL, so the
+                    // connect hook of `runtime` does not name them. This
+                    // broker's URL names the application that the lock-wait
+                    // probe reads, and only its insert touches horsies_tasks.
+                    let database_url =
+                        crate::broker::terminalization_matrix::migrated_database_url().await;
+                    let separator = if database_url.contains('?') { '&' } else { '?' };
+                    let insert_broker = Arc::new(
+                        PostgresBroker::connect_with(&PostgresConfig::from_url(format!(
+                            "{database_url}{separator}application_name={INSERT_APPLICATION}"
+                        )))
+                        .await
+                        .unwrap(),
+                    );
                     let mut blocker = admin.begin().await.unwrap();
                     sqlx::query("LOCK TABLE horsies_tasks IN ACCESS EXCLUSIVE MODE")
                         .execute(&mut *blocker)
                         .await
                         .unwrap();
                     let pool = lock_pool.clone();
-                    let broker = broker.clone();
+                    let broker = insert_broker.clone();
                     let schedules = schedules.clone();
                     let config = config.clone();
                     let task = tokio::spawn(async move {
@@ -2155,16 +2241,25 @@ mod tests {
                         .await
                         .unwrap();
                     });
-                    tokio::time::timeout(Duration::from_secs(5),async {
+                    tokio::time::timeout(Duration::from_secs(5), async {
                         loop {
-                            let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='test_scheduler_private' AND wait_event_type='Lock')").fetch_one(&admin).await.unwrap();
-                            if waiting { break; }
+                            let waiting: bool = sqlx::query_scalar(INSERT_LOCK_WAIT_SQL)
+                                .bind(INSERT_APPLICATION)
+                                .fetch_one(&admin)
+                                .await
+                                .unwrap();
+                            if waiting {
+                                break;
+                            }
                             tokio::time::sleep(Duration::from_millis(10)).await;
                         }
-                    }).await.unwrap();
+                    })
+                    .await
+                    .unwrap();
                     task.abort();
                     assert!(task.await.unwrap_err().is_cancelled());
                     blocker.rollback().await.unwrap();
+                    insert_broker.close().await;
                     tokio::time::timeout(Duration::from_secs(5), async {
                         loop {
                             match state::try_acquire_schedule_lock(&admin, &name)

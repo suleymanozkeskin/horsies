@@ -10,19 +10,12 @@ and the stamp check names every function that republication renders.
 from __future__ import annotations
 
 import inspect
-import re
 from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
 
 from horsies.core.history.maintenance.coverage import ensure_partition_coverage
-from horsies.core.history.reads import lookup_generation
-from horsies.core.history.reads.lookup_generation import LookupManifest
-from horsies.core.history.reads.publisher import (
-    RENDERED_READER_SIGNATURES,
-    StagedLoaderPublisher,
-)
 from horsies.core.models.retention import RetentionConfig
 
 pytestmark = [pytest.mark.unit]
@@ -80,30 +73,6 @@ class TestEnsureSequence:
         assert positions == sorted(positions)
 
 
-class TestRenderedReadersAreStamped:
-    def test_the_stamped_signatures_are_the_rendered_functions(self) -> None:
-        """A function that republication renders but does not stamp would
-        never count as stale, so the two lists must name the same set."""
-        republish_source = inspect.getsource(StagedLoaderPublisher.republish)
-        renderers = set(
-            re.findall(r'render_staged_\w+_function', republish_source)
-        )
-        empty = LookupManifest(leaves=())
-        rendered: set[str] = set()
-        for renderer in renderers:
-            source = getattr(lookup_generation, renderer)(empty)
-            match = re.search(
-                r'CREATE OR REPLACE FUNCTION (\w+)\(p_task_id uuid'
-                r'(, p_include_live boolean)?',
-                source,
-            )
-            assert match is not None, renderer
-            parameters = 'uuid, boolean' if match.group(2) else 'uuid'
-            rendered.add(f'{match.group(1)}({parameters})')
-        assert len(renderers) == len(RENDERED_READER_SIGNATURES)
-        assert rendered == set(RENDERED_READER_SIGNATURES)
-
-
 class TestPruningWiring:
     def test_maintenance_pass_prunes_after_coverage(self) -> None:
         """The tick runs coverage, then pruning, then reschedules.
@@ -115,7 +84,7 @@ class TestPruningWiring:
         """
         from horsies.core.worker.reaper import ReaperMixin
 
-        source = inspect.getsource(ReaperMixin._run_reaper_pass)
+        source = inspect.getsource(ReaperMixin._run_reaper_pass)  # pyright: ignore[reportPrivateUsage]
         positions = [
             source.index('maintain_partition_coverage('),
             source.index('prune_expired_partitions('),
@@ -123,45 +92,48 @@ class TestPruningWiring:
         ]
         assert positions == sorted(positions)
 
-    def test_driver_finalizes_before_either_sweep(self) -> None:
-        """One pending finalization blocks every further detach on its
-        parent, so the finalize phase must precede both sweeps."""
-        from horsies.core.history.maintenance.pruning import (
-            prune_expired_partitions,
+
+class TestPruneCandidateKinds:
+    """The pass hands heartbeat leaves to the heartbeat sweep and period
+    leaves to the history sweep, in candidate order; neither sweep sees the
+    other's leaves."""
+
+    def test_each_sweep_gets_only_its_kind(self) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        from horsies.core.history.commands import LeafBounds, LeafRef
+        from horsies.core.history.outcomes import PruneReach
+        from horsies.core.history.partitions.retirement import (
+            CandidateAttachment,
+            PruneCandidate,
+            PruneCandidates,
+            RetiredClassKind,
         )
 
-        source = inspect.getsource(prune_expired_partitions)
-        positions = [
-            source.index('_finalize_interrupted_detaches('),
-            source.index('sweep_expired_heartbeat_leaves('),
-            source.index('sweep_expired_history_leaves('),
+        def candidate(name: str, kind: RetiredClassKind) -> PruneCandidate:
+            lower = datetime(2021, 1, 1, tzinfo=UTC)
+            return PruneCandidate(
+                leaf=LeafRef(
+                    leaf_name=name,
+                    class_key='standard_1d',
+                    bounds=LeafBounds(lower=lower, upper=lower + timedelta(days=1)),
+                ),
+                class_kind=kind,
+                attachment=CandidateAttachment.ATTACHED,
+            )
+
+        candidates = PruneCandidates(
+            leaves=(
+                candidate('history_a', RetiredClassKind.PERIOD),
+                candidate('heartbeat_a', RetiredClassKind.HEARTBEAT),
+                candidate('history_b', RetiredClassKind.PERIOD),
+            ),
+            reach=PruneReach.WITHIN_BOUNDS,
+        )
+
+        assert [leaf.leaf_name for leaf in candidates.of_kind(RetiredClassKind.PERIOD)] == [
+            'history_a', 'history_b',
         ]
-        assert positions == sorted(positions)
-
-
-class TestPruningDiscoveryFilters:
-    def test_forever_is_structurally_excluded(self) -> None:
-        """Both discovery statements select classes by kind and leaves with
-        an anchored lower bound; the forever class and its static leaf can
-        never become a candidate."""
-        from horsies.core.history.maintenance.pruning import (
-            EXPIRED_FINITE_LEAVES_SQL,
-            EXPIRED_HISTORY_LEAVES_SQL,
-        )
-
-        for statement in (
-            EXPIRED_FINITE_LEAVES_SQL,
-            EXPIRED_HISTORY_LEAVES_SQL,
-        ):
-            assert "'FOREVER'" not in statement
-            assert "c.lower_bound_kind = 'AT'" in statement
-            assert 'c.dropped_at IS NULL' in statement
-
-    def test_history_discovery_excludes_the_heartbeat_class(self) -> None:
-        """Heartbeat leaves are the heartbeat sweep's; the history sweep
-        must not race it for the same leaves."""
-        from horsies.core.history.maintenance.pruning import (
-            EXPIRED_HISTORY_LEAVES_SQL,
-        )
-
-        assert "r.class_kind = 'PERIOD'" in EXPIRED_HISTORY_LEAVES_SQL
+        assert [
+            leaf.leaf_name for leaf in candidates.of_kind(RetiredClassKind.HEARTBEAT)
+        ] == ['heartbeat_a']

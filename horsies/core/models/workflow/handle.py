@@ -28,7 +28,7 @@ from horsies.core.utils.loop_runner import (
     async_context_message,
     in_running_event_loop,
 )
-from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.utils.db import autocommit_connection, is_retryable_connection_error
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
 from horsies.core.process_role import (
     ProcessRole,
@@ -43,16 +43,6 @@ from horsies.core.brokers.resources import (
     ListenerEnabled,
 )
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.lifecycle.commands import CancelNodesOfCancelledWorkflow
-from horsies.core.lifecycle.outcomes import (
-    AlreadyApplied,
-    Applied,
-    LostClaim,
-    SourceStateConflict,
-    TaskAbsent,
-    TerminalizationOutcome,
-)
-from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import (
     Json,
@@ -77,7 +67,6 @@ from .context import SubWorkflowSummary
 from .enums import (
     OkT,
     OutT,
-    WF_TASK_TERMINAL_VALUES,
     WorkflowStatus,
     WorkflowTaskStatus,
     stored_node_status,
@@ -98,28 +87,6 @@ logger = get_logger('workflow.handle')
 _T = TypeVar('_T')
 _TASK_TERMINAL_VALUES: list[str] = [status.value for status in TASK_TERMINAL_STATES]
 
-
-def _require_transition_only_batch(
-    outcomes: list[TerminalizationOutcome],
-) -> None:
-    """Workflow-scoped batches may report only rows they transitioned."""
-    for outcome in outcomes:
-        match outcome:
-            case Applied():
-                continue
-            case (
-                AlreadyApplied()
-                | LostClaim()
-                | SourceStateConflict()
-                | TaskAbsent()
-            ):
-                raise RuntimeError(
-                    'cancelled-workflow terminalization returned '
-                    f'{type(outcome).__name__}; workflow-scoped batches '
-                    'report transitioned rows only'
-                )
-            case _ as unreachable:
-                assert_never(unreachable)
 
 if TYPE_CHECKING:
     from horsies.core.brokers.postgres import PostgresBroker
@@ -174,20 +141,14 @@ GET_WORKFLOW_TASKS_SQL = text("""
     ORDER BY wt.task_index
 """)
 
-CANCEL_WORKFLOW_SQL = text("""
-    UPDATE horsies_workflows
-    SET status = 'CANCELLED', updated_at = NOW()
-    WHERE id = :wf_id AND status IN ('PENDING', 'RUNNING', 'PAUSED')
-""")
-
-# Lock the workflow row first, before any horsies_tasks/horsies_workflow_tasks
-# rows, so the cancel transaction acquires {horsies_workflows,
-# horsies_workflow_tasks} in the same order as COMPLETE_WORKFLOW_TASK_SQL
-# (workflows before workflow_tasks). The two paths previously locked in
-# opposite orders and deadlocked under contention — a task completing while
-# its workflow is being cancelled — with Postgres aborting one side
-# (SQLSTATE 40P01). Lock-order invariant (N6): any transaction locking both
-# tables must take horsies_workflows first.
+# The locks of the paused expiry (``expire_paused_workflows``), in the order
+# of horsies_workflow_cancel: the workflow row first, before any
+# horsies_tasks/horsies_workflow_tasks rows, so the expiry acquires
+# {horsies_workflows, horsies_workflow_tasks} in the same order as
+# horsies_workflow_node_finish (workflows before workflow_tasks). Lock-order
+# invariant (N6): any transaction locking both tables must take
+# horsies_workflows first, or it deadlocks against a completing task
+# (SQLSTATE 40P01).
 LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL = text("""
     SELECT id FROM horsies_workflows WHERE id = :wf_id FOR UPDATE
 """)
@@ -210,9 +171,10 @@ LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL = text("""
     FOR UPDATE
 """)
 
+# Every write of a terminal node status sets completed_at, SKIPPED included.
 SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL = text("""
     UPDATE horsies_workflow_tasks
-    SET status = 'SKIPPED'
+    SET status = 'SKIPPED', completed_at = NOW()
     WHERE workflow_id = :wf_id AND status IN ('PENDING', 'READY')
 """)
 
@@ -229,19 +191,6 @@ SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL = text("""
       AND wt.task_id = ANY(CAST(:cancelled_task_ids AS uuid[]))
 """)
 
-SELECT_CANCELLABLE_DESCENDANT_WORKFLOWS_SQL = text("""
-    WITH RECURSIVE descendants AS (
-        SELECT id, status
-        FROM horsies_workflows
-        WHERE parent_workflow_id = :wf_id
-        UNION ALL
-        SELECT child.id, child.status
-        FROM horsies_workflows child
-        JOIN descendants parent ON child.parent_workflow_id = parent.id
-    )
-    SELECT id FROM descendants
-    WHERE status IN ('PENDING', 'RUNNING', 'PAUSED')
-""")
 
 
 # =============================================================================
@@ -1586,7 +1535,31 @@ class WorkflowHandle(Generic[OutT]):
         return self._sync_call(self.cancel_async, 'cancel')
 
     async def cancel_async(self) -> HandleResult[None]:
-        """Async version of cancel()."""
+        """Async version of cancel().
+
+        One statement in autocommit (``horsies_workflow_cancel``): the
+        workflow and every PENDING, RUNNING or PAUSED descendant become
+        CANCELLED with ``completed_at``; the tasks behind ENQUEUED nodes are
+        cancelled; PENDING and READY nodes, and the ENQUEUED nodes of the
+        cancelled tasks, become SKIPPED. A node whose task already started
+        stays RUNNING until the task ends.
+
+        Returns:
+            ``Ok(None)`` when the tree is cancelled, or when the workflow is
+            already terminal (nothing written).
+            ``Err(HandleWorkflowNotFound)`` when no workflow has the id.
+            ``Err(HandleDbOperationFailed)`` on a database error: the
+            statement wrote nothing, or its commit outcome is unknown.
+            ``Err(HandleEventLoopLimit)``: nothing ran.
+            ``OutcomeDecodeError`` (raised) when the function returns a row
+            outside its contract (a defect).
+        """
+        from horsies.core.workflows.functions import (
+            CANCEL_WORKFLOW_FUNCTION_SQL,
+            CancelOutcome,
+            decode_cancel_outcome,
+        )
+
         match await self.broker.select_resources():
             case Err(loop_limit):
                 return self._event_loop_limit(loop_limit, 'cancel')
@@ -1595,164 +1568,12 @@ class WorkflowHandle(Generic[OutT]):
 
         try:
             async with resources.session_factory() as session:
-                lock_params = {
-                    'wf_id': self.workflow_id,
-                    'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
-                    'task_terminal_states': _TASK_TERMINAL_VALUES,
-                }
-                # Workflow row first — see the lock-order invariant (N6) on
-                # LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL and COMPLETE_WORKFLOW_TASK_SQL.
-                await session.execute(
-                    LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL,
+                connection = await autocommit_connection(session)
+                result = await connection.execute(
+                    CANCEL_WORKFLOW_FUNCTION_SQL,
                     {'wf_id': self.workflow_id},
                 )
-                # Close the worker-pickup race before flipping workflow status:
-                # workers claim horsies_tasks rows with SKIP LOCKED, while
-                # enqueue/ready transitions mutate horsies_workflow_tasks rows.
-                await session.execute(
-                    LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
-                    lock_params,
-                )
-                await session.execute(
-                    LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL,
-                    lock_params,
-                )
-                # If an enqueue finished while we waited for workflow_task locks,
-                # catch the newly linked task row before the status update below.
-                await session.execute(
-                    LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
-                    lock_params,
-                )
-
-                # Cancel workflow (UPDATE is a no-op if not found or already terminal)
-                await session.execute(
-                    CANCEL_WORKFLOW_SQL,
-                    {'wf_id': self.workflow_id},
-                )
-
-                # Verify workflow exists — UPDATE is a no-op for both
-                # nonexistent workflows and those in non-cancellable states.
-                exists = await session.execute(
-                    GET_WORKFLOW_STATUS_SQL,
-                    {'wf_id': self.workflow_id},
-                )
-                exists_row = exists.fetchone()
-                if exists_row is None:
-                    return Err(HandleWorkflowNotFound(
-                        message=f'Workflow {self.workflow_id} not found',
-                        workflow_id=self.workflow_id,
-                    ))
-
-                # An Err returns before the commit: the transaction rolls back.
-                match _parse_stored_workflow_status(
-                    self.workflow_id, exists_row.status,
-                ):
-                    case Err() as stored_data_invalid:
-                        return stored_data_invalid
-                    case Ok(status_val):
-                        pass
-                if status_val != WorkflowStatus.CANCELLED:
-                    # Non-cancellable state (COMPLETED, FAILED) → no-op
-                    return Ok(None)
-
-                # CANCELLED (either by our UPDATE or already) → idempotent cleanup
-                # Cancel ENQUEUED tasks that have not started execution yet.
-                # This guarantees they are no longer claimable by workers.
-                # A backing task may briefly be RUNNING while workflow_task is
-                # still ENQUEUED; user code starts only after the workflow_task
-                # RUNNING handoff, so that state is still cancellable.
-                parent_outcomes = await apply_batch_async(
-                    await session.connection(),
-                    CancelNodesOfCancelledWorkflow(
-                        workflow_ids=(self.workflow_id,),
-                    ),
-                )
-                _require_transition_only_batch(parent_outcomes)
-
-                # Skip pending/ready tasks
-                await session.execute(
-                    SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL,
-                    {'wf_id': self.workflow_id},
-                )
-
-                # Skip ENQUEUED workflow tasks whose backing task was cancelled above.
-                await session.execute(
-                    SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL,
-                    {
-                        'wf_id': self.workflow_id,
-                        'cancelled_task_ids': [
-                            outcome.task_id for outcome in parent_outcomes
-                        ],
-                    },
-                )
-
-                # Cascade cancellation to active child workflows. Each
-                # descendant gets the same lock-before-flip treatment as the
-                # parent above, so child cancellation is race-safe against a
-                # worker picking up a child backing task. The CANCELLED status
-                # flip fires ``horsies_workflow_notify_trigger`` per row, so no
-                # manual ``workflow_done`` notify is needed. The parent node may
-                # stay RUNNING until an already-started child task exits, but the
-                # child workflow boundary is terminal immediately.
-                descendant_rows = await session.execute(
-                    SELECT_CANCELLABLE_DESCENDANT_WORKFLOWS_SQL,
-                    {'wf_id': self.workflow_id},
-                )
-                child_workflow_ids = [row.id for row in descendant_rows.fetchall()]
-                for child_workflow_id in child_workflow_ids:
-                    child_lock_params = {
-                        'wf_id': child_workflow_id,
-                        'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
-                        'task_terminal_states': _TASK_TERMINAL_VALUES,
-                    }
-                    # Child workflow row first (same lock-order invariant as the
-                    # parent above), then backing tasks + workflow tasks before
-                    # flipping status, then re-lock backing tasks to catch a row
-                    # an enqueue linked while we waited for the workflow-task
-                    # locks.
-                    await session.execute(
-                        LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL,
-                        {'wf_id': child_workflow_id},
-                    )
-                    await session.execute(
-                        LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
-                        child_lock_params,
-                    )
-                    await session.execute(
-                        LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL,
-                        child_lock_params,
-                    )
-                    await session.execute(
-                        LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
-                        child_lock_params,
-                    )
-                    await session.execute(
-                        CANCEL_WORKFLOW_SQL,
-                        {'wf_id': child_workflow_id},
-                    )
-                    child_outcomes = await apply_batch_async(
-                        await session.connection(),
-                        CancelNodesOfCancelledWorkflow(
-                            workflow_ids=(child_workflow_id,),
-                        ),
-                    )
-                    _require_transition_only_batch(child_outcomes)
-                    await session.execute(
-                        SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL,
-                        {'wf_id': child_workflow_id},
-                    )
-                    await session.execute(
-                        SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL,
-                        {
-                            'wf_id': child_workflow_id,
-                            'cancelled_task_ids': [
-                                outcome.task_id for outcome in child_outcomes
-                            ],
-                        },
-                    )
-
-                await session.commit()
-            return Ok(None)
+                rows = result.fetchall()
         except SQLAlchemyError as exc:
             return Err(HandleDbOperationFailed(
                 message=f'Cancel failed for workflow {self.workflow_id}: {exc}',
@@ -1760,6 +1581,18 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_id=self.workflow_id,
                 exception=exc,
             ))
+        # The CANCELLED status write fires horsies_workflow_notify_trigger
+        # per workflow row, so no workflow_done notify is sent here.
+        match decode_cancel_outcome(rows):
+            case CancelOutcome.CANCELLED | CancelOutcome.NOT_CANCELLABLE:
+                return Ok(None)
+            case CancelOutcome.NOT_FOUND:
+                return Err(HandleWorkflowNotFound(
+                    message=f'Workflow {self.workflow_id} not found',
+                    workflow_id=self.workflow_id,
+                ))
+            case _ as unreachable:
+                assert_never(unreachable)
 
     # ─── pause ───────────────────────────────────────────────────────
 

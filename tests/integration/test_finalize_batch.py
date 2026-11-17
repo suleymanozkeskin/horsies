@@ -96,7 +96,9 @@ WAIT_POLL_S: Final = 0.05
 REPLY_DROP_WAIT_S: Final = 5.0
 OUTER_BOUND_S: Final = 30.0
 TASK_LOCK_SEED: Final = 731
-UNREGISTERED_CLASS: Final = 'batch_no_partition'
+UNREGISTERED_CLASS: Final = 'standard_1777d'
+"""A class of the baseline key form that no test registers: no history leaf
+covers it, so the move of its row raises."""
 QUEUE_ROOM: Final = 4 * BATCH_ROWS
 """The batch queue bound of the test workers. A worker's bound is twice its
 claim budget, which is 2 for the one-slot test worker; these tests finalize
@@ -1075,12 +1077,12 @@ async def _seed_running_workflow_nodes(
         _ = await session.execute(
             text("""
                 INSERT INTO horsies_workflow_tasks
-                    (id, workflow_id, task_index, node_id, task_name, input,
+                    (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                      queue_name, priority, dependencies,
                      allow_failed_deps, join_type, is_subworkflow, status,
                      task_id, started_at, created_at,
                      max_retries, execution, retention_class_key)
-                VALUES (:id, :workflow_id, :index, :node_id, :task_name, '{}',
+                VALUES ('NONE', :id, :workflow_id, :index, :node_id, :task_name, '{}',
                         :queue, 100, '{}', FALSE, 'all', FALSE,
                         'RUNNING', :task_id, NOW(), NOW(),
                         0, 'ISOLATED', 'standard_30d')

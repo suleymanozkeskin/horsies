@@ -21,6 +21,11 @@
 -- there): horsies_claim, horsies_claim_candidates, horsies_claim_in_flight, horsies_complete_task_fused,
 -- horsies_complete_tasks_fused, horsies_finish_workflow_success, horsies_finish_failed_attempt.
 --
+-- History calls: each terminal write passes the row it locked to horsies_move_task_to_history(horsies_tasks, ...)
+-- (0006_history_functions.sql); each miss passes the writer's kind and fence kind to horsies_terminalization_miss
+-- (0008_history_maintenance_functions.sql); history is probed through the published reader
+-- horsies_task_provenance_staged(uuid), which returns no row for an id that history does not hold.
+--
 -- Part of migration 1000: the install concatenates the files of this folder in name order and computes one
 -- checksum over the result.
 
@@ -382,12 +387,8 @@ BEGIN
     -- 2. A repeat probes history under the task advisory lock.
     IF p_send_kind = 'REPEAT' THEN
         PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
-        SELECT * INTO v_provenance FROM horsies_task_provenance_staged(p_task_id, FALSE);
-        IF v_provenance.found THEN
-            IF v_provenance.location <> 'HISTORY' THEN
-                RAISE EXCEPTION 'horsies_enqueue_task: provenance reported a location other than history'
-                    USING ERRCODE = 'data_corrupted';
-            END IF;
+        SELECT p.* INTO v_provenance FROM horsies_task_provenance_staged(p_task_id) AS p;
+        IF FOUND THEN
             SELECT h.command_fingerprint_version, h.command_fingerprint, h.sent_at
             INTO v_history
             FROM horsies_task_history h
@@ -951,6 +952,21 @@ CREATE FUNCTION horsies_node_has_dependents(p_task_id uuid) RETURNS boolean
     )
 $$;
 
+-- horsies_node_downstream_subworkflow: internal. The downstream_subworkflow fact of the node of this task (REACHABLE
+-- or NONE), written at workflow start from the static graph; NULL when no node links the task. Phase 2 of a
+-- REACHABLE node runs in a transaction, because its promotion can owe a child start. Reads the node by task_id
+-- (ix_horsies_workflow_tasks_task_id); takes no lock.
+-- Callers: horsies_finish_workflow_success, horsies_finish_failed_attempt, horsies_finish_stale_attempt, next to
+-- node_has_dependents.
+-- Python: no counterpart; Python's phase 2 always runs in one transaction.
+CREATE FUNCTION horsies_node_downstream_subworkflow(p_task_id uuid) RETURNS text
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT n.downstream_subworkflow::text
+    FROM horsies_workflow_tasks n
+    WHERE n.task_id = p_task_id
+$$;
+
 -- horsies_complete_task_fused: the success of one plain task. Replaces the interim function of the same name.
 --
 -- Guarantee:
@@ -996,9 +1012,10 @@ BEGIN
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
+    -- The whole locked row (task): the move takes it as read here.
     SELECT t.id, t.status, t.retry_count, t.started_at, t.claimed_by_worker_id, t.claimed_at,
            t.worker_hostname, t.worker_pid, t.worker_process_name, t.queue_name,
-           clock_timestamp() AS db_now
+           clock_timestamp() AS db_now, t AS task
     INTO v_ctx
     FROM horsies_tasks t
     WHERE t.id = p_task_id
@@ -1012,8 +1029,7 @@ BEGIN
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
                m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[], 'OWNER_AND_GENERATION', p_worker_id,
-            p_claimed_at
+            p_task_id, 'COMPLETE_FUSED', 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
         ) AS m;
         RETURN;
     END IF;
@@ -1042,7 +1058,7 @@ BEGIN
 
     v_terminal_at := NOW();
     PERFORM horsies_move_task_to_history(
-        p_task_id, 'COMPLETED', 'COMPLETE_FUSED', v_terminal_at, p_result, NULL, NULL
+        v_ctx.task, 'COMPLETED', 'COMPLETE_FUSED', v_terminal_at, p_result, NULL, NULL
     );
     IF p_wake THEN
         PERFORM pg_notify('task_queue_' || v_ctx.queue_name, 'capacity');
@@ -1130,13 +1146,14 @@ $$;
 -- the same name.
 --
 -- Guarantee: in one statement: the fence (RUNNING, owner, claim generation), the COMPLETED attempt row, the move
--- (COMPLETE_LOCKED), which records the phase-2 work, then node_has_dependents. No capacity wake: phase 2 sends it.
+-- (COMPLETE_LOCKED), which records the phase-2 work, then node_has_dependents and downstream_subworkflow. No
+-- capacity wake: phase 2 sends it.
 -- A refusal writes nothing and is classified by horsies_terminalization_miss. Refused (22023): a NULL claim
 -- generation, a plain task. A NULL result is refused with 23502 (not_null_violation), as the move requires one.
 --
 -- Locks: the task advisory lock, then the row by id alone (FOR UPDATE), then the node row (in the move).
--- Returns one row: the shared outcome columns, queue_name and task_name (APPLIED only), and node_has_dependents
--- (APPLIED only; NULL on every other outcome).
+-- Returns one row: the shared outcome columns, queue_name and task_name (APPLIED only), node_has_dependents and
+-- downstream_subworkflow (APPLIED only; NULL on every other outcome).
 -- Python: horsies_finish_workflow_success (core/history/terminalization/move.py:1285-1392), its call
 -- (core/worker/finalize.py:1322-1372).
 CREATE FUNCTION horsies_finish_workflow_success(
@@ -1157,7 +1174,8 @@ CREATE FUNCTION horsies_finish_workflow_success(
     observed_guard jsonb,
     queue_name text,
     task_name text,
-    node_has_dependents boolean
+    node_has_dependents boolean,
+    downstream_subworkflow text
 )
     LANGUAGE plpgsql
     AS $$
@@ -1175,9 +1193,10 @@ BEGIN
             USING ERRCODE = 'not_null_violation';
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
+    -- The whole locked row (task): the move takes it as read here.
     SELECT t.id, t.status, t.retry_count, t.started_at, t.claimed_by_worker_id, t.claimed_at,
            t.worker_hostname, t.worker_pid, t.worker_process_name, t.is_workflow_task, t.queue_name, t.task_name,
-           clock_timestamp() AS db_now
+           clock_timestamp() AS db_now, t AS task
     INTO v_ctx
     FROM horsies_tasks t
     WHERE t.id = p_task_id
@@ -1190,10 +1209,9 @@ BEGIN
         RETURN QUERY
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
                m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard,
-               NULL::text, NULL::text, NULL::boolean
+               NULL::text, NULL::text, NULL::boolean, NULL::text
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[], 'OWNER_AND_GENERATION', p_worker_id,
-            p_claimed_at
+            p_task_id, 'COMPLETE_LOCKED', 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
         ) AS m;
         RETURN;
     END IF;
@@ -1227,12 +1245,13 @@ BEGIN
 
     v_terminal_at := NOW();
     PERFORM horsies_move_task_to_history(
-        p_task_id, 'COMPLETED', 'COMPLETE_LOCKED', v_terminal_at, p_result, NULL, NULL
+        v_ctx.task, 'COMPLETED', 'COMPLETE_LOCKED', v_terminal_at, p_result, NULL, NULL
     );
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'COMPLETE_LOCKED'::text,
         'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
-        v_ctx.queue_name::text, v_ctx.task_name::text, horsies_node_has_dependents(p_task_id);
+        v_ctx.queue_name::text, v_ctx.task_name::text, horsies_node_has_dependents(p_task_id),
+        horsies_node_downstream_subworkflow(p_task_id);
 END
 $$;
 
@@ -1259,7 +1278,7 @@ $$;
 --   the placement is ISOLATED. The delayed retry wake is the caller's, at next_retry_at.
 -- - Terminal: the move (FAIL_RUNNING) and, for a plain task with p_wake TRUE, the capacity wake
 --   pg_notify('task_queue_' || queue_name, 'capacity'), in the same statement. A workflow task gets
---   node_has_dependents; its phase 2 sends the wake.
+--   node_has_dependents and downstream_subworkflow; its phase 2 sends the wake.
 --
 -- Arguments: p_retry_kind NONE | RETRY (p_expected_retry_count, p_retry_delay_s finite and >= 0, p_retry_placement
 -- SAME_CLASS | ISOLATED; NULL for NONE). p_result, the task's error code and failed reason are the terminal values;
@@ -1271,7 +1290,7 @@ $$;
 -- Returns one row: the shared outcome columns (outcome APPLIED, RETRY_SCHEDULED, RELEASED, or a miss outcome),
 -- retry_disposition (APPLIED: NOT_REQUESTED or PAST_DEADLINE), retry_count and next_retry_at (RETRY_SCHEDULED),
 -- good_until (PAST_DEADLINE), is_workflow_task, queue_name, task_name (APPLIED; queue_name also RETRY_SCHEDULED and
--- RELEASED), node_has_dependents (APPLIED of a workflow task; else NULL).
+-- RELEASED), node_has_dependents and downstream_subworkflow (APPLIED of a workflow task; else NULL).
 -- Python: horsies_finish_failed_attempt (core/history/terminalization/move.py:1045-1262), READ_IN_FLIGHT_ATTEMPT_SQL
 -- (core/worker/sql.py:306-314) and its read (core/worker/failed_attempt.py:101-130), the call
 -- (core/worker/failed_attempt.py:298-330, core/worker/finalize.py:1467-1523), the killed-child path
@@ -1310,7 +1329,8 @@ CREATE FUNCTION horsies_finish_failed_attempt(
     is_workflow_task boolean,
     queue_name text,
     task_name text,
-    node_has_dependents boolean
+    node_has_dependents boolean,
+    downstream_subworkflow text
 )
     LANGUAGE plpgsql
     AS $$
@@ -1369,9 +1389,10 @@ BEGIN
     END IF;
 
     PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
+    -- The whole locked row (task): the move takes it as read here.
     SELECT t.id, t.status, t.retry_count, t.started_at, t.claimed_by_worker_id, t.claimed_at,
            t.worker_hostname, t.worker_pid, t.worker_process_name, t.good_until, t.is_workflow_task,
-           t.queue_name, t.task_name, clock_timestamp() AS db_now
+           t.queue_name, t.task_name, clock_timestamp() AS db_now, t AS task
     INTO v_ctx
     FROM horsies_tasks t
     WHERE t.id = p_task_id
@@ -1400,7 +1421,7 @@ BEGIN
             p_task_id, NULL::bigint, 'RELEASED'::text, NULL::timestamptz, NULL::text,
             'CLAIMED'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
             NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean;
+            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
     END IF;
 
@@ -1414,9 +1435,9 @@ BEGIN
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
                m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard,
                NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-               NULL::boolean, NULL::text, NULL::text, NULL::boolean
+               NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['FAIL_RUNNING']::text[], 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
+            p_task_id, 'FAIL_RUNNING', 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
         ) AS m;
         RETURN;
     END IF;
@@ -1477,13 +1498,13 @@ BEGIN
             p_task_id, NULL::bigint, 'RETRY_SCHEDULED'::text, NULL::timestamptz, NULL::text,
             'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
             NULL::text, v_ctx.retry_count + 1, v_next_retry_at, NULL::timestamptz,
-            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean;
+            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
     END IF;
 
     v_terminal_at := NOW();
     PERFORM horsies_move_task_to_history(
-        p_task_id, 'FAILED', 'FAIL_RUNNING', v_terminal_at, p_result, p_error_code, p_failed_reason
+        v_ctx.task, 'FAILED', 'FAIL_RUNNING', v_terminal_at, p_result, p_error_code, p_failed_reason
     );
     IF NOT v_ctx.is_workflow_task AND p_wake THEN
         PERFORM pg_notify('task_queue_' || v_ctx.queue_name, 'capacity');
@@ -1493,7 +1514,8 @@ BEGIN
         'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
         v_retry_disposition, NULL::integer, v_next_retry_at, v_good_until,
         v_ctx.is_workflow_task, v_ctx.queue_name::text, v_ctx.task_name::text,
-        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_has_dependents(p_task_id) END;
+        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_has_dependents(p_task_id) END,
+        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_downstream_subworkflow(p_task_id) END;
 END
 $$;
 
@@ -1590,8 +1612,8 @@ $$;
 --   failure with retry_disposition PAST_DEADLINE). The row goes back to PENDING with every claim and run field
 --   cleared, retry_count + 1, enqueued_at = next_retry_at; the execution class is kept. The delayed retry wake is the
 --   caller's, at next_retry_at.
--- - Failure: the move (FAIL_STALE). No capacity wake, as Python. A workflow task gets node_has_dependents; phase-2
---   recovery runs its phase 2.
+-- - Failure: the move (FAIL_STALE). No capacity wake, as Python. A workflow task gets node_has_dependents and
+--   downstream_subworkflow; phase-2 recovery runs its phase 2.
 --
 -- Arguments: thresholds in ms (>= 0); p_retry_kind NONE | RETRY (p_expected_retry_count, p_retry_delay_s finite
 -- and >= 0; NULL for NONE); the terminal result, error code and failed reason; the attempt message and reason.
@@ -1633,7 +1655,8 @@ CREATE FUNCTION horsies_finish_stale_attempt(
     is_workflow_task boolean,
     queue_name text,
     task_name text,
-    node_has_dependents boolean
+    node_has_dependents boolean,
+    downstream_subworkflow text
 )
     LANGUAGE plpgsql
     AS $$
@@ -1679,7 +1702,8 @@ BEGIN
 
     PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
     -- One capture: the locked row, the beat read beside it, and the instant both thresholds are judged at. Nothing
-    -- is read again after a refusal, so the evidence cannot show a beat that the judgement did not see.
+    -- is read again after a refusal, so the evidence cannot show a beat that the judgement did not see. The whole
+    -- locked row (task) is the row that the move takes.
     SELECT t.id, t.status, t.retry_count, t.started_at, t.finalizing_at, t.claimed_by_worker_id, t.claimed_at,
            t.worker_hostname, t.worker_pid, t.worker_process_name, t.good_until, t.is_workflow_task,
            t.queue_name, t.task_name,
@@ -1695,7 +1719,8 @@ BEGIN
                LIMIT 1
            ) AS last_heartbeat,
            NOW() AS evaluated_at,
-           clock_timestamp() AS db_now
+           clock_timestamp() AS db_now,
+           t AS task
     INTO v_ctx
     FROM horsies_tasks t
     WHERE t.id = p_task_id
@@ -1706,9 +1731,9 @@ BEGIN
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
                m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard,
                NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-               NULL::boolean, NULL::text, NULL::text, NULL::boolean
+               NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['FAIL_STALE']::text[], 'NONE', NULL::text, NULL::timestamptz
+            p_task_id, 'FAIL_STALE', 'NONE', NULL::text, NULL::timestamptz
         ) AS m;
         RETURN;
     END IF;
@@ -1734,7 +1759,7 @@ BEGIN
                 'evaluated_at', v_ctx.evaluated_at
             ),
             NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-            NULL::boolean, NULL::text, NULL::text, NULL::boolean;
+            NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
     END IF;
 
@@ -1747,7 +1772,7 @@ BEGIN
                 'retry_count', v_ctx.retry_count
             ),
             NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-            NULL::boolean, NULL::text, NULL::text, NULL::boolean;
+            NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
     END IF;
 
@@ -1806,20 +1831,21 @@ BEGIN
             p_task_id, NULL::bigint, 'RETRY_SCHEDULED'::text, NULL::timestamptz, NULL::text,
             'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
             NULL::text, v_ctx.retry_count + 1, v_next_retry_at, NULL::timestamptz,
-            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean;
+            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
     END IF;
 
     v_terminal_at := NOW();
     PERFORM horsies_move_task_to_history(
-        p_task_id, 'FAILED', 'FAIL_STALE', v_terminal_at, p_result, p_error_code, p_failed_reason
+        v_ctx.task, 'FAILED', 'FAIL_STALE', v_terminal_at, p_result, p_error_code, p_failed_reason
     );
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'FAIL_STALE'::text,
         'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
         v_retry_disposition, NULL::integer, v_next_retry_at, v_good_until,
         v_ctx.is_workflow_task, v_ctx.queue_name::text, v_ctx.task_name::text,
-        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_has_dependents(p_task_id) END;
+        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_has_dependents(p_task_id) END,
+        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_downstream_subworkflow(p_task_id) END;
 END
 $$;
 
@@ -2043,7 +2069,6 @@ CREATE FUNCTION horsies_cancel_task(p_task_id uuid, p_include_running boolean) R
 DECLARE
     v_task record;
     v_provenance record;
-    v_history_is_workflow boolean;
     v_terminal_at timestamptz;
 BEGIN
     IF num_nulls(p_task_id, p_include_running) <> 0 THEN
@@ -2051,30 +2076,15 @@ BEGIN
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
-    SELECT t.status, t.claimed_by_worker_id, t.claimed_at, t.is_workflow_task
+    SELECT t.status, t.claimed_by_worker_id, t.claimed_at, t.is_workflow_task, t AS task
     INTO v_task
     FROM horsies_tasks t
     WHERE t.id = p_task_id
     FOR UPDATE;
 
     IF NOT FOUND THEN
-        SELECT * INTO v_provenance FROM horsies_task_provenance_staged(p_task_id, FALSE);
-        IF NOT v_provenance.found THEN
-            RETURN QUERY SELECT
-                p_task_id, NULL::bigint, 'TASK_ABSENT'::text, NULL::timestamptz, NULL::text,
-                NULL::text, NULL::text, NULL::timestamptz, NULL::text, NULL::jsonb;
-            RETURN;
-        END IF;
-        IF v_provenance.location <> 'HISTORY' THEN
-            RAISE EXCEPTION 'horsies_cancel_task: provenance reported a location other than history after a live miss'
-                USING ERRCODE = 'data_corrupted';
-        END IF;
-        SELECT h.is_workflow_task INTO v_history_is_workflow
-        FROM horsies_task_history h
-        WHERE h.task_id = p_task_id
-          AND h.terminal_at = v_provenance.terminal_at;
+        SELECT p.* INTO v_provenance FROM horsies_task_provenance_staged(p_task_id) AS p;
         IF NOT FOUND THEN
-            -- The leaf that held the row was dropped between the two reads.
             RETURN QUERY SELECT
                 p_task_id, NULL::bigint, 'TASK_ABSENT'::text, NULL::timestamptz, NULL::text,
                 NULL::text, NULL::text, NULL::timestamptz, NULL::text, NULL::jsonb;
@@ -2083,14 +2093,14 @@ BEGIN
         RETURN QUERY SELECT
             p_task_id, NULL::bigint,
             CASE
-                WHEN NOT v_history_is_workflow AND v_provenance.terminalization_kind = 'CANCEL_ADMIN'
+                WHEN NOT v_provenance.is_workflow_task AND v_provenance.terminalization_kind = 'CANCEL_ADMIN'
                 THEN 'ALREADY_APPLIED'
                 ELSE 'SOURCE_STATE_CONFLICT'
             END::text,
             v_provenance.terminal_at, v_provenance.terminalization_kind::text,
             v_provenance.status::text, NULL::text, NULL::timestamptz,
             CASE
-                WHEN v_history_is_workflow THEN 'WORKFLOW_TASK'
+                WHEN v_provenance.is_workflow_task THEN 'WORKFLOW_TASK'
                 WHEN v_provenance.terminalization_kind = 'CANCEL_ADMIN' THEN NULL
                 ELSE 'FOREIGN_TERMINALIZATION'
             END::text,
@@ -2114,7 +2124,7 @@ BEGIN
 
     v_terminal_at := NOW();
     PERFORM horsies_move_task_to_history(
-        p_task_id, 'CANCELLED', 'CANCEL_ADMIN', v_terminal_at, NULL, 'TASK_CANCELLED', 'Cancelled via monitoring API'
+        v_task.task, 'CANCELLED', 'CANCEL_ADMIN', v_terminal_at, NULL, 'TASK_CANCELLED', 'Cancelled via monitoring API'
     );
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'CANCEL_ADMIN'::text,

@@ -46,7 +46,7 @@ from horsies.core.models.retention import RetentionConfig
 
 pytestmark = [pytest.mark.unit]
 
-_DB_URL = 'postgresql+psycopg://u:p@localhost:5432/db'
+_DB_URL = 'postgresql://u:p@localhost:5432/db'
 
 
 def _raised_codes(build: object) -> list[ErrorCode | None]:

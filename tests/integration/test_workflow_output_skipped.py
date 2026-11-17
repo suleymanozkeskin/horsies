@@ -46,11 +46,11 @@ from horsies.core.types.result import Err, Ok, Result
 from horsies.core.workflows.engine import (
     drain_parent_propagations_in_session,
     on_subworkflow_complete,
-    on_workflow_task_complete,
-    pop_pending_parent_propagations,
 )
+from horsies.core.workflows.node_finish import CapacityWake, finish_node
+from tests.broker_resources_support import current_resources
 
-from .conftest import start_ok
+from .conftest import finish_phase_one, finish_task, start_ok
 
 pytestmark = [pytest.mark.integration]
 
@@ -236,11 +236,7 @@ class TestOutputNodeUnderSuccessPolicy:
         result: TaskResult[int, TaskError],
     ) -> None:
         """Complete one node as the worker does, with parent propagation."""
-        node = await self._node(session, workflow_id, index)
-        await on_workflow_task_complete(
-            session, node.task_id, result, broker, task_name=node.task_name,
-        )
-        await drain_parent_propagations_in_session(session, broker)
+        await finish_task(session, broker, workflow_id, index, result)
         await session.commit()
 
     async def _run_skipped_child(
@@ -714,13 +710,20 @@ class TestOutputNodeUnderSuccessPolicy:
         child_id: str,
         stored: str | None,
     ) -> None:
-        """Complete a child, replace its stored result, then advance the parent."""
+        """Complete a child, replace its stored result, then advance the parent.
+
+        Phase 2 of each node runs without the parent advance it owes, so the
+        parent node is still RUNNING when the stored result is replaced.
+        """
         for index, result in ((0, FAILED_RESULT), (2, OK_RESULT)):
-            node = await self._node(session, child_id, index)
-            await on_workflow_task_complete(
-                session, node.task_id, result, broker, task_name=node.task_name,
+            done = await finish_phase_one(session, broker, child_id, index, result)
+            _ = await finish_node(
+                current_resources(broker).session_factory,
+                broker,
+                done.task_id,
+                done.facts,
+                CapacityWake.SEND,
             )
-        _ = pop_pending_parent_propagations(session)
         await session.execute(
             text('UPDATE horsies_workflows SET result = :result WHERE id = :wf_id'),
             {'result': stored, 'wf_id': child_id},

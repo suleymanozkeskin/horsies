@@ -12,10 +12,13 @@ pub mod client_family;
 pub mod core_rows;
 #[cfg(test)]
 pub(crate) mod enqueue_history_tests;
+#[cfg(test)]
+mod enqueue_identity_ports;
 pub mod error;
 pub mod health;
 pub(crate) mod history_reads;
 pub(crate) mod key_reservation;
+mod lifecycle_operations;
 #[cfg(test)]
 pub(crate) mod lifecycle_tests;
 pub mod listener;
@@ -33,7 +36,10 @@ pub mod result_types;
 pub mod row;
 #[cfg(test)]
 mod send_path_tests;
+#[cfg(test)]
+mod session_url_tests;
 pub mod slot_health;
+pub mod stale_recovery;
 #[cfg(test)]
 mod start_deadline_tests;
 pub mod task_lists;
@@ -57,7 +63,8 @@ pub use health::{
     DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
     WORKER_PING_CHANNEL,
 };
-pub use migrations::{expected_schema_version, run_horsies_migrations, MIGRATIONS_TABLE};
+pub use lifecycle_operations::{CancelAnswer, CancelTaskError};
+pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
     ClaimPassParams, PostgresBroker, PrestartExpiry, SchemaInitializationMode, WorkflowStop,

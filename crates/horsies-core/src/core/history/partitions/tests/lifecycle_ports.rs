@@ -37,9 +37,7 @@ fn past_fold() -> DateTime<Utc> {
 }
 
 fn test_options(database: &TestDatabase) -> PgConnectOptions {
-    PgConnectOptions::from_str(&database_url())
-        .expect("invalid test database URL")
-        .database(&database.database_name)
+    PgConnectOptions::from_str(database.url()).expect("invalid test database URL")
 }
 
 /// A pool on the test database whose sessions run in `zone`.
@@ -133,10 +131,11 @@ async fn seed_history_pending_row(pool: &PgPool, class_key: &str, leaf_lower: Da
     .expect("insert pending workflow");
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
+             downstream_subworkflow,
              id, workflow_id, task_index, task_name, input, queue_name, priority,
              dependencies, allow_failed_deps, join_type, max_retries, execution,
              retention_class_key, status, is_subworkflow, created_at
-         ) VALUES ($1, $2, 0, 'port pending node', '{}', 'default', 100,
+         ) VALUES ('NONE', $1, $2, 0, 'port pending node', '{}', 'default', 100,
                    '{}', FALSE, 'all', 0, 'ISOLATED',
                    $3, 'RUNNING', FALSE, NOW())",
     )
@@ -287,8 +286,8 @@ async fn a_detach_whose_bounds_differ_from_the_catalog_is_refused() {
             .expect("shifted bounds"),
     )
     .expect("shifted leaf ref");
-    let command = DetachExpiredHistoryLeaf::new(shifted, None, Some(5_000)).expect("detach");
-    let outcome = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader, &NoQuarantine)
+    let command = DetachExpiredHistoryLeaf::new(shifted, Some(5_000)).expect("detach");
+    let outcome = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader)
         .await
         .expect("detach outcome");
     assert!(
@@ -368,8 +367,8 @@ async fn a_fresh_leaf_is_not_expired_and_a_detach_keeps_it() {
             eligible_at: today + Duration::days(31),
         }
     );
-    let command = DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach");
-    let outcome = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader, &NoQuarantine)
+    let command = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(5_000)).expect("detach");
+    let outcome = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader)
         .await
         .expect("detach outcome");
     assert!(
@@ -419,11 +418,11 @@ async fn a_busy_detach_is_bounded_and_restores_both_timeouts() {
         .execute(holder.as_mut())
         .await
         .expect("hold the parent in SHARE mode");
-    let command = DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(9_000)).expect("detach");
+    let command = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(9_000)).expect("detach");
     let started = Instant::now();
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        detach_expired_leaf(&detach_pool, &command, &UnpublishedLoader, &NoQuarantine),
+        detach_expired_leaf(&detach_pool, &command, &UnpublishedLoader),
     )
     .await
     .expect("the detach returns")
@@ -478,9 +477,9 @@ async fn a_detach_cancelled_right_after_the_lock_frees_the_lock() {
         "SELECT class_key, class_kind, retention_days, heartbeat_horizon_hours",
     )
     .await;
-    let command = DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach");
+    let command = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(5_000)).expect("detach");
     let detach = tokio::spawn(async move {
-        detach_expired_leaf(&detach_pool, &command, &UnpublishedLoader, &NoQuarantine).await
+        detach_expired_leaf(&detach_pool, &command, &UnpublishedLoader).await
     });
     pause.wait_until_entered().await;
 

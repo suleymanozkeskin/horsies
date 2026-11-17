@@ -34,12 +34,11 @@ from ..commands import (
     is_safe_identifier,
 )
 from ..ddl.tables import FOREVER_CLASS_KEY
-from ..errors import HistoryContractError, HistoryParentAbsent
+from ..errors import HistoryContractError
 from ..names import (
     HEARTBEAT_CLASS_KEY,
     HEARTBEATS_TABLE,
     LEAF_CATALOG,
-    LEAF_LOCK_KEY_FUNCTION,
     RETENTION_CLASSES,
     TASK_HISTORY_FOREVER,
     TASK_HISTORY_PARENT,
@@ -47,46 +46,6 @@ from ..names import (
 
 INDEX_SCHEMA_VERSION = 1
 """Current per-leaf index layout version recorded on creation."""
-
-LEAF_CATALOG_DDL = f"""
-CREATE TABLE {LEAF_CATALOG} (
-    leaf_name text PRIMARY KEY,
-    parent_name text NOT NULL,
-    class_key text NOT NULL
-        REFERENCES {RETENTION_CLASSES}(class_key),
-    lower_anchor timestamptz NOT NULL,
-    upper_anchor timestamptz NOT NULL,
-    index_schema_version smallint NOT NULL,
-    id_index_name text NOT NULL,
-    partition_bound text NOT NULL,
-    min_birth_at timestamptz,
-    min_birth_verified boolean NOT NULL,
-    created_at timestamptz NOT NULL,
-    detached_at timestamptz,
-    dropped_at timestamptz,
-    CHECK (lower_anchor < upper_anchor),
-    CHECK (dropped_at IS NULL OR detached_at IS NOT NULL),
-    UNIQUE (class_key, lower_anchor, upper_anchor)
-)
-"""
-
-LEAF_LOCK_KEY_FUNCTION_DDL = f"""
-CREATE FUNCTION {LEAF_LOCK_KEY_FUNCTION}(
-    p_class_key text,
-    p_anchor timestamptz
-) RETURNS bigint
-LANGUAGE sql
-STABLE
-STRICT
-AS $function$
-    SELECT hashtextextended(
-        p_class_key || chr(31) ||
-        extract(epoch FROM date_trunc('day', p_anchor, 'UTC'))
-            ::bigint::text,
-        1601
-    )
-$function$
-"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,125 +430,6 @@ async def read_all_attached_leaf_rows(
     function and turn their retained rows into false absence.
     """
     return await _read_attached(connection, class_key=None)
-
-
-@dataclass(frozen=True, slots=True)
-class ManifestLeafSelection:
-    """The attached set, split by whether the relation actually exists.
-
-    The staged readers probe relations by name, and PostgreSQL does not
-    validate PL/pgSQL bodies at CREATE — a generated function naming a
-    relation that is gone builds happily and dies at execution, on the
-    finalize path, for every queue and class at once. So the probe list
-    must be filtered by existence.
-
-    The catalog is NOT corrected to match. A cataloged-attached leaf whose
-    relation vanished means someone changed the database behind the
-    manager's back, and `CatalogConflictKind` states the stance: that needs
-    an operator, not a heuristic. Stamping the row dropped would destroy
-    the evidence of an accidental drop and reclassify it as ordinary
-    ageing. The reader routes around the wound; the memory keeps it.
-
-    Both halves are retained because they answer different questions. The
-    probe list says which relations can be read; the complete attached set
-    says what history was retained, which is what the birth floor means.
-    """
-
-    attached: tuple[LeafCatalogRow, ...]
-    absent_relations: frozenset[str]
-
-
-# The parent is derived from the class key as `leaf_parent_name` derives it.
-_MANIFEST_SELECTION_SQL = f"""
-SELECT leaf_name,
-       to_regclass(leaf_name) IS NOT NULL AS relation_exists,
-       to_regclass(
-           CASE class_key
-               WHEN :forever_class THEN :forever_parent
-               WHEN :heartbeat_class THEN :heartbeat_parent
-               ELSE :history_parent || '_' || class_key
-           END
-       ) IS NOT NULL AS parent_exists
-FROM {LEAF_CATALOG}
-WHERE detached_at IS NULL
-  AND dropped_at IS NULL
-ORDER BY lower_anchor NULLS FIRST, leaf_name
-"""
-
-
-
-async def read_manifest_leaf_rows(
-    connection: AsyncConnection,
-) -> ManifestLeafSelection:
-    """The attached set for publication, with missing relations named.
-
-    `to_regclass` resolves through `search_path`, so a session that cannot
-    see the schema reports every leaf missing, and publishing that would
-    empty the manifest and turn all retained history into genuine false
-    absence. Most of that hazard is already closed upstream: this reader's
-    own query names the leaf catalog unqualified, so a session that cannot
-    see the schema fails there with `undefined_table` before any leaf is
-    examined. What remains is leaf relations resolving NULL en masse while
-    the catalog itself stays readable.
-
-    That residue is a SYSTEMIC question, so it takes a systemic test: no
-    history row resolving its parent. One unresolvable parent means that
-    one class's parent is gone — its leaves are unreadable and reported
-    absent like any other — and treating a single row as evidence about
-    the session would refuse publication over a class that may not even
-    be probed.
-
-    Scope is what makes the test mean anything, so this reader consults
-    exactly the rows the probe list will contain: history classes, the
-    same filter `manifest_from_catalog` applies at assembly. Heartbeat
-    leaves share this catalog and never enter the manifest, and a
-    deployment that has not run the heartbeat cutover carries heartbeat
-    rows whose parent does not exist — a state the heartbeat registration
-    models as a typed refusal rather than an error. Resolving those rows
-    here would let a tolerated state raise, and a deployment holding only
-    such rows would satisfy any threshold phrased over the whole catalog.
-    """
-    rows = (
-        await connection.execute(
-            text(_MANIFEST_SELECTION_SQL),
-            {
-                'forever_class': FOREVER_CLASS_KEY,
-                'forever_parent': TASK_HISTORY_FOREVER,
-                'heartbeat_class': HEARTBEAT_CLASS_KEY,
-                'heartbeat_parent': HEARTBEATS_TABLE,
-                'history_parent': TASK_HISTORY_PARENT,
-            },
-        )
-    ).all()
-    attached: list[LeafCatalogRow] = []
-    absent: list[str] = []
-    history_rows = 0
-    any_parent_resolves = False
-    for row in rows:
-        leaf_name = _required_str(row.leaf_name, 'leaf_name')
-        catalog_row = await read_leaf_catalog_row(connection, leaf_name)
-        if catalog_row is None:
-            raise HistoryContractError(
-                f'attached leaf {leaf_name!r} vanished from the catalog mid-read'
-            )
-        attached.append(catalog_row)
-        if catalog_row.class_key == HEARTBEAT_CLASS_KEY:
-            continue
-        history_rows += 1
-        relation_exists = _required_bool(row.relation_exists, 'relation_exists')
-        parent_exists = _required_bool(row.parent_exists, 'parent_exists')
-        any_parent_resolves = any_parent_resolves or parent_exists
-        if not relation_exists:
-            absent.append(leaf_name)
-    if history_rows and not any_parent_resolves:
-        raise HistoryParentAbsent(
-            'no attached history leaf resolves its parent relation; the '
-            'session cannot see the history schema, and publishing this '
-            'would report every retained row as absent'
-        )
-    return ManifestLeafSelection(
-        attached=tuple(attached), absent_relations=frozenset(absent)
-    )
 
 
 async def _read_attached(

@@ -277,7 +277,6 @@ impl IsolatedPool {
                     task_id: task.task_id,
                     task_name: task.task_name.clone(),
                     worker_id: self.shared.config.worker_id.clone(),
-                    task_kind: task.kind,
                     claimed_at: task.claimed_at,
                     work,
                     input,

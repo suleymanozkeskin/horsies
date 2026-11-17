@@ -46,7 +46,10 @@ use crate::broker::row::task::{
     TaskResultRow, TaskRunningContextRow,
 };
 
-use crate::broker::client_family::ClientFamily;
+use crate::broker::client_family::{
+    admit_family, recorded_family_from, ClientFamily, FamilyCheckError, FamilyCheckFailure,
+    RecordedFamily,
+};
 use crate::broker::process_listener::{
     default_payload_capacity, fixed_channel, CheckInterruption, ListenError, ProcessListener,
     SessionCheckFailure, SESSION_CAPABILITY_TIMEOUT, SESSION_CHECK_CHANNEL_PREFIX,
@@ -349,37 +352,58 @@ pub enum PrestartExpiry {
 // horsies_complete_task_fused's ctx CTE), not passed by the caller: the
 // ownership CAS makes the claim-time snapshot provably equal to the row, so
 // self-incrementing removes the snapshot from the written value entirely.
-// The optional `started_at` fence ($4) scopes the CAS to a claim generation
-// (C10); `NULL` disables it.
+// The optional `started_at` fence ($4) scopes the CAS to a claim generation;
+// `NULL` disables it.
+//
+// The written row is the retry row of the baseline retry write
+// (`horsies/core/baseline/sql/0004_lifecycle_functions.sql:1479-1496`):
+// PENDING, retry_count + 1, enqueued_at = next_retry_at, and every claim and
+// run field cleared. The retry time is `$2`, or the database clock when `$2`
+// is NULL (no delay): `enqueued_at` is NOT NULL in the baseline
+// (`0001_tables.sql:79`). A retry time at or after `good_until` is refused.
 const REQUEUE_SQL: &str = "\
-UPDATE horsies_tasks
+WITH retry AS (
+    SELECT COALESCE($2::timestamptz, now()) AS due_at
+)
+UPDATE horsies_tasks t
 SET status = 'PENDING',
-    retry_count = COALESCE(retry_count, 0) + 1,
-    next_retry_at = $2,
-    enqueued_at = $2,
-    error_code = NULL,
+    retry_count = t.retry_count + 1,
+    next_retry_at = retry.due_at,
+    enqueued_at = retry.due_at,
+    claimed_at = NULL,
+    claimed_by_worker_id = NULL,
+    claim_expires_at = NULL,
+    started_at = NULL,
+    worker_pid = NULL,
+    worker_hostname = NULL,
+    worker_process_name = NULL,
     finalizing_at = NULL,
     finalizing_by_worker_id = NULL,
     updated_at = NOW()
-WHERE id = $1
-  AND status = 'RUNNING'
-  AND claimed_by_worker_id = $3
-  AND (good_until IS NULL OR $2 < good_until)
-  AND ($4::timestamptz IS NULL OR started_at = $4)
-RETURNING id";
+FROM retry
+WHERE t.id = $1
+  AND t.status = 'RUNNING'
+  AND t.claimed_by_worker_id = $3
+  AND (t.good_until IS NULL OR retry.due_at < t.good_until)
+  AND ($4::timestamptz IS NULL OR t.started_at = $4)
+RETURNING t.id";
 
+// A live row holds no result and no failed reason: the baseline keeps them
+// with the terminal record in history (`horsies_tasks` in
+// `horsies/core/baseline/sql/0001_tables.sql`). The live reads below select
+// `NULL` for them, as Python's live reads do (`GET_TASK_STATUS_NAME_SQL`,
+// `horsies/core/brokers/postgres.py:942-948`; `get_task_info_async`,
+// `:3659-3672`).
+
+/// The live row of the result wait while the staged result function is not
+/// published.
 const GET_RESULT_SQL: &str = "\
-SELECT id, status, result, failed_reason
+SELECT id, status, NULL::text AS result, NULL::text AS failed_reason
 FROM horsies_tasks
 WHERE id = $1";
 
 const GET_RAW_RESULT_PROBE_SQL: &str = "\
 SELECT id, task_name, status
-FROM horsies_tasks
-WHERE id = $1";
-
-const GET_RAW_RESULT_RECORD_SQL: &str = "\
-SELECT id, task_name, status, result
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -392,48 +416,15 @@ static GET_RAW_RESULT_PROBE: TypedStatement = TypedStatement::new(
     &[ParameterType::Uuid],
 );
 
-static GET_RAW_RESULT_RECORD: TypedStatement = TypedStatement::new(
-    "get_raw_result_record",
-    GET_RAW_RESULT_RECORD_SQL,
-    &[ParameterType::Uuid],
-);
-
+/// The live row of a task info read. The terminal times, the error code, the
+/// result and the failed reason are `NULL` whatever the include flags say:
+/// the flags select fields of a history row only.
 const GET_TASK_INFO_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
-       next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
-       worker_hostname, worker_pid, worker_process_name, error_code, failed_reason, result,
-       execution
-FROM horsies_tasks
-WHERE id = $1";
-
-/// Metadata query excluding result and failed_reason columns.
-///
-/// Used when `include_result=false` and `include_failed_reason=false` to
-/// avoid fetching potentially large TEXT columns, matching Python's default
-/// `info(include_result=False, include_failed_reason=False)` behaviour.
-const GET_TASK_INFO_MINIMAL_SQL: &str = "\
-SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
-       next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
-       worker_hostname, worker_pid, worker_process_name, error_code,
-       NULL::TEXT AS failed_reason, NULL::TEXT AS result, execution
-FROM horsies_tasks
-WHERE id = $1";
-
-/// Metadata query including result but excluding failed_reason.
-const GET_TASK_INFO_RESULT_ONLY_SQL: &str = "\
-SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
-       next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
-       worker_hostname, worker_pid, worker_process_name, error_code,
-       NULL::TEXT AS failed_reason, result, execution
-FROM horsies_tasks
-WHERE id = $1";
-
-/// Metadata query including failed_reason but excluding result.
-const GET_TASK_INFO_REASON_ONLY_SQL: &str = "\
-SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
-       next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
-       worker_hostname, worker_pid, worker_process_name, error_code,
-       failed_reason, NULL::TEXT AS result, execution
+       next_retry_at, sent_at, enqueued_at, claimed_at, started_at,
+       NULL::timestamptz AS completed_at, NULL::timestamptz AS failed_at,
+       worker_hostname, worker_pid, worker_process_name, NULL::text AS error_code,
+       NULL::text AS failed_reason, NULL::text AS result, execution
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -603,24 +594,6 @@ static LIVE_TASK_EXISTS: TypedStatement = TypedStatement::new(
 static GET_TASK_INFO: TypedStatement =
     TypedStatement::new("get_task_info", GET_TASK_INFO_SQL, &[ParameterType::Uuid]);
 
-static GET_TASK_INFO_MINIMAL: TypedStatement = TypedStatement::new(
-    "get_task_info_minimal",
-    GET_TASK_INFO_MINIMAL_SQL,
-    &[ParameterType::Uuid],
-);
-
-static GET_TASK_INFO_RESULT_ONLY: TypedStatement = TypedStatement::new(
-    "get_task_info_result_only",
-    GET_TASK_INFO_RESULT_ONLY_SQL,
-    &[ParameterType::Uuid],
-);
-
-static GET_TASK_INFO_REASON_ONLY: TypedStatement = TypedStatement::new(
-    "get_task_info_reason_only",
-    GET_TASK_INFO_REASON_ONLY_SQL,
-    &[ParameterType::Uuid],
-);
-
 // ---------------------------------------------------------------------------
 // Monitoring / observability SQL
 // ---------------------------------------------------------------------------
@@ -760,6 +733,14 @@ static HEALTH_CHECK: TypedStatement = TypedStatement::new("health_check", HEALTH
 
 /// `SELECT 1` on the session pool in the worker boot check.
 static SESSION_CHECK: TypedStatement = TypedStatement::new("session_check", HEALTH_CHECK_SQL, &[]);
+
+/// The NOTIFY of the worker boot's session check, on the main core pool:
+/// `$1` the check channel.
+static SESSION_CHECK_NOTIFY: TypedStatement = TypedStatement::new(
+    "session_check_notify",
+    "SELECT pg_notify($1, 'ok')",
+    &[ParameterType::Text],
+);
 
 /// A pooled connection that waited in the pool for longer than this is
 /// pinged before use when `pool_pre_ping` is on (Python
@@ -1015,8 +996,9 @@ pub enum WorkflowStopBeforeStart {
 /// - `pool` and `session_pool`: sqlx pools. They are the adapter for the
 ///   call sites that have not moved to the statement layer yet: the broker's
 ///   lifecycle statements, the worker, the workflow engine, the scheduler,
-///   the web layer, migrations and the listeners, which borrow them through
-///   [`PostgresBroker::pool`] and [`PostgresBroker::session_pool`].
+///   the web layer and the listeners, which borrow them through
+///   [`PostgresBroker::pool`] and [`PostgresBroker::session_pool`]. The
+///   schema install runs on the core pools.
 ///
 /// Every LISTEN of the broker goes through the process listener of its
 /// session URL: one connection, shared with the other brokers of the process
@@ -1165,6 +1147,26 @@ impl PostgresBroker {
             .await
     }
 
+    /// Connect the broker of a worker's child: no migration and no fleet
+    /// gate check, as [`Self::connect_observe_only`]; the main URL pool keeps
+    /// `kept_open` connections open and, with `check`, pings every pooled
+    /// connection at checkout ([`PoolProfile::Child`]).
+    ///
+    /// Must run inside a tokio runtime when `kept_open` keeps connections
+    /// open: the pool starts the task that opens them.
+    pub async fn connect_child(
+        config: &PostgresConfig,
+        kept_open: crate::db::KeptOpen,
+        check: bool,
+    ) -> Result<Self, BrokerError> {
+        Self::connect_with_profile(
+            config,
+            SchemaInitializationMode::ObserveOnly,
+            PoolProfile::Child { kept_open, check },
+        )
+        .await
+    }
+
     /// Connect a worker's broker: the main URL pool is the worker profile
     /// pool, which keeps [`crate::db::WORKER_RESERVED_CONNECTIONS`] free from
     /// batch checkouts for the reaper and the per-task writes.
@@ -1195,7 +1197,7 @@ impl PostgresBroker {
         let core = CoreHandle::open(config, profile)?;
         let connect_options = pg_connect_options(&config.database_url, config.echo)?;
         let runtime_options = match profile {
-            PoolProfile::Producer => pg_pool_options(config),
+            PoolProfile::Producer | PoolProfile::Child { .. } => pg_pool_options(config),
             PoolProfile::Worker => pg_worker_runtime_pool_options(config),
         };
         let reserve_runtime =
@@ -1274,15 +1276,36 @@ impl PostgresBroker {
         Ok(broker)
     }
 
-    /// Run embedded SQL migrations.
+    /// Install the schema: run the embedded migrations that the database
+    /// lacks, and record or check this handle's client family
+    /// ([`crate::broker::migrations`]). A broker built with
+    /// [`SchemaInitializationMode::ObserveOnly`] runs nothing.
     ///
-    /// Bookkeeps in the horsies-owned `horsies_migrations` table so it never
-    /// collides with an application's own `sqlx::migrate!()` runner.
+    /// Runs on the session-work core pool (the session pool, or the main
+    /// pool when the URLs are equal). Bookkeeps in the horsies-owned
+    /// `horsies_migrations` table, so it never collides with an
+    /// application's own migration runner. A close waits for it as for a
+    /// write.
+    ///
+    /// Errors: [`BrokerError::SchemaRefused`] and
+    /// [`BrokerError::ClientFamilyMismatch`] (nothing was changed; not
+    /// retryable); [`BrokerError::InstallLock`]; [`BrokerError::Statement`];
+    /// [`BrokerError::RowDecode`]; [`BrokerError::PoolSettings`] when a
+    /// closed handle cannot open its pools again.
     pub async fn migrate(&self) -> Result<(), BrokerError> {
-        if self.schema_initialization_mode == SchemaInitializationMode::ObserveOnly {
-            return Ok(());
+        match self.schema_initialization_mode {
+            SchemaInitializationMode::ObserveOnly => return Ok(()),
+            SchemaInitializationMode::MigrateAndValidate => {}
         }
-        crate::broker::migrations::install_schema(&self.session_pool, self.client_family).await
+        let (open, _write) = self.core.pools_for_write()?;
+        crate::broker::migrations::install_schema_on(
+            open.pools().session_work(),
+            self.client_family,
+            crate::broker::migrations::InstallLockPlan::fleet(),
+            self.statement_log,
+        )
+        .await
+        .map_err(BrokerError::from)
     }
 
     /// The same handle for a client of `family`. The install records it, and
@@ -1296,56 +1319,77 @@ impl PostgresBroker {
     /// records this handle's client family. Reads never call it. A handle
     /// whose install ran in this process has passed it already. A database of
     /// the other family, or with no family row, is
-    /// `BrokerError::ClientFamilyMismatch`, not retryable; a database failure
-    /// is not kept, so the next write checks again. One statement, once.
+    /// `BrokerError::ClientFamilyMismatch`, not retryable; a failed read
+    /// ([`FamilyCheckFailure`]) is `BrokerError::Statement`,
+    /// `BrokerError::PoolSettings` or `BrokerError::RowDecode`, and is not
+    /// kept, so the next write checks again. One statement, once.
     pub async fn ensure_client_family_for_write(&self) -> Result<(), BrokerError> {
+        match self.check_client_family_for_write().await {
+            Ok(()) => Ok(()),
+            Err(FamilyCheckError::Mismatch(mismatch)) => Err(mismatch.into()),
+            Err(FamilyCheckError::ReadFailed(failure)) => Err(failure.into()),
+        }
+    }
+
+    /// The check of [`PostgresBroker::ensure_client_family_for_write`], with
+    /// its closed error. A pass is kept for the life of the handle; a
+    /// mismatch or a failed read is not.
+    async fn check_client_family_for_write(&self) -> Result<(), FamilyCheckError> {
         self.client_family_admitted
             .get_or_try_init(|| async {
-                let rows = self.query_main(&READ_CLIENT_FAMILY.bind().finish()).await?;
-                let stored: Option<String> = match rows.first() {
-                    Some(row) => Some(column(row, &READ_CLIENT_FAMILY, "family")?),
-                    None => None,
-                };
-                crate::broker::client_family::admit_family(
-                    crate::broker::client_family::recorded_family_from(stored),
-                    self.client_family,
-                )
+                let recorded = self
+                    .read_client_family()
+                    .await
+                    .map_err(FamilyCheckError::ReadFailed)?;
+                admit_family(recorded, self.client_family).map_err(FamilyCheckError::Mismatch)
             })
             .await?;
         Ok(())
     }
 
-    /// Ensure the embedded schema is initialized exactly once for this broker.
+    /// Reads the family row on the main core pool. Checkout and bound as
+    /// [`PostgresBroker::query_main`]. Writes nothing.
+    async fn read_client_family(&self) -> Result<RecordedFamily, FamilyCheckFailure> {
+        let open = self
+            .core
+            .pools()
+            .map_err(FamilyCheckFailure::PoolsNotReopened)?;
+        let statement = READ_CLIENT_FAMILY.bind().finish();
+        self.log_statement(statement.statement());
+        let rows = open
+            .main()
+            .query(
+                CheckoutClass::Batch,
+                &statement,
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+            .map_err(FamilyCheckFailure::Statement)?;
+        let stored: Option<String> = match rows.first() {
+            Some(row) => Some(
+                column(row, &READ_CLIENT_FAMILY, "family")
+                    .map_err(FamilyCheckFailure::FamilyColumnUndecodable)?,
+            ),
+            None => None,
+        };
+        Ok(recorded_family_from(stored))
+    }
+
+    /// Install the schema once for this broker ([`PostgresBroker::migrate`]).
     ///
-    /// The first successful call runs embedded SQL migrations and verifies the
-    /// validated task-history cutover attestation. Later calls are a no-op. If
-    /// initialization fails, the guard remains unset so a future caller can
-    /// retry.
+    /// The first successful call installs or checks the schema; later calls
+    /// are a no-op. A failure is not kept, so a later call runs the install
+    /// again. The install ends only at this build's whole chain (a newer or
+    /// unknown schema is refused), and it records or checks this handle's
+    /// family, so writes of this handle need no second family read.
     pub async fn ensure_schema_initialized(&self) -> Result<(), BrokerError> {
-        if self.schema_initialization_mode == SchemaInitializationMode::ObserveOnly {
-            return Ok(());
+        match self.schema_initialization_mode {
+            SchemaInitializationMode::ObserveOnly => return Ok(()),
+            SchemaInitializationMode::MigrateAndValidate => {}
         }
         self.schema_initialized
             .get_or_try_init(|| async {
-                let expected = crate::broker::migrations::expected_schema_version();
-                let before =
-                    crate::broker::migrations::successful_schema_version(&self.session_pool)
-                        .await?;
-                if before.is_some_and(|actual| actual > expected) {
-                    return Err(BrokerError::SchemaVersionMismatch {
-                        expected,
-                        actual: before,
-                    });
-                }
                 self.migrate().await?;
-                let actual =
-                    crate::broker::migrations::successful_schema_version(&self.session_pool)
-                        .await?;
-                if actual != Some(expected) {
-                    return Err(BrokerError::SchemaVersionMismatch { expected, actual });
-                }
-                // The install recorded or checked the family: writes of this
-                // handle need no second read.
                 let _already_admitted = self.client_family_admitted.set(());
                 Ok::<(), BrokerError>(())
             })
@@ -1365,9 +1409,9 @@ impl PostgresBroker {
         &self.pool
     }
 
-    /// The sqlx pool on the session URL, used for schema work, partition
-    /// maintenance, and LISTEN/NOTIFY: the adapter for call sites that have
-    /// not moved to the statement layer.
+    /// The sqlx pool on the session URL, used for partition maintenance and
+    /// LISTEN/NOTIFY: the adapter for call sites that have not moved to the
+    /// statement layer.
     pub fn session_pool(&self) -> &PgPool {
         &self.session_pool
     }
@@ -1387,10 +1431,11 @@ impl PostgresBroker {
     }
 
     /// The open core pools, for a lifecycle writer that runs on the main
-    /// core pool ([`crate::broker::attempt_writes`]), and the token of its
-    /// write: [`PostgresBroker::close`] waits for the write while the token
-    /// lives. In a worker the main core pool is the worker profile pool. An
-    /// `Idle` handle opens its pools first.
+    /// core pool ([`crate::broker::attempt_writes`]) or a workflow step
+    /// (`workflow_engine::steps`), and the token of its write:
+    /// [`PostgresBroker::close`] waits for the write while the token lives.
+    /// In a worker the main core pool is the worker profile pool. An `Idle`
+    /// handle opens its pools first.
     ///
     /// Errors: [`BrokerError::PoolSettings`] when the pools cannot be built.
     pub(crate) fn core_pools_for_write(
@@ -1473,13 +1518,15 @@ impl PostgresBroker {
     ///
     /// The handle checks its client family before the transaction: a
     /// database of another family, or with no family row, is
-    /// `RerunError::ClientFamilyMismatch`, and nothing is written.
+    /// `RerunError::ClientFamilyMismatch`; a family row that could not be
+    /// read is `RerunError::FamilyCheckFailed`. In both cases nothing is
+    /// written.
     pub async fn rerun_task(
         &self,
         command: RerunTask,
         policy: RerunEnqueuePolicy,
     ) -> Result<RerunOutcome, RerunError> {
-        self.ensure_client_family_for_write()
+        self.check_client_family_for_write()
             .await
             .map_err(rerun_family_error)?;
         let mut transaction = self.pool.begin().await?;
@@ -1869,12 +1916,17 @@ impl PostgresBroker {
     /// Runs through `horsies_expire_owned_claim`, which fences on worker
     /// ownership but deliberately not on the claim generation: once the
     /// deadline has passed, expiry is the correct outcome for whichever
-    /// generation holds the row. `Applied` and `AlreadyApplied` both mean the
-    /// task is expired, as Python's `_expire_claimed_task_before_start`
+    /// generation holds the row. One statement on the main core pool,
+    /// checked out as reserved work. `Applied` and `AlreadyApplied` both mean
+    /// the task is expired, as Python's `_expire_claimed_task_before_start`
     /// (`core/worker/child_runner.py`) reads them; any other outcome is
     /// logged with its evidence at the adapter boundary. The stored error is
     /// Python's: `TASK_EXPIRED` with its message and the task and worker ids
     /// as `data`.
+    ///
+    /// Errors: [`BrokerError::Statement`], or
+    /// [`BrokerError::TerminalizationContract`] for a row outside the wire
+    /// contract.
     pub async fn expire_claimed_task_before_start(
         &self,
         task_id: Uuid,
@@ -1892,8 +1944,10 @@ impl PostgresBroker {
         let result_json =
             serde_json::to_string(&task_result).map_err(BrokerError::Serialization)?;
 
+        let (open, _write) = self.core_pools_for_write()?;
         let outcomes = crate::broker::terminalization::terminalize(
-            &self.pool,
+            open.main(),
+            self.statement_log,
             &crate::core::lifecycle::TerminalizationCommand::ExpireOwnedClaim {
                 task_id,
                 fence: crate::core::lifecycle::WorkerOwned {
@@ -2130,7 +2184,7 @@ impl PostgresBroker {
         };
 
         // Quick check — task may already be done, or may not exist.
-        if let Some(outcome) = self.poll_result(task_id).await? {
+        if let Some(outcome) = Box::pin(self.poll_result::<T>(task_id)).await? {
             return Ok(outcome);
         }
 
@@ -2138,7 +2192,7 @@ impl PostgresBroker {
 
         // Re-check after subscribing to avoid a race where the task completes
         // between our first check and the subscribe.
-        if let Some(outcome) = self.poll_result(task_id).await? {
+        if let Some(outcome) = Box::pin(self.poll_result::<T>(task_id)).await? {
             return Ok(outcome);
         }
 
@@ -2149,9 +2203,8 @@ impl PostgresBroker {
             // not-found / WaitTimeout).
             if let Some(d) = deadline {
                 if Instant::now() >= d {
-                    return self
-                        .final_poll_or_timeout(task_id, start.elapsed().as_millis() as u64)
-                        .await;
+                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                    return Box::pin(self.final_poll_or_timeout::<T>(task_id, elapsed_ms)).await;
                 }
             }
 
@@ -2163,7 +2216,7 @@ impl PostgresBroker {
                 None => interval,
             };
             wait_mode.pause(wait).await;
-            if let Some(outcome) = self.poll_result(task_id).await? {
+            if let Some(outcome) = Box::pin(self.poll_result::<T>(task_id)).await? {
                 return Ok(outcome);
             }
         }
@@ -2186,7 +2239,7 @@ impl PostgresBroker {
         let start = Instant::now();
         let limit =
             WaitLimit::parse(timeout).map_err(|refused| invalid_input(refused.to_string()))?;
-        match self.raw_result_probe(task_id).await? {
+        match Box::pin(self.raw_result_probe(task_id)).await? {
             RawResultProbe::Record(record) => return Ok(Some(record)),
             RawResultProbe::Absent => return Ok(None),
             RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
@@ -2194,7 +2247,7 @@ impl PostgresBroker {
 
         let mut wait_mode = self.result_wait_mode(task_id).await;
 
-        match self.raw_result_probe(task_id).await? {
+        match Box::pin(self.raw_result_probe(task_id)).await? {
             RawResultProbe::Record(record) => return Ok(Some(record)),
             RawResultProbe::Absent => return Ok(None),
             RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
@@ -2203,7 +2256,7 @@ impl PostgresBroker {
         let deadline = limit.deadline_from(start);
         loop {
             if deadline.is_some_and(|at| Instant::now() >= at) {
-                return match self.raw_result_probe(task_id).await? {
+                return match Box::pin(self.raw_result_probe(task_id)).await? {
                     RawResultProbe::Record(record) | RawResultProbe::Waiting(record) => {
                         Ok(Some(record))
                     }
@@ -2219,7 +2272,7 @@ impl PostgresBroker {
                 .map(|at| at.saturating_duration_since(Instant::now()).min(interval))
                 .unwrap_or(interval);
             wait_mode.pause(wait).await;
-            match self.raw_result_probe(task_id).await? {
+            match Box::pin(self.raw_result_probe(task_id)).await? {
                 RawResultProbe::Record(record) => return Ok(Some(record)),
                 RawResultProbe::Absent => return Ok(None),
                 RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
@@ -2259,7 +2312,9 @@ impl PostgresBroker {
     /// By default, the `result` and `failed_reason` fields are excluded
     /// (returned as `None`), matching Python's
     /// `info(include_result=False, include_failed_reason=False)` default.
-    /// Pass `true` for either flag to include the corresponding column.
+    /// Pass `true` for either flag to include the field of a terminal task's
+    /// history row. A live task has no result, failed reason, error code or
+    /// terminal time: those fields are `None` whatever the flags say.
     pub async fn get_task_info(
         &self,
         task_id: Uuid,
@@ -2279,15 +2334,11 @@ impl PostgresBroker {
         include_failed_reason: bool,
         include_attempts: bool,
     ) -> BrokerResult<Option<TaskInfo>> {
-        let statement: &'static TypedStatement = match (include_result, include_failed_reason) {
-            (true, true) => &GET_TASK_INFO,
-            (true, false) => &GET_TASK_INFO_RESULT_ONLY,
-            (false, true) => &GET_TASK_INFO_REASON_ONLY,
-            (false, false) => &GET_TASK_INFO_MINIMAL,
-        };
-
         let row = self
-            .read_main(&statement.bind().value(&task_id).finish(), task_info_row)
+            .read_main(
+                &GET_TASK_INFO.bind().value(&task_id).finish(),
+                task_info_row,
+            )
             .await
             .map_err(|error| BrokerOperationError {
                 code: BrokerErrorCode::TaskInfoQueryFailed,
@@ -2314,8 +2365,7 @@ impl PostgresBroker {
                 Ok(Some(info))
             }
             None => {
-                let detail = self
-                    .fetch_history_detail(task_id)
+                let detail = Box::pin(self.fetch_history_detail(task_id))
                     .await
                     .map_err(task_info_history_error)?;
                 match detail {
@@ -2774,8 +2824,7 @@ impl PostgresBroker {
     /// Mirrors Python's `HEALTH_CHECK_SQL` used by `horsies check --live`.
     ///
     /// This does not check LISTEN/NOTIFY. Workers run
-    /// [`check_session_delivery`](Self::check_session_delivery) at every
-    /// boot.
+    /// [`check_worker_session`](Self::check_worker_session) at every boot.
     pub async fn health_check(&self) -> Result<(), BrokerError> {
         let rows = self.query_main(&HEALTH_CHECK.bind().finish()).await?;
         let _row = one_row(rows, &HEALTH_CHECK)?;
@@ -2922,53 +2971,37 @@ impl PostgresBroker {
         Ok(pongs)
     }
 
-    /// The pool checks of a worker boot, before the session check
-    /// ([`PostgresBroker::check_session_delivery`]):
+    /// The session check of a worker boot, on the statement layer: both core
+    /// pools keep a transaction, and the session URL keeps session state (a
+    /// LISTEN on it receives a NOTIFY). Runs at every worker boot, with or
+    /// without PgBouncer mode (Python `validate_worker_database_paths`,
+    /// `horsies/core/brokers/postgres.py:1383-1412`).
     ///
-    /// 1. `SELECT 1` on the main core pool. Its first checkout runs the
-    ///    statement-pooling check: a URL that does not keep a transaction is
-    ///    `StatementPooledUrl`, not retryable.
-    /// 2. `SELECT 1` on the session core pool when the session URL differs
-    ///    (its first checkout runs the statement-pooling check too).
+    /// Steps:
+    /// 1. `SELECT 1` on the session core pool when the session URL differs
+    ///    from the main URL. Its first checkout runs the statement-pooling
+    ///    check of that pool.
+    /// 2. Subscribe a wake on `horsies_check_<32 hex>` on the broker's
+    ///    listener, the connection that carries the claim wakes and the pings.
+    /// 3. One autocommit `SELECT pg_notify($1, 'ok')` on the main core pool.
+    ///    Its first checkout runs the statement-pooling check of the main
+    ///    pool.
+    /// 4. Wait at most [`SESSION_CAPABILITY_TIMEOUT`] for the NOTIFY.
     ///
-    /// A database that cannot be reached fails with its retryable error, so
-    /// the worker's start resilience retries it.
-    pub async fn check_worker_session(&self) -> Result<(), BrokerError> {
-        self.health_check().await?;
-        let open = self.core.pools()?;
-        match open.pools().session() {
-            SessionPool::SameAsMain => {}
-            SessionPool::Separate { pool, .. } => {
-                self.log_statement(&SESSION_CHECK);
-                let rows = pool
-                    .query(
-                        CheckoutClass::Batch,
-                        &SESSION_CHECK.bind().finish(),
-                        StatementBound::ConnectionTimeouts,
-                    )
-                    .await?;
-                let _row = one_row(rows, &SESSION_CHECK)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// The session check of a worker boot: the session URL keeps session
-    /// state when a LISTEN on it receives a NOTIFY. Runs at every worker boot,
-    /// with or without PgBouncer mode (Python `validate_worker_database_paths`,
-    /// `horsies/core/brokers/postgres.py:1436-1460`).
+    /// The subscription is dropped at the end, and the listener UNLISTENs the
+    /// channel. Nothing is written.
     ///
-    /// Steps: subscribe a wake on `horsies_check_<32 hex>` on the broker's
-    /// listener, the connection that carries the claim wakes and the pings;
-    /// one autocommit `SELECT pg_notify($1, 'ok')` on the main pool; wait at
-    /// most [`SESSION_CAPABILITY_TIMEOUT`]. The subscription is dropped at the
-    /// end, and the listener UNLISTENs the channel.
-    ///
-    /// Outcomes: `Ok` when the NOTIFY arrives; `NotCapable` (not retryable)
-    /// when it does not arrive in time; `Subscribe`, `Notify` and
-    /// `Interrupted` carry their retry rule (a database that cannot be
-    /// reached is retryable).
-    pub async fn check_session_delivery(&self) -> Result<(), SessionCheckFailure> {
+    /// Outcomes: `Ok` when the NOTIFY arrives. Not retryable: `NotCapable`
+    /// (no NOTIFY in time), `PoolSettings`, and `SessionPool` or `Notify`
+    /// with a permanent failure (a statement-pooled URL). `Subscribe`,
+    /// `SessionPool`, `Notify` and `Interrupted` otherwise carry their retry
+    /// rule (a database that cannot be reached is retryable).
+    pub async fn check_worker_session(&self) -> Result<(), SessionCheckFailure> {
+        let open = self
+            .core
+            .pools()
+            .map_err(SessionCheckFailure::PoolSettings)?;
+        self.check_session_pool(open.pools().session()).await?;
         let listener = self
             .listener
             .start()
@@ -2982,9 +3015,15 @@ impl PostgresBroker {
             .subscribe_wake(channel.clone(), PayloadFilter::AnyPayload)
             .await
             .map_err(SessionCheckFailure::Subscribe)?;
-        sqlx::query("SELECT pg_notify($1, 'ok')")
-            .bind(channel.as_str())
-            .execute(&self.pool)
+        let channel_name: &str = channel.as_str();
+        self.log_statement(&SESSION_CHECK_NOTIFY);
+        let _notified = open
+            .main()
+            .execute(
+                CheckoutClass::Batch,
+                &SESSION_CHECK_NOTIFY.bind().value(&channel_name).finish(),
+                StatementBound::ConnectionTimeouts,
+            )
             .await
             .map_err(SessionCheckFailure::Notify)?;
         match tokio::time::timeout(SESSION_CAPABILITY_TIMEOUT, delivery.recv()).await {
@@ -2999,6 +3038,27 @@ impl PostgresBroker {
                 session_url: listener.masked_url().clone(),
                 waited: SESSION_CAPABILITY_TIMEOUT,
             }),
+        }
+    }
+
+    /// Step 1 of [`PostgresBroker::check_worker_session`]: `SELECT 1` on the
+    /// session core pool when the session URL differs from the main URL;
+    /// nothing when it does not (the main pool's check runs at the NOTIFY).
+    async fn check_session_pool(&self, session: &SessionPool) -> Result<(), SessionCheckFailure> {
+        match session {
+            SessionPool::SameAsMain => Ok(()),
+            SessionPool::Separate { pool, .. } => {
+                self.log_statement(&SESSION_CHECK);
+                let _selected = pool
+                    .execute(
+                        CheckoutClass::Batch,
+                        &SESSION_CHECK.bind().finish(),
+                        StatementBound::ConnectionTimeouts,
+                    )
+                    .await
+                    .map_err(SessionCheckFailure::SessionPool)?;
+                Ok(())
+            }
         }
     }
 
@@ -3156,8 +3216,8 @@ impl PostgresBroker {
             TaskResultRead::Live(live) => Ok(ResultRowProbe::Row(TaskResultRow {
                 id: task_id,
                 status: live.status,
-                result: live.result,
-                failed_reason: live.failed_reason,
+                result: None,
+                failed_reason: None,
             })),
             TaskResultRead::History(history) => Ok(ResultRowProbe::Row(history_task_result_row(
                 task_id, history,
@@ -3192,6 +3252,11 @@ impl PostgresBroker {
         self.confirm_result_absence(task_id).await
     }
 
+    /// One probe of the raw result wait. A live row holds no result, so the
+    /// live read takes the id, name and status only, as Python's
+    /// `_probe_live_result_row` (`horsies/core/brokers/postgres.py:2156-2191`):
+    /// a terminal status is a record with no result, a live status waits, and
+    /// a row that is not live is read from history.
     async fn raw_result_probe(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
         let live = self
             .read_main(
@@ -3200,52 +3265,28 @@ impl PostgresBroker {
             )
             .await
             .map_err(raw_result_operation_error)?;
-        if let Some(row) = live.into_iter().next() {
-            let status: crate::core::TaskStatus = row
-                .status
-                .parse()
-                .map_err(|error| raw_result_operation_error(BrokerError::InvalidStatus(error)))?;
-            if matches!(
-                status,
-                crate::core::TaskStatus::Completed
-                    | crate::core::TaskStatus::Failed
-                    | crate::core::TaskStatus::Expired
-            ) {
-                let terminal = self
-                    .read_main(
-                        &GET_RAW_RESULT_RECORD.bind().value(&task_id).finish(),
-                        raw_result_db_row,
-                    )
-                    .await
-                    .map_err(raw_result_operation_error)?;
-                let Some(terminal) = terminal.into_iter().next() else {
-                    return self.history_raw_result_probe(task_id).await;
-                };
-                let terminal_status: crate::core::TaskStatus =
-                    terminal.status.parse().map_err(|error| {
-                        raw_result_operation_error(BrokerError::InvalidStatus(error))
-                    })?;
-                return Ok(RawResultProbe::Record(RawResultRecord {
-                    task_id: terminal.id,
-                    task_name: terminal.task_name,
-                    status: terminal_status,
-                    raw_result: decode_raw_result_object(terminal.result.as_deref())?,
-                }));
-            }
-            let record = RawResultRecord {
-                task_id: row.id,
-                task_name: row.task_name,
-                status,
-                raw_result: None,
-            };
-            return Ok(if status == crate::core::TaskStatus::Cancelled {
-                RawResultProbe::Record(record)
-            } else {
-                RawResultProbe::Waiting(record)
-            });
-        }
-
-        self.history_raw_result_probe(task_id).await
+        let Some(row) = live.into_iter().next() else {
+            return self.history_raw_result_probe(task_id).await;
+        };
+        let status: crate::core::TaskStatus = row
+            .status
+            .parse()
+            .map_err(|error| raw_result_operation_error(BrokerError::InvalidStatus(error)))?;
+        let record = RawResultRecord {
+            task_id: row.id,
+            task_name: row.task_name,
+            status,
+            raw_result: None,
+        };
+        Ok(match status {
+            crate::core::TaskStatus::Completed
+            | crate::core::TaskStatus::Failed
+            | crate::core::TaskStatus::Cancelled
+            | crate::core::TaskStatus::Expired => RawResultProbe::Record(record),
+            crate::core::TaskStatus::Pending
+            | crate::core::TaskStatus::Claimed
+            | crate::core::TaskStatus::Running => RawResultProbe::Waiting(record),
+        })
     }
 
     async fn history_raw_result_probe(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
@@ -3319,22 +3360,58 @@ fn idempotency_reservation_window_seconds(
     Ok(window.num_seconds())
 }
 
-/// The rerun error of a failed client-family check.
-///
-/// # Panics
-///
-/// `ensure_client_family_for_write` fails only with a database error or a
-/// family mismatch; any other error is a defect of that function.
-fn rerun_family_error(error: BrokerError) -> RerunError {
+/// The rerun error of a client-family check that did not pass.
+fn rerun_family_error(error: FamilyCheckError) -> RerunError {
     match error {
-        BrokerError::ClientFamilyMismatch { stored, own } => {
-            RerunError::ClientFamilyMismatch { stored, own }
+        FamilyCheckError::Mismatch(mismatch) => RerunError::ClientFamilyMismatch {
+            stored: mismatch.stored,
+            own: mismatch.own,
+        },
+        FamilyCheckError::ReadFailed(failure) => RerunError::FamilyCheckFailed(failure),
+    }
+}
+
+#[cfg(test)]
+mod rerun_family_error_tests {
+    use super::rerun_family_error;
+    use crate::broker::client_family::{
+        ClientFamily, FamilyCheckError, FamilyCheckFailure, FamilyMismatch, RecordedFamily,
+    };
+    use crate::core::history::rerun::RerunError;
+    use crate::db::{NotSentCause, StatementFailure, Transience};
+
+    #[test]
+    fn a_family_mismatch_is_the_rerun_mismatch() {
+        let error = rerun_family_error(FamilyCheckError::Mismatch(FamilyMismatch {
+            stored: RecordedFamily::NotRecorded,
+            own: ClientFamily::Rust,
+        }));
+        assert!(matches!(
+            error,
+            RerunError::ClientFamilyMismatch {
+                stored: RecordedFamily::NotRecorded,
+                own: ClientFamily::Rust,
+            }
+        ));
+    }
+
+    /// A failed family read is a rerun error, never a panic, and keeps the
+    /// retry class of its statement.
+    #[test]
+    fn a_failed_family_read_is_a_rerun_error_with_its_retry_class() {
+        let error = rerun_family_error(FamilyCheckError::ReadFailed(
+            FamilyCheckFailure::Statement(StatementFailure::NotSent {
+                statement: "read_client_family",
+                cause: NotSentCause::ConnectionClosed,
+            }),
+        ));
+        match error {
+            RerunError::FamilyCheckFailed(failure) => {
+                assert!(matches!(failure, FamilyCheckFailure::Statement(_)));
+                assert_eq!(failure.transience(), Transience::Transient);
+            }
+            other => panic!("expected FamilyCheckFailed, got {other:?}"),
         }
-        BrokerError::Database(database) => RerunError::Database(database),
-        other => panic!(
-            "ensure_client_family_for_write failed with {other:?}, which is neither a database \
-             error nor a family mismatch"
-        ),
     }
 }
 
@@ -3381,26 +3458,6 @@ fn raw_result_probe_row(
     })
 }
 
-#[derive(Debug)]
-struct RawResultDbRow {
-    id: Uuid,
-    task_name: String,
-    status: String,
-    result: Option<String>,
-}
-
-fn raw_result_db_row(
-    row: &Row,
-    statement: &TypedStatement,
-) -> Result<RawResultDbRow, RowDecodeError> {
-    Ok(RawResultDbRow {
-        id: column(row, statement, "id")?,
-        task_name: column(row, statement, "task_name")?,
-        status: column(row, statement, "status")?,
-        result: column(row, statement, "result")?,
-    })
-}
-
 enum RawResultProbe {
     Record(RawResultRecord),
     Waiting(RawResultRecord),
@@ -3416,10 +3473,8 @@ fn raw_result_from_history_detail(
         None | Some(TaskDetailResult::Absent { .. }) => Ok(RawResultProbe::Absent),
         Some(TaskDetailResult::Live { .. }) => Ok(RawResultProbe::Retry),
         Some(TaskDetailResult::History(detail)) => {
-            let status: crate::core::TaskStatus = detail
-                .status
-                .parse()
-                .map_err(|error| raw_result_operation_error(BrokerError::InvalidStatus(error)))?;
+            // Parsed at the history read (`HistoryTaskDetail.status`).
+            let status: crate::core::TaskStatus = detail.status;
             if !status.is_terminal() {
                 return Err(raw_result_operation_error(BrokerError::InvalidStatus(
                     format!("history task {task_id} has non-terminal status {status}"),
@@ -3438,19 +3493,6 @@ fn raw_result_from_history_detail(
             }))
         }
     }
-}
-
-fn decode_raw_result_object(
-    raw_result: Option<&str>,
-) -> BrokerResult<Option<serde_json::Map<String, serde_json::Value>>> {
-    raw_result
-        .map(|raw| {
-            crate::core::codec::from_json_str::<serde_json::Value>(raw)
-                .map_err(|error| invalid_raw_result(format!("result JSON is invalid: {error}")))
-                .and_then(decode_raw_result_value)
-        })
-        .transpose()
-        .map(Option::flatten)
 }
 
 fn decode_raw_result_value(
@@ -4215,7 +4257,7 @@ mod tests {
             error.data,
             Some(serde_json::json!({ "task_id": task_id.to_string() }))
         );
-        assert!(error.cause.is_none());
+        assert!(error.exception.is_none());
     }
 
     /// Completed task with a string result type.
@@ -4659,7 +4701,7 @@ mod horsies_claim_tests {
         let wid = format!("w-{suffix}");
         let qa = format!("pr160_v12_{suffix}");
         let queues = vec![qa.clone()];
-        let id = seed(&pool, &qa, "PENDING", 0, None, None).await;
+        let id = seed(&pool, &qa, "PENDING", 1, None, None).await;
 
         let rows = broker
             .claim_batch(&base_params(&wid, &queues))
@@ -4667,9 +4709,7 @@ mod horsies_claim_tests {
             .expect("claim");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, id);
-        let claimed_at = rows[0]
-            .claimed_at
-            .expect("claimed row must carry claimed_at");
+        let claimed_at = rows[0].claimed_at;
         let db_claimed_at: DateTime<Utc> =
             sqlx::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
                 .bind(&id)
@@ -4695,10 +4735,10 @@ mod horsies_claim_tests {
         let qb = format!("pr160_b_{suffix}");
         let queues = vec![qa.clone(), qb.clone()];
 
-        // qb carries the better task priority (0 vs 5), but qa has the better
+        // qb carries the better task priority (1 vs 5), but qa has the better
         // QUEUE priority — queue rank must win the global ordering.
         seed(&pool, &qa, "PENDING", 5, None, None).await;
-        let qb_id = seed(&pool, &qb, "PENDING", 0, None, None).await;
+        let qb_id = seed(&pool, &qb, "PENDING", 1, None, None).await;
 
         let mut params = base_params(&wid, &queues);
         params.processes = 1; // budget of exactly 1
@@ -4715,7 +4755,7 @@ mod horsies_claim_tests {
         // Same budget, equal queue priorities: task priority decides.
         cleanup(&pool, &queues).await;
         seed(&pool, &qa, "PENDING", 5, None, None).await;
-        let qb_id2 = seed(&pool, &qb, "PENDING", 0, None, None).await;
+        let qb_id2 = seed(&pool, &qb, "PENDING", 1, None, None).await;
         let params_flat = {
             let mut p = base_params(&wid, &queues);
             p.processes = 1;
@@ -4744,9 +4784,9 @@ mod horsies_claim_tests {
         let queues = vec![qa.clone()];
 
         // Cap 2 with one RUNNING (other worker) -> exactly 1 claimable.
-        seed(&pool, &qa, "RUNNING", 0, Some("other-worker"), None).await;
+        seed(&pool, &qa, "RUNNING", 1, Some("other-worker"), None).await;
         for _ in 0..5 {
-            seed(&pool, &qa, "PENDING", 0, None, None).await;
+            seed(&pool, &qa, "PENDING", 1, None, None).await;
         }
 
         let mut params = base_params(&wid, &queues);
@@ -4773,7 +4813,7 @@ mod horsies_claim_tests {
         let queues = vec![qa.clone()];
 
         for _ in 0..5 {
-            seed(&pool, &qa, "PENDING", 0, None, None).await;
+            seed(&pool, &qa, "PENDING", 1, None, None).await;
         }
 
         // The global in-flight count spans the whole table; anchor the cap on
@@ -4799,7 +4839,7 @@ mod horsies_claim_tests {
         let queues = vec![qa.clone()];
 
         for _ in 0..5 {
-            seed(&pool, &qa, "PENDING", 0, None, None).await;
+            seed(&pool, &qa, "PENDING", 1, None, None).await;
         }
 
         let mut params = base_params(&wid, &queues);
@@ -4821,9 +4861,9 @@ mod horsies_claim_tests {
         let qa = format!("pr160_exp_{suffix}");
         let queues = vec![qa.clone()];
 
-        let expired_id = seed(&pool, &qa, "CLAIMED", 0, Some("dead-worker"), Some(-600)).await;
+        let expired_id = seed(&pool, &qa, "CLAIMED", 1, Some("dead-worker"), Some(-600)).await;
         // Active claim by another worker must NOT be reclaimed.
-        seed(&pool, &qa, "CLAIMED", 0, Some("live-worker"), Some(600)).await;
+        seed(&pool, &qa, "CLAIMED", 1, Some("live-worker"), Some(600)).await;
 
         let params = base_params(&wid, &queues);
         let rows = broker.claim_batch(&params).await.expect("claim");
@@ -4855,7 +4895,7 @@ mod horsies_claim_tests {
         let qa = format!("pr160_lease_{suffix}");
         let queues = vec![qa.clone()];
 
-        let _task = seed(&pool, &qa, "PENDING", 0, None, None).await;
+        let _task = seed(&pool, &qa, "PENDING", 1, None, None).await;
 
         let params = base_params(&wid, &queues);
         let rows = broker.claim_batch(&params).await.expect("claim");
@@ -4899,9 +4939,9 @@ mod horsies_claim_tests {
         let queues = vec![qa.clone()];
 
         // Worker already holds 2 active claims; guard is 2 -> nothing claimed.
-        seed(&pool, &qa, "CLAIMED", 0, Some(&wid), Some(600)).await;
-        seed(&pool, &qa, "CLAIMED", 0, Some(&wid), Some(600)).await;
-        seed(&pool, &qa, "PENDING", 0, None, None).await;
+        seed(&pool, &qa, "CLAIMED", 1, Some(&wid), Some(600)).await;
+        seed(&pool, &qa, "CLAIMED", 1, Some(&wid), Some(600)).await;
+        seed(&pool, &qa, "PENDING", 1, None, None).await;
 
         let mut params = base_params(&wid, &queues);
         params.max_claim_per_worker = 2;
@@ -4923,10 +4963,10 @@ mod horsies_claim_tests {
         let queues = vec![qa.clone()];
 
         // budget = (processes 1 + prefetch 2) - RUNNING 1 - CLAIMED 1 = 1.
-        seed(&pool, &qa, "RUNNING", 0, Some(&wid), None).await;
-        seed(&pool, &qa, "CLAIMED", 0, Some(&wid), Some(600)).await;
+        seed(&pool, &qa, "RUNNING", 1, Some(&wid), None).await;
+        seed(&pool, &qa, "CLAIMED", 1, Some(&wid), Some(600)).await;
         for _ in 0..3 {
-            seed(&pool, &qa, "PENDING", 0, None, None).await;
+            seed(&pool, &qa, "PENDING", 1, None, None).await;
         }
 
         let mut params = base_params(&wid, &queues);
@@ -4953,8 +4993,8 @@ mod horsies_claim_tests {
         let queues = vec![queue.clone()];
         let middle = seed(pool, &queue, "PENDING", 50, None, None).await;
         let last = seed(pool, &queue, "PENDING", 100, None, None).await;
-        let second = seed(pool, &queue, "PENDING", 1, None, None).await;
-        let first = seed(pool, &queue, "CLAIMED", 0, Some("old_worker"), Some(-60)).await;
+        let second = seed(pool, &queue, "PENDING", 2, None, None).await;
+        let first = seed(pool, &queue, "CLAIMED", 1, Some("old_worker"), Some(-60)).await;
         let rows = broker
             .claim_batch(&base_params("claim_order_worker", &queues))
             .await
@@ -4974,14 +5014,14 @@ mod horsies_claim_tests {
         let ready = format!("claim_ready_{suffix}");
         let queues = vec![blocked.clone(), ready.clone()];
         let mut unused = Vec::new();
-        for priority in 0..10 {
+        for priority in 1..=10 {
             unused.push(seed(pool, &blocked, "PENDING", priority, None, None).await);
         }
         let mut expected = Vec::new();
-        for priority in 0..10 {
+        for priority in 1..=10 {
             let id = seed(pool, &ready, "PENDING", priority, None, None).await;
             match priority {
-                0 | 1 => expected.push(id),
+                1 | 2 => expected.push(id),
                 _ => unused.push(id),
             }
         }
@@ -5030,7 +5070,7 @@ mod fused_finalize_tests {
     //! locks the RUNNING row, writes the COMPLETED attempt from the locked
     //! row, transitions, and fires the capacity notify.
     use super::*;
-    use crate::broker::terminalization::terminalize;
+    use crate::broker::terminalization::on_test_pool::terminalize;
     use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
     use serial_test::serial;
     use uuid::Uuid;
@@ -5051,8 +5091,6 @@ mod fused_finalize_tests {
                     claimed_at,
                 },
                 result_json: result_json.to_owned(),
-                notify_channel: "task_queue_default".to_owned(),
-                notify_payload: format!("capacity:{task_id}"),
             },
         )
         .await
@@ -5674,48 +5712,6 @@ mod set_running_heartbeat_tests {
         assert_eq!(fields.len(), 9);
         cleanup(&pool, &id).await;
     }
-
-    /// C21: `horsies_heartbeats.id` is BIGINT (migration 0020). `HeartbeatRow.id`
-    /// must be `i64` so `query_as` decodes it — including ids past `i32::MAX`.
-    /// With the old `i32` field, sqlx errors decoding the INT8 column.
-    #[tokio::test]
-    #[serial]
-    async fn heartbeat_row_decodes_bigint_id() {
-        use crate::broker::row::heartbeat::HeartbeatRow;
-
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
-        broker.ensure_schema_initialized().await.expect("schema");
-        let pool = broker.pool().clone();
-        let big_id: i64 = 3_000_000_000; // > i32::MAX
-        let task_id = Uuid::new_v4().to_string();
-
-        sqlx::query(
-            "INSERT INTO horsies_heartbeats (id, task_id, sender_id, role, sent_at, hostname, pid) \
-             VALUES ($1, $2, 'w1', 'runner', NOW(), 'h1', 1)",
-        )
-        .bind(big_id)
-        .bind(test_uuid(&task_id))
-        .execute(&pool)
-        .await
-        .expect("insert heartbeat");
-
-        let row: HeartbeatRow = sqlx::query_as(
-            "SELECT id, task_id, sender_id, role, sent_at, hostname, pid \
-             FROM horsies_heartbeats WHERE id = $1",
-        )
-        .bind(big_id)
-        .fetch_one(&pool)
-        .await
-        .expect("HeartbeatRow must decode a BIGINT id");
-        assert_eq!(row.id, big_id);
-
-        sqlx::query("DELETE FROM horsies_heartbeats WHERE id = $1")
-            .bind(big_id)
-            .execute(&pool)
-            .await
-            .ok();
-    }
 }
 
 #[cfg(test)]
@@ -5794,7 +5790,7 @@ mod filter_non_runnable_tests {
             for index in 0..2 {
                 let task_id = Uuid::new_v4();
                 ids.push(task_id);
-                sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,node_id,task_name,input,queue_name,priority,dependencies,allow_failed_deps,join_type,status,is_subworkflow,max_retries,execution,retention_class_key,task_id,created_at) VALUES($1,$2,$3,$4,'lookup_test','null','default',100,'{}',FALSE,'all','ENQUEUED',FALSE,0,'ISOLATED','forever',$5,NOW())")
+                sqlx::query("INSERT INTO horsies_workflow_tasks(downstream_subworkflow, id,workflow_id,task_index,node_id,task_name,input,queue_name,priority,dependencies,allow_failed_deps,join_type,status,is_subworkflow,max_retries,execution,retention_class_key,task_id,created_at) VALUES('NONE', $1,$2,$3,$4,'lookup_test','null','default',100,'{}',FALSE,'all','ENQUEUED',FALSE,0,'ISOLATED','forever',$5,NOW())")
                     .bind(Uuid::new_v4()).bind(workflow_id).bind(index)
                     .bind(format!("node_{index}")).bind(task_id)
                     .execute(&mut *tx).await.unwrap();
@@ -5893,11 +5889,11 @@ mod filter_non_runnable_tests {
 
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, allow_failed_deps, join_type,
                 status, is_subworkflow, max_retries, execution, retention_class_key,
                 task_id, created_at
-            ) VALUES ($1, $2, 0, 'node_0', 'c15_task', 'null',
+            ) VALUES ('NONE', $1, $2, 0, 'node_0', 'c15_task', 'null',
                       'default', 100, '{}', FALSE, 'all',
                       'ENQUEUED', FALSE, 3, 'ISOLATED', 'standard_30d',
                       $3, NOW())",
@@ -5994,11 +5990,14 @@ mod filter_non_runnable_tests {
 
 #[cfg(test)]
 mod terminal_at_stamp_tests {
-    //! Every terminal transition stamps `terminal_at` in the same statement
-    //! (parity with horsies PR #219 / schema v17); live transitions leave it
-    //! NULL. One pin per status family through the legacy writers; the
-    //! writer-inventory scan (tests/writer_inventory.rs) covers the rest
-    //! structurally.
+    //! Every terminal transition moves the row out of `horsies_tasks` into
+    //! `horsies_task_history` and stamps `terminal_at` from the database
+    //! clock in the same statement; a live transition keeps the row live and
+    //! writes no history row. The baseline live table has no `terminal_at`
+    //! column, and the history column is NOT NULL
+    //! (`horsies/core/baseline/sql/0001_tables.sql`). One pin per status
+    //! family; the writer-inventory scan (tests/writer_inventory.rs) covers
+    //! the rest structurally.
     use super::*;
     use serial_test::serial;
     use uuid::Uuid;
@@ -6049,16 +6048,53 @@ mod terminal_at_stamp_tests {
         .expect("seed task");
     }
 
-    async fn terminal_at_of(pool: &sqlx::PgPool, id: &str) -> (String, Option<DateTime<Utc>>) {
-        sqlx::query_as(
-            "SELECT status, terminal_at FROM horsies_tasks WHERE id = $1
-             UNION ALL
-             SELECT status, terminal_at FROM horsies_task_history WHERE task_id = $1",
-        )
-        .bind(test_uuid(id))
-        .fetch_one(pool)
-        .await
-        .expect("read task")
+    /// The database clock, read in a statement of its own.
+    async fn database_now(pool: &sqlx::PgPool) -> DateTime<Utc> {
+        sqlx::query_scalar("SELECT now()")
+            .fetch_one(pool)
+            .await
+            .expect("read the database clock")
+    }
+
+    /// The status of the live row, or `None` when `horsies_tasks` does not
+    /// hold the task.
+    async fn live_status(pool: &sqlx::PgPool, id: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+            .bind(test_uuid(id))
+            .fetch_optional(pool)
+            .await
+            .expect("read the live row")
+    }
+
+    /// The status and `terminal_at` of the history row, or `None` when
+    /// history does not hold the task.
+    async fn history_row(pool: &sqlx::PgPool, id: &str) -> Option<(String, DateTime<Utc>)> {
+        sqlx::query_as("SELECT status, terminal_at FROM horsies_task_history WHERE task_id = $1")
+            .bind(test_uuid(id))
+            .fetch_optional(pool)
+            .await
+            .expect("read the history row")
+    }
+
+    /// The task left the live table, and its history row has `status` and a
+    /// `terminal_at` of the transition: at or after `before` (the database
+    /// clock before the transition) and at or before the database clock
+    /// after it.
+    async fn assert_moved(pool: &sqlx::PgPool, id: &str, status: &str, before: DateTime<Utc>) {
+        assert_eq!(
+            live_status(pool, id).await,
+            None,
+            "the {status} transition must remove the live row"
+        );
+        let after = database_now(pool).await;
+        let Some((history_status, terminal_at)) = history_row(pool, id).await else {
+            panic!("the {status} transition must write a history row");
+        };
+        assert_eq!(history_status, status);
+        assert!(
+            before <= terminal_at && terminal_at <= after,
+            "terminal_at {terminal_at} must be the transition time, from {before} to {after}"
+        );
     }
 
     async fn cleanup(pool: &sqlx::PgPool, id: &str) {
@@ -6094,8 +6130,9 @@ mod terminal_at_stamp_tests {
         .fetch_one(&pool)
         .await
         .expect("stamp claim generation");
+        let before = database_now(&pool).await;
 
-        let outcomes = crate::broker::terminalization::terminalize(
+        let outcomes = crate::broker::terminalization::on_test_pool::terminalize(
             &pool,
             &crate::core::lifecycle::TerminalizationCommand::CompleteTaskFused {
                 task_id: Uuid::parse_str(&id).expect("test identity must be UUID"),
@@ -6104,8 +6141,6 @@ mod terminal_at_stamp_tests {
                     claimed_at: generation,
                 },
                 result_json: "{\"Ok\":1}".to_owned(),
-                notify_channel: "task_queue_default".to_owned(),
-                notify_payload: format!("capacity:{id}"),
             },
         )
         .await
@@ -6115,12 +6150,7 @@ mod terminal_at_stamp_tests {
             [crate::core::lifecycle::TerminalizationOutcome::Applied { .. }]
         ));
 
-        let (status, terminal_at) = terminal_at_of(&pool, &id).await;
-        assert_eq!(status, "COMPLETED");
-        assert!(
-            terminal_at.is_some(),
-            "COMPLETED row must carry terminal_at"
-        );
+        assert_moved(&pool, &id, "COMPLETED", before).await;
 
         cleanup(&pool, &id).await;
     }
@@ -6132,8 +6162,9 @@ mod terminal_at_stamp_tests {
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "RUNNING", Some("w1"), None).await;
+        let before = database_now(&pool).await;
 
-        let outcomes = crate::broker::terminalization::terminalize(
+        let outcomes = crate::broker::terminalization::on_test_pool::terminalize(
             &pool,
             &crate::core::lifecycle::TerminalizationCommand::FailLockedTask {
                 task_id: Uuid::parse_str(&id).expect("test identity must be UUID"),
@@ -6152,9 +6183,7 @@ mod terminal_at_stamp_tests {
             [crate::core::lifecycle::TerminalizationOutcome::Applied { .. }]
         ));
 
-        let (status, terminal_at) = terminal_at_of(&pool, &id).await;
-        assert_eq!(status, "FAILED");
-        assert!(terminal_at.is_some(), "FAILED row must carry terminal_at");
+        assert_moved(&pool, &id, "FAILED", before).await;
 
         cleanup(&pool, &id).await;
     }
@@ -6166,22 +6195,18 @@ mod terminal_at_stamp_tests {
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "PENDING", None, None).await;
+        let before = database_now(&pool).await;
 
-        let applied = broker
-            .cancel(
-                Uuid::parse_str(&id).unwrap(),
-                &[crate::core::types::status::TaskStatus::Pending],
-            )
-            .await
-            .expect("cancel");
-        assert!(applied);
-
-        let (status, terminal_at) = terminal_at_of(&pool, &id).await;
-        assert_eq!(status, "CANCELLED");
-        assert!(
-            terminal_at.is_some(),
-            "CANCELLED row must carry terminal_at"
+        let cancelled =
+            crate::monitoring::cancel_task(&broker, Uuid::parse_str(&id).unwrap(), false)
+                .await
+                .expect("cancel");
+        assert_eq!(
+            cancelled.was_status,
+            crate::core::types::status::TaskStatus::Pending
         );
+
+        assert_moved(&pool, &id, "CANCELLED", before).await;
 
         cleanup(&pool, &id).await;
     }
@@ -6193,6 +6218,7 @@ mod terminal_at_stamp_tests {
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "CLAIMED", Some("w1"), Some(-60)).await;
+        let before = database_now(&pool).await;
 
         let expired = broker
             .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
@@ -6200,16 +6226,18 @@ mod terminal_at_stamp_tests {
             .expect("expire");
         assert_eq!(expired, PrestartExpiry::Expired);
 
-        let (status, terminal_at) = terminal_at_of(&pool, &id).await;
-        assert_eq!(status, "EXPIRED");
-        assert!(terminal_at.is_some(), "EXPIRED row must carry terminal_at");
+        assert_moved(&pool, &id, "EXPIRED", before).await;
 
         cleanup(&pool, &id).await;
     }
 
+    /// A requeue is a live transition: the row stays live as PENDING, writes
+    /// no history row, counts the retry, and clears every claim and run
+    /// field, as the baseline retry write
+    /// (`horsies/core/baseline/sql/0004_lifecycle_functions.sql:1479-1496`).
     #[tokio::test]
     #[serial]
-    async fn requeue_leaves_terminal_at_null() {
+    async fn requeue_keeps_the_row_live_and_writes_no_history_row() {
         let broker = connect().await;
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
@@ -6221,11 +6249,69 @@ mod terminal_at_stamp_tests {
             .expect("requeue");
         assert!(applied);
 
-        let (status, terminal_at) = terminal_at_of(&pool, &id).await;
-        assert_eq!(status, "PENDING");
+        assert_eq!(live_status(&pool, &id).await.as_deref(), Some("PENDING"));
+        assert_eq!(
+            history_row(&pool, &id).await,
+            None,
+            "a live transition must write no history row"
+        );
+        let (retry_count, cleared): (i32, serde_json::Value) = sqlx::query_as(
+            "SELECT retry_count,
+                    jsonb_build_object(
+                        'claimed_at', claimed_at,
+                        'claimed_by_worker_id', claimed_by_worker_id,
+                        'claim_expires_at', claim_expires_at,
+                        'started_at', started_at,
+                        'worker_pid', worker_pid,
+                        'worker_hostname', worker_hostname,
+                        'worker_process_name', worker_process_name,
+                        'finalizing_at', finalizing_at,
+                        'finalizing_by_worker_id', finalizing_by_worker_id
+                    )
+             FROM horsies_tasks WHERE id = $1",
+        )
+        .bind(test_uuid(&id))
+        .fetch_one(&pool)
+        .await
+        .expect("requeued row");
+        assert_eq!(retry_count, 1);
+        let fields = cleared.as_object().expect("field object");
+        for (field, value) in fields {
+            assert!(value.is_null(), "requeue must clear {field}, found {value}");
+        }
+        assert_eq!(fields.len(), 9);
+
+        cleanup(&pool, &id).await;
+    }
+
+    /// A requeue with no retry time is due at once: `next_retry_at` and the
+    /// NOT NULL `enqueued_at` take the database clock of the requeue.
+    #[tokio::test]
+    #[serial]
+    async fn requeue_with_no_retry_time_is_due_at_the_database_clock() {
+        let broker = connect().await;
+        let pool = broker.pool().clone();
+        let id = Uuid::new_v4().to_string();
+        seed(&pool, &id, "RUNNING", Some("w1"), None).await;
+        let before = database_now(&pool).await;
+
+        let applied = broker
+            .requeue(Uuid::parse_str(&id).unwrap(), None, "w1")
+            .await
+            .expect("requeue");
+        assert!(applied);
+
+        let after = database_now(&pool).await;
+        let (enqueued_at, next_retry_at): (DateTime<Utc>, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT enqueued_at, next_retry_at FROM horsies_tasks WHERE id = $1")
+                .bind(test_uuid(&id))
+                .fetch_one(&pool)
+                .await
+                .expect("requeued row");
+        assert_eq!(next_retry_at, Some(enqueued_at));
         assert!(
-            terminal_at.is_none(),
-            "live transition must not stamp terminal_at"
+            before <= enqueued_at && enqueued_at <= after,
+            "enqueued_at {enqueued_at} must be the requeue time, from {before} to {after}"
         );
 
         cleanup(&pool, &id).await;
@@ -6450,17 +6536,29 @@ mod broker_operation_error_tests {
         }
     }
 
+    /// `close` returns the core pools to `Idle`, and the next operation opens
+    /// new pools (`HandleState::Idle`, `broker/pools.rs`), as Python's broker
+    /// stays usable after `close_async`
+    /// (`horsies/core/brokers/postgres.py:2403-2411`). A ping after a close
+    /// meets the server: here a refused connection, which is retryable. A
+    /// checkout on a closed pool (`PoolClosed`) stays not retryable
+    /// (`a_monitoring_read_failure_carries_the_driver_classification`).
     #[tokio::test]
-    async fn a_database_ping_on_a_closed_pool_is_not_retryable() {
+    async fn a_database_ping_after_close_opens_new_pools_and_a_refused_connection_is_retryable() {
         let broker = unreachable_broker();
         broker.close().await;
 
         let Err(failed) = broker.ping_database().await else {
-            panic!("a closed pool cannot ping");
+            panic!("no server listens on the unreachable URL");
         };
 
         assert_eq!(failed.code, BrokerErrorCode::DbPingFailed);
-        assert!(!failed.retryable);
+        assert!(
+            !failed.message.contains("pool is closed"),
+            "the ping must run on new pools: {}",
+            failed.message
+        );
+        assert!(failed.retryable, "{}", failed.message);
     }
 
     fn checkout_failed(cause: crate::db::CheckoutFailure) -> BrokerError {
@@ -7086,7 +7184,9 @@ mod enqueue_task_options_tests {
             task_name: "t".to_owned(),
             queue_name: None,
             good_until: None,
-            auto_retry_for: Some(vec![crate::core::TaskErrorCode::User("X".to_owned())]),
+            auto_retry_for: Some(vec![crate::core::TaskErrorCode::User(
+                crate::core::UserCode::parse("X").expect("X is a user code"),
+            )]),
             retry_policy: Some(crate::core::RetryPolicy::exponential(30, 4, true).unwrap()),
             timeout_ms: Some(1_000),
         };
@@ -7205,7 +7305,102 @@ mod task_info_code_tests {
         assert_eq!(undecodable.code, BrokerErrorCode::TaskInfoQueryFailed);
         assert!(!undecodable.retryable);
     }
+
+    /// A FAILED history row whose stored result is `payload`, with a
+    /// matching digest and envelope version 1.
+    fn history_detail_with_result(payload: &[u8]) -> HistoryTaskDetail {
+        let at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 8, 7, 0, 0, 0).unwrap();
+        HistoryTaskDetail {
+            task_id: test_uuid("0192b3a4-0000-7000-8000-000000000001"),
+            task_name: "stored_result".to_owned(),
+            queue_name: "default".to_owned(),
+            priority: 100,
+            status: crate::core::TaskStatus::Failed,
+            terminalization_kind: "FAIL_RUNNING".to_owned(),
+            terminal_at: at,
+            retention_class_key: "forever".to_owned(),
+            enqueued_at: at,
+            created_at: at,
+            sent_at: Some(at),
+            claimed_at: Some(at),
+            started_at: Some(at),
+            good_until: None,
+            retry_count: 0,
+            max_retries: 0,
+            last_claimed_worker_id: Some("w-1".to_owned()),
+            last_worker_hostname: Some("host-1".to_owned()),
+            last_worker_pid: Some(100),
+            result_envelope_version: crate::core::history::archive::versions::ARCHIVE_VERSION_1,
+            result_codec: crate::core::history::archive::versions::JSON_UTF8_CODEC.to_owned(),
+            result_content_type: crate::core::history::archive::versions::JSON_CONTENT_TYPE
+                .to_owned(),
+            result_payload: Some(payload.to_vec()),
+            result_digest: Some(
+                crate::core::history::archive::versions::archive_digest(payload).to_vec(),
+            ),
+            error_code: Some("BOOM".to_owned()),
+            final_failed_reason: None,
+            rerun_of_task_id: None,
+            rerun_root_task_id: None,
+            workflow_id: None,
+            is_workflow_task: false,
+            rerun_input_disposition: "NOT_REQUESTED".to_owned(),
+            rerun_input_version: None,
+            rerun_input_codec: None,
+            rerun_input_content_type: None,
+            rerun_input_digest: None,
+            rerun_input_inline: None,
+            attempts: Vec::new(),
+        }
+    }
+
+    /// Asserts that the task info of a history row with `payload` as its
+    /// stored result is `INVALID_JSON_PAYLOAD`, not retryable.
+    fn assert_refused_as_invalid_json_payload(payload: &[u8]) {
+        let shown = String::from_utf8_lossy(payload);
+        let Err(refused) =
+            history_task_info(history_detail_with_result(payload), true, false, false)
+        else {
+            panic!("a stored result of {shown:.40} must not read");
+        };
+        assert_eq!(
+            refused.code,
+            BrokerErrorCode::InvalidJsonPayload,
+            "{shown:.40}"
+        );
+        assert!(!refused.retryable, "{shown:.40}");
+    }
+
+    /// Python `test_broker_postgres.py::TestHistoryTaskInfoResultDecode::test_stored_result_is_refused_as_invalid_json_payload`,
+    /// the payloads that every build refuses: `NaN` and an empty payload.
+    #[test]
+    fn a_stored_result_outside_strict_json_is_invalid_json_payload() {
+        for payload in [&b"{\"x\":NaN}"[..], &b""[..]] {
+            assert_refused_as_invalid_json_payload(payload);
+        }
+    }
+
+    /// Python `test_broker_postgres.py::TestHistoryTaskInfoResultDecode::test_stored_result_is_refused_as_invalid_json_payload`,
+    /// the payloads past the strict read rule (`core::codec::check_json_bytes`):
+    /// a float out of range and an integer of 5000 digits (refused in a
+    /// default build by serde_json's range check, read as text under its
+    /// `arbitrary_precision` feature), and a repeated key (read in every
+    /// build).
+    #[test]
+    fn a_stored_result_past_the_strict_rule_is_invalid_json_payload_in_every_build() {
+        let long_integer = format!("{{\"x\":{}}}", "1".repeat(5000));
+        for payload in [
+            &b"{\"x\":1e9999}"[..],
+            long_integer.as_bytes(),
+            &b"{\"x\":1,\"x\":2}"[..],
+        ] {
+            assert_refused_as_invalid_json_payload(payload);
+        }
+    }
 }
 
 #[cfg(test)]
 mod result_read_spec_tests;
+
+#[cfg(test)]
+mod ping_and_wait_tests;

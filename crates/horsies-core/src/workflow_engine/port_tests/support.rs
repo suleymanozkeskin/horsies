@@ -9,17 +9,14 @@
 //! Times that the engine compares with the database clock are set with
 //! `NOW()` in SQL, so the test clock never enters a comparison.
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::broker::client_family::ClientFamily;
-use crate::broker::migrations::install_schema;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
@@ -33,10 +30,12 @@ use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::{AnyNode, OnError, TaskError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
+use crate::test_support::{server_url, with_database, TestDatabase};
 use crate::workflow_engine::bound_handle::WorkflowHandle;
-use crate::workflow_engine::engine::on_workflow_task_complete;
+use crate::workflow_engine::engine::{
+    on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
+};
 use crate::workflow_engine::start::start_workflow;
-use crate::workflow_engine::WorkflowError;
 
 /// The worker that holds every task a test runs.
 pub(super) const WORKER: &str = "workflow-port-worker";
@@ -46,11 +45,24 @@ pub(super) const WORKER: &str = "workflow-port-worker";
 /// where it is.
 pub(super) const PORT_QUEUE: &str = "port_workflow_q";
 
-/// Task options that the core refuses each time it builds a task from them:
-/// a JSON array where the core reads an object (`InvalidTaskOptions`). A node
-/// that stores them raises on every promotion, in the same way as Python's
-/// `BAD_GOOD_UNTIL` row and `PoisonOptionsChild` (`[]` there too).
+/// Task options that are not a JSON object (Python's `PoisonOptionsChild`
+/// uses `[]` too):
+/// - stored on a promoted task node, they fail that node alone with
+///   `WORKER_SERIALIZATION_ERROR` (Python `_build_enqueued_task_params`,
+///   `horsies/core/workflows/engine.py:798-805`; the baseline
+///   `horsies_workflow_task_options_refusal`);
+/// - on the task of a child node that has a `good_until`, the merge of the
+///   deadline into them raises at each child start (Python
+///   `_child_task_options_json`, `horsies/core/workflows/engine.py:425-475`).
 pub(super) const POISON_TASK_OPTIONS: &str = "[]";
+
+/// The process facts that the start write (`horsies_start_attempt`) records
+/// on a RUNNING task row that [`seed_node_task`] seeds. Every write that
+/// moves a row to RUNNING sets them, and the attempt row of a failure copies
+/// them into its NOT NULL columns (`horsies_task_attempts`).
+const SEEDED_WORKER_PID: i32 = 4242;
+const SEEDED_WORKER_HOSTNAME: &str = "port-seed-host";
+const SEEDED_WORKER_PROCESS_NAME: &str = "port-seed-process";
 
 /// A stored success policy that does not parse: a case is a number, not an
 /// object (Python's `BAD_POLICY`).
@@ -64,18 +76,17 @@ pub(super) async fn shared_pool() -> PgPool {
     crate::broker::terminalization_matrix::migrated_pool().await
 }
 
-/// Prefix of the databases that [`IsolatedDatabase`] creates.
-const ISOLATED_DATABASE_PREFIX: &str = "core_wf_port_";
-
-/// Length of the hex suffix of a generated database name (a simple UUID).
-const ISOLATED_DATABASE_SUFFIX_LENGTH: usize = 32;
-
 /// Connections of one test pool.
 const TEST_POOL_CONNECTIONS: u32 = 5;
 
 /// History leaves the coverage pass creates ahead, in days and in hours.
 const COVERAGE_HISTORY_DAYS: u32 = 2;
 const COVERAGE_HEARTBEAT_HOURS: u32 = 2;
+
+/// The maintenance database of the test server: `ALTER DATABASE ...
+/// ALLOW_CONNECTIONS false` cannot run on a session of the database it
+/// changes.
+const ADMIN_DATABASE: &str = "postgres";
 
 // ---------------------------------------------------------------------------
 // Isolated database
@@ -85,36 +96,17 @@ const COVERAGE_HEARTBEAT_HOURS: u32 = 2;
 /// reads every workflow, so a test that runs one gets its own database, as
 /// the Python tests do (`isolated_test_database`).
 pub(super) struct IsolatedDatabase {
-    admin: PgConnection,
+    admin: tokio_postgres::Client,
     pub(super) pool: PgPool,
-    options: PgConnectOptions,
-    name: String,
+    database: TestDatabase,
 }
 
 impl IsolatedDatabase {
-    /// Creates, migrates and covers a new database, and records the core's
-    /// client family in it (a workflow start, pause, resume and cancel refuse
-    /// a database with no family row). Inactive databases that earlier runs
-    /// left behind are dropped first.
+    /// A copy of the installed test template (`crate::test_support`),
+    /// covered by the partition coverage pass.
     pub(super) async fn create() -> Self {
-        let shared_url = crate::broker::terminalization_matrix::migrated_database_url().await;
-        let base = PgConnectOptions::from_str(&shared_url).expect("parse the test database URL");
-        let mut admin = PgConnection::connect_with(&base.clone().database("postgres"))
-            .await
-            .expect("connect to the admin database");
-        lock_setup(&mut admin).await;
-        drop_inactive_databases(&mut admin).await;
-        let name = format!("{ISOLATED_DATABASE_PREFIX}{}", Uuid::new_v4().simple());
-        sqlx::query(&format!("CREATE DATABASE \"{name}\""))
-            .execute(&mut admin)
-            .await
-            .expect("create the isolated database");
-        unlock_setup(&mut admin).await;
-        let options = base.database(&name);
-        let pool = connect(&options).await;
-        install_schema(&pool, ClientFamily::Rust)
-            .await
-            .expect("install the schema of the isolated database");
+        let database = TestDatabase::create().await;
+        let pool = connect(database.url()).await;
         let coverage = ensure_partition_coverage_in_pool(
             &pool,
             COVERAGE_HISTORY_DAYS,
@@ -128,109 +120,47 @@ impl IsolatedDatabase {
             matches!(coverage, CoverageOutcome::Ensured(_)),
             "partition coverage of the isolated database: {coverage:?}"
         );
+        let admin =
+            crate::test_support::connect(&with_database(&server_url(), ADMIN_DATABASE)).await;
         Self {
             admin,
             pool,
-            options,
-            name,
+            database,
         }
     }
 
     /// A second pool on the same database: a process that did not share any
     /// state in memory with the first one.
     pub(super) async fn other_process_pool(&self) -> PgPool {
-        connect(&self.options).await
+        connect(self.database.url()).await
     }
 
     /// Allows or refuses new connections to the database. Connections that
     /// are open stay open, so a pool keeps working while a new connection,
     /// such as a listener's, is refused.
     pub(super) async fn allow_connections(&mut self, allowed: bool) {
-        sqlx::query(&format!(
-            "ALTER DATABASE \"{}\" ALLOW_CONNECTIONS {allowed}",
-            self.name
-        ))
-        .execute(&mut self.admin)
-        .await
-        .expect("change ALLOW_CONNECTIONS of the isolated database");
+        self.admin
+            .batch_execute(&format!(
+                "ALTER DATABASE \"{}\" ALLOW_CONNECTIONS {allowed}",
+                self.database.name()
+            ))
+            .await
+            .expect("change ALLOW_CONNECTIONS of the isolated database");
     }
 
     /// Closes the pool and drops the database.
-    pub(super) async fn drop(mut self) {
+    pub(super) async fn drop(self) {
         self.pool.close().await;
-        lock_setup(&mut self.admin).await;
-        drop_database(&mut self.admin, &self.name, DropMode::Forced).await;
-        unlock_setup(&mut self.admin).await;
+        self.database.drop().await;
     }
 }
 
-async fn connect(options: &PgConnectOptions) -> PgPool {
+async fn connect(url: &str) -> PgPool {
     PgPoolOptions::new()
         .max_connections(TEST_POOL_CONNECTIONS)
-        .connect_with(options.clone())
+        .connect(url)
         .await
         .expect("connect the test pool")
-}
-
-async fn lock_setup(admin: &mut PgConnection) {
-    sqlx::query("SELECT pg_advisory_lock(hashtext('horsies_workflow_port_database_setup'))")
-        .execute(admin)
-        .await
-        .expect("lock the database setup");
-}
-
-async fn unlock_setup(admin: &mut PgConnection) {
-    let unlocked: bool = sqlx::query_scalar(
-        "SELECT pg_advisory_unlock(hashtext('horsies_workflow_port_database_setup'))",
-    )
-    .fetch_one(admin)
-    .await
-    .expect("unlock the database setup");
-    assert!(unlocked, "the database setup lock was not held");
-}
-
-/// How a generated database is dropped.
-#[derive(Debug, Clone, Copy)]
-enum DropMode {
-    /// Only when no session uses it (a database of an earlier run).
-    InactiveOnly,
-    /// With `FORCE`: this test owns it.
-    Forced,
-}
-
-async fn drop_database(admin: &mut PgConnection, name: &str, mode: DropMode) {
-    let suffix = name
-        .strip_prefix(ISOLATED_DATABASE_PREFIX)
-        .expect("a generated database name starts with the prefix");
-    assert!(
-        suffix.len() == ISOLATED_DATABASE_SUFFIX_LENGTH
-            && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "refuse to drop a database that this module did not generate: {name:?}"
-    );
-    let statement = match mode {
-        DropMode::InactiveOnly => format!("DROP DATABASE \"{name}\""),
-        DropMode::Forced => format!("DROP DATABASE \"{name}\" WITH (FORCE)"),
-    };
-    sqlx::query(&statement)
-        .execute(admin)
-        .await
-        .expect("drop the generated database");
-}
-
-async fn drop_inactive_databases(admin: &mut PgConnection) {
-    let stale: Vec<String> = sqlx::query_scalar(
-        "SELECT d.datname FROM pg_database d
-         WHERE left(d.datname, length($1)) = $1
-           AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)
-         ORDER BY d.datname",
-    )
-    .bind(ISOLATED_DATABASE_PREFIX)
-    .fetch_all(&mut *admin)
-    .await
-    .expect("list inactive generated databases");
-    for name in stale {
-        drop_database(admin, &name, DropMode::InactiveOnly).await;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -608,7 +538,10 @@ impl LiveStatus {
 
 /// Inserts the live task row of a workflow node: an engine-minted row with no
 /// fingerprint, key or retained input. A CLAIMED or RUNNING row is held by
-/// [`WORKER`] since `NOW()`; a CLAIMED row's claim runs one more minute.
+/// [`WORKER`] since `NOW()`; a CLAIMED row's claim runs one more minute; a
+/// RUNNING row carries the process facts of the start write
+/// ([`SEEDED_WORKER_PID`], [`SEEDED_WORKER_HOSTNAME`],
+/// [`SEEDED_WORKER_PROCESS_NAME`]).
 /// Returns the claim generation (`claimed_at`), `None` for a PENDING row.
 pub(super) async fn seed_node_task(
     pool: &PgPool,
@@ -632,13 +565,20 @@ pub(super) async fn seed_node_task(
              CASE WHEN $2 = 'PENDING' THEN NULL ELSE $3 END,
              CASE WHEN $2 = 'CLAIMED' THEN NOW() + INTERVAL '1 minute' END,
              CASE WHEN $2 = 'RUNNING' THEN NOW() END,
-             NULL, NULL, NULL, NULL, NULL, 0, 0, NULL, NULL, TRUE, NOW(), FALSE, NULL, NULL
+             NULL, NULL,
+             CASE WHEN $2 = 'RUNNING' THEN $4 END,
+             CASE WHEN $2 = 'RUNNING' THEN $5 END,
+             CASE WHEN $2 = 'RUNNING' THEN $6 END,
+             0, 0, NULL, NULL, TRUE, NOW(), FALSE, NULL, NULL
          )
          RETURNING claimed_at",
     )
     .bind(task_id)
     .bind(status.as_sql())
     .bind(WORKER)
+    .bind(SEEDED_WORKER_PID)
+    .bind(SEEDED_WORKER_HOSTNAME)
+    .bind(SEEDED_WORKER_PROCESS_NAME)
     .fetch_one(pool)
     .await
     .expect("seed the workflow task row")
@@ -715,7 +655,8 @@ pub(super) fn required(cases: &[&[usize]]) -> SuccessPolicy {
 
 /// A registry that resolves each of `children` by its definition key.
 pub(super) fn registry_of(children: &[WorkflowSpec]) -> WorkflowSpecRegistry {
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     for child in children {
         registry
             .register(RegisteredWorkflowSpec {
@@ -792,7 +733,9 @@ pub(super) fn handle(pool: &PgPool, workflow_id: Uuid) -> WorkflowHandle<serde_j
     WorkflowHandle::new(
         workflow_id,
         broker(pool),
-        Arc::new(WorkflowSpecRegistry::new()),
+        Arc::new(WorkflowSpecRegistry::new(
+            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        )),
         PayloadPolicy::default(),
         RetentionConfig::default(),
     )
@@ -843,15 +786,12 @@ pub(super) async fn try_finish_task(
     task_id: Uuid,
     outcome: &TaskResult<serde_json::Value>,
     registry: &WorkflowSpecRegistry,
-) -> Result<(), WorkflowError> {
-    let result_json = finish_phase1(pool, task_id, outcome).await;
+) -> Result<WorkflowTaskCompletion, WorkflowTaskCompletionError> {
+    let _ = finish_phase1(pool, task_id, outcome).await;
     on_workflow_task_complete(
-        pool,
+        &PostgresBroker::from_pool(pool.clone()),
         task_id,
-        &result_json,
-        outcome.is_ok(),
         registry,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
