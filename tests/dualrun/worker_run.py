@@ -15,7 +15,7 @@ One side of a pair:
 3. Wait for the stop point of the scenario, at most ``TERMINAL_WAIT``:
    - ``StopWhenTerminal``: every sent task and every task of the started
      workflows has its history row, and every started workflow is
-     COMPLETED, FAILED, CANCELLED or PAUSED;
+     COMPLETED, FAILED, CANCELLED, EXPIRED or PAUSED;
    - ``StopWhenRunning``: every sent task is RUNNING, so the stop arrives
      while they run;
    - ``PauseWhenRunning``: the first node writes its marker; the runner
