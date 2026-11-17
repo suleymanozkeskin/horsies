@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
 import pytest
@@ -22,22 +21,12 @@ from horsies.core.models.workflow import (
     WorkflowSpec,
     OnError,
 )
-from horsies.core.workflows.engine import (
-    _queue_parent_propagation,  # pyright: ignore[reportPrivateUsage]
-    pop_pending_parent_propagations,
-)
 from horsies.core.workflows.node_finish import CapacityWake, finish_node
 from horsies.core.workflows.recovery import (
     GLOBAL_SCAN_ROW_CAP,
-    recover_stuck_workflows,
-    _run_recovery_candidate,  # pyright: ignore[reportPrivateUsage]
+    recover_stuck_workflows_global,
 )
 from horsies.core.workflows.phase2_recovery import drive_phase2_recovery
-from horsies.core.workflows.recovery_limit import (
-    LogFailuresOnly,
-    RecoveryCandidateOutcome,
-    RecoveryCase,
-)
 
 from .conftest import (
     make_args_receiver_task,
@@ -50,6 +39,22 @@ from horsies.core.models.workflow import SuccessPolicy, SuccessCase
 from tests.integration.history_seeding import force_terminal
 from tests.integration.conftest import finish_phase_one
 from tests.broker_resources_support import current_resources
+
+
+async def _recover(session: AsyncSession, broker: PostgresBroker) -> int:
+    """One global workflow recovery pass, as the reaper runs it.
+
+    Each candidate runs in its own transaction, so the seeded state is
+    committed first and the caller's next read starts a fresh snapshot.
+
+    Returns the count of recovered candidates.
+    """
+    await session.commit()
+    report = await recover_stuck_workflows_global(
+        current_resources(broker).session_factory,
+        broker,
+    )
+    return report.recovered
 
 
 async def _run_phase2_recovery(
@@ -143,7 +148,7 @@ class RecoveryChildWorkflow(WorkflowDefinition[int]):
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope='function')
 class TestWorkflowRecovery:
-    """Tests for recover_stuck_workflows()."""
+    """Tests for the global workflow recovery pass."""
 
     @pytest_asyncio.fixture
     async def setup(
@@ -156,86 +161,6 @@ class TestWorkflowRecovery:
         await session.execute(text('TRUNCATE horsies_workflow_tasks, horsies_workflows, horsies_tasks CASCADE'))
         await session.commit()
         return session, broker, app
-
-    async def _insert_probe_workflow(self, session: AsyncSession, wf_id: str) -> None:
-        """Insert a minimal RUNNING workflow row used as a SAVEPOINT probe."""
-        await session.execute(
-            text("""
-                INSERT INTO horsies_workflows
-                    (id, name, status, on_error, depth, root_workflow_id,
-                     sent_at, created_at, updated_at)
-                VALUES (:id, 'savepoint_probe', 'RUNNING', 'fail', 0, :id,
-                        NOW(), NOW(), NOW())
-            """),
-            {'id': wf_id},
-        )
-
-    async def _probe_exists(self, session: AsyncSession, wf_id: str) -> bool:
-        row = (
-            await session.execute(
-                text('SELECT 1 FROM horsies_workflows WHERE id = :id'),
-                {'id': wf_id},
-            )
-        ).fetchone()
-        return row is not None
-
-    async def test_run_recovery_candidate_failure_rolls_back_savepoint(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """A failing candidate rolls back its DB writes and restores the
-        in-memory propagation queue, leaving the surrounding pass intact."""
-        session, _broker, _app = setup
-
-        _queue_parent_propagation(session, 'baseline-child')
-        probe_id = str(uuid.uuid4())
-
-        async def _poison() -> bool:
-            await self._insert_probe_workflow(session, probe_id)
-            _queue_parent_propagation(session, 'candidate-child')
-            raise RuntimeError("reserved key '__h_task_result__'")
-
-        result = await _run_recovery_candidate(
-            session,
-            case=RecoveryCase.PENDING_TERMINAL_DEPS,
-            action=_poison,
-            failure_policy=LogFailuresOnly(),
-        )
-
-        assert result is RecoveryCandidateOutcome.NOT_COUNTED
-        # SAVEPOINT rollback dropped the probe row...
-        assert not await self._probe_exists(session, probe_id)
-        # ...and the queue is restored to the pre-candidate snapshot.
-        assert session.info['horsies_pending_parent_propagations'] == [
-            'baseline-child',
-        ]
-        await session.rollback()
-
-    async def test_run_recovery_candidate_success_commits_savepoint(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """A succeeding candidate keeps its DB writes and queued propagations."""
-        session, _broker, _app = setup
-
-        probe_id = str(uuid.uuid4())
-
-        async def _succeed() -> bool:
-            await self._insert_probe_workflow(session, probe_id)
-            _queue_parent_propagation(session, 'candidate-child')
-            return True
-
-        result = await _run_recovery_candidate(
-            session,
-            case=RecoveryCase.PENDING_TERMINAL_DEPS,
-            action=_succeed,
-            failure_policy=LogFailuresOnly(),
-        )
-
-        assert result is RecoveryCandidateOutcome.APPLIED
-        assert await self._probe_exists(session, probe_id)
-        assert pop_pending_parent_propagations(session) == ['candidate-child']
-        await session.rollback()
 
     async def test_recover_ready_not_enqueued(
         self,
@@ -262,7 +187,7 @@ class TestWorkflowRecovery:
         await session.commit()
 
         # Run recovery
-        recovered = await recover_stuck_workflows(session)
+        recovered = await _recover(session, broker)
         await session.commit()
 
         # Should have recovered 1 task
@@ -319,7 +244,7 @@ class TestWorkflowRecovery:
         await session.commit()
 
         # Run recovery
-        recovered = await recover_stuck_workflows(session)
+        recovered = await _recover(session, broker)
         await session.commit()
 
         assert recovered == 1
@@ -374,7 +299,7 @@ class TestWorkflowRecovery:
         await session.commit()
 
         # Run recovery
-        recovered = await recover_stuck_workflows(session)
+        recovered = await _recover(session, broker)
         await session.commit()
 
         assert recovered == 1
@@ -456,7 +381,7 @@ class TestWorkflowRecovery:
         await session.commit()
 
         # Run recovery
-        recovered = await recover_stuck_workflows(session)
+        recovered = await _recover(session, broker)
         await session.commit()
 
         assert recovered == 1
@@ -515,7 +440,7 @@ class TestWorkflowRecovery:
         await session.commit()
 
         # Run recovery
-        await recover_stuck_workflows(session)
+        await _recover(session, broker)
         await session.commit()
 
         # Workflow should still be PAUSED (not touched)
@@ -562,10 +487,10 @@ class TestWorkflowRecovery:
         await session.commit()
 
         # Run recovery twice
-        recovered1 = await recover_stuck_workflows(session)
+        recovered1 = await _recover(session, broker)
         await session.commit()
 
-        recovered2 = await recover_stuck_workflows(session)
+        recovered2 = await _recover(session, broker)
         await session.commit()
 
         # First run should recover, second should find nothing
@@ -618,7 +543,7 @@ class TestWorkflowRecovery:
         await session.commit()
 
         # Run recovery (this sends NOTIFY internally)
-        recovered = await recover_stuck_workflows(session)
+        recovered = await _recover(session, broker)
         await session.commit()
 
         # Verify workflow is now completed (NOTIFY would have been sent)
@@ -692,7 +617,7 @@ class TestWorkflowRecovery:
         await session.commit()
 
         # Run recovery
-        recovered = await recover_stuck_workflows(session)
+        recovered = await _recover(session, broker)
         await session.commit()
 
         assert recovered == 1
@@ -1149,7 +1074,7 @@ class TestWorkflowRecovery:
         )
         await session.commit()
 
-        recovered = await recover_stuck_workflows(session)
+        recovered = await _recover(session, broker)
         await session.commit()
 
         assert recovered == 1
@@ -1198,7 +1123,7 @@ class TestWorkflowRecovery:
         )
         await session.commit()
 
-        recovered = await recover_stuck_workflows(session, broker)
+        recovered = await _recover(session, broker)
         await session.commit()
 
         assert recovered == 1
@@ -1264,7 +1189,7 @@ class TestWorkflowRecovery:
         )
         await session.commit()
 
-        recovered = await recover_stuck_workflows(session)
+        recovered = await _recover(session, broker)
         await session.commit()
 
         # 2 recoveries: Case 0 skips B, then Case 2+3 finalizes workflow (all tasks terminal)
@@ -1322,7 +1247,7 @@ class TestWorkflowRecovery:
         )
         await session.commit()
 
-        recovered = await recover_stuck_workflows(session)
+        recovered = await _recover(session, broker)
         await session.commit()
 
         assert recovered == 1
@@ -1340,65 +1265,6 @@ class TestWorkflowRecovery:
         assert row[1] is not None
 
     # ── Case 1.5: READY SubWorkflowNodes not started ──
-
-    async def test_recover_subworkflow_ready_without_broker_leaves_ready(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """Case 1.5: READY subworkflow without a broker stays ready for broker retry."""
-        session, broker, app = setup
-        task_a = make_simple_task(app, 'recover_sub_nb_a')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=RecoveryChildWorkflow,
-            waits_for=[node_a],
-        )
-
-        spec = _workflow(app, 
-            name='recover_sub_no_broker',
-            tasks=[node_a, node_child],
-            output=node_child,
-        )
-
-        handle = await start_ok(spec, broker)
-
-        # Simulate: A completed, SubWorkflowNode stuck at READY with NULL sub_workflow_id
-        await session.execute(
-            text("""
-                UPDATE horsies_workflow_tasks
-                SET status = 'COMPLETED', result = :result
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {
-                'wf_id': handle.workflow_id,
-                'result': _strict_result_json(TaskResult(ok=2)),
-            },
-        )
-        await session.execute(
-            text("""
-                UPDATE horsies_workflow_tasks
-                SET status = 'READY', sub_workflow_id = NULL
-                WHERE workflow_id = :wf_id AND task_index = 1
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        await session.commit()
-
-        # Recovery without broker
-        recovered = await recover_stuck_workflows(session, broker=None)
-        await session.commit()
-
-        assert recovered == 0
-
-        result = await session.execute(
-            text("""
-                SELECT status FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 1
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        assert result.fetchone()[0] == 'READY'
 
     async def test_recover_subworkflow_ready_with_broker(
         self,
@@ -1445,7 +1311,7 @@ class TestWorkflowRecovery:
         await session.commit()
 
         # Recovery with broker — should start the child workflow
-        recovered = await recover_stuck_workflows(session, broker)
+        recovered = await _recover(session, broker)
         await session.commit()
 
         assert recovered == 1
@@ -1528,7 +1394,7 @@ class TestWorkflowRecovery:
         await session.commit()
 
         # Recovery should detect the completed child and update the parent node
-        recovered = await recover_stuck_workflows(session, broker)
+        recovered = await _recover(session, broker)
         await session.commit()
 
         assert recovered >= 1
@@ -1588,7 +1454,7 @@ class TestWorkflowRecovery:
         await session.commit()
 
         # Recovery should detect the cancelled child and update the parent node.
-        recovered = await recover_stuck_workflows(session, broker)
+        recovered = await _recover(session, broker)
         await session.commit()
 
         assert recovered >= 1
@@ -1665,7 +1531,7 @@ class TestWorkflowRecovery:
         )
         await session.commit()
 
-        recovered = await recover_stuck_workflows(session)
+        recovered = await _recover(session, broker)
         await session.commit()
 
         assert recovered == 1

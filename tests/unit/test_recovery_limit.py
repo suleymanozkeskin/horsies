@@ -1,8 +1,8 @@
 """The workflow recovery limit: classification, outcomes, and the error text.
 
-The real writes are in tests/integration/test_workflow_recovery_limit.py. An
-action is an input of `_run_recovery_candidate`, so a raising action patches
-nothing.
+The real writes are in tests/integration/test_workflow_recovery_limit.py.
+Here the count statement (`count_recovery_raise`) is patched, and the pass
+runs against sessions that answer with planned rows.
 """
 
 # pyright: reportPrivateUsage=false
@@ -37,9 +37,9 @@ from horsies.core.workflows import recovery
 from horsies.core.workflows.recovery import (
     RecoveryCaseMetrics,
     RecoveryReport,
-    _GlobalCandidateOutcome,
-    _recovered_count,
-    _run_recovery_candidate,
+    _candidate_failed,
+    _GlobalScope,
+    _Pass,
 )
 from horsies.core.workflows.recovery_limit import (
     MAX_EXCEPTION_TYPE_LENGTH,
@@ -198,104 +198,70 @@ class TestRecoveryLimitError:
         assert '\\ud800' in decoded.message
 
 
-def _session() -> AsyncMock:
-    """A session with a real `info` dict: the propagation queue lives there."""
-    session = AsyncMock()
-    session.info = {}
-    return session
-
-
-def _raising(error: Exception) -> Any:
-    async def action() -> bool:
-        raise error
-
-    return action
-
-
-async def _returning(value: bool) -> bool:
-    return value
+def _pass(policy: Any) -> _Pass:
+    return _Pass(
+        session_factory=MagicMock(),
+        broker=MagicMock(),
+        scope=_GlobalScope(max_rows=200),
+        failure_policy=policy,
+    )
 
 
 @pytest.mark.asyncio
-class TestRunRecoveryCandidate:
-    """The session is a mock, so the SAVEPOINT is not exercised here."""
-
-    async def test_an_action_that_applied(self) -> None:
-        metrics = RecoveryCaseMetrics()
-        outcome = await _run_recovery_candidate(
-            _session(),
-            case=RecoveryCase.READY_NOT_ENQUEUED,
-            action=lambda: _returning(True),
-            metrics=metrics,
-            failure_policy=LogFailuresOnly(),
-        )
-        assert outcome is RecoveryCandidateOutcome.APPLIED
-        assert metrics == RecoveryCaseMetrics()
-
-    async def test_an_action_that_refused(self) -> None:
-        metrics = RecoveryCaseMetrics()
-        outcome = await _run_recovery_candidate(
-            _session(),
-            case=RecoveryCase.READY_NOT_ENQUEUED,
-            action=lambda: _returning(False),
-            metrics=metrics,
-            failure_policy=LogFailuresOnly(),
-        )
-        assert outcome is RecoveryCandidateOutcome.REFUSED
-        assert metrics.refusals == 1
-        assert metrics.errors == 0
+class TestCandidateFailed:
+    """A raised candidate: its log, its case metrics and the failure bound."""
 
     async def test_a_log_only_pass_writes_nothing(self) -> None:
         metrics = RecoveryCaseMetrics()
-        with patch.object(recovery, 'record_recovery_raise', AsyncMock()) as record:
-            outcome = await _run_recovery_candidate(
-                _session(),
+        with patch.object(recovery, 'count_recovery_raise', AsyncMock()) as record:
+            failed = await _candidate_failed(
+                _pass(LogFailuresOnly()),
+                RuntimeError('a defect'),
                 case=RecoveryCase.READY_NOT_ENQUEUED,
                 workflow_id=_WORKFLOW_ID,
-                action=_raising(RuntimeError('a defect')),
+                task_index=2,
                 metrics=metrics,
-                failure_policy=LogFailuresOnly(),
             )
-        assert outcome is RecoveryCandidateOutcome.NOT_COUNTED
+        assert failed.record is RecoveryCandidateOutcome.NOT_COUNTED
         record.assert_not_awaited()
         assert metrics.errors == 1
         assert metrics.failures_counted == 0
 
     async def test_a_transient_raise_writes_nothing(self) -> None:
         metrics = RecoveryCaseMetrics()
-        with patch.object(recovery, 'record_recovery_raise', AsyncMock()) as record:
-            outcome = await _run_recovery_candidate(
-                _session(),
+        with patch.object(recovery, 'count_recovery_raise', AsyncMock()) as record:
+            failed = await _candidate_failed(
+                _pass(_COUNTING),
+                _wrapped('57P01'),
                 case=RecoveryCase.READY_NOT_ENQUEUED,
                 workflow_id=_WORKFLOW_ID,
-                action=_raising(_wrapped('57P01')),
+                task_index=2,
                 metrics=metrics,
-                failure_policy=_COUNTING,
             )
-        assert outcome is RecoveryCandidateOutcome.NOT_COUNTED
+        assert failed.record is RecoveryCandidateOutcome.NOT_COUNTED
         record.assert_not_awaited()
         assert metrics.errors == 1
 
     async def test_a_persistent_raise_is_recorded(self) -> None:
-        session = _session()
+        pass_ = _pass(_COUNTING)
         with patch.object(
             recovery,
-            'record_recovery_raise',
+            'count_recovery_raise',
             AsyncMock(return_value=RecoveryCandidateOutcome.COUNTED),
         ) as record:
-            outcome = await _run_recovery_candidate(
-                session,
+            failed = await _candidate_failed(
+                pass_,
+                AssertionError('a defect'),
                 case=RecoveryCase.READY_NOT_ENQUEUED,
                 workflow_id=_WORKFLOW_ID,
                 task_index=2,
-                action=_raising(AssertionError('a defect')),
-                failure_policy=_COUNTING,
+                metrics=RecoveryCaseMetrics(),
             )
-        assert outcome is RecoveryCandidateOutcome.COUNTED
+        assert failed.record is RecoveryCandidateOutcome.COUNTED
         record.assert_awaited_once()
         assert record.await_args is not None
-        recorded_session, policy, failure = record.await_args.args
-        assert recorded_session is session
+        session_factory, policy, failure = record.await_args.args
+        assert session_factory is pass_.session_factory
         assert policy is _COUNTING
         assert failure == RecoveryRaise(
             workflow_id=_WORKFLOW_ID,
@@ -321,28 +287,19 @@ class TestRunRecoveryCandidate:
     ) -> None:
         metrics = RecoveryCaseMetrics()
         with patch.object(
-            recovery, 'record_recovery_raise', AsyncMock(return_value=record),
+            recovery, 'count_recovery_raise', AsyncMock(return_value=record),
         ):
-            _ = await _run_recovery_candidate(
-                _session(),
+            _ = await _candidate_failed(
+                _pass(_COUNTING),
+                RuntimeError('a defect'),
                 case=RecoveryCase.READY_NOT_ENQUEUED,
                 workflow_id=_WORKFLOW_ID,
-                action=_raising(RuntimeError('a defect')),
+                task_index=2,
                 metrics=metrics,
-                failure_policy=_COUNTING,
             )
         assert metrics.failures_counted == counted
         assert metrics.limit_reached == limit_reached
         assert metrics.errors == 1
-
-    async def test_counting_a_raise_with_no_workflow_is_a_defect(self) -> None:
-        with pytest.raises(AssertionError, match='no workflow id'):
-            _ = await _run_recovery_candidate(
-                _session(),
-                case=RecoveryCase.QUEUED_PARENT_PROPAGATION,
-                action=_raising(RuntimeError('a defect')),
-                failure_policy=_COUNTING,
-            )
 
 
 class TestReportRecoveryLimit:
@@ -378,15 +335,6 @@ class TestReportRecoveryLimit:
         expected: RecoveryCandidateOutcome,
     ) -> None:
         assert report_recovery_limit(result, _failure(), 25) is expected
-
-
-class TestRecoveredCount:
-    @pytest.mark.parametrize('outcome', list(RecoveryCandidateOutcome))
-    def test_only_an_applied_candidate_adds_one(
-        self, outcome: RecoveryCandidateOutcome,
-    ) -> None:
-        expected = 1 if outcome is RecoveryCandidateOutcome.APPLIED else 0
-        assert _recovered_count(outcome) == expected
 
 
 class TestHealth:
@@ -460,23 +408,37 @@ class TestTopLevelErrors:
         assert report.health()['errors'] == 1
 
 
-def _session_factory(audit_row: Any) -> MagicMock:
+def _session_factory(*answers: Any) -> MagicMock:
+    """Sessions whose statements answer with ``answers`` in order: a list of
+    rows, or an exception to raise."""
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
-    result = MagicMock()
-    result.one_or_none = MagicMock(return_value=audit_row)
-    session.execute = AsyncMock(return_value=result)
+    session.connection = AsyncMock(return_value=session)
+    pending = list(answers)
+
+    async def _execute(*_args: Any, **_kwargs: Any) -> MagicMock:
+        answer = pending.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        result = MagicMock()
+        result.fetchall = MagicMock(return_value=answer)
+        return result
+
+    session.execute = AsyncMock(side_effect=_execute)
     return MagicMock(return_value=session)
 
 
 def _audit_row(*, completion: bool, orphan: bool) -> SimpleNamespace:
     return SimpleNamespace(
+        outcome='PAGE',
         scanned_count=1,
-        completion_ids=['completion'] if completion else [],
-        orphan_ids=['orphan'] if orphan else [],
+        completion_ids=[_WORKFLOW_ID] if completion else [],
+        orphan_ids=[_WORKFLOW_ID] if orphan else [],
         orphan_names=['name'] if orphan else [],
-        claim_token='token',
+        claim_token=(
+            '00000000-0000-0000-0000-0000000000aa' if completion or orphan else None
+        ),
     )
 
 
@@ -485,64 +447,55 @@ class TestEachFailureCountsOnce:
     """Each step that adds to a case must not add to the pass-level count."""
 
     @staticmethod
-    async def _health(audit_row: Any, **patches: Any) -> dict[str, object]:
+    async def _health(*answers: Any) -> dict[str, object]:
         report = RecoveryReport()
-        with (
-            patch.object(recovery, 'recover_stuck_workflows', AsyncMock(return_value=0)),
-            patch.multiple(recovery, **patches),
-        ):
-            await recovery._recover_stuck_workflows_global(
-                _session_factory(audit_row),
-                None,
-                report,
-                _COUNTING,
-            )
+        pass_ = _Pass(
+            session_factory=_session_factory(*answers),
+            broker=MagicMock(),
+            scope=_GlobalScope(max_rows=200),
+            failure_policy=_COUNTING,
+        )
+        await recovery._recover_global_end_states(pass_, 200, report)
         return report.health()
 
-    async def test_a_failed_renewal_for_a_completion(self) -> None:
-        health = await self._health(
-            _audit_row(completion=True, orphan=False),
-            _renew_global_claim=AsyncMock(side_effect=RuntimeError('lost')),
-        )
-        assert health['errors'] == 1
-
-    async def test_a_failed_renewal_for_an_orphan(self) -> None:
-        health = await self._health(
-            _audit_row(completion=False, orphan=True),
-            _renew_global_claim=AsyncMock(side_effect=RuntimeError('lost')),
-            _release_global_claim=AsyncMock(),
-        )
+    async def test_a_failed_completion_candidate(self) -> None:
+        with patch.object(
+            recovery,
+            'count_recovery_raise',
+            AsyncMock(return_value=RecoveryCandidateOutcome.COUNTED),
+        ):
+            health = await self._health(
+                [_audit_row(completion=True, orphan=False)],
+                RuntimeError('lost'),
+                [],
+            )
         assert health['errors'] == 1
 
     async def test_a_failed_orphan_candidate(self) -> None:
         health = await self._health(
-            _audit_row(completion=False, orphan=True),
-            _renew_global_claim=AsyncMock(return_value=True),
-            _release_global_claim=AsyncMock(),
-            _recover_global_orphan_candidate=AsyncMock(
-                return_value=_GlobalCandidateOutcome.ERROR,
-            ),
+            [_audit_row(completion=False, orphan=True)],
+            RuntimeError('lost'),
+            [],
         )
         assert health['errors'] == 1
 
     async def test_a_failed_release_counts_in_each_case_that_it_serves(self) -> None:
+        unchanged = SimpleNamespace(outcome='UNCHANGED', advance_child_workflow_id=None)
         health = await self._health(
-            _audit_row(completion=False, orphan=False),
-            _release_global_claim=AsyncMock(side_effect=RuntimeError('lost')),
+            [_audit_row(completion=True, orphan=False)],
+            [unchanged],
+            RuntimeError('lost'),
         )
         assert health['errors'] == 2
 
     async def test_a_failed_audit_counts_in_each_case_that_it_serves(self) -> None:
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(side_effect=RuntimeError('audit failed'))
         with (
-            patch.object(recovery, 'recover_stuck_workflows', AsyncMock(return_value=0)),
+            patch.object(recovery, '_recover_stuck_nodes', AsyncMock(return_value=None)),
             pytest.raises(recovery.RecoveryPassFailure) as raised,
         ):
             await recovery.recover_stuck_workflows_global(
-                MagicMock(return_value=session),
+                _session_factory(RuntimeError('audit failed')),
+                MagicMock(),
             )
         assert raised.value.health()['errors'] == 2
         assert str(raised.value.error) == 'audit failed'
@@ -551,12 +504,12 @@ class TestEachFailureCountsOnce:
         with (
             patch.object(
                 recovery,
-                '_recover_stuck_workflows_global',
+                '_recover_stuck_nodes',
                 AsyncMock(side_effect=RuntimeError('commit failed')),
             ),
             pytest.raises(recovery.RecoveryPassFailure) as raised,
         ):
-            await recovery.recover_stuck_workflows_global(MagicMock())
+            await recovery.recover_stuck_workflows_global(MagicMock(), MagicMock())
         assert raised.value.health()['errors'] == 1
         assert raised.value.report.errors == 1
 
@@ -583,25 +536,20 @@ class TestConfig:
 @pytest.mark.asyncio
 async def test_each_pass_makes_a_new_pass_id() -> None:
     """The integration suite shows that one id serves all cases of a pass."""
-    seen: list[CountFailures] = []
+    seen: list[Any] = []
 
-    async def _capture(
-        _factory: Any,
-        _broker: Any,
-        report: RecoveryReport,
-        policy: Any,
-    ) -> RecoveryReport:
-        seen.append(policy)
-        return report
+    async def _capture(pass_: _Pass, _report: RecoveryReport) -> None:
+        seen.append(pass_.failure_policy)
 
     with (
-        patch.object(recovery, '_recover_stuck_workflows_global', _capture),
+        patch.object(recovery, '_recover_stuck_nodes', _capture),
+        patch.object(recovery, '_recover_global_end_states', AsyncMock(return_value=None)),
         patch.object(
             recovery, 'count_over_failure_limit', AsyncMock(return_value=0),
         ),
     ):
-        await recovery.recover_stuck_workflows_global(MagicMock(), failure_limit=7)
-        await recovery.recover_stuck_workflows_global(MagicMock(), failure_limit=7)
+        await recovery.recover_stuck_workflows_global(MagicMock(), MagicMock(), failure_limit=7)
+        await recovery.recover_stuck_workflows_global(MagicMock(), MagicMock(), failure_limit=7)
 
     assert [policy.limit for policy in seen] == [7, 7]
     assert seen[0].pass_id != seen[1].pass_id
