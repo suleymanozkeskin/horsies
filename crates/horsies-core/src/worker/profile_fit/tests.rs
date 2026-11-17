@@ -14,7 +14,6 @@ use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool
 use crate::broker::PostgresBroker;
 use crate::core::config::worker_profile::SelectedProfile;
 use crate::core::config::AppConfig;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::worker::children::ChildLaunch;
 use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
@@ -173,11 +172,9 @@ async fn the_boot_logs_the_memory_fit_then_the_connection_fit_and_the_worker_sta
         }))
         .expect("a valid test profile"),
     };
-    let worker = Worker::new(
+    let worker = Worker::of_child_specs(
         broker,
-        Arc::new(WorkflowSpecRegistry::new(
-            crate::core::registry::BuilderHookName::SPEC_BUILDER,
-        )),
+        crate::test_support::child_specs::no_child_specs(),
         app_config,
         WorkerConfig {
             queues: vec!["default".to_owned()],

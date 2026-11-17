@@ -64,7 +64,6 @@ mod p7_maintenance_tests {
     use crate::core::history::periods::RetentionDays;
     use crate::core::history::reads::publisher::StagedLoaderPublisher;
     use crate::core::lifecycle::TerminalizationOutcome;
-    use crate::core::registry::workflow::WorkflowSpecRegistry;
     use crate::test_support::terminal_writes;
     use chrono::Timelike;
     use serial_test::serial;
@@ -256,9 +255,7 @@ mod p7_maintenance_tests {
 
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::workflow_engine::child_spec::ChildSpecs::Registry(std::sync::Arc::new(
-                WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            )),
+            &crate::test_support::child_specs::no_child_specs(),
             &recovery,
             &retention,
             &health,
@@ -355,9 +352,7 @@ mod p7_maintenance_tests {
 
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::workflow_engine::child_spec::ChildSpecs::Registry(std::sync::Arc::new(
-                WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            )),
+            &crate::test_support::child_specs::no_child_specs(),
             &recovery,
             &retention,
             &health,
@@ -417,9 +412,7 @@ mod p7_maintenance_tests {
 
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::workflow_engine::child_spec::ChildSpecs::Registry(std::sync::Arc::new(
-                WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            )),
+            &crate::test_support::child_specs::no_child_specs(),
             &recovery,
             &retention,
             &health,
@@ -610,9 +603,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::workflow_engine::child_spec::ChildSpecs::Registry(std::sync::Arc::new(
-                WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            )),
+            &crate::test_support::child_specs::no_child_specs(),
             &recovery,
             &retention,
             &health,
@@ -2133,7 +2124,6 @@ mod tests {
         ensure_startup_coverage, StartupCoverageOutcome,
     };
     use crate::core::history::reads::publisher::StagedLoaderPublisher;
-    use crate::core::registry::workflow::WorkflowSpecRegistry;
     use serial_test::serial;
     use uuid::Uuid;
 
@@ -2277,11 +2267,7 @@ mod tests {
                 advisory_key_reaper(),
                 run_reaper_pass(
                     &broker,
-                    &crate::workflow_engine::child_spec::ChildSpecs::Registry(std::sync::Arc::new(
-                        WorkflowSpecRegistry::new(
-                            crate::core::registry::BuilderHookName::SPEC_BUILDER,
-                        ),
-                    )),
+                    &crate::test_support::child_specs::no_child_specs(),
                     &recovery,
                     &RetentionConfig::default(),
                     &health,

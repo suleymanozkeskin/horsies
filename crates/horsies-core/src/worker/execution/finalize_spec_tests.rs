@@ -24,9 +24,7 @@ use super::{
 };
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::config::PostgresConfig;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{BuiltInTaskCode, TaskError};
 use crate::core::task::result::TaskResult;
 use crate::core::task::Execution;
@@ -818,12 +816,7 @@ async fn phase_two_on(
 ) -> Result<(), FinalizeError> {
     finalize_workflow_phase(
         broker,
-        ChildBuild::Registry {
-            registry: &WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            ),
-            retention: &RetentionConfig::default(),
-        },
+        ChildBuild::Client(&crate::test_support::child_specs::TestChildSpecs::empty()),
         task_id,
         queue,
         is_workflow_task,

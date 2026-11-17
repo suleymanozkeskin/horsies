@@ -26,7 +26,6 @@ use crate::core::history::partitions::manager::create_daily_leaf;
 use crate::core::history::partitions::publication::UnpublishedLoader;
 use crate::core::history::periods::RetentionDays;
 use crate::core::lifecycle::TerminalizationOutcome;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::test_support::terminal_writes;
 
 /// The row retention window of the Python tests.
@@ -74,9 +73,7 @@ async fn run_maintenance_pass(pool: &PgPool, retention: &RetentionConfig) -> Rea
     let mut orphan_state = OrphanSweepState::default();
     run_reaper_pass(
         &crate::broker::PostgresBroker::from_pool(pool.clone()),
-        &crate::workflow_engine::child_spec::ChildSpecs::Registry(std::sync::Arc::new(
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        )),
+        &crate::test_support::child_specs::no_child_specs(),
         &recovery,
         retention,
         &health,
