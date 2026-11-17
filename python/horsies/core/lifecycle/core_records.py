@@ -19,12 +19,13 @@ logged the evidence with the refusal (``EvidenceLoggedByCore``).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Final
+from typing import Final, assert_never
 
 import horsies._core as core
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
+    Applied,
     EvidenceLoggedByCore,
     GuardEvidence,
     GuardKind,
@@ -36,7 +37,9 @@ from horsies.core.lifecycle.outcomes import (
     PhaseTwoStep,
     SourceStateConflict,
     TaskAbsent,
+    TerminalizationOutcome,
 )
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.status import TaskStatus
 
 CLAIM_GUARD: Final = 'CLAIM'
@@ -142,3 +145,51 @@ def source_state_conflict_of(record: core.AttemptSourceStateConflict) -> SourceS
 def task_absent_of(record: core.AttemptTaskAbsent) -> TaskAbsent:
     """No live or history row. Pure."""
     return TaskAbsent(task_id=str(record.task_id), ordinality=None)
+
+
+type TaskRowEndRecord = (
+    core.TaskRowEnded
+    | core.AttemptAlreadyApplied
+    | core.AttemptLostClaim
+    | core.AttemptSourceStateConflict
+    | core.AttemptTaskAbsent
+    | core.AttemptWriteFailed
+)
+"""The records of a single-row expiry or orphan cancel of the core."""
+
+
+def task_row_end_of(record: TaskRowEndRecord, subject: str) -> TerminalizationOutcome:
+    """The outcome of a single-row expiry or orphan cancel of the core
+    (``expire_owned_claim``, ``cancel_owned_orphan_async``). Pure.
+
+    ``subject`` names the caller in the raised failure.
+
+    Raises:
+        CoreOperationFailed: an ``AttemptWriteFailed`` record: the statement
+            wrote nothing, or it committed and its reply was lost (a replay of
+            the same write reports a committed one as ``AlreadyApplied``).
+        OutcomeDecodeError: a text of the record outside the Python catalogs.
+    """
+    match record:
+        case core.TaskRowEnded():
+            return Applied(
+                task_id=str(record.task_id),
+                ordinality=None,
+                terminal_at=record.terminal_at,
+                kind=terminalization_kind_of(record.kind),
+                observed=observed_of(
+                    record.observed_status, record.observed_worker_id, record.observed_claimed_at,
+                ),
+            )
+        case core.AttemptAlreadyApplied():
+            return already_applied_of(record)
+        case core.AttemptLostClaim():
+            return lost_claim_of(record)
+        case core.AttemptSourceStateConflict():
+            return source_state_conflict_of(record)
+        case core.AttemptTaskAbsent():
+            return task_absent_of(record)
+        case core.AttemptWriteFailed(message=message, retryable=retryable):
+            raise CoreOperationFailed(subject, message, retryable)
+        case _ as unreachable:
+            assert_never(unreachable)

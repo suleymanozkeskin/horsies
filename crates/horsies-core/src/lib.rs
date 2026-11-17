@@ -112,6 +112,7 @@ pub use crate::broker::stale_recovery::{
 };
 pub use crate::broker::{
     CancelAnswer, CancelTaskError, EnqueueRefusal, EnqueueRefusalCause, SendKind,
+    WorkflowRetentionFailed, WorkflowRetentionPass,
 };
 pub use crate::core::history::enqueue::SendPart;
 pub use crate::worker::execution::FinalizingMark;

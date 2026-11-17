@@ -28,6 +28,12 @@ from horsies.core.utils.url import to_psycopg_url
 if TYPE_CHECKING:
     from horsies._core import CoreHandle
     from horsies.core.brokers.postgres import PostgresBroker
+    from horsies.core.brokers.resources import BrokerResources
+    from horsies.core.history.maintenance.coverage import (
+        CoverageOutcome,
+        StartupCoverageRefused,
+    )
+    from horsies.core.models.retention import RetentionConfig
 
 # --- Imports from sibling modules (extracted for maintainability) ---
 from horsies.core.worker.config import WorkerConfig as WorkerConfig  # noqa: F401
@@ -383,6 +389,32 @@ class Worker(
                 )
             case broker:
                 return broker._core_handle
+
+    async def _ensure_startup_coverage(
+        self,
+        resources: BrokerResources,
+        retention_cfg: RetentionConfig,
+    ) -> CoverageOutcome | StartupCoverageRefused:
+        """The startup coverage pass in the core, on this worker's core
+        handle (``ensure_startup_coverage_in_core``, ``GATED``):
+        ``StartupCoverageRefused`` when no heartbeat leaf covers the present
+        instant after the pass. ``resources`` is not read: the pass runs on
+        the core pools, not on ``partition_maintenance``.
+
+        Raises ``CoreOperationFailed`` when the pass has no outcome and
+        ``CoreError`` when the core of this process cannot run it; the boot
+        stops on either, as it stopped on a database error.
+        """
+        from horsies.core.history.maintenance.coverage import (
+            ensure_startup_coverage_in_core,
+        )
+
+        return await ensure_startup_coverage_in_core(
+            self.core_handle,
+            history_horizon_days=retention_cfg.history_leaf_horizon_days,
+            heartbeat_horizon_hours=retention_cfg.heartbeat_leaf_horizon_hours,
+            declared_classes=retention_cfg.registrable_classes(),
+        )
 
     def request_stop(self) -> None:
         """Request worker to stop gracefully."""
@@ -990,19 +1022,14 @@ class Worker(
             # of on the first RUNNING transition.
             from horsies.core.history.maintenance.coverage import (
                 StartupCoverageRefused,
-                ensure_startup_coverage_in_database,
             )
 
             from horsies.core.models.retention import RetentionConfig
 
             retention_cfg = self.cfg.retention_config or RetentionConfig()
-            startup_coverage = await ensure_startup_coverage_in_database(
-                resources.partition_maintenance,
-                history_horizon_days=retention_cfg.history_leaf_horizon_days,
-                heartbeat_horizon_hours=(
-                    retention_cfg.heartbeat_leaf_horizon_hours
-                ),
-                declared_classes=retention_cfg.registrable_classes(),
+            startup_coverage = await self._ensure_startup_coverage(
+                resources,
+                retention_cfg,
             )
             match startup_coverage:
                 case StartupCoverageRefused(outcome=refused_outcome):

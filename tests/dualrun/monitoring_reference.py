@@ -48,7 +48,7 @@ from horsies.monitoring.models import (
     StatusCount,
 )
 from horsies.monitoring.pages import BreakdownLimit
-from horsies.monitoring.queries import (
+from tests.dualrun.reference.monitoring_queries import (
     _ERROR_FACET_CAP,
     _STATUS_BY_VALUE,
     _STATUS_ORDER,
