@@ -31,6 +31,10 @@ use crate::operations::release::{release_claims_operation, ReleaseClaimsRequest}
 use crate::operations::schema::{install_operation, schema_status_operation};
 use crate::operations::stale_claims::requeue_stale_claimed_operation;
 use crate::operations::stale_running::mark_stale_running_operation;
+use crate::operations::success::{
+    complete_successes_operation, finish_workflow_success_operation, workflow_success_command,
+    SuccessBatchRequest,
+};
 use crate::operations::task_info::{task_info_operation, TaskInfoParts};
 use crate::process_core::{core_for_call, Core};
 use crate::records::{BrokerFailure, DatabasePingRecord, HandleClosed, Outcome};
@@ -358,6 +362,55 @@ impl CoreHandle {
             "CoreHandle.finish_ended_attempt_async",
             CallKind::Write,
             finish_ended_attempt_operation(self.connection(), request.get().command()),
+        )
+    }
+
+    /// Write the plain successes of one request in one statement
+    /// (`horsies_complete_tasks_fused`): `SuccessesWritten` with one row
+    /// record per success in the request order, `BatchRolledBack`, or
+    /// `BatchCommitUnknown`. Writes. Awaitable only: its caller, the
+    /// worker's finalize batcher, runs on the worker's event loop. Rows
+    /// outside the function's contract raise `PanicException`.
+    fn complete_successes_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, SuccessBatchRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (worker_id, batch) = request.get().parts();
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.complete_successes_async",
+            CallKind::Write,
+            complete_successes_operation(self.connection(), worker_id, batch),
+        )
+    }
+
+    /// Write phase 1 of a workflow task's success
+    /// (`horsies_finish_workflow_success`): `WorkflowSuccessApplied` with the
+    /// phase 2 owed, a refusal (`AttemptAlreadyApplied`, `AttemptLostClaim`,
+    /// `AttemptSourceStateConflict`, `AttemptTaskAbsent`), or
+    /// `AttemptWriteFailed`. Writes, in one statement. Awaitable only: its
+    /// caller, the worker's finalize, runs on the worker's event loop. A
+    /// naive `claimed_at` raises `TypeError`.
+    #[pyo3(signature = (task_id, *, worker_id, claimed_at, result_json))]
+    fn finish_workflow_success_async<'py>(
+        &self,
+        py: Python<'py>,
+        task_id: Uuid,
+        worker_id: String,
+        claimed_at: &Bound<'_, PyAny>,
+        result_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let command = workflow_success_command(task_id, worker_id, claimed_at, result_json)?;
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.finish_workflow_success_async",
+            CallKind::Write,
+            finish_workflow_success_operation(self.connection(), command),
         )
     }
 
