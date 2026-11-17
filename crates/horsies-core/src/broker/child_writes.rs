@@ -101,7 +101,7 @@ pub const LONGEST_REFUSAL_WRITES_BOUND: Duration = longer(
 );
 
 /// The longer of two times, for a constant. Pure.
-const fn longer(first: Duration, second: Duration) -> Duration {
+pub(crate) const fn longer(first: Duration, second: Duration) -> Duration {
     match first.as_nanos() >= second.as_nanos() {
         true => first,
         false => second,

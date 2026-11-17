@@ -52,16 +52,50 @@ fn the_parent_waits_past_the_child_bound_after_a_return() {
     assert!(ISOLATED_LEFTOVER_BACKSTOP > child_bound);
 }
 
-/// The leftover backstop follows from its named parts: the grace, the
-/// cancel rounds, the marker of a Python child and the margin (Python
-/// `ISOLATED_LEFTOVER_BACKSTOP_S`).
+/// The leftover backstop follows from its named parts: the longest end of a
+/// child of any kind after a return with work left (the grace, the cancel
+/// rounds and the marker of that kind), and the margin. No child kind's end
+/// with the margin passes it.
+#[test]
+fn the_leftover_backstop_is_the_longest_child_end_and_the_margin() {
+    use super::isolated::{
+        CORE_CHILD_LEFTOVER_END, LEFT_WORK_MARKER_END, LONGEST_LEFTOVER_END,
+        PYTHON_CHILD_LEFTOVER_END,
+    };
+    use super::seat_runs::SHARED_BACKSTOP_MARGIN;
+    use crate::broker::child_writes::FINALIZING_MARKER_END;
+    use crate::worker::executor::protocol::{ISOLATED_LEFTOVER_GRACE, STUCK_REPORT_DELAY};
+
+    let grace_and_rounds = ISOLATED_LEFTOVER_GRACE + STUCK_REPORT_DELAY;
+    let python_child_end = grace_and_rounds + LEFT_WORK_MARKER_END;
+    let core_child_end = grace_and_rounds + FINALIZING_MARKER_END;
+    assert_eq!(PYTHON_CHILD_LEFTOVER_END, python_child_end);
+    assert_eq!(CORE_CHILD_LEFTOVER_END, core_child_end);
+    assert_eq!(LONGEST_LEFTOVER_END, python_child_end.max(core_child_end));
+    assert_eq!(
+        ISOLATED_LEFTOVER_BACKSTOP,
+        LONGEST_LEFTOVER_END + SHARED_BACKSTOP_MARGIN
+    );
+    for end in [python_child_end, core_child_end] {
+        assert!(
+            ISOLATED_LEFTOVER_BACKSTOP >= end + SHARED_BACKSTOP_MARGIN,
+            "{end:?}"
+        );
+    }
+}
+
+/// The times of the leftover backstop and its parts.
 #[test]
 fn the_leftover_backstop_keeps_its_time() {
+    use super::isolated::{CORE_CHILD_LEFTOVER_END, PYTHON_CHILD_LEFTOVER_END};
+
     assert_eq!(
         super::isolated::LEFT_WORK_MARKER_END,
         Duration::from_secs(15)
     );
-    assert_eq!(ISOLATED_LEFTOVER_BACKSTOP, Duration::from_millis(26_300));
+    assert_eq!(PYTHON_CHILD_LEFTOVER_END, Duration::from_millis(16_300));
+    assert_eq!(CORE_CHILD_LEFTOVER_END, Duration::from_millis(21_300));
+    assert_eq!(ISOLATED_LEFTOVER_BACKSTOP, Duration::from_millis(31_300));
 }
 
 // ---------------------------------------------------------------------------
