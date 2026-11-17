@@ -11,7 +11,7 @@ use horsies_core::manifest_schema::{
 use crate::catalogs::{group_by_module, render_module, render_package_init, CATALOG_FOLDER};
 use crate::core_stub::{render_core_stub, CORE_STUB_FILE};
 use crate::manifest::{
-    render_manifest_module, MANIFEST_MODULE_FILE, SCHEDULER_MANIFEST_MODULE_FILE,
+    render_manifest_module, DumpEncoder, MANIFEST_MODULE_FILE, SCHEDULER_MANIFEST_MODULE_FILE,
     WORKER_MANIFEST_MODULE_FILE, WORKFLOW_SPEC_MODULE_FILE,
 };
 use crate::python_text::GENERATED_HEADER;
@@ -111,19 +111,21 @@ pub fn render_all() -> Vec<GeneratedFile> {
     }
     files.push(GeneratedFile {
         relative_path: catalog_folder.join(MANIFEST_MODULE_FILE),
-        text: render_manifest_module(&PRODUCER_MANIFEST),
+        text: render_manifest_module(&PRODUCER_MANIFEST, DumpEncoder::PlainJson),
     });
     files.push(GeneratedFile {
         relative_path: catalog_folder.join(WORKER_MANIFEST_MODULE_FILE),
-        text: render_manifest_module(&WORKER_MANIFEST),
+        text: render_manifest_module(&WORKER_MANIFEST, DumpEncoder::PlainJson),
     });
     files.push(GeneratedFile {
         relative_path: catalog_folder.join(SCHEDULER_MANIFEST_MODULE_FILE),
-        text: render_manifest_module(&SCHEDULER_MANIFEST),
+        text: render_manifest_module(&SCHEDULER_MANIFEST, DumpEncoder::PlainJson),
     });
     files.push(GeneratedFile {
         relative_path: catalog_folder.join(WORKFLOW_SPEC_MODULE_FILE),
-        text: render_manifest_module(&WORKFLOW_SPEC_DATA),
+        // The spec data holds user text (names, keys, node inputs): it is
+        // written by the encoder of every stored form.
+        text: render_manifest_module(&WORKFLOW_SPEC_DATA, DumpEncoder::StrictJsonIo),
     });
     files.push(GeneratedFile {
         relative_path: PathBuf::from(CORE_STUB_FILE),

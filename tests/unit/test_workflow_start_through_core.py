@@ -13,7 +13,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, assert_never
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -36,7 +36,8 @@ from horsies.core.models.workflow import (
     WorkflowSpec,
 )
 from horsies.core.types.core_failure import CoreOperationFailed
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.codec.json_io import SerializationError
+from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.workflows.lifecycle import start_workflow_async
 from horsies.core.workflows.registry import register_workflow_definition
 from horsies.core.workflows.spec_data import workflow_spec_data, workflow_spec_json
@@ -106,6 +107,17 @@ def _spec() -> WorkflowSpec[Any]:
     )
 
 
+def _spec_json(spec: WorkflowSpec[Any]) -> str:
+    """The spec data text of ``spec`` with the app's node rows."""
+    match workflow_spec_json(spec, top_node_rows(APP.get_broker(), spec)):
+        case Ok(ok_value=text):
+            return text
+        case Err(err_value=refused):
+            raise AssertionError(f'the spec data does not encode: {refused}')
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _broker(answer: object = None, *, raises: BaseException | None = None) -> Any:
     """The app's broker with a core handle that answers the start with ``answer``."""
     broker = APP.get_broker()
@@ -141,15 +153,13 @@ class TestSpecData:
         assert data.nodes[3].join.kind == 'QUORUM'
         assert data.nodes[3].allow_failed_deps is True
         assert data.queue_classes == {'default': 'standard_30d'}
-        policy = json.loads(workflow_spec_json(spec, top_node_rows(APP.get_broker(), spec)))[
-            'success_policy'
-        ]
+        policy = json.loads(_spec_json(spec))['success_policy']
         assert policy == {'kind': 'CASES', 'cases': [{'required': [3]}], 'optional': [2]}
 
     def test_the_core_reads_the_spec_data(self) -> None:
         spec = _spec()
         request = core.WorkflowStartRequest(
-            spec_json=workflow_spec_json(spec, top_node_rows(APP.get_broker(), spec)),
+            spec_json=_spec_json(spec),
             workflow_id=uuid.UUID(WORKFLOW_ID),
             sent_at=SENT_AT,
             resend_on_transient_err=False,
@@ -232,6 +242,21 @@ class TestStartAnswers:
         assert isinstance(error, WorkflowStartEnqueueFailed)
         assert error.retryable is True
         assert isinstance(error.exception, core.TooManyPendingCalls)
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_spec_data_that_does_not_encode_is_refused_with_no_core_call(self) -> None:
+        broker = _broker(_record(core.WorkflowStarted))
+        node = TaskNode(fn=value_task, kwargs={'value': 1})
+        spec = APP.workflow(
+            'start_core.\ud800', [node], output=node, definition_key='start_core.surrogate.v1',
+        )
+        result = await start_workflow_async(spec, broker, WORKFLOW_ID, SENT_AT)
+
+        assert is_err(result)
+        error = result.err_value
+        assert isinstance(error, WorkflowStartValidationFailed)
+        assert isinstance(error.exception, SerializationError)
+        broker._core_handle.start_workflow_async.assert_not_awaited()  # pyright: ignore[reportPrivateUsage]
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_a_refused_prevalidation_makes_no_core_call(self) -> None:

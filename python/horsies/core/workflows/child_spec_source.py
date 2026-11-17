@@ -10,7 +10,8 @@ node rows of the child. It answers:
 
 - ``ChildSpecBuilt``: the child's spec as workflow spec data;
 - ``ChildSpecRefused``: the node fails with the stored error, as the Python
-  build fails it.
+  build fails it; also ``WORKFLOW_ENQUEUE_FAILED`` when the child's spec
+  data does not encode (a text with a lone surrogate).
 
 An exception other than these answers is a defect of the client: the core
 fails the step loudly. ``KeyboardInterrupt`` and ``SystemExit`` pass
@@ -21,15 +22,17 @@ from __future__ import annotations
 
 import weakref
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, assert_never
 
 from horsies._core import ChildSpecBuilt, ChildSpecRefused, ChildSpecRequest
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
+from horsies.core.types.result import Err, Ok
 from horsies.core.workflows.child_build import (
     ChildBuildFailed,
     ChildBuilt,
     ChildOfNode,
     build_child_within_depth,
+    node_error,
     node_failure_result,
 )
 from horsies.core.workflows.spec_data import workflow_spec_json
@@ -95,7 +98,18 @@ def build_child_spec(
     )
     match built:
         case ChildBuilt(spec=spec, nodes=rows):
-            return ChildSpecBuilt(spec_json=workflow_spec_json(spec, rows))
+            match workflow_spec_json(spec, rows):
+                case Ok(ok_value=spec_json):
+                    return ChildSpecBuilt(spec_json=spec_json)
+                case Err(err_value=refused):
+                    return _refused(node_error(
+                        node.workflow_id,
+                        node.task_index,
+                        f'Child workflow {spec.name} does not encode as spec data: {refused}',
+                        OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
+                    ))
+                case _ as unreachable:
+                    assert_never(unreachable)
         case ChildBuildFailed(error=error):
             return _refused(error)
 

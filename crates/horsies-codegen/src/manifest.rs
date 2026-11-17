@@ -28,8 +28,46 @@ pub const WORKFLOW_SPEC_MODULE_FILE: &str = "workflow_spec.py";
 /// with a default come before the fields without one.
 const DATACLASS: &str = "@dataclass(frozen=True, slots=True, kw_only=True)";
 
+/// The JSON encoder of a module's dump function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DumpEncoder {
+    /// `json.dumps` of `dataclasses.asdict`; the dump returns `str`. For a
+    /// manifest of library config.
+    PlainJson,
+    /// `dumps_json` of `horsies.core.codec.json_io`, the strict encoder of
+    /// every stored form, on `dataclasses.asdict` with each tuple field as a
+    /// list (`dumps_json` refuses a tuple); the dump returns
+    /// `SerdeResult[str]`, an `Err` for a text that UTF-8 cannot encode. For
+    /// data that holds user text: a character outside ASCII is written as it
+    /// is, not as a `\u` escape.
+    StrictJsonIo,
+}
+
+/// The imports of a module whose dump uses `json.dumps`.
+const PLAIN_JSON_IMPORTS: &str =
+    "from __future__ import annotations\n\nimport dataclasses\nimport json\n\
+     from dataclasses import dataclass\nfrom typing import Final, Literal\n\n";
+
+/// The imports of a module whose dump uses `dumps_json`.
+const STRICT_JSON_IO_IMPORTS: &str = "from __future__ import annotations\n\nimport dataclasses\n\
+     from dataclasses import dataclass\nfrom typing import Final, Literal, cast\n\n\
+     from horsies.core.codec.json_io import SerdeResult, dumps_json\n\n";
+
+/// The helpers of a `dumps_json` dump: `dataclasses.asdict` keeps a tuple
+/// field as a tuple, and `dumps_json` takes only lists.
+const STRICT_JSON_IO_HELPERS: &str =
+    "\n\ndef _json_object(members: list[tuple[str, object]]) -> dict[str, object]:\n    \
+     \"\"\"A dataclass as a JSON object for `dumps_json`: a tuple field as a list.\"\"\"\n    \
+     return {name: _json_member(value) for name, value in members}\n\
+     \n\ndef _json_member(value: object) -> object:\n    \
+     match value:\n        \
+     case tuple():\n            \
+     return list(cast('tuple[object, ...]', value))\n        \
+     case _:\n            \
+     return value\n";
+
 /// The text of the manifest module.
-pub fn render_manifest_module(module: &ManifestModule) -> String {
+pub fn render_manifest_module(module: &ManifestModule, encoder: DumpEncoder) -> String {
     let dump = dump_function_name(module.root);
     let bounds = module.int_bounds();
     let mut text = format!("{GENERATED_HEADER}\n");
@@ -41,10 +79,10 @@ pub fn render_manifest_module(module: &ManifestModule) -> String {
         words(module.root),
         module.reader
     ));
-    text.push_str(
-        "from __future__ import annotations\n\nimport dataclasses\nimport json\n\
-         from dataclasses import dataclass\nfrom typing import Final, Literal\n\n",
-    );
+    text.push_str(match encoder {
+        DumpEncoder::PlainJson => PLAIN_JSON_IMPORTS,
+        DumpEncoder::StrictJsonIo => STRICT_JSON_IO_IMPORTS,
+    });
     text.push_str(&render_all_list(module, &dump, &bounds));
     text.push_str(&format!(
         "\nMANIFEST_VERSION: Final = {}\n\"\"\"The manifest version this core reads.\"\"\"\n",
@@ -61,14 +99,32 @@ pub fn render_manifest_module(module: &ManifestModule) -> String {
     for manifest_type in module.types {
         text.push_str(&render_type(manifest_type));
     }
-    text.push_str(&format!(
-        "\n\ndef {dump}(manifest: {root}) -> str:\n    \
-         \"\"\"The JSON text of `manifest`, in the form that {reader} takes.\"\"\"\n    \
-         return json.dumps(dataclasses.asdict(manifest), separators=(',', ':'), allow_nan=False)\n",
-        root = module.root,
-        reader = module.reader_short
-    ));
+    text.push_str(&render_dump(module, &dump, encoder));
     text
+}
+
+/// The dump function of `module`, named `dump`, with its helpers.
+fn render_dump(module: &ManifestModule, dump: &str, encoder: DumpEncoder) -> String {
+    match encoder {
+        DumpEncoder::PlainJson => format!(
+            "\n\ndef {dump}(manifest: {root}) -> str:\n    \
+             \"\"\"The JSON text of `manifest`, in the form that {reader} takes.\"\"\"\n    \
+             return json.dumps(dataclasses.asdict(manifest), separators=(',', ':'), allow_nan=False)\n",
+            root = module.root,
+            reader = module.reader_short
+        ),
+        DumpEncoder::StrictJsonIo => format!(
+            "{STRICT_JSON_IO_HELPERS}\n\ndef {dump}(manifest: {root}) -> SerdeResult[str]:\n    \
+             \"\"\"The JSON text of `manifest`, in the form that {reader} takes.\n\n    \
+             The encoder is `dumps_json`, as for every stored form: a character\n    \
+             outside ASCII is written as it is. Err when a text of `manifest` holds\n    \
+             a lone surrogate, which UTF-8 cannot encode.\n    \
+             \"\"\"\n    \
+             return dumps_json(dataclasses.asdict(manifest, dict_factory=_json_object))\n",
+            root = module.root,
+            reader = module.reader_short
+        ),
+    }
 }
 
 fn render_all_list(module: &ManifestModule, dump: &str, bounds: &[IntBound]) -> String {
@@ -332,7 +388,7 @@ mod tests {
 
     #[test]
     fn the_producer_manifest_module_has_every_type_bound_and_the_dump() {
-        let rendered = render_manifest_module(&PRODUCER_MANIFEST);
+        let rendered = render_manifest_module(&PRODUCER_MANIFEST, DumpEncoder::PlainJson);
         assert!(rendered.starts_with(GENERATED_HEADER));
         for manifest_type in PRODUCER_MANIFEST.types {
             let defined = match manifest_type.shape {
@@ -377,7 +433,7 @@ mod tests {
 
     #[test]
     fn the_worker_manifest_module_has_every_type_bound_and_the_dump() {
-        let rendered = render_manifest_module(&WORKER_MANIFEST);
+        let rendered = render_manifest_module(&WORKER_MANIFEST, DumpEncoder::PlainJson);
         assert!(rendered.starts_with(GENERATED_HEADER));
         for manifest_type in WORKER_MANIFEST.types {
             let defined = match manifest_type.shape {
@@ -398,7 +454,7 @@ mod tests {
 
     #[test]
     fn the_scheduler_manifest_module_has_every_type_bound_and_the_dump() {
-        let rendered = render_manifest_module(&SCHEDULER_MANIFEST);
+        let rendered = render_manifest_module(&SCHEDULER_MANIFEST, DumpEncoder::PlainJson);
         assert!(rendered.starts_with(GENERATED_HEADER));
         for manifest_type in SCHEDULER_MANIFEST.types {
             let defined = match manifest_type.shape {
@@ -420,7 +476,7 @@ mod tests {
 
     #[test]
     fn the_workflow_spec_data_module_has_every_type_bound_and_the_dump() {
-        let rendered = render_manifest_module(&WORKFLOW_SPEC_DATA);
+        let rendered = render_manifest_module(&WORKFLOW_SPEC_DATA, DumpEncoder::StrictJsonIo);
         assert!(rendered.starts_with(GENERATED_HEADER));
         for manifest_type in WORKFLOW_SPEC_DATA.types {
             let defined = match manifest_type.shape {
@@ -434,8 +490,17 @@ mod tests {
         for bound in WORKFLOW_SPEC_DATA.int_bounds() {
             assert!(rendered.contains(&format!("\n{}_MIN: Final = {}\n", bound.name, bound.min)));
         }
-        assert!(rendered
-            .contains("\ndef dump_workflow_spec_data(manifest: WorkflowSpecData) -> str:\n"));
+        assert!(rendered.contains(
+            "\ndef dump_workflow_spec_data(manifest: WorkflowSpecData) -> SerdeResult[str]:\n"
+        ));
+        assert!(rendered.contains(
+            "    return dumps_json(dataclasses.asdict(manifest, dict_factory=_json_object))\n"
+        ));
+        assert!(
+            rendered.contains("\nfrom horsies.core.codec.json_io import SerdeResult, dumps_json\n")
+        );
+        assert!(!rendered.contains("import json\n"));
+        assert!(!rendered.contains("json.dumps("));
         assert!(rendered.contains("    nodes: tuple[SpecNode, ...]\n"));
         assert!(rendered.contains("    args_from: dict[str, int]\n"));
         assert!(rendered.contains("    queue_classes: dict[str, str]\n"));

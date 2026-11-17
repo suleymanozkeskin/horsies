@@ -3,13 +3,15 @@
 A vector's value is the spec data document; Python builds the generated
 dataclasses of ``horsies._catalog.workflow_spec`` from it and
 ``dump_workflow_spec_data`` writes the text that crosses to the core
-(``python/horsies/core/workflows/spec_data.py``, ``workflow_spec_json``). The
-core reads the text with ``parse_workflow_spec_data``; the core and the Rust
-client test the same file.
+(``python/horsies/core/workflows/spec_data.py``, ``workflow_spec_json``) with
+``dumps_json``, the encoder of every stored form. The core reads the text
+with ``parse_workflow_spec_data``; the core and the Rust client test the same
+file.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from typing import Any, Final, cast
 
@@ -40,6 +42,8 @@ from horsies._catalog.workflow_spec import (
     WorkflowSpecData,
     dump_workflow_spec_data,
 )
+from horsies.core.codec.json_io import SerializationError
+from horsies.core.types.result import Err, Ok
 from tests.stored_form_vectors import load_form, rows, text_of
 
 _FORM: Final = load_form('workflow_spec_data.json')
@@ -157,7 +161,18 @@ def _document(vector: dict[str, object]) -> Document:
     'vector', rows(_FORM, 'vectors'), ids=lambda vector: text_of(vector, 'name'),
 )
 def test_each_document_encodes_to_its_text(vector: dict[str, object]) -> None:
-    assert dump_workflow_spec_data(spec_data_of(_document(vector))) == text_of(vector, 'text')
+    assert dump_workflow_spec_data(spec_data_of(_document(vector))) == Ok(text_of(vector, 'text'))
+
+
+@pytest.mark.unit
+def test_a_text_with_a_lone_surrogate_is_refused_by_the_encoder() -> None:
+    vector = rows(_FORM, 'vectors')[0]
+    data = dataclasses.replace(spec_data_of(_document(vector)), name='checkout\ud800')
+    match dump_workflow_spec_data(data):
+        case Err(err_value=refused):
+            assert isinstance(refused, SerializationError)
+        case Ok(ok_value=text):
+            raise AssertionError(f'the encoder wrote {text!r}')
 
 
 @pytest.mark.unit

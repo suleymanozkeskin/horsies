@@ -256,6 +256,15 @@ written in Rust, on a new baseline schema.
   limit that is not read, or a core that cannot run the call, is one error
   with the cause as its note, as before.
 
+- **The workflow spec data is written by `dumps_json`.** The text that a
+  workflow start and a sub-workflow child build send the core (the
+  generated `dump_workflow_spec_data`, which now returns `SerdeResult[str]`)
+  writes a character outside ASCII as the character, not as a `\u` escape,
+  as every other stored form does. A spec whose text holds a lone surrogate
+  is refused before the core call: the start returns
+  `WorkflowStartValidationFailed`, and a child build fails its node with
+  `WORKFLOW_ENQUEUE_FAILED`.
+
 ### Fixed
 
 - **A stored retry policy that does not validate fails the task at claim.**
