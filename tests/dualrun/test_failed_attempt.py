@@ -305,7 +305,6 @@ async def _persist(probe: _Probe, case: _Case, worker_id: str) -> None:
             failed_reason=failure.failed_reason,
         ),
         report,
-        TaskResult(err=_task_failure(case)),
         claim=case.claim,
         child=_Phase1Input(ok=True, result_json_str=failure.result_json, failed_reason=None),
     )
