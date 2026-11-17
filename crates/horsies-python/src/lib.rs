@@ -27,6 +27,8 @@
 //!   parent-child frame codec through pure calls (`frames`).
 //! - `prepare_worker` builds the worker of a worker manifest, and
 //!   `PreparedWorker.run` runs it on the main thread (`worker`).
+//! - A `MonitoringHandler` serves the monitoring web app of a `CoreHandle`
+//!   for the FastAPI mount of `create_monitoring_app` (`web_handler`).
 
 mod bridge;
 mod child_handle;
@@ -39,6 +41,7 @@ mod operations;
 mod process_core;
 mod records;
 mod scheduler;
+mod web_handler;
 mod worker;
 
 use pyo3::prelude::*;
@@ -345,6 +348,15 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<scheduler::SchedulerTicked>()?;
     module.add_class::<scheduler::SchedulerTickFailed>()?;
     module.add_class::<scheduler::SchedulerStopped>()?;
+    module.add_class::<web_handler::MonitoringHandler>()?;
+    module.add_class::<web_handler::RouteAccess>()?;
+    module.add_class::<web_handler::AccessGrant>()?;
+    module.add_class::<web_handler::MonitoringRequest>()?;
+    module.add_class::<web_handler::MonitoringResponse>()?;
+    module.add_class::<web_handler::EventStream>()?;
+    module.add_class::<web_handler::EventFrame>()?;
+    module.add_class::<web_handler::EventStreamEnded>()?;
+    module.add_class::<web_handler::EventStreamRefused>()?;
     module.add_class::<worker::PreparedWorker>()?;
     module.add_class::<worker::WorkerProfileRefused>()?;
     module.add_class::<worker::WorkerStopped>()?;
