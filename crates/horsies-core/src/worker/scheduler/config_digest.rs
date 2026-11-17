@@ -383,20 +383,45 @@ mod tests {
         &text[start..end]
     }
 
+    /// The pattern texts of the vectors whose time of day has a fraction of
+    /// a second. The Python config refuses such a `time`, and the manifest
+    /// parser refuses its text (`SchedulePattern::validate`); their digests
+    /// stay contract vectors of the digest text.
+    const PATTERN_TEXTS_WITH_A_FRACTION_OF_A_SECOND: [&str; 2] = [
+        r#"{"type":"daily","time":"03:00:00.500000"}"#,
+        r#"{"type":"daily","time":"03:00:00.000005"}"#,
+    ];
+
     /// A manifest pattern text that Python wrote parses to the pattern whose
-    /// digest is the digest that Python stores, for every pattern kind.
+    /// digest is the digest that Python stores, for every pattern kind. A
+    /// text whose time of day has a fraction of a second is refused.
     #[test]
     fn the_pattern_text_of_each_vector_parses_to_a_pattern_with_the_python_digest() {
+        let mut refused_texts = Vec::new();
         for vector in python_vectors() {
             let text = pattern_text(&vector);
-            let parsed = crate::scheduler_manifest::PatternJson::try_from(text.to_owned())
-                .unwrap_or_else(|refused| panic!("{text} parses: {refused}"));
-            assert_eq!(
-                hex(&config_digest(parsed.pattern(), vector.timezone)),
-                vector.digest_hex,
-                "{text}"
-            );
+            let parsed = crate::scheduler_manifest::PatternJson::try_from(text.to_owned());
+            match (
+                PATTERN_TEXTS_WITH_A_FRACTION_OF_A_SECOND.contains(&text),
+                parsed,
+            ) {
+                (false, Ok(parsed)) => assert_eq!(
+                    hex(&config_digest(parsed.pattern(), vector.timezone)),
+                    vector.digest_hex,
+                    "{text}"
+                ),
+                (false, Err(refused)) => panic!("{text} parses: {refused}"),
+                (true, Err(refused)) => {
+                    assert!(
+                        refused.contains("time must be a whole second"),
+                        "{text}: {refused}"
+                    );
+                    refused_texts.push(text);
+                }
+                (true, Ok(_parsed)) => panic!("{text} has a fraction of a second and parses"),
+            }
         }
+        assert_eq!(refused_texts, PATTERN_TEXTS_WITH_A_FRACTION_OF_A_SECOND);
     }
 
     #[test]

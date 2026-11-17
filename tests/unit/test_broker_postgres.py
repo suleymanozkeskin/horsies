@@ -25,6 +25,8 @@ from horsies.core.brokers.enqueue_task import SendKind
 from horsies._core import (
     BrokerFailure,
     DatabasePingRecord,
+    SchemaInstalled,
+    SchemaInstallNotRun,
     StaleClaimsBoundReached,
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
@@ -497,7 +499,11 @@ class TestPostgresBrokerPgBouncerWiring:
                 pgbouncer_transaction_mode=True,
             )
             broker = PostgresBroker(config)
-            await broker._ensure_initialized(await resources_of(broker))
+            # The Python install, which the dual-run reference runs.
+            await broker._run_with_schema_engine(  # pyright: ignore[reportPrivateUsage]
+                await resources_of(broker),
+                broker._maybe_run_schema_init,  # pyright: ignore[reportPrivateUsage]
+            )
 
         assert mock_engine.call_args_list[0].args[0] == sqlalchemy_url(database_url)
         assert mock_engine.call_args_list[1].args[0] == sqlalchemy_url(session_url)
@@ -541,7 +547,11 @@ class TestPostgresBrokerPgBouncerWiring:
                 pgbouncer_transaction_mode=True,
             )
             broker = PostgresBroker(config)
-            await broker._ensure_initialized(await resources_of(broker))
+            # The Python install, which the dual-run reference runs.
+            await broker._run_with_schema_engine(  # pyright: ignore[reportPrivateUsage]
+                await resources_of(broker),
+                broker._maybe_run_schema_init,  # pyright: ignore[reportPrivateUsage]
+            )
 
         lock_keys = [
             call.args[1][0]
@@ -3142,18 +3152,89 @@ class TestGetTaskInfoAsyncErrorPaths:
 
 @pytest.mark.unit
 class TestEnsureSchemaInitialized:
-    """Tests for ensure_schema_initialized public entry point."""
+    """ensure_schema_initialized maps the record of the core install to its result."""
+
+    @staticmethod
+    def _uninitialized(outcome: object) -> Any:
+        """A broker that has not installed, whose core install answers ``outcome``."""
+        broker = _make_broker()
+        broker._initialized = False
+        handle = MagicMock()
+        handle.install_schema_async = AsyncMock(return_value=outcome)
+        broker._core_handle = handle
+        return broker
 
     @pytest.mark.asyncio
-    async def test_ensure_schema_initialized_returns_ok_on_success(self) -> None:
-        """When already initialized, ensure_schema_initialized returns Ok(None)."""
+    async def test_an_initialized_broker_does_not_call_the_core(self) -> None:
         broker = _make_broker()
-        # _make_broker already sets _initialized = True, so _ensure_initialized is a no-op.
+        handle = MagicMock()
+        handle.install_schema_async = AsyncMock()
+        broker._core_handle = handle
 
         result = await broker.ensure_schema_initialized()
 
-        assert is_ok(result)
-        assert result.ok_value is None
+        assert result == Ok(None)
+        handle.install_schema_async.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('outcome_class', [SchemaInstalled, SchemaInstallNotRun])
+    async def test_an_install_is_ok_once_per_broker(self, outcome_class: type) -> None:
+        broker = self._uninitialized(MagicMock(spec=outcome_class))
+
+        first = await broker.ensure_schema_initialized()
+        second = await broker.ensure_schema_initialized()
+
+        assert (first, second) == (Ok(None), Ok(None))
+        broker._core_handle.install_schema_async.assert_awaited_once_with()
+        assert broker._initialized is True
+
+    @pytest.mark.asyncio
+    async def test_a_failed_install_is_schema_init_failed_and_runs_again(self) -> None:
+        broker = self._uninitialized(
+            MagicMock(
+                spec=BrokerFailure,
+                code='SCHEMA_INIT_FAILED',
+                message='the database was installed by the RUST client',
+                retryable=False,
+            ),
+        )
+
+        first = await broker.ensure_schema_initialized()
+        second = await broker.ensure_schema_initialized()
+
+        assert is_err(first)
+        failed = first.err_value
+        assert failed.code is BrokerErrorCode.SCHEMA_INIT_FAILED
+        assert failed.retryable is False
+        assert 'installed by the RUST client' in failed.message
+        assert isinstance(failed.exception, CoreOperationFailed)
+        assert failed.exception.subject == 'PostgresBroker.ensure_schema_initialized'
+        assert is_err(second)
+        assert broker._core_handle.install_schema_async.await_count == 2
+        assert broker._initialized is False
+
+    @pytest.mark.asyncio
+    async def test_a_core_that_cannot_run_the_install_is_schema_init_failed(self) -> None:
+        broker = self._uninitialized(None)
+        error = TooManyPendingCalls('CoreHandle.install_schema_async', 65_536)
+        broker._core_handle.install_schema_async = AsyncMock(side_effect=error)
+
+        result = await broker.ensure_schema_initialized()
+
+        assert is_err(result)
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.SCHEMA_INIT_FAILED
+        assert failed.retryable is True
+        assert failed.exception is error
+
+    @pytest.mark.asyncio
+    async def test_another_failure_code_is_a_defect(self) -> None:
+        broker = self._uninitialized(
+            MagicMock(spec=BrokerFailure, code='DB_PING_FAILED', message='x', retryable=False),
+        )
+
+        with pytest.raises(AssertionError, match='DB_PING_FAILED'):
+            await broker.ensure_schema_initialized()
 
 
 @pytest.mark.unit

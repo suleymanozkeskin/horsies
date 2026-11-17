@@ -15,9 +15,12 @@ PENDING row, or answers what the row that holds the task id or the key holds:
   that finished answers SAME_COMMAND or PAYLOAD_MISMATCH by the same
   comparison, and never runs a second time.
 
-``enqueue_result`` maps the outcome to the result of
-``PostgresBroker.enqueue_async``. The statement runs alone in autocommit; a
-refusal writes nothing and leaves no key reservation of this send.
+A send is a first run, or the rerun of a finished task
+(``horsies.core.history.rerun.operations.rerun_task``), which names its source
+and its root. ``enqueue_result`` maps the outcome to the result of
+``PostgresBroker.enqueue_async``. A send runs alone in autocommit; a rerun runs
+in its caller's transaction. A refusal writes nothing and leaves no key
+reservation of this send.
 """
 
 from __future__ import annotations
@@ -62,7 +65,9 @@ ENQUEUE_TASK_SQL = text("""
         CAST(:start_delay_s AS INTEGER),
         CAST(:fingerprint_version AS SMALLINT),
         CAST(:fingerprint AS BYTEA),
-        'FIRST_RUN', NULL, NULL,
+        :lineage_kind,
+        CAST(:rerun_of_task_id AS uuid),
+        CAST(:rerun_root_task_id AS uuid),
         :key_kind,
         CAST(:key_digest AS BYTEA),
         CAST(:key_scope_version AS SMALLINT),
@@ -137,6 +142,24 @@ type EnqueueKey = Unkeyed | Keyed
 
 
 @dataclass(frozen=True, slots=True)
+class FirstRun:
+    """The send is the first run of its command: the row has no lineage."""
+
+
+@dataclass(frozen=True, slots=True)
+class RerunOf:
+    """The send reruns the finished task ``source_task_id``; ``root_task_id``
+    is the first task of the lineage (the source itself when the source is no
+    rerun)."""
+
+    source_task_id: UUID
+    root_task_id: UUID
+
+
+type EnqueueLineage = FirstRun | RerunOf
+
+
+@dataclass(frozen=True, slots=True)
 class EnqueueRow:
     """The checked values of one send, as the row stores them."""
 
@@ -155,6 +178,7 @@ class EnqueueRow:
     start: EnqueueStart
     command_fingerprint: bytes
     key: EnqueueKey
+    lineage: EnqueueLineage
 
 
 def _start_params(start: EnqueueStart) -> dict[str, Any]:
@@ -189,6 +213,24 @@ def _key_params(key: EnqueueKey) -> dict[str, Any]:
             assert_never(unreachable)
 
 
+def _lineage_params(lineage: EnqueueLineage) -> dict[str, Any]:
+    match lineage:
+        case FirstRun():
+            return {
+                'lineage_kind': 'FIRST_RUN',
+                'rerun_of_task_id': None,
+                'rerun_root_task_id': None,
+            }
+        case RerunOf(source_task_id=source_task_id, root_task_id=root_task_id):
+            return {
+                'lineage_kind': 'RERUN',
+                'rerun_of_task_id': str(source_task_id),
+                'rerun_root_task_id': str(root_task_id),
+            }
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def enqueue_task_params(row: EnqueueRow, send_kind: SendKind) -> dict[str, Any]:
     """The parameters of ``ENQUEUE_TASK_SQL``, one entry per bind. Pure."""
     return {
@@ -207,6 +249,7 @@ def enqueue_task_params(row: EnqueueRow, send_kind: SendKind) -> dict[str, Any]:
         **_start_params(row.start),
         'fingerprint_version': COMMAND_FINGERPRINT_VERSION,
         'fingerprint': row.command_fingerprint,
+        **_lineage_params(row.lineage),
         **_key_params(row.key),
         'send_kind': send_kind.value,
     }

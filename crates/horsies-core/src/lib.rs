@@ -113,10 +113,12 @@ pub use crate::worker::finalize_batch::{
 
 // Child mode of a Rust worker binary: the entry checks `child_mode` first
 // and, in child mode, exits with the code of `run_child_host`. Task bodies
-// start work that belongs to their run with `spawn_in_run`.
+// start work that belongs to their run with `spawn_in_run`, and read the
+// cancel signal of their run with `run_cancel_signal`.
 pub use crate::worker::executor::child_host::{
-    child_mode, run_child_host, spawn_in_run, ChildApp, ChildArgs, ChildArgsError, ChildHostExit,
-    ChildMode, RunSpawnRefused, CHILD_MODE_ARGUMENT, MAX_RUN_WORK,
+    child_mode, run_cancel_signal, run_child_host, spawn_in_run, ChildApp, ChildArgs,
+    ChildArgsError, ChildHostExit, ChildMode, RunCancelSignal, RunSignalRefused, RunSpawnRefused,
+    CHILD_MODE_ARGUMENT, MAX_RUN_WORK,
 };
 
 // worker re-exports

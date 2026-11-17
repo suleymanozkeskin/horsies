@@ -227,6 +227,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::task_info::TaskInfoRecord>()?;
     module.add_class::<operations::task_info::TaskAttemptRecord>()?;
     module.add_class::<operations::task_info::TaskInfoNotFound>()?;
+    module.add_class::<operations::monitoring_window::MonitoringWindowRecord>()?;
+    module.add_class::<operations::monitoring_window::WindowRefusedRecord>()?;
     module.add_class::<scheduler::SchedulerStarted>()?;
     module.add_class::<scheduler::SchedulerStartRefused>()?;
     module.add_class::<scheduler::SchedulerStartFailed>()?;
@@ -237,6 +239,10 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(core_state, module)?)?;
     module.add_function(wrap_pyfunction!(mint_task_id, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_log_levels, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        operations::monitoring_window::resolve_monitoring_window,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(set_panic_rule, module)?)?;
     errors::add_errors(module)?;
     Ok(())

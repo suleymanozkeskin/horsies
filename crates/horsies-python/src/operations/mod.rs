@@ -10,6 +10,7 @@ pub mod enqueue;
 pub mod expiry_and_orphans;
 pub mod failed_attempt;
 pub mod finalizing;
+pub mod monitoring_window;
 pub mod queue_starts;
 pub mod release;
 pub mod result;
