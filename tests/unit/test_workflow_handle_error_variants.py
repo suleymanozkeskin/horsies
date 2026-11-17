@@ -13,16 +13,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from types import SimpleNamespace
+import uuid
 from typing import Any, get_args
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.exc import OperationalError
 
+import horsies._core as core
 from horsies.core.brokers.resources import EventLoopLimit, ListenerDisabled
 from horsies.core.codec.json_io import SerializationError
-from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.core.models.tasks import OperationalErrorCode, RetrievalCode
 from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.handle import (
@@ -41,7 +41,7 @@ from horsies.core.models.workflow.handle_types import (
     HandleWorkflowNotFound,
 )
 from horsies.core.types.result import Err, Ok, is_err, is_ok
-from horsies.core.workflows.functions import CANCEL_WORKFLOW_FUNCTION_SQL
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.web.routes import actions as actions_module
 from horsies.web.routes.actions import (
     RESUME_RECOVERY_WARNING,
@@ -220,44 +220,54 @@ class TestStoredWorkflowStatus:
 # =============================================================================
 
 
-def _cancel_session(outcome: str) -> tuple[AsyncMock, AsyncMock]:
-    """A session whose autocommit connection returns one cancel row."""
-    result = MagicMock()
-    result.fetchall.return_value = [SimpleNamespace(outcome=outcome)]
-    connection = AsyncMock()
-    connection.execute = AsyncMock(return_value=result)
-    session = AsyncMock()
-    session.connection = AsyncMock(return_value=connection)
-    return session, connection
+def _cancel_record(record_class: type, **fields: object) -> MagicMock:
+    """A stand-in for a record of ``horsies._core``: a class pattern matches it."""
+    record = MagicMock(spec=record_class)
+    record.workflow_id = uuid.UUID(WORKFLOW_ID)
+    for name, value in fields.items():
+        setattr(record, name, value)
+    return record
+
+
+def _core_broker(answer: object = None, *, raises: BaseException | None = None) -> MagicMock:
+    """A broker whose core handle answers the cancel with ``answer``, or raises."""
+    broker = MagicMock()
+    match raises:
+        case None:
+            broker._core_handle.cancel_workflow_async = AsyncMock(return_value=answer)
+        case _:
+            broker._core_handle.cancel_workflow_async = AsyncMock(side_effect=raises)
+    return broker
+
+
+def _handle_with_core_answer(
+    answer: object = None, *, raises: BaseException | None = None,
+) -> WorkflowHandle[Any]:
+    """A handle on ``_core_broker``."""
+    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=_core_broker(answer, raises=raises))
 
 
 class TestCancelOutcome:
-    """cancel_async sends one horsies_workflow_cancel statement; its outcome decides."""
+    """cancel_async runs one horsies_workflow_cancel in the core; its record decides."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize('outcome', ['CANCELLED', 'NOT_CANCELLABLE'])
-    async def test_a_cancelled_or_terminal_workflow_is_ok(self, outcome: str) -> None:
-        session, connection = _cancel_session(outcome)
-        handle = _handle_with_session(session)
+    @pytest.mark.parametrize(
+        'record_class', [core.WorkflowCancelled, core.WorkflowNotCancellable],
+    )
+    async def test_a_cancelled_or_terminal_workflow_is_ok(self, record_class: type) -> None:
+        broker = _core_broker(_cancel_record(record_class))
+        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
 
         result = await handle.cancel_async()
 
         assert result == Ok(None)
-        assert session.connection.await_args is not None
-        assert session.connection.await_args.kwargs == {
-            'execution_options': {'isolation_level': 'AUTOCOMMIT'},
-        }
-        assert connection.execute.await_count == 1
-        assert connection.execute.await_args is not None
-        assert connection.execute.await_args.args == (
-            CANCEL_WORKFLOW_FUNCTION_SQL, {'wf_id': WORKFLOW_ID},
+        broker._core_handle.cancel_workflow_async.assert_awaited_once_with(
+            uuid.UUID(WORKFLOW_ID),
         )
-        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_an_unknown_workflow_is_not_found(self) -> None:
-        session, _ = _cancel_session('NOT_FOUND')
-        handle = _handle_with_session(session)
+        handle = _handle_with_core_answer(_cancel_record(core.WorkflowAbsent))
 
         result = await handle.cancel_async()
 
@@ -266,26 +276,35 @@ class TestCancelOutcome:
         assert result.err_value.workflow_id == WORKFLOW_ID
 
     @pytest.mark.asyncio
-    async def test_a_statement_error_is_db_operation_failed(self) -> None:
-        session, connection = _cancel_session('CANCELLED')
-        cause = _db_error()
-        connection.execute = AsyncMock(side_effect=cause)
-        handle = _handle_with_session(session)
+    async def test_a_failure_record_is_db_operation_failed(self) -> None:
+        handle = _handle_with_core_answer(_cancel_record(
+            core.HandleFailed,
+            code='DB_OPERATION_FAILED',
+            message=CAUSE_MARKER,
+            retryable=True,
+        ))
+
+        result = await handle.cancel_async()
+
+        assert is_err(result)
+        err = result.err_value
+        assert isinstance(err, HandleDbOperationFailed)
+        assert isinstance(err.exception, CoreOperationFailed)
+        assert err.exception.subject == 'cancel_workflow'
+        assert err.retryable is True
+        assert CAUSE_MARKER in err.message
+
+    @pytest.mark.asyncio
+    async def test_a_core_boundary_error_is_db_operation_failed(self) -> None:
+        stopped = core.CoreStopped('core task', 'planned panic')
+        handle = _handle_with_core_answer(raises=stopped)
 
         result = await handle.cancel_async()
 
         assert is_err(result)
         assert isinstance(result.err_value, HandleDbOperationFailed)
-        assert result.err_value.exception is cause
-        assert result.err_value.retryable is True
-
-    @pytest.mark.asyncio
-    async def test_a_row_outside_the_contract_raises(self) -> None:
-        session, _ = _cancel_session('CANCEL_PENDING')
-        handle = _handle_with_session(session)
-
-        with pytest.raises(OutcomeDecodeError, match='CANCEL_PENDING'):
-            await handle.cancel_async()
+        assert result.err_value.exception is stopped
+        assert result.err_value.retryable is False
 
 
 # =============================================================================

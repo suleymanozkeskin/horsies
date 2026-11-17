@@ -33,6 +33,7 @@ class SwitchModule(Enum):
     LIFECYCLE = 'lifecycle'
     BROKER = 'broker'
     MONITORING_AND_WEB = 'monitoring-and-web'
+    WORKFLOW_ENGINE = 'workflow-engine'
 
 
 class Implementation(Enum):

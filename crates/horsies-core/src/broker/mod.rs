@@ -53,6 +53,7 @@ pub mod wait_limit;
 #[cfg(test)]
 mod worker_state_read_tests;
 mod workflow_claim_settle;
+mod workflow_operations;
 
 pub use bound_handle::TaskHandle;
 pub use class_budgets::{ClassBudget, ClassBudgets};
