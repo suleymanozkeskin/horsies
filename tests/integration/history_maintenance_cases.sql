@@ -556,6 +556,29 @@ SELECT fixture_check(
     'create heartbeat leaf: a conformant leaf is ALREADY_CONFORMANT',
     fixture_create_heartbeat(current_setting('fixture.hour')::timestamptz) = 'ALREADY_CONFORMANT'
 );
+DO $$
+BEGIN
+    EXECUTE format('DROP INDEX %I', horsies_heartbeat_leaf_name(current_setting('fixture.hour')::timestamptz) || '_probe_idx');
+    EXECUTE format('CREATE INDEX %I ON %I (task_id, role varchar_pattern_ops, sent_at DESC)',
+                   horsies_heartbeat_leaf_name(current_setting('fixture.hour')::timestamptz) || '_probe_idx',
+                   horsies_heartbeat_leaf_name(current_setting('fixture.hour')::timestamptz));
+END
+$$;
+SELECT fixture_check(
+    'leaf indexes: a key column with another operator class than its type''s default is not conformant',
+    (SELECT array_agg(index_name || ':' || holder || ':' || conformant::text)
+     FROM horsies_history_leaf_indexes('HEARTBEAT',
+                                       horsies_heartbeat_leaf_name(current_setting('fixture.hour')::timestamptz)))
+        = ARRAY[horsies_heartbeat_leaf_name(current_setting('fixture.hour')::timestamptz) || '_probe_idx:LEAF:false']
+);
+SELECT set_config('fixture.outcome', fixture_create_heartbeat(current_setting('fixture.hour')::timestamptz), true);
+SELECT fixture_check(
+    'create heartbeat leaf: a probe index with another operator class is INDEX_REPAIRED',
+    current_setting('fixture.outcome') = 'INDEX_REPAIRED'
+    AND pg_get_indexdef(to_regclass(horsies_heartbeat_leaf_name(current_setting('fixture.hour')::timestamptz)
+                                    || '_probe_idx')) LIKE '% USING btree (task_id, role, sent_at DESC)'
+    AND fixture_create_heartbeat(current_setting('fixture.hour')::timestamptz) = 'ALREADY_CONFORMANT'
+);
 SELECT fixture_create_heartbeat(current_setting('fixture.hour')::timestamptz + interval '1 hour');
 DO $$
 BEGIN

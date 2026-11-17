@@ -14,11 +14,8 @@ from ..history.names import WORKFLOW_PHASE2_PENDING, WORKFLOW_PHASE2_QUARANTINE
 from ..history.periods import RetentionClassKey
 from ..models.tasks import Execution
 
-# -- SQL constants for resume_workflow and the engine's child workflow start --
+# -- SQL constants for the engine's child workflow start --
 
-CHECK_WORKFLOW_EXISTS_SQL = text(
-    """SELECT id FROM horsies_workflows WHERE id = :wf_id"""
-)
 # Bulk node insert of the engine's child workflow start
 # (enqueue_subworkflow_task; executemany over all nodes in one pipelined
 # batch). Differences from the per-row inserts above:
@@ -79,33 +76,6 @@ RESET_ABANDONED_WORKFLOW_TASKS_SQL = text("""
         started_at = NULL
     WHERE task_id = ANY(:task_ids)
       AND status IN ('ENQUEUED', 'RUNNING')
-""")
-# -- SQL constants for resume_workflow --
-
-RESUME_WORKFLOW_SQL = text("""
-    UPDATE horsies_workflows
-    SET status = 'RUNNING', updated_at = NOW()
-    WHERE id = :wf_id AND status = 'PAUSED'
-    RETURNING id, depth, root_workflow_id
-""")
-GET_PENDING_WORKFLOW_TASKS_SQL = text("""
-    SELECT task_index FROM horsies_workflow_tasks
-    WHERE workflow_id = :wf_id AND status = 'PENDING'
-""")
-GET_READY_WORKFLOW_TASKS_SQL = text("""
-    SELECT task_index, dependencies, is_subworkflow FROM horsies_workflow_tasks
-    WHERE workflow_id = :wf_id AND status = 'READY'
-""")
-# -- SQL constants for _cascade_resume_to_children --
-
-GET_PAUSED_CHILD_WORKFLOWS_SQL = text("""
-    SELECT id, depth, root_workflow_id FROM horsies_workflows
-    WHERE parent_workflow_id = :wf_id AND status = 'PAUSED'
-""")
-RESUME_CHILD_WORKFLOW_SQL = text("""
-    UPDATE horsies_workflows
-    SET status = 'RUNNING', updated_at = NOW()
-    WHERE id = :wf_id AND status = 'PAUSED'
 """)
 # -- SQL constants for enqueue_workflow_task --
 

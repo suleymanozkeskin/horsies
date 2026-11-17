@@ -123,6 +123,11 @@ CHILD_FINISH_FUNCTION_SQL: Final = _step_statement(
 )
 """The advance of the parent node of a terminal child workflow, one level."""
 
+RESUME_WORKFLOW_FUNCTION_SQL: Final = _step_statement(
+    'horsies_workflow_resume(CAST(:wf_id AS uuid))'
+)
+"""The resume of a PAUSED workflow tree, in the caller's transaction."""
+
 PHASE2_RECOVER_FUNCTION_SQL: Final = _step_statement(
     'horsies_workflow_phase2_recover(CAST(:task_id AS uuid), '
     'CAST(:attempt_bound AS integer))'
@@ -183,6 +188,19 @@ class ChildFinishDisposition(Enum):
 
     PARENT_ABSENT = 'PARENT_ABSENT'
     """The parent workflow row is gone; nothing written."""
+
+
+class ResumeDisposition(Enum):
+    """The disposition of ``horsies_workflow_resume``."""
+
+    RESUMED = 'RESUMED'
+    """The workflow and its PAUSED descendants are RUNNING."""
+
+    NOT_PAUSED = 'NOT_PAUSED'
+    """The workflow exists and is not PAUSED (``detail``: its status); nothing written."""
+
+    NOT_FOUND = 'NOT_FOUND'
+    """No workflow has this id; nothing written."""
 
 
 class NodeFinishDisposition(Enum):

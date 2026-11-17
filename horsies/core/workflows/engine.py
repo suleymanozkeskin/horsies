@@ -4089,4 +4089,3 @@ pause_workflow_sync = _lifecycle.pause_workflow_sync
 resume_workflow = _lifecycle.resume_workflow
 resume_workflow_sync = _lifecycle.resume_workflow_sync
 cascade_pause_to_children = _lifecycle.cascade_pause_to_children
-cascade_resume_to_children = _lifecycle.cascade_resume_to_children
