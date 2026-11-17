@@ -1,19 +1,16 @@
-/// Workflow test helpers for starting workflows and simulating task completion.
+/// Workflow test helpers for starting workflows and reading their rows.
 ///
-/// Mirrors Python's `conftest.py` helpers: `start_ok`, `complete_task`,
-/// `get_task_status`, `get_workflow_status`.
+/// Mirrors Python's `conftest.py` helpers: `start_ok`, `get_task_status`,
+/// `get_workflow_status`.
 use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use horsies::{
-    Horsies, PostgresBroker, TaskResult, WorkflowHandle, WorkflowSpec, WorkflowSpecRegistry,
-};
+use horsies::{Horsies, PostgresBroker, WorkflowHandle, WorkflowSpec, WorkflowSpecRegistry};
 
 use crate::fixtures;
-use crate::tasks::result_json;
 
 /// Start a workflow and panic on failure (for tests that expect success).
 pub async fn start_ok<T>(
@@ -64,119 +61,6 @@ pub async fn get_task_id(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> U
     .expect("workflow task not found");
 
     id.expect("task_id is NULL (task not yet enqueued)")
-}
-
-/// Simulate task completion by calling on_workflow_task_complete.
-pub async fn complete_task(
-    pool: &PgPool,
-    workflow_id: Uuid,
-    task_index: i32,
-    result: &TaskResult<serde_json::Value>,
-    registry: &WorkflowSpecRegistry,
-) {
-    let task_id = get_task_id(pool, workflow_id, task_index).await;
-
-    let result_str = result_json(result);
-    let worker_id = "horsies-test-support";
-    let mut transaction = pool.begin().await.expect("completion transaction");
-    let (retry_count, started_at): (i32, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
-        "UPDATE horsies_tasks
-         SET status = 'RUNNING', claimed = FALSE,
-             claimed_by_worker_id = $2,
-             claimed_at = COALESCE(claimed_at, NOW()),
-             started_at = COALESCE(started_at, NOW()),
-             updated_at = NOW()
-         WHERE id = $1 AND status IN ('PENDING', 'CLAIMED', 'RUNNING')
-         RETURNING retry_count, started_at",
-    )
-    .bind(task_id)
-    .bind(worker_id)
-    .fetch_one(transaction.as_mut())
-    .await
-    .expect("failed to lock simulated workflow task");
-
-    let (outcome, error_code) = match result {
-        TaskResult::Ok(_) => {
-            sqlx::query(
-                "INSERT INTO horsies_task_attempts (
-                     task_id, attempt, outcome, will_retry, started_at, finished_at,
-                     worker_id
-                 ) VALUES ($1, $2, 'COMPLETED', FALSE, $3, NOW(), $4)",
-            )
-            .bind(task_id)
-            .bind(retry_count + 1)
-            .bind(started_at)
-            .bind(worker_id)
-            .execute(transaction.as_mut())
-            .await
-            .expect("failed to record completed attempt");
-            let outcome: String = sqlx::query_scalar(
-                "SELECT outcome
-                 FROM horsies_complete_locked_task($1, $2, $3)",
-            )
-            .bind(task_id)
-            .bind(worker_id)
-            .bind(&result_str)
-            .fetch_one(transaction.as_mut())
-            .await
-            .expect("failed to complete task canonically");
-            (outcome, None)
-        }
-        TaskResult::Err(err) => {
-            let error_code = err.error_code.as_ref().map(|c| c.to_string());
-            sqlx::query(
-                "INSERT INTO horsies_task_attempts (
-                     task_id, attempt, outcome, will_retry, started_at, finished_at,
-                     error_code, error_message, worker_id
-                 ) VALUES ($1, $2, 'FAILED', FALSE, $3, NOW(), $4, $5, $6)",
-            )
-            .bind(task_id)
-            .bind(retry_count + 1)
-            .bind(started_at)
-            .bind(&error_code)
-            .bind(&err.message)
-            .bind(worker_id)
-            .execute(transaction.as_mut())
-            .await
-            .expect("failed to record failed attempt");
-            let outcome: String = sqlx::query_scalar(
-                "SELECT outcome
-                 FROM horsies_fail_locked_task($1, $2, $3, $4, $5)",
-            )
-            .bind(task_id)
-            .bind(worker_id)
-            .bind(&result_str)
-            .bind(&error_code)
-            .bind(Option::<String>::None)
-            .fetch_one(transaction.as_mut())
-            .await
-            .expect("failed to fail task canonically");
-            (outcome, error_code)
-        }
-    };
-    assert_eq!(
-        outcome, "APPLIED",
-        "terminalization must apply exactly once"
-    );
-    let _ = error_code;
-    transaction
-        .commit()
-        .await
-        .expect("commit simulated completion");
-
-    // Call the workflow engine's completion handler.
-    let is_success = result.is_ok();
-    horsies::on_workflow_task_complete(
-        pool,
-        task_id,
-        &result_str,
-        is_success,
-        registry,
-        &horsies::PayloadPolicy::default(),
-        &horsies::RetentionConfig::default(),
-    )
-    .await
-    .expect("on_workflow_task_complete failed");
 }
 
 /// Get workflow task status by index.

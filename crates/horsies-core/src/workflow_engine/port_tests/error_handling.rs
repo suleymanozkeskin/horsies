@@ -184,6 +184,42 @@ async fn a_second_failure_while_paused_keeps_the_first_error() {
     super::support::end_workflows(&pool, &[workflow_id]).await;
 }
 
+/// Rust `test_on_error_fail_keeps_first_failed_error_by_index`: under
+/// `on_error = fail`, the stored workflow error is the error of the FAILED
+/// node with the lowest index while the workflow is RUNNING, whatever order
+/// the failures finish in. Node 2 never finishes, so the workflow stays
+/// RUNNING.
+#[tokio::test]
+#[serial]
+async fn the_stored_error_is_the_one_of_the_lowest_failed_index() {
+    let pool = shared_pool().await;
+    let mut workflow_spec = spec(
+        "fail_first_error_by_index",
+        vec![
+            after(0, "index_a", &[]),
+            after(1, "index_b", &[]),
+            after(2, "index_blocker", &[]),
+        ],
+    );
+    workflow_spec.on_error = OnError::Fail;
+    let workflow_id = start(
+        &pool,
+        &workflow_spec,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
+
+    fail(&pool, workflow_id, 1, "SECOND_ERROR").await;
+    fail(&pool, workflow_id, 0, "FIRST_ERROR").await;
+
+    assert_eq!(workflow_status(&pool, workflow_id).await, "RUNNING");
+    assert_eq!(
+        workflow_error_code(&pool, workflow_id).await.as_deref(),
+        Some("FIRST_ERROR")
+    );
+    super::support::end_workflows(&pool, &[workflow_id]).await;
+}
+
 /// `test_pause_guard_blocks_ready_to_enqueued`: a READY node of a PAUSED
 /// workflow gets no task when a dependency finishes.
 #[tokio::test]
