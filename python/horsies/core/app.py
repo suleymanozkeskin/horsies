@@ -95,6 +95,10 @@ from horsies.core.codec.validation_errors import ValueValidationError, exception
 from horsies.core.types.result import is_err
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.worker_profile import WorkerProfile, profile_path
+from horsies._catalog.manifest import dump_producer_manifest
+from horsies._core import ConnectivityPassed, ConnectivityRefused, CoreError, CoreHandle
+from horsies.core.history.identity.keys import IDEMPOTENCY_WINDOW_DEFAULT
+from horsies.core.manifest import to_producer_manifest
 from horsies.core.worker.profile_fit import (
     CONNECTIONS_HELP,
     ConnectionsExceedServer,
@@ -252,6 +256,19 @@ def _no_location(error: _E) -> _E:
     """
     error.location = None
     return error
+
+
+def _connectivity_failed(cause: str) -> ConfigurationError:
+    """Python's refusal of a connectivity step other than the LISTEN probe,
+    with its cause as the note. Pure."""
+    return _no_location(
+        ConfigurationError(
+            message='broker connectivity check failed',
+            code=ErrorCode.BROKER_INVALID_URL,
+            notes=[cause],
+            help_text='check database_url in PostgresConfig',
+        )
+    )
 
 
 def _worker_connection_errors(
@@ -1313,12 +1330,23 @@ class Horsies:
         return errors
 
     def _check_broker_connectivity(self) -> list[HorsiesError]:
-        """Check broker connectivity using isolated connections.
+        """Check the database paths with the core's connectivity check, the
+        rule of both clients (``CoreHandle.check_connectivity``).
 
-        Uses a short-lived async engine/session to avoid mutating the app's
-        long-lived broker/session pool inside an ephemeral asyncio.run loop.
-        On a thread that runs an event loop, ``asyncio.run`` cannot start, so
-        the check reports ``CHECK_LIVE_ASYNC_CONTEXT`` and connects to nothing.
+        In order, stopping at the first failure: ``SELECT 1`` on
+        ``database_url``; ``SELECT 1`` on ``session_database_url`` when it
+        differs; in PgBouncer transaction mode, a LISTEN probe on the session
+        URL that must receive a NOTIFY within 2 s. The check runs on a core
+        handle of its own, built from ``config.broker`` with the schema mode
+        ``OBSERVE_ONLY`` (no schema step), and closes it; the app's broker is
+        not built. On a thread that runs an event loop the blocking core call
+        cannot run, so the check reports ``CHECK_LIVE_ASYNC_CONTEXT`` and
+        connects to nothing.
+
+        Returns at most one error, ``BROKER_INVALID_URL``: "broker listener
+        capability check failed" for the probe, "broker connectivity check
+        failed" for every other step and for a core that cannot run the
+        call. Nothing is written but the probe's one NOTIFY.
         """
         if in_running_event_loop():
             return [
@@ -1337,89 +1365,58 @@ class Horsies:
                     )
                 )
             ]
-
-        import asyncio
-
-        import psycopg
-        from sqlalchemy import text
-        from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-        from horsies.core.brokers.session_capability import (
-            probe_session_capability,
+        handle = CoreHandle(
+            dump_producer_manifest(
+                to_producer_manifest(
+                    self.config.broker,
+                    schema='OBSERVE_ONLY',
+                    idempotency_reservation_window=IDEMPOTENCY_WINDOW_DEFAULT,
+                ),
+            ),
+            pool_profile='PRODUCER',
         )
-        from horsies.core.utils.url import sqlalchemy_url, to_psycopg_url
-
-        HEALTH_CHECK_SQL = text("""SELECT 1""")
-        LISTENER_PROBE_TIMEOUT_SECONDS = 2.0
-
-        errors: list[HorsiesError] = []
         try:
-            base_engine_cfg = self.config.broker.sqlalchemy_engine_kwargs()
-
-            async def _test_connection(
-                database_url: str,
-                *,
-                connect_args: dict[str, object] | None = None,
-            ) -> None:
-                engine_cfg = dict(base_engine_cfg)
-                if connect_args:
-                    engine_cfg['connect_args'] = connect_args
-                health_engine = create_async_engine(
-                    sqlalchemy_url(database_url), **engine_cfg
-                )
-                health_session_factory = async_sessionmaker(
-                    health_engine, expire_on_commit=False
-                )
-                try:
-                    async with health_session_factory() as session:
-                        await session.execute(HEALTH_CHECK_SQL)
-                finally:
-                    await health_engine.dispose()
-
-            async def _run_listener_probe() -> None:
-                try:
-                    await probe_session_capability(
-                        to_psycopg_url(
-                            self.config.broker.effective_session_database_url
-                        ),
-                        timeout_seconds=LISTENER_PROBE_TIMEOUT_SECONDS,
+            outcome = handle.check_connectivity()
+        except CoreError as exc:
+            return [_connectivity_failed(str(exc))]
+        finally:
+            self._close_check_handle(handle)
+        match outcome:
+            case ConnectivityPassed():
+                return []
+            case ConnectivityRefused(step='LISTENER', message=message):
+                return [
+                    _no_location(
+                        ConfigurationError(
+                            message='broker listener capability check failed',
+                            code=ErrorCode.BROKER_INVALID_URL,
+                            notes=[
+                                'session_database_url appears to be transaction-pooled; '
+                                'LISTEN notification was not delivered',
+                                message,
+                            ],
+                            help_text=(
+                                'use a direct/session-capable Postgres URL for '
+                                'session_database_url'
+                            ),
+                        )
                     )
-                except (asyncio.TimeoutError, psycopg.Error) as exc:
-                    raise ConfigurationError(
-                        message='broker listener capability check failed',
-                        code=ErrorCode.BROKER_INVALID_URL,
-                        notes=[
-                            'session_database_url appears to be transaction-pooled; LISTEN notification was not delivered',
-                        ],
-                        help_text='use a direct/session-capable Postgres URL for session_database_url',
-                    ) from exc
+                ]
+            case ConnectivityRefused(message=message):
+                return [_connectivity_failed(message)]
+            case _ as unreachable:
+                assert_never(unreachable)
 
-            async def _test_all_connections() -> None:
-                await _test_connection(
-                    self.config.broker.database_url.get_secret_value(),
-                    connect_args=self.config.broker.pooled_connect_args,
-                )
-                if self.config.broker.session_database_url is not None:
-                    await _test_connection(
-                        self.config.broker.session_database_url.get_secret_value()
-                    )
-                if self.config.broker.pgbouncer_transaction_mode:
-                    await _run_listener_probe()
-
-            asyncio.run(_test_all_connections())
-        except HorsiesError as exc:
-            errors.append(exc)
-        except Exception as exc:
-            errors.append(
-                _no_location(
-                    ConfigurationError(
-                        message='broker connectivity check failed',
-                        code=ErrorCode.BROKER_INVALID_URL,
-                        notes=[str(exc)],
-                        help_text='check database_url in PostgresConfig',
-                    )
-                )
+    def _close_check_handle(self, handle: CoreHandle) -> None:
+        """Close the core handle of a live check. A core that cannot run the
+        close is logged: the check's answer stands, and the process holds the
+        handle's pools until it ends."""
+        try:
+            _ = handle.close()
+        except CoreError as exc:
+            self.logger.warning(
+                'the core handle of the live check did not close: %s', exc,
             )
-        return errors
 
     def _check_worker_connections(self) -> list[HorsiesError]:
         """Compare each worker profile with the server connection limit.
