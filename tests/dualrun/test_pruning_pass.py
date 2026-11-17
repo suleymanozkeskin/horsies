@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """Dual-run of the pruning pass moving onto the 0006 pruning functions.
 
 Both sides seed the same state on a fresh baseline database (the default
@@ -26,13 +27,21 @@ The snapshots must be equal and the pass reports must be equal. Three cases
 pin the rule differences of the switch; one of them seeds a 43-day-old leaf
 detached out of band without a catalog record, so the published manifest
 still names it.
+
+Caller pairs (the switch of the reaper's pruning to the core), on the same
+seeds: reference = the Python caller before the switch
+(``reference/pruning_caller.py``: ``prune_expired_partitions`` on the broker
+resources' ``partition_maintenance``, summarized); candidate =
+``ReaperMixin._run_partition_pruning``, the pass in the core
+(``CoreHandle.prune_expired_partitions_async``). The snapshots, the partition
+tree included, and the summaries must be equal.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final, LiteralString
@@ -40,8 +49,11 @@ from typing import Final, LiteralString
 import psycopg
 import pytest
 from psycopg import sql
+from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
+
+from horsies.core.brokers.postgres import PostgresBroker
 
 from horsies.core.history.commands import (
     PRUNE_BOUNDS,
@@ -51,7 +63,11 @@ from horsies.core.history.commands import (
     PruneBounds,
 )
 from horsies.core.history.maintenance.database import PartitionMaintenanceDatabase
-from horsies.core.history.maintenance.pruning import PrunePass, prune_expired_partitions
+from horsies.core.history.maintenance.pruning import (
+    PrunePass,
+    PrunePassSummary,
+    prune_expired_partitions,
+)
 from horsies.core.history.outcomes import LeafCreated, PruneReach
 from horsies.core.history.partitions.manager import create_daily_leaf
 from horsies.core.history.partitions.publication import (
@@ -59,11 +75,14 @@ from horsies.core.history.partitions.publication import (
     UnpublishedLoader,
 )
 from horsies.core.history.reads.publisher import StagedLoaderPublisher
+from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import Err, Ok, Result
+from horsies.core.worker.reaper import ReaperMixin
 from tests.dualrun.capture import Connection
 from tests.dualrun.clients import sqlalchemy_url
 from tests.dualrun.compare import compare_snapshots, render_diff
 from tests.dualrun.databases import DualRunDatabase, install_baseline_schema
+from tests.dualrun.reference import pruning_caller
 from tests.dualrun.reference.pruning import prune_expired_partitions_before
 from tests.dualrun.selfcheck import (
     SelfCheckRun,
@@ -314,9 +333,9 @@ async def _pass(database: DualRunDatabase, run: PrunePassRun) -> PrunePass:
 
 
 @dataclass(frozen=True, slots=True)
-class SideRun:
+class SideRun[R]:
     run: SelfCheckRun
-    report: PrunePass
+    report: R
     unrecorded_after_pass: tuple[str, ...]
     """Leaves without a parent whose detach the catalog does not record after
     the pass. The capture reads a detached relation only through its catalog
@@ -346,9 +365,12 @@ def _record_unrecorded_detaches(connection: Connection) -> tuple[str, ...]:
     return names
 
 
-def _run_side(
-    database: DualRunDatabase, anchors: Anchors, seeds: Seeds, run: PrunePassRun
-) -> Result[SideRun, SelfCheckStepFailed]:
+def _run_side[R](
+    database: DualRunDatabase,
+    anchors: Anchors,
+    seeds: Seeds,
+    act: Callable[[DualRunDatabase], Coroutine[object, object, R]],
+) -> Result[SideRun[R], SelfCheckStepFailed]:
     with psycopg.connect(database.url, autocommit=True) as connection:
         match read_run_start(connection):
             case Err(failed):
@@ -362,7 +384,7 @@ def _run_side(
                 pass
         try:
             _seed(database, connection, anchors, seeds)
-            report = asyncio.run(_pass(database, run))
+            report = asyncio.run(act(database))
             unrecorded = _record_unrecorded_detaches(connection)
         except (psycopg.Error, SQLAlchemyError) as exc:
             return Err(SelfCheckStepFailed(step='seed and prune', cause=str(exc)))
@@ -373,7 +395,7 @@ def _run_side(
                 return Ok(SideRun(run=captured, report=report, unrecorded_after_pass=unrecorded))
 
 
-def _ok(result: Result[SideRun, SelfCheckStepFailed]) -> SideRun:
+def _ok[R](result: Result[SideRun[R], SelfCheckStepFailed]) -> SideRun[R]:
     match result:
         case Ok(run):
             return run
@@ -381,22 +403,40 @@ def _ok(result: Result[SideRun, SelfCheckStepFailed]) -> SideRun:
             pytest.fail(f'{failed.step}: {failed.cause}')
 
 
-def _same_hour(first: SideRun, second: SideRun) -> bool:
+def _same_hour[R](first: SideRun[R], second: SideRun[R]) -> bool:
     hour = 3600
     return first.run.window.start.timestamp() // hour == second.run.window.end.timestamp() // hour
 
 
-def _pair(make_database: MakeDatabase, seeds: Seeds) -> tuple[SideRun, SideRun]:
+def _act(run: PrunePassRun) -> Callable[[DualRunDatabase], Coroutine[object, object, PrunePass]]:
+    return lambda database: _pass(database, run)
+
+
+def _sides[R](
+    make_database: MakeDatabase,
+    seeds: Seeds,
+    reference_act: Callable[[DualRunDatabase], Coroutine[object, object, R]],
+    candidate_act: Callable[[DualRunDatabase], Coroutine[object, object, R]],
+) -> tuple[SideRun[R], SideRun[R]]:
     for attempt in range(1, ATTEMPTS + 1):
         anchors = _anchors()
-        reference = _ok(
-            _run_side(make_database(), anchors, seeds, prune_expired_partitions_before)
-        )
-        candidate = _ok(_run_side(make_database(), anchors, seeds, prune_expired_partitions))
+        reference = _ok(_run_side(make_database(), anchors, seeds, reference_act))
+        candidate = _ok(_run_side(make_database(), anchors, seeds, candidate_act))
         if attempt < ATTEMPTS and not _same_hour(reference, candidate):
             continue
         return reference, candidate
     raise AssertionError('the loop returns on its last attempt')
+
+
+def _pair(
+    make_database: MakeDatabase, seeds: Seeds
+) -> tuple[SideRun[PrunePass], SideRun[PrunePass]]:
+    return _sides(
+        make_database,
+        seeds,
+        _act(prune_expired_partitions_before),
+        _act(prune_expired_partitions),
+    )
 
 
 def _entries(report: PrunePass) -> list[tuple[str, str, str | None]]:
@@ -516,3 +556,100 @@ def test_a_leaf_detached_out_of_band_is_recorded_and_dropped(
     ]
     assert _entries(candidate.report) == [heartbeat, (detached, 'LeafDetached', 'LeafDropped')]
     assert candidate.report.errors == ()
+
+
+# ---- The caller switch: the Python reaper caller against the core ----
+
+WORKER_CONNECTIONS: Final = 4
+"""The pool size of the worker broker of a caller pair."""
+
+
+async def _caller_pass(database: DualRunDatabase, python_caller: bool) -> PrunePassSummary:
+    broker = PostgresBroker(
+        PostgresConfig(
+            database_url=SecretStr(database.url),
+            pool_size=WORKER_CONNECTIONS,
+            max_overflow=0,
+        )
+    )
+    try:
+        match await broker.select_resources():
+            case Err(limit):
+                raise AssertionError(f'broker resources: {limit.describe()}')
+            case Ok(resources):
+                pass
+        match python_caller:
+            case True:
+                return await pruning_caller.run_partition_pruning(
+                    ReaperMixin(), broker, resources
+                )
+            case False:
+                return await ReaperMixin()._run_partition_pruning(broker, resources)
+    finally:
+        _ = await broker.close_async()
+
+
+def _caller_act(python_caller: bool) -> Callable[[DualRunDatabase], Coroutine[object, object, PrunePassSummary]]:
+    return lambda database: _caller_pass(database, python_caller)
+
+
+def _caller_pair(
+    make_database: MakeDatabase, seeds: Seeds
+) -> tuple[SideRun[PrunePassSummary], SideRun[PrunePassSummary]]:
+    return _sides(make_database, seeds, _caller_act(True), _caller_act(False))
+
+
+@pytest.mark.parametrize(
+    'seeds',
+    [
+        STANDARD,
+        Seeds(
+            expired_history=True,
+            out_of_band_detach=False,
+            blocked_interrupted=True,
+            unpublished_leaf=False,
+        ),
+        Seeds(
+            expired_history=False,
+            out_of_band_detach=True,
+            blocked_interrupted=False,
+            unpublished_leaf=False,
+        ),
+        Seeds(
+            expired_history=False,
+            out_of_band_detach=False,
+            blocked_interrupted=False,
+            unpublished_leaf=True,
+        ),
+    ],
+    ids=['standard', 'blocked-interrupted', 'out-of-band-detach', 'unpublished-leaf'],
+)
+def test_the_core_reaper_pass_prunes_as_the_python_reaper_pass(
+    empty_database: MakeDatabase, seeds: Seeds
+) -> None:
+    reference, candidate = _caller_pair(empty_database, seeds)
+
+    diff = compare_snapshots(reference.run.snapshot, candidate.run.snapshot)
+
+    assert diff.entries == (), render_diff(diff)
+    assert candidate.report == reference.report
+    assert candidate.unrecorded_after_pass == reference.unrecorded_after_pass == ()
+    assert candidate.report.errors == ()
+
+
+def test_the_core_reaper_pass_reports_the_standard_seeds(
+    empty_database: MakeDatabase,
+) -> None:
+    """The summary of the standard seeds, with Python's refusal text and counts."""
+    _, candidate = _caller_pair(empty_database, STANDARD)
+    anchors = _anchors()
+
+    assert candidate.report == PrunePassSummary(
+        finalized_leaves=(_leaf_name(anchors.history(42)),),
+        detached_count=3,
+        dropped_count=3,
+        refusals=(f'{_leaf_name(anchors.history(41))}: LeafPendingBlocked',),
+        errors=(),
+        reach=PruneReach.WITHIN_BOUNDS,
+    )
+    assert candidate.report.acted

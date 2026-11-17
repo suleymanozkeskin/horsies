@@ -33,15 +33,27 @@ from tests.dualrun.cells import (
     NormalizeError,
     PendingDocument,
     PendingId,
+    RawRow,
     RawSnapshot,
     StableCell,
     StableRow,
     cell_ids,
+    generated_name,
     stable_rows,
 )
-from tests.dualrun.rules import IdFamily, SnapshotCatalog, TableRules, catalog_defects
+from tests.dualrun.rules import (
+    ColumnSpec,
+    Exact,
+    GeneratedName,
+    IdFamily,
+    SnapshotCatalog,
+    TableRules,
+    catalog_defects,
+)
 from tests.dualrun.values import (
     Cell,
+    ExactValue,
+    NullValue,
     IdLabel,
     JsonDocument,
     NormalizedValue,
@@ -91,12 +103,36 @@ class AmbiguousGroup:
     row_count: int
 
 
+PARTITION_TREE: Final = TableRules(
+    name='partition tree',
+    columns=(
+        ColumnSpec(name='parent', rule=Exact()),
+        ColumnSpec(name='leaf', rule=GeneratedName()),
+        ColumnSpec(name='detach_pending', rule=Exact()),
+        ColumnSpec(name='bound', rule=Exact()),
+    ),
+    order_by=('parent', 'leaf'),
+    identity=('parent', 'leaf'),
+)
+"""The rules of the partition tree section: one row per leaf that
+``pg_inherits`` attaches to a partitioned ``horsies_`` parent. A leaf name
+holds a day or an hour (``GeneratedName``); a bound is ``the catalog bounds``
+when it equals the range of the leaf's catalog row (whose anchors compare by
+their own rules), else its text (a class parent's list bound, an open
+bound)."""
+
+
 @dataclass(frozen=True, slots=True)
 class NormalizedSnapshot:
-    """A database state with ids, clock values and ignored columns normalized."""
+    """A database state with ids, clock values and ignored columns normalized.
+
+    ``partition_tree`` holds the rows of ``PARTITION_TREE``, in (parent, leaf)
+    order.
+    """
 
     tables: tuple[NormalizedTable, ...]
     ambiguities: tuple[AmbiguousGroup, ...]
+    partition_tree: tuple[NormalizedRow, ...] = ()
 
     def table(self, name: str) -> NormalizedTable:
         """The table called ``name``. The table must be in the catalog."""
@@ -406,6 +442,22 @@ def _assert_shape(raw: RawSnapshot, catalog: SnapshotCatalog) -> None:
             ), f'a raw row of {table.name} has {len(row)} cells, the rules have {width}'
 
 
+def _partition_tree_row(row: RawRow, window: RunWindow) -> NormalizedRow:
+    """One partition tree row by the rules of ``PARTITION_TREE``. Pure."""
+    match row:
+        case (str() as parent, str() as leaf, str() as detach_pending, bound):
+            return (
+                ExactValue(text=parent),
+                generated_name(leaf, window),
+                ExactValue(text=detach_pending),
+                NullValue() if bound is None else ExactValue(text=bound),
+            )
+        case _:
+            raise AssertionError(
+                f'a partition tree row is {row!r}, not (parent, leaf, detach pending, bound)'
+            )
+
+
 def normalize_snapshot(
     raw: RawSnapshot,
     catalog: SnapshotCatalog,
@@ -434,4 +486,12 @@ def normalize_snapshot(
         normalized, groups = _label_table(table_index, table, stable, book)
         tables.append(normalized)
         ambiguities.extend(groups)
-    return Ok(NormalizedSnapshot(tables=tuple(tables), ambiguities=tuple(ambiguities)))
+    return Ok(
+        NormalizedSnapshot(
+            tables=tuple(tables),
+            ambiguities=tuple(ambiguities),
+            partition_tree=tuple(
+                _partition_tree_row(row, window) for row in raw.partition_tree
+            ),
+        )
+    )

@@ -25,8 +25,12 @@ tick.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Final, assert_never
 
 from sqlalchemy.exc import SQLAlchemyError
+
+from horsies._core import CoreHandle, PruneFailed, PrunePassRecord
+from horsies.core.types.core_failure import CoreOperationFailed
 
 from ..commands import (
     DETACH_STATEMENT_TIMEOUT_MS,
@@ -72,8 +76,12 @@ __all__ = [
     'DETACH_STATEMENT_TIMEOUT_MS',
     'HistoryLeafSwept',
     'PRUNE_BOUNDS',
+    'PRUNING_SUBJECT',
     'PrunePass',
+    'PrunePassSummary',
     'prune_expired_partitions',
+    'prune_expired_partitions_in_core',
+    'summary_of_pass',
     'sweep_expired_history_leaves',
 ]
 
@@ -377,3 +385,86 @@ async def prune_expired_partitions(
         ),
         reach=_combined_reach(candidates.reach, heartbeat.reach, history.reach),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class PrunePassSummary:
+    """The facts of one pruning pass that the reaper logs and keeps in its
+    pruning health (``ReaperMixin._run_reaper_pass``).
+
+    ``refusals`` and ``errors`` are the entries of ``PrunePass``: one per
+    leaf, ``leaf: OutcomeName`` and ``leaf: cause``. ``detached_count``
+    counts the swept leaves left detached, by this pass or an earlier one;
+    ``dropped_count`` the swept leaves this pass dropped.
+    """
+
+    finalized_leaves: tuple[str, ...]
+    detached_count: int
+    dropped_count: int
+    refusals: tuple[str, ...]
+    errors: tuple[str, ...]
+    reach: PruneReach
+
+    @property
+    def acted(self) -> bool:
+        """Whether the pass has anything worth a log line. A swept leaf is
+        either dropped or listed as a refusal, so this equals
+        ``PrunePass.acted``."""
+        return bool(
+            self.finalized_leaves
+            or self.dropped_count
+            or self.refusals
+            or self.errors
+        )
+
+
+def summary_of_pass(prune: PrunePass) -> PrunePassSummary:
+    """The summary of one Python pass. Pure."""
+    return PrunePassSummary(
+        finalized_leaves=prune.finalized_leaves,
+        detached_count=prune.detached_count,
+        dropped_count=prune.dropped_count,
+        refusals=prune.refusals,
+        errors=prune.errors,
+        reach=prune.reach,
+    )
+
+
+PRUNING_SUBJECT: Final = 'CoreHandle.prune_expired_partitions_async'
+"""The subject of a ``CoreOperationFailed`` of the core pruning pass."""
+
+
+async def prune_expired_partitions_in_core(handle: CoreHandle) -> PrunePassSummary:
+    """One pruning pass in the core (``CoreHandle.prune_expired_partitions_async``):
+    the steps of ``prune_expired_partitions`` with ``StagedLoaderPublisher``
+    on the session-work core pool of ``handle``, whose connections carry the
+    TCP keepalives and the TCP user timeout of the config. The candidate
+    read, the finalize phase, then the heartbeat and the period sweeps; each
+    leaf's detach and drop commit alone, and a leaf's error or refusal is
+    listed in the summary.
+
+    Returns the summary of the core's record. Raises:
+
+    - ``CoreOperationFailed`` when the pass has no report (the connect, the
+      client family check or the candidate read failed); nothing was
+      detached or dropped;
+    - ``CoreError`` when the core of this process cannot run the pass.
+
+    A cancel of the caller does not stop the pass: the core runs it to its
+    end, within its bound of acted leaves.
+    """
+    record = await handle.prune_expired_partitions_async()
+    match record:
+        case PrunePassRecord():
+            return PrunePassSummary(
+                finalized_leaves=tuple(record.finalized_leaves),
+                detached_count=record.detached,
+                dropped_count=record.dropped,
+                refusals=tuple(record.refusals),
+                errors=tuple(record.errors),
+                reach=PruneReach(record.reach),
+            )
+        case PruneFailed(message=message, retryable=retryable):
+            raise CoreOperationFailed(PRUNING_SUBJECT, message, retryable)
+        case _ as unreachable:
+            assert_never(unreachable)
