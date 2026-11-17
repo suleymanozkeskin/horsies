@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -31,13 +30,12 @@ from horsies.core.models.workflow import (
 )
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.types.result import is_ok, is_err
-from horsies.core.workflows.engine import on_workflow_task_complete
 from horsies.core.workflows.lifecycle import expire_paused_workflows
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 
 from .conftest import make_simple_task, make_failing_task, make_workflow_spec, start_ok
-from tests.integration.conftest import task_name_for
+from tests.integration.conftest import finish_task
 from tests.broker_resources_support import current_resources, listener_of, replaced_resources
 
 
@@ -58,44 +56,6 @@ async def _workflow_completed_at(
             {'id': workflow_id},
         )
     ).scalar_one()
-
-
-async def _complete_task(
-    session: AsyncSession,
-    broker: PostgresBroker,
-    workflow_id: str,
-    task_index: int,
-    result: TaskResult[Any, TaskError],
-) -> None:
-    """Simulate task completion by looking up the task_id and calling the engine.
-
-    Polls for task_id with a short timeout to handle the case where a
-    predecessor's completion has just enqueued this task (setting task_id)
-    but the commit hasn't been visible yet.
-    """
-    deadline = time.monotonic() + 2.0
-    while True:
-        res = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = :idx
-            """),
-            {'wf_id': workflow_id, 'idx': task_index},
-        )
-        row = res.fetchone()
-        if row and row[0]:
-            await on_workflow_task_complete(
-            session, row[0], result, broker,
-            task_name=await task_name_for(session, row[0]),
-        )
-            await session.commit()
-            return
-        if time.monotonic() >= deadline:
-            raise AssertionError(
-                f'Task {task_index} in workflow {workflow_id} has no task_id '
-                f'after 2s (row={row}). Task was never enqueued.',
-            )
-        await asyncio.sleep(0.05)
 
 
 # =============================================================================
@@ -149,7 +109,7 @@ class TestWorkflowHandleStatus:
 
         handle = await start_ok(spec, broker)
 
-        await _complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         status_r = await handle.status_async()
         assert is_ok(status_r)
@@ -172,7 +132,7 @@ class TestWorkflowHandleStatus:
 
         handle = await start_ok(spec, broker)
 
-        await _complete_task(
+        await finish_task(
             session,
             broker,
             handle.workflow_id,
@@ -201,7 +161,7 @@ class TestWorkflowHandleStatus:
 
         handle = await start_ok(spec, broker)
 
-        await _complete_task(
+        await finish_task(
             session,
             broker,
             handle.workflow_id,
@@ -257,7 +217,7 @@ class TestWorkflowHandleGet:
 
         handle = await start_ok(spec, broker)
 
-        await _complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
 
         result = await handle.get_async(timeout_ms=1000)
         assert result.is_ok()
@@ -280,7 +240,7 @@ class TestWorkflowHandleGet:
 
         handle = await start_ok(spec, broker)
 
-        await _complete_task(
+        await finish_task(
             session,
             broker,
             handle.workflow_id,
@@ -309,7 +269,7 @@ class TestWorkflowHandleGet:
 
         handle = await start_ok(spec, broker)
 
-        await _complete_task(
+        await finish_task(
             session,
             broker,
             handle.workflow_id,
@@ -340,7 +300,7 @@ class TestWorkflowHandleGet:
             on_error=OnError.PAUSE,
         )
         handle = await start_ok(spec, broker)
-        await _complete_task(
+        await finish_task(
             session,
             broker,
             handle.workflow_id,
@@ -383,7 +343,7 @@ class TestWorkflowHandleGet:
             on_error=OnError.PAUSE,
         )
         handle = await start_ok(spec, broker)
-        await _complete_task(
+        await finish_task(
             session,
             broker,
             handle.workflow_id,
@@ -526,8 +486,8 @@ class TestWorkflowHandleResults:
         handle = await start_ok(spec, broker)
 
         # Complete both
-        await _complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
-        await _complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=20))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=20))
 
         results_r = await handle.results_async()
         assert is_ok(results_r)
@@ -558,8 +518,8 @@ class TestWorkflowHandleResults:
 
         handle = await start_ok(spec, broker)
 
-        await _complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
-        await _complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=20))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=20))
 
         result_a = await handle.result_for_async(node_a.key())
         result_b = await asyncio.to_thread(handle.result_for, node_b)
@@ -742,7 +702,7 @@ class TestWorkflowHandleResults:
 
         handle = await start_ok(spec, broker)
 
-        await _complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=42))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=42))
 
         tasks_r = await handle.tasks_async()
         assert is_ok(tasks_r)
@@ -1185,7 +1145,7 @@ class TestWorkflowHandleCancel:
         handle = await start_ok(spec, broker)
 
         # Complete the workflow first
-        await _complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         status_r = await handle.status_async()
         assert is_ok(status_r)
@@ -1253,7 +1213,7 @@ class TestWorkflowHandleCancel:
         assert cancelled_at is not None
 
         # The still-running task finishes after the cancel.
-        await _complete_task(
+        await finish_task(
             session, broker, handle.workflow_id, 0, TaskResult(ok=10),
         )
 
@@ -1846,8 +1806,8 @@ class TestWorkflowHandleOutput:
         handle = await start_ok(spec, broker)
 
         # Complete both
-        await _complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
-        await _complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=200))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=200))
 
         result = await handle.get_async(timeout_ms=1000)
         assert result.is_ok()
@@ -1878,9 +1838,9 @@ class TestWorkflowHandleOutput:
         handle = await start_ok(spec, broker)
 
         # Complete all
-        await _complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
-        await _complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=20))
-        await _complete_task(session, broker, handle.workflow_id, 2, TaskResult(ok=30))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=20))
+        await finish_task(session, broker, handle.workflow_id, 2, TaskResult(ok=30))
 
         result = await handle.get_async(timeout_ms=1000)
         assert result.is_ok()
@@ -1917,8 +1877,8 @@ class TestWorkflowHandleOutput:
         handle = await start_ok(spec, broker)
 
         # Complete A, then fail B
-        await _complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
-        await _complete_task(
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(
             session,
             broker,
             handle.workflow_id,
@@ -1953,8 +1913,8 @@ class TestWorkflowHandleOutput:
         handle = await start_ok(spec, broker)
 
         # Complete both with different values
-        await _complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
-        await _complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=200))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
+        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=200))
 
         results_r = await handle.results_async()
         assert is_ok(results_r)
@@ -1988,8 +1948,8 @@ class TestWorkflowHandleOutput:
         handle = await start_ok(spec, broker)
 
         # Complete both
-        await _complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=111))
-        await _complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=222))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=111))
+        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=222))
 
         result = await handle.get_async(timeout_ms=1000)
         assert result.is_ok()
@@ -2062,7 +2022,7 @@ class TestWorkflowHandlePauseResume:
         handle = await start_ok(spec, broker)
 
         # Complete the workflow
-        await _complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
         status_r = await handle.status_async()
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.COMPLETED
@@ -2214,8 +2174,8 @@ class TestWorkflowHandlePauseResume:
         assert status_r.ok_value == WorkflowStatus.RUNNING
 
         # Complete both tasks
-        await _complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
-        await _complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=20))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=20))
 
         status_r = await handle.status_async()
         assert is_ok(status_r)
@@ -2547,7 +2507,7 @@ class TestListenerFallbackContract:
         )
         handle = await start_ok(spec, broker)
 
-        await _complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
 
         listen_err = Err_(BrokerOperationFailed(
             code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
