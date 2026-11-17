@@ -8,6 +8,9 @@
 //! - [`PostgresBroker::mark_stale_running_as_failed`]: one stale RUNNING
 //!   pass, `horsies_stale_running_scan` and one `horsies_finish_stale_attempt`
 //!   per candidate.
+//! - [`PostgresBroker::finish_failed_attempt`] and
+//!   [`PostgresBroker::finish_ended_attempt`]: `horsies_finish_failed_attempt`
+//!   under the claimed-row rules `REFUSE` and `RELEASE`.
 //! - [`PostgresBroker::cancel_task`]: `horsies_cancel_task`, the
 //!   administrative cancel of one plain task (Python
 //!   `horsies.monitoring.task_actions.cancel_task`, and the core's monitoring
@@ -24,6 +27,7 @@
 
 use uuid::Uuid;
 
+use crate::broker::attempt_writes::{self, FinishFailedAttempt};
 use crate::broker::claims::{release_claims, ReleaseClaims, ReleaseOutcome};
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
@@ -32,8 +36,8 @@ use crate::broker::stale_recovery::{
     StaleRunningThresholds, ThresholdMs, STALE_RUNNING_SCAN_BATCH,
 };
 use crate::core::lifecycle::{
-    decode_outcome_row, GuardEvidence, ObservedTaskState, ObservedWorkflowTask, OutcomeDecodeError,
-    TerminalizationOutcome,
+    decode_outcome_row, FailedAttemptOutcome, GuardEvidence, ObservedTaskState,
+    ObservedWorkflowTask, OutcomeDecodeError, TerminalizationOutcome, UnreportedAttemptOutcome,
 };
 use crate::core::types::status::TaskStatus;
 use crate::db::{CheckoutClass, ParameterType, StatementBound, TypedStatement};
@@ -169,6 +173,49 @@ impl PostgresBroker {
             STALE_RUNNING_SCAN_BATCH,
         )
         .await
+    }
+
+    /// Write the failed attempt of a task whose child reported a result
+    /// (Python `horsies.core.worker.failed_attempt.finish_failed_attempt`,
+    /// claimed-row rule `REFUSE`): `horsies_finish_failed_attempt`, one
+    /// statement in autocommit on the main core pool, checked out as
+    /// reserved work. Under the full fence (worker, claim generation, and
+    /// the retry count of a retry) it writes the attempt row and the retry,
+    /// or the terminal failure with its capacity wake (a plain task), or
+    /// nothing on a refusal. The retry request is the caller's.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); [`BrokerError::Statement`] (nothing written,
+    /// or `OutcomeUnknown`: the same command sent again reports a committed
+    /// failure as `AlreadyApplied` and a committed retry as `LostClaim`);
+    /// [`BrokerError::TerminalizationContract`] for a row outside the wire
+    /// contract.
+    pub async fn finish_failed_attempt(
+        &self,
+        command: &FinishFailedAttempt,
+    ) -> Result<FailedAttemptOutcome, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        attempt_writes::finish_failed_attempt(open.main(), self.statement_log(), command).await
+    }
+
+    /// Write the end of an attempt whose child ended without a result
+    /// (Python `horsies.core.worker.failed_attempt.finish_ended_attempt`,
+    /// claimed-row rule `RELEASE`): a row still CLAIMED by this worker at
+    /// this claim generation goes back to the queue with no attempt row
+    /// (`Released`); any other row is written or refused as
+    /// [`PostgresBroker::finish_failed_attempt`] does. One statement, as
+    /// there.
+    ///
+    /// Errors: as [`PostgresBroker::finish_failed_attempt`]; after
+    /// `OutcomeUnknown` a committed release is reported as a refusal.
+    pub async fn finish_ended_attempt(
+        &self,
+        command: &FinishFailedAttempt,
+    ) -> Result<UnreportedAttemptOutcome, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        attempt_writes::finish_unreported_attempt(open.main(), self.statement_log(), command).await
     }
 
     /// Cancel one plain task (Python `horsies.monitoring.task_actions.cancel_task`):

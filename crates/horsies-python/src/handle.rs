@@ -24,6 +24,9 @@ use crate::bridge::CallKind;
 use crate::errors::{refusal_error, ManifestRefused};
 use crate::operations::cancel::cancel_task_operation;
 use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
+use crate::operations::failed_attempt::{
+    finish_ended_attempt_operation, finish_failed_attempt_operation, FinishFailedAttemptRequest,
+};
 use crate::operations::release::{release_claims_operation, ReleaseClaimsRequest};
 use crate::operations::schema::{install_operation, schema_status_operation};
 use crate::operations::stale_claims::requeue_stale_claimed_operation;
@@ -313,6 +316,48 @@ impl CoreHandle {
                 stale_after_ms,
                 finalizing_stale_after_ms,
             ),
+        )
+    }
+
+    /// Write the failed attempt of a child that reported a result
+    /// (`horsies_finish_failed_attempt`, claimed-row rule `REFUSE`):
+    /// `AttemptFailureApplied`, `AttemptRetryScheduled`, `AttemptAlreadyApplied`,
+    /// `AttemptLostClaim`, `AttemptSourceStateConflict`, `AttemptTaskAbsent`,
+    /// or `AttemptWriteFailed`. Writes, in one statement. Awaitable only: its
+    /// caller, the worker's finalize, runs on the worker's event loop.
+    fn finish_failed_attempt_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, FinishFailedAttemptRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.finish_failed_attempt_async",
+            CallKind::Write,
+            finish_failed_attempt_operation(self.connection(), request.get().command()),
+        )
+    }
+
+    /// Write the end of an attempt whose child ended without a result
+    /// (claimed-row rule `RELEASE`): `AttemptClaimReleased` for a row that
+    /// this claim still held CLAIMED, else the outcomes of
+    /// `finish_failed_attempt_async`. Writes, in one statement. Awaitable
+    /// only: its caller, the worker's dispatch, runs on the worker's event
+    /// loop.
+    fn finish_ended_attempt_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, FinishFailedAttemptRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.finish_ended_attempt_async",
+            CallKind::Write,
+            finish_ended_attempt_operation(self.connection(), request.get().command()),
         )
     }
 
