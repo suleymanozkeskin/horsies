@@ -1087,6 +1087,109 @@ async fn a_busy_lock_refuses_after_its_wait_and_changes_nothing() {
     database.drop().await;
 }
 
+/// Python `test_broker_postgres.py::TestBaselineInstall::test_install_finished_by_another_broker_while_waiting_is_not_repeated`:
+/// an installer that waits for the lock reads the state again under it. When
+/// another installer finished the chain during the wait, the waiter applies
+/// nothing and returns.
+#[tokio::test]
+#[serial]
+async fn an_install_finished_by_another_installer_during_the_wait_is_not_repeated() {
+    let database = MigrationTestDatabase::create().await;
+    let lock = InstallLockPlan {
+        key: rand::thread_rng().gen_range(1..i64::MAX),
+        wait: Duration::from_secs(60),
+    };
+    let holder = database.hold_lock(lock.key).await;
+    let other_installer = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        database
+            .install(ClientFamily::Rust, test_lock())
+            .await
+            .expect("the other installer installs the chain");
+        let installed = installed_on(&database).await;
+        let released: bool = holder
+            .query_one("SELECT pg_advisory_unlock($1)", &[&lock.key])
+            .await
+            .expect("release the lock")
+            .get(0);
+        assert!(released);
+        installed
+    };
+
+    let (waited, installed) =
+        tokio::join!(database.install(ClientFamily::Rust, lock), other_installer);
+
+    waited.expect("the waiter finds the chain current");
+    assert_eq!(installed_on(&database).await, installed);
+    assert_eq!(
+        bookkeeping_rows(&database).await,
+        chain_rows(embedded_migrations().len())
+    );
+    database.drop().await;
+}
+
+/// Python `test_broker_postgres.py::TestBaselineInstall::test_read_only_broker_runs_no_schema_statement`:
+/// an observe-only broker runs no schema statement. On an empty database its
+/// install calls return and the database stays empty.
+#[tokio::test]
+#[serial]
+async fn an_observe_only_broker_runs_no_schema_statement() {
+    let database = MigrationTestDatabase::create().await;
+    let broker = crate::broker::PostgresBroker::connect_observe_only(
+        &crate::core::config::PostgresConfig::from_url(database.database.url()),
+    )
+    .await
+    .expect("connect an observe-only broker");
+
+    broker
+        .ensure_schema_initialized()
+        .await
+        .expect("an observe-only broker installs nothing");
+    broker
+        .migrate()
+        .await
+        .expect("an observe-only broker migrates nothing");
+
+    assert!(!relation_exists(&database, MIGRATIONS_TABLE).await);
+    assert!(!relation_exists(&database, "horsies_client_family").await);
+    broker.close().await;
+    drop(broker);
+    database.drop().await;
+}
+
+/// Python `test_broker_postgres.py::TestEnsureSchemaInitialized::test_ensure_schema_initialized_returns_ok_on_success`:
+/// on a database that holds the chain and this client's family, the install
+/// of a broker returns `Ok`, again on a second call, and writes nothing.
+#[tokio::test]
+#[serial]
+async fn the_install_of_a_broker_on_a_current_database_is_ok_and_writes_nothing() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+    let before = installed_on(&database).await;
+    let broker = crate::broker::PostgresBroker::connect_with(
+        &crate::core::config::PostgresConfig::from_url(database.database.url()),
+    )
+    .await
+    .expect("connect the broker");
+
+    broker
+        .ensure_schema_initialized()
+        .await
+        .expect("a current database is installed");
+    broker
+        .ensure_schema_initialized()
+        .await
+        .expect("a second call is a no-op");
+
+    assert_eq!(installed_on(&database).await, before);
+    broker.close().await;
+    drop(broker);
+    database.drop().await;
+}
+
 /// A statement of migration 1000 fails: its transaction rolls back with the
 /// bookkeeping and family rows, and the lock is released.
 #[tokio::test]

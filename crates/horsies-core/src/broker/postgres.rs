@@ -7309,3 +7309,6 @@ mod task_info_code_tests {
 
 #[cfg(test)]
 mod result_read_spec_tests;
+
+#[cfg(test)]
+mod ping_and_wait_tests;

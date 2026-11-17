@@ -35,6 +35,8 @@ pub mod result_types;
 pub mod row;
 #[cfg(test)]
 mod send_path_tests;
+#[cfg(test)]
+mod session_url_tests;
 pub mod slot_health;
 pub mod stale_recovery;
 #[cfg(test)]
