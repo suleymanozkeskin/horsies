@@ -762,7 +762,7 @@ Each entry: Title -- summary -> URL
 - Errors Reference -- the error codes for both clients: task codes, send, workflow start and handle codes, HRS config codes -> /horsies/tasks/errors/
 - Error Types -- the Python error types: TaskError, BrokerResult and BrokerOperationError, the calls that run on the core, TaskSendError, WorkflowStartResult, HandleResult, HorsiesError, TaskResult -> /horsies/tasks/error-types/
 - Retrieving Results -- TaskHandle.get() -> /horsies/tasks/retrieving-results/
-- Retry Policy -- fixed/exponential backoff -> /horsies/tasks/retry-policy/
+- Retry Policy -- policy fields and limits, the retry delay (backoff, floor, jitter, cap), auto-retry triggers, retry vs rerun -> /horsies/tasks/retry-policy/
 
 ### Workflows
 - Workflow Semantics -- DAG behavior, failure, dependencies -> /horsies/concepts/workflows/workflow-semantics/
@@ -849,7 +849,8 @@ send, send_async, enqueue, dispatch, produce, TaskSendResult, TaskSendError, ret
 TaskResult, is_ok, is_err, ok_value, err_value -> /horsies/tasks/error-handling/
 BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode, TaskError, TaskSendErrorCode, error codes, UNHANDLED_EXCEPTION -> /horsies/tasks/errors/
 TaskHandle, get, get_async, timeout, result -> /horsies/tasks/retrieving-results/
-RetryPolicy, retry, backoff, exponential, fixed, auto_retry_for -> /horsies/tasks/retry-policy/
+retry, backoff, exponential, fixed, jitter, max_delay_seconds, auto_retry_for -> /horsies/tasks/retry-policy/
+RetryPolicy, RetryPolicy.fixed, RetryPolicy.exponential, exception_mapper -> /horsies/tasks/defining-tasks/#configure-retries
 PENDING, CLAIMED, RUNNING, COMPLETED, FAILED, task status -> /horsies/concepts/task-lifecycle/
 TaskResult, Result pattern, error as value -> /horsies/concepts/result-handling/
 QueueMode, DEFAULT, CUSTOM, priority, CustomQueueConfig -> /horsies/concepts/queue-modes/

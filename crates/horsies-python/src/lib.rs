@@ -168,6 +168,12 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::workflow_phase2::ParentAdvanceStoppedRecord>()?;
     module.add_class::<operations::workflow_phase2_recovery::Phase2RecoveryRecord>()?;
     module.add_class::<operations::workflow_phase2_recovery::Phase2RecoveryFailed>()?;
+    module.add_class::<operations::workflow_recovery::RecoveryCaseRecord>()?;
+    module.add_class::<operations::workflow_recovery::RecoveryPassRecord>()?;
+    module.add_class::<operations::workflow_recovery::RecoveryPassFailed>()?;
+    module.add_class::<operations::claim_settle::SettleRequest>()?;
+    module.add_class::<operations::claim_settle::ClaimsSettled>()?;
+    module.add_class::<operations::claim_settle::SettleFailed>()?;
     module.add_class::<child_handle::CoreChildHandle>()?;
     module.add_class::<scheduler::CoreScheduler>()?;
     module.add_class::<records::BrokerFailure>()?;

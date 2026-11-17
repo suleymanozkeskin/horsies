@@ -1703,6 +1703,7 @@ class TestWorkflowHandleCancel:
             session_factory=current_resources(broker).session_factory,
             listener=MagicMock(),
             cfg=cfg,
+            broker=broker,
         )
 
         # Simulate claim/cancel race: this worker owns a CLAIMED task while

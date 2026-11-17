@@ -29,6 +29,7 @@ use crate::errors::{refusal_error, ManifestRefused};
 use crate::operations::arguments::utc_instant;
 use crate::operations::cancel::cancel_task_operation;
 use crate::operations::claim::{claim_pass_operation, ClaimPassRequest};
+use crate::operations::claim_settle::{settle_claimed_workflow_tasks_operation, SettleRequest};
 use crate::operations::coverage::{ensure_partition_coverage_operation, CoverageRequestArgument};
 use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
 use crate::operations::expiry_and_orphans::{
@@ -74,6 +75,7 @@ use crate::operations::workflow_reads::{
     wait_workflow_result_operation, workflow_node_result_operation,
     workflow_node_results_operation, workflow_nodes_operation, workflow_status_operation,
 };
+use crate::operations::workflow_recovery::recover_workflows_operation;
 use crate::operations::workflow_resume::resume_workflow_operation;
 use crate::operations::workflow_retention::delete_expired_workflows_operation;
 use crate::operations::workflow_start::{start_workflow_operation, WorkflowStartRequest};
@@ -819,6 +821,50 @@ impl CoreHandle {
                 quarantine_after_attempts,
                 source,
             ),
+        )
+    }
+
+    /// One global workflow recovery pass of the reaper, with `failure_limit`
+    /// passes per workflow before it fails closed: `RecoveryPassRecord` or
+    /// `RecoveryPassFailed`. Writes; each candidate commits alone, and owed
+    /// child starts build their children through the child spec source. A
+    /// build that raised `KeyboardInterrupt` or `SystemExit` raises it again
+    /// after the pass. A negative value raises `OverflowError`; with no child
+    /// spec source it raises `RuntimeError`.
+    #[pyo3(signature = (*, failure_limit))]
+    fn recover_workflows_async<'py>(
+        &self,
+        py: Python<'py>,
+        failure_limit: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        let source = self.child_spec_source(core)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.recover_workflows_async",
+            CallKind::Write,
+            recover_workflows_operation(self.connection(), failure_limit, source),
+        )
+    }
+
+    /// Settle the claimed workflow tasks of one claim pass
+    /// (`horsies_workflow_claimed_tasks_settle`): `ClaimsSettled` with the
+    /// tasks of PAUSED and CANCELLED workflows, never to dispatch, or
+    /// `SettleFailed`. Writes, one statement per 1000 claims. A claim with no
+    /// task sends nothing.
+    fn settle_claimed_workflow_tasks_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'py, SettleRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.settle_claimed_workflow_tasks_async",
+            CallKind::Write,
+            settle_claimed_workflow_tasks_operation(self.connection(), request.get().parts()),
         )
     }
 

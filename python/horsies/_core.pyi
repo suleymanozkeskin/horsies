@@ -186,6 +186,17 @@ class CoreHandle:
         pass. A negative value raises OverflowError; with no child spec source it raises
         RuntimeError.
         """
+    def recover_workflows_async(self, *, failure_limit: int) -> asyncio.Future[RecoveryPassRecord | RecoveryPassFailed]:
+        """One global workflow recovery pass of the reaper, with failure_limit passes per workflow
+        before it fails closed. Writes; each candidate commits alone, and owed child starts build
+        their children through the child spec source. A build that raised KeyboardInterrupt or
+        SystemExit raises it again after the pass. A negative value raises OverflowError; with
+        no child spec source it raises RuntimeError.
+        """
+    def settle_claimed_workflow_tasks_async(self, request: SettleRequest) -> asyncio.Future[ClaimsSettled | SettleFailed]:
+        """Settle the claimed workflow tasks of one claim pass. Writes, one statement per 1000
+        claims. A request with no claim sends nothing.
+        """
     def pause_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed]:
         """Pause one workflow tree. Writes, in one statement. A row outside the function's contract
         raises PanicException.
@@ -2071,6 +2082,93 @@ class Phase2RecoveryRecord:
 class Phase2RecoveryFailed:
     """The pass failed before it recovered a record: the client family check, the discovery or
     the count. Nothing was recovered.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class RecoveryCaseRecord:
+    """Bounded work and outcome counts of one recovery case."""
+    @property
+    def rows_selected(self) -> int: ...
+    @property
+    def candidates_returned(self) -> int: ...
+    @property
+    def duration_ms(self) -> int: ...
+    @property
+    def refusals(self) -> int: ...
+    @property
+    def errors(self) -> int: ...
+    @property
+    def failures_counted(self) -> int: ...
+    @property
+    def limit_reached(self) -> int: ...
+
+
+@final
+class RecoveryPassRecord:
+    """What one pass did: the candidates recovered over every case, the failures that no case
+    counted, the workflows over the failure limit, and the counts of each case. The audit
+    page of cases 2/3 and 4 scanned case_2_3.rows_selected workflows and returned
+    case_2_3.candidates_returned completion candidates.
+    """
+    @property
+    def recovered(self) -> int: ...
+    @property
+    def pass_errors(self) -> int: ...
+    @property
+    def over_failure_limit(self) -> int: ...
+    @property
+    def case_0(self) -> RecoveryCaseRecord: ...
+    @property
+    def case_1(self) -> RecoveryCaseRecord: ...
+    @property
+    def case_1_5(self) -> RecoveryCaseRecord: ...
+    @property
+    def case_1_6(self) -> RecoveryCaseRecord: ...
+    @property
+    def case_2_3(self) -> RecoveryCaseRecord: ...
+    @property
+    def case_4(self) -> RecoveryCaseRecord: ...
+
+
+@final
+class RecoveryPassFailed:
+    """The pass failed: the client family check, a discovery statement, the audit page or the
+    count of workflows over the limit. report holds the counts of the cases before it.
+    """
+    @property
+    def report(self) -> RecoveryPassRecord: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class SettleRequest:
+    """The claims of one settle: the worker and each claimed workflow task with its claim
+    generation. A naive datetime raises TypeError.
+    """
+    def __init__(self, *, worker_id: str, claims: list[tuple[uuid.UUID, datetime.datetime]]) -> None: ...
+
+
+@final
+class ClaimsSettled:
+    """The settle committed: the tasks of PAUSED and CANCELLED workflows, never to dispatch, in
+    input order. Every other claim dispatches.
+    """
+    @property
+    def blocked_task_ids(self) -> list[uuid.UUID]: ...
+
+
+@final
+class SettleFailed:
+    """The settle failed: the client family check, a statement, or rows outside the function's
+    contract (not retryable). The statements before the failed one stay committed.
     """
     @property
     def message(self) -> str: ...

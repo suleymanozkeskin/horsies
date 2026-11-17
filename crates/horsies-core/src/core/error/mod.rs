@@ -117,6 +117,9 @@ pub enum ErrorCode {
     /// connections than the server has usable slots, or the server limit
     /// could not be read.
     CheckWorkerConnections,
+    /// `check --live` from a blocking call on a thread that runs an event
+    /// loop or a tokio runtime: the live phases did not run.
+    CheckLiveAsyncContext,
     BrokerInitFailed,
     CheckReservedCodeCollision,
     ConfigInvalidRetention,
@@ -180,6 +183,7 @@ impl ErrorCode {
             Self::ConfigInvalidResilience => "HRS-208",
             Self::ConfigInvalidWorkerProfile => "HRS-218",
             Self::CheckWorkerConnections => "HRS-219",
+            Self::CheckLiveAsyncContext => "HRS-217",
             Self::BrokerInitFailed => "HRS-211",
             Self::CheckReservedCodeCollision => "HRS-212",
             Self::ConfigInvalidRetention => "HRS-216",
@@ -248,6 +252,7 @@ impl ErrorCode {
             | Self::ConfigInvalidResilience
             | Self::ConfigInvalidWorkerProfile
             | Self::CheckWorkerConnections
+            | Self::CheckLiveAsyncContext
             | Self::BrokerInitFailed
             | Self::CheckReservedCodeCollision
             | Self::ConfigInvalidRetention => ErrorCategory::Config,
@@ -325,6 +330,7 @@ impl ErrorCode {
                 | Self::ConfigInvalidResilience
                 | Self::ConfigInvalidWorkerProfile
                 | Self::CheckWorkerConnections
+                | Self::CheckLiveAsyncContext
                 | Self::BrokerInitFailed
                 | Self::CheckReservedCodeCollision
                 | Self::ConfigInvalidRetention
@@ -526,6 +532,8 @@ mod tests {
             ErrorCategory::Config,
         );
         assert!(ErrorCode::CheckWorkerConnections.is_config_error());
+        assert_eq!(ErrorCode::CheckLiveAsyncContext.to_string(), "HRS-217");
+        assert!(ErrorCode::CheckLiveAsyncContext.is_config_error());
     }
 
     #[test]

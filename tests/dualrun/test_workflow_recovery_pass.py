@@ -23,6 +23,11 @@ The orphan pair holds a RUNNING workflow with no node (case 4). Its stored
 error is the one named difference: the catalog code
 ``WORKFLOW_START_INCOMPLETE`` in place of Python's ``E400``, which is not a
 catalog error (approved rule for the stored error of recovery case 4).
+
+The caller pair runs the same seed with the Python pass that the reaper
+called before the switch against the pass in the core
+(``ReaperMixin._recover_workflows``, ``CoreHandle.recover_workflows_async``):
+empty diff, equal health without durations.
 """
 
 from __future__ import annotations
@@ -45,6 +50,8 @@ from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import TaskNode, WorkflowDefinition, WorkflowSpec
 from horsies.core.types.result import Err, Ok
+from horsies.core.models.recovery import DEFAULT_WORKFLOW_RECOVERY_FAILURE_LIMIT
+from horsies.core.worker.reaper import ReaperMixin
 from horsies.core.workflows.recovery import recover_stuck_workflows_global
 from horsies.core.workflows.registry import register_workflow_definition
 from tests.dualrun.capture import Connection
@@ -367,3 +374,43 @@ def test_an_orphan_fails_with_the_catalog_code_in_place_of_e400(
             raise AssertionError(render_diff(run.diff))
     assert run.reference.report == run.candidate.report
     assert run.candidate.report['recovered'] == 1
+
+
+# ---------------------------------------------------------------------------
+# The caller pair: the Python pass against the pass in the core
+# ---------------------------------------------------------------------------
+
+
+class _Reaper(ReaperMixin):
+    """The reaper mixin alone: its recovery call reads only the broker."""
+
+
+async def _core_async(database: DualRunDatabase) -> dict[str, object]:
+    async with open_broker(database) as broker:
+        _attach(broker)
+        report = await _Reaper()._recover_workflows(  # pyright: ignore[reportPrivateUsage]
+            broker, failure_limit=DEFAULT_WORKFLOW_RECOVERY_FAILURE_LIMIT,
+        )
+        return _health_without_durations(report.health())
+
+
+def _core(database: DualRunDatabase, seed: _Seed) -> dict[str, object]:
+    _finish_seeded_nodes(database, seed)
+    return asyncio.run(_core_async(database))
+
+
+def test_the_recovery_pass_on_the_core_writes_what_the_python_pass_wrote(
+    empty_database: MakeDatabase,
+) -> None:
+    run = run_or_fail(
+        dual_run(
+            empty_database,
+            _seed,
+            OperationSide(name='python pass', act=_candidate),
+            OperationSide(name='core pass', act=_core),
+        )
+    )
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    assert run.candidate.report == run.reference.report
+    assert run.candidate.report['recovered'] == 6

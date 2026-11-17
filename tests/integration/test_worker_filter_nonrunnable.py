@@ -17,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_command_fingerprint
 
@@ -32,7 +33,7 @@ CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 # ---------------------------------------------------------------------------
 
 
-def _make_worker(engine: AsyncEngine) -> Worker:
+def _make_worker(engine: AsyncEngine, broker: PostgresBroker) -> Worker:
     """Construct a Worker wired to the test DB."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
@@ -40,7 +41,7 @@ def _make_worker(engine: AsyncEngine) -> Worker:
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
-    return Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
+    return Worker(session_factory=sf, listener=MagicMock(), cfg=cfg, broker=broker)
 
 
 async def _insert_claimed_task(
@@ -189,6 +190,7 @@ def _make_rows(*task_ids: str) -> list[dict[str, Any]]:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_no_workflow_tasks_pass_through(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
@@ -197,7 +199,7 @@ async def test_no_workflow_tasks_pass_through(
     tid_b = await _insert_claimed_task(session)
     await session.commit()
 
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     rows = _make_rows(tid_a, tid_b)
 
     result = await worker._filter_nonrunnable_workflow_tasks(rows)
@@ -219,12 +221,13 @@ async def test_no_workflow_tasks_pass_through(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_paused_workflow_cancels_and_resets(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """Task in a PAUSED workflow → excluded from return,
     horsies_tasks → CANCELLED, horsies_workflow_tasks → READY with task_id=NULL."""
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     tid = await _insert_claimed_task(
         session,
         claimed_by_worker_id=worker.worker_instance_id,
@@ -268,11 +271,12 @@ async def test_paused_workflow_cancels_and_resets(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_paused_retry_window_task_cancels_and_resets_running_node(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """A paused retry-window CLAIMED task resets even when workflow_task is RUNNING."""
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     tid = await _insert_claimed_task(
         session,
         claimed_by_worker_id=worker.worker_instance_id,
@@ -306,12 +310,13 @@ async def test_paused_retry_window_task_cancels_and_resets_running_node(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_cancelled_workflow_cancels_and_skips(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """Task in a CANCELLED workflow → excluded from return,
     horsies_tasks → CANCELLED, horsies_workflow_tasks → SKIPPED."""
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     tid = await _insert_claimed_task(
         session,
         claimed_by_worker_id=worker.worker_instance_id,
@@ -354,12 +359,13 @@ async def test_cancelled_workflow_cancels_and_skips(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_mixed_runnable_paused_cancelled(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """Mix of no-workflow, PAUSED, and CANCELLED tasks →
     only the no-workflow task is returned."""
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     tid_ok = await _insert_claimed_task(session)
     tid_paused = await _insert_claimed_task(
         session,
@@ -405,11 +411,12 @@ async def test_mixed_runnable_paused_cancelled(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_paused_workflow_does_not_reset_task_owned_by_another_worker(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """A worker must not unclaim another worker's PAUSED workflow task."""
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     other_worker_id = f'{worker.worker_instance_id}-other'
     tid = await _insert_claimed_task(session, claimed_by_worker_id=other_worker_id)
     wf_id = await _link_task_to_workflow(session, tid, wf_status='PAUSED')
@@ -441,11 +448,12 @@ async def test_paused_workflow_does_not_reset_task_owned_by_another_worker(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_cancelled_workflow_does_not_reset_task_owned_by_another_worker(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """A worker must not cancel another worker's CANCELLED workflow task."""
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     other_worker_id = f'{worker.worker_instance_id}-other'
     tid = await _insert_claimed_task(session, claimed_by_worker_id=other_worker_id)
     wf_id = await _link_task_to_workflow(session, tid, wf_status='CANCELLED')

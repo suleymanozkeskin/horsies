@@ -167,52 +167,181 @@ def might_crash() -> TaskResult[str, TaskError]:
 
 ### Configure Retries
 
-With explicit try/except:
+`retry_policy` takes a `RetryPolicy`. A failure retries when its error code is in `auto_retry_for` and retries remain. The policy fields, the delay steps and the retry rules are on [Retry Policy](/horsies/tasks/retry-policy/).
 
-<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import RetryPolicy, TaskResult, TaskError, JsonValue
 
 @app.task(
-    "some_api_call",
-    retry_policy=RetryPolicy.exponential(
-        base_seconds=30,
-        max_retries=5,
-        auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"],
-    ),
+    "flaky_task",
+    retry_policy=RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"]),
 )
-def some_api_call() -> TaskResult[dict[str, JsonValue], TaskError]:
-    try:
-        result = call_external_api()
-        return TaskResult(ok=result)
-    except TimeoutError:
-        return TaskResult(err=TaskError(error_code="TIMEOUT", message="Request timed out"))
-    except ConnectionError:
-        return TaskResult(err=TaskError(error_code="CONNECTION_ERROR", message="Connection failed"))
+def flaky_task() -> TaskResult[str, TaskError]:
+    # Retries up to 3 times, after 1 min, 5 min and 15 min
+    ...
 ```
 
-Or with the exception mapper (no try/except needed):
+#### RetryPolicy Constructors
 
-<!-- check: skip partial -- uses names that the page does not define -->
+| Constructor | Policy |
+| ----------- | ------ |
+| `RetryPolicy.fixed(intervals, *, auto_retry_for, jitter=True)` | `fixed` backoff. `max_retries` is `len(intervals)` |
+| `RetryPolicy.exponential(base_seconds, *, max_retries, auto_retry_for, jitter=True, max_delay_seconds=None)` | `exponential` backoff from one base interval |
+| `RetryPolicy(...)` | Every field, with the defaults below |
+
+```python
+# Fixed: wait 1 min, then 5 min, then 15 min
+RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"])
+
+# Equivalent to:
+RetryPolicy(
+    max_retries=3,
+    intervals=[60, 300, 900],
+    backoff_strategy='fixed',
+    auto_retry_for=["TRANSIENT_ERROR"],
+)
+
+# Exponential with base 30 s: retry after 30 s, 60 s, 120 s, 240 s, 480 s
+RetryPolicy.exponential(base_seconds=30, max_retries=5, auto_retry_for=["TRANSIENT_ERROR"])
+
+# Equivalent to:
+RetryPolicy(
+    max_retries=5,
+    intervals=[30],  # one base interval
+    backoff_strategy='exponential',
+    auto_retry_for=["TRANSIENT_ERROR"],
+)
+
+# No jitter, for delays that are the same on each run
+RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"], jitter=False)
+
+# Exponential, but never wait longer than 10 minutes between retries
+RetryPolicy.exponential(
+    base_seconds=30,
+    max_retries=10,
+    auto_retry_for=["TRANSIENT_ERROR"],
+    max_delay_seconds=600,
+)
+
+# Equivalent to:
+RetryPolicy(
+    max_retries=10,
+    intervals=[30],
+    backoff_strategy='exponential',
+    max_delay_seconds=600,
+    auto_retry_for=["TRANSIENT_ERROR"],
+)
+```
+
+`RetryPolicy.fixed()` has no `max_delay_seconds` parameter. For a `fixed` policy with a cap, use `RetryPolicy(...)`.
+
+| Field | Type | Default |
+| ----- | ---- | ------- |
+| `auto_retry_for` | `list[str \| BuiltInTaskCode]` | (required) |
+| `max_retries` | `int` | `3` |
+| `intervals` | `list[int]` | `[60, 300, 900]` |
+| `backoff_strategy` | `Literal['fixed', 'exponential']` | `'fixed'` |
+| `jitter` | `bool` | `True` |
+| `max_delay_seconds` | `int \| None` | `None` (no cap) |
+
+An `auto_retry_for` entry is a code string or a `BuiltInTaskCode` member. A name in the form of an exception class, such as `"TimeoutError"`, is refused: retries match error codes only.
+
+A policy that breaks a rule of [Policy Fields](/horsies/tasks/retry-policy/#policy-fields) raises `ValueError` when it is built:
+
+```python
+# This raises ValueError:
+RetryPolicy(
+    max_retries=3,
+    intervals=[60, 300],  # Only 2 intervals for 3 retries
+    backoff_strategy='fixed',
+    auto_retry_for=["TRANSIENT_ERROR"],
+)
+
+# This also raises ValueError:
+RetryPolicy(
+    max_retries=3,
+    intervals=[60, 300, 900],  # Multiple intervals
+    backoff_strategy='exponential',  # Exponential needs exactly 1 interval
+    auto_retry_for=["TRANSIENT_ERROR"],
+)
+```
+
+#### Return a Retryable Error
+
+Return a `TaskError` with a code that `auto_retry_for` lists:
+
 ```python
 @app.task(
-    "some_api_call",
+    "call_external_api",
     retry_policy=RetryPolicy.exponential(
-        base_seconds=30,
+        base_seconds=60,
         max_retries=5,
-        auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"],
+        auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"],
     ),
+)
+def call_external_api() -> TaskResult[dict[str, JsonValue], TaskError]:
+    try:
+        response = requests.get("https://api.example.com")
+        if response.status_code == 429:
+            return TaskResult(err=TaskError(
+                error_code="RATE_LIMITED",
+                message="the API answered 429",
+            ))
+        return TaskResult(ok=response.json())
+    except requests.Timeout:
+        return TaskResult(err=TaskError(
+            error_code="TIMEOUT",
+            message="the API did not answer in time",
+        ))
+```
+
+`auto_retry_for` reads `error_code` only. `message` is optional: `TaskError(error_code="RATE_LIMITED")` retries in the same way.
+
+#### Map Exceptions to Codes
+
+`exception_mapper` maps an exception that the task raises to an error code, so the task needs no try/except. The mapper matches the exact exception class (`type(exc)`).
+
+```python
+@app.task(
+    "call_api",
+    retry_policy=RetryPolicy.fixed([30, 60, 120], auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"]),
     exception_mapper={
         TimeoutError: "TIMEOUT",
         ConnectionError: "CONNECTION_ERROR",
     },
 )
-def some_api_call() -> TaskResult[dict[str, JsonValue], TaskError]:
-    result = call_external_api()
-    return TaskResult(ok=result)
+def call_api() -> TaskResult[dict[str, JsonValue], TaskError]:
+    # No try/except: a TimeoutError becomes "TIMEOUT"
+    response = requests.get("https://api.example.com", timeout=10)
+    return TaskResult(ok=response.json())
 ```
 
-For backoff strategies, jitter, and auto-retry triggers, see [Retry Policy](../retry-policy).
+A mapper on `AppConfig` applies to all tasks:
+
+```python
+from pydantic import SecretStr
+
+config = AppConfig(
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    exception_mapper={
+        TimeoutError: "TIMEOUT",
+        ConnectionError: "CONNECTION_ERROR",
+        PermissionError: "PERMISSION_DENIED",
+    },
+    default_unhandled_error_code="UNHANDLED_EXCEPTION",
+)
+```
+
+When the task raises an exception, the code comes from the first match in this order:
+
+1. The task's `exception_mapper` (exact class lookup)
+2. `AppConfig.exception_mapper` (exact class lookup)
+3. The task's `default_unhandled_error_code`
+4. `AppConfig.default_unhandled_error_code` (default `"UNHANDLED_EXCEPTION"`)
+
+A task entry has priority over a global entry. A task that returns `TaskResult(err=...)` does not use the mapper.
+
+Only the exact class matches; a subclass does not. Map each subclass that you expect.
 
 ### Assign to Queue (CUSTOM Mode)
 

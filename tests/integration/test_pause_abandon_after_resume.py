@@ -33,6 +33,7 @@ from horsies.core.types.result import is_ok
 from horsies.core.utils.url import to_psycopg_url
 from horsies.core.worker import child_runner
 from horsies.core.worker.child_pool import _initialize_worker_pool
+from horsies._core import CoreHandle
 from horsies.core.worker.claiming import ClaimMixin
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.queue_cap_hold import QueueCapHold, start_check_caps
@@ -118,6 +119,10 @@ def _claim_filter_probe(broker: PostgresBroker) -> ClaimMixin:
             self._queue_cap_hold = QueueCapHold(
                 start_check_caps(cfg.prefetch_buffer, cfg.queue_max_concurrency),
             )
+
+        @property
+        def core_handle(self) -> CoreHandle:
+            return broker._core_handle  # pyright: ignore[reportPrivateUsage]
 
         async def _dispatch_one(
             self, *args: Any, **kwargs: Any,
