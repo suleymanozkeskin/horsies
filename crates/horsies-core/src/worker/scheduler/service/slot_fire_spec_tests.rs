@@ -87,6 +87,8 @@ fn prepared_schedules(schedule_name: &str, task_name: &str) -> PreparedSchedules
                 .expect("two intervals inside the bounds"),
         ),
         timeout_ms: Some(TASK_TIMEOUT_MS),
+        execution: crate::core::task::Execution::Isolated,
+        cancel_grace_ms: None,
     };
     PreparedSchedules::from([(
         schedule_name.to_owned(),

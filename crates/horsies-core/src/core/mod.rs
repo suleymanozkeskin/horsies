@@ -33,10 +33,11 @@ pub use registry::{
     WorkflowSpecRegistry,
 };
 pub use task::{
-    AsyncTaskFn, BackoffStrategy, BlockingTaskFn, BuiltInTaskCode, ContractCode, ExceptionRecord,
-    Execution, ExecutionClass, OperationalErrorCode, OutcomeCode, RegisteredTask, RetrievalCode,
-    RetryPolicy, RetryPolicyError, StoredErrorRefused, SubWorkflowFailure, TaskAttemptInfo,
-    TaskError, TaskErrorCode, TaskErrorKind, TaskInfo, TaskOptions, TaskResult, TaskSendError,
+    AsyncTaskFn, BackoffStrategy, BlockingTaskFn, BuiltInTaskCode, CancelGraceMs,
+    CancelGraceOutOfRange, ContractCode, ExceptionRecord, Execution, ExecutionClass,
+    OperationalErrorCode, OutcomeCode, RegisteredTask, RetrievalCode, RetryPolicy,
+    RetryPolicyError, StoredErrorRefused, SubWorkflowFailure, TaskAttemptInfo, TaskError,
+    TaskErrorCode, TaskErrorKind, TaskInfo, TaskOptions, TaskResult, TaskSendError,
     TaskSendErrorCode, TaskSendPayload, TaskSendResult, UserCode, UserCodeRefused,
 };
 pub use types::{TaskAttemptOutcome, TaskStatus, TASK_TERMINAL_STATES, TASK_TERMINAL_VALUES};
