@@ -137,6 +137,7 @@ const ENQUEUE_REQUEST_PARAMETERS: &[StubParameter] = &[
         "RetentionDefault | RetentionForever | RetentionPeriod",
     ),
     keyword("rerun_input", "Literal['APP_DEFAULT', 'KEEP', 'DROP']"),
+    keyword("send_kind", "Literal['FIRST', 'REPEAT']"),
 ];
 
 const ENQUEUE_PARAMETERS: &[StubParameter] = &[positional("request", "EnqueueRequest")];
@@ -223,7 +224,7 @@ const CORE_HANDLE_METHODS: [StubFunction; 15] = [
         name: "enqueue",
         parameters: ENQUEUE_PARAMETERS,
         returns: TypeText::Plain(SEND_OUTCOME),
-        doc: "Enqueue one task. Writes; a resend of the same request is safe.",
+        doc: "Enqueue one task, in one statement. Writes; a resend with send_kind REPEAT is safe.",
     },
     StubFunction {
         name: "enqueue_async",
@@ -361,7 +362,7 @@ const ARGUMENT_CLASSES: [StubClass; 8] = [
     },
     StubClass {
         name: "EnqueueRequest",
-        doc: "One frozen send. None for good_until, task_options_json or idempotency_key\nmeans no deadline, no options, no key.",
+        doc: "One frozen send. None for good_until, task_options_json or idempotency_key\nmeans no deadline, no options, no key. send_kind is FIRST for the first send of the task\nid and REPEAT for a send retry: a task that finished then answers from history.",
         constructor: Constructor::Parameters(ENQUEUE_REQUEST_PARAMETERS),
         properties: &[property("task_id", "uuid.UUID")],
         methods: &[],
