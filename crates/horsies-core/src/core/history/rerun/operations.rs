@@ -8,8 +8,6 @@ use uuid::Uuid;
 use crate::broker::core_rows::{
     column, execute_in, one_row, query_in, RowDecodeError, StatementLog,
 };
-use crate::broker::error::BrokerError;
-use crate::broker::key_reservation::{claim_key_reservation, KeyClaim};
 use crate::broker::pools::PoolSettingsError;
 use crate::core::history::archive::attempts::decode_attempt_snapshot;
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
@@ -20,7 +18,9 @@ use crate::core::history::identity::fingerprint::FingerprintError;
 use crate::core::history::identity::keys::{
     validate_reservation_window, IdempotencyKeyError, IDEMPOTENCY_SCOPE_VERSION,
 };
-use crate::core::history::identity::reservations::ReservationClaim;
+use crate::core::history::identity::reservations::{
+    decode_reservation_row, key_reservation_claim_sql, ReservationClaim,
+};
 use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 use crate::core::history::names::LIVE_TASKS;
 use crate::core::history::reads::detail::TaskAbsenceReason;
@@ -280,6 +280,37 @@ static INSERT_RERUN: LazyLock<TypedStatement> = LazyLock::new(|| {
     )
 });
 
+static KEY_RESERVATION_CLAIM_SQL: LazyLock<String> = LazyLock::new(key_reservation_claim_sql);
+
+/// `horsies_key_reservation_claim`, with the SQL text of
+/// [`key_reservation_claim_sql`]. Parameters in order: key digest, key scope
+/// version, window in seconds, fingerprint version, fingerprint, task id.
+static KEY_RESERVATION_CLAIM: LazyLock<TypedStatement> = LazyLock::new(|| {
+    TypedStatement::new(
+        "key_reservation_claim",
+        KEY_RESERVATION_CLAIM_SQL.as_str(),
+        &[
+            ParameterType::Bytea,
+            ParameterType::Int2,
+            ParameterType::Int8,
+            ParameterType::Int2,
+            ParameterType::Bytea,
+            ParameterType::Uuid,
+        ],
+    )
+});
+
+/// The key of a keyed rerun, claimed for the new task.
+struct RerunKeyClaim<'a> {
+    key_digest: &'a [u8],
+    /// The reservation window in whole seconds, as Python's rerun
+    /// (`int(policy.reservation_window.total_seconds())`).
+    window_seconds: i64,
+    fingerprint_version: i16,
+    fingerprint: &'a [u8],
+    task_id: Uuid,
+}
+
 /// The facts of a history source that the rerun decides on and copies
 /// (Python `RerunSource`). The stored status is a [`TaskStatus`] and the
 /// attempt snapshot decoded; a source that fails either is corrupt.
@@ -429,20 +460,14 @@ pub(crate) async fn rerun_task_in_transaction(
     };
 
     if let Some(key_digest) = facts.idempotency_key_digest.as_ref() {
-        // The window in whole seconds, as Python's rerun
-        // (`int(policy.reservation_window.total_seconds())`).
-        let claim = KeyClaim {
+        let claim = RerunKeyClaim {
             key_digest: key_digest.as_slice(),
-            key_scope_version: IDEMPOTENCY_SCOPE_VERSION,
-            reservation_window_seconds: policy.reservation_window.num_seconds(),
+            window_seconds: policy.reservation_window.num_seconds(),
             fingerprint_version: facts.command_fingerprint_version,
             fingerprint: facts.command_fingerprint.as_slice(),
             task_id: new_task_id,
         };
-        match claim_key_reservation(transaction, log, &claim)
-            .await
-            .map_err(key_claim_error)?
-        {
+        match claim_rerun_key(transaction, log, &claim).await? {
             ReservationClaim::Replay { task_id } => {
                 return Ok(RerunOutcome::KeyReplay {
                     existing_task_id: task_id,
@@ -601,15 +626,50 @@ fn history_source(row: &Row, statement: &TypedStatement) -> Result<SourceRead, R
     }))
 }
 
-/// The rerun error of a failed key reservation claim. The claim answers
-/// [`BrokerError::Statement`] or [`BrokerError::RowDecode`]; any other error
-/// is a defect of the claim and panics.
-fn key_claim_error(error: BrokerError) -> RerunError {
-    match error {
-        BrokerError::Statement(failure) => RerunError::Statement(failure),
-        BrokerError::RowDecode(decode) => RerunError::RowDecode(decode),
-        other => panic!(
-            "the key reservation claim answers Statement or RowDecode, but answered: {other}"
+/// Claim the reservation of a rerun's key in the caller's transaction (Python
+/// `claim_key_reservation`). Writes the reservation row when the outcome is
+/// `Applied`; the caller's commit or rollback decides whether it stays.
+///
+/// Errors: [`RerunError::Statement`]; [`RerunError::RowDecode`] for a row
+/// that is not one row of the function's columns.
+///
+/// Panics when the outcome row breaks the claim contract (an unknown
+/// outcome, no task id, or an observed fingerprint version that does not fit
+/// the outcome): that is a defect of `horsies_key_reservation_claim`, not a
+/// refusal of the rerun. The panic names the statement and the row (the
+/// rule of #1231).
+async fn claim_rerun_key(
+    transaction: &mut Transaction<'_>,
+    log: StatementLog,
+    claim: &RerunKeyClaim<'_>,
+) -> Result<ReservationClaim, RerunError> {
+    let statement: &TypedStatement = &KEY_RESERVATION_CLAIM;
+    let rows = query_in(
+        transaction,
+        log,
+        &statement
+            .bind()
+            .value(&claim.key_digest)
+            .value(&IDEMPOTENCY_SCOPE_VERSION)
+            .value(&claim.window_seconds)
+            .value(&claim.fingerprint_version)
+            .value(&claim.fingerprint)
+            .value(&claim.task_id)
+            .finish(),
+    )
+    .await?;
+    let row = one_row(rows, statement)?;
+    let outcome: Option<String> = column(&row, statement, "outcome")?;
+    let task_id: Option<Uuid> = column(&row, statement, "task_id")?;
+    let observed_fingerprint_version: Option<i16> =
+        column(&row, statement, "observed_fingerprint_version")?;
+    match decode_reservation_row(outcome.as_deref(), task_id, observed_fingerprint_version) {
+        Ok(claimed) => Ok(claimed),
+        Err(error) => panic!(
+            "statement `{}` returned a row outside the claim contract \
+             (outcome {outcome:?}, task_id {task_id:?}, \
+             observed_fingerprint_version {observed_fingerprint_version:?}): {error}",
+            statement.name(),
         ),
     }
 }
