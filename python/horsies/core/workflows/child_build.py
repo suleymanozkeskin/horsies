@@ -238,7 +238,12 @@ def _load_definition(
 def _args_from_map(
     node: ChildOfNode,
 ) -> dict[str, int] | ChildBuildFailed:
-    """The validated ``args_from`` map of ``node``; empty when it has none."""
+    """The validated ``args_from`` map of ``node``; empty when it has none.
+
+    A value must be an ``int`` that is not a ``bool``: ``bool`` is a subclass
+    of ``int``, and ``true`` and ``false`` are refused, not read as the
+    indexes 1 and 0.
+    """
     raw: object = None
     match node.args_from:
         case None | '':
@@ -268,7 +273,11 @@ def _args_from_map(
     pairs = cast(dict[object, object], raw)
     validated: dict[str, int] = {}
     for key, value in pairs.items():
-        if not isinstance(key, str) or not isinstance(value, int):
+        if (
+            not isinstance(key, str)
+            or isinstance(value, bool)
+            or not isinstance(value, int)
+        ):
             return _failed(
                 node,
                 f'args_from has non-int values for subworkflow task {node.task_index}',
