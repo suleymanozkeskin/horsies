@@ -9,6 +9,7 @@ use horsies_core::manifest_schema::{
 };
 
 use crate::catalogs::{group_by_module, render_module, render_package_init, CATALOG_FOLDER};
+use crate::constants::{render_constant_module, CONSTANT_MODULES};
 use crate::core_stub::{render_core_stub, CORE_STUB_FILE};
 use crate::manifest::{
     render_manifest_module, DumpEncoder, MANIFEST_MODULE_FILE, SCHEDULER_MANIFEST_MODULE_FILE,
@@ -127,6 +128,12 @@ pub fn render_all() -> Vec<GeneratedFile> {
         // written by the encoder of every stored form.
         text: render_manifest_module(&WORKFLOW_SPEC_DATA, DumpEncoder::StrictJsonIo),
     });
+    for module in &CONSTANT_MODULES {
+        files.push(GeneratedFile {
+            relative_path: catalog_folder.join(module.file),
+            text: render_constant_module(module),
+        });
+    }
     files.push(GeneratedFile {
         relative_path: PathBuf::from(CORE_STUB_FILE),
         text: render_core_stub(&CORE_MODULE),
@@ -270,8 +277,11 @@ mod tests {
         let modules = group_by_module(CODE_CATALOGS);
         // __init__.py, one file per catalog module, manifest.py,
         // worker_manifest.py, scheduler_manifest.py, workflow_spec.py,
-        // _core.pyi
-        assert_eq!(files.len(), modules.len() + 6);
+        // one file per constant module, _core.pyi
+        assert_eq!(files.len(), modules.len() + 6 + CONSTANT_MODULES.len());
+        let paths: std::collections::BTreeSet<&PathBuf> =
+            files.iter().map(|file| &file.relative_path).collect();
+        assert_eq!(paths.len(), files.len());
         for file in &files {
             assert!(file.text.starts_with(GENERATED_HEADER));
         }
