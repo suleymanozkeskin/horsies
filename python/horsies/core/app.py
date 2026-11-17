@@ -10,6 +10,8 @@ from typing import (
     ParamSpec,
     Any,
     Union,
+    Final,
+    assert_never,
     cast,
     get_origin,
 )
@@ -94,20 +96,17 @@ from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.codec.validation_errors import ValueValidationError, exception_text
 from horsies.core.types.result import is_err
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.worker_profile import WorkerProfile, profile_path
 from horsies._catalog.manifest import dump_producer_manifest
-from horsies._core import ConnectivityPassed, ConnectivityRefused, CoreError, CoreHandle
+from horsies._core import (
+    ConnectivityPassed,
+    ConnectivityRefused,
+    CoreError,
+    CoreHandle,
+    WorkerConnectionError,
+)
 from horsies.core.history.identity.keys import IDEMPOTENCY_WINDOW_DEFAULT
 from horsies.core.manifest import to_producer_manifest
-from horsies.core.worker.profile_fit import (
-    CONNECTIONS_HELP,
-    ConnectionsExceedServer,
-    ConnectionsFit,
-    ServerConnectionLimit,
-    ServerConnectionLimitUnreadable,
-    compare_connections,
-    read_server_connection_limit,
-)
+from horsies.core.worker_manifest import dump_worker_profiles
 
 if TYPE_CHECKING:
     from horsies.core.task_decorator import (
@@ -271,34 +270,44 @@ def _connectivity_failed(cause: str) -> ConfigurationError:
     )
 
 
-def _worker_connection_errors(
-    profiles: Mapping[str, WorkerProfile],
-    limit: ServerConnectionLimit,
-) -> list[HorsiesError]:
-    """One error for each profile that needs more connections than the
-    server has usable slots, in name order."""
-    errors: list[HorsiesError] = []
-    for name in sorted(profiles):
-        match compare_connections(profiles[name], limit):
-            case ConnectionsExceedServer() as exceed:
-                errors.append(
-                    _no_location(
-                        ConfigurationError(
-                            message=f'{profile_path(name)}: {exceed.describe()}',
-                            code=ErrorCode.CHECK_WORKER_CONNECTIONS,
-                            notes=[
-                                exceed.need.formula(),
-                                exceed.need.task_sends_note(),
-                            ],
-                            help_text=CONNECTIONS_HELP,
-                        )
-                    )
-                )
-            case ConnectionsFit():
-                pass
-            case _ as unreachable:
-                assert_never(unreachable)
-    return errors
+_LIMIT_UNREADABLE_HELP: Final = (
+    'the worker profiles were not compared with max_connections; check that '
+    "the role can run current_setting('max_connections')"
+)
+"""The help of a worker connection check that the core could not run."""
+
+
+def _worker_connection_error(refusal: WorkerConnectionError) -> ConfigurationError:
+    """Python's error of one refusal of the core's worker connection check:
+    its message, notes and help, and the Python code of its core code
+    (``HRS-219``, ``CHECK_WORKER_CONNECTIONS``). Pure.
+
+    Raises:
+        ValueError: a core code that ``ErrorCode`` does not have, a defect of
+            the pairing of the core and this package.
+    """
+    code = None if refusal.code is None else ErrorCode(refusal.code)
+    return _no_location(
+        ConfigurationError(
+            message=refusal.message,
+            code=code,
+            notes=list(refusal.notes),
+            help_text=refusal.help_text,
+        )
+    )
+
+
+def _worker_connections_unchecked(cause: str) -> ConfigurationError:
+    """Python's error of a worker connection check that the core could not
+    run, with its cause as the note. Pure."""
+    return _no_location(
+        ConfigurationError(
+            message='the server connection limit could not be read',
+            code=ErrorCode.CHECK_WORKER_CONNECTIONS,
+            notes=[cause],
+            help_text=_LIMIT_UNREADABLE_HELP,
+        )
+    )
 
 
 class Horsies:
@@ -824,9 +833,12 @@ class Horsies:
         Phase 3.6: Schedule validation — skipped for the worker role, which
             never acts on schedules. Validates timezone, task registration,
             queue, and the kwargs wire contract for each enabled schedule.
-        Phase 4 (if live): Broker connectivity — async SELECT 1.
-        Phase 4.1 (if live): Worker connections — each worker profile against
-            the server connection limit. Skipped through a transaction pooler.
+        Phase 4 (if live): Broker connectivity — the core's connectivity
+            check.
+        Phase 4.1 (if live): Worker connections — the core's check of each
+            worker profile against the server connection limit. Nothing is
+            read with no profile or through a transaction pooler.
+        Both live phases run on one core handle of their own.
 
         Args:
             live: If True, also run the live phases (Phase 4 and 4.1).
@@ -876,13 +888,10 @@ class Horsies:
         if all_errors:
             return all_errors
 
-        # Phase 4 (optional): broker connectivity
+        # Phase 4 and 4.1 (optional): connectivity, then the worker profiles
+        # against the server connection limit
         if live:
-            all_errors.extend(self._check_broker_connectivity())
-            if all_errors:
-                return all_errors
-            # Phase 4.1: worker profiles against the server connection limit
-            all_errors.extend(self._check_worker_connections())
+            all_errors.extend(self._check_live())
 
         return all_errors
 
@@ -1329,24 +1338,18 @@ class Horsies:
 
         return errors
 
-    def _check_broker_connectivity(self) -> list[HorsiesError]:
-        """Check the database paths with the core's connectivity check, the
-        rule of both clients (``CoreHandle.check_connectivity``).
+    def _check_live(self) -> list[HorsiesError]:
+        """Run the live phases on one core handle of their own: the
+        connectivity check, then, when it passed, the worker connections.
 
-        In order, stopping at the first failure: ``SELECT 1`` on
-        ``database_url``; ``SELECT 1`` on ``session_database_url`` when it
-        differs; in PgBouncer transaction mode, a LISTEN probe on the session
-        URL that must receive a NOTIFY within 2 s. The check runs on a core
-        handle of its own, built from ``config.broker`` with the schema mode
-        ``OBSERVE_ONLY`` (no schema step), and closes it; the app's broker is
-        not built. On a thread that runs an event loop the blocking core call
-        cannot run, so the check reports ``CHECK_LIVE_ASYNC_CONTEXT`` and
-        connects to nothing.
+        The handle is built from ``config.broker`` with the schema mode
+        ``OBSERVE_ONLY`` (no schema step) and closed at the end; the app's
+        broker is not built. On a thread that runs an event loop the
+        blocking core calls cannot run, so the check reports
+        ``CHECK_LIVE_ASYNC_CONTEXT`` and connects to nothing.
 
-        Returns at most one error, ``BROKER_INVALID_URL``: "broker listener
-        capability check failed" for the probe, "broker connectivity check
-        failed" for every other step and for a core that cannot run the
-        call. Nothing is written but the probe's one NOTIFY.
+        Returns the errors of the first phase that refused, or none. Nothing
+        is written but the LISTEN probe's one NOTIFY.
         """
         if in_running_event_loop():
             return [
@@ -1376,11 +1379,32 @@ class Horsies:
             pool_profile='PRODUCER',
         )
         try:
+            connectivity_errors = self._check_broker_connectivity(handle)
+            if connectivity_errors:
+                return connectivity_errors
+            return self._check_worker_connections(handle)
+        finally:
+            self._close_check_handle(handle)
+
+    def _check_broker_connectivity(self, handle: CoreHandle) -> list[HorsiesError]:
+        """Check the database paths with the core's connectivity check, the
+        rule of both clients (``CoreHandle.check_connectivity``).
+
+        In order, stopping at the first failure: ``SELECT 1`` on
+        ``database_url``; ``SELECT 1`` on ``session_database_url`` when it
+        differs; in PgBouncer transaction mode, a LISTEN probe on the session
+        URL that must receive a NOTIFY within 2 s. Runs on ``handle``, the
+        live check's own handle.
+
+        Returns at most one error, ``BROKER_INVALID_URL``: "broker listener
+        capability check failed" for the probe, "broker connectivity check
+        failed" for every other step and for a core that cannot run the
+        call. Nothing is written but the probe's one NOTIFY.
+        """
+        try:
             outcome = handle.check_connectivity()
         except CoreError as exc:
             return [_connectivity_failed(str(exc))]
-        finally:
-            self._close_check_handle(handle)
         match outcome:
             case ConnectivityPassed():
                 return []
@@ -1418,64 +1442,30 @@ class Horsies:
                 'the core handle of the live check did not close: %s', exc,
             )
 
-    def _check_worker_connections(self) -> list[HorsiesError]:
-        """Compare each worker profile with the server connection limit.
+    def _check_worker_connections(self, handle: CoreHandle) -> list[HorsiesError]:
+        """Compare each worker profile with the server connection limit, with
+        the core's check, the rule of both clients
+        (``CoreHandle.check_worker_connections``).
 
-        One worker of a profile opens its parent pool, its listener, its
-        runner heartbeat connection and the pools of its children. A profile
-        whose worker opens more than the server has usable slots is an error
-        here; each error also states what task code that sends adds. The
-        worker itself only warns at boot. With no profiles, or through a
-        transaction pooler, nothing is read. Runs after the connectivity
-        phase, so the server answered a moment before.
+        One worker of a profile opens its parent pool, its session pool when
+        the session URL differs, its listener, its runner heartbeat
+        connection and the pools of its children. A profile whose worker
+        opens more than the server has usable slots is an error here; each
+        error also states what task code that sends adds. The worker itself
+        only warns at boot. With no profiles, or through a transaction
+        pooler, the core reads nothing. Runs on ``handle``, after the
+        connectivity phase passed on it.
+
+        Returns one ``CHECK_WORKER_CONNECTIONS`` error per profile that does
+        not fit, in name order, or one when the limit was not read or the
+        core could not run the call. Writes nothing.
         """
-        profiles = self.config.worker_profiles
-        broker_config = self.config.broker
-        if not profiles or broker_config.pgbouncer_transaction_mode:
-            return []
-
-        import asyncio
-
-        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
-        from horsies.core.utils.url import sqlalchemy_url
-
-        async def _read_limit() -> (
-            ServerConnectionLimit | ServerConnectionLimitUnreadable
-        ):
-            engine_cfg = dict(broker_config.sqlalchemy_engine_kwargs())
-            engine_cfg['connect_args'] = broker_config.pooled_connect_args
-            engine = create_async_engine(
-                sqlalchemy_url(broker_config.database_url.get_secret_value()),
-                **engine_cfg,
-            )
-            try:
-                return await read_server_connection_limit(
-                    async_sessionmaker(engine, expire_on_commit=False),
-                )
-            finally:
-                await engine.dispose()
-
-        match asyncio.run(_read_limit()):
-            case ServerConnectionLimitUnreadable(reason=reason):
-                return [
-                    _no_location(
-                        ConfigurationError(
-                            message='the server connection limit could not be read',
-                            code=ErrorCode.CHECK_WORKER_CONNECTIONS,
-                            notes=[reason],
-                            help_text=(
-                                'the worker profiles were not compared with '
-                                'max_connections; check that the role can run '
-                                "current_setting('max_connections')"
-                            ),
-                        )
-                    )
-                ]
-            case ServerConnectionLimit() as limit:
-                return _worker_connection_errors(profiles, limit)
-            case _ as unreachable:
-                assert_never(unreachable)
+        profiles_json = dump_worker_profiles(self.config.worker_profiles)
+        try:
+            refusals = handle.check_worker_connections(profiles_json)
+        except CoreError as exc:
+            return [_worker_connections_unchecked(str(exc))]
+        return [_worker_connection_error(refusal) for refusal in refusals]
 
     def list_tasks(self) -> list[str]:
         """List tasks registered with this app"""
