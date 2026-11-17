@@ -15,6 +15,7 @@
 //! ([`spawn_in_run`]), and the protocol's exit codes.
 
 mod args;
+mod handle_setup;
 mod host;
 mod link;
 mod panic;
@@ -37,6 +38,7 @@ mod stored_form_vector_tests;
 mod tests;
 
 pub use args::{child_mode, ChildArgs, ChildArgsError, ChildMode, CHILD_MODE_ARGUMENT};
+pub use handle_setup::{child_handle_setup, ChildHandleSetup};
 pub use host::{
     child_command, run_child_host, ChildApp, ChildHookFailure, ChildHostExit, ChildLogSetup,
     ChildStartFuture, ChildStartHook, NamedChildStartHook, CHILD_START_HOOK_BOUND,

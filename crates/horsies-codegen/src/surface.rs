@@ -80,11 +80,21 @@ pub struct StubClass {
     pub methods: &'static [StubFunction],
 }
 
+/// A static method of a class: a function with no `self`, called on the
+/// class.
+#[derive(Clone, Copy, Debug)]
+pub struct StubStaticMethod {
+    /// The name of the class that holds it, as in [`StubClass::name`].
+    pub class_name: &'static str,
+    pub function: StubFunction,
+}
+
 /// The whole module.
 #[derive(Clone, Copy, Debug)]
 pub struct ModuleSurface {
     pub exceptions: &'static [StubException],
     pub classes: &'static [StubClass],
+    pub static_methods: &'static [StubStaticMethod],
     pub functions: &'static [StubFunction],
 }
 
@@ -1978,7 +1988,7 @@ const HANDLE_CLASSES: &[StubClass] = &[
 },
     StubClass {
         name: "CoreChildHandle",
-        doc: "The core handle of one worker's child process: the producer manifest of its child pool,\nthe connections the pool keeps open, and the ping at checkout. Built in the child after\nits start; building it starts nothing.",
+        doc: "The core handle of one worker's child process, built from its init frame (from_init), or\nfrom the producer manifest of its child pool, the connections the pool keeps open, and the\nping at checkout. Built in the child after its start; building it starts nothing.",
         constructor: Constructor::Parameters(CORE_CHILD_HANDLE_PARAMETERS),
         properties: &[],
         methods: CORE_CHILD_HANDLE_METHODS,
@@ -3644,8 +3654,19 @@ const FUNCTIONS: &[StubFunction] = &[
 ];
 
 /// The surface of `horsies._core`.
+const STATIC_METHODS: &[StubStaticMethod] = &[StubStaticMethod {
+    class_name: "CoreChildHandle",
+    function: StubFunction {
+        name: "from_init",
+        parameters: &[positional("init", "InitFrame")],
+        returns: TypeText::Plain("CoreChildHandle"),
+        doc: "The child handle of the child that init boots: the database URL, the connection settings\nand the pool of the child kind come from the frame and stay in the core. Starts nothing.",
+    },
+}];
+
 pub const CORE_MODULE: ModuleSurface = ModuleSurface {
     exceptions: EXCEPTIONS,
     classes: &CLASSES,
+    static_methods: STATIC_METHODS,
     functions: FUNCTIONS,
 };

@@ -131,6 +131,12 @@ pub enum SessionDatabase {
 pub struct DatabaseUrl(String);
 
 impl DatabaseUrl {
+    /// A URL that the core already holds, for a manifest that the core
+    /// builds itself (the core handle of a worker's child).
+    pub(crate) fn new(url: String) -> Self {
+        Self(url)
+    }
+
     /// The URL text, for the connection layer only. Never log it.
     pub fn expose(&self) -> &str {
         &self.0

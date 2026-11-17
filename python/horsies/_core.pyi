@@ -321,9 +321,9 @@ class CoreHandle:
 
 @final
 class CoreChildHandle:
-    """The core handle of one worker's child process: the producer manifest of its child pool,
-    the connections the pool keeps open, and the ping at checkout. Built in the child after
-    its start; building it starts nothing.
+    """The core handle of one worker's child process, built from its init frame (from_init), or
+    from the producer manifest of its child pool, the connections the pool keeps open, and the
+    ping at checkout. Built in the child after its start; building it starts nothing.
     """
     def __init__(self, manifest_json: str, *, kept_open: int, check_at_checkout: bool) -> None: ...
     def start_attempt(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, worker_pid: int, worker_hostname: str, deadline_in_ms: int | None) -> AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed:
@@ -352,6 +352,11 @@ class CoreChildHandle:
         """
     def mark_finalizing_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime) -> asyncio.Future[FinalizingMarked | FinalizingNotHeld | MarkFinalizingFailed]:
         """The awaitable form of the method above."""
+    @staticmethod
+    def from_init(init: InitFrame) -> CoreChildHandle:
+        """The child handle of the child that init boots: the database URL, the connection settings
+        and the pool of the child kind come from the frame and stay in the core. Starts nothing.
+        """
 
 
 @final

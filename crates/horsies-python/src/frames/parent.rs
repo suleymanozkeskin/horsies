@@ -71,8 +71,6 @@ pub struct InitFrameRecord {
 
 impl InitFrameRecord {
     /// The decoded init frame.
-    // The first caller is the child handle built from the init frame.
-    #[allow(dead_code)]
     pub fn frame(&self) -> &InitFrame {
         &self.frame
     }

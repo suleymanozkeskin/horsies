@@ -20,6 +20,8 @@ mod child;
 mod parent;
 mod preload;
 
+pub use parent::InitFrameRecord;
+
 use std::sync::{Mutex, PoisonError};
 
 use horsies_core::frame_protocol::{
