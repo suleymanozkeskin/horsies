@@ -135,6 +135,10 @@ class CoreHandle:
         """One partition coverage pass on the session-work pool. Writes (DDL and catalog rows);
         each leaf commits alone.
         """
+    def prune_expired_partitions_async(self) -> asyncio.Future[PrunePassRecord | PruneFailed]:
+        """One pruning pass on the session-work pool. Writes (DDL and catalog rows); each leaf's
+        detach and drop commit alone.
+        """
     def cancel_task_async(self, task_id: uuid.UUID, *, include_running: bool) -> asyncio.Future[TaskCancelledRecord | CancelRefusedWorkflowTask | CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid]:
         """Cancel one plain task; a RUNNING task only with include_running. Writes, in one
         statement. An outcome that contradicts the function raises PanicException.
@@ -1508,6 +1512,37 @@ class CoverageFailed:
     """The pass has no outcome: the connect, the client family check, a probe, the coverage
     gate, the class registration or the final publication failed, or a row broke its
     function's contract.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class PrunePassRecord:
+    """One pruning pass: the finalized leaves, the counts of the swept leaves left detached and
+    dropped, the refusals and errors (one entry per leaf), and whether a per-pass bound left
+    expired leaves for the next pass.
+    """
+    @property
+    def finalized_leaves(self) -> list[str]: ...
+    @property
+    def detached(self) -> int: ...
+    @property
+    def dropped(self) -> int: ...
+    @property
+    def refusals(self) -> list[str]: ...
+    @property
+    def errors(self) -> list[str]: ...
+    @property
+    def reach(self) -> Literal['WITHIN_BOUNDS', 'TRUNCATED']: ...
+
+
+@final
+class PruneFailed:
+    """The pass has no report: the connect, the client family check or the candidate read
+    failed, or a candidate row broke its function's contract. Nothing was detached or dropped.
     """
     @property
     def message(self) -> str: ...
