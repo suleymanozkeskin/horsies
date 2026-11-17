@@ -780,7 +780,7 @@ async def test_task_expired_plain_task_skips_finalization(
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """Plain-task TASK_EXPIRED keeps the skip: Ok(None), no DB write,
-    no phase 2, no persisted-result load."""
+    no phase 2, no load of the persisted terminal."""
     task_id = await _insert_running_task(session, is_workflow_task=False)
     worker = _make_worker(engine)
     handle = task_finished_handle(
@@ -789,7 +789,7 @@ async def test_task_expired_plain_task_skips_finalization(
     worker._finalize_workflow_phase = AsyncMock(  # type: ignore[method-assign]
         return_value=Ok(None),
     )
-    worker._load_persisted_task_result = AsyncMock()  # type: ignore[method-assign]
+    worker._load_persisted_terminal = AsyncMock()  # type: ignore[method-assign]
 
     result = await worker._finalize_after(
         handle,
@@ -803,7 +803,7 @@ async def test_task_expired_plain_task_skips_finalization(
     assert result.ok_value is None
     assert await _get_task_status(session, task_id) == 'RUNNING'
     worker._finalize_workflow_phase.assert_not_awaited()
-    worker._load_persisted_task_result.assert_not_awaited()
+    worker._load_persisted_terminal.assert_not_awaited()
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -812,15 +812,16 @@ async def test_task_expired_workflow_task_loader_error_propagates(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Workflow-task TASK_EXPIRED with a failing persisted-result load
-    returns that finalize error (phase-2 stage) instead of skipping."""
+    """Workflow-task TASK_EXPIRED with a failing load of the persisted
+    terminal returns that finalize error (phase-2 stage) instead of
+    skipping."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
     handle = task_finished_handle(
         ok=False, result_json='', failed_reason='TASK_EXPIRED',
     )
     loader_err = _make_finalize_error(task_id, _FINALIZE_STAGE_PHASE2)
-    worker._load_persisted_task_result = AsyncMock(  # type: ignore[method-assign]
+    worker._load_persisted_terminal = AsyncMock(  # type: ignore[method-assign]
         return_value=Err(loader_err),
     )
     worker._finalize_workflow_phase = AsyncMock(  # type: ignore[method-assign]
@@ -836,8 +837,10 @@ async def test_task_expired_workflow_task_loader_error_propagates(
     )
 
     assert is_err(result)
+    assert result.err_value.error_code == loader_err.error_code
     assert result.err_value.stage == _FINALIZE_STAGE_PHASE2
     assert result.err_value.task_id == task_id
+    worker._load_persisted_terminal.assert_awaited_once_with(task_id)
     worker._finalize_workflow_phase.assert_not_awaited()
 
 
