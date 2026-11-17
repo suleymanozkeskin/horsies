@@ -41,27 +41,33 @@ async fn a_moved_task_detail_carries_the_end_stamp_of_its_status() {
         "{outcomes:?}"
     );
 
-    let completed_detail = get_task_detail(&broker, completed.id)
-        .await
-        .expect("completed detail")
-        .expect("completed task");
+    let completed_detail = found_detail(
+        get_task_detail(&broker, completed.id)
+            .await
+            .expect("completed detail"),
+    );
     assert_eq!(completed_detail.leaf.status, "COMPLETED");
     assert!(completed_detail.leaf.completed_at.is_some());
     assert_eq!(completed_detail.leaf.failed_at, None);
 
-    let cancelled_detail = get_task_detail(&broker, cancelled.id)
-        .await
-        .expect("cancelled detail")
-        .expect("cancelled task");
+    let cancelled_detail = found_detail(
+        get_task_detail(&broker, cancelled.id)
+            .await
+            .expect("cancelled detail"),
+    );
     assert_eq!(cancelled_detail.leaf.status, "CANCELLED");
     assert!(cancelled_detail.leaf.failed_at.is_some());
     assert_eq!(cancelled_detail.leaf.completed_at, None);
 
+    let unknown = Uuid::new_v4();
     assert_eq!(
-        get_task_detail(&broker, Uuid::new_v4())
+        get_task_detail(&broker, unknown)
             .await
             .expect("unknown detail"),
-        None
+        TaskDetailRead::NotFound(TaskDetailNotFound {
+            task_id: unknown,
+            reason: TaskAbsenceReason::NotClassified,
+        })
     );
     clean_w2(&pool, &scope).await;
 }

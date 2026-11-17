@@ -25,6 +25,7 @@ use crate::broker::attempt_writes::{
     finish_failed_attempt, finish_unreported_attempt, finish_workflow_success, AttemptFailure,
     AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement, RetryRequest,
 };
+use crate::broker::core_rows::{one_row, scalar, StatementLog};
 use crate::broker::error::is_retryable_sqlx_error;
 use crate::broker::listener::notify_task_queue;
 use crate::broker::terminalization::terminalize;
@@ -42,9 +43,11 @@ use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
 use crate::core::workflow::context::{WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
-use crate::db::{CheckoutClass, ParameterType, StatementBound, TypedStatement};
+use crate::db::{
+    CheckoutClass, CorePool, ParameterType, StatementBound, StatementFailure, TypedStatement,
+};
 use crate::workflow_engine::args_merge::unwrap_args_from_entries;
-use crate::workflow_engine::phase2_recovery::{send_phase2_wake, Phase2Wake};
+use crate::workflow_engine::phase2_recovery::Phase2Wake;
 use crate::workflow_engine::steps::{
     advance_parents, node_finish_alone, node_finish_in_transaction, ChildBuild, Dependents,
     NodeFinishDisposition, OwedParentAdvances,
@@ -540,7 +543,7 @@ async fn persist_workflow_success(
             phase_two: PhaseTwoForm::Step(phase_two.step),
         }),
         WorkflowSuccessOutcome::Refused(AttemptWriteRefusal::AlreadyApplied { .. }) => {
-            replay_of_committed_write(broker.pool(), task_id, true).await
+            replay_of_committed_write(broker, task_id, true).await
         }
         WorkflowSuccessOutcome::Refused(
             AttemptWriteRefusal::LostClaim { .. }
@@ -667,7 +670,7 @@ async fn after_failed_attempt(
             queue_name,
             ..
         } => {
-            wake_when_retry_due(broker.pool(), command, queue_name);
+            wake_when_retry_due(broker, command, queue_name);
             tracing::info!(
                 task_id = %command.task_id,
                 retry_count,
@@ -677,7 +680,7 @@ async fn after_failed_attempt(
             Ok(FinalizeOutcome::Retried)
         }
         FailedAttemptOutcome::Refused(AttemptWriteRefusal::AlreadyApplied { .. }) => {
-            replay_of_committed_write(broker.pool(), command.task_id, is_workflow_task).await
+            replay_of_committed_write(broker, command.task_id, is_workflow_task).await
         }
         FailedAttemptOutcome::Refused(
             AttemptWriteRefusal::LostClaim { .. }
@@ -688,9 +691,12 @@ async fn after_failed_attempt(
 }
 
 /// Wake the queue of a scheduled retry after the delay of its request
-/// (Python `RetryMixin._wake_when_retry_due`). A failed wake is logged: the
-/// retried row is PENDING and the worker's poll finds it.
-fn wake_when_retry_due(pool: &sqlx::PgPool, command: &FinishFailedAttempt, queue_name: String) {
+/// (Python `RetryMixin._wake_when_retry_due`): one `pg_notify` in autocommit
+/// on the main core pool of `broker`, as open when the retry was written. A
+/// failed wake is logged: the retried row is PENDING and the worker's poll
+/// finds it. A close of the broker in the delay closes that pool, so the
+/// wake fails and is logged.
+fn wake_when_retry_due(broker: &PostgresBroker, command: &FinishFailedAttempt, queue_name: String) {
     let delay_seconds = match command.retry {
         RetryRequest::RetryAfter { delay_seconds, .. } => delay_seconds,
         RetryRequest::NoRetry => unreachable!(
@@ -698,11 +704,25 @@ fn wake_when_retry_due(pool: &sqlx::PgPool, command: &FinishFailedAttempt, queue
             command.task_id
         ),
     };
-    let pool = pool.clone();
     let task_id = command.task_id;
+    let open = match broker.core_pools_for_write() {
+        Ok((open, _write)) => open,
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task_id,
+                queue = %queue_name,
+                error = %error,
+                "delayed retry NOTIFY not scheduled; worker polling fallback will recover",
+            );
+            return;
+        }
+    };
+    let statement_log = broker.statement_log();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs_f64(delay_seconds)).await;
-        if let Err(error) = notify_task_queue(&pool, &queue_name, task_id).await {
+        if let Err(error) =
+            notify_task_queue(open.main(), statement_log, &queue_name, task_id).await
+        {
             tracing::warn!(
                 task_id = %task_id,
                 queue = %queue_name,
@@ -717,12 +737,12 @@ fn wake_when_retry_due(pool: &sqlx::PgPool, command: &FinishFailedAttempt, queue
 /// phase 2 while its durable phase-2 record exists; a plain task owes
 /// nothing.
 async fn replay_of_committed_write(
-    pool: &sqlx::PgPool,
+    broker: &PostgresBroker,
     task_id: Uuid,
     is_workflow_task: bool,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     match is_workflow_task {
-        true => match load_pending_phase_two(pool, task_id).await? {
+        true => match load_pending_phase_two(broker, task_id).await? {
             PendingPhaseTwo::Owed => Ok(FinalizeOutcome::Terminal {
                 capacity_notified: false,
                 phase_two: PhaseTwoForm::NotKnown,
@@ -790,11 +810,12 @@ fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> boo
 ///
 /// A workflow task runs `horsies_workflow_node_finish` on the worker reserve
 /// ([`finish_workflow_node`]), which sends the capacity wake when phase 1 did
-/// not. A plain task sends the wake as one statement when phase 1 did not; an
-/// error of the wake is a phase-2 error, never dropped, retryable when the
-/// database error is transient (`is_retryable_sqlx_error`, Python
-/// `_phase2_error`, `core/worker/finalize.py:1676-1697`). Returns the parent
-/// advances that the step owes after its commit.
+/// not. A plain task sends the wake as one statement on the main core pool,
+/// on the reserve, when phase 1 did not; an error of the wake is a phase-2
+/// error, never dropped, retryable when the database error is transient
+/// (`BrokerError::is_retryable`, Python `_phase2_error`,
+/// `core/worker/finalize.py:1676-1697`). Returns the parent advances that the
+/// step owes after its commit.
 ///
 /// Errors: [`FinalizeError`] at [`FinalizeStage::Phase2Workflow`], retryable
 /// when the failure may clear.
@@ -821,21 +842,59 @@ pub(crate) async fn finalize_workflow_phase(
         }
         false => {
             // Skipped when phase 1's statement already sent the wake in the
-            // same commit as the transition.
+            // same commit as the transition: no statement, no checkout.
             let wake = match capacity_notified {
-                true => Phase2Wake::NoWake,
+                true => return Ok(OwedParentAdvances::default()),
                 false => capacity_wake(queue_name),
             };
-            send_phase2_wake(broker.pool(), &wake)
+            let wake_error = |error: crate::broker::BrokerError| FinalizeError {
+                stage: FinalizeStage::Phase2Workflow,
+                task_id,
+                message: format!("capacity wake of queue {queue_name:?} failed: {error}"),
+                retryable: error.is_retryable(),
+            };
+            let (open, _write) = broker.core_pools_for_write().map_err(wake_error)?;
+            send_phase2_wake(open.main(), broker.statement_log(), &wake)
                 .await
-                .map_err(|error| FinalizeError {
-                    stage: FinalizeStage::Phase2Workflow,
-                    task_id,
-                    message: format!("capacity wake of queue {queue_name:?} failed: {error}"),
-                    retryable: is_retryable_sqlx_error(&error),
-                })?;
+                .map_err(|failure| wake_error(crate::broker::BrokerError::Statement(failure)))?;
             Ok(OwedParentAdvances::default())
         }
+    }
+}
+
+/// The statement of a phase-2 wake: `$1` the channel, `$2` the payload.
+static SEND_PHASE2_WAKE: TypedStatement = TypedStatement::new(
+    "send_phase2_wake",
+    "SELECT pg_notify($1, $2)",
+    &[ParameterType::Text, ParameterType::Text],
+);
+
+/// Send `wake` as one statement in autocommit on `pool`, a per-task write
+/// ([`CheckoutClass::Reserved`]). Writes nothing else. [`Phase2Wake::NoWake`]
+/// sends nothing.
+///
+/// Errors: the failed statement, for example on a dead connection or a
+/// channel name that the server refuses; nothing was sent, or the outcome is
+/// unknown.
+pub(crate) async fn send_phase2_wake(
+    pool: &CorePool,
+    statement_log: StatementLog,
+    wake: &Phase2Wake,
+) -> Result<(), StatementFailure> {
+    match wake {
+        Phase2Wake::Queue { channel, payload } => {
+            let statement = &SEND_PHASE2_WAKE;
+            let bound = statement.bind().value(channel).value(payload).finish();
+            statement_log.log(statement);
+            pool.execute(
+                CheckoutClass::Reserved,
+                &bound,
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+            .map(|_notified| ())
+        }
+        Phase2Wake::NoWake => Ok(()),
     }
 }
 
@@ -963,26 +1022,49 @@ enum PendingPhaseTwo {
     Consumed,
 }
 
+/// [`PENDING_PHASE_TWO_EXISTS_SQL`] with its parameter type: task id.
+static PENDING_PHASE_TWO_EXISTS: TypedStatement = TypedStatement::new(
+    "pending_phase_two_exists",
+    PENDING_PHASE_TWO_EXISTS_SQL,
+    &[ParameterType::Uuid],
+);
+
 /// Read whether a workflow task's phase-2 record exists after a phase-1
-/// replay. One statement; writes nothing. The moved history row is not read:
-/// the record is the evidence that phase 2 is still owed.
+/// replay. One statement in autocommit on the main core pool of `broker`,
+/// in the per-task write that replays ([`CheckoutClass::Reserved`]); writes
+/// nothing. The moved history row is not read: the record is the evidence
+/// that phase 2 is still owed.
 ///
 /// Errors: the read fails: [`FinalizeError`] at
-/// [`FinalizeStage::Phase2Workflow`], retryable.
+/// [`FinalizeStage::Phase2Workflow`], retryable when the failure may clear
+/// (Python `_load_persisted_terminal`: `is_retryable_connection_error`).
 async fn load_pending_phase_two(
-    pool: &sqlx::PgPool,
+    broker: &PostgresBroker,
     task_id: Uuid,
 ) -> Result<PendingPhaseTwo, FinalizeError> {
-    let owed: bool = sqlx::query_scalar(PENDING_PHASE_TWO_EXISTS_SQL)
-        .bind(task_id)
-        .fetch_one(pool)
+    let read_error = |error: crate::broker::BrokerError| FinalizeError {
+        stage: FinalizeStage::Phase2Workflow,
+        task_id,
+        message: format!("failed to load the phase-2 record: {error}"),
+        retryable: error.is_retryable(),
+    };
+    let (open, _write) = broker.core_pools_for_write().map_err(read_error)?;
+    let statement = &PENDING_PHASE_TWO_EXISTS;
+    let bound = statement.bind().value(&task_id).finish();
+    broker.statement_log().log(statement);
+    let rows = open
+        .main()
+        .query(
+            CheckoutClass::Reserved,
+            &bound,
+            StatementBound::ConnectionTimeouts,
+        )
         .await
-        .map_err(|error| FinalizeError {
-            stage: FinalizeStage::Phase2Workflow,
-            task_id,
-            message: format!("failed to load the phase-2 record: {error}"),
-            retryable: true,
-        })?;
+        .map_err(|failure| read_error(crate::broker::BrokerError::Statement(failure)))?;
+    let row = one_row(rows, statement)
+        .map_err(|decode| read_error(crate::broker::BrokerError::RowDecode(decode)))?;
+    let owed: bool = scalar(&row, statement)
+        .map_err(|decode| read_error(crate::broker::BrokerError::RowDecode(decode)))?;
     Ok(match owed {
         true => PendingPhaseTwo::Owed,
         false => PendingPhaseTwo::Consumed,

@@ -16,7 +16,7 @@ use crate::db::{Row as CoreRow, StatementFailure, TypedStatement};
 use super::function_rows::{
     breakdown_from_rows, breakdown_row, builtin_taxonomy, page_from_rows, schedule_row,
     status_counts, task_detail_row, task_list_row, workflow_name_row, workflow_node, workflow_run,
-    workflow_runs, DetailRead, DetailRowError, NodeRead, RunRead, MONITORING_SCHEDULES,
+    workflow_runs, DetailRowError, NodeRead, RunRead, MONITORING_SCHEDULES,
     MONITORING_TASK_BREAKDOWN, MONITORING_TASK_DETAIL, MONITORING_TASK_FACETS,
     MONITORING_TASK_LIST, MONITORING_TASK_STATS, MONITORING_WORKFLOW_NAMES,
     MONITORING_WORKFLOW_NODE, MONITORING_WORKFLOW_RUN, MONITORING_WORKFLOW_RUNS,
@@ -29,7 +29,7 @@ use crate::core::types::status::TaskStatus;
 use super::errors::{MonitoringQueryError, MonitoringResult};
 use super::models::{
     Breakdown, ErrorCategory, ErrorFacet, FacetValue, Facets, ScheduleStateInfo, StatusCount,
-    TaskDetail, TaskListPage, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
+    TaskDetailRead, TaskListPage, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
 };
 
 pub const MAX_TASK_PAGE_REACH: i64 = 500;
@@ -743,14 +743,23 @@ pub async fn list_tasks(
 
 /// One task, live or in history, with its attempts and workflow link, read
 /// by `horsies_monitoring_task_detail` in one statement (one snapshot).
-/// `None` for a task that neither place holds. A history row that does not
-/// decode, or a published reader that reports the task live after the live
-/// miss of the same snapshot, is `HISTORY_CONTRACT_VIOLATION`; any other
-/// failure, a missing reader too, is `DB_OPERATION_FAILED`.
+///
+/// Outcomes:
+/// - `Found`: the live row, or the history row when the live table has no
+///   row. Attempts are oldest first.
+/// - `NotFound`: neither place holds the task. The reason, classified in the
+///   same snapshot, says whether retention can explain it: an id that is not
+///   a UUIDv7 is not classified; a UUIDv7 born before the latest upper bound
+///   of a detached leaf of a period class (plus 5 s) predates retained
+///   history; any other UUIDv7 is within it.
+/// - A history row that does not decode, or a published reader that reports
+///   the task live after the live miss of the same snapshot, is
+///   `HISTORY_CONTRACT_VIOLATION`; any other failure, a missing reader too,
+///   is `DB_OPERATION_FAILED`.
 pub async fn get_task_detail(
     broker: &PostgresBroker,
     task_id: Uuid,
-) -> MonitoringResult<Option<TaskDetail>> {
+) -> MonitoringResult<TaskDetailRead> {
     let operation = "task detail query";
     let statement = &MONITORING_TASK_DETAIL;
     let with_result = false;
@@ -767,11 +776,7 @@ pub async fn get_task_detail(
         .await
         .map_err(|error| function_failure(operation, error))?;
     let row = one_row(rows, statement).map_err(|error| row_failure(operation, error))?;
-    match task_detail_row(&row, statement) {
-        Ok(DetailRead::Found(detail)) => Ok(Some(detail)),
-        Ok(DetailRead::Absent) => Ok(None),
-        Err(error) => Err(detail_row_failure(operation, error)),
-    }
+    task_detail_row(&row, statement).map_err(|error| detail_row_failure(operation, error))
 }
 
 /// The distinct names of the root runs, for the run filter, in the database

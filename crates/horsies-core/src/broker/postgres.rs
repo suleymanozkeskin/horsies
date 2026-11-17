@@ -1213,6 +1213,15 @@ impl PostgresBroker {
         Ok(self.core.pools_for_write()?)
     }
 
+    /// The open core pools, for a read of a client handle that runs on the
+    /// main core pool ([`crate::broker::lifecycle_operations`]). A close does
+    /// not wait for it. An `Idle` handle opens its pools first.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] when the pools cannot be built.
+    pub(crate) fn core_pools_for_read(&self) -> Result<std::sync::Arc<OpenPools>, BrokerError> {
+        Ok(self.core.pools()?)
+    }
+
     /// Whether this broker logs each core statement it runs, for the
     /// lifecycle writers that run on the main core pool.
     pub(crate) fn statement_log(&self) -> StatementLog {

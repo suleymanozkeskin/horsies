@@ -627,6 +627,12 @@ impl QueueStarts {
     pub fn of(&self, queue_name: &str) -> u64 {
         self.counts.get(queue_name).copied().unwrap_or(0)
     }
+
+    /// Every counted queue with its count. A queue with no counted row is
+    /// absent.
+    pub fn into_counts(self) -> HashMap<String, u64> {
+        self.counts
+    }
 }
 
 /// Count the queues of `check`: one statement on `pool`, as batch work.

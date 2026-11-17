@@ -1448,7 +1448,7 @@ impl Worker {
         let claimer_interval =
             Duration::from_millis(self.app_config.recovery.claimer_heartbeat_interval_ms);
         let claimer_hb = spawn_claimer_heartbeat(
-            self.broker.pool().clone(),
+            Arc::clone(&self.broker),
             self.worker_id.clone(),
             self.hostname.clone(),
             std::process::id() as i32,
@@ -1460,7 +1460,7 @@ impl Worker {
         let reaper_health = new_reaper_health();
         let reaper = self.spawn_reaper_loop(Arc::clone(&reaper_health));
         let state_loop = crate::worker::worker_state::spawn_worker_state_loop(
-            self.broker.pool().clone(),
+            Arc::clone(&self.broker),
             self.worker_id.clone(),
             self.hostname.clone(),
             std::process::id() as i32,
@@ -1691,10 +1691,9 @@ fn reap_finished(writes: &mut JoinSet<()>) {
 mod tests {
     use super::*;
     use crate::worker::execution::{
-        capacity_wake, persist_ok_result, persist_terminal_state, run_phase2, FinalizeOutcome,
-        FinalizeStage, Phase2Work,
+        capacity_wake, persist_ok_result, persist_terminal_state, run_phase2, send_phase2_wake,
+        FinalizeOutcome, FinalizeStage, Phase2Work,
     };
-    use crate::workflow_engine::phase2_recovery::send_phase2_wake;
 
     use crate::async_task_fn;
     use crate::broker::{ClaimedTaskRow, PostgresBroker};
@@ -4004,9 +4003,14 @@ mod tests {
         listener.listen("task_new").await.unwrap();
         listener.listen("task_queue_high-priority").await.unwrap();
 
-        send_phase2_wake(&pool, &capacity_wake("high-priority"))
-            .await
-            .expect("send the capacity wake");
+        let core_pool = crate::broker::pools::core_pool_for_test_pool(&pool);
+        send_phase2_wake(
+            &core_pool,
+            crate::broker::core_rows::StatementLog::Off,
+            &capacity_wake("high-priority"),
+        )
+        .await
+        .expect("send the capacity wake");
 
         let first = tokio::time::timeout(Duration::from_secs(2), listener.recv())
             .await
@@ -4026,14 +4030,31 @@ mod tests {
     }
 
     /// A capacity wake that the database refuses is an error, never dropped
-    /// (#722): a closed pool answers `PoolClosed`.
+    /// (#722): a closed pool answers `PoolClosed`, and nothing was sent.
     #[tokio::test]
     #[serial]
     async fn capacity_wake_on_a_closed_pool_is_an_error() {
         let pool = test_pool().await;
-        pool.close().await;
-        let sent = send_phase2_wake(&pool, &capacity_wake("default")).await;
-        assert!(matches!(sent, Err(sqlx::Error::PoolClosed)), "{sent:?}");
+        let core_pool = crate::broker::pools::core_pool_for_test_pool(&pool);
+        core_pool.close();
+        let sent = send_phase2_wake(
+            &core_pool,
+            crate::broker::core_rows::StatementLog::Off,
+            &capacity_wake("default"),
+        )
+        .await;
+        assert!(
+            matches!(
+                sent,
+                Err(crate::db::StatementFailure::NotSent {
+                    cause: crate::db::NotSentCause::Checkout(
+                        crate::db::CheckoutFailure::PoolClosed { .. }
+                    ),
+                    ..
+                })
+            ),
+            "{sent:?}"
+        );
     }
 
     /// A database of its own, migrated without the install's family record,
