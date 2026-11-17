@@ -29,6 +29,7 @@ pub mod stop_before_start;
 pub mod success;
 pub mod task_info;
 pub mod task_lists;
+pub mod worker_connections;
 pub mod worker_ping;
 pub mod worker_reads;
 pub mod workflow_lifecycle;

@@ -20,7 +20,6 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.worker_profile import IsolatedChildren, WorkerProfile
-from horsies.core.worker.profile_fit import ServerConnectionLimit
 
 RUNTIME_URL = SecretStr('postgresql://u:p@pooler:6432/db')
 SESSION_URL = SecretStr('postgresql://u:p@direct:5432/db')
@@ -61,10 +60,9 @@ class TestEngineKwargsHideParameters:
         finally:
             await engine.dispose()
 
-    def test_live_check_engine_hides_parameters(self) -> None:
-        """The live check's one engine of its own reads the server
-        connection limit for the worker profiles; the connectivity step runs
-        in the core and builds no engine."""
+    def test_live_check_opens_no_engine(self) -> None:
+        """Both live phases run in the core on one core handle: the
+        connectivity step and the worker connection step build no engine."""
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(database_url=RUNTIME_URL),
@@ -73,22 +71,29 @@ class TestEngineKwargsHideParameters:
                 },
             ),
         )
-        mock_engine = mock.MagicMock()
-        mock_engine.dispose = mock.AsyncMock()
-        reader = mock.AsyncMock(
-            return_value=ServerConnectionLimit(max_connections=100, reserved=3),
-        )
+
+        class _Passed:
+            """Stands for ``horsies._core.ConnectivityPassed``."""
+
+        class _Handle:
+            def __init__(self, manifest_json: str, *, pool_profile: str) -> None:
+                _ = (manifest_json, pool_profile)
+
+            def check_connectivity(self) -> _Passed:
+                return _Passed()
+
+            def check_worker_connections(self, profiles_json: str) -> list[object]:
+                _ = profiles_json
+                return []
+
+            def close(self) -> None:
+                return None
 
         with (
-            mock.patch(
-                'sqlalchemy.ext.asyncio.create_async_engine',
-                return_value=mock_engine,
-            ) as mock_create_engine,
-            mock.patch.object(app, '_check_broker_connectivity', return_value=[]),
-            mock.patch('horsies.core.app.read_server_connection_limit', reader),
+            mock.patch('sqlalchemy.ext.asyncio.create_async_engine') as mock_create_engine,
+            mock.patch('horsies.core.app.CoreHandle', _Handle),
+            mock.patch('horsies.core.app.ConnectivityPassed', _Passed),
         ):
-            _ = app.check(live=True)
+            assert app.check(live=True) == []
 
-        assert mock_create_engine.call_args_list
-        for engine_call in mock_create_engine.call_args_list:
-            assert engine_call.kwargs['hide_parameters'] is True
+        mock_create_engine.assert_not_called()

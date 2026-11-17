@@ -19,6 +19,8 @@ other refusal by the core is a defect of this module.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -360,6 +362,22 @@ def worker_profile_manifest(profile: WorkerProfile) -> wire.WorkerProfileManifes
         drain_timeout_ms=drain_timeout_ms(profile.drain_timeout),
         preload=_preload(profile.preload),
         parent_cpu=_parent_cpu(profile.parent_cpu),
+    )
+
+
+def dump_worker_profiles(profiles: Mapping[str, WorkerProfile]) -> str:
+    """The JSON text of `profiles` in the form of the `profiles` member of
+    the worker manifest: each profile as `worker_profile_manifest` gives it,
+    by name, written as `dump_worker_manifest` writes the manifest. The live
+    check sends it to the core (`CoreHandle.check_worker_connections`). Pure.
+    """
+    return json.dumps(
+        {
+            name: dataclasses.asdict(worker_profile_manifest(profile))
+            for name, profile in profiles.items()
+        },
+        separators=(',', ':'),
+        allow_nan=False,
     )
 
 
