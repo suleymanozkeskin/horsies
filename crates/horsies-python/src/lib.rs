@@ -25,6 +25,8 @@
 //!   broker of a `CoreHandle` (`scheduler`).
 //! - The Python child program and the preload process speak the core's
 //!   parent-child frame codec through pure calls (`frames`).
+//! - `prepare_worker` builds the worker of a worker manifest, and
+//!   `PreparedWorker.run` runs it on the main thread (`worker`).
 
 mod bridge;
 mod child_handle;
@@ -36,6 +38,7 @@ mod operations;
 mod process_core;
 mod records;
 mod scheduler;
+mod worker;
 
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
@@ -248,6 +251,25 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::monitoring_reads::TaskDetailAbsent>()?;
     module.add_class::<operations::task_lists::TaskListComplete>()?;
     module.add_class::<operations::task_lists::TaskListTruncated>()?;
+    module.add_class::<operations::worker_reads::ResourceShortageRecord>()?;
+    module.add_class::<operations::worker_reads::DownSlotRecord>()?;
+    module.add_class::<operations::worker_reads::AllSlotsServingRecord>()?;
+    module.add_class::<operations::worker_reads::SlotsDownRecord>()?;
+    module.add_class::<operations::worker_reads::ClassBudgetRecord>()?;
+    module.add_class::<operations::worker_reads::WorkerStateRecord>()?;
+    module.add_class::<operations::worker_reads::WorkerStatesRecord>()?;
+    module.add_class::<operations::worker_reads::WorkerStateAbsent>()?;
+    module.add_class::<operations::worker_reads::StreamServedRecord>()?;
+    module.add_class::<operations::worker_reads::StreamWithoutCapacityRecord>()?;
+    module.add_class::<operations::worker_reads::StreamUnservedRecord>()?;
+    module.add_class::<operations::worker_reads::StreamCoverageRecord>()?;
+    module.add_class::<operations::worker_reads::ClassCoverageRecord>()?;
+    module.add_class::<operations::worker_reads::OldestWaitingRecord>()?;
+    module.add_class::<operations::worker_reads::NoneDueRecord>()?;
+    module.add_class::<operations::worker_reads::PendingStreamRecord>()?;
+    module.add_class::<operations::worker_reads::BudgetLoadRecord>()?;
+    module.add_class::<operations::worker_reads::WorkerClassLoadRecord>()?;
+    module.add_class::<operations::worker_reads::ClassReportRecord>()?;
     module.add_class::<operations::monitoring_window::MonitoringWindowRecord>()?;
     module.add_class::<operations::monitoring_window::WindowRefusedRecord>()?;
     module.add_class::<operations::workflow_lifecycle::WorkflowPaused>()?;
@@ -256,6 +278,16 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::workflow_lifecycle::WorkflowNotCancellable>()?;
     module.add_class::<operations::workflow_lifecycle::WorkflowAbsent>()?;
     module.add_class::<operations::workflow_lifecycle::HandleFailed>()?;
+    module.add_class::<operations::workflow_reads::WorkflowStatusRead>()?;
+    module.add_class::<operations::workflow_reads::WorkflowCompletedRead>()?;
+    module.add_class::<operations::workflow_reads::WorkflowEndedRead>()?;
+    module.add_class::<operations::workflow_reads::WorkflowPausedRead>()?;
+    module.add_class::<operations::workflow_reads::WaitTimedOut>()?;
+    module.add_class::<operations::workflow_reads::StoredNodeResultRecord>()?;
+    module.add_class::<operations::workflow_reads::WorkflowNodeResultsRead>()?;
+    module.add_class::<operations::workflow_reads::NodeResultNotStored>()?;
+    module.add_class::<operations::workflow_reads::StoredNodeRecord>()?;
+    module.add_class::<operations::workflow_reads::WorkflowNodesRead>()?;
     module.add_class::<operations::workflow_retention::WorkflowsDeleted>()?;
     module.add_class::<operations::workflow_retention::WorkflowDeleteFailed>()?;
     module.add_class::<operations::paused_expiry::PausedExpired>()?;
@@ -266,9 +298,16 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<scheduler::SchedulerTicked>()?;
     module.add_class::<scheduler::SchedulerTickFailed>()?;
     module.add_class::<scheduler::SchedulerStopped>()?;
+    module.add_class::<worker::PreparedWorker>()?;
+    module.add_class::<worker::WorkerProfileRefused>()?;
+    module.add_class::<worker::WorkerStopped>()?;
+    module.add_class::<worker::WorkerBootFailed>()?;
+    module.add_class::<worker::WorkerFailed>()?;
+    module.add_class::<worker::StopRequested>()?;
     module.add_function(wrap_pyfunction!(baseline_sql_files, module)?)?;
     module.add_function(wrap_pyfunction!(core_state, module)?)?;
     module.add_function(wrap_pyfunction!(mint_task_id, module)?)?;
+    module.add_function(wrap_pyfunction!(worker::prepare_worker, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_log_levels, module)?)?;
     module.add_function(wrap_pyfunction!(
         operations::monitoring_window::resolve_monitoring_window,

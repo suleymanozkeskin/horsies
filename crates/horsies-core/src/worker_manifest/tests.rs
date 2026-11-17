@@ -10,7 +10,7 @@ use crate::core::config::child_sizing::parent_pool_connections;
 use crate::core::error::{ErrorCode, HorsiesError};
 
 /// A profile with every setting of every kind of child.
-fn full_profile() -> Value {
+pub(crate) fn full_profile() -> Value {
     json!({
         "isolated": {
             "kind": "CHILDREN",
@@ -59,7 +59,7 @@ fn isolated_profile(count: u32) -> Value {
     profile
 }
 
-fn manifest(profiles: Value, request: Value) -> Value {
+pub(crate) fn manifest(profiles: Value, request: Value) -> Value {
     json!({
         "manifest_version": 1,
         "database": {
@@ -179,11 +179,11 @@ fn retention_section() -> Value {
     })
 }
 
-fn named(name: &str) -> Value {
+pub(crate) fn named(name: &str) -> Value {
     json!({"kind": "NAMED", "name": name})
 }
 
-fn parsed(document: &Value) -> WorkerManifest {
+pub(crate) fn parsed(document: &Value) -> WorkerManifest {
     parse_worker_manifest(&document.to_string())
         .unwrap_or_else(|refused| panic!("the manifest parses: {refused}"))
 }

@@ -1,7 +1,7 @@
 """The handle errors of the workflow operations that run in the core.
 
-A workflow operation of the handle (pause, cancel) runs one statement through
-``horsies._core``. The core answers with one record per outcome; these
+A workflow operation of the handle (pause, cancel, and the reads) runs one
+statement through ``horsies._core``. The core answers with one record per outcome; these
 functions build the public ``HandleOperationError`` of a failure record, of a
 core boundary error, and of a workflow id text that is not a UUID.
 """
@@ -27,6 +27,11 @@ class WorkflowOperation(Enum):
 
     PAUSE = 'pause_workflow'
     CANCEL = 'cancel_workflow'
+    STATUS = 'workflow_status'
+    GET = 'wait_workflow_result'
+    RESULT_FOR = 'workflow_node_result'
+    RESULTS = 'workflow_node_results'
+    TASKS = 'workflow_nodes'
 
 
 def _label(operation: WorkflowOperation) -> str:
@@ -36,6 +41,16 @@ def _label(operation: WorkflowOperation) -> str:
             return 'Pause'
         case WorkflowOperation.CANCEL:
             return 'Cancel'
+        case WorkflowOperation.STATUS:
+            return 'Status'
+        case WorkflowOperation.GET:
+            return 'Get'
+        case WorkflowOperation.RESULT_FOR:
+            return 'Result read'
+        case WorkflowOperation.RESULTS:
+            return 'Results'
+        case WorkflowOperation.TASKS:
+            return 'Tasks'
         case _ as unreachable:
             assert_never(unreachable)
 

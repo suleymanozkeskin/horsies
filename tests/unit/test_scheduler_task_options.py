@@ -252,7 +252,7 @@ class TestScheduledRunStoresTheTaskOptions:
         send_kwargs = send_broker.enqueue_async.await_args.kwargs
         assert fire.command.task_options is not None
         assert fire.command.task_options == send_kwargs['task_options']
-        assert fire.command.stored_input == send_kwargs['kwargs_json']
+        assert fire.command.stored_input == send_kwargs['input_json']
         assert send_kwargs['good_until'] is None
 
     async def test_every_slot_of_a_catch_up_sends_one_command(self) -> None:

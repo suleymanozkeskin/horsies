@@ -168,6 +168,19 @@ class CoreHandle:
         """Expire the PAUSED workflows older than older_than_us microseconds, at most batch_size,
         oldest first. Writes; each candidate commits alone.
         """
+    def workflow_status_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowStatusRead | WorkflowAbsent | HandleFailed]:
+        """The status of one workflow. Reads only."""
+    def wait_workflow_result_async(self, workflow_id: uuid.UUID, *, timeout_ms: int | None) -> asyncio.Future[WorkflowCompletedRead | WorkflowEndedRead | WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleFailed]:
+        """Wait for the end of one workflow, up to timeout_ms (no limit for None). Reads only; a
+        cancelled await drops the wait and its subscription. A negative timeout raises
+        OverflowError.
+        """
+    def workflow_node_results_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowNodeResultsRead | WorkflowAbsent | HandleFailed]:
+        """The nodes of one workflow that store a result. Reads only."""
+    def workflow_node_result_async(self, workflow_id: uuid.UUID, node_id: str) -> asyncio.Future[StoredNodeResultRecord | NodeResultNotStored | HandleFailed]:
+        """The stored result of one node. Reads only."""
+    def workflow_nodes_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowNodesRead | WorkflowAbsent | HandleFailed]:
+        """The nodes of one workflow in index order. Reads only."""
     def task_info(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> TaskInfoRecord | TaskInfoNotFound | BrokerFailure:
         """The info of one task. Installs the schema once per handle first; then reads only."""
     def task_info_async(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> asyncio.Future[TaskInfoRecord | TaskInfoNotFound | BrokerFailure]:
@@ -226,6 +239,28 @@ class CoreHandle:
     def expired_tasks_async(self) -> asyncio.Future[TaskListComplete | TaskListTruncated | BrokerFailure]:
         """The PENDING tasks whose good_until passed before a worker took them. Reads only, in
         one statement.
+        """
+    def worker_states_async(self) -> asyncio.Future[WorkerStatesRecord | BrokerFailure]:
+        """The latest state snapshot per worker, idle workers included. Reads only, in one
+        statement. A cancelled await drops the read.
+        """
+    def worker_state_async(self, worker_id: str) -> asyncio.Future[WorkerStateRecord | WorkerStateAbsent | BrokerFailure]:
+        """The latest state snapshot of one worker, or WorkerStateAbsent when it wrote none. Reads
+        only, in one statement.
+        """
+    def worker_state_history_async(self, worker_id: str, *, limit: int | None) -> asyncio.Future[WorkerStatesRecord | BrokerFailure]:
+        """The state snapshots of one worker, newest first: at most limit, or every retained one for
+        None. A limit of 0 or less is INVALID_INPUT; a limit that PostgreSQL refuses as a bigint
+        is MONITORING_QUERY_FAILED, not retryable; both before any core call. Reads only, in one
+        statement.
+        """
+    def class_coverage_async(self) -> asyncio.Future[ClassCoverageRecord | BrokerFailure]:
+        """The fleet check: for each (queue, class) with PENDING rows, whether a live worker serves
+        it. Reads only, in one statement.
+        """
+    def class_report_async(self) -> asyncio.Future[ClassReportRecord | BrokerFailure]:
+        """The pending streams with their oldest wait and coverage, and the budget load of each
+        live worker. Reads only, in one statement.
         """
 
 
@@ -1355,6 +1390,221 @@ class TaskListTruncated:
 
 
 @final
+class ResourceShortageRecord:
+    """The cause of a down slot that ran short of an OS resource."""
+    @property
+    def errno(self) -> Literal['EMFILE', 'ENFILE', 'ENOMEM', 'EAGAIN']: ...
+
+
+@final
+class DownSlotRecord:
+    """A worker slot whose last child boot failed for a cause that can clear."""
+    @property
+    def slot(self) -> int: ...
+    @property
+    def cause(self) -> ResourceShortageRecord | Literal['THREAD_START_REFUSED']: ...
+    @property
+    def detail(self) -> str: ...
+    @property
+    def down_since(self) -> datetime.datetime: ...
+    @property
+    def failed_boots(self) -> int: ...
+
+
+@final
+class AllSlotsServingRecord:
+    """No slot of the worker was down when it wrote the snapshot."""
+
+
+@final
+class SlotsDownRecord:
+    """The worker was degraded: these slots were down, in slot order. Never empty."""
+    @property
+    def slots(self) -> list[DownSlotRecord]: ...
+
+
+@final
+class ClassBudgetRecord:
+    """One claim budget of a worker, as its snapshot recorded it; serves is in Execution order."""
+    @property
+    def budget(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']: ...
+    @property
+    def capacity(self) -> int: ...
+    @property
+    def serves(self) -> list[Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']]: ...
+
+
+@final
+class WorkerStateRecord:
+    """One horsies_worker_states row. recovery_config_json is the JSON text of the stored object."""
+    @property
+    def worker_id(self) -> str: ...
+    @property
+    def snapshot_at(self) -> datetime.datetime: ...
+    @property
+    def hostname(self) -> str: ...
+    @property
+    def pid(self) -> int: ...
+    @property
+    def processes(self) -> int: ...
+    @property
+    def max_claim_batch(self) -> int: ...
+    @property
+    def max_claim_per_worker(self) -> int: ...
+    @property
+    def cluster_wide_cap(self) -> int | None: ...
+    @property
+    def queues(self) -> list[str]: ...
+    @property
+    def queue_priorities(self) -> dict[str, int]: ...
+    @property
+    def queue_max_concurrency(self) -> dict[str, int]: ...
+    @property
+    def recovery_config_json(self) -> str: ...
+    @property
+    def tasks_running(self) -> int: ...
+    @property
+    def tasks_claimed(self) -> int: ...
+    @property
+    def memory_usage_mb(self) -> float | None: ...
+    @property
+    def memory_percent(self) -> float | None: ...
+    @property
+    def cpu_percent(self) -> float | None: ...
+    @property
+    def children_memory_mb(self) -> float | None: ...
+    @property
+    def worker_started_at(self) -> datetime.datetime: ...
+    @property
+    def slot_health(self) -> AllSlotsServingRecord | SlotsDownRecord: ...
+    @property
+    def class_capacity(self) -> list[ClassBudgetRecord]: ...
+
+
+@final
+class WorkerStatesRecord:
+    """The snapshots of a worker state read: the latest per worker, or the history of one worker,
+    newest first.
+    """
+    @property
+    def states(self) -> list[WorkerStateRecord]: ...
+
+
+@final
+class WorkerStateAbsent:
+    """The worker has written no snapshot."""
+    @property
+    def worker_id(self) -> str: ...
+
+
+@final
+class StreamServedRecord:
+    """Live workers serve the stream with capacity in service."""
+    @property
+    def workers(self) -> int: ...
+    @property
+    def capacity(self) -> int: ...
+
+
+@final
+class StreamWithoutCapacityRecord:
+    """Live workers serve the stream, and none has capacity in service."""
+    @property
+    def workers(self) -> int: ...
+
+
+@final
+class StreamUnservedRecord:
+    """No live worker serves the stream."""
+
+
+@final
+class StreamCoverageRecord:
+    """The coverage of one pending stream."""
+    @property
+    def queue_name(self) -> str: ...
+    @property
+    def execution(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']: ...
+    @property
+    def state(self) -> StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord: ...
+
+
+@final
+class ClassCoverageRecord:
+    """The fleet check, read at checked_at (database time)."""
+    @property
+    def checked_at(self) -> datetime.datetime: ...
+    @property
+    def live_workers(self) -> int: ...
+    @property
+    def streams(self) -> list[StreamCoverageRecord]: ...
+
+
+@final
+class OldestWaitingRecord:
+    """At least one row of the stream is due; wait is how long the oldest due row waited."""
+    @property
+    def enqueued_at(self) -> datetime.datetime: ...
+    @property
+    def wait(self) -> datetime.timedelta: ...
+
+
+@final
+class NoneDueRecord:
+    """Every row of the stream is due later."""
+    @property
+    def next_due_at(self) -> datetime.datetime: ...
+
+
+@final
+class PendingStreamRecord:
+    """One pending stream of the class report."""
+    @property
+    def queue_name(self) -> str: ...
+    @property
+    def execution(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']: ...
+    @property
+    def wait(self) -> OldestWaitingRecord | NoneDueRecord: ...
+    @property
+    def state(self) -> StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord: ...
+
+
+@final
+class BudgetLoadRecord:
+    """One claim budget of a live worker, with the rows it holds."""
+    @property
+    def budget(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']: ...
+    @property
+    def capacity(self) -> int: ...
+    @property
+    def serves(self) -> list[Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']]: ...
+    @property
+    def in_flight(self) -> int: ...
+
+
+@final
+class WorkerClassLoadRecord:
+    """The claim budgets of one live worker, in Execution order."""
+    @property
+    def worker_id(self) -> str: ...
+    @property
+    def snapshot_at(self) -> datetime.datetime: ...
+    @property
+    def budgets(self) -> list[BudgetLoadRecord]: ...
+
+
+@final
+class ClassReportRecord:
+    """The class report, read at checked_at (database time); workers by worker id."""
+    @property
+    def checked_at(self) -> datetime.datetime: ...
+    @property
+    def streams(self) -> list[PendingStreamRecord]: ...
+    @property
+    def workers(self) -> list[WorkerClassLoadRecord]: ...
+
+
+@final
 class WorkflowPaused:
     """The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed
     tasks of the paused tree are abandoned.
@@ -1445,6 +1695,122 @@ class PausedExpiryFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+
+
+@final
+class WorkflowStatusRead:
+    """The stored status of a workflow."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def status(self) -> Literal['PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'PAUSED', 'CANCELLED', 'EXPIRED']: ...
+
+
+@final
+class WorkflowCompletedRead:
+    """The workflow is COMPLETED, with its stored result envelope (None only when a write
+    outside the library stored it so).
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def result_json(self) -> str | None: ...
+
+
+@final
+class WorkflowEndedRead:
+    """The workflow is FAILED, CANCELLED or EXPIRED, with its stored error."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def status(self) -> Literal['FAILED', 'CANCELLED', 'EXPIRED']: ...
+    @property
+    def error_json(self) -> str | None: ...
+
+
+@final
+class WorkflowPausedRead:
+    """The workflow is PAUSED."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WaitTimedOut:
+    """The workflow is PENDING or RUNNING after the timeout."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class StoredNodeResultRecord:
+    """One node that stores a result."""
+    @property
+    def node_id(self) -> str | None: ...
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def result_json(self) -> str: ...
+    @property
+    def is_subworkflow(self) -> bool: ...
+    @property
+    def sub_definition_key(self) -> str | None: ...
+
+
+@final
+class WorkflowNodeResultsRead:
+    """The nodes of a workflow that store a result; empty when none does."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def nodes(self) -> list[StoredNodeResultRecord]: ...
+
+
+@final
+class NodeResultNotStored:
+    """No node of this id stores a result, or no workflow has the id; the read does not tell
+    the two apart.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def node_id(self) -> str: ...
+
+
+@final
+class StoredNodeRecord:
+    """One node of a workflow, with its stored values as text."""
+    @property
+    def node_id(self) -> str | None: ...
+    @property
+    def task_index(self) -> int: ...
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def status(self) -> str: ...
+    @property
+    def result_json(self) -> str | None: ...
+    @property
+    def started_at(self) -> datetime.datetime | None: ...
+    @property
+    def completed_at(self) -> datetime.datetime | None: ...
+    @property
+    def sub_workflow_id(self) -> uuid.UUID | None: ...
+    @property
+    def sub_workflow_summary_json(self) -> str | None: ...
+    @property
+    def is_subworkflow(self) -> bool: ...
+    @property
+    def sub_definition_key(self) -> str | None: ...
+
+
+@final
+class WorkflowNodesRead:
+    """The nodes of a workflow in index order; empty when it has none."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def nodes(self) -> list[StoredNodeRecord]: ...
 
 
 @final
@@ -1763,7 +2129,7 @@ class TaskResult:
 @final
 class StoppedBeforeRunning:
     """The child stopped before it set the row RUNNING; no task code ran."""
-    def __init__(self, *, reason: Literal['CLAIM_LOST', 'OWNERSHIP_UNCONFIRMED', 'WORKFLOW_STOPPED', 'TASK_EXPIRED', 'NODE_NOT_LINKED']) -> None: ...
+    def __init__(self, *, reason: Literal['CLAIM_LOST', 'OWNERSHIP_UNCONFIRMED', 'WORKFLOW_STOPPED', 'TASK_EXPIRED', 'NODE_NOT_LINKED', 'ORPHAN_CANCELLED']) -> None: ...
 
 
 @final
@@ -1912,6 +2278,65 @@ class PreloadRefusedFrame:
     def __init__(self, *, reason: str) -> None: ...
 
 
+@final
+class PreparedWorker:
+    """The worker of one worker manifest, not run yet. host.on_started() runs once per run on
+    the callback thread, after the start and before the first claim; an exception from it is
+    logged at ERROR and the worker runs on.
+    """
+    def run(self) -> WorkerStopped | WorkerBootFailed | WorkerFailed:
+        """Build the worker and run it until a stop request or a failure. Main thread only: the
+        signal handlers run between wait slices, and there is no total bound. Raises
+        NotMainThread off the main thread, RuntimeError for a second run, and the exception of
+        a signal handler after the run ended.
+        """
+    def request_stop(self) -> StopRequested:
+        """Ask the run to stop: the claim loop ends and the children drain within the profile's
+        drain timeout. Idempotent; any thread; returns at once.
+        """
+
+
+@final
+class WorkerProfileRefused:
+    """The profile of the manifest is refused: the profile set fails its checks, or the start
+    names no profile or an unknown one. refusals are the lines of the report.
+    """
+    @property
+    def refusals(self) -> list[str]: ...
+
+
+@final
+class WorkerStopped:
+    """The run ended at a stop request."""
+
+
+@final
+class WorkerBootFailed:
+    """The start of the worker failed; it claimed nothing. message names the subject and the
+    cause.
+    """
+    @property
+    def cause(self) -> Literal['SCHEMA_REFUSED', 'CLIENT_FAMILY_REFUSED', 'STATEMENT_POOLED_URL', 'SESSION_NOT_CAPABLE', 'START_TIMED_OUT', 'DATABASE_UNAVAILABLE', 'DATABASE_REFUSED', 'BOOT_ATTEMPTS_EXHAUSTED', 'CHILD_HOOK_FAILED', 'PRELOAD_REFUSED', 'BASELINE_OVER_LIMIT', 'PLACEMENT_REFUSED', 'SPAWNER_START_FAILED', 'CONFIG_REFUSED', 'LISTENER_REFUSED']: ...
+    @property
+    def message(self) -> str: ...
+
+
+@final
+class WorkerFailed:
+    """The worker was ready, then failed; its running tasks drained first. message names the
+    subject and the cause.
+    """
+    @property
+    def cause(self) -> Literal['SERVICE_LOOP_DIED', 'RUNNER_HEARTBEAT_LOST', 'POOL_FAILED', 'BASELINE_OVER_LIMIT', 'CLAIM_FAILED']: ...
+    @property
+    def message(self) -> str: ...
+
+
+@final
+class StopRequested:
+    """The stop request is recorded."""
+
+
 def baseline_sql_files() -> list[tuple[str, str]]:
     """The baseline SQL files as (file name, text) pairs, in run order. Starts nothing."""
 
@@ -1936,6 +2361,12 @@ def encode_preload_frame(frame: PreloadReadyFrame | ChildForkedFrame | ForkFaile
 
 def mint_task_id() -> uuid.UUID | IdMintRefused:
     """Mint a new task id (UUIDv7). Starts no runtime."""
+
+
+def prepare_worker(manifest_json: str, *, host: object) -> PreparedWorker | WorkerProfileRefused:
+    """Parse a worker manifest and pick its profile. Pure: starts no runtime. host has an
+    on_started() method. A refused manifest raises ManifestRefused.
+    """
 
 
 def protocol_numbers() -> ProtocolNumbers:

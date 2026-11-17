@@ -59,7 +59,15 @@ use crate::operations::task_info::{task_info_operation, TaskInfoParts};
 use crate::operations::task_lists::{
     expired_tasks_operation, stale_tasks_operation, stale_threshold,
 };
+use crate::operations::worker_reads::{
+    class_coverage_operation, class_report_operation, history_limit,
+    worker_state_history_operation, worker_state_operation, worker_states_operation,
+};
 use crate::operations::workflow_lifecycle::{cancel_workflow_operation, pause_workflow_operation};
+use crate::operations::workflow_reads::{
+    wait_workflow_result_operation, workflow_node_result_operation,
+    workflow_node_results_operation, workflow_nodes_operation, workflow_status_operation,
+};
 use crate::operations::workflow_retention::delete_expired_workflows_operation;
 use crate::process_core::{core_for_call, Core};
 use crate::records::{BrokerFailure, DatabasePingRecord, HandleClosed, Outcome};
@@ -667,6 +675,99 @@ impl CoreHandle {
         )
     }
 
+    /// The status of one workflow: `WorkflowStatusRead`, `WorkflowAbsent` or
+    /// `HandleFailed`. Reads only. Awaitable only: the sync handle methods
+    /// run the awaitable ones on the broker's loop runner.
+    fn workflow_status_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.workflow_status_async",
+            CallKind::Read,
+            workflow_status_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// Wait for the end of one workflow, up to `timeout_ms` (no limit for
+    /// None): `WorkflowCompletedRead`, `WorkflowEndedRead`,
+    /// `WorkflowPausedRead`, `WaitTimedOut`, `WorkflowAbsent` or
+    /// `HandleFailed`. Reads only; a cancelled await drops the wait and its
+    /// subscription. A negative timeout raises `OverflowError`.
+    #[pyo3(signature = (workflow_id, *, timeout_ms))]
+    fn wait_workflow_result_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+        timeout_ms: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.wait_workflow_result_async",
+            CallKind::Read,
+            wait_workflow_result_operation(self.connection(), workflow_id, timeout_ms),
+        )
+    }
+
+    /// The nodes of one workflow that store a result:
+    /// `WorkflowNodeResultsRead`, `WorkflowAbsent` or `HandleFailed`. Reads
+    /// only.
+    fn workflow_node_results_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.workflow_node_results_async",
+            CallKind::Read,
+            workflow_node_results_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// The stored result of one node: `StoredNodeResultRecord`,
+    /// `NodeResultNotStored` or `HandleFailed`. Reads only.
+    fn workflow_node_result_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+        node_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.workflow_node_result_async",
+            CallKind::Read,
+            workflow_node_result_operation(self.connection(), workflow_id, node_id),
+        )
+    }
+
+    /// The nodes of one workflow in index order: `WorkflowNodesRead`,
+    /// `WorkflowAbsent` or `HandleFailed`. Reads only.
+    fn workflow_nodes_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.workflow_nodes_async",
+            CallKind::Read,
+            workflow_nodes_operation(self.connection(), workflow_id),
+        )
+    }
+
     /// One workflow retention pass of the reaper: batches of at most
     /// `batch_size` rows (counted by nodes) of terminal workflows older than
     /// `older_than_hours` with no live backing task, with their node rows,
@@ -1050,6 +1151,100 @@ impl CoreHandle {
             "CoreHandle.expired_tasks_async",
             CallKind::Read,
             expired_tasks_operation(self.connection()),
+        )
+    }
+
+    /// The latest state snapshot per worker, idle workers included:
+    /// `WorkerStatesRecord` or `BrokerFailure` with
+    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement. Awaitable
+    /// only: the sync facade of `Horsies` runs the async method on the
+    /// broker's loop runner. A cancelled await drops the read.
+    fn worker_states_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.worker_states_async",
+            CallKind::Read,
+            worker_states_operation(self.connection()),
+        )
+    }
+
+    /// The latest state snapshot of one worker: `WorkerStateRecord`,
+    /// `WorkerStateAbsent` (no snapshot), or `BrokerFailure` with
+    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement. Awaitable
+    /// only. A cancelled await drops the read.
+    fn worker_state_async<'py>(
+        &self,
+        py: Python<'py>,
+        worker_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.worker_state_async",
+            CallKind::Read,
+            worker_state_operation(self.connection(), worker_id),
+        )
+    }
+
+    /// The state snapshots of one worker, newest first: at most `limit`, or
+    /// every retained one for `None`. `WorkerStatesRecord`, or
+    /// `BrokerFailure` with `INVALID_INPUT` (a limit of 0 or less) or
+    /// `MONITORING_QUERY_FAILED`. A limit of 0 or less, and a limit that
+    /// Python's statement refused, answer in a future that is already done,
+    /// before any core call (`history_limit`); a limit that is not an `int`
+    /// or `None` raises `TypeError`. Reads only, in one statement. Awaitable only. A
+    /// cancelled await drops the read.
+    #[pyo3(signature = (worker_id, *, limit))]
+    fn worker_state_history_async<'py>(
+        &self,
+        py: Python<'py>,
+        worker_id: String,
+        limit: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let limit = match history_limit(limit)? {
+            Ok(limit) => limit,
+            Err(refused) => return done_future(py, refused),
+        };
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.worker_state_history_async",
+            CallKind::Read,
+            worker_state_history_operation(self.connection(), worker_id, limit),
+        )
+    }
+
+    /// The fleet check: for each (queue, class) with PENDING rows, whether a
+    /// live worker serves it. `ClassCoverageRecord` or `BrokerFailure` with
+    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement. Awaitable
+    /// only. A cancelled await drops the read.
+    fn class_coverage_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.class_coverage_async",
+            CallKind::Read,
+            class_coverage_operation(self.connection()),
+        )
+    }
+
+    /// The pending streams with their oldest wait and coverage, and the
+    /// budget load of each live worker. `ClassReportRecord` or
+    /// `BrokerFailure` with `MONITORING_QUERY_FAILED`. Reads only, in one
+    /// statement. Awaitable only. A cancelled await drops the read.
+    fn class_report_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.class_report_async",
+            CallKind::Read,
+            class_report_operation(self.connection()),
         )
     }
 }

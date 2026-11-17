@@ -6,8 +6,9 @@ one of its claim budgets serves the class (``ClassBudget.serves``). A worker
 is live while its latest state snapshot is at most
 ``WORKER_STATE_LIVE_WINDOW_S`` old.
 
-The types are frozen reports. The functions are pure; the database reads
-that feed them live in ``horsies.core.brokers.class_coverage_reads``.
+The types are frozen reports. The functions are pure. The class reads of
+``PostgresBroker`` run in the core and give these types
+(``horsies.core.brokers.worker_state_records``).
 """
 
 from __future__ import annotations

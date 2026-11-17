@@ -1,4 +1,10 @@
-"""Database reads for the execution classes of the fleet.
+"""Database reads for the execution classes of the fleet: Python's reads
+before the monitoring switch.
+
+The dual-run reference of ``PostgresBroker.get_class_coverage_async`` and
+``get_class_report_async``, which the core runs since the switch
+(``tests/dualrun/reference/broker_monitoring.py``).
+
 
 ``read_class_coverage`` is the fleet check: for each (queue, class) with
 ``PENDING`` rows, whether a live worker serves it. ``read_class_report``

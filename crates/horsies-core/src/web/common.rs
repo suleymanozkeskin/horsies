@@ -120,23 +120,6 @@ impl ApiError {
         }
     }
 
-    /// FastAPI's answer for a path id that is not a UUID, as for a
-    /// `uuid.UUID` path parameter: type `uuid_parsing`, pydantic's message,
-    /// and the parser's reason in `ctx.error`. No database call is made.
-    pub(crate) fn path_uuid(
-        field: &'static str,
-        raw: &str,
-        error: &uuid::Error,
-    ) -> ValidationIssue {
-        ValidationIssue {
-            error_type: "uuid_parsing",
-            loc: vec!["path", field],
-            msg: uuid_parsing_message(error),
-            input: raw.into(),
-            ctx: Some(serde_json::json!({ "error": error.to_string() })),
-        }
-    }
-
     pub(crate) fn body_validation(message: impl Into<String>, input: serde_json::Value) -> Self {
         Self::Validation(vec![ValidationIssue {
             error_type: "value_error",
@@ -450,13 +433,84 @@ pub(crate) fn parse_path_uuid(field: &'static str, raw: &str) -> Result<uuid::Uu
     })
 }
 
-/// Parse the workflow path id of an action route. Text that is not a UUID
-/// is refused with FastAPI's 422 `uuid_parsing` body before any database
-/// call. The read routes answer such a text with their 404 instead.
-pub(crate) fn parse_workflow_path_uuid(raw: &str) -> Result<uuid::Uuid, ApiError> {
-    uuid::Uuid::parse_str(raw).map_err(|error| {
-        ApiError::Validation(vec![ApiError::path_uuid("workflow_id", raw, &error)])
-    })
+/// The longest integer text that pydantic parses, after the whitespace is
+/// trimmed: 4,300 bytes (pydantic-core `str_as_int`, the default of
+/// Python's `sys.int_info.default_max_str_digits`).
+const MAX_INTEGER_TEXT_BYTES: usize = 4_300;
+
+/// A path parameter that FastAPI reads as an `int`, by pydantic's rule
+/// for text (pydantic-core `str_as_int`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathInteger {
+    /// An integer that fits in 32 bits.
+    Fits(i32),
+    /// An integer outside the 32-bit range: no `integer` column holds it.
+    OutsideI32,
+    /// Not an integer: FastAPI's 422 `int_parsing`.
+    NotAnInteger,
+    /// Longer than [`MAX_INTEGER_TEXT_BYTES`]: FastAPI's 422
+    /// `int_parsing_size`.
+    TooLong,
+}
+
+/// The digits of integer text: an optional sign, then ASCII digits, with
+/// single underscores between digits as pydantic strips them (none at the
+/// start or the end, no two in a row). `None` for other text. Pure.
+fn integer_digits(text: &str) -> Option<(bool, String)> {
+    let underscores_valid = !text.starts_with('_') && !text.ends_with('_') && !text.contains("__");
+    let joined = match (text.contains('_'), underscores_valid) {
+        (false, _) => text.to_owned(),
+        (true, true) => text.replace('_', ""),
+        (true, false) => return None,
+    };
+    let (negative, digits) = match joined.as_bytes().first() {
+        Some(b'-') => (true, &joined[1..]),
+        Some(b'+') => (false, &joined[1..]),
+        _ => (false, joined.as_str()),
+    };
+    match !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        true => Some((negative, digits.to_owned())),
+        false => None,
+    }
+}
+
+/// Read path text as pydantic reads an `int` (pydantic-core `str_as_int`):
+/// whitespace trimmed; a sign; ASCII digits; single underscores between
+/// digits; and a fraction of zeros only (`12.0`, `12.000`). Pure.
+pub(crate) fn parse_path_integer(raw: &str) -> PathInteger {
+    let text = raw.trim();
+    if text.len() > MAX_INTEGER_TEXT_BYTES {
+        return PathInteger::TooLong;
+    }
+    let whole = match text.split_once('.') {
+        None => text,
+        Some((whole, fraction)) if !fraction.is_empty() && fraction.bytes().all(|b| b == b'0') => {
+            whole
+        }
+        Some(_) => return PathInteger::NotAnInteger,
+    };
+    let Some((negative, digits)) = integer_digits(whole) else {
+        return PathInteger::NotAnInteger;
+    };
+    let significant = digits.trim_start_matches('0');
+    // i32 holds at most 10 digits; a longer run is out of range by length.
+    if significant.len() > 10 {
+        return PathInteger::OutsideI32;
+    }
+    let magnitude: i64 = match significant.is_empty() {
+        true => 0,
+        false => significant
+            .parse()
+            .expect("at most 10 ASCII digits fit in i64"),
+    };
+    let value = match negative {
+        true => -magnitude,
+        false => magnitude,
+    };
+    match i32::try_from(value) {
+        Ok(fits) => PathInteger::Fits(fits),
+        Err(_) => PathInteger::OutsideI32,
+    }
 }
 
 #[cfg(test)]
@@ -471,6 +525,52 @@ mod tests {
             retryable: false,
             source: MonitoringQueryErrorSource::Database(sqlx::Error::PoolTimedOut),
         }
+    }
+
+    #[test]
+    fn path_integer_text_is_read_as_pydantic_reads_an_int() {
+        for (raw, read) in [
+            ("12", PathInteger::Fits(12)),
+            (" 12 ", PathInteger::Fits(12)),
+            ("\u{a0}12\n", PathInteger::Fits(12)),
+            ("+12", PathInteger::Fits(12)),
+            ("-12", PathInteger::Fits(-12)),
+            ("0012", PathInteger::Fits(12)),
+            ("-0", PathInteger::Fits(0)),
+            ("1_000", PathInteger::Fits(1_000)),
+            ("0_1", PathInteger::Fits(1)),
+            ("12.0", PathInteger::Fits(12)),
+            ("+1_0.00", PathInteger::Fits(10)),
+            ("2147483647", PathInteger::Fits(i32::MAX)),
+            ("-2147483648", PathInteger::Fits(i32::MIN)),
+            ("2147483648", PathInteger::OutsideI32),
+            ("-2147483649", PathInteger::OutsideI32),
+            ("99999999999999999999", PathInteger::OutsideI32),
+            ("00000000000000000007", PathInteger::Fits(7)),
+            ("12.5", PathInteger::NotAnInteger),
+            ("12.", PathInteger::NotAnInteger),
+            (".0", PathInteger::NotAnInteger),
+            ("12.00_0", PathInteger::NotAnInteger),
+            ("1.0.0", PathInteger::NotAnInteger),
+            ("1__0", PathInteger::NotAnInteger),
+            ("_1", PathInteger::NotAnInteger),
+            ("1_", PathInteger::NotAnInteger),
+            ("+-1", PathInteger::NotAnInteger),
+            ("- 1", PathInteger::NotAnInteger),
+            ("+", PathInteger::NotAnInteger),
+            ("", PathInteger::NotAnInteger),
+            ("0x1f", PathInteger::NotAnInteger),
+            ("1e3", PathInteger::NotAnInteger),
+            ("\u{663}", PathInteger::NotAnInteger),
+            ("not-an-int", PathInteger::NotAnInteger),
+        ] {
+            assert_eq!(parse_path_integer(raw), read, "{raw:?}");
+        }
+        assert_eq!(
+            parse_path_integer(&"1".repeat(4_300)),
+            PathInteger::OutsideI32
+        );
+        assert_eq!(parse_path_integer(&"1".repeat(4_301)), PathInteger::TooLong);
     }
 
     #[test]

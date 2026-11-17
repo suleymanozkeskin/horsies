@@ -55,6 +55,7 @@ pub mod wait_limit;
 mod worker_state_read_tests;
 mod workflow_claim_settle;
 mod workflow_operations;
+mod workflow_reads;
 
 pub use bound_handle::TaskHandle;
 pub use class_budgets::{ClassBudget, ClassBudgets};
@@ -70,8 +71,8 @@ pub use error::{
     EnqueueRefusalCause,
 };
 pub use health::{
-    DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
-    WORKER_PING_CHANNEL,
+    checked_history_limit, worker_history_limit_refused, DatabasePing, WorkerPingRequest,
+    WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
 };
 pub use lifecycle_operations::{CancelAnswer, CancelTaskError};
 pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};
