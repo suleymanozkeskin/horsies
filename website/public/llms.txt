@@ -909,7 +909,8 @@ slugify, NodeKey -> /horsies/concepts/workflows/workflow-examples/
 node_id, NODE_ID_PATTERN -> /horsies/concepts/workflows/workflow-semantics/
 showcase, demo app, example application -> /horsies/quick-start/06-showcase/
 remote PostgreSQL, managed PostgreSQL, connection budget, PgBouncer pooling, health checks -> /horsies/configuration/remote-postgres/
-RetentionConfig, retention class, retention_class_key, queue_retention, partitions -> /horsies/configuration/retention-config/
+retention class, retention_class_key, queue_retention, retention_periods, partitions -> /horsies/configuration/retention-config/
+RetentionConfig -> /horsies/configuration/app-config/#retention-configuration
 on_child_process_start, child-process hook, per-child setup -> /horsies/workers/child-process-hooks/
 liveness, worker ping, class coverage, slot health, snapshot fields -> /horsies/monitoring/worker-health/
 ping_database, ping_workers, WorkerPong, WorkerStateSnapshot, ClassCoverage, ClassReport -> /horsies/monitoring/health-reads/
