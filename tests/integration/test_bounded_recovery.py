@@ -19,14 +19,22 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.workflows.recovery import (
-    FAIL_ORPHANED_WORKFLOW_SQL,
     GLOBAL_SCAN_ROW_CAP,
     GLOBAL_WORKFLOW_AUDIT_CLAIM_TTL_MS,
+    RecoveryReport,
+    _ClaimHold,
+    _GlobalScope,
+    _Pass,
+    _recover_orphan_candidate,
+    recover_stuck_workflows_global,
+)
+from horsies.core.workflows.recovery_limit import LogFailuresOnly
+# The audit statement before the redesign is the body of
+# horsies_workflow_recovery_audit_page; the plan and lock tests read it here.
+from tests.dualrun.reference.workflow_recovery_pass import (
+    FAIL_ORPHANED_WORKFLOW_SQL,
     GLOBAL_WORKFLOW_AUDIT_SQL,
     LOCK_GLOBAL_WORKFLOW_AUDIT_CLAIM_SQL,
-    _GlobalCandidateOutcome,
-    _recover_global_orphan_candidate,
-    recover_stuck_workflows_global,
 )
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
@@ -466,13 +474,19 @@ async def test_stale_page_owner_cannot_mutate_after_claim_takeover(
         await takeover.commit()
     assert [str(value) for value in second.orphan_ids] == [workflow_id]
 
-    outcome = await _recover_global_orphan_candidate(
-        current_resources(broker).session_factory,
+    hold = await _recover_orphan_candidate(
+        _Pass(
+            session_factory=current_resources(broker).session_factory,
+            broker=broker,
+            scope=_GlobalScope(max_rows=GLOBAL_SCAN_ROW_CAP),
+            failure_policy=LogFailuresOnly(),
+        ),
         workflow_id,
         'stale_owner_orphan',
         stale_token,
+        RecoveryReport(),
     )
-    assert outcome is _GlobalCandidateOutcome.CLAIM_LOST
+    assert hold is _ClaimHold.LOST
     async with engine.connect() as connection:
         status = (await connection.execute(
             text('SELECT status FROM horsies_workflows WHERE id = :id'),

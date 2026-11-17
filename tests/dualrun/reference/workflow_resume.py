@@ -8,7 +8,8 @@ read; else, for the root, the re-evaluation of each PENDING node
 dependency results); then, breadth first, the same for each PAUSED child
 (``cascade_resume_to_children``) with its completion check; the completion
 check of the root; the drain of the parent advances. After the commit, the
-recovery pass of the tree, as the switched caller still runs it.
+recovery pass of the tree before its redesign
+(``tests/dualrun/reference/workflow_recovery_pass.py``).
 
 The engine functions that the resume called stay in the package (workflow
 recovery calls them); this module keeps the resume's own statements and its
@@ -161,7 +162,7 @@ async def resume(
         check_workflow_completion,
         drain_parent_propagations_in_session,
     )
-    from horsies.core.workflows.recovery import (
+    from tests.dualrun.reference.workflow_recovery_pass import (
         GET_WORKFLOW_TREE_IDS_SQL,
         recover_stuck_workflow_tree,
     )

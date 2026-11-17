@@ -700,11 +700,12 @@ class TestResumePass:
         workflow_id = await _seed_workflow(harness)
         await _seed_node(harness, workflow_id, 0, status='READY', options=BAD_GOOD_UNTIL)
 
-        async with harness.sessions() as session:
-            await recover_stuck_workflow_tree(
-                session, harness.broker, [workflow_id],
-            )
-            await session.commit()
+        report = await recover_stuck_workflow_tree(
+            harness.sessions, harness.broker, workflow_id,
+        )
+
+        assert report.metrics['case_1'].errors == 1
+        assert report.metrics['case_1'].failures_counted == 0
 
         assert await _failed_passes(harness, workflow_id) is None
         assert await _node_status(harness, workflow_id, 0) == 'READY'

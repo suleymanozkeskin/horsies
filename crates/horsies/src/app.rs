@@ -17,7 +17,7 @@ pub use horsies_core::manifest::SchemaMode;
 
 use crate::config::{producer_manifest, rust_config_refusals};
 use crate::registry::{check_queue, queue_priority, register_task, valid_queue_names, QueueSource};
-use crate::{AppConfig, HorsiesError, ValidationReport};
+use crate::{AppConfig, HorsiesError, TaskRuntime, ValidationReport};
 
 /// The environment variable that suppresses sends in this process when its
 /// value is `1`, with surrounding whitespace ignored (Python
@@ -220,6 +220,13 @@ impl Horsies {
         registrars
             .into_iter()
             .try_for_each(|registrar| registrar(self))
+    }
+
+    /// The runtime that task bodies of this app take as their first
+    /// parameter: it reads the app's state. The `#[horsies::task]` attribute
+    /// calls it when the task registers.
+    pub fn task_runtime(&self) -> TaskRuntime {
+        TaskRuntime::new(Arc::clone(self.state()))
     }
 
     /// The core handle of the app.

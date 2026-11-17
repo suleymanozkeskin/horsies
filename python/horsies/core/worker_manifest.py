@@ -12,10 +12,9 @@ set and picks the requested profile, so each client sends the set and the
 Pydantic refuses every user error first. The manifest bounds a few values
 that the config does not bound above (`prefetch_buffer`, the claim lease,
 the claim renew age, `cluster_wide_cap`, a queue's `max_concurrency`, the
-paused workflow age, the payload thresholds): a value above its manifest
-bound is a `ValueAboveManifestBound`, the only failure of
-`to_worker_manifest`. Any other refusal by the core is a defect of this
-module.
+payload thresholds): a value above its manifest bound is a
+`ValueAboveManifestBound`, the only failure of `to_worker_manifest`. Any
+other refusal by the core is a defect of this module.
 """
 
 from __future__ import annotations
@@ -93,14 +92,6 @@ class ValueAboveManifestBound:
     maximum: int
 
 
-@dataclass(frozen=True, slots=True)
-class _UnboundedSections:
-    """The sections that hold a value Pydantic does not bound above."""
-
-    retention: wire.RetentionManifest
-    payload: wire.PayloadManifest
-
-
 def to_worker_manifest(
     config: AppConfig,
     *,
@@ -118,8 +109,7 @@ def to_worker_manifest(
 
     Errors: `ValueAboveManifestBound` for the first value above its
     manifest bound: the claim values (`worker_claim_manifest`), then the
-    paused workflow age (`retention_manifest`), then the payload thresholds
-    (`payload_manifest`).
+    payload thresholds (`payload_manifest`).
     """
     match worker_claim_manifest(config):
         case Ok(claim):
@@ -128,8 +118,8 @@ def to_worker_manifest(
             return Err(above)
         case _ as unreachable:
             assert_never(unreachable)
-    match _unbounded_sections(config):
-        case Ok(sections):
+    match payload_manifest(config.payload):
+        case Ok(payload):
             pass
         case Err(above):
             return Err(above)
@@ -152,34 +142,13 @@ def to_worker_manifest(
             profile=profile_request(profile),
             claim=claim,
             recovery=recovery_manifest(config.recovery),
-            retention=sections.retention,
+            retention=retention_manifest(config.retention),
             resilience=resilience_manifest(config.resilience),
-            payload=sections.payload,
+            payload=payload,
             tasks={name: execution_of(execution) for name, execution in tasks.items()},
             child_launch=child_launch,
         ),
     )
-
-
-def _unbounded_sections(
-    config: AppConfig,
-) -> Result[_UnboundedSections, ValueAboveManifestBound]:
-    """The retention and payload sections, in that order of checks. Pure."""
-    match retention_manifest(config.retention):
-        case Ok(retention):
-            pass
-        case Err(above):
-            return Err(above)
-        case _ as unreachable:
-            assert_never(unreachable)
-    match payload_manifest(config.payload):
-        case Ok(payload):
-            pass
-        case Err(above):
-            return Err(above)
-        case _ as unreachable:
-            assert_never(unreachable)
-    return Ok(_UnboundedSections(retention=retention, payload=payload))
 
 
 def profile_request(profile: str | None) -> wire.ProfileRequest:
@@ -287,44 +256,34 @@ def recovery_manifest(config: RecoveryConfig) -> wire.RecoveryManifest:
     )
 
 
-def retention_manifest(
-    config: RetentionConfig,
-) -> Result[wire.RetentionManifest, ValueAboveManifestBound]:
+def retention_manifest(config: RetentionConfig) -> wire.RetentionManifest:
     """The retention section of `config`. A `None` that turns pruning or the
-    paused expiry off is its own variant; a period is whole days. Pure.
-
-    Errors: `ValueAboveManifestBound` for a `paused_workflow_auto_cancel_after`
-    of more microseconds than `PAUSED_AGE_MICROS_MAX`.
+    paused expiry off is its own variant; a period is whole days. Pure;
+    Pydantic bounds every field, the paused age at `PAUSED_AGE_MICROS_MAX`
+    microseconds included.
     """
-    match _paused_expiry(config.paused_workflow_auto_cancel_after):
-        case Ok(paused_expiry):
-            pass
-        case Err(above):
-            return Err(above)
-        case _ as unreachable:
-            assert_never(unreachable)
-    return Ok(
-        wire.RetentionManifest(
-            worker_state_retention=_worker_state_retention(
-                config.worker_state_retention_hours,
-            ),
-            terminal_record_retention=_terminal_record_retention(
-                config.terminal_record_retention_hours,
-            ),
-            paused_workflow_auto_cancel_after=paused_expiry,
-            history_leaf_horizon_days=config.history_leaf_horizon_days,
-            heartbeat_leaf_horizon_hours=config.heartbeat_leaf_horizon_hours,
-            retention_periods=tuple(
-                _period_days(period) for period in config.retention_periods
-            ),
-            queue_retention={
-                queue: _queue_retention(period)
-                for queue, period in config.queue_retention.items()
-            },
-            partition_maintenance_interval_s=config.partition_maintenance_interval_s,
-            retention_sweep_interval_s=config.retention_sweep_interval_s,
-            retention_delete_batch_size=config.retention_delete_batch_size,
+    return wire.RetentionManifest(
+        worker_state_retention=_worker_state_retention(
+            config.worker_state_retention_hours,
         ),
+        terminal_record_retention=_terminal_record_retention(
+            config.terminal_record_retention_hours,
+        ),
+        paused_workflow_auto_cancel_after=_paused_expiry(
+            config.paused_workflow_auto_cancel_after,
+        ),
+        history_leaf_horizon_days=config.history_leaf_horizon_days,
+        heartbeat_leaf_horizon_hours=config.heartbeat_leaf_horizon_hours,
+        retention_periods=tuple(
+            _period_days(period) for period in config.retention_periods
+        ),
+        queue_retention={
+            queue: _queue_retention(period)
+            for queue, period in config.queue_retention.items()
+        },
+        partition_maintenance_interval_s=config.partition_maintenance_interval_s,
+        retention_sweep_interval_s=config.retention_sweep_interval_s,
+        retention_delete_batch_size=config.retention_delete_batch_size,
     )
 
 
@@ -608,22 +567,26 @@ def _queue_concurrency(
                     assert_never(unreachable)
 
 
-def _paused_expiry(
-    age: timedelta | None,
-) -> Result[wire.PausedWorkflowExpiry, ValueAboveManifestBound]:
+def _paused_expiry(age: timedelta | None) -> wire.PausedWorkflowExpiry:
+    """The paused expiry of an age that `RetentionConfig` validation
+    accepted.
+
+    Validation refuses an age of zero or less and an age above
+    `PAUSED_AGE_MICROS_MAX` microseconds, so such an age here is a defect
+    and raises `AssertionError`.
+    """
     match age:
         case None:
-            return Ok(wire.PausedWorkflowExpiryNoExpiry())
+            return wire.PausedWorkflowExpiryNoExpiry()
         case positive:
             micros = positive // _ONE_MICROSECOND
-            path = 'retention.paused_workflow_auto_cancel_after'
-            match _at_most(path, micros, wire.PAUSED_AGE_MICROS_MAX):
-                case Ok(within):
-                    return Ok(wire.PausedWorkflowExpiryAfter(micros=within))
-                case Err() as above:
-                    return above
-                case _ as unreachable:
-                    assert_never(unreachable)
+            if not wire.PAUSED_AGE_MICROS_MIN <= micros <= wire.PAUSED_AGE_MICROS_MAX:
+                raise AssertionError(
+                    'a validated paused workflow age is from '
+                    f'{wire.PAUSED_AGE_MICROS_MIN} to '
+                    f'{wire.PAUSED_AGE_MICROS_MAX} microseconds, got {micros}',
+                )
+            return wire.PausedWorkflowExpiryAfter(micros=micros)
 
 
 def _worker_state_retention(hours: int | None) -> wire.WorkerStateRetention:

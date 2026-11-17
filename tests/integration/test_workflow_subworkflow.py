@@ -1989,7 +1989,8 @@ class TestSubworkflowRecovery:
     ) -> None:
         """Recovery handles case where child completed but parent node wasn't updated."""
         session, broker, app = setup
-        from horsies.core.workflows.recovery import recover_stuck_workflows
+        from horsies.core.workflows.recovery import recover_stuck_workflows_global
+        from tests.broker_resources_support import current_resources
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=StartChildWorkflow,
@@ -2029,7 +2030,11 @@ class TestSubworkflowRecovery:
         await session.commit()
 
         # Run recovery
-        recovered = await recover_stuck_workflows(session, broker)
+        recovered = (
+            await recover_stuck_workflows_global(
+                current_resources(broker).session_factory, broker,
+            )
+        ).recovered
         await session.commit()
 
         assert recovered >= 1
@@ -2091,7 +2096,8 @@ class TestSubworkflowRecovery:
     ) -> None:
         """Recovery handles case where child FAILED but parent node still stuck RUNNING."""
         session, broker, app = setup
-        from horsies.core.workflows.recovery import recover_stuck_workflows
+        from horsies.core.workflows.recovery import recover_stuck_workflows_global
+        from tests.broker_resources_support import current_resources
 
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=StartChildWorkflow,
@@ -2150,7 +2156,11 @@ class TestSubworkflowRecovery:
         await session.commit()
 
         # Run recovery
-        recovered = await recover_stuck_workflows(session, broker)
+        recovered = (
+            await recover_stuck_workflows_global(
+                current_resources(broker).session_factory, broker,
+            )
+        ).recovered
         await session.commit()
 
         assert recovered >= 1

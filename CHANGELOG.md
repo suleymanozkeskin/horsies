@@ -19,6 +19,15 @@ and there is no migration contract between pre-1.0 versions.
   worker killed, have no `cancel_end`. The `data` keeps `task_id` and
   `timeout_ms`.
 
+- **`paused_workflow_auto_cancel_after` is at most 365,000 days.** A
+  longer age is refused when the config is built: Python raises
+  `ConfigurationError` with `CONFIG_INVALID_RETENTION` (HRS-216), and the
+  Rust config reader refuses it with `PausedAgeRefused::TooLong`. The
+  expiry selects the workflows whose last update is before `now()` minus
+  the age. A longer age can put that instant before PostgreSQL's lowest
+  timestamp (4714-11-24 BC). 0.7.0 accepted any positive `timedelta`, and
+  such an age failed every sweep with `timestamp out of range`.
+
 ### Rust client (crate `horsies`)
 
 The crate `horsies` is rebuilt on `horsies-core`, the engine that the
@@ -117,6 +126,29 @@ unless it starts with "Added".
   `WORKFLOW_OUTPUT_SKIPPED`. `ExceptionRecord` and `SubWorkflowFailure`
   (the failed child workflow as top-level fields) replace
   `SubWorkflowError`.
+- **An input that does not decode, and a returned value that does not
+  read back, are `WORKER_SERIALIZATION_ERROR`.** The worker child decodes
+  the input with the task's input type. It encodes the returned value,
+  decodes the text with the task's output type, encodes that value again,
+  and stores the result only when the two texts are equal. The stored error
+  names the type, the field path and the kind of the failure; a part of the
+  message that comes from the input is written as `<input>`. Before, these
+  were `ARGUMENT_TYPE_MISMATCH` and `RETURN_TYPE_MISMATCH`, with the value
+  in `data.actual_value`.
+- **`async_task_fn!` and `blocking_task_fn!` take a function that returns
+  `Result<T, TaskError<E>>`.** `async_task_fn_kwargs!` and
+  `blocking_task_fn_kwargs!` are removed: an object input is one input
+  value, so `async_task_fn!` covers it. The registered task records the
+  module of the call site, the `module` of the exception record of a panic.
+- **`TaskRuntime::state::<T>()` returns `Result<Arc<T>, StateNotProvided>`**
+  in place of a `TaskError` with the free code `STATE_NOT_PROVIDED`.
+- **Added: `TaskRuntime::cancelled()`, `TaskRuntime::is_cancelled()` and
+  `TaskRuntime::spawn(name, future)`.** The cancel signal fires when a
+  `SHARED_ASYNC` run reaches its `timeout_ms`; the body and its work then
+  have `cancel_grace_ms` to end. Work started with `spawn` belongs to the
+  run: the child waits for it when the body returns, cancels it after the
+  grace, and reports work that does not stop. `spawn` returns
+  `RunSpawnRefused` outside the async body of a run.
 - **The CLI types and `fetch_docs` are no longer public.** `Cli`, `Command`,
   `LogLevel`, `execute_web`, `WebArgs`, `WebAuthMode`,
   `WebCliError`, `execute_cutover`, `CutoverArgs`, `CutoverCliError`,
