@@ -10,8 +10,8 @@ use crate::broker::core_rows::StatementLog;
 use crate::broker::stale_recovery::{
     finish_stale_attempt, requeue_stale_claimed_pass, scan_stale_running, wake_retried_queue,
     FinishStaleAttempt, RecoveryBatch, StaleCandidate, StaleClaimsRequeuePass, StaleRetry,
-    StaleRunningThresholds, ThresholdMs, ThresholdOutOfRange,
-    STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
+    StaleRunningPass, StaleRunningThresholds, ThresholdMs, ThresholdOutOfRange,
+    STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS, STALE_RUNNING_SCAN_BATCH,
 };
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
@@ -814,14 +814,6 @@ purged_nodes AS (
 DELETE FROM horsies_workflows
 WHERE id IN (SELECT id FROM budgeted)";
 
-/// Max stale-RUNNING candidates a single reaper pass processes. Each candidate
-/// is one statement under the cluster-wide reaper gate, so this bounds how
-/// long one pass holds the gate; successive passes drain any larger backlog.
-const STALE_RUNNING_SCAN_BATCH: RecoveryBatch = match RecoveryBatch::new(1_000) {
-    Some(batch) => batch,
-    None => panic!("1000 rows is a recovery batch"),
-};
-
 /// Wall-clock budget for one retention pass across both retained-row statements. A
 /// backlog that does not drain within the budget resumes on the next pass;
 /// every statement still runs at least one batch per pass so a deep backlog
@@ -1342,7 +1334,8 @@ async fn run_reaper_pass(
 /// Each statement runs alone on `pool`, checked out as reserved work, and
 /// commits alone, so the candidates before a failure stay recovered. A
 /// candidate whose statement fails is logged, and the pass goes on with the
-/// next candidate. Returns the number of candidates retried or failed.
+/// next candidate. Returns the number of candidates retried or failed, and
+/// logs Python's warning when the scan read a full batch.
 ///
 /// Errors: the scan's [`crate::broker::BrokerError::Statement`] or
 /// [`crate::broker::BrokerError::RowDecode`]; nothing was written.
@@ -1352,6 +1345,30 @@ pub async fn mark_stale_running_as_failed(
     thresholds: StaleRunningThresholds,
     batch: RecoveryBatch,
 ) -> Result<u64, crate::broker::BrokerError> {
+    let pass = stale_running_pass(pool, log, thresholds, batch).await?;
+    match pass {
+        StaleRunningPass::Complete { .. } => {}
+        StaleRunningPass::ScanFull { scan_batch, .. } => tracing::warn!(
+            scan_batch,
+            "mark_stale_tasks_as_failed read a full scan batch of {scan_batch} candidates; the \
+             rest is recovered next pass",
+        ),
+    }
+    Ok(pass.recovered())
+}
+
+/// One stale RUNNING pass, as [`mark_stale_running_as_failed`] describes,
+/// with whether the scan read a full batch. Logs each candidate's outcome
+/// and failure; the caller reports the end of the pass.
+///
+/// Errors: the scan's [`crate::broker::BrokerError::Statement`] or
+/// [`crate::broker::BrokerError::RowDecode`]; nothing was written.
+pub(crate) async fn stale_running_pass(
+    pool: &CorePool,
+    log: StatementLog,
+    thresholds: StaleRunningThresholds,
+    batch: RecoveryBatch,
+) -> Result<StaleRunningPass, crate::broker::BrokerError> {
     let candidates = scan_stale_running(pool, log, thresholds, batch).await?;
     let mut recovered: u64 = 0;
     for candidate in &candidates {
@@ -1382,7 +1399,21 @@ pub async fn mark_stale_running_as_failed(
             }
         }
     }
-    Ok(recovered)
+    Ok(stale_running_end(candidates.len(), batch, recovered))
+}
+
+/// The end of a stale RUNNING pass whose scan read `scanned` candidates of
+/// at most `batch`. Pure.
+fn stale_running_end(scanned: usize, batch: RecoveryBatch, recovered: u64) -> StaleRunningPass {
+    let scan_batch = batch.get().unsigned_abs();
+    let full = usize::try_from(scan_batch).is_ok_and(|bound| scanned >= bound);
+    match full {
+        true => StaleRunningPass::ScanFull {
+            recovered,
+            scan_batch,
+        },
+        false => StaleRunningPass::Complete { recovered },
+    }
 }
 
 /// Whether one stale candidate was retried or failed.
@@ -2921,3 +2952,42 @@ mod retention_ports;
 
 #[cfg(test)]
 mod reaper_pass_ports;
+
+#[cfg(test)]
+mod stale_running_end_tests {
+    use super::{stale_running_end, RecoveryBatch, StaleRunningPass};
+
+    fn batch(rows: i32) -> RecoveryBatch {
+        RecoveryBatch::new(rows).expect("a recovery batch")
+    }
+
+    /// Python `mark_stale_tasks_as_failed`: a scan that read its whole batch
+    /// warns that the rest is recovered next pass; a shorter scan does not.
+    #[test]
+    fn a_scan_of_a_whole_batch_is_full_and_a_shorter_one_is_complete() {
+        assert_eq!(
+            stale_running_end(1_000, batch(1_000), 7),
+            StaleRunningPass::ScanFull {
+                recovered: 7,
+                scan_batch: 1_000
+            }
+        );
+        assert_eq!(
+            stale_running_end(999, batch(1_000), 7),
+            StaleRunningPass::Complete { recovered: 7 }
+        );
+        assert_eq!(
+            stale_running_end(0, batch(1), 0),
+            StaleRunningPass::Complete { recovered: 0 }
+        );
+        assert_eq!(StaleRunningPass::Complete { recovered: 3 }.recovered(), 3);
+        assert_eq!(
+            StaleRunningPass::ScanFull {
+                recovered: 4,
+                scan_batch: 1
+            }
+            .recovered(),
+            4
+        );
+    }
+}

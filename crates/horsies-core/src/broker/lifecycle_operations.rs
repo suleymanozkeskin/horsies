@@ -5,6 +5,9 @@
 //!   pass, `horsies_requeue_stale_claims` in bounded batches.
 //! - [`PostgresBroker::release_claims`]: `horsies_release_claims`, the return
 //!   of claimed rows that no child started.
+//! - [`PostgresBroker::mark_stale_running_as_failed`]: one stale RUNNING
+//!   pass, `horsies_stale_running_scan` and one `horsies_finish_stale_attempt`
+//!   per candidate.
 //! - [`PostgresBroker::cancel_task`]: `horsies_cancel_task`, the
 //!   administrative cancel of one plain task (Python
 //!   `horsies.monitoring.task_actions.cancel_task`, and the core's monitoring
@@ -25,7 +28,8 @@ use crate::broker::claims::{release_claims, ReleaseClaims, ReleaseOutcome};
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::stale_recovery::{
-    requeue_stale_claimed_pass, StaleClaimsRequeueFailed, StaleClaimsRequeuePass, ThresholdMs,
+    requeue_stale_claimed_pass, StaleClaimsRequeueFailed, StaleClaimsRequeuePass, StaleRunningPass,
+    StaleRunningThresholds, ThresholdMs, STALE_RUNNING_SCAN_BATCH,
 };
 use crate::core::lifecycle::{
     decode_outcome_row, GuardEvidence, ObservedTaskState, ObservedWorkflowTask, OutcomeDecodeError,
@@ -33,6 +37,7 @@ use crate::core::lifecycle::{
 };
 use crate::core::types::status::TaskStatus;
 use crate::db::{CheckoutClass, ParameterType, StatementBound, TypedStatement};
+use crate::worker::recovery::stale_running_pass;
 
 /// `horsies_cancel_task`. Parameters in order: task id, whether a RUNNING
 /// row may be cancelled.
@@ -133,6 +138,37 @@ impl PostgresBroker {
         self.ensure_client_family_for_write().await?;
         let (open, _write) = self.core_pools_for_write()?;
         release_claims(open.main(), self.statement_log(), command).await
+    }
+
+    /// One stale RUNNING pass (Python `PostgresBroker.mark_stale_tasks_as_failed`):
+    /// `horsies_stale_running_scan` reads at most 1000 candidates with no
+    /// lock; each candidate is then one `horsies_finish_stale_attempt`, which
+    /// judges the row again under its locks and writes the crash retry that
+    /// the task's policy admits for `WORKER_CRASHED`, or the terminal failure
+    /// (`FAIL_STALE`), or nothing. A scheduled retry wakes its queue (best
+    /// effort). Each statement commits alone, on the main core pool, checked
+    /// out as reserved work.
+    ///
+    /// A candidate whose statement fails is logged and skipped, and the pass
+    /// goes on, as Python does. [`StaleRunningPass::ScanFull`] says that the
+    /// scan read a full batch, so stale rows can remain for the next pass.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); the scan's [`BrokerError::Statement`] or
+    /// [`BrokerError::RowDecode`] (nothing written).
+    pub async fn mark_stale_running_as_failed(
+        &self,
+        thresholds: StaleRunningThresholds,
+    ) -> Result<StaleRunningPass, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        stale_running_pass(
+            open.main(),
+            self.statement_log(),
+            thresholds,
+            STALE_RUNNING_SCAN_BATCH,
+        )
+        .await
     }
 
     /// Cancel one plain task (Python `horsies.monitoring.task_actions.cancel_task`):

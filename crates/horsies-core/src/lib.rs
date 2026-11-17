@@ -83,8 +83,8 @@ pub use crate::broker::claims::{
     MAX_RELEASED_CLAIMS,
 };
 pub use crate::broker::stale_recovery::{
-    StaleClaimsRequeueFailed, StaleClaimsRequeuePass, ThresholdMs, ThresholdOutOfRange,
-    STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
+    StaleClaimsRequeueFailed, StaleClaimsRequeuePass, StaleRunningPass, StaleRunningThresholds,
+    ThresholdMs, ThresholdOutOfRange, STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
 };
 pub use crate::broker::{CancelAnswer, CancelTaskError, SendKind};
 
