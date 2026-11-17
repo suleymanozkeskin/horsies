@@ -1,11 +1,10 @@
 """The statements of a child that write one task row: the start and the
 finalizing marker.
 
-The start is one ``horsies_start_attempt`` call; the function reads its row
-by id alone (its SQL cases pin that). The marker reads its row by id alone,
-in a MATERIALIZED CTE that locks it FOR NO KEY UPDATE and computes the fence
-as one boolean, and updates by that id. So only the primary key serves it,
-whatever the statistics say.
+The start is one ``horsies_start_attempt`` call and the marker one
+``horsies_mark_finalizing`` call; each function reads its row by id alone
+(their SQL cases pin the outcomes, and ``test_task_row_plans.py`` the plan of
+the marker's row read).
 """
 
 from __future__ import annotations
@@ -22,8 +21,10 @@ from horsies.core.worker.child_runner import (
     START_ATTEMPT_SQL,
     AttemptMissed,
     AttemptStarted,
+    FinalizingMark,
     StartMiss,
     mark_finalizing_params,
+    read_finalizing_mark,
     read_start_outcome,
     start_attempt_params,
 )
@@ -35,13 +36,6 @@ CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 def _words(sql: str) -> str:
     return ' '.join(sql.split())
-
-
-def test_the_marker_row_is_read_by_id_alone_and_updated_by_that_id() -> None:
-    words = _words(MARK_FINALIZING_SQL)
-
-    assert 'FROM horsies_tasks WHERE id = %s FOR NO KEY UPDATE' in words
-    assert 'FROM target WHERE t.id = target.id AND target.' in words
 
 
 def test_the_start_is_one_function_call_with_one_parameter_per_placeholder() -> None:
@@ -86,20 +80,29 @@ def test_a_row_outside_the_contract_is_a_defect(row: tuple[object, ...] | None) 
         read_start_outcome(row, 'task-1')
 
 
-def test_the_marker_has_one_parameter_per_placeholder() -> None:
+def test_the_marker_is_one_function_call_with_one_parameter_per_placeholder() -> None:
     params = mark_finalizing_params('task-1', 'worker-1', CLAIMED_AT)
 
+    assert 'FROM horsies_mark_finalizing(' in _words(MARK_FINALIZING_SQL)
     assert MARK_FINALIZING_SQL.count('%s') == len(params)
 
 
-def test_the_marker_fence_checks_the_claim_time_with_no_null_branch() -> None:
-    words = _words(MARK_FINALIZING_SQL)
-
-    assert 'AND claimed_by_worker_id = %s AND claimed_at = %s::timestamptz' in words
-    assert 'IS NULL OR claimed_at' not in words
-
-
-def test_the_marker_fence_takes_the_worker_then_the_claim_time() -> None:
+def test_the_marker_takes_the_task_the_worker_then_the_claim_time() -> None:
     params = mark_finalizing_params('task-1', 'worker-1', CLAIMED_AT)
 
-    assert params == ('worker-1', CLAIMED_AT, 'task-1', 'worker-1')
+    assert params == ('task-1', 'worker-1', CLAIMED_AT)
+
+
+@pytest.mark.parametrize('mark', list(FinalizingMark), ids=[each.value for each in FinalizingMark])
+def test_each_marker_outcome_reads_as_its_member(mark: FinalizingMark) -> None:
+    assert read_finalizing_mark((mark.value,), 'task-1') is mark
+
+
+@pytest.mark.parametrize(
+    'row',
+    [None, ('SOMETHING_ELSE',), ('MARKED', None)],
+    ids=['no row', 'unknown outcome', 'extra column'],
+)
+def test_a_marker_row_outside_the_contract_is_a_defect(row: tuple[object, ...] | None) -> None:
+    with pytest.raises(AssertionError, match='horsies_mark_finalizing returned'):
+        read_finalizing_mark(row, 'task-1')
