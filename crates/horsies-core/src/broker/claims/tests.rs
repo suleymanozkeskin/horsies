@@ -151,6 +151,47 @@ fn rows_the_claim_never_returns_are_a_defect() {
     }
 }
 
+/// Python `test_claim_plan.py::TestRowClass::test_the_stored_class_parses`:
+/// the stored `execution` of a claimed row reads as its class, for each of
+/// the three values.
+#[test]
+fn the_stored_class_of_a_claimed_row_parses() {
+    for (stored, class) in [
+        ("ISOLATED", Execution::Isolated),
+        ("SHARED_ASYNC", Execution::SharedAsync),
+        ("SHARED_THREAD", Execution::SharedThread),
+    ] {
+        let pass = decode_claim_pass(vec![ClaimWireRow {
+            execution: Some(stored.to_owned()),
+            ..claimed_wire(1)
+        }])
+        .expect("a claimed row of a stored class reads");
+
+        assert_eq!(pass.claimed.len(), 1, "{stored}");
+        assert_eq!(pass.claimed[0].execution, class, "{stored}");
+    }
+}
+
+/// Python `test_claim_plan.py::TestRowClass::test_a_value_outside_the_enum_is_a_defect`:
+/// a claimed row whose `execution` is not an `Execution` value breaks the
+/// row contract of the claim, and the refusal names the task and the value.
+#[test]
+fn a_claimed_row_of_a_class_outside_the_enum_is_refused_with_its_task() {
+    let refused = decode_claim_pass(vec![ClaimWireRow {
+        execution: Some("SHARED_GPU".to_owned()),
+        ..claimed_wire(1)
+    }])
+    .expect_err("a class outside the enum breaks the row contract");
+
+    assert!(
+        refused.contains(&format!(
+            "claimed task {} has execution \"SHARED_GPU\"",
+            task(1)
+        )),
+        "{refused}"
+    );
+}
+
 // --- claim pass arguments -----------------------------------------------------
 
 #[test]
