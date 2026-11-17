@@ -119,6 +119,13 @@ mod tests {
         assert!(zero_age.contains("age is refused"), "{zero_age}");
         let negative = expiry_arguments(-1, 50).expect_err("a negative age");
         assert!(negative.contains("age is refused"), "{negative}");
+        let (longest, _) =
+            expiry_arguments(PausedWorkflowAge::MAX_MICROS, 50).expect("the longest age");
+        assert_eq!(longest.micros(), PausedWorkflowAge::MAX_MICROS);
+        let too_long = expiry_arguments(PausedWorkflowAge::MAX_MICROS + 1, 50)
+            .expect_err("an age above the bound");
+        assert!(too_long.contains("age is refused"), "{too_long}");
+        assert!(too_long.contains("longer than"), "{too_long}");
         let zero_batch = expiry_arguments(1, 0).expect_err("a batch of zero");
         assert!(zero_batch.contains("batch size"), "{zero_batch}");
     }

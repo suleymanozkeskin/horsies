@@ -64,7 +64,10 @@ async fn same_age_leaves_diverge_on_the_declared_period() {
     let short_leaf = leaf_days_ago(&database.pool, &short_parent, "standard_7d", 10).await;
     let long_leaf = leaf_days_ago(&database.pool, &long_parent, "standard_30d", 10).await;
 
-    let pass = prune_expired_partitions(&database.pool, &UnpublishedLoader).await;
+    let pass =
+        prune_expired_partitions(&core_pool_for_test_pool(&database.pool), StatementLog::Off)
+            .await
+            .expect("a pruning pass");
 
     assert!(pass.errors.is_empty(), "{:?}", pass.errors);
     assert_eq!(swept_names(&pass), vec![short_leaf.leaf_name()]);
@@ -88,7 +91,10 @@ async fn the_smallest_period_still_retains_each_whole_day() {
     let yesterday = leaf_days_ago(&database.pool, &parent, "standard_1d", 1).await;
     let old = leaf_days_ago(&database.pool, &parent, "standard_1d", 3).await;
 
-    let pass = prune_expired_partitions(&database.pool, &UnpublishedLoader).await;
+    let pass =
+        prune_expired_partitions(&core_pool_for_test_pool(&database.pool), StatementLog::Off)
+            .await
+            .expect("a pruning pass");
 
     assert!(pass.errors.is_empty(), "{:?}", pass.errors);
     assert_eq!(swept_names(&pass), vec![old.leaf_name()]);
@@ -110,7 +116,10 @@ async fn an_overdue_leaf_drops_and_leaves_inside_their_period_stay() {
     let inside = leaf_days_ago(&database.pool, &parent, "standard_30d", 10).await;
     let fresh = leaf_days_ago(&database.pool, &parent, "standard_30d", 0).await;
 
-    let pass = prune_expired_partitions(&database.pool, &UnpublishedLoader).await;
+    let pass =
+        prune_expired_partitions(&core_pool_for_test_pool(&database.pool), StatementLog::Off)
+            .await
+            .expect("a pruning pass");
 
     assert!(pass.errors.is_empty(), "{:?}", pass.errors);
     assert_eq!(pass.dropped_count(), 1);

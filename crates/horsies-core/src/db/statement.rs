@@ -384,12 +384,10 @@ pub(crate) async fn execute_count(
 }
 
 /// Runs one command with the simple query protocol: `BEGIN`, `COMMIT`,
-/// `ROLLBACK`, or the text of a [`SqlScript`]. A command has no parameter, so
-/// nothing is prepared, also under PgBouncer transaction mode.
-pub(crate) async fn run_command(
-    client: &ClientWrapper,
-    sql: &'static str,
-) -> Result<(), AttemptError> {
+/// `ROLLBACK`, the text of a [`SqlScript`], or the text of a
+/// [`crate::db::PartitionDdl`]. A command has no parameter, so nothing is
+/// prepared, also under PgBouncer transaction mode.
+pub(crate) async fn run_command(client: &ClientWrapper, sql: &str) -> Result<(), AttemptError> {
     client.batch_execute(sql).await.map_err(at(Stage::Run))
 }
 

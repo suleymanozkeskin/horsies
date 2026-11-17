@@ -8,74 +8,68 @@ mod parse;
 mod user_error_code;
 mod workflow_input;
 
-/// Attribute macro for defining an async horsies task.
-///
-/// # Example
+/// Define an async task.
 ///
 /// ```ignore
 /// #[horsies::task("validate_order", queue = "standard")]
-/// async fn validate_order(order: Order) -> Result<ValidatedOrder, TaskError> {
+/// async fn validate_order(order: Order) -> Result<ValidatedOrder, TaskError<OrderCode>> {
 ///     Ok(ValidatedOrder { ... })
 /// }
 /// ```
 ///
-/// Tasks that need to start a dynamic workflow at runtime may inject
-/// `horsies::TaskRuntime` as the first parameter:
+/// The function returns `Result<T, TaskError<E>>`: `T` is the output type
+/// and `E` the code type of the task's own errors
+/// (`#[derive(horsies::UserErrorCode)]`, or `std::convert::Infallible`).
+/// Its parameters form the input: none is `()`, one is its type, several
+/// are a generated `Input` struct. A first parameter of type
+/// `horsies::TaskRuntime` is not input: the body gets the runtime of the
+/// app.
+///
+/// Attributes after the name:
+/// - `queue = "name"`: a queue of `Custom` queue mode.
+/// - `execution = isolated | shared_async`: the class of the task; the
+///   default is `isolated`. `shared_async` needs `timeout_ms`.
+/// - `timeout_ms = 1000..=4294967295`: the deadline of a run.
+/// - `cancel_grace_ms = 100..=10000`: `shared_async` only; the time from
+///   the cancel signal at the deadline to the drop of the body. Default
+///   1,000.
+/// - `retry_policy = <RetryPolicy>` with `auto_retry_for = ["CODE", ...]`:
+///   both or neither. A code is a built-in code (`TASK_TIMEOUT`,
+///   `WORKER_CRASHED`, ...) or a code of `E`; any other is a compile
+///   error.
+/// - `workflow_ctx`: the input gets the workflow context.
+///
+/// The attribute generates a module of the same name:
 ///
 /// ```ignore
-/// #[horsies::task("scrape_detail")]
-/// async fn scrape_detail(
-///     rt: horsies::TaskRuntime,
-///     input: ScrapeInput,
-/// ) -> Result<(), TaskError> {
-///     if let Some(spec) = build_enrichment_spec(&input)? {
-///         rt.start::<()>(spec).await?;
-///     }
-///     Ok(())
-/// }
-/// ```
-///
-/// Registered tasks also generate global helpers for dispatch from anywhere:
-///
-/// ```ignore
-/// extract_attachment_text::send(input).await?;
-/// extract_attachment_text::schedule(Duration::from_secs(30), input).await?;
-/// // Explicit handle-based path (testing / advanced):
-/// let extract = extract_attachment_text::handle(&rt)?;
-/// ```
-///
-/// `TaskRuntime` can also retrieve typed app-provided state:
-///
-/// ```ignore
-/// let settings = rt.state::<AppSettings>()?;
-/// ```
-///
-/// Generates a companion `#[doc(hidden)]` module with a `register()`
-/// function. Register via:
-///
-/// ```ignore
-/// let task = validate_order::register(&mut app)?;
+/// let validate = validate_order::register(&mut app)?;   // TaskFunction<Order, ValidatedOrder, OrderCode>
+/// let handle = validate_order::send(order).await?;      // after the first register in the process
+/// let later = validate_order::schedule(WholeSeconds::from_secs(30), order).await?;
+/// let function = validate_order::handle(&runtime)?;     // from a TaskRuntime
 /// ```
 #[proc_macro_attribute]
 pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attrs = parse_macro_input!(attr as parse::TaskAttrs);
     let func = parse_macro_input!(item as ItemFn);
 
-    match codegen::generate_task(attrs, func, /* blocking */ false) {
+    match codegen::generate_task(attrs, func, codegen::BodyKind::Async) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-/// Attribute macro for defining a blocking (CPU-bound) horsies task.
+/// Define a blocking task: a `fn` that runs on a thread of its worker
+/// child.
 ///
-/// Same as `#[horsies::task]` but generates a `blocking_task_fn!` registration
-/// instead of `async_task_fn!`.
+/// The same attributes and generated module as `#[horsies::task]`, with
+/// `execution = isolated | shared_thread`. `shared_thread` needs
+/// `timeout_ms` and takes no `cancel_grace_ms`: a thread cannot be
+/// cancelled.
 ///
 /// ```ignore
-/// #[horsies::blocking_task("cpu_heavy", queue = "background")]
-/// fn cpu_heavy(input: HeavyInput) -> Result<HeavyOutput, TaskError> {
-///     Ok(HeavyOutput { ... })
+/// #[horsies::blocking_task("resize", execution = shared_thread, timeout_ms = 60_000)]
+/// fn resize(input: ResizeInput) -> Result<String, TaskError<ImageCode>> {
+///     Ok(format!("{} at {}px", input.path, input.width))
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -83,7 +77,7 @@ pub fn blocking_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attrs = parse_macro_input!(attr as parse::TaskAttrs);
     let func = parse_macro_input!(item as ItemFn);
 
-    match codegen::generate_task(attrs, func, /* blocking */ true) {
+    match codegen::generate_task(attrs, func, codegen::BodyKind::Blocking) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
@@ -91,12 +85,17 @@ pub fn blocking_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Derive typed workflow field tokens for a named-field input struct.
 ///
-/// Generates one associated function per field:
+/// Generates one associated function `field_<name>()` per field that serde
+/// reads, with the key that serde reads: `rename`, `rename_all` and raw
+/// identifiers (`r#type` is `type`) are applied. A field with
+/// `#[serde(skip)]` or `#[serde(skip_deserializing)]` gets no token. A
+/// `#[serde(flatten)]` field is a compile error: its keys are those of its
+/// own type.
 ///
 /// ```ignore
 /// #[derive(Serialize, Deserialize, horsies::WorkflowInput)]
 /// struct ProcessInput {
-///     data: TaskResult<String>,
+///     data: String,
 /// }
 ///
 /// process_data::node()?.arg_from(ProcessInput::field_data(), fetch);

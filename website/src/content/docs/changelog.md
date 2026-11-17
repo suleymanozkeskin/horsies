@@ -23,6 +23,15 @@ there is no migration contract between pre-1.0 versions.
   worker killed, have no `cancel_end`. The `data` keeps `task_id` and
   `timeout_ms`.
 
+- **`paused_workflow_auto_cancel_after` is at most 365,000 days.** A
+  longer age is refused when the config is built: Python raises
+  `ConfigurationError` with `CONFIG_INVALID_RETENTION` (HRS-216), and the
+  Rust config reader refuses it with `PausedAgeRefused::TooLong`. The
+  expiry selects the workflows whose last update is before `now()` minus
+  the age. A longer age can put that instant before PostgreSQL's lowest
+  timestamp (4714-11-24 BC). 0.7.0 accepted any positive `timedelta`, and
+  such an age failed every sweep with `timestamp out of range`.
+
 ## 0.7.0 — 2026-11-15
 
 0.7.0 runs a task in one of three execution modes: in an isolated child,

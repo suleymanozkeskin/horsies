@@ -221,7 +221,7 @@ Controls task-history storage and retained workflow data.
 |---|---|---|---|
 | `worker_state_retention_hours` | `Option<u32>` | `Some(168)` | Retain worker-state rows; `None` disables cleanup |
 | `terminal_record_retention_hours` | `Option<u32>` | `Some(720)` | Retain terminal workflow rows; task history uses classes instead |
-| `paused_workflow_auto_cancel_after` | `Option<chrono::Duration>` | `None` | Expire workflows that remain PAUSED past this positive duration |
+| `paused_workflow_auto_cancel_after` | `Option<PausedWorkflowAge>` | `None` | Expire workflows that remain PAUSED past this age: positive, whole microseconds, at most `PausedWorkflowAge::MAX_DAYS` (365,000 days); any other value is refused with `PausedAgeRefused` |
 | `history_leaf_horizon_days` | `u32` | `3` | Complete future daily history leaves; range 2–14 |
 | `heartbeat_leaf_horizon_hours` | `u32` | `6` | Complete future hourly heartbeat leaves; range 2–48 |
 | `retention_classes` | `Vec<RetentionClassConfig>` | empty | Extra immutable finite classes |

@@ -39,7 +39,7 @@ from horsies.core.models.recovery import (
     RecoveryConfig,
 )
 from horsies.core.models.resilience import WorkerResilienceConfig
-from horsies.core.models.retention import RetentionConfig
+from horsies.core.models.retention import PAUSED_WORKFLOW_AGE_MAX, RetentionConfig
 from horsies.core.models.tasks import Execution
 from horsies.core.models.worker_profile import (
     DEFAULT_DRAIN_TIMEOUT,
@@ -870,21 +870,19 @@ class TestRetention:
     def test_the_defaults_turn_the_paused_expiry_off_and_keep_records_hours(
         self,
     ) -> None:
-        assert retention_manifest(RetentionConfig()) == Ok(
-            wire.RetentionManifest(
-                worker_state_retention=wire.WorkerStateRetentionHours(hours=24 * 7),
-                terminal_record_retention=wire.TerminalRecordRetentionHours(
-                    hours=24 * 30,
-                ),
-                paused_workflow_auto_cancel_after=wire.PausedWorkflowExpiryNoExpiry(),
-                history_leaf_horizon_days=3,
-                heartbeat_leaf_horizon_hours=6,
-                retention_periods=(),
-                queue_retention={},
-                partition_maintenance_interval_s=900,
-                retention_sweep_interval_s=300,
-                retention_delete_batch_size=500,
+        assert retention_manifest(RetentionConfig()) == wire.RetentionManifest(
+            worker_state_retention=wire.WorkerStateRetentionHours(hours=24 * 7),
+            terminal_record_retention=wire.TerminalRecordRetentionHours(
+                hours=24 * 30,
             ),
+            paused_workflow_auto_cancel_after=wire.PausedWorkflowExpiryNoExpiry(),
+            history_leaf_horizon_days=3,
+            heartbeat_leaf_horizon_hours=6,
+            retention_periods=(),
+            queue_retention={},
+            partition_maintenance_interval_s=900,
+            retention_sweep_interval_s=300,
+            retention_delete_batch_size=500,
         )
 
     def test_none_is_no_pruning_and_a_period_is_its_days(self) -> None:
@@ -895,11 +893,7 @@ class TestRetention:
             retention_periods=(timedelta(days=7), timedelta(days=90)),
             queue_retention={'high': timedelta(days=14), 'low': None},
         )
-        match retention_manifest(config):
-            case Ok(section):
-                pass
-            case Err(above):
-                pytest.fail(f'refused: {above}')
+        section = retention_manifest(config)
         assert section.worker_state_retention == wire.WorkerStateRetentionNoPruning()
         assert section.terminal_record_retention == (
             wire.TerminalRecordRetentionNoPruning()
@@ -913,17 +907,26 @@ class TestRetention:
             'low': wire.QueueRetentionForever(),
         }
 
-    def test_a_paused_age_above_its_bound_stops_the_section(self) -> None:
-        config = RetentionConfig(paused_workflow_auto_cancel_after=timedelta.max)
-        micros = timedelta.max // timedelta(microseconds=1)
-        assert micros > wire.PAUSED_AGE_MICROS_MAX
-        assert retention_manifest(config) == Err(
-            ValueAboveManifestBound(
-                path='retention.paused_workflow_auto_cancel_after',
-                value=micros,
-                maximum=wire.PAUSED_AGE_MICROS_MAX,
-            ),
+    def test_the_paused_age_bound_is_the_manifest_bound(self) -> None:
+        """Pydantic refuses an age above the bound, so the longest age it
+        accepts is the longest age the manifest holds."""
+        assert PAUSED_WORKFLOW_AGE_MAX == timedelta(days=365_000)
+        assert PAUSED_WORKFLOW_AGE_MAX // timedelta(microseconds=1) == (
+            wire.PAUSED_AGE_MICROS_MAX
         )
+        config = RetentionConfig(
+            paused_workflow_auto_cancel_after=PAUSED_WORKFLOW_AGE_MAX,
+        )
+        assert retention_manifest(config).paused_workflow_auto_cancel_after == (
+            wire.PausedWorkflowExpiryAfter(micros=wire.PAUSED_AGE_MICROS_MAX)
+        )
+
+    def test_a_paused_age_that_validation_refuses_is_a_defect_here(self) -> None:
+        unvalidated = RetentionConfig.model_construct(
+            paused_workflow_auto_cancel_after=timedelta.max,
+        )
+        with pytest.raises(AssertionError, match='validated paused workflow age'):
+            retention_manifest(unvalidated)
 
     def test_a_period_that_validation_refuses_is_a_defect_here(self) -> None:
         unvalidated = RetentionConfig.model_construct(

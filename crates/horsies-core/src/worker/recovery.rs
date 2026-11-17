@@ -27,8 +27,7 @@ use crate::core::history::identity::reservations::{
 use crate::core::history::maintenance::coverage::{
     CoverageOutcome, CoverageRequest, CoverageSerialization,
 };
-use crate::core::history::maintenance::pruning::{prune_expired_partitions, PruneReach};
-use crate::core::history::reads::publisher::StagedLoaderPublisher;
+use crate::core::history::maintenance::pruning::PruneReach;
 use crate::core::lifecycle::StaleAttemptOutcome;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
@@ -54,6 +53,7 @@ mod p7_maintenance_tests {
     use crate::core::history::partitions::manager::create_daily_leaf;
     use crate::core::history::partitions::publication::LoaderPublication;
     use crate::core::history::periods::RetentionDays;
+    use crate::core::history::reads::publisher::StagedLoaderPublisher;
     use crate::core::lifecycle::TerminalizationOutcome;
     use crate::test_support::terminal_writes;
     use chrono::Timelike;
@@ -1283,7 +1283,7 @@ async fn run_reaper_pass(
 
         // Coverage and pruning are independently contained: either half runs
         // and publishes health even when the other refuses.
-        let prune = prune_expired_partitions(maintenance_pool, &StagedLoaderPublisher).await;
+        let prune = broker.prune_expired_partitions().await;
         // Expired key reservations are removed after pruning, in bounded
         // batches; the rest waits for the next pass.
         let key_reservations = match cleanup_expired_reservations_pass(
@@ -1304,18 +1304,29 @@ async fn run_reaper_pass(
                 serde_json::json!({"state": "error", "error": error.to_string()})
             }
         };
-        health.write().await.partition_pruning = Some(serde_json::json!({
-            "finalized": prune.finalized_leaves.len(),
-            "detached": prune.detached_count(),
-            "dropped": prune.dropped_count(),
-            "refusals": prune.refusals,
-            "errors": prune.errors,
-            "reach": match prune.reach {
-                PruneReach::WithinBounds => "within_bounds",
-                PruneReach::Truncated => "truncated",
-            },
-            "key_reservations": key_reservations,
-        }));
+        let pruning_health = match prune {
+            Ok(prune) => serde_json::json!({
+                "finalized": prune.finalized_leaves.len(),
+                "detached": prune.detached_count(),
+                "dropped": prune.dropped_count(),
+                "refusals": prune.refusals,
+                "errors": prune.errors,
+                "reach": match prune.reach {
+                    PruneReach::WithinBounds => "within_bounds",
+                    PruneReach::Truncated => "truncated",
+                },
+                "key_reservations": key_reservations,
+            }),
+            Err(error) => {
+                tracing::error!(%error, "partition pruning failed");
+                serde_json::json!({
+                    "state": "error",
+                    "error": error.to_string(),
+                    "key_reservations": key_reservations,
+                })
+            }
+        };
+        health.write().await.partition_pruning = Some(pruning_health);
         *next_partition_maintenance = tokio::time::Instant::now()
             + Duration::from_secs(retention.partition_maintenance_interval_s);
     }
@@ -1910,6 +1921,7 @@ mod tests {
     use crate::core::history::maintenance::coverage::{
         ensure_startup_coverage, StartupCoverageOutcome,
     };
+    use crate::core::history::reads::publisher::StagedLoaderPublisher;
     use serial_test::serial;
     use uuid::Uuid;
 

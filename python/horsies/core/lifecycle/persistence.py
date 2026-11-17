@@ -61,7 +61,6 @@ from .commands import (
 from .fences import (
     OwnedClaim,
     OwnedClaimBatch,
-    PriorLockedRead,
     TerminalFence,
     WorkerOwned,
 )
@@ -914,7 +913,7 @@ def _logged_fence(
             }
         case None:
             return None, None
-        case PriorLockedRead() | WorkerOwned() | OwnedClaim():
+        case WorkerOwned() | OwnedClaim():
             return type(fence).__name__, fence
         case _ as unreachable:
             assert_never(unreachable)

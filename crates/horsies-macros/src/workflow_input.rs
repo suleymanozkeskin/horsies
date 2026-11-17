@@ -1,5 +1,6 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+use syn::ext::IdentExt;
 use syn::punctuated::Punctuated;
 use syn::{Attribute, Data, DeriveInput, Expr, ExprLit, Fields, Lit, Meta, Token};
 
@@ -38,25 +39,41 @@ pub fn derive_workflow_input(input: DeriveInput) -> syn::Result<TokenStream> {
     // Rust field name while deserialization expects the renamed key (C13).
     let rename_all = serde_string(&struct_attrs, "rename_all");
 
-    let field_fns = fields.iter().map(|field| {
+    let mut field_fns = Vec::with_capacity(fields.len());
+    for field in &fields {
         let field_ident = field.ident.as_ref().expect("named field");
+        // serde reads no key for a skipped field, and the keys of a flattened
+        // field are those of its own type, which this derive cannot see.
+        if serde_flag(&field.attrs, "flatten") {
+            return Err(syn::Error::new_spanned(
+                field,
+                "WorkflowInput has no field token for a #[serde(flatten)] field: its keys are \
+                 those of its own type; derive WorkflowInput on that type, or list its fields \
+                 here",
+            ));
+        }
+        if serde_flag(&field.attrs, "skip") || serde_flag(&field.attrs, "skip_deserializing") {
+            continue;
+        }
         let field_ty = &field.ty;
-        let fn_ident = format_ident!("field_{}", field_ident);
+        // A raw identifier (`r#type`) is the key `type`, as serde reads it.
+        let rust_name = field_ident.unraw().to_string();
+        let fn_ident = format_ident!("field_{}", rust_name);
         // Field-level `rename` wins; otherwise apply a struct-level `rename_all`
         // rule to the Rust field name; otherwise use the field name verbatim.
         let field_name = match serde_string(&field.attrs, "rename") {
             Some(name) => name,
             None => match &rename_all {
-                Some(rule) => apply_rename_rule(rule, &field_ident.to_string()),
-                None => field_ident.to_string(),
+                Some(rule) => apply_rename_rule(rule, &rust_name),
+                None => rust_name.clone(),
             },
         };
-        quote! {
+        field_fns.push(quote! {
             pub fn #fn_ident() -> horsies::InputField<Self, #field_ty> {
                 horsies::__private::input_field(#field_name)
             }
-        }
-    });
+        });
+    }
 
     Ok(quote! {
         impl #impl_generics #ident #ty_generics #where_clause {
@@ -88,6 +105,25 @@ fn serde_string(attrs: &[Attribute], key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Whether a `#[serde(...)]` attribute of `attrs` holds the bare flag
+/// `flag`, such as `skip` or `flatten`.
+fn serde_flag(attrs: &[Attribute], flag: &str) -> bool {
+    attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("serde"))
+        .filter_map(|attr| match &attr.meta {
+            Meta::List(list) => list
+                .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+                .ok(),
+            Meta::Path(_) | Meta::NameValue(_) => None,
+        })
+        .any(|metas| {
+            metas
+                .iter()
+                .any(|meta| matches!(meta, Meta::Path(path) if path.is_ident(flag)))
+        })
 }
 
 fn extract_serde_string(meta: &Meta, key: &str) -> Option<String> {

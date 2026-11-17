@@ -3,9 +3,12 @@
 //!
 //! - Importing `horsies._core` starts nothing: no runtime, no thread, no
 //!   connection.
-//! - The first operation starts one tokio runtime and the log forwarder
-//!   thread, and stamps them with the process id. The callback thread starts
-//!   later, at the first Python callback (`bridge::callback_thread`).
+//! - The first operation starts the core's runtime of the process
+//!   (`horsies_core::process_runtime`, shaped here: two workers, the log
+//!   dispatch on each thread) and the log forwarder thread, and stamps them
+//!   with the process id. The core's pools and listener drive their
+//!   connections on that runtime. The callback thread starts later, at the
+//!   first Python callback (`bridge::callback_thread`).
 //! - A call in a process whose id differs from the stamp is refused with
 //!   `ForkedAfterCoreStart`: the process was forked without `exec` after the
 //!   core started, and tokio does not support a runtime in such a child. The
@@ -26,9 +29,13 @@
 
 use std::cell::RefCell;
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::panic::PanicHookInfo;
-use std::sync::{Mutex, Once, OnceLock};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 
+use horsies_core::process_runtime::{
+    process_runtime, shape_process_runtime, ProcessRuntime, RuntimeShape, ShapeOutcome, ThreadStart,
+};
 use pyo3::prelude::*;
 use tokio::sync::watch;
 
@@ -122,7 +129,7 @@ pub enum CoreStatus {
 /// The started core of one process.
 pub struct Core {
     pid: u32,
-    runtime: tokio::runtime::Runtime,
+    runtime: &'static ProcessRuntime,
     first_panic: OnceLock<PanicReport>,
     stop_signal: watch::Sender<bool>,
     log: LogBridge,
@@ -338,7 +345,7 @@ fn start_core() -> Result<&'static Core, CallRefusal> {
     // task that this start runs.
     let _rule_in_force = PANIC_RULE.get_or_init(|| PanicRule::StopCore);
     let (log, records) = LogBridge::new();
-    let runtime = build_runtime(log.dispatch().clone()).map_err(CallRefusal::StartFailed)?;
+    let runtime = start_runtime(log.dispatch().clone()).map_err(CallRefusal::StartFailed)?;
     logging::start_forwarder(records, log.sink()).map_err(|error| {
         CallRefusal::StartFailed(StartFailure::LogForwarderStartFailed {
             cause: error.to_string(),
@@ -358,18 +365,26 @@ fn start_core() -> Result<&'static Core, CallRefusal> {
     Ok(CORE.get_or_init(|| core))
 }
 
-fn build_runtime(dispatch: tracing::Dispatch) -> Result<tokio::runtime::Runtime, StartFailure> {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(PRODUCER_RUNTIME_WORKER_THREADS)
-        .max_blocking_threads(MAX_BLOCKING_THREADS)
-        .thread_name(RUNTIME_THREAD_NAME)
-        .on_thread_start(move || logging::make_thread_default(&dispatch))
-        .enable_time()
-        .enable_io()
-        .build()
-        .map_err(|error| StartFailure::RuntimeBuildFailed {
-            cause: error.to_string(),
-        })
+/// Shape the core's runtime of the process for a Python process and start
+/// it. A runtime that runs already (an earlier start that failed after it,
+/// at the log forwarder) is used as it is: it has this shape.
+fn start_runtime(dispatch: tracing::Dispatch) -> Result<&'static ProcessRuntime, StartFailure> {
+    let shape = RuntimeShape {
+        worker_threads: NonZeroUsize::new(PRODUCER_RUNTIME_WORKER_THREADS)
+            .expect("the producer runtime has worker threads"),
+        max_blocking_threads: NonZeroUsize::new(MAX_BLOCKING_THREADS)
+            .expect("the producer runtime has a blocking pool"),
+        thread_name: RUNTIME_THREAD_NAME,
+        on_thread_start: ThreadStart::Run(Arc::new(move || {
+            logging::make_thread_default(&dispatch)
+        })),
+    };
+    match shape_process_runtime(shape) {
+        ShapeOutcome::Shaped | ShapeOutcome::AlreadyRunning => {}
+    }
+    process_runtime().map_err(|refusal| StartFailure::RuntimeBuildFailed {
+        cause: refusal.to_string(),
+    })
 }
 
 /// Chain a hook that keeps the cause of each panic on its thread, so that

@@ -2,7 +2,7 @@ use horsies::task;
 use horsies::TaskError;
 
 #[task("sum_two")]
-async fn sum_two(a: i32, b: i32) -> Result<i32, TaskError> {
+async fn sum_two(a: i32, b: i32) -> Result<i32, TaskError<std::convert::Infallible>> {
     Ok(a + b)
 }
 

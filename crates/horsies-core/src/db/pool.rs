@@ -34,13 +34,14 @@ use deadpool::managed::{
 use deadpool::Runtime;
 use deadpool_postgres::ClientWrapper;
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
-use tokio::task::AbortHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::{CancelToken, Row};
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 use super::connect::{open_connection, ConnectPlan, DriverConnection};
+use super::ddl::PartitionDdl;
 use super::failure::{
     error_scope, CancelRequestOutcome, CheckoutFailure, ConnectError, ConnectFailure, ErrorScope,
     NotSentCause, RefusalCause, StatementFailure, UnknownOutcomeCause,
@@ -51,6 +52,7 @@ use super::statement::{
     StatementBound, StatementProtocol, CANCEL_GRACE,
 };
 use super::transaction::TransactionCommand;
+use crate::process_runtime::spawn_on_process_runtime;
 
 /// PostgreSQL's upper limit of `max_connections`; no pool can be larger.
 pub const POSTGRES_MAX_BACKENDS: u32 = 262_143;
@@ -338,8 +340,7 @@ impl Manager for CoreManager {
     type Error = ConnectError;
 
     async fn create(&self) -> Result<CoreConnection, ConnectError> {
-        let (client, connection) = open_connection(&self.plan).await?;
-        let driver = tokio::spawn(drive_connection(connection));
+        let (client, driver) = open_on_process_runtime(Arc::clone(&self.plan)).await?;
         let abort = driver.abort_handle();
         // Dropping the wrapper on a failed setup aborts the driver task.
         let client = ClientWrapper::new(client, driver);
@@ -480,6 +481,39 @@ async fn open_missing(
 }
 
 /// Drives one pooled connection until it closes.
+/// Open a connection of `plan` and start its driver, both on the runtime of
+/// the process ([`crate::process_runtime`]): the socket belongs to the
+/// runtime that opened it, and the connection lives while its driver runs,
+/// so the connection serves every runtime of the process and outlives the
+/// runtime of the caller.
+///
+/// Errors: the [`ConnectError`] of the attempt;
+/// [`ConnectFailure::RuntimeUnavailable`] when the process runtime cannot be
+/// used (nothing was connected).
+async fn open_on_process_runtime(
+    plan: Arc<ConnectPlan>,
+) -> Result<(tokio_postgres::Client, JoinHandle<()>), ConnectError> {
+    let masked_url = plan.masked_url().clone();
+    let opening = spawn_on_process_runtime(async move {
+        let (client, connection) = open_connection(&plan).await?;
+        let driver = tokio::spawn(drive_connection(connection));
+        Ok::<_, ConnectError>((client, driver))
+    })
+    .map_err(|refusal| ConnectError {
+        masked_url,
+        cause: ConnectFailure::RuntimeUnavailable(refusal),
+    })?;
+    match opening.await {
+        Ok(opened) => opened,
+        // The process runtime lives in a static and never shuts down, so the
+        // open is never cancelled; a panic in it is a defect, resumed here.
+        Err(join) => match join.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(join) => unreachable!("the process runtime cancelled a connect: {join}"),
+        },
+    }
+}
+
 async fn drive_connection(connection: DriverConnection) {
     match connection.await {
         Ok(()) => {}
@@ -559,12 +593,25 @@ impl CorePool {
         match plan.sizing.kept_open() {
             KeptOpen::NoConnections => {}
             KeptOpen::Connections(kept) => {
-                let _keeper = tokio::spawn(keep_open(
+                // On the process runtime, as the connections it keeps. When
+                // that runtime cannot be used, no connection can open either:
+                // each checkout names the refusal.
+                match spawn_on_process_runtime(keep_open(
                     pool.weak(),
                     kept,
                     checkout_timeouts(plan.checkout_wait),
                     plan.role,
-                ));
+                )) {
+                    Ok(_keeper) => {}
+                    Err(refusal) => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            role = ?plan.role,
+                            %refusal,
+                            "the pool keeps no connection open: the process runtime cannot be used",
+                        );
+                    }
+                }
             }
         }
         CorePool {
@@ -858,6 +905,28 @@ impl PooledConnection {
         self.ensure_usable(name)?;
         let bounding = self.bounding(bound);
         let outcome = run_bounded(run_command(&self.object.client, script.sql()), bounding).await;
+        self.settle(name, outcome)
+    }
+
+    /// Runs one partition DDL statement (simple query protocol, no
+    /// parameters) with the same three outcomes as a statement. A refusal
+    /// keeps the server error, so a held lock (`55P03`, `lock_not_available`)
+    /// and a statement timeout (`57014`) stay apart.
+    ///
+    /// The statement runs in autocommit: an open [`crate::db::Transaction`]
+    /// borrows this connection, so no transaction is open while this method
+    /// runs. Session settings (`statement_timeout`, `lock_timeout`) apply as
+    /// the caller set them.
+    pub async fn run_partition_ddl(
+        &mut self,
+        ddl: &PartitionDdl,
+        bound: StatementBound,
+    ) -> Result<(), StatementFailure> {
+        let name = ddl.name();
+        self.ensure_usable(name)?;
+        let bounding = self.bounding(bound);
+        let sql = ddl.sql();
+        let outcome = run_bounded(run_command(&self.object.client, &sql), bounding).await;
         self.settle(name, outcome)
     }
 

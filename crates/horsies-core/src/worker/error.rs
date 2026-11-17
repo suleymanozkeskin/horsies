@@ -52,6 +52,12 @@ pub enum WorkerError {
     #[error("worker child start failed: {0}")]
     SpawnerStart(SpawnerStartError),
 
+    /// The preload process of an `app` preload profile refused, or did not
+    /// report ready (Python `PreloadRefused`). The worker started no child.
+    /// A `library` profile uses `exec` instead.
+    #[error("worker child start failed: the preload parent refused: {reason}")]
+    PreloadRefused { reason: String },
+
     /// An `on_child_process_start` hook failed in a child at the start
     /// (Python `ChildHookFailedError`). Never retried: every new child runs
     /// the hook again.
@@ -111,6 +117,7 @@ impl WorkerError {
             Self::RunnerHeartbeatLost { .. } => false,
             Self::PlacementRefused(_)
             | Self::SpawnerStart(_)
+            | Self::PreloadRefused { .. }
             | Self::ChildHookFailed
             | Self::ChildrenStartFailed(_)
             | Self::PoolFailed(_)

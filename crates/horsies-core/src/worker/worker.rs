@@ -38,8 +38,8 @@ use crate::db::{
 };
 use crate::worker::backoff::RetryBackoff;
 use crate::worker::children::{
-    attempt_end, baseline_limits, exit_not_seen, pending_task_limit, plan_placement, ChildLaunch,
-    ChildrenStopped, PoolFacts, WorkerChildren,
+    attempt_end, baseline_limits, exit_not_seen, pending_task_limit, plan_placement, preload_plan,
+    ChildLaunch, ChildrenStopped, PoolFacts, WorkerChildren,
 };
 use crate::worker::claim_pass::{
     claim_for_dispatch, BrokerClaimSteps, ClaimBatchLimit, ClaimPassCounts, RegisteredClasses,
@@ -54,7 +54,9 @@ use crate::worker::executor::slots::{
     ClaimedTask, NotRunCause, OrphanSelfHeal, OutcomeWriter, PoolBoard, PoolFailure,
     PoolStopReport, RetryFacts, TaskKind,
 };
-use crate::worker::executor::supervisor::{Spawner, SpawnerStopReport, CHILD_KILL_WAIT};
+use crate::worker::executor::supervisor::{
+    PreloadMode, PreloadStart, PreloadUnsupported, Spawner, SpawnerStopReport, CHILD_KILL_WAIT,
+};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
 use crate::worker::finalize_batch::stop::drain_then_close;
 use crate::worker::finalize_batch::{FinalizeBatcher, FlusherBound};
@@ -448,6 +450,63 @@ async fn watch_new_kind_baselines(
     }
 }
 
+/// What the start of the preload process means for the worker (Python
+/// `SlotPool._start_preload`). Only the `app` mode refuses: the user chose
+/// it, so its failure is reported. In the `library` mode a failure costs
+/// child start time, so children use `exec` and the worker goes on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreloadOutcome {
+    /// Children fork from the preload process.
+    Forks,
+    /// Children use `exec`; `warning` is logged when there is one.
+    Exec { warning: Option<String> },
+    /// The worker fails before any child starts.
+    Refused { reason: String },
+}
+
+/// The outcome of a preload start in `mode`. Pure.
+fn preload_outcome(mode: PreloadMode, start: PreloadStart) -> PreloadOutcome {
+    match (mode, start) {
+        (_, PreloadStart::Ready { .. }) => PreloadOutcome::Forks,
+        (
+            PreloadMode::App,
+            PreloadStart::Unsupported(PreloadUnsupported::NotLinux { platform }),
+        ) => PreloadOutcome::Exec {
+            warning: Some(format!(
+                "App preload needs Linux, this is {platform}. Using exec."
+            )),
+        },
+        (PreloadMode::Library, PreloadStart::Unsupported(PreloadUnsupported::NotLinux { .. })) => {
+            PreloadOutcome::Exec { warning: None }
+        }
+        (_, PreloadStart::Unsupported(PreloadUnsupported::MissingKernelSupport { reason })) => {
+            PreloadOutcome::Exec {
+                warning: Some(format!(
+                    "Child preload cannot run on this host: {reason}. Using exec."
+                )),
+            }
+        }
+        (PreloadMode::App, PreloadStart::Refused { reason })
+        | (PreloadMode::App, PreloadStart::StartFailed { detail: reason }) => {
+            PreloadOutcome::Refused { reason }
+        }
+        (PreloadMode::Library, PreloadStart::Refused { reason }) => PreloadOutcome::Exec {
+            warning: Some(format!(
+                "No preload parent, using exec: the preload process refused: {reason}"
+            )),
+        },
+        (PreloadMode::Library, PreloadStart::StartFailed { detail }) => PreloadOutcome::Exec {
+            warning: Some(format!("No preload parent, using exec: {detail}")),
+        },
+        (_, PreloadStart::SpawnerStopped) => PreloadOutcome::Exec {
+            warning: Some(
+                "No preload parent, using exec: the spawner stopped during the preload start"
+                    .to_owned(),
+            ),
+        },
+    }
+}
+
 /// The children of a started worker, the spawner thread that starts them,
 /// and the registry of the tasks that children hold.
 struct RunningChildren {
@@ -787,14 +846,15 @@ impl Worker {
 
     /// Start the children before any database work, so a bad app or hook
     /// fails at once (Python `start`, `_start_slots`): the CPU plan, the
-    /// spawner thread, one pool per kind, then the wait for the first
-    /// generation, the placement of the worker's threads and the memory
-    /// baseline guard. A stop during the start ends it with `Ok(None)`.
+    /// spawner thread, the preload process of the profile, one pool per
+    /// kind, then the wait for the first generation, the placement of the
+    /// worker's threads and the memory baseline guard. A stop during the
+    /// start ends it with `Ok(None)`.
     ///
     /// Errors: [`WorkerError::PlacementRefused`], [`WorkerError::SpawnerStart`],
-    /// [`WorkerError::ChildHookFailed`] (never retried),
-    /// [`WorkerError::ChildrenStartFailed`]. The pools and the spawner are
-    /// stopped before an error returns.
+    /// [`WorkerError::PreloadRefused`], [`WorkerError::ChildHookFailed`]
+    /// (never retried), [`WorkerError::ChildrenStartFailed`]. The pools and
+    /// the spawner are stopped before an error returns.
     async fn start_pools(&self) -> Result<Option<RunningChildren>, WorkerError> {
         let profile = &self.profile.profile;
         let placement =
@@ -805,6 +865,21 @@ impl Worker {
             Ok(started) => started.map_err(WorkerError::SpawnerStart)?,
             Err(joined) => std::panic::resume_unwind(joined.into_panic()),
         };
+        // The preload process starts before the first child, so the first
+        // generation forks from it (Python `SlotPool.start`).
+        if let Some(plan) = preload_plan(profile, &self.launch) {
+            let mode = plan.mode;
+            match preload_outcome(mode, spawner.handle().start_preload(plan).await) {
+                PreloadOutcome::Forks | PreloadOutcome::Exec { warning: None } => {}
+                PreloadOutcome::Exec {
+                    warning: Some(warning),
+                } => tracing::warn!("{warning}"),
+                PreloadOutcome::Refused { reason } => {
+                    RunningChildren::stop_spawner(spawner).await;
+                    return Err(WorkerError::PreloadRefused { reason });
+                }
+            }
+        }
         let live = LiveDispatches::default();
         let children = WorkerChildren::start(
             profile,
@@ -1765,6 +1840,7 @@ mod tests {
             },
             ChildLaunch {
                 command: crate::worker::executor::slots::scripted::idle_child_of_any_kind(),
+                preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
                 program: ChildProgram::Rust,
                 log_level: ChildLogLevel::Info,
                 database_url,
@@ -2347,6 +2423,7 @@ mod tests {
             },
             ChildLaunch {
                 command,
+                preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
                 program: ChildProgram::Rust,
                 log_level: ChildLogLevel::Info,
                 database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
@@ -2382,6 +2459,7 @@ mod tests {
             },
             ChildLaunch {
                 command: crate::worker::executor::slots::scripted::idle_child_of_any_kind(),
+                preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
                 program: ChildProgram::Rust,
                 log_level: ChildLogLevel::Info,
                 database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
@@ -2683,6 +2761,81 @@ mod tests {
     /// Python `Worker.stop`: the drain line names each task that the drain
     /// deadline killed, as Python prints its list of ids; a drain that
     /// killed none logs no line.
+    /// Python `SlotPool._start_preload`: only the `app` mode refuses; the
+    /// `library` mode and a host without the preload path use `exec`.
+    #[test]
+    fn only_an_app_preload_that_does_not_start_refuses_the_worker() {
+        use crate::worker::executor::protocol::ProcessId;
+        let ready = PreloadStart::Ready {
+            pid: ProcessId::new(42).unwrap(),
+        };
+        assert_eq!(
+            preload_outcome(PreloadMode::App, ready),
+            PreloadOutcome::Forks
+        );
+        for (mode, start) in [
+            (
+                PreloadMode::App,
+                PreloadStart::Refused {
+                    reason: "import failed".to_owned(),
+                },
+            ),
+            (
+                PreloadMode::App,
+                PreloadStart::StartFailed {
+                    detail: "import failed".to_owned(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                preload_outcome(mode, start),
+                PreloadOutcome::Refused {
+                    reason: "import failed".to_owned()
+                }
+            );
+        }
+        assert_eq!(
+            preload_outcome(
+                PreloadMode::Library,
+                PreloadStart::Refused {
+                    reason: "import failed".to_owned()
+                }
+            ),
+            PreloadOutcome::Exec {
+                warning: Some(
+                    "No preload parent, using exec: the preload process refused: import failed"
+                        .to_owned()
+                )
+            }
+        );
+        let not_linux =
+            || PreloadStart::Unsupported(PreloadUnsupported::NotLinux { platform: "macos" });
+        assert_eq!(
+            preload_outcome(PreloadMode::Library, not_linux()),
+            PreloadOutcome::Exec { warning: None }
+        );
+        assert_eq!(
+            preload_outcome(PreloadMode::App, not_linux()),
+            PreloadOutcome::Exec {
+                warning: Some("App preload needs Linux, this is macos. Using exec.".to_owned())
+            }
+        );
+        assert_eq!(
+            preload_outcome(
+                PreloadMode::App,
+                PreloadStart::Unsupported(PreloadUnsupported::MissingKernelSupport {
+                    reason: "pidfd_open: ENOSYS".to_owned()
+                })
+            ),
+            PreloadOutcome::Exec {
+                warning: Some(
+                    "Child preload cannot run on this host: pidfd_open: ENOSYS. Using exec."
+                        .to_owned()
+                )
+            }
+        );
+    }
+
     #[test]
     fn the_drain_line_names_the_killed_tasks_as_python_does() {
         let killed = [Uuid::from_u128(1), Uuid::from_u128(2)];

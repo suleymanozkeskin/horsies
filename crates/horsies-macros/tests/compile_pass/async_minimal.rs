@@ -2,7 +2,7 @@ use horsies::task;
 use horsies::TaskError;
 
 #[task("minimal")]
-async fn minimal(_: ()) -> Result<String, TaskError> {
+async fn minimal(_: ()) -> Result<String, TaskError<std::convert::Infallible>> {
     Ok("ok".into())
 }
 

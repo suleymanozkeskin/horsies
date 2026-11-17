@@ -19,6 +19,15 @@ and there is no migration contract between pre-1.0 versions.
   worker killed, have no `cancel_end`. The `data` keeps `task_id` and
   `timeout_ms`.
 
+- **`paused_workflow_auto_cancel_after` is at most 365,000 days.** A
+  longer age is refused when the config is built: Python raises
+  `ConfigurationError` with `CONFIG_INVALID_RETENTION` (HRS-216), and the
+  Rust config reader refuses it with `PausedAgeRefused::TooLong`. The
+  expiry selects the workflows whose last update is before `now()` minus
+  the age. A longer age can put that instant before PostgreSQL's lowest
+  timestamp (4714-11-24 BC). 0.7.0 accepted any positive `timedelta`, and
+  such an age failed every sweep with `timestamp out of range`.
+
 ### Rust client (crate `horsies`)
 
 The crate `horsies` is rebuilt on `horsies-core`, the engine that the
@@ -140,6 +149,39 @@ unless it starts with "Added".
   run: the child waits for it when the body returns, cancels it after the
   grace, and reports work that does not stop. `spawn` returns
   `RunSpawnRefused` outside the async body of a run.
+- **A task declares its execution class.** `#[horsies::task]` and
+  `#[horsies::blocking_task]` take `execution = isolated | shared_async |
+  shared_thread`; the default is `isolated`. An `async fn` runs `isolated`
+  or `shared_async`, a `fn` runs `isolated` or `shared_thread`; another
+  class is a compile error. A shared class without `timeout_ms` is a
+  compile error. The class is stored with the task's options of every send.
+- **Added: `cancel_grace_ms` on a `shared_async` task**, from 100 to 10,000
+  ms, default 1,000: the time from the cancel signal at the deadline to the
+  drop of the body. On another class it is a compile error.
+- **`auto_retry_for` is checked at compile time.** A built-in name
+  (`TASK_TIMEOUT`, `WORKER_CRASHED`, ...) is stored as the built-in code;
+  any other entry must be a code of the task's code type `E`, else the
+  task does not compile. Before, every entry was stored as a user code, so
+  a built-in name never matched. `retry_policy` and `auto_retry_for` go
+  together, with at least one code, as in Python: one without the other is
+  a compile error (before, codes without a policy were dropped).
+- **A task function returns `Result<T, TaskError<E>>`.** `TaskError`
+  without its code type is a compile error; a task with no codes of its own
+  uses `TaskError<std::convert::Infallible>`. `register` refuses a code
+  type whose `CODES` holds a built-in or reserved name (`HRS-212`), which
+  only a hand-written `UserErrorCode` impl can have.
+- **The module that `#[horsies::task]` generates changes.** `register`
+  returns `TaskFunction<A, T, E>`; `send`, `schedule` and `with_options`
+  return `Result<TaskHandle<T, E>, TaskSendError>`; `schedule` takes
+  `WholeSeconds`; `handle(&runtime)` returns
+  `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>`. The generated
+  `Input` struct derives serde through `horsies`, so it needs no `serde`
+  name in the user's crate.
+- **Field tokens use the key that serde reads.** In `params::<name>()` and
+  `#[derive(WorkflowInput)]` a raw identifier `r#type` is the key `type`
+  (before: `r#type`). `#[derive(WorkflowInput)]` makes no token for a
+  `#[serde(skip)]` or `#[serde(skip_deserializing)]` field, and refuses a
+  `#[serde(flatten)]` field at compile time.
 - **The CLI types and `fetch_docs` are no longer public.** `Cli`, `Command`,
   `LogLevel`, `execute_web`, `WebArgs`, `WebAuthMode`,
   `WebCliError`, `execute_cutover`, `CutoverArgs`, `CutoverCliError`,
