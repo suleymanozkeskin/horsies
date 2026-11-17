@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::task::Execution;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -194,6 +195,24 @@ pub struct TaskDetail {
     pub attempts: Vec<TaskAttemptInfo>,
     pub workflow_id: Option<Uuid>,
     pub workflow_task_index: Option<i32>,
+}
+
+/// The answer of the task detail read (Python `TaskDetail |
+/// TaskDetailNotFound`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaskDetailRead {
+    /// The live row, or the history row when the live table has no row.
+    Found(TaskDetail),
+    /// Neither the live table nor the history holds the task.
+    NotFound(TaskDetailNotFound),
+}
+
+/// No live row and no history row has this task id. `reason` says whether
+/// retention can explain the absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskDetailNotFound {
+    pub task_id: Uuid,
+    pub reason: TaskAbsenceReason,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

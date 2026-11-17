@@ -77,7 +77,6 @@ async fn run_maintenance_pass(pool: &PgPool, retention: &RetentionConfig) -> Rea
         pool,
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &recovery,
-        &PayloadPolicy::default(),
         retention,
         &health,
         &mut next_retention_cleanup,

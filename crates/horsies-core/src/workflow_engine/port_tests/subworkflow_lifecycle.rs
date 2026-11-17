@@ -25,7 +25,6 @@ use crate::broker::attempt_writes::{
 };
 use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::core_pool_for_test_pool;
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{FailedAttemptOutcome, OwnedClaim};
 use crate::core::registry::workflow::RegisteredWorkflowSpec;
@@ -76,11 +75,9 @@ async fn recovery_pass(pool: &PgPool, registry: &WorkflowSpecRegistry) -> u64 {
     .await
     .expect("the phase-2 drain");
     let report = recover_stuck_workflows(
-        pool,
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         registry,
-        0,
         FAILURE_LIMIT,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
