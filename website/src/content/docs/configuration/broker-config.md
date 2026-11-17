@@ -18,24 +18,26 @@ broker = PostgresConfig(
 
 ## Fields
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `database_url` | `SecretStr` | required | SQLAlchemy connection URL |
-| `session_database_url` | `SecretStr \| None` | `None` | Direct/session-capable URL for schema setup and LISTEN/NOTIFY |
-| `pgbouncer_transaction_mode` | `bool` | `False` | Disable prepared statements for transaction-pooled PgBouncer |
-| `pool_size` | `int` | 5 | Connection pool size (raise for high-throughput producers) |
-| `max_overflow` | `int` | 10 | Additional connections beyond pool_size |
-| `pool_timeout` | `int` | 30 | Seconds to wait for connection |
-| `pool_pre_ping` | `bool` | `True` | Ping a pooled connection at checkout when it waited in the pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`), in every engine but the one of the worker process; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
-| `worker_pool_pre_ping` | `bool` | `False` | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: the worker sends a one-statement write in one round trip, and a dead pooled connection fails its first statement with a connection error that the worker retries; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
-| `tcp_keepalives` | `bool` | `True` | Enable libpq TCP keepalives on broker and child-process connections; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
-| `tcp_keepalives_idle` | `int` | 30 | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
-| `tcp_keepalives_interval` | `int` | 10 | Seconds between keepalive probes (libpq `keepalives_interval`) |
-| `tcp_keepalives_count` | `int` | 3 | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
-| `tcp_user_timeout_ms` | `int` | 30000 | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the operating system default; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
-| `retain_rerun_input_default` | `bool` | `False` | App-level default for rerun-input retention at enqueue; a per-task value overrides it |
-| `echo` | `bool` | `False` | Echo SQL statements to logs. Bound values are not shown |
-| `pool_recycle` | `int` | 1800 | Recycle connections after N seconds |
+| Field | Type | Default | Range | Description |
+|-------|------|---------|-------|-------------|
+| `database_url` | `SecretStr` | required | – | SQLAlchemy connection URL |
+| `session_database_url` | `SecretStr \| None` | `None` | – | Direct/session-capable URL for schema setup and LISTEN/NOTIFY |
+| `pgbouncer_transaction_mode` | `bool` | `False` | – | Disable prepared statements for transaction-pooled PgBouncer |
+| `pool_size` | `int` | 5 | 1 to 10,000 | Connection pool size (raise for high-throughput producers) |
+| `max_overflow` | `int` | 10 | 0 to 10,000 | Additional connections beyond pool_size |
+| `pool_timeout` | `int` | 30 | 0 to 4,294,967,295; `0`: a checkout does not wait | Seconds to wait for connection |
+| `pool_pre_ping` | `bool` | `True` | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`), in every engine but the one of the worker process; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `worker_pool_pre_ping` | `bool` | `False` | – | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: the worker sends a one-statement write in one round trip, and a dead pooled connection fails its first statement with a connection error that the worker retries; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
+| `tcp_keepalives` | `bool` | `True` | – | Enable libpq TCP keepalives on broker and child-process connections; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `tcp_keepalives_idle` | `int` | 30 | 1 to 32,767 | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
+| `tcp_keepalives_interval` | `int` | 10 | 1 to 32,767 | Seconds between keepalive probes (libpq `keepalives_interval`) |
+| `tcp_keepalives_count` | `int` | 3 | 1 to 127 | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
+| `tcp_user_timeout_ms` | `int` | 30000 | `0` or 1 to 2,147,483,647 | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the operating system default; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `retain_rerun_input_default` | `bool` | `False` | – | App-level default for rerun-input retention at enqueue; a per-task value overrides it |
+| `echo` | `bool` | `False` | – | Echo SQL statements to logs. Bound values are not shown |
+| `pool_recycle` | `int` | 1800 | `-1` (never) or 0 to 4,294,967,295 | Recycle connections after N seconds |
+
+A pool value outside its range is refused with `ConfigurationError` `HRS-213` (`CONFIG_INVALID_BROKER_POOL`), and a TCP value outside its range with `HRS-215` (`CONFIG_INVALID_KEEPALIVE`). `pool_size=0` and `max_overflow=-1` mean no limit in SQLAlchemy; they are refused, because the core always bounds its connections. The three keepalive values are checked only when `tcp_keepalives` is `True`.
 
 The pools of a worker are not `PostgresConfig` fields. Each child kind has its own `pool` and `task_send_pool` in the worker profile, and the worker process has `WorkerProfile.pool`. See [Connection Pools and the Default Executor](/horsies/workers/worker-profiles/#connection-pools-and-the-default-executor). `worker_child_pool_min_size`, `worker_child_pool_max_size`, `worker_child_pool_check`, `worker_pool_size` and `worker_max_overflow` were removed in 0.7.0; a config that sets one fails with `HRS-213`, and the error names the profile field that replaces it.
 
