@@ -17,6 +17,8 @@ use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
+use crate::core_failures::FailureException;
+
 /// The row as a statement saw it under its locks.
 #[derive(Clone, Debug)]
 struct Observed {
@@ -82,7 +84,8 @@ pub struct AttemptTaskAbsent {
 
 /// The statement failed. It wrote nothing, or it committed and its reply
 /// was lost (the same write sent again reports a committed effect as a
-/// replay or a refusal).
+/// replay or a refusal). `exception` is the cause, with the write as its
+/// subject.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct AttemptWriteFailed {
@@ -90,14 +93,17 @@ pub struct AttemptWriteFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    pub exception: FailureException,
 }
 
 impl AttemptWriteFailed {
-    pub fn new(task_id: Uuid, error: &BrokerError) -> Self {
+    /// The failure of the write `subject` of `task_id` that met `error`.
+    pub fn new(subject: &'static str, task_id: Uuid, error: &BrokerError) -> Self {
         Self {
             task_id,
             message: error.to_string(),
             retryable: error.is_retryable(),
+            exception: FailureException::of(subject, error),
         }
     }
 }

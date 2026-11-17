@@ -14,6 +14,7 @@ use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// The plain task moved to history as CANCELLED. `was_status` is the status
@@ -64,7 +65,12 @@ pub struct CancelFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `cancel_task`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed cancel.
+const SUBJECT: &str = "cancel_task";
 
 /// Stored task data does not parse, for example a history status that is
 /// not a task status. The cancel refused the task, so nothing changed; a
@@ -113,6 +119,7 @@ fn failed(task_id: Uuid, error: &BrokerError) -> CancelOutcome {
         task_id,
         message: error.to_string(),
         retryable: error.is_retryable(),
+        exception: FailureException::of(SUBJECT, error),
     })
 }
 

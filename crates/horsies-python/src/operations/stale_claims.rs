@@ -7,12 +7,15 @@
 //! before the failure requeued. The Python client maps them to the result of
 //! `PostgresBroker.requeue_stale_claimed` (`CLEANUP_FAILED` for a failure).
 
-use horsies_core::{StaleClaimsRequeueFailed as PassFailed, StaleClaimsRequeuePass, ThresholdMs};
+use horsies_core::{
+    FailureCause, StaleClaimsRequeueFailed as PassFailed, StaleClaimsRequeuePass, ThresholdMs,
+};
 
 use super::arguments::threshold_ms;
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// The pass ended at a short batch: no eligible row was left. Every batch
@@ -43,7 +46,12 @@ pub struct StaleClaimsRequeueFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `requeue_stale_claimed`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed pass.
+const SUBJECT: &str = "requeue_stale_claimed";
 
 impl From<PassFailed> for StaleClaimsRequeueFailed {
     fn from(failed: PassFailed) -> Self {
@@ -51,6 +59,7 @@ impl From<PassFailed> for StaleClaimsRequeueFailed {
             requeued_before: failed.requeued_before,
             message: failed.error.to_string(),
             retryable: failed.error.is_retryable(),
+            exception: FailureException::of(SUBJECT, &failed.error),
         }
     }
 }
@@ -86,6 +95,12 @@ fn stale_threshold(value_ms: i64) -> Result<ThresholdMs, String> {
 fn refused_threshold(message: String) -> StaleClaimsRequeueFailed {
     StaleClaimsRequeueFailed {
         requeued_before: 0,
+        exception: FailureException::new(
+            SUBJECT,
+            message.clone(),
+            false,
+            FailureCause::PreconditionFailed,
+        ),
         message,
         retryable: false,
     }

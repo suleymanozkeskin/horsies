@@ -18,7 +18,8 @@ use chrono::{DateTime, Utc};
 use horsies_core::core::task::send_types::send_error_from_enqueue;
 use horsies_core::{
     BrokerError, BrokerErrorCode, CheckedSend, EnqueueRefusal, EnqueueRefusalCause,
-    EnqueueRetention, RetentionClassKeyRefused, SendKind, SendPart, TaskSendError, TaskSendPayload,
+    EnqueueRetention, FailureCause, RetentionClassKeyRefused, SendKind, SendPart, TaskSendError,
+    TaskSendPayload,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -26,6 +27,7 @@ use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
 use super::arguments::{utc_instant, RerunInputPolicy, StartArgument, StartRule};
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// One send, as the core takes it. Built once, at the boundary.
@@ -226,14 +228,19 @@ fn refused_code(part: SendPart) -> BrokerErrorCode {
 /// The enqueue failed; the row may or may not exist. A retention class key
 /// that no class derives is this record too, built before any statement:
 /// nothing was written, and `retryable` is false
-/// (`retention_key_refused`).
+/// (`retention_key_refused`). `exception` is the cause, with the subject
+/// `enqueue`.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct SendEnqueueFailed {
     pub task_id: Uuid,
     pub message: String,
     pub retryable: bool,
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed enqueue.
+const ENQUEUE_SUBJECT: &str = "enqueue";
 
 /// The task id exists with another command or idempotency key. Nothing was
 /// written.
@@ -270,7 +277,12 @@ pub enum SendOutcome {
     Invalid(SendValidationFailed),
     /// No retention class derives the class key; nothing was written.
     RetentionKeyRefused(SendEnqueueFailed),
-    Refused(TaskSendError),
+    /// The send catalog's answer to a broker error, and the cause of that
+    /// error.
+    Refused {
+        error: TaskSendError,
+        cause: FailureCause,
+    },
 }
 
 impl<'py> IntoPyObject<'py> for SendOutcome {
@@ -283,12 +295,16 @@ impl<'py> IntoPyObject<'py> for SendOutcome {
             Self::Enqueued(task_id) => Enqueued { task_id }.into_bound_py_any(py),
             Self::Invalid(invalid) => invalid.into_bound_py_any(py),
             Self::RetentionKeyRefused(failed) => failed.into_bound_py_any(py),
-            Self::Refused(error) => refusal_record(py, error),
+            Self::Refused { error, cause } => refusal_record(py, error, cause),
         }
     }
 }
 
-fn refusal_record(py: Python<'_>, error: TaskSendError) -> PyResult<Bound<'_, PyAny>> {
+fn refusal_record(
+    py: Python<'_>,
+    error: TaskSendError,
+    cause: FailureCause,
+) -> PyResult<Bound<'_, PyAny>> {
     match error {
         TaskSendError::SendSuppressed { message } => {
             SendSuppressed { message }.into_bound_py_any(py)
@@ -312,6 +328,7 @@ fn refusal_record(py: Python<'_>, error: TaskSendError) -> PyResult<Bound<'_, Py
             ..
         } => SendEnqueueFailed {
             task_id,
+            exception: FailureException::new(ENQUEUE_SUBJECT, message.clone(), retryable, cause),
             message,
             retryable,
         }
@@ -413,9 +430,16 @@ fn retention_key_refused(
     task_name: &str,
     refused: &RetentionClassKeyRefused,
 ) -> SendEnqueueFailed {
+    let message = format!("Failed to enqueue task {task_name}: {refused}");
     SendEnqueueFailed {
         task_id,
-        message: format!("Failed to enqueue task {task_name}: {refused}"),
+        exception: FailureException::new(
+            ENQUEUE_SUBJECT,
+            message.clone(),
+            false,
+            FailureCause::PreconditionFailed,
+        ),
+        message,
         retryable: false,
     }
 }
@@ -432,11 +456,10 @@ fn refused(
         BrokerError::EnqueueContract(refusal) => {
             SendOutcome::Invalid(SendValidationFailed::of(refusal, error.to_string()))
         }
-        other => SendOutcome::Refused(send_error_from_enqueue(
-            command.task_id,
-            command.payload(retention),
-            other,
-        )),
+        other => SendOutcome::Refused {
+            error: send_error_from_enqueue(command.task_id, command.payload(retention), other),
+            cause: other.failure_cause(),
+        },
     }
 }
 

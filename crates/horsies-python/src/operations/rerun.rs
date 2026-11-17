@@ -20,7 +20,7 @@
 use chrono::{DateTime, Duration, Utc};
 use horsies_core::{
     decode_rerun_write, named_bind, prepare_rerun_write, rerun_read, CallerRow, CallerStatement,
-    CallerType, ClientFamily, NotEligibleReason, RecordedFamily, RerunEnqueuePolicy,
+    CallerType, ClientFamily, FailureCause, NotEligibleReason, RecordedFamily, RerunEnqueuePolicy,
     RerunPreparation, RerunRefusal, RerunTask, RerunWrite, RerunWriteOutcome, StatementValue,
 };
 use pyo3::exceptions::PyValueError;
@@ -29,6 +29,7 @@ use pyo3::types::{PyBool, PyBytes, PyDict, PyInt, PyString, PyTuple};
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
+use crate::core_failures::FailureException;
 use crate::errors::{self, CoreDefect};
 use crate::operations::arguments::utc_instant;
 use crate::process_core;
@@ -332,12 +333,18 @@ pub struct RerunClassNotRegistered {
 
 /// The database records the other client family (`stored` is `RUST`) or
 /// none (`stored` is `None`). Nothing written. `message` names both.
+/// `exception` is the refusal, a `CorePreconditionFailed` with the subject
+/// `rerun_task`, not retryable.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct RerunClientFamilyMismatch {
     pub stored: Option<&'static str>,
     pub message: String,
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a refused rerun.
+const RERUN_SUBJECT: &str = "rerun_task";
 
 /// The caller key is not a valid idempotency key; `cause` names why.
 /// Nothing written.
@@ -481,16 +488,22 @@ fn preparation_record(preparation: RerunPreparation) -> PreparationRecord {
             PreparationRecord::ClassNotRegistered(RerunClassNotRegistered { class_key })
         }
         RerunPreparation::ClientFamilyMismatch { stored, own } => {
+            let message = format!(
+                "rerun refused: this database was installed by {stored}; this is the {} client",
+                own.as_str()
+            );
             PreparationRecord::ClientFamilyMismatch(RerunClientFamilyMismatch {
                 stored: match stored {
                     RecordedFamily::Recorded(family) => Some(family.as_str()),
                     RecordedFamily::NotRecorded => None,
                 },
-                message: format!(
-                    "rerun refused: this database was installed by {stored}; this is the {} \
-                     client",
-                    own.as_str()
+                exception: FailureException::new(
+                    RERUN_SUBJECT,
+                    message.clone(),
+                    false,
+                    FailureCause::PreconditionFailed,
                 ),
+                message,
             })
         }
         RerunPreparation::CallerKeyRefused(refused) => {
@@ -692,6 +705,7 @@ mod tests {
             PreparationRecord::ClientFamilyMismatch(RerunClientFamilyMismatch {
                 stored: Some("RUST"),
                 ref message,
+                ..
             }) if message.contains("the RUST client") && message.contains("PYTHON")
         ));
         assert!(matches!(

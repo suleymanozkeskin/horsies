@@ -27,6 +27,7 @@ use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
 use super::attempt_records::{observed_fields, AttemptWriteFailed, RefusalRecord};
+use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 
 /// The pending expiry pass ended at a short batch: no due row was left. Every
@@ -56,7 +57,15 @@ pub struct PendingExpiryFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `expire_pending_tasks`.
+    pub exception: FailureException,
 }
+
+/// The subject of the exception of a failed pending expiry pass.
+const PENDING_EXPIRY_SUBJECT: &str = "expire_pending_tasks";
+
+/// The subject of the exception of a failed or refused orphan page.
+const ORPHAN_AUDIT_SUBJECT: &str = "audit_orphaned_workflow_tasks";
 
 impl From<PassFailed> for PendingExpiryFailed {
     fn from(failed: PassFailed) -> Self {
@@ -64,6 +73,7 @@ impl From<PassFailed> for PendingExpiryFailed {
             expired_before: failed.expired_before,
             message: failed.error.to_string(),
             retryable: failed.error.is_retryable(),
+            exception: FailureException::of(PENDING_EXPIRY_SUBJECT, &failed.error),
         }
     }
 }
@@ -129,13 +139,15 @@ pub struct OrphanPageAudited {
 }
 
 /// Another sweep holds the orphan cursor: the page was refused at once
-/// (SQLSTATE 55P03) and wrote nothing.
+/// (SQLSTATE 55P03) and wrote nothing. `exception` is the server's error,
+/// a `CoreServerError` with that SQLSTATE.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct OrphanAuditLockBusy {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    pub exception: FailureException,
 }
 
 /// The page did not commit: a failed connect or client family check, a
@@ -147,6 +159,8 @@ pub struct OrphanAuditFailed {
     /// The cause, with its subject.
     pub message: String,
     pub retryable: bool,
+    /// The cause, with the subject `audit_orphaned_workflow_tasks`.
+    pub exception: FailureException,
 }
 
 /// The outcome of one orphan page.
@@ -182,10 +196,12 @@ fn orphan_audit_outcome(page: Result<OrphanAuditPage, BrokerError>) -> OrphanAud
             true => OrphanAuditOutcome::LockBusy(OrphanAuditLockBusy {
                 message: error.to_string(),
                 retryable: error.is_retryable(),
+                exception: FailureException::of(ORPHAN_AUDIT_SUBJECT, &error),
             }),
             false => OrphanAuditOutcome::Failed(OrphanAuditFailed {
                 message: error.to_string(),
                 retryable: error.is_retryable(),
+                exception: FailureException::of(ORPHAN_AUDIT_SUBJECT, &error),
             }),
         },
     }
@@ -261,7 +277,11 @@ fn task_row_end_record(task_id: Uuid, end: Result<TaskRowEnd, BrokerError>) -> T
         Ok(TaskRowEnd::Refused(refusal)) => {
             TaskRowEndRecord::Refused(RefusalRecord::from(&refusal))
         }
-        Err(error) => TaskRowEndRecord::Failed(AttemptWriteFailed::new(task_id, &error)),
+        Err(error) => TaskRowEndRecord::Failed(AttemptWriteFailed::new(
+            "expire_owned_claim",
+            task_id,
+            &error,
+        )),
     }
 }
 
