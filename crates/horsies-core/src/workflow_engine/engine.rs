@@ -5330,3 +5330,6 @@ mod completion_rule_tests {
 
 #[cfg(test)]
 mod task_complete_tests;
+
+#[cfg(test)]
+mod promotion_branch_tests;
