@@ -67,33 +67,11 @@ Retention and partition-coverage fields moved to
 
 ## Recovery Behaviors
 
-### Stale CLAIMED Tasks
+What the reaper does with a stale CLAIMED or RUNNING task, and what a worker does when it cannot write
+its runner heartbeats, is on [Heartbeats & Recovery](/horsies/workers/heartbeats-recovery/#recovery-actions).
+The thresholds that decide it are in [Fields](#fields).
 
-When a task is CLAIMED but the claimer heartbeat stops:
-
-- **Safe to requeue**: User code never started executing
-- Task is reset to PENDING for another worker to claim
-- Original worker may have crashed before dispatching
-
-### Stale RUNNING Tasks
-
-When a **regular** task is RUNNING but the runner heartbeat stops:
-
-- **Not safe to blindly requeue**: User code was executing, could have partial side effects
-- If the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining: scheduled for retry (returns to PENDING with `next_retry_at`)
-- Otherwise: marked as FAILED with `WORKER_CRASHED` error
-
-`running_stale_threshold_ms` is based on missing runner heartbeats, not total
-task duration. Long tasks remain healthy as long as the worker writes their
-heartbeats. With `auto_fail_stale_running` on, a worker that cannot write them
-for half of `running_stale_threshold_ms` kills its tasks and exits non-zero, so
-the reaper does not fail a task that still runs. That half must hold one
-`runner_heartbeat_interval_ms` plus 2 s for a heartbeat to land, so the
-threshold is at least `2 × (runner_heartbeat_interval_ms + 2_000)`. With it
-off, the worker logs the failed writes and keeps running.
-After user code returns, the child marks the task as finalizing before the
-parent writes the terminal result. The reaper will not recover that task until
-`finalizing_stale_threshold_ms` has also elapsed.
+### Workflow Progression After a Crash
 
 For **workflow** tasks, terminalization records the owed workflow progression in a transactional outbox as it moves the task to history, and the reaper consumes those records. Task finalization is two transactions — the task is terminalized first, then the workflow DAG is advanced — so a progression can be owed for a brief moment while its finalizer is still in flight. The reaper waits `crashed_worker_recovery_grace_ms` (default 10s) before consuming such a record, so it does not race a healthy finalizer; only a genuine crash in that gap is recovered (after the grace plus one reaper sweep). This grace is independent of the heartbeat-coupled thresholds. See [Heartbeats & Recovery](../../workers/heartbeats-recovery) for details.
 
@@ -163,17 +141,6 @@ If the limit write fails, the count stays, the workflow stays `RUNNING`, and a
 again. `over_failure_limit` on the worker health surface counts such workflows
 and the ones with live nodes.
 
-## Heartbeat System
-
-<!-- todo:diagram-needed - Heartbeat flow diagram -->
-
-Two heartbeat types:
-
-1. **Claimer heartbeat**: Sent by worker for CLAIMED tasks (not yet running)
-2. **Runner heartbeat**: Written by the worker process, from its own thread, for the RUNNING tasks that its children hold
-
-The reaper (running in each worker) checks for missing heartbeats.
-
 ## Threshold Guidelines
 
 | Threshold | Constraint |
@@ -187,24 +154,8 @@ The reaper (running in each worker) checks for missing heartbeats.
 | Check interval | 1 second to 10 minutes |
 | Heartbeat intervals | 1 second to 2 minutes |
 
-### For CPU-Heavy Tasks
-
-A task that holds the GIL does not delay its runner heartbeats, because the
-worker process writes them. CPU-bound tasks need no extra margin.
-
-### For Quick Tasks
-
-Fast tasks can use tighter thresholds:
-
-```python
-RecoveryConfig(
-    runner_heartbeat_interval_ms=10_000,    # Heartbeat every 10s
-    running_stale_threshold_ms=40_000,      # 40s before considered stale
-)
-```
-
-The worker stops when no heartbeat lands for 20 s, so a heartbeat may take up
-to 10 s to land.
+For the heartbeat timing rules, CPU-heavy tasks and quick tasks, see
+[Timing Guidelines](/horsies/workers/heartbeats-recovery/#timing-guidelines).
 
 ## Validation
 
@@ -245,17 +196,4 @@ Tasks will remain stuck until manually resolved.
 
 ## Manual Recovery
 
-Query stale tasks via broker:
-
-```python
-broker = app.get_broker()
-
-# Find stale tasks
-stale = await broker.get_stale_tasks(stale_threshold_minutes=5)
-
-# Manually fail stale RUNNING tasks
-failed_count = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
-
-# Manually requeue stale CLAIMED tasks
-requeued_count = await broker.requeue_stale_claimed(stale_threshold_ms=120_000)
-```
+See [Manual Recovery](/horsies/workers/heartbeats-recovery/#manual-recovery).

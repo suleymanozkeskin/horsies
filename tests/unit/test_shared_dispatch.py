@@ -92,7 +92,6 @@ from horsies.core.worker.shared_stop import (
     BesideBlockedLoop,
     BlockedTheLoop,
     CancelEnd,
-    EndedByKill,
     NoCancelSignal,
     RetryPlacement,
     ReturnedBeforeKill,
@@ -465,7 +464,10 @@ class TestFinalizeShared:
         )
 
     @pytest.mark.parametrize('retry', list(RetryPlacement))
-    @pytest.mark.parametrize('cancel_end', list(CancelEnd))
+    @pytest.mark.parametrize(
+        'cancel_end',
+        [CancelEnd.RETURNED_AFTER_SIGNAL, CancelEnd.DROPPED_AFTER_GRACE],
+    )
     async def test_a_reported_deadline_writes_the_timeout(
         self,
         retry: RetryPlacement,
@@ -634,7 +636,7 @@ class TestFinalizeKilledRun:
             1500,
             CLAIM,
             retry=retry,
-            cancel=EndedByKill(),
+            cancel=CancelEnd.KILLED_WITH_CHILD,
         )
         writes.recovery.assert_not_awaited()
 

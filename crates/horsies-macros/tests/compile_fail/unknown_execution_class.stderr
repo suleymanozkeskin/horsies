@@ -1,0 +1,19 @@
+error: unknown execution class `pooled`; expected isolated, shared_async or shared_thread
+ --> tests/compile_fail/unknown_execution_class.rs:5:27
+  |
+5 | #[task("bad", execution = pooled)]
+  |                           ^^^^^^
+
+warning: unused import: `std::convert::Infallible`
+ --> tests/compile_fail/unknown_execution_class.rs:1:5
+  |
+1 | use std::convert::Infallible;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `TaskError`
+ --> tests/compile_fail/unknown_execution_class.rs:3:21
+  |
+3 | use horsies::{task, TaskError};
+  |                     ^^^^^^^^^

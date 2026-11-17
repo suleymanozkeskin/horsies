@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: auto_retry_for of task 'bad': RATE_LIMITED is neither a built-in code nor a code of FetchCode
+  --> tests/compile_fail/auto_retry_for_unknown_code.rs:12:40
+   |
+12 |     auto_retry_for = ["UPSTREAM_DOWN", "RATE_LIMITED"]
+   |                                        ^^^^^^^^^^^^^^ evaluation of `_` failed here

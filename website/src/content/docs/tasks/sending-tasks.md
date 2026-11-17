@@ -400,11 +400,11 @@ Use `is_ok(result)` / `is_err(result)` from `horsies` as type-narrowing guards.
 
 ### `TaskSendError`
 
-A union with one frozen variant per `TaskSendErrorCode` member; each variant has only the fields of its failure. The variants, their fields and `NoCause` are in the [Errors Reference](/horsies/tasks/errors/#tasksenderror).
+A union with one frozen variant per `TaskSendErrorCode` member; each variant has only the fields of its failure. The variants, their fields and `NoCause` are in [Error Types](/horsies/tasks/error-types/#tasksenderror).
 
 ### `TaskSendErrorCode`
 
-The codes, and which of them the retry methods accept, are in the [Errors Reference](/horsies/tasks/errors/#tasksenderrorcode).
+The codes, and which of them the retry methods accept, are in the [Errors Reference](/horsies/tasks/errors/#send-error-codes).
 
 ### `TaskHandle[T]`
 

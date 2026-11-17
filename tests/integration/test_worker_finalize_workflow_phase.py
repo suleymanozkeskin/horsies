@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import psycopg
 import psycopg.sql
@@ -27,12 +27,12 @@ from horsies.core.lifecycle.outcomes import PhaseTwoStep
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import TaskNode
 from horsies.core.types.result import Ok, is_err, is_ok
-from horsies.core.worker import finalize as finalize_module
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.finalize import _NodeFinishOwed
 from horsies.core.worker.worker import Worker, _FINALIZE_STAGE_PHASE2
 from horsies.core.workflows import steps as steps_module
 from horsies.core.workflows.node_finish import FactsUnknown
+from tests.phase2_support import failing_phase2
 from tests.integration.conftest import DB_URL, PhaseOneDone, finish_phase_one, start_ok
 
 pytestmark = [pytest.mark.integration]
@@ -229,19 +229,15 @@ async def test_phase_two_that_fails_after_its_wake_sends_no_wake(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_a_raise_in_phase_two_is_a_phase2_error(
+async def test_a_failed_phase_two_is_a_phase2_error(
     engine: AsyncEngine,
     broker: PostgresBroker,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A raise of the phase-2 call → Err(_FinalizeError), stage phase 2,
-    retryable only for a transient connection error."""
+    """A failure record of the phase 2 → Err(_FinalizeError), stage phase 2,
+    retryable as the record says."""
     worker = _make_worker(engine, broker)
-    monkeypatch.setattr(
-        finalize_module,
-        'finish_node',
-        AsyncMock(side_effect=RuntimeError('workflow engine exploded')),
-    )
+    _ = failing_phase2(broker, monkeypatch, 'workflow engine exploded')
 
     result = await worker._finalize_workflow_phase(
         str(uuid.uuid4()),
@@ -251,7 +247,7 @@ async def test_a_raise_in_phase_two_is_a_phase2_error(
     assert is_err(result)
     err = result.err_value
     assert err.stage == _FINALIZE_STAGE_PHASE2
-    assert err.retryable is False  # RuntimeError is not a retryable connection error
+    assert err.retryable is False
     assert err.data is not None
     assert 'workflow engine exploded' in err.data['exception']
 

@@ -167,6 +167,25 @@ class CoreHandle:
         the child spec source. A build that raised KeyboardInterrupt or SystemExit raises it
         again. With no child spec source it raises RuntimeError.
         """
+    def finish_workflow_node_async(self, request: NodeFinishRequest) -> asyncio.Future[NodeFinished | NodeFinishFailed]:
+        """Phase 2 of one finished workflow task. Writes; the child starts it owes build their
+        children through the child spec source. A build that raised KeyboardInterrupt or
+        SystemExit raises it again. With no child spec source it raises RuntimeError.
+        """
+    def advance_workflow_parents_async(self, child_workflow_ids: list[uuid.UUID]) -> asyncio.Future[ParentsAdvanced | ParentAdvanceStopped]:
+        """Advance the parent nodes above child_workflow_ids, one transaction per level. Writes; the
+        child starts a level owes build their children through the child spec source. A build
+        that raised KeyboardInterrupt or SystemExit raises it again. With no child spec source
+        it raises RuntimeError.
+        """
+    def recover_workflow_phase2_async(self, *, grace_ms: int, max_rows: int, quarantine_after_attempts: int) -> asyncio.Future[Phase2RecoveryRecord | Phase2RecoveryFailed]:
+        """One phase-2 recovery pass of the reaper: the phase-2 records older than grace_ms and
+        under quarantine_after_attempts, oldest first, at most max_rows, each in its own
+        transaction. Writes; owed child starts build their children through the child spec
+        source. A build that raised KeyboardInterrupt or SystemExit raises it again after the
+        pass. A negative value raises OverflowError; with no child spec source it raises
+        RuntimeError.
+        """
     def pause_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed]:
         """Pause one workflow tree. Writes, in one statement. A row outside the function's contract
         raises PanicException.
@@ -1957,6 +1976,106 @@ class WorkflowIdTaken:
     def workflow_id(self) -> uuid.UUID: ...
     @property
     def existing_name(self) -> str: ...
+
+
+@final
+class NodeFinishRequest:
+    """One frozen phase 2. Another facts or wake value raises ValueError."""
+    def __init__(self, *, task_id: uuid.UUID, facts: Literal['NO_DEPENDENTS', 'DEPENDENTS_WITHOUT_SUBWORKFLOW', 'SUBWORKFLOW_REACHABLE', 'UNKNOWN'], wake: Literal['SEND', 'NONE']) -> None: ...
+
+
+@final
+class NodeFinished:
+    """The phase 2 committed, or found nothing to write. A SOURCE_* disposition kept the
+    phase-2 record and wrote nothing. parent_advances are the child workflows whose parent
+    nodes advance after the commit.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def disposition(self) -> Literal['APPLIED', 'APPLIED_WORKFLOW_ENDED', 'ALREADY_APPLIED', 'PENDING_ABSENT', 'SOURCE_ABSENT', 'SOURCE_STATE_CONFLICT', 'SOURCE_VERSION_CONFLICT', 'SOURCE_DIGEST_MISMATCH']: ...
+    @property
+    def workflow_status(self) -> str | None: ...
+    @property
+    def parent_advances(self) -> list[uuid.UUID]: ...
+
+
+@final
+class NodeFinishFailed:
+    """The phase 2 failed: the client family check, a statement, a child build that did not
+    run, a child tree that the core refuses, or a row outside the function's contract (not
+    retryable). Nothing committed, or the outcome is unknown.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class ParentsAdvanced:
+    """Every parent advance committed."""
+    @property
+    def child_workflow_ids(self) -> list[uuid.UUID]: ...
+
+
+@final
+class ParentAdvanceStopped:
+    """The parent advance stopped at the level of failed_child_workflow_id; the levels before
+    it committed. still_owed holds every advance a retry runs, the failed level first.
+    """
+    @property
+    def failed_child_workflow_id(self) -> uuid.UUID: ...
+    @property
+    def still_owed(self) -> list[uuid.UUID]: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class Phase2RecoveryRecord:
+    """What one pass did. pending_absent counts the records that were gone while their node is
+    not terminal (nothing written).
+    """
+    @property
+    def considered(self) -> int: ...
+    @property
+    def applied(self) -> int: ...
+    @property
+    def already_applied(self) -> int: ...
+    @property
+    def superseded(self) -> int: ...
+    @property
+    def pending_absent(self) -> int: ...
+    @property
+    def retained(self) -> int: ...
+    @property
+    def failed(self) -> int: ...
+    @property
+    def quarantined(self) -> int: ...
+    @property
+    def raised_counted(self) -> int: ...
+    @property
+    def over_attempt_bound(self) -> int: ...
+    @property
+    def retained_details(self) -> list[str]: ...
+    @property
+    def quarantine_refusals(self) -> list[str]: ...
+
+
+@final
+class Phase2RecoveryFailed:
+    """The pass failed before it recovered a record: the client family check, the discovery or
+    the count. Nothing was recovered.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
 
 
 @final

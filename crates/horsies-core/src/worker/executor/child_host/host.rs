@@ -30,9 +30,9 @@ use crate::process_runtime::{
 };
 use crate::worker::executor::protocol::{
     decode_parent_frame, BootDetail, BootErrorName, BootFailedFrame, ChildConnection,
-    ChildExitCode, ChildFrame, ChildKind, ChildPool, ChildProgram, FrameReader, InitFrame,
-    ParentFrame, ParentFrameRefusal, ProcessId, ReadyFrame, ReportedBootCause, ServerSessions,
-    ShortageErrno,
+    ChildExitCode, ChildFrame, ChildKind, ChildLogLevel, ChildPool, ChildProgram, FrameReader,
+    InitFrame, ParentFrame, ParentFrameRefusal, ProcessId, ReadyFrame, ReportedBootCause,
+    ServerSessions, ShortageErrno,
 };
 use crate::worker::executor::supervisor::{ChildCommand, MailboxBound};
 
@@ -69,6 +69,21 @@ pub struct ChildApp {
     /// handle of it whose pool is the `task_send_pool` of the child's kind
     /// ([`super::child_producer`]).
     pub producer_manifest: ProducerManifest,
+    /// What the child does with the log level of its init frame.
+    pub log_setup: ChildLogSetup,
+}
+
+/// What a child does with the log level of its init frame (the worker's
+/// `--loglevel`), before its boot. Records before the init frame (a bad
+/// socket, a frame that is not an init frame) reach only a subscriber that
+/// the binary installed before child mode.
+pub enum ChildLogSetup {
+    /// The binary keeps its own log setup, or none.
+    NoSetup,
+    /// Called once with the level, before the boot: the binary installs its
+    /// subscriber at that level. It must not fail: a setup that cannot
+    /// install keeps the logs it has.
+    Install(Box<dyn FnOnce(ChildLogLevel) + Send + Sync>),
 }
 
 /// Why a start hook failed, as the hook names it. The child logs it.
@@ -491,6 +506,10 @@ fn boot_and_serve(
     reader: FrameReader,
     init: InitFrame,
 ) -> ChildHostExit {
+    match std::mem::replace(&mut app.log_setup, ChildLogSetup::NoSetup) {
+        ChildLogSetup::NoSetup => {}
+        ChildLogSetup::Install(install) => install(init.log_level),
+    }
     publish_child_producer(task_send_manifest(
         &app.producer_manifest,
         task_send_pool_of(init.child_kind),

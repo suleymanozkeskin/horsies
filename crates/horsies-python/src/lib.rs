@@ -161,6 +161,13 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::workflow_resume::WorkflowResumed>()?;
     module.add_class::<operations::workflow_resume::WorkflowNotPaused>()?;
     module.add_class::<operations::workflow_resume::WorkflowResumeRecoveryFailed>()?;
+    module.add_class::<operations::workflow_phase2::NodeFinishRequest>()?;
+    module.add_class::<operations::workflow_phase2::NodeFinishedRecord>()?;
+    module.add_class::<operations::workflow_phase2::NodeFinishFailed>()?;
+    module.add_class::<operations::workflow_phase2::ParentsAdvanced>()?;
+    module.add_class::<operations::workflow_phase2::ParentAdvanceStoppedRecord>()?;
+    module.add_class::<operations::workflow_phase2_recovery::Phase2RecoveryRecord>()?;
+    module.add_class::<operations::workflow_phase2_recovery::Phase2RecoveryFailed>()?;
     module.add_class::<child_handle::CoreChildHandle>()?;
     module.add_class::<scheduler::CoreScheduler>()?;
     module.add_class::<records::BrokerFailure>()?;

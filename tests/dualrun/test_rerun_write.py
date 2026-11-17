@@ -27,11 +27,9 @@ must be equal and the answers must be equal.
 Each caller transaction waits before the rerun, so the start of the
 transaction and the time of the rerun's statement differ. The answer records
 whether ``enqueued_at`` and ``created_at`` are later than the start of the
-transaction: both sides date ``enqueued_at`` by the statement. ``created_at``
-is the one known difference: the old INSERT dated it by the statement, and
-``horsies_insert_task_rows`` dates it by the start of the transaction (#1422).
-Each answer also checks that the stored fingerprint is the version-1
-fingerprint of the row's own columns.
+transaction: both sides date both by the statement. Each answer also checks
+that the stored fingerprint is the version-1 fingerprint of the row's own
+columns.
 """
 
 from __future__ import annotations
@@ -343,19 +341,6 @@ def _pair(
             pytest.fail(f'{failed.step}: {failed.cause}')
 
 
-def _same_except_created_at(
-    reference: tuple[StepAnswer, ...], candidate: tuple[StepAnswer, ...]
-) -> None:
-    """The answers are equal but for ``created_at`` of each written row,
-    which the reference dates by the statement and the candidate by the start
-    of the transaction (#1422)."""
-    expected = tuple(
-        replace(answer, created_by_statement=False) if isinstance(answer, Enqueued) else answer
-        for answer in reference
-    )
-    assert candidate == expected
-
-
 _FIRST_ENQUEUED: Final = Enqueued(
     new_task='rerun 1',
     source='source failed',
@@ -373,7 +358,7 @@ def test_an_unkeyed_rerun_writes_the_row_of_before(empty_database: MakeDatabase)
 
     assert pair.diff.entries == (), render_diff(pair.diff)
     assert pair.reference.report == (_FIRST_ENQUEUED,)
-    _same_except_created_at(pair.reference.report, pair.candidate.report)
+    assert pair.candidate.report == pair.reference.report
 
 
 def test_a_keyed_rerun_sent_twice_replays_the_first(empty_database: MakeDatabase) -> None:
@@ -383,7 +368,7 @@ def test_a_keyed_rerun_sent_twice_replays_the_first(empty_database: MakeDatabase
 
     assert pair.diff.entries == (), render_diff(pair.diff)
     assert pair.reference.report == (_FIRST_ENQUEUED, KeyReplayed(existing_task='rerun 1'))
-    _same_except_created_at(pair.reference.report, pair.candidate.report)
+    assert pair.candidate.report == pair.reference.report
 
 
 def test_a_keyed_rerun_of_another_command_conflicts(empty_database: MakeDatabase) -> None:
@@ -399,7 +384,7 @@ def test_a_keyed_rerun_of_another_command_conflicts(empty_database: MakeDatabase
         _FIRST_ENQUEUED,
         KeyConflicted(source='source failed', reserved_by='rerun 1'),
     )
-    _same_except_created_at(pair.reference.report, pair.candidate.report)
+    assert pair.candidate.report == pair.reference.report
 
 
 def test_a_rolled_back_keyed_rerun_leaves_no_row_and_no_reservation(
@@ -419,7 +404,7 @@ def test_a_rolled_back_keyed_rerun_leaves_no_row_and_no_reservation(
         _FIRST_ENQUEUED,
         replace(_FIRST_ENQUEUED, new_task='rerun 2'),
     )
-    _same_except_created_at(pair.reference.report, pair.candidate.report)
+    assert pair.candidate.report == pair.reference.report
 
 
 def test_refused_sources_write_nothing_as_before(empty_database: MakeDatabase) -> None:

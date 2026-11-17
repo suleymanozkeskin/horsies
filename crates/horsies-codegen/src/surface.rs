@@ -427,6 +427,27 @@ const CHILD_SPEC_REFUSED_PARAMETERS: &[StubParameter] =
     &[keyword("message", "str"), keyword("failure_result", "str")];
 const RESUME_WORKFLOW_OUTCOME: &str = "WorkflowResumed | WorkflowNotPaused | \
      WorkflowResumeRecoveryFailed | WorkflowAbsent | HandleFailed";
+const FINISH_WORKFLOW_NODE_PARAMETERS: &[StubParameter] =
+    &[positional("request", "NodeFinishRequest")];
+const ADVANCE_WORKFLOW_PARENTS_PARAMETERS: &[StubParameter] =
+    &[positional("child_workflow_ids", "list[uuid.UUID]")];
+const NODE_FINISH_REQUEST_PARAMETERS: &[StubParameter] = &[
+    keyword("task_id", "uuid.UUID"),
+    keyword(
+        "facts",
+        "Literal['NO_DEPENDENTS', 'DEPENDENTS_WITHOUT_SUBWORKFLOW', 'SUBWORKFLOW_REACHABLE', \
+         'UNKNOWN']",
+    ),
+    keyword("wake", "Literal['SEND', 'NONE']"),
+];
+const NODE_FINISH_DISPOSITION: &str = "Literal['APPLIED', 'APPLIED_WORKFLOW_ENDED', \
+     'ALREADY_APPLIED', 'PENDING_ABSENT', 'SOURCE_ABSENT', 'SOURCE_STATE_CONFLICT', \
+     'SOURCE_VERSION_CONFLICT', 'SOURCE_DIGEST_MISMATCH']";
+const RECOVER_WORKFLOW_PHASE2_PARAMETERS: &[StubParameter] = &[
+    keyword("grace_ms", "int"),
+    keyword("max_rows", "int"),
+    keyword("quarantine_after_attempts", "int"),
+];
 const PAUSE_WORKFLOW_OUTCOME: &str =
     "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed";
 const CANCEL_WORKFLOW_OUTCOME: &str =
@@ -450,7 +471,7 @@ const SCHEDULER_TICK_OUTCOME: &str = "SchedulerTicked | SchedulerTickFailed";
 const SCHEDULER_RUN_OUTCOME: &str =
     "SchedulerStopped | SchedulerStartRefused | SchedulerStartFailed";
 
-const CORE_SCHEDULER_METHODS: [StubFunction; 4] = [
+const CORE_SCHEDULER_METHODS: &[StubFunction] = &[
     StubFunction {
         name: "start_async",
         parameters: &[],
@@ -477,7 +498,7 @@ const CORE_SCHEDULER_METHODS: [StubFunction; 4] = [
     },
 ];
 
-const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
+const CORE_CHILD_HANDLE_METHODS: &[StubFunction] = &[
     StubFunction {
         name: "start_attempt",
         parameters: START_ATTEMPT_PARAMETERS,
@@ -516,7 +537,7 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
     },
 ];
 
-const CORE_HANDLE_METHODS: [StubFunction; 40] = [
+const CORE_HANDLE_METHODS: &[StubFunction] = &[
     StubFunction {
         name: "close",
         parameters: &[],
@@ -686,6 +707,24 @@ const CORE_HANDLE_METHODS: [StubFunction; 40] = [
         doc: "Resume one workflow tree. Writes; the child starts it owes build their children through\nthe child spec source. A build that raised KeyboardInterrupt or SystemExit raises it\nagain. With no child spec source it raises RuntimeError.",
     },
     StubFunction {
+        name: "finish_workflow_node_async",
+        parameters: FINISH_WORKFLOW_NODE_PARAMETERS,
+        returns: TypeText::FutureOf("NodeFinished | NodeFinishFailed"),
+        doc: "Phase 2 of one finished workflow task. Writes; the child starts it owes build their\nchildren through the child spec source. A build that raised KeyboardInterrupt or\nSystemExit raises it again. With no child spec source it raises RuntimeError.",
+    },
+    StubFunction {
+        name: "advance_workflow_parents_async",
+        parameters: ADVANCE_WORKFLOW_PARENTS_PARAMETERS,
+        returns: TypeText::FutureOf("ParentsAdvanced | ParentAdvanceStopped"),
+        doc: "Advance the parent nodes above child_workflow_ids, one transaction per level. Writes; the\nchild starts a level owes build their children through the child spec source. A build\nthat raised KeyboardInterrupt or SystemExit raises it again. With no child spec source\nit raises RuntimeError.",
+    },
+    StubFunction {
+        name: "recover_workflow_phase2_async",
+        parameters: RECOVER_WORKFLOW_PHASE2_PARAMETERS,
+        returns: TypeText::FutureOf("Phase2RecoveryRecord | Phase2RecoveryFailed"),
+        doc: "One phase-2 recovery pass of the reaper: the phase-2 records older than grace_ms and\nunder quarantine_after_attempts, oldest first, at most max_rows, each in its own\ntransaction. Writes; owed child starts build their children through the child spec\nsource. A build that raised KeyboardInterrupt or SystemExit raises it again after the\npass. A negative value raises OverflowError; with no child spec source it raises\nRuntimeError.",
+    },
+    StubFunction {
         name: "pause_workflow_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(PAUSE_WORKFLOW_OUTCOME),
@@ -770,7 +809,7 @@ const TASK_LIST_OUTCOME: &str = "TaskListComplete | TaskListTruncated | BrokerFa
 const MONITORING_DETAIL_OUTCOME: &str = "MonitoringJson | TaskDetailAbsent | MonitoringFailed";
 
 /// The monitoring methods of `CoreHandle`.
-const MONITORING_HANDLE_METHODS: [StubFunction; 18] = [
+const MONITORING_HANDLE_METHODS: &[StubFunction] = &[
     StubFunction {
         name: "monitoring_list_tasks_async",
         parameters: MONITORING_LIST_TASKS_PARAMETERS,
@@ -960,7 +999,7 @@ const EXCEPTIONS: &[StubException] = &[
     },
 ];
 
-const ARGUMENT_CLASSES: [StubClass; 11] = [
+const ARGUMENT_CLASSES: &[StubClass] = &[
     StubClass {
         name: "StartNow",
         doc: "Start the task as soon as a worker can claim it.",
@@ -1040,7 +1079,7 @@ const ARGUMENT_CLASSES: [StubClass; 11] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 79] = [
+const RECORD_CLASSES: &[StubClass] = &[
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -1827,7 +1866,7 @@ const RECORD_CLASSES: [StubClass; 79] = [
     },
 ];
 
-const HANDLE_CLASSES: [StubClass; 3] = [
+const HANDLE_CLASSES: &[StubClass] = &[
     StubClass {
     name: "CoreHandle",
     doc: "The core handle of one producer manifest and the pool profile of its process: PRODUCER,\nor WORKER (the main core pool keeps 2 connections free from batch checkouts for the\nper-task writes). Building it starts nothing.",
@@ -1840,19 +1879,19 @@ const HANDLE_CLASSES: [StubClass; 3] = [
         doc: "The core handle of one worker's child process: the producer manifest of its child pool,\nthe connections the pool keeps open, and the ping at checkout. Built in the child after\nits start; building it starts nothing.",
         constructor: Constructor::Parameters(CORE_CHILD_HANDLE_PARAMETERS),
         properties: &[],
-        methods: &CORE_CHILD_HANDLE_METHODS,
+        methods: CORE_CHILD_HANDLE_METHODS,
     },
     StubClass {
         name: "CoreScheduler",
         doc: "The scheduler of one scheduler manifest on the broker of a CoreHandle. Building it\nstarts nothing. A refused manifest raises ManifestRefused. One call runs at a time: a\ncall while another is in flight raises RuntimeError.",
         constructor: Constructor::Parameters(CORE_SCHEDULER_PARAMETERS),
         properties: &[],
-        methods: &CORE_SCHEDULER_METHODS,
+        methods: CORE_SCHEDULER_METHODS,
     },
 ];
 
 /// The classes of the monitoring reads and the web handler.
-const MONITORING_CLASSES: [StubClass; 33] = [
+const MONITORING_CLASSES: &[StubClass] = &[
     StubClass {
         name: "MonitoringWindowRecord",
         doc: "The window of one monitoring request: UTC bounds, increasing, at most the core's maximum\napart.",
@@ -2189,7 +2228,7 @@ const MONITORING_CLASSES: [StubClass; 33] = [
     },
 ];
 
-const WORKFLOW_CLASSES: [StubClass; 32] = [
+const WORKFLOW_CLASSES: &[StubClass] = &[
     StubClass {
         name: "WorkflowPaused",
         doc: "The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed\ntasks of the paused tree are abandoned.",
@@ -2459,6 +2498,85 @@ const WORKFLOW_CLASSES: [StubClass; 32] = [
         methods: &[],
     },
     StubClass {
+        name: "NodeFinishRequest",
+        doc: "One frozen phase 2. Another facts or wake value raises ValueError.",
+        constructor: Constructor::Parameters(NODE_FINISH_REQUEST_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "NodeFinished",
+        doc: "The phase 2 committed, or found nothing to write. A SOURCE_* disposition kept the\nphase-2 record and wrote nothing. parent_advances are the child workflows whose parent\nnodes advance after the commit.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            StubProperty {
+                name: "disposition",
+                annotation: TypeText::Plain(NODE_FINISH_DISPOSITION),
+            },
+            property("workflow_status", "str | None"),
+            property("parent_advances", "list[uuid.UUID]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "NodeFinishFailed",
+        doc: "The phase 2 failed: the client family check, a statement, a child build that did not\nrun, a child tree that the core refuses, or a row outside the function's contract (not\nretryable). Nothing committed, or the outcome is unknown.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ParentsAdvanced",
+        doc: "Every parent advance committed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("child_workflow_ids", "list[uuid.UUID]")],
+        methods: &[],
+    },
+    StubClass {
+        name: "ParentAdvanceStopped",
+        doc: "The parent advance stopped at the level of failed_child_workflow_id; the levels before\nit committed. still_owed holds every advance a retry runs, the failed level first.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("failed_child_workflow_id", "uuid.UUID"),
+            property("still_owed", "list[uuid.UUID]"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "Phase2RecoveryRecord",
+        doc: "What one pass did. pending_absent counts the records that were gone while their node is\nnot terminal (nothing written).",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("considered", "int"),
+            property("applied", "int"),
+            property("already_applied", "int"),
+            property("superseded", "int"),
+            property("pending_absent", "int"),
+            property("retained", "int"),
+            property("failed", "int"),
+            property("quarantined", "int"),
+            property("raised_counted", "int"),
+            property("over_attempt_bound", "int"),
+            property("retained_details", "list[str]"),
+            property("quarantine_refusals", "list[str]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "Phase2RecoveryFailed",
+        doc: "The pass failed before it recovered a record: the client family check, the discovery or\nthe count. Nothing was recovered.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
         name: "WorkflowResumed",
         doc: "The workflow was PAUSED; its tree is RUNNING again.",
         constructor: Constructor::NoConstructor,
@@ -2497,7 +2615,7 @@ const WORKFLOW_CLASSES: [StubClass; 32] = [
 
 /// The classes of the history switch: the coverage pass, the pruning pass and the rerun
 /// in the caller's transaction.
-const HISTORY_CLASSES: [StubClass; 24] = [
+const HISTORY_CLASSES: &[StubClass] = &[
     StubClass {
         name: "CoverageRequest",
         doc: "One frozen coverage pass: the two horizons, the declared retention periods in whole days,\nand how a damaged pass is serialized. A period outside 1 to 1825 days, a horizon below two\nleaves, or another serialization raises ValueError.",
@@ -2694,7 +2812,7 @@ const HISTORY_CLASSES: [StubClass; 24] = [
 
 /// The classes of the parent-child frame codec, for the Python child program
 /// and the preload process.
-const FRAME_CLASSES: [StubClass; 41] = [
+const FRAME_CLASSES: &[StubClass] = &[
     StubClass {
         name: "PythonProgram",
         doc: "What a Python child imports before it reports ready.",
@@ -3000,7 +3118,7 @@ const WORKER_FAIL_CAUSE: &str = "Literal['SERVICE_LOOP_DIED', 'RUNNER_HEARTBEAT_
      'POOL_FAILED', 'BASELINE_OVER_LIMIT', 'CLAIM_FAILED']";
 const WORKER_RUN_OUTCOME: &str = "WorkerStopped | WorkerBootFailed | WorkerFailed";
 
-const PREPARED_WORKER_METHODS: [StubFunction; 2] = [
+const PREPARED_WORKER_METHODS: &[StubFunction] = &[
     StubFunction {
         name: "run",
         parameters: &[],
@@ -3016,13 +3134,13 @@ const PREPARED_WORKER_METHODS: [StubFunction; 2] = [
 ];
 
 /// The classes of the worker run.
-const WORKER_CLASSES: [StubClass; 6] = [
+const WORKER_CLASSES: &[StubClass] = &[
     StubClass {
         name: "PreparedWorker",
         doc: "The worker of one worker manifest, not run yet. host.on_started() runs once per run on\nthe callback thread, after the start and before the first claim; an exception from it is\nlogged at ERROR and the worker runs on.",
         constructor: Constructor::NoConstructor,
         properties: &[],
-        methods: &PREPARED_WORKER_METHODS,
+        methods: PREPARED_WORKER_METHODS,
     },
     StubClass {
         name: "WorkerProfileRefused",
