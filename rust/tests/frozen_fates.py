@@ -63,7 +63,6 @@ _CHAR: Final = re.compile(r"'(?:\\.|[^'\\])'")
 RENAMED: Final[dict[str, str]] = {
     'terminal_move_emits_task_done_without_a_monitoring_status_event': 'broker::monitoring_schema_tests::a_terminal_move_sends_task_done_and_the_status_event',
     'cancel_locked_refuses_workflow_tasks_and_never_overwrites_terminal': 'broker::terminalization_matrix::cancel_task_refuses_workflow_tasks_and_never_overwrites_terminal',
-    'check_catches_missing_input_in_builder_produced_spec': 'core::app::tests::check_catches_a_null_input_in_builder_produced_spec',
     'declarations_and_queue_mappings_fail_closed': 'core::config::retention::tests::periods_and_queue_mappings_fail_closed',
     'precedence_and_registrable_classes_are_exact': 'core::config::retention::tests::precedence_sendable_and_registrable_periods_are_exact',
     'command_union_carries_exactly_the_seven_variants': 'core::history::commands::tests::command_union_carries_exactly_the_six_variants',
@@ -73,19 +72,11 @@ RENAMED: Final[dict[str, str]] = {
     'guard_probe_set_is_standard_horizon_plus_the_open_ended_leaf': 'core::history::partitions::tests::guard_probe_set_is_standard_horizon_plus_the_static_forever_leaf',
     'fifteen_commands_fifteen_kinds': 'core::lifecycle::tests::eleven_commands_eleven_kinds',
     'display_codes': 'core::task::error::tests::display_codes_and_errors',
-    'decode_task_input_reads_kwargs_payload': 'core::task::macros::tests::decode_task_input_reads_an_object_input',
-    'kwargs_macro_bad_envelope_returns_error': 'core::task::macros::tests::kwargs_macro_bad_input_returns_error',
-    'kwargs_macro_missing_kwargs_field': 'core::task::macros::tests::kwargs_macro_missing_input_fields',
     'serialize_retry_options_emits_timeout_ms_alone': 'core::task::options::tests::stored_options_text_emits_timeout_ms_alone',
     'case_name_first_satisfied': 'core::workflow::policy::tests::evaluate_first_case_satisfied',
     'case_name_second_satisfied': 'core::workflow::policy::tests::evaluate_second_case_satisfied',
     'success_case_name_serde_round_trip': 'core::workflow::policy::tests::success_case_serde_round_trip',
-    'subworkflow_kwargs_json_preserved_after_build': 'core::workflow::spec::tests::subworkflow_input_json_preserved_after_build',
-    'kwargs_json_preserved_after_build': 'core::workflow::spec::tests::input_json_preserved_after_build',
     'validate_retry_rejects_internal_failed': 'core::workflow::start_types::tests::validate_retry_rejects_validation_failed',
-    'set_input_scalar_serializes_to_args_json': 'core::workflow::sub_workflow::tests::set_input_scalar_serializes_to_input_json',
-    'set_input_object_serializes_to_kwargs_json': 'core::workflow::sub_workflow::tests::set_input_object_serializes_to_input_json',
-    'field_level_set_rejects_after_args_json': 'core::workflow::sub_workflow::tests::field_level_set_rejects_after_a_non_object_input',
     'broadcaster_uses_its_own_listener_and_batches_real_notify_bursts': 'web::tests::broadcaster_subscribes_on_the_broker_listener_and_batches_real_notify_bursts',
     'notify_worker_capacity_emits_queue_specific_signal_only': 'worker::worker::tests::capacity_wake_emits_queue_specific_signal_only',
     'merge_missing_dep_wraps_in_task_result_err': 'workflow_engine::args_merge::tests::merge_failed_dep_wraps_in_task_result_err',
@@ -93,8 +84,11 @@ RENAMED: Final[dict[str, str]] = {
     'merge_invalid_existing_kwargs_is_error': 'workflow_engine::args_merge::tests::merge_invalid_existing_input_is_error',
     'merge_deadline_round_trips_through_parse': 'workflow_engine::tests::merge_deadline_round_trips_through_the_reader',
     'recovery_rolls_back_one_failed_row_and_advances_the_next_candidate': 'workflow_engine::phase2_recovery::tests::recovery_rolls_back_one_failed_row_counts_its_raise_and_advances_the_next_candidate',
-    'workflow_handle_get_fails_closed_on_malformed_expiry_error': 'workflow_engine::query::wait_tests::the_result_read_fails_closed_on_a_malformed_expiry_error',
+    'workflow_handle_get_fails_closed_on_malformed_expiry_error': 'workflow_engine::query::wait_tests::the_wait_returns_a_malformed_expiry_error_as_stored',
     'zero_scan_limit_has_undefined_completion_yield': 'workflow_engine::recovery::cap_tests::a_zero_page_size_is_refused_and_has_undefined_completion_yield',
+    'get_workflow_result_no_timeout_returns_not_found_for_missing_workflow': 'workflow_engine::query::wait_tests::a_wait_with_no_timeout_returns_not_found_for_a_missing_workflow',
+    'workflow_handle_get_returns_immediately_for_paused_workflow': 'workflow_engine::query::wait_tests::the_wait_returns_immediately_for_a_paused_workflow',
+    'workflow_handle_get_preserves_structured_expiry_error': 'workflow_engine::query::wait_tests::the_wait_returns_a_structured_expiry_error_as_stored',
 }
 
 CLEAN_SLATE: Final = (
@@ -240,6 +234,17 @@ def _deleted_detail(test: TestFn) -> str:
     match test.file.split('/'):
         case _ if _CLEAN_SLATE_FILE.search(test.file) or _CLEAN_SLATE_NAME.search(test.name):
             return CLEAN_SLATE
+        case (
+            ['src', 'core', 'app.rs']
+            | ['src', 'core', 'registry', 'workflow.rs']
+            | ['src', 'core', 'task', 'macros.rs']
+            | ['src', 'core', 'workflow', 'spec.rs' | 'node.rs' | 'sub_workflow.rs' | 'definition.rs']
+            | ['src', 'workflow_engine', 'query.rs']
+        ):
+            return (
+                'the typed API of the old Rust client left horsies-core (#1830, #1832, #1833, '
+                f'#1839); the pull request that removed the test names its covering test; {NO_TWIN}'
+            )
         case ['src', 'task.rs' | 'lib.rs' | 'workflow.rs']:
             return (
                 'the frozen facade API is replaced by the 0.8.0 client API (build plan 1.2 and '
