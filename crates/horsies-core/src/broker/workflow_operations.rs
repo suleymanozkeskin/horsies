@@ -5,6 +5,8 @@
 //!   a RUNNING workflow and its RUNNING descendants.
 //! - [`PostgresBroker::cancel_workflow`]: `horsies_workflow_cancel`, the cancel
 //!   of a workflow tree.
+//! - [`PostgresBroker::resume_client_workflow`]: `horsies_workflow_resume`, the
+//!   resume of a PAUSED tree, with its child starts from the client's source.
 //! - [`PostgresBroker::expire_paused_workflows`]: `horsies_workflow_expire_paused`
 //!   per candidate, the paused expiry of the reaper.
 //! - [`PostgresBroker::delete_expired_workflows`]: the workflow retention
@@ -28,6 +30,7 @@ use crate::core::config::retention::PausedWorkflowAge;
 use crate::core::workflow::handle_types::HandleResult;
 use crate::db::{CheckoutClass, ParameterType, StatementBound, TypedStatement};
 use crate::worker::recovery::DELETE_EXPIRED_WORKFLOWS_SQL;
+use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle;
 
@@ -100,6 +103,35 @@ impl PostgresBroker {
     /// Panics: a row outside the function's contract (a defect).
     pub async fn cancel_workflow(&self, workflow_id: Uuid) -> HandleResult<bool> {
         lifecycle::cancel_workflow(self, workflow_id).await
+    }
+
+    /// Resume a workflow tree of a client that builds its children through
+    /// `source` (Python `resume_workflow`,
+    /// `python/horsies/core/workflows/lifecycle.py`): `horsies_workflow_resume`
+    /// in a transaction with the child starts it owes, then the parent
+    /// advances after the commit, then the recovery pass of the tree.
+    ///
+    /// Outcomes:
+    /// - `Ok(true)`: the workflow was PAUSED and its tree is RUNNING.
+    /// - `Ok(false)`: the workflow exists and is not PAUSED; nothing was
+    ///   written.
+    /// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
+    /// - `DB_OPERATION_FAILED`: the client family check, a statement, or a
+    ///   child build that `source` did not run; nothing committed, or the
+    ///   `COMMIT` reply was lost.
+    /// - `STORED_DATA_INVALID`: an owed child met a value that does not
+    ///   encode; nothing committed.
+    /// - `RESUME_RECOVERY_FAILED`: the resume committed, and the parent
+    ///   advance or the recovery pass after it failed.
+    ///
+    /// Panics: a row outside a function's contract, or a child tree that the
+    /// core refuses (a defect).
+    pub async fn resume_client_workflow(
+        &self,
+        workflow_id: Uuid,
+        source: &dyn ChildSpecSource,
+    ) -> HandleResult<bool> {
+        lifecycle::resume_client_workflow(self, workflow_id, source).await
     }
 
     /// Expire the PAUSED workflows older than `older_than`, at most
