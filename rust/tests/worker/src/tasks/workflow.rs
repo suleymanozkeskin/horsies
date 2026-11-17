@@ -6,8 +6,11 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use horsies::{
-    blocking_task, task, NodeKey, TaskError, TaskOutcome, UserErrorCode, WorkflowContext,
+    blocking_task, task, NodeKey, RetryPolicy, TaskError, TaskOutcome, UserErrorCode,
+    WorkflowContext,
 };
+
+use crate::markers;
 
 /// The minimum run of a node: distinct timestamps between nodes (Python
 /// `time.sleep(0.05)`).
@@ -22,10 +25,39 @@ pub enum WfCode {
     NoCtx,
     /// A context node did not find the node it reads.
     NotInContext,
+    /// The codes that `e2e_wf_fail_with` and `e2e_sub_int_fail` take by
+    /// name (Python passes the code text).
+    OptionalFail,
+    RequiredFail,
+    Case1Fail,
+    FirstError,
+    SecondError,
+    E2eSubChildFail,
+    E2eUpstreamFail,
+    /// `e2e_wf_fail_with` or `e2e_sub_int_fail` got a code text that this
+    /// enum does not name.
+    UnlistedCode,
+    /// `e2e_wf_retry_then_ok` before its successful attempt.
+    RetryNeeded,
+    /// A marker operation failed in the child.
+    MarkerFailed,
+}
+
+impl WfCode {
+    /// The code of `text`, or [`WfCode::UnlistedCode`] for a text that this
+    /// enum does not name.
+    pub fn of_text(text: &str) -> WfCode {
+        WfCode::from_code(text).unwrap_or(WfCode::UnlistedCode)
+    }
 }
 
 fn node_run() {
     std::thread::sleep(NODE_RUN);
+}
+
+/// The error of a node that fails with the code named `error_code`.
+fn failure(error_code: &str, message: String) -> TaskError<WfCode> {
+    TaskError::user(WfCode::of_text(error_code), message)
 }
 
 /// Python `e2e_wf_step`.
@@ -57,6 +89,51 @@ pub fn fail() -> Result<i64, TaskError<WfCode>> {
         WfCode::DeliberateFailure,
         "Failed: DELIBERATE_FAILURE",
     ))
+}
+
+/// Python `e2e_wf_fail_with`: always fails with the code named
+/// `error_code`.
+#[blocking_task("e2e_wf_fail_with")]
+pub fn fail_with(error_code: String) -> Result<i64, TaskError<WfCode>> {
+    node_run();
+    Err(failure(&error_code, format!("Failed with {error_code}")))
+}
+
+/// Python `e2e_wf_mark`: returns `value`.
+#[blocking_task("e2e_wf_mark")]
+pub fn mark(value: String) -> Result<String, TaskError<WfCode>> {
+    node_run();
+    Ok(value)
+}
+
+/// Python `e2e_wf_slow_mark`: returns `value` after `delay_ms`.
+#[blocking_task("e2e_wf_slow_mark")]
+pub fn slow_mark(value: String, delay_ms: u64) -> Result<String, TaskError<WfCode>> {
+    std::thread::sleep(Duration::from_millis(delay_ms));
+    Ok(value)
+}
+
+/// Python `e2e_wf_retry_then_ok`: `RETRY_NEEDED` until the attempt
+/// `succeed_on_attempt` of `token`, then `succeeded_on_attempt_<n>`. The
+/// retry policy comes from the registration: three retries 1 s, 2 s and
+/// 4 s apart. The attempts are counted with marker files, which every child
+/// of the worker sees.
+#[blocking_task(
+    "e2e_wf_retry_then_ok",
+    retry_policy = RetryPolicy::exponential(1, 3, false).expect("a valid exponential policy"),
+    auto_retry_for = ["RETRY_NEEDED"]
+)]
+pub fn retry_then_ok(token: String, succeed_on_attempt: u32) -> Result<String, TaskError<WfCode>> {
+    node_run();
+    let attempt = markers::next_attempt(&token)
+        .map_err(|cause| TaskError::user(WfCode::MarkerFailed, cause.to_string()))?;
+    match attempt < succeed_on_attempt {
+        true => Err(TaskError::user(
+            WfCode::RetryNeeded,
+            format!("attempt {attempt} of {succeed_on_attempt}"),
+        )),
+        false => Ok(format!("succeeded_on_attempt_{attempt}")),
+    }
 }
 
 /// Python `e2e_wf_produce_int`.
@@ -139,6 +216,22 @@ pub async fn ctx_reader(
     workflow_ctx: Option<WorkflowContext>,
 ) -> Result<i64, TaskError<WfCode>> {
     context_value(workflow_ctx.as_ref(), &source)
+}
+
+/// Python `e2e_wf_ctx_reader_str`: the text value of node `source` from the
+/// context, or that node's error.
+#[task("e2e_wf_ctx_reader_str", workflow_ctx)]
+pub async fn ctx_reader_str(
+    source: String,
+    workflow_ctx: Option<WorkflowContext>,
+) -> Result<String, TaskError<WfCode>> {
+    let context = workflow_ctx
+        .ok_or_else(|| TaskError::user(WfCode::NoCtx, "WorkflowContext not provided"))?;
+    match context.result_for::<String, WfCode>(&NodeKey::new(source)) {
+        Ok(TaskOutcome::Succeeded(value)) => Ok(value),
+        Ok(TaskOutcome::Failed(error)) => Err(error),
+        Err(missing) => Err(TaskError::user(WfCode::NotInContext, missing.to_string())),
+    }
 }
 
 /// Python `e2e_wf_ctx_sum`: the sum of nodes `first` and `second` from the
