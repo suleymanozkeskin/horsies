@@ -65,12 +65,11 @@ from tests.integration.autocommit_support import (
     open_proxied_worker,
     proxied_url,
     psycopg_url,
-    recorded_turns,
     steady_state_turns,
     upstream_of,
 )
 from tests.fixtures.child_core import child_core_handle_for
-from tests.integration.round_trip_proxy import RoundTripProxy, Turn
+from tests.integration.round_trip_proxy import RoundTripProxy
 from tests.integration.test_workflow_node_handoff import (
     WORKER_ID as NODE_WORKER_ID,
     _seed_claimed_workflow_task,
@@ -198,14 +197,14 @@ async def _history_rows(session: AsyncSession, task_id: str) -> int:
     return count
 
 
-def _statement_turns(turns: tuple[Turn, ...]) -> list[Turn]:
-    """The turns that send a statement; a new connection's startup turns
-    carry none."""
-    return [
-        turn
-        for turn in turns
-        if any(message.startswith(('P:', 'Q:')) for message in turn.messages)
-    ]
+async def _claimed_workflow_task(session: AsyncSession) -> Case:
+    """A CLAIMED workflow task of NODE_WORKER_ID whose node waits in a
+    RUNNING workflow, committed."""
+    claimed_at = datetime.now(timezone.utc)
+    task_id = await _seed_claimed_workflow_task(session, claimed_at)
+    await _seed_running_workflow_with_node(session, task_id, 'ENQUEUED')
+    await session.commit()
+    return task_id, claimed_at
 
 
 # ---------------------------------------------------------------------------
@@ -448,11 +447,11 @@ async def test_a_shared_async_workflow_start_is_one_statement(
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """The RUNNING write of a workflow task and its node write are one
-    horsies_start_attempt statement through the core handle of the child."""
-    claimed_at = datetime.now(timezone.utc)
-    task_id = await _seed_claimed_workflow_task(session, claimed_at)
-    await _seed_running_workflow_with_node(session, task_id, 'ENQUEUED')
-    await session.commit()
+    horsies_start_attempt statement through the core handle of the child,
+    once the handle's connection is set up (``steady_state_turns``)."""
+
+    async def arrange() -> Case:
+        return await _claimed_workflow_task(session)
 
     async def act(case: Case) -> None:
         started = await confirm_until_not_resumed(
@@ -464,9 +463,9 @@ async def test_a_shared_async_workflow_start_is_one_statement(
         )
         assert started is None
 
-    turns = await recorded_turns(proxy, act, (task_id, claimed_at))
+    (task_id, _), turns = await steady_state_turns(proxy, arrange, act)
 
-    assert len(_statement_turns(turns)) == ONE_STATEMENT, turns
+    assert len(turns) == ONE_STATEMENT, turns
     row = await _row(session, task_id)
     assert row is not None and row.status == 'RUNNING'
 
@@ -541,10 +540,11 @@ async def test_a_sync_workflow_start_is_one_statement(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    claimed_at = datetime.now(timezone.utc)
-    task_id = await _seed_claimed_workflow_task(session, claimed_at)
-    await _seed_running_workflow_with_node(session, task_id, 'ENQUEUED')
-    await session.commit()
+    """The sync form of the start of a workflow task: one statement once
+    the handle's connection is set up (``steady_state_turns``)."""
+
+    async def arrange() -> Case:
+        return await _claimed_workflow_task(session)
 
     async def act(case: Case) -> None:
         started = _confirm_until_not_resumed(
@@ -556,8 +556,8 @@ async def test_a_sync_workflow_start_is_one_statement(
         )
         assert started is None
 
-    turns = await recorded_turns(proxy, act, (task_id, claimed_at))
+    (task_id, _), turns = await steady_state_turns(proxy, arrange, act)
 
-    assert len(_statement_turns(turns)) == ONE_STATEMENT, turns
+    assert len(turns) == ONE_STATEMENT, turns
     row = await _row(session, task_id)
     assert row is not None and row.status == 'RUNNING'
