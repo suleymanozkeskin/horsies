@@ -91,7 +91,7 @@ pub use process_listener::{
 };
 pub use result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRead, RawResultRecord,
-    TaskInfoRead,
+    StoredEnvelopeRefused, StoredEnvelopeText, TaskInfoRead,
 };
 pub use row::heartbeat::HeartbeatRow;
 pub use row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow, TaskResultRow};

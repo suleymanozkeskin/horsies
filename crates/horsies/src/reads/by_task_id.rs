@@ -124,7 +124,7 @@ fn stored_result(record: RawResultRecord) -> Result<StoredResult, ReadError> {
             task_id,
             task_name: record.task_name,
             status,
-            envelope_json: serde_json::Value::Object(envelope).to_string(),
+            envelope_json: envelope.as_str().to_owned(),
         }),
         (
             status @ (TaskStatus::Completed
@@ -141,15 +141,15 @@ fn stored_result(record: RawResultRecord) -> Result<StoredResult, ReadError> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{json, Map, Value};
+    use horsies_core::StoredEnvelopeText;
+    use serde_json::{json, Value};
 
     use super::*;
 
-    fn envelope(value: Value) -> Map<String, Value> {
-        match value {
-            Value::Object(map) => map,
-            other => panic!("an envelope is an object: {other}"),
-        }
+    fn envelope(value: Value) -> StoredEnvelopeText {
+        StoredEnvelopeText::parse(value.to_string())
+            .unwrap()
+            .expect("an envelope is an object")
     }
 
     fn record(status: TaskStatus, raw_result: Option<Value>) -> RawResultRecord {
