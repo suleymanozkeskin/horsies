@@ -13,17 +13,17 @@ use serial_test::serial;
 use sqlx::PgPool;
 
 use super::*;
-use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
+use crate::core::lifecycle::TerminalizationOutcome;
 use crate::core::registry::workflow::RegisteredWorkflowSpec;
 use crate::core::workflow::node::SubWorkflowParams;
 use crate::core::workflow::spec::WorkflowSpecBuilder;
 use crate::core::workflow::sub_workflow::SubWorkflowNode;
 use crate::core::{OnError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
 use crate::db::CheckoutClass;
+use crate::test_support::terminal_writes;
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::lifecycle::{pause_workflow, resume_workflow};
 use crate::workflow_engine::start::start_workflow;
@@ -165,19 +165,21 @@ async fn seed_subworkflow_node(
     .expect("seed sub-workflow node");
 }
 
-/// A RUNNING task claimed by [`WORKER`] behind the RUNNING task node 0 of
-/// `workflow_id`, from which a sub-workflow node is reachable.
+/// A RUNNING task claimed by [`WORKER`], with the process facts of its start,
+/// behind the RUNNING task node 0 of `workflow_id`, from which a sub-workflow
+/// node is reachable.
 async fn seed_running_task_node(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
     sqlx::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
              started_at, claimed_at, claimed_by_worker_id, is_workflow_task, retry_count,
              max_retries, command_fingerprint_version, command_fingerprint,
-             retention_class_key, retain_rerun_input, created_at, updated_at, execution
+             retention_class_key, retain_rerun_input, created_at, updated_at, execution,
+             worker_pid, worker_hostname, worker_process_name
          ) VALUES (
              $1, 'child_start_root', 'default', 100, '{}', 'RUNNING', NOW(), NOW(), NOW(),
              NOW(), $2, TRUE, 0, 0, NULL, NULL, 'standard_30d', FALSE, NOW(), NOW(),
-             'ISOLATED'
+             'ISOLATED', 4242, 'child-start-host', 'child-start-process'
          )",
     )
     .bind(task_id)
@@ -207,18 +209,9 @@ async fn seed_running_task_node(pool: &PgPool, workflow_id: Uuid, task_id: Uuid)
 /// Completes the task: phase 1 of a worker, which writes its phase-2 record.
 async fn complete_task(pool: &PgPool, task_id: Uuid) {
     let result = serde_json::to_string(&TaskResult::Ok(serde_json::json!({"value": 7}))).unwrap();
-    let outcomes = terminalize(
-        pool,
-        &TerminalizationCommand::CompleteLockedTask {
-            task_id,
-            fence: PriorLockedRead {
-                worker_id: WORKER.to_owned(),
-            },
-            result_json: result,
-        },
-    )
-    .await
-    .expect("terminalize the workflow task");
+    let outcomes = terminal_writes::complete_workflow_task(pool, task_id, WORKER, &result)
+        .await
+        .expect("terminalize the workflow task");
     assert!(matches!(
         outcomes.as_slice(),
         [TerminalizationOutcome::Applied { .. }]

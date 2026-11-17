@@ -16,7 +16,6 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
@@ -24,13 +23,14 @@ use crate::core::history::maintenance::coverage::{
     ensure_partition_coverage_in_pool, CoverageOutcome,
 };
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
-use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
+use crate::core::lifecycle::TerminalizationOutcome;
 use crate::core::registry::workflow::RegisteredWorkflowSpec;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::{AnyNode, OnError, TaskError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
 use crate::db::CheckoutClass;
+use crate::test_support::terminal_writes::{self, TerminalFailure};
 use crate::test_support::{server_url, with_database, TestDatabase};
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::engine::{
@@ -781,13 +781,16 @@ pub(super) fn handle(pool: &PgPool, workflow_id: Uuid) -> WorkflowHandle<serde_j
     )
 }
 
-/// Takes the live task of a node to RUNNING under [`WORKER`], as the claim and
-/// the start handoff do, and the node to RUNNING with it.
+/// Takes the live task of a node to RUNNING under [`WORKER`], with the process
+/// facts of its start, as the claim and the start handoff do, and the node to
+/// RUNNING with it.
 async fn hold_running(pool: &PgPool, task_id: Uuid) {
     let held = sqlx::query(
         "UPDATE horsies_tasks
          SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
-             claim_expires_at = NULL, started_at = NOW(), updated_at = NOW()
+             claim_expires_at = NULL, started_at = NOW(), worker_pid = 4242,
+             worker_hostname = 'port-host', worker_process_name = 'port-process',
+             updated_at = NOW()
          WHERE id = $1 AND status IN ('PENDING', 'CLAIMED', 'RUNNING')",
     )
     .bind(task_id)
@@ -846,26 +849,22 @@ pub(super) async fn finish_phase1(
 ) -> String {
     hold_running(pool, task_id).await;
     let result_json = serde_json::to_string(outcome).expect("encode the task outcome");
-    let fence = PriorLockedRead {
-        worker_id: WORKER.to_owned(),
-    };
-    let command = match outcome {
-        TaskResult::Ok(_) => TerminalizationCommand::CompleteLockedTask {
-            task_id,
-            fence,
-            result_json: result_json.clone(),
-        },
-        TaskResult::Err(error) => TerminalizationCommand::FailLockedTask {
-            task_id,
-            fence,
-            result_json: result_json.clone(),
-            error_code: code(error),
-            failed_reason: None,
-        },
-    };
-    let outcomes = terminalize(pool, &command)
-        .await
-        .expect("phase 1 of the workflow task");
+    let outcomes = match outcome {
+        TaskResult::Ok(_) => {
+            terminal_writes::complete_workflow_task(pool, task_id, WORKER, &result_json).await
+        }
+        TaskResult::Err(error) => {
+            let error_code = code(error);
+            terminal_writes::fail_running_task(
+                pool,
+                task_id,
+                WORKER,
+                &TerminalFailure::of_task(&result_json, error_code.as_deref(), None),
+            )
+            .await
+        }
+    }
+    .expect("phase 1 of the workflow task");
     assert!(
         matches!(
             outcomes.as_slice(),
