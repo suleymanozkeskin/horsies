@@ -5,6 +5,8 @@
 //! `core/worker/child_pool.py`, the init frame of each child kind).
 //!
 //! - [`ChildLaunch`]: what every child runs, from the host.
+//! - [`preload_plan`]: the preload process of the profile, when its children
+//!   fork from one.
 //! - [`WorkerChildren::start`]: the pools of the profile, booting at once.
 //! - [`WorkerChildren::submit`]: the route of a claimed row and its submit
 //!   to the pool of its kind.
@@ -26,8 +28,8 @@ use uuid::Uuid;
 
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::worker_profile::{
-    IsolatedSetting, MemoryLimitSetting, ParentCpu, SharedAsyncSetting, SharedThreadSetting,
-    TaskLimitSetting, WorkerProfile,
+    ChildPreload, IsolatedSetting, MemoryLimitSetting, ParentCpu, SharedAsyncSetting,
+    SharedThreadSetting, TaskLimitSetting, WorkerProfile,
 };
 use crate::worker::executor::placement::{plan_own_core, CpuPlacement, PlacementRefused};
 use crate::worker::executor::protocol::{
@@ -41,7 +43,9 @@ use crate::worker::executor::slots::{
     NotRunCause, PoolBoard, PoolService, PoolStopReport, SharedPool, SharedPoolConfig,
     SharedSlotService, SlotPhase, Submitted, TaskLimit,
 };
-use crate::worker::executor::supervisor::{ChildCommand, SpawnerHandle, CHILD_KILL_WAIT};
+use crate::worker::executor::supervisor::{
+    ChildCommand, PreloadMode, PreloadPlan, SpawnerHandle, CHILD_KILL_WAIT,
+};
 use crate::worker::runner_beats::{LiveDispatches, StaleRunningRecovery};
 
 /// The process name of every child (Python `process_name='horsies-child'`).
@@ -55,6 +59,9 @@ pub struct ChildLaunch {
     /// The program of each child. The spawner appends the socket descriptor
     /// and the worker pid.
     pub command: ChildCommand,
+    /// How the preload process starts, for a profile whose children fork
+    /// from one.
+    pub preload: PreloadProgram,
     /// The Python app to import, or the Rust tasks of the worker binary.
     pub program: ChildProgram,
     pub log_level: ChildLogLevel,
@@ -64,6 +71,41 @@ pub struct ChildLaunch {
     /// ([`ChildConnection::of_config`] of the app's broker config; Python
     /// `WorkerConfig.child_connect_kwargs`).
     pub connection: ChildConnection,
+}
+
+/// How the preload process of the children starts (Linux).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreloadProgram {
+    /// The program and its first arguments. The spawner appends the
+    /// descriptor of the preload's socket, the worker pid and the mode.
+    Command(ChildCommand),
+    /// The child program has no preload process (a Rust child): every child
+    /// starts with `exec`.
+    NoPreloadProgram,
+}
+
+/// The preload process of `profile`: `None` when the profile asks for none
+/// or the child program has none. Its init frame is the init frame of the
+/// first kind of child of the profile, in the order isolated, shared async,
+/// shared thread (Python sends the isolated init frame). Pure.
+pub fn preload_plan(profile: &WorkerProfile, launch: &ChildLaunch) -> Option<PreloadPlan> {
+    let mode = match profile.preload {
+        ChildPreload::Library => PreloadMode::Library,
+        ChildPreload::App => PreloadMode::App,
+        ChildPreload::NoPreload => return None,
+    };
+    let command = match &launch.preload {
+        PreloadProgram::Command(command) => command.clone(),
+        PreloadProgram::NoPreloadProgram => return None,
+    };
+    let child_kind = isolated_kind(profile)
+        .or_else(|| shared_async_kind(profile))
+        .or_else(|| shared_thread_kind(profile))?;
+    Some(PreloadPlan {
+        command,
+        mode,
+        init: init_frame(launch, child_kind),
+    })
 }
 
 /// The most tasks that may wait for a slot or a seat in one pool: twice the
@@ -214,6 +256,65 @@ pub struct PoolFacts {
     pub placement: CpuPlacement,
 }
 
+/// The child kind of the isolated children of the profile, when it has
+/// some.
+fn isolated_kind(profile: &WorkerProfile) -> Option<ChildKind> {
+    let IsolatedSetting::IsolatedChildren(children) = profile.isolated else {
+        return None;
+    };
+    Some(ChildKind::Isolated(IsolatedChild {
+        pool: resolved_pool(children.resolved_pool()),
+        task_send_pool: protocol_count(
+            children.task_send_pool.connections.get(),
+            TaskSendPool::new,
+            "isolated task_send_pool",
+        ),
+    }))
+}
+
+/// The child kind of the shared async children of the profile, when it has
+/// some.
+fn shared_async_kind(profile: &WorkerProfile) -> Option<ChildKind> {
+    let SharedAsyncSetting::SharedAsyncChildren(children) = profile.shared_async else {
+        return None;
+    };
+    Some(ChildKind::SharedAsync(SharedAsyncChild {
+        seats: protocol_count(children.seats.get(), AsyncSeats::new, "shared async seats"),
+        pool: resolved_pool(children.resolved_pool()),
+        executor_threads: protocol_count(
+            children.resolved_executor_threads().get(),
+            ExecutorThreads::new,
+            "shared async executor threads",
+        ),
+        task_send_pool: protocol_count(
+            children.task_send_pool.connections.get(),
+            TaskSendPool::new,
+            "shared async task_send_pool",
+        ),
+    }))
+}
+
+/// The child kind of the shared thread children of the profile, when it has
+/// some.
+fn shared_thread_kind(profile: &WorkerProfile) -> Option<ChildKind> {
+    let SharedThreadSetting::SharedThreadChildren(children) = profile.shared_thread else {
+        return None;
+    };
+    Some(ChildKind::SharedThread(SharedThreadChild {
+        seats: protocol_count(
+            children.seats.get(),
+            ThreadSeats::new,
+            "shared thread seats",
+        ),
+        pool: resolved_pool(children.resolved_pool()),
+        task_send_pool: protocol_count(
+            children.task_send_pool.connections.get(),
+            TaskSendPool::new,
+            "shared thread task_send_pool",
+        ),
+    }))
+}
+
 /// The config of the isolated pool of the profile, when it has isolated
 /// children (Python `_slot_pool_config`, `child_kind=IsolatedChild(...)`).
 pub fn isolated_pool_config(
@@ -224,14 +325,7 @@ pub fn isolated_pool_config(
     let IsolatedSetting::IsolatedChildren(children) = profile.isolated else {
         return None;
     };
-    let kind = ChildKind::Isolated(IsolatedChild {
-        pool: resolved_pool(children.resolved_pool()),
-        task_send_pool: protocol_count(
-            children.task_send_pool.connections.get(),
-            TaskSendPool::new,
-            "isolated task_send_pool",
-        ),
-    });
+    let kind = isolated_kind(profile)?;
     Some(IsolatedPoolConfig {
         command: launch.command.clone(),
         init: init_frame(launch, kind),
@@ -255,20 +349,7 @@ pub fn shared_async_pool_config(
     let SharedAsyncSetting::SharedAsyncChildren(children) = profile.shared_async else {
         return None;
     };
-    let kind = ChildKind::SharedAsync(SharedAsyncChild {
-        seats: protocol_count(children.seats.get(), AsyncSeats::new, "shared async seats"),
-        pool: resolved_pool(children.resolved_pool()),
-        executor_threads: protocol_count(
-            children.resolved_executor_threads().get(),
-            ExecutorThreads::new,
-            "shared async executor threads",
-        ),
-        task_send_pool: protocol_count(
-            children.task_send_pool.connections.get(),
-            TaskSendPool::new,
-            "shared async task_send_pool",
-        ),
-    });
+    let kind = shared_async_kind(profile)?;
     Some(SharedPoolConfig {
         command: launch.command.clone(),
         init: init_frame(launch, kind),
@@ -292,19 +373,7 @@ pub fn shared_thread_pool_config(
     let SharedThreadSetting::SharedThreadChildren(children) = profile.shared_thread else {
         return None;
     };
-    let kind = ChildKind::SharedThread(SharedThreadChild {
-        seats: protocol_count(
-            children.seats.get(),
-            ThreadSeats::new,
-            "shared thread seats",
-        ),
-        pool: resolved_pool(children.resolved_pool()),
-        task_send_pool: protocol_count(
-            children.task_send_pool.connections.get(),
-            TaskSendPool::new,
-            "shared thread task_send_pool",
-        ),
-    });
+    let kind = shared_thread_kind(profile)?;
     Some(SharedPoolConfig {
         command: launch.command.clone(),
         init: init_frame(launch, kind),

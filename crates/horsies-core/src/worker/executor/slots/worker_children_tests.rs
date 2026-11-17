@@ -23,6 +23,7 @@ use crate::worker::runner_beats::LiveDispatches;
 fn launch(command: ChildCommand) -> ChildLaunch {
     ChildLaunch {
         command,
+        preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
         program: ChildProgram::Rust,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
