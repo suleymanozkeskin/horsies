@@ -3,6 +3,7 @@
 //! conversion of its outcome; `handle.rs` binds them to `CoreHandle`.
 
 pub mod arguments;
+pub mod cancel;
 pub mod enqueue;
 pub mod release;
 pub mod schema;
