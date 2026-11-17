@@ -49,8 +49,6 @@ count was the statement and one ping. The core pings a connection that
 waited in its pool past its own idle limit (1 s), so it sends the ping or
 not; its count is never higher than Python's."""
 
-CORE_PING: Final = 'SELECT 1'
-"""The simple query of the core's ping."""
 
 
 @pytest.fixture(autouse=True)
@@ -135,14 +133,15 @@ async def _live_status(session: AsyncSession, task_id: str) -> str | None:
 
 def _assert_one_statement(turns: tuple[Turn, ...], *, pre_ping: bool) -> None:
     """One Bind/Execute turn, the statement; with the pre-ping on, at most
-    ``PING`` more turns, each the core's ping."""
+    ``PING`` more turns, each a ping (``Turn.is_ping``): the core's in the
+    core run, the engine's in the Python run of a dual-run."""
     executed = [turn for turn in turns if turn.executes()]
     others = [turn for turn in turns if not turn.executes()]
     assert len(executed) == 1, turns
     match pre_ping:
         case True:
             assert len(others) <= PING, turns
-            assert all(turn.has_simple_query(CORE_PING) for turn in others), turns
+            assert all(turn.is_ping() for turn in others), turns
         case False:
             assert others == [], turns
 

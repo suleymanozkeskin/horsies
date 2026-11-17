@@ -10,12 +10,11 @@
 //! a node without its own priority takes its queue's priority, and each task
 //! queue takes the retention class of the app's queue mapping.
 
-use std::collections::BTreeMap;
-
+use horsies_core::core::python_text::python_isoformat_utc;
 use horsies_core::{
     parse_workflow_spec_data, ClientSpec, OnError, SpecDataRefused, WORKFLOW_SPEC_DATA_VERSION,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use super::input::NodeInput;
 use super::node::{JoinType, NodeDeadline, NodePriority};
@@ -50,14 +49,16 @@ pub(crate) fn spec_data_text(
     spec: &WorkflowSpec,
     config: &AppConfig,
 ) -> Result<String, HorsiesError> {
-    let mut queue_classes: BTreeMap<String, String> = BTreeMap::new();
+    // The class of each task queue, in the order of the nodes that first
+    // name it (a Python dict): a later node on a queue keeps its place.
+    let mut queue_classes: Map<String, Value> = Map::new();
     let mut nodes = Vec::with_capacity(spec.nodes.len());
     for node in &spec.nodes {
         if let SpecBody::Task { queue, .. } = &node.body {
             check_queue(config, queue).map_err(|refused| unresolved_queue(spec, node, &refused))?;
             let _previous = queue_classes.insert(
                 queue.clone(),
-                config.retention.resolve_queue_retention(queue).class_key(),
+                Value::String(config.retention.resolve_queue_retention(queue).class_key()),
             );
         }
         nodes.push(node_document(spec, node, config)?);
@@ -173,9 +174,10 @@ fn node_document(
 }
 
 /// The stored options text of a task node: the task's options with the
-/// node's deadline as the member `good_until` (RFC 3339, as Python's
-/// `isoformat()` of an aware time), the members in their order. `None` for
-/// a task with no options and a node with no deadline. Pure.
+/// node's deadline as the member `good_until`, the members in their order.
+/// The deadline is written as Python's `isoformat()` writes an aware UTC
+/// time: `+00:00`, and 6 fraction digits when the microsecond is not 0.
+/// `None` for a task with no options and a node with no deadline. Pure.
 ///
 /// Errors: the cause, for an options text that is not a JSON object.
 pub(crate) fn task_options_text(
@@ -191,7 +193,7 @@ pub(crate) fn task_options_text(
         None => NodeInput::empty(),
     };
     let value = serde_json::value::RawValue::from_string(
-        serde_json::to_string(&at.to_rfc3339()).map_err(|error| error.to_string())?,
+        serde_json::to_string(&python_isoformat_utc(at)).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
     members
@@ -286,6 +288,11 @@ mod tests {
         assert_eq!(
             task_options_text(None, NodeDeadline::NoDeadline).unwrap(),
             None
+        );
+        let whole_milliseconds = deadline + chrono::Duration::milliseconds(500);
+        assert_eq!(
+            task_options_text(None, NodeDeadline::At(whole_milliseconds)).unwrap(),
+            Some(r#"{"good_until":"2026-11-18T00:00:00.500000+00:00"}"#.to_owned())
         );
     }
 

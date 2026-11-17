@@ -46,9 +46,8 @@ pub(crate) enum ScheduleManifestRefused {
 /// The scheduler manifest of `schedule` in the app of `config` and `tasks`.
 /// Pure: no I/O.
 ///
-/// The input text of each enabled schedule is its `input` value as JSON,
-/// `null` for a schedule without input. The caller checks it with the
-/// task's input type before the scheduler starts.
+/// The input text of each enabled schedule is [`schedule_input_text`]. The
+/// caller checks it with the task's input type before the scheduler starts.
 ///
 /// Errors: [`ScheduleManifestRefused`], for the first schedule in config
 /// order that has one, then the parse of the whole document.
@@ -127,7 +126,7 @@ fn send_document(
         "task_name": schedule.task_name,
         "queue_name": queue,
         "priority": queue_priority(config, &queue),
-        "input_json": input_json(schedule),
+        "input_json": schedule_input_text(schedule),
         "task_options": task_options,
         "retention_class_key": config.retention.resolve_queue_retention(&queue).class_key(),
         "retain_rerun_input": config.broker.retain_rerun_input_default,
@@ -160,15 +159,23 @@ fn pattern_json(schedule: &TaskSchedule) -> String {
     })
 }
 
-/// The input of each slot as one JSON value; `null` for a schedule without
-/// input.
-fn input_json(schedule: &TaskSchedule) -> String {
-    serde_json::to_string(&schedule.input).unwrap_or_else(|error| {
-        panic!(
-            "the input of schedule '{}' is a JSON value and encodes: {error}",
-            schedule.name
-        )
-    })
+/// The input text of a schedule without input: no keyword arguments, as
+/// Python's scheduler stores it (`EMPTY_TASK_INPUT`).
+const NO_INPUT_TEXT: &str = "{}";
+
+/// The input of each slot as one JSON text: the schedule's `input` value,
+/// or `{}` for a schedule without input (`null`), as Python stores a
+/// schedule without kwargs. Pure.
+pub(crate) fn schedule_input_text(schedule: &TaskSchedule) -> String {
+    match &schedule.input {
+        Value::Null => NO_INPUT_TEXT.to_owned(),
+        given => serde_json::to_string(given).unwrap_or_else(|error| {
+            panic!(
+                "the input of schedule '{}' is a JSON value and encodes: {error}",
+                schedule.name
+            )
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -290,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn a_schedule_without_input_sends_null_and_a_task_without_options_stores_none() {
+    fn a_schedule_without_input_sends_an_empty_object_and_a_task_without_options_stores_none() {
         let config = config();
         let schedule = ScheduleConfig::new(vec![TaskSchedule::new(
             "cleanup",
@@ -299,7 +306,7 @@ mod tests {
         )]);
         let manifest = scheduler_manifest(&config, &schedule, &registry(&config, None)).unwrap();
         let send = send_of(&manifest, 0);
-        assert_eq!(send.input_json, "null");
+        assert_eq!(send.input_json, "{}");
         assert_eq!(send.task_options, ScheduleTaskOptions::NoOptions);
     }
 

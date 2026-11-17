@@ -622,7 +622,7 @@ unless it starts with "Added".
   `register` returns `TaskFunction<validate_order::Input, T, E>`, and
   `validate_order::params::order()` is the field token of a node. A task
   with no parameters, or with one parameter written `()`, has the input
-  `()`: a send stores `null`, a node `{}`. A parameter whose value is
+  `()`: a send and a node store `{}`. A parameter whose value is
   stored needs a name: `_` is a compile error for it.
   `#[derive(WorkflowInput)]` gives the field tokens of a sub-workflow's
   params type.
@@ -742,6 +742,31 @@ unless it starts with "Added".
   `rerun::SqlxCaller` (feature `sqlx`). Errors are `CallerRerunError<E>`:
   `Driver(E)`, `ClassNotRegistered { key }`, `ClientFamilyMismatch
   { stored }`, `CallerKeyRefused`, `IdMintRefused`, `Row`.
+- **The client writes each stored form as Python writes it**, as the shared
+  vectors of `crates/horsies-core/tests/fixtures/stored_forms/` pin it:
+  - Task input: a send of a task with no parameters, and a schedule
+    without input, store `{}` (no keyword arguments), not `null`.
+  - Task options of a workflow node: the deadline `good_until` is written
+    as Python's `isoformat()`, with 6 fraction digits when the microsecond
+    is not 0 (`…12.500000+00:00`, not `…12.500+00:00`).
+  - Task options of a send with a deadline (`TaskSendOptions::good_until`):
+    the options text holds the deadline in `good_until`, in Python's
+    `isoformat()`; before, `null`. A task with no options and a send with a
+    deadline stores the options of an `ISOLATED` task with the deadline. The
+    command fingerprint of a send hashes this text, as Python's does.
+    `TaskOptions::stored_send_options_text` (added) writes it.
+  - Workflow spec data, the text that a workflow start sends the core:
+    `queue_classes` lists the task queues in the order of the nodes that
+    first name them, as a Python dict does; before, sorted by name.
+  - Task input and result: a date-time of type `StoredDateTime` (below) is
+    written with Python's fraction (`…12.500000Z`). A plain chrono
+    `DateTime` or `NaiveDateTime` keeps chrono's serde form (`…12.500Z`);
+    both clients read either text to the same value.
+- **Added: `StoredDateTime<T>`**, a chrono date-time
+  (`DateTime<Tz>` or `NaiveDateTime`) that a task input or result stores in
+  Python's text: no fraction for a whole second, 6 digits for a whole
+  microsecond, 9 digits below the microsecond; the offset `Z` when it is 0.
+  It reads any RFC 3339 fraction.
 
 ## [0.7.0] - 2026-11-15
 

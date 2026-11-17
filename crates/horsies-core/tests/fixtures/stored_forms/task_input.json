@@ -1,7 +1,7 @@
 {
   "form": "task input",
   "vectors": [
-    {"name": "no_parameters", "parameters": [], "text": "{}", "rust_drift": {"text": "null", "finding": "no-parameter-input"}},
+    {"name": "no_parameters", "parameters": [], "text": "{}"},
     {"name": "bool_true", "parameters": [{"name": "value", "type": "bool", "value": true}], "text": "{\"value\":true}"},
     {"name": "i64_small", "parameters": [{"name": "value", "type": "i64", "value": "7"}], "text": "{\"value\":7}"},
     {"name": "i64_negative", "parameters": [{"name": "value", "type": "i64", "value": "-42"}], "text": "{\"value\":-42}"},
@@ -31,12 +31,14 @@
     {"name": "str_escapes", "parameters": [{"name": "value", "type": "str", "value": "\u0000\b\f\u001f\"\\/\n\r\t"}], "text": "{\"value\":\"\\u0000\\b\\f\\u001f\\\"\\\\/\\n\\r\\t\"}"},
     {"name": "str_line_separators", "parameters": [{"name": "value", "type": "str", "value": "  "}], "text": "{\"value\":\"  \"}"},
     {"name": "datetime_utc_microseconds", "parameters": [{"name": "value", "type": "datetime_utc", "value": "2026-08-12T09:10:12.654321+00:00"}], "text": "{\"value\":\"2026-08-12T09:10:12.654321Z\"}"},
-    {"name": "datetime_utc_whole_milliseconds", "parameters": [{"name": "value", "type": "datetime_utc", "value": "2026-08-12T09:10:12.500000+00:00"}], "text": "{\"value\":\"2026-08-12T09:10:12.500000Z\"}", "rust_drift": {"text": "{\"value\":\"2026-08-12T09:10:12.500Z\"}", "finding": "datetime-milliseconds"}},
+    {"name": "datetime_utc_whole_milliseconds", "parameters": [{"name": "value", "type": "datetime_utc", "value": "2026-08-12T09:10:12.500000+00:00"}], "text": "{\"value\":\"2026-08-12T09:10:12.500000Z\"}"},
     {"name": "datetime_utc_whole_seconds", "parameters": [{"name": "value", "type": "datetime_utc", "value": "2026-08-12T09:10:12+00:00"}], "text": "{\"value\":\"2026-08-12T09:10:12Z\"}"},
     {"name": "datetime_offset_east", "parameters": [{"name": "value", "type": "datetime_offset", "value": "2026-08-12T09:10:12.654321+02:00"}], "text": "{\"value\":\"2026-08-12T09:10:12.654321+02:00\"}"},
     {"name": "datetime_offset_west", "parameters": [{"name": "value", "type": "datetime_offset", "value": "2026-08-12T09:10:12.654321-05:30"}], "text": "{\"value\":\"2026-08-12T09:10:12.654321-05:30\"}"},
     {"name": "datetime_offset_zero", "parameters": [{"name": "value", "type": "datetime_offset", "value": "2026-08-12T09:10:12.654321+00:00"}], "text": "{\"value\":\"2026-08-12T09:10:12.654321Z\"}"},
+    {"name": "datetime_offset_whole_milliseconds", "parameters": [{"name": "value", "type": "datetime_offset", "value": "2026-08-12T09:10:12.500000+02:00"}], "text": "{\"value\":\"2026-08-12T09:10:12.500000+02:00\"}"},
     {"name": "datetime_naive", "parameters": [{"name": "value", "type": "datetime_naive", "value": "2026-08-12T09:10:12.654321"}], "text": "{\"value\":\"2026-08-12T09:10:12.654321\"}"},
+    {"name": "datetime_naive_whole_milliseconds", "parameters": [{"name": "value", "type": "datetime_naive", "value": "2026-08-12T09:10:12.500000"}], "text": "{\"value\":\"2026-08-12T09:10:12.500000\"}"},
     {"name": "date", "parameters": [{"name": "value", "type": "date", "value": "2026-08-12"}], "text": "{\"value\":\"2026-08-12\"}"},
     {"name": "uuid", "parameters": [{"name": "value", "type": "uuid", "value": "0192f3b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b"}], "text": "{\"value\":\"0192f3b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b\"}"},
     {"name": "decimal", "parameters": [{"name": "value", "type": "decimal", "value": "1.10"}], "text": "{\"value\":\"1.10\"}", "rust_cannot_express": "the Rust client depends on no decimal type; a String holds the same text but is not a decimal"},
