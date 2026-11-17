@@ -43,6 +43,7 @@ use uuid::Uuid;
 use crate::core::config::child_sizing::{FINALIZE_BATCH_FLUSHERS, PARENT_POOL_CLAIM_CONNECTIONS};
 use crate::core::lifecycle::TerminalizationOutcome;
 use crate::db::{PoolSizing, StatementFailure, Transience};
+use crate::failure_cause::{FailureCause, ServerErrorFacts};
 
 pub mod statement;
 pub mod stop;
@@ -121,6 +122,7 @@ pub enum BatchWriteError {
     NotSent {
         transience: Transience,
         detail: String,
+        cause: FailureCause,
     },
     /// The server refused the statement: no row changed. One row of the
     /// batch can be the cause.
@@ -128,12 +130,13 @@ pub enum BatchWriteError {
     Refused {
         transience: Transience,
         detail: String,
+        server_error: ServerErrorFacts,
     },
     /// The statement was sent and its reply was lost: each row may have
     /// committed or not. A replay of a row finds it `AlreadyApplied` when it
     /// committed.
     #[error("the plain-success batch has an unknown outcome: {detail}")]
-    CommitUnknown { detail: String },
+    CommitUnknown { detail: String, cause: FailureCause },
     /// The statement returned rows that break its contract: a row that does
     /// not decode, a count other than the batch, or an outcome of another
     /// task at the position of a row. The statement completed, so what it
@@ -159,11 +162,20 @@ impl From<&StatementFailure> for BatchWriteError {
         let detail = failure.to_string();
         let transience = failure.transience();
         match failure {
-            StatementFailure::NotSent { .. } => BatchWriteError::NotSent { transience, detail },
-            StatementFailure::StatementRefused { .. } => {
-                BatchWriteError::Refused { transience, detail }
-            }
-            StatementFailure::OutcomeUnknown { .. } => BatchWriteError::CommitUnknown { detail },
+            StatementFailure::NotSent { .. } => BatchWriteError::NotSent {
+                transience,
+                detail,
+                cause: failure.failure_cause(),
+            },
+            StatementFailure::StatementRefused { cause, .. } => BatchWriteError::Refused {
+                transience,
+                detail,
+                server_error: ServerErrorFacts::of(cause.server_error()),
+            },
+            StatementFailure::OutcomeUnknown { .. } => BatchWriteError::CommitUnknown {
+                detail,
+                cause: failure.failure_cause(),
+            },
         }
     }
 }

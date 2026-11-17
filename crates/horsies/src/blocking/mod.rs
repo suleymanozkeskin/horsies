@@ -331,11 +331,13 @@ fn block_health<V>(
             code: BrokerErrorCode::AsyncContext,
             message: async_context_message(blocking_call, async_call),
             retryable: false,
+            cause: horsies_core::FailureCause::PreconditionFailed,
         }),
         Place::RuntimeRefused(refusal) => Err(BrokerOperationError {
             code,
             message: format!("the read did not start: {refusal}"),
             retryable: refusal_retryable(&refusal),
+            cause: horsies_core::FailureCause::PreconditionFailed,
         }),
     }
 }

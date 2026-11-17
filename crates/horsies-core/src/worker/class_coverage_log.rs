@@ -507,6 +507,7 @@ mod tests {
             code: BrokerErrorCode::MonitoringQueryFailed,
             message: "get_class_coverage refused: worker w1 ...".to_owned(),
             retryable: false,
+            cause: crate::failure_cause::FailureCause::ContractViolation,
         });
 
         let first = log.lines(&failed, now);

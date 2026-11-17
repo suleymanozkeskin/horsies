@@ -187,6 +187,7 @@ fn connect_failure(code: BrokerErrorCode, error: &BrokerError) -> BrokerOperatio
         code,
         message: error.to_string(),
         retryable: error.is_retryable(),
+        cause: error.failure_cause(),
     }
 }
 

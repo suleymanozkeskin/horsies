@@ -20,6 +20,7 @@ pub mod catalog;
 #[doc(hidden)]
 pub mod core;
 pub mod db;
+pub mod failure_cause;
 pub mod handle;
 pub mod log_targets;
 pub mod manifest;
@@ -241,6 +242,8 @@ pub use crate::workflow_engine::engine::{
     on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
 };
 pub use crate::workflow_engine::error::WorkflowError;
+// the cause of a failed operation, which a client names to its user
+pub use crate::failure_cause::{FailureCause, ServerErrorFacts};
 pub use crate::workflow_engine::info::WorkflowTaskInfo;
 pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_workflow};
 pub use crate::workflow_engine::phase2_recovery::Phase2RecoverySummary;

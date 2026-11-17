@@ -206,6 +206,7 @@ impl<T> WorkflowHandle<T> {
                 message: error.to_string(),
                 retryable: error.is_retryable(),
                 workflow_id: self.workflow_id,
+                cause: error.failure_cause(),
             })
     }
 
@@ -325,6 +326,7 @@ impl<T> WorkflowHandle<T> {
             message: format!("workflow {} not found", self.workflow_id),
             retryable: false,
             workflow_id: self.workflow_id,
+            cause: horsies_core::FailureCause::PreconditionFailed,
         }
     }
 
@@ -334,6 +336,7 @@ impl<T> WorkflowHandle<T> {
             message,
             retryable: false,
             workflow_id: self.workflow_id,
+            cause: horsies_core::FailureCause::ContractViolation,
         }
     }
 

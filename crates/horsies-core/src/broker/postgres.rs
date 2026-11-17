@@ -66,6 +66,7 @@ use crate::broker::wait_limit::WaitLimit;
 use crate::db::{
     PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription, DEFAULT_SOCKET_SETTINGS,
 };
+use crate::failure_cause::FailureCause;
 
 use crate::broker::pools::{
     CloseOutcome, CoreHandle, OpenPools, PoolProfile, SessionPool, WriteInFlight,
@@ -2122,6 +2123,7 @@ impl PostgresBroker {
                  on {TASK_INFO_READ_PASSES} passes in a row"
             ),
             retryable: true,
+            cause: FailureCause::PreconditionFailed,
         })
     }
 
@@ -2144,6 +2146,7 @@ impl PostgresBroker {
                 code: BrokerErrorCode::TaskInfoQueryFailed,
                 message: error.to_string(),
                 retryable: error.is_retryable(),
+                cause: error.failure_cause(),
             })?
             .into_iter()
             .next();
@@ -2299,6 +2302,7 @@ impl PostgresBroker {
                 code: BrokerErrorCode::DbPingFailed,
                 message: format!("database ping failed: {error}"),
                 retryable: error.is_retryable(),
+                cause: error.failure_cause(),
             }),
         }
     }
@@ -2360,6 +2364,7 @@ impl PostgresBroker {
             code: BrokerErrorCode::WorkerPingFailed,
             message: format!("ping_workers payload encode failed: {}", e),
             retryable: false,
+            cause: FailureCause::ContractViolation,
         })?;
 
         let _notified = self
@@ -2396,6 +2401,7 @@ impl PostgresBroker {
                         code: BrokerErrorCode::WorkerPingFailed,
                         message: "ping_workers reply wait failed: the listener stopped".to_owned(),
                         retryable: true,
+                        cause: FailureCause::Connection,
                     });
                 }
                 Ok(PayloadEvent::Payload(reply)) => {
@@ -2872,6 +2878,7 @@ fn task_info_history_error(error: BrokerError) -> BrokerOperationError {
         code,
         message: error.to_string(),
         retryable: error.is_retryable(),
+        cause: error.failure_cause(),
     }
 }
 
@@ -3029,6 +3036,7 @@ fn invalid_raw_result(message: String) -> BrokerOperationError {
         code: BrokerErrorCode::InvalidJsonPayload,
         message,
         retryable: false,
+        cause: FailureCause::ContractViolation,
     }
 }
 
@@ -3043,6 +3051,7 @@ fn raw_result_operation_error(error: BrokerError) -> BrokerOperationError {
         code,
         message: error.to_string(),
         retryable: error.is_retryable(),
+        cause: error.failure_cause(),
     }
 }
 
@@ -3266,6 +3275,7 @@ fn monitoring_query_error(operation: &str, error: BrokerError) -> BrokerOperatio
         code: BrokerErrorCode::MonitoringQueryFailed,
         message: format!("{operation} failed: {error}"),
         retryable: error.is_retryable(),
+        cause: error.failure_cause(),
     }
 }
 
@@ -3279,11 +3289,13 @@ fn worker_ping_subscribe_error(error: &ListenError) -> BrokerOperationError {
             code: BrokerErrorCode::ListenerDisabled,
             message: format!("ping_workers needs a listener: {error}"),
             retryable: false,
+            cause: error.failure_cause(),
         },
         ListenError::PlanRefused(_) | ListenError::Subscribe(_) => BrokerOperationError {
             code: BrokerErrorCode::WorkerPingFailed,
             message: format!("ping_workers reply subscribe failed: {error}"),
             retryable: error.is_retryable(),
+            cause: error.failure_cause(),
         },
     }
 }
@@ -3295,6 +3307,7 @@ fn worker_ping_statement_error(operation: &str, error: BrokerError) -> BrokerOpe
         code: BrokerErrorCode::WorkerPingFailed,
         message: format!("ping_workers {operation} failed: {error}"),
         retryable: error.is_retryable(),
+        cause: error.failure_cause(),
     }
 }
 
@@ -3305,6 +3318,7 @@ fn invalid_input(message: String) -> BrokerOperationError {
         code: BrokerErrorCode::InvalidInput,
         message,
         retryable: false,
+        cause: FailureCause::PreconditionFailed,
     }
 }
 
