@@ -42,7 +42,7 @@ from tests.dualrun.reference.monitoring_queries import (
     get_workflow_node,
     list_tasks,
 )
-from horsies.web.routes._common import query_failed
+from tests.dualrun.reference.web_routes._common import query_failed
 from tests.monitoring_function_support import (
     function_broker,
     history_row,

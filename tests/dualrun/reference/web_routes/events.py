@@ -16,7 +16,7 @@ from typing import AsyncIterator
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
-from horsies.web.events import (
+from tests.dualrun.reference.web_events import (
     HEARTBEAT_SECONDS,
     TOPIC_DEGRADED,
     EventBroadcaster,

@@ -20,6 +20,10 @@ bookkeeping and adapts:
 
 The version is read with a plain SELECT and cached briefly, so a dashboard
 left open does not re-query it on every request.
+
+The monitoring app runs the same probe and the action gate in the core
+(``create_monitoring_app`` mounts the core's handler); this module keeps the
+public states and texts, and ``SchemaProbe`` for Python callers.
 """
 
 from __future__ import annotations
@@ -27,7 +31,6 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Awaitable, Callable
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -243,18 +246,3 @@ def classify_stored_version(stored: int) -> SchemaStatus:
         version=stored,
         expected_version=EXPECTED_SCHEMA_VERSION,
     )
-
-
-def schema_guard(probe: SchemaProbe) -> Callable[[], Awaitable[None]]:
-    """Build the dependency that refuses actions on a foreign schema.
-
-    Applied to every action route, so a new action cannot be added without
-    inheriting the rule.
-    """
-
-    async def guard() -> None:
-        status = await probe.status()
-        if not status.compatible:
-            raise SchemaIncompatible(status)
-
-    return guard

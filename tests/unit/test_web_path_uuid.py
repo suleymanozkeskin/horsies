@@ -6,7 +6,7 @@ from uuid import UUID
 
 import pytest
 
-from horsies.web.routes._common import PathIdNotUuid, parse_path_uuid
+from tests.dualrun.reference.web_routes._common import PathIdNotUuid, parse_path_uuid
 
 pytestmark = [pytest.mark.unit]
 

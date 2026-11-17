@@ -2,7 +2,9 @@
 
 One row per Python entry point of ``horsies.monitoring`` and ``horsies.web``
 that calls the core. Every read runs in pool mode: one statement in
-autocommit on the core's pool. Run:
+autocommit on the core's pool. The web app row puts the Python app before the
+switch (its routers, schema probe, read caches and event broadcaster) in the
+place of ``create_monitoring_app`` on the core's handler. Run:
 ``pytest tests/integration --dual-run=monitoring-and-web``.
 """
 
@@ -146,5 +148,13 @@ MONITORING_AND_WEB_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         reference_path='tests.dualrun.reference.broker_monitoring:ping_workers_async',
         mode=PoolMode(),
         core_methods=('ping_workers_async',),
+    ),
+    DualRunOperation(
+        name='monitoring web app',
+        production_path='horsies.web.app:create_monitoring_app',
+        reference_path='tests.dualrun.reference.web_app:create_monitoring_app',
+        mode=PoolMode(),
+        core_methods=(),
+        core_functions=('MonitoringHandler',),
     ),
 )

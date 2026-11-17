@@ -23,7 +23,7 @@ from horsies.monitoring import (
     list_workflow_names,
     list_workflow_runs,
 )
-from horsies.web.routes._common import query_failed
+from tests.dualrun.reference.web_routes._common import query_failed
 
 
 def build_router(broker: PostgresBroker) -> APIRouter:
