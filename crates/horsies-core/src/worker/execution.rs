@@ -618,7 +618,7 @@ pub(crate) enum UnreportedAttemptWrite {
 /// Write the failed attempt of a child that ended without a report (a
 /// timeout, a loop kill or a crash) in one statement, with the claimed-row
 /// rule `RELEASE` (Python `_write_ended_attempt`,
-/// `horsies/core/worker/dispatch.py:357-423`, which sends the release and
+/// `python/horsies/core/worker/dispatch.py:357-423`, which sends the release and
 /// the failed attempt as two statements).
 ///
 /// Errors: a phase-1 [`FinalizeError`], retryable when the database error
@@ -899,7 +899,7 @@ pub(crate) async fn send_phase2_wake(
 }
 
 /// The payload of a capacity wake. The baseline functions send the same
-/// constant (`horsies/core/baseline/sql/0004_lifecycle_functions.sql:1064`,
+/// constant (`crates/horsies-core/baseline/0004_lifecycle_functions.sql:1064`,
 /// `:1510`; `0005_workflow_functions.sql:1972`). No receiver reads the
 /// payload on a queue channel: the claim loop subscribes by channel.
 const CAPACITY_WAKE_PAYLOAD: &str = "capacity";

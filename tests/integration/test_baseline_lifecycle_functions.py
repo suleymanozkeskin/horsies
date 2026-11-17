@@ -16,7 +16,6 @@ import pytest
 import pytest_asyncio
 
 from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
-from horsies.core.types.result import Err, Ok
 from horsies.core.utils.url import to_psycopg_url
 from tests.integration import baseline_lifecycle_sessions as sessions
 from tests.integration.conftest import DB_URL
@@ -28,11 +27,7 @@ _CASES_SQL = Path(__file__).with_name('baseline_lifecycle_functions.sql')
 
 
 def _migration() -> BaselineMigration:
-    match load_baseline_migration():
-        case Ok(loaded):
-            return loaded
-        case Err(unreadable):
-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
+    return load_baseline_migration()
 
 
 @pytest_asyncio.fixture

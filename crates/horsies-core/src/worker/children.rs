@@ -68,7 +68,7 @@ pub struct ChildLaunch {
 
 /// The most tasks that may wait for a slot or a seat in one pool: twice the
 /// claim budget of the worker (Python `_pending_task_limit`,
-/// `horsies/core/worker/worker.py:529-536`): `2 * max(seats +
+/// `python/horsies/core/worker/worker.py:529-536`): `2 * max(seats +
 /// prefetch_buffer, claimed_per_worker)`, with no claimed limit as 0.
 pub fn pending_task_limit(profile: &WorkerProfile, prefetch_buffer: u32) -> NonZeroUsize {
     let claimed_per_worker = match profile.claim.claimed_per_worker {
@@ -150,7 +150,7 @@ pub fn exit_not_seen(recovery: &RecoveryConfig) -> ExitNotSeen {
 }
 
 /// The CPUs of the worker and its children (Python `plan_cpu_placement`,
-/// `horsies/core/worker/worker.py:614-618`). `OWN_CORE` that the machine
+/// `python/horsies/core/worker/worker.py:614-618`). `OWN_CORE` that the machine
 /// cannot give fails the start before any child starts.
 pub fn plan_placement(parent_cpu: ParentCpu) -> Result<CpuPlacement, PlacementRefused> {
     match parent_cpu {

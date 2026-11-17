@@ -255,16 +255,16 @@ class TestModuleDocstrings:
         assert read_module_blocks(MODULE, source) == Ok(())
 
     def test_extract_all_writes_a_module_docstring_block(self, tmp_path: Path) -> None:
-        package = tmp_path / 'horsies'
-        package.mkdir()
+        package = tmp_path / 'python' / 'horsies'
+        package.mkdir(parents=True)
         (package / 'module.py').write_text('"""Title.\n\n```python\nx = 1\n```\n"""\n')
         output = tmp_path / 'out'
 
         errors = extract_all(tmp_path, output)
 
         assert errors == ()
-        assert find_modules(tmp_path) == (Path('horsies/module.py'),)
-        assert [path.name for path in output.glob('*.py')] == ['horsies_module.py']
+        assert find_modules(tmp_path) == (Path('python/horsies/module.py'),)
+        assert [path.name for path in output.glob('*.py')] == ['python_horsies_module.py']
 
 
 class TestRealDocs:

@@ -3,7 +3,7 @@
 
 use chrono::{DateTime, Utc};
 use horsies_core::catalog::CodeEnum;
-use horsies_core::{BrokerErrorCode, TaskAttemptInfo, TaskInfo};
+use horsies_core::{BrokerErrorCode, ExecutionClass, TaskAttemptInfo, TaskInfo};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -62,7 +62,10 @@ impl From<TaskAttemptInfo> for TaskAttemptRecord {
 /// The metadata of one task, with the fields of Python's `TaskInfo`.
 /// `result_json` is the stored result envelope as JSON text, when the read
 /// asked for it and the task has one; `attempts` is a list when the read
-/// asked for attempts.
+/// asked for attempts. `execution` is the stored class of a live task
+/// (`ISOLATED`, `SHARED_ASYNC` or `SHARED_THREAD`), and `None` for a task
+/// read from history, which does not keep the class (Python
+/// `TaskInfo.execution`).
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct TaskInfoRecord {
@@ -88,6 +91,7 @@ pub struct TaskInfoRecord {
     pub failed_reason: Option<String>,
     pub result_json: Option<String>,
     pub attempts: Option<Vec<TaskAttemptRecord>>,
+    pub execution: Option<String>,
 }
 
 impl TaskInfoRecord {
@@ -123,7 +127,17 @@ impl TaskInfoRecord {
             failed_reason: info.failed_reason,
             result_json,
             attempts,
+            execution: execution_of(info.execution),
         })
+    }
+}
+
+/// The reported class of a task: the stored class name of a live task, or
+/// `None` for a task read from history. Pure.
+fn execution_of(execution: ExecutionClass) -> Option<String> {
+    match execution {
+        ExecutionClass::Live(class) => Some(class.as_str().to_owned()),
+        ExecutionClass::NotKeptInHistory => None,
     }
 }
 
@@ -156,13 +170,16 @@ impl<'py> IntoPyObject<'py> for TaskInfoOutcome {
     }
 }
 
-/// Read the info of one task. Reads only.
+/// Read the info of one task. Installs the schema once per handle first, as
+/// Python's `get_task_info_async`; a failed connect or install is
+/// `TASK_INFO_QUERY_FAILED`, as Python reports any failure of the read.
+/// Then reads only.
 pub async fn task_info_operation(
     connection: BrokerConnection,
     task_id: Uuid,
     parts: TaskInfoParts,
 ) -> TaskInfoOutcome {
-    let broker = match connection.broker().await {
+    let broker = match connection.initialized_broker().await {
         Ok(broker) => broker,
         Err(error) => {
             return TaskInfoOutcome::Failed(BrokerFailure::from_broker_error(
@@ -185,5 +202,31 @@ pub async fn task_info_operation(
         },
         Ok(None) => TaskInfoOutcome::NotFound(TaskInfoNotFound { task_id }),
         Err(error) => TaskInfoOutcome::Failed(BrokerFailure::from(error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use horsies_core::Execution;
+
+    use super::*;
+
+    #[test]
+    fn a_live_task_reports_its_stored_class() {
+        for (class, name) in [
+            (Execution::Isolated, "ISOLATED"),
+            (Execution::SharedAsync, "SHARED_ASYNC"),
+            (Execution::SharedThread, "SHARED_THREAD"),
+        ] {
+            assert_eq!(
+                execution_of(ExecutionClass::Live(class)).as_deref(),
+                Some(name)
+            );
+        }
+    }
+
+    #[test]
+    fn a_task_read_from_history_reports_no_class() {
+        assert_eq!(execution_of(ExecutionClass::NotKeptInHistory), None);
     }
 }

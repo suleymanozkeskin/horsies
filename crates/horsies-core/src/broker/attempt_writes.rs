@@ -1,10 +1,10 @@
 //! The two one-statement writers of a RUNNING task's attempt.
 //!
 //! - `horsies_finish_failed_attempt`: the attempt row with the retry or the
-//!   terminal failure (Python `horsies/core/worker/failed_attempt.py`).
+//!   terminal failure (Python `python/horsies/core/worker/failed_attempt.py`).
 //! - `horsies_finish_workflow_success`: the attempt row, the history row and
 //!   the phase-2 record of a workflow task's success (Python
-//!   `horsies/core/worker/workflow_success.py`).
+//!   `python/horsies/core/worker/workflow_success.py`).
 //!
 //! Each function takes the task advisory lock, then the row lock under the
 //! full fence (worker and claim generation; the failed attempt also fences on

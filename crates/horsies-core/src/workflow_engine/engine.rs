@@ -159,7 +159,7 @@ WHERE workflow_id = $1 AND task_index = $2 AND status IN ('PENDING', 'READY')";
 // is the `good_until` member of the node's stored task options ($6), cast as
 // `horsies_workflow_node_tasks_insert` casts it: a text that the timestamptz
 // input cannot read raises (22007 or 22008) and nothing is inserted. Python
-// passes `str()` of the member to its insert (`horsies/core/workflows/engine.py:831-835`).
+// passes `str()` of the member to its insert (`python/horsies/core/workflows/engine.py:831-835`).
 const ENQUEUE_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, input, task_options, execution,
@@ -599,12 +599,12 @@ pub(crate) enum PromotionStep {
     Continue,
     /// A node failure paused the workflow (`on_error = pause`): no other node of the step is promoted. Nodes
     /// that the step did not reach stay PENDING, and resume evaluates them again (Python reverts the nodes of
-    /// the level that it moved and did not build to READY, `horsies/core/workflows/engine.py:474-533`).
+    /// the level that it moved and did not build to READY, `python/horsies/core/workflows/engine.py:474-533`).
     WorkflowPaused,
 }
 
 /// A promoted node, prepared from its own stored data, or refused. Python: `_EnqueueBuildError`
-/// (`horsies/core/workflows/engine.py:620-631`).
+/// (`python/horsies/core/workflows/engine.py:620-631`).
 pub(crate) enum Preparation<T> {
     Built(T),
     Refused(NodeRefusal),
@@ -617,18 +617,18 @@ pub(crate) enum NodeRefusal {
     /// child cannot be built or started. The text of the refusal.
     NotPrepared(String),
     /// An `args_from` key names a member of the node's static input (Python
-    /// `horsies/core/workflows/engine.py:834-839`, `:1151-1163`).
+    /// `python/horsies/core/workflows/engine.py:834-839`, `:1151-1163`).
     StaticMemberConflict(ArgsFromConflict),
     /// A member of the child's params does not decode to its builder parameter; the builder did not run.
     /// The node error is Python's for that member, as [`params_refused_error`] builds it:
     /// `WORKER_SERIALIZATION_ERROR` with the static-member or the `args_from` text, and the workflow id and
-    /// the node index in `data` (`horsies/core/workflows/engine.py:1063-1080`, `:1134-1157`).
+    /// the node index in `data` (`python/horsies/core/workflows/engine.py:1063-1080`, `:1134-1157`).
     ParamsRefused(TaskError),
 }
 
 impl NodeRefusal {
     /// The error that a refused task node stores: `WORKER_SERIALIZATION_ERROR` with the text of the refusal
-    /// (Python `horsies/core/workflows/engine.py:746-790`), or `WORKFLOW_ENQUEUE_FAILED` for an `args_from`
+    /// (Python `python/horsies/core/workflows/engine.py:746-790`), or `WORKFLOW_ENQUEUE_FAILED` for an `args_from`
     /// conflict (`:834-839`).
     pub(crate) fn task_node_error(self, workflow_id: Uuid, task_index: i32) -> TaskError {
         match self {
@@ -647,7 +647,7 @@ impl NodeRefusal {
 
     /// The error that a refused sub-workflow node stores, `WORKFLOW_ENQUEUE_FAILED` in both cases: the build
     /// failure with the name of the workflow that holds the node, `workflow_name` (Python
-    /// `horsies/core/workflows/engine.py:1180-1251`), or the `args_from` conflict (`:1151-1163`).
+    /// `python/horsies/core/workflows/engine.py:1180-1251`), or the `args_from` conflict (`:1151-1163`).
     pub(crate) fn subworkflow_node_error(
         self,
         workflow_id: Uuid,
@@ -740,7 +740,7 @@ pub(crate) fn preparation<T, E: Into<PreparationStop>>(
 /// The child spec of the promoted sub-workflow node `task_index` of `workflow_id`: its input after the
 /// `args_from` merge, made into the builder input by [`child_build_input`] with the node's stored
 /// `args_from`, its stored params, then the build (Python checks the merge and its conflict,
-/// `horsies/core/workflows/engine.py:1048-1163`, before the build, `:1165-1215`).
+/// `python/horsies/core/workflows/engine.py:1048-1163`, before the build, `:1165-1215`).
 ///
 /// Every refusal fails the node alone: a stored input from which the builder input cannot be made and a
 /// failed build are [`NodeRefusal::NotPrepared`] with the label and the text of the [`ChildSpecError`]; a
@@ -783,7 +783,7 @@ pub(crate) fn prepare_child_spec(
 }
 
 /// The error that a node stores when the promotion cannot prepare it (Python `_fail_enqueued_task`,
-/// `horsies/core/workflows/engine.py:474-533`): the code, the message, and the workflow id and the node
+/// `python/horsies/core/workflows/engine.py:474-533`): the code, the message, and the workflow id and the node
 /// index in `data`.
 pub(crate) fn node_not_prepared_error(
     workflow_id: Uuid,
@@ -1054,7 +1054,7 @@ async fn promote_dependents_level(
 
     // Build the task row of each ready plain node before the level writes: these nodes take no
     // workflow context, so the build reads no row. A node that the build refuses ([`NodeRefusal`])
-    // fails alone here (Python `_fail_enqueued_task`, `horsies/core/workflows/engine.py:474-533`):
+    // fails alone here (Python `_fail_enqueued_task`, `python/horsies/core/workflows/engine.py:474-533`):
     // its own data does not read, or its `args_from` names a member of its static input
     // (`:834-839`). A failure that pauses the workflow ends the level before it writes: no node
     // of the level is promoted and no sibling gets a task row; the nodes stay PENDING and resume
@@ -1270,7 +1270,7 @@ async fn promote_dependents_level(
 /// ([`enqueue_workflow_task`]) or its child workflow ([`enqueue_subworkflow_task`]).
 /// An enqueue that raises leaves the node PENDING, as Python's promotion, which runs
 /// in one transaction, leaves it (recovery case 0 runs each candidate in a savepoint,
-/// `horsies/core/workflows/recovery.py:93-94`, `:712-760`).
+/// `python/horsies/core/workflows/recovery.py:93-94`, `:712-760`).
 async fn try_make_ready_and_enqueue(
     pool: &PgPool,
     workflow_id: Uuid,
@@ -1537,7 +1537,7 @@ struct EnqueueInsertParams {
 /// its static input, is [`PreparationStop::Refused`] (the node fails alone,
 /// [`preparation`]); a failed read is [`PreparationStop::Failed`]. The stored
 /// `good_until` is not read here: the insert casts it, and a text that the database
-/// cannot read raises there (Python `horsies/core/workflows/engine.py:831-835`).
+/// cannot read raises there (Python `python/horsies/core/workflows/engine.py:831-835`).
 /// Writes nothing.
 async fn build_enqueued_task_params(
     pool: &PgPool,
@@ -1755,7 +1755,7 @@ async fn enqueue_workflow_task(
 /// (`SUBWORKFLOW_DEPTH_LIMIT_REACHED`).
 ///
 /// Mirrors Python's `_fail_enqueued_task` and `_fail_subworkflow_load`
-/// (`horsies/core/workflows/engine.py:474-584`): writes FAILED via the terminal-state CAS guard
+/// (`python/horsies/core/workflows/engine.py:474-584`): writes FAILED via the terminal-state CAS guard
 /// (`UPDATE_WORKFLOW_TASK_FAILED_SQL`), then runs the failure-propagation chain (handle failure policy →
 /// process dependents → check completion). On a CAS-miss (row already terminal), skips propagation because
 /// whichever path set the terminal state has already propagated the appropriate outcome.
@@ -1880,7 +1880,7 @@ async fn claim_and_fail_node(
 /// parse, a database error) rolls back the READY mark too: the node stays
 /// PENDING and the error is returned (Python raises from
 /// `enqueue_subworkflow_task` and its transaction rolls back,
-/// `horsies/core/workflows/engine.py:1011-1025`).
+/// `python/horsies/core/workflows/engine.py:1011-1025`).
 async fn enqueue_subworkflow_task(
     pool: &PgPool,
     workflow_id: Uuid,
@@ -1952,7 +1952,7 @@ async fn enqueue_subworkflow_task(
     // Build child spec: use spec_builder if available for dynamic parameterization,
     // otherwise use the static registered spec. A child that cannot be built or started,
     // or an `args_from` key that names a member of the static input, fails the node alone
-    // with WORKFLOW_ENQUEUE_FAILED (Python `horsies/core/workflows/engine.py:1151-1215`).
+    // with WORKFLOW_ENQUEUE_FAILED (Python `python/horsies/core/workflows/engine.py:1151-1215`).
     let built = preparation(prepare_child_spec(
         registered,
         workflow_id,
@@ -4311,9 +4311,9 @@ mod promotion_batch_tests {
 
     /// A node of the batched level whose stored options are not a JSON object fails alone with
     /// `WORKER_SERIALIZATION_ERROR` before the level writes (Python
-    /// `horsies/core/workflows/engine.py:798-805`). With `on_error=pause` the failure pauses the
+    /// `python/horsies/core/workflows/engine.py:798-805`). With `on_error=pause` the failure pauses the
     /// workflow and ends the level: the sibling stays PENDING and gets no task row (Python
-    /// `_enqueue_promoted`, `horsies/core/workflows/engine.py:2331-2378`, inserts no task row for
+    /// `_enqueue_promoted`, `python/horsies/core/workflows/engine.py:2331-2378`, inserts no task row for
     /// the level).
     #[tokio::test]
     #[serial]
@@ -4373,7 +4373,7 @@ mod promotion_batch_tests {
     /// A node of the batched level whose stored `good_until` the database cannot read is not
     /// refused: the bulk insert casts the text and raises (22007), and the level's transaction
     /// rolls back, so no node of the level is promoted and no task row stays (Python passes
-    /// `str()` of the member to its insert, `horsies/core/workflows/engine.py:831-835`, and the
+    /// `str()` of the member to its insert, `python/horsies/core/workflows/engine.py:831-835`, and the
     /// step rolls back).
     #[tokio::test]
     #[serial]

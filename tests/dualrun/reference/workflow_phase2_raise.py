@@ -1,6 +1,6 @@
 """The record of a persistent phase-2 raise, before ``horsies_workflow_phase2_record_raise``.
 
-``horsies/core/workflows/phase2_recovery.py`` (``_record_raised_row``) sent,
+``python/horsies/core/workflows/phase2_recovery.py`` (``_record_raised_row``) sent,
 in one session transaction: the read of the record's workflow and node; the
 attempt count update; under the bound, the commit. At the bound, in a
 savepoint (``apply_recovery_limit``): the workflow row lock, and when the

@@ -39,7 +39,7 @@ from horsies.core.skills_installer import (
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_SKILL_DIR = _REPO_ROOT / 'horsies' / '.agents' / 'skills' / 'horsies'
+_SKILL_DIR = _REPO_ROOT / 'python' / 'horsies' / '.agents' / 'skills' / 'horsies'
 _REFERENCE_FILES = ('tasks.md', 'workflows.md', 'configs.md', 'monitoring.md')
 
 
@@ -537,7 +537,7 @@ class TestSkillFolderShape:
 
 
 def _matches_package_glob(relative: str, pattern: str) -> bool:
-    """Match like setuptools: ``*`` stays inside one path part, ``**`` crosses parts."""
+    """Match like a maturin include glob: ``*`` stays inside one path part, ``**`` crosses parts."""
     regex = ''.join(
         '.*' if token == '**' else '[^/]*' if token == '*' else re.escape(token)
         for token in re.split(r'(\*\*|\*)', pattern)
@@ -545,17 +545,33 @@ def _matches_package_glob(relative: str, pattern: str) -> bool:
     return re.fullmatch(regex, relative) is not None
 
 
+def _puts_files_into_the_wheel(entry: dict[str, object]) -> bool:
+    """Whether a ``[tool.maturin] include`` entry targets the wheel.
+
+    maturin takes ``format`` as ``'sdist'``, ``'wheel'`` or a list of them.
+    """
+    match entry['format']:
+        case 'wheel' | ['wheel'] | ['sdist', 'wheel'] | ['wheel', 'sdist']:
+            return True
+        case _:
+            return False
+
+
 class TestPackageData:
     def test_package_data_covers_every_skill_file(self) -> None:
         config = tomllib.loads((_REPO_ROOT / 'pyproject.toml').read_text())
-        patterns = config['tool']['setuptools']['package-data']['horsies']
-        package_root = _REPO_ROOT / 'horsies'
+        patterns = [
+            str(entry['path'])
+            for entry in config['tool']['maturin']['include']
+            if _puts_files_into_the_wheel(entry)
+        ]
+        package_root = _REPO_ROOT / 'python' / 'horsies'
 
         uncovered = [
             relative
             for path in sorted((package_root / '.agents').rglob('*'))
             if path.is_file()
-            for relative in [path.relative_to(package_root).as_posix()]
+            for relative in [path.relative_to(_REPO_ROOT).as_posix()]
             if not any(_matches_package_glob(relative, pattern) for pattern in patterns)
         ]
 

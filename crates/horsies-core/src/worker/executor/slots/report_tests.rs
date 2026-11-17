@@ -1,7 +1,7 @@
 //! The finalize decision of a child report: what the worker writes for each
-//! end that a child reported (Python `horsies/core/lifecycle/classify.py`,
+//! end that a child reported (Python `python/horsies/core/lifecycle/classify.py`,
 //! `classify` and `terminalization_for_refused_retry`, and
-//! `horsies/core/worker/finalize.py`, `_attempt_failure_of`).
+//! `python/horsies/core/worker/finalize.py`, `_attempt_failure_of`).
 //!
 //! Python decides on typed reports first and writes after. The core builds
 //! the write of each failure with a pure function of the report and the

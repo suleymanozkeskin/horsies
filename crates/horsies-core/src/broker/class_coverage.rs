@@ -6,7 +6,7 @@
 //! worker is live while its latest state snapshot is at most
 //! `WORKER_STATE_LIVE_WINDOW_S` old.
 //!
-//! Python reference: `horsies/core/models/class_coverage.py`. The types are
+//! Python reference: `python/horsies/core/models/class_coverage.py`. The types are
 //! frozen reports. The functions are pure; the database reads that feed them
 //! are in `broker::class_coverage_reads`.
 

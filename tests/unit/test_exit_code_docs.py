@@ -20,7 +20,7 @@ REPO = Path(__file__).resolve().parents[2]
 MIGRATION_PAGE = REPO / 'website/src/content/docs/migrations/migration-to-0-7-0.md'
 CLI_PAGES = (
     REPO / 'website/src/content/docs/cli.md',
-    REPO / 'horsies/docs/cli.md',
+    REPO / 'python/horsies/docs/cli.md',
 )
 # Codes that are new or changed in 0.7.0, with the process that exits.
 CHANGED_IN_0_7_0 = {

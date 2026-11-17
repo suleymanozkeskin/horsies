@@ -9,6 +9,8 @@
 //!   released and checks signals every 100 ms; an async call returns an
 //!   asyncio future that the loop's completion queue sets (`bridge`). No
 //!   runtime thread takes the GIL.
+//! - A service run (a worker, the scheduler loop) ends at a stop request and
+//!   has no total bound (`bridge::service_run`).
 //! - A Python callback of the core runs on the process's one callback
 //!   thread, started at the first callback (`bridge::callback_thread`).
 //! - A panic in an operation raises `PanicException` (a `BaseException`); a
@@ -92,6 +94,14 @@ fn mint_task_id() -> PyResult<MintOutcome> {
             cause: error.to_string(),
         }),
     })
+}
+
+/// The files of the baseline migration (version 1000) as `(file name, text)`
+/// pairs, in the order they run. The texts are compiled into this module from
+/// `crates/horsies-core/baseline/`. Pure: no I/O, and it starts no runtime.
+#[pyfunction]
+fn baseline_sql_files() -> Vec<(&'static str, &'static str)> {
+    horsies_core::BASELINE_SQL_FILE_TEXTS.to_vec()
 }
 
 /// Set what a panic in a core background task does in this process:
@@ -194,6 +204,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::task_info::TaskInfoRecord>()?;
     module.add_class::<operations::task_info::TaskAttemptRecord>()?;
     module.add_class::<operations::task_info::TaskInfoNotFound>()?;
+    module.add_function(wrap_pyfunction!(baseline_sql_files, module)?)?;
     module.add_function(wrap_pyfunction!(core_state, module)?)?;
     module.add_function(wrap_pyfunction!(mint_task_id, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_log_levels, module)?)?;

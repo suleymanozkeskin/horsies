@@ -173,7 +173,7 @@ async fn child_summary_counts_follow_the_child_node_statuses() {
 /// `test_terminal_two_step_handles_zero_task_workflow`: a workflow with no
 /// node has an empty terminal set, and its completion reads no row and fails
 /// on nothing. It has no output node, so it stores Python's outputless result
-/// with three empty maps (`horsies/core/workflows/engine.py:3935-3983`; the
+/// with three empty maps (`python/horsies/core/workflows/engine.py:3935-3983`; the
 /// baseline `horsies_workflow_outputless_result`).
 #[tokio::test]
 #[serial]
