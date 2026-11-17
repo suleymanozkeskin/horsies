@@ -265,7 +265,7 @@ export default defineConfig({
 						{
 							label: 'Quick Start',
 							items: [
-								{ label: 'Getting Started', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Getting Started', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
 							],
 						},
 						{
@@ -275,15 +275,15 @@ export default defineConfig({
 								{ label: 'Task Errors', slug: 'rust/tasks/errors' },
 								{ label: 'Sending Tasks', slug: 'rust/tasks/sending-tasks' },
 								{ label: 'Retrieving Results', slug: 'rust/tasks/retrieving-results' },
-								{ label: 'Blocking API', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Blocking API', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
 							],
 						},
 						{
 							label: 'Workflows',
 							items: [
-								{ label: 'Workflow API', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
-								{ label: 'Typed Node Builder', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
-								{ label: 'Subworkflows', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Workflow API', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Typed Node Builder', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Subworkflows', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
 							],
 						},
 						{
@@ -295,36 +295,36 @@ export default defineConfig({
 						{
 							label: 'Workers',
 							items: [
-								{ label: 'Worker Setup', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Worker Setup', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
 							],
 						},
 						{
 							label: 'Scheduling',
 							items: [
-								{ label: 'Schedule Config', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Schedule Config', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
 							],
 						},
 						{
 							label: 'Monitoring',
 							items: [
 								{ label: 'Health Reads', slug: 'rust/monitoring/health-reads' },
-								{ label: 'Monitoring Queries', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
-								{ label: 'Web UI Mount', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Monitoring Queries', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Web UI Mount', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
 							],
 						},
 						{
 							label: 'Operations',
 							items: [
-								{ label: 'Rerun in Your Transaction', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
-								{ label: 'Async Frameworks', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
-								{ label: 'Testing', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Rerun in Your Transaction', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Async Frameworks', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Testing', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
 								{ label: 'CLI Reference', slug: 'rust/cli' },
 							],
 						},
 						{
 							label: 'Migrations',
 							items: [
-								{ label: 'Switching to 0.8.0', link: 'https://github.com/suleymanozkeskin/horsies/issues/1412', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Switching to 0.8.0', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
 							],
 						},
 					],
