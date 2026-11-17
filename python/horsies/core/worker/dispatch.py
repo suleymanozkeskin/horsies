@@ -119,7 +119,13 @@ from horsies.core.worker.runner_heartbeat import (
     StaleRunningRecoveryOn,
     stale_running_recovery,
 )
-from horsies.core.worker.shared_stop import RetryPlacement, TimedOutAtKill
+from horsies.core.worker.shared_stop import (
+    NoCancelSignal,
+    RetryPlacement,
+    TimedOutAtKill,
+    TimeoutCancel,
+    timeout_error_data,
+)
 from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
 from horsies.core.worker.thread_slots import ThreadRunRequest
 from horsies.core.worker.finalize import _NodeFinishOwed, _phase2_of_a_replay
@@ -832,6 +838,7 @@ class DispatchMixin:
                     timeout_ms,
                     claim,
                     retry=RetryPlacement.SAME_CLASS,
+                    cancel=NoCancelSignal(),
                 )
             case ChildEndUnknown(pid=pid):
                 match await self._wait_for_unseen_exit(handle, task_id, pid):
@@ -841,6 +848,7 @@ class DispatchMixin:
                             timeout_ms,
                             claim,
                             retry=RetryPlacement.SAME_CLASS,
+                            cancel=NoCancelSignal(),
                         )
                     case _AttemptEndUnknown() as unknown:
                         return unknown
@@ -897,6 +905,7 @@ class DispatchMixin:
                             timeout_ms,
                             claim,
                             retry=RetryPlacement.SAME_CLASS,
+                            cancel=NoCancelSignal(),
                         )
                     case _AttemptEndUnknown() as unknown:
                         return unknown
@@ -914,6 +923,7 @@ class DispatchMixin:
                     timeout_ms,
                     claim,
                     retry=RetryPlacement.SAME_CLASS,
+                    cancel=NoCancelSignal(),
                 )
             case NotDispatched():
                 raise AssertionError(
@@ -1027,12 +1037,14 @@ class DispatchMixin:
         claim: DispatchClaim,
         *,
         retry: RetryPlacement,
+        cancel: TimeoutCancel,
     ) -> _TimeoutSettled | _TimeoutWriteFailed:
         """Record the timeout of an attempt whose child has exited.
 
         Ownership-guarded like every finalize path, and fenced to the claim
         generation of ``claim``. ``retry`` is where the retry runs, when
-        the policy retries the timeout.
+        the policy retries the timeout. ``cancel`` decides the
+        ``cancel_end`` of the error data (``timeout_error_data``).
 
         ``_TimeoutSettled`` covers each way the row is settled:
         - a RUNNING row fails with TASK_TIMEOUT and its attempt row, in one
@@ -1057,6 +1069,7 @@ class DispatchMixin:
                 timeout_ms,
                 claim,
                 retry,
+                cancel,
             )
         except Exception as exc:
             logger.error(
@@ -1073,6 +1086,7 @@ class DispatchMixin:
         timeout_ms: int,
         claim: DispatchClaim,
         retry: RetryPlacement,
+        cancel: TimeoutCancel,
     ) -> _TimeoutSettled:
         """Settle this claim's row for a timeout.
 
@@ -1082,7 +1096,7 @@ class DispatchMixin:
         task_error = TaskError(
             error_code=OutcomeCode.TASK_TIMEOUT,
             message=f'Task exceeded timeout_ms={timeout_ms}',
-            data={'task_id': task_id, 'timeout_ms': timeout_ms},
+            data=timeout_error_data(task_id, timeout_ms, cancel),
         )
         written = await self._write_ended_attempt(
             task_id,

@@ -73,7 +73,7 @@ from horsies.core.worker.stored_timeout import (
     TaskTimeout,
     TimeoutValueInvalid,
 )
-from horsies.core.worker.shared_stop import RetryPlacement
+from horsies.core.worker.shared_stop import NoCancelSignal, RetryPlacement
 from horsies.core.worker.thread_slots import RunCulprit, ThreadRunRequest
 from horsies.core.worker.worker import Worker
 
@@ -332,7 +332,10 @@ class TestFinalizeThread:
         ('outcome', 'retry'),
         [
             (
-                SeatDeadlineEnded(retry=RetryPlacement.SAME_CLASS),
+                SeatDeadlineEnded(
+                    retry=RetryPlacement.SAME_CLASS,
+                    cancel=NoCancelSignal(),
+                ),
                 RetryPlacement.SAME_CLASS,
             ),
             (
@@ -371,6 +374,7 @@ class TestFinalizeThread:
             1500,
             CLAIM,
             retry=retry,
+            cancel=NoCancelSignal(),
         )
         worker._finalize_child_loss.assert_not_awaited()  # type: ignore[attr-defined]
 
@@ -396,6 +400,7 @@ class TestFinalizeThread:
                     1500,
                     RetryPlacement.ISOLATED,
                     CLAIM,
+                    NoCancelSignal(),
                 )
             case Ok():
                 raise AssertionError(result)
@@ -424,7 +429,10 @@ class TestFinalizeThread:
         with pytest.raises(AssertionError, match='deadline it does not have'):
             await self._finalize(
                 worker,
-                SeatDeadlineEnded(retry=RetryPlacement.SAME_CLASS),
+                SeatDeadlineEnded(
+                    retry=RetryPlacement.SAME_CLASS,
+                    cancel=NoCancelSignal(),
+                ),
                 refusal,
             )
 
