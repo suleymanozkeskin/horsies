@@ -19,6 +19,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.utils.url import to_psycopg_url
 from horsies.core.workflows.engine import (
     check_workflow_completion,
@@ -197,6 +198,7 @@ async def test_rolled_back_finalization_sends_no_notification(
 async def test_a_failed_child_gives_its_parent_a_summary_without_output(
     clean_workflow_tables: None,
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
 ) -> None:
     """The child's output node completed, but the child FAILED: the parent's
@@ -216,7 +218,7 @@ async def test_a_failed_child_gives_its_parent_a_summary_without_output(
 
     await check_workflow_completion(session, child_id)
     await session.commit()
-    await _make_worker(engine)._drive_parent_propagations([child_id])
+    await _make_worker(engine, broker)._drive_parent_propagations([child_id])
 
     summary_text = (await session.execute(
         text("""
