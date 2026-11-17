@@ -17,8 +17,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Final, LiteralString, assert_never, cast
 
@@ -26,8 +27,11 @@ from psycopg import AsyncCursor
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
+import horsies._core as core
+
 from ..history.terminalization.move import TASK_LOCK_SEED
 from ..logging import get_logger
+from ..types.core_failure import CoreOperationFailed
 from ..types.result import Err, Ok, Result
 from ..utils.db import (
     AutocommitFailure,
@@ -66,7 +70,14 @@ from .fences import (
     TerminalFence,
     WorkerOwned,
 )
-from .operations import function_name_of
+from .core_records import (
+    already_applied_of,
+    lost_claim_of,
+    observed_of,
+    source_state_conflict_of,
+    task_absent_of,
+)
+from .operations import TerminalizationKind, function_name_of
 from .outcomes import (
     AlreadyApplied,
     Applied,
@@ -554,21 +565,53 @@ class FusedCompletionBatch:
         return self.commands[0].fence.worker_id
 
 
+COMPLETE_SUCCESSES_SUBJECT: Final = 'CoreHandle.complete_successes_async'
+"""The subject of a failure of the plain-success batch in the core."""
+
+
+@dataclass(frozen=True, slots=True)
+class CoreNotSent:
+    """The core did not send the batch statement: its pools, its client
+    family check or its checkout failed (the record ``BatchNotSent``).
+    ``error`` carries the core's message and retry classification."""
+
+    error: CoreOperationFailed
+
+
+@dataclass(frozen=True, slots=True)
+class CoreStatementRefused:
+    """The server refused the batch statement that the core sent (the
+    record ``BatchRefused``); one row can be the cause. ``error`` carries the
+    core's message and retry classification."""
+
+    error: CoreOperationFailed
+
+
+@dataclass(frozen=True, slots=True)
+class CoreOutcomeUnknown:
+    """The reply of the batch statement that the core sent was lost (the
+    record ``BatchCommitUnknown``). ``error`` carries the core's message."""
+
+    error: CoreOperationFailed
+
+
 @dataclass(frozen=True, slots=True)
 class BatchRolledBack:
     """No row of the batch changed.
 
-    ``cause`` is ``NotSent`` (the pool or the connect failed) or
-    ``StatementRefused`` (the driver or the server refused the statement; a
-    row that raises refuses the whole statement).
+    ``cause`` is ``NotSent`` or ``CoreNotSent`` (the statement was not sent:
+    the pool, the connect or the checkout failed), or ``StatementRefused`` or
+    ``CoreStatementRefused`` (the driver or the server refused the statement;
+    a row that raises refuses the whole statement).
     """
 
-    cause: NotSent | StatementRefused
+    cause: NotSent | StatementRefused | CoreNotSent | CoreStatementRefused
 
     @property
     def retryable(self) -> bool:
         """Whether the cause may clear: a connection error, a pool timeout,
-        or a transient server error such as a deadlock."""
+        or a transient server error such as a deadlock. A core cause carries
+        the core's classification."""
         return is_retryable_connection_error(self.cause.error)
 
 
@@ -578,7 +621,7 @@ class BatchCommitUnknown:
     committed or not; a replay of a row classifies it (``AlreadyApplied``
     when it committed)."""
 
-    cause: OutcomeUnknown
+    cause: OutcomeUnknown | CoreOutcomeUnknown
 
 
 type BatchWriteError = BatchRolledBack | BatchCommitUnknown
@@ -635,6 +678,10 @@ async def apply_fused_batch(
 ) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
     """Write a batch of plain-success completions as one statement.
 
+    The worker writes through the core (``complete_fused_batch_in_core``);
+    this stays for the dual-run reference of the worker's caller and for the
+    tests of the statement.
+
     One round trip in autocommit on ``runner``: a checkout per call
     (``PooledStatements``) or a held connection (``HeldConnection``). A batch of
     one row runs ``horsies_complete_task_fused`` itself; a batch of several
@@ -669,6 +716,130 @@ async def apply_fused_batch(
             )
         _log_outcome(command, outcome)
     return Ok(tuple(outcomes))
+
+
+async def complete_fused_batch_in_core(
+    handle: core.CoreHandle,
+    batch: FusedCompletionBatch,
+) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
+    """``apply_fused_batch`` through the core: one statement
+    (``CoreHandle.complete_successes_async``), the same outcomes and the
+    same log.
+
+    The core sends ``horsies_complete_tasks_fused`` for every batch, also a
+    batch of one row; that function runs ``horsies_complete_task_fused``
+    once per row. The outcome of a batch of one row has no ordinality, as
+    ``apply_fused_batch`` gives it; the outcome of a batch of several rows
+    has its 1-based position. A task id that is not a UUID is a defect of
+    the claim that gave it: ``ValueError``.
+
+    Outcomes:
+        Ok(outcomes): one outcome per command, in input order.
+        Err(BatchRolledBack(CoreNotSent)): the statement was not sent; no
+            row changed.
+        Err(BatchRolledBack(CoreStatementRefused)): the server refused the
+            statement; no row changed.
+        Err(BatchCommitUnknown(CoreOutcomeUnknown)): the commit of each row
+            is unknown.
+
+    Raises:
+        CoreError: the core of this process cannot run the call.
+        OutcomeDecodeError: a record outside the Python catalogs.
+        RuntimeError: an outcome of another task at the position of a
+            command, or a count other than the batch. These are defects.
+    """
+    request = core.SuccessBatchRequest(
+        worker_id=batch.worker_id,
+        rows=[
+            (uuid.UUID(command.task_id), command.fence.claimed_at, command.result_json)
+            for command in batch.commands
+        ],
+    )
+    record = await handle.complete_successes_async(request)
+    match record:
+        case core.SuccessesWritten():
+            pass
+        case core.BatchNotSent(message=message, retryable=retryable):
+            return Err(
+                BatchRolledBack(
+                    cause=CoreNotSent(
+                        error=CoreOperationFailed(COMPLETE_SUCCESSES_SUBJECT, message, retryable),
+                    ),
+                ),
+            )
+        case core.BatchRefused(message=message, retryable=retryable):
+            return Err(
+                BatchRolledBack(
+                    cause=CoreStatementRefused(
+                        error=CoreOperationFailed(COMPLETE_SUCCESSES_SUBJECT, message, retryable),
+                    ),
+                ),
+            )
+        case core.BatchCommitUnknown(message=message):
+            return Err(
+                BatchCommitUnknown(
+                    cause=CoreOutcomeUnknown(
+                        error=CoreOperationFailed(COMPLETE_SUCCESSES_SUBJECT, message, True),
+                    ),
+                ),
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+    rows = record.rows
+    if len(rows) != len(batch.commands):
+        raise RuntimeError(
+            f'{COMPLETE_SUCCESSES_SUBJECT} answered {len(rows)} rows for a batch '
+            f'of {len(batch.commands)}'
+        )
+    outcomes: list[TerminalizationOutcome] = []
+    for position, (command, row) in enumerate(zip(batch.commands, rows, strict=True), start=1):
+        outcome = replace(
+            _success_row_outcome(row),
+            ordinality=None if len(batch.commands) == 1 else position,
+        )
+        if outcome.task_id != command.task_id:
+            raise RuntimeError(
+                f'{COMPLETE_SUCCESSES_SUBJECT} answered task {outcome.task_id} at '
+                f'the position of task {command.task_id}'
+            )
+        _log_outcome(command, outcome)
+        outcomes.append(outcome)
+    return Ok(tuple(outcomes))
+
+
+def _success_row_outcome(
+    row: core.SuccessApplied
+    | core.AttemptAlreadyApplied
+    | core.AttemptLostClaim
+    | core.AttemptSourceStateConflict
+    | core.AttemptTaskAbsent,
+) -> TerminalizationOutcome:
+    """The outcome of one row record of a batch, with no ordinality. Pure.
+
+    Raises:
+        OutcomeDecodeError: a record outside the Python catalogs.
+    """
+    match row:
+        case core.SuccessApplied():
+            return Applied(
+                task_id=str(row.task_id),
+                ordinality=None,
+                terminal_at=row.terminal_at,
+                kind=TerminalizationKind.COMPLETE_FUSED,
+                observed=observed_of(
+                    row.observed_status, row.observed_worker_id, row.observed_claimed_at,
+                ),
+            )
+        case core.AttemptAlreadyApplied():
+            return already_applied_of(row)
+        case core.AttemptLostClaim():
+            return lost_claim_of(row)
+        case core.AttemptSourceStateConflict():
+            return source_state_conflict_of(row)
+        case core.AttemptTaskAbsent():
+            return task_absent_of(row)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _fused_statement(batch: FusedCompletionBatch) -> SingleStatement:

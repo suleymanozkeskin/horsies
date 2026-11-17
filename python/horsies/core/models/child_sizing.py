@@ -77,8 +77,8 @@ give 1,660, 40 give 1,520."""
 
 FINALIZE_BATCH_FLUSHERS: Final = 2
 """The steady flushers of the batched success write (``FinalizeBatcher``):
-they write whenever rows wait. Each one holds one connection of the parent
-pool while it writes (``HeldConnection``)."""
+they write whenever rows wait. Each one runs one statement at a time through
+the worker's core handle, whose pool has the size of the parent pool."""
 
 PARENT_POOL_CLAIM_CONNECTIONS: Final = 1
 """The connection of the parent pool that the claim loop holds while it

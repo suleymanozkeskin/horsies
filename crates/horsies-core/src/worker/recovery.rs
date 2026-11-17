@@ -36,7 +36,6 @@ use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 #[cfg(test)]
 mod p7_maintenance_tests {
     use super::*;
-    use crate::broker::terminalization::on_test_pool::terminalize;
     use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
     use crate::core::history::ddl::classes::{finite_class_parent_name, register_period_class};
     use crate::core::history::ddl::runtime_names::daily_leaf_name;
@@ -50,7 +49,8 @@ mod p7_maintenance_tests {
     use crate::core::history::partitions::manager::create_daily_leaf;
     use crate::core::history::partitions::publication::LoaderPublication;
     use crate::core::history::periods::RetentionDays;
-    use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
+    use crate::core::lifecycle::TerminalizationOutcome;
+    use crate::test_support::terminal_writes;
     use chrono::Timelike;
     use serial_test::serial;
     use uuid::Uuid;
@@ -114,18 +114,10 @@ mod p7_maintenance_tests {
             serde_json::json!({"retained": true}),
         ))
         .unwrap();
-        let outcomes = terminalize(
-            pool,
-            &TerminalizationCommand::CompleteLockedTask {
-                task_id,
-                fence: PriorLockedRead {
-                    worker_id: "p7-retention-worker".to_owned(),
-                },
-                result_json: result,
-            },
-        )
-        .await
-        .unwrap();
+        let outcomes =
+            terminal_writes::complete_workflow_task(pool, task_id, "p7-retention-worker", &result)
+                .await
+                .unwrap();
         assert!(matches!(
             outcomes.as_slice(),
             [TerminalizationOutcome::Applied { .. }]

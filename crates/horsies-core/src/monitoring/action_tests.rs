@@ -9,10 +9,9 @@ use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::lifecycle::{
-    PriorLockedRead, TerminalizationCommand, TerminalizationOutcome, WorkerOwned,
-};
+use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome, WorkerOwned};
 use crate::core::registry::workflow::WorkflowSpecRegistry;
+use crate::test_support::terminal_writes::{self, TerminalFailure};
 use crate::{TaskStatus, WorkflowStatus};
 
 use super::*;
@@ -67,14 +66,16 @@ async fn clean_w3(pool: &PgPool) {
 
 /// Insert one live row. Only a CLAIMED row holds a claim lease
 /// (`horsies_tasks_status_live`; Python
-/// `tests/integration/monitoring_seeding.py:268-274`).
+/// `tests/integration/monitoring_seeding.py:268-274`). A RUNNING row carries
+/// the process facts that its start writes.
 async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
     sqlx::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
             started_at, claimed_at, claimed_by_worker_id, claim_expires_at, is_workflow_task,
             retry_count, max_retries, command_fingerprint_version, command_fingerprint,
-            retention_class_key, retain_rerun_input, created_at, updated_at, execution
+            retention_class_key, retain_rerun_input, created_at, updated_at, execution,
+            worker_pid, worker_hostname, worker_process_name
         ) VALUES (
             $1, $2, 'default', 100, 'null', $3, NOW(), NOW() - INTERVAL '60 seconds',
             CASE WHEN $3 = 'RUNNING' THEN NOW() - INTERVAL '30 seconds' END,
@@ -82,7 +83,10 @@ async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
             CASE WHEN $3 = 'CLAIMED' THEN NOW() + INTERVAL '1 minute' END, $5, 0, 3,
             CASE WHEN $5 THEN NULL ELSE 1 END,
             CASE WHEN $5 THEN NULL ELSE decode(repeat('0c', 32), 'hex') END, 'forever', FALSE,
-            NOW(), NOW(), 'ISOLATED'
+            NOW(), NOW(), 'ISOLATED',
+            CASE WHEN $3 = 'RUNNING' THEN 4242 END,
+            CASE WHEN $3 = 'RUNNING' THEN 'w3-host' END,
+            CASE WHEN $3 = 'RUNNING' THEN 'w3-process' END
         )",
     )
     .bind(seed.id)
@@ -95,37 +99,25 @@ async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
     .expect("seed W3 task");
 }
 
+/// The success of a RUNNING plain task of `w3-worker`.
 async fn complete_task(pool: &PgPool, task_id: Uuid) {
-    let outcomes = terminalize(
-        pool,
-        &TerminalizationCommand::CompleteLockedTask {
-            task_id,
-            fence: PriorLockedRead {
-                worker_id: "w3-worker".to_owned(),
-            },
-            result_json: "{\"Ok\":true}".to_owned(),
-        },
-    )
-    .await
-    .expect("complete W3 task");
+    let outcomes =
+        terminal_writes::complete_plain_task(pool, task_id, "w3-worker", "{\"Ok\":true}")
+            .await
+            .expect("complete W3 task");
     assert!(matches!(
         outcomes.as_slice(),
         [TerminalizationOutcome::Applied { .. }]
     ));
 }
 
+/// The terminal failure of a RUNNING task of `w3-worker`, plain or workflow.
 async fn fail_task(pool: &PgPool, task_id: Uuid) {
-    let outcomes = terminalize(
+    let outcomes = terminal_writes::fail_running_task(
         pool,
-        &TerminalizationCommand::FailLockedTask {
-            task_id,
-            fence: PriorLockedRead {
-                worker_id: "w3-worker".to_owned(),
-            },
-            result_json: "{\"Err\":{}}".to_owned(),
-            error_code: Some("TASK_EXCEPTION".to_owned()),
-            failed_reason: Some("W3 failure".to_owned()),
-        },
+        task_id,
+        "w3-worker",
+        &TerminalFailure::of_task("{\"Err\":{}}", Some("TASK_EXCEPTION"), Some("W3 failure")),
     )
     .await
     .expect("fail W3 task");

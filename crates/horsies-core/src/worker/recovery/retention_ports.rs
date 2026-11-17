@@ -15,7 +15,6 @@ use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
 use super::*;
-use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::SendKind;
 use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
 use crate::core::history::ddl::classes::{finite_class_parent_name, register_period_class};
@@ -26,7 +25,8 @@ use crate::core::history::partitions::catalog::database_now;
 use crate::core::history::partitions::manager::create_daily_leaf;
 use crate::core::history::partitions::publication::UnpublishedLoader;
 use crate::core::history::periods::RetentionDays;
-use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
+use crate::core::lifecycle::TerminalizationOutcome;
+use crate::test_support::terminal_writes;
 
 /// The row retention window of the Python tests.
 const RETENTION_HOURS: u32 = 24;
@@ -414,18 +414,10 @@ async fn a_finished_row_lands_in_the_leaf_of_its_class() {
     .expect("encode result");
     for class_key in ["forever", "standard_30d", "standard_7d"] {
         let task_id = seed_running_task(&database.pool, class_key, worker_id).await;
-        let outcomes = terminalize(
-            &database.pool,
-            &TerminalizationCommand::CompleteLockedTask {
-                task_id,
-                fence: PriorLockedRead {
-                    worker_id: worker_id.to_owned(),
-                },
-                result_json: result.clone(),
-            },
-        )
-        .await
-        .expect("complete the task");
+        let outcomes =
+            terminal_writes::complete_plain_task(&database.pool, task_id, worker_id, &result)
+                .await
+                .expect("complete the task");
         assert!(
             matches!(
                 outcomes.as_slice(),

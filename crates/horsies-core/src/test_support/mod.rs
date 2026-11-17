@@ -1,7 +1,9 @@
 //! Test support of the library's tests: the test databases
-//! ([`database`]), and the core handle on one of them.
+//! ([`database`]), the core handle on one of them, and the terminal writes
+//! of seeds ([`terminal_writes`]).
 
 mod database;
+pub(crate) mod terminal_writes;
 
 pub(crate) use database::{
     connect, database_name_prefix, database_of_this_test, is_generated_name, is_valid_prefix,

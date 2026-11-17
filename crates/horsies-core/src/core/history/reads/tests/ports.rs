@@ -11,10 +11,10 @@ use sha2::{Digest, Sha256};
 use super::*;
 use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::pools::unpinged_single_connection_core_pool;
-use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::names::{TASK_DETAIL_FUNCTION, TASK_RESULT_FUNCTION};
 use crate::core::history::reads::publisher::rendered_reader_signatures;
-use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
+use crate::core::lifecycle::TerminalizationOutcome;
+use crate::test_support::terminal_writes::{self, TerminalFailure};
 
 const PORT_WORKER: &str = "port-reads-worker";
 
@@ -72,18 +72,10 @@ async fn seed_running_task(
 }
 
 async fn complete(pool: &PgPool, task_id: Uuid) {
-    let outcomes = terminalize(
-        pool,
-        &TerminalizationCommand::CompleteLockedTask {
-            task_id,
-            fence: PriorLockedRead {
-                worker_id: PORT_WORKER.to_owned(),
-            },
-            result_json: "{\"Ok\":true}".to_owned(),
-        },
-    )
-    .await
-    .expect("complete the task");
+    let outcomes =
+        terminal_writes::complete_plain_task(pool, task_id, PORT_WORKER, "{\"Ok\":true}")
+            .await
+            .expect("complete the task");
     assert!(
         matches!(
             outcomes.as_slice(),
@@ -139,17 +131,11 @@ async fn the_detail_carries_the_archived_inline_rerun_input() {
     publish_readers(&database.pool).await;
     let task_id = v7_with_birth(Utc::now() - Duration::minutes(1));
     seed_running_task(&database.pool, task_id, "standard_30d", "{\"x\":1}", true).await;
-    let outcomes = terminalize(
+    let outcomes = terminal_writes::fail_running_task(
         &database.pool,
-        &TerminalizationCommand::FailLockedTask {
-            task_id,
-            fence: PriorLockedRead {
-                worker_id: PORT_WORKER.to_owned(),
-            },
-            result_json: "{\"Err\":{}}".to_owned(),
-            error_code: Some("TASK_ERROR".to_owned()),
-            failed_reason: Some("port failure".to_owned()),
-        },
+        task_id,
+        PORT_WORKER,
+        &TerminalFailure::of_task("{\"Err\":{}}", Some("TASK_ERROR"), Some("port failure")),
     )
     .await
     .expect("fail the task");
