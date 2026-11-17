@@ -123,7 +123,7 @@ impl PostgresBroker {
                         attempt = attempt + 2,
                         wait_ms = wait.as_millis() as u64,
                         error = %error,
-                        "workflow start failed (retryable), retrying",
+                        "workflow start failed (retryable), retrying: {error}",
                     );
                     tokio::time::sleep(wait).await;
                     attempt += 1;
@@ -171,7 +171,10 @@ impl PostgresBroker {
                 workflow_id = %workflow_id,
                 child_workflow_id = %failure.failed_child_workflow_id,
                 error = %failure.error,
-                "parent advance after the workflow start failed; workflow recovery advances it",
+                "Parent advance after the start of workflow {workflow_id} failed at child \
+                 workflow {}: {}; workflow recovery advances it",
+                failure.failed_child_workflow_id,
+                failure.error,
             );
         }
         Ok(outcome)

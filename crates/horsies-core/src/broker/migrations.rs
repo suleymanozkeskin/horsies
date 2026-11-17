@@ -809,7 +809,7 @@ async fn install_once(
         (Err(error), Err(lost)) => {
             tracing::warn!(
                 error = %lost,
-                "the schema install lock was not released cleanly after a failed install",
+                "the schema install lock was not released cleanly after a failed install: {lost}",
             );
             Err(error)
         }
@@ -1184,7 +1184,8 @@ impl LockSession {
             Err(failure) => {
                 tracing::warn!(
                     error = %failure,
-                    "releasing the schema install lock failed; the connection is discarded",
+                    "releasing the schema install lock failed: {failure}; the connection is \
+                     discarded",
                 );
                 Err(SchemaInstallError::Lock(InstallLockFailure::OwnershipLost))
             }

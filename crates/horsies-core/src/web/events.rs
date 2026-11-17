@@ -351,7 +351,10 @@ impl EventBroadcaster {
         let topics = match TopicSubscriptions::subscribe(&self.broker).await {
             Ok(topics) => topics,
             Err(error) => {
-                tracing::warn!(error = %error, "monitoring event subscriptions failed to start");
+                tracing::warn!(
+                    error = %error,
+                    "Monitoring event listener failed to subscribe: {error}",
+                );
                 self.degrade().await;
                 return;
             }

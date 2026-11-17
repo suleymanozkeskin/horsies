@@ -2053,14 +2053,15 @@ impl PostgresBroker {
         {
             Ok(subscription) => ResultWaitMode::Subscribed(subscription),
             Err(error @ ListenError::NoSessionUrl) => {
-                tracing::debug!(%task_id, error = %error, "the result wait polls");
+                tracing::debug!(%task_id, error = %error, "the result wait polls: {error}");
                 ResultWaitMode::Polling
             }
             Err(error @ (ListenError::PlanRefused(_) | ListenError::Subscribe(_))) => {
                 tracing::warn!(
                     %task_id,
                     error = %error,
-                    "the task_done subscription was refused; the result wait polls instead",
+                    "LISTEN unavailable; falling back to polling for task_done. Original error: \
+                     {error}",
                 );
                 ResultWaitMode::Polling
             }

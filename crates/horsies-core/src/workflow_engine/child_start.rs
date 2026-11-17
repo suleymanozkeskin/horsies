@@ -306,8 +306,8 @@ pub(crate) async fn child_start_kind(
                 task_index = owed.task_index,
                 sub_workflow_name = ?owed.sub_workflow_name,
                 definition_key = ?owed.sub_definition_key,
-                error = ?failure.message(),
-                "sub-workflow child not started; its node fails",
+                error = %failure,
+                "sub-workflow child not started: {failure}; its node fails",
             );
             Ok(ChildStartKind::Failure {
                 failure_result: failure.into_stored_result()?,

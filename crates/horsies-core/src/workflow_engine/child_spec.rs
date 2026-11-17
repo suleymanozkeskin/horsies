@@ -232,14 +232,6 @@ pub(crate) enum NodeFailure {
 }
 
 impl NodeFailure {
-    /// The error text, for the log.
-    pub(crate) fn message(&self) -> Option<&str> {
-        match self {
-            Self::Core(error) => error.message.as_deref(),
-            Self::Client { message, .. } => Some(message),
-        }
-    }
-
     /// The result envelope that the node stores.
     ///
     /// Errors: [`WorkflowError::Serialization`] when a core error does not
@@ -250,6 +242,17 @@ impl NodeFailure {
                 crate::workflow_engine::start_statement::node_failure_result(error)
             }
             Self::Client { failure_result, .. } => Ok(failure_result),
+        }
+    }
+}
+
+/// The error text of a node failure, for the log: the core's error with its
+/// code (`[CODE] message`), or the client's text.
+impl std::fmt::Display for NodeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Core(error) => write!(f, "{error}"),
+            Self::Client { message, .. } => f.write_str(message),
         }
     }
 }
@@ -312,8 +315,8 @@ mod tests {
             failure_result: r#"{"err":{"error_code":"SUBWORKFLOW_LOAD_FAILED"}}"#.to_owned(),
         };
         assert_eq!(
-            failure.message(),
-            Some("Failed to load subworkflow definition for parent:1")
+            failure.to_string(),
+            "Failed to load subworkflow definition for parent:1"
         );
         assert_eq!(
             failure.into_stored_result().expect("stored"),

@@ -883,7 +883,11 @@ async fn advance_after_candidate(
             workflow_id = %workflow_id,
             error_type = failure.error_type(),
             error = %failure.detail(),
-            "parent advance after a workflow recovery candidate failed; recovery case 1.6 advances it",
+            "Parent advance after a workflow recovery candidate failed: \
+             workflow_id={workflow_id} exception_type={} exception={}; recovery case 1.6 \
+             advances it",
+            failure.error_type(),
+            failure.detail(),
         );
     }
 }
@@ -1299,7 +1303,7 @@ async fn recover_global_workflow_end_states(
         )
         .await;
         if let Err(error) = released {
-            tracing::error!(%error, "workflow audit claim release failed");
+            tracing::error!(%error, "Workflow audit claim release failed: {error}");
             report.errors += 1;
             report.metrics.case2_3.errors += 1;
             report.metrics.case4.errors += 1;
@@ -1424,7 +1428,8 @@ async fn recover_orphan_candidate(
             tracing::error!(
                 workflow_id = %workflow_id,
                 error = %error,
-                "recovery case 4: failed to mark orphaned workflow as FAILED",
+                "Global orphan workflow recovery failed: workflow_id={workflow_id} \
+                 exception={error}",
             );
             report.errors += 1;
             report.metrics.case4.errors += 1;
@@ -1698,7 +1703,8 @@ async fn recover_tree_case4(
                 tracing::error!(
                     workflow_id = %row.workflow_id,
                     error = %error,
-                    "recovery case 4: failed to mark orphaned workflow as FAILED",
+                    "Orphan workflow recovery failed: workflow_id={} exception={error}",
+                    row.workflow_id,
                 );
                 report.errors += 1;
                 report.metrics.case4.errors += 1;

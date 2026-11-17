@@ -378,7 +378,7 @@ impl Manager for CoreManager {
                     tracing::debug!(
                         target: LOG_TARGET,
                         %error,
-                        "a pooled connection failed its ping; it is replaced",
+                        "a pooled connection failed its ping: {error}; it is replaced",
                     );
                     Err(RecycleError::message(format!(
                         "the ping before checkout failed: {error}"
@@ -450,7 +450,7 @@ async fn keep_open(
                     target: LOG_TARGET,
                     role = %role,
                     error = %error,
-                    "a connection the pool keeps open did not open; it is tried again",
+                    "a connection the pool keeps open did not open: {error}; it is tried again",
                 );
             }
         }
@@ -518,7 +518,11 @@ async fn drive_connection(connection: DriverConnection) {
     match connection.await {
         Ok(()) => {}
         Err(error) => {
-            tracing::debug!(target: LOG_TARGET, %error, "a database connection ended with an error");
+            tracing::debug!(
+                target: LOG_TARGET,
+                %error,
+                "a database connection ended with an error: {error}",
+            );
         }
     }
 }
