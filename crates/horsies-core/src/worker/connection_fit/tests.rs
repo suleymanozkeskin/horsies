@@ -692,8 +692,21 @@ async fn a_server_error_makes_the_limit_unreadable() {
     let read = read_server_connection_limit(&broker).await;
 
     match read {
-        Err(ConnectionLimitUnreadable::Database(sqlx::Error::Database(error))) => {
-            assert_eq!(error.code().as_deref(), Some("3D000"), "{error}");
+        Err(ConnectionLimitUnreadable::Database(BrokerError::Statement(
+            crate::db::StatementFailure::NotSent {
+                cause:
+                    crate::db::NotSentCause::Checkout(crate::db::CheckoutFailure::ConnectFailed {
+                        cause:
+                            crate::db::ConnectError {
+                                cause: crate::db::ConnectFailure::ServerRefused(error),
+                                ..
+                            },
+                        ..
+                    }),
+                ..
+            },
+        ))) => {
+            assert_eq!(error.code().code(), "3D000", "{error}");
         }
         other => panic!("expected the server's refusal, got {other:?}"),
     }
@@ -714,8 +727,8 @@ async fn a_connection_that_cannot_be_made_makes_the_limit_unreadable() {
 
 /// `test_no_answer_within_the_bound_is_unreadable`: a server that takes the
 /// connection and never answers. The clock is paused, so the bound of the
-/// read passes with no real wait; the acquire bound of the pool is longer,
-/// so the bound of the read is what ends it.
+/// read passes with no real wait; the connect bound of the pool (the URL's
+/// `connect_timeout`) is longer, so the bound of the read is what ends it.
 #[tokio::test(start_paused = true)]
 async fn no_answer_within_the_bound_makes_the_limit_unreadable() {
     let silent = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -725,14 +738,13 @@ async fn no_answer_within_the_bound_makes_the_limit_unreadable() {
     // The accepted stream stays open in the output of this task until the
     // handle is dropped; the task never writes to it.
     let held = tokio::spawn(async move { silent.accept().await });
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(CONNECTION_LIMIT_READ_TIMEOUT * 6)
-        .connect_lazy(&format!("postgresql://postgres:none@127.0.0.1:{port}/none"))
-        .expect("a lazy pool of a silent server");
-    let broker = PostgresBroker::from_pool(pool);
+    let connect_bound_seconds = CONNECTION_LIMIT_READ_TIMEOUT.as_secs() * 6;
+    let handle = crate::test_support::core_handle(&format!(
+        "postgresql://postgres:none@127.0.0.1:{port}/none?connect_timeout={connect_bound_seconds}"
+    ));
+    let open = handle.pools().expect("the pools of a silent server build");
 
-    let read = read_server_connection_limit(&broker).await;
+    let read = read_connection_limit_on(open.main(), StatementLog::Off).await;
 
     held.abort();
     match read {

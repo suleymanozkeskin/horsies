@@ -52,11 +52,11 @@ pub use crate::core::{
     NodeKey, NodeRef, OnError, OperationalErrorCode, OutcomeCode, PayloadPolicy, PostgresConfig,
     PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
     RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec, ResilienceConfigError, ResolvedEnqueue,
-    RetentionChoice, RetentionConfig, RetentionConfigError, RetrievalCode, RetryPolicy,
-    RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowFailure,
-    SubWorkflowNode, SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy,
-    TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind, TaskInfo,
-    TaskNode, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
+    RetentionChoice, RetentionClassKeyRefused, RetentionConfig, RetentionConfigError,
+    RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn,
+    SubWorkflowFailure, SubWorkflowNode, SubWorkflowParams, SubWorkflowSummary, SuccessCase,
+    SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind,
+    TaskInfo, TaskNode, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
     TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, TypedNodeRef, UserCode,
     UserCodeRefused, ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig,
     WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta, WorkflowSpec,
@@ -95,7 +95,10 @@ pub use crate::broker::stale_recovery::{
     StaleClaimsRequeueFailed, StaleClaimsRequeuePass, StaleRunningPass, StaleRunningThresholds,
     ThresholdMs, ThresholdOutOfRange, STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
 };
-pub use crate::broker::{CancelAnswer, CancelTaskError, SendKind};
+pub use crate::broker::{
+    CancelAnswer, CancelTaskError, EnqueueRefusal, EnqueueRefusalCause, SendKind,
+};
+pub use crate::core::history::enqueue::SendPart;
 pub use crate::worker::finalize_batch::{
     BatchOutcomes, BatchWriteError, PlainSuccess, SuccessBatch, SuccessBatchError,
     FUSED_BATCH_MAX_ROWS,
