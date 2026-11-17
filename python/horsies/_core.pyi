@@ -162,6 +162,11 @@ class CoreHandle:
         spec source. A build that raised KeyboardInterrupt or SystemExit raises it again. With no
         child spec source it raises RuntimeError.
         """
+    def resume_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowResumed | WorkflowNotPaused | WorkflowResumeRecoveryFailed | WorkflowAbsent | HandleFailed]:
+        """Resume one workflow tree. Writes; the child starts it owes build their children through
+        the child spec source. A build that raised KeyboardInterrupt or SystemExit raises it
+        again. With no child spec source it raises RuntimeError.
+        """
     def pause_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed]:
         """Pause one workflow tree. Writes, in one statement. A row outside the function's contract
         raises PanicException.
@@ -1952,6 +1957,31 @@ class WorkflowIdTaken:
     def workflow_id(self) -> uuid.UUID: ...
     @property
     def existing_name(self) -> str: ...
+
+
+@final
+class WorkflowResumed:
+    """The workflow was PAUSED; its tree is RUNNING again."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowNotPaused:
+    """The workflow exists and is not PAUSED. Nothing was written."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowResumeRecoveryFailed:
+    """The resume committed; the parent advance or the recovery pass of the tree after it
+    failed. The workflow is RUNNING, and workflow recovery finishes the work. Not retryable.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def message(self) -> str: ...
 
 
 @final

@@ -9,7 +9,6 @@ from collections import deque
 from typing import TYPE_CHECKING, Any, TypeVar, assert_never, cast
 
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from typing import Final
@@ -20,7 +19,6 @@ from horsies.core.codec.task_options import stored_execution, stored_max_retries
 from horsies.core.codec.typed import encode_task_error
 from horsies.core.models.tasks import Execution, OutcomeCode, TaskError
 from horsies.core.types.result import Ok, Err, is_err as _is_err
-from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     WorkflowHandle,
@@ -30,11 +28,9 @@ from horsies.core.models.workflow import (
 from horsies.core.models.workflow.handle import _OUTPUTLESS_TERMINALS
 from horsies.core.models.workflow.typing_utils import _resolve_source_node_ok_type
 from horsies.core.errors import WorkflowValidationError, ErrorCode
-from horsies.core.utils.db import autocommit_connection, is_retryable_connection_error
+from horsies.core.utils.db import autocommit_connection
 from horsies.core.models.workflow.handle_types import (
     HandleAsyncContext,
-    HandleDbOperationFailed,
-    HandleEventLoopLimit,
     HandleLoopRunnerFailed,
     HandleResult,
     HandleResumeRecoveryFailed,
@@ -49,13 +45,6 @@ from horsies.core.workflows.start_types import (
     WorkflowStartValidationFailed,
 )
 from horsies.core.history.periods import RetentionClassKey
-from horsies.core.workflows.steps import (
-    RESUME_WORKFLOW_FUNCTION_SQL,
-    ParentAdvanceFailure,
-    ResumeDisposition,
-    advance_parents,
-    run_in_transaction,
-)
 from horsies.core.workflows.sql import (
     GET_RUNNING_CHILD_WORKFLOWS_SQL,
     PAUSE_CHILD_WORKFLOW_SQL,
@@ -506,17 +495,6 @@ def start_workflow(
 
 
 
-def _event_loop_limit(
-    workflow_id: str, operation: str, loop_limit: EventLoopLimit,
-) -> Err[HandleEventLoopLimit]:
-    """Build the lifecycle error for the event loop limit. Nothing ran."""
-    return Err(HandleEventLoopLimit(
-        message=f'{operation} of workflow {workflow_id}: {loop_limit.describe()}',
-        workflow_id=workflow_id,
-        loop_limit=loop_limit,
-    ))
-
-
 async def pause_workflow(
     broker: 'PostgresBroker',
     workflow_id: str,
@@ -691,15 +669,17 @@ async def resume_workflow(
 ) -> HandleResult[bool]:
     """Resume a paused workflow and its paused descendants.
 
-    One transaction: ``BEGIN``, ``horsies_workflow_resume``, one
-    ``horsies_workflow_child_start`` per child start that it owes, ``COMMIT``.
-    The function moves the workflow and its PAUSED descendants to RUNNING,
-    promotes their PENDING nodes, enqueues their READY nodes (task rows
-    minted, child starts owed for sub-workflow nodes), and runs the
-    completion check of each resumed workflow, deepest first. After the
-    commit, the parent nodes of the child workflows that the step ended
-    advance (one transaction per level), then the recovery pass of the tree
-    runs, as before.
+    The core runs it on the broker's core handle
+    (``CoreHandle.resume_workflow_async``): one transaction, ``BEGIN``,
+    ``horsies_workflow_resume``, one ``horsies_workflow_child_start`` per
+    child start that it owes (each child built through the broker's child
+    spec source, which runs its ``build_with``), ``COMMIT``. The function
+    moves the workflow and its PAUSED descendants to RUNNING, promotes their
+    PENDING nodes, enqueues their READY nodes, and runs the completion check
+    of each resumed workflow, deepest first. After the commit, the parent
+    nodes of the child workflows that the step ended advance (one
+    transaction per level), then the recovery pass of the tree runs. A
+    cancel of the caller does not stop it.
 
     Args:
         broker: PostgreSQL broker for database operations.
@@ -710,92 +690,65 @@ async def resume_workflow(
         ``Ok(False)`` if workflow exists but is not PAUSED (no-op).
         ``Err(HandleWorkflowNotFound)`` if workflow does not exist.
         ``Err(HandleDbOperationFailed)`` on a database error before the
-        resume commits; the transaction rolled back, or its commit outcome
-        is unknown.
+        resume commits, a child build that the core could not run, or a
+        core boundary error; the transaction rolled back, or its commit
+        outcome is unknown. An id that is not a UUID is not retryable.
+        ``Err(HandleStoredDataInvalid)`` if a stored value does not parse.
         ``Err(HandleResumeRecoveryFailed)`` when the resume committed and the
         parent advance or the recovery pass after it failed; the workflow
         is RUNNING.
-        ``Err(HandleEventLoopLimit)`` if the broker already serves its limit
-        of open event loops and this is a new one; nothing ran.
-        ``OutcomeDecodeError`` for a row outside the function's contract,
-        ``SerializationError`` for a child tree value that does not
-        serialize, and ``ChildStartLimitExceeded``: defects; nothing
-        committed. Any other exception propagates.
-    """
-    match await broker.select_resources():
-        case Err(loop_limit):
-            return _event_loop_limit(workflow_id, 'resume', loop_limit)
-        case Ok(resources):
-            pass
 
+    Raises:
+        PanicException: a row outside a function's contract, or a child tree
+            that the core refuses (a defect); nothing committed.
+        KeyboardInterrupt, SystemExit: raised by a child's ``build_with``;
+            the resume rolled back.
+    """
+    from horsies._core import (
+        CoreError,
+        HandleFailed,
+        WorkflowAbsent,
+        WorkflowNotPaused,
+        WorkflowResumed,
+        WorkflowResumeRecoveryFailed,
+    )
+    from horsies.core.types.core_failure import CoreOperationFailed
+    from horsies.core.workflows.handle_records import (
+        WorkflowOperation,
+        core_call_error,
+        handle_failed_error,
+        workflow_uuid,
+    )
+
+    match workflow_uuid(workflow_id, WorkflowOperation.RESUME):
+        case Err(not_an_id):
+            return Err(not_an_id)
+        case Ok(workflow_key):
+            pass
     try:
-        async with resources.session_factory() as session:
-            committed = await run_in_transaction(
-                session,
-                broker,
-                RESUME_WORKFLOW_FUNCTION_SQL,
-                {'wf_id': workflow_id},
-                'horsies_workflow_resume',
-                ResumeDisposition,
-            )
-    except SQLAlchemyError as exc:
-        return Err(HandleDbOperationFailed(
-            message=f'Resume failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
-            retryable=is_retryable_connection_error(exc),
-            workflow_id=workflow_id,
-            exception=exc,
-        ))
-    match committed.outcome.disposition:
-        case ResumeDisposition.NOT_FOUND:
+        record = await broker._core_handle.resume_workflow_async(workflow_key)  # pyright: ignore[reportPrivateUsage]
+    except CoreError as exc:
+        return Err(core_call_error(exc, workflow_id, WorkflowOperation.RESUME))
+    match record:
+        case WorkflowResumed():
+            return Ok(True)
+        case WorkflowNotPaused():
+            return Ok(False)
+        case WorkflowAbsent():
             return Err(HandleWorkflowNotFound(
                 message=f'Workflow {workflow_id} not found',
                 workflow_id=workflow_id,
             ))
-        case ResumeDisposition.NOT_PAUSED:
-            return Ok(False)
-        case ResumeDisposition.RESUMED:
-            pass
+        case WorkflowResumeRecoveryFailed(message=message):
+            return Err(HandleResumeRecoveryFailed(
+                message=message,
+                workflow_id=workflow_id,
+                exception=CoreOperationFailed(WorkflowOperation.RESUME.value, message, False),
+            ))
+        case HandleFailed():
+            return Err(handle_failed_error(record, workflow_id, WorkflowOperation.RESUME))
         case _ as unreachable:
             assert_never(unreachable)
-
-    match await advance_parents(broker, resources.session_factory, committed.parent_advances):
-        case None:
-            pass
-        case ParentAdvanceFailure(failed_child_workflow_id=child_id, cause=cause):
-            return Err(HandleResumeRecoveryFailed(
-                message=(
-                    f'Workflow {workflow_id} resumed; the parent advance of child '
-                    f'workflow {child_id} failed: {type(cause).__name__}: {cause}'
-                ),
-                workflow_id=workflow_id,
-                exception=cause,
-            ))
-
-    try:
-        # A task can finish while this transaction has resumed a child workflow
-        # but before that status change is visible to the task-completion
-        # callback. The callback observes PAUSED and correctly avoids
-        # propagation; once resume commits, run the recovery pass to close
-        # that race through the same step functions. Scope it to the resumed
-        # workflow's tree (self + descendants) so resume does not trigger a
-        # full-DB recovery sweep over unrelated workflows.
-        from horsies.core.workflows.recovery import recover_stuck_workflow_tree
-
-        _ = await recover_stuck_workflow_tree(
-            resources.session_factory,
-            broker,
-            workflow_id,
-        )
-    except SQLAlchemyError as exc:
-        return Err(HandleResumeRecoveryFailed(
-            message=(
-                f'Workflow {workflow_id} resumed; the recovery pass for its '
-                f'tree failed: {type(exc).__name__}: {exc}'
-            ),
-            workflow_id=workflow_id,
-            exception=exc,
-        ))
-    return Ok(True)
 
 
 def resume_workflow_sync(

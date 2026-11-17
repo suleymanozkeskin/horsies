@@ -14,8 +14,11 @@ exited nonzero. The same job at the same commit passed minutes earlier.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
+from tests.perf import __main__ as perf_main
 from tests.perf.__main__ import (
     GATE_ENVIRONMENT,
     _control_disagreements,
@@ -26,7 +29,7 @@ from tests.perf.__main__ import (
     _select_scenarios,
 )
 from tests.perf.counters import Counts
-from tests.perf.scenarios import scenario_by_name
+from tests.perf.scenarios import Scenario, SingleRowScenario, scenario_by_name
 from tests.perf.runner import (
     Conditions,
     Measurement,
@@ -79,6 +82,22 @@ def _counts(
         wal_bytes=wal_bytes,
         wal_fpi=0,
         write_transactions=write_transactions,
+    )
+
+
+def _with_candidate() -> Scenario:
+    """A scenario with a candidate side, for the checks of a real comparison.
+
+    On the baseline schema no scenario has a second implementation, so the
+    contract checks are exercised on a scenario whose candidate is its own
+    baseline.
+    """
+    scenario = scenario_by_name('owned-claim-expiry')
+    assert isinstance(scenario, SingleRowScenario)
+    return dataclasses.replace(
+        scenario,
+        candidate=scenario.baseline,
+        candidate_invocation=scenario.baseline_invocation,
     )
 
 
@@ -200,7 +219,7 @@ class TestCandidateContractChecks:
         candidate: Counts,
     ) -> tuple[str, ...]:
         return _contract_violations(
-            scenario=scenario_by_name('owned-claim-expiry'),
+            scenario=_with_candidate(),
             conditions=_conditions('existing statement against function'),
             baseline=Measurement(samples_ms=[1.0], counts=baseline),
             candidate=Measurement(samples_ms=[1.0], counts=candidate),
@@ -250,7 +269,7 @@ class TestCandidateContractChecks:
 
     def test_missing_plan_evidence_fails(self) -> None:
         report = _contract_violations(
-            scenario=scenario_by_name('owned-claim-expiry'),
+            scenario=_with_candidate(),
             conditions=_conditions('existing statement against function'),
             baseline=Measurement(samples_ms=[1.0], counts=_counts()),
             candidate=Measurement(samples_ms=[1.0], counts=_counts()),
@@ -258,6 +277,20 @@ class TestCandidateContractChecks:
             control=False,
         )
         assert 'instrumented plan evidence is missing' in report
+
+    def test_a_scenario_without_candidate_has_no_contract_to_break(self) -> None:
+        report = _contract_violations(
+            scenario=scenario_by_name('owned-claim-expiry'),
+            conditions=_conditions('existing statement against function'),
+            baseline=Measurement(samples_ms=[1.0], counts=_counts()),
+            candidate=Measurement(
+                samples_ms=[1.0],
+                counts=_counts(client_statements=400),
+            ),
+            plans=None,
+            control=False,
+        )
+        assert report == ()
 
 
 class TestGateEnvironment:
@@ -287,13 +320,35 @@ class TestGateEnvironment:
 class TestScenarioSelection:
     def test_candidates_contains_every_and_only_real_comparison(self) -> None:
         selected = _select_scenarios('candidates')
-        assert selected
         assert all(scenario.candidate is not None for scenario in selected)
         assert {scenario.name for scenario in selected} == {
             scenario.name
             for scenario in _select_scenarios('all')
             if scenario.candidate is not None
         }
+
+    def test_a_selection_of_no_scenario_is_refused(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A run that measures nothing must not exit as if it passed."""
+        def select_nothing(selector: str) -> tuple[Scenario, ...]:
+            del selector
+            return ()
+
+        monkeypatch.setattr(perf_main, '_select_scenarios', select_nothing)
+        with pytest.raises(SystemExit) as raised:
+            perf_main.main(
+                [
+                    '--dsn',
+                    'postgresql://perf@localhost/unused',
+                    '--scenario',
+                    'candidates',
+                    '--scale',
+                    'smoke',
+                ]
+            )
+        assert raised.value.code == 2
 
 
 class TestObservationCount:

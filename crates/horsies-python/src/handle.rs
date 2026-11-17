@@ -70,6 +70,7 @@ use crate::operations::workflow_reads::{
     wait_workflow_result_operation, workflow_node_result_operation,
     workflow_node_results_operation, workflow_nodes_operation, workflow_status_operation,
 };
+use crate::operations::workflow_resume::resume_workflow_operation;
 use crate::operations::workflow_retention::delete_expired_workflows_operation;
 use crate::operations::workflow_start::{start_workflow_operation, WorkflowStartRequest};
 use crate::process_core::{core_for_call, Core};
@@ -707,6 +708,29 @@ impl CoreHandle {
             "CoreHandle.start_workflow_async",
             CallKind::Write,
             start_workflow_operation(self.connection(), request.get().parts(), source),
+        )
+    }
+
+    /// Resume one workflow tree (`horsies_workflow_resume`): `WorkflowResumed`,
+    /// `WorkflowNotPaused`, `WorkflowResumeRecoveryFailed`, `WorkflowAbsent`
+    /// or `HandleFailed`. Writes; the child starts it owes build their
+    /// children through the child spec source. A build that raised
+    /// `KeyboardInterrupt` or `SystemExit` raises it again. Awaitable only:
+    /// its callers run it on the loop runner. With no child spec source it
+    /// raises `RuntimeError`.
+    fn resume_workflow_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        let source = self.child_spec_source(core)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.resume_workflow_async",
+            CallKind::Write,
+            resume_workflow_operation(self.connection(), workflow_id, source),
         )
     }
 
