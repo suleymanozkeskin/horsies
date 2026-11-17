@@ -982,6 +982,11 @@ fn node_error_from_result(task_index: i32, result: Option<&str>) -> Result<Optio
     let Some(text) = result else {
         return Ok(None);
     };
+    // Python `_node_error` reads the text with `loads_json`: an empty text
+    // and the JSON value `null` are no result.
+    if text.is_empty() || text.trim_matches([' ', '\t', '\n', '\r']) == "null" {
+        return Ok(None);
+    }
     match serde_json::from_str::<TaskResult<serde_json::Value>>(text) {
         Ok(TaskResult::Ok(_)) => Ok(None),
         Ok(TaskResult::Err(error)) => Ok(normalize_optional_text(error.message.as_deref())),
@@ -1361,6 +1366,13 @@ mod tests {
         ));
 
         assert_eq!(node_error_from_result(0, None).expect("decodes"), None);
+        for no_result in ["", "null", " null\n"] {
+            assert_eq!(
+                node_error_from_result(0, Some(no_result)).expect("no result"),
+                None,
+                "{no_result:?}"
+            );
+        }
         assert_eq!(
             node_error_from_result(0, Some(&value)).expect("decodes"),
             None
