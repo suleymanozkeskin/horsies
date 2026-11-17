@@ -664,6 +664,7 @@ async fn every_task_gets_its_predicted_end_in_a_mixed_run() {
                 AttemptEnd::TimedOut {
                     timeout: timeout_ms(1_000),
                     retry: RetryPlacement::SameClass,
+                    cancel: TimeoutCancel::NoSignal,
                 }
             ),
             Fate::Garbage => assert!(crash_reason(end).contains("bad frame")),

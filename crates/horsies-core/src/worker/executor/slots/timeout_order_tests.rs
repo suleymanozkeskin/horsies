@@ -222,6 +222,7 @@ fn timed_out() -> AttemptEnd {
     AttemptEnd::TimedOut {
         timeout: timeout_ms(1_000),
         retry: RetryPlacement::SameClass,
+        cancel: TimeoutCancel::NoSignal,
     }
 }
 
