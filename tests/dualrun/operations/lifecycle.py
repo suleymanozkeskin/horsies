@@ -40,4 +40,11 @@ LIFECYCLE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=('cancel_task_async',),
     ),
+    DualRunOperation(
+        name='stale RUNNING recovery',
+        production_path='horsies.core.brokers.postgres:PostgresBroker.mark_stale_tasks_as_failed',
+        reference_path='tests.dualrun.reference.stale_running_caller:mark_stale_tasks_as_failed',
+        mode=PoolMode(),
+        core_methods=('mark_stale_running_async',),
+    ),
 )
