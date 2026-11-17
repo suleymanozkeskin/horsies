@@ -614,6 +614,11 @@ impl ReleaseBatch {
             claimed_ats: claims.iter().map(|(_, claimed_at)| *claimed_at).collect(),
         })
     }
+
+    /// Whether the batch holds no claim.
+    pub fn is_empty(&self) -> bool {
+        self.task_ids.is_empty()
+    }
 }
 
 /// The return of claimed rows that no child started.
