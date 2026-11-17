@@ -210,6 +210,7 @@ export default defineConfig({
 							label: 'Workflows',
 							items: [
 								{ label: 'Workflow API', slug: 'concepts/workflows/workflow-api' },
+								{ label: 'Workflow Examples', slug: 'concepts/workflows/workflow-examples' },
 								{ label: 'Subworkflows', slug: 'concepts/workflows/subworkflows' },
 								{ label: 'Typed Node Builder', slug: 'concepts/workflows/typed-node-builder' },
 								{ label: 'Start a Workflow Once', slug: 'guides/start-workflow-once' },
