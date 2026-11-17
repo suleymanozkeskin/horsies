@@ -12,6 +12,7 @@
 mod baseline_lifecycle_functions;
 mod baseline_scheduler_monitoring_sql;
 mod baseline_sql;
+mod baseline_workflow_functions;
 mod harness;
 mod history_functions_sql;
 mod history_maintenance_sql;

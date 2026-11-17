@@ -1,6 +1,6 @@
 -- Fixtures for the workflow engine cases: helper functions only, no rows. Loaded before
 -- baseline_workflow_functions.sql (one transaction, rolled back) and before the two-session cases of
--- test_baseline_workflow_functions.py (committed in their own database).
+-- sql_tests/baseline_workflow_functions.rs (committed in their own database).
 
 -- The published provenance reader is rendered by horsies_publish_history_readers; this stand-in answers "not found"
 -- (no row), so the move's duplicate identity guard passes.
