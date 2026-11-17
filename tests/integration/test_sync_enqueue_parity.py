@@ -44,7 +44,7 @@ async def _sync_enqueue(
     broker: PostgresBroker, **keywords: object
 ) -> tuple[str, object]:
     """Run the SYNC wrapper off-loop, as a real sync caller would."""
-    task_id = str(uuid.uuid4())
+    task_id = uuid.uuid4()
     outcome = await asyncio.to_thread(
         broker.enqueue,
         'parity.task',
@@ -55,7 +55,7 @@ async def _sync_enqueue(
         **keywords,
     )
     assert not is_err(outcome), outcome
-    return task_id, outcome
+    return str(task_id), outcome
 
 
 async def test_sync_enqueue_carries_the_retention_class(
