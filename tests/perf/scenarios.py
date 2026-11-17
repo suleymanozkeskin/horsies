@@ -13,9 +13,10 @@ would flatter it by the batch size.
 On the baseline schema each scenario has one implementation, the statement
 that the product sends, so both sides of a run execute it (a control run). A
 release is compared with another release by running the harness of each
-release on one server in one session. The candidate slot stays for a
-comparison of two implementations on one schema; a gate refuses a scenario
-without a candidate unless the run is a control run.
+release on one server in one session (``tests/perf/releases/README.md``).
+The candidate slot stays for a comparison of two implementations on one
+schema; a gate refuses a scenario without a candidate unless the run is a
+control run.
 
 Seeded rows carry ids of the column type: one UUIDv7 per scenario, role,
 kind of row and index (``seed_rows``). The ids of one role and kind share
