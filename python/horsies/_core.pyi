@@ -149,6 +149,55 @@ class CoreHandle:
 
 
 @final
+class CoreChildHandle:
+    """The core handle of one worker's child process: the producer manifest of its child pool,
+    the connections the pool keeps open, and the ping at checkout. Built in the child after
+    its start; building it starts nothing.
+    """
+    def __init__(self, manifest_json: str, *, kept_open: int, check_at_checkout: bool) -> None: ...
+    def start_attempt(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, worker_pid: int, worker_hostname: str, deadline_in_ms: int | None) -> AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed:
+        """Start one claimed task. Writes, in one statement. deadline_in_ms is the time left before
+        the deadline of the run, or None: when it has passed by the time the pool gives the
+        connection, no statement runs. A naive claimed_at raises TypeError.
+        """
+    def start_attempt_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, worker_pid: int, worker_hostname: str, deadline_in_ms: int | None) -> asyncio.Future[AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed]:
+        """The awaitable form of the method above."""
+    def mark_finalizing(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime) -> FinalizingMarked | FinalizingNotHeld | MarkFinalizingFailed:
+        """Write the finalizing marker of a run whose body ended. Writes, in one statement, with
+        the pool's bounds. A naive claimed_at raises TypeError.
+        """
+    def mark_finalizing_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime) -> asyncio.Future[FinalizingMarked | FinalizingNotHeld | MarkFinalizingFailed]:
+        """The awaitable form of the method above."""
+
+
+@final
+class CoreScheduler:
+    """The scheduler of one scheduler manifest on the broker of a CoreHandle. Building it
+    starts nothing. A refused manifest raises ManifestRefused. One call runs at a time: a
+    call while another is in flight raises RuntimeError.
+    """
+    def __init__(self, handle: CoreHandle, manifest_json: str) -> None: ...
+    def start_async(self) -> asyncio.Future[SchedulerStarted | SchedulerStartRefused | SchedulerStartFailed]:
+        """Connect, install the schema once per handle, and start the scheduler: the start checks,
+        the client family check and the state start. Writes. A start that completed before
+        answers SchedulerStarted at once.
+        """
+    def tick_async(self) -> asyncio.Future[SchedulerTicked | SchedulerTickFailed]:
+        """One tick: the due read, the existence heal on its cadence, one fire per due schedule.
+        Writes. Raises RuntimeError before a completed start and after the end of a run.
+        """
+    def run_async(self) -> asyncio.Future[SchedulerStopped | SchedulerStartRefused | SchedulerStartFailed]:
+        """The start when none completed, then a tick at once and one per check interval until a
+        stop request; with nothing to fire, the wait for the stop request. A cancel of the future
+        asks for the stop.
+        """
+    def request_stop(self) -> None:
+        """Ask the run to stop at its next tick boundary; a fire in flight runs to its end.
+        Idempotent; returns at once.
+        """
+
+
+@final
 class StartNow:
     """Start the task as soon as a worker can claim it."""
     def __init__(self) -> None: ...
@@ -824,6 +873,77 @@ class QueueStartsFailed:
 
 
 @final
+class AttemptStarted:
+    """The row is RUNNING with its first runner beat, from started_at on the database clock."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def started_at(self) -> datetime.datetime: ...
+
+
+@final
+class AttemptMissed:
+    """The start wrote nothing; reason is the first reason that holds. The path after the miss
+    is the caller's.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def reason(self) -> Literal['DEADLINE_PASSED', 'NOT_HELD', 'LEASE_EXPIRED', 'WORKFLOW_PAUSED', 'WORKFLOW_CANCELLED', 'NODE_NOT_LINKED']: ...
+
+
+@final
+class DeadlineBeforeStart:
+    """The deadline of the run passed while the start waited for a pooled connection. No
+    statement ran: the row stays CLAIMED.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class StartFailed:
+    """The start failed. It wrote nothing, or it committed and its reply was lost: the row may
+    be RUNNING.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class FinalizingMarked:
+    """The finalizing marker is written: the row is RUNNING under this worker's claim generation."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class FinalizingNotHeld:
+    """The finalizing marker wrote nothing: the row is absent, not RUNNING, or held by another
+    worker or another claim generation.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class MarkFinalizingFailed:
+    """The finalizing marker failed. It wrote nothing, or it committed and its reply was lost:
+    the marker may be written.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
 class ClaimsReleased:
     """The release statement ran: one row outcome per claim, in the request order."""
     @property
@@ -911,6 +1031,53 @@ class CancelStoredDataInvalid:
     def task_id(self) -> uuid.UUID: ...
     @property
     def message(self) -> str: ...
+
+
+@final
+class SchedulerStarted:
+    """The start of the scheduler completed."""
+
+
+@final
+class SchedulerStartRefused:
+    """The start refused a schedule before any state write: a zone that the core does not
+    know, a send that the command rules refuse, or a pattern with no slot after the database
+    time.
+    """
+    @property
+    def schedule(self) -> str: ...
+    @property
+    def reason(self) -> str: ...
+
+
+@final
+class SchedulerStartFailed:
+    """The start failed before the state start: the connect, the schema install or the client
+    family check. No schedule state was written.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class SchedulerTicked:
+    """The tick ran. The failure of one due schedule is logged and does not fail the tick."""
+
+
+@final
+class SchedulerTickFailed:
+    """The tick fired nothing: the core pools could not open, or the due read failed."""
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class SchedulerStopped:
+    """The run ended at a stop request."""
 
 
 def baseline_sql_files() -> list[tuple[str, str]]:
