@@ -218,7 +218,7 @@ async fn a_first_failed_sub_workflow_error_keeps_its_child_fields() {
     let pool = shared_pool().await;
     let child_id = Uuid::new_v4();
     let summary = SubWorkflowSummary {
-        status: "FAILED".to_owned(),
+        status: WorkflowStatus::Failed,
         output: None,
         total_tasks: 1,
         completed_tasks: 0,

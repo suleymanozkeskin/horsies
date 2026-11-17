@@ -448,8 +448,12 @@ async fn a_child_success_reads_the_same_on_every_surface() {
     assert_eq!(infos[0].status, WorkflowTaskStatus::Completed);
     assert_eq!(infos[0].sub_workflow_id, Some(child_id));
     assert_eq!(
-        summary_of(infos[0].sub_workflow_summary.as_deref()).status,
-        "COMPLETED"
+        infos[0]
+            .sub_workflow_summary
+            .as_ref()
+            .expect("tasks() gives the child summary")
+            .status,
+        WorkflowStatus::Completed
     );
     assert_ok_value(
         infos[0].result.as_ref().expect("tasks() holds the result"),
@@ -482,8 +486,12 @@ async fn a_handle_built_from_the_id_reads_status_tasks_and_results() {
     assert_eq!(infos[0].status, WorkflowTaskStatus::Completed);
     assert!(infos[0].sub_workflow_id.is_some());
     assert_eq!(
-        summary_of(infos[0].sub_workflow_summary.as_deref()).status,
-        "COMPLETED"
+        infos[0]
+            .sub_workflow_summary
+            .as_ref()
+            .expect("tasks() gives the child summary")
+            .status,
+        WorkflowStatus::Completed
     );
     assert_ok_value(
         infos[0].result.as_ref().expect("tasks() holds the result"),
@@ -538,8 +546,12 @@ async fn a_child_failure_reads_the_same_sub_workflow_error_on_every_surface() {
     assert_eq!(infos[0].status, WorkflowTaskStatus::Failed);
     assert_eq!(infos[0].sub_workflow_id, Some(child_id));
     assert_eq!(
-        summary_of(infos[0].sub_workflow_summary.as_deref()).status,
-        "FAILED"
+        infos[0]
+            .sub_workflow_summary
+            .as_ref()
+            .expect("tasks() gives the child summary")
+            .status,
+        WorkflowStatus::Failed
     );
     let _info = assert_subworkflow_error(
         infos[0].result.as_ref().expect("tasks() holds the result"),
