@@ -362,11 +362,9 @@ async fn a_pause_after_the_dependents_read_leaves_the_promoted_nodes_ready_with_
     .await;
 
     let _report = recover_stuck_workflows(
-        &db.pool,
+        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        0,
         RECOVERY_FAILURE_LIMIT,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
