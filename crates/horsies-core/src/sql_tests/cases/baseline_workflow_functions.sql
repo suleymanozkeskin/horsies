@@ -2,7 +2,7 @@
 -- baseline_workflow_fixtures.sql. The caller runs both files in one transaction and rolls it back. Each case is one
 -- DO block: a pass case checks the rows that the function wrote; a refusal case checks the SQLSTATE and that nothing
 -- was written. A failed check raises with the case name. The two-session lock-order cases are in
--- test_baseline_workflow_functions.py.
+-- sql_tests/baseline_workflow_functions.rs.
 
 -- Workflow start -----------------------------------------------------------------------------------------------------
 
