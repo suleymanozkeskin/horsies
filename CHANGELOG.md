@@ -755,6 +755,9 @@ unless it starts with "Added".
     deadline stores the options of an `ISOLATED` task with the deadline. The
     command fingerprint of a send hashes this text, as Python's does.
     `TaskOptions::stored_send_options_text` (added) writes it.
+  - Workflow spec data, the text that a workflow start sends the core:
+    `queue_classes` lists the task queues in the order of the nodes that
+    first name them, as a Python dict does; before, sorted by name.
   - Task input and result: a date-time of type `StoredDateTime` (below) is
     written with Python's fraction (`…12.500000Z`). A plain chrono
     `DateTime` or `NaiveDateTime` keeps chrono's serde form (`…12.500Z`);
