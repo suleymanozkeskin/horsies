@@ -39,7 +39,7 @@ fn monitoring_routes(app: &Horsies) -> Result<Router, Box<dyn std::error::Error>
 
 - Building the router does no I/O. The core handler is built at the first request, on the app's handle. A request whose broker cannot be built is answered 503 with the cause; the next request tries again.
 - The mount runs no schema step. For a process that only monitors, build the app with `Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)`. See [App Config](/horsies/rust/configuration/app-config/#schema-modes).
-- A workflow resume builds the sub-workflow children that it owes from the workflow definitions registered on `app` at the first request. Mount the router from the app's own binary, after the registrations, when the UI must resume such workflows.
+- A workflow resume builds the sub-workflow children that it owes from the workflow definitions registered on `app` when the resume runs. Mount the router from the app's own binary, after the registrations, when the UI must resume such workflows.
 
 ## MonitoringConfig
 
