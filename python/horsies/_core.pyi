@@ -55,6 +55,13 @@ class PanicRuleFixed(CoreDefect):
     """
 
 
+class NotMainThread(CoreDefect):
+    """A run form was called off the main thread, where Python runs signal handlers.
+
+    The run did not start. args: (subject,).
+    """
+
+
 class PanicException(BaseException):
     """Rust code called from Python panicked."""
 
@@ -65,6 +72,12 @@ class CoreHandle:
     def __init__(self, manifest_json: str) -> None: ...
     @property
     def manifest_version(self) -> int: ...
+    def close(self) -> HandleClosed:
+        """Close the handle's core pools. Writes in flight end within the close bound; the ones that
+        do not are logged with their count. A handle that never connected starts nothing.
+        """
+    def close_async(self) -> asyncio.Future[HandleClosed]:
+        """The awaitable form of the method above."""
     def ping_database(self) -> DatabasePingRecord | BrokerFailure:
         """Ping the database."""
     def ping_database_async(self) -> asyncio.Future[DatabasePingRecord | BrokerFailure]:
@@ -78,11 +91,47 @@ class CoreHandle:
     def schema_status_async(self) -> asyncio.Future[SchemaStatusRecord]:
         """The awaitable form of the method above."""
     def enqueue(self, request: EnqueueRequest) -> Enqueued | SendSuppressed | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict:
-        """Enqueue one task. Writes; a resend of the same request is safe."""
+        """Enqueue one task, in one statement. Writes; a resend with send_kind REPEAT is safe."""
     def enqueue_async(self, request: EnqueueRequest) -> asyncio.Future[Enqueued | SendSuppressed | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict]:
         """The awaitable form of the method above."""
+    def requeue_stale_claimed_async(self, stale_after_ms: int) -> asyncio.Future[StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed]:
+        """One stale CLAIMED requeue pass. Writes; each batch commits alone. A threshold that
+        does not fit in 64 bits raises OverflowError.
+        """
+    def mark_stale_running_async(self, stale_after_ms: int, finalizing_stale_after_ms: int) -> asyncio.Future[StaleRunningRecovered | StaleRunningScanFull | StaleRunningScanFailed]:
+        """One stale RUNNING recovery pass. Writes; each candidate commits alone. A threshold
+        that does not fit in 64 bits raises OverflowError.
+        """
+    def finish_failed_attempt_async(self, request: FinishFailedAttemptRequest) -> asyncio.Future[AttemptFailureApplied | AttemptRetryScheduled | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed]:
+        """Write the failed attempt of a child that reported a result (claimed-row rule REFUSE).
+        Writes, in one statement.
+        """
+    def finish_ended_attempt_async(self, request: FinishFailedAttemptRequest) -> asyncio.Future[AttemptClaimReleased | AttemptFailureApplied | AttemptRetryScheduled | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed]:
+        """Write the end of an attempt whose child ended without a result (claimed-row rule
+        RELEASE). Writes, in one statement.
+        """
+    def complete_successes_async(self, request: SuccessBatchRequest) -> asyncio.Future[SuccessesWritten | BatchRolledBack | BatchCommitUnknown]:
+        """Write the plain successes of one request in one statement. Writes. Rows outside the
+        function's contract raise PanicException.
+        """
+    def finish_workflow_success_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, result_json: str) -> asyncio.Future[WorkflowSuccessApplied | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed]:
+        """Write phase 1 of a workflow task's success. Writes, in one statement. A naive
+        claimed_at raises TypeError.
+        """
+    def claim_pass_async(self, request: ClaimPassRequest) -> asyncio.Future[ClaimPassRecord | ClaimPassFailed]:
+        """One claim pass. Writes, in one statement; the dispatch stays with the caller."""
+    def count_queue_starts_async(self, request: QueueStartsRequest) -> asyncio.Future[QueueStartsRecord | QueueStartsFailed]:
+        """Count the capped queues of one soft-cap start check. Reads only, in one statement; a
+        check with no queue sends nothing.
+        """
+    def release_claims_async(self, request: ReleaseClaimsRequest) -> asyncio.Future[ClaimsReleased | ReleaseFailed]:
+        """Release the claims of one request. Writes, in one statement."""
+    def cancel_task_async(self, task_id: uuid.UUID, *, include_running: bool) -> asyncio.Future[TaskCancelledRecord | CancelRefusedWorkflowTask | CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid]:
+        """Cancel one plain task; a RUNNING task only with include_running. Writes, in one
+        statement. An outcome that contradicts the function raises PanicException.
+        """
     def task_info(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> TaskInfoRecord | TaskInfoNotFound | BrokerFailure:
-        """The info of one task. Reads only."""
+        """The info of one task. Installs the schema once per handle first; then reads only."""
     def task_info_async(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> asyncio.Future[TaskInfoRecord | TaskInfoNotFound | BrokerFailure]:
         """The awaitable form of the method above."""
 
@@ -132,11 +181,72 @@ class RetentionPeriod:
 @final
 class EnqueueRequest:
     """One frozen send. None for good_until, task_options_json or idempotency_key
-    means no deadline, no options, no key.
+    means no deadline, no options, no key. send_kind is FIRST for the first send of the task
+    id and REPEAT for a send retry: a task that finished then answers from history.
     """
-    def __init__(self, *, task_id: uuid.UUID, task_name: str, queue_name: str, priority: int, input_json: str, sent_at: datetime.datetime, start: StartNow | StartAfterDelay | StartAt, good_until: datetime.datetime | None, task_options_json: str | None, idempotency_key: str | None, retention: RetentionDefault | RetentionForever | RetentionPeriod, rerun_input: Literal['APP_DEFAULT', 'KEEP', 'DROP']) -> None: ...
+    def __init__(self, *, task_id: uuid.UUID, task_name: str, queue_name: str, priority: int, input_json: str, sent_at: datetime.datetime, start: StartNow | StartAfterDelay | StartAt, good_until: datetime.datetime | None, task_options_json: str | None, idempotency_key: str | None, retention: RetentionDefault | RetentionForever | RetentionPeriod, rerun_input: Literal['APP_DEFAULT', 'KEEP', 'DROP'], send_kind: Literal['FIRST', 'REPEAT']) -> None: ...
     @property
     def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class NoRetry:
+    """The failed attempt writes the terminal failure."""
+    def __init__(self) -> None: ...
+
+
+@final
+class RetryAfter:
+    """The failed attempt writes the retry, unless its next attempt would start at or after
+    good_until. expected_retry_count is part of the fence. Another placement raises ValueError.
+    """
+    def __init__(self, *, expected_retry_count: int, delay_s: float, placement: Literal['SAME_CLASS', 'ISOLATED']) -> None: ...
+
+
+@final
+class FinishFailedAttemptRequest:
+    """One frozen failed attempt of a RUNNING task. A naive claimed_at raises TypeError; another
+    attempt_outcome raises ValueError.
+    """
+    def __init__(self, *, task_id: uuid.UUID, worker_id: str, claimed_at: datetime.datetime, retry: NoRetry | RetryAfter, result_json: str, error_code: str | None, failed_reason: str | None, attempt_outcome: Literal['FAILED', 'WORKER_FAILURE'], attempt_error_message: str | None, attempt_failed_reason: str | None) -> None: ...
+    @property
+    def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class SuccessBatchRequest:
+    """The plain successes of one worker for one statement: 1 to 64 rows, each task once. A
+    naive claimed_at raises TypeError; no row, more rows or a repeated task id raises
+    ValueError.
+    """
+    def __init__(self, *, worker_id: str, rows: list[tuple[uuid.UUID, datetime.datetime, str]]) -> None: ...
+
+
+@final
+class ClaimPassRequest:
+    """One frozen claim pass. A negative count or one above 32 bits raises OverflowError; an
+    unknown class name, a route to a budget the pass does not hold or a lease of 0 raises
+    ValueError.
+    """
+    def __init__(self, *, worker_id: str, queues: list[str], queue_priority: dict[str, int], queue_max_concurrency: dict[str, int], hard_cap_mode: bool, budgets: dict[Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'], int], routes: dict[Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'], Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']], prefetch_buffer: int, max_claim_per_worker: int, max_claim_batch: int, cluster_wide_cap: int | None, claim_lease_ms: int, lock_keys: list[int]) -> None: ...
+
+
+@final
+class QueueStartsRequest:
+    """One frozen soft-cap start check: the capped queues that have held rows, and the started
+    claims (task id, claim generation) whose outcome write has not ended. A naive datetime
+    raises TypeError.
+    """
+    def __init__(self, *, worker_id: str, queues: list[str], started: list[tuple[uuid.UUID, datetime.datetime]]) -> None: ...
+
+
+@final
+class ReleaseClaimsRequest:
+    """One frozen release: the claims of one worker, at most 1000, each task once, each with
+    the claim generation of its dispatch. A naive datetime raises TypeError; more claims, a
+    repeated task id or another placement raises ValueError.
+    """
+    def __init__(self, *, worker_id: str, claims: list[tuple[uuid.UUID, datetime.datetime]], placement: Literal['SAME_CLASS', 'ISOLATED']) -> None: ...
 
 
 @final
@@ -155,6 +265,13 @@ class DatabasePingRecord:
     """The round trip of one database ping."""
     @property
     def latency_ms(self) -> float: ...
+
+
+@final
+class HandleClosed:
+    """The close of a handle ended: its core pools are closed, or it never connected. The next
+    operation on the handle opens new core pools.
+    """
 
 
 @final
@@ -284,7 +401,7 @@ class TaskAttemptRecord:
 @final
 class TaskInfoRecord:
     """The metadata of one task, with the fields of TaskInfo. result_json is the
-    stored result envelope as JSON text.
+    stored result envelope as JSON text; execution is None for a task read from history.
     """
     @property
     def task_id(self) -> uuid.UUID: ...
@@ -328,6 +445,8 @@ class TaskInfoRecord:
     def result_json(self) -> str | None: ...
     @property
     def attempts(self) -> list[TaskAttemptRecord] | None: ...
+    @property
+    def execution(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'] | None: ...
 
 
 @final
@@ -335,6 +454,428 @@ class TaskInfoNotFound:
     """Neither the live table nor the task history holds the task."""
     @property
     def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class StaleClaimsDrained:
+    """The requeue pass ended at a short batch: no eligible row was left. Every batch committed."""
+    @property
+    def requeued(self) -> int: ...
+
+
+@final
+class StaleClaimsBoundReached:
+    """The requeue pass ran its bound of full batches and stopped; eligible rows can remain.
+    Every batch committed.
+    """
+    @property
+    def requeued(self) -> int: ...
+
+
+@final
+class StaleClaimsRequeueFailed:
+    """The requeue pass stopped at a failure. The batches before it committed requeued_before
+    rows; the failed batch wrote nothing, or its outcome is unknown.
+    """
+    @property
+    def requeued_before(self) -> int: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class StaleRunningRecovered:
+    """The stale RUNNING pass ended; its scan read fewer candidates than its batch. recovered
+    counts the candidates whose crash retry or failure committed.
+    """
+    @property
+    def recovered(self) -> int: ...
+
+
+@final
+class StaleRunningScanFull:
+    """The stale RUNNING pass ended, and its scan read a full batch of scan_batch candidates:
+    stale rows can remain for the next pass.
+    """
+    @property
+    def recovered(self) -> int: ...
+    @property
+    def scan_batch(self) -> int: ...
+
+
+@final
+class StaleRunningScanFailed:
+    """The stale RUNNING pass did not run: a threshold out of range, a failed connect or family
+    check, or a failed scan. Nothing was written.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class AttemptAlreadyApplied:
+    """The writer's own effect was already committed: a replay after a lost reply. Nothing was
+    written.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def terminal_at(self) -> datetime.datetime: ...
+    @property
+    def kind(self) -> str: ...
+    @property
+    def observed_status(self) -> str | None: ...
+    @property
+    def observed_worker_id(self) -> str | None: ...
+    @property
+    def observed_claimed_at(self) -> datetime.datetime | None: ...
+
+
+@final
+class AttemptLostClaim:
+    """The row is live, and the fence does not match it. Nothing was written."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def observed_status(self) -> str | None: ...
+    @property
+    def observed_worker_id(self) -> str | None: ...
+    @property
+    def observed_claimed_at(self) -> datetime.datetime | None: ...
+
+
+@final
+class AttemptSourceStateConflict:
+    """The row exists and is not this writer's to end; guard names the guard that refused it.
+    Nothing was written.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def guard(self) -> Literal['CLAIM', 'DEADLINE', 'STALENESS', 'RETRY_COUNT', 'WORKFLOW_STATUS', 'WORKFLOW_LINK_ABSENT', 'WORKFLOW_LINK_STATE', 'FOREIGN_TERMINALIZATION', 'WORKFLOW_TASK']: ...
+    @property
+    def observed_status(self) -> str | None: ...
+    @property
+    def observed_worker_id(self) -> str | None: ...
+    @property
+    def observed_claimed_at(self) -> datetime.datetime | None: ...
+
+
+@final
+class AttemptTaskAbsent:
+    """No live or history row has this id. Nothing was written."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class AttemptWriteFailed:
+    """The statement failed. It wrote nothing, or it committed and its reply was lost."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class PhaseTwoOwedRecord:
+    """Phase 2 of a workflow task is owed: it advances the node and wakes the queue."""
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def queue_name(self) -> str: ...
+    @property
+    def step(self) -> Literal['NO_DEPENDENTS', 'DEPENDENTS_WITHOUT_SUBWORKFLOW', 'SUBWORKFLOW_REACHABLE']: ...
+
+
+@final
+class RetryNotRequested:
+    """The caller asked for no retry."""
+
+
+@final
+class RetryPastDeadline:
+    """The caller asked for a retry, and its next attempt would start at or after good_until."""
+    @property
+    def next_retry_at(self) -> datetime.datetime: ...
+    @property
+    def good_until(self) -> datetime.datetime: ...
+
+
+@final
+class CapacityWoken:
+    """A plain task: the statement sent its capacity wake. Nothing is owed."""
+
+
+@final
+class AttemptFailureApplied:
+    """The terminal failure and its attempt row committed."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def terminal_at(self) -> datetime.datetime: ...
+    @property
+    def observed_status(self) -> str | None: ...
+    @property
+    def observed_worker_id(self) -> str | None: ...
+    @property
+    def observed_claimed_at(self) -> datetime.datetime | None: ...
+    @property
+    def retry(self) -> RetryNotRequested | RetryPastDeadline: ...
+    @property
+    def after(self) -> CapacityWoken | PhaseTwoOwedRecord: ...
+
+
+@final
+class AttemptRetryScheduled:
+    """The retry and its attempt row committed; retry_count is the count the row now holds."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def retry_count(self) -> int: ...
+    @property
+    def next_retry_at(self) -> datetime.datetime: ...
+    @property
+    def queue_name(self) -> str: ...
+    @property
+    def observed_status(self) -> str | None: ...
+    @property
+    def observed_worker_id(self) -> str | None: ...
+    @property
+    def observed_claimed_at(self) -> datetime.datetime | None: ...
+
+
+@final
+class AttemptClaimReleased:
+    """Rule RELEASE: the row was still CLAIMED by this claim; it is PENDING again with no
+    attempt row.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def queue_name(self) -> str: ...
+    @property
+    def observed_status(self) -> str | None: ...
+    @property
+    def observed_worker_id(self) -> str | None: ...
+    @property
+    def observed_claimed_at(self) -> datetime.datetime | None: ...
+
+
+@final
+class SuccessApplied:
+    """The success of this row committed with the statement."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def terminal_at(self) -> datetime.datetime: ...
+    @property
+    def observed_status(self) -> str | None: ...
+    @property
+    def observed_worker_id(self) -> str | None: ...
+    @property
+    def observed_claimed_at(self) -> datetime.datetime | None: ...
+
+
+@final
+class SuccessesWritten:
+    """The batch statement ran: one row record per success, in the request order."""
+    @property
+    def rows(self) -> list[SuccessApplied | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent]: ...
+
+
+@final
+class BatchRolledBack:
+    """No row of the batch changed."""
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class BatchCommitUnknown:
+    """The reply of the batch statement was lost: each row may have committed or not."""
+    @property
+    def message(self) -> str: ...
+
+
+@final
+class WorkflowSuccessApplied:
+    """Phase 1 of the workflow task's success committed; phase_two is the phase 2 owed."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def terminal_at(self) -> datetime.datetime: ...
+    @property
+    def observed_status(self) -> str | None: ...
+    @property
+    def observed_worker_id(self) -> str | None: ...
+    @property
+    def observed_claimed_at(self) -> datetime.datetime | None: ...
+    @property
+    def phase_two(self) -> PhaseTwoOwedRecord: ...
+
+
+@final
+class ClaimedRowRecord:
+    """One row the claim pass took; claimed_at is the claim generation of this claim."""
+    @property
+    def id(self) -> uuid.UUID: ...
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def queue_name(self) -> str: ...
+    @property
+    def input(self) -> str: ...
+    @property
+    def task_options(self) -> str | None: ...
+    @property
+    def execution(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']: ...
+    @property
+    def is_workflow_task(self) -> bool: ...
+    @property
+    def claimed_at(self) -> datetime.datetime: ...
+    @property
+    def retry_count(self) -> int: ...
+    @property
+    def max_retries(self) -> int: ...
+
+
+@final
+class ClaimPassRecord:
+    """The claim pass ran: the claimed rows in dispatch order, and the rows its plan chose and
+    its take did not get.
+    """
+    @property
+    def claimed(self) -> list[ClaimedRowRecord]: ...
+    @property
+    def short_of_plan(self) -> int: ...
+
+
+@final
+class ClaimPassFailed:
+    """The claim pass failed. It wrote nothing, or it committed and its reply was lost; claimed
+    rows then return to the queue when their lease expires.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class QueueStartsRecord:
+    """The count of each queue of the check: its RUNNING rows plus the started claims still
+    CLAIMED. A queue with no counted row is absent: its count is 0.
+    """
+    @property
+    def starts(self) -> dict[str, int]: ...
+
+
+@final
+class QueueStartsFailed:
+    """The count failed. It wrote nothing."""
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class ClaimsReleased:
+    """The release statement ran: one row outcome per claim, in the request order."""
+    @property
+    def rows(self) -> list[ReleasedRow | NotHeldRow]: ...
+
+
+@final
+class ReleasedRow:
+    """The row was CLAIMED by the worker at its claim generation and is PENDING again."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class NotHeldRow:
+    """The row is absent, or not CLAIMED by the worker at this claim generation. It was not
+    touched.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class ReleaseFailed:
+    """The release failed. The statement wrote nothing, or it committed and its reply was lost."""
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class TaskCancelledRecord:
+    """The plain task moved to history as CANCELLED; was_status is the status it left."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def was_status(self) -> Literal['PENDING', 'CLAIMED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED']: ...
+
+
+@final
+class CancelRefusedWorkflowTask:
+    """The task belongs to a workflow, live or finished. Nothing changed."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def current_status(self) -> Literal['PENDING', 'CLAIMED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED']: ...
+
+
+@final
+class CancelRefusedStatus:
+    """The task's status does not admit the cancel: a terminal status (an earlier cancel
+    included), or RUNNING without the opt-in. Nothing changed.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def current_status(self) -> Literal['PENDING', 'CLAIMED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED']: ...
+
+
+@final
+class CancelTaskAbsent:
+    """Neither the live table nor history holds the task. Nothing changed."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class CancelFailed:
+    """The connect, the client family check or the statement failed. The statement wrote
+    nothing, or it committed and its reply was lost.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class CancelStoredDataInvalid:
+    """Stored task data does not parse. The cancel refused the task; nothing changed."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def message(self) -> str: ...
 
 
 def baseline_sql_files() -> list[tuple[str, str]]:

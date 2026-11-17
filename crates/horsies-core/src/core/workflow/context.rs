@@ -288,7 +288,7 @@ mod tests {
         assert!(back.has_summary("sub-node"));
         let key: NodeKey<i32> = NodeKey::new("sub-node".to_owned());
         let restored = back.summary_for(&key).unwrap();
-        assert_eq!(restored.status, "COMPLETED");
+        assert_eq!(restored.status, WorkflowStatus::Completed);
         assert_eq!(restored.output, Some(serde_json::json!(42)));
         assert_eq!(restored.total_tasks, 3);
     }
