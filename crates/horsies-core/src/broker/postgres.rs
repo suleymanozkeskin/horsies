@@ -45,8 +45,7 @@ use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
 };
 use crate::broker::row::task::{
-    ClaimedId, ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow,
-    TaskResultRow,
+    ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow, TaskResultRow,
 };
 use crate::broker::workflow_claim_settle::{settle_claimed_workflow_tasks, ClaimDisposition};
 
@@ -223,8 +222,6 @@ pub enum PrestartExpiry {
 // horsies_complete_task_fused's ctx CTE), not passed by the caller: the
 // ownership CAS makes the claim-time snapshot provably equal to the row, so
 // self-incrementing removes the snapshot from the written value entirely.
-// The optional `started_at` fence ($4) scopes the CAS to a claim generation;
-// `NULL` disables it.
 //
 // The written row is the retry row of the baseline retry write
 // (`horsies/core/baseline/sql/0004_lifecycle_functions.sql:1479-1496`):
@@ -256,8 +253,19 @@ WHERE t.id = $1
   AND t.status = 'RUNNING'
   AND t.claimed_by_worker_id = $3
   AND (t.good_until IS NULL OR retry.due_at < t.good_until)
-  AND ($4::timestamptz IS NULL OR t.started_at = $4)
 RETURNING t.id";
+
+/// [`REQUEUE_SQL`] on the statement layer: the task id, the retry time
+/// (`NULL`: the database clock), the worker id.
+static REQUEUE: TypedStatement = TypedStatement::new(
+    "requeue",
+    REQUEUE_SQL,
+    &[
+        ParameterType::Uuid,
+        ParameterType::Timestamptz,
+        ParameterType::Text,
+    ],
+);
 
 // A live row holds no result and no failed reason: the baseline keeps them
 // with the terminal record in history (`horsies_tasks` in
@@ -1685,31 +1693,46 @@ impl PostgresBroker {
     /// Returns `true` if the update was applied (task was RUNNING).
     /// Returns `false` if the task was no longer RUNNING (e.g., already
     /// marked FAILED by the stale-task reaper).
+    ///
+    /// One statement in autocommit on the main core pool, as a per-task
+    /// write ([`CheckoutClass::Reserved`]); a close waits for it. The fence
+    /// is the owner (`worker_id`), with no claim generation.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] when a closed handle cannot open
+    /// its pools again; [`BrokerError::Statement`]. After `OutcomeUnknown`
+    /// the row may be PENDING; the same requeue sent again answers `false`.
     pub async fn requeue(
         &self,
         task_id: Uuid,
         next_retry_at: Option<DateTime<Utc>>,
         worker_id: &str,
     ) -> Result<bool, BrokerError> {
-        // No claim-generation fence on the direct (non-execution) path.
-        let row: Option<ClaimedId> = sqlx::query_as(REQUEUE_SQL)
-            .bind(task_id)
-            .bind(next_retry_at)
-            .bind(worker_id)
-            .bind(None::<DateTime<Utc>>)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
+        let (open, _write) = self.core_pools_for_write()?;
+        let statement = &REQUEUE;
+        self.log_statement(statement);
+        let rows = open
+            .main()
+            .query(
+                CheckoutClass::Reserved,
+                &statement
+                    .bind()
+                    .value(&task_id)
+                    .value(&next_retry_at)
+                    .value(&worker_id)
+                    .finish(),
+                StatementBound::ConnectionTimeouts,
+            )
+            .await?;
+        let requeued = !rows.is_empty();
 
-        if row.is_some() {
-            tracing::debug!(task_id = %task_id, "task requeued");
-        } else {
-            tracing::warn!(
+        match requeued {
+            true => tracing::debug!(task_id = %task_id, "task requeued"),
+            false => tracing::warn!(
                 task_id = %task_id,
                 "task requeue skipped: task no longer RUNNING or not owned by this worker"
-            );
+            ),
         }
-        Ok(row.is_some())
+        Ok(requeued)
     }
 
     /// Get task attempts for a specific task (most recent first).
