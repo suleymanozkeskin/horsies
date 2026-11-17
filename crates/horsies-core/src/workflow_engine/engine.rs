@@ -16,7 +16,7 @@ use crate::core::{
 use crate::workflow_engine::args_merge::child_build_input;
 use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
-    stored_sub_workflow_params, ChildSpecError, ChildSpecFailure,
+    stored_sub_workflow_params, ChildSpecError, ChildSpecFailure, ChildStartStop,
 };
 use crate::workflow_engine::start_statement::{
     child_spec_failure_text, params_refused_error, RefusedMember,
@@ -155,7 +155,11 @@ WHERE workflow_id = $1 AND task_index = $2 AND status IN ('PENDING', 'READY')";
 
 // An engine-minted task row carries no command fingerprint, no idempotency
 // key and no retained input (horsies_tasks_command_fingerprint_by_origin).
-// `sent_at` is the start call time of the node's workflow ($11).
+// `sent_at` is the start call time of the node's workflow ($10). `good_until`
+// is the `good_until` member of the node's stored task options ($6), cast as
+// `horsies_workflow_node_tasks_insert` casts it: a text that the timestamptz
+// input cannot read raises (22007 or 22008) and nothing is inserted. Python
+// passes `str()` of the member to its insert (`horsies/core/workflows/engine.py:831-835`).
 const ENQUEUE_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, input, task_options, execution,
@@ -166,8 +170,9 @@ INSERT INTO horsies_tasks (
     retain_rerun_input, rerun_of_task_id, rerun_root_task_id
 )
 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8,
-        (SELECT w.sent_at FROM horsies_workflows w WHERE w.id = $11::uuid), NOW(), NULL, NULL, NULL,
-        'PENDING', NOW(), 0, $9, $10, TRUE, NOW(), FALSE, NULL, NULL)";
+        (SELECT w.sent_at FROM horsies_workflows w WHERE w.id = $10::uuid), NOW(), NULL, NULL, NULL,
+        'PENDING', NOW(), 0, $9, (nullif($6, '')::jsonb ->> 'good_until')::timestamptz,
+        TRUE, NOW(), FALSE, NULL, NULL)";
 
 /// A node's `started_at` is its enqueue time (Python `ENQUEUE_WORKFLOW_TASK_SQL`,
 /// `core/workflows/sql.py:114-116`).
@@ -792,6 +797,17 @@ impl From<WorkflowError> for PreparationStop {
     }
 }
 
+/// A sub-workflow root of the child that cannot start is split as a `WorkflowError` is; every other failure
+/// of the child start of the engine code is an error of the step ([`ChildStartStop`]).
+impl From<ChildStartStop> for PreparationStop {
+    fn from(stop: ChildStartStop) -> Self {
+        match stop {
+            ChildStartStop::RootSubworkflowNotStarted(error) => PreparationStop::from(error),
+            ChildStartStop::Failed(error) => PreparationStop::Failed(error),
+        }
+    }
+}
+
 /// The node input after the `args_from` merge; an `args_from` key that names a member of the static input
 /// refuses the node. Pure.
 pub(crate) fn merged_input_or_refusal(merge: ArgsFromMerge) -> Result<String, PreparationStop> {
@@ -1055,7 +1071,6 @@ async fn enqueue_phase2_dependent_in_tx(
         .bind(row.facts.execution.as_str())
         .bind(&row.facts.retention_class_key)
         .bind(row.max_retries)
-        .bind(row.good_until)
         .bind(workflow_id)
         .execute(transaction.as_mut())
         .await?;
@@ -1073,16 +1088,16 @@ async fn enqueue_phase2_dependent_in_tx(
     Ok(PromotionStep::Continue)
 }
 
-/// The values of a promoted task node's task row that come from the node's own stored data.
+/// The values of a promoted task node's task row that come from the node's own stored data. The deadline
+/// is not here: the insert casts the `good_until` member of the stored options (`ENQUEUE_TASK_SQL`).
 pub(crate) struct PreparedTaskRow {
     /// The node's input with its `args_from` and workflow context members.
     pub(crate) input: String,
-    pub(crate) good_until: Option<chrono::DateTime<chrono::Utc>>,
     pub(crate) max_retries: i32,
     pub(crate) facts: WorkflowTaskFacts,
 }
 
-/// The stored data of a READY task node that resume or recovery case 1 enqueues.
+/// The stored data of a READY task node that recovery case 1 enqueues.
 pub(crate) struct ReadyNodeData<'a> {
     pub(crate) task_index: i32,
     pub(crate) task_name: &'a str,
@@ -1094,11 +1109,12 @@ pub(crate) struct ReadyNodeData<'a> {
     pub(crate) queue_name: &'a str,
 }
 
-/// Builds the task row values of a READY task node that resume or recovery case 1 enqueues: the input
-/// (`args_from` from the dependency rows, then the workflow context), the deadline, the retry limit and the
-/// facts. A refusal of the node's own data, or an `args_from` key that names a member of its static input,
-/// is [`PreparationStop::Refused`]; a failed read is [`PreparationStop::Failed`]. Reads on `pool`; writes
-/// nothing.
+/// Builds the task row values of a READY task node that recovery case 1 enqueues: the input (`args_from`
+/// from the dependency rows, then the workflow context), the retry limit and the facts. A refusal of the
+/// node's own data, or an `args_from` key that names a member of its static input, is
+/// [`PreparationStop::Refused`]; a failed read is [`PreparationStop::Failed`]. The stored `good_until` is
+/// not read here: the insert casts it, and a text that the database cannot read raises there. Reads on
+/// `pool`; writes nothing.
 pub(crate) async fn prepare_ready_task_row(
     pool: &PgPool,
     workflow_id: Uuid,
@@ -1124,7 +1140,8 @@ pub(crate) async fn prepare_ready_task_row(
         merged_input,
     )
     .await?;
-    let good_until = crate::workflow_engine::node_good_until(
+    // The retry limit is read first: its refusal of options that do not read names the node.
+    let max_retries = crate::workflow_engine::node_max_retries(
         node.task_index,
         node.task_name,
         node.task_options,
@@ -1135,23 +1152,17 @@ pub(crate) async fn prepare_ready_task_row(
         retention.resolve_queue_class(node.queue_name).as_deref(),
     )
     .map_err(|error| WorkflowError::Validation(error.to_string()))?;
-    let max_retries = crate::workflow_engine::node_max_retries(
-        node.task_index,
-        node.task_name,
-        node.task_options,
-    )?;
     Ok(PreparedTaskRow {
         input,
-        good_until,
         max_retries,
         facts,
     })
 }
 
 /// Builds the task row values of a promoted task node: its input (`args_from`, then the workflow context,
-/// read in the transaction), its deadline, its retry limit and its facts. A refusal of the node's own data,
-/// or an `args_from` key that names a member of its static input, is [`PreparationStop::Refused`]; a failed
-/// read is [`PreparationStop::Failed`]. Writes nothing.
+/// read in the transaction), its retry limit and its facts. A refusal of the node's own data, or an
+/// `args_from` key that names a member of its static input, is [`PreparationStop::Refused`]; a failed read
+/// is [`PreparationStop::Failed`]. The insert casts the stored `good_until`. Writes nothing.
 async fn prepare_phase2_task_row(
     transaction: &mut Transaction<'_, Postgres>,
     workflow_id: Uuid,
@@ -1165,7 +1176,8 @@ async fn prepare_phase2_task_row(
     let input =
         inject_phase2_workflow_context_in_tx(transaction, workflow_id, node, merged_input).await?;
     enforce_payload_policy(payload, &node.task_name, PayloadKind::Kwargs, input.len());
-    let good_until = crate::workflow_engine::node_good_until(
+    // The retry limit is read first: its refusal of options that do not read names the node.
+    let max_retries = crate::workflow_engine::node_max_retries(
         node.task_index,
         &node.task_name,
         node.task_options.as_deref(),
@@ -1176,14 +1188,8 @@ async fn prepare_phase2_task_row(
         retention.resolve_queue_class(&node.queue_name).as_deref(),
     )
     .map_err(|error| WorkflowError::Validation(error.to_string()))?;
-    let max_retries = crate::workflow_engine::node_max_retries(
-        node.task_index,
-        &node.task_name,
-        node.task_options.as_deref(),
-    )?;
     Ok(PreparedTaskRow {
         input,
-        good_until,
         max_retries,
         facts,
     })
@@ -1292,8 +1298,9 @@ async fn enqueue_phase2_subworkflow_in_tx(
         }
     };
     let root = depth.root_workflow_id.unwrap_or(workflow_id);
-    // The child start writes in a savepoint: a child that cannot be prepared (a node with no resolved queue,
-    // for example) leaves no child row, and its node fails alone. A database error ends the step.
+    // The child start writes in a savepoint: a sub-workflow root of the child that cannot start leaves no
+    // child row, and this node fails alone. Every other failure of the child start ends the step
+    // (`ChildStartStop`).
     let mut savepoint = sqlx::Acquire::begin(&mut **transaction).await?;
     let started = preparation(
         start_child_workflow_in_tx(
@@ -1899,7 +1906,12 @@ async fn promote_dependents_level(
                         .push("NOW()")
                         .push("0")
                         .push_bind(p.max_retries)
-                        .push_bind(p.good_until)
+                        // good_until: the member of the stored options, cast as in
+                        // ENQUEUE_TASK_SQL. A text that does not read raises, and the level's
+                        // transaction rolls back.
+                        .push("(nullif(")
+                        .push_bind_unseparated(p.task_options.clone())
+                        .push_unseparated(", '')::jsonb ->> 'good_until')::timestamptz")
                         .push("TRUE")
                         .push("NOW()")
                         .push("FALSE")
@@ -1949,8 +1961,14 @@ async fn promote_dependents_level(
 /// Core resolver: evaluate whether a dependent task can transition to READY.
 ///
 /// Counts dependency statuses, evaluates join condition, and either
-/// marks the task READY + enqueues it, or marks it SKIPPED if the
-/// join condition can never be satisfied.
+/// enqueues the node, or marks it SKIPPED if the join condition can never be
+/// satisfied.
+///
+/// The READY mark of an enqueued node commits in one transaction with its task row
+/// ([`enqueue_workflow_task`]) or its child workflow ([`enqueue_subworkflow_task`]).
+/// An enqueue that raises leaves the node PENDING, as Python's promotion, which runs
+/// in one transaction, leaves it (recovery case 0 runs each candidate in a savepoint,
+/// `horsies/core/workflows/recovery.py:93-94`, `:712-760`).
 async fn try_make_ready_and_enqueue(
     pool: &PgPool,
     workflow_id: Uuid,
@@ -2078,57 +2096,54 @@ async fn try_make_ready_and_enqueue(
         }
     }
 
-    // Mark READY.
-    let ready_result: Option<IdRow> = sqlx::query_as(UPDATE_WORKFLOW_TASK_READY_SQL)
-        .bind(workflow_id)
-        .bind(task.task_index)
-        .fetch_optional(pool)
-        .await?;
-
-    if ready_result.is_none() {
-        // Already transitioned (race condition guard).
-        return Ok(());
-    }
-
+    // The dependency rows for the `args_from` members, read on the pool before the
+    // enqueue's transaction, which holds only the enqueue's writes.
     let dep_results = if task.args_from.is_some() {
         get_dependency_results(pool, workflow_id, dep_indices).await?
     } else {
         HashMap::new()
     };
 
-    if task.is_subworkflow {
-        // Sub-workflow: launch child workflow instead of enqueuing a task.
-        enqueue_subworkflow_task(
-            pool,
-            workflow_id,
-            task,
-            registry,
-            &dep_results,
-            payload,
-            retention,
-        )
-        .await?;
-    } else {
-        // Regular task: enqueue into horsies_tasks.
-        enqueue_workflow_task(
-            pool,
-            workflow_id,
-            task,
-            &dep_results,
-            registry,
-            payload,
-            retention,
-        )
-        .await?;
+    // The enqueue marks the node READY (the CAS that claims it) with its task row or
+    // child workflow, in one transaction.
+    match task.is_subworkflow {
+        true => {
+            enqueue_subworkflow_task(
+                pool,
+                workflow_id,
+                task,
+                registry,
+                &dep_results,
+                payload,
+                retention,
+            )
+            .await
+        }
+        false => {
+            enqueue_workflow_task(
+                pool,
+                workflow_id,
+                task,
+                &dep_results,
+                registry,
+                payload,
+                retention,
+            )
+            .await
+        }
     }
-
-    Ok(())
 }
 
 /// Re-evaluate the exact PENDING node selected by workflow recovery.
 ///
 /// Returns true only when that node leaves PENDING. This does not use a
 /// dependency as a proxy, so it cannot advance unrelated sibling nodes.
+///
+/// Errors: the error of the enqueue. A task insert that raises (a stored
+/// `good_until` that the database cannot read) or a child start that cannot write
+/// its child rolls back with the READY mark, so the node stays PENDING
+/// ([`try_make_ready_and_enqueue`]); the recovery pass counts the error toward the
+/// failure limit.
 pub(crate) async fn recover_pending_workflow_task(
     pool: &PgPool,
     workflow_id: Uuid,
@@ -2204,8 +2219,8 @@ struct EnqueueInsertParams {
     priority: i32,
     /// The node's input with its args_from and workflow context members.
     input: String,
-    good_until: Option<chrono::DateTime<chrono::Utc>>,
     max_retries: i32,
+    /// The node's stored task options. The insert casts their `good_until` member.
     task_options: Option<String>,
     facts: WorkflowTaskFacts,
 }
@@ -2214,11 +2229,14 @@ struct EnqueueInsertParams {
 ///
 /// Shared by `enqueue_workflow_task` (single-node) and the batched promotion
 /// pipeline. Merges `args_from` dependency results into the node's input, injects
-/// `workflow_ctx` when configured (the only DB read here), parses retry/good_until
+/// `workflow_ctx` when configured (the only DB read here), parses the retry limit
 /// and the execution class from task_options, with the task id the caller minted.
 /// A refusal of the node's own data, or an `args_from` key that names a member of
 /// its static input, is [`PreparationStop::Refused`] (the node fails alone,
-/// [`preparation`]); a failed read is [`PreparationStop::Failed`]. Writes nothing.
+/// [`preparation`]); a failed read is [`PreparationStop::Failed`]. The stored
+/// `good_until` is not read here: the insert casts it, and a text that the database
+/// cannot read raises there (Python `horsies/core/workflows/engine.py:831-835`).
+/// Writes nothing.
 async fn build_enqueued_task_params(
     pool: &PgPool,
     workflow_id: Uuid,
@@ -2263,11 +2281,6 @@ async fn build_enqueued_task_params(
         &task.task_name,
         task.task_options.as_deref(),
     )?;
-    let good_until = crate::workflow_engine::node_good_until(
-        task.task_index,
-        &task.task_name,
-        task.task_options.as_deref(),
-    )?;
     let retention_class_key = retention.resolve_queue_class(&task.queue_name);
     let facts = prepare_workflow_task_facts(
         &merged_input,
@@ -2282,7 +2295,6 @@ async fn build_enqueued_task_params(
         queue_name: task.queue_name.clone(),
         priority: task.priority,
         input: merged_input,
-        good_until,
         max_retries,
         task_options: task.task_options.clone(),
         facts,
@@ -2318,10 +2330,12 @@ pub(crate) async fn inject_workflow_ctx_into_input(
     Ok(serde_json::to_string(&object)?)
 }
 
-/// Create a horsies_tasks row for a workflow task and link it.
+/// Mark a PENDING workflow task READY, create its horsies_tasks row and link it, in one transaction.
 ///
 /// Merges `args_from` results into the task's input. A node that the build refuses ([`NodeRefusal`])
-/// fails alone instead (`fail_workflow_node`).
+/// fails alone instead ([`claim_and_fail_node`]). An insert that raises (a stored `good_until` that the
+/// database cannot read) rolls back the READY mark too: the node stays PENDING and the error is returned.
+/// A node that another promotion claimed first is left to it.
 async fn enqueue_workflow_task(
     pool: &PgPool,
     workflow_id: Uuid,
@@ -2349,8 +2363,7 @@ async fn enqueue_workflow_task(
     let params = match built {
         Preparation::Built(params) => params,
         Preparation::Refused(refusal) => {
-            // The step's outcome (paused or not) has no further node to stop here.
-            return fail_workflow_node(
+            return claim_and_fail_node(
                 pool,
                 workflow_id,
                 task.task_index,
@@ -2359,15 +2372,25 @@ async fn enqueue_workflow_task(
                 payload,
                 retention,
             )
-            .await
-            .map(|_step| ());
+            .await;
         }
     };
 
-    // INSERT + LINK in a single transaction to prevent orphaned horsies_task rows
-    // if the workflow is paused/cancelled between INSERT and LINK.
-    // Matches Python's atomic ENQUEUE_WORKFLOW_TASK_SQL pattern.
+    // READY + INSERT + LINK in a single transaction: an insert that raises leaves the node PENDING,
+    // and a LINK that matches no row (the workflow was paused or cancelled) leaves no orphaned
+    // horsies_task row. Matches Python's atomic ENQUEUE_WORKFLOW_TASK_SQL pattern.
     let mut tx = pool.begin().await?;
+
+    let claimed: Option<IdRow> = sqlx::query_as(UPDATE_WORKFLOW_TASK_READY_SQL)
+        .bind(workflow_id)
+        .bind(task.task_index)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if claimed.is_none() {
+        // Already transitioned (race condition guard).
+        tx.rollback().await?;
+        return Ok(());
+    }
 
     sqlx::query(ENQUEUE_TASK_SQL)
         .bind(params.task_id)
@@ -2379,7 +2402,6 @@ async fn enqueue_workflow_task(
         .bind(params.facts.execution.as_str())
         .bind(&params.facts.retention_class_key)
         .bind(params.max_retries)
-        .bind(params.good_until)
         .bind(workflow_id)
         .execute(&mut *tx)
         .await?;
@@ -2387,7 +2409,8 @@ async fn enqueue_workflow_task(
     // Link workflow_task to the created horsies_tasks row.
     // Guards on wt.status = 'READY' AND w.status = 'RUNNING'.
     // If the workflow was paused/cancelled, this updates 0 rows and the
-    // transaction rolls back (no orphaned horsies_task).
+    // transaction rolls back (no orphaned horsies_task, and the node stays
+    // PENDING; resume evaluates it again).
     let link_result = sqlx::query(LINK_ENQUEUED_TASK_SQL)
         .bind(&params.task_id)
         .bind(workflow_id)
@@ -2396,12 +2419,12 @@ async fn enqueue_workflow_task(
         .await?;
 
     if link_result.rows_affected() == 0 {
-        // Workflow was paused/cancelled or task already enqueued. Rollback.
+        // Workflow was paused/cancelled. Rollback.
         tx.rollback().await?;
         tracing::debug!(
             workflow_id = %workflow_id,
             task_index = task.task_index,
-            "workflow task link failed (workflow no longer RUNNING or task not READY), rolled back",
+            "workflow task link failed (workflow no longer RUNNING), rolled back",
         );
         return Ok(());
     }
@@ -2422,9 +2445,6 @@ async fn enqueue_workflow_task(
 // Sub-workflow enqueue and completion
 // ---------------------------------------------------------------------------
 
-/// Launch a child workflow for a sub-workflow node.
-///
-/// Looks up the child spec in the registry, builds it dynamically if a
 /// Mark a promoted node FAILED and apply the failure: a node that the promotion refuses ([`NodeRefusal`]:
 /// `WORKER_SERIALIZATION_ERROR` for a task node whose own data does not read, `WORKFLOW_ENQUEUE_FAILED` for a
 /// sub-workflow node whose child cannot be built or started and for a node whose `args_from` names a member
@@ -2511,8 +2531,54 @@ pub(crate) async fn fail_workflow_node(
     Ok(PromotionStep::Continue)
 }
 
-/// `spec_builder` is registered (supporting runtime parameterization),
-/// starts the child workflow, and links the parent workflow_task to it.
+/// Fail a PENDING node that its promotion refused, or whose child cannot start: the READY mark
+/// (`UPDATE_WORKFLOW_TASK_READY_SQL`) claims the node first, as on every promotion path, then
+/// [`fail_workflow_node`] writes FAILED and applies the failure. A node that another promotion claimed
+/// first, or that left PENDING, is left alone and nothing is written.
+async fn claim_and_fail_node(
+    pool: &PgPool,
+    workflow_id: Uuid,
+    task_index: i32,
+    error: TaskError,
+    registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
+    retention: &RetentionConfig,
+) -> Result<(), WorkflowError> {
+    let claimed: Option<IdRow> = sqlx::query_as(UPDATE_WORKFLOW_TASK_READY_SQL)
+        .bind(workflow_id)
+        .bind(task_index)
+        .fetch_optional(pool)
+        .await?;
+    match claimed {
+        None => Ok(()),
+        // The step's outcome (paused or not) has no further node to stop here.
+        Some(_claimed) => fail_workflow_node(
+            pool,
+            workflow_id,
+            task_index,
+            error,
+            registry,
+            payload,
+            retention,
+        )
+        .await
+        .map(|_step| ()),
+    }
+}
+
+/// Launch a child workflow for a PENDING sub-workflow node.
+///
+/// Looks up the child spec in the registry, builds it dynamically if a
+/// `spec_builder` is registered (supporting runtime parameterization), then
+/// marks the node READY, starts the child workflow and links the parent
+/// workflow_task to it, in one transaction. A child that cannot be built, and a
+/// sub-workflow root of the child that cannot start, fail the node alone
+/// ([`claim_and_fail_node`]). Any other failure of the child start
+/// ([`ChildStartStop::Failed`]: task options of the task function that do not
+/// parse, a database error) rolls back the READY mark too: the node stays
+/// PENDING and the error is returned (Python raises from
+/// `enqueue_subworkflow_task` and its transaction rolls back,
+/// `horsies/core/workflows/engine.py:1011-1025`).
 async fn enqueue_subworkflow_task(
     pool: &PgPool,
     workflow_id: Uuid,
@@ -2543,7 +2609,7 @@ async fn enqueue_subworkflow_task(
     ) {
         Ok(child_depth) => child_depth,
         Err(error) => {
-            return fail_workflow_node(
+            return claim_and_fail_node(
                 pool,
                 workflow_id,
                 task.task_index,
@@ -2552,8 +2618,7 @@ async fn enqueue_subworkflow_task(
                 payload,
                 retention,
             )
-            .await
-            .map(|_step| ());
+            .await;
         }
     };
 
@@ -2564,9 +2629,9 @@ async fn enqueue_subworkflow_task(
     else {
         // Child definition is not registered on this worker under the node's key. Mark the parent
         // workflow_task FAILED and propagate, rather than returning an error
-        // that leaves the parent stuck in READY and the workflow RUNNING
+        // that leaves the parent stuck and the workflow RUNNING
         // forever (parity with Python's _fail_subworkflow_load / PR #39).
-        return fail_workflow_node(
+        return claim_and_fail_node(
             pool,
             workflow_id,
             task.task_index,
@@ -2579,8 +2644,7 @@ async fn enqueue_subworkflow_task(
             payload,
             retention,
         )
-        .await
-        .map(|_step| ());
+        .await;
     };
 
     // Build child spec: use spec_builder if available for dynamic parameterization,
@@ -2599,7 +2663,7 @@ async fn enqueue_subworkflow_task(
     let child_spec = match built {
         Preparation::Built(child_spec) => child_spec,
         Preparation::Refused(refusal) => {
-            return fail_workflow_node(
+            return claim_and_fail_node(
                 pool,
                 workflow_id,
                 task.task_index,
@@ -2608,17 +2672,28 @@ async fn enqueue_subworkflow_task(
                 payload,
                 retention,
             )
-            .await
-            .map(|_step| ());
+            .await;
         }
     };
 
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
 
-    // Start child workflow + link parent in a single transaction.
+    // READY mark + child workflow + parent link in a single transaction.
     // Prevents orphaned child workflows if the parent is paused between
-    // child creation and link (matching Python's atomic pattern).
+    // child creation and link (matching Python's atomic pattern), and a child
+    // start that raises leaves the node PENDING.
     let mut tx = pool.begin().await?;
+
+    let claimed: Option<IdRow> = sqlx::query_as(UPDATE_WORKFLOW_TASK_READY_SQL)
+        .bind(workflow_id)
+        .bind(task.task_index)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if claimed.is_none() {
+        // Already transitioned (race condition guard).
+        tx.rollback().await?;
+        return Ok(());
+    }
 
     let started = preparation(
         start_child_workflow_in_tx(
@@ -2636,9 +2711,10 @@ async fn enqueue_subworkflow_task(
     let child_id = match started {
         Preparation::Built(child_id) => child_id,
         Preparation::Refused(refusal) => {
-            // No child row stays: the child's writes roll back before the node fails.
+            // No child row stays: the child's writes and the READY mark roll back
+            // before the node fails.
             tx.rollback().await?;
-            return fail_workflow_node(
+            return claim_and_fail_node(
                 pool,
                 workflow_id,
                 task.task_index,
@@ -2647,8 +2723,7 @@ async fn enqueue_subworkflow_task(
                 payload,
                 retention,
             )
-            .await
-            .map(|_step| ());
+            .await;
         }
     };
 
@@ -5455,11 +5530,12 @@ mod promotion_batch_tests {
         cleanup(&pool, &wf_id).await;
     }
 
-    /// A node of the batched level whose stored deadline does not read fails alone with
-    /// `WORKER_SERIALIZATION_ERROR` before the level writes. With `on_error=pause` the failure
-    /// pauses the workflow and ends the level: the sibling stays PENDING and gets no task row
-    /// (Python `_enqueue_promoted`, `horsies/core/workflows/engine.py:2331-2378`, inserts no task
-    /// row for the level).
+    /// A node of the batched level whose stored options are not a JSON object fails alone with
+    /// `WORKER_SERIALIZATION_ERROR` before the level writes (Python
+    /// `horsies/core/workflows/engine.py:798-805`). With `on_error=pause` the failure pauses the
+    /// workflow and ends the level: the sibling stays PENDING and gets no task row (Python
+    /// `_enqueue_promoted`, `horsies/core/workflows/engine.py:2331-2378`, inserts no task row for
+    /// the level).
     #[tokio::test]
     #[serial]
     async fn a_refused_node_that_pauses_the_workflow_ends_the_level_before_it_writes() {
@@ -5475,13 +5551,13 @@ mod promotion_batch_tests {
         insert_node(&pool, &wf_id, 1, vec![0], "PENDING", "all", false).await;
         insert_node(&pool, &wf_id, 2, vec![0], "PENDING", "all", false).await;
         sqlx::query(
-            r#"UPDATE horsies_workflow_tasks SET task_options = '{"good_until": 12345}'
-               WHERE workflow_id = $1::uuid AND task_index = 1"#,
+            "UPDATE horsies_workflow_tasks SET task_options = '[]'
+             WHERE workflow_id = $1::uuid AND task_index = 1",
         )
         .bind(test_uuid(&wf_id))
         .execute(&pool)
         .await
-        .expect("store a deadline that does not read");
+        .expect("store options that are not a JSON object");
 
         process_dependents(
             &pool,
@@ -5511,6 +5587,59 @@ mod promotion_batch_tests {
         assert!(task_id_of(&pool, &wf_id, 1).await.is_none());
         assert_eq!(node_status(&pool, &wf_id, 2).await, "PENDING");
         assert!(task_id_of(&pool, &wf_id, 2).await.is_none());
+
+        cleanup(&pool, &wf_id).await;
+    }
+
+    /// A node of the batched level whose stored `good_until` the database cannot read is not
+    /// refused: the bulk insert casts the text and raises (22007), and the level's transaction
+    /// rolls back, so no node of the level is promoted and no task row stays (Python passes
+    /// `str()` of the member to its insert, `horsies/core/workflows/engine.py:831-835`, and the
+    /// step rolls back).
+    #[tokio::test]
+    #[serial]
+    async fn a_stored_deadline_that_does_not_read_raises_from_the_level_insert() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let wf_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id).await;
+        insert_node(&pool, &wf_id, 0, vec![], "COMPLETED", "all", false).await;
+        insert_node(&pool, &wf_id, 1, vec![0], "PENDING", "all", false).await;
+        insert_node(&pool, &wf_id, 2, vec![0], "PENDING", "all", false).await;
+        sqlx::query(
+            r#"UPDATE horsies_workflow_tasks SET task_options = '{"good_until": "not-a-date"}'
+               WHERE workflow_id = $1::uuid AND task_index = 1"#,
+        )
+        .bind(test_uuid(&wf_id))
+        .execute(&pool)
+        .await
+        .expect("store a deadline that the database cannot read");
+
+        let error = process_dependents(
+            &pool,
+            test_uuid(&wf_id),
+            0,
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect_err("the level insert raises");
+
+        match error {
+            WorkflowError::Database(error) => assert_eq!(
+                error
+                    .as_database_error()
+                    .and_then(|database_error| database_error.code())
+                    .as_deref(),
+                Some("22007"),
+                "{error}"
+            ),
+            other => panic!("expected the database refusal of the deadline, got {other:?}"),
+        }
+        for task_index in [1, 2] {
+            assert_eq!(node_status(&pool, &wf_id, task_index).await, "PENDING");
+            assert!(task_id_of(&pool, &wf_id, task_index).await.is_none());
+        }
 
         cleanup(&pool, &wf_id).await;
     }
