@@ -2812,6 +2812,9 @@ mod retention_ports;
 mod reaper_pass_ports;
 
 #[cfg(test)]
+mod stored_form_vector_tests;
+
+#[cfg(test)]
 mod stale_running_end_tests {
     use super::{stale_running_end, RecoveryBatch, StaleRunningPass};
 

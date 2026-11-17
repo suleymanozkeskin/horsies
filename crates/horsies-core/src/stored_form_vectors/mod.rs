@@ -5,6 +5,7 @@
 //! core encodes each value that it writes to the text, and reads each text to
 //! the value. The Python client and the Rust client test the same files.
 
+pub(crate) mod error_data;
 pub(crate) mod result_envelope;
 mod task_input;
 

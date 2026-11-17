@@ -13,8 +13,7 @@ use std::fmt::Debug;
 
 use horsies_core::core::codec::task_result_to_json_string;
 use horsies_core::{
-    BuiltInTaskCode, RawResultRecord, StoredEnvelopeText, SubWorkflowFailure, SubWorkflowSummary,
-    TaskErrorCode, TaskErrorKind, TaskResult, TaskStatus, UserCode,
+    RawResultRecord, StoredEnvelopeText, TaskErrorCode, TaskResult, TaskStatus, UserCode,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -22,10 +21,12 @@ use serde_json::value::RawValue;
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{check_typed, vector_file, RustCase, RustDrift, TypedCheck};
+use super::{
+    check_typed, error_code, record, stored_error, vector_file, RustCase, RustDrift, TypedCheck,
+};
 use crate::handle::outcome_of_record;
 use crate::task::body::{body_result, encode_output};
-use crate::{ExceptionRecord, TaskError, TaskOutcome};
+use crate::{TaskError, TaskOutcome};
 
 #[derive(Deserialize)]
 struct ResultEnvelopeForm {
@@ -70,17 +71,6 @@ fn envelope_of_value(name: &str, bytes: &[u8]) -> String {
     serde_json::to_string(&TaskResult::Ok(raw)).expect("an envelope of a JSON text encodes")
 }
 
-/// A record of a stored envelope, as the core's result read gives it.
-fn record(name: &str, status: TaskStatus, text: &str) -> RawResultRecord {
-    RawResultRecord {
-        task_id: Uuid::nil(),
-        task_name: "stored_form_vector".to_owned(),
-        status,
-        raw_result: StoredEnvelopeText::parse(text.to_owned())
-            .unwrap_or_else(|refused| panic!("{name}: the core refused the envelope: {refused}")),
-    }
-}
-
 /// The check of an ok vector: the client's text of the value, and the read
 /// of Python's text.
 struct OkValue<'a> {
@@ -105,63 +95,6 @@ impl TypedCheck for OkValue<'_> {
             Ok(TaskOutcome::Failed(error)) => panic!("{name}: read an error: {error}"),
             Err(error) => panic!("{name}: the read refused Python's text: {error}"),
         }
-    }
-}
-
-/// The code of a task error notation.
-fn error_code(name: &str, notation: &Value) -> TaskErrorCode {
-    match (notation["built_in"].as_str(), notation["user"].as_str()) {
-        (Some(code), None) => TaskErrorCode::BuiltIn(
-            BuiltInTaskCode::parse(code)
-                .unwrap_or_else(|| panic!("{name}: {code} is not a built-in code")),
-        ),
-        (None, Some(code)) => TaskErrorCode::User(
-            UserCode::parse(code).unwrap_or_else(|refused| panic!("{name}: {refused}")),
-        ),
-        _ => panic!("{name}: an error code is built_in or user"),
-    }
-}
-
-/// The stored form of a task error notation, with `stored_data` in place of
-/// its `data` when the vector names one.
-fn stored_error(
-    name: &str,
-    notation: &Value,
-    stored_data: Option<&Value>,
-) -> horsies_core::TaskError {
-    let data = match stored_data {
-        Some(stored) => Some(stored.clone()),
-        None => match &notation["data"] {
-            Value::Null => None,
-            given => Some(given.clone()),
-        },
-    };
-    let exception = match &notation["exception"] {
-        Value::Null => None,
-        record => Some(
-            serde_json::from_value::<ExceptionRecord>(record.clone())
-                .unwrap_or_else(|error| panic!("{name}: {error}")),
-        ),
-    };
-    let kind = match notation.get("sub_workflow") {
-        None => TaskErrorKind::Plain,
-        Some(sub_workflow) => TaskErrorKind::SubWorkflow(SubWorkflowFailure {
-            sub_workflow_id: Uuid::parse_str(
-                sub_workflow["id"]
-                    .as_str()
-                    .unwrap_or_else(|| panic!("{name}: a sub-workflow id is text")),
-            )
-            .unwrap_or_else(|error| panic!("{name}: {error}")),
-            sub_workflow_summary: SubWorkflowSummary::from_stored_value(&sub_workflow["summary"])
-                .unwrap_or_else(|refused| panic!("{name}: {refused}")),
-        }),
-    };
-    horsies_core::TaskError {
-        exception,
-        error_code: error_code(name, &notation["error_code"]),
-        data,
-        message: notation["message"].as_str().map(str::to_owned),
-        kind,
     }
 }
 
