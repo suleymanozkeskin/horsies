@@ -28,7 +28,7 @@ from horsies.core.utils.loop_runner import (
     async_context_message,
     in_running_event_loop,
 )
-from horsies.core.utils.db import autocommit_connection, is_retryable_connection_error
+from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
 from horsies.core.process_role import (
     ProcessRole,
@@ -1537,59 +1537,67 @@ class WorkflowHandle(Generic[OutT]):
     async def cancel_async(self) -> HandleResult[None]:
         """Async version of cancel().
 
-        One statement in autocommit (``horsies_workflow_cancel``): the
-        workflow and every PENDING, RUNNING or PAUSED descendant become
-        CANCELLED with ``completed_at``; the tasks behind ENQUEUED nodes are
-        cancelled; PENDING and READY nodes, and the ENQUEUED nodes of the
-        cancelled tasks, become SKIPPED. A node whose task already started
-        stays RUNNING until the task ends.
+        One statement in autocommit (``horsies_workflow_cancel``) that the
+        core runs on the broker's core handle
+        (``CoreHandle.cancel_workflow_async``); a cancel of the caller does
+        not stop it. The workflow and every PENDING, RUNNING or PAUSED
+        descendant become CANCELLED with ``completed_at``; the tasks behind
+        ENQUEUED nodes are cancelled; PENDING and READY nodes, and the
+        ENQUEUED nodes of the cancelled tasks, become SKIPPED. A node whose
+        task already started stays RUNNING until the task ends.
 
         Returns:
             ``Ok(None)`` when the tree is cancelled, or when the workflow is
             already terminal (nothing written).
             ``Err(HandleWorkflowNotFound)`` when no workflow has the id.
-            ``Err(HandleDbOperationFailed)`` on a database error: the
-            statement wrote nothing, or its commit outcome is unknown.
-            ``Err(HandleEventLoopLimit)``: nothing ran.
-            ``OutcomeDecodeError`` (raised) when the function returns a row
-            outside its contract (a defect).
+            ``Err(HandleDbOperationFailed)`` on a database error or a core
+            boundary error: the statement wrote nothing, or its commit
+            outcome is unknown. An id that is not a UUID is not retryable.
+            ``Err(HandleStoredDataInvalid)`` when a stored value does not
+            parse.
+
+        Raises:
+            PanicException: the function returned a row outside its contract
+                (a defect of the core).
         """
-        from horsies.core.workflows.functions import (
-            CANCEL_WORKFLOW_FUNCTION_SQL,
-            CancelOutcome,
-            decode_cancel_outcome,
+        from horsies._core import (
+            CoreError,
+            HandleFailed,
+            WorkflowAbsent,
+            WorkflowCancelled,
+            WorkflowNotCancellable,
+        )
+        from horsies.core.workflows.handle_records import (
+            WorkflowOperation,
+            core_call_error,
+            handle_failed_error,
+            workflow_uuid,
         )
 
-        match await self.broker.select_resources():
-            case Err(loop_limit):
-                return self._event_loop_limit(loop_limit, 'cancel')
-            case Ok(resources):
+        match workflow_uuid(self.workflow_id, WorkflowOperation.CANCEL):
+            case Err(not_an_id):
+                return Err(not_an_id)
+            case Ok(workflow_key):
                 pass
-
         try:
-            async with resources.session_factory() as session:
-                connection = await autocommit_connection(session)
-                result = await connection.execute(
-                    CANCEL_WORKFLOW_FUNCTION_SQL,
-                    {'wf_id': self.workflow_id},
-                )
-                rows = result.fetchall()
-        except SQLAlchemyError as exc:
-            return Err(HandleDbOperationFailed(
-                message=f'Cancel failed for workflow {self.workflow_id}: {exc}',
-                retryable=is_retryable_connection_error(exc),
-                workflow_id=self.workflow_id,
-                exception=exc,
-            ))
+            record = await self.broker._core_handle.cancel_workflow_async(  # pyright: ignore[reportPrivateUsage]
+                workflow_key,
+            )
+        except CoreError as exc:
+            return Err(core_call_error(exc, self.workflow_id, WorkflowOperation.CANCEL))
         # The CANCELLED status write fires horsies_workflow_notify_trigger
         # per workflow row, so no workflow_done notify is sent here.
-        match decode_cancel_outcome(rows):
-            case CancelOutcome.CANCELLED | CancelOutcome.NOT_CANCELLABLE:
+        match record:
+            case WorkflowCancelled() | WorkflowNotCancellable():
                 return Ok(None)
-            case CancelOutcome.NOT_FOUND:
+            case WorkflowAbsent():
                 return Err(HandleWorkflowNotFound(
                     message=f'Workflow {self.workflow_id} not found',
                     workflow_id=self.workflow_id,
+                ))
+            case HandleFailed():
+                return Err(handle_failed_error(
+                    record, self.workflow_id, WorkflowOperation.CANCEL,
                 ))
             case _ as unreachable:
                 assert_never(unreachable)

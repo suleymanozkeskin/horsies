@@ -217,6 +217,7 @@ const CANCEL_TASK_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("include_running", "bool"),
 ];
+const WORKFLOW_ID_PARAMETERS: &[StubParameter] = &[positional("workflow_id", "uuid.UUID")];
 const RAW_RESULT_RECORD_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("timeout_ms", "int | None"),
@@ -285,6 +286,11 @@ const MARK_STALE_RUNNING_OUTCOME: &str =
 const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
      CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
 
+const PAUSE_WORKFLOW_OUTCOME: &str =
+    "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed";
+const CANCEL_WORKFLOW_OUTCOME: &str =
+    "WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleFailed";
+
 const START_ATTEMPT_OUTCOME: &str =
     "AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed";
 const MARK_FINALIZING_OUTCOME: &str = "FinalizingMarked | FinalizingNotHeld | MarkFinalizingFailed";
@@ -349,7 +355,7 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 4] = [
     },
 ];
 
-const CORE_HANDLE_METHODS: [StubFunction; 24] = [
+const CORE_HANDLE_METHODS: [StubFunction; 26] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -469,6 +475,18 @@ const CORE_HANDLE_METHODS: [StubFunction; 24] = [
         parameters: CANCEL_TASK_PARAMETERS,
         returns: TypeText::FutureOf(CANCEL_TASK_OUTCOME),
         doc: "Cancel one plain task; a RUNNING task only with include_running. Writes, in one\nstatement. An outcome that contradicts the function raises PanicException.",
+    },
+    StubFunction {
+        name: "pause_workflow_async",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::FutureOf(PAUSE_WORKFLOW_OUTCOME),
+        doc: "Pause one workflow tree. Writes, in one statement. A row outside the function's contract\nraises PanicException.",
+    },
+    StubFunction {
+        name: "cancel_workflow_async",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::FutureOf(CANCEL_WORKFLOW_OUTCOME),
+        doc: "Cancel one workflow tree. Writes, in one statement. A row outside the function's contract\nraises PanicException.",
     },
     StubFunction {
         name: "task_info",
@@ -1395,8 +1413,61 @@ const MONITORING_CLASSES: [StubClass; 2] = [
     },
 ];
 
-const CLASS_COUNT: usize =
-    HANDLE_CLASSES.len() + ARGUMENT_CLASSES.len() + RECORD_CLASSES.len() + MONITORING_CLASSES.len();
+const WORKFLOW_CLASSES: [StubClass; 6] = [
+    StubClass {
+        name: "WorkflowPaused",
+        doc: "The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed\ntasks of the paused tree are abandoned.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowNotRunning",
+        doc: "The workflow exists and is not RUNNING. Nothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowCancelled",
+        doc: "The workflow was PENDING, RUNNING or PAUSED; its tree is CANCELLED.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowNotCancellable",
+        doc: "The workflow is COMPLETED, FAILED, CANCELLED or EXPIRED. Nothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowAbsent",
+        doc: "No workflow has this id. Nothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "HandleFailed",
+        doc: "The connect, the client family check or the statement failed (DB_OPERATION_FAILED), or a\nstored value of the workflow does not parse (STORED_DATA_INVALID, not retryable). After\nDB_OPERATION_FAILED the statement wrote nothing, or it committed and its reply was lost.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("code", "Literal['DB_OPERATION_FAILED', 'STORED_DATA_INVALID']"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+];
+
+const CLASS_COUNT: usize = HANDLE_CLASSES.len()
+    + ARGUMENT_CLASSES.len()
+    + RECORD_CLASSES.len()
+    + MONITORING_CLASSES.len()
+    + WORKFLOW_CLASSES.len();
 
 const CLASSES: [StubClass; CLASS_COUNT] = {
     let mut classes = [HANDLE_CLASSES[0]; CLASS_COUNT];
@@ -1421,6 +1492,12 @@ const CLASSES: [StubClass; CLASS_COUNT] = {
     while monitoring_position < MONITORING_CLASSES.len() {
         classes[monitoring_start + monitoring_position] = MONITORING_CLASSES[monitoring_position];
         monitoring_position += 1;
+    }
+    let workflow_start = monitoring_start + MONITORING_CLASSES.len();
+    let mut workflow_position = 0;
+    while workflow_position < WORKFLOW_CLASSES.len() {
+        classes[workflow_start + workflow_position] = WORKFLOW_CLASSES[workflow_position];
+        workflow_position += 1;
     }
     classes
 };

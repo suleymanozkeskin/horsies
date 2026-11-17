@@ -19,3 +19,4 @@ pub mod stale_running;
 pub mod start;
 pub mod success;
 pub mod task_info;
+pub mod workflow_lifecycle;

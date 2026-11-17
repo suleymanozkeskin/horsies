@@ -42,6 +42,7 @@ use crate::operations::success::{
     SuccessBatchRequest,
 };
 use crate::operations::task_info::{task_info_operation, TaskInfoParts};
+use crate::operations::workflow_lifecycle::{cancel_workflow_operation, pause_workflow_operation};
 use crate::process_core::{core_for_call, Core};
 use crate::records::{BrokerFailure, DatabasePingRecord, HandleClosed, Outcome};
 
@@ -543,6 +544,46 @@ impl CoreHandle {
             "CoreHandle.cancel_task_async",
             CallKind::Write,
             cancel_task_operation(self.connection(), task_id, include_running),
+        )
+    }
+
+    /// Pause one workflow tree (`horsies_workflow_pause`): `WorkflowPaused`,
+    /// `WorkflowNotRunning`, `WorkflowAbsent`, or `HandleFailed`. Writes, in
+    /// one statement. Awaitable only: its caller,
+    /// `horsies.core.workflows.lifecycle.pause_workflow`, is a coroutine. A row
+    /// outside the function's contract raises `PanicException`.
+    fn pause_workflow_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.pause_workflow_async",
+            CallKind::Write,
+            pause_workflow_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// Cancel one workflow tree (`horsies_workflow_cancel`):
+    /// `WorkflowCancelled`, `WorkflowNotCancellable`, `WorkflowAbsent`, or
+    /// `HandleFailed`. Writes, in one statement. Awaitable only: its caller,
+    /// `WorkflowHandle.cancel_async`, is a coroutine. A row outside the
+    /// function's contract raises `PanicException`.
+    fn cancel_workflow_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.cancel_workflow_async",
+            CallKind::Write,
+            cancel_workflow_operation(self.connection(), workflow_id),
         )
     }
 

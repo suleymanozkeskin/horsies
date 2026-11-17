@@ -135,6 +135,14 @@ class CoreHandle:
         """Cancel one plain task; a RUNNING task only with include_running. Writes, in one
         statement. An outcome that contradicts the function raises PanicException.
         """
+    def pause_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed]:
+        """Pause one workflow tree. Writes, in one statement. A row outside the function's contract
+        raises PanicException.
+        """
+    def cancel_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleFailed]:
+        """Cancel one workflow tree. Writes, in one statement. A row outside the function's contract
+        raises PanicException.
+        """
     def task_info(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> TaskInfoRecord | TaskInfoNotFound | BrokerFailure:
         """The info of one task. Installs the schema once per handle first; then reads only."""
     def task_info_async(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> asyncio.Future[TaskInfoRecord | TaskInfoNotFound | BrokerFailure]:
@@ -1096,6 +1104,59 @@ class WindowRefusedRecord:
     """The requested window is not servable; reason names why."""
     @property
     def reason(self) -> str: ...
+
+
+@final
+class WorkflowPaused:
+    """The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed
+    tasks of the paused tree are abandoned.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowNotRunning:
+    """The workflow exists and is not RUNNING. Nothing was written."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowCancelled:
+    """The workflow was PENDING, RUNNING or PAUSED; its tree is CANCELLED."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowNotCancellable:
+    """The workflow is COMPLETED, FAILED, CANCELLED or EXPIRED. Nothing was written."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowAbsent:
+    """No workflow has this id. Nothing was written."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class HandleFailed:
+    """The connect, the client family check or the statement failed (DB_OPERATION_FAILED), or a
+    stored value of the workflow does not parse (STORED_DATA_INVALID, not retryable). After
+    DB_OPERATION_FAILED the statement wrote nothing, or it committed and its reply was lost.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def code(self) -> Literal['DB_OPERATION_FAILED', 'STORED_DATA_INVALID']: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
 
 
 def baseline_sql_files() -> list[tuple[str, str]]:
