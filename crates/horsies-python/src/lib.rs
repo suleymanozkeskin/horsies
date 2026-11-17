@@ -158,6 +158,9 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::workflow_start::WorkflowExists>()?;
     module.add_class::<operations::workflow_start::WorkflowIdTaken>()?;
     module.add_class::<operations::workflow_start::WorkflowStartFailed>()?;
+    module.add_class::<operations::workflow_resume::WorkflowResumed>()?;
+    module.add_class::<operations::workflow_resume::WorkflowNotPaused>()?;
+    module.add_class::<operations::workflow_resume::WorkflowResumeRecoveryFailed>()?;
     module.add_class::<child_handle::CoreChildHandle>()?;
     module.add_class::<scheduler::CoreScheduler>()?;
     module.add_class::<records::BrokerFailure>()?;

@@ -453,6 +453,56 @@ unless it starts with "Added".
   `WebCliError`, `execute_cutover`, `CutoverArgs`, `CutoverCliError`,
   `CutoverCommand`, `execute_transcode`, `TranscodeArgs`,
   `TranscodeCliError` and `TranscodeCommand` are removed from the library.
+- **The workflow DSL is the client's, and it builds a spec as data.**
+  `WorkflowSpecBuilder`, `WorkflowSpec`, `TaskNode`, `SubWorkflowNode`,
+  `NodeKey`, `NodeRef`, `TypedNodeRef`, `InputField`, `JoinType`,
+  `SuccessPolicy`, `SuccessCase`, `WorkflowDefinition`, `WorkflowDefConfig`
+  and `WorkflowContext` are types of the crate, not of the core. A reference
+  names a node of the builder that returned it: `TypedNodeRef::new` is not
+  public, `NodeRef::index` is a method, and `build` refuses a reference of
+  another builder (`HRS-006`, `HRS-011`, `HRS-012`). `SuccessPolicy` and
+  `SuccessCase` take node references in place of indexes.
+- **A dependency's result is received as `TaskOutcome<S, E>`.** `arg_from`
+  takes a field of type `TaskOutcome<S, E>` and a `TypedNodeRef<S>`; `E`
+  reads the dependency's user codes, and `UserCode` reads any.
+  `TaskResult<T>` is removed. A task whose one parameter is a
+  `TaskOutcome` or a `WorkflowContext` gets an `Input` struct, so a node
+  binds the parameter by name.
+- **A node's input is one JSON object.** `TaskNode::args_json` and
+  `kwargs_json` are replaced by `input_json(text)`, which returns a
+  `Result`; `set_input` of a value that does not encode as an object is
+  refused (`HRS-026`). `TaskFunction::node()` gives a node with the task's
+  queue and options and the input `{}`; `TaskNode::raw` and
+  `TaskNode::task_options` are no longer public. A task with no parameters
+  reads the input `{}` as well as `null`.
+- **`set` and `set_input` encode a value and read it back, as a send
+  does.** A value that does not encode or read back, a non-finite float
+  included, is refused with `HRS-031`; before, `set` stored NaN as `null`.
+- **`WorkflowSpecBuilder::build` decodes each node's input with the input
+  type of its task or child workflow**, with each `args_from` member as a
+  result and the workflow context when the task takes it: a member that
+  binds to no field is `HRS-019`, a missing field `HRS-020`, a value of
+  another type `HRS-031`. It also refuses an `any` or quorum join with an
+  `args_from` member whose field has no default (`HRS-013`), a priority
+  outside 1 to 100 (`HRS-034`), and `workflow_ctx_from` on a task without
+  `workflow_ctx` (`HRS-010`).
+- **`JoinType::Quorum` holds `min_success`;** `join_quorum` takes a `u32`.
+- **The output type of a workflow is checked.** `WorkflowDefinition::build`
+  refuses a definition whose `Output` is not its output node's type
+  (`HRS-025`). A workflow with no output node has `Output =
+  OutputlessResults`, the outcome of each node by node id.
+- **`SubWorkflowNode` gives params with `SubWorkflowParams::{NotGiven,
+  Given(P)}`.** Make one with `SubWorkflowNode::of::<D>(params)` or
+  `D::node(params)`; `set` and `arg_from` give params too. A node that gives
+  none stores the input `{}`, as Python. `SubWorkflowNode::new`, `typed`,
+  `from_definition`, `input_json`, `good_until` and `workflow_ctx_from` are
+  removed. `WorkflowDefinition::Params` is `Serialize + DeserializeOwned`.
+- **`WorkflowContext::result_for::<T, E>` returns `Result<TaskOutcome<T,
+  E>, WorkflowContextError>`** (`NotInContext`, `Unreadable`,
+  `UnknownUserCode`); `summary_for` returns `&SubWorkflowSummary`, and
+  `output_for` the child's output read as `T`.
+- **`UserErrorCode::code` returns `&str`.** Added: `UserCode` implements
+  `UserErrorCode`, with every user code as checked text.
 
 ## [0.7.0] - 2026-11-15
 

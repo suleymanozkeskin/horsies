@@ -33,13 +33,14 @@ from tests.perf.counters import Counts, CounterProbe, install_extension
 from tests.perf.scenarios import (
     BatchScenario,
     Invocation,
+    Role,
     Scenario,
+    SeedRows,
     SingleRowScenario,
     analyze,
     delete_seeded,
-    id_prefix,
+    seed_rows,
     seed_terminal_ballast,
-    task_ids,
 )
 from tests.perf.statistics import (
     Comparison,
@@ -129,9 +130,9 @@ def run_scenario(
     control: bool = False,
 ) -> RunResult:
     """Measure both sides of one scenario and judge the difference."""
-    baseline_prefix = id_prefix(scenario.name, 'base')
-    candidate_prefix = id_prefix(scenario.name, 'cand')
-    ballast_prefix = id_prefix(scenario.name, 'ball')
+    baseline_rows = seed_rows(scenario.name, Role.BASELINE)
+    candidate_rows = seed_rows(scenario.name, Role.CANDIDATE)
+    ballast_rows = seed_rows(scenario.name, Role.BALLAST)
 
     with engine.connect() as connection:
         install_extension(connection)
@@ -141,12 +142,12 @@ def run_scenario(
         synchronous_commit = server_setting(connection, 'synchronous_commit')
         autovacuum = server_setting(connection, 'autovacuum')
 
-        for stale in (baseline_prefix, candidate_prefix):
+        for stale in (baseline_rows, candidate_rows):
             scenario.cleanup(connection, stale)
-        delete_seeded(connection, ballast_prefix)
+        delete_seeded(connection, ballast_rows)
         seed_terminal_ballast(
             connection,
-            prefix=ballast_prefix,
+            rows=ballast_rows,
             count=BALLAST_ROWS,
             payload_bytes=200,
         )
@@ -154,8 +155,8 @@ def run_scenario(
             baseline, candidate, plans = _measure_interleaved(
                 connection,
                 scenario=scenario,
-                baseline_prefix=baseline_prefix,
-                candidate_prefix=candidate_prefix,
+                baseline_rows=baseline_rows,
+                candidate_rows=candidate_rows,
                 observations=observations,
                 block_size=block_size,
                 control=control,
@@ -165,9 +166,9 @@ def run_scenario(
             # Roll it back before cleanup so the original error is not masked
             # by a second "current transaction is aborted" cleanup error.
             connection.rollback()
-            for seeded in (baseline_prefix, candidate_prefix):
+            for seeded in (baseline_rows, candidate_rows):
                 scenario.cleanup(connection, seeded)
-            delete_seeded(connection, ballast_prefix)
+            delete_seeded(connection, ballast_rows)
 
     match scenario:
         case SingleRowScenario():
@@ -258,8 +259,8 @@ def _measure_interleaved(
     connection: Connection,
     *,
     scenario: Scenario,
-    baseline_prefix: str,
-    candidate_prefix: str,
+    baseline_rows: SeedRows,
+    candidate_rows: SeedRows,
     observations: int,
     block_size: int,
     control: bool,
@@ -271,7 +272,7 @@ def _measure_interleaved(
     same state.
     """
     blocks = -(-observations // block_size)
-    prefixes = {Side.BASELINE: baseline_prefix, Side.CANDIDATE: candidate_prefix}
+    rows = {Side.BASELINE: baseline_rows, Side.CANDIDATE: candidate_rows}
 
     # A single-row operation consumes the row named in its parameters, so both
     # sides can be seeded once from disjoint id ranges. A batch operation
@@ -286,27 +287,27 @@ def _measure_interleaved(
         case SingleRowScenario():
             # One warmup block per side beyond the measured ones.
             per_side_rows = (blocks + 1) * block_size
-            for side, prefix in prefixes.items():
-                _seed_for(scenario, connection, prefix=prefix, count=per_side_rows)
-                ids[side] = task_ids(prefix, per_side_rows)
+            for side, side_rows in rows.items():
+                _seed_for(scenario, connection, rows=side_rows, count=per_side_rows)
+                ids[side] = side_rows.tasks.ids(per_side_rows)
             analyze(connection)
             plans = _capture_plans(
                 connection,
                 scenario,
-                baseline_warmup_id=f'{baseline_prefix}1',
-                candidate_warmup_id=f'{candidate_prefix}1',
-                baseline_task_id=f'{baseline_prefix}2',
-                candidate_task_id=f'{candidate_prefix}2',
+                baseline_warmup_id=baseline_rows.tasks.id_at(1),
+                candidate_warmup_id=candidate_rows.tasks.id_at(1),
+                baseline_task_id=baseline_rows.tasks.id_at(2),
+                candidate_task_id=candidate_rows.tasks.id_at(2),
                 control=control,
             )
         case BatchScenario():
-            for side in prefixes:
+            for side in rows:
                 ids[side] = iter(())
             plans = _capture_batch_plans(
                 connection,
                 scenario,
-                baseline_prefix=baseline_prefix,
-                candidate_prefix=candidate_prefix,
+                baseline_rows=baseline_rows,
+                candidate_rows=candidate_rows,
                 control=control,
             )
         case _ as unreachable:
@@ -317,7 +318,7 @@ def _measure_interleaved(
     probe = CounterProbe(connection)
 
     for side in (Side.BASELINE, Side.CANDIDATE):
-        _seed_block(scenario, connection, prefix=prefixes[side], block_size=block_size)
+        _seed_block(scenario, connection, rows=rows[side], block_size=block_size)
         _run_block(
             connection,
             scenario,
@@ -332,7 +333,7 @@ def _measure_interleaved(
             _seed_block(
                 scenario,
                 connection,
-                prefix=prefixes[side],
+                rows=rows[side],
                 block_size=block_size,
             )
             probe.begin()
@@ -403,8 +404,8 @@ def _capture_batch_plans(
     connection: Connection,
     scenario: BatchScenario,
     *,
-    baseline_prefix: str,
-    candidate_prefix: str,
+    baseline_rows: SeedRows,
+    candidate_rows: SeedRows,
     control: bool,
 ) -> PlanEvidence | None:
     """Capture each discovery plan against its own isolated eligible pool."""
@@ -414,17 +415,17 @@ def _capture_batch_plans(
     if candidate_factory is None:
         return None
 
-    scenario.cleanup(connection, baseline_prefix)
-    scenario.cleanup(connection, candidate_prefix)
-    scenario.seed(connection, baseline_prefix, scenario.batch_size)
+    scenario.cleanup(connection, baseline_rows)
+    scenario.cleanup(connection, candidate_rows)
+    scenario.seed(connection, baseline_rows, scenario.batch_size)
     analyze(connection)
     baseline = _explain(connection, scenario.baseline_invocation())
-    scenario.cleanup(connection, baseline_prefix)
+    scenario.cleanup(connection, baseline_rows)
 
-    scenario.seed(connection, candidate_prefix, scenario.batch_size)
+    scenario.seed(connection, candidate_rows, scenario.batch_size)
     analyze(connection)
     candidate = _explain(connection, candidate_factory())
-    scenario.cleanup(connection, candidate_prefix)
+    scenario.cleanup(connection, candidate_rows)
     return PlanEvidence(baseline=baseline, candidate=candidate)
 
 
@@ -555,7 +556,7 @@ def _seed_block(
     scenario: Scenario,
     connection: Connection,
     *,
-    prefix: str,
+    rows: SeedRows,
     block_size: int,
 ) -> None:
     """Rows a batch block will consume, seeded immediately before it runs."""
@@ -563,12 +564,13 @@ def _seed_block(
         case SingleRowScenario():
             return
         case BatchScenario(batch_size=batch_size):
-            # Clear first: a batch operation transitions its rows rather than
-            # removing them, so last block's ids are still present and would
-            # collide. Every block therefore starts from a pool holding exactly
-            # what it is meant to consume.
-            scenario.cleanup(connection, prefix)
-            scenario.seed(connection, prefix, block_size * batch_size)
+            # Clear first: a batch operation moves its rows to history, where
+            # last block's ids are still present, and a second move of one id
+            # is refused by the duplicate identity guard. Every block
+            # therefore starts from a pool holding exactly what it is meant
+            # to consume.
+            scenario.cleanup(connection, rows)
+            scenario.seed(connection, rows, block_size * batch_size)
             analyze(connection)
         case _ as unreachable:
             assert_never(unreachable)
@@ -578,10 +580,10 @@ def _seed_for(
     scenario: Scenario,
     connection: Connection,
     *,
-    prefix: str,
+    rows: SeedRows,
     count: int,
 ) -> None:
-    scenario.seed(connection, prefix, count)
+    scenario.seed(connection, rows, count)
 
 
 def _payload_bytes(scenario: Scenario) -> int:
