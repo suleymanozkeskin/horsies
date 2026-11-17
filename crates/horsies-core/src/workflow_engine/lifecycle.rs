@@ -25,20 +25,20 @@ fn test_uuid(value: &str) -> Uuid {
 // ---------------------------------------------------------------------------
 
 /// The PAUSED workflows whose last status change is older than `$1`
-/// milliseconds, oldest first, at most `$2` (`idx_horsies_workflows_paused_age`).
+/// microseconds, oldest first, at most `$2` (`idx_horsies_workflows_paused_age`).
 /// Python: the candidate read of `expire_paused_workflows`
 /// (`core/workflows/lifecycle.py:1019-1031`).
 static PAUSED_EXPIRY_CANDIDATES: TypedStatement = TypedStatement::new(
     "paused_expiry_candidates",
     "SELECT id FROM horsies_workflows
      WHERE status = 'PAUSED'
-       AND updated_at < now() - $1 * interval '1 millisecond'
+       AND updated_at < now() - $1 * interval '1 microsecond'
      ORDER BY updated_at, id
      LIMIT $2",
     &[ParameterType::Int8, ParameterType::Int8],
 );
 
-/// `horsies_workflow_expire_paused(workflow_id, older_than_ms, error)`: expires
+/// `horsies_workflow_expire_paused(workflow_id, older_than_us, error)`: expires
 /// one PAUSED workflow older than the age, in one statement in autocommit.
 static EXPIRE_PAUSED: TypedStatement = TypedStatement::new(
     "horsies_workflow_expire_paused",
@@ -207,16 +207,16 @@ pub async fn cancel_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> Hand
 ///   EXPIRED only while the workflow is PAUSED and older than the age, so a resume that committed first wins.
 ///   The stored error is `WORKFLOW_EXPIRED` with the policy and the age in seconds, and the message
 ///   `paused_workflow_auto_cancel_after elapsed: <age>` with Python's `str(timedelta)` of the age.
-/// - The age goes to the database in whole milliseconds. An age with a part below one millisecond is rounded
-///   up, so a workflow never expires before its age.
+/// - The age goes to the database in exact microseconds (`<micros> * interval '1 microsecond'`, a time interval
+///   with no day field), as Python sends it: no rounding, and the same age in any session time zone.
 /// - `older_than` may be zero: every PAUSED workflow of the batch is a candidate (Python takes any
 ///   `timedelta`).
 ///
 /// Returns: the count of workflows that this call expired.
 ///
 /// Errors (nothing was read or written when the arguments are refused):
-/// - [`WorkflowError::Validation`]: a negative age, an age outside the range of microseconds, or a
-///   `batch_size` below 1.
+/// - [`WorkflowError::Validation`]: a negative age, an age outside the range of microseconds, an age that is not
+///   a whole number of microseconds, or a `batch_size` below 1.
 /// - [`WorkflowError::Serialization`]: the stored error does not encode.
 /// - [`WorkflowError::Broker`]: the candidate read or a candidate's statement failed. The candidates before
 ///   it are expired; the rest wait for the next call. A statement with a lost reply may have committed
@@ -233,14 +233,14 @@ pub async fn expire_paused_workflows(
             "paused expiry requires a positive batch size, got {batch_size}"
         )));
     }
-    let older_than_ms = paused_age_millis(older_than)?;
+    let older_than_us = paused_age_micros(older_than)?;
     let error_json = paused_expiry_error(older_than)?;
     let candidates = run_alone(
         broker,
         CheckoutClass::Reserved,
         &PAUSED_EXPIRY_CANDIDATES
             .bind()
-            .value(&older_than_ms)
+            .value(&older_than_us)
             .value(&batch_size)
             .finish(),
     )
@@ -258,7 +258,7 @@ pub async fn expire_paused_workflows(
             &EXPIRE_PAUSED
                 .bind()
                 .value(&workflow_id)
-                .value(&older_than_ms)
+                .value(&older_than_us)
                 .value(&error_json)
                 .finish(),
         )
@@ -278,20 +278,25 @@ pub async fn expire_paused_workflows(
     Ok(expired)
 }
 
-/// The paused age in whole milliseconds, rounded up. Pure.
+/// The paused age in microseconds, exact. Pure.
 ///
-/// Errors: [`WorkflowError::Validation`] for a negative age.
-fn paused_age_millis(older_than: chrono::Duration) -> Result<i64, WorkflowError> {
+/// Errors: [`WorkflowError::Validation`] for a negative age, an age that is not a whole number of microseconds
+/// (the database compares in microseconds, and a finer part would be cut), or an age outside the range of
+/// microseconds.
+fn paused_age_micros(older_than: chrono::Duration) -> Result<i64, WorkflowError> {
     if older_than < chrono::Duration::zero() {
         return Err(WorkflowError::Validation(format!(
             "paused expiry requires an age of 0 or more, got {older_than}"
         )));
     }
-    let whole = older_than.num_milliseconds();
-    match older_than > chrono::Duration::milliseconds(whole) {
-        true => Ok(whole + 1),
-        false => Ok(whole),
+    if older_than.subsec_nanos() % 1_000 != 0 {
+        return Err(WorkflowError::Validation(format!(
+            "paused expiry requires an age in whole microseconds, got {older_than}"
+        )));
     }
+    older_than.num_microseconds().ok_or_else(|| {
+        WorkflowError::Validation("paused expiry duration exceeds microsecond range".to_owned())
+    })
 }
 
 /// The stored error of a workflow that the age policy expired: `WORKFLOW_EXPIRED`, the policy name and the
@@ -864,27 +869,44 @@ mod p7_lifecycle_tests {
         );
     }
 
-    /// The age goes to the database in whole milliseconds, rounded up: a workflow never expires before its
-    /// age.
+    /// The age goes to the database in exact microseconds, as Python's `older_than // timedelta(microseconds=1)`:
+    /// a part below one millisecond is kept, and one day is 86 400 000 000 microseconds.
     #[test]
-    fn the_paused_age_is_whole_milliseconds_rounded_up() {
-        assert_eq!(paused_age_millis(chrono::Duration::zero()).unwrap(), 0);
+    fn the_paused_age_is_exact_microseconds() {
+        assert_eq!(paused_age_micros(chrono::Duration::zero()).unwrap(), 0);
         assert_eq!(
-            paused_age_millis(chrono::Duration::hours(1)).unwrap(),
-            3_600_000
+            paused_age_micros(chrono::Duration::microseconds(500)).unwrap(),
+            500
         );
         assert_eq!(
-            paused_age_millis(chrono::Duration::microseconds(1_500)).unwrap(),
-            2
+            paused_age_micros(chrono::Duration::microseconds(1_500)).unwrap(),
+            1_500
         );
         assert_eq!(
-            paused_age_millis(chrono::Duration::nanoseconds(1)).unwrap(),
-            1
+            paused_age_micros(chrono::Duration::hours(1)).unwrap(),
+            3_600_000_000
         );
-        assert!(matches!(
-            paused_age_millis(chrono::Duration::microseconds(-1)),
-            Err(WorkflowError::Validation(_))
-        ));
+        assert_eq!(
+            paused_age_micros(chrono::Duration::days(1)).unwrap(),
+            86_400_000_000
+        );
+    }
+
+    /// An age that the database cannot compare exactly is refused: negative, finer than one microsecond, or
+    /// outside the range of microseconds.
+    #[test]
+    fn a_paused_age_that_is_not_exact_microseconds_is_refused() {
+        for age in [
+            chrono::Duration::microseconds(-1),
+            chrono::Duration::nanoseconds(1),
+            chrono::Duration::microseconds(1_500) + chrono::Duration::nanoseconds(1),
+            chrono::Duration::MAX,
+        ] {
+            assert!(
+                matches!(paused_age_micros(age), Err(WorkflowError::Validation(_))),
+                "{age}"
+            );
+        }
     }
 
     /// The stored error carries the age in seconds with Python's `total_seconds()` precision (microseconds).
