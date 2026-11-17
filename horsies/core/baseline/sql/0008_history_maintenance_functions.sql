@@ -621,11 +621,13 @@ $$;
 --
 -- Rows: one per expected leaf, ordered by leaf_kind, class_key, lower_anchor (the OPEN bound first):
 -- - history leaves: every registered PERIOD class, today (UTC) and the next p_history_horizon_days days; the static
---   forever leaf (horsies_task_history_forever_open, OPEN lower bound, upper anchor 9999-01-01);
+--   forever leaf (horsies_task_history_forever_open, OPEN lower and upper bounds);
 -- - heartbeat leaves: the current UTC hour and the next p_heartbeat_horizon_hours hours.
 -- Columns: checked_at (statement_timestamp, the same on every row); leaf_kind (history | heartbeat); class_key;
--- parent_name; leaf_name; lower_bound_kind (OPEN | AT); lower_anchor (NULL for OPEN); upper_anchor; conformant
--- (horsies_history_leaf_state answers CONFORMANT); and, the same on every row:
+-- parent_name; leaf_name; lower_bound_kind (OPEN | AT); lower_anchor (NULL for OPEN); upper_bound_kind (OPEN | AT:
+-- OPEN for the forever leaf only, whose coverage has no end; its partition bound 9999-01-01 is not reported);
+-- upper_anchor (NULL for OPEN); conformant (horsies_history_leaf_state answers CONFORMANT); and, the same on every
+-- row:
 -- - registration_healthy: the heartbeat class with p_heartbeat_horizon_hours, one PERIOD class per day count of
 --   horsies_retention_period_days(p_declared_days), and the forever class are registered;
 -- - publication_healthy: horsies_history_readers_current();
@@ -641,7 +643,7 @@ $$;
 -- for example 16 for the default class only, 7 days and 6 hours.
 -- Replaces: history/maintenance/coverage.py:103-528 (_COVERAGE_PROBE_SQL) with :655-739 (the SET LOCAL TIME ZONE and
 -- the probe read): two statements.
-CREATE FUNCTION horsies_coverage_probe(p_declared_days smallint[], p_history_horizon_days smallint, p_heartbeat_horizon_hours smallint) RETURNS TABLE(checked_at timestamp with time zone, leaf_kind text, class_key text, parent_name text, leaf_name text, lower_bound_kind text, lower_anchor timestamp with time zone, upper_anchor timestamp with time zone, conformant boolean, registration_healthy boolean, publication_healthy boolean, absent_leaves text[])
+CREATE FUNCTION horsies_coverage_probe(p_declared_days smallint[], p_history_horizon_days smallint, p_heartbeat_horizon_hours smallint) RETURNS TABLE(checked_at timestamp with time zone, leaf_kind text, class_key text, parent_name text, leaf_name text, lower_bound_kind text, lower_anchor timestamp with time zone, upper_bound_kind text, upper_anchor timestamp with time zone, conformant boolean, registration_healthy boolean, publication_healthy boolean, absent_leaves text[])
     LANGUAGE plpgsql STABLE
     SET "TimeZone" TO 'UTC'
     AS $$
@@ -687,7 +689,8 @@ BEGIN
         SELECT 'history'::text AS leaf_kind, r.class_key::text AS class_key,
                'horsies_task_history_' || r.class_key AS parent_name,
                horsies_history_leaf_name(r.class_key, day.lower_anchor) AS leaf_name,
-               'AT'::text AS lower_bound_kind, day.lower_anchor, day.lower_anchor + interval '1 day' AS upper_anchor
+               'AT'::text AS lower_bound_kind, day.lower_anchor, 'AT'::text AS upper_bound_kind,
+               day.lower_anchor + interval '1 day' AS upper_anchor
         FROM horsies_retention_classes AS r
         CROSS JOIN clock
         CROSS JOIN LATERAL (
@@ -696,11 +699,12 @@ BEGIN
         ) AS day
         WHERE r.class_kind = 'PERIOD'
         UNION ALL
+        -- The partition bound of the forever leaf (its catalog upper_anchor), for the state check only.
         SELECT 'history', 'forever', 'horsies_task_history_forever', 'horsies_task_history_forever_open', 'OPEN',
-               NULL::timestamptz, '9999-01-01 00:00:00+00'::timestamptz
+               NULL::timestamptz, 'OPEN', '9999-01-01 00:00:00+00'::timestamptz
         UNION ALL
         SELECT 'heartbeat', 'heartbeats', 'horsies_heartbeats', horsies_heartbeat_leaf_name(hour.lower_anchor), 'AT',
-               hour.lower_anchor, hour.lower_anchor + interval '1 hour'
+               hour.lower_anchor, 'AT', hour.lower_anchor + interval '1 hour'
         FROM clock
         CROSS JOIN LATERAL (
             SELECT date_trunc('hour', clock.checked_at, 'UTC') + hour_offset * interval '1 hour' AS lower_anchor
@@ -719,7 +723,8 @@ BEGIN
         e.leaf_name,
         e.lower_bound_kind,
         e.lower_anchor,
-        e.upper_anchor,
+        e.upper_bound_kind,
+        CASE e.upper_bound_kind WHEN 'AT' THEN e.upper_anchor END,
         s.state = 'CONFORMANT',
         registration.healthy,
         publication.healthy,
