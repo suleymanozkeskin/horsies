@@ -233,7 +233,9 @@ pub fn worker_failure_write(
 }
 
 /// The failed attempt of a child the worker killed or lost: the code of
-/// the end, the retry the policy admits for it, at `placement`. Pure.
+/// the end, the retry the policy admits for it, at `placement`, with
+/// Python's error `data`: `task_id` and `worker_id` (Python
+/// `_recover_worker_future_failure`). Pure.
 pub fn killed_child_write(
     task: &ClaimedTask,
     worker_id: &str,
@@ -242,7 +244,11 @@ pub fn killed_child_write(
     placement: RetryPlacement,
 ) -> FinishFailedAttempt {
     let code_text = code.value();
-    let error = TaskError::builtin(code, message.clone());
+    let mut error = TaskError::builtin(code, message.clone());
+    error.data = Some(serde_json::json!({
+        "task_id": task.task_id.to_string(),
+        "worker_id": worker_id,
+    }));
     FinishFailedAttempt {
         task_id: task.task_id,
         fence: fence(task, worker_id),
@@ -307,8 +313,8 @@ fn timeout_data(task_id: Uuid, timeout: TaskTimeoutMs, cancel: TimeoutCancel) ->
 
 /// The crash-recovery write of an attempt that reached `timeout` and whose
 /// `TASK_TIMEOUT` write failed on every retry: the same code and placement,
-/// with a message that names the failed writes (Python
-/// `_recover_timed_out_row`). Pure.
+/// with a message that names the failed writes, and with the `data` of
+/// crash recovery (Python `_recover_timed_out_row`). Pure.
 pub fn timeout_recovery_write(
     task: &ClaimedTask,
     worker_id: &str,

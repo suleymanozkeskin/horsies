@@ -35,6 +35,11 @@ and there is no migration contract between pre-1.0 versions.
   cancel route does; they answered 503 with the driver's text. A
   `urn:uuid:` or braced id is read as its UUID.
 
+- **`ping_workers` refuses a `timeout_seconds` of NaN.** It answers
+  `INVALID_INPUT` (`timeout_seconds must be positive, got nan`) before any
+  I/O; it sent the ping and returned at once with no reply. An infinite
+  `timeout_seconds` still waits with no deadline.
+
 - **The `TASK_TIMEOUT` error of a `SHARED_ASYNC` task tells how the task
   ended.** Its `data` gets the key `cancel_end`: `RETURNED_AFTER_SIGNAL`
   when the task and its work ended within `cancel_grace_ms` after the
@@ -237,6 +242,32 @@ unless it starts with "Added".
   removed.
 - **`schedule` takes `WholeSeconds`** in place of a `Duration`, whose
   sub-second part was dropped.
+- **`TaskHandle::get` takes a `WaitLimit` and returns
+  `Result<TaskOutcome<T, E>, ReadError>`.** `TaskResult<T>` is removed. The
+  outer error is the read failing: `WaitTimedOut`, `TaskNotFound`,
+  `ResultNotAvailable`, `StoredResultUnreadable`, `UnknownUserCode` (a
+  stored user code that `E` does not name), `WaitInsideTask` and
+  `Database`, each with Python's code from `ReadError::code`. The inner
+  value is `Succeeded(T)` or `Failed(TaskError<E>)`; a cancelled task is
+  `Failed` with `TASK_CANCELLED`. `WaitLimit::parse` refuses a limit above
+  about 49.7 days before any read. The handle keeps an outcome and the
+  failures of the stored data, as Python; a timeout, an absent task and a
+  database failure are read again.
+- **A result wait in a worker child is refused** with `WaitInsideTask` and
+  sends no statement, as in Python.
+- **Reads by task id are on the app:** `get_result::<T, E>`,
+  `get_raw_result` (the stored envelope as JSON text with the status),
+  `get_task_info` with `TaskInfoParts`, and `task_handle_of` for a handle of
+  a task sent elsewhere. Task info lists attempts newest first.
+- **The health reads are on the app**, as in Python: `ping_database`,
+  `ping_workers` (with `PingTarget`), `list_worker_states`,
+  `get_worker_state`, `get_worker_state_history` (with
+  `WorkerHistoryLimit`), `get_stale_tasks`, `get_expired_tasks`, and,
+  added, `get_class_coverage` and `get_class_report`. A failure is
+  `BrokerOperationError` with Python's broker code.
+- **The stale and expired task lists are bounded.** Each returns
+  `BoundedTaskList::Complete(rows)`, or `Truncated` at 10,000 rows. The
+  stale threshold is `StaleMinutes`, whole minutes from 0 to 525,600.
 - **`TaskRuntime::task_handle` returns `TaskFunctionNotFound`**
   (`NotRegistered`, `OtherTypes`) in place of a `TaskError`.
 - **The CLI types and `fetch_docs` are no longer public.** `Cli`, `Command`,
