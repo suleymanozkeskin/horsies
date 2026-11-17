@@ -81,17 +81,15 @@ enum MissedStart {
 /// A database error of the start or of its miss path releases the claim at
 /// once with the fenced release, and the run ends `OWNERSHIP_UNCONFIRMED`.
 pub(super) async fn start_attempt(context: &HostContext, facts: &RunFacts) -> Started {
-    let command = StartAttempt {
-        task_id: facts.task_id,
-        fence: OwnedClaim {
+    let command = StartAttempt::of_process(
+        facts.task_id,
+        OwnedClaim {
             worker_id: facts.worker_id.clone(),
             claimed_at: facts.claimed_at,
         },
-        worker_pid: context.pid,
-        worker_hostname: context.app.hostname.clone(),
-        worker_process_name: format!("worker-{}", context.pid),
-        beat_sender_id: format!("{}:{}", facts.worker_id, context.pid),
-    };
+        context.pid,
+        context.app.hostname.clone(),
+    );
     for _ in 0..PRE_START_CONFIRM_ATTEMPTS {
         let outcome = match context.broker.core_pools_for_write() {
             Ok((open, _write)) => {
