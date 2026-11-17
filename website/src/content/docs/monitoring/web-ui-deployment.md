@@ -2,39 +2,30 @@
 title: Web UI Deployment & Authentication
 section: shared
 summary: Mounting the monitoring app in a host application, running it standalone, and the identity, connection, and schema contracts each mode carries.
-related: [web-ui-overview, action-semantics, ../configuration/remote-postgres, ../troubleshooting/pgbouncer]
+related: [web-ui-overview, web-ui-mount, action-semantics, ../configuration/remote-postgres, ../troubleshooting/pgbouncer]
 tags: [monitoring, web, deployment, authentication, security, pgbouncer]
 ---
 
-The monitoring app runs in one of two modes: mounted inside a host FastAPI
-application, or standalone from the `horsies web` CLI. Both serve the same API
-and the same SPA. They differ in who owns identity and who owns the broker.
+The monitoring app runs in one of two modes: mounted inside a host web
+application, or standalone from the `horsies web` command of the Python package.
+Both serve the same API and the same SPA. They differ in who owns identity and
+who owns the broker.
 
 horsies never owns identity. Every deployment supplies an authorization policy,
 and the library enforces the verdict it returns.
 
+The API is on the client pages: [Web UI Mount](/horsies/monitoring/web-ui-mount/)
+(Python). The Rust page is not written yet.
+
 ## Mounted mode
 
-`create_monitoring_app` builds a FastAPI sub-app. Mount it at any path; the SPA
-detects its mount point per request and works from any prefix.
+The client builds the monitoring app, and the host application mounts it at any
+path. The SPA detects its mount point per request and works from any prefix.
 
-```python
-from fastapi import FastAPI
-from horsies.web import AllowAll, create_monitoring_app
-
-from myapp.tasks import app as horsies_app
-
-api = FastAPI()
-api.mount(
-    "/monitoring",
-    create_monitoring_app(horsies_app, auth_policy=AllowAll()),
-)
-```
-
-`auth_policy` is keyword-only and has no default. `AllowAll()` is not "no
-authentication" — it is the statement *this mount is already guarded by the host
-application*. Mount it behind the host's own authentication, or behind a policy
-that enforces one.
+The mount takes an authorization policy, and the policy has no default.
+`AllowAll` is not "no authentication": it is the statement *this mount is
+already guarded by the host application*. Mount it behind the host's own
+authentication, or behind a policy that enforces one.
 
 Mounted mode constructs nothing: it uses the broker the host app already
 configured, with whatever pooling and migration behavior that app was built
@@ -42,24 +33,14 @@ with.
 
 ### Authorization policies
 
-A policy answers two questions per request.
-
-```python
-from typing import Protocol
-
-from fastapi import Request
-
-
-class MonitoringAuthPolicy(Protocol):
-    async def can_view(self, request: Request) -> bool: ...
-    async def can_act(self, request: Request) -> bool: ...
-```
+A policy answers two questions per request: can the request view (`can_view`),
+and can it act (`can_act`).
 
 | Policy | `can_view` | `can_act` | Use |
 |---|---|---|---|
-| `AllowAll()` | `True` | `True` | The mount already sits behind the host app's authentication |
-| `ViewOnly()` | `True` | `False` | Read-only dashboard |
-| `TrustedHeader(header_name, allow_actions=...)` | header present and non-empty | same check, gated by `allow_actions` | A reverse proxy is the identity boundary |
+| `AllowAll` | `True` | `True` | The mount already sits behind the host app's authentication |
+| `ViewOnly` | `True` | `False` | Read-only dashboard |
+| `TrustedHeader` (a header name, and whether actions are allowed) | header present and non-empty | same check, when actions are allowed | A reverse proxy is the identity boundary |
 
 Every `/api` route depends on `can_view`; a false verdict returns 403
 `{"detail": "Not authorized."}` and the SPA renders a full-screen
@@ -67,41 +48,14 @@ not-authorized state. Every mutating route additionally requires `can_act` and
 the header `X-Horsies-Intent: action`; a POST without that header is rejected
 with 403.
 
-Implement the protocol directly to delegate to the host app's session, JWT, or
-RBAC layer.
-
-```python
-from fastapi import Request
-
-from myapp.security import current_user
-
-
-class SessionPolicy:
-    async def can_view(self, request: Request) -> bool:
-        user = await current_user(request)
-        return user is not None
-
-    async def can_act(self, request: Request) -> bool:
-        user = await current_user(request)
-        return user is not None and user.is_operator
-```
+A custom policy answers the two questions itself, for example from the host
+app's session, JWT, or RBAC layer.
 
 ### Custom CSS
 
-`MonitoringUIConfig` injects one stylesheet link last in the served
-`index.html`, after every built-in stylesheet, so it overrides any design token.
-
-```python
-from horsies.web import MonitoringUIConfig, ViewOnly, create_monitoring_app
-
-from myapp.tasks import app as horsies_app
-
-monitoring = create_monitoring_app(
-    horsies_app,
-    auth_policy=ViewOnly(),
-    config=MonitoringUIConfig(custom_css_url="/static/horsies-theme.css"),
-)
-```
+The UI config can name one stylesheet URL. The app injects its link last in the
+served `index.html`, after every built-in stylesheet, so it overrides any design
+token.
 
 Overriding CSS custom properties is the entire customization contract. There is
 no build-time theming and no theme JSON.
@@ -129,17 +83,7 @@ and cancel. It does not support resuming a run whose next nodes carry
 into a fresh task row requires the source task's registered return type. Use the
 app-path form where that matters.
 
-| Flag | Default | Description |
-| ---- | ------- | ----------- |
-| `<app_path>` | — | Dotted path to the app, e.g. `myapp.tasks:app`. Mutually exclusive with `--database-url` |
-| `--database-url URL` | — | Registry-less mode. Mutually exclusive with `<app_path>` |
-| `--session-database-url URL` | — | Direct, session-capable URL for LISTEN/NOTIFY when the main URL is transaction-pooled |
-| `--pgbouncer-transaction-mode` | off | Disable server-side statement caching for a transaction-pooled PgBouncer |
-| `--host HOST` | `127.0.0.1` | Bind address |
-| `--port PORT` | `8600` | Bind port |
-| `--auth MODE` | `none` | `none` or `trusted-header` |
-| `--trusted-header NAME` | `X-Forwarded-User` | Header carrying the proxy-verified identity |
-| `--enable-actions` | off | Permit the four mutating endpoints |
+The flags are in the [CLI Reference](/horsies/cli/#horsies-web).
 
 ### Bind rules
 
@@ -190,8 +134,8 @@ listener.
 | SSE event listener | ~2 connections for the process lifetime |
 | Manual worker ping | One LISTEN round trip per invocation |
 
-The listener is the web app's own `PostgresListener`, not the broker's internal
-one, which isolates it from result-waiter state. It starts lazily on the first
+The listener is the web app's own, not the broker's internal one, which
+isolates it from result-waiter state. It starts lazily on the first
 SSE subscriber and closes at shutdown. Its subscriptions are held for the app's
 lifetime, so there is no per-request LISTEN churn.
 
@@ -211,7 +155,7 @@ horsies web \
   --pgbouncer-transaction-mode
 ```
 
-In mounted mode this is already the host app's `PostgresConfig`: the web app
+In mounted mode this is already the broker config of the host app: the web app
 uses `session_database_url` when set, and falls back to `database_url`
 otherwise. Without a session-capable URL the event stream cannot connect, and
 the dashboard runs permanently on its polling fallback.
@@ -281,7 +225,7 @@ horsies web myapp.tasks:app --host 0.0.0.0 \
   --auth trusted-header --trusted-header X-Forwarded-User
 ```
 
-**Don't pass `AllowAll()` to reach a dashboard you have not otherwise
+**Don't use the `AllowAll` policy to reach a dashboard you have not otherwise
 guarded.** `AllowAll` asserts that the mount is already authenticated. It is
 required to be explicit precisely so the choice is deliberate.
 
@@ -290,13 +234,10 @@ schema.** It reports `ABSENT` and stops. Start a horsies app or worker instead.
 
 ## Static assets
 
-The SPA is served from `horsies/web/static/` in the package, which CI builds into the wheel. If
-that directory is missing — a source checkout, or a build that skipped the
-frontend step — `/api/*` continues to work and `GET /` returns 503:
-
-```json
-{"detail": "horsies web UI assets are not built. Run: cd webui && bun install && bun run build"}
-```
+When the built SPA assets are missing, for example in a source checkout,
+`/api/*` continues to work and `GET /` returns 503 with a detail that names the
+build command. The Python path and message are in
+[Static Assets](/horsies/monitoring/web-ui-mount/#static-assets).
 
 Static assets are served without the auth dependency; they carry no data. Every
 `/api/*` route is gated, so an unauthorized viewer receives the shell and then
