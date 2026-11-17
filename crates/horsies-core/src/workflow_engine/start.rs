@@ -47,13 +47,23 @@ pub(crate) struct NodeTaskFacts {
 
 /// Parse the typed facts of a task node from its merged task options and the
 /// retention class key of its queue (`None`: forever).
+///
+/// An input or options text that does not read, and options that the reader
+/// of a task row refuses, are [`WorkflowError::Validation`] naming the node
+/// index and its task (Python's start refusal names the task,
+/// `start_task_node_facts`, `core/workflows/lifecycle.py`). Pure.
 pub(crate) fn node_task_facts(
     node: &AnyNode,
     merged_task_options: Option<&str>,
     queue_class_key: Option<&str>,
 ) -> Result<NodeTaskFacts, WorkflowError> {
     let facts = prepare_workflow_task_facts(&node.input_json, merged_task_options, queue_class_key)
-        .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+        .map_err(|error| {
+            WorkflowError::Validation(format!(
+                "workflow node {} ({}) refused: {error}",
+                node.index, node.task_name,
+            ))
+        })?;
     Ok(NodeTaskFacts {
         max_retries: node_max_retries(node.index, &node.task_name, merged_task_options)?,
         good_until: node_good_until(node.index, &node.task_name, merged_task_options)?,
