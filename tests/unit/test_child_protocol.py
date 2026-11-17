@@ -187,6 +187,7 @@ def _run_frame(**changes: object) -> RunFrame:
         is_workflow_task=True,
         timeout=TaskTimeout(ms=1000),
         claimed_at=datetime(2026, 11, 1, 12, 30, 15, 250, tzinfo=timezone.utc),
+        orphan_self_heal=True,
     )
     return dataclasses.replace(frame, **changes)  # type: ignore[arg-type]
 
@@ -202,6 +203,7 @@ def _shared_run_frame(**changes: object) -> SharedRunFrame:
         is_workflow_task=False,
         claimed_at=datetime(2026, 11, 1, 12, 30, 15, 250, tzinfo=timezone.utc),
         work=SeatTask(timeout_ms=30_000, cancel_grace_ms=5_000),
+        orphan_self_heal=True,
     )
     return dataclasses.replace(frame, **changes)  # type: ignore[arg-type]
 
@@ -283,6 +285,17 @@ class TestSharedFrames:
         frame = _shared_run_frame()
         meta, body = _split(encode_parent_frame(frame))
         assert decode_parent_frame(meta, body) == Ok(frame)
+
+    @pytest.mark.parametrize('orphan_self_heal', [True, False])
+    def test_the_orphan_self_heal_of_a_run_round_trips(self, orphan_self_heal: bool) -> None:
+        """The child's stop before start takes the self-heal from its run."""
+        for frame in (
+            _run_frame(orphan_self_heal=orphan_self_heal),
+            _shared_run_frame(orphan_self_heal=orphan_self_heal),
+        ):
+            meta, body = _split(encode_parent_frame(frame))
+            assert json.loads(meta)['orphan_self_heal'] is orphan_self_heal
+            assert decode_parent_frame(meta, body) == Ok(frame)
 
     @pytest.mark.parametrize(
         'refusal',
@@ -375,6 +388,8 @@ class TestSharedFrames:
             ('task_id', None),
             ('claimed_at', 'not a date'),
             ('is_workflow_task', 0),
+            ('orphan_self_heal', 1),
+            ('orphan_self_heal', None),
         ],
     )
     def test_every_shared_run_field_is_checked(self, key: str, value: object) -> None:
@@ -1201,6 +1216,8 @@ class TestMalformedMetadata:
             ('timeout', {'kind': 'later'}),
             ('claimed_at', 'not a date'),
             ('claimed_at', 5),
+            ('orphan_self_heal', 1),
+            ('orphan_self_heal', 'true'),
         ],
     )
     def test_every_run_field_is_checked(self, key: str, value: object) -> None:
@@ -1515,3 +1532,18 @@ class TestBootFailureFromException:
                 assert task_loop.report() == NoTaskLoop()
             case Err(failed):
                 raise AssertionError(failed)
+
+
+class TestRunFrameOrphanSelfHeal:
+    """The orphan self-heal of a run travels in its run frame: the child's
+    stop before start takes it as an argument. A run frame without it is
+    malformed."""
+
+    @pytest.mark.parametrize('kind', ['run', 'shared_run'])
+    def test_a_missing_orphan_self_heal_is_refused(self, kind: str) -> None:
+        fields, body = _run_frame_fields(kind)
+        del fields['orphan_self_heal']
+
+        decoded = decode_parent_frame(json.dumps(fields).encode(), body)
+
+        assert decoded == Err(MalformedFrame('_BadField: orphan_self_heal'))

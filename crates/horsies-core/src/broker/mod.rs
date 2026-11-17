@@ -58,6 +58,7 @@ mod workflow_operations;
 pub mod workflow_phase2;
 mod workflow_reads;
 pub mod workflow_start;
+pub(crate) mod workflow_stop_before_start;
 
 pub use bound_handle::TaskHandle;
 pub use class_budgets::{ClassBudget, ClassBudgets};
@@ -81,9 +82,7 @@ pub use lifecycle_operations::{CancelAnswer, CancelTaskError};
 pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};
 pub use partition_maintenance::{CoveragePassError, PrunePassError};
 pub use pools::{PoolProfile, PoolSettingsError};
-pub use postgres::{
-    PostgresBroker, PrestartExpiry, SchemaInitializationMode, WorkflowStop, WorkflowStopBeforeStart,
-};
+pub use postgres::{PostgresBroker, PrestartExpiry, SchemaInitializationMode};
 pub use process_listener::{
     CheckInterruption, ListenError, ListenerPlanError, SessionCheckFailure,
 };
@@ -99,3 +98,4 @@ pub use slot_health::{
     MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
 pub use workflow_operations::{WorkflowRetentionFailed, WorkflowRetentionPass};
+pub use workflow_stop_before_start::{OrphanSelfHeal, StopBeforeStart, StopMove};

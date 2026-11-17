@@ -41,7 +41,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
 
-import psycopg
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,10 +63,8 @@ from horsies.core.lifecycle.persistence import (
     apply_async,
     apply_batch_async,
 )
-from horsies.core.worker.child_runner import (
-    _expire_claimed_task_before_start,
-    _handle_workflow_stop_before_start,
-)
+from horsies.core.worker.child_pool import _get_child_core_handle
+from horsies.core.worker.child_runner import StartMissReason, _after_missed_start
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.terminal_writes import (
     StaleFailure,
@@ -205,10 +202,6 @@ async def _task_state(
     ).fetchone()
     assert row is not None, f'task {task_id} vanished'
     return str(row[0]), row[1]
-
-
-def _psycopg_dsn(db_url: str) -> str:
-    return db_url
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +393,20 @@ async def _paused_workflow_api(ctx: Context, eligible: bool) -> str:
     return task.task_id
 
 
+def _child_miss_path(task_id: str, reason: StartMissReason, dispatched: datetime) -> None:
+    """The miss path of a child after a start that missed with ``reason``,
+    through the core handle of the suite (``_after_missed_start``): the stop
+    before start of a workflow task, or the expiry of the claim."""
+    _ = _after_missed_start(
+        _get_child_core_handle(),
+        task_id,
+        WORKER_ID,
+        reason,
+        dispatched,
+        orphan_self_heal=False,
+    )
+
+
 async def _child_pause(ctx: Context, eligible: bool) -> str:
     generation = _now() - timedelta(minutes=1)
     task = await _seed_task(
@@ -408,16 +415,7 @@ async def _child_pause(ctx: Context, eligible: bool) -> str:
     await _seed_workflow(ctx.session, task.task_id, wf_status='PAUSED')
     await ctx.session.commit()
     dispatched = generation if eligible else generation - timedelta(minutes=1)
-    with psycopg.connect(_psycopg_dsn(ctx.db_url)) as conn:
-        with conn.cursor() as cursor:
-            _handle_workflow_stop_before_start(
-                cursor,
-                conn,
-                task.task_id,
-                'PAUSED',
-                WORKER_ID,
-                dispatched,
-            )
+    _child_miss_path(task.task_id, 'WORKFLOW_PAUSED', dispatched)
     await ctx.session.commit()
     return task.task_id
 
@@ -430,16 +428,7 @@ async def _child_cancel(ctx: Context, eligible: bool) -> str:
     await _seed_workflow(ctx.session, task.task_id, wf_status='CANCELLED')
     await ctx.session.commit()
     dispatched = generation if eligible else generation - timedelta(minutes=1)
-    with psycopg.connect(_psycopg_dsn(ctx.db_url)) as conn:
-        with conn.cursor() as cursor:
-            _handle_workflow_stop_before_start(
-                cursor,
-                conn,
-                task.task_id,
-                'CANCELLED',
-                WORKER_ID,
-                dispatched,
-            )
+    _child_miss_path(task.task_id, 'WORKFLOW_CANCELLED', dispatched)
     await ctx.session.commit()
     return task.task_id
 
@@ -448,18 +437,12 @@ async def _child_expire(ctx: Context, eligible: bool) -> str:
     # The deadline is the guard, not the claim generation: expiry is correct
     # for whichever generation holds a row whose good_until has passed.
     good_until = _now() - timedelta(minutes=1) if eligible else _now() + timedelta(hours=1)
+    claimed_at = _now()
     task = await _seed_task(
-        ctx.session, status='CLAIMED', claimed_at=_now(), good_until=good_until,
+        ctx.session, status='CLAIMED', claimed_at=claimed_at, good_until=good_until,
     )
     await ctx.session.commit()
-    with psycopg.connect(_psycopg_dsn(ctx.db_url)) as conn:
-        with conn.cursor() as cursor:
-            _expire_claimed_task_before_start(
-                cursor,
-                conn,
-                task.task_id,
-                WORKER_ID,
-            )
+    _child_miss_path(task.task_id, 'DEADLINE_PASSED', claimed_at)
     await ctx.session.commit()
     return task.task_id
 

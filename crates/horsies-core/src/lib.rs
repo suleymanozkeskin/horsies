@@ -117,8 +117,8 @@ pub use crate::broker::stale_recovery::{
     ThresholdMs, ThresholdOutOfRange, STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
 };
 pub use crate::broker::{
-    CancelAnswer, CancelTaskError, EnqueueRefusal, EnqueueRefusalCause, SendKind,
-    WorkflowRetentionFailed, WorkflowRetentionPass,
+    CancelAnswer, CancelTaskError, EnqueueRefusal, EnqueueRefusalCause, OrphanSelfHeal, SendKind,
+    StopBeforeStart, StopMove, WorkflowRetentionFailed, WorkflowRetentionPass,
 };
 pub use crate::core::history::enqueue::SendPart;
 pub use crate::worker::execution::FinalizingMark;

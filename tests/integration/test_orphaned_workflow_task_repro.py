@@ -15,12 +15,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.types.result import is_ok
+from horsies.core.worker.child_pool import _get_child_core_handle, _initialize_worker_pool
+from horsies.core.worker.child_runner import (
+    _WorkflowResumedBeforeStart,
+    _after_missed_start,
+    _confirm_until_not_resumed,
+)
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.sql import COUNT_IN_FLIGHT_FOR_WORKER_SQL
 from horsies.core.worker.worker import Worker
 from tests.dispatch_claim_support import claim_at
 from tests.integration.conftest import compute_test_command_fingerprint
-from tests.broker_resources_support import current_resources
+from tests.broker_resources_support import current_resources, listener_of
 
 # The claim generation of every row seeded here, which the fences of the
 # worker check.
@@ -143,20 +149,41 @@ async def _link_runnable_workflow_node(
     await session.commit()
 
 
+def _orphan_worker(broker: PostgresBroker, db_url: str, worker_id: str, *, self_heal: bool) -> Worker:
+    """A worker of ``worker_id`` whose recovery config sets the orphan
+    self-heal to ``self_heal``."""
+    worker = Worker(
+        session_factory=current_resources(broker).session_factory,
+        listener=MagicMock(),
+        cfg=WorkerConfig(
+            dsn=db_url,
+            psycopg_dsn=db_url.replace('+psycopg', ''),
+            queues=['default'],
+            recovery_config=RecoveryConfig(
+                auto_terminate_orphaned_workflow_tasks=self_heal,
+            ),
+        ),
+    )
+    worker.worker_instance_id = worker_id
+    return worker
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope='function')
-async def test_workflow_check_failed_cancels_orphan_and_frees_budget(
+async def test_the_stop_before_start_cancels_an_orphan_and_frees_budget(
     clean_workflow_tables: None,
     session: AsyncSession,
     broker: PostgresBroker,
     db_url: str,
 ) -> None:
-    """Lever 2: finalizing WORKFLOW_CHECK_FAILED on a genuine orphan cancels it.
+    """Lever 2: the child's stop before start cancels a genuine orphan.
 
     A CLAIMED workflow task with no live workflow_task linkage can never reach
-    RUNNING. Finalization must give it a terminal disposition (CANCELLED) and
-    release the claim instead of leaving it CLAIMED, so in-flight budget frees
-    and the reaper no longer requeues it.
+    RUNNING. Its start misses with NODE_NOT_LINKED, and the stop before start
+    (with the orphan self-heal of the run, from the worker's recovery config)
+    gives it a terminal disposition (CANCELLED) instead of leaving it CLAIMED,
+    so in-flight budget frees and the reaper no longer requeues it. The
+    worker's finalize of ORPHAN_CANCELLED then owes nothing.
     """
     _ = clean_workflow_tables
     worker_id = 'worker-orphan-repro'
@@ -165,35 +192,63 @@ async def test_workflow_check_failed_cancels_orphan_and_frees_budget(
         worker_id=worker_id,
     )
     assert await _in_flight_for_worker(session, worker_id) == 1
+    worker = _orphan_worker(broker, db_url, worker_id, self_heal=True)
+    _initialize_worker_pool(listener_of(broker).database_url)
 
-    worker = Worker(
-        session_factory=current_resources(broker).session_factory,
-        listener=MagicMock(),
-        cfg=WorkerConfig(
-            dsn=db_url,
-            psycopg_dsn=db_url.replace('+psycopg', ''),
-            queues=['default'],
-            recovery_config=RecoveryConfig(),  # flag defaults True
-        ),
+    stopped = _confirm_until_not_resumed(
+        task_id,
+        worker_id,
+        True,
+        CLAIMED_AT,
+        orphan_self_heal=worker.cfg.orphan_self_heal(),
     )
-    worker.worker_instance_id = worker_id
-
     result = await worker._persist_task_terminal_state(
         task_id=task_id,
         now=datetime.now(timezone.utc),
         ok=False,
         result_json_str='',
-        failed_reason='WORKFLOW_CHECK_FAILED',
+        failed_reason='ORPHAN_CANCELLED',
         task_name='workflow_join_barrier',
         queue_name='default',
         is_workflow_task=True,
         claim=claim_at(CLAIMED_AT),
     )
 
+    assert stopped == (False, '', 'ORPHAN_CANCELLED')
     assert is_ok(result)
     assert await _task_status(session, task_id) == 'CANCELLED'
     assert await _terminalization_kind(session, task_id) == 'CANCEL_ORPHAN'
     assert await _in_flight_for_worker(session, worker_id) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio(loop_scope='function')
+async def test_the_stop_before_start_does_not_cancel_a_task_with_a_runnable_node_link(
+    clean_workflow_tables: None,
+    session: AsyncSession,
+    broker: PostgresBroker,
+) -> None:
+    """The live-link guard: a stop before start whose task a runnable node
+    links writes nothing. The claim is still startable in a RUNNING
+    workflow, so the stop answers that the start runs again."""
+    _ = (clean_workflow_tables, broker)
+    worker_id = 'worker-orphan-stop-live-link'
+    task_id = await _seed_orphaned_claimed_workflow_task(session, worker_id=worker_id)
+    await _link_runnable_workflow_node(session, task_id)
+
+    stopped = _after_missed_start(
+        _get_child_core_handle(),
+        task_id,
+        worker_id,
+        'NODE_NOT_LINKED',
+        CLAIMED_AT,
+        orphan_self_heal=True,
+    )
+
+    assert stopped == _WorkflowResumedBeforeStart()
+    assert await _task_status(session, task_id) == 'CLAIMED'
+    assert await _terminalization_kind(session, task_id) is None
+    assert await _in_flight_for_worker(session, worker_id) == 1
 
 
 @pytest.mark.integration
@@ -204,30 +259,27 @@ async def test_workflow_check_failed_disabled_leaves_orphan_claimed(
     broker: PostgresBroker,
     db_url: str,
 ) -> None:
-    """With self-heal disabled, finalize leaves the orphan CLAIMED (inspection mode).
+    """With self-heal disabled, the orphan stays CLAIMED (inspection mode).
 
-    The flag gates the finalize-time cancellation symmetrically with the reaper
-    step: off => not cancelled at finalize, and (separately) not requeued by the
-    reaper either.
+    The flag gates the cancel of the stop before start symmetrically with the
+    reaper step: off => the child reports WORKFLOW_CHECK_FAILED with nothing
+    written, the finalize writes nothing, and (separately) the reaper does
+    not requeue it either.
     """
     _ = clean_workflow_tables
     worker_id = 'worker-orphan-disabled'
     task_id = await _seed_orphaned_claimed_workflow_task(session, worker_id=worker_id)
+    worker = _orphan_worker(broker, db_url, worker_id, self_heal=False)
+    _initialize_worker_pool(listener_of(broker).database_url)
 
-    worker = Worker(
-        session_factory=current_resources(broker).session_factory,
-        listener=MagicMock(),
-        cfg=WorkerConfig(
-            dsn=db_url,
-            psycopg_dsn=db_url.replace('+psycopg', ''),
-            queues=['default'],
-            recovery_config=RecoveryConfig(
-                auto_terminate_orphaned_workflow_tasks=False,
-            ),
-        ),
+    stopped = _confirm_until_not_resumed(
+        task_id,
+        worker_id,
+        True,
+        CLAIMED_AT,
+        orphan_self_heal=worker.cfg.orphan_self_heal(),
     )
-    worker.worker_instance_id = worker_id
-
+    assert stopped == (False, '', 'WORKFLOW_CHECK_FAILED')
     result = await worker._persist_task_terminal_state(
         task_id=task_id,
         now=datetime.now(timezone.utc),

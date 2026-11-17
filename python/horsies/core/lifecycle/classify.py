@@ -1,7 +1,7 @@
 """Deciding what a finished child means, before any of it is written down.
 
 A child process reports back through two channels that predate this module: a
-success flag and a free-text reason, plus a serialized result payload. Five of
+success flag and a free-text reason, plus a serialized result payload. Six of
 those reason strings are not reasons at all — they are control-flow sentinels
 telling the worker that finalization must not proceed, or must proceed
 differently. Comparing them as strings at the point of use is what let a
@@ -36,7 +36,6 @@ from ..models.tasks import (
     TaskResult,
 )
 from .commands import (
-    CancelOwnedOrphan,
     CompleteLockedTask,
     CompleteTaskFused,
     FailLockedTask,
@@ -59,6 +58,11 @@ class AbortReason(Enum):
     OWNERSHIP_UNCONFIRMED = 'OWNERSHIP_UNCONFIRMED'
     WORKFLOW_STOPPED = _WORKFLOW_STOPPED
     WORKFLOW_CHECK_FAILED = 'WORKFLOW_CHECK_FAILED'
+    """The node of the workflow task is not linked, and the orphan self-heal
+    of the run is off: the stop before start wrote nothing."""
+    ORPHAN_CANCELLED = 'ORPHAN_CANCELLED'
+    """The node of the workflow task is not linked, and the stop before start
+    cancelled the task (the orphan self-heal of the run is on)."""
     TASK_EXPIRED = OutcomeCode.TASK_EXPIRED.value
 
 
@@ -148,7 +152,6 @@ class FinalizeContext:
     is_workflow_task: bool
     queue_name: str
     result_json: str
-    orphan_self_heal_enabled: bool
 
 
 def _owned_claim(context: FinalizeContext) -> OwnedClaim:
@@ -173,6 +176,7 @@ class FinalizeNoOpReason(Enum):
     WORKFLOW_STOPPED = 'WORKFLOW_STOPPED'
     EXPIRED_PLAIN_TASK = 'EXPIRED_PLAIN_TASK'
     ORPHAN_SELF_HEAL_DISABLED = 'ORPHAN_SELF_HEAL_DISABLED'
+    ORPHAN_CANCELLED = 'ORPHAN_CANCELLED'
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,19 +307,18 @@ def _classify_abort(
             return ReplayWorkflowPhase2(task_id=context.task_id)
         case AbortReason.WORKFLOW_CHECK_FAILED:
             # The claim is held but the node linkage is gone, so this row can
-            # never reach RUNNING. Cancelling it is the only progress
-            # available; with self-heal off it is left claimed for inspection,
-            # which the reaper also declines to touch.
-            if not context.orphan_self_heal_enabled:
-                return NoTerminalAction(
-                    reason=FinalizeNoOpReason.ORPHAN_SELF_HEAL_DISABLED,
-                )
-            return ApplyTerminalization(
-                CancelOwnedOrphan(
-                    task_id=context.task_id,
-                    fence=_owned_claim(context),
-                )
+            # never reach RUNNING. The child's stop before start cancels such
+            # a task when the orphan self-heal of the run is on
+            # (ORPHAN_CANCELLED); this reason means it was off, and the row is
+            # left claimed for inspection, which the reaper also declines to
+            # touch.
+            return NoTerminalAction(
+                reason=FinalizeNoOpReason.ORPHAN_SELF_HEAL_DISABLED,
             )
+        case AbortReason.ORPHAN_CANCELLED:
+            # The child's stop before start moved the row to history as
+            # CANCELLED (CANCEL_ORPHAN): nothing is owed.
+            return NoTerminalAction(reason=FinalizeNoOpReason.ORPHAN_CANCELLED)
         case _ as unreachable:
             assert_never(unreachable)
 

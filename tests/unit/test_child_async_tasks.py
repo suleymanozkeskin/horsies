@@ -133,6 +133,7 @@ def _runner(
                     is_workflow_task=False,
                     claimed_at=CLAIMED_AT,
                     task_loop=task_loop,
+                    orphan_self_heal=True,
                 )
             )
 
@@ -497,6 +498,7 @@ class TestResultWaitsInsideAnAsyncTask:
             with (
                 patch.object(child_runner, '_run_child_start_hooks'),
                 patch.object(child_runner, '_initialize_worker_pool'),
+                patch.object(child_runner, '_initialize_child_core_handle'),
             ):
                 child_runner.finish_child_start(
                     app, UNREACHABLE_URL, None, ResolvedPool(0, 2, True)

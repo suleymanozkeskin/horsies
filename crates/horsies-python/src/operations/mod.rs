@@ -24,6 +24,7 @@ pub mod schema;
 pub mod stale_claims;
 pub mod stale_running;
 pub mod start;
+pub mod stop_before_start;
 pub mod success;
 pub mod task_info;
 pub mod task_lists;

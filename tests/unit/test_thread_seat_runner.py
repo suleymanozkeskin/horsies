@@ -10,12 +10,12 @@ pool under them is; with a real database they are covered in
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import json
 import threading
 import time
-from collections.abc import Generator, Iterator
+import uuid
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import SecretStr
 
+import horsies._core as core
 from horsies.core.app import Horsies
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import decode_task_result
@@ -52,7 +53,6 @@ from horsies.core.worker.child_runner import (
     DeadlineBeforeStart,
     StartAllowed,
     StatementsBound,
-    StatementsUnbounded,
 )
 from horsies.core.worker.shared_child import (
     MarkerBeforeDeadline,
@@ -117,6 +117,7 @@ def _frame(task_name: str, kwargs: dict[str, Any] | None = None) -> SharedRunFra
         is_workflow_task=False,
         claimed_at=CLAIMED_AT,
         work=ThreadSeatTask(timeout_ms=60_000),
+        orphan_self_heal=True,
     )
 
 
@@ -197,8 +198,8 @@ def test_a_def_task_runs_on_the_seat_thread(steps: _Steps) -> None:
         'worker-1',
         False,
         CLAIMED_AT,
+        orphan_self_heal=True,
         start_check=StartAllowed,
-        statements=StatementsUnbounded(),
     )
     steps.mark.assert_not_called()
 
@@ -306,59 +307,46 @@ class TestTheMarkerOfAThreadSeat:
             statements=StatementsBound(thread_runner.REFUSAL_STATEMENTS_TIMEOUT_S),
         )
 
-    def test_the_running_update_of_a_refusal_is_bounded(self, steps: _Steps) -> None:
+    def test_the_running_update_of_a_refusal_goes_through_the_core(
+        self,
+        steps: _Steps,
+    ) -> None:
+        """The RUNNING update of a refusal runs through the core handle of the
+        child, with the bounds of its pool: the wait for a connection and the
+        connection timeouts. The child sends no statement bound of its own;
+        the named statement bound of the start is the core's (#1240)."""
         frame = dataclasses.replace(_frame('thread_double'), work=REFUSAL)
 
         _ = thread_runner.run_thread_seat_task(frame, REFUSAL, lambda: StartAllowed())
 
         assert steps.confirm.call_args is not None
-        assert steps.confirm.call_args.kwargs['statements'] == StatementsBound(
-            thread_runner.REFUSAL_STATEMENTS_TIMEOUT_S,
-        )
+        assert 'statements' not in steps.confirm.call_args.kwargs
+        assert steps.confirm.call_args.kwargs['orphan_self_heal'] is True
 
 
-class _SlowPool:
-    """A sync pool that gives a connection ``wait_s`` after the ask, as a
-    full pool does. Records each statement run on its connections."""
+class _SlowHandle:
+    """A core handle of the child whose start gets its pooled connection
+    ``wait_s`` after the ask, as a full pool does, then checks the time left
+    that the seat sent, as the core does: past it, no statement runs
+    (``DeadlineBeforeStart``). Records each start that ran a statement."""
 
     def __init__(self, wait_s: float) -> None:
         self.wait_s = wait_s
-        self.statements: list[str] = []
+        self.deadlines_in_ms: list[int | None] = []
+        self.started: list[uuid.UUID] = []
 
-    @contextlib.contextmanager
-    def connection(self, timeout: float | None = None) -> Generator[_Connection]:
-        _ = timeout
+    def start_attempt(self, task_id: uuid.UUID, **kwargs: Any) -> Any:
+        deadline_in_ms = kwargs['deadline_in_ms']
+        self.deadlines_in_ms.append(deadline_in_ms)
         time.sleep(self.wait_s)
-        yield _Connection(self.statements)
-
-
-class _Connection:
-    def __init__(self, statements: list[str]) -> None:
-        self._statements = statements
-
-    def cursor(self, row_factory: object = None) -> _Cursor:
-        _ = row_factory
-        return _Cursor(self._statements)
-
-    def commit(self) -> None:
-        return None
-
-    def rollback(self) -> None:
-        return None
-
-
-class _Cursor:
-    rowcount = 1
-
-    def __init__(self, statements: list[str]) -> None:
-        self._statements = statements
-
-    def execute(self, sql: str, params: object = ()) -> None:
-        _ = params
-        self._statements.append(sql)
-
-    def fetchone(self) -> tuple[str]:
-        return ('task-1',)
+        if deadline_in_ms is not None and deadline_in_ms < self.wait_s * 1000.0:
+            record = MagicMock(spec=core.DeadlineBeforeStart)
+            record.task_id = task_id
+            return record
+        self.started.append(task_id)
+        record = MagicMock(spec=core.AttemptStarted)
+        record.task_id = task_id
+        return record
 
 
 class _RecordingWriter:
@@ -382,13 +370,13 @@ class _RecordingWriter:
 def test_a_seat_that_gets_its_connection_after_the_deadline_does_not_start(
     fresh_marks: None,
 ) -> None:
-    """The real seat thread, run table and seat program, on a pool that
-    answers 0.5 s after the ask: the deadline (0.2 s) fires during the
-    wait. The RUNNING update does not run, the body does not run, and the
-    run ends with the timeout; its row stays CLAIMED for the worker to
-    return to the queue."""
+    """The real seat thread, run table and seat program, on a core handle
+    whose pool answers 0.5 s after the ask: the deadline (0.2 s) fires
+    during the wait. The RUNNING update does not run, the body does not run,
+    and the run ends with the timeout; its row stays CLAIMED for the worker
+    to return to the queue."""
     _ = fresh_marks
-    pool = _SlowPool(wait_s=0.5)
+    handle = _SlowHandle(wait_s=0.5)
     writer = _RecordingWriter()
     table = ThreadRunTable(1, writer)
     deadlines = threading.Thread(target=table.serve_deadlines, daemon=True)
@@ -397,10 +385,11 @@ def test_a_seat_that_gets_its_connection_after_the_deadline_does_not_start(
     )
     frame = dataclasses.replace(
         _frame('thread_double', {'x': 2}),
+        task_id=str(uuid.uuid4()),
         work=ThreadSeatTask(timeout_ms=200),
     )
     with (
-        patch.object(child_runner, '_get_worker_pool', MagicMock(return_value=pool)),
+        patch.object(child_runner, '_get_child_core_handle', MagicMock(return_value=handle)),
         patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)),
     ):
         deadlines.start()
@@ -418,7 +407,9 @@ def test_a_seat_that_gets_its_connection_after_the_deadline_does_not_start(
             deadlines.join(10.0)
 
     assert RAN == []
-    assert pool.statements == []
+    assert handle.started == []
+    [deadline_in_ms] = handle.deadlines_in_ms
+    assert deadline_in_ms is not None and 1 <= deadline_in_ms <= 200
     assert [type(item).__name__ for item in writer.frames] == [
         'DeadlineFiredFrame',
         'SharedResultFrame',

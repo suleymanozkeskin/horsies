@@ -4,8 +4,8 @@
 //! worker claims it again: the row is CLAIMED by that worker once more, so
 //! only the claim generation tells the two dispatches apart. The post-claim
 //! workflow check (`PostgresBroker::filter_non_runnable_workflow_tasks`) and
-//! the pre-start stop (`PostgresBroker::stop_workflow_task_before_start`)
-//! fence on it.
+//! the pre-start stop (`horsies_workflow_task_stop_before_start`) fence on
+//! it.
 
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
@@ -15,9 +15,10 @@ use super::support::*;
 use crate::broker::claims::claim_pass;
 use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::core_pool_for_test_pool;
-use crate::broker::postgres::{PostgresBroker, WorkflowStop};
+use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::core::lifecycle::TerminalizationCommand;
+use crate::broker::workflow_stop_before_start::{stop_before_start, OrphanSelfHeal};
+use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand};
 
 const CLAIM_QUEUE: &str = "lifecycle_claim_fence";
 
@@ -139,10 +140,26 @@ async fn real_claim_path_arms_the_fence() {
     cleanup_workflows(&pool, &[workflow_id]).await;
 }
 
+/// The stop before start of `task_id` under the claim of the dispatch that
+/// carries `dispatched`, with the orphan self-heal off.
+async fn stop_dispatched(pool: &sqlx::PgPool, task_id: Uuid, dispatched: DateTime<Utc>) {
+    let _stopped = stop_before_start(
+        &core_pool_for_test_pool(pool),
+        StatementLog::Off,
+        task_id,
+        &OwnedClaim {
+            worker_id: WORKER.to_owned(),
+            claimed_at: dispatched,
+        },
+        OrphanSelfHeal::Off,
+    )
+    .await
+    .expect("stop before start");
+}
+
 /// One case of `test_child_prestart_fences_on_claim_generation`.
 struct PrestartCase {
     workflow_status: &'static str,
-    stop: WorkflowStop,
     kind: &'static str,
     fresh_node_status: &'static str,
     fresh_node_link: NodeLink,
@@ -157,13 +174,9 @@ async fn child_prestart_fences(case: PrestartCase) {
     let fresh = seed_task(&pool, &workflow_task_claimed_at(dispatched)).await;
     let stale_workflow = link_workflow_task(&pool, stale, "ENQUEUED", case.workflow_status).await;
     let fresh_workflow = link_workflow_task(&pool, fresh, "ENQUEUED", case.workflow_status).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
 
     for task_id in [stale, fresh] {
-        let _stopped = broker
-            .stop_workflow_task_before_start(task_id, case.stop, WORKER, dispatched)
-            .await
-            .expect("stop before start");
+        stop_dispatched(&pool, task_id, dispatched).await;
     }
 
     assert_eq!(status_of(&pool, stale).await, "CLAIMED");
@@ -189,7 +202,6 @@ async fn child_prestart_fences(case: PrestartCase) {
 async fn child_prestart_fences_on_claim_generation_paused() {
     child_prestart_fences(PrestartCase {
         workflow_status: "PAUSED",
-        stop: WorkflowStop::Paused,
         kind: "PAUSE_ABANDON_CLAIM",
         fresh_node_status: "READY",
         fresh_node_link: NodeLink::Detached,
@@ -203,7 +215,6 @@ async fn child_prestart_fences_on_claim_generation_paused() {
 async fn child_prestart_fences_on_claim_generation_cancelled() {
     child_prestart_fences(PrestartCase {
         workflow_status: "CANCELLED",
-        stop: WorkflowStop::Cancelled,
         kind: "WORKFLOW_CANCEL_CLAIM",
         fresh_node_status: "SKIPPED",
         fresh_node_link: NodeLink::Linked,
@@ -228,10 +239,7 @@ async fn child_prestart_still_cancels_requeued_pending_row() {
     .await;
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "CANCELLED").await;
 
-    let _stopped = PostgresBroker::from_pool(pool.clone())
-        .stop_workflow_task_before_start(task_id, WorkflowStop::Cancelled, WORKER, dispatched)
-        .await
-        .expect("stop before start");
+    stop_dispatched(&pool, task_id, dispatched).await;
 
     assert_eq!(status_of(&pool, task_id).await, "CANCELLED");
     assert_eq!(

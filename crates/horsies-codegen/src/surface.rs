@@ -277,10 +277,11 @@ const EXPIRE_OWNED_CLAIM_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("worker_id", "str"),
 ];
-const CANCEL_OWNED_ORPHAN_PARAMETERS: &[StubParameter] = &[
+const STOP_BEFORE_START_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("worker_id", "str"),
     keyword("claimed_at", "datetime.datetime"),
+    keyword("orphan_self_heal", "bool"),
 ];
 
 const TASK_LIST_QUERY_PARAMETERS: &[StubParameter] = &[
@@ -464,6 +465,8 @@ const WORKFLOW_NODES_OUTCOME: &str = "WorkflowNodesRead | WorkflowAbsent | Handl
 const START_ATTEMPT_OUTCOME: &str =
     "AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed";
 const MARK_FINALIZING_OUTCOME: &str = "FinalizingMarked | FinalizingNotHeld | MarkFinalizingFailed";
+const STOP_BEFORE_START_OUTCOME: &str =
+    "StoppedBeforeStart | ResumedBeforeStart | StopBeforeStartFailed";
 
 const SCHEDULER_START_OUTCOME: &str =
     "SchedulerStarted | SchedulerStartRefused | SchedulerStartFailed";
@@ -521,6 +524,18 @@ const CORE_CHILD_HANDLE_METHODS: &[StubFunction] = &[
         name: "expire_owned_claim_async",
         parameters: EXPIRE_OWNED_CLAIM_PARAMETERS,
         returns: TypeText::FutureOf(TASK_ROW_END_OUTCOME),
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "stop_workflow_task_before_start",
+        parameters: STOP_BEFORE_START_PARAMETERS,
+        returns: TypeText::Plain(STOP_BEFORE_START_OUTCOME),
+        doc: "Stop one claimed workflow task whose start missed. Writes, in one statement, which judges\nthe task again under its locks; with orphan_self_heal it cancels a task that no node\nlinks live. A naive claimed_at raises TypeError.",
+    },
+    StubFunction {
+        name: "stop_workflow_task_before_start_async",
+        parameters: STOP_BEFORE_START_PARAMETERS,
+        returns: TypeText::FutureOf(STOP_BEFORE_START_OUTCOME),
         doc: "The awaitable form of the method above.",
     },
     StubFunction {
@@ -681,12 +696,6 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         parameters: &[],
         returns: TypeText::FutureOf(AUDIT_ORPHANED_WORKFLOW_TASKS_OUTCOME),
         doc: "One page of the orphan sweep and its cursor counts, in one transaction. Writes.",
-    },
-    StubFunction {
-        name: "cancel_owned_orphan_async",
-        parameters: CANCEL_OWNED_ORPHAN_PARAMETERS,
-        returns: TypeText::FutureOf(TASK_ROW_END_OUTCOME),
-        doc: "Cancel one claimed workflow task that this claim holds and that no runnable node\nlinks. Writes, in one statement. A naive claimed_at raises TypeError.",
     },
     StubFunction {
         name: "register_child_spec_source",
@@ -1414,7 +1423,7 @@ const RECORD_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "TaskRowEnded",
-        doc: "The row moved to history: kind is EXPIRE_CLAIMED or CANCEL_ORPHAN. The observed fields\nare the row as the statement locked it.",
+        doc: "The row moved to history: kind is EXPIRE_CLAIMED. The observed fields are the row as the\nstatement locked it.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("task_id", "uuid.UUID"),
@@ -1734,6 +1743,43 @@ const RECORD_CLASSES: &[StubClass] = &[
     StubClass {
         name: "MarkFinalizingFailed",
         doc: "The finalizing marker failed. It wrote nothing, or it committed and its reply was lost:\nthe marker may be written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "StoppedBeforeStart",
+        doc: "The stop ran a step that ends the start of this claim: outcome is the step, move_outcome\nthe outcome of its move, None for NODE_NOT_LINKED, which writes nothing.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property(
+                "outcome",
+                "Literal['EXPIRED', 'ABANDONED', 'CANCELLED', 'ORPHAN_CANCELLED', 'NODE_NOT_LINKED', \
+                 'NOT_HELD']",
+            ),
+            property(
+                "move_outcome",
+                "Literal['APPLIED', 'ALREADY_APPLIED', 'LOST_CLAIM', 'SOURCE_STATE_CONFLICT', \
+                 'TASK_ABSENT'] | None",
+            ),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ResumedBeforeStart",
+        doc: "A resume came first: the claim is still startable. Nothing is written; the caller runs\nthe start once more.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "StopBeforeStartFailed",
+        doc: "The stop failed. It wrote nothing, or it committed and its reply was lost: the same stop\nsent again reports a committed move as ALREADY_APPLIED, or the row as not held.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("task_id", "uuid.UUID"),

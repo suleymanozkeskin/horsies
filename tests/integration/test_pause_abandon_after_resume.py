@@ -21,7 +21,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.lifecycle.commands import AbandonOwnedNode, AbandonOwnedNodes
+from horsies.core.lifecycle.commands import AbandonOwnedNodes
 from horsies.core.lifecycle.fences import OwnedClaimBatch
 from horsies.core.lifecycle.outcomes import (
     Applied,
@@ -32,8 +32,8 @@ from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.types.result import is_ok
 from horsies.core.utils.url import to_psycopg_url
 from horsies.core.worker import child_runner
-from horsies.core.worker.child_pool import _initialize_worker_pool
-from horsies._core import CoreHandle
+from horsies.core.worker.child_pool import _get_child_core_handle, _initialize_worker_pool
+from horsies._core import CoreChildHandle, CoreHandle
 from horsies.core.worker.claiming import ClaimMixin
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.queue_cap_hold import QueueCapHold, start_check_caps
@@ -329,43 +329,20 @@ def _set_workflow_running(workflow_id: str) -> None:
         )
 
 
-@pytest.mark.asyncio(loop_scope='function')
-async def test_child_starts_a_task_resumed_before_its_abandon(
-    session: AsyncSession,
-    broker: PostgresBroker,
-    clean_workflow_tables: None,  # noqa: ARG001
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The child reads PAUSED before start; the resume commits before the abandon."""
-    claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
-    workflow_id, task_id = await _seed_paused_workflow_with_claimed_node(
-        session,
-        claimed_at,
-    )
-    _initialize_worker_pool(listener_of(broker).database_url)
-    real_apply_sync = child_runner.apply_sync
+class _ResumeBeforeStop:
+    """The core handle of the child, with a resume of ``workflow_id`` that
+    commits right before the stop before start."""
 
-    def _resume_then_apply(cursor: Any, command: Any) -> Any:
-        if isinstance(command, AbandonOwnedNode):
-            _set_workflow_running(workflow_id)
-        return real_apply_sync(cursor, command)
+    def __init__(self, handle: CoreChildHandle, workflow_id: str) -> None:
+        self._handle = handle
+        self._workflow_id = workflow_id
 
-    monkeypatch.setattr(child_runner, 'apply_sync', _resume_then_apply)
+    def start_attempt(self, *args: Any, **kwargs: Any) -> Any:
+        return self._handle.start_attempt(*args, **kwargs)
 
-    result = child_runner._confirm_until_not_resumed(
-        task_id,
-        WORKER_ID,
-        True,
-        claimed_at,
-    )
-
-    assert result is None
-    assert await _node_and_task(session, workflow_id, task_id) == (
-        'RUNNING',
-        task_id,
-        'RUNNING',
-        'RUNNING',
-    )
+    def stop_workflow_task_before_start(self, *args: Any, **kwargs: Any) -> Any:
+        _set_workflow_running(self._workflow_id)
+        return self._handle.stop_workflow_task_before_start(*args, **kwargs)
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -376,27 +353,23 @@ async def test_child_starts_a_task_resumed_before_its_abandon(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The start misses on the paused workflow; the resume commits before
-    the abandon judges the workflow under its lock, so the abandon refuses
-    and the next attempt starts the task."""
+    the stop judges the workflow under its lock, so the stop finds the claim
+    still startable (RESUMED) and the next attempt starts the task."""
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     workflow_id, task_id = await _seed_paused_workflow_with_claimed_node(
         session,
         claimed_at,
     )
     _initialize_worker_pool(listener_of(broker).database_url)
-    real_begin = child_runner._begin_workflow_stop
-
-    def _resume_then_begin(cursor: Any) -> None:
-        _set_workflow_running(workflow_id)
-        real_begin(cursor)
-
-    monkeypatch.setattr(child_runner, '_begin_workflow_stop', _resume_then_begin)
+    handle = _ResumeBeforeStop(_get_child_core_handle(), workflow_id)
+    monkeypatch.setattr(child_runner, '_get_child_core_handle', lambda: handle)
 
     result = child_runner._confirm_until_not_resumed(
         task_id,
         WORKER_ID,
         True,
         claimed_at,
+        orphan_self_heal=True,
     )
 
     assert result is None

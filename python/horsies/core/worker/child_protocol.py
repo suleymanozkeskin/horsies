@@ -155,6 +155,10 @@ class RunFrame:
 
     ``claimed_at`` is the claim time that the claim of the task returned.
     The child fences each write of the attempt on it and ``worker_id``.
+    ``orphan_self_heal`` is the app's
+    ``RecoveryConfig.auto_terminate_orphaned_workflow_tasks``: with it, the
+    stop before start of a workflow task whose node is not linked cancels
+    the task.
     """
 
     task_id: str
@@ -165,6 +169,7 @@ class RunFrame:
     is_workflow_task: bool
     timeout: StoredTimeout
     claimed_at: datetime
+    orphan_self_heal: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,7 +232,8 @@ class SharedRunFrame:
     ``dispatch`` names this run in the pool, from 1, and each frame of the
     child about it carries the same number. ``work`` is the task with its
     deadline, or the refusal that fails it. ``claimed_at`` is the claim
-    time of the task, as in ``RunFrame``.
+    time of the task, and ``orphan_self_heal`` the app's orphan self-heal,
+    as in ``RunFrame``.
     """
 
     dispatch: int
@@ -239,6 +245,7 @@ class SharedRunFrame:
     is_workflow_task: bool
     claimed_at: datetime
     work: SharedWork
+    orphan_self_heal: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -731,6 +738,7 @@ def _encode_run_frame(frame: RunFrame) -> EncodedFrame:
             'is_workflow_task': frame.is_workflow_task,
             'timeout': _encode_timeout(frame.timeout),
             'claimed_at': frame.claimed_at.isoformat(),
+            'orphan_self_heal': frame.orphan_self_heal,
         },
         (args or b'') + (kwargs or b''),
     )
@@ -763,6 +771,7 @@ def _encode_shared_run_frame(frame: SharedRunFrame) -> EncodedFrame:
             'is_workflow_task': frame.is_workflow_task,
             'claimed_at': frame.claimed_at.isoformat(),
             'work': _encode_seat_work(frame.work),
+            'orphan_self_heal': frame.orphan_self_heal,
         },
         body,
     )
@@ -1333,6 +1342,7 @@ def _decode_run(meta: Mapping[str, Any], body: bytes) -> RunFrame:
         is_workflow_task=_flag(meta, 'is_workflow_task'),
         timeout=_decode_timeout(meta),
         claimed_at=_claim_time(meta),
+        orphan_self_heal=_flag(meta, 'orphan_self_heal'),
     )
 
 
@@ -1374,6 +1384,7 @@ def _decode_shared_run(meta: Mapping[str, Any], body: bytes) -> SharedRunFrame:
         is_workflow_task=_flag(meta, 'is_workflow_task'),
         claimed_at=_claim_time(meta),
         work=_decode_seat_work(meta),
+        orphan_self_heal=_flag(meta, 'orphan_self_heal'),
     )
 
 
