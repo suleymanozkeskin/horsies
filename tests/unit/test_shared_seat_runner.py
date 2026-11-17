@@ -2,9 +2,9 @@
 the finalizing marker that the seat loop asks for at its end
 (``mark_seat_finalizing``).
 
-Real registered tasks run here. The database steps, the RUNNING transition
-and the finalizing marker, are replaced; their own tests are in
-``test_shared_lifecycle``.
+Real registered tasks run here, from version-2 frames as the core decodes
+them. The database steps, the RUNNING transition and the finalizing marker,
+are replaced; their own tests are in ``test_shared_lifecycle``.
 """
 
 # pyright: reportPrivateUsage=false
@@ -12,18 +12,17 @@ and the finalizing marker, are replaced; their own tests are in
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import json
-import logging
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Iterator
-from datetime import datetime, timezone
-from typing import Any, NoReturn
+from typing import Any, Final, NoReturn
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import SecretStr
 
+import horsies._core as core
 from horsies.core.app import Horsies
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import decode_task_result
@@ -39,35 +38,35 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.worker import child_runner, shared_child, shared_runner
 from horsies.core.worker.child_inbox import ParentFrameInbox
-from horsies.core.worker.child_protocol import (
+from horsies.core.worker.child_frames import (
     ChildFrame,
     RssMb,
-    SeatFinished,
-    SeatRefusal,
-    SeatTask,
+    SeatEnd,
     SeatTimedOut,
     SharedResultFrame,
-    SharedRunFrame,
-    StopFrame,
-    WireResult,
 )
+from horsies.core.worker.run_return import ResultEnvelope
 from horsies.core.worker.shared_child import (
     FrameWithResult,
-    MarkerBeforeDeadline,
-    MarkerWindow,
-    MarkerWithoutDeadline,
     SeatReturn,
     SetRunning,
     StoppedBeforeRunning,
 )
-from horsies.core.worker.stored_timeout import CancelGraceInvalid, TimeoutValueInvalid
+from horsies.core.worker.stored_timeout import CancelGraceInvalid
+from tests.fixtures.core_frames import (
+    CLAIMED_AT,
+    async_work,
+    refusal,
+    shared_run_frame,
+    stop_frame,
+)
 
 EXECUTOR_THREADS = 4
 """The size of the default executor of a test child."""
 
 pytestmark = [pytest.mark.unit]
 
-CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+TASK_ID: Final = uuid.UUID('0190f2d8-7c1e-7a3b-9f00-000000000051')
 SCENARIO_TIMEOUT_S = 5.0
 """The longest wait of a test for an event of the code under test."""
 
@@ -196,18 +195,19 @@ async def seat_left_work_ignores_cancel() -> TaskResult[int, TaskError]:
     return TaskResult(ok=6)
 
 
-def _frame(task_name: str, kwargs: dict[str, Any] | None = None) -> SharedRunFrame:
-    return SharedRunFrame(
+def _frame(
+    task_name: str,
+    kwargs: dict[str, Any] | None = None,
+    *,
+    work: dict[str, object] | None = None,
+) -> core.SharedRunFrame:
+    return shared_run_frame(
         dispatch=1,
-        task_id='task-1',
+        task_id=TASK_ID,
         task_name=task_name,
-        args_json='[]',
-        kwargs_json=json.dumps(kwargs or {}),
-        worker_id='worker-1',
-        is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
-        work=SeatTask(timeout_ms=60_000, cancel_grace_ms=1_000),
+        work=work if work is not None else async_work(60_000, 1_000),
         orphan_self_heal=True,
+        input_json=json.dumps(kwargs or {}),
     )
 
 
@@ -215,16 +215,23 @@ def _frame_for(
     dispatch: int,
     task_name: str,
     kwargs: dict[str, Any] | None = None,
-) -> SharedRunFrame:
-    return dataclasses.replace(
-        _frame(task_name, kwargs),
+    *,
+    timeout_ms: int = 60_000,
+    grace_ms: int = 1_000,
+) -> core.SharedRunFrame:
+    return shared_run_frame(
         dispatch=dispatch,
-        task_id=f'task-{dispatch}',
+        task_id=uuid.UUID(int=dispatch),
+        task_name=task_name,
+        work=async_work(timeout_ms, grace_ms),
+        orphan_self_heal=True,
+        input_json=json.dumps(kwargs or {}),
     )
 
 
-def _wire_of(end: SeatFinished) -> WireResult:
-    return end.ok, end.result_json, end.failed_reason
+def _envelope_of(end: SeatEnd) -> ResultEnvelope:
+    assert isinstance(end, ResultEnvelope), end
+    return end
 
 
 class _RecordingWriter:
@@ -261,21 +268,19 @@ def steps() -> Iterator[_Steps]:
         yield replaced
 
 
-def _run(frame: SharedRunFrame) -> SeatReturn:
+def _run(frame: core.SharedRunFrame) -> SeatReturn:
     with patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)):
         return asyncio.run(shared_runner.run_seat_task(frame))
 
 
-def _set_running(seat_return: SeatReturn) -> WireResult:
-    """The wire of a run that set its row RUNNING."""
+def _set_running(seat_return: SeatReturn) -> ResultEnvelope:
+    """The result envelope of a run that set its row RUNNING."""
     assert isinstance(seat_return, SetRunning), seat_return
-    return seat_return.wire
+    return seat_return.result
 
 
-def _result(wire: WireResult, ok_type: Any) -> TaskResult[Any, TaskError]:
-    ok, payload, _reason = wire
-    assert ok is True
-    return decode_task_result(loads_json(payload).unwrap(), ok_type)
+def _result(envelope: ResultEnvelope, ok_type: Any) -> TaskResult[Any, TaskError]:
+    return decode_task_result(loads_json(envelope.text).unwrap(), ok_type)
 
 
 @pytest.fixture(autouse=True)
@@ -289,14 +294,12 @@ def fresh_marks() -> Iterator[None]:
 def test_an_async_task_runs_on_the_running_loop(steps: _Steps) -> None:
     """The run ends at the result: the seat loop writes the marker at the
     end of the run, not the run itself."""
-    wire = _set_running(_run(_frame('seat_double', {'x': 21})))
+    envelope = _set_running(_run(_frame('seat_double', {'x': 21})))
 
-    assert _result(wire, int).unwrap() == 42
-    assert wire[2] is None
+    assert _result(envelope, int).unwrap() == 42
     steps.confirm.assert_awaited_once_with(
-        'task-1',
+        str(TASK_ID),
         'worker-1',
-        False,
         CLAIMED_AT,
         orphan_self_heal=True,
     )
@@ -304,12 +307,13 @@ def test_an_async_task_runs_on_the_running_loop(steps: _Steps) -> None:
 
 
 def test_a_def_task_is_refused_before_it_runs(steps: _Steps) -> None:
-    wire = _set_running(_run(_frame('seat_sync')))
+    envelope = _set_running(_run(_frame('seat_sync')))
 
-    error = _result(wire, int).unwrap_err()
+    error = _result(envelope, int).unwrap_err()
     assert error.error_code == OperationalErrorCode.WORKER_RESOLUTION_ERROR
-    assert wire[2] == (
-        'the task is def, and a shared async child runs only async def tasks'
+    assert error.message == (
+        'Failed to resolve seat_sync: the task is def, and a shared async '
+        'child runs only async def tasks'
     )
     assert RAN == []
 
@@ -318,16 +322,20 @@ def test_a_refusal_fails_the_task_after_running_and_before_resolve(
     steps: _Steps,
 ) -> None:
     """The response of an isolated child for a refused stored timeout."""
-    refusal = CancelGraceInvalid(reason='stored cancel_grace_ms is below 100 ms')
-    frame = dataclasses.replace(
-        _frame('seat_double', {'x': 21}),
-        work=SeatRefusal(refusal=refusal),
+    reason = 'stored cancel_grace_ms is below 100 ms'
+    frame = _frame(
+        'seat_double',
+        {'x': 21},
+        work=refusal('grace_invalid', reason),
     )
 
-    wire = _set_running(_run(frame))
+    envelope = _set_running(_run(frame))
 
-    assert wire == child_runner._stored_timeout_refusal_response('seat_double', refusal)
-    error = _result(wire, int).unwrap_err()
+    assert envelope == child_runner._stored_timeout_refusal_response(
+        'seat_double',
+        CancelGraceInvalid(reason=reason),
+    )
+    error = _result(envelope, int).unwrap_err()
     assert error.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
     assert error.data == {
         'task_name': 'seat_double',
@@ -341,32 +349,27 @@ def test_a_refusal_fails_the_task_after_running_and_before_resolve(
 
 
 def test_a_refusal_after_a_stop_before_start_returns_the_stop(steps: _Steps) -> None:
-    steps.confirm.return_value = (False, '', 'CLAIM_LOST')
-    frame = dataclasses.replace(
-        _frame('seat_never'),
-        work=SeatRefusal(refusal=TimeoutValueInvalid(reason='y')),
-    )
+    steps.confirm.return_value = StoppedBeforeRunning('CLAIM_LOST')
+    frame = _frame('seat_never', work=refusal('value_invalid', 'y'))
 
-    assert _run(frame) == StoppedBeforeRunning((False, '', 'CLAIM_LOST'))
+    assert _run(frame) == StoppedBeforeRunning('CLAIM_LOST')
     steps.mark.assert_not_awaited()
 
 
 def test_a_stop_before_start_runs_no_body_and_reports_no_running_row(
     steps: _Steps,
 ) -> None:
-    steps.confirm.return_value = (False, '', 'CLAIM_LOST')
+    steps.confirm.return_value = StoppedBeforeRunning('CLAIM_LOST')
 
-    assert _run(_frame('seat_never')) == StoppedBeforeRunning(
-        (False, '', 'CLAIM_LOST'),
-    )
+    assert _run(_frame('seat_never')) == StoppedBeforeRunning('CLAIM_LOST')
     assert RAN == []
     steps.mark.assert_not_awaited()
 
 
 def test_a_task_that_raises_is_mapped(steps: _Steps) -> None:
-    wire = _set_running(_run(_frame('seat_raises')))
+    envelope = _set_running(_run(_frame('seat_raises')))
 
-    error = _result(wire, int).unwrap_err()
+    error = _result(envelope, int).unwrap_err()
     assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
 
 
@@ -383,9 +386,9 @@ def test_a_cancel_of_the_body_ends_the_run(steps: _Steps) -> None:
         return await run
 
     with patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)):
-        wire = _set_running(asyncio.run(cancel_after_start()))
+        envelope = _set_running(asyncio.run(cancel_after_start()))
 
-    error = _result(wire, int).unwrap_err()
+    error = _result(envelope, int).unwrap_err()
     assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
     assert 'CancelledError' in (error.message or '')
 
@@ -395,87 +398,31 @@ def test_a_body_that_cancels_its_own_task_goes_through_the_mapper(
 ) -> None:
     """No deadline fired: the cancel request is the body's own. The worker
     maps it through the exception mapper of the task."""
-    wire = _set_running(_run(_frame('seat_cancels_itself')))
+    envelope = _set_running(_run(_frame('seat_cancels_itself')))
 
-    error = _result(wire, int).unwrap_err()
+    error = _result(envelope, int).unwrap_err()
     assert error.error_code == 'CANCELLED_BY_BODY'
 
 
 def test_a_generator_exit_of_the_body_goes_through_the_mapper(steps: _Steps) -> None:
     """The seat maps what ``await_task_call_in_worker`` maps: a
     ``GeneratorExit`` that leaves the body as well."""
-    wire = _set_running(_run(_frame('seat_raises_generator_exit')))
+    envelope = _set_running(_run(_frame('seat_raises_generator_exit')))
 
-    error = _result(wire, int).unwrap_err()
+    error = _result(envelope, int).unwrap_err()
     assert error.error_code == 'GENERATOR_EXIT_OF_BODY'
 
 
 class TestTheMarkerOfASeat:
     """``mark_seat_finalizing``: the marker that the seat loop asks for at
-    the end of a run, within its window."""
+    the end of a run, through the core handle of the child, fenced on the
+    claim of the frame. Its bound is the core's
+    (``test_shared_lifecycle``)."""
 
-    def test_a_run_without_a_deadline_writes_the_marker(self, steps: _Steps) -> None:
-        frame = _frame('seat_quick')
+    def test_a_run_writes_the_marker_of_its_claim(self, steps: _Steps) -> None:
+        asyncio.run(shared_runner.mark_seat_finalizing(_frame('seat_quick')))
 
-        asyncio.run(
-            shared_runner.mark_seat_finalizing(
-                MagicMock(),
-                frame,
-                MarkerWithoutDeadline(),
-            ),
-        )
-
-        steps.mark.assert_awaited_once()
-        assert steps.mark.await_args is not None
-        assert steps.mark.await_args.args[1:] == ('task-1', 'worker-1', CLAIMED_AT)
-
-    def test_a_marker_within_its_window_is_written(self, steps: _Steps) -> None:
-        asyncio.run(
-            shared_runner.mark_seat_finalizing(
-                MagicMock(),
-                _frame('seat_quick'),
-                MarkerBeforeDeadline(seconds=5.0),
-            ),
-        )
-
-        steps.mark.assert_awaited_once()
-
-    def test_a_marker_past_its_window_is_cut_and_logged(
-        self,
-        steps: _Steps,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """The deadline of the run comes first: the write is cut there, and
-        the call returns, so the end of the run follows at once."""
-        cut = asyncio.Event()
-
-        async def waits_for_a_connection(*_args: object) -> None:
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                cut.set()
-                raise
-
-        steps.mark.side_effect = waits_for_a_connection
-
-        async def scenario() -> float:
-            started = time.monotonic()
-            await shared_runner.mark_seat_finalizing(
-                MagicMock(),
-                _frame('seat_quick'),
-                MarkerBeforeDeadline(seconds=0.05),
-            )
-            return time.monotonic() - started
-
-        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
-            took_s = asyncio.run(scenario())
-
-        assert cut.is_set()
-        assert took_s < 1.0
-        assert any(
-            'Finalizing marker of task task-1 skipped' in record.getMessage()
-            for record in caplog.records
-        )
+        steps.mark.assert_awaited_once_with(TASK_ID, 'worker-1', CLAIMED_AT)
 
     def test_a_cancel_of_the_caller_propagates(self, steps: _Steps) -> None:
         marking = asyncio.Event()
@@ -488,11 +435,7 @@ class TestTheMarkerOfASeat:
 
         async def cancel_in_marker() -> None:
             run = asyncio.ensure_future(
-                shared_runner.mark_seat_finalizing(
-                    MagicMock(),
-                    _frame('seat_quick'),
-                    MarkerBeforeDeadline(seconds=60.0),
-                ),
+                shared_runner.mark_seat_finalizing(_frame('seat_quick')),
             )
             await asyncio.wait_for(marking.wait(), SCENARIO_TIMEOUT_S)
             run.cancel()
@@ -508,9 +451,9 @@ def test_a_body_that_returns_after_cancelling_its_own_task_goes_through_the_mapp
     """The cancel request is still pending when the body returns. The run
     ends as a cancel of the body, through its mapper, and the seat task
     does not end cancelled."""
-    wire = _set_running(_run(_frame('seat_cancels_itself_and_returns')))
+    envelope = _set_running(_run(_frame('seat_cancels_itself_and_returns')))
 
-    error = _result(wire, int).unwrap_err()
+    error = _result(envelope, int).unwrap_err()
     assert error.error_code == 'CANCELLED_BY_BODY'
 
 
@@ -520,18 +463,13 @@ class _Exited(BaseException):
 
 class _RealSeatRunner:
     """``StartedSeats`` that runs the real ``run_seat_task`` and the real
-    ``mark_seat_finalizing``, on a pool that the patched steps never use."""
+    ``mark_seat_finalizing``, over the patched steps."""
 
-    async def run(self, frame: SharedRunFrame) -> SeatReturn:
+    async def run(self, frame: core.SharedRunFrame) -> SeatReturn:
         return await shared_runner.run_seat_task(frame)
 
-    async def mark_finalizing(
-        self, frame: SharedRunFrame, window: MarkerWindow
-    ) -> None:
-        await shared_runner.mark_seat_finalizing(MagicMock(), frame, window)
-
-    async def stop(self) -> None:
-        return None
+    async def mark_finalizing(self, frame: core.SharedRunFrame) -> None:
+        await shared_runner.mark_seat_finalizing(frame)
 
 
 @pytest.fixture
@@ -545,13 +483,6 @@ def exits(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(shared_child, '_exit_for_defect', record_exit)
     return seen
-
-
-def _timed(frame: SharedRunFrame, timeout_ms: int, grace_ms: int) -> SharedRunFrame:
-    return dataclasses.replace(
-        frame,
-        work=SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=grace_ms),
-    )
 
 
 type _Scenario = Callable[[ParentFrameInbox, _RecordingWriter], Awaitable[None]]
@@ -580,7 +511,7 @@ def _on_seat_loop(seats: int, scenario: _Scenario) -> _RecordingWriter:
             # failed, so the loop can close.
             for release in RELEASE:
                 release.set()
-        inbox.put(StopFrame())
+        inbox.put(stop_frame())
         await asyncio.wait_for(serving, SCENARIO_TIMEOUT_S)
 
     with patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)):
@@ -618,28 +549,25 @@ def test_a_pending_self_cancel_on_the_seat_loop_ends_only_that_run(
 
     assert exits == []
     ends = {frame.dispatch: frame.end for frame in writer.results()}
-    neighbour = ends[1]
-    assert isinstance(neighbour, SeatFinished)
-    assert _result(_wire_of(neighbour), int).unwrap() == 8
-    cancelled = ends[2]
-    assert isinstance(cancelled, SeatFinished)
-    error = _result(_wire_of(cancelled), int).unwrap_err()
+    assert _result(_envelope_of(ends[1]), int).unwrap() == 8
+    error = _result(_envelope_of(ends[2]), int).unwrap_err()
     assert error.error_code == 'CANCELLED_BY_BODY'
 
 
 class TestTheMarkerOnTheSeatLoop:
     """The finalizing marker is the last write of a run: at the end of the
     run, after its coroutine and its marked work, only for a run that ended
-    without a cancel, and never past its deadline."""
+    without a cancel, before its deadline. It has the bound of the core
+    handle, not the deadline of the run."""
 
-    def test_a_return_before_the_deadline_keeps_its_result_when_the_marker_crosses_it(
+    def test_a_marker_that_crosses_the_deadline_keeps_the_result_and_reports_after_it(
         self,
         steps: _Steps,
         exits: list[str],
     ) -> None:
         """The marker waits on the pool past the deadline of the run. The
-        run returned in time, so its end is what it returned; the marker is
-        cut at the deadline, and no deadline report goes out."""
+        run returned in time, so its end is what it returned, and no
+        deadline report goes out; the end report follows the marker."""
 
         async def waits_on_the_pool(*_args: object) -> None:
             await asyncio.sleep(1.5)
@@ -649,7 +577,7 @@ class TestTheMarkerOnTheSeatLoop:
 
         async def scenario(inbox: ParentFrameInbox, writer: _RecordingWriter) -> None:
             sent = time.monotonic()
-            inbox.put(_timed(_frame_for(1, 'seat_quick'), 300, 1000))
+            inbox.put(_frame_for(1, 'seat_quick', timeout_ms=300, grace_ms=1000))
             await _until(lambda: len(writer.results()) == 1)
             took_s.append(time.monotonic() - sent)
 
@@ -657,13 +585,11 @@ class TestTheMarkerOnTheSeatLoop:
 
         assert exits == []
         assert _kinds(writer, 1) == ['SharedResultFrame']
-        end = writer.results()[0].end
-        assert isinstance(end, SeatFinished)
-        assert _result(_wire_of(end), int).unwrap() == 1
+        assert _result(_envelope_of(writer.results()[0].end), int).unwrap() == 1
         steps.mark.assert_awaited_once()
-        # The end report came at the deadline (0.3 s), not when the marker
-        # would have ended (1.5 s).
-        assert 0.25 <= took_s[0] < 1.0
+        # The end report came when the marker ended (1.5 s), after the
+        # deadline (0.3 s).
+        assert took_s[0] >= 1.5
 
     def test_runs_that_timed_out_write_no_marker_in_their_grace(
         self,
@@ -684,7 +610,9 @@ class TestTheMarkerOnTheSeatLoop:
 
         async def scenario(inbox: ParentFrameInbox, writer: _RecordingWriter) -> None:
             for dispatch in range(1, seats + 1):
-                inbox.put(_timed(_frame_for(dispatch, 'seat_waits'), 200, 100))
+                inbox.put(
+                    _frame_for(dispatch, 'seat_waits', timeout_ms=200, grace_ms=100),
+                )
             await _until(lambda: len(writer.results()) == seats)
 
         writer = _on_seat_loop(seats, scenario)
@@ -717,7 +645,9 @@ class TestTheMarkerOnTheSeatLoop:
         async def scenario(inbox: ParentFrameInbox, writer: _RecordingWriter) -> None:
             writers.append(writer)
             RELEASE.append(asyncio.Event())
-            inbox.put(_timed(_frame_for(1, 'seat_leaves_work'), 5_000, 2_000))
+            inbox.put(
+                _frame_for(1, 'seat_leaves_work', timeout_ms=5_000, grace_ms=2_000),
+            )
             await asyncio.sleep(0.2)
             assert results_at_marker == [], 'the marker came before the work ended'
             assert writer.results() == []
@@ -728,9 +658,7 @@ class TestTheMarkerOnTheSeatLoop:
 
         assert exits == []
         assert results_at_marker == [0]
-        end = writer.results()[0].end
-        assert isinstance(end, SeatFinished)
-        assert _result(_wire_of(end), int).unwrap() == 5
+        assert _result(_envelope_of(writer.results()[0].end), int).unwrap() == 5
 
     def test_a_run_whose_work_is_stuck_after_its_deadline_writes_no_marker(
         self,
@@ -745,7 +673,12 @@ class TestTheMarkerOnTheSeatLoop:
         async def scenario(inbox: ParentFrameInbox, writer: _RecordingWriter) -> None:
             RELEASE.append(asyncio.Event())
             inbox.put(
-                _timed(_frame_for(1, 'seat_left_work_ignores_cancel'), 200, 100),
+                _frame_for(
+                    1,
+                    'seat_left_work_ignores_cancel',
+                    timeout_ms=200,
+                    grace_ms=100,
+                ),
             )
             await _until(lambda: 'RunStuckFrame' in _kinds(writer, 1))
             steps.mark.assert_not_awaited()

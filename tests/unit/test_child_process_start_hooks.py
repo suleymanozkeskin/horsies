@@ -21,10 +21,7 @@ from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.boot_failure import ThreadStartRefused, ThreadStartRefusedError
 from horsies.core.types.result import Err, Ok
-from horsies.core.models.worker_profile import ResolvedPool
-from horsies import _core as core
 from horsies.core.worker.child_frames import boot_failed_frame
-from tests.fixtures.core_frames import init_frame, shared_async_kind
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.worker import child_runner, shared_runner
 from horsies.core.worker.child_runner import (
@@ -34,15 +31,6 @@ from horsies.core.worker.child_runner import (
 from horsies.core.worker.shared_runner import run_shared_async_start_hooks
 
 pytestmark = [pytest.mark.unit]
-
-
-_SEAT_POOL = ResolvedPool(min_size=0, max_size=1, check=False)
-"""A pool that opens with no connection."""
-
-
-def _seat_init() -> core.InitFrame:
-    """The init frame of a shared async child."""
-    return init_frame(child_kind=shared_async_kind(seats=1))
 
 
 def _make_app() -> Horsies:
@@ -399,9 +387,7 @@ class TestRunSharedAsyncHooks:
 
         monkeypatch.setattr(threading.Thread, 'start', refuse)
 
-        started = asyncio.run(
-            shared_runner.PostgresSeatProgram().start(_seat_init(), _SEAT_POOL),
-        )
+        started = asyncio.run(shared_runner.PostgresSeatProgram().start())
 
         assert started == Err(
             boot_failed_frame(
@@ -413,37 +399,30 @@ class TestRunSharedAsyncHooks:
         )
         assert calls == []
 
-    def test_the_async_pool_opens_with_the_pool_of_the_kind(
+    def test_the_start_runs_the_async_hooks_and_gives_the_seats(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The start opens the async pool of the child with the bounds and
-        the check of the pool that the parent sent for its kind, on the URL
-        and the connection settings of the app's broker config."""
-        monkeypatch.setattr(shared_runner, 'get_current_app', _make_app)
-        opened: list[dict[str, object]] = []
+        """The start opens no pool: the writes of the seats go through the
+        core handle of the child, which the sync boot built. It runs the
+        async start hooks of the app, then gives the seats."""
+        app = _make_app()
+        calls: list[str] = []
 
-        async def record_open(database_url: str, **kwargs: object) -> object:
-            opened.append({'database_url': database_url, **kwargs})
-            return object()
+        async def open_client() -> None:
+            calls.append('ran')
 
-        monkeypatch.setattr(shared_runner, 'open_shared_async_pool', record_open)
-        pool = ResolvedPool(min_size=2, max_size=7, check=False)
+        app.on_shared_async_child_start(open_client)
+        monkeypatch.setattr(shared_runner, 'get_current_app', lambda: app)
 
-        started = asyncio.run(
-            shared_runner.PostgresSeatProgram().start(_seat_init(), pool),
-        )
+        started = asyncio.run(shared_runner.PostgresSeatProgram().start())
 
-        assert isinstance(started, Ok)
-        assert opened == [
-            {
-                'database_url': 'postgresql://user:pass@localhost/db',
-                'connect_kwargs': _make_app().config.broker.pooled_connect_args,
-                'min_size': 2,
-                'max_size': 7,
-                'check_on_checkout': False,
-            },
-        ]
+        match started:
+            case Ok(seats):
+                assert isinstance(seats, shared_runner.PostgresSeats)
+            case Err(failed):
+                pytest.fail(f'the start failed: {failed}')
+        assert calls == ['ran']
 
     def test_hooks_run_in_order_on_the_running_loop(
         self,

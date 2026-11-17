@@ -42,7 +42,6 @@ from horsies.core.worker.child_frames import (
     stored_refusal_of,
 )
 from horsies.core.worker.child_main import ParentFrameReader, python_program_of, read_init_frame
-from horsies.core.worker.child_pool import pool_of
 from horsies.core.worker.child_runner import RunTheTask, isolated_work_of
 from horsies.core.worker.run_return import ResultEnvelope, StoppedBeforeRunning
 from horsies.core.worker.stored_timeout import (
@@ -317,7 +316,7 @@ class TestFrameReader:
         match init.child_kind:
             case core.SharedAsyncChildKind() as kind:
                 assert kind.seats == 4
-                assert pool_of(kind).max_size == 2
+                assert kind.pool.max_size == 2
             case _:
                 pytest.fail('a shared async kind decodes as one')
         assert isinstance(init_frame(child_kind=shared_thread_kind()).child_kind, core.SharedThreadChildKind)

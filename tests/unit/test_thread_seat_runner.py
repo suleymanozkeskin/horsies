@@ -1,24 +1,22 @@
 """One task run on a seat of a shared thread child (``run_thread_seat_task``).
 
-Real registered tasks run here, on a thread. The database steps around the
-body, the RUNNING transition and the finalizing marker, are replaced, or the
-pool under them is; with a real database they are covered in
-``tests/integration``.
+Real registered tasks run here, on a thread, from version-2 frames as the
+core decodes them. The database steps around the body, the RUNNING
+transition and the finalizing marker, are replaced, or the core handle under
+them is; with a real database they are covered in ``tests/integration``.
 """
 
 # pyright: reportPrivateUsage=false
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import threading
 import time
 import uuid
 from collections.abc import Iterator
-from datetime import datetime, timezone
-from typing import Any
-from unittest.mock import MagicMock, patch
+from typing import Any, Final
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from pydantic import SecretStr
@@ -38,35 +36,35 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.worker import child_runner, thread_runner
-from horsies.core.worker.child_protocol import (
+from horsies.core.worker.child_frames import (
     ChildFrame,
     RssMb,
-    SeatRefusal,
     SeatTimedOut,
     SharedResultFrame,
-    SharedRunFrame,
-    ThreadSeatTask,
     ThreadSeatWork,
-    WireResult,
 )
 from horsies.core.worker.child_runner import (
     DeadlineBeforeStart,
     StartAllowed,
-    StatementsBound,
 )
+from horsies.core.worker.run_return import ResultEnvelope
 from horsies.core.worker.shared_child import (
-    MarkerBeforeDeadline,
-    MarkerWithoutDeadline,
     SeatReturn,
     SetRunning,
     StoppedBeforeRunning,
 )
 from horsies.core.worker.stored_timeout import TimeoutValueInvalid
 from horsies.core.worker.thread_child import ThreadRunTable, ThreadSeats
+from tests.fixtures.core_frames import (
+    CLAIMED_AT,
+    refusal,
+    shared_run_frame,
+    thread_work,
+)
 
 pytestmark = [pytest.mark.unit]
 
-CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+TASK_ID: Final = uuid.UUID('0190f2d8-7c1e-7a3b-9f00-000000000041')
 
 APP = Horsies(
     AppConfig(
@@ -103,22 +101,30 @@ def thread_never() -> TaskResult[int, TaskError]:
     return TaskResult(ok=1)
 
 
-REFUSAL = SeatRefusal(refusal=TimeoutValueInvalid(reason='no stored timeout'))
-
-
-def _frame(task_name: str, kwargs: dict[str, Any] | None = None) -> SharedRunFrame:
-    return SharedRunFrame(
+def _frame(
+    task_name: str,
+    kwargs: dict[str, Any] | None = None,
+    *,
+    task_id: uuid.UUID = TASK_ID,
+    work: dict[str, object] | None = None,
+) -> core.SharedRunFrame:
+    return shared_run_frame(
         dispatch=1,
-        task_id='task-1',
+        task_id=task_id,
         task_name=task_name,
-        args_json='[]',
-        kwargs_json=json.dumps(kwargs or {}),
-        worker_id='worker-1',
-        is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
-        work=ThreadSeatTask(timeout_ms=60_000),
+        work=work if work is not None else thread_work(60_000),
         orphan_self_heal=True,
+        input_json=json.dumps(kwargs or {}),
     )
+
+
+def _seat_work(frame: core.SharedRunFrame) -> ThreadSeatWork:
+    """The work of a frame of a thread seat."""
+    match frame.work:
+        case core.ThreadTaskWork() | core.StoredOptionsRefused() as work:
+            return work
+        case core.AsyncTaskWork():
+            raise AssertionError(f'run {frame.dispatch} is not a thread seat run')
 
 
 class _Steps:
@@ -134,7 +140,7 @@ def steps() -> Iterator[_Steps]:
     replaced = _Steps()
     with (
         patch.object(thread_runner, '_confirm_until_not_resumed', replaced.confirm),
-        patch.object(thread_runner, '_mark_task_finalizing', replaced.mark),
+        patch.object(thread_runner, 'mark_run_finalizing', replaced.mark),
     ):
         yield replaced
 
@@ -145,20 +151,15 @@ def fresh_marks() -> Iterator[None]:
     yield
 
 
-def _run(frame: SharedRunFrame, work: ThreadSeatWork | None = None) -> SeatReturn:
+def _run(frame: core.SharedRunFrame) -> SeatReturn:
     """Run on a thread named as a seat, as the child does."""
     results: list[SeatReturn] = []
 
     def body() -> None:
         with patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)):
-            match frame.work:
-                case ThreadSeatTask() | SeatRefusal() as frame_work:
-                    pass
-                case _:
-                    raise AssertionError(frame.work)
             returned = thread_runner.run_thread_seat_task(
                 frame,
-                work or frame_work,
+                _seat_work(frame),
                 StartAllowed,
             )
             match returned:
@@ -174,29 +175,26 @@ def _run(frame: SharedRunFrame, work: ThreadSeatWork | None = None) -> SeatRetur
     return results[0]
 
 
-def _set_running(seat_return: SeatReturn) -> WireResult:
-    """The wire of a run that set its row RUNNING."""
+def _set_running(seat_return: SeatReturn) -> ResultEnvelope:
+    """The result envelope of a run that set its row RUNNING."""
     assert isinstance(seat_return, SetRunning), seat_return
-    return seat_return.wire
+    return seat_return.result
 
 
-def _result(wire: WireResult, ok_type: Any) -> TaskResult[Any, TaskError]:
-    ok, payload, _reason = wire
-    assert ok is True
-    return decode_task_result(loads_json(payload).unwrap(), ok_type)
+def _result(envelope: ResultEnvelope, ok_type: Any) -> TaskResult[Any, TaskError]:
+    return decode_task_result(loads_json(envelope.text).unwrap(), ok_type)
 
 
 def test_a_def_task_runs_on_the_seat_thread(steps: _Steps) -> None:
     """The run ends at the result: the seat writes the marker after the run
     table fixed the end, not the run itself."""
-    wire = _set_running(_run(_frame('thread_double', {'x': 21})))
+    envelope = _set_running(_run(_frame('thread_double', {'x': 21})))
 
-    assert _result(wire, int).unwrap() == 42
+    assert _result(envelope, int).unwrap() == 42
     assert RAN == ['horsies-seat-0']
     steps.confirm.assert_called_once_with(
-        'task-1',
+        str(TASK_ID),
         'worker-1',
-        False,
         CLAIMED_AT,
         orphan_self_heal=True,
         start_check=StartAllowed,
@@ -205,13 +203,13 @@ def test_a_def_task_runs_on_the_seat_thread(steps: _Steps) -> None:
 
 
 def test_an_async_def_task_is_refused_before_it_runs(steps: _Steps) -> None:
-    wire = _set_running(_run(_frame('thread_async')))
+    envelope = _set_running(_run(_frame('thread_async')))
 
-    error = _result(wire, int).unwrap_err()
+    error = _result(envelope, int).unwrap_err()
     assert error.error_code == OperationalErrorCode.WORKER_RESOLUTION_ERROR
-    assert (
-        wire[2]
-        == 'the task is async def, and a shared thread child runs only def tasks'
+    assert error.message == (
+        'Failed to resolve thread_async: the task is async def, and a shared '
+        'thread child runs only def tasks'
     )
     assert RAN == []
 
@@ -219,20 +217,20 @@ def test_an_async_def_task_is_refused_before_it_runs(steps: _Steps) -> None:
 def test_a_refusal_fails_the_task_after_running_and_before_resolve(
     steps: _Steps,
 ) -> None:
-    refusal = TimeoutValueInvalid(
-        reason='stored timeout_ms is absent for execution SHARED_THREAD',
-    )
-    frame = dataclasses.replace(
-        _frame('thread_double', {'x': 21}),
-        work=SeatRefusal(refusal=refusal),
+    reason = 'stored timeout_ms is absent for execution SHARED_THREAD'
+    frame = _frame(
+        'thread_double',
+        {'x': 21},
+        work=refusal('value_invalid', reason),
     )
 
-    wire = _set_running(_run(frame))
+    envelope = _set_running(_run(frame))
 
-    assert wire == child_runner._stored_timeout_refusal_response(
-        'thread_double', refusal
+    assert envelope == child_runner._stored_timeout_refusal_response(
+        'thread_double',
+        TimeoutValueInvalid(reason=reason),
     )
-    error = _result(wire, int).unwrap_err()
+    error = _result(envelope, int).unwrap_err()
     assert error.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
     assert error.data == {
         'task_name': 'thread_double',
@@ -247,65 +245,53 @@ def test_a_refusal_fails_the_task_after_running_and_before_resolve(
 def test_a_stop_before_start_runs_no_body_and_reports_no_running_row(
     steps: _Steps,
 ) -> None:
-    steps.confirm.return_value = (False, '', 'CLAIM_LOST')
+    steps.confirm.return_value = StoppedBeforeRunning('CLAIM_LOST')
 
-    assert _run(_frame('thread_never')) == StoppedBeforeRunning(
-        (False, '', 'CLAIM_LOST'),
-    )
+    assert _run(_frame('thread_never')) == StoppedBeforeRunning('CLAIM_LOST')
     assert RAN == []
     steps.mark.assert_not_called()
 
 
 def test_a_task_that_raises_is_mapped(steps: _Steps) -> None:
-    wire = _set_running(_run(_frame('thread_raises')))
+    envelope = _set_running(_run(_frame('thread_raises')))
 
-    error = _result(wire, int).unwrap_err()
+    error = _result(envelope, int).unwrap_err()
     assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
 
 
 def test_an_unknown_task_is_a_resolution_error(steps: _Steps) -> None:
-    wire = _set_running(_run(_frame('not_registered')))
+    envelope = _set_running(_run(_frame('not_registered')))
 
-    error = _result(wire, int).unwrap_err()
+    error = _result(envelope, int).unwrap_err()
     assert error.error_code == OperationalErrorCode.WORKER_RESOLUTION_ERROR
 
 
 class TestTheMarkerOfAThreadSeat:
-    """``mark_thread_seat_finalizing``: the marker after the return, with
-    the wait for a pooled connection bounded by the deadline of the run."""
+    """``mark_thread_seat_finalizing``: the marker after the return goes
+    through the core handle of the child, fenced on the claim of the frame,
+    with the bound of the core for a task and for a refusal alike."""
 
-    def test_a_run_with_a_deadline_waits_for_a_connection_until_it(
+    def test_a_task_and_a_refusal_write_the_marker_of_their_claim(
         self,
         steps: _Steps,
     ) -> None:
-        thread_runner.mark_thread_seat_finalizing(
-            _frame('thread_double'),
-            MarkerBeforeDeadline(seconds=0.25),
+        seats = thread_runner.PostgresThreadSeats()
+
+        seats.mark_finalizing(_frame('thread_double'))
+        seats.mark_finalizing(
+            _frame('thread_double', work=refusal('value_invalid', 'no stored timeout')),
         )
 
-        steps.mark.assert_called_once_with(
-            'task-1',
-            'worker-1',
-            CLAIMED_AT,
-            connection_wait_s=0.25,
-        )
+        assert steps.mark.call_args_list == [
+            call(TASK_ID, 'worker-1', CLAIMED_AT),
+            call(TASK_ID, 'worker-1', CLAIMED_AT),
+        ]
 
-    def test_a_refusal_keeps_the_wait_of_the_pool_and_bounds_its_statement(
-        self,
-        steps: _Steps,
-    ) -> None:
-        """The refusal backstop of the parent relies on this bound."""
-        thread_runner.mark_thread_seat_finalizing(
-            dataclasses.replace(_frame('thread_double'), work=REFUSAL),
-            MarkerWithoutDeadline(),
-        )
-
-        steps.mark.assert_called_once_with(
-            'task-1',
-            'worker-1',
-            CLAIMED_AT,
-            statements=StatementsBound(thread_runner.REFUSAL_STATEMENTS_TIMEOUT_S),
-        )
+    def test_the_refusal_writes_are_bounded_as_in_a_shared_async_child(self) -> None:
+        """The refusal backstop of the parent relies on this bound: two
+        start attempts and the marker, each with the end of a cancelled
+        statement."""
+        assert thread_runner.THREAD_REFUSAL_WRITES_BOUND_S == 120.0
 
 
 class _SlowHandle:
@@ -367,11 +353,13 @@ def test_a_seat_that_gets_its_connection_after_the_deadline_does_not_start(
     seats = ThreadSeats(
         1, table, thread_runner.PostgresThreadSeats(), lambda: RssMb(1.0)
     )
-    frame = dataclasses.replace(
-        _frame('thread_double', {'x': 2}),
-        task_id=str(uuid.uuid4()),
-        work=ThreadSeatTask(timeout_ms=200),
+    frame = _frame(
+        'thread_double',
+        {'x': 2},
+        task_id=uuid.uuid4(),
+        work=thread_work(200),
     )
+    work = _seat_work(frame)
     with (
         patch.object(child_runner, '_get_child_core_handle', MagicMock(return_value=handle)),
         patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)),
@@ -379,8 +367,8 @@ def test_a_seat_that_gets_its_connection_after_the_deadline_does_not_start(
         deadlines.start()
         assert seats.start().is_ok()
         try:
-            table.add(frame, ThreadSeatTask(timeout_ms=200))
-            seats.give(frame, ThreadSeatTask(timeout_ms=200))
+            table.add(frame, work)
+            seats.give(frame, work)
             ends_by = time.monotonic() + 10.0
             while not writer.results():
                 assert time.monotonic() < ends_by, 'the run did not end'

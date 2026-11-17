@@ -161,8 +161,16 @@ def pool(min_size: int = 0, max_size: int = 2, check: bool = False) -> dict[str,
     return {'min_size': min_size, 'max_size': max_size, 'check': check}
 
 
-def isolated_kind(task_send_pool: int = 1) -> dict[str, object]:
-    return {'kind': 'isolated', 'pool': pool(), 'task_send_pool': task_send_pool}
+def isolated_kind(
+    task_send_pool: int = 1,
+    child_pool: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """An isolated child kind; ``child_pool`` defaults to ``pool()``."""
+    return {
+        'kind': 'isolated',
+        'pool': child_pool if child_pool is not None else pool(),
+        'task_send_pool': task_send_pool,
+    }
 
 
 def shared_async_kind(seats: int = 2, executor_threads: int = 2) -> dict[str, object]:
@@ -212,8 +220,23 @@ def init_meta(
     }
 
 
-def init_frame(*, child_kind: dict[str, object] | None = None) -> core.InitFrame:
+def init_frame(
+    *,
+    child_kind: dict[str, object] | None = None,
+    app_locator: str = 'app.main:app',
+    imports: tuple[str, ...] = (),
+    log_level: str = 'info',
+    database_url: str = 'postgresql://user:secret@127.0.0.1:1/none',
+) -> core.InitFrame:
     """An init frame of a Python child, as the core decodes it."""
-    frame = _decoded(init_meta(child_kind=child_kind))
+    frame = _decoded(
+        init_meta(
+            child_kind=child_kind,
+            app_locator=app_locator,
+            imports=imports,
+            log_level=log_level,
+            database_url=database_url,
+        ),
+    )
     assert isinstance(frame, core.InitFrame), frame
     return frame

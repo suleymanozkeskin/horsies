@@ -1,12 +1,10 @@
 """The lifecycle writes of a shared async child.
 
-The pre-start transition goes through the awaitable methods of the core
-handle of the child: each test stands in that handle with a fake that
-answers scripted records and keeps each call. The records of
-``horsies._core`` have no Python constructor, so a ``MagicMock`` of the
-record class stands in for each; a class pattern matches it. The finalizing
-marker runs on a fake pool, connection and cursor that record what the child
-sends.
+The pre-start transition and the finalizing marker go through the awaitable
+methods of the core handle of the child: each test stands in that handle
+with a fake that answers scripted records and keeps each call. The records
+of ``horsies._core`` have no Python constructor, so a ``MagicMock`` of the
+record class stands in for each; a class pattern matches it.
 """
 
 # pyright: reportPrivateUsage=false
@@ -18,8 +16,6 @@ import logging
 import os
 import socket
 import uuid
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -27,19 +23,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import horsies._core as core
-from horsies.core.models.tasks import OutcomeCode
 from horsies.core.worker import shared_lifecycle, slots, thread_runner
 from horsies.core.worker.run_return import StopReason, StoppedBeforeRunning
-from horsies.core.worker.child_pool import (
-    CHILD_POOL_CONNECTION_WAIT_S,
-    SHARED_POOL_CONNECTION_WAIT_S,
-)
-from horsies.core.worker.child_runner import (
-    CANCEL_REQUEST_TIMEOUT_S,
-    _PRE_START_CONFIRM_ATTEMPTS,
-    MARK_FINALIZING_SQL,
-    mark_finalizing_params,
-)
+from horsies.core.worker.child_runner import _PRE_START_CONFIRM_ATTEMPTS
 
 pytestmark = [pytest.mark.unit]
 
@@ -47,71 +33,6 @@ CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e02'
 # A test of a bound fails, not hangs, when the bound is gone.
 OUTER_BOUND_S = 5.0
-
-
-class _Row(tuple[Any, ...]):
-    """A named-tuple-like row: ``status`` and index 0."""
-
-    status: Any
-
-    def __new__(cls, *values: Any, status: Any = None) -> _Row:
-        row = super().__new__(cls, values)
-        row.status = status
-        return row
-
-
-class _Cursor:
-    """Records each statement; ``fetchone`` returns the scripted rows in order."""
-
-    def __init__(self, rows: list[Any]) -> None:
-        self.queries: list[tuple[str, tuple[Any, ...]]] = []
-        self._rows = list(rows)
-        self.rowcount = 1
-
-    async def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
-        self.queries.append((sql, params))
-
-    async def fetchone(self) -> Any:
-        return self._rows.pop(0)
-
-
-class _Conn:
-    def __init__(self, cursor: _Cursor) -> None:
-        self.cursor_ = cursor
-        self.commits = 0
-        self.rollbacks = 0
-
-    def cursor(self, row_factory: Any = None) -> _Cursor:
-        return self.cursor_
-
-    async def commit(self) -> None:
-        self.commits += 1
-
-    async def rollback(self) -> None:
-        self.rollbacks += 1
-
-
-class _Pool:
-    """Hands out ``conns`` in order, one per ``connection()``."""
-
-    def __init__(self, *conns: _Conn) -> None:
-        self._conns = list(conns)
-
-    @asynccontextmanager
-    async def connection(self) -> AsyncGenerator[_Conn]:
-        yield self._conns.pop(0)
-
-
-class _BrokenPool:
-    @asynccontextmanager
-    async def connection(self) -> AsyncGenerator[_Conn]:
-        raise OSError('connection refused')
-        yield _Conn(_Cursor([]))
-
-
-def _pool(fake: _Pool | _BrokenPool) -> Any:
-    """The fake as the pool type that the functions take."""
-    return fake
 
 
 def _record(record_class: type, **fields: object) -> MagicMock:
@@ -173,10 +94,12 @@ class _Handle:
         starts: list[Any],
         stops: list[Any] | None = None,
         expiries: list[Any] | None = None,
+        markers: list[Any] | None = None,
     ) -> None:
         self._starts = starts
         self._stops = stops or []
         self._expiries = expiries or []
+        self._markers = markers or []
         self.calls: list[tuple[str, uuid.UUID, dict[str, object]]] = []
 
     async def start_attempt_async(self, task_id: uuid.UUID, **kwargs: object) -> Any:
@@ -193,16 +116,24 @@ class _Handle:
         self.calls.append(('expire_owned_claim_async', task_id, kwargs))
         return self._expiries.pop(0)
 
+    async def mark_finalizing_async(self, task_id: uuid.UUID, **kwargs: object) -> Any:
+        self.calls.append(('mark_finalizing_async', task_id, kwargs))
+        return self._markers.pop(0)
+
     def names(self) -> list[str]:
         return [name for name, _, _ in self.calls]
 
 
 class _HangingHandle(_Handle):
-    """A handle whose start never answers: a start that waits on a row lock,
-    or a server that does not answer."""
+    """A handle whose start and marker never answer: a write that waits on a
+    row lock, or a server that does not answer."""
 
     async def start_attempt_async(self, task_id: uuid.UUID, **kwargs: object) -> Any:
         self.calls.append(('start_attempt_async', task_id, kwargs))
+        await asyncio.Event().wait()
+
+    async def mark_finalizing_async(self, task_id: uuid.UUID, **kwargs: object) -> Any:
+        self.calls.append(('mark_finalizing_async', task_id, kwargs))
         await asyncio.Event().wait()
 
 
@@ -350,26 +281,16 @@ class TestRefusalBound:
             _PRE_START_CONFIRM_ATTEMPTS * attempt_s + marker_s
         )
         assert shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S == (
-            SHARED_POOL_CONNECTION_WAIT_S
+            shared_lifecycle.CHILD_WRITE_CHECKOUT_WAIT_S
             + shared_lifecycle.RUNNING_STATEMENTS_TIMEOUT_S
         )
 
-    def test_the_writes_of_a_thread_refusal_have_a_named_bound(self) -> None:
-        """Each start attempt has the bound of the core, with the end of a
-        statement that the core cancelled; the marker has the bounds of the
-        sync pool of the child."""
-        attempt_s = (
-            shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S
-            + shared_lifecycle.CANCELLED_WRITE_END_S
-        )
-        marker_s = (
-            CHILD_POOL_CONNECTION_WAIT_S
-            + thread_runner.REFUSAL_STATEMENTS_TIMEOUT_S
-            + CANCEL_REQUEST_TIMEOUT_S
-        )
-
+    def test_the_writes_of_a_thread_refusal_have_the_same_bound(self) -> None:
+        """A shared thread child makes the same writes through the same core
+        handle: each start attempt and the marker have the bounds of the
+        core, with the end of a statement that the core cancelled."""
         assert thread_runner.THREAD_REFUSAL_WRITES_BOUND_S == (
-            _PRE_START_CONFIRM_ATTEMPTS * attempt_s + marker_s
+            shared_lifecycle.REFUSAL_WRITES_BOUND_S
         )
 
     def test_the_refusal_backstop_comes_after_the_writes_and_a_block_report(
@@ -519,28 +440,35 @@ class TestMissedStart:
         assert _confirm(handle) == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
 
-class TestFinalizingMarker:
-    def test_the_marker_is_fenced_on_the_claim_generation(self) -> None:
-        cursor = _Cursor([('MARKED',)])
-        conn = _Conn(cursor)
-
+def _mark(handle: Any) -> None:
+    with patch.object(shared_lifecycle, '_get_child_core_handle', return_value=handle):
         asyncio.run(
             shared_lifecycle.mark_task_finalizing(
-                _pool(_Pool(conn)),
-                'task-1',
+                uuid.UUID(TASK_ID),
                 'worker-1',
                 CLAIMED_AT,
             ),
         )
 
-        assert cursor.queries == [
+
+class TestFinalizingMarker:
+    def test_the_marker_is_fenced_on_the_claim_generation(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.DEBUG, logger='horsies.worker')
+        handle = _Handle(starts=[], markers=[_record(core.FinalizingMarked)])
+
+        _mark(handle)
+
+        assert handle.calls == [
             (
-                MARK_FINALIZING_SQL,
-                mark_finalizing_params('task-1', 'worker-1', CLAIMED_AT),
+                'mark_finalizing_async',
+                uuid.UUID(TASK_ID),
+                {'worker_id': 'worker-1', 'claimed_at': CLAIMED_AT},
             ),
         ]
-        # One statement on an autocommit connection: no transaction to end.
-        assert (conn.commits, conn.rollbacks) == (0, 0)
+        assert 'finalizing' not in caplog.text
 
     def test_a_marker_that_finds_another_claim_is_logged_and_does_not_raise(
         self,
@@ -548,64 +476,89 @@ class TestFinalizingMarker:
     ) -> None:
         caplog.set_level(logging.DEBUG, logger='horsies.worker')
 
-        asyncio.run(
-            shared_lifecycle.mark_task_finalizing(
-                _pool(_Pool(_Conn(_Cursor([('NOT_HELD',)])))),
-                'task-1',
-                'worker-1',
-                CLAIMED_AT,
-            ),
+        _mark(_Handle(starts=[], markers=[_record(core.FinalizingNotHeld)]))
+
+        assert (
+            f'Finalizing marker for task {TASK_ID} skipped: the claim changed'
+            in caplog.text
         )
+        assert f'Failed to mark task {TASK_ID} finalizing' not in caplog.text
 
-        assert 'Finalizing marker for task task-1 skipped: the claim changed' in caplog.text
-        assert 'Failed to mark task task-1 finalizing' not in caplog.text
-
-    def test_a_marker_row_outside_the_contract_raises(self) -> None:
-        with pytest.raises(AssertionError, match='horsies_mark_finalizing returned'):
-            asyncio.run(
-                shared_lifecycle.mark_task_finalizing(
-                    _pool(_Pool(_Conn(_Cursor([None])))),
-                    'task-1',
-                    'worker-1',
-                    CLAIMED_AT,
-                ),
-            )
+    def test_a_marker_record_outside_the_catalog_is_a_defect(self) -> None:
+        with pytest.raises(AssertionError):
+            _mark(_Handle(starts=[], markers=[object()]))
 
     def test_a_failed_marker_is_logged_and_does_not_raise(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        asyncio.run(
-            shared_lifecycle.mark_task_finalizing(
-                _pool(_BrokenPool()),
-                'task-1',
-                'worker-1',
-                CLAIMED_AT,
+        _mark(
+            _Handle(
+                starts=[],
+                markers=[
+                    _record(
+                        core.MarkFinalizingFailed,
+                        message='connection refused',
+                        retryable=True,
+                    ),
+                ],
             ),
         )
-        assert 'Failed to mark task task-1 finalizing' in caplog.text
+
+        assert (
+            f'Failed to mark task {TASK_ID} finalizing: connection refused'
+            in caplog.text
+        )
+
+    def test_a_core_that_cannot_run_the_marker_is_logged_and_does_not_raise(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        handle = MagicMock()
+        handle.mark_finalizing_async.side_effect = core.TooManyPendingCalls(
+            'the queue is full',
+        )
+
+        _mark(handle)
+
+        assert f'Failed to mark task {TASK_ID} finalizing' in caplog.text
 
     def test_a_marker_that_hangs_ends_at_its_bound(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        class _HangingCursor(_Cursor):
-            async def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
-                await asyncio.Event().wait()
-
+        """The wait of the seat ends at the bound of the core, also when the
+        core call does not answer."""
         monkeypatch.setattr(shared_lifecycle, 'FINALIZING_MARKER_TIMEOUT_S', 0.05)
 
         async def run() -> float:
             loop = asyncio.get_running_loop()
             started = loop.time()
-            await shared_lifecycle.mark_task_finalizing(
-                _pool(_Pool(_Conn(_HangingCursor([])))),
-                'task-1',
-                'worker-1',
-                CLAIMED_AT,
+            await asyncio.wait_for(
+                shared_lifecycle.mark_task_finalizing(
+                    uuid.UUID(TASK_ID),
+                    'worker-1',
+                    CLAIMED_AT,
+                ),
+                OUTER_BOUND_S,
             )
             return loop.time() - started
 
-        assert asyncio.run(run()) < 1.0
-        assert 'Failed to mark task task-1 finalizing' in caplog.text
+        with patch.object(
+            shared_lifecycle,
+            '_get_child_core_handle',
+            return_value=_HangingHandle(starts=[]),
+        ):
+            elapsed_s = asyncio.run(run())
+
+        assert elapsed_s < 1.0
+        assert f'Failed to mark task {TASK_ID} finalizing' in caplog.text
+        assert 'did not finish within' in caplog.text
+
+    def test_the_bound_of_the_marker_is_the_core_bound(self) -> None:
+        """The core cancels the marker at 10 s; a cancelled statement ends
+        within 10 s more (the core's ``FINALIZING_MARKER_BOUND`` and
+        ``CANCELLED_WRITE_END``)."""
+        assert shared_lifecycle.FINALIZING_MARKER_TIMEOUT_S == 10.0
+        assert shared_lifecycle.CANCELLED_WRITE_END_S == 10.0

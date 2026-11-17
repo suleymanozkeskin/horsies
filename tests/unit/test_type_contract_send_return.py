@@ -457,7 +457,6 @@ def _run_child(
             '_confirm_ownership_and_set_running',
             MagicMock(return_value=None),
         ),
-        patch.object(child_runner, '_mark_task_finalizing', MagicMock()),
         patch.object(child_runner, 'get_current_app', MagicMock(return_value=app)),
     ):
         return wire_of(

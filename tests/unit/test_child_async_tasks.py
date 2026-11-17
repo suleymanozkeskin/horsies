@@ -41,12 +41,11 @@ from horsies.core.models.tasks import (
 from horsies.core.models.workflow import NodeKey, WorkflowContext
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.process_role import ProcessRole
-from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import child_runner
-from horsies.core.worker.child_protocol import LoopHoldsNoTask
+from horsies.core.worker.child_frames import LoopHoldsNoTask
 from horsies.core.worker.task_loop import (
     AsyncTaskPresence,
     LoopNotCreated,
@@ -54,6 +53,7 @@ from horsies.core.worker.task_loop import (
     TaskLoop,
 )
 from horsies.core.worker.child_runner import RunTheTask
+from tests.fixtures.core_frames import init_frame
 from tests.fixtures.run_return import wire_of
 
 pytestmark = [pytest.mark.unit]
@@ -115,9 +115,6 @@ def _runner(
                     '_confirm_ownership_and_set_running',
                     set_running or MagicMock(return_value=None),
                 ),
-            )
-            stack.enter_context(
-                patch.object(child_runner, '_mark_task_finalizing', MagicMock()),
             )
             stack.enter_context(
                 patch.object(
@@ -496,12 +493,9 @@ class TestResultWaitsInsideAnAsyncTask:
         try:
             with (
                 patch.object(child_runner, '_run_child_start_hooks'),
-                patch.object(child_runner, '_initialize_worker_pool'),
                 patch.object(child_runner, '_initialize_child_core_handle'),
             ):
-                child_runner.finish_child_start(
-                    app, UNREACHABLE_URL, None, ResolvedPool(0, 2, True)
-                )
+                child_runner.finish_child_start(app, init_frame())
             with patch.object(broker, 'enqueue_async', enqueue_async):
                 wire = _runner(app, task_loop)(waits_inside_task.task_name)
         finally:
