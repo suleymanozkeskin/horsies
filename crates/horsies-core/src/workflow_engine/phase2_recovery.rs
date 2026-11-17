@@ -318,7 +318,9 @@ pub(crate) async fn drive_phase2_recovery_with(
                     task_id = %task_id,
                     error_type = failure.error_type(),
                     error = %failure.detail(),
-                    "phase-2 recovery failed for the record",
+                    "Phase-2 recovery failed for task {task_id}: {}: {}",
+                    failure.error_type(),
+                    failure.detail(),
                 );
                 match failure.class() {
                     FailureClass::Transient => {}
@@ -429,7 +431,10 @@ async fn advance_after_recovery(
             task_id = %task_id,
             error_type = failure.error_type(),
             error = %failure.detail(),
-            "parent advance after phase-2 recovery failed; workflow recovery advances it",
+            "Phase-2 recovery of task {task_id}: the parent advance failed: {}: {}; workflow \
+             recovery advances it",
+            failure.error_type(),
+            failure.detail(),
         );
     }
 }
@@ -570,7 +575,7 @@ fn count_raise(
         Err(error) => tracing::error!(
             task_id = %task_id,
             %error,
-            "phase-2 recovery could not record the raise of the record",
+            "Phase-2 recovery could not record the raise of task {task_id}: {error}",
         ),
     }
 }

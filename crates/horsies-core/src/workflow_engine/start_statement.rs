@@ -360,8 +360,8 @@ async fn tree_arguments<'a>(
                     tracing::error!(
                         workflow_id = %workflow.workflow_id,
                         task_index,
-                        error = ?failure.message(),
-                        "sub-workflow root not started; its node fails",
+                        error = %failure,
+                        "sub-workflow root not started: {failure}; its node fails",
                     );
                     arguments.push_failed_record(workflow.workflow_id, task_index, failure)?;
                 }

@@ -548,14 +548,16 @@ impl WorkflowWaitMode {
         {
             Ok(subscription) => WorkflowWaitMode::Subscribed(subscription),
             Err(error @ ListenError::NoSessionUrl) => {
-                tracing::debug!(%workflow_id, error = %error, "the workflow wait polls");
+                tracing::debug!(%workflow_id, error = %error, "the workflow wait polls: {error}");
                 WorkflowWaitMode::Polling
             }
             Err(error @ (ListenError::PlanRefused(_) | ListenError::Subscribe(_))) => {
                 tracing::warn!(
                     %workflow_id,
                     error = %error,
-                    "the workflow_done subscription was refused; the workflow wait polls instead",
+                    "LISTEN unavailable; falling back to polling for workflow_done. If using \
+                     PgBouncer transaction pooling, configure PostgresConfig.session_database_url \
+                     with a direct/session-capable Postgres URL. Original error: {error}",
                 );
                 WorkflowWaitMode::Polling
             }
