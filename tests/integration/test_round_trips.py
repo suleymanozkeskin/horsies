@@ -201,11 +201,12 @@ async def test_a_plain_success_finalize_is_one_statement(
     clean_workflow_tables: None,  # noqa: ARG001
     pre_ping: bool,
 ) -> None:
-    """The fused completion is its own transaction, on the held connection
-    of a steady flusher. In steady state that connection is held, so there is
-    no checkout and no pre-ping: one round trip, also with
-    ``worker_pool_pre_ping`` on. The held connections keep their connection
-    for the whole test, so a slow host cannot make them give it back."""
+    """The fused completion is its own transaction, sent by the core on its
+    pool through the worker's core handle. The core pings a pooled
+    connection only after it was idle for ``DEFAULT_IDLE_PING_AFTER`` (with
+    ``worker_pool_pre_ping`` on), so in steady state the completion is one
+    round trip, also with pre-ping on. The claim loop's held connection
+    keeps its connection for the whole test."""
     opened = await open_proxied_worker(proxied_url(db_url, proxy), pre_ping=pre_ping)
     for held in opened.worker._held_connections:  # pyright: ignore[reportPrivateUsage]
         held._idle_release_s = HELD_FOR_THE_TEST_S  # pyright: ignore[reportPrivateUsage]
