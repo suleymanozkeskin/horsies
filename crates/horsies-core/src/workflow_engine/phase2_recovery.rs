@@ -560,10 +560,10 @@ fn count_raise(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::terminalization::on_test_pool::terminalize;
     use crate::core::config::retention::RetentionConfig;
     use crate::core::history::phase2::consumption::{consume_phase2, Phase2DispositionKind};
-    use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
+    use crate::core::lifecycle::TerminalizationOutcome;
+    use crate::test_support::terminal_writes::{self, TerminalFailure};
     use serial_test::serial;
     use sqlx::PgPool;
 
@@ -611,11 +611,12 @@ mod tests {
                 id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
                 started_at, claimed_at, claimed_by_worker_id, is_workflow_task, retry_count,
                 max_retries, command_fingerprint_version, command_fingerprint,
-                retention_class_key, retain_rerun_input, created_at, updated_at, execution
+                retention_class_key, retain_rerun_input, created_at, updated_at, execution,
+                worker_pid, worker_hostname, worker_process_name
             ) VALUES (
                 $1, 'p7_phase2_root', 'default', 100, 'null', 'RUNNING', NOW(), NOW(), NOW(),
                 NOW(), 'p7-worker', TRUE, 0, 0, NULL, NULL, 'forever', FALSE, NOW(), NOW(),
-                'ISOLATED'
+                'ISOLATED', 4242, 'p7-host', 'p7-process'
             )",
         )
         .bind(task_id)
@@ -663,18 +664,9 @@ mod tests {
             serde_json::json!({"value": 7}),
         ))
         .unwrap();
-        let outcomes = terminalize(
-            pool,
-            &TerminalizationCommand::CompleteLockedTask {
-                task_id,
-                fence: PriorLockedRead {
-                    worker_id: "p7-worker".to_owned(),
-                },
-                result_json: result,
-            },
-        )
-        .await
-        .expect("terminalize workflow task");
+        let outcomes = terminal_writes::complete_workflow_task(pool, task_id, "p7-worker", &result)
+            .await
+            .expect("terminalize workflow task");
         assert!(matches!(
             outcomes.as_slice(),
             [TerminalizationOutcome::Applied { .. }]
@@ -1165,17 +1157,11 @@ mod tests {
                 .expect("a user error code"),
         ))
         .expect("encode the failure result");
-        let outcomes = terminalize(
+        let outcomes = terminal_writes::fail_running_task(
             &pool,
-            &TerminalizationCommand::FailLockedTask {
-                task_id,
-                fence: PriorLockedRead {
-                    worker_id: "p7-worker".to_owned(),
-                },
-                result_json: failure,
-                error_code: Some("NODE_FAILURE".to_owned()),
-                failed_reason: Some("the node failed".to_owned()),
-            },
+            task_id,
+            "p7-worker",
+            &TerminalFailure::of_task(&failure, Some("NODE_FAILURE"), Some("the node failed")),
         )
         .await
         .expect("fail the workflow task");
@@ -1888,17 +1874,11 @@ mod tests {
             let stored =
                 serde_json::to_string(&crate::core::TaskResult::<serde_json::Value>::Err(error))
                     .expect("encode the failure result");
-            let outcomes = terminalize(
+            let outcomes = terminal_writes::fail_running_task(
                 &pool,
-                &TerminalizationCommand::FailLockedTask {
-                    task_id,
-                    fence: PriorLockedRead {
-                        worker_id: "p7-worker".to_owned(),
-                    },
-                    result_json: stored,
-                    error_code: Some(code.to_owned()),
-                    failed_reason: None,
-                },
+                task_id,
+                "p7-worker",
+                &TerminalFailure::of_task(&stored, Some(code), None),
             )
             .await
             .expect("fail the workflow task");

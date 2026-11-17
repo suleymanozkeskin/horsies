@@ -1078,7 +1078,7 @@ mod replay_read_tests;
 
 /// What the finalizing marker found on the task row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FinalizingMark {
+pub enum FinalizingMark {
     /// The row is RUNNING under this worker's claim generation; the marker is
     /// written.
     Marked,
