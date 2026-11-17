@@ -779,9 +779,9 @@ fn check_input(
         .filter(|(member, _)| !links.args_from.contains_key(*member))
         .collect();
     // The static members were compared above; this decode looks for a
-    // missing field only.
+    // missing field of the input itself (depth 0) only.
     if let Err(failure) = input_check(input.text_with(&without_results).as_bytes(), &[]) {
-        if let Some(member) = missing_field(&failure) {
+        if let (0, Some(member)) = (failure.depth, missing_field(&failure)) {
             if links.args_from.contains_key(member) {
                 report.add(
                     HorsiesError::new(format!(
@@ -809,7 +809,13 @@ fn check_input(
 /// - A key below a member that binds to no field (depth 2 or more):
 ///   `WORKFLOW_KWARGS_NOT_SERIALIZABLE`, as Python's strict encode of the
 ///   member's value.
-/// - A missing field: `WORKFLOW_MISSING_REQUIRED_PARAMS`.
+/// - A field of the input itself that has no value (depth 0, the path
+///   `.`): `WORKFLOW_MISSING_REQUIRED_PARAMS`, as Python's check of the
+///   parameters.
+/// - A missing field inside a member's value (depth 1 or more: serde gives
+///   it the path of the value that misses it, `options` or `parcels[0]`):
+///   `WORKFLOW_KWARGS_NOT_SERIALIZABLE`, as Python's strict encode of the
+///   member's value.
 /// - A value of another type: `WORKFLOW_KWARGS_NOT_SERIALIZABLE`.
 ///
 /// serde gives a key inside a value that it buffers (an internally tagged
@@ -824,7 +830,8 @@ fn decode_refusal(owner: &str, failure: &DecodeFailure) -> HorsiesError {
     ) {
         (true, 0 | 1, _) => ErrorCode::WorkflowInvalidKwargKey,
         (true, _, _) => ErrorCode::WorkflowKwargsNotSerializable,
-        (false, _, Some(_)) => ErrorCode::WorkflowMissingRequiredParams,
+        (false, 0, Some(_)) => ErrorCode::WorkflowMissingRequiredParams,
+        (false, _, Some(_)) => ErrorCode::WorkflowKwargsNotSerializable,
         (false, _, None) => ErrorCode::WorkflowKwargsNotSerializable,
     };
     HorsiesError::new(format!(

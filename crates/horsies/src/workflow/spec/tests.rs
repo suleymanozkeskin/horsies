@@ -432,6 +432,54 @@ fn a_missing_field_is_refused() {
     );
 }
 
+/// The refusal of a spec with one node of `I` whose input text is `input`.
+fn input_refusal<I>(input: &str) -> HorsiesError
+where
+    I: Serialize + serde::de::DeserializeOwned + 'static,
+{
+    let mut builder = WorkflowSpecBuilder::new("ship");
+    builder.task(task_node::<u32, I>("ship").input_json(input).unwrap());
+    refusal(builder)
+}
+
+/// #1734: a field of the input itself that has no value (depth 0) is
+/// `HRS-020`, as Python's check of the parameters.
+#[test]
+fn a_missing_field_of_the_input_is_refused_with_hrs_020() {
+    let refused = input_refusal::<StrictShipInput>(r#"{"options": {"retries": 1}}"#);
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowMissingRequiredParams));
+    assert!(
+        refused.message.contains(".: missing field `label`"),
+        "{refused}"
+    );
+}
+
+/// #1734: a field missing inside a member's value (depth 1, the path of
+/// the member) is `HRS-031`, as Python's strict encode of the value.
+#[test]
+fn a_missing_field_of_a_member_s_value_is_refused_with_hrs_031() {
+    let refused = input_refusal::<StrictShipInput>(r#"{"label": "a", "options": {}}"#);
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
+    assert!(
+        refused.message.contains("options: missing field `retries`"),
+        "{refused}"
+    );
+}
+
+/// #1734: a field missing inside an element of a member's list (depth 2,
+/// the path of the element) is `HRS-031`.
+#[test]
+fn a_missing_field_of_a_list_element_is_refused_with_hrs_031() {
+    let refused = input_refusal::<ShipInput>(r#"{"label": "a", "options": {}, "parcels": [{}]}"#);
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
+    assert!(
+        refused
+            .message
+            .contains("parcels[0]: missing field `weight`"),
+        "{refused}"
+    );
+}
+
 #[test]
 fn a_member_of_another_type_is_refused() {
     let mut builder = WorkflowSpecBuilder::new("types");

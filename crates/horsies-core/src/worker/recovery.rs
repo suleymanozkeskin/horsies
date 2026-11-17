@@ -1,12 +1,15 @@
+use std::future::Future;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(test)]
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::broker::core_rows::StatementLog;
+use crate::broker::core_rows::{one_row, query_in, scalar, StatementLog};
 use crate::broker::expiry_and_orphans::{
     cancel_orphan_page, expire_pending_pass, OrphanAuditPage, PendingExpiryFailed,
     PendingExpiryPass, PENDING_EXPIRY_MAX_BATCHES_PER_PASS,
@@ -18,10 +21,11 @@ use crate::broker::stale_recovery::{
     STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS, STALE_RUNNING_SCAN_BATCH,
 };
 use crate::broker::CoveragePassError;
-use crate::broker::PostgresBroker;
+use crate::broker::{BrokerError, PostgresBroker, WorkflowRetentionPass};
 use crate::core::codec::task_result_to_json_string;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
+use crate::core::history::errors::HistoryError;
 use crate::core::history::identity::reservations::{
     cleanup_expired_reservations_pass, ReservationCleanupPass, RESERVATION_CLEANUP_BATCHES_PER_PASS,
 };
@@ -32,7 +36,10 @@ use crate::core::history::maintenance::pruning::PruneReach;
 use crate::core::lifecycle::StaleAttemptOutcome;
 use crate::core::python_text::python_isoformat_utc;
 use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
-use crate::db::CorePool;
+use crate::db::{
+    CheckoutClass, CorePool, IsolationLevel, ParameterType, RollbackOutcome, StatementBound,
+    Transaction, TypedStatement,
+};
 use crate::log_targets::STALE_RUNNING_PASS;
 
 use crate::worker::class_coverage_log::{check_class_coverage, ClassCoverageLog};
@@ -192,7 +199,7 @@ mod p7_maintenance_tests {
         let mut config = RetentionConfig::default();
         config.worker_state_retention_hours = Some(1);
         config.terminal_record_retention_hours = Some(1);
-        run_retention_cleanup(&pool, &config).await;
+        run_retention_cleanup(&PostgresBroker::from_pool(pool.clone()), &config).await;
 
         let state: (i64, i64, i64, i64, i64) = sqlx::query_as(
             "SELECT
@@ -249,8 +256,6 @@ mod p7_maintenance_tests {
 
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &pool,
-            &pool,
             &crate::workflow_engine::child_spec::ChildSpecs::Registry(std::sync::Arc::new(
                 WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             )),
@@ -350,8 +355,6 @@ mod p7_maintenance_tests {
 
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &pool,
-            &pool,
             &crate::workflow_engine::child_spec::ChildSpecs::Registry(std::sync::Arc::new(
                 WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             )),
@@ -414,8 +417,6 @@ mod p7_maintenance_tests {
 
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &pool,
-            &pool,
             &crate::workflow_engine::child_spec::ChildSpecs::Registry(std::sync::Arc::new(
                 WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             )),
@@ -609,8 +610,6 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
         run_reaper_pass(
             &PostgresBroker::from_pool(pool.clone()),
-            &pool,
-            &pool,
             &crate::workflow_engine::child_spec::ChildSpecs::Registry(std::sync::Arc::new(
                 WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             )),
@@ -744,6 +743,14 @@ WHERE (worker_id, snapshot_at) IN (
     FOR UPDATE SKIP LOCKED
 )";
 
+/// The worker-state retention delete: one batch of snapshots older than `$1`
+/// hours (text), at most `$2` rows. Its row count counts snapshots.
+static DELETE_EXPIRED_WORKER_STATES: TypedStatement = TypedStatement::new(
+    "delete_expired_worker_states",
+    DELETE_EXPIRED_WORKER_STATES_SQL,
+    &[ParameterType::Text, ParameterType::Int8],
+);
+
 // One workflow-batched statement deletes a workflow and its node rows together
 // (parity with horsies PR #216; replaces the former workflow_tasks + workflows
 // statement pair, which re-evaluated the live-task guard per batch as a
@@ -777,9 +784,10 @@ WHERE (worker_id, snapshot_at) IN (
 // net for non-retention deletes.
 //
 // The top-level DELETE's rowcount counts WORKFLOWS, which under the node
-// budget is routinely smaller than $2 while backlog remains — the reaper
-// therefore drives this statement with DrainedWhen::EmptyBatch rather than
-// the short-batch heuristic the row-batched statements use.
+// budget is routinely smaller than $2 while backlog remains — the workflow
+// retention pass (`PostgresBroker::delete_expired_workflows`) therefore runs
+// batches until one deletes no workflow, rather than the short-batch
+// heuristic the row-batched statements use.
 pub(crate) const DELETE_EXPIRED_WORKFLOWS_SQL: &str = "\
 WITH live AS MATERIALIZED (
     SELECT DISTINCT wt.workflow_id
@@ -843,15 +851,16 @@ pub fn new_reaper_health() -> ReaperHealth {
 /// Spawn the reaper loop for stale task recovery.
 ///
 /// Periodically checks for stale RUNNING and CLAIMED tasks, marking them
-/// as FAILED or requeuing them respectively. The caller has checked the
-/// client family of the handle that owns both pools
-/// (`Worker::start_database`); the reaper's partition maintenance writes
-/// without a second check.
+/// as FAILED or requeuing them respectively. Every statement of the loop
+/// runs on the broker's core pools: the gate, the recovery steps, the
+/// retention cleanup and the fleet check on the main core pool as reserved
+/// work ([`CheckoutClass::Reserved`]), the partition maintenance on the
+/// session-work pool. The caller has checked the client family of the
+/// handle (`Worker::start_database`); the reaper's partition maintenance
+/// writes without a second check.
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_reaper(
     broker: Arc<PostgresBroker>,
-    runtime_pool: PgPool,
-    maintenance_pool: PgPool,
     child_specs: ChildSpecs,
     config: RecoveryConfig,
     retention: RetentionConfig,
@@ -884,43 +893,43 @@ pub fn spawn_reaper(
             // Cluster-wide gate: only one worker runs a pass per interval.
             // The passes are safe to run concurrently (SKIP LOCKED), but
             // redundant across a cluster; the gate elides the duplicate work.
-            match acquire_gate(&runtime_pool, advisory_key_reaper()).await {
-                GatePass::Skip => {
+            let pass = async {
+                run_reaper_pass(
+                    &broker,
+                    &child_specs,
+                    &config,
+                    &retention,
+                    &health,
+                    &mut next_retention_cleanup,
+                    &mut next_partition_maintenance,
+                    &mut orphan_state,
+                )
+                .await;
+                check_class_coverage(&broker, &mut coverage_log).await;
+            };
+            let gated = match broker.core_pools_for_read() {
+                Ok(open) => {
+                    run_under_gate(
+                        open.main(),
+                        broker.statement_log(),
+                        advisory_key_reaper(),
+                        pass,
+                    )
+                    .await
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "periodic-pass gate connection unavailable: {error}; skipping interval",
+                    );
+                    GatedPass::Unavailable
+                }
+            };
+            match gated {
+                GatedPass::Busy => {
                     tracing::debug!("reaper pass skipped: another worker holds the gate");
                 }
-                GatePass::Ungated => {
-                    run_reaper_pass(
-                        &broker,
-                        &runtime_pool,
-                        &maintenance_pool,
-                        &child_specs,
-                        &config,
-                        &retention,
-                        &health,
-                        &mut next_retention_cleanup,
-                        &mut next_partition_maintenance,
-                        &mut orphan_state,
-                    )
-                    .await;
-                    check_class_coverage(&runtime_pool, &mut coverage_log).await;
-                }
-                GatePass::Held(tx) => {
-                    run_reaper_pass(
-                        &broker,
-                        &runtime_pool,
-                        &maintenance_pool,
-                        &child_specs,
-                        &config,
-                        &retention,
-                        &health,
-                        &mut next_retention_cleanup,
-                        &mut next_partition_maintenance,
-                        &mut orphan_state,
-                    )
-                    .await;
-                    check_class_coverage(&runtime_pool, &mut coverage_log).await;
-                    release_gate(tx).await;
-                }
+                GatedPass::Held | GatedPass::Ungated | GatedPass::Unavailable => {}
             }
 
             tokio::select! {
@@ -931,16 +940,33 @@ pub fn spawn_reaper(
     })
 }
 
-/// Outcome of trying to acquire a cluster-wide periodic-pass gate.
-enum GatePass {
-    /// Gate held by an otherwise-idle transaction; commit after the pass to
-    /// release the xact-scoped lock.
-    Held(sqlx::Transaction<'static, sqlx::Postgres>),
-    /// Another worker holds the gate this interval; skip the pass.
-    Skip,
-    /// Gating disabled (single-connection pool): run the pass ungated.
+/// How one interval of a periodic pass ran under its cluster-wide gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatedPass {
+    /// The gate was held for the pass; its transaction ended after the pass.
+    Held,
+    /// Another worker holds the gate this interval: the pass did not run.
+    Busy,
+    /// The gate could not be taken (no connection, or its statement failed):
+    /// the pass did not run. The cause is logged.
+    Unavailable,
+    /// The pool has fewer than [`GATED_PASS_MIN_CONNECTIONS`] connections:
+    /// the pass ran with no gate.
     Ungated,
 }
+
+/// The fewest connections of the pool with which a pass takes its gate: the
+/// gate transaction holds one connection while the pass body checks out
+/// another (Python `_reaper_gate_enabled`, `parent_pool_size >= 2`).
+const GATED_PASS_MIN_CONNECTIONS: u32 = 2;
+
+/// `pg_try_advisory_xact_lock` on a periodic-pass gate key (Python
+/// `REAPER_GATE_TRY_LOCK_SQL`).
+static GATE_TRY_LOCK: TypedStatement = TypedStatement::new(
+    "reaper_gate_try_lock",
+    "SELECT pg_try_advisory_xact_lock($1)",
+    &[ParameterType::Int8],
+);
 
 /// Derive a fixed 64-bit advisory key from a label (first 8 bytes of SHA-256).
 fn advisory_key_from(label: &[u8]) -> i64 {
@@ -959,61 +985,101 @@ fn advisory_key_reaper() -> i64 {
     advisory_key_from(b"horsies:reaper:v1")
 }
 
-/// Try to acquire a periodic-pass gate as a transaction-scoped advisory lock on
-/// `key`, held by an otherwise-idle transaction for the duration of the pass.
+/// Run `pass` under a periodic-pass gate: a transaction-scoped advisory lock
+/// on `key`, held by an otherwise idle transaction on a connection of `pool`
+/// for the duration of the pass. The gate's connection is reserved work
+/// ([`CheckoutClass::Reserved`]).
 ///
 /// Xact scoping keeps acquire and release on one server backend under
 /// PgBouncer transaction pooling (a session-level lock would not survive
-/// between round-trips there), and rollback-on-drop releases the lock on any
-/// error path.
-async fn acquire_gate(pool: &PgPool, key: i64) -> GatePass {
-    // The gate holds one connection while the pass body needs another; on a
-    // single-connection pool that would deadlock, so run ungated. SKIP LOCKED
-    // keeps an ungated pass correct (just possibly duplicated). Parity with
-    // horsies PR #101 4a7344ec.
-    if pool.options().get_max_connections() < 2 {
-        return GatePass::Ungated;
+/// between round-trips there). The lock ends with the gate transaction: at
+/// its commit after the pass, at its rollback when another worker holds the
+/// gate, and when the server closes a discarded connection.
+///
+/// A pool of fewer than [`GATED_PASS_MIN_CONNECTIONS`] connections runs the
+/// pass ungated: the gate would hold its only connection while the pass body
+/// waits for a second one. SKIP LOCKED keeps an ungated pass correct (just
+/// possibly duplicated). Parity with horsies PR #101 4a7344ec.
+///
+/// `pass` runs only for [`GatedPass::Held`] and [`GatedPass::Ungated`]. A
+/// failure to take the gate is logged as a warning, and the interval is
+/// skipped.
+async fn run_under_gate(
+    pool: &CorePool,
+    log: StatementLog,
+    key: i64,
+    pass: impl Future<Output = ()>,
+) -> GatedPass {
+    if pool.sizing().size() < GATED_PASS_MIN_CONNECTIONS {
+        pass.await;
+        return GatedPass::Ungated;
     }
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(e) => {
+    let mut connection = match pool.checkout(CheckoutClass::Reserved).await {
+        Ok(connection) => connection,
+        Err(error) => {
             tracing::warn!(
-                error = %e,
-                "periodic-pass gate connection unavailable: {e}; skipping interval",
+                %error,
+                "periodic-pass gate connection unavailable: {error}; skipping interval",
             );
-            return GatePass::Skip;
+            return GatedPass::Unavailable;
         }
     };
-    let acquired: bool = match sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(key)
-        .fetch_one(tx.as_mut())
-        .await
-    {
-        Ok(acquired) => acquired,
+    let mut gate = match connection.begin(IsolationLevel::ServerDefault).await {
+        Ok(gate) => gate,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "periodic-pass gate connection unavailable: {error}; skipping interval",
+            );
+            return GatedPass::Unavailable;
+        }
+    };
+    match try_gate_lock(&mut gate, log, key).await {
+        Ok(true) => {}
+        Ok(false) => {
+            end_gate(gate).await;
+            return GatedPass::Busy;
+        }
         Err(error) => {
             tracing::warn!(
                 %error,
                 "periodic-pass advisory gate failed: {error}; skipping interval",
             );
-            return GatePass::Skip;
+            end_gate(gate).await;
+            return GatedPass::Unavailable;
         }
-    };
-    if acquired {
-        GatePass::Held(tx)
-    } else {
-        GatePass::Skip
     }
-}
-
-/// Release a periodic-pass gate by committing its holder transaction (the
-/// xact-scoped lock frees on commit; on error it frees via rollback-on-drop).
-async fn release_gate(tx: sqlx::Transaction<'static, sqlx::Postgres>) {
-    if let Err(e) = tx.commit().await {
+    pass.await;
+    if let Err(error) = gate.commit().await {
         tracing::warn!(
-            error = %e,
-            "periodic-pass gate commit failed: {e}; lock frees when the connection closes",
+            %error,
+            "periodic-pass gate commit failed: {error}; lock frees when the connection closes",
         );
     }
+    GatedPass::Held
+}
+
+/// One `pg_try_advisory_xact_lock` on `key` in the gate transaction: whether
+/// this transaction now holds the gate.
+///
+/// Errors: the statement's [`BrokerError::Statement`], or
+/// [`BrokerError::RowDecode`] for a reply that is not one boolean.
+async fn try_gate_lock(
+    gate: &mut Transaction<'_>,
+    log: StatementLog,
+    key: i64,
+) -> Result<bool, BrokerError> {
+    let statement = &GATE_TRY_LOCK;
+    let rows = query_in(gate, log, &statement.bind().value(&key).finish()).await?;
+    let acquired: bool = scalar(&one_row(rows, statement)?, statement)?;
+    Ok(acquired)
+}
+
+/// Ends a gate transaction that does not hold the gate, or whose lock
+/// statement failed. A failed rollback discards the connection; the server
+/// ends the transaction when the socket closes.
+async fn end_gate(gate: Transaction<'_>) {
+    let _ended: RollbackOutcome = gate.rollback().await;
 }
 
 /// Run one reaper pass, in Python's order: stale-CLAIMED requeue, orphan
@@ -1021,8 +1087,6 @@ async fn release_gate(tx: sqlx::Transaction<'static, sqlx::Postgres>) {
 /// periodic retention cleanup and partition maintenance.
 async fn run_reaper_pass(
     broker: &PostgresBroker,
-    runtime_pool: &PgPool,
-    maintenance_pool: &PgPool,
     child_specs: &ChildSpecs,
     config: &RecoveryConfig,
     retention: &RetentionConfig,
@@ -1258,7 +1322,7 @@ async fn run_reaper_pass(
 
     // Retention cleanup (runs every retention_sweep_interval_s).
     if tokio::time::Instant::now() >= *next_retention_cleanup {
-        run_retention_cleanup(runtime_pool, retention).await;
+        run_retention_cleanup(broker, retention).await;
         *next_retention_cleanup =
             tokio::time::Instant::now() + Duration::from_secs(retention.retention_sweep_interval_s);
     }
@@ -1328,10 +1392,9 @@ async fn run_reaper_pass(
         let prune = broker.prune_expired_partitions().await;
         // Expired key reservations are removed after pruning, in bounded
         // batches; the rest waits for the next pass.
-        let key_reservations = match cleanup_expired_reservations_pass(
-            maintenance_pool,
+        let key_reservations = match cleanup_expired_key_reservations(
+            broker,
             i32::try_from(retention.retention_delete_batch_size).unwrap_or(i32::MAX),
-            RESERVATION_CLEANUP_BATCHES_PER_PASS,
         )
         .await
         {
@@ -1372,6 +1435,43 @@ async fn run_reaper_pass(
         *next_partition_maintenance = tokio::time::Instant::now()
             + Duration::from_secs(retention.partition_maintenance_interval_s);
     }
+}
+
+/// Why the expired key reservation cleanup of a maintenance pass has no
+/// outcome.
+#[derive(Debug, thiserror::Error)]
+enum KeyReservationCleanupFailed {
+    /// The core pools could not open; nothing was deleted.
+    #[error(transparent)]
+    Pools(BrokerError),
+    /// A cleanup statement failed, or its reply broke the function's
+    /// contract. The batches before it stay committed.
+    #[error(transparent)]
+    Cleanup(HistoryError),
+}
+
+/// The expired key reservation cleanup of a maintenance pass
+/// ([`cleanup_expired_reservations_pass`]): at most
+/// [`RESERVATION_CLEANUP_BATCHES_PER_PASS`] batches of `batch_size` on the
+/// main core pool, as reserved work. Holds a write token, so
+/// [`PostgresBroker::close`] waits for it.
+///
+/// Errors: [`KeyReservationCleanupFailed`].
+async fn cleanup_expired_key_reservations(
+    broker: &PostgresBroker,
+    batch_size: i32,
+) -> Result<ReservationCleanupPass, KeyReservationCleanupFailed> {
+    let (open, _write) = broker
+        .core_pools_for_write()
+        .map_err(KeyReservationCleanupFailed::Pools)?;
+    cleanup_expired_reservations_pass(
+        open.main(),
+        broker.statement_log(),
+        batch_size,
+        RESERVATION_CLEANUP_BATCHES_PER_PASS,
+    )
+    .await
+    .map_err(KeyReservationCleanupFailed::Cleanup)
 }
 
 /// Recover the stale RUNNING tasks of one pass: the crash retry that the
@@ -1838,123 +1938,189 @@ pub async fn requeue_stale_claimed(
     }
 }
 
-/// The drained signal for one retention DELETE's batching loop.
-#[derive(Clone, Copy)]
-enum DrainedWhen {
-    /// The statement's rowcount equals the rows the batch selects: a short
-    /// batch means nothing eligible is left.
-    ShortBatch,
-    /// The workflow statement: its rowcount counts workflows while the node
-    /// budget keeps batches routinely short of `batch_size` — only a
-    /// zero-row batch means drained, at the cost of one empty statement per
-    /// drained pass.
-    EmptyBatch,
+/// What one retention pass deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RetentionDeleted {
+    worker_states: u64,
+    workflows: u64,
 }
 
-/// Run one retention DELETE in bounded batches (autocommit per batch).
+/// Why a retention pass stopped before its end. The batches that committed
+/// before the failure stay committed; the backlog resumes on the next pass.
+#[derive(Debug, thiserror::Error)]
+enum RetentionCleanupFailed {
+    /// A setting that the retention config check holds at 1 or more is 0
+    /// (a config that did not pass the check). Nothing was deleted by the
+    /// step that reads it.
+    #[error("{setting} is 0; the retention config check requires at least 1")]
+    ZeroSetting { setting: &'static str },
+    /// The worker-state step failed after deleting `deleted_before` rows;
+    /// the workflow step did not run. After `OutcomeUnknown` the failed batch
+    /// may have committed.
+    #[error("worker-state retention failed after {deleted_before} deleted row(s): {error}")]
+    WorkerStates {
+        deleted_before: u64,
+        error: BrokerError,
+    },
+    /// The workflow step failed after deleting `deleted_before` workflows.
+    /// After `OutcomeUnknown` the failed batch may have committed.
+    #[error("workflow retention failed after {deleted_before} deleted workflow(s): {error}")]
+    Workflows {
+        deleted_before: u64,
+        error: BrokerError,
+    },
+}
+
+/// `value` of the retention setting `setting` as a count above zero.
 ///
-/// Always runs at least one batch; stops when the backlog reads as drained
-/// (per `drained_when`) or the pass deadline is reached (backlog resumes next
-/// pass). Bounded batches keep per-transaction WAL and row locks flat
-/// regardless of backlog size.
-async fn delete_expired_in_batches(
-    pool: &PgPool,
-    sql: &str,
-    retention_hours: u32,
-    batch_size: i64,
+/// Errors: [`RetentionCleanupFailed::ZeroSetting`] for 0.
+fn retention_setting(
+    value: u32,
+    setting: &'static str,
+) -> Result<NonZeroU32, RetentionCleanupFailed> {
+    NonZeroU32::new(value).ok_or(RetentionCleanupFailed::ZeroSetting { setting })
+}
+
+/// One worker-state retention step (Python `_delete_expired_in_batches` with
+/// `DELETE_EXPIRED_WORKER_STATES_SQL`): batches of at most `batch_size`
+/// snapshots older than `retention_hours`, each one statement in autocommit
+/// on the main core pool as reserved work ([`CheckoutClass::Reserved`]),
+/// until a batch deletes fewer than `batch_size` rows (nothing eligible is
+/// left) or `deadline` has passed after a batch. The first batch always
+/// runs. Holds a write token, so [`PostgresBroker::close`] waits for it.
+///
+/// Returns: the count of snapshots deleted.
+///
+/// Errors: [`RetentionCleanupFailed::WorkerStates`] with the count of the
+/// batches that committed before the failure.
+async fn delete_expired_worker_states(
+    broker: &PostgresBroker,
+    retention_hours: NonZeroU32,
+    batch_size: NonZeroU32,
     deadline: tokio::time::Instant,
-    drained_when: DrainedWhen,
-) -> Result<u64, sqlx::Error> {
-    let hours = retention_hours.to_string();
-    let mut total: u64 = 0;
+) -> Result<u64, RetentionCleanupFailed> {
+    let failed = |deleted_before: u64, error: BrokerError| RetentionCleanupFailed::WorkerStates {
+        deleted_before,
+        error,
+    };
+    let (open, _write) = broker
+        .core_pools_for_write()
+        .map_err(|error| failed(0, error))?;
+    let hours = retention_hours.get().to_string();
+    let limit = i64::from(batch_size.get());
+    let full_batch = u64::from(batch_size.get());
+    let mut deleted: u64 = 0;
     loop {
-        let deleted = sqlx::query(sql)
-            .bind(&hours)
-            .bind(batch_size)
-            .execute(pool)
-            .await?
-            .rows_affected();
-        total += deleted;
-        let drained = match drained_when {
-            DrainedWhen::ShortBatch => deleted < batch_size as u64,
-            DrainedWhen::EmptyBatch => deleted == 0,
-        };
-        if drained {
-            return Ok(total);
+        let bound = DELETE_EXPIRED_WORKER_STATES
+            .bind()
+            .value(&hours)
+            .value(&limit)
+            .finish();
+        broker.statement_log().log(&DELETE_EXPIRED_WORKER_STATES);
+        let batch = open
+            .main()
+            .execute(
+                CheckoutClass::Reserved,
+                &bound,
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+            .map_err(|failure| failed(deleted, BrokerError::from(failure)))?;
+        deleted += batch;
+        if batch < full_batch {
+            return Ok(deleted);
         }
         if tokio::time::Instant::now() >= deadline {
             tracing::info!(
-                total_deleted = total,
+                total_deleted = deleted,
                 "retention pass time budget reached; remaining backlog resumes next pass",
             );
-            return Ok(total);
+            return Ok(deleted);
         }
     }
 }
 
-/// Run retention cleanup for relational monitoring and workflow records.
+/// The steps of one retention pass, in Python's order: the worker-state
+/// snapshots, then the workflows with their node rows. Each step is gated by
+/// its config (`None` = disabled). A failed step ends the pass.
 ///
-/// Matches Python's retention cleanup logic in the worker's reaper loop.
-/// Each category is gated by its config (None = disabled). A workflow and its
-/// node rows are deleted together by the workflow-batched statement.
-/// Deletes run in bounded batches under a shared pass time budget.
+/// Errors: [`RetentionCleanupFailed`].
+async fn retention_pass(
+    broker: &PostgresBroker,
+    config: &RetentionConfig,
+    deadline: tokio::time::Instant,
+) -> Result<RetentionDeleted, RetentionCleanupFailed> {
+    let worker_states = match config.worker_state_retention_hours {
+        None => 0,
+        Some(hours) => {
+            delete_expired_worker_states(
+                broker,
+                retention_setting(hours, "worker_state_retention_hours")?,
+                retention_setting(
+                    config.retention_delete_batch_size,
+                    "retention_delete_batch_size",
+                )?,
+                deadline,
+            )
+            .await?
+        }
+    };
+    // Workflows and their node rows go together in one workflow-batched
+    // statement. Terminal tasks already moved to partitioned history and are
+    // never row-deleted here. The step's budget is what is left of the pass
+    // budget; its first batch always runs.
+    let workflows = match config.terminal_record_retention_hours {
+        None => 0,
+        Some(hours) => broker
+            .delete_expired_workflows(WorkflowRetentionPass {
+                retention_hours: retention_setting(hours, "terminal_record_retention_hours")?,
+                batch_size: retention_setting(
+                    config.retention_delete_batch_size,
+                    "retention_delete_batch_size",
+                )?,
+                budget: deadline.saturating_duration_since(tokio::time::Instant::now()),
+            })
+            .await
+            .map_err(|failed| RetentionCleanupFailed::Workflows {
+                deleted_before: failed.deleted_before,
+                error: failed.error,
+            })?,
+    };
+    Ok(RetentionDeleted {
+        worker_states,
+        workflows,
+    })
+}
+
+/// Run retention cleanup for relational monitoring and workflow records
+/// (Python `ReaperMixin._run_reaper_pass`, its retention part,
+/// `python/horsies/core/worker/reaper.py:380-434`).
+///
+/// The worker-state snapshots, then the workflows with their node rows
+/// ([`PostgresBroker::delete_expired_workflows`]), each gated by its config
+/// (`None` = disabled). Deletes run in bounded batches under one pass time
+/// budget ([`RETENTION_PASS_TIME_BUDGET`]); each step runs at least one
+/// batch. Every batch is one statement in autocommit on the main core pool,
+/// as reserved work. A failure is logged as an error; the batches before it
+/// stay committed, and the backlog resumes on the next pass.
 ///
 /// Called by the reaper loop every `retention_sweep_interval_s`.
-pub async fn run_retention_cleanup(pool: &PgPool, config: &RetentionConfig) {
-    let mut deleted_worker_states: u64 = 0;
-    let mut deleted_workflows: u64 = 0;
-
-    let batch_size = i64::from(config.retention_delete_batch_size);
-
+pub async fn run_retention_cleanup(broker: &PostgresBroker, config: &RetentionConfig) {
     // Shared wall-clock budget across the statements. A backlog that
     // outlives the budget resumes next pass.
     let deadline = tokio::time::Instant::now() + RETENTION_PASS_TIME_BUDGET;
-
-    let result: Result<(), sqlx::Error> = async {
-        if let Some(hours) = config.worker_state_retention_hours {
-            deleted_worker_states = delete_expired_in_batches(
-                pool,
-                DELETE_EXPIRED_WORKER_STATES_SQL,
-                hours,
-                batch_size,
-                deadline,
-                DrainedWhen::ShortBatch,
-            )
-            .await?;
-        }
-
-        if let Some(hours) = config.terminal_record_retention_hours {
-            // Workflows and their node rows go together in one
-            // workflow-batched statement. Terminal tasks already moved to
-            // partitioned history and are never row-deleted here.
-            deleted_workflows = delete_expired_in_batches(
-                pool,
-                DELETE_EXPIRED_WORKFLOWS_SQL,
-                hours,
-                batch_size,
-                deadline,
-                DrainedWhen::EmptyBatch,
-            )
-            .await?;
-        }
-
-        Ok(())
-    }
-    .await;
-
-    match result {
-        Ok(()) => {
-            let total = deleted_worker_states + deleted_workflows;
-            if total > 0 {
+    match retention_pass(broker, config, deadline).await {
+        Ok(deleted) => {
+            if deleted.worker_states + deleted.workflows > 0 {
                 tracing::info!(
-                    deleted_worker_states,
-                    deleted_workflows,
+                    deleted_worker_states = deleted.worker_states,
+                    deleted_workflows = deleted.workflows,
                     "retention cleanup completed",
                 );
             }
         }
-        Err(e) => {
-            tracing::error!(error = %e, "Retention cleanup error: {e}");
+        Err(error) => {
+            tracing::error!(%error, "Retention cleanup error: {error}");
         }
     }
 }
@@ -1978,60 +2144,123 @@ mod tests {
     /// `RecoveryConfig::retention_delete_batch_size`).
     const TEST_RETENTION_BATCH: i64 = 500;
 
-    #[tokio::test]
-    async fn gate_runs_ungated_only_for_static_single_connection_capacity() {
-        let single = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect_lazy(&crate::test_support::server_url())
-            .unwrap();
-        assert!(matches!(
-            acquire_gate(&single, advisory_key_reaper()).await,
-            GatePass::Ungated
-        ));
+    /// The most batches [`drain_expired_workflows`] runs before the test
+    /// fails.
+    const DRAIN_BATCH_LIMIT: u32 = 1_000;
 
-        let unavailable = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect_lazy(&crate::test_support::server_url())
-            .unwrap();
-        unavailable.close().await;
-        assert!(matches!(
-            acquire_gate(&unavailable, advisory_key_reaper()).await,
-            GatePass::Skip
-        ));
+    /// Delete every terminal workflow of the test database with no live
+    /// backing task, of any age: the leftovers of other tests, so that the
+    /// counts of a test see only its own workflows.
+    async fn drain_expired_workflows(pool: &PgPool) {
+        for _ in 0..DRAIN_BATCH_LIMIT {
+            let deleted = sqlx::query(DELETE_EXPIRED_WORKFLOWS_SQL)
+                .bind("0")
+                .bind(TEST_RETENTION_BATCH)
+                .execute(pool)
+                .await
+                .expect("drain the expired workflows")
+                .rows_affected();
+            if deleted == 0 {
+                return;
+            }
+        }
+        panic!("the expired workflows did not drain within {DRAIN_BATCH_LIMIT} batches");
     }
 
-    /// #772: the reaper's gate and pass run on the worker reserve, so a pass
-    /// completes while every connection of the runtime pool is held.
+    /// A pool of one connection runs the pass with no gate; a pool whose
+    /// connection cannot be checked out skips the interval and does not run
+    /// the pass.
+    #[tokio::test]
+    async fn gate_runs_ungated_only_for_static_single_connection_capacity() {
+        let lazy = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy(&crate::test_support::server_url())
+            .unwrap();
+
+        let single = crate::broker::pools::session_core_pool_for_test_pool(&lazy, 1);
+        let mut ran = false;
+        let gated = run_under_gate(&single, StatementLog::Off, advisory_key_reaper(), async {
+            ran = true;
+        })
+        .await;
+        assert_eq!(gated, GatedPass::Ungated);
+        assert!(ran, "an ungated pass runs");
+
+        let unavailable = crate::broker::pools::session_core_pool_for_test_pool(&lazy, 2);
+        unavailable.close();
+        let mut ran = false;
+        let gated = run_under_gate(
+            &unavailable,
+            StatementLog::Off,
+            advisory_key_reaper(),
+            async {
+                ran = true;
+            },
+        )
+        .await;
+        assert_eq!(gated, GatedPass::Unavailable);
+        assert!(!ran, "a pass whose gate cannot be taken does not run");
+    }
+
+    /// A gate that another session holds is busy: the pass does not run.
     #[tokio::test]
     #[serial]
-    async fn a_reaper_pass_completes_on_the_reserve_while_the_runtime_pool_is_exhausted() {
+    async fn a_gate_held_by_another_session_skips_the_pass() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let mut holder = pool.begin().await.expect("begin the holder");
+        let taken: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(advisory_key_reaper())
+            .fetch_one(holder.as_mut())
+            .await
+            .expect("take the gate");
+        assert!(taken, "setup: the holder takes the gate");
+
+        let core = crate::broker::pools::session_core_pool_for_test_pool(&pool, 2);
+        let mut ran = false;
+        let gated = run_under_gate(&core, StatementLog::Off, advisory_key_reaper(), async {
+            ran = true;
+        })
+        .await;
+        holder.rollback().await.expect("release the gate");
+        core.close();
+
+        assert_eq!(gated, GatedPass::Busy);
+        assert!(!ran, "a pass whose gate another worker holds does not run");
+    }
+
+    /// #772: the reaper's gate and pass run on the reserve of the worker
+    /// profile pool, so a pass completes while batch checkouts hold every
+    /// batch connection.
+    #[tokio::test]
+    #[serial]
+    async fn a_reaper_pass_completes_on_the_reserve_while_batch_checkouts_hold_the_pool() {
         let seed = test_pool().await;
         let task_id = Uuid::new_v4();
         insert_stale_running_task(&seed, task_id, "NULL").await;
 
-        let runtime = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .acquire_timeout(Duration::from_millis(500))
-            .connect_with((*seed.connect_options()).clone())
+        // Three connections: one for batch checkouts and the reserve of two.
+        let mut config = crate::core::config::PostgresConfig::from_url(
+            crate::test_support::database_of_this_test().await.url(),
+        );
+        config.pool_size = 3;
+        config.max_overflow = 0;
+        config.pool_timeout = 1;
+        let broker = PostgresBroker::connect_worker_with(&config)
             .await
-            .unwrap();
-        let broker = crate::broker::PostgresBroker::from_pool(runtime.clone());
-        let held = [
-            runtime.acquire().await.unwrap(),
-            runtime.acquire().await.unwrap(),
-        ];
+            .expect("connect the broker of a worker");
+        let open = broker.core_pools_for_read().expect("open the core pools");
+        let held = open
+            .main()
+            .checkout(CheckoutClass::Batch)
+            .await
+            .expect("check out the one batch connection");
         assert!(
-            matches!(
-                acquire_gate(&runtime, advisory_key_reaper()).await,
-                GatePass::Skip
-            ),
-            "the exhausted runtime pool cannot take the gate",
+            open.main()
+                .checkout_within(CheckoutClass::Batch, Duration::ZERO)
+                .await
+                .is_err(),
+            "the batch checkouts hold every batch connection",
         );
 
-        let GatePass::Held(gate) = acquire_gate(broker.reserve_pool(), advisory_key_reaper()).await
-        else {
-            panic!("the reserve takes the reaper gate");
-        };
         let mut recovery = RecoveryConfig::default();
         recovery.auto_requeue_stale_claimed = false;
         recovery.auto_terminate_orphaned_workflow_tasks = false;
@@ -2042,25 +2271,33 @@ mod tests {
         let mut orphan_state = OrphanSweepState::default();
         let pass = tokio::time::timeout(
             Duration::from_secs(30),
-            run_reaper_pass(
-                &broker,
-                broker.reserve_pool(),
-                broker.reserve_maintenance_pool(),
-                &crate::workflow_engine::child_spec::ChildSpecs::Registry(std::sync::Arc::new(
-                    WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-                )),
-                &recovery,
-                &RetentionConfig::default(),
-                &health,
-                &mut next_retention_cleanup,
-                &mut next_partition_maintenance,
-                &mut orphan_state,
+            run_under_gate(
+                open.main(),
+                StatementLog::Off,
+                advisory_key_reaper(),
+                run_reaper_pass(
+                    &broker,
+                    &crate::workflow_engine::child_spec::ChildSpecs::Registry(std::sync::Arc::new(
+                        WorkflowSpecRegistry::new(
+                            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+                        ),
+                    )),
+                    &recovery,
+                    &RetentionConfig::default(),
+                    &health,
+                    &mut next_retention_cleanup,
+                    &mut next_partition_maintenance,
+                    &mut orphan_state,
+                ),
             ),
         )
         .await;
-        assert!(pass.is_ok(), "the reaper pass completes on the reserve");
-        release_gate(gate).await;
         drop(held);
+        assert_eq!(
+            pass.expect("the reaper pass completes on the reserve"),
+            GatedPass::Held,
+            "the reserve takes the reaper gate",
+        );
 
         let failed: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM horsies_task_history
@@ -2265,17 +2502,7 @@ mod tests {
 
         // Drain pre-existing eligible candidates (other tests' leftovers) so
         // the rows_affected assertions below see only this test's workflow.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        delete_expired_in_batches(
-            &pool,
-            DELETE_EXPIRED_WORKFLOWS_SQL,
-            0,
-            TEST_RETENTION_BATCH,
-            deadline,
-            DrainedWhen::EmptyBatch,
-        )
-        .await
-        .unwrap();
+        drain_expired_workflows(&pool).await;
 
         let wf_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
@@ -2425,9 +2652,10 @@ mod tests {
 
     /// The node budget bounds each statement's node deletions: 4 workflows ×
     /// 3 nodes against budget 6 → two workflows per statement; the empty-batch
-    /// drain loop still removes the whole backlog in one
-    /// `delete_expired_in_batches` call (a short-batch heuristic would stop
-    /// after the first 2-row batch — the revert-proof). A workflow larger than
+    /// drain loop of the reaper's workflow retention still removes the whole
+    /// backlog in one `PostgresBroker::delete_expired_workflows` call (a
+    /// short-batch heuristic would stop after the first 2-row batch — the
+    /// revert-proof). A workflow larger than
     /// the whole budget drains alone instead of starving.
     /// Parity with horsies PR #216.
     #[tokio::test]
@@ -2437,17 +2665,7 @@ mod tests {
 
         // Drain pre-existing eligible candidates (other tests' leftovers) so
         // the rows_affected assertions below see only this test's workflows.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        delete_expired_in_batches(
-            &pool,
-            DELETE_EXPIRED_WORKFLOWS_SQL,
-            0,
-            TEST_RETENTION_BATCH,
-            deadline,
-            DrainedWhen::EmptyBatch,
-        )
-        .await
-        .unwrap();
+        drain_expired_workflows(&pool).await;
 
         let seed_workflow = |pool: PgPool, nodes: i64| async move {
             let wf_id = Uuid::new_v4();
@@ -2514,18 +2732,15 @@ mod tests {
 
         // The empty-batch drain loop removes the rest in one call (2 + 0-row
         // statements); short-batch semantics would have returned after the
-        // first 2-row batch above.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        let total = delete_expired_in_batches(
-            &pool,
-            DELETE_EXPIRED_WORKFLOWS_SQL,
-            0,
-            6,
-            deadline,
-            DrainedWhen::EmptyBatch,
-        )
-        .await
-        .unwrap();
+        // first 2-row batch above. The seeded workflows are two hours old.
+        let total = PostgresBroker::from_pool(pool.clone())
+            .delete_expired_workflows(WorkflowRetentionPass {
+                retention_hours: NonZeroU32::new(1).expect("one hour is above zero"),
+                batch_size: NonZeroU32::new(6).expect("six nodes is above zero"),
+                budget: Duration::from_secs(60),
+            })
+            .await
+            .expect("the workflow retention pass");
         assert_eq!(total, 2, "drain loop continues past short batches to empty");
         assert_eq!(count_workflows(pool.clone()).await, 0);
 

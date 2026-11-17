@@ -83,8 +83,9 @@ Each method returns `Result<TaskNode<T, I>, HorsiesError>`. The text of `input_j
 
 | Input | Code |
 |-------|------|
-| A key, at any depth, that binds to no field of the input type | `HRS-019` |
+| A key of the input that binds to no parameter | `HRS-019` |
 | A parameter with no value and no `arg_from` | `HRS-020` |
+| A key that binds to no field, or a field with no value, inside the value of a parameter | `HRS-031` |
 | A value of another type | `HRS-031` |
 | A parameter that both `set` and `arg_from` give | `HRS-021` |
 
