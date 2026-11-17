@@ -235,8 +235,8 @@ pub use crate::workflow_engine::child_spec::{
 pub use crate::workflow_engine::args_merge::ChildBuildInput;
 pub use crate::workflow_engine::start::ChildSpecError;
 pub use crate::workflow_engine::start_statement::{
-    build_failed_error, merged_child_input, node_failure_result, params_refused_error,
-    subworkflow_load_failed_error, NodeInput, RefusedMember,
+    build_failed_error, merged_child_input, node_failure_result, params_decode_failed_error,
+    params_refused_error, subworkflow_load_failed_error, NodeInput, RefusedMember,
 };
 
 pub use crate::workflow_engine::engine::{
