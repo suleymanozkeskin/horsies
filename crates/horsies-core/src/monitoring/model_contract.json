@@ -1,0 +1,853 @@
+{
+  "Breakdown": {
+    "group_by": "string",
+    "group_count": "integer",
+    "groups": {
+      "list": {
+        "model": {
+          "cancelled": "integer",
+          "claimed": "integer",
+          "completed": "integer",
+          "expired": "integer",
+          "failed": "integer",
+          "group": {
+            "union": {
+              "tag": "kind",
+              "variants": {
+                "unclaimed": {},
+                "value": {
+                  "value": "string"
+                }
+              }
+            }
+          },
+          "pending": "integer",
+          "retried": "integer",
+          "running": "integer",
+          "total": "integer"
+        }
+      }
+    },
+    "total": {
+      "model": {
+        "cancelled": "integer",
+        "claimed": "integer",
+        "completed": "integer",
+        "expired": "integer",
+        "failed": "integer",
+        "pending": "integer",
+        "retried": "integer",
+        "running": "integer",
+        "total": "integer"
+      }
+    }
+  },
+  "BreakdownCounts": {
+    "cancelled": "integer",
+    "claimed": "integer",
+    "completed": "integer",
+    "expired": "integer",
+    "failed": "integer",
+    "pending": "integer",
+    "retried": "integer",
+    "running": "integer",
+    "total": "integer"
+  },
+  "BudgetLoadInfo": {
+    "budget": {
+      "enum": [
+        "ISOLATED",
+        "SHARED_ASYNC",
+        "SHARED_THREAD"
+      ]
+    },
+    "capacity": "integer",
+    "free": "integer",
+    "in_flight": "integer",
+    "serves": {
+      "list": {
+        "enum": [
+          "ISOLATED",
+          "SHARED_ASYNC",
+          "SHARED_THREAD"
+        ]
+      }
+    }
+  },
+  "ClassReportInfo": {
+    "checked_at": "date-time",
+    "live_window_s": "integer",
+    "streams": {
+      "list": {
+        "model": {
+          "coverage": {
+            "union": {
+              "tag": "kind",
+              "variants": {
+                "no_capacity": {
+                  "workers": "integer"
+                },
+                "served": {
+                  "capacity": "integer",
+                  "workers": "integer"
+                },
+                "unserved": {}
+              }
+            }
+          },
+          "execution": {
+            "enum": [
+              "ISOLATED",
+              "SHARED_ASYNC",
+              "SHARED_THREAD"
+            ]
+          },
+          "queue_name": "string",
+          "wait": {
+            "union": {
+              "tag": "kind",
+              "variants": {
+                "none_due": {
+                  "next_due_at": "date-time"
+                },
+                "waiting": {
+                  "oldest_due_at": "date-time",
+                  "wait_s": "integer"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "workers": {
+      "list": {
+        "model": {
+          "budgets": {
+            "list": {
+              "model": {
+                "budget": {
+                  "enum": [
+                    "ISOLATED",
+                    "SHARED_ASYNC",
+                    "SHARED_THREAD"
+                  ]
+                },
+                "capacity": "integer",
+                "free": "integer",
+                "in_flight": "integer",
+                "serves": {
+                  "list": {
+                    "enum": [
+                      "ISOLATED",
+                      "SHARED_ASYNC",
+                      "SHARED_THREAD"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "snapshot_at": "date-time",
+          "worker_id": "string"
+        }
+      }
+    }
+  },
+  "DownSlotInfo": {
+    "cause": "string",
+    "detail": "string",
+    "down_since": "date-time",
+    "failed_boots": "integer",
+    "slot": "integer"
+  },
+  "ErrorFacet": {
+    "category": "string",
+    "count": "integer",
+    "value": "string"
+  },
+  "FacetValue": {
+    "count": "integer",
+    "value": "string"
+  },
+  "Facets": {
+    "error_category_totals": {
+      "map": "integer"
+    },
+    "error_codes": {
+      "list": {
+        "model": {
+          "category": "string",
+          "count": "integer",
+          "value": "string"
+        }
+      }
+    },
+    "queues": {
+      "list": {
+        "model": {
+          "count": "integer",
+          "value": "string"
+        }
+      }
+    },
+    "task_names": {
+      "list": {
+        "model": {
+          "count": "integer",
+          "value": "string"
+        }
+      }
+    },
+    "workers": {
+      "list": {
+        "model": {
+          "count": "integer",
+          "value": "string"
+        }
+      }
+    }
+  },
+  "GroupRow": {
+    "cancelled": "integer",
+    "claimed": "integer",
+    "completed": "integer",
+    "expired": "integer",
+    "failed": "integer",
+    "group": {
+      "union": {
+        "tag": "kind",
+        "variants": {
+          "unclaimed": {},
+          "value": {
+            "value": "string"
+          }
+        }
+      }
+    },
+    "pending": "integer",
+    "retried": "integer",
+    "running": "integer",
+    "total": "integer"
+  },
+  "LeafTaskInfo": {
+    "completed_at": {
+      "nullable": "date-time"
+    },
+    "enqueued_at": {
+      "nullable": "date-time"
+    },
+    "error_code": {
+      "nullable": "string"
+    },
+    "exec_s": {
+      "nullable": "integer"
+    },
+    "execution": {
+      "nullable": {
+        "enum": [
+          "ISOLATED",
+          "SHARED_ASYNC",
+          "SHARED_THREAD"
+        ]
+      }
+    },
+    "failed_at": {
+      "nullable": "date-time"
+    },
+    "failed_reason": {
+      "nullable": "string"
+    },
+    "good_until": {
+      "nullable": "date-time"
+    },
+    "max_retries": "integer",
+    "queue_s": {
+      "nullable": "integer"
+    },
+    "retry_count": "integer",
+    "started_at": {
+      "nullable": "date-time"
+    },
+    "status": "string",
+    "task_id": "uuid",
+    "worker_hostname": {
+      "nullable": "string"
+    }
+  },
+  "LivenessReport": {
+    "db_latency_ms": {
+      "nullable": "number"
+    },
+    "db_reachable": "boolean",
+    "workers": {
+      "list": {
+        "model": {
+          "hostname": "string",
+          "pid": "integer",
+          "round_trip_ms": "number",
+          "worker_id": "string"
+        }
+      }
+    }
+  },
+  "PendingStreamInfo": {
+    "coverage": {
+      "union": {
+        "tag": "kind",
+        "variants": {
+          "no_capacity": {
+            "workers": "integer"
+          },
+          "served": {
+            "capacity": "integer",
+            "workers": "integer"
+          },
+          "unserved": {}
+        }
+      }
+    },
+    "execution": {
+      "enum": [
+        "ISOLATED",
+        "SHARED_ASYNC",
+        "SHARED_THREAD"
+      ]
+    },
+    "queue_name": "string",
+    "wait": {
+      "union": {
+        "tag": "kind",
+        "variants": {
+          "none_due": {
+            "next_due_at": "date-time"
+          },
+          "waiting": {
+            "oldest_due_at": "date-time",
+            "wait_s": "integer"
+          }
+        }
+      }
+    }
+  },
+  "ScheduleStateInfo": {
+    "last_run_at": {
+      "nullable": "date-time"
+    },
+    "last_task_id": {
+      "nullable": "uuid"
+    },
+    "next_run_at": {
+      "nullable": "date-time"
+    },
+    "run_count": "integer",
+    "schedule_name": "string",
+    "updated_at": "date-time"
+  },
+  "StatusCount": {
+    "count": "integer",
+    "status": "string"
+  },
+  "TaskAttemptInfo": {
+    "attempt": "integer",
+    "error_code": {
+      "nullable": "string"
+    },
+    "error_message": {
+      "nullable": "string"
+    },
+    "failed_reason": {
+      "nullable": "string"
+    },
+    "finished_at": {
+      "nullable": "date-time"
+    },
+    "outcome": "string",
+    "started_at": {
+      "nullable": "date-time"
+    },
+    "will_retry": "boolean",
+    "worker_hostname": {
+      "nullable": "string"
+    }
+  },
+  "TaskDetail": {
+    "attempts": {
+      "list": {
+        "model": {
+          "attempt": "integer",
+          "error_code": {
+            "nullable": "string"
+          },
+          "error_message": {
+            "nullable": "string"
+          },
+          "failed_reason": {
+            "nullable": "string"
+          },
+          "finished_at": {
+            "nullable": "date-time"
+          },
+          "outcome": "string",
+          "started_at": {
+            "nullable": "date-time"
+          },
+          "will_retry": "boolean",
+          "worker_hostname": {
+            "nullable": "string"
+          }
+        }
+      }
+    },
+    "error_category": {
+      "nullable": "string"
+    },
+    "is_workflow_task": "boolean",
+    "leaf": {
+      "model": {
+        "completed_at": {
+          "nullable": "date-time"
+        },
+        "enqueued_at": {
+          "nullable": "date-time"
+        },
+        "error_code": {
+          "nullable": "string"
+        },
+        "exec_s": {
+          "nullable": "integer"
+        },
+        "execution": {
+          "nullable": {
+            "enum": [
+              "ISOLATED",
+              "SHARED_ASYNC",
+              "SHARED_THREAD"
+            ]
+          }
+        },
+        "failed_at": {
+          "nullable": "date-time"
+        },
+        "failed_reason": {
+          "nullable": "string"
+        },
+        "good_until": {
+          "nullable": "date-time"
+        },
+        "max_retries": "integer",
+        "queue_s": {
+          "nullable": "integer"
+        },
+        "retry_count": "integer",
+        "started_at": {
+          "nullable": "date-time"
+        },
+        "status": "string",
+        "task_id": "uuid",
+        "worker_hostname": {
+          "nullable": "string"
+        }
+      }
+    },
+    "priority": "integer",
+    "queue_name": "string",
+    "task_name": "string",
+    "workflow_id": {
+      "nullable": "string"
+    },
+    "workflow_task_index": {
+      "nullable": "integer"
+    }
+  },
+  "TaskListPage": {
+    "rows": {
+      "list": {
+        "model": {
+          "completed_at": {
+            "nullable": "date-time"
+          },
+          "enqueued_at": {
+            "nullable": "date-time"
+          },
+          "error_category": {
+            "nullable": "string"
+          },
+          "error_code": {
+            "nullable": "string"
+          },
+          "exec_s": {
+            "nullable": "integer"
+          },
+          "failed_at": {
+            "nullable": "date-time"
+          },
+          "id": "uuid",
+          "is_workflow_task": "boolean",
+          "max_retries": "integer",
+          "priority": "integer",
+          "queue_name": "string",
+          "queue_s": {
+            "nullable": "integer"
+          },
+          "retry_count": "integer",
+          "started_at": {
+            "nullable": "date-time"
+          },
+          "status": "string",
+          "task_name": "string",
+          "worker_hostname": {
+            "nullable": "string"
+          },
+          "worker_id": {
+            "nullable": "string"
+          }
+        }
+      }
+    },
+    "total": "integer"
+  },
+  "TaskSummary": {
+    "completed_at": {
+      "nullable": "date-time"
+    },
+    "enqueued_at": {
+      "nullable": "date-time"
+    },
+    "error_category": {
+      "nullable": "string"
+    },
+    "error_code": {
+      "nullable": "string"
+    },
+    "exec_s": {
+      "nullable": "integer"
+    },
+    "failed_at": {
+      "nullable": "date-time"
+    },
+    "id": "uuid",
+    "is_workflow_task": "boolean",
+    "max_retries": "integer",
+    "priority": "integer",
+    "queue_name": "string",
+    "queue_s": {
+      "nullable": "integer"
+    },
+    "retry_count": "integer",
+    "started_at": {
+      "nullable": "date-time"
+    },
+    "status": "string",
+    "task_name": "string",
+    "worker_hostname": {
+      "nullable": "string"
+    },
+    "worker_id": {
+      "nullable": "string"
+    }
+  },
+  "WorkerClassLoadInfo": {
+    "budgets": {
+      "list": {
+        "model": {
+          "budget": {
+            "enum": [
+              "ISOLATED",
+              "SHARED_ASYNC",
+              "SHARED_THREAD"
+            ]
+          },
+          "capacity": "integer",
+          "free": "integer",
+          "in_flight": "integer",
+          "serves": {
+            "list": {
+              "enum": [
+                "ISOLATED",
+                "SHARED_ASYNC",
+                "SHARED_THREAD"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "snapshot_at": "date-time",
+    "worker_id": "string"
+  },
+  "WorkerHistoryPoint": {
+    "cpu_percent": {
+      "nullable": "number"
+    },
+    "memory_percent": {
+      "nullable": "number"
+    },
+    "memory_usage_mb": {
+      "nullable": "number"
+    },
+    "snapshot_at": "date-time",
+    "tasks_claimed": "integer",
+    "tasks_running": "integer"
+  },
+  "WorkerPingInfo": {
+    "hostname": "string",
+    "pid": "integer",
+    "round_trip_ms": "number",
+    "worker_id": "string"
+  },
+  "WorkerStateInfo": {
+    "cluster_wide_cap": {
+      "nullable": "integer"
+    },
+    "cpu_percent": {
+      "nullable": "number"
+    },
+    "down_slots": {
+      "list": {
+        "model": {
+          "cause": "string",
+          "detail": "string",
+          "down_since": "date-time",
+          "failed_boots": "integer",
+          "slot": "integer"
+        }
+      }
+    },
+    "hostname": "string",
+    "memory_percent": {
+      "nullable": "number"
+    },
+    "memory_usage_mb": {
+      "nullable": "number"
+    },
+    "pid": "integer",
+    "processes": "integer",
+    "queue_max_concurrency": {
+      "map": "integer"
+    },
+    "queues": {
+      "list": "string"
+    },
+    "slot_health": {
+      "enum": [
+        "all_serving",
+        "slots_down"
+      ]
+    },
+    "snapshot_age_s": {
+      "nullable": "integer"
+    },
+    "snapshot_at": "date-time",
+    "stale": "boolean",
+    "tasks_claimed": "integer",
+    "tasks_running": "integer",
+    "uptime_s": {
+      "nullable": "integer"
+    },
+    "worker_id": "string",
+    "worker_started_at": "date-time"
+  },
+  "WorkflowEdge": {
+    "from_index": "integer",
+    "to_index": "integer"
+  },
+  "WorkflowNodeInfo": {
+    "allow_failed_deps": "boolean",
+    "child_failed": {
+      "nullable": "integer"
+    },
+    "child_total": {
+      "nullable": "integer"
+    },
+    "completed_at": {
+      "nullable": "date-time"
+    },
+    "exec_s": {
+      "nullable": "integer"
+    },
+    "is_subworkflow": "boolean",
+    "node_id": {
+      "nullable": "string"
+    },
+    "node_status": "string",
+    "started_at": {
+      "nullable": "date-time"
+    },
+    "sub_workflow_id": {
+      "nullable": "string"
+    },
+    "task_index": "integer",
+    "task_name": "string"
+  },
+  "WorkflowRunDetail": {
+    "edges": {
+      "list": {
+        "model": {
+          "from_index": "integer",
+          "to_index": "integer"
+        }
+      }
+    },
+    "failed_count": "integer",
+    "failed_indices": {
+      "list": "integer"
+    },
+    "nodes": {
+      "list": {
+        "model": {
+          "allow_failed_deps": "boolean",
+          "child_failed": {
+            "nullable": "integer"
+          },
+          "child_total": {
+            "nullable": "integer"
+          },
+          "completed_at": {
+            "nullable": "date-time"
+          },
+          "exec_s": {
+            "nullable": "integer"
+          },
+          "is_subworkflow": "boolean",
+          "node_id": {
+            "nullable": "string"
+          },
+          "node_status": "string",
+          "started_at": {
+            "nullable": "date-time"
+          },
+          "sub_workflow_id": {
+            "nullable": "string"
+          },
+          "task_index": "integer",
+          "task_name": "string"
+        }
+      }
+    },
+    "run": {
+      "model": {
+        "completed_at": {
+          "nullable": "date-time"
+        },
+        "created_at": {
+          "nullable": "date-time"
+        },
+        "definition_key": {
+          "nullable": "string"
+        },
+        "id": "string",
+        "name": "string",
+        "status": "string",
+        "wall_s": {
+          "nullable": "integer"
+        }
+      }
+    }
+  },
+  "WorkflowRunSummary": {
+    "completed_at": {
+      "nullable": "date-time"
+    },
+    "created_at": {
+      "nullable": "date-time"
+    },
+    "definition_key": {
+      "nullable": "string"
+    },
+    "id": "string",
+    "name": "string",
+    "status": "string",
+    "wall_s": {
+      "nullable": "integer"
+    }
+  },
+  "WorkflowTaskDetail": {
+    "attempts": {
+      "list": {
+        "model": {
+          "attempt": "integer",
+          "error_code": {
+            "nullable": "string"
+          },
+          "error_message": {
+            "nullable": "string"
+          },
+          "failed_reason": {
+            "nullable": "string"
+          },
+          "finished_at": {
+            "nullable": "date-time"
+          },
+          "outcome": "string",
+          "started_at": {
+            "nullable": "date-time"
+          },
+          "will_retry": "boolean",
+          "worker_hostname": {
+            "nullable": "string"
+          }
+        }
+      }
+    },
+    "is_subworkflow": "boolean",
+    "leaf": {
+      "nullable": {
+        "model": {
+          "completed_at": {
+            "nullable": "date-time"
+          },
+          "enqueued_at": {
+            "nullable": "date-time"
+          },
+          "error_code": {
+            "nullable": "string"
+          },
+          "exec_s": {
+            "nullable": "integer"
+          },
+          "execution": {
+            "nullable": {
+              "enum": [
+                "ISOLATED",
+                "SHARED_ASYNC",
+                "SHARED_THREAD"
+              ]
+            }
+          },
+          "failed_at": {
+            "nullable": "date-time"
+          },
+          "failed_reason": {
+            "nullable": "string"
+          },
+          "good_until": {
+            "nullable": "date-time"
+          },
+          "max_retries": "integer",
+          "queue_s": {
+            "nullable": "integer"
+          },
+          "retry_count": "integer",
+          "started_at": {
+            "nullable": "date-time"
+          },
+          "status": "string",
+          "task_id": "uuid",
+          "worker_hostname": {
+            "nullable": "string"
+          }
+        }
+      }
+    },
+    "node_error": {
+      "nullable": "string"
+    },
+    "node_id": {
+      "nullable": "string"
+    },
+    "node_status": "string",
+    "task_index": "integer",
+    "task_name": "string"
+  }
+}
