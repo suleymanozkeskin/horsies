@@ -954,7 +954,7 @@ async fn drive_parent_advances(
         broker,
         CheckoutClass::Reserved,
         owed,
-        ChildBuild {
+        ChildBuild::Registry {
             registry,
             retention: &retention,
         },

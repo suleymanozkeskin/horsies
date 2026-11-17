@@ -717,7 +717,7 @@ async fn recover_stuck_workflows_in_scope(
     let mut report = RecoveryReport::default();
     let pass = PassContext {
         broker,
-        build: ChildBuild {
+        build: ChildBuild::Registry {
             registry,
             retention,
         },
@@ -1753,7 +1753,7 @@ async fn audit_end_states(
     let retention = RetentionConfig::default();
     let pass = PassContext {
         broker,
-        build: ChildBuild {
+        build: ChildBuild::Registry {
             registry,
             retention: &retention,
         },
@@ -1807,7 +1807,7 @@ mod cap_tests {
                 .value(&workflow_id)
                 .value(&task_indexes)
                 .finish(),
-            ChildBuild {
+            ChildBuild::Registry {
                 registry: &registry,
                 retention: &retention,
             },
@@ -1833,7 +1833,7 @@ mod cap_tests {
                 .value(&workflow_id)
                 .value(&task_index)
                 .finish(),
-            ChildBuild {
+            ChildBuild::Registry {
                 registry: &registry,
                 retention: &retention,
             },

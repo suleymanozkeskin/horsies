@@ -2336,8 +2336,9 @@ const WORKFLOW_CLASSES: [StubClass; 20] = [
     },
 ];
 
-/// The classes of the history switch: the coverage pass and the pruning pass.
-const HISTORY_CLASSES: [StubClass; 8] = [
+/// The classes of the history switch: the coverage pass, the pruning pass and the rerun
+/// in the caller's transaction.
+const HISTORY_CLASSES: [StubClass; 24] = [
     StubClass {
         name: "CoverageRequest",
         doc: "One frozen coverage pass: the two horizons, the declared retention periods in whole days,\nand how a damaged pass is serialized. A period outside 1 to 1825 days, a horizon below two\nleaves, or another serialization raises ValueError.",
@@ -2416,6 +2417,118 @@ const HISTORY_CLASSES: [StubClass; 8] = [
         doc: "The pass has no report: the connect, the client family check or the candidate read\nfailed, or a candidate row broke its function's contract. Nothing was detached or dropped.",
         constructor: Constructor::NoConstructor,
         properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunCommandRecord",
+        doc: "One rerun request: the source task id, the deadline of the new task (aware, or None\nfor no deadline) and the caller key. A naive deadline raises TypeError.",
+        constructor: Constructor::Parameters(&[keyword("source_task_id", "uuid.UUID"), keyword("deadline", "datetime.datetime | None"), keyword("caller_key", "str | None")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunPolicyRecord",
+        doc: "The enqueue policy of the new task: its retention class key, whether it keeps its input\nfor a rerun, and the reservation window of a caller key in microseconds. A window not\nabove 0 or above 30 days, or an empty class key, raises ValueError.",
+        constructor: Constructor::Parameters(&[keyword("retention_class_key", "str"), keyword("retain_rerun_input", "bool"), keyword("reservation_window_us", "int")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "PreparedStatement",
+        doc: "One statement for the caller's connection: sql with a named bind and a cast for each\nparameter, parameters (one value per bind, p1 first), and the result columns as (name,\nSQL type) in row order.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("name", "str"), property("sql", "str"), property("parameters", "dict[str, object]"), property("columns", "list[tuple[str, str]]")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunWriteRecord",
+        doc: "The write of a rerun: run statement, then pass its row to decode_rerun_write.\nnew_task_id is the id minted for the new task.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("statement", "PreparedStatement"), property("new_task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunSourceLiveRecord",
+        doc: "The source is live; its own lifecycle owns its retry. Nothing written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunSourceAbsentRecord",
+        doc: "No live or history record has the source id. Nothing written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID"), property("reason", "Literal['PREDATES_RETAINED_HISTORY', 'WITHIN_RETAINED_HISTORY', 'NOT_CLASSIFIED']")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunSourceCorruptRecord",
+        doc: "The source history row does not decode; detail names why. Nothing written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID"), property("detail", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunNotEligibleRecord",
+        doc: "The source is not eligible for a rerun. Nothing written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID"), property("reason", "Literal['COMPLETED_SOURCE', 'WORKFLOW_TASK']")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunInputUnavailableRecord",
+        doc: "The source stores no input envelope; disposition is its stored reason. Nothing written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID"), property("disposition", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunInputCorruptRecord",
+        doc: "The stored envelope, its input or its options fail their checks; detail names why.\nNothing written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID"), property("detail", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunClassNotRegistered",
+        doc: "The new task's retention class has no class row. Nothing written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("class_key", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunClientFamilyMismatch",
+        doc: "The database records the other client family, or none (stored is None). Nothing\nwritten. message names both.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("stored", "Literal['PYTHON', 'RUST'] | None"), property("message", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunCallerKeyRefused",
+        doc: "The caller key is not a valid idempotency key; cause names why. Nothing written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("cause", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunEnqueuedRecord",
+        doc: "The new task exists: this write, or this write already run in the caller's transaction.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("new_task_id", "uuid.UUID"), property("source_task_id", "uuid.UUID"), property("rerun_root_task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunKeyReplayRecord",
+        doc: "The caller key already holds this rerun command, as existing_task_id.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("existing_task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunKeyConflictRecord",
+        doc: "The caller key holds another command (the source's own included).",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID"), property("reserved_by_task_id", "uuid.UUID")],
         methods: &[],
     },
 ];
@@ -2875,6 +2988,12 @@ const FUNCTIONS: &[StubFunction] = &[
         doc: "Decode one parent frame from its metadata and its body. Pure.",
     },
     StubFunction {
+        name: "decode_rerun_write",
+        parameters: &[positional("write", "RerunWriteRecord"), positional("row", "tuple[object, ...]")],
+        returns: TypeText::Plain("RerunEnqueuedRecord | RerunKeyReplayRecord | RerunKeyConflictRecord"),
+        doc: "The outcome of the row of a rerun write (a tuple in column order). Pure. A row that does\nnot fit the columns raises CoreDefect; an answer that contradicts the minted id raises\nPanicException.",
+    },
+    StubFunction {
         name: "encode_child_frame",
         parameters: &[positional("frame", "ReadyFrame | BootFailedFrame | ResultFrame | BodyReturnedFrame | LeftWorkEndedFrame | LeftWorkStuckFrame | SharedResultFrame | DeadlineFiredFrame | SecondCancelFrame | RunStuckFrame | LeftoverCancelFrame | LeftoverStuckFrame | LoopBlockedFrame")],
         returns: TypeText::Plain("bytes | FrameTooLarge"),
@@ -2893,6 +3012,12 @@ const FUNCTIONS: &[StubFunction] = &[
         doc: "Mint a new task id (UUIDv7). Starts no runtime.",
     },
     StubFunction {
+        name: "prepare_rerun_write",
+        parameters: &[positional("read", "PreparedStatement"), positional("row", "tuple[object, ...]"), positional("command", "RerunCommandRecord"), positional("policy", "RerunPolicyRecord"), keyword("sent_at", "datetime.datetime")],
+        returns: TypeText::Plain("RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunCallerKeyRefused | IdMintRefused"),
+        doc: "Decide the rerun from the row of its read (a tuple in column order): the write, or the\nanswer that ends it with nothing written. Pure apart from the id mint. A row that does not\nfit the columns raises CoreDefect.",
+    },
+    StubFunction {
         name: "prepare_worker",
         parameters: &[positional("manifest_json", "str"), keyword("host", "object")],
         returns: TypeText::Plain("PreparedWorker | WorkerProfileRefused"),
@@ -2909,6 +3034,12 @@ const FUNCTIONS: &[StubFunction] = &[
         parameters: &[],
         returns: TypeText::Plain("None"),
         doc: "Read the effective level of every horsies logger again.",
+    },
+    StubFunction {
+        name: "rerun_read",
+        parameters: &[positional("command", "RerunCommandRecord"), positional("policy", "RerunPolicyRecord")],
+        returns: TypeText::Plain("PreparedStatement"),
+        doc: "The source read of a rerun as a PreparedStatement. Pure: starts no runtime.",
     },
     StubFunction {
         name: "resolve_monitoring_window",

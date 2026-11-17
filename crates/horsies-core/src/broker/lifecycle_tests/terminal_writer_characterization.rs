@@ -79,8 +79,8 @@ fn scenarios_of(kind: TerminalizationKind) -> (Scenario, Scenario) {
             functions("a_row_a_concurrent_claim_holds_is_stepped_around"),
         ),
         TerminalizationKind::CancelAdmin => (
-            matrix("cancel_locked_applies_within_permitted_statuses_only"),
-            matrix("cancel_locked_refuses_workflow_tasks_and_never_overwrites_terminal"),
+            matrix("cancel_task_applies_and_refuses_a_running_task_without_the_opt_in"),
+            matrix("cancel_task_refuses_workflow_tasks_and_never_overwrites_terminal"),
         ),
         TerminalizationKind::CancelOrphan => (
             matrix("cancel_owned_orphan_applies_only_without_runnable_linkage"),
