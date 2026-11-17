@@ -288,7 +288,6 @@ async fn tasks_of_a_workflow_without_a_node_is_an_empty_list() {
 /// the read's depth bound makes `tasks()` return `STORED_DATA_INVALID`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #849"]
 async fn a_summary_past_the_depth_bound_makes_tasks_return_stored_data_invalid() {
     let pool = shared_pool().await;
     let parent = seed_workflow(&pool, &WorkflowSeed::running()).await;

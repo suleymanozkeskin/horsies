@@ -51,9 +51,9 @@ use crate::worker::executor::placement::WorkerThreads;
 use crate::worker::executor::protocol::TaskInputText;
 use crate::worker::executor::slots::{
     describe_claim_plan, guard_new_kind_baselines, start_children, unserved_classes_line,
-    AttemptEnd, BaselineOverLimit, ChildrenStart, ChildrenStartFailed, Claimed, ClaimedTask,
-    NotRunCause, OrphanSelfHeal, OutcomeWriter, PoolBoard, PoolFailure, PoolStopReport, RetryFacts,
-    TaskKind,
+    AttemptEnd, BaselineOverLimit, ChildrenStart, ChildrenStartFailed, ClaimRoute, Claimed,
+    ClaimedTask, NotRunCause, OrphanSelfHeal, OutcomeWriter, PoolBoard, PoolFailure,
+    PoolStopReport, RetryFacts, TaskKind,
 };
 use crate::worker::executor::supervisor::{Spawner, SpawnerStopReport, CHILD_KILL_WAIT};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
@@ -432,18 +432,17 @@ struct RunningChildren {
 
 impl RunningChildren {
     /// Stop the pools with `drain` (Python `SlotPool.stop`), then the
-    /// spawner thread. Logs a drain that had to kill children.
+    /// spawner thread. Logs the tasks whose children the drain deadline
+    /// killed (Python `Worker.stop`).
     async fn stop_pools(children: WorkerChildren, drain: Duration) {
         let ChildrenStopped { report } = children.stop(drain).await;
-        match report {
-            PoolStopReport::Drained => {}
-            PoolStopReport::KilledAtDrainDeadline | PoolStopReport::AbortedAfterDrain => {
-                tracing::error!(
-                    "Drain exceeded {:.0}s (hung task?); the children that still ran tasks were \
-                     killed",
-                    drain.as_secs_f64()
-                );
-            }
+        let killed = match report {
+            PoolStopReport::Drained => Vec::new(),
+            PoolStopReport::KilledAtDrainDeadline { killed }
+            | PoolStopReport::AbortedAfterDrain { killed } => killed,
+        };
+        if let Some(line) = drain_kill_line(drain, &killed) {
+            tracing::error!("{line}");
         }
         tracing::info!("Worker child processes stopped");
     }
@@ -466,6 +465,27 @@ impl RunningChildren {
     async fn stop_after_failed_start(self) {
         Self::stop_pools(self.children, Duration::ZERO).await;
         Self::stop_spawner(self.spawner).await;
+    }
+}
+
+/// Python's line for the tasks whose children the drain deadline killed
+/// (`horsies/core/worker/worker.py`, `Worker.stop`: `'Drain exceeded %.0fs
+/// (hung task?); killed tasks: %s'` with the list of the task ids), or
+/// `None` when it killed none: Python logs only a list with an id. Pure.
+fn drain_kill_line(drain: Duration, killed: &[Uuid]) -> Option<String> {
+    match killed.is_empty() {
+        true => None,
+        false => {
+            let ids: Vec<String> = killed
+                .iter()
+                .map(|task_id| format!("'{task_id}'"))
+                .collect();
+            Some(format!(
+                "Drain exceeded {:.0}s (hung task?); killed tasks: [{}]",
+                drain.as_secs_f64(),
+                ids.join(", ")
+            ))
+        }
     }
 }
 
@@ -1057,9 +1077,12 @@ impl Worker {
     /// One claim pass (Python `_claim_and_dispatch_all`): the claim with the
     /// budgets and routes of the slots now, the workflow filter, the row
     /// class check, then each row to the pool of its kind. A row of a queue
-    /// that `hold` checks waits in `hold`; then the start check admits the
-    /// held rows that their queue's count leaves room for, also on a pass
-    /// that claimed nothing.
+    /// that `hold` checks waits in `hold` with the budget of its route; then
+    /// the start check admits the held rows that their queue's count leaves
+    /// room for and that a free child of their budget takes now, also on a
+    /// pass that claimed nothing. A row of a class that the plan does not
+    /// serve is submitted at once: it reaches no child, and its claim goes
+    /// back to the queue (`NoChildOfItsKind`), as for an uncapped queue.
     ///
     /// Errors: the error of the claim, the filter, the class return or the
     /// start check. The rows the claim committed before a later step failed
@@ -1073,12 +1096,14 @@ impl Worker {
         writes: &mut JoinSet<()>,
         hold: &mut QueueCapHold,
     ) -> Result<ClaimPassCounts, WorkerError> {
-        let request = self.claim_request(children.service().claim_classes());
+        let service = children.service();
+        let plan = service.plan();
+        let request = self.claim_request(service.claim_classes());
         let claimed = claim_for_dispatch(steps, &request, &self.registered).await?;
         for row in claimed.rows {
-            match hold.holds(&row.queue_name) {
-                true => hold.hold(row),
-                false => self.dispatch(
+            match (hold.holds(&row.queue_name), plan.route(row.execution)) {
+                (true, ClaimRoute::ServedBy(budget)) => hold.hold(row, budget),
+                (false, _) | (true, ClaimRoute::NotServed) => self.dispatch(
                     children,
                     writer,
                     writes,
@@ -1087,7 +1112,10 @@ impl Worker {
                 ),
             }
         }
-        let admitted = admit_held_rows(&self.broker, &self.worker_id, hold).await?;
+        let admitted = admit_held_rows(&self.broker, &self.worker_id, hold, || {
+            children.free_capacity()
+        })
+        .await?;
         for admitted in admitted {
             self.dispatch(
                 children,
@@ -2553,6 +2581,24 @@ mod tests {
         assert!(held < writes);
         assert!(writes < beats);
         assert!(beats < spawner);
+    }
+
+    /// Python `Worker.stop`: the drain line names each task that the drain
+    /// deadline killed, as Python prints its list of ids; a drain that
+    /// killed none logs no line.
+    #[test]
+    fn the_drain_line_names_the_killed_tasks_as_python_does() {
+        let killed = [Uuid::from_u128(1), Uuid::from_u128(2)];
+
+        assert_eq!(
+            drain_kill_line(Duration::from_secs(30), &killed).as_deref(),
+            Some(
+                "Drain exceeded 30s (hung task?); killed tasks: \
+                 ['00000000-0000-0000-0000-000000000001', \
+                 '00000000-0000-0000-0000-000000000002']"
+            )
+        );
+        assert_eq!(drain_kill_line(Duration::from_secs(30), &[]), None);
     }
 
     /// A start attempt that does not finish in time is retryable, as in
