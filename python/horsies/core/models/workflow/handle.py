@@ -34,7 +34,7 @@ from horsies.core.brokers.resources import (
     EventLoopLimit,
 )
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.json_io import loads_json
+from horsies.core.codec.json_io import SerializationError, loads_json
 from horsies.core.codec.typed import (
     Json,
     TypeAnnotation,
@@ -465,6 +465,53 @@ def _decode_per_task_envelope(
                 data={'node_id': node_id, 'task_name': task_name},
             ),
         )
+
+
+def _stored_node_result(
+    stored: str | None,
+    *,
+    app: Any | None,
+    task_name: str,
+    node_id: str,
+    sub_definition_key: str | None,
+) -> TaskResult[Any, TaskError] | None:
+    """The ``result`` of one node of ``tasks()``, from its stored result
+    text. Pure apart from the type lookups of the decode.
+
+    Outcomes:
+        - NULL: ``None``. A node with no result stores NULL.
+        - An empty text: ``RESULT_DESERIALIZATION_ERROR``. No writer stores
+          an empty result, so it is corrupt data, not "no result".
+        - A text that is not JSON: ``RESULT_DESERIALIZATION_ERROR``.
+        - JSON: the outcome of ``_decode_per_task_envelope``.
+    """
+    match stored:
+        case None:
+            return None
+        case '':
+            # loads_json reads an empty text as None, so it is refused here.
+            return TaskResult(
+                err=TaskError(
+                    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                    message=f'Result JSON corrupt for node {node_id}: the stored text is empty',
+                ),
+            )
+        case text:
+            loads_r = loads_json(text)
+            if is_err(loads_r):
+                return TaskResult(
+                    err=TaskError(
+                        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                        message=f'Result JSON corrupt: {loads_r.err_value}',
+                    ),
+                )
+            return _decode_per_task_envelope(
+                loads_r.ok_value,
+                app=app,
+                task_name=task_name,
+                node_id=node_id,
+                sub_definition_key=sub_definition_key,
+            )
 
 
 def _decode_workflow_envelope(
@@ -1218,6 +1265,13 @@ class WorkflowHandle(Generic[OutT]):
 
         ``Ok([])``: the workflow exists and has no node.
         ``Err(HandleWorkflowNotFound)``: no workflow has this id.
+        ``Err(HandleStoredDataInvalid)``: a stored sub-workflow summary does
+        not read; an empty text is refused. A node without a summary stores
+        NULL and has ``sub_workflow_summary=None``.
+
+        A node without a result stores NULL and has ``result=None``. A stored
+        result that does not read, an empty text included, gives that node a
+        ``result`` with ``RESULT_DESERIALIZATION_ERROR``.
         """
         return self._sync_call(self.tasks_async, 'tasks')
 
@@ -1264,50 +1318,55 @@ class WorkflowHandle(Generic[OutT]):
             # The column is nullable; every spec assigns a node id, and the
             # read before the switch used the stored value as it is.
             node_id = cast(str, row.node_id)
-            task_result_value: TaskResult[Any, TaskError] | None = None
-            if row.result_json:
-                loads_r = loads_json(row.result_json)
-                if is_err(loads_r):
-                    task_result_value = TaskResult(
-                        err=TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                            message=f'Result JSON corrupt: {loads_r.err_value}',
-                        ),
-                    )
-                else:
-                    task_result_value = _decode_per_task_envelope(
-                        loads_r.ok_value,
-                        app=self.broker.app,
-                        task_name=row.task_name,
-                        node_id=node_id,
-                        sub_definition_key=(
-                            row.sub_definition_key if row.is_subworkflow else None
-                        ),
-                    )
+            task_result_value = _stored_node_result(
+                row.result_json,
+                app=self.broker.app,
+                task_name=row.task_name,
+                node_id=node_id,
+                sub_definition_key=(
+                    row.sub_definition_key if row.is_subworkflow else None
+                ),
+            )
 
-            summary: SubWorkflowSummary[Any] | None = None
-            if row.sub_workflow_summary_json:
-                summary_loads_r = loads_json(row.sub_workflow_summary_json)
-                if is_err(summary_loads_r):
+            summary: SubWorkflowSummary[Any] | None
+            match row.sub_workflow_summary_json:
+                case None:
+                    summary = None
+                case '':
+                    # NULL is the one stored form of "no summary". loads_json
+                    # reads an empty text as None, so it is refused here.
                     return Err(HandleStoredDataInvalid(
                         message=(
                             f'sub_workflow_summary JSON corrupt for node '
-                            f'{row.node_id}: {summary_loads_r.err_value}'
+                            f'{row.node_id}: the stored text is empty'
                         ),
                         workflow_id=self.workflow_id,
-                        exception=summary_loads_r.err_value,
-                    ))
-                try:
-                    summary = SubWorkflowSummary.from_json(summary_loads_r.ok_value)
-                except ValueError as summary_exc:
-                    return Err(HandleStoredDataInvalid(
-                        message=(
-                            f'sub_workflow_summary invalid for node '
-                            f'{row.node_id}: {summary_exc}'
+                        exception=SerializationError(
+                            'JSON parse failed: the stored text is empty',
                         ),
-                        workflow_id=self.workflow_id,
-                        exception=summary_exc,
                     ))
+                case summary_json:
+                    summary_loads_r = loads_json(summary_json)
+                    if is_err(summary_loads_r):
+                        return Err(HandleStoredDataInvalid(
+                            message=(
+                                f'sub_workflow_summary JSON corrupt for node '
+                                f'{row.node_id}: {summary_loads_r.err_value}'
+                            ),
+                            workflow_id=self.workflow_id,
+                            exception=summary_loads_r.err_value,
+                        ))
+                    try:
+                        summary = SubWorkflowSummary.from_json(summary_loads_r.ok_value)
+                    except ValueError as summary_exc:
+                        return Err(HandleStoredDataInvalid(
+                            message=(
+                                f'sub_workflow_summary invalid for node '
+                                f'{row.node_id}: {summary_exc}'
+                            ),
+                            workflow_id=self.workflow_id,
+                            exception=summary_exc,
+                        ))
 
             out.append(WorkflowTaskInfo(
                 node_id=row.node_id,

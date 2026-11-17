@@ -1687,6 +1687,19 @@ class TestGetRawResultRecordAsync:
         assert isinstance(result.err_value.exception, NoCause)
 
     @pytest.mark.asyncio
+    async def test_an_empty_stored_result_is_invalid_json_payload(self) -> None:
+        broker = self._broker_answering(self._record('COMPLETED', ''))
+
+        result = await broker.get_raw_result_record_async(RESULT_TASK_ID)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
+        assert isinstance(result.err_value.exception, SerializationError)
+        assert result.err_value.message == (
+            f'Result JSON parse failed for task {RESULT_TASK_ID}: the stored text is empty'
+        )
+
+    @pytest.mark.asyncio
     async def test_corrupt_stored_data_found_by_the_core_is_invalid_json_payload(
         self,
     ) -> None:
@@ -3170,6 +3183,21 @@ class TestGetTaskInfoAsync:
         assert is_err(result)
         assert isinstance(result.err_value, BrokerInvalidJsonPayload)
         assert isinstance(result.err_value.exception, exception_class)
+
+    @pytest.mark.asyncio
+    async def test_an_empty_stored_result_is_invalid_json_payload(self) -> None:
+        broker = self._broker_answering(
+            _task_info_record(status='COMPLETED', result_json=''),
+        )
+
+        result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
+        assert isinstance(result.err_value.exception, SerializationError)
+        assert result.err_value.message == (
+            f'Result JSON parse failed for task {TASK_INFO_ID}: the stored text is empty'
+        )
 
     @pytest.mark.asyncio
     async def test_attempts_keep_the_core_order(self) -> None:

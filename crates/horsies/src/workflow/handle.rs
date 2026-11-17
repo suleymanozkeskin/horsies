@@ -356,7 +356,8 @@ fn stored_data_invalid(workflow_id: Uuid, message: String) -> HandleOperationErr
 /// One stored node of `workflow_id`, read (Python `tasks`). Pure.
 ///
 /// Errors: `STORED_DATA_INVALID` for a stored status outside the node
-/// statuses, and for a stored sub-workflow summary that does not read.
+/// statuses, and for a stored sub-workflow summary that does not read. An
+/// empty summary text does not read: a node without a summary stores NULL.
 fn node_info(workflow_id: Uuid, node: StoredNode) -> HandleResult<WorkflowNodeInfo> {
     let status = serde_json::from_value::<WorkflowTaskStatus>(serde_json::Value::String(
         node.status.clone(),
