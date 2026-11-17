@@ -23,10 +23,13 @@
 //! - A `CoreHandle` is built once from a typed manifest (`handle`).
 //! - A `CoreScheduler` runs the scheduler of a scheduler manifest on the
 //!   broker of a `CoreHandle` (`scheduler`).
+//! - The Python child program and the preload process speak the core's
+//!   parent-child frame codec through pure calls (`frames`).
 
 mod bridge;
 mod child_handle;
 mod errors;
+mod frames;
 mod handle;
 mod logging;
 mod operations;
@@ -244,6 +247,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(set_panic_rule, module)?)?;
+    frames::add_frames(module)?;
     errors::add_errors(module)?;
     Ok(())
 }

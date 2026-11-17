@@ -121,6 +121,10 @@ pub use crate::worker::executor::child_host::{
     CHILD_MODE_ARGUMENT, MAX_RUN_WORK,
 };
 
+// The parent-child frame codec, for the Python child program and the
+// preload process: they speak it through `horsies._core`.
+pub use crate::worker::executor::protocol as frame_protocol;
+
 // worker re-exports
 pub use crate::worker::{
     cli::LogLevel,
