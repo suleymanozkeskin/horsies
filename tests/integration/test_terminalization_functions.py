@@ -11,6 +11,12 @@ operations write CANCELLED and two write COMPLETED, so "already terminal at my
 target status" cannot distinguish this operation's own committed work from
 somebody else's — and a caller told its work was already done will not repeat
 the coupled write that should have accompanied it.
+
+The refusals that the database decides before it changes a row (the live
+status check, the batch bounds, the id-keyed batch arrays) are Rust database
+tests of the core crate, in
+``crates/horsies-core/src/sql_tests/terminalization_functions.rs``. The tests
+here read each outcome through the Python lifecycle.
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ import psycopg
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.sql.elements import TextClause
 
@@ -360,41 +366,6 @@ def _fused(task_id: str, claimed_at: datetime = GENERATION) -> CompleteTaskFused
         fence=OwnedClaim(worker_id=WORKER, claimed_at=claimed_at),
         result_json='{"ok": 2}',
     )
-
-
-class TestLiveStatusInvariant:
-    async def test_the_live_table_refuses_a_terminal_status(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """A terminal task leaves the live table; the live row cannot hold a
-        terminal status (CHECK horsies_tasks_status_live)."""
-        task_id = await _seed(
-            session,
-            status='PENDING',
-            worker_id=None,
-            claimed_at=None,
-        )
-
-        with pytest.raises(IntegrityError, match='horsies_tasks_status_live'):
-            await session.execute(
-                text("""
-                    UPDATE horsies_tasks
-                    SET status = 'CANCELLED'
-                    WHERE id = :id
-                """),
-                {'id': task_id},
-            )
-            await session.commit()
-        await session.rollback()
-
-        row = (
-            await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
-                {'id': task_id},
-            )
-        ).one()
-        assert row.status == 'PENDING'
 
 
 class TestAppliedTransitions:
@@ -1577,40 +1548,6 @@ class TestExpirePendingTasks:
         await session.commit()
         assert outcomes == []
 
-    @pytest.mark.parametrize('batch_size', ['NULL', '0', '-1'])
-    async def test_an_unbounded_or_absurd_batch_mutates_nothing(
-        self,
-        session: AsyncSession,
-        clean_workflow_tables: None,
-        batch_size: str,
-    ) -> None:
-        """LIMIT NULL means no limit at all, so NULL must be an error.
-
-        The bound exists to keep one pass from committing an unbounded
-        notification burst; a call that disables it is refused before any
-        row is touched.
-        """
-        task_id = await _seed(session, status='PENDING')
-        await _deadline(session, task_id, seconds_ago=60)
-
-        with pytest.raises(Exception, match='positive integer'):
-            await session.execute(
-                text(f"""
-                    SELECT * FROM horsies_expire_pending_tasks(
-                        CAST({batch_size} AS INTEGER), '{{}}', 'TASK_EXPIRED'
-                    )
-                """),
-            )
-        await session.rollback()
-
-        status = (
-            await session.execute(
-                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
-                {'id': task_id},
-            )
-        ).scalar_one()
-        assert status == 'PENDING'
-
     async def test_a_row_a_concurrent_claim_holds_is_stepped_around(
         self,
         session: AsyncSession,
@@ -2116,37 +2053,6 @@ class TestCancelOrphanedTasks:
         await session.commit()
         assert outcomes == []
 
-    @pytest.mark.parametrize('batch_size', ['NULL', '0', '-1'])
-    async def test_an_invalid_bound_raises_before_mutation(
-        self,
-        session: AsyncSession,
-        clean_workflow_tables: None,
-        batch_size: str,
-    ) -> None:
-        task_id = await _seed(
-            session,
-            status='CLAIMED',
-            is_workflow_task=True,
-        )
-
-        with pytest.raises(Exception, match='positive integer'):
-            await session.execute(
-                text(f"""
-                    SELECT * FROM horsies_cancel_orphaned_tasks(
-                        CAST({batch_size} AS INTEGER)
-                    )
-                """),
-            )
-        await session.rollback()
-
-        status = (
-            await session.execute(
-                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
-                {'id': task_id},
-            )
-        ).scalar_one()
-        assert status == 'CLAIMED'
-
     async def test_a_locked_orphan_is_stepped_around(
         self,
         session: AsyncSession,
@@ -2647,64 +2553,6 @@ class TestIdKeyedWorkflowBatches:
         else:
             assert summary.error_code is None
             assert summary.failed_reason is None
-
-    @pytest.mark.parametrize(
-        'function_name',
-        ['horsies_abandon_owned_nodes', 'horsies_cancel_owned_nodes'],
-    )
-    @pytest.mark.parametrize(
-        ('ids_sql', 'generations_sql', 'message'),
-        [
-            ('NULL', "ARRAY['2026-08-04 09:00:00+00']", 'non-NULL'),
-            ("ARRAY['one']", 'NULL', 'non-NULL'),
-            (
-                "ARRAY['one', '00000000-0000-4000-8000-000000000002']",
-                "ARRAY['2026-08-04 09:00:00+00']",
-                'lengths differ',
-            ),
-            (
-                'ARRAY[NULL]::uuid[]',
-                "ARRAY['2026-08-04 09:00:00+00']",
-                'non-NULL',
-            ),
-            (
-                "ARRAY['one', 'one']",
-                "ARRAY['2026-08-04 09:00:00+00', " "'2026-08-04 09:00:01+00']",
-                'distinct',
-            ),
-        ],
-    )
-    async def test_invalid_arrays_raise_before_mutation(
-        self,
-        session: AsyncSession,
-        function_name: str,
-        ids_sql: str,
-        generations_sql: str,
-        message: str,
-    ) -> None:
-        task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
-        ids = ids_sql.replace('one', task_id)
-
-        with pytest.raises(Exception, match=message):
-            await session.execute(
-                text(f"""
-                    SELECT * FROM {function_name}(
-                        CAST({ids} AS uuid[]),
-                        CAST({generations_sql} AS TIMESTAMPTZ[]),
-                        :worker_id
-                    )
-                """),
-                {'worker_id': WORKER},
-            )
-        await session.rollback()
-
-        status = (
-            await session.execute(
-                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
-                {'id': task_id},
-            )
-        ).scalar_one()
-        assert status == 'CLAIMED'
 
     @pytest.mark.parametrize('command_type', [AbandonOwnedNodes, CancelOwnedNodes])
     async def test_a_null_generation_is_refused(
