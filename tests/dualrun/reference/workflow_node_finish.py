@@ -10,9 +10,9 @@ parent advances that the completion check queued ran after the commit, one
 transaction per level (``_drive_parent_propagations`` with the engine's
 ``on_subworkflow_complete``).
 
-The engine functions stay in the package: workflow recovery calls
-``on_subworkflow_complete``, and ``on_workflow_task_complete`` keeps its
-other callers.
+``on_workflow_task_complete`` and its statement are copied in
+``workflow_progression.py``; ``on_subworkflow_complete`` stays in the
+package for workflow recovery.
 """
 
 from __future__ import annotations
@@ -35,10 +35,10 @@ async def finish_node(
     result: TaskResult[Any, TaskError],
 ) -> None:
     """The phase-2 transaction of one task, then its parent advances."""
-    from horsies.core.workflows.engine import (
+    from horsies.core.workflows.engine import pop_pending_parent_propagations
+    from tests.dualrun.reference.workflow_progression import (
         QueueWake,
         on_workflow_task_complete,
-        pop_pending_parent_propagations,
     )
 
     async with session_factory() as session:

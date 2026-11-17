@@ -47,10 +47,7 @@ from horsies.core.models.workflow import TaskNode, WorkflowDefinition
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.types.result import is_err
 from horsies.core.worker.sql import DELETE_EXPIRED_WORKFLOWS_SQL
-from horsies.core.workflows.engine import (
-    on_workflow_task_complete,
-    start_workflow_async,
-)
+from horsies.core.workflows.engine import start_workflow_async
 from horsies.core.workflows.phase2_recovery import (
     Phase2RecoverySummary,
     _RaisedRowNotRecorded,
@@ -73,7 +70,7 @@ from horsies.core.workflows.recovery_limit import (
     classify_recovery_raise,
 )
 from tests.broker_resources_support import current_resources
-from tests.integration.conftest import DB_URL
+from tests.integration.conftest import DB_URL, finish_task
 from tests.integration.isolated_database import isolated_test_database
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
@@ -111,6 +108,20 @@ INSERT_NODE_SQL = text("""
         :options, :status, :is_subworkflow, :sub_workflow_id,
         :sub_definition_key, :task_id, NOW(),
         :max_retries, :execution, :retention_class_key, :sub_workflow_params
+    )
+""")
+
+INSERT_LIVE_TASK_SQL = text("""
+    INSERT INTO horsies_tasks (
+        id, task_name, queue_name, priority, input, status, sent_at,
+        enqueued_at, is_workflow_task, retry_count, max_retries,
+        command_fingerprint_version, command_fingerprint,
+        retention_class_key, retain_rerun_input, created_at, updated_at,
+        execution
+    ) VALUES (
+        :id, :task_name, 'default', 100, '{}', 'PENDING', NOW(),
+        NOW(), TRUE, 0, 0, NULL, NULL, 'standard_30d', FALSE, NOW(), NOW(),
+        'ISOLATED'
     )
 """)
 
@@ -228,6 +239,15 @@ async def _seed_node(
                 'retention_class_key': None if subworkflow_node else 'standard_30d',
                 'sub_workflow_params': 'NOT_GIVEN' if subworkflow_node else None,
             },
+        )
+        await session.commit()
+
+
+async def _seed_live_task(harness: Harness, task_id: str) -> None:
+    """A PENDING workflow task of ``TASK_NAME``: a worker can claim and end it."""
+    async with harness.sessions() as session:
+        await session.execute(
+            INSERT_LIVE_TASK_SQL, {'id': task_id, 'task_name': TASK_NAME},
         )
         await session.commit()
 
@@ -821,6 +841,7 @@ class TestLiveNodes:
         self, harness: Harness,
     ) -> None:
         live_task = str(uuid.uuid4())
+        await _seed_live_task(harness, live_task)
         workflow_id = await _seed_workflow(harness)
         await _seed_node(harness, workflow_id, 0, status='READY', options=BAD_GOOD_UNTIL)
         await _seed_node(harness, workflow_id, 1, status='RUNNING', task_id=live_task)
@@ -834,14 +855,7 @@ class TestLiveNodes:
         assert reports[-1].over_failure_limit == 1
 
         async with harness.sessions() as session:
-            await on_workflow_task_complete(
-                session,
-                live_task,
-                TaskResult(ok=1),
-                harness.broker,
-                task_name=TASK_NAME,
-            )
-            await session.commit()
+            await finish_task(session, harness.broker, workflow_id, 1, TaskResult(ok=1))
 
         assert await _workflow_status(harness, workflow_id) == 'FAILED'
         error = await _workflow_error(harness, workflow_id)
@@ -855,6 +869,7 @@ class TestLiveNodes:
         """The nodes that the success case requires completed, so the
         declared policy decides."""
         live_task = str(uuid.uuid4())
+        await _seed_live_task(harness, live_task)
         workflow_id = await _seed_workflow(
             harness, policy='{"cases":[{"required_indices":[1]}]}',
         )
@@ -863,14 +878,7 @@ class TestLiveNodes:
         await _run_passes(harness, LIMIT)
 
         async with harness.sessions() as session:
-            await on_workflow_task_complete(
-                session,
-                live_task,
-                TaskResult(ok=1),
-                harness.broker,
-                task_name=TASK_NAME,
-            )
-            await session.commit()
+            await finish_task(session, harness.broker, workflow_id, 1, TaskResult(ok=1))
 
         assert await _node_status(harness, workflow_id, 0) == 'FAILED'
         assert await _workflow_status(harness, workflow_id) == 'COMPLETED'

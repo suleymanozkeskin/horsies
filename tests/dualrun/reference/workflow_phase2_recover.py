@@ -9,8 +9,8 @@ disposition that keeps the record, one attempt on the record and, at the
 attempt bound, ``horsies_phase2_quarantine_one``. A raise is outside this
 copy (the seeds raise none).
 
-The engine progression stays in the package (the worker's phase 2 calls
-it); this module keeps the recovery's own statements and its order.
+The progression is copied in ``workflow_progression.py``; this module
+keeps the recovery's own statements and its order.
 """
 
 from __future__ import annotations
@@ -110,7 +110,10 @@ async def _progress(
     disposition: Phase2Disposition,
     terminal_status: str,
 ) -> None:
-    from horsies.core.workflows.engine import NodeMayHaveDependents, apply_node_progression
+    from tests.dualrun.reference.workflow_progression import (
+        NodeMayHaveDependents,
+        apply_node_progression,
+    )
 
     assert disposition.workflow_id is not None and disposition.task_index is not None
     failure: TaskResult[Any, TaskError] | None = None

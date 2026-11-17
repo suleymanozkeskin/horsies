@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, assert_never, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, assert_never, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -94,7 +94,6 @@ from horsies.core.workflows.sql import (
     GET_FIRST_FAILED_TASK_RESULT_SQL,
     GET_OUTPUT_TASK_RESULT_SQL,
     GET_SUBWORKFLOW_SUMMARIES_SQL,
-    COMPLETE_WORKFLOW_TASK_SQL,
     GET_TASK_CONFIG_SQL,
     GET_TASK_RESULTS_BY_INDEXES_SQL,
     GET_TASK_STATUSES_SQL,
@@ -133,7 +132,7 @@ logger = get_logger('workflow.engine')
 #   warning — when failure-handling code hits a terminal-state CAS guard
 #     (exceptional-on-exceptional: _fail_enqueued_task, _fail_subworkflow_load).
 #   debug — when routine completion paths hit one (broker callback redelivery /
-#     replay: on_workflow_task_complete, on_subworkflow_complete).
+#     replay: on_subworkflow_complete).
 
 from horsies.core.models.tasks import Execution, OperationalErrorCode, OutcomeCode
 
@@ -1693,320 +1692,6 @@ async def _build_workflow_context_data(
     }
 
 
-
-
-
-
-def pause_halts_progression(workflow_status: str | None) -> bool:
-    """Whether a workflow's status stops progression after a node write.
-
-    Read at lock time: pause and cancel are UPDATEs on the locked
-    workflow row, so the status cannot change for the rest of the
-    transaction that observed it. Both progression paths — the
-    in-process completion and the outbox-driven recovery — ask this one
-    question rather than spelling the comparison twice.
-    """
-    return workflow_status == WorkflowStatus.PAUSED.value
-
-
-@dataclass(frozen=True, slots=True)
-class QueueWake:
-    """The capacity wake of a finished task's queue: ``pg_notify(channel,
-    payload)``, sent in the transaction that advances the node."""
-
-    channel: str
-    payload: str
-
-
-@dataclass(frozen=True, slots=True)
-class NoQueueWake:
-    """The caller sends no capacity wake."""
-
-
-type NodeCompletionWake = QueueWake | NoQueueWake
-
-
-@dataclass(frozen=True, slots=True)
-class NodeHasNoDependents:
-    """No node of the workflow lists the node in its dependencies.
-
-    The dependencies of a workflow are written with its nodes, in the
-    transaction that starts it, and never change, so this holds for the
-    life of the workflow. The progression does not read the dependents."""
-
-
-@dataclass(frozen=True, slots=True)
-class NodeMayHaveDependents:
-    """A node of the workflow may list the node in its dependencies: the
-    progression reads the dependents."""
-
-
-type NodeDependents = NodeHasNoDependents | NodeMayHaveDependents
-
-
-def _node_dependents(has_dependents: bool) -> NodeDependents:
-    """The dependents of a node, from ``has_dependents`` of
-    ``COMPLETE_WORKFLOW_TASK_SQL``. Pure."""
-    if has_dependents:
-        return NodeMayHaveDependents()
-    return NodeHasNoDependents()
-
-
-def _wake_parameters(wake: NodeCompletionWake) -> dict[str, str | None]:
-    """The wake parameters of ``COMPLETE_WORKFLOW_TASK_SQL``; NULL sends
-    none. Pure."""
-    match wake:
-        case QueueWake(channel=channel, payload=payload):
-            return {'wake_channel': channel, 'wake_payload': payload}
-        case NoQueueWake():
-            return {'wake_channel': None, 'wake_payload': None}
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-async def on_workflow_task_complete(
-    session: AsyncSession,
-    task_id: str,
-    result: 'TaskResult[Any, TaskError]',
-    broker: 'PostgresBroker | None',
-    *,
-    task_name: str,
-    wake: NodeCompletionWake = NoQueueWake(),
-) -> None:
-    """
-    The node write and progression of a finished workflow task, with the
-    session statements. The worker's phase 2 runs
-    ``horsies_workflow_node_finish`` instead (``node_finish.finish_node``);
-    no library path calls this.
-
-    Raises:
-        SerializationError: a value that the engine built does not
-            serialize, for example the encoded result envelope. This is a
-            defect; the caller's transaction rolls back.
-        Exception: DB/engine errors propagate to the typed seams that own
-            recovery: the worker folds them into a phase2 finalize error
-            with bounded retries, pause and resume fold a database error
-            into a HandleOperationError variant, and the reaper contains
-            each recovery pass as one unit.
-
-    ``task_name`` is the completed task's registered name, read by the
-    caller from the task row it already holds (worker dispatch/finalize,
-    recovery case 1.7). It equals the workflow node's ``task_name`` by
-    construction (the node enqueue writes the task row from the node), and
-    is needed BEFORE any statement: the single locate+lock+CAS statement
-    binds the encoded result, and encoding resolves the source task's
-    ``task_ok_type`` from this name.
-
-    ``wake`` is sent by the first statement, whether or not the task has a
-    node: the worker's phase 2 passes the capacity wake of the task's queue,
-    so the wake costs no round trip of its own. It is delivered at COMMIT.
-
-    Strict-serde phase 7: ``broker`` is required (explicit `None` allowed for
-    unit-test branches that return before dependency propagation). Removing
-    the implicit default surfaces missing-broker bugs at the call site instead
-    of degrading to a `WORKER_SERIALIZATION_ERROR` during args_from envelope
-    encoding when `broker.app` is needed to resolve the source task's
-    `task_ok_type`.
-    """
-    # 1. Decide terminal status and encode the result envelope before any
-    # statement.
-    encoded = _encode_node_result(
-        result,
-        broker,
-        task_id=task_id,
-        task_name=task_name,
-    )
-
-    # 2. One statement: locate the workflow task, take the workflow row's
-    # FOR UPDATE lock (serializes completion handling per workflow so
-    # concurrent completions don't race dependency promotion), CAS-update
-    # the node to its terminal status, and return the progression context.
-    row = (
-        await session.execute(
-            COMPLETE_WORKFLOW_TASK_SQL,
-            {
-                'tid': task_id,
-                'status': encoded.status,
-                'result': _ser_or_raise(
-                    dumps_json(encoded.envelope),
-                    f'completion result for task {task_id}',
-                ),
-                'terminal_states': WF_TASK_TERMINAL_VALUES,
-                **_wake_parameters(wake),
-            },
-        )
-    ).one()
-    if row.workflow_id is None:
-        return  # Not a workflow task (or its workflow row is missing)
-
-    workflow_id = row.workflow_id
-    task_index = row.task_index
-    if not row.cas_won:
-        logger.debug(
-            'Workflow task already terminal, skipping progression: '
-            'workflow=%s task_index=%s task_id=%s',
-            workflow_id, task_index, task_id,
-        )
-        return
-
-    # 3-6. Everything after the node write, shared with the outbox-driven
-    # recovery path so a node that reaches its terminal status by either
-    # route progresses identically.
-    await apply_node_progression(
-        session,
-        broker,
-        workflow_id=workflow_id,
-        task_index=task_index,
-        failure=encoded.result if encoded.result.is_err() else None,
-        on_error=row.on_error,
-        workflow_status=row.wf_status,
-        depth=row.depth,
-        root_workflow_id=row.root_workflow_id,
-        dependents=_node_dependents(row.has_dependents),
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class _EncodedNodeResult:
-    """The terminal write of a node and the result its progression sees."""
-
-    status: Literal['COMPLETED', 'FAILED']
-    envelope: dict[str, Json]
-    """The wire envelope of ``result``, which the node stores."""
-    result: 'TaskResult[Any, TaskError]'
-    """The task's result, or the serialization error that replaced it."""
-
-
-def _encode_node_result(
-    result: 'TaskResult[Any, TaskError]',
-    broker: 'PostgresBroker | None',
-    *,
-    task_id: str,
-    task_name: str,
-) -> _EncodedNodeResult:
-    """Encode the result of a node's task into the wire envelope.
-
-    The envelope carries the ``__h_task_result__`` marker that the readers of
-    a stored node result (``_decode_stored_task_result``,
-    ``_decode_err_only``, the child to parent pass-through of
-    ``on_subworkflow_complete``) expect. The source task's declared
-    ``task_ok_type`` validates the value when the broker has an app; ``Any``
-    is used otherwise (test and recovery paths), so a missing type never
-    fails the completion.
-
-    A result that does not encode is logged and replaced by a FAILED result
-    with ``WORKER_SERIALIZATION_ERROR``: a deterministic encode failure
-    would otherwise repeat on every phase-2 retry. The encode of that error
-    is fixed-schema and total. No I/O besides the log.
-    """
-    ok_type_for_encode: Any = Any
-    if broker is not None and broker.app is not None:
-        resolved = _resolve_source_ok_type(broker.app, task_name)
-        if resolved is not None:
-            ok_type_for_encode = resolved
-    try:
-        return _EncodedNodeResult(
-            status='COMPLETED' if result.is_ok() else 'FAILED',
-            envelope=encode_task_result(result, ok_type_for_encode),
-            result=result,
-        )
-    except Exception as exc:
-        # The text of ``exc`` can come from user code, for example a
-        # validator, so a lone surrogate in it is escaped: the encode of
-        # the error refuses one.
-        from horsies.core.models.tasks import TaskError, TaskResult
-
-        logger.error(
-            'Failed to encode completion result for task=%s '
-            'task_name=%s: %s; storing a serialization-error envelope',
-            task_id,
-            task_name,
-            exc,
-        )
-        failure: TaskResult[Any, TaskError] = TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                message=(
-                    'Failed to encode completion result: '
-                    f'{escape_lone_surrogates(str(exc))}'
-                ),
-                data={'task_id': task_id, 'task_name': task_name},
-            ),
-        )
-        return _EncodedNodeResult(
-            status='FAILED',
-            envelope=encode_task_result(failure, type(None)),
-            result=failure,
-        )
-
-
-async def apply_node_progression(
-    session: AsyncSession,
-    broker: 'PostgresBroker | None',
-    *,
-    workflow_id: str,
-    task_index: int,
-    failure: 'TaskResult[Any, TaskError] | None',
-    on_error: str | None,
-    workflow_status: str | None,
-    depth: int | None,
-    root_workflow_id: str | None,
-    dependents: NodeDependents,
-) -> None:
-    """Everything a workflow does after one of its nodes goes terminal.
-
-    Failure policy, the paused guard, dependent promotion, and the
-    workflow-completion check — in that order, inside the caller's
-    transaction, which must already hold the workflow row's lock.
-
-    Both progression paths call this: the in-process completion, which
-    has just CAS-written the node itself, and the outbox-driven recovery,
-    where the database-owned consumption function wrote the node and
-    returned this same context. ``failure`` is the task's error when the
-    node went terminal unsuccessfully and ``None`` otherwise — the
-    policy step is the only one that needs it. ``dependents`` is
-    ``NodeHasNoDependents`` when no node of the workflow waits for the
-    node: the dependents read is not sent, as it would return no row.
-    """
-    # 3. Handle failure based on on_error policy. The locked row's
-    # on_error is authoritative: the held lock freezes the workflow row.
-    if failure is not None:
-        should_continue = await _handle_workflow_task_failure(
-            session, workflow_id, failure,
-            known_on_error=on_error,
-        )
-        if not should_continue:
-            # PAUSE mode - stop processing, don't propagate to dependents
-            return
-
-    # 4. PAUSED guard.
-    if pause_halts_progression(workflow_status):
-        return  # Don't propagate - workflow is paused
-
-    # 5. Find and potentially enqueue dependent tasks
-    match dependents:
-        case NodeHasNoDependents():
-            pass
-        case NodeMayHaveDependents():
-            await _process_dependents(
-                session,
-                workflow_id,
-                task_index,
-                broker,
-                depth=depth if depth is not None else 0,
-                root_workflow_id=root_workflow_id or workflow_id,
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
-
-    # 6. Check if workflow is complete (this transaction already holds the
-    # workflow lock taken in step 2)
-    await check_workflow_completion(session, workflow_id, broker, lock_held=True)
-
-
-
-
-
 async def _process_dependents(
     session: AsyncSession,
     workflow_id: str,
@@ -3374,8 +3059,8 @@ async def on_subworkflow_complete(
     )
 
     # 4. Serialize parent-side promotion with other completions of the same
-    # parent: on_workflow_task_complete takes this lock for exactly that
-    # reason, and the failure/completion paths below (steps 5 and 8) acquire
+    # parent: the node finish (horsies_workflow_node_finish) takes this lock
+    # for exactly that reason, and the failure/completion paths below (steps 5 and 8) acquire
     # it anyway, in the same child→parent order. Without it, two sibling
     # child workflows finishing concurrently can each observe the other's
     # node as non-terminal and leave a fan-in dependent PENDING until the

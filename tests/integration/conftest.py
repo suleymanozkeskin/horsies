@@ -308,17 +308,6 @@ async def start_ok(
     return r.ok_value
 
 
-async def task_name_for(session: AsyncSession, task_id: str) -> str:
-    """Resolve a backing task's registered name, as the worker does from
-    the task row it holds (on_workflow_task_complete requires it)."""
-    res = await session.execute(
-        text('SELECT task_name FROM horsies_tasks WHERE id = :id'),
-        {'id': task_id},
-    )
-    row = res.fetchone()
-    return str(row[0]) if row else ''
-
-
 FINISH_WORKER_ID = 'worker-integration-finish'
 """The worker that ``finish_task`` claims a node's task for."""
 
