@@ -1436,8 +1436,8 @@ impl Worker {
     /// with no stop request stops the worker with `ServiceLoopDied`
     /// (C11-inverse).
     ///
-    /// Errors: [`WorkerError::Config`] when the runner heartbeat watchdog
-    /// thread does not start.
+    /// Errors: [`WorkerError::Config`] when the runner heartbeat pool is
+    /// refused, or its watchdog thread does not start.
     fn spawn_services(
         &self,
         children: &WorkerChildren,
@@ -1480,8 +1480,11 @@ impl Worker {
         // stops the worker through its token.
         let beats_cancel = CancellationToken::new();
         let fail_closed_stop = FailClosedStop::new(self.cancel.clone());
+        let beat_pool = runner_beat_pool(&self.app_config.broker).map_err(|error| {
+            WorkerError::Config(format!("the runner heartbeat pool is refused: {error}"))
+        })?;
         let (runner_beat_watch, runner_beats) = launch_runner_beats(
-            runner_beat_pool(self.broker.pool()),
+            Arc::new(beat_pool),
             BeatSender {
                 worker_id: self.worker_id.clone(),
                 hostname: self.hostname.clone(),
