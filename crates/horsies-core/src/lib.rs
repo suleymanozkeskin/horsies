@@ -88,8 +88,8 @@ pub use crate::broker::attempt_writes::{
 };
 pub use crate::broker::claims::{
     ClaimClasses, ClaimPass, ClaimPassRequest, ClaimTake, ClaimedRow, QueueStartCheck, QueueStarts,
-    ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement, UnheldBudget,
-    MAX_RELEASED_CLAIMS,
+    ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement, StartAttempt,
+    StartMiss, StartOutcome, StartWindow, UnheldBudget, WindowedStart, MAX_RELEASED_CLAIMS,
 };
 pub use crate::broker::stale_recovery::{
     StaleClaimsRequeueFailed, StaleClaimsRequeuePass, StaleRunningPass, StaleRunningThresholds,
