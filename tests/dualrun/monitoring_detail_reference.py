@@ -31,7 +31,6 @@ from horsies.core.history.reads.detail import (
     LiveTaskLocation,
     TaskDetailAbsent,
     read_task_detail,
-    staged_detail_published,
 )
 from horsies.core.models.task_pg import TaskAttemptModel, TaskModel
 from horsies.core.models.tasks import Execution
@@ -366,10 +365,9 @@ async def _history_detail(
     """The history side of a detail read, after the live read found no row.
 
     Terminalization moves finished rows out of the live table, so an
-    absent live row is the normal terminal case, not an error. A database
-    without the staged detail function has no history to read:
-    ``NOT_CLASSIFIED``. A task in neither place gets its reason from the
-    detached leaves (``_ABSENCE_REASON_SQL``). The session reads in one snapshot
+    absent live row is the normal terminal case, not an error. A task in
+    neither place gets its reason from the detached leaves
+    (``_ABSENCE_REASON_SQL``). The session reads in one snapshot
     (``_begin_one_snapshot``), so the staged read cannot find the task live.
 
     Raises:
@@ -378,8 +376,6 @@ async def _history_detail(
             live read found no row.
     """
     connection = await session.connection()
-    if not await staged_detail_published(connection):
-        return TaskAbsenceReason.NOT_CLASSIFIED
     detail = await read_task_detail(connection, task_id=uuid.UUID(task_id))
     match detail:
         case HistoryTaskDetail():
