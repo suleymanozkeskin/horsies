@@ -2,8 +2,8 @@
 
 History reads are anchor-scoped by ratified budget, but the
 monitoring routes carry no time parameter — so the window is
-resolved here: optional `since`/`until` with a server default when
-absent. The constants are MONITORING-OWNED (the reservation
+resolved per request, by the core: optional `since`/`until` with a
+server default when absent. The constants are MONITORING-OWNED (the reservation
 precedent's shape, its constants not reused). A request over the
 maximum is refused with the maximum named, never clamped — a caller
 asking for ninety days learns the bound, not a silently truncated
@@ -13,11 +13,19 @@ answer.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Final
+from datetime import datetime, timedelta
+from typing import Final, assert_never
 
+from horsies._core import (
+    MonitoringWindowRecord,
+    WindowRefusedRecord,
+    resolve_monitoring_window as core_resolve_monitoring_window,
+)
 from horsies.core.history.reads.pages import HistoryWindow
 
+# The core's values (``MONITORING_WINDOW_DEFAULT`` and ``MONITORING_WINDOW_MAX``
+# of ``horsies_core::monitoring``), restated until the generated constants of
+# #1423 replace them.
 MONITORING_WINDOW_DEFAULT: Final = timedelta(hours=24)
 MONITORING_WINDOW_MAX: Final = timedelta(days=30)
 
@@ -72,24 +80,21 @@ def resolve_monitoring_window(
     ``MONITORING_WINDOW_DEFAULT`` ending now. A lone ``since`` runs to
     now; a lone ``until`` covers the default span ending there. Bounds
     must be timezone-aware, increasing, and within
-    ``MONITORING_WINDOW_MAX``.
+    ``MONITORING_WINDOW_MAX``. The bounds of the window are in UTC.
+
+    The core resolves the window (``horsies._core.resolve_monitoring_window``);
+    the call is pure and starts no runtime.
+
+    Raises:
+        CoreError: the core of this process stopped, or the process was
+            forked after the core started in its parent. Every core call of
+            the process raises it.
+        TypeError: ``now`` is naive, or a bound is not a ``datetime``.
     """
-    anchor = now if now is not None else datetime.now(timezone.utc)
-    if since is not None and since.tzinfo is None:
-        return WindowRefused(reason='since must be timezone-aware')
-    if until is not None and until.tzinfo is None:
-        return WindowRefused(reason='until must be timezone-aware')
-    upper = until if until is not None else anchor
-    lower = since if since is not None else upper - MONITORING_WINDOW_DEFAULT
-    if lower >= upper:
-        return WindowRefused(
-            reason='the window must be increasing (since < until)'
-        )
-    if upper - lower > MONITORING_WINDOW_MAX:
-        maximum_days = MONITORING_WINDOW_MAX.days
-        return WindowRefused(
-            reason=(
-                f'the window exceeds the {maximum_days}-day maximum'
-            )
-        )
-    return MonitoringWindow(lower=lower, upper=upper)
+    match core_resolve_monitoring_window(since=since, until=until, now=now):
+        case MonitoringWindowRecord(lower=lower, upper=upper):
+            return MonitoringWindow(lower=lower, upper=upper)
+        case WindowRefusedRecord(reason=reason):
+            return WindowRefused(reason=reason)
+        case _ as unreachable:
+            assert_never(unreachable)

@@ -1,5 +1,11 @@
 # pyright: reportPrivateUsage=false
-"""Tests for Scheduler service-level methods (mock-based, no DB)."""
+"""Tests of the Python scheduler loop (mock-based, no DB).
+
+The loop is the reference of the scheduler dual-runs
+(``tests/dualrun/reference/scheduler_loop_caller.py``); the production
+``Scheduler`` is a facade on ``horsies._core.CoreScheduler``
+(``test_scheduler_facade.py``).
+"""
 
 from __future__ import annotations
 
@@ -39,7 +45,7 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import Execution, TaskError, TaskResult
 from horsies.core.models.workflow import WorkflowContext
 from horsies.core.scheduler.calculator import calculate_next_run
-from horsies.core.scheduler.service import Scheduler
+from tests.dualrun.reference.scheduler_loop_caller import Scheduler
 from horsies.core.scheduler.state import (
     DueSchedule,
     DueScheduleRead,
@@ -1104,7 +1110,7 @@ class TestInitializeSchedules:
 
         # Should not raise — bad schedule is isolated
         with patch(
-            'horsies.core.scheduler.service.calculate_next_run',
+            'tests.dualrun.reference.scheduler_loop_caller.calculate_next_run',
             side_effect=_fail_on_call(2),
         ):
             await scheduler._initialize_schedules()
@@ -2160,7 +2166,7 @@ class TestCalculateMissedRunsAdditionalPaths:
         now = _utc(2025, 6, 1, 12, 0, 20)
 
         with patch(
-            'horsies.core.scheduler.service.calculate_next_run',
+            'tests.dualrun.reference.scheduler_loop_caller.calculate_next_run',
             return_value=first_due,  # non-monotonic: same as cursor
         ):
             result = scheduler._calculate_missed_runs(schedule, first_due, now, max_runs=10)
@@ -2196,7 +2202,7 @@ class TestPreloadTaskModules:
         scheduler = self._make_scheduler()
         scheduler.app.get_discovered_task_modules = MagicMock(return_value=[])
 
-        with patch('horsies.core.scheduler.service.logger') as mock_logger:
+        with patch('tests.dualrun.reference.scheduler_loop_caller.logger') as mock_logger:
             scheduler._preload_task_modules()
 
         mock_logger.warning.assert_called_once()
@@ -2219,7 +2225,7 @@ class TestPreloadTaskModules:
             return_value=['tasks/my_tasks.py'],
         )
 
-        with patch('horsies.core.scheduler.service.import_by_path') as mock_import:
+        with patch('tests.dualrun.reference.scheduler_loop_caller.import_by_path') as mock_import:
             scheduler._preload_task_modules()
 
         mock_import.assert_called_once()
@@ -2233,7 +2239,7 @@ class TestPreloadTaskModules:
             return_value=['myapp.tasks'],
         )
 
-        with patch('horsies.core.scheduler.service.importlib.import_module') as mock_import:
+        with patch('tests.dualrun.reference.scheduler_loop_caller.importlib.import_module') as mock_import:
             scheduler._preload_task_modules()
 
         mock_import.assert_called_once_with('myapp.tasks')
@@ -2253,7 +2259,7 @@ class TestPreloadTaskModules:
                 raise ImportError('cannot import bad_module')
 
         with patch(
-            'horsies.core.scheduler.service.importlib.import_module',
+            'tests.dualrun.reference.scheduler_loop_caller.importlib.import_module',
             side_effect=_track_import,
         ):
             scheduler._preload_task_modules()
@@ -2409,7 +2415,7 @@ class TestScheduleCommand:
 
         scheduler, _ = _started_with_real_broker(schedule, value_fn)
 
-        with patch('horsies.core.scheduler.service.warn_if_payload_large') as warn:
+        with patch('tests.dualrun.reference.scheduler_loop_caller.warn_if_payload_large') as warn:
             await scheduler._check_schedule(schedule, _DUE, _utc(2025, 6, 1, 12, 0, 3))
 
         warn.assert_called_once_with(
@@ -2445,7 +2451,7 @@ class TestScheduleCommand:
         schedule = TaskSchedule(name='s', task_name='my_task', pattern=IntervalSchedule(seconds=5))
         scheduler, state_manager = _started_with_real_broker(schedule, lambda: 'ok')
 
-        with patch('horsies.core.scheduler.service.warn_if_payload_large') as warn:
+        with patch('tests.dualrun.reference.scheduler_loop_caller.warn_if_payload_large') as warn:
             await scheduler._check_schedule(schedule, _DUE, _utc(2025, 6, 1, 12, 0, 3))
 
         [fire] = _fires(state_manager)
@@ -2591,7 +2597,7 @@ class TestEnsureStatesExist:
         state_manager.read_due_schedules = AsyncMock(return_value=_due_read())
 
         with patch(
-            'horsies.core.scheduler.service.calculate_next_run',
+            'tests.dualrun.reference.scheduler_loop_caller.calculate_next_run',
             side_effect=_fail_on_call(1),
         ):
             await scheduler._check_and_run_schedules()
@@ -2671,7 +2677,7 @@ class TestEnsureStatesExist:
         # Tick 2: every calculation succeeds -> healthy, cadence resumes.
         # Ticks 3-4: inside the interval -> no heal.
         with patch(
-            'horsies.core.scheduler.service.calculate_next_run',
+            'tests.dualrun.reference.scheduler_loop_caller.calculate_next_run',
             side_effect=_fail_on_call(1),
         ):
             for _tick in range(4):
@@ -2753,7 +2759,7 @@ class TestPreloadTaskModulesAdditionalPaths:
 
         with pytest.raises(AttributeError, match='no suppress_sends'):
             with patch(
-                'horsies.core.scheduler.service.importlib.import_module',
+                'tests.dualrun.reference.scheduler_loop_caller.importlib.import_module',
             ):
                 scheduler._preload_task_modules()
 
@@ -2781,11 +2787,11 @@ class TestPreloadTaskModulesAdditionalPaths:
 
         with (
             patch(
-                'horsies.core.scheduler.service.import_by_path',
+                'tests.dualrun.reference.scheduler_loop_caller.import_by_path',
                 side_effect=ImportError('cannot import'),
             ),
             patch(
-                'horsies.core.scheduler.service.importlib.import_module',
+                'tests.dualrun.reference.scheduler_loop_caller.importlib.import_module',
                 side_effect=_record_import,
             ),
         ):
@@ -2823,7 +2829,7 @@ class TestPreloadTaskModulesAdditionalPaths:
             with (
                 patch('os.getcwd', return_value=fake_cwd),
                 patch(
-                    'horsies.core.scheduler.service.importlib.import_module',
+                    'tests.dualrun.reference.scheduler_loop_caller.importlib.import_module',
                 ),
             ):
                 scheduler._preload_task_modules()

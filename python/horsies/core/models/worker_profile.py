@@ -46,7 +46,6 @@ from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.child_sizing import (
     DEFAULT_ISOLATED_POOL_CONNECTIONS,
     DEFAULT_TASK_SEND_POOL_CONNECTIONS,
-    FINALIZE_BATCH_FLUSHERS,
     PARENT_POOL_CLAIM_CONNECTIONS,
     PARENT_POOL_MIN_CONNECTIONS,
     PARENT_POOL_RESERVE,
@@ -610,13 +609,17 @@ class ParentPool(BaseModel):
       ``PARENT_POOL_CONNECTIONS_FLOOR`` to ``PARENT_POOL_CONNECTIONS_CAP``
       (``horsies.core.models.child_sizing``).
 
-    Under load the claim loop holds one connection of the pool, and each of
-    the ``FINALIZE_BATCH_FLUSHERS`` steady flushers of the batched success
-    write holds one. ``PARENT_POOL_RESERVE`` more stay free for the reaper,
-    the claimer heartbeat and the writes per task: the flushers run at most
-    ``parent_pool_flusher_bound(max_size)`` at once. AppConfig validation
-    refuses an explicit size below ``PARENT_POOL_MIN_CONNECTIONS``, which is
-    also the floor of a derived size.
+    The worker process opens two pools of ``max_size`` connections: the pool
+    of its engine and the pool of its core handle. Under load the claim loop
+    holds one connection of the engine pool, and ``PARENT_POOL_RESERVE`` more
+    stay free there for the reaper, the claimer heartbeat and the writes per
+    task that run in Python. The flushers of the batched success write check
+    out connections of the core pool, at most
+    ``parent_pool_flusher_bound(max_size)`` at once, so ``PARENT_POOL_RESERVE``
+    stay free there for the writes per task that run in the core. AppConfig
+    validation refuses an explicit size below ``PARENT_POOL_MIN_CONNECTIONS``.
+    A derived size is at least ``PARENT_POOL_CONNECTIONS_FLOOR``, which is
+    above that minimum.
     """
 
     model_config = ConfigDict(extra='forbid', frozen=True)
@@ -1132,13 +1135,15 @@ def _parent_pool_size_error(name: str, connections: int) -> ConfigurationError:
         'below the minimum of the pool of the worker process '
         f'({PARENT_POOL_MIN_CONNECTIONS})',
         [
-            f'minimum = claim loop {PARENT_POOL_CLAIM_CONNECTIONS} + steady '
-            f'flushers of the batched success write {FINALIZE_BATCH_FLUSHERS} '
-            f'+ reserve {PARENT_POOL_RESERVE}',
-            'the claim loop and the steady flushers hold their connections '
-            'while the worker is busy; the reserve is for the reaper, the '
-            'claimer heartbeat and the writes of failures, retries and '
-            'workflow nodes, which otherwise wait for the pool timeout and fail',
+            f'minimum = claim loop {PARENT_POOL_CLAIM_CONNECTIONS} + reserve '
+            f'{PARENT_POOL_RESERVE}',
+            'the worker process opens two pools of this size: the claim loop '
+            'holds a connection of its engine pool while the worker is busy, '
+            'and the flushers of the batched success write check out '
+            'connections of its core pool; each pool keeps the reserve for the '
+            'reaper, the claimer heartbeat and the writes of failures, retries '
+            'and workflow nodes, which otherwise wait for the pool timeout and '
+            'fail',
         ],
         f'set max_size=PoolSize(connections={PARENT_POOL_MIN_CONNECTIONS}) or '
         'more, or max_size=PoolSizeFromSeats()',

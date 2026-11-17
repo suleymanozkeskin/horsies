@@ -9,6 +9,7 @@ import pytest
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.core.workflows.functions import (
     CancelOutcome,
+    PausedExpiryOutcome,
     PauseOutcome,
     RaiseCounted,
     RaiseLimitReached,
@@ -17,6 +18,7 @@ from horsies.core.workflows.functions import (
     RecoveryLimitWrite,
     decode_cancel_outcome,
     decode_pause_outcome,
+    decode_paused_expiry_outcome,
     decode_phase2_raise,
 )
 
@@ -65,6 +67,27 @@ class TestDecodeCancelOutcome:
     def test_an_unknown_outcome_is_refused(self) -> None:
         with pytest.raises(OutcomeDecodeError, match="'PAUSED'"):
             decode_cancel_outcome([_row('PAUSED')])
+
+
+@pytest.mark.unit
+class TestDecodePausedExpiryOutcome:
+    """One row with an outcome of ``PausedExpiryOutcome``; anything else is a defect."""
+
+    @pytest.mark.parametrize('outcome', list(PausedExpiryOutcome), ids=lambda o: o.value)
+    def test_each_outcome_reads_as_its_member(self, outcome: PausedExpiryOutcome) -> None:
+        assert decode_paused_expiry_outcome([_row(outcome.value)]) is outcome
+
+    def test_no_row_is_refused(self) -> None:
+        with pytest.raises(OutcomeDecodeError, match='returned 0 rows'):
+            decode_paused_expiry_outcome([])
+
+    def test_two_rows_are_refused(self) -> None:
+        with pytest.raises(OutcomeDecodeError, match='returned 2 rows'):
+            decode_paused_expiry_outcome([_row('EXPIRED'), _row('EXPIRED')])
+
+    def test_an_unknown_outcome_is_refused(self) -> None:
+        with pytest.raises(OutcomeDecodeError, match="'CANCELLED'"):
+            decode_paused_expiry_outcome([_row('CANCELLED')])
 
 
 def _raise_row(

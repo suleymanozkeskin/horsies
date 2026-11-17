@@ -236,45 +236,50 @@ class TestParentPoolConnections:
 
 
 class TestParentPoolMinimum:
-    """The fewest connections of the pool of the worker process: the claim
-    loop, the steady flushers of the batched success write, and the reserve
-    for the other users of the pool."""
+    """The fewest connections of the pools of the worker process: the claim
+    loop and the reserve of the engine pool. The flushers of the batched
+    success write take connections of the core pool, so the minimum does not
+    count them."""
 
     def test_the_counted_connections(self) -> None:
         assert (
             PARENT_POOL_CLAIM_CONNECTIONS,
-            FINALIZE_BATCH_FLUSHERS,
             PARENT_POOL_RESERVE,
             PARENT_POOL_MIN_CONNECTIONS,
-        ) == (1, 2, 2, 5)
+        ) == (1, 2, 3)
 
 
 class TestParentPoolFlusherBound:
-    """The flushers of the batched success write run on the parent pool less
-    the connection of the claim loop and the reserve."""
+    """The flushers of the batched success write run on the core pool of the
+    worker less the reserve. The claim loop holds no connection of the core
+    pool."""
 
     @pytest.mark.parametrize(
         ('connections', 'expected'),
         [
-            (5, 2),  # the minimum: the steady flushers only
-            (6, 3),  # one surge flusher
-            (20, 17),  # the cap of a derived size
-            (1000, 997),  # the largest PoolSize
+            (3, 1),  # the minimum: one steady flusher
+            (4, 2),  # the steady flushers only
+            (5, 3),  # the floor of a derived size: one surge flusher
+            (20, 18),  # the cap of a derived size
+            (1000, 998),  # the largest PoolSize
         ],
     )
     def test_the_bound(self, connections: int, expected: int) -> None:
         assert parent_pool_flusher_bound(connections) == expected
 
-    def test_the_minimum_runs_the_steady_flushers_only(self) -> None:
+    def test_the_minimum_runs_one_flusher(self) -> None:
+        assert parent_pool_flusher_bound(PARENT_POOL_MIN_CONNECTIONS) == 1
+
+    def test_a_derived_size_runs_the_steady_flushers(self) -> None:
         assert (
-            parent_pool_flusher_bound(PARENT_POOL_MIN_CONNECTIONS)
-            == FINALIZE_BATCH_FLUSHERS
+            parent_pool_flusher_bound(PARENT_POOL_CONNECTIONS_FLOOR)
+            >= FINALIZE_BATCH_FLUSHERS
         )
 
     def test_a_pool_below_the_minimum_is_a_defect(self) -> None:
         with pytest.raises(
             AssertionError,
-            match='a parent pool of 4 connections is below the minimum of 5',
+            match='a parent pool of 2 connections is below the minimum of 3',
         ):
             parent_pool_flusher_bound(PARENT_POOL_MIN_CONNECTIONS - 1)
 

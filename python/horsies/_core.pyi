@@ -1080,6 +1080,24 @@ class SchedulerStopped:
     """The run ended at a stop request."""
 
 
+@final
+class MonitoringWindowRecord:
+    """The window of one monitoring request: UTC bounds, increasing, at most the core's maximum
+    apart.
+    """
+    @property
+    def lower(self) -> datetime.datetime: ...
+    @property
+    def upper(self) -> datetime.datetime: ...
+
+
+@final
+class WindowRefusedRecord:
+    """The requested window is not servable; reason names why."""
+    @property
+    def reason(self) -> str: ...
+
+
 def baseline_sql_files() -> list[tuple[str, str]]:
     """The baseline SQL files as (file name, text) pairs, in run order. Starts nothing."""
 
@@ -1094,6 +1112,13 @@ def mint_task_id() -> uuid.UUID | IdMintRefused:
 
 def refresh_log_levels() -> None:
     """Read the effective level of every horsies logger again."""
+
+
+def resolve_monitoring_window(*, since: datetime.datetime | None, until: datetime.datetime | None, now: datetime.datetime | None) -> MonitoringWindowRecord | WindowRefusedRecord:
+    """Resolve the terminal-history window of one monitoring request. Absent bounds take the
+    default: the last 24 hours ending at until, or at now (the clock of this process when
+    None). A naive since or until is refused; a naive now raises TypeError. Starts no runtime.
+    """
 
 
 def set_panic_rule(rule: Literal['STOP_CORE', 'ABORT_PROCESS']) -> None:

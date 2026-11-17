@@ -35,6 +35,17 @@ CANCEL_WORKFLOW_FUNCTION_SQL: Final = text("""
 the tree, the tasks behind ENQUEUED nodes, and the nodes that did not start."""
 
 
+EXPIRE_PAUSED_WORKFLOW_FUNCTION_SQL: Final = text("""
+    SELECT outcome, observed_status, expired_task_ids
+    FROM horsies_workflow_expire_paused(
+        CAST(:wf_id AS uuid), CAST(:age_us AS bigint), CAST(:error AS text)
+    )
+""")
+"""Expiry of one PAUSED workflow older than the age in microseconds: the
+cancel body of one workflow with EXPIRED and the stored error; nothing is
+written for a workflow that is not PAUSED or not old enough."""
+
+
 PHASE2_RECORD_RAISE_FUNCTION_SQL: Final = text("""
     SELECT outcome, attempt_count, limit_outcome, quarantine_verdict
     FROM horsies_workflow_phase2_record_raise(
@@ -70,6 +81,21 @@ class CancelOutcome(Enum):
 
     NOT_CANCELLABLE = 'NOT_CANCELLABLE'
     """The workflow is in a terminal status. Nothing was written."""
+
+    NOT_FOUND = 'NOT_FOUND'
+    """No workflow has this id. Nothing was written."""
+
+
+class PausedExpiryOutcome(Enum):
+    """What ``horsies_workflow_expire_paused`` did."""
+
+    EXPIRED = 'EXPIRED'
+    """The workflow is EXPIRED; the tasks behind its ENQUEUED nodes moved to
+    history as cancelled, and its nodes that did not start are SKIPPED."""
+
+    NOT_EXPIRED = 'NOT_EXPIRED'
+    """The workflow is not PAUSED, or was PAUSED for less than the age (a
+    resume committed first). Nothing was written."""
 
     NOT_FOUND = 'NOT_FOUND'
     """No workflow has this id. Nothing was written."""
@@ -129,6 +155,28 @@ def decode_cancel_outcome(rows: Sequence[Any]) -> CancelOutcome:
             raise OutcomeDecodeError(
                 f'horsies_workflow_cancel returned outcome {value!r}; '
                 'expected CANCELLED, NOT_CANCELLABLE or NOT_FOUND',
+            )
+
+
+def decode_paused_expiry_outcome(rows: Sequence[Any]) -> PausedExpiryOutcome:
+    """The outcome of a ``horsies_workflow_expire_paused`` call from its rows. Pure.
+
+    Raises:
+        OutcomeDecodeError: not one row, or an outcome outside
+            ``PausedExpiryOutcome``.
+    """
+    value = _one_outcome(rows, 'horsies_workflow_expire_paused')
+    match value:
+        case 'EXPIRED':
+            return PausedExpiryOutcome.EXPIRED
+        case 'NOT_EXPIRED':
+            return PausedExpiryOutcome.NOT_EXPIRED
+        case 'NOT_FOUND':
+            return PausedExpiryOutcome.NOT_FOUND
+        case _:
+            raise OutcomeDecodeError(
+                f'horsies_workflow_expire_paused returned outcome {value!r}; '
+                'expected EXPIRED, NOT_EXPIRED or NOT_FOUND',
             )
 
 

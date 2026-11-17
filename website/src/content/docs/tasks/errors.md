@@ -564,7 +564,7 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | HRS-215 | `CONFIG_INVALID_KEEPALIVE` | Invalid TCP keepalive settings: a keepalive value below 1 while `tcp_keepalives` is on, or a negative `tcp_user_timeout_ms` |
 | HRS-216 | `CONFIG_INVALID_RETENTION` | Invalid retention configuration |
 | HRS-217 | `CHECK_LIVE_ASYNC_CONTEXT` | `check(live=True)` was called on a thread that runs an event loop; the live check did not run |
-| HRS-218 | `CONFIG_INVALID_WORKER_PROFILE` | A worker profile in `AppConfig.worker_profiles` is not valid: a name a `--profile` argument cannot carry, a profile with no children, a claim limit above the capacity of the worker, a child pool whose `min_size` is above its resolved `max_size`, or a `PoolSize` below 5 (`PARENT_POOL_MIN_CONNECTIONS`) for the pool of the worker process (`ParentPool.max_size`). The message names the profile and the field path |
+| HRS-218 | `CONFIG_INVALID_WORKER_PROFILE` | A worker profile in `AppConfig.worker_profiles` is not valid: a name a `--profile` argument cannot carry, a profile with no children, a claim limit above the capacity of the worker, a child pool whose `min_size` is above its resolved `max_size`, or a `PoolSize` below 3 (`PARENT_POOL_MIN_CONNECTIONS`) for the pool of the worker process (`ParentPool.max_size`). The message names the profile and the field path |
 | HRS-219 | `CHECK_WORKER_CONNECTIONS` | `check(live=True)`: one worker of a profile opens more Postgres connections itself than the server has usable slots (the error also states what task code that sends adds: the `task_send_pool` of each child kind), or the server limit could not be read |
 
 ### Registry (HRS-300-HRS-399)

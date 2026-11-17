@@ -19,8 +19,12 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 from horsies._catalog.manifest import dump_producer_manifest
 from horsies._core import (
+    BrokerFailure,
     CoreError,
     CoreHandle,
+    DatabasePingRecord,
+    SchemaInstalled,
+    SchemaInstallNotRun,
     StaleClaimsBoundReached,
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
@@ -63,6 +67,7 @@ from horsies.core.brokers.enqueue_task import (
     EnqueueOutcome,
     EnqueueRow,
     EnqueueStart,
+    FirstRun,
     Keyed,
     SendKind,
     StartAfterDelay,
@@ -1543,6 +1548,10 @@ class PostgresBroker:
     async def _maybe_run_schema_init(self, engine: AsyncEngine) -> None:
         """Install the baseline schema when this broker runs migrations.
 
+        The Python install before the switch to the core: the broker installs
+        through ``_ensure_initialized``, and only the dual-run reference
+        (``tests/dualrun/reference/install_caller.py``) runs this path.
+
         ``engine`` is the session URL's engine: the reader publication runs
         on it. The state read, the lock and the migration use their own
         direct session connection.
@@ -1728,39 +1737,68 @@ class PostgresBroker:
                     raise RuntimeError(message)
                 body_error.add_note(message)
 
-    async def _ensure_initialized(self, resources: BrokerResources) -> None:
+    async def _ensure_initialized(self) -> None:
+        """Install the schema once per broker through ``CoreHandle.install_schema_async``.
+
+        The core installs the baseline into an empty database, or completes
+        or checks an installed one, under the fleet schema lock: the
+        migration with this client's family row, then the published history
+        readers. A handle with migrations off or ``assume_initialized`` runs
+        no schema statement. After a success the broker does not call the
+        core again; a broker built with ``assume_initialized=True`` never
+        calls it.
+
+        The ``_maybe_run_schema_init`` path of this class is the Python
+        install before the switch; the dual-run reference
+        (``tests/dualrun/reference/install_caller.py``) runs it.
+
+        Raises:
+            CoreOperationFailed: the core reported ``SCHEMA_INIT_FAILED``;
+                ``retryable`` is the core's classification of the cause. The
+                broker keeps nothing, so the next call installs again.
+            CoreError: the core of this process cannot run the call.
+        """
         if self._initialized:
             return
-        await self._run_with_schema_engine(resources, self._maybe_run_schema_init)
-        self._initialized = True
+        match await self._core_handle.install_schema_async():
+            case SchemaInstalled() | SchemaInstallNotRun():
+                self._initialized = True
+            case BrokerFailure(code='SCHEMA_INIT_FAILED', message=message, retryable=retryable):
+                raise CoreOperationFailed(
+                    'PostgresBroker.ensure_schema_initialized', message, retryable,
+                )
+            case BrokerFailure(code=code):
+                raise AssertionError(f'the core schema install answered the code {code}')
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def ensure_schema_initialized(
         self,
     ) -> Result[None, BrokerOperationFailed | BrokerEventLoopLimit]:
-        """
-        Public entry point to ensure tables and triggers exist.
+        """Install the schema, or check it, once per broker. Writes.
 
-        Safe to call multiple times and from multiple processes; internally
-        guarded by a PostgreSQL advisory lock to avoid DDL races.
+        Safe to call many times and from many processes: the core guards the
+        install with the fleet schema advisory lock, and waits for another
+        installer's lock for at most the core's bound.
 
-        Returns Ok(None) on success. On failure: ``BrokerOperationFailed``
-        with ``SCHEMA_INIT_FAILED`` and its cause, or ``BrokerEventLoopLimit``
-        when the call ran on one loop more than the broker's limit.
+        Returns ``Ok(None)`` on success. On failure ``BrokerOperationFailed``
+        with ``SCHEMA_INIT_FAILED`` and its cause: the core reported the
+        install failed (``exception`` is a ``CoreOperationFailed``), for
+        example a database of the other client family or one this build
+        cannot install into (not retryable), or the core of this process
+        cannot run the call (``exception`` is the ``CoreError``). The install
+        runs on the core pools, so ``BrokerEventLoopLimit`` is no longer a
+        failure exit. A cancel of the caller does not stop the install.
         """
-        match await self.select_resources():
-            case Err(loop_limit):
-                return _loop_limit_err('ensure_schema_initialized', loop_limit)
-            case Ok(resources):
-                pass
         try:
-            await self._ensure_initialized(resources)
-            return Ok(None)
-        except Exception as exc:
+            await self._ensure_initialized()
+        except (CoreOperationFailed, CoreError) as exc:
             return _operation_failed(
                 BrokerErrorCode.SCHEMA_INIT_FAILED,
                 f'Schema initialization failed: {exc}',
                 exc,
             )
+        return Ok(None)
 
     # ----------------- Async API -----------------
 
@@ -1837,6 +1875,7 @@ class PostgresBroker:
                 start=_enqueue_start(enqueued_at, enqueue_delay_seconds),
                 command_fingerprint=command.fingerprint,
                 key=key_r.ok_value,
+                lineage=FirstRun(),
             ),
         ))
 
@@ -1942,7 +1981,7 @@ class PostgresBroker:
         # it raises RuntimeError for operator states such as an incomplete
         # cutover, and each of those is a failed enqueue, not a crash.
         try:
-            await self._ensure_initialized(resources)
+            await self._ensure_initialized()
         except Exception as exc:
             return _enqueue_failed(
                 f'Failed to enqueue task {task_name}: {exc}',
@@ -2274,7 +2313,7 @@ class PostgresBroker:
             case Ok(resources):
                 pass
         try:
-            await self._ensure_initialized(resources)
+            await self._ensure_initialized()
 
             start_time = asyncio.get_event_loop().time()
 
@@ -2562,30 +2601,51 @@ class PostgresBroker:
                 return first_rows
 
     async def ping_database_async(self) -> BrokerResult[DatabasePing]:
-        """Probe Postgres reachability with ``SELECT 1`` through the live pool.
+        """Probe Postgres reachability with one statement on the broker's main
+        core pool, through ``CoreHandle.ping_database_async``.
 
-        Goes through the broker's own pool (not an isolated engine), so a
-        success also confirms a connection could be checked out. Returns the
-        measured round-trip latency.
+        A success also confirms that a connection could be checked out of the
+        pool. Returns the measured round-trip latency. Reads only; a cancel
+        of the caller drops the ping.
+
+        Failures, each ``DB_PING_FAILED``; nothing changed:
+        - the connect or the statement failed; ``retryable`` is the core's
+          classification of the cause, and ``exception`` a
+          ``CoreOperationFailed``;
+        - the core of this process cannot run the call (``CoreError``: it
+          stopped, did not start, or has too many calls in flight); the
+          ``exception`` is that error, and ``retryable`` follows
+          ``core_error_retryable``.
         """
-        match await self.select_resources():
-            case Err(loop_limit):
-                return _loop_limit_err('ping_database', loop_limit)
-            case Ok(resources):
-                pass
-        loop = asyncio.get_running_loop()
         try:
-            start = loop.time()
-            async with resources.session_factory() as session:
-                await session.execute(text('SELECT 1'))
-            latency_ms = (loop.time() - start) * 1000.0
-            return Ok(DatabasePing(latency_ms=latency_ms))
-        except Exception as exc:
-            return _operation_failed(
-                BrokerErrorCode.DB_PING_FAILED,
-                f'ping_database failed: {exc}',
-                exc,
+            outcome = await self._core_handle.ping_database_async()
+        except CoreError as exc:
+            return Err(
+                BrokerOperationFailed(
+                    code=BrokerErrorCode.DB_PING_FAILED,
+                    message=f'ping_database failed: {exc}',
+                    retryable=core_error_retryable(exc),
+                    exception=exc,
+                ),
             )
+        match outcome:
+            case DatabasePingRecord(latency_ms=latency_ms):
+                return Ok(DatabasePing(latency_ms=latency_ms))
+            case BrokerFailure(code='DB_PING_FAILED', message=message, retryable=retryable):
+                return Err(
+                    BrokerOperationFailed(
+                        code=BrokerErrorCode.DB_PING_FAILED,
+                        message=f'ping_database failed: {message}',
+                        retryable=retryable,
+                        exception=CoreOperationFailed(
+                            'PostgresBroker.ping_database_async', message, retryable,
+                        ),
+                    ),
+                )
+            case BrokerFailure(code=code):
+                raise AssertionError(f'the core database ping answered the code {code}')
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def ping_workers_async(
         self,
@@ -3668,7 +3728,7 @@ class PostgresBroker:
             case Ok(resources):
                 pass
         try:
-            await self._ensure_initialized(resources)
+            await self._ensure_initialized()
 
             async with resources.session_factory() as session:
                 base_columns = [
