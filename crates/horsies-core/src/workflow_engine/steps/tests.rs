@@ -75,7 +75,7 @@ async fn seed_claimed_node(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
              queue_name, priority, dependencies, allow_failed_deps, join_type, status,
              is_subworkflow, task_id, created_at, max_retries, execution, retention_class_key
          ) VALUES (
-             'NONE', $1, $2, 0, 'root', 'workflow_steps_task', 'null', 'default', 100, '{}',
+             'NONE', $1, $2, 0, 'root', 'workflow_steps_task', '{}', 'default', 100, '{}',
              FALSE, 'all', 'ENQUEUED', FALSE, $3, NOW(), 0, 'ISOLATED', 'forever'
          )",
     )
@@ -85,6 +85,27 @@ async fn seed_claimed_node(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
     .execute(pool)
     .await
     .expect("seed enqueued node");
+}
+
+/// A RUNNING sub-workflow node at index 0 of `workflow_id` whose child is `child_id`: the parent node that
+/// `seed_workflow` names for a child.
+async fn seed_running_subworkflow_node(pool: &PgPool, workflow_id: Uuid, child_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO horsies_workflow_tasks (
+             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+             queue_name, priority, dependencies, allow_failed_deps, join_type, status,
+             is_subworkflow, sub_workflow_params, sub_workflow_id, created_at
+         ) VALUES (
+             'NONE', $1, $2, 0, 'child', '__sub_workflow:workflow_steps_child', '{}', 'default',
+             100, '{}', FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN', $3, NOW()
+         )",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workflow_id)
+    .bind(child_id)
+    .execute(pool)
+    .await
+    .expect("seed running sub-workflow node");
 }
 
 async fn workflow_status(pool: &PgPool, id: Uuid) -> String {
@@ -797,6 +818,8 @@ fn every_resume_disposition_text_reads_and_others_do_not() {
 
 /// A PAUSED tree is resumed in one step: the root and its PAUSED child are
 /// RUNNING, and the child's READY node is ENQUEUED with a minted task row.
+/// The root's sub-workflow node of the child is still RUNNING, so the
+/// completion check of the resume leaves the root RUNNING.
 /// A second resume finds the root RUNNING: `false`, nothing written. An id
 /// with no workflow is `WORKFLOW_NOT_FOUND`.
 #[tokio::test]
@@ -809,6 +832,7 @@ async fn resume_resumes_the_paused_tree_and_answers_the_other_outcomes() {
     let claimed_task = Uuid::new_v4();
     seed_workflow(&pool, root, "RUNNING", None).await;
     seed_workflow(&pool, child, "RUNNING", Some(root)).await;
+    seed_running_subworkflow_node(&pool, root, child).await;
     seed_claimed_node(&pool, child, claimed_task).await;
     assert!(pause_workflow(&broker, root).await.expect("pause"));
     let registry = crate::core::WorkflowSpecRegistry::new(
