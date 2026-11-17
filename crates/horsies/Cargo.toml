@@ -21,7 +21,7 @@ cli = [
     "dep:tracing-subscriber",
 ]
 # The axum mount of the core's monitoring handler (`horsies::web`).
-web = ["dep:axum", "horsies-core/web"]
+web = ["dep:axum", "dep:futures-util", "horsies-core/web"]
 # The rerun adapter for a `tokio_postgres::Transaction`.
 tokio-postgres = ["dep:tokio-postgres"]
 # The rerun adapter for a `sqlx::Transaction<'_, Postgres>`.
@@ -52,6 +52,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 gethostname = "0.4"
 axum = { version = "0.8", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
+# The event stream body of the web mount and the bounded read of a request
+# body.
+futures-util = { version = "0.3", optional = true }
 owo-colors = { version = "4", optional = true }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
@@ -68,6 +71,8 @@ tracing-subscriber = { version = "0.3", features = [
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+# `oneshot` of the web mount's tests.
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true
