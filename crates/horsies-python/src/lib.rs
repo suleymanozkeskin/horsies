@@ -206,7 +206,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::success::SuccessBatchRequest>()?;
     module.add_class::<operations::success::SuccessApplied>()?;
     module.add_class::<operations::success::SuccessesWritten>()?;
-    module.add_class::<operations::success::BatchRolledBack>()?;
+    module.add_class::<operations::success::BatchNotSent>()?;
+    module.add_class::<operations::success::BatchRefused>()?;
     module.add_class::<operations::success::BatchCommitUnknown>()?;
     module.add_class::<operations::success::WorkflowSuccessApplied>()?;
     module.add_class::<operations::task_info::TaskInfoRecord>()?;

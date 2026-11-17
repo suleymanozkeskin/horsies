@@ -257,7 +257,8 @@ const FINISH_FAILED_ATTEMPT_OUTCOME: &str = "AttemptFailureApplied | AttemptRetr
 const FINISH_ENDED_ATTEMPT_OUTCOME: &str = "AttemptClaimReleased | AttemptFailureApplied | \
      AttemptRetryScheduled | AttemptAlreadyApplied | AttemptLostClaim | \
      AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed";
-const COMPLETE_SUCCESSES_OUTCOME: &str = "SuccessesWritten | BatchRolledBack | BatchCommitUnknown";
+const COMPLETE_SUCCESSES_OUTCOME: &str =
+    "SuccessesWritten | BatchNotSent | BatchRefused | BatchCommitUnknown";
 const FINISH_WORKFLOW_SUCCESS_OUTCOME: &str = "WorkflowSuccessApplied | AttemptAlreadyApplied | \
      AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed";
 const GUARD_TEXT: &str = "Literal['CLAIM', 'DEADLINE', 'STALENESS', 'RETRY_COUNT', \
@@ -998,8 +999,15 @@ const RECORD_CLASSES: [StubClass; 61] = [
         methods: &[],
     },
     StubClass {
-        name: "BatchRolledBack",
-        doc: "No row of the batch changed.",
+        name: "BatchNotSent",
+        doc: "No row of the batch changed, and the statement was not sent: the pools, the client\nfamily check or the checkout failed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
+        name: "BatchRefused",
+        doc: "No row of the batch changed: the server refused the statement. One row can be the cause.",
         constructor: Constructor::NoConstructor,
         properties: &[property("message", "str"), property("retryable", "bool")],
         methods: &[],
