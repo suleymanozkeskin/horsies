@@ -446,9 +446,8 @@ async def finish_task(
     ``horsies_workflow_node_finish`` in the form of the node facts that phase
     1 read, with the child starts it owes, and the parent advances after it.
     A task that is no longer live (its phase 1 committed earlier) gets phase
-    2 alone in the transaction form, as a replay. A node with no task does
-    nothing. Fails the test on any other phase-1 outcome or a failed parent
-    advance.
+    2 alone in the transaction form, as a replay. Fails the test for a node
+    with no task, any other phase-1 outcome, or a failed parent advance.
     """
     from horsies.core.workflows.node_finish import (
         CapacityWake,
@@ -469,8 +468,7 @@ async def finish_task(
         )
     ).fetchone()
     if node is None or node.task_id is None:
-        await session.commit()
-        return
+        pytest.fail(f'node {task_index} of workflow {workflow_id} has no task')
     task_id = str(node.task_id)
     claimed_at = (
         await session.execute(
