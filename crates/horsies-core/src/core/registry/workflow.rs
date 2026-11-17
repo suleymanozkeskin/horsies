@@ -655,7 +655,7 @@ impl WorkflowSpecRegistry {
     /// This is the shared validation entry point used by:
     /// - `WorkflowStarter::start` / `start_with_id` (top-level dynamic starts)
     /// - `WorkflowFunction::bound_spec` (registered workflow starts)
-    /// - `build_child_spec` in engine/lifecycle/start (child spec_builder paths)
+    /// - `materialize_child_spec` in `workflow_engine/start.rs` (the host build of a child)
     /// - `check()` registered workflow and builder validation phases
     ///
     /// Performs:

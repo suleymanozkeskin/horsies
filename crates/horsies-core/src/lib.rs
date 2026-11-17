@@ -145,8 +145,7 @@ pub use crate::core::history::rerun::{
 };
 pub use crate::workflow_engine::bound_handle::WorkflowHandle;
 pub use crate::workflow_engine::engine::{
-    on_subworkflow_complete, on_workflow_task_complete, WorkflowTaskCompletion,
-    WorkflowTaskCompletionError,
+    on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
 };
 pub use crate::workflow_engine::error::WorkflowError;
 pub use crate::workflow_engine::info::WorkflowTaskInfo;
