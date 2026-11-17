@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use tokio::sync::{oneshot, Notify};
 use tokio::task::JoinSet;
+use uuid::Uuid;
 
 use super::board::{PoolBoard, PoolHealth, SlotPhase};
 use super::budgets::SlotService;
@@ -134,6 +135,26 @@ struct SlotQueue {
     idle: usize,
 }
 
+/// The tasks whose children the drain deadline killed, in the order of the
+/// kills (Python `StopReport.killed_task_ids`). The slot tasks of one pool
+/// note them; the stop of the pool takes them. Each slot notes at most the
+/// runs of its child once, at the one drain deadline, so the seats of the
+/// pool bound the list.
+#[derive(Debug, Default)]
+pub(super) struct DrainKills(Mutex<Vec<Uuid>>);
+
+impl DrainKills {
+    /// Note the tasks of a child that the drain deadline kills.
+    pub(super) fn note(&self, task_ids: impl IntoIterator<Item = Uuid>) {
+        lock(&self.0).extend(task_ids);
+    }
+
+    /// Take the noted tasks, in the order of the kills.
+    fn take(&self) -> Vec<Uuid> {
+        std::mem::take(&mut *lock(&self.0))
+    }
+}
+
 /// The state that the pool and its slot tasks share.
 pub(super) struct PoolShared {
     pub(super) config: IsolatedPoolConfig,
@@ -144,11 +165,12 @@ pub(super) struct PoolShared {
     pub(super) board: Arc<PoolBoard>,
     queue: Mutex<SlotQueue>,
     pub(super) queued: Notify,
+    pub(super) drain_kills: DrainKills,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    // A poisoned lock means a panic while it was held; the queue is still a
-    // valid value.
+    // A poisoned lock means a panic while it was held; the queue and the
+    // noted kills are still valid values.
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -254,16 +276,44 @@ pub enum Submitted {
     NotDispatched(NotRunCause),
 }
 
-/// How the stop ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How the stop ended. `killed` names the tasks whose children the drain
+/// deadline killed, in the order of the kills.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PoolStopReport {
-    /// Every slot ended within the drain timeout.
+    /// Every slot ended within the drain timeout, and no child was killed.
     Drained,
     /// The drain deadline killed the busy children; every slot ended after.
-    KilledAtDrainDeadline,
+    KilledAtDrainDeadline { killed: Vec<Uuid> },
     /// Slot tasks still ran 30 s after the kills and were aborted. Their
     /// tasks got the end their answer held.
-    AbortedAfterDrain,
+    AbortedAfterDrain { killed: Vec<Uuid> },
+}
+
+/// When the slot tasks of a pool ended at its stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SlotsEnded {
+    /// Within the drain timeout.
+    InDrain,
+    /// After the drain deadline, within the wait after the kills.
+    AfterKills,
+    /// Not within the wait after the kills: the rest were aborted.
+    Aborted,
+}
+
+impl PoolStopReport {
+    /// The report of a stop whose slots ended `ended`, with the tasks the
+    /// drain deadline killed. The deadline is the board's, so another pool
+    /// can pass it while this pool's slots still end within their drain
+    /// timeout; kills then make the report `KilledAtDrainDeadline`. Pure.
+    pub(super) fn of(ended: SlotsEnded, killed: Vec<Uuid>) -> PoolStopReport {
+        match (ended, killed.is_empty()) {
+            (SlotsEnded::InDrain, true) => PoolStopReport::Drained,
+            (SlotsEnded::InDrain, false) | (SlotsEnded::AfterKills, _) => {
+                PoolStopReport::KilledAtDrainDeadline { killed }
+            }
+            (SlotsEnded::Aborted, _) => PoolStopReport::AbortedAfterDrain { killed },
+        }
+    }
 }
 
 /// The isolated children of a worker.
@@ -317,6 +367,7 @@ impl IsolatedPool {
                 idle: 0,
             }),
             queued: Notify::new(),
+            drain_kills: DrainKills::default(),
         });
         let mut slots = JoinSet::new();
         for index in indices {
@@ -390,30 +441,44 @@ impl IsolatedPool {
     /// their sessions (their tasks take the crash path), and the slots get
     /// 30 s more before they are aborted. The stop and the drain deadline
     /// are those of the board, so every pool of the worker stops with them.
+    /// The report names the tasks whose children the deadline killed.
     pub async fn stop(mut self, drain_timeout: Duration) -> PoolStopReport {
         self.shared.board.begin_stop();
         self.shared.answer_waiting(NotRunCause::PoolStopping);
-        stop_slots(&mut self.slots, &self.shared.board, drain_timeout).await
+        stop_slots(
+            &mut self.slots,
+            &self.shared.board,
+            &self.shared.drain_kills,
+            drain_timeout,
+        )
+        .await
     }
 }
 
 /// Wait for the slot tasks of a pool to end within the drain timeout; then
-/// pass the drain deadline, wait 30 s more, and abort what is left.
+/// pass the drain deadline, wait 30 s more, and abort what is left. The
+/// report takes the tasks that the slots noted in `kills`.
 pub(super) async fn stop_slots(
     slots: &mut JoinSet<()>,
     board: &PoolBoard,
+    kills: &DrainKills,
     drain_timeout: Duration,
 ) -> PoolStopReport {
-    if join_all(slots, drain_timeout).await {
-        return PoolStopReport::Drained;
-    }
-    board.pass_drain_deadline();
-    if join_all(slots, AFTER_DRAIN_KILL_WAIT).await {
-        return PoolStopReport::KilledAtDrainDeadline;
-    }
-    slots.abort_all();
-    let _ = join_all(slots, AFTER_DRAIN_KILL_WAIT).await;
-    PoolStopReport::AbortedAfterDrain
+    let ended = match join_all(slots, drain_timeout).await {
+        true => SlotsEnded::InDrain,
+        false => {
+            board.pass_drain_deadline();
+            match join_all(slots, AFTER_DRAIN_KILL_WAIT).await {
+                true => SlotsEnded::AfterKills,
+                false => {
+                    slots.abort_all();
+                    let _ = join_all(slots, AFTER_DRAIN_KILL_WAIT).await;
+                    SlotsEnded::Aborted
+                }
+            }
+        }
+    };
+    PoolStopReport::of(ended, kills.take())
 }
 
 /// Wait up to `bound` for every slot task. A panic of a slot task is a
