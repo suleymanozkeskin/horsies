@@ -20,6 +20,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
@@ -82,6 +83,21 @@ SOURCE_OPTIONS = '{"timeout_ms":5}'
 terminalization_schema = terminalization_schema_fixture(
     'task_history_it_rerun'
 )
+
+
+@pytest_asyncio.fixture()
+async def python_family(terminalization_schema: HistorySchema) -> None:
+    """The family row that the install of a Python broker records. The
+    rerun runs on the core, which writes only into a database of its own
+    family; this module's schema comes from the baseline SQL, which records
+    no family."""
+    async with terminalization_schema.engine.begin() as connection:
+        _ = await connection.execute(
+            text(
+                'INSERT INTO horsies_client_family (only_row, family, recorded_at) '
+                "VALUES (TRUE, 'PYTHON', now())"
+            )
+        )
 
 
 def policy(
@@ -163,6 +179,7 @@ async def history_row_bytes(
     ).one()
 
 
+@pytest.mark.usefixtures('python_family')
 class TestRerunEndToEnd:
     @pytest.mark.asyncio
     async def test_failed_task_reruns_by_the_provenance_table(
@@ -367,6 +384,7 @@ class TestRerunEndToEnd:
             assert row.input == SOURCE_INPUT
 
 
+@pytest.mark.usefixtures('python_family')
 class TestTypedRefusals:
     @pytest.mark.asyncio
     async def test_an_invalid_stored_execution_is_input_corrupt(
@@ -583,6 +601,7 @@ class TestTypedRefusals:
             assert tasks_after == tasks_before
 
 
+@pytest.mark.usefixtures('python_family')
 class TestKeyedRerun:
     @pytest.mark.asyncio
     async def test_replay_returns_the_committed_rerun(
