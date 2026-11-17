@@ -1409,9 +1409,10 @@ impl CoreHandle {
     /// (`PostgresBroker::ping_workers`, on the process listener):
     /// `WorkerPongsRecord`, or `BrokerFailure` with `INVALID_INPUT`,
     /// `LISTENER_DISABLED` (an `ASSUME_INITIALIZED` handle has no listener)
-    /// or `WORKER_PING_FAILED`. The arguments follow Python's rules
-    /// (`ping_request`); a refused argument answers in a future that is
-    /// already done, before any core call. Sends one NOTIFY; writes no row.
+    /// or `WORKER_PING_FAILED`. The arguments and the handle's listener follow
+    /// Python's rules (`ping_request`); a refused argument, or a handle with
+    /// no listener, answers in a future that is already done, before any
+    /// core call or connect. Sends one NOTIFY; writes no row.
     /// Awaitable only: the sync facade of `Horsies` runs the async method
     /// on the broker's loop runner. A cancelled await drops the wait and the
     /// reply subscription.
@@ -1423,10 +1424,12 @@ impl CoreHandle {
         timeout_seconds: &Bound<'_, PyAny>,
         min_responses: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let request = match ping_request(target_worker_id, timeout_seconds, min_responses)? {
-            Ok(request) => request,
-            Err(refused) => return done_future(py, refused),
-        };
+        let listener = self.connection().lazy_handle().listener();
+        let request =
+            match ping_request(target_worker_id, timeout_seconds, min_responses, listener)? {
+                Ok(request) => request,
+                Err(refused) => return done_future(py, refused),
+            };
         let core = checked_core(py)?;
         call_async(
             py,
