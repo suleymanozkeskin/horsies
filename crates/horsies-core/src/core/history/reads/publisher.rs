@@ -2,7 +2,7 @@
 //!
 //! The readers are rendered in the database by
 //! `horsies_publish_history_readers()`
-//! (`horsies/core/baseline/sql/0008_history_maintenance_functions.sql`), the
+//! (`crates/horsies-core/baseline/0008_history_maintenance_functions.sql`), the
 //! one renderer of every client. One call, in the caller's transaction,
 //! rewrites the manifest table from the leaf catalog, replaces the four
 //! readers and stamps each with the manifest it was rendered from. A call on
@@ -10,7 +10,7 @@
 //!
 //! The manifest table, not the reader source, answers `references_leaf`.
 //!
-//! Python: `horsies/core/history/reads/publisher.py`.
+//! Python: `python/horsies/core/history/reads/publisher.py`.
 
 use sqlx::{FromRow, PgConnection};
 

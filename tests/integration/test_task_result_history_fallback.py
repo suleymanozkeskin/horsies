@@ -202,11 +202,11 @@ class TestHistoryFallback:
             await broker.close_async()
 
     @pytest.mark.asyncio
-    async def test_unpublished_staged_function_keeps_old_semantics(
+    async def test_an_id_held_nowhere_is_absent(
         self, make_database: MakeDatabase
     ) -> None:
-        """A pre-coverage database has no history to consult: absent
-        means absent, exactly as before."""
+        """An id that neither the live table nor history holds: the readers
+        that the install publishes answer absent, and the result is Ok(None)."""
         url = await make_database()
         broker = PostgresBroker(
             PostgresConfig(database_url=SecretStr(url))

@@ -1,6 +1,6 @@
 """Workflow resume, before ``horsies_workflow_resume``.
 
-``resume_workflow`` (``horsies/core/workflows/lifecycle.py``) sent, in one
+``resume_workflow`` (``python/horsies/core/workflows/lifecycle.py``) sent, in one
 session transaction: the root PAUSED to RUNNING; on no row, the existence
 read; else, for the root, the re-evaluation of each PENDING node
 (``try_make_ready_and_enqueue``) and the enqueue of each READY node

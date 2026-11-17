@@ -7,11 +7,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    broker, node, node_status, ok, registry_of, required, seed_node, seed_node_task, seed_workflow,
-    spec, task_node, workflow, workflow_status, IsolatedDatabase, LiveStatus, NodeSeed, ParentLink,
-    WorkflowSeed, WORKER,
+    node, node_status, ok, registry_of, required, seed_node, seed_node_task, seed_workflow, spec,
+    start_claimed_task, task_node, workflow, workflow_status, IsolatedDatabase, LiveStatus,
+    NodeSeed, ParentLink, WorkflowSeed,
 };
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::{TaskError, WorkflowSpec, WorkflowSpecRegistry};
 use crate::workflow_engine::recovery::{recover_stuck_workflows, RecoveryReport};
@@ -21,11 +20,9 @@ const LIMIT: u32 = 3;
 
 async fn pass(pool: &PgPool, registry: &WorkflowSpecRegistry) -> RecoveryReport {
     recover_stuck_workflows(
-        pool,
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         registry,
-        0,
         LIMIT,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
@@ -361,11 +358,13 @@ async fn a_cancelled_or_failed_child_fails_its_parent_node() {
 }
 
 /// `test_orphaned_workflow_task_repro.py::test_workflow_check_failed_disabled_leaves_orphan_claimed`:
-/// with self-heal off, a claimed workflow task with no runnable node is
-/// neither cancelled nor run.
+/// a claimed workflow task with no runnable node is not run: the start of
+/// the child host misses with `NODE_NOT_LINKED` and writes nothing, so the
+/// task stays CLAIMED. With orphan self-heal off the outcome writer then
+/// writes nothing either
+/// (`worker/executor/slots/settle_tests.rs::a_task_whose_node_is_not_linked_stays_claimed_when_the_self_heal_is_off`).
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #921"]
 async fn an_orphan_stays_claimed_when_self_heal_is_off() {
     let db = IsolatedDatabase::create().await;
     let task_id = Uuid::new_v4();
@@ -381,18 +380,14 @@ async fn an_orphan_stays_claimed_when_self_heal_is_off() {
     )
     .await;
 
-    let _outcome = crate::worker::execution::confirm_ownership_and_set_running(
-        &broker(&db.pool),
-        task_id,
-        WORKER,
-        4242,
-        "port-host",
-        true,
-        claimed_at,
-        false,
-    )
-    .await;
+    let outcome = start_claimed_task(&db.pool, task_id, claimed_at).await;
 
+    assert_eq!(
+        outcome,
+        crate::broker::claims::StartOutcome::Missed(
+            crate::broker::claims::StartMiss::NodeNotLinked
+        )
+    );
     let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(&db.pool)

@@ -8,7 +8,6 @@ use crate::core::history::archive::attempts::{decode_attempt_snapshot, AttemptRe
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::TASK_DETAIL_FUNCTION;
-use crate::core::history::reads::result::FUNCTION_PUBLISHED_SQL;
 use crate::core::types::status::TaskStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,11 +160,6 @@ pub(crate) fn task_detail_sql() -> String {
 /// monitoring task detail and the rerun read call the same function.
 pub(crate) const TASK_ABSENCE_REASON_SQL: &str = "SELECT horsies_task_absence_reason($1)";
 
-/// The `regprocedure` text of the staged detail function.
-pub(crate) fn task_detail_function_signature() -> String {
-    format!("{TASK_DETAIL_FUNCTION}(uuid)")
-}
-
 pub async fn read_task_detail(
     connection: &mut PgConnection,
     task_id: Uuid,
@@ -277,11 +271,4 @@ async fn classify_absence(
         .fetch_one(connection)
         .await?;
     TaskAbsenceReason::parse(&reason)
-}
-
-pub async fn staged_detail_published(connection: &mut PgConnection) -> Result<bool, HistoryError> {
-    Ok(sqlx::query_scalar(FUNCTION_PUBLISHED_SQL)
-        .bind(task_detail_function_signature())
-        .fetch_one(connection)
-        .await?)
 }

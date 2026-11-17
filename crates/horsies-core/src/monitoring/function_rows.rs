@@ -1,27 +1,39 @@
-//! The monitoring reads that call the baseline functions (`0007`):
-//! `horsies_monitoring_task_list`, `horsies_monitoring_task_facets` and
-//! `horsies_monitoring_task_detail`. The statements, their typed parameters,
+//! The monitoring reads that call the baseline functions (`0007`): the
+//! task list, facets, detail, status counts and breakdown
+//! (`horsies_monitoring_task_*`), the workflow names, runs, run and node
+//! (`horsies_monitoring_workflow_*`) and the schedules
+//! (`horsies_monitoring_schedules`). The statements, their typed parameters,
 //! and the decoding of their rows into the monitoring models.
 //!
 //! The functions own the SQL: filters, sort, page bounds, totals, the facet
-//! caps, the detail snapshot and the absence rule. The client passes typed
-//! values and reads plain rows.
+//! caps, the list bounds, the snapshot and the absence rule. The client
+//! passes typed values and reads plain rows.
+
+use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::broker::core_rows::{column, RowDecodeError};
+use crate::broker::task_lists::{ListEnd, ListRow};
 use crate::core::history::archive::attempts::{
     decode_attempt_snapshot, decode_live_attempt_snapshot, AttemptRecord,
 };
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
 use crate::core::history::reads::aggregates::plan_rows_from_explain_text;
+use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::task::error::{ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode};
+use crate::core::task::result::TaskResult;
 use crate::core::types::status::TaskStatus;
 use crate::db::{ParameterType, Row, TypedStatement};
 
-use super::models::{ErrorCategory, LeafTaskInfo, TaskAttemptInfo, TaskDetail, TaskSummary};
-use super::queries::{normalize_optional_text, span_s};
+use super::models::{
+    Breakdown, BreakdownCounts, BreakdownGroup, ErrorCategory, GroupRow, LeafTaskInfo,
+    ScheduleStateInfo, StatusCount, TaskAttemptInfo, TaskDetail, TaskDetailNotFound,
+    TaskDetailRead, TaskSummary, WorkflowEdge, WorkflowNodeInfo, WorkflowRunDetail,
+    WorkflowRunSummary, WorkflowTaskDetail,
+};
+use super::queries::{elapsed_s, normalize_optional_text, span_s, TaskGroupBy};
 
 /// One page of the task list. Parameters in order: window lower and upper
 /// bound, statuses, task names, queue names, worker ids, error codes, error
@@ -73,14 +85,15 @@ pub(super) static MONITORING_TASK_FACETS: TypedStatement = TypedStatement::new(
     ],
 );
 
-/// One task with its attempts and workflow link. Parameters: task id, with
-/// result, with attempts.
+/// One task with its attempts and workflow link, or the reason it is
+/// absent. Parameters: task id, with result, with attempts.
 pub(super) static MONITORING_TASK_DETAIL: TypedStatement = TypedStatement::new(
     "monitoring_task_detail",
     "SELECT location, task_id, task_name, queue_name, priority, status, is_workflow_task,
             retry_count, max_retries, enqueued_at, started_at, good_until, worker_hostname,
             terminal_at, error_code, final_failed_reason, attempt_archive_version,
-            attempt_snapshot, attempt_snapshot_digest, workflow_id, workflow_task_index
+            attempt_snapshot, attempt_snapshot_digest, workflow_id, workflow_task_index,
+            absence_reason
      FROM horsies_monitoring_task_detail($1, $2, $3)",
     &[
         ParameterType::Uuid,
@@ -89,12 +102,118 @@ pub(super) static MONITORING_TASK_DETAIL: TypedStatement = TypedStatement::new(
     ],
 );
 
-/// Whether the detail function and the published reader it calls exist.
-pub(super) static DETAIL_FUNCTIONS_PUBLISHED: TypedStatement = TypedStatement::new(
-    "monitoring_detail_functions_published",
-    "SELECT to_regprocedure('horsies_monitoring_task_detail(uuid,boolean,boolean)') IS NOT NULL
-                AS detail_function,
-            to_regprocedure('horsies_task_detail_staged(uuid)') IS NOT NULL AS staged_reader",
+/// The count of each task status. Parameters in order: window lower and
+/// upper bound, task names, queue names, worker ids, error codes, error
+/// categories, retried only, the built-in codes and their categories. Rows
+/// come one per status, in the fixed status order.
+pub(super) static MONITORING_TASK_STATS: TypedStatement = TypedStatement::new(
+    "monitoring_task_stats",
+    "SELECT row_position, status, task_count
+     FROM horsies_monitoring_task_stats($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     ORDER BY row_position",
+    &[
+        ParameterType::Timestamptz,
+        ParameterType::Timestamptz,
+        ParameterType::TextArray,
+        ParameterType::TextArray,
+        ParameterType::TextArray,
+        ParameterType::TextArray,
+        ParameterType::TextArray,
+        ParameterType::Bool,
+        ParameterType::TextArray,
+        ParameterType::TextArray,
+    ],
+);
+
+/// The task counts per group and their total. Parameters in order: window
+/// lower and upper bound, group column (`worker`, `task_name` or `queue`),
+/// statuses, task names, queue names, worker ids, error codes, error
+/// categories, retried only, the built-in codes and their categories, the
+/// group limit. Rows come as the `TOTAL` row, then the `GROUP` rows in
+/// final order.
+pub(super) static MONITORING_TASK_BREAKDOWN: TypedStatement = TypedStatement::new(
+    "monitoring_task_breakdown",
+    "SELECT row_kind, row_position, group_kind, group_value, group_count, total, pending,
+            claimed, running, completed, failed, cancelled, expired, retried
+     FROM horsies_monitoring_task_breakdown(
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+     )
+     ORDER BY row_position",
+    &[
+        ParameterType::Timestamptz,
+        ParameterType::Timestamptz,
+        ParameterType::Text,
+        ParameterType::TextArray,
+        ParameterType::TextArray,
+        ParameterType::TextArray,
+        ParameterType::TextArray,
+        ParameterType::TextArray,
+        ParameterType::TextArray,
+        ParameterType::Bool,
+        ParameterType::TextArray,
+        ParameterType::TextArray,
+        ParameterType::Int4,
+    ],
+);
+
+/// The names of the root runs, then the `LIST_END` row.
+pub(super) static MONITORING_WORKFLOW_NAMES: TypedStatement = TypedStatement::new(
+    "monitoring_workflow_names",
+    "SELECT row_kind, row_position, workflow_name, list_state, row_bound
+     FROM horsies_monitoring_workflow_names()
+     ORDER BY row_position NULLS LAST",
+    &[],
+);
+
+/// The newest root runs. Parameters in order: name and status (each `NULL`
+/// for no filter), limit.
+pub(super) static MONITORING_WORKFLOW_RUNS: TypedStatement = TypedStatement::new(
+    "monitoring_workflow_runs",
+    "SELECT row_position, workflow_id, workflow_name, definition_key, status, created_at,
+            completed_at
+     FROM horsies_monitoring_workflow_runs($1, $2, $3)
+     ORDER BY row_position",
+    &[
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Int4,
+    ],
+);
+
+/// One run: the `RUN` row, then its `NODE` rows in task index order; or one
+/// `ABSENT` row. Parameter: the run id.
+pub(super) static MONITORING_WORKFLOW_RUN: TypedStatement = TypedStatement::new(
+    "monitoring_workflow_run",
+    "SELECT row_kind, row_position, workflow_id, workflow_name, definition_key, status,
+            created_at, started_at, completed_at, task_index, node_id, task_name, dependencies,
+            allow_failed_deps, is_subworkflow, sub_workflow_id, child_total, child_failed
+     FROM horsies_monitoring_workflow_run($1)
+     ORDER BY row_position NULLS FIRST",
+    &[ParameterType::Uuid],
+);
+
+/// One node with its backing task: one `NODE` row (the node columns
+/// `node_*`, then the columns of the task detail under their own names), or
+/// one `ABSENT` row. Parameters: the run id, the task index.
+pub(super) static MONITORING_WORKFLOW_NODE: TypedStatement = TypedStatement::new(
+    "monitoring_workflow_node",
+    "SELECT row_kind, node_task_index, node_id, node_task_name, node_status,
+            node_is_subworkflow, node_result, location, task_id, task_name, queue_name,
+            priority, status, is_workflow_task, retry_count, max_retries, enqueued_at,
+            started_at, good_until, worker_hostname, terminal_at, error_code,
+            final_failed_reason, attempt_archive_version, attempt_snapshot,
+            attempt_snapshot_digest, workflow_id, workflow_task_index, absence_reason
+     FROM horsies_monitoring_workflow_node($1, $2)",
+    &[ParameterType::Uuid, ParameterType::Int4],
+);
+
+/// Every schedule state, soonest next run first, then the `LIST_END` row.
+pub(super) static MONITORING_SCHEDULES: TypedStatement = TypedStatement::new(
+    "monitoring_schedules",
+    "SELECT row_kind, row_position, schedule_name, last_run_at, next_run_at, last_task_id,
+            run_count, updated_at, list_state, row_bound
+     FROM horsies_monitoring_schedules()
+     ORDER BY row_position NULLS LAST",
     &[],
 );
 
@@ -343,14 +462,6 @@ pub(super) fn page_from_rows(
     Ok((totals, summaries))
 }
 
-/// The answer of the detail function.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) enum DetailRead {
-    Found(TaskDetail),
-    /// Neither the live table nor the history holds the task.
-    Absent,
-}
-
 /// What a detail row breaks: a row shape defect, or stored history data
 /// that does not decode (a status that is not a task status, an attempt
 /// snapshot that fails its check).
@@ -366,14 +477,16 @@ impl From<RowDecodeError> for DetailRowError {
     }
 }
 
-/// Reads the one row of the detail function.
+/// Reads the one row of the detail function: the task, or the reason the
+/// function gives for its absence. A reason the function does not define is
+/// a row shape defect, as a location it does not define is.
 pub(super) fn task_detail_row(
     row: &Row,
     statement: &TypedStatement,
-) -> Result<DetailRead, DetailRowError> {
+) -> Result<TaskDetailRead, DetailRowError> {
     let place: String = column(row, statement, "location")?;
     let location = match place.as_str() {
-        "ABSENT" => return Ok(DetailRead::Absent),
+        "ABSENT" => return Ok(TaskDetailRead::NotFound(absent_task(row, statement)?)),
         other => location(statement, other)?,
     };
     let task_id: Uuid = column(row, statement, "task_id")?;
@@ -461,7 +574,7 @@ pub(super) fn task_detail_row(
         worker_hostname: column(row, statement, "worker_hostname")?,
         good_until: column(row, statement, "good_until")?,
     };
-    Ok(DetailRead::Found(TaskDetail {
+    Ok(TaskDetailRead::Found(TaskDetail {
         leaf,
         task_name: column(row, statement, "task_name")?,
         queue_name: column(row, statement, "queue_name")?,
@@ -473,6 +586,19 @@ pub(super) fn task_detail_row(
         workflow_id: column(row, statement, "workflow_id")?,
         workflow_task_index: column(row, statement, "workflow_task_index")?,
     }))
+}
+
+/// The `ABSENT` row of the detail function: the task id and the reason
+/// that `horsies_task_absence_reason` classifies in the same snapshot.
+fn absent_task(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<TaskDetailNotFound, RowDecodeError> {
+    let task_id: Uuid = column(row, statement, "task_id")?;
+    let reason: String = column(row, statement, "absence_reason")?;
+    let reason =
+        TaskAbsenceReason::parse(&reason).map_err(|error| shape(statement, error.to_string()))?;
+    Ok(TaskDetailNotFound { task_id, reason })
 }
 
 fn attempt_info(record: &AttemptRecord) -> TaskAttemptInfo {
@@ -489,22 +615,427 @@ fn attempt_info(record: &AttemptRecord) -> TaskAttemptInfo {
     }
 }
 
-/// A detail call that met an undefined function: whether the database
-/// lacks only the published reader (the detail answers "not found", as
-/// before the first coverage pass) or the detail function itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DetailPublication {
-    /// The detail function exists and the published reader does not.
-    ReaderNotPublished,
-    /// Anything else: the refusal stands.
-    RefusalStands,
+/// The status counts of the stats function: one per task status, in the
+/// fixed status order. Errors: a column that does not decode, or rows that
+/// are not the seven statuses in that order.
+pub(super) fn status_counts(
+    rows: &[Row],
+    statement: &TypedStatement,
+) -> Result<Vec<StatusCount>, RowDecodeError> {
+    let counts = rows
+        .iter()
+        .map(|row| {
+            Ok(StatusCount {
+                status: column(row, statement, "status")?,
+                count: column(row, statement, "task_count")?,
+            })
+        })
+        .collect::<Result<Vec<_>, RowDecodeError>>()?;
+    let answered: Vec<&str> = counts.iter().map(|count| count.status.as_str()).collect();
+    let expected: Vec<String> = TaskStatus::ALL.iter().map(ToString::to_string).collect();
+    match answered == expected {
+        true => Ok(counts),
+        false => Err(shape(
+            statement,
+            format!("the stats function answered the statuses {answered:?}"),
+        )),
+    }
 }
 
-pub(super) fn detail_publication(detail_function: bool, staged_reader: bool) -> DetailPublication {
-    match (detail_function, staged_reader) {
-        (true, false) => DetailPublication::ReaderNotPublished,
-        (true, true) | (false, _) => DetailPublication::RefusalStands,
+/// One row of the breakdown function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum BreakdownRow {
+    /// The counts of every group, and the number of groups.
+    Total {
+        counts: BreakdownCounts,
+        group_count: i64,
+    },
+    /// One group.
+    Group(GroupRow),
+}
+
+fn breakdown_counts(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<BreakdownCounts, RowDecodeError> {
+    Ok(BreakdownCounts {
+        total: column(row, statement, "total")?,
+        pending: column(row, statement, "pending")?,
+        claimed: column(row, statement, "claimed")?,
+        running: column(row, statement, "running")?,
+        completed: column(row, statement, "completed")?,
+        failed: column(row, statement, "failed")?,
+        cancelled: column(row, statement, "cancelled")?,
+        expired: column(row, statement, "expired")?,
+        retried: column(row, statement, "retried")?,
+    })
+}
+
+/// Reads one row of the breakdown function. A `GROUP` row is a stored value
+/// (`VALUE` with its value) or the unclaimed tasks (`UNCLAIMED`, no value).
+pub(super) fn breakdown_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<BreakdownRow, RowDecodeError> {
+    let kind: String = column(row, statement, "row_kind")?;
+    match kind.as_str() {
+        "TOTAL" => Ok(BreakdownRow::Total {
+            counts: breakdown_counts(row, statement)?,
+            group_count: column(row, statement, "group_count")?,
+        }),
+        "GROUP" => {
+            let group_kind: String = column(row, statement, "group_kind")?;
+            let group_value: Option<String> = column(row, statement, "group_value")?;
+            let group = match (group_kind.as_str(), group_value) {
+                ("VALUE", Some(value)) => BreakdownGroup::Value { value },
+                ("UNCLAIMED", None) => BreakdownGroup::Unclaimed,
+                ("VALUE", None) => {
+                    return Err(shape(statement, "a VALUE group has no value".to_owned()))
+                }
+                ("UNCLAIMED", Some(value)) => {
+                    return Err(shape(
+                        statement,
+                        format!("the UNCLAIMED group has the value {value:?}"),
+                    ))
+                }
+                (other, _) => {
+                    return Err(shape(statement, format!("unknown group_kind {other:?}")))
+                }
+            };
+            Ok(BreakdownRow::Group(GroupRow {
+                counts: breakdown_counts(row, statement)?,
+                group,
+            }))
+        }
+        other => Err(shape(statement, format!("unknown row_kind {other:?}"))),
     }
+}
+
+/// The breakdown from the rows of the function, in their order: the one
+/// `TOTAL` row first, then the `GROUP` rows in final order. Pure.
+pub(super) fn breakdown_from_rows(
+    group_by: TaskGroupBy,
+    rows: Vec<BreakdownRow>,
+) -> Result<Breakdown, String> {
+    let mut rows = rows.into_iter();
+    let (total, group_count) = match rows.next() {
+        Some(BreakdownRow::Total {
+            counts,
+            group_count,
+        }) => (counts, group_count),
+        Some(BreakdownRow::Group(_)) => {
+            return Err("the breakdown answered a GROUP row before its TOTAL row".to_owned())
+        }
+        None => return Err("the breakdown answered no TOTAL row".to_owned()),
+    };
+    let groups = rows
+        .map(|row| match row {
+            BreakdownRow::Group(group) => Ok(group),
+            BreakdownRow::Total { .. } => {
+                Err("the breakdown answered a second TOTAL row".to_owned())
+            }
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(Breakdown {
+        group_by: group_by.as_str().to_owned(),
+        groups,
+        total,
+        group_count,
+    })
+}
+
+/// Reads one row of a bounded list function: an item row of `item_kind`
+/// through `item`, or the `LIST_END` row.
+fn bounded_list_row<T>(
+    row: &Row,
+    statement: &TypedStatement,
+    item_kind: &str,
+    item: fn(&Row, &TypedStatement) -> Result<T, RowDecodeError>,
+) -> Result<ListRow<T>, RowDecodeError> {
+    let kind: String = column(row, statement, "row_kind")?;
+    match kind.as_str() {
+        "LIST_END" => {
+            let state: String = column(row, statement, "list_state")?;
+            match state.as_str() {
+                "COMPLETE" => Ok(ListRow::End(ListEnd::Complete)),
+                "TRUNCATED" => {
+                    let bound: i32 = column(row, statement, "row_bound")?;
+                    let bound = usize::try_from(bound)
+                        .map_err(|_| shape(statement, format!("row_bound {bound} is negative")))?;
+                    Ok(ListRow::End(ListEnd::Truncated { bound }))
+                }
+                other => Err(shape(statement, format!("unknown list_state {other:?}"))),
+            }
+        }
+        other if other == item_kind => Ok(ListRow::Task(item(row, statement)?)),
+        other => Err(shape(statement, format!("unknown row_kind {other:?}"))),
+    }
+}
+
+fn workflow_name(row: &Row, statement: &TypedStatement) -> Result<String, RowDecodeError> {
+    column(row, statement, "workflow_name")
+}
+
+/// Reads one row of the workflow names function.
+pub(super) fn workflow_name_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<ListRow<String>, RowDecodeError> {
+    bounded_list_row(row, statement, "NAME", workflow_name)
+}
+
+fn schedule_state(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<ScheduleStateInfo, RowDecodeError> {
+    Ok(ScheduleStateInfo {
+        schedule_name: column(row, statement, "schedule_name")?,
+        last_run_at: column(row, statement, "last_run_at")?,
+        next_run_at: column(row, statement, "next_run_at")?,
+        last_task_id: column(row, statement, "last_task_id")?,
+        run_count: column(row, statement, "run_count")?,
+        updated_at: column(row, statement, "updated_at")?,
+    })
+}
+
+/// Reads one row of the schedules function.
+pub(super) fn schedule_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<ListRow<ScheduleStateInfo>, RowDecodeError> {
+    bounded_list_row(row, statement, "SCHEDULE", schedule_state)
+}
+
+/// The summary of a run, from a row of the runs function or the `RUN` row of
+/// the run function. The wall time of an open run counts up to now.
+fn run_summary(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<WorkflowRunSummary, RowDecodeError> {
+    let created_at: DateTime<Utc> = column(row, statement, "created_at")?;
+    let completed_at: Option<DateTime<Utc>> = column(row, statement, "completed_at")?;
+    Ok(WorkflowRunSummary {
+        id: column(row, statement, "workflow_id")?,
+        name: column(row, statement, "workflow_name")?,
+        definition_key: column(row, statement, "definition_key")?,
+        status: column(row, statement, "status")?,
+        created_at: Some(created_at),
+        completed_at,
+        wall_s: elapsed_s(Some(created_at), completed_at),
+    })
+}
+
+/// The runs of the runs function, in their order.
+pub(super) fn workflow_runs(
+    rows: &[Row],
+    statement: &TypedStatement,
+) -> Result<Vec<WorkflowRunSummary>, RowDecodeError> {
+    rows.iter().map(|row| run_summary(row, statement)).collect()
+}
+
+/// The execution time of a node: a RUNNING node counts up to now; a finished
+/// node with a completion time is closed; any other node has none.
+fn node_exec_s(
+    status: &str,
+    started_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
+) -> Option<i64> {
+    match (status, completed_at) {
+        ("RUNNING", _) => elapsed_s(started_at, None),
+        ("COMPLETED" | "FAILED" | "SKIPPED" | "CANCELLED", Some(completed_at)) => {
+            elapsed_s(started_at, Some(completed_at))
+        }
+        _ => None,
+    }
+}
+
+/// One `NODE` row of the run function, and the indexes the node depends on.
+struct RunNode {
+    info: WorkflowNodeInfo,
+    dependencies: Vec<i32>,
+}
+
+fn run_node(row: &Row, statement: &TypedStatement) -> Result<RunNode, RowDecodeError> {
+    let kind: String = column(row, statement, "row_kind")?;
+    match kind.as_str() {
+        "NODE" => {}
+        other => {
+            return Err(shape(
+                statement,
+                format!("a row of kind {other:?} follows the RUN row"),
+            ))
+        }
+    }
+    let node_status: String = column(row, statement, "status")?;
+    let started_at: Option<DateTime<Utc>> = column(row, statement, "started_at")?;
+    let completed_at: Option<DateTime<Utc>> = column(row, statement, "completed_at")?;
+    let exec_s = node_exec_s(&node_status, started_at, completed_at);
+    Ok(RunNode {
+        info: WorkflowNodeInfo {
+            task_index: column(row, statement, "task_index")?,
+            node_id: column(row, statement, "node_id")?,
+            task_name: column(row, statement, "task_name")?,
+            node_status,
+            is_subworkflow: column(row, statement, "is_subworkflow")?,
+            sub_workflow_id: column(row, statement, "sub_workflow_id")?,
+            allow_failed_deps: column(row, statement, "allow_failed_deps")?,
+            started_at,
+            completed_at,
+            exec_s,
+            child_total: column(row, statement, "child_total")?,
+            child_failed: column(row, statement, "child_failed")?,
+        },
+        dependencies: column(row, statement, "dependencies")?,
+    })
+}
+
+/// The run, its nodes in task index order, its edges and its failed nodes.
+/// An edge joins a dependency to the node that names it; a dependency on an
+/// index that the run does not have makes no edge. Pure.
+fn run_detail(run: WorkflowRunSummary, nodes: Vec<RunNode>) -> WorkflowRunDetail {
+    let known: HashSet<i32> = nodes.iter().map(|node| node.info.task_index).collect();
+    let mut edges = Vec::new();
+    for node in &nodes {
+        for dependency in node
+            .dependencies
+            .iter()
+            .filter(|dependency| known.contains(*dependency))
+        {
+            edges.push(WorkflowEdge {
+                from_index: *dependency,
+                to_index: node.info.task_index,
+            });
+        }
+    }
+    let nodes: Vec<WorkflowNodeInfo> = nodes.into_iter().map(|node| node.info).collect();
+    let failed_indices: Vec<i32> = nodes
+        .iter()
+        .filter(|node| node.node_status == "FAILED")
+        .map(|node| node.task_index)
+        .collect();
+    WorkflowRunDetail {
+        run,
+        nodes,
+        edges,
+        failed_count: i64::try_from(failed_indices.len()).unwrap_or(i64::MAX),
+        failed_indices,
+    }
+}
+
+/// The answer of the run function.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum RunRead {
+    Found(WorkflowRunDetail),
+    /// No run has the id.
+    Absent,
+}
+
+/// Reads the rows of the run function: the `RUN` row and its `NODE` rows,
+/// or the one `ABSENT` row.
+pub(super) fn workflow_run(
+    rows: &[Row],
+    statement: &TypedStatement,
+) -> Result<RunRead, RowDecodeError> {
+    let Some((first, node_rows)) = rows.split_first() else {
+        return Err(shape(
+            statement,
+            "the run function answered no row".to_owned(),
+        ));
+    };
+    let kind: String = column(first, statement, "row_kind")?;
+    match (kind.as_str(), node_rows.is_empty()) {
+        ("ABSENT", true) => Ok(RunRead::Absent),
+        ("ABSENT", false) => Err(shape(statement, "a row follows the ABSENT row".to_owned())),
+        ("RUN", _) => {
+            let run = run_summary(first, statement)?;
+            let nodes = node_rows
+                .iter()
+                .map(|row| run_node(row, statement))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(RunRead::Found(run_detail(run, nodes)))
+        }
+        (other, _) => Err(shape(statement, format!("unknown row_kind {other:?}"))),
+    }
+}
+
+/// The error text of a node: the message of the error that its stored
+/// result holds. The node `error` column has no writer (the result holds
+/// the error). No result, a result with a value, and an error with no
+/// message give `None`. Errors: a result that does not decode, as the
+/// reason, naming the node.
+fn node_error_from_result(task_index: i32, result: Option<&str>) -> Result<Option<String>, String> {
+    let Some(text) = result else {
+        return Ok(None);
+    };
+    match serde_json::from_str::<TaskResult<serde_json::Value>>(text) {
+        Ok(TaskResult::Ok(_)) => Ok(None),
+        Ok(TaskResult::Err(error)) => Ok(normalize_optional_text(error.message.as_deref())),
+        Err(cause) => Err(format!(
+            "stored result of workflow node {task_index} does not decode: {cause}"
+        )),
+    }
+}
+
+/// The answer of the node function.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum NodeRead {
+    Found(WorkflowTaskDetail),
+    /// The run has no node at the index.
+    Absent,
+}
+
+/// Reads the one row of the node function.
+pub(super) fn workflow_node(
+    rows: &[Row],
+    statement: &TypedStatement,
+) -> Result<NodeRead, DetailRowError> {
+    let [row] = rows else {
+        return Err(DetailRowError::Row(shape(
+            statement,
+            format!("the node function answered {} rows", rows.len()),
+        )));
+    };
+    let kind: String = column(row, statement, "row_kind")?;
+    match kind.as_str() {
+        "ABSENT" => Ok(NodeRead::Absent),
+        "NODE" => node_detail(row, statement).map(NodeRead::Found),
+        other => Err(DetailRowError::Row(shape(
+            statement,
+            format!("unknown row_kind {other:?}"),
+        ))),
+    }
+}
+
+/// A `NODE` row: the node, its error, and its backing task with the task's
+/// attempts. A node with no backing task (a sub-workflow node, or a task
+/// node before its task exists: `location` is `NULL`) and a node whose task
+/// is in neither place (`ABSENT`) have no leaf and no attempt.
+fn node_detail(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<WorkflowTaskDetail, DetailRowError> {
+    let task_index: i32 = column(row, statement, "node_task_index")?;
+    let node_result: Option<String> = column(row, statement, "node_result")?;
+    let node_error = node_error_from_result(task_index, node_result.as_deref())
+        .map_err(DetailRowError::StoredData)?;
+    let location: Option<String> = column(row, statement, "location")?;
+    let (leaf, attempts) = match location {
+        None => (None, Vec::new()),
+        Some(_) => match task_detail_row(row, statement)? {
+            TaskDetailRead::Found(detail) => (Some(detail.leaf), detail.attempts),
+            TaskDetailRead::NotFound(_) => (None, Vec::new()),
+        },
+    };
+    Ok(WorkflowTaskDetail {
+        task_index,
+        node_id: column(row, statement, "node_id")?,
+        task_name: column(row, statement, "node_task_name")?,
+        node_status: column(row, statement, "node_status")?,
+        is_subworkflow: column(row, statement, "node_is_subworkflow")?,
+        node_error,
+        leaf,
+        attempts,
+    })
 }
 
 #[cfg(test)]
@@ -633,19 +1164,205 @@ mod tests {
         assert_eq!(unique.len(), taxonomy.codes.len());
     }
 
+    fn counts(total: i64) -> BreakdownCounts {
+        BreakdownCounts {
+            total,
+            pending: total,
+            claimed: 0,
+            running: 0,
+            completed: 0,
+            failed: 0,
+            cancelled: 0,
+            expired: 0,
+            retried: 0,
+        }
+    }
+
+    fn group(value: Option<&str>, total: i64) -> BreakdownRow {
+        BreakdownRow::Group(GroupRow {
+            counts: counts(total),
+            group: match value {
+                Some(value) => BreakdownGroup::Value {
+                    value: value.to_owned(),
+                },
+                None => BreakdownGroup::Unclaimed,
+            },
+        })
+    }
+
     #[test]
-    fn only_a_missing_reader_answers_not_found() {
+    fn the_breakdown_is_the_total_row_then_the_groups_in_their_order() {
+        let breakdown = breakdown_from_rows(
+            TaskGroupBy::Worker,
+            vec![
+                BreakdownRow::Total {
+                    counts: counts(5),
+                    group_count: 3,
+                },
+                group(Some("w1"), 3),
+                group(None, 2),
+            ],
+        )
+        .expect("rows in contract order");
+
+        assert_eq!(breakdown.group_by, "worker");
+        assert_eq!(breakdown.total, counts(5));
+        assert_eq!(breakdown.group_count, 3);
         assert_eq!(
-            detail_publication(true, false),
-            DetailPublication::ReaderNotPublished
+            breakdown
+                .groups
+                .iter()
+                .map(|row| row.group.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                BreakdownGroup::Value {
+                    value: "w1".to_owned()
+                },
+                BreakdownGroup::Unclaimed,
+            ]
+        );
+    }
+
+    #[test]
+    fn breakdown_rows_out_of_contract_are_refused() {
+        let total = || BreakdownRow::Total {
+            counts: counts(0),
+            group_count: 0,
+        };
+        assert!(breakdown_from_rows(TaskGroupBy::Queue, Vec::new()).is_err());
+        assert!(breakdown_from_rows(TaskGroupBy::Queue, vec![group(Some("q"), 1)]).is_err());
+        assert!(breakdown_from_rows(TaskGroupBy::Queue, vec![total(), total()]).is_err());
+    }
+
+    fn run() -> WorkflowRunSummary {
+        WorkflowRunSummary {
+            id: Uuid::nil(),
+            name: "flow".to_owned(),
+            definition_key: None,
+            status: "RUNNING".to_owned(),
+            created_at: None,
+            completed_at: None,
+            wall_s: None,
+        }
+    }
+
+    fn node(task_index: i32, status: &str, dependencies: Vec<i32>) -> RunNode {
+        RunNode {
+            info: WorkflowNodeInfo {
+                task_index,
+                node_id: None,
+                task_name: "t".to_owned(),
+                node_status: status.to_owned(),
+                is_subworkflow: false,
+                sub_workflow_id: None,
+                allow_failed_deps: false,
+                started_at: None,
+                completed_at: None,
+                exec_s: None,
+                child_total: None,
+                child_failed: None,
+            },
+            dependencies,
+        }
+    }
+
+    /// Python `TestGetWorkflowRun::test_nodes_ordered_and_edges_derived_from_dependencies`
+    /// and `::test_dependency_on_a_missing_index_is_dropped`, on the rows.
+    #[test]
+    fn edges_join_known_dependencies_and_failed_nodes_are_listed() {
+        let detail = run_detail(
+            run(),
+            vec![
+                node(0, "COMPLETED", vec![]),
+                node(1, "FAILED", vec![0]),
+                node(2, "FAILED", vec![0, 1, 99]),
+            ],
+        );
+
+        assert_eq!(
+            detail
+                .edges
+                .iter()
+                .map(|edge| (edge.from_index, edge.to_index))
+                .collect::<Vec<_>>(),
+            vec![(0, 1), (0, 2), (1, 2)]
+        );
+        assert_eq!(detail.failed_indices, vec![1, 2]);
+        assert_eq!(detail.failed_count, 2);
+        assert_eq!(
+            detail
+                .nodes
+                .iter()
+                .map(|node| node.task_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn a_node_runs_until_it_finishes_and_only_a_finished_node_is_closed() {
+        let started = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("valid time");
+        let completed = started + chrono::Duration::seconds(30);
+
+        assert!(node_exec_s("RUNNING", Some(started), None).is_some_and(|seconds| seconds > 30));
+        for status in ["COMPLETED", "FAILED", "SKIPPED", "CANCELLED"] {
+            assert_eq!(
+                node_exec_s(status, Some(started), Some(completed)),
+                Some(30),
+                "{status}"
+            );
+            assert_eq!(node_exec_s(status, Some(started), None), None, "{status}");
+        }
+        assert_eq!(
+            node_exec_s("ENQUEUED", Some(started), Some(completed)),
+            None
+        );
+    }
+
+    fn stored(result: &TaskResult<serde_json::Value>) -> String {
+        serde_json::to_string(result).expect("encode a stored result")
+    }
+
+    #[test]
+    fn a_failed_node_shows_the_message_of_its_stored_error() {
+        let failed = stored(&TaskResult::Err(
+            crate::core::task::error::TaskError::builtin(
+                OutcomeCode::UpstreamSkipped,
+                "node blew up",
+            ),
+        ));
+
+        assert_eq!(
+            node_error_from_result(0, Some(&failed)).expect("decodes"),
+            Some("node blew up".to_owned())
+        );
+    }
+
+    #[test]
+    fn no_result_a_value_and_a_blank_message_show_no_error() {
+        let value = stored(&TaskResult::Ok(serde_json::json!({"rows": 3})));
+        let blank = stored(&TaskResult::Err(
+            crate::core::task::error::TaskError::builtin(OutcomeCode::UpstreamSkipped, "  "),
+        ));
+
+        assert_eq!(node_error_from_result(0, None).expect("decodes"), None);
+        assert_eq!(
+            node_error_from_result(0, Some(&value)).expect("decodes"),
+            None
         );
         assert_eq!(
-            detail_publication(true, true),
-            DetailPublication::RefusalStands
+            node_error_from_result(0, Some(&blank)).expect("decodes"),
+            None
         );
-        assert_eq!(
-            detail_publication(false, false),
-            DetailPublication::RefusalStands
-        );
+    }
+
+    /// A stored result that does not decode is refused, naming the node; the
+    /// node read reports it as a broken history contract.
+    #[test]
+    fn a_stored_result_that_does_not_decode_is_refused_naming_the_node() {
+        let reason = node_error_from_result(4, Some("not json"))
+            .expect_err("a result that is not JSON is refused");
+
+        assert!(reason.contains("workflow node 4"), "{reason}");
     }
 }

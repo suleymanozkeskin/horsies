@@ -1,6 +1,6 @@
 """Workflow start, before ``horsies_workflow_start``.
 
-``start_workflow_async`` (``horsies/core/workflows/lifecycle.py``) sent, in
+``start_workflow_async`` (``python/horsies/core/workflows/lifecycle.py``) sent, in
 one session transaction: the top workflow row (``ON CONFLICT DO NOTHING``);
 on a conflict, the read of the stored name; else every node row in one
 bulk insert, the task-node roots ENQUEUED with their task ids; then, for

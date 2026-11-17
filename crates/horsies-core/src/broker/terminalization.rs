@@ -14,11 +14,14 @@
 //!   work that did not happen is what the row-per-transition contract exists
 //!   to prevent.
 //!
-//! Two forms run a command:
+//! Three forms run a command:
 //! - [`terminalize`] runs the statement alone on a core pool, in autocommit:
 //!   the statement is its own transaction and its locks end with it. The
 //!   checkout is reserved work ([`CheckoutClass::Reserved`]): a lifecycle
 //!   write never waits on the reserve gate.
+//! - [`terminalize_and_commit_if`] runs the statement in a transaction of
+//!   its own on a core pool, checked out as reserved work, and commits it
+//!   only when the caller's check accepts every outcome.
 //! - [`terminalize_in_tx`] runs the same SQL in the caller's sqlx
 //!   transaction. The functions never commit, so a coupled workflow-node
 //!   write belongs in the same transaction as the transition it proves.
@@ -26,14 +29,16 @@
 use sqlx::postgres::{PgArguments, PgRow};
 use sqlx::{Postgres, Transaction};
 
-use crate::broker::core_rows::StatementLog;
+use crate::broker::core_rows::{roll_back, StatementLog};
 use crate::core::lifecycle::operations::function_name_of;
 use crate::core::lifecycle::outcomes::{decode_outcome_pg_row, decode_outcome_row};
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome};
 use crate::core::types::status::TaskStatus;
 use crate::db::{
-    BoundStatement, CheckoutClass, CorePool, ParameterType, Row, StatementBound, TypedStatement,
+    BoundStatement, CheckoutClass, CorePool, IsolationLevel, NotSentCause, ParameterType, Row,
+    StatementBound, StatementFailure, TypedStatement,
 };
+use crate::log_targets::TERMINALIZATION_OUTCOME;
 
 use super::error::BrokerError;
 
@@ -253,12 +258,22 @@ fn status_texts(statuses: &[TaskStatus]) -> Vec<String> {
     statuses.iter().map(|status| status.to_string()).collect()
 }
 
-/// Bind the command's arguments to its statement and run it alone on `pool`.
+/// Where the statement of a command runs.
+enum StatementTarget<'t, 'c> {
+    /// Alone on the pool, in autocommit, on a connection checked out as
+    /// reserved work.
+    Pool(&'t CorePool),
+    /// In an open transaction on a core connection; the owner of the
+    /// transaction commits or rolls it back.
+    Transaction(&'t mut crate::db::Transaction<'c>),
+}
+
+/// Bind the command's arguments to its statement and run it on `target`.
 ///
-/// Reserved checkout; bounded by the connection's own timeouts. Errors:
+/// Bounded by the connection's own timeouts. Errors:
 /// [`BrokerError::Statement`].
 async fn run_command(
-    pool: &CorePool,
+    target: &mut StatementTarget<'_, '_>,
     log: StatementLog,
     command: &TerminalizationCommand,
 ) -> Result<Vec<Row>, BrokerError> {
@@ -270,7 +285,7 @@ async fn run_command(
             result_json,
         } => {
             let bound = statement.bind().value(task_id).value(&fence.worker_id);
-            run_bound(pool, log, bound.value(result_json).finish()).await
+            run_bound(target, log, bound.value(result_json).finish()).await
         }
         TerminalizationCommand::CompleteTaskFused {
             task_id,
@@ -279,7 +294,7 @@ async fn run_command(
         } => {
             let bound = statement.bind().value(task_id).value(&fence.worker_id);
             let bound = bound.value(&fence.claimed_at).value(result_json);
-            run_bound(pool, log, bound.finish()).await
+            run_bound(target, log, bound.finish()).await
         }
         TerminalizationCommand::FailLockedTask {
             task_id,
@@ -293,7 +308,7 @@ async fn run_command(
                 .value(result_json)
                 .value(error_code)
                 .value(failed_reason);
-            run_bound(pool, log, bound.finish()).await
+            run_bound(target, log, bound.finish()).await
         }
         TerminalizationCommand::FailStaleTask {
             task_id,
@@ -306,7 +321,7 @@ async fn run_command(
             let bound = statement.bind().value(task_id).value(stale_after_ms);
             let bound = bound.value(finalizing_stale_after_ms).value(result_json);
             run_bound(
-                pool,
+                target,
                 log,
                 bound.value(error_code).value(failed_reason).finish(),
             )
@@ -320,7 +335,7 @@ async fn run_command(
         } => {
             let bound = statement.bind().value(task_id).value(&fence.worker_id);
             run_bound(
-                pool,
+                target,
                 log,
                 bound.value(result_json).value(error_code).finish(),
             )
@@ -333,7 +348,7 @@ async fn run_command(
         } => {
             let batch_size = batch_size.get();
             let bound = statement.bind().value(&batch_size).value(result_json);
-            run_bound(pool, log, bound.value(error_code).finish()).await
+            run_bound(target, log, bound.value(error_code).finish()).await
         }
         TerminalizationCommand::CancelLockedTask {
             task_id,
@@ -342,7 +357,7 @@ async fn run_command(
         } => {
             let statuses = status_texts(permitted_source_statuses);
             run_bound(
-                pool,
+                target,
                 log,
                 statement.bind().value(task_id).value(&statuses).finish(),
             )
@@ -351,7 +366,7 @@ async fn run_command(
         TerminalizationCommand::CancelOwnedOrphan { task_id, fence }
         | TerminalizationCommand::AbandonOwnedNode { task_id, fence } => {
             let bound = statement.bind().value(task_id).value(&fence.worker_id);
-            run_bound(pool, log, bound.value(&fence.claimed_at).finish()).await
+            run_bound(target, log, bound.value(&fence.claimed_at).finish()).await
         }
         TerminalizationCommand::CancelOwnedNode {
             task_id,
@@ -362,40 +377,50 @@ async fn run_command(
             let bound = bound
                 .value(&fence.claimed_at)
                 .value(accepts_requeued_pending);
-            run_bound(pool, log, bound.finish()).await
+            run_bound(target, log, bound.finish()).await
         }
         TerminalizationCommand::CancelOrphanedTasks { batch_size } => {
             let batch_size = batch_size.get();
-            run_bound(pool, log, statement.bind().value(&batch_size).finish()).await
+            run_bound(target, log, statement.bind().value(&batch_size).finish()).await
         }
         TerminalizationCommand::AbandonOwnedNodes { fence }
         | TerminalizationCommand::CancelOwnedNodes { fence } => {
             let (task_ids, generations) = (fence.task_ids(), fence.generations());
             let worker_id = fence.worker_id();
             let bound = statement.bind().value(&task_ids).value(&generations);
-            run_bound(pool, log, bound.value(&worker_id).finish()).await
+            run_bound(target, log, bound.value(&worker_id).finish()).await
         }
         TerminalizationCommand::AbandonNodesOfPausedWorkflows { workflow_ids }
         | TerminalizationCommand::CancelNodesOfCancelledWorkflow { workflow_ids } => {
-            run_bound(pool, log, statement.bind().value(workflow_ids).finish()).await
+            run_bound(target, log, statement.bind().value(workflow_ids).finish()).await
         }
     }
 }
 
-/// Run one bound statement alone on `pool` as reserved work.
+/// Run one bound statement on `target`, bounded by the connection's own
+/// timeouts.
 async fn run_bound(
-    pool: &CorePool,
+    target: &mut StatementTarget<'_, '_>,
     log: StatementLog,
     bound: BoundStatement<'_>,
 ) -> Result<Vec<Row>, BrokerError> {
     log.log(bound.statement());
-    Ok(pool
-        .query(
-            CheckoutClass::Reserved,
-            &bound,
-            StatementBound::ConnectionTimeouts,
-        )
-        .await?)
+    let rows = match target {
+        StatementTarget::Pool(pool) => {
+            pool.query(
+                CheckoutClass::Reserved,
+                &bound,
+                StatementBound::ConnectionTimeouts,
+            )
+            .await?
+        }
+        StatementTarget::Transaction(transaction) => {
+            transaction
+                .query(&bound, StatementBound::ConnectionTimeouts)
+                .await?
+        }
+    };
+    Ok(rows)
 }
 
 /// The sqlx form of the command's statement, for [`terminalize_in_tx`].
@@ -595,6 +620,7 @@ pub fn log_terminalization_outcome(operation: &str, outcome: &TerminalizationOut
             observed,
         } => {
             tracing::debug!(
+                target: TERMINALIZATION_OUTCOME,
                 operation,
                 %task_id,
                 ?ordinality,
@@ -612,6 +638,7 @@ pub fn log_terminalization_outcome(operation: &str, outcome: &TerminalizationOut
             observed,
         } => {
             tracing::warn!(
+                target: TERMINALIZATION_OUTCOME,
                 operation,
                 %task_id,
                 ?ordinality,
@@ -626,7 +653,14 @@ pub fn log_terminalization_outcome(operation: &str, outcome: &TerminalizationOut
             ordinality,
             observed,
         } => {
-            tracing::warn!(operation, %task_id, ?ordinality, ?observed, "terminalization lost claim");
+            tracing::warn!(
+                target: TERMINALIZATION_OUTCOME,
+                operation,
+                %task_id,
+                ?ordinality,
+                ?observed,
+                "terminalization lost claim"
+            );
         }
         TerminalizationOutcome::SourceStateConflict {
             task_id,
@@ -635,6 +669,7 @@ pub fn log_terminalization_outcome(operation: &str, outcome: &TerminalizationOut
             evidence,
         } => {
             tracing::warn!(
+                target: TERMINALIZATION_OUTCOME,
                 operation,
                 %task_id,
                 ?ordinality,
@@ -647,7 +682,13 @@ pub fn log_terminalization_outcome(operation: &str, outcome: &TerminalizationOut
             task_id,
             ordinality,
         } => {
-            tracing::warn!(operation, %task_id, ?ordinality, "terminalization task absent");
+            tracing::warn!(
+                target: TERMINALIZATION_OUTCOME,
+                operation,
+                %task_id,
+                ?ordinality,
+                "terminalization task absent"
+            );
         }
     }
 }
@@ -670,10 +711,76 @@ pub(crate) async fn terminalize(
     log: StatementLog,
     command: &TerminalizationCommand,
 ) -> Result<Vec<TerminalizationOutcome>, BrokerError> {
+    let rows = run_command(&mut StatementTarget::Pool(pool), log, command).await?;
+    decode_outcomes(&rows, command)
+}
+
+/// Run a command in a transaction of its own on `pool` and commit it only
+/// when `accept` accepts every outcome it reports. Returns what `accept`
+/// returns.
+///
+/// `BEGIN`, the statement and `COMMIT` run on one connection checked out as
+/// reserved work, each bound by the connection's own timeouts: two round
+/// trips more than [`terminalize`]. Each outcome is logged
+/// ([`log_terminalization_outcome`]) before `accept` reads it.
+///
+/// Errors (nothing committed, except after a `COMMIT` whose reply was lost):
+/// - [`BrokerError::Statement`]: the checkout, `BEGIN`, the statement,
+///   `COMMIT` or `ROLLBACK` failed. After a failed statement the connection
+///   is discarded and the server rolls the transaction back.
+///   `OutcomeUnknown` at `COMMIT`: the transaction may have committed.
+/// - [`BrokerError::TerminalizationContract`] when a row or the row count
+///   breaks the wire contract; the transaction is rolled back.
+/// - The error of `accept`; the transaction is rolled back.
+pub(crate) async fn terminalize_and_commit_if<T>(
+    pool: &CorePool,
+    log: StatementLog,
+    command: &TerminalizationCommand,
+    accept: impl FnOnce(&[TerminalizationOutcome]) -> Result<T, BrokerError>,
+) -> Result<T, BrokerError> {
+    let mut connection = pool
+        .checkout(CheckoutClass::Reserved)
+        .await
+        .map_err(|cause| {
+            BrokerError::Statement(StatementFailure::NotSent {
+                statement: statement_of(command).name(),
+                cause: NotSentCause::Checkout(cause),
+            })
+        })?;
+    let mut transaction = connection.begin(IsolationLevel::ServerDefault).await?;
+    // A failed statement leaves the transaction aborted or its connection
+    // discarded: the transaction drops at the return, and nothing commits.
+    let rows = run_command(
+        &mut StatementTarget::Transaction(&mut transaction),
+        log,
+        command,
+    )
+    .await?;
+    match decode_outcomes(&rows, command).and_then(|outcomes| accept(&outcomes)) {
+        Ok(accepted) => {
+            transaction.commit().await?;
+            Ok(accepted)
+        }
+        Err(refused) => {
+            roll_back(transaction).await?;
+            Err(refused)
+        }
+    }
+}
+
+/// Decode every row of a command's statement, enforce the cardinality of the
+/// command, and log each outcome ([`log_terminalization_outcome`]). Pure but
+/// for the log.
+///
+/// Errors: [`BrokerError::TerminalizationContract`] when a row or the row
+/// count breaks the wire contract.
+fn decode_outcomes(
+    rows: &[Row],
+    command: &TerminalizationCommand,
+) -> Result<Vec<TerminalizationOutcome>, BrokerError> {
     let operation = function_name_of(command);
-    let rows = run_command(pool, log, command).await?;
     let outcomes = enforce_cardinality(
-        decode_rows(&rows, operation)?,
+        decode_rows(rows, operation)?,
         cardinality_of(command),
         operation,
     )?;

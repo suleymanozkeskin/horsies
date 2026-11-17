@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
 use crate::broker::{PostgresBroker, SchemaInitializationMode};
 use crate::core::Horsies;
+use crate::monitoring::TaskAbsenceReason;
 use crate::AppConfig;
 
 use super::app::{build_router, WebState};
@@ -30,6 +31,7 @@ use super::events::{
     data_frame, degraded_frame, EventBroadcaster, EventCoalescer, TopicEvent, CHANNEL_TOPICS,
     MAX_IDS_PER_EVENT,
 };
+use super::routes::task_not_found_text;
 use super::schema::{
     SchemaProbe, SchemaReader, SchemaState, SchemaStatus, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
 };
@@ -745,7 +747,6 @@ async fn spa_is_public_mountable_injected_and_traversal_safe() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn embedded_spa_and_each_primary_view_api_roundtrip_against_postgres() {
     let mut state = migrated_state().await;
     state.assets = Arc::new(EmbeddedAssets);
@@ -1234,7 +1235,6 @@ async fn task_stats_route_reuses_a_successful_scope_within_the_ttl() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
     let state = migrated_state().await;
     let prefix = format!("w4_http_{}__", Uuid::new_v4().simple());
@@ -1556,6 +1556,82 @@ async fn a_path_id_that_is_not_a_uuid_is_fastapi_uuid_parsing() {
         body["detail"][1]["loc"],
         serde_json::json!(["path", "task_index"])
     );
+}
+
+/// Python `tests/unit/test_monitoring_task_detail_absence.py`,
+/// `TestWebRoute::test_each_reason_is_not_found`: the 404 text of each
+/// absence reason.
+#[test]
+fn each_absence_reason_has_the_not_found_text_of_python() {
+    for (reason, text) in [
+        (
+            TaskAbsenceReason::PredatesRetainedHistory,
+            "Task not found. Its id is older than the retained task history.",
+        ),
+        (TaskAbsenceReason::WithinRetainedHistory, "Task not found."),
+        (TaskAbsenceReason::NotClassified, "Task not found."),
+    ] {
+        assert_eq!(task_not_found_text(reason), text, "{reason:?}");
+    }
+}
+
+/// A UUIDv7 whose embedded birth is `birth`, with random tail bits.
+fn uuid7_born_at(birth: chrono::DateTime<chrono::Utc>) -> Uuid {
+    let milliseconds =
+        u128::try_from(birth.timestamp_millis()).expect("the birth is after the Unix epoch");
+    let tail = Uuid::new_v4().as_u128() & ((1_u128 << 80) - 1);
+    let value = (milliseconds << 80) | tail;
+    let value = (value & !(0xF_u128 << 76)) | (0x7_u128 << 76);
+    let value = (value & !(0x3_u128 << 62)) | (0x2_u128 << 62);
+    Uuid::from_u128(value)
+}
+
+/// Python `test_web_api.py::TestTaskReads::test_unknown_task_is_not_found`,
+/// and the route through the database for each text: an id born before the
+/// upper anchor of a detached period leaf answers that it is older than the
+/// retained history; a UUIDv4 and a later UUIDv7 answer `Task not found.`.
+#[tokio::test]
+#[serial]
+async fn an_absent_task_is_not_found_with_the_text_of_its_absence_reason() {
+    let state = migrated_state().await;
+    let detached_upper = chrono::Utc::now() - chrono::Duration::days(1);
+    sqlx::query(
+        "INSERT INTO horsies_task_history_leaf_catalog (
+             leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor,
+             index_schema_version, created_at, detached_at, dropped_at
+         ) VALUES ($1, 'standard_30d', 'AT', $2, $3, 1, now(), now(), now())",
+    )
+    .bind(format!("web_detached_{}", Uuid::new_v4().simple()))
+    .bind(detached_upper - chrono::Duration::days(1))
+    .bind(detached_upper)
+    .execute(state.broker.pool())
+    .await
+    .expect("record a detached period leaf");
+    let router = build_router(state);
+
+    for (task_id, text) in [
+        (Uuid::new_v4(), "Task not found."),
+        (
+            uuid7_born_at(detached_upper - chrono::Duration::hours(1)),
+            "Task not found. Its id is older than the retained task history.",
+        ),
+        (
+            uuid7_born_at(detached_upper + chrono::Duration::hours(1)),
+            "Task not found.",
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request(Method::GET, &format!("/api/tasks/{task_id}")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{task_id}");
+        assert_eq!(
+            json(response).await,
+            serde_json::json!({"detail": text}),
+            "{task_id}"
+        );
+    }
 }
 
 /// Python `test_web_api.py::TestTaskReads::test_stats_returns_seven_fixed_cards`:

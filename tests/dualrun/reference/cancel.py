@@ -1,6 +1,6 @@
 """Cancel from monitoring, before ``horsies_cancel_task``.
 
-``cancel_task`` (``horsies/monitoring/task_actions.py``) sent, in one session
+``cancel_task`` (``python/horsies/monitoring/task_actions.py``) sent, in one session
 transaction: the task advisory lock (``LOCK_TASK_SQL``), the row lock read
 of ``is_workflow_task``, then ``horsies_cancel_locked_task`` with the
 permitted source statuses, and committed only an applied cancel. A row

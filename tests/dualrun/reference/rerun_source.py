@@ -1,9 +1,9 @@
 """The rerun source read, before ``horsies_rerun_source_read``.
 
-``rerun_task`` (``horsies/core/history/rerun/operations.py``) sent, in the
+``rerun_task`` (``python/horsies/core/history/rerun/operations.py``) sent, in the
 caller's transaction: the class check of the new task's retention class
 (``CLASS_REGISTERED_SQL``), then ``read_task_detail``
-(``horsies/core/history/reads/detail.py``), one statement over the published
+(``python/horsies/core/history/reads/detail.py``), one statement over the published
 detail reader (``DETAIL_SQL``). An absent source was ``NOT_CLASSIFIED``: the
 detail read classified no absence. A stored status that is not a
 ``TaskStatus`` member, an attempt snapshot that does not decode, or a location

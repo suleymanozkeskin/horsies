@@ -366,11 +366,7 @@ _PYTHON_READS_POSTGRESQL_REFUSES: Final = (
 
 
 def _migration() -> BaselineMigration:
-    match load_baseline_migration():
-        case Ok(loaded):
-            return loaded
-        case Err(unreadable):
-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
+    return load_baseline_migration()
 
 
 @pytest_asyncio.fixture(scope='module', loop_scope='module')

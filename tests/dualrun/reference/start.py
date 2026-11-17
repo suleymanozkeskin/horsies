@@ -1,6 +1,6 @@
 """Start of a claimed task, before ``horsies_start_attempt``.
 
-``_confirm_ownership_and_set_running`` (``horsies/core/worker/child_runner.py``,
+``_confirm_ownership_and_set_running`` (``python/horsies/core/worker/child_runner.py``,
 and its async copy in ``shared_lifecycle.py``) sent the RUNNING update with its
 first runner beat (a workflow task in a transaction, with the node write
 ``START_WORKFLOW_NODE_SQL`` after it). A start that matched no row rolled its

@@ -2,12 +2,12 @@
 //! isolated slots that hold their tasks (Python
 //! `tests/unit/test_runner_heartbeat.py`).
 //!
-//! - A write fails on demand on a pool whose server refuses the connection:
-//!   each acquire ends at its `acquire_timeout`.
-//! - A write never returns on a pool whose server accepts the connection
-//!   and never answers.
-//! - A write fails, then lands, on a pool of the test database whose
-//!   connection hook refuses every connection until a deadline.
+//! - A write fails on demand on a pool whose server refuses the connection.
+//! - A write does not return within a test on a pool whose server accepts
+//!   the connection and never answers (the connect ends at
+//!   [`BEAT_CONNECT_TIMEOUT`]).
+//! - A write fails, then lands, on a pool that reaches the test database
+//!   through a gate that closes every connection until a deadline.
 //! - Children are `/bin/sh` processes that the spawner thread starts.
 
 use std::net::TcpListener;
@@ -15,7 +15,6 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use chrono::TimeZone;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
@@ -45,8 +44,8 @@ const WAIT: Duration = Duration::from_secs(10);
 const INTERVAL: Duration = Duration::from_millis(50);
 /// A fail-closed window that passes within a test.
 const SHORT_WINDOW: Duration = Duration::from_millis(500);
-/// A write on an unreachable server fails after this.
-const FAILING_ACQUIRE: Duration = Duration::from_millis(100);
+/// Connections that one test gate accepts before it stops.
+const GATE_CONNECTION_LIMIT: u32 = 1_000;
 
 /// Stale running recovery whose fail-closed window is `window`.
 fn recovery_on(window: Duration) -> StaleRunningRecovery {
@@ -55,36 +54,82 @@ fn recovery_on(window: Duration) -> StaleRunningRecovery {
     }
 }
 
-/// A pool on a port where no server listens: every write fails after
-/// [`FAILING_ACQUIRE`].
-fn refusing_pool() -> PgPool {
-    let options = PgConnectOptions::new()
-        .host("127.0.0.1")
-        .port(1)
-        .username("horsies")
-        .database("horsies");
-    PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(FAILING_ACQUIRE)
-        .connect_lazy_with(options)
+/// A pool on a port where no server listens: every write fails at its
+/// connect.
+fn refusing_pool() -> Arc<CorePool> {
+    test_beat_pool("postgresql://horsies@127.0.0.1:1/horsies")
 }
 
 /// A pool on `silent`, which takes the connection and never answers: a
-/// write does not return within a test.
-fn silent_pool(silent: &TcpListener) -> PgPool {
+/// write does not return before [`BEAT_CONNECT_TIMEOUT`].
+fn silent_pool(silent: &TcpListener) -> Arc<CorePool> {
     let port = silent
         .local_addr()
         .expect("the silent listener has a port")
         .port();
-    let options = PgConnectOptions::new()
-        .host("127.0.0.1")
-        .port(port)
-        .username("horsies")
-        .database("horsies");
-    PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(Duration::from_secs(600))
-        .connect_lazy_with(options)
+    test_beat_pool(&format!("postgresql://horsies@127.0.0.1:{port}/horsies"))
+}
+
+/// A TCP gate in front of the test database: until its deadline it closes
+/// each connection it accepts, so the connect fails; from then on it relays
+/// each connection to the database. It counts both.
+struct ClosingGate {
+    port: u16,
+    refused: Arc<AtomicU32>,
+    admitted: Arc<AtomicU32>,
+    accept_loop: JoinHandle<()>,
+}
+
+impl ClosingGate {
+    /// Listen on a free local port in front of `host`:`port` until
+    /// `refuse_until`, then relay.
+    async fn start(host: String, port: u16, refuse_until: Instant) -> Self {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind the gate");
+        let gate_port = listener.local_addr().expect("the gate has a port").port();
+        let refused = Arc::new(AtomicU32::new(0));
+        let admitted = Arc::new(AtomicU32::new(0));
+        let counts = (Arc::clone(&refused), Arc::clone(&admitted));
+        let accept_loop = tokio::spawn(async move {
+            let (refused, admitted) = counts;
+            for _ in 0..GATE_CONNECTION_LIMIT {
+                let Ok((mut client, _)) = listener.accept().await else {
+                    return;
+                };
+                match Instant::now() < refuse_until {
+                    true => {
+                        refused.fetch_add(1, Ordering::SeqCst);
+                        drop(client);
+                    }
+                    false => {
+                        admitted.fetch_add(1, Ordering::SeqCst);
+                        let host = host.clone();
+                        let _relay = tokio::spawn(async move {
+                            if let Ok(mut upstream) =
+                                tokio::net::TcpStream::connect((host.as_str(), port)).await
+                            {
+                                let _ended =
+                                    tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                            }
+                        });
+                    }
+                }
+            }
+        });
+        Self {
+            port: gate_port,
+            refused,
+            admitted,
+            accept_loop,
+        }
+    }
+}
+
+impl Drop for ClosingGate {
+    fn drop(&mut self) {
+        self.accept_loop.abort();
+    }
 }
 
 fn sender() -> BeatSender {
@@ -105,7 +150,11 @@ struct Launched {
     fail_closed_stop: FailClosedStop,
 }
 
-fn launch(pool: PgPool, live: &LiveDispatches, stale_running: StaleRunningRecovery) -> Launched {
+fn launch(
+    pool: Arc<CorePool>,
+    live: &LiveDispatches,
+    stale_running: StaleRunningRecovery,
+) -> Launched {
     let worker_stop = CancellationToken::new();
     let beats_cancel = CancellationToken::new();
     let fail_closed_stop = FailClosedStop::new(worker_stop.clone());
@@ -313,35 +362,17 @@ async fn a_dead_writer_stops_the_worker() {
 #[serial_test::serial]
 async fn a_failed_write_inside_the_window_recovers() {
     let database = crate::broker::terminalization_matrix::migrated_pool().await;
-    let refused = Arc::new(AtomicU32::new(0));
-    let admitted = Arc::new(AtomicU32::new(0));
+    let options = database.connect_options();
     let refuse_until = Instant::now() + Duration::from_millis(700);
-    let pool = {
-        let refused = Arc::clone(&refused);
-        let admitted = Arc::clone(&admitted);
-        PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(Duration::from_millis(150))
-            .after_connect(move |_connection, _meta| {
-                let refused = Arc::clone(&refused);
-                let admitted = Arc::clone(&admitted);
-                Box::pin(async move {
-                    match Instant::now() < refuse_until {
-                        true => {
-                            refused.fetch_add(1, Ordering::SeqCst);
-                            Err(sqlx::Error::Protocol(
-                                "the test refuses connections until its deadline".to_owned(),
-                            ))
-                        }
-                        false => {
-                            admitted.fetch_add(1, Ordering::SeqCst);
-                            Ok(())
-                        }
-                    }
-                })
-            })
-            .connect_lazy_with((*database.connect_options()).clone())
-    };
+    let gate = ClosingGate::start(
+        options.get_host().to_owned(),
+        options.get_port(),
+        refuse_until,
+    )
+    .await;
+    let pool = test_beat_pool(&crate::broker::pools::test_url_of(
+        &(*options).clone().host("127.0.0.1").port(gate.port),
+    ));
     let spawner = Spawner::start().expect("the spawner starts");
     let (spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
@@ -352,8 +383,8 @@ async fn a_failed_write_inside_the_window_recovers() {
     let launched = launch(pool, &live, recovery_on(Duration::from_secs(2)));
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    assert!(refused.load(Ordering::SeqCst) > 0, "no write failed");
-    assert!(admitted.load(Ordering::SeqCst) > 0, "no write landed");
+    assert!(gate.refused.load(Ordering::SeqCst) > 0, "no write failed");
+    assert!(gate.admitted.load(Ordering::SeqCst) > 0, "no write landed");
     launched.still_watching();
     assert_eq!(*spawned.exit.borrow(), ExitState::Running);
     launched.stop().await;
@@ -398,7 +429,7 @@ fn a_slow_beat_counts_from_its_landing() {
 async fn stop_ends_the_writer_and_the_watchdog() {
     let pool = refusing_pool();
     let launched = launch(
-        pool.clone(),
+        Arc::clone(&pool),
         &LiveDispatches::default(),
         recovery_on(Duration::from_secs(30)),
     );
@@ -413,7 +444,13 @@ async fn stop_ends_the_writer_and_the_watchdog() {
         .await
         .expect("the writer ends at its cancel")
         .expect("the writer does not panic");
-    assert!(pool.is_closed());
+    assert!(
+        matches!(
+            pool.checkout(CheckoutClass::Reserved).await,
+            Err(crate::db::CheckoutFailure::PoolClosed { .. })
+        ),
+        "the writer closes its pool at its end"
+    );
     tokio::time::timeout(WAIT, tokio::task::spawn_blocking(move || watch.stop()))
         .await
         .expect("the watchdog stops in time")
@@ -731,7 +768,6 @@ fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
         task_id: claimed.task_id,
         task_name: claimed.task_name.clone(),
         worker_id: WORKER.to_owned(),
-        task_kind: claimed.kind,
         claimed_at: claimed.claimed_at,
         work: IsolatedWork::Run,
         input: input(),

@@ -1,8 +1,6 @@
 [build-system]
-# >=69: recursive "**" globs in package-data need setuptools >= 62.3, and
-# the built wheel must carry the whole web/static tree.
-requires = ["setuptools>=69", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
 
 [project]
 name = "horsies"
@@ -10,6 +8,7 @@ version = "0.7.0"
 description = "A Python library for distributed task execution"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 authors = [
     { name = "Suleyman Ozkeskin" },
@@ -57,15 +56,22 @@ Issues = "https://github.com/suleymanozkeskin/horsies/issues"
 [project.scripts]
 horsies = "horsies.core.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["horsies*"]
-
-[tool.setuptools]
-license-files = ["LICENSE"]
-
-[tool.setuptools.package-data]
-horsies = [".agents/skills/horsies/*.md", "web/static/**", "core/baseline/sql/*.sql"]
+[tool.maturin]
+# The extension module horsies._core, built from crates/horsies-python.
+manifest-path = "crates/horsies-python/Cargo.toml"
+module-name = "horsies._core"
+python-source = "python"
+features = ["extension-module"]
+# maturin packs every file under python/horsies/ that .gitignore does not
+# exclude. The built web UI is git-ignored, so it is listed here; the skill
+# files are listed so that the package data is stated, not implied. The
+# baseline SQL files are compiled into horsies._core; the sdist carries them
+# so that a build from the sdist can compile them.
+include = [
+    { path = "python/horsies/web/static/**/*", format = ["sdist", "wheel"] },
+    { path = "python/horsies/.agents/skills/horsies/*.md", format = ["sdist", "wheel"] },
+    { path = "crates/horsies-core/baseline/*.sql", format = "sdist" },
+]
 
 [dependency-groups]
 dev = [
@@ -96,6 +102,8 @@ markers = [
 
 [tool.pyright]
 typeCheckingMode = "strict"
+# The package is in python/; pyright resolves it there with or without an install.
+extraPaths = ["python"]
 
 
 [tool.ruff.lint]
@@ -113,3 +121,15 @@ docstring-quotes = "single"
 
 [tool.uv]
 exclude-newer = "7 days"
+# uv rebuilds the local install when one of these changes: the Rust sources of
+# horsies._core and the files that it compiles in.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "crates/**/Cargo.toml" },
+    { file = "crates/**/*.rs" },
+    { file = "crates/horsies-core/baseline/*.sql" },
+    { file = "crates/horsies-core/migrations/*.sql" },
+    { file = "crates/horsies-core/webui-dist/**/*" },
+]

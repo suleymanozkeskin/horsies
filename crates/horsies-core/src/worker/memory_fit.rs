@@ -1,6 +1,6 @@
 //! Whether the per-child memory limits of a worker profile fit the memory
-//! that the worker can use (Python `horsies/core/worker/profile_fit.py`, the
-//! memory part, lines 1-470; the boot log, `horsies/core/cli.py:617-688`).
+//! that the worker can use (Python `python/horsies/core/worker/profile_fit.py`, the
+//! memory part, lines 1-470; the boot log, `python/horsies/core/cli.py:617-688`).
 //!
 //! - The sum of `recycle.above` over the isolated, shared async and shared
 //!   thread children is compared with the usable memory. A mode with
@@ -571,7 +571,7 @@ pub struct BootMemoryLog {
 }
 
 /// The records that the worker logs for the memory fit of its profile
-/// `name`, with Python's levels and texts (`horsies/core/cli.py:617-688`):
+/// `name`, with Python's levels and texts (`python/horsies/core/cli.py:617-688`):
 /// an unreadable cgroup is a warning; then the comparison: a sum above the
 /// usable memory or an unreadable memory is a warning, a fitting sum and no
 /// sum are info. Pure.

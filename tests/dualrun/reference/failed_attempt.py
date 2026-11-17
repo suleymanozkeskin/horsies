@@ -1,16 +1,16 @@
 """Failed attempt, before the retry facts travelled with the claim.
 
-``horsies/core/worker/failed_attempt.py`` read the row of the claim
+``python/horsies/core/worker/failed_attempt.py`` read the row of the claim
 generation first (``READ_IN_FLIGHT_ATTEMPT_SQL``, no lock), and the retry
 request came from the facts that the read returned. Then
 ``horsies_finish_failed_attempt`` ran with the ``REFUSE`` rule, on the same
 autocommit connection:
 
 - the finalize of a reported failure (``_persist_failed_attempt``,
-  ``horsies/core/worker/finalize.py``) read only for a task error; a
+  ``python/horsies/core/worker/finalize.py``) read only for a task error; a
   worker-level failure sent no retry;
 - the end of an attempt whose child ended without a result
-  (``_write_ended_attempt``, ``horsies/core/worker/dispatch.py``) returned a
+  (``_write_ended_attempt``, ``python/horsies/core/worker/dispatch.py``) returned a
   CLAIMED row to the queue with ``UNCLAIM_CLAIMED_TASK_SQL``, and sent no
   retry for a row that the claim did not hold.
 """

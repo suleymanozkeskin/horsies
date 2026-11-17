@@ -6,21 +6,22 @@
 //! the migration runner of an application on the same database.
 //!
 //! The embedded chain:
-//! - Version 1000 is the baseline schema: every package file of
-//!   `horsies/core/baseline/sql/`, in the order of Python's
-//!   `BASELINE_SQL_FILES` (`horsies/core/baseline/migration.py`), concatenated
-//!   with no separator, with one SHA-384 checksum over the UTF-8 bytes of the
-//!   result. It creates [`MIGRATIONS_TABLE`], the 0.x guard row of
-//!   `horsies_schema_version` and the empty `horsies_client_family` table
-//!   itself. The Python package installs the same files as its migration 1000
-//!   with the same checksum rule, so both write the same bookkeeping row.
+//! - Version 1000 is the baseline schema: every file of
+//!   `crates/horsies-core/baseline/`, in the order of `baseline_sql_files!`
+//!   below, concatenated with no separator, with one SHA-384 checksum over the
+//!   UTF-8 bytes of the result. It creates [`MIGRATIONS_TABLE`], the 0.x guard
+//!   row of `horsies_schema_version` and the empty `horsies_client_family`
+//!   table itself. The Python package reads the same files through
+//!   `horsies._core` ([`BASELINE_SQL_FILE_TEXTS`]) and installs them as its
+//!   migration 1000 with the same checksum rule, so both write the same
+//!   bookkeeping row.
 //! - Version 1001 holds the claim functions of the copied Rust worker, which
 //!   have no counterpart in migration 1000. It goes when the worker claims
 //!   through the functions of migration 1000.
 //!
 //! The install ([`install_schema_on`]; Python reference:
-//! `horsies/core/baseline/install.py`, and `_run_fleet_schema_init` in
-//! `horsies/core/brokers/postgres.py`):
+//! `python/horsies/core/baseline/install.py`, and `_run_fleet_schema_init` in
+//! `python/horsies/core/brokers/postgres.py`):
 //! 1. Read the state of the current schema on a session-work connection, with
 //!    no lock: one statement on an empty database, two otherwise.
 //! 2. Decide. A database that holds this build's chain and this client's
@@ -68,28 +69,35 @@ pub const MIGRATIONS_TABLE: &str = "horsies_migrations";
 pub const BASELINE_MIGRATION_VERSION: i64 = 1000;
 
 /// Declares the baseline file list once. From one list of file names it
-/// builds `BASELINE_SQL_FILES` (the names) and `BASELINE_SQL` (the texts,
-/// concatenated with no separator), so the names and the migration text
-/// cannot differ. The files of `horsies/core/baseline/sql/` are the single
-/// source; the core includes them by relative path and keeps no copy.
+/// builds `BASELINE_SQL_FILES` (the names), `BASELINE_SQL_FILE_TEXTS` (each
+/// name with its text) and `BASELINE_SQL` (the texts, concatenated with no
+/// separator), so the names and the migration text cannot differ. The files
+/// of `crates/horsies-core/baseline/` are the single source; the core includes
+/// them by relative path and keeps no copy.
 macro_rules! baseline_sql_files {
     ($($file:literal),+ $(,)?) => {
         /// The file names of migration 1000, in the order they run.
         #[cfg(test)]
         pub(crate) const BASELINE_SQL_FILES: &[&str] = &[$($file),+];
 
+        /// The files of migration 1000 as `(file name, text)` pairs, in the
+        /// order they run. The Python package reads its migration 1000
+        /// through these (`horsies._core.baseline_sql_files`).
+        pub const BASELINE_SQL_FILE_TEXTS: &[(&str, &str)] = &[
+            $(($file, include_str!(concat!("../../baseline/", $file)))),+
+        ];
+
         /// Migration 1000: the files of `BASELINE_SQL_FILES`, in that
         /// order, concatenated with no separator.
         const BASELINE_SQL: &str = concat!(
-            $(include_str!(concat!("../../../../horsies/core/baseline/sql/", $file))),+
+            $(include_str!(concat!("../../baseline/", $file))),+
         );
     };
 }
 
-// Python's `BASELINE_SQL_FILES` (`horsies/core/baseline/migration.py`), in
-// the same order. A file added to the folder or to Python's list without a
-// line here fails `baseline_file_list_is_python_s_list_and_the_whole_folder`
-// and Python's `tests/unit/test_baseline_migration.py`.
+// The files of `crates/horsies-core/baseline/`, in the order they run. A file
+// added to the folder without a line here fails
+// `baseline_file_list_is_the_whole_folder`.
 baseline_sql_files!(
     "0001_tables.sql",
     "0002_indexes.sql",
@@ -103,12 +111,11 @@ baseline_sql_files!(
 
 /// The tables file of the baseline.
 #[cfg(test)]
-pub(crate) const BASELINE_TABLES_SQL: &str =
-    include_str!("../../../../horsies/core/baseline/sql/0001_tables.sql");
+pub(crate) const BASELINE_TABLES_SQL: &str = include_str!("../../baseline/0001_tables.sql");
 /// The interim functions file of the baseline.
 #[cfg(test)]
 pub(crate) const BASELINE_INTERIM_FUNCTIONS_SQL: &str =
-    include_str!("../../../../horsies/core/baseline/sql/0003_interim_functions.sql");
+    include_str!("../../baseline/0003_interim_functions.sql");
 
 /// Bytes of a SHA-384 checksum.
 const CHECKSUM_BYTES: usize = 48;
@@ -239,7 +246,7 @@ fn shipped_versions() -> Vec<i64> {
 // ---- The install lock ----
 
 /// The name whose digest is the install lock key (Python
-/// `PostgresBroker._schema_advisory_key`, `horsies/core/brokers/postgres.py`).
+/// `PostgresBroker._schema_advisory_key`, `python/horsies/core/brokers/postgres.py`).
 const INSTALL_LOCK_NAME: &str = "horsies:schema:v1";
 
 /// The longest an installer waits for another installer's lock, then

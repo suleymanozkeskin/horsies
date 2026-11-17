@@ -271,6 +271,16 @@ impl ConnectionSettings {
         self.connect_timeout
     }
 
+    /// These settings with `timeout` as the bound of one connect per host,
+    /// in place of the URL's `connect_timeout` (as a libpq keyword argument
+    /// overrides the same parameter of a conninfo).
+    pub fn with_connect_timeout(self, timeout: Duration) -> ConnectionSettings {
+        ConnectionSettings {
+            connect_timeout: timeout,
+            ..self
+        }
+    }
+
     pub fn tls(&self) -> &TlsSettings {
         &self.tls
     }
