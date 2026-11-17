@@ -168,7 +168,7 @@ from horsies.core.worker.stored_timeout import (
     TimeoutValueInvalid,
 )
 from horsies.core.worker.workflow_success import (
-    finish_workflow_success,
+    finish_workflow_success_in_core,
     success_for,
 )
 from horsies.core.workflows.node_finish import (
@@ -1354,18 +1354,20 @@ class FinalizeMixin:
     ) -> Result[_NodeFinishOwed | None, _FinalizeError]:
         """Phase 1 of a workflow task's success: one statement.
 
-        ``finish_workflow_success`` runs ``horsies_finish_workflow_success``
-        in autocommit: the attempt row, the move and the phase-2 record of
-        the node commit together. ``SuccessApplied`` owes phase 2 in the form
-        of its node facts; ``AlreadyApplied`` (a replay of a committed
-        success) reloads the routing facts of the task for the phase-2
-        replay; a refusal wrote nothing and owes nothing. Database errors
-        become a phase-1 error, retryable when the connection failed; its
+        ``finish_workflow_success_in_core`` runs
+        ``horsies_finish_workflow_success`` through the core, in one
+        statement: the attempt row, the move and the phase-2 record of the
+        node commit together. ``SuccessApplied`` owes phase 2 in the form of
+        its node facts; ``AlreadyApplied`` (a replay of a committed success)
+        reloads the routing facts of the task for the phase-2 replay; a
+        refusal wrote nothing and owes nothing. A failed write
+        (``CoreOperationFailed``, or a ``CoreError`` of the core boundary)
+        becomes a phase-1 error, retryable when the cause may clear; its
         data keeps the child's report for the replay.
         """
         try:
-            outcome = await finish_workflow_success(
-                self.sf,
+            outcome = await finish_workflow_success_in_core(
+                self.core_handle,
                 success_for(completion, claimed_at=claim.claimed_at),
             )
         except Exception as exc:
