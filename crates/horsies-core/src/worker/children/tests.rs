@@ -324,3 +324,47 @@ fn shared_cpus_place_nothing_and_own_core_needs_linux() {
         Err(PlacementRefused::NotLinux { .. })
     ));
 }
+
+/// Python `SlotPool.stop` reports the killed tasks of its one pool; the
+/// worker joins the reports of its three pools: the worst stop, with the
+/// killed tasks of every pool in pool order.
+#[test]
+fn the_stop_reports_of_the_pools_join_their_killed_tasks() {
+    let isolated = Uuid::from_u128(1);
+    let shared = [Uuid::from_u128(2), Uuid::from_u128(3)];
+
+    assert_eq!(
+        join_stop_reports([
+            PoolStopReport::KilledAtDrainDeadline {
+                killed: vec![isolated]
+            },
+            PoolStopReport::Drained,
+            PoolStopReport::KilledAtDrainDeadline {
+                killed: shared.to_vec()
+            },
+        ]),
+        PoolStopReport::KilledAtDrainDeadline {
+            killed: vec![isolated, shared[0], shared[1]]
+        }
+    );
+    assert_eq!(
+        join_stop_reports([
+            PoolStopReport::KilledAtDrainDeadline {
+                killed: vec![isolated]
+            },
+            PoolStopReport::AbortedAfterDrain { killed: Vec::new() },
+            PoolStopReport::Drained,
+        ]),
+        PoolStopReport::AbortedAfterDrain {
+            killed: vec![isolated]
+        }
+    );
+    assert_eq!(
+        join_stop_reports([
+            PoolStopReport::Drained,
+            PoolStopReport::Drained,
+            PoolStopReport::Drained,
+        ]),
+        PoolStopReport::Drained
+    );
+}

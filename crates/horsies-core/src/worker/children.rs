@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::worker_profile::{
@@ -388,8 +389,9 @@ impl ChildrenView {
     }
 }
 
-/// What the stop of the pools did: the worst report of any pool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What the stop of the pools did: the worst report of any pool, with the
+/// tasks that the drain deadline killed in every pool.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildrenStopped {
     pub report: PoolStopReport,
 }
@@ -542,20 +544,38 @@ impl WorkerChildren {
         let (isolated, shared_async, shared_thread) =
             tokio::join!(isolated, shared_async, shared_thread);
         ChildrenStopped {
-            report: [isolated, shared_async, shared_thread]
-                .into_iter()
-                .max_by_key(|report| stop_rank(*report))
-                .unwrap_or(PoolStopReport::Drained),
+            report: join_stop_reports([isolated, shared_async, shared_thread]),
         }
     }
 }
 
-/// The order of the stop reports, worst last.
-fn stop_rank(report: PoolStopReport) -> u8 {
-    match report {
-        PoolStopReport::Drained => 0,
-        PoolStopReport::KilledAtDrainDeadline => 1,
-        PoolStopReport::AbortedAfterDrain => 2,
+/// How far the stop of one pool went, worst last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum StopReach {
+    Drained,
+    Killed,
+    Aborted,
+}
+
+/// One report for the pools: the worst of `reports`, with the killed tasks
+/// of every pool in pool order (Python joins one list of the one pool).
+/// Pure.
+fn join_stop_reports(reports: [PoolStopReport; 3]) -> PoolStopReport {
+    let mut reach = StopReach::Drained;
+    let mut killed: Vec<Uuid> = Vec::new();
+    for report in reports {
+        let (pool_reach, pool_killed) = match report {
+            PoolStopReport::Drained => (StopReach::Drained, Vec::new()),
+            PoolStopReport::KilledAtDrainDeadline { killed } => (StopReach::Killed, killed),
+            PoolStopReport::AbortedAfterDrain { killed } => (StopReach::Aborted, killed),
+        };
+        reach = reach.max(pool_reach);
+        killed.extend(pool_killed);
+    }
+    match reach {
+        StopReach::Drained => PoolStopReport::Drained,
+        StopReach::Killed => PoolStopReport::KilledAtDrainDeadline { killed },
+        StopReach::Aborted => PoolStopReport::AbortedAfterDrain { killed },
     }
 }
 
