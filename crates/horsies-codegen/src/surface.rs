@@ -164,7 +164,19 @@ const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
     "StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed";
 const RELEASE_CLAIMS_OUTCOME: &str = "ClaimsReleased | ReleaseFailed";
 
-const CORE_HANDLE_METHODS: [StubFunction; 12] = [
+const CORE_HANDLE_METHODS: [StubFunction; 14] = [
+    StubFunction {
+        name: "close",
+        parameters: &[],
+        returns: TypeText::Plain("HandleClosed"),
+        doc: "Close the handle's core pools. Writes in flight end within the close bound; the ones that\ndo not are logged with their count. A handle that never connected starts nothing.",
+    },
+    StubFunction {
+        name: "close_async",
+        parameters: &[],
+        returns: TypeText::FutureOf("HandleClosed"),
+        doc: "The awaitable form of the method above.",
+    },
     StubFunction {
         name: "ping_database",
         parameters: &[],
@@ -351,7 +363,7 @@ const ARGUMENT_CLASSES: [StubClass; 8] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 23] = [
+const RECORD_CLASSES: [StubClass; 24] = [
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -371,6 +383,13 @@ const RECORD_CLASSES: [StubClass; 23] = [
         doc: "The round trip of one database ping.",
         constructor: Constructor::NoConstructor,
         properties: &[property("latency_ms", "float")],
+        methods: &[],
+    },
+    StubClass {
+        name: "HandleClosed",
+        doc: "The close of a handle ended: its core pools are closed, or it never connected. The next\noperation on the handle opens new core pools.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
         methods: &[],
     },
     StubClass {
@@ -595,8 +614,8 @@ const HANDLE_CLASSES: [StubClass; 1] = [StubClass {
     methods: &CORE_HANDLE_METHODS,
 }];
 
-const CLASSES: [StubClass; 32] = {
-    let mut classes = [HANDLE_CLASSES[0]; 32];
+const CLASSES: [StubClass; 33] = {
+    let mut classes = [HANDLE_CLASSES[0]; 33];
     let mut position = 0;
     while position < ARGUMENT_CLASSES.len() {
         classes[1 + position] = ARGUMENT_CLASSES[position];

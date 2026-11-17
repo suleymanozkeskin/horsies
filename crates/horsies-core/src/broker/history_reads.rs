@@ -19,8 +19,8 @@ use crate::broker::core_rows::{
 use crate::broker::error::BrokerError;
 use crate::core::history::errors::HistoryError;
 use crate::core::history::reads::detail::{
-    history_detail_from_wire, task_absence_reason_query_sql, task_detail_function_signature,
-    task_detail_sql, HistoryDetailWireRow, TaskAbsenceReason, TaskDetailResult,
+    history_detail_from_wire, task_detail_function_signature, task_detail_sql,
+    HistoryDetailWireRow, TaskAbsenceReason, TaskDetailResult, TASK_ABSENCE_REASON_SQL,
 };
 use crate::core::history::reads::result::{
     decode_result_row, task_result_function_signature, task_result_sql, ResultWireRow,
@@ -48,15 +48,11 @@ static TASK_DETAIL: LazyLock<TypedStatement> = LazyLock::new(|| {
     )
 });
 
-static TASK_ABSENCE_REASON_SQL: LazyLock<String> = LazyLock::new(task_absence_reason_query_sql);
-
-static TASK_ABSENCE_REASON: LazyLock<TypedStatement> = LazyLock::new(|| {
-    TypedStatement::new(
-        "task_absence_reason",
-        TASK_ABSENCE_REASON_SQL.as_str(),
-        &[ParameterType::Uuid],
-    )
-});
+static TASK_ABSENCE_REASON: TypedStatement = TypedStatement::new(
+    "task_absence_reason",
+    TASK_ABSENCE_REASON_SQL,
+    &[ParameterType::Uuid],
+);
 
 static FUNCTION_PUBLISHED: TypedStatement = TypedStatement::new(
     "staged_function_published",
@@ -254,7 +250,15 @@ mod tests {
     fn the_statements_carry_the_history_read_sql() {
         assert_eq!(TASK_RESULT.sql(), task_result_sql());
         assert_eq!(TASK_DETAIL.sql(), task_detail_sql());
-        assert_eq!(TASK_ABSENCE_REASON.sql(), task_absence_reason_query_sql());
         assert_eq!(FUNCTION_PUBLISHED.sql(), FUNCTION_PUBLISHED_SQL);
+    }
+
+    /// The absence reason is the one SQL rule of the baseline, not a copy.
+    #[test]
+    fn the_absence_reason_calls_the_baseline_function() {
+        assert_eq!(
+            TASK_ABSENCE_REASON.sql(),
+            "SELECT horsies_task_absence_reason($1)"
+        );
     }
 }
