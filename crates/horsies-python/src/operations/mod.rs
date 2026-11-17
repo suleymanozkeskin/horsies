@@ -8,6 +8,7 @@ pub mod cancel;
 pub mod claim;
 pub mod enqueue;
 pub mod failed_attempt;
+pub mod queue_starts;
 pub mod release;
 pub mod schema;
 pub mod stale_claims;

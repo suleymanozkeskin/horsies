@@ -169,6 +169,9 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::failed_attempt::AttemptFailureApplied>()?;
     module.add_class::<operations::failed_attempt::AttemptRetryScheduled>()?;
     module.add_class::<operations::failed_attempt::AttemptClaimReleased>()?;
+    module.add_class::<operations::queue_starts::QueueStartsRequest>()?;
+    module.add_class::<operations::queue_starts::QueueStartsRecord>()?;
+    module.add_class::<operations::queue_starts::QueueStartsFailed>()?;
     module.add_class::<operations::release::ReleaseClaimsRequest>()?;
     module.add_class::<operations::release::ClaimsReleased>()?;
     module.add_class::<operations::release::ReleasedRow>()?;
