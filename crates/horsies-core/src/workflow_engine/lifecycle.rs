@@ -1,17 +1,18 @@
-use std::collections::VecDeque;
-
+use crate::broker::core_rows::{column, one_row, RowDecodeError};
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
 use crate::core::WorkflowSpecRegistry;
+#[cfg(test)]
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::db::CheckoutClass;
+use crate::db::{CheckoutClass, ParameterType, Row, TypedStatement};
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::steps::{
-    self, advance_parents, CancelOutcome, ChildBuild, PauseOutcome, ResumeDisposition,
+    self, advance_parents, run_alone, CancelOutcome, ChildBuild, PauseOutcome, ResumeDisposition,
+    StepContractError,
 };
 
 #[cfg(test)]
@@ -20,107 +21,69 @@ fn test_uuid(value: &str) -> Uuid {
 }
 
 // ---------------------------------------------------------------------------
-// SQL constants
+// Statements
 // ---------------------------------------------------------------------------
 
-/// Lock the workflow row first, before any workflow_task rows, so the cancel
-/// transaction acquires `{horsies_workflows, horsies_workflow_tasks}` in the same
-/// order as `COMPLETE_WORKFLOW_TASK_SQL` (workflows before workflow_tasks). The
-/// two paths previously ran in opposite orders and could deadlock under
-/// contention — a task completing while its workflow is being cancelled — with
-/// Postgres aborting one side (SQLSTATE 40P01). Lock-order invariant (N6): any
-/// transaction locking both tables must take horsies_workflows first.
-const LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL: &str = "\
-SELECT id FROM horsies_workflows WHERE id = $1 FOR UPDATE";
+/// The PAUSED workflows whose last status change is older than `$1`
+/// milliseconds, oldest first, at most `$2` (`idx_horsies_workflows_paused_age`).
+/// Python: the candidate read of `expire_paused_workflows`
+/// (`core/workflows/lifecycle.py:1019-1031`).
+static PAUSED_EXPIRY_CANDIDATES: TypedStatement = TypedStatement::new(
+    "paused_expiry_candidates",
+    "SELECT id FROM horsies_workflows
+     WHERE status = 'PAUSED'
+       AND updated_at < now() - $1 * interval '1 millisecond'
+     ORDER BY updated_at, id
+     LIMIT $2",
+    &[ParameterType::Int8, ParameterType::Int8],
+);
 
-/// Lock the workflow's backing horsies_tasks rows before flipping the workflow
-/// status, so a concurrent worker claim (which uses `FOR UPDATE SKIP LOCKED`)
-/// cannot pick them up during the cancellation window. Excludes terminal rows.
-const LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL: &str = "\
-SELECT t.id
-FROM horsies_tasks t
-JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
-WHERE wt.workflow_id = $1
-  AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
-  AND t.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-FOR UPDATE OF t";
-
-/// Lock the workflow's non-terminal workflow_task rows for the duration of the
-/// cancellation transaction.
-const LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL: &str = "\
-SELECT id
-FROM horsies_workflow_tasks
-WHERE workflow_id = $1
-  AND status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
-FOR UPDATE";
-
-// Step 1 of workflow cancellation — cancelling not-yet-started backing tasks
-// of ENQUEUED workflow_tasks — is `horsies_cancel_nodes_of_cancelled_workflow`
-// (broker/terminalization.rs): the workflow's CANCELLED or EXPIRED status is verified
-// in-statement, so the function runs after the status flip in the same
-// transaction. A backing task may briefly be RUNNING while its node is still
-// ENQUEUED; user code runs only after the node's own RUNNING handoff, so
-// that state is still cancellable.
-
-/// Step 2: Skip PENDING/READY workflow_tasks (not ENQUEUED or RUNNING). Every write to a terminal node
-/// status sets `completed_at`.
-const SKIP_PENDING_READY_TASKS_SQL: &str = "\
-UPDATE horsies_workflow_tasks
-SET status = 'SKIPPED', completed_at = NOW()
-WHERE workflow_id = $1 AND status IN ('PENDING', 'READY')";
-
-/// Step 3: Skip ENQUEUED workflow_tasks whose horsies_tasks were just cancelled.
-const SKIP_CANCELLED_ENQUEUED_TASKS_SQL: &str = "\
-UPDATE horsies_workflow_tasks wt
-SET status = 'SKIPPED',
-    completed_at = NOW()
-WHERE wt.workflow_id = $1
-  AND wt.status = 'ENQUEUED'
-  AND wt.task_id = ANY($2::uuid[])";
-
-const FIND_EXPIRED_PAUSED_WORKFLOWS_SQL: &str = "\
-SELECT id FROM horsies_workflows
-WHERE status = 'PAUSED'
-  AND updated_at < NOW() - ($1::double precision * INTERVAL '1 second')
-ORDER BY updated_at, id
-LIMIT $2";
-
-const EXPIRE_PAUSED_WORKFLOW_SQL: &str = "\
-UPDATE horsies_workflows
-SET status = 'EXPIRED', error = $2, completed_at = NOW(), updated_at = NOW()
-WHERE id = $1 AND status = 'PAUSED'
-  AND updated_at < NOW() - ($3::double precision * INTERVAL '1 second')
-RETURNING id";
-
-/// Find RUNNING child workflows of a given parent.
-const FIND_RUNNING_CHILDREN_SQL: &str = "\
-SELECT id FROM horsies_workflows
-WHERE parent_workflow_id = $1 AND status = 'RUNNING'";
-
-/// Pause a single child workflow (RUNNING -> PAUSED).
-const PAUSE_CHILD_WORKFLOW_SQL: &str = "\
-UPDATE horsies_workflows
-SET status = 'PAUSED', updated_at = NOW()
-WHERE id = $1 AND status = 'RUNNING'";
-
-/// Reset the abandoned nodes of just-cancelled backing rows to READY, so
-/// resume enqueues a fresh row for each. Runs in the same transaction as
-/// `horsies_abandon_nodes_of_paused_workflows`, whose applied outcomes name
-/// the rows this reset targets.
-const RESET_ABANDONED_NODES_SQL: &str = "\
-UPDATE horsies_workflow_tasks wt
-SET status = 'READY', task_id = NULL, started_at = NULL
-WHERE wt.task_id = ANY($1)
-  AND wt.status IN ('ENQUEUED', 'RUNNING')";
+/// `horsies_workflow_expire_paused(workflow_id, older_than_ms, error)`: expires
+/// one PAUSED workflow older than the age, in one statement in autocommit.
+static EXPIRE_PAUSED: TypedStatement = TypedStatement::new(
+    "horsies_workflow_expire_paused",
+    "SELECT outcome, observed_status, expired_task_ids
+     FROM horsies_workflow_expire_paused($1, $2, $3)",
+    &[
+        ParameterType::Uuid,
+        ParameterType::Int8,
+        ParameterType::Text,
+    ],
+);
 
 // ---------------------------------------------------------------------------
-// Row types
+// Outcomes
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, sqlx::FromRow)]
-#[allow(dead_code)]
-struct IdRow {
-    id: Uuid,
+/// What `horsies_workflow_expire_paused` did with one candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PausedExpiry {
+    /// The workflow is EXPIRED; the tasks behind its ENQUEUED nodes moved to
+    /// history as cancelled, and its waiting nodes are SKIPPED.
+    Expired { expired_task_ids: Vec<Uuid> },
+    /// The workflow is not PAUSED, or was PAUSED for less than the age (a
+    /// resume committed first). Nothing was written.
+    NotExpired,
+    /// No workflow has this id (a retention delete after the candidate
+    /// read). Nothing was written.
+    NotFound,
+}
+
+/// Decodes the one row of `horsies_workflow_expire_paused`. Pure.
+fn paused_expiry_outcome(rows: Vec<Row>) -> Result<PausedExpiry, StepContractError> {
+    let row = one_row(rows, &EXPIRE_PAUSED)?;
+    let outcome: String = column(&row, &EXPIRE_PAUSED, "outcome")?;
+    match outcome.as_str() {
+        "EXPIRED" => Ok(PausedExpiry::Expired {
+            expired_task_ids: column(&row, &EXPIRE_PAUSED, "expired_task_ids")?,
+        }),
+        "NOT_EXPIRED" => Ok(PausedExpiry::NotExpired),
+        "NOT_FOUND" => Ok(PausedExpiry::NotFound),
+        _ => Err(StepContractError::UnknownOutcome {
+            function: EXPIRE_PAUSED.name(),
+            outcome,
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -150,7 +113,6 @@ fn to_handle_error(e: WorkflowError, workflow_id: Uuid) -> HandleOperationError 
 /// - `Validation`: only the host build of a child that a resume owes gives it (a stored node input that the
 ///   `args_from` merge refuses, a built child spec that the tree arguments refuse); Python's resume lets
 ///   every exception other than a database error propagate.
-/// - `WorkflowTimeout`, `WorkflowError`: no workflow operation constructs them.
 pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> HandleOperationError {
     let (code, retryable) = match e {
         WorkflowError::WorkflowNotFound { .. } => (HandleErrorCode::WorkflowNotFound, false),
@@ -162,10 +124,7 @@ pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> Ha
         WorkflowError::InvalidStatus(_) | WorkflowError::Serialization(_) => {
             (HandleErrorCode::StoredDataInvalid, false)
         }
-        WorkflowError::WorkflowTimeout { .. }
-        | WorkflowError::WorkflowError(_)
-        | WorkflowError::Validation(_)
-        | WorkflowError::StepContract(_) => panic!(
+        WorkflowError::Validation(_) | WorkflowError::StepContract(_) => panic!(
             "workflow handle operation on workflow {workflow_id} failed with an error that has no \
              handle catalog entry (a defect): {e}"
         ),
@@ -238,92 +197,127 @@ pub async fn cancel_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> Hand
     }
 }
 
-/// Expire PAUSED workflows older than the configured policy age.
+/// Expires the PAUSED workflows older than the age policy `older_than`, at most `batch_size` per call (Python
+/// `expire_paused_workflows`, `core/workflows/lifecycle.py:964-1096`).
 ///
-/// `older_than` may be zero: every PAUSED workflow of the batch is selected (Python's
-/// `expire_paused_workflows` takes any `timedelta`, `core/workflows/lifecycle.py:1409`). A negative age and a
-/// `batch_size` below 1 are refused with `WorkflowError::Validation`, and nothing is read or written.
+/// - One read of the candidates, oldest first ([`PAUSED_EXPIRY_CANDIDATES`]), then
+///   `horsies_workflow_expire_paused` per candidate, each one statement in autocommit. Every statement runs on
+///   the main core pool of `broker` with the reserve ([`CheckoutClass::Reserved`]): the reaper calls this.
+/// - The function locks the workflow row, then the live tasks behind its nodes, then its live nodes; it writes
+///   EXPIRED only while the workflow is PAUSED and older than the age, so a resume that committed first wins.
+///   The stored error is `WORKFLOW_EXPIRED` with the policy and the age in seconds, and the message
+///   `paused_workflow_auto_cancel_after elapsed: <age>` with Python's `str(timedelta)` of the age.
+/// - The age goes to the database in whole milliseconds. An age with a part below one millisecond is rounded
+///   up, so a workflow never expires before its age.
+/// - `older_than` may be zero: every PAUSED workflow of the batch is a candidate (Python takes any
+///   `timedelta`).
 ///
-/// Each candidate owns one transaction and follows the cancel lock order:
-/// workflow row, backing tasks, workflow-task rows, backing-task re-lock,
-/// PAUSED-to-EXPIRED CAS, canonical backing-task terminalization, then node
-/// skips for exactly the moved task IDs.
+/// Returns: the count of workflows that this call expired.
+///
+/// Errors (nothing was read or written when the arguments are refused):
+/// - [`WorkflowError::Validation`]: a negative age, an age outside the range of microseconds, or a
+///   `batch_size` below 1.
+/// - [`WorkflowError::Serialization`]: the stored error does not encode.
+/// - [`WorkflowError::Broker`]: the candidate read or a candidate's statement failed. The candidates before
+///   it are expired; the rest wait for the next call. A statement with a lost reply may have committed
+///   (`OutcomeUnknown`).
+/// - [`WorkflowError::StepContract`]: a row outside the function's contract. The candidate's statement
+///   committed whatever it wrote.
 pub async fn expire_paused_workflows(
-    pool: &PgPool,
+    broker: &PostgresBroker,
     older_than: chrono::Duration,
     batch_size: i64,
 ) -> Result<u64, WorkflowError> {
-    let seconds = older_than.num_milliseconds() as f64 / 1_000.0;
-    if seconds < 0.0 || batch_size <= 0 {
-        return Err(WorkflowError::Validation(
-            "paused expiry requires an age of 0 or more and a positive batch size".to_owned(),
-        ));
+    if batch_size <= 0 {
+        return Err(WorkflowError::Validation(format!(
+            "paused expiry requires a positive batch size, got {batch_size}"
+        )));
     }
-    let candidates: Vec<IdRow> = sqlx::query_as(FIND_EXPIRED_PAUSED_WORKFLOWS_SQL)
-        .bind(seconds)
-        .bind(batch_size)
-        .fetch_all(pool)
+    let older_than_ms = paused_age_millis(older_than)?;
+    let error_json = paused_expiry_error(older_than)?;
+    let candidates = run_alone(
+        broker,
+        CheckoutClass::Reserved,
+        &PAUSED_EXPIRY_CANDIDATES
+            .bind()
+            .value(&older_than_ms)
+            .value(&batch_size)
+            .finish(),
+    )
+    .await?;
+    let workflow_ids = candidates
+        .iter()
+        .map(|row| column::<Uuid>(row, &PAUSED_EXPIRY_CANDIDATES, "id"))
+        .collect::<Result<Vec<Uuid>, RowDecodeError>>()
+        .map_err(StepContractError::from)?;
+    let mut expired = 0_u64;
+    for workflow_id in workflow_ids {
+        let rows = run_alone(
+            broker,
+            CheckoutClass::Reserved,
+            &EXPIRE_PAUSED
+                .bind()
+                .value(&workflow_id)
+                .value(&older_than_ms)
+                .value(&error_json)
+                .finish(),
+        )
         .await?;
-    let error_text = format!(
+        match paused_expiry_outcome(rows)? {
+            PausedExpiry::Expired { expired_task_ids } => {
+                expired += 1;
+                tracing::info!(
+                    workflow_id = %workflow_id,
+                    expired_tasks = expired_task_ids.len(),
+                    "paused workflow expired by its age policy",
+                );
+            }
+            PausedExpiry::NotExpired | PausedExpiry::NotFound => {}
+        }
+    }
+    Ok(expired)
+}
+
+/// The paused age in whole milliseconds, rounded up. Pure.
+///
+/// Errors: [`WorkflowError::Validation`] for a negative age.
+fn paused_age_millis(older_than: chrono::Duration) -> Result<i64, WorkflowError> {
+    if older_than < chrono::Duration::zero() {
+        return Err(WorkflowError::Validation(format!(
+            "paused expiry requires an age of 0 or more, got {older_than}"
+        )));
+    }
+    let whole = older_than.num_milliseconds();
+    match older_than > chrono::Duration::milliseconds(whole) {
+        true => Ok(whole + 1),
+        false => Ok(whole),
+    }
+}
+
+/// The stored error of a workflow that the age policy expired: `WORKFLOW_EXPIRED`, the policy name and the
+/// age in seconds (Python `older_than.total_seconds()`), and the message with Python's `str(timedelta)`.
+/// Pure.
+///
+/// Errors: [`WorkflowError::Validation`] for a negative age or one outside the range of microseconds;
+/// [`WorkflowError::Serialization`] when the error does not encode.
+fn paused_expiry_error(older_than: chrono::Duration) -> Result<String, WorkflowError> {
+    let micros = older_than.num_microseconds().ok_or_else(|| {
+        WorkflowError::Validation("paused expiry duration exceeds microsecond range".to_owned())
+    })?;
+    let message = format!(
         "paused_workflow_auto_cancel_after elapsed: {}",
         format_python_timedelta(older_than)?,
     );
-    let error_json = serde_json::to_string(&crate::core::TaskError {
+    Ok(serde_json::to_string(&crate::core::TaskError {
         exception: None,
         error_code: crate::core::OutcomeCode::WorkflowExpired.into(),
         data: Some(serde_json::json!({
             "policy": "paused_workflow_auto_cancel_after",
-            "older_than_seconds": seconds,
+            "older_than_seconds": micros as f64 / 1_000_000.0,
         })),
-        message: Some(error_text),
+        message: Some(message),
         kind: crate::core::TaskErrorKind::Plain,
-    })?;
-    let mut expired = 0_u64;
-    for candidate in candidates {
-        let mut tx = pool.begin().await?;
-        for statement in [
-            LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL,
-            LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
-            LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL,
-            LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
-        ] {
-            sqlx::query(statement)
-                .bind(candidate.id)
-                .execute(&mut *tx)
-                .await?;
-        }
-        let won: Option<IdRow> = sqlx::query_as(EXPIRE_PAUSED_WORKFLOW_SQL)
-            .bind(candidate.id)
-            .bind(&error_json)
-            .bind(seconds)
-            .fetch_optional(&mut *tx)
-            .await?;
-        if won.is_none() {
-            tx.rollback().await?;
-            continue;
-        }
-        let outcomes = crate::broker::terminalization::terminalize_in_tx(
-            &mut tx,
-            &crate::core::lifecycle::TerminalizationCommand::CancelNodesOfCancelledWorkflow {
-                workflow_ids: vec![candidate.id],
-            },
-        )
-        .await
-        .map_err(WorkflowError::Broker)?;
-        let moved_ids: Vec<Uuid> = outcomes.iter().map(|outcome| outcome.task_id()).collect();
-        sqlx::query(SKIP_PENDING_READY_TASKS_SQL)
-            .bind(candidate.id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(SKIP_CANCELLED_ENQUEUED_TASKS_SQL)
-            .bind(candidate.id)
-            .bind(&moved_ids)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        expired += 1;
-    }
-    Ok(expired)
+    })?)
 }
 
 fn format_python_timedelta(duration: chrono::Duration) -> Result<String, WorkflowError> {
@@ -396,61 +390,6 @@ pub async fn pause_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> Handl
         )),
         Err(error) => Err(to_handle_error(error, workflow_id)),
     }
-}
-
-/// Pause all RUNNING descendants and relocate claimed-but-not-started backing
-/// rows for the complete paused tree. The caller's transaction owns every
-/// status write, history move, and exact node reset.
-pub(crate) async fn pause_tree_and_relocate_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    workflow_id: Uuid,
-) -> Result<Vec<Uuid>, WorkflowError> {
-    let mut queue = VecDeque::from([workflow_id]);
-    let mut paused_ids = vec![workflow_id];
-    while let Some(parent_id) = queue.pop_front() {
-        let children: Vec<IdRow> = sqlx::query_as(FIND_RUNNING_CHILDREN_SQL)
-            .bind(parent_id)
-            .fetch_all(&mut **tx)
-            .await?;
-        for child in children {
-            let changed = sqlx::query(PAUSE_CHILD_WORKFLOW_SQL)
-                .bind(child.id)
-                .execute(&mut **tx)
-                .await?;
-            if changed.rows_affected() == 1 {
-                paused_ids.push(child.id);
-                queue.push_back(child.id);
-            }
-        }
-    }
-    let outcomes = crate::broker::terminalization::terminalize_in_tx(
-        tx,
-        &crate::core::lifecycle::TerminalizationCommand::AbandonNodesOfPausedWorkflows {
-            workflow_ids: paused_ids.clone(),
-        },
-    )
-    .await
-    .map_err(WorkflowError::Broker)?;
-    let abandoned: Vec<Uuid> = outcomes.iter().map(|outcome| outcome.task_id()).collect();
-    if !abandoned.is_empty() {
-        sqlx::query(RESET_ABANDONED_NODES_SQL)
-            .bind(&abandoned)
-            .execute(&mut **tx)
-            .await?;
-    }
-    // No manual notify: the PAUSED status flip fires `workflow_done` through
-    // `horsies_notify_workflow_status_change` for each paused workflow.
-    Ok(paused_ids)
-}
-
-pub(crate) async fn pause_tree_and_relocate(
-    pool: &PgPool,
-    workflow_id: Uuid,
-) -> Result<Vec<Uuid>, WorkflowError> {
-    let mut tx = pool.begin().await?;
-    let paused = pause_tree_and_relocate_in_tx(&mut tx, workflow_id).await?;
-    tx.commit().await?;
-    Ok(paused)
 }
 
 /// Resumes a workflow tree: `horsies_workflow_resume`, in a transaction (`BEGIN`, the step, one
@@ -884,16 +823,88 @@ mod p7_lifecycle_tests {
         ));
     }
 
+    /// A broker on a port that refuses connections: a refusal of the arguments must come before any read.
+    fn unreachable_broker() -> PostgresBroker {
+        PostgresBroker::from_pool(
+            PgPool::connect_lazy("postgres://postgres@127.0.0.1:1/horsies_unreachable")
+                .expect("a lazy pool"),
+        )
+    }
+
     /// A negative age is refused before any read.
     #[tokio::test]
     async fn a_negative_paused_age_is_refused() {
-        // A lazy pool on a port that refuses connections: the refusal must come before any read.
-        let pool = PgPool::connect_lazy("postgres://postgres@127.0.0.1:1/horsies_unreachable")
-            .expect("a lazy pool");
-        let refused = expire_paused_workflows(&pool, chrono::Duration::seconds(-1), 10).await;
+        let refused =
+            expire_paused_workflows(&unreachable_broker(), chrono::Duration::seconds(-1), 10).await;
         assert!(
             matches!(refused, Err(WorkflowError::Validation(_))),
             "{refused:?}"
+        );
+    }
+
+    /// A batch size below 1 is refused before any read.
+    #[tokio::test]
+    async fn a_batch_size_below_one_is_refused() {
+        let refused =
+            expire_paused_workflows(&unreachable_broker(), chrono::Duration::hours(1), 0).await;
+        assert!(
+            matches!(refused, Err(WorkflowError::Validation(_))),
+            "{refused:?}"
+        );
+    }
+
+    /// A failed candidate read is a broker error.
+    #[tokio::test]
+    async fn a_failed_candidate_read_is_a_broker_error() {
+        let failed =
+            expire_paused_workflows(&unreachable_broker(), chrono::Duration::hours(1), 10).await;
+        assert!(
+            matches!(failed, Err(WorkflowError::Broker(_))),
+            "{failed:?}"
+        );
+    }
+
+    /// The age goes to the database in whole milliseconds, rounded up: a workflow never expires before its
+    /// age.
+    #[test]
+    fn the_paused_age_is_whole_milliseconds_rounded_up() {
+        assert_eq!(paused_age_millis(chrono::Duration::zero()).unwrap(), 0);
+        assert_eq!(
+            paused_age_millis(chrono::Duration::hours(1)).unwrap(),
+            3_600_000
+        );
+        assert_eq!(
+            paused_age_millis(chrono::Duration::microseconds(1_500)).unwrap(),
+            2
+        );
+        assert_eq!(
+            paused_age_millis(chrono::Duration::nanoseconds(1)).unwrap(),
+            1
+        );
+        assert!(matches!(
+            paused_age_millis(chrono::Duration::microseconds(-1)),
+            Err(WorkflowError::Validation(_))
+        ));
+    }
+
+    /// The stored error carries the age in seconds with Python's `total_seconds()` precision (microseconds).
+    #[test]
+    fn the_stored_error_names_the_policy_and_the_age() {
+        let error: TaskError = serde_json::from_str(
+            &paused_expiry_error(chrono::Duration::microseconds(3_600_000_250)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(error.error_code, OutcomeCode::WorkflowExpired.into());
+        assert_eq!(
+            error.message.as_deref(),
+            Some("paused_workflow_auto_cancel_after elapsed: 1:00:00.000250"),
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "policy": "paused_workflow_auto_cancel_after",
+                "older_than_seconds": 3_600.000_25,
+            })),
         );
     }
 
@@ -1088,9 +1099,13 @@ mod p7_lifecycle_tests {
         .await
         .unwrap();
 
-        let expired = expire_paused_workflows(&pool, chrono::Duration::hours(1), 10)
-            .await
-            .unwrap();
+        let expired = expire_paused_workflows(
+            &PostgresBroker::from_pool(pool.clone()),
+            chrono::Duration::hours(1),
+            10,
+        )
+        .await
+        .unwrap();
         assert_eq!(expired, 1);
         let (status, error_json, node_status): (String, String, String) = sqlx::query_as(
             "SELECT w.status, w.error, wt.status
@@ -1174,9 +1189,13 @@ mod p7_lifecycle_tests {
         .unwrap();
 
         assert_eq!(
-            expire_paused_workflows(&pool, chrono::Duration::hours(1), 10,)
-                .await
-                .unwrap(),
+            expire_paused_workflows(
+                &PostgresBroker::from_pool(pool.clone()),
+                chrono::Duration::hours(1),
+                10,
+            )
+            .await
+            .unwrap(),
             1,
         );
         let recovery = crate::workflow_engine::recovery::recover_stuck_workflow_tree(
@@ -1280,9 +1299,13 @@ mod p7_lifecycle_tests {
         .unwrap();
 
         assert_eq!(
-            expire_paused_workflows(&pool, chrono::Duration::hours(1), 10)
-                .await
-                .unwrap(),
+            expire_paused_workflows(
+                &PostgresBroker::from_pool(pool.clone()),
+                chrono::Duration::hours(1),
+                10,
+            )
+            .await
+            .unwrap(),
             1,
         );
         let child_status: String =

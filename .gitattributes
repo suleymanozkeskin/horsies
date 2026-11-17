@@ -1,1 +1,2 @@
 crates/horsies/webui-dist/** -whitespace
+crates/horsies-core/webui-dist/** -whitespace
