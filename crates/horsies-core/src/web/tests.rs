@@ -31,6 +31,10 @@ use super::events::{
     data_frame, degraded_frame, EventBroadcaster, EventCoalescer, TopicEvent, CHANNEL_TOPICS,
     MAX_IDS_PER_EVENT,
 };
+use super::handler::{
+    AccessGrant, AccessNeed, GrantedAccess, MonitoringHandler, RequestParts, ResponseForm,
+    ResponseParts, Verdict,
+};
 use super::routes::task_not_found_text;
 use super::schema::{
     SchemaProbe, SchemaReader, SchemaState, SchemaStatus, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
@@ -122,6 +126,7 @@ fn test_state(
         payload: app.config().payload.clone(),
         retention: app.config().retention.clone(),
         heartbeat: Duration::from_millis(25),
+        client_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
 }
 
@@ -1171,6 +1176,7 @@ async fn migrated_state() -> WebState {
         payload: app.config().payload.clone(),
         retention: app.config().retention.clone(),
         heartbeat: Duration::from_millis(25),
+        client_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
 }
 
@@ -2007,4 +2013,306 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
         "{body}"
     );
     assert_eq!(objects, (None, None, None, 0));
+}
+
+fn granted_handler(actions_enabled: bool) -> MonitoringHandler {
+    let mut state = test_state(
+        lazy_pool(),
+        Arc::new(GrantedAccess),
+        fixed_probe(status(
+            SchemaState::Match,
+            Some(crate::expected_schema_version()),
+        )),
+        actions_enabled,
+        MemoryAssets::standard(),
+    );
+    state.client_version = "9.9.9-client".to_owned();
+    MonitoringHandler::from_state(state)
+}
+
+fn parts(method: Method, path: &str) -> RequestParts {
+    RequestParts {
+        method,
+        path: path.to_owned(),
+        raw_query: None,
+        intent_header: None,
+        content_type: None,
+        body: axum::body::Bytes::new(),
+        base_path: "/monitor".to_owned(),
+    }
+}
+
+fn action_parts(path: &str) -> RequestParts {
+    RequestParts {
+        intent_header: Some(INTENT_VALUE.to_owned()),
+        content_type: Some("application/json".to_owned()),
+        body: axum::body::Bytes::from_static(b"{}"),
+        ..parts(Method::POST, path)
+    }
+}
+
+const fn grant(view: Verdict, act: Verdict) -> AccessGrant {
+    AccessGrant { view, act }
+}
+
+fn body_json(response: &ResponseParts) -> serde_json::Value {
+    serde_json::from_slice(&response.body).expect("a JSON body")
+}
+
+/// The verdicts that each route needs are the ones the Python app asks:
+/// `can_view` on every read route and the event stream, `can_view` then
+/// `can_act` on `/api/meta` and on the action routes, only `can_view` on an
+/// action route while actions are disabled, and none on the page, its
+/// assets and every other path.
+#[test]
+fn the_handler_asks_the_verdicts_of_the_python_routes() {
+    let handler = granted_handler(true);
+    let id = Uuid::nil();
+    for (method, path, need) in [
+        (
+            Method::GET,
+            "/api/meta".to_owned(),
+            AccessNeed::ViewReportAct,
+        ),
+        (Method::GET, "/api/tasks".to_owned(), AccessNeed::View),
+        (Method::GET, "/api/tasks/stats".to_owned(), AccessNeed::View),
+        (
+            Method::GET,
+            "/api/tasks/facets".to_owned(),
+            AccessNeed::View,
+        ),
+        (
+            Method::GET,
+            "/api/tasks/breakdown".to_owned(),
+            AccessNeed::View,
+        ),
+        (Method::GET, format!("/api/tasks/{id}"), AccessNeed::View),
+        (Method::HEAD, format!("/api/tasks/{id}"), AccessNeed::View),
+        (Method::GET, "/api/workflows".to_owned(), AccessNeed::View),
+        (
+            Method::GET,
+            "/api/workflows/names".to_owned(),
+            AccessNeed::View,
+        ),
+        (
+            Method::GET,
+            format!("/api/workflows/{id}"),
+            AccessNeed::View,
+        ),
+        (
+            Method::GET,
+            format!("/api/workflows/{id}/tasks/3"),
+            AccessNeed::View,
+        ),
+        (Method::GET, "/api/workers".to_owned(), AccessNeed::View),
+        (
+            Method::GET,
+            "/api/workers/ping".to_owned(),
+            AccessNeed::View,
+        ),
+        (
+            Method::GET,
+            "/api/workers/schedules".to_owned(),
+            AccessNeed::View,
+        ),
+        (
+            Method::GET,
+            "/api/workers/classes".to_owned(),
+            AccessNeed::View,
+        ),
+        (
+            Method::GET,
+            "/api/workers/w1/history".to_owned(),
+            AccessNeed::View,
+        ),
+        (
+            Method::POST,
+            format!("/api/tasks/{id}/cancel"),
+            AccessNeed::ViewAndAct,
+        ),
+        (
+            Method::POST,
+            format!("/api/workflows/{id}/pause"),
+            AccessNeed::ViewAndAct,
+        ),
+        (
+            Method::POST,
+            format!("/api/workflows/{id}/resume"),
+            AccessNeed::ViewAndAct,
+        ),
+        (
+            Method::POST,
+            format!("/api/workflows/{id}/cancel"),
+            AccessNeed::ViewAndAct,
+        ),
+        (Method::GET, "/".to_owned(), AccessNeed::Public),
+        (Method::GET, "/assets/app.js".to_owned(), AccessNeed::Public),
+        (
+            Method::GET,
+            "/tasks/some/client/route".to_owned(),
+            AccessNeed::Public,
+        ),
+        (Method::GET, "/api/unknown".to_owned(), AccessNeed::Public),
+        (
+            Method::GET,
+            "/api/workers/w1".to_owned(),
+            AccessNeed::Public,
+        ),
+        (
+            Method::GET,
+            format!("/api/tasks/{id}/cancel"),
+            AccessNeed::Public,
+        ),
+        (Method::POST, "/api/tasks".to_owned(), AccessNeed::Public),
+        (Method::GET, "/api/tasks/".to_owned(), AccessNeed::Public),
+    ] {
+        let access = handler.route_access(&method, &path);
+        assert_eq!(access.need, need, "{method} {path}");
+        assert_eq!(access.form, ResponseForm::OneResponse, "{method} {path}");
+    }
+    let events = handler.route_access(&Method::GET, "/api/events");
+    assert_eq!(events.need, AccessNeed::View);
+    assert_eq!(events.form, ResponseForm::EventStream);
+
+    let view_only = granted_handler(false);
+    let cancel = view_only.route_access(&Method::POST, &format!("/api/tasks/{id}/cancel"));
+    assert_eq!(cancel.need, AccessNeed::View);
+}
+
+/// The handler answers with the guards and routes of the router, reading
+/// the verdicts of the grant; no database is reachable here.
+#[tokio::test]
+async fn the_handler_serves_the_routes_with_the_verdicts_of_the_grant() {
+    let handler = granted_handler(true);
+
+    let refused = handler
+        .handle(
+            parts(Method::GET, "/api/tasks/not-a-uuid"),
+            grant(Verdict::Refused, Verdict::NotAsked),
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body_json(&refused),
+        serde_json::json!({"detail": "Not authorized."})
+    );
+
+    let read = handler
+        .handle(
+            parts(Method::GET, "/api/tasks/not-a-uuid"),
+            grant(Verdict::Allowed, Verdict::NotAsked),
+        )
+        .await;
+    assert_eq!(read.status, StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(&read), task_path_id_refusal("not-a-uuid"));
+
+    let meta = handler
+        .handle(
+            parts(Method::GET, "/api/meta"),
+            grant(Verdict::Allowed, Verdict::Refused),
+        )
+        .await;
+    assert_eq!(meta.status, StatusCode::OK);
+    let meta = body_json(&meta);
+    assert_eq!(meta["can_act"], false);
+    assert_eq!(meta["base_path"], "/monitor");
+    assert_eq!(meta["horsies_version"], "9.9.9-client");
+
+    let act_refused = handler
+        .handle(
+            action_parts("/api/workflows/not-a-uuid/pause"),
+            grant(Verdict::Allowed, Verdict::Refused),
+        )
+        .await;
+    assert_eq!(act_refused.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body_json(&act_refused),
+        serde_json::json!({"detail": "Not authorized."})
+    );
+
+    let no_intent = handler
+        .handle(
+            RequestParts {
+                intent_header: None,
+                ..action_parts("/api/workflows/not-a-uuid/pause")
+            },
+            grant(Verdict::Allowed, Verdict::Allowed),
+        )
+        .await;
+    assert_eq!(no_intent.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body_json(&no_intent),
+        serde_json::json!({"detail": format!("Missing {INTENT_HEADER}: {INTENT_VALUE} header.")})
+    );
+
+    let action = handler
+        .handle(
+            action_parts("/api/workflows/not-a-uuid/pause"),
+            grant(Verdict::Allowed, Verdict::Allowed),
+        )
+        .await;
+    assert_eq!(action.status, StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(&action)["code"], "INVALID_INPUT");
+
+    let page = handler
+        .handle(
+            parts(Method::GET, "/"),
+            grant(Verdict::NotAsked, Verdict::NotAsked),
+        )
+        .await;
+    assert_eq!(page.status, StatusCode::OK);
+    let html = std::str::from_utf8(&page.body).expect("the page is text");
+    assert!(html.contains("/monitor/"), "{html}");
+
+    let not_a_path = handler
+        .handle(
+            parts(Method::GET, "/not a path"),
+            grant(Verdict::NotAsked, Verdict::NotAsked),
+        )
+        .await;
+    assert_eq!(not_a_path.status, StatusCode::BAD_REQUEST);
+}
+
+/// While actions are disabled, an action route asks only `can_view`, and
+/// the act guard refuses without a verdict to act.
+#[tokio::test]
+async fn an_action_while_actions_are_disabled_is_refused_without_asking_to_act() {
+    let handler = granted_handler(false);
+
+    let refused = handler
+        .handle(
+            action_parts("/api/workflows/not-a-uuid/pause"),
+            grant(Verdict::Allowed, Verdict::NotAsked),
+        )
+        .await;
+
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body_json(&refused),
+        serde_json::json!({"detail": "Not authorized."})
+    );
+}
+
+#[tokio::test]
+#[should_panic(expected = "does not answer the need")]
+async fn a_grant_that_skips_a_needed_verdict_is_a_defect() {
+    let handler = granted_handler(true);
+    let _ = handler
+        .handle(
+            parts(Method::GET, "/api/meta"),
+            grant(Verdict::Allowed, Verdict::NotAsked),
+        )
+        .await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "is the event stream")]
+async fn the_event_stream_has_no_single_response() {
+    let handler = granted_handler(true);
+    let _ = handler
+        .handle(
+            parts(Method::GET, "/api/events"),
+            grant(Verdict::Allowed, Verdict::NotAsked),
+        )
+        .await;
 }
