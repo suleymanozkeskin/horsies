@@ -246,6 +246,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::workflow_lifecycle::WorkflowNotCancellable>()?;
     module.add_class::<operations::workflow_lifecycle::WorkflowAbsent>()?;
     module.add_class::<operations::workflow_lifecycle::HandleFailed>()?;
+    module.add_class::<operations::workflow_retention::WorkflowsDeleted>()?;
+    module.add_class::<operations::workflow_retention::WorkflowDeleteFailed>()?;
     module.add_class::<scheduler::SchedulerStarted>()?;
     module.add_class::<scheduler::SchedulerStartRefused>()?;
     module.add_class::<scheduler::SchedulerStartFailed>()?;

@@ -155,6 +155,11 @@ class CoreHandle:
         """Cancel one workflow tree. Writes, in one statement. A row outside the function's contract
         raises PanicException.
         """
+    def delete_expired_workflows_async(self, older_than_hours: int, batch_size: int, budget_ms: int) -> asyncio.Future[WorkflowsDeleted | WorkflowDeleteFailed]:
+        """One workflow retention pass of the reaper, in batches until one deletes nothing or the
+        budget has passed. Writes; each batch commits alone. A negative value raises
+        OverflowError.
+        """
     def task_info(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> TaskInfoRecord | TaskInfoNotFound | BrokerFailure:
         """The info of one task. Installs the schema once per handle first; then reads only."""
     def task_info_async(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> asyncio.Future[TaskInfoRecord | TaskInfoNotFound | BrokerFailure]:
@@ -1312,6 +1317,28 @@ class HandleFailed:
     def workflow_id(self) -> uuid.UUID: ...
     @property
     def code(self) -> Literal['DB_OPERATION_FAILED', 'STORED_DATA_INVALID']: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class WorkflowsDeleted:
+    """The workflow retention pass ended: a batch deleted no workflow, or the budget passed
+    after a batch.
+    """
+    @property
+    def deleted(self) -> int: ...
+
+
+@final
+class WorkflowDeleteFailed:
+    """The workflow retention pass failed. deleted_before counts the workflows of the batches
+    that committed first; a batch whose reply was lost may have committed.
+    """
+    @property
+    def deleted_before(self) -> int: ...
     @property
     def message(self) -> str: ...
     @property
