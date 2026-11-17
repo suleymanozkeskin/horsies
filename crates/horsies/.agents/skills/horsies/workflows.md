@@ -364,6 +364,7 @@ Fields: `code`, `message`, `retryable`, `workflow_name`, `workflow_id`
 | `ValidationFailed` | Before any I/O: no definition key, an output type that is not the handle's (`HRS-025`), a sub-workflow node of a definition that is not registered (`HRS-020`), params given to a definition without params (`HRS-022`), a template build that refused, or a start before the registration in the process |
 | `WorkflowIdConflict` | The id belongs to another workflow name. Nothing was written |
 | `EnqueueFailed` | The connect, the schema install or the start failed. `retryable` is the classification of the cause. A start again with the same id finds the workflow when the commit reply was lost |
+| `AsyncContext` | A blocking start (`horsies::blocking`) on a thread that runs a tokio runtime. Nothing was written; `workflow_id` is the id of the start. Not retryable |
 
 `WorkflowFunction::retry_start(&error)` starts again with the error's
 `workflow_id`. It refuses with `ValidationFailed` an error that is not
@@ -406,6 +407,7 @@ with the error's id.
 | `StoredResultUnreadable { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored value does not read with the handle's types |
 | `UnknownUserCode { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored user code is not a code of `E` |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A wait in a worker child. Nothing was read |
+| `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` on a thread that runs a tokio runtime. Nothing was read |
 | `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed |
 
 `HandleOperationError` (from `status`, `results`, `tasks`, `cancel`,
@@ -413,7 +415,8 @@ with the error's id.
 operations document these codes: `WorkflowNotFound`, `DbOperationFailed`,
 `StoredDataInvalid` (`status`, `tasks`, `resume`), and
 `ResumeRecoveryFailed` (`resume` committed and the work after it failed:
-the workflow is RUNNING).
+the workflow is RUNNING). A blocking form (`handle.blocking()`) on a thread
+that runs a tokio runtime is `AsyncContext`, and nothing ran.
 
 ## Success Policy and `on_error`
 

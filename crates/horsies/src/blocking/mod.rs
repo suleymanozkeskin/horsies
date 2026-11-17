@@ -1,13 +1,17 @@
 //! Blocking forms of the async API, for a program that does not run a
 //! tokio runtime (Python's sync calls: `send`, `schedule`, the retries,
 //! `TaskHandle.get` and `info`, the app's reads by task id and health
-//! reads, `check(live=True)`).
+//! reads, `check(live=True)`, the workflow starts and the sync methods of
+//! `WorkflowHandle`).
 //!
 //! Each async type gives a view with `blocking()`: [`TaskFunctionView`],
-//! [`TaskHandleView`] and [`HorsiesView`]. A view method has the name, the
-//! arguments and the result type of the async method. It runs the async
-//! method on the core's process runtime, which drives the app's
-//! connections, and blocks the calling thread until the method ends.
+//! [`TaskHandleView`], [`HorsiesView`], [`WorkflowFunctionView`],
+//! [`WorkflowTemplateView`] and [`WorkflowHandleView`]; the process-wide
+//! starts have the blocking functions [`start_workflow`] and
+//! [`start_workflow_with`]. A view method has the name, the arguments and
+//! the result type of the async method. It runs the async method on the
+//! core's process runtime, which drives the app's connections, and blocks
+//! the calling thread until the method ends.
 //!
 //! ```ignore
 //! let send_email = send_email::register(&mut app)?;
@@ -21,7 +25,10 @@
 //!   `TaskSendError::AsyncContext` (with the prepared task id and payload,
 //!   so `retry_send(&error).await` completes the same send),
 //!   `ReadError::AsyncContext`, `BrokerOperationError` with
-//!   `BrokerErrorCode::AsyncContext`, or a `CheckReport` with `HRS-217`.
+//!   `BrokerErrorCode::AsyncContext`, a `CheckReport` with `HRS-217`,
+//!   `WorkflowStartErrorCode::AsyncContext` with the workflow id of the
+//!   start, `HandleErrorCode::AsyncContext`, or
+//!   `WorkflowReadError::AsyncContext`.
 //! - The thread of a blocking task body in a worker child (a `fn` task)
 //!   drives no async task: a blocking call works there, also where the
 //!   child runtime's handle is set.
@@ -29,9 +36,13 @@
 //!   of the one that started it, or the OS refused its threads), the call
 //!   answers the database failure of its catalog with the cause; nothing
 //!   was sent.
-//!
-//! The workflow start and the workflow handle get their views with the
-//! workflow start of the client.
+
+mod workflow;
+
+pub use workflow::{
+    start_workflow, start_workflow_with, WorkflowFunctionView, WorkflowHandleView,
+    WorkflowTemplateView,
+};
 
 use std::future::Future;
 use std::num::NonZeroUsize;
