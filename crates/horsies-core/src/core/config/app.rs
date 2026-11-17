@@ -1388,10 +1388,9 @@ mod tests {
     /// row key. The line `EXTRA` sits in the table of that level; the key
     /// goes there. The names are Python's models; the socket settings and
     /// `pool_recycle` of `broker` are Rust forms of Python's flat
-    /// `PostgresConfig` fields. Their unit variants `OFF`, `SYSTEM_DEFAULT`
-    /// and `NEVER` skip the other members of their table (#1706), so they
-    /// have no row. A new nested config type needs a row.
-    const CONFIG_LEVELS: [(&str, &str); 34] = [
+    /// `PostgresConfig` fields, with a row per variant. A new nested config
+    /// type needs a row.
+    const CONFIG_LEVELS: [(&str, &str); 37] = [
         (
             "extra_app_config",
             "EXTRA
@@ -1435,6 +1434,33 @@ database_url = \"postgresql://localhost/db\"
 [broker.tcp_user_timeout]
 kind = \"AFTER\"
 milliseconds = 30000
+EXTRA
+",
+        ),
+        (
+            "extra_pool_recycle_never",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[broker.pool_recycle]
+kind = \"NEVER\"
+EXTRA
+",
+        ),
+        (
+            "extra_tcp_keepalives_off",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[broker.tcp_keepalives]
+kind = \"OFF\"
+EXTRA
+",
+        ),
+        (
+            "extra_tcp_user_timeout_system_default",
+            "[broker]
+database_url = \"postgresql://localhost/db\"
+[broker.tcp_user_timeout]
+kind = \"SYSTEM_DEFAULT\"
 EXTRA
 ",
         ),

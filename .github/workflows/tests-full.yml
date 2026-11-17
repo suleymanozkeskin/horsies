@@ -157,13 +157,14 @@ jobs:
         if: always()
         run: docker compose -f tests/fixtures/pgbouncer/compose.yaml down -v
 
-  # The Rust client, its macros and the examples on each supported Postgres
-  # major. The end-to-end crates under rust/tests/ and the PgBouncer lane of
-  # the client move to the client of the core with #1410.
+  # The core, the extension module crate, the generator, the Rust client, its
+  # macros and the examples on each supported Postgres major. The end-to-end
+  # crates under rust/tests/ and the PgBouncer lane of the client move to the
+  # client of the core with #1410.
   rust-tests:
     name: rust-tests (Postgres ${{ matrix.postgres }})
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     permissions:
       contents: read
     strategy:
@@ -197,6 +198,22 @@ jobs:
           rustup toolchain install
           rustc --version
 
+      # horsies-python enables PyO3's `abi3-py313` feature, so its build script
+      # needs a Python 3.13 interpreter; the runner's python3 is older.
+      # `cargo test -p horsies-python` links libpython (the `extension-module`
+      # feature is on only in the wheel build). This Python ships the shared
+      # library, and the action puts its folder on LD_LIBRARY_PATH.
+      - name: Install Python 3.13 for PyO3
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Point PyO3 at Python 3.13
+        env:
+          PYTHON_PATH: ${{ steps.python.outputs.python-path }}
+        run: echo "PYO3_PYTHON=$PYTHON_PATH" >> "$GITHUB_ENV"
+
       # One cache shared by the Postgres majors. Only runs on main write it.
       - name: Cache Cargo builds
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -212,6 +229,25 @@ jobs:
       # The compile-pass and compile-fail cases (trybuild).
       - name: Test the macros
         run: cargo test -p horsies-macros
+
+      # The core's tests create one database per test, copied from a
+      # template that each test process installs, on the server of
+      # DATABASE_URL (crates/horsies-core/src/test_support/database.rs).
+      - name: Create the core test database
+        run: docker exec ${{ job.services.postgres.id }} createdb -U postgres horsies-core
+
+      # The `web` feature adds the monitoring handler and its tests; no core
+      # test needs the feature off.
+      - name: Test the core
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-core
+        run: cargo test -p horsies-core --features web
+
+      - name: Test the extension module crate
+        run: cargo test -p horsies-python
+
+      - name: Test the generator
+        run: cargo test -p horsies-codegen
 
       - name: Test the client with default features
         env:

@@ -4,6 +4,8 @@ use chrono::{NaiveTime, Timelike};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
+use super::no_member_after_the_tag;
+
 /// Days of the week.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -317,26 +319,6 @@ fn month_max_days(month: i64) -> i64 {
 
 fn default_cron_step() -> u32 {
     1
-}
-
-/// The body of a tagged unit variant ([`CronNumericTerm::Every`],
-/// [`CronEnumTerm::Every`], [`DaySelector::EveryDay`]): the members after the
-/// tag, which must be none. serde reads a unit variant of an internally
-/// tagged enum and skips its other members, also under
-/// `deny_unknown_fields`; Python's `CronEvery` and `EveryDay` refuse them
-/// (`extra='forbid'`).
-///
-/// Errors: serde's unknown-field error, which names the first member.
-fn no_member_after_the_tag<'de, D>(deserializer: D) -> Result<(), D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    /// A body with no members.
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct NoMembers {}
-
-    NoMembers::deserialize(deserializer).map(|NoMembers {}| ())
 }
 
 /// Cron term over an integer field (minute, hour, day-of-month).

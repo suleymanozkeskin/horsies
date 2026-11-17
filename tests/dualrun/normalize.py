@@ -33,6 +33,8 @@ from tests.dualrun.cells import (
     NormalizeError,
     PendingDocument,
     PendingId,
+    PendingLeaf,
+    PendingText,
     RawRow,
     RawSnapshot,
     StableCell,
@@ -56,6 +58,7 @@ from tests.dualrun.values import (
     NullValue,
     IdLabel,
     JsonDocument,
+    LabelledText,
     NormalizedValue,
     OffsetFromAnchor,
     OrderKeyCell,
@@ -65,6 +68,7 @@ from tests.dualrun.values import (
     UnlabelledId,
     map_json,
     render_json,
+    render_text,
     render_value,
     sort_token,
 )
@@ -211,24 +215,42 @@ def _order_value(cell: StableCell, book: _LabelBook) -> OrderKeyValue:
             return cell
 
 
-def _leaf_text(leaf: NormalizedValue | PendingId, book: _LabelBook) -> str:
+def _leaf_text(leaf: PendingLeaf, book: _LabelBook) -> str:
     match leaf:
         case PendingId():
             return render_value(_known(leaf, book))
+        case PendingText(parts=parts):
+            return render_text(
+                parts, lambda pending: render_value(_known(pending, book))
+            )
         case _:
             return render_value(leaf)
 
 
-def _final_leaf(leaf: NormalizedValue | PendingId, book: _LabelBook) -> NormalizedValue:
+def _final_label(pending: PendingId, book: _LabelBook) -> IdLabel:
+    match book.lookup(pending.raw):
+        case IdLabel() as label:
+            return label
+        case UnlabelledId():
+            raise AssertionError(
+                f'id {pending.raw!r} has no label after its table was labelled'
+            )
+
+
+def _final_part(part: str | PendingId, book: _LabelBook) -> str | IdLabel:
+    match part:
+        case str():
+            return part
+        case PendingId():
+            return _final_label(part, book)
+
+
+def _final_leaf(leaf: PendingLeaf, book: _LabelBook) -> NormalizedValue:
     match leaf:
-        case PendingId(raw=raw):
-            match book.lookup(raw):
-                case IdLabel() as label:
-                    return label
-                case UnlabelledId():
-                    raise AssertionError(
-                        f'id {raw!r} has no label after its table was labelled'
-                    )
+        case PendingId():
+            return _final_label(leaf, book)
+        case PendingText(parts=parts):
+            return LabelledText(parts=tuple(_final_part(part, book) for part in parts))
         case _:
             return leaf
 
@@ -248,14 +270,20 @@ def _final_value(cell: StableCell, book: _LabelBook) -> NormalizedValue:
 # ---- Masked tokens (reference order and tie check) ----
 
 
-def _leaf_token(
-    leaf: NormalizedValue | PendingId, marks: dict[str, str], book: _LabelBook
-) -> str:
+def _id_token(pending: PendingId, marks: dict[str, str], book: _LabelBook) -> str:
+    match marks.get(pending.raw):
+        case None:
+            return render_value(_known(pending, book))
+        case mark:
+            return mark
+
+
+def _leaf_token(leaf: PendingLeaf, marks: dict[str, str], book: _LabelBook) -> str:
     match leaf:
-        case PendingId(raw=raw) if raw in marks:
-            return marks[raw]
         case PendingId():
-            return render_value(_known(leaf, book))
+            return _id_token(leaf, marks, book)
+        case PendingText(parts=parts):
+            return render_text(parts, lambda pending: _id_token(pending, marks, book))
         case _:
             return render_value(leaf)
 
