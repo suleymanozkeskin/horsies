@@ -1,0 +1,5 @@
+error: variants `RateLimited` and `RATELimited` have the same code RATE_LIMITED
+ --> tests/compile_fail/user_error_code_repeated_code.rs:8:5
+  |
+8 |     RATELimited,
+  |     ^^^^^^^^^^^
