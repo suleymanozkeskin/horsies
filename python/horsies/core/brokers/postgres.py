@@ -25,6 +25,8 @@ from horsies._core import (
     DatabasePingRecord,
     SchemaInstalled,
     SchemaInstallNotRun,
+    RawResultAbsent,
+    RawResultRecordRecord,
     TaskAttemptRecord,
     TaskInfoNotFound,
     TaskInfoRecord,
@@ -2434,32 +2436,44 @@ class PostgresBroker:
         task_id: UUID,
         timeout_ms: Optional[int] = None,
     ) -> BrokerResult[RawResultRecord | None]:
-        """Raw broker fetch of a task's stored result envelope.
+        """Raw broker fetch of a task's stored result envelope, through
+        ``CoreHandle.raw_result_record_async``.
 
-        Strict-serde phase 6a primitive. The broker performs no typed
-        decoding; callers at the handle/app layer derive ``ok_type``
-        from ``record.task_name`` and call
+        The broker performs no typed decoding; callers at the handle/app
+        layer derive ``ok_type`` from ``record.task_name`` and call
         ``decode_task_result(record.raw_result, ok_type)``.
+
+        The core installs the schema once per handle first, then reads the
+        live row or the history record. While the task has not finished it
+        waits up to ``timeout_ms`` (no limit for ``None``) for a
+        ``task_done`` notification on the process listener of the session
+        URL, reading again at each wake and at the core's interval; a broker
+        built with ``assume_initialized=True`` has no listener and reads
+        again every 200 ms. Reads only: a cancel of the caller drops the
+        wait.
 
         Semantics:
 
-        - ``Ok(None)``: row truly absent (no ``TaskModel`` row for
-          ``task_id``).
+        - ``Ok(None)``: neither the live table nor the history holds the task.
         - ``Ok(RawResultRecord(status=COMPLETED|FAILED|EXPIRED, raw_result=<dict>))``:
-          terminal row with a stored payload.
+          terminal task with a stored payload.
         - ``Ok(RawResultRecord(status=CANCELLED, raw_result=None))``:
           task was cancelled before completion.
         - ``Ok(RawResultRecord(status=<non-terminal>, raw_result=None))``:
-          timeout fired before the row reached a terminal state.
-        - ``Err(BrokerOperationError(INVALID_JSON_PAYLOAD, ...))``:
-          stored JSON failed strict parse (malformed, non-finite
-          float, non-object envelope).
+          the limit passed before the task reached a terminal state.
+        - ``Err(BrokerInvalidJsonPayload)``: the stored result does not read
+          (malformed, non-finite number, not an object, a history digest
+          that differs). The same read fails again.
         - ``Err(BrokerWaitInsideTask)``: the call runs in a process that
           runs task bodies (a worker child). This is the first check: it
           comes before the argument checks. Nothing ran.
         - ``Err(BrokerInvalidInput)``: ``timeout_ms`` is not None or an int
           from 0 to ``MAX_TASK_TIMEOUT_MS``. Nothing ran.
-        - ``Err(...)`` with other codes for DB / listener failures.
+        - ``Err(BrokerOperationFailed(TASK_INFO_QUERY_FAILED))``: the
+          connect, the install or a read failed (``retryable`` is the core's
+          classification, ``exception`` a ``CoreOperationFailed``), or the
+          core of this process cannot run the call (``exception`` is the
+          ``CoreError``).
         """
         if process_role() is ProcessRole.RUNS_TASK_BODIES:
             return _wait_inside_task_err(
@@ -2471,134 +2485,30 @@ class PostgresBroker:
                     message=f'raw result fetch of task {task_id}: {refused.message}',
                     exception=NoCause(),
                 ))
-            case Ok(ok_value=timeout_seconds):
-                pass
-        match await self.select_resources():
-            case Err(loop_limit):
-                return _loop_limit_err('raw result fetch', loop_limit)
-            case Ok(resources):
+            case Ok():
                 pass
         try:
-            await self._ensure_initialized()
-
-            start_time = asyncio.get_event_loop().time()
-
-            # Quick path: row may already be terminal.
-            async with resources.session_factory() as session:
-                outcome = await self._probe_result_row(session, task_id)
-                if outcome is not _STILL_WAITING:
-                    return cast(
-                        'BrokerResult[RawResultRecord | None]', outcome,
-                    )
-
-            # Listen + poll loop. A broker without a listener polls.
-            q: asyncio.Queue[Any] | None = None
-            subscription: tuple[PostgresListener, asyncio.Queue[Any]] | None = None
-            match resources.listener:
-                case ListenerEnabled(listener=listener):
-                    listen_r = await listener.listen_payload('task_done', str(task_id))
-                    match listen_r:
-                        case Ok(queue):
-                            q = queue
-                            subscription = (listener, queue)
-                        case Err(listen_err):
-                            self.logger.debug(
-                                'LISTEN unavailable; falling back to polling '
-                                'for task_done. Original error: %s',
-                                listen_err.message,
-                            )
-                case ListenerDisabled():
-                    pass
-
-            try:
-                poll_interval = 5.0 if q is not None else 0.2
-                while True:
-                    remaining_timeout: float | None = None
-                    if timeout_seconds is not None:
-                        elapsed = (
-                            asyncio.get_event_loop().time() - start_time
-                        )
-                        remaining_timeout = timeout_seconds - elapsed
-                        if remaining_timeout <= 0:
-                            # Timeout. Surface current row state so the
-                            # caller can map to WAIT_TIMEOUT / outcome
-                            # codes per their UX. The row may have moved
-                            # to terminal between checks; one more read
-                            # to capture the latest snapshot.
-                            async with resources.session_factory() as session:
-                                outcome = await self._probe_result_row(
-                                    session,
-                                    task_id,
-                                    non_terminal_snapshot=True,
-                                )
-                                return cast(
-                                    'BrokerResult[RawResultRecord | None]',
-                                    outcome,
-                                )
-
-                    wait_time = (
-                        min(poll_interval, remaining_timeout)
-                        if remaining_timeout is not None
-                        else poll_interval
-                    )
-
-                    if q is not None:
-                        try:
-
-                            async def _wait_for_task() -> None:
-                                while True:
-                                    note = await q.get()
-                                    if note.payload == str(task_id):
-                                        return
-
-                            await asyncio.wait_for(
-                                _wait_for_task(), timeout=wait_time,
-                            )
-                        except asyncio.TimeoutError:
-                            pass
-                    else:
-                        await asyncio.sleep(wait_time)
-
-                    async with resources.session_factory() as session:
-                        outcome = await self._probe_result_row(
-                            session, task_id,
-                        )
-                        if outcome is not _STILL_WAITING:
-                            return cast(
-                                'BrokerResult[RawResultRecord | None]',
-                                outcome,
-                            )
-            finally:
-                match subscription:
-                    case (listener, queue):
-                        await self._unsubscribe_task_done_safely(
-                            listener, task_id, queue,
-                        )
-                    case None:
-                        pass
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self.logger.exception(
-                'Broker error while retrieving raw task result record',
+            outcome = await self._core_handle.raw_result_record_async(
+                task_id, timeout_ms=timeout_ms,
             )
-            return _operation_failed(
-                BrokerErrorCode.TASK_INFO_QUERY_FAILED,
-                f'Broker error while retrieving task {task_id}: {exc}',
-                exc,
-            )
+        except CoreError as exc:
+            return self._raw_result_core_error(task_id, exc)
+        return self._raw_result_of_outcome(task_id, outcome)
 
     def get_raw_result_record(
         self,
         task_id: UUID,
         timeout_ms: Optional[int] = None,
     ) -> BrokerResult[RawResultRecord | None]:
-        """Synchronous wrapper around ``get_raw_result_record_async``.
+        """The blocking form of ``get_raw_result_record_async``:
+        ``CoreHandle.raw_result_record`` on the calling thread, with the GIL
+        released and signals checked every 100 ms.
 
-        Runs the async path on the broker's background event loop via
-        ``LoopRunner``. In a process that runs task bodies it returns
+        In a process that runs task bodies it returns
         ``Err(BrokerWaitInsideTask)`` first. On a thread that runs an event
-        loop it returns ``Err(ASYNC_CONTEXT)``. Neither does I/O.
+        loop it returns ``Err(ASYNC_CONTEXT)``. Neither does I/O. A wait
+        with a limit is bounded by the limit plus the core's bound of a
+        blocking call; a wait with no limit has no call bound, as before.
         """
         if process_role() is ProcessRole.RUNS_TASK_BODIES:
             return _wait_inside_task_err(
@@ -2609,14 +2519,110 @@ class PostgresBroker:
                 'PostgresBroker.get_raw_result_record()',
                 'broker.get_raw_result_record_async(...)',
             )
+        match wait_timeout_seconds(timeout_ms):
+            case Err(err_value=refused):
+                return Err(BrokerInvalidInput(
+                    message=f'raw result fetch of task {task_id}: {refused.message}',
+                    exception=NoCause(),
+                ))
+            case Ok():
+                pass
         try:
-            return self.run_sync(
-                self.get_raw_result_record_async, task_id, timeout_ms,
-            )
-        except LoopRunnerError as exc:
-            return _loop_runner_err(
-                f'PostgresBroker.get_raw_result_record({task_id!r})', exc,
-            )
+            outcome = self._core_handle.raw_result_record(task_id, timeout_ms=timeout_ms)
+        except CoreError as exc:
+            return self._raw_result_core_error(task_id, exc)
+        return self._raw_result_of_outcome(task_id, outcome)
+
+    def _raw_result_core_error(
+        self, task_id: UUID, exc: CoreError,
+    ) -> Err[BrokerOperationFailed]:
+        """The core of this process cannot run a result read: it stopped,
+        did not start, has too many calls in flight, or a blocking call
+        reached its bound. Logged on ``horsies.broker``; nothing changed."""
+        self.logger.error(
+            'Broker error while retrieving raw task result record for task %s: %s',
+            task_id,
+            exc,
+        )
+        return Err(
+            BrokerOperationFailed(
+                code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                message=f'Broker error while retrieving task {task_id}: {exc}',
+                retryable=core_error_retryable(exc),
+                exception=exc,
+            ),
+        )
+
+    def _raw_result_of_outcome(
+        self,
+        task_id: UUID,
+        outcome: RawResultRecordRecord | RawResultAbsent | BrokerFailure,
+    ) -> BrokerResult[RawResultRecord | None]:
+        """The result of one core result read.
+
+        - ``RawResultRecordRecord``: ``Ok(RawResultRecord)``; ``result_json``
+          is read with the strict JSON reader (``INVALID_JSON_PAYLOAD`` when
+          it does not read as an object or null).
+        - ``RawResultAbsent``: ``Ok(None)``.
+        - ``BrokerFailure(INVALID_JSON_PAYLOAD)``: ``BrokerInvalidJsonPayload``.
+        - ``BrokerFailure(TASK_INFO_QUERY_FAILED)``: ``BrokerOperationFailed``,
+          logged on ``horsies.broker``.
+
+        Each failure's ``exception`` is a ``CoreOperationFailed``. Another
+        code contradicts the core's catalog of the read, for example
+        ``INVALID_INPUT`` for a limit that the check above admitted:
+        ``AssertionError``.
+        """
+        match outcome:
+            case RawResultRecordRecord(
+                task_name=task_name, status=status, result_json=result_json,
+            ):
+                match result_json:
+                    case None:
+                        raw_result = None
+                    case str():
+                        match _strict_result_envelope(task_id, result_json):
+                            case Ok(envelope):
+                                raw_result = envelope
+                            case Err() as refused:
+                                return refused
+                return Ok(RawResultRecord(
+                    task_id=task_id,
+                    task_name=task_name,
+                    status=TaskStatus(status),
+                    raw_result=raw_result,
+                ))
+            case RawResultAbsent():
+                return Ok(None)
+            case BrokerFailure(code='INVALID_JSON_PAYLOAD', message=message):
+                return Err(BrokerInvalidJsonPayload(
+                    message=message,
+                    exception=CoreOperationFailed(
+                        'PostgresBroker.get_raw_result_record_async', message, False,
+                    ),
+                ))
+            case BrokerFailure(
+                code='TASK_INFO_QUERY_FAILED', message=message, retryable=retryable,
+            ):
+                self.logger.error(
+                    'Broker error while retrieving raw task result record for task %s: %s',
+                    task_id,
+                    message,
+                )
+                return Err(
+                    BrokerOperationFailed(
+                        code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                        message=f'Broker error while retrieving task {task_id}: {message}',
+                        retryable=retryable,
+                        exception=CoreOperationFailed(
+                            'PostgresBroker.get_raw_result_record_async', message, retryable,
+                        ),
+                    ),
+                )
+            case BrokerFailure(code=code):
+                raise AssertionError(f'the core result read answered the code {code}')
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _unsubscribe_task_done_safely(
         self, listener: PostgresListener, task_id: UUID, q: asyncio.Queue[Any],

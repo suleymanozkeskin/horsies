@@ -27,6 +27,8 @@ from horsies._core import (
     DatabasePingRecord,
     SchemaInstalled,
     SchemaInstallNotRun,
+    RawResultAbsent,
+    RawResultRecordRecord,
     TaskAttemptRecord,
     TaskInfoNotFound,
     TaskInfoRecord,
@@ -50,6 +52,7 @@ from horsies.core.brokers.result_types import (
     BrokerInvalidTaskOptions,
     BrokerListenerDisabled,
     BrokerOperationFailed,
+    RawResultRecord,
 )
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
@@ -94,6 +97,7 @@ from horsies.core.baseline.install import (
 )
 from horsies.core.types.status import TaskAttemptOutcome, TaskStatus
 from horsies.core.utils.loop_runner import LoopRunnerError
+from tests.dualrun.reference import result_caller
 from tests.broker_resources_support import (
     attach_loop_limit,
     pin_resources,
@@ -1366,13 +1370,197 @@ class TestScheduleSlotTaskId:
 # ---------------------------------------------------------------------------
 
 
+RESULT_TASK_ID = UUID('0198c0de-0000-7000-8000-000000000123')
+RESULT_MISSING_ID = UUID('0198c0de-0000-7000-8000-000000000001')
+
+
 @pytest.mark.unit
 class TestGetRawResultRecordAsync:
-    """Cover ``PostgresBroker.get_raw_result_record_async`` directly.
+    """get_raw_result_record_async maps the record of one core read to its result."""
 
-    Replaces the removed ``get_result_async`` semantics at the broker
-    layer. Typed-decode coverage lives at the ``Horsies.get_result_async``
-    layer; broker tests only verify the raw envelope-fetch contract.
+    @staticmethod
+    def _broker_answering(outcome: object) -> Any:
+        broker = _make_broker()
+        handle = MagicMock()
+        handle.raw_result_record_async = AsyncMock(return_value=outcome)
+        broker._core_handle = handle
+        return broker
+
+    @staticmethod
+    def _record(status: str, result_json: str | None) -> MagicMock:
+        return MagicMock(
+            spec=RawResultRecordRecord,
+            task_id=RESULT_TASK_ID,
+            task_name='my_task',
+            status=status,
+            result_json=result_json,
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_absent_task_is_ok_none(self) -> None:
+        broker = self._broker_answering(
+            MagicMock(spec=RawResultAbsent, task_id=RESULT_MISSING_ID),
+        )
+
+        result = await broker.get_raw_result_record_async(RESULT_MISSING_ID)
+
+        assert result == Ok(None)
+        broker._core_handle.raw_result_record_async.assert_awaited_once_with(
+            RESULT_MISSING_ID, timeout_ms=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_finished_task_gives_its_envelope(self) -> None:
+        envelope = '{"__h_task_result__":true,"ok":7,"err":null}'
+        broker = self._broker_answering(self._record('COMPLETED', envelope))
+
+        result = await broker.get_raw_result_record_async(RESULT_TASK_ID, timeout_ms=5_000)
+
+        assert result == Ok(RawResultRecord(
+            task_id=RESULT_TASK_ID,
+            task_name='my_task',
+            status=TaskStatus.COMPLETED,
+            raw_result={'__h_task_result__': True, 'ok': 7, 'err': None},
+        ))
+        broker._core_handle.raw_result_record_async.assert_awaited_once_with(
+            RESULT_TASK_ID, timeout_ms=5_000,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('status', ['CANCELLED', 'RUNNING'])
+    async def test_a_record_without_a_result_has_no_payload(self, status: str) -> None:
+        broker = self._broker_answering(self._record(status, None))
+
+        result = await broker.get_raw_result_record_async(RESULT_TASK_ID, timeout_ms=10)
+
+        assert is_ok(result)
+        record = result.ok_value
+        assert record is not None
+        assert record.status is TaskStatus(status)
+        assert record.raw_result is None
+
+    @pytest.mark.asyncio
+    async def test_a_stored_result_that_is_not_an_object_is_invalid_json_payload(
+        self,
+    ) -> None:
+        broker = self._broker_answering(self._record('COMPLETED', '[1]'))
+
+        result = await broker.get_raw_result_record_async(RESULT_TASK_ID)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
+        assert isinstance(result.err_value.exception, NoCause)
+
+    @pytest.mark.asyncio
+    async def test_corrupt_stored_data_found_by_the_core_is_invalid_json_payload(
+        self,
+    ) -> None:
+        broker = self._broker_answering(
+            MagicMock(
+                spec=BrokerFailure,
+                code='INVALID_JSON_PAYLOAD',
+                message='Result archive digest mismatch',
+                retryable=False,
+            ),
+        )
+
+        result = await broker.get_raw_result_record_async(RESULT_TASK_ID)
+
+        assert is_err(result)
+        failed = result.err_value
+        assert isinstance(failed, BrokerInvalidJsonPayload)
+        assert 'digest mismatch' in failed.message
+        assert isinstance(failed.exception, CoreOperationFailed)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_read_is_task_info_query_failed_and_logged(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        broker = self._broker_answering(
+            MagicMock(
+                spec=BrokerFailure,
+                code='TASK_INFO_QUERY_FAILED',
+                message='connection lost',
+                retryable=True,
+            ),
+        )
+
+        with caplog.at_level('ERROR', logger='horsies.broker'):
+            result = await broker.get_raw_result_record_async(RESULT_TASK_ID)
+
+        assert is_err(result)
+        failed = result.err_value
+        assert isinstance(failed, BrokerOperationFailed)
+        assert failed.code is BrokerErrorCode.TASK_INFO_QUERY_FAILED
+        assert failed.retryable is True
+        assert isinstance(failed.exception, CoreOperationFailed)
+        assert 'connection lost' in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_core_that_cannot_run_the_read_is_task_info_query_failed(self) -> None:
+        broker = _make_broker()
+        error = TooManyPendingCalls('CoreHandle.raw_result_record_async', 65_536)
+        handle = MagicMock()
+        handle.raw_result_record_async = AsyncMock(side_effect=error)
+        broker._core_handle = handle
+
+        result = await broker.get_raw_result_record_async(RESULT_TASK_ID)
+
+        assert is_err(result)
+        assert result.err_value.code is BrokerErrorCode.TASK_INFO_QUERY_FAILED
+        assert result.err_value.retryable is True
+        assert result.err_value.exception is error
+
+    @pytest.mark.asyncio
+    async def test_a_refused_limit_is_invalid_input_before_the_core(self) -> None:
+        broker = self._broker_answering(None)
+
+        result = await broker.get_raw_result_record_async(RESULT_TASK_ID, timeout_ms=-1)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidInput)
+        broker._core_handle.raw_result_record_async.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_another_failure_code_is_a_defect(self) -> None:
+        broker = self._broker_answering(
+            MagicMock(spec=BrokerFailure, code='INVALID_INPUT', message='x', retryable=False),
+        )
+
+        with pytest.raises(AssertionError, match='INVALID_INPUT'):
+            await broker.get_raw_result_record_async(RESULT_TASK_ID)
+
+    @pytest.mark.asyncio
+    async def test_a_cancel_of_the_caller_propagates(self) -> None:
+        broker = _make_broker()
+        handle = MagicMock()
+        handle.raw_result_record_async = AsyncMock(side_effect=asyncio.CancelledError)
+        broker._core_handle = handle
+
+        with pytest.raises(asyncio.CancelledError):
+            await broker.get_raw_result_record_async(RESULT_TASK_ID)
+
+    def test_the_blocking_form_runs_the_blocking_core_read(self) -> None:
+        broker = _make_broker()
+        broker._loop_runner = MagicMock()
+        handle = MagicMock()
+        handle.raw_result_record = MagicMock(
+            return_value=MagicMock(spec=RawResultAbsent, task_id=RESULT_TASK_ID),
+        )
+        broker._core_handle = handle
+
+        result = broker.get_raw_result_record(RESULT_TASK_ID, timeout_ms=5_000)
+
+        assert result == Ok(None)
+        handle.raw_result_record.assert_called_once_with(RESULT_TASK_ID, timeout_ms=5_000)
+        broker._loop_runner.call.assert_not_called()
+
+
+@pytest.mark.unit
+class TestPythonRawResultRead:
+    """The Python result read and wait before the switch to the core, kept
+    as the dual-run reference (``tests/dualrun/reference/result_caller.py``):
+    the probe on the loop's SQLAlchemy set and the wait on its listener.
     """
 
     @pytest.mark.asyncio
@@ -1382,7 +1570,7 @@ class TestGetRawResultRecordAsync:
         session = _make_result_session(None)
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
-        result = await broker.get_raw_result_record_async('missing-id')
+        result = await result_caller.get_raw_result_record_async(broker, RESULT_MISSING_ID)
 
         assert is_ok(result)
         assert result.unwrap() is None
@@ -1403,12 +1591,12 @@ class TestGetRawResultRecordAsync:
         session = _make_result_session(_make_task_row(status=status))
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
-        result = await broker.get_raw_result_record_async('task-123')
+        result = await result_caller.get_raw_result_record_async(broker, RESULT_TASK_ID)
 
         assert is_ok(result)
         record = result.unwrap()
         assert isinstance(record, RawResultRecord)
-        assert record.task_id == 'task-123'
+        assert record.task_id == RESULT_TASK_ID
         assert record.task_name == 'my_task'
         assert record.status == status
         assert record.raw_result is None
@@ -1424,7 +1612,7 @@ class TestGetRawResultRecordAsync:
         session = _make_result_session(row)
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
-        result = await broker.get_raw_result_record_async('task-123')
+        result = await result_caller.get_raw_result_record_async(broker, RESULT_TASK_ID)
 
         assert is_ok(result)
         record = result.unwrap()
@@ -1453,8 +1641,8 @@ class TestGetRawResultRecordAsync:
         with patch(
             'horsies.core.brokers.postgres.asyncio.sleep', new=AsyncMock(),
         ):
-            result = await broker.get_raw_result_record_async(
-                'task-123', timeout_ms=10,
+            result = await result_caller.get_raw_result_record_async(
+                broker, RESULT_TASK_ID, timeout_ms=10,
             )
 
         assert is_ok(result)
@@ -1472,7 +1660,7 @@ class TestGetRawResultRecordAsync:
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         with pytest.raises(asyncio.CancelledError):
-            await broker.get_raw_result_record_async('task-123')
+            await result_caller.get_raw_result_record_async(broker, RESULT_TASK_ID)
 
     @pytest.mark.asyncio
     async def test_cancellation_still_completes_unsubscribe_cleanup(self) -> None:
@@ -1507,8 +1695,8 @@ class TestGetRawResultRecordAsync:
         )
 
         task = asyncio.create_task(
-            broker.get_raw_result_record_async(
-                'task-123', timeout_ms=60_000,
+            result_caller.get_raw_result_record_async(
+                broker, RESULT_TASK_ID, timeout_ms=60_000,
             )
         )
 
@@ -1530,7 +1718,7 @@ class TestGetRawResultRecordAsync:
 
         assert finished.is_set() is True
         _listener_of(broker).unsubscribe_payload.assert_awaited_once_with(
-            'task_done', 'task-123', q,
+            'task_done', str(RESULT_TASK_ID), q,
         )
 
 
@@ -2625,25 +2813,6 @@ class TestSyncFacades:
     # removed: strict-serde phase 6 dropped ``broker.get_result``. Sync
     # bridge coverage moved up to ``Horsies.get_result`` — see
     # ``tests/unit/test_app_get_result.py``.)
-
-    def test_get_raw_result_record_delegates_to_loop_runner(self) -> None:
-        """get_raw_result_record() should call _loop_runner.call with
-        get_raw_result_record_async (the strict-serde phase 6 broker
-        primitive that replaces the old get_result loop bridge)."""
-        broker = _make_broker()
-        broker._loop_runner = MagicMock()
-        broker._loop_runner.call = MagicMock(return_value=Ok(None))
-
-        result = broker.get_raw_result_record('task-id', timeout_ms=5000)
-
-        assert is_ok(result)
-        broker._loop_runner.call.assert_called_once()
-        call_args = broker._loop_runner.call.call_args
-        coro_fn = call_args[0][0]
-        assert (
-            getattr(coro_fn, '__name__', None)
-            == 'get_raw_result_record_async'
-        )
 
     def test_get_task_info_runs_the_blocking_core_read(self) -> None:
         """get_task_info() calls CoreHandle.task_info on this thread, not the runner."""
