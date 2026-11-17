@@ -94,7 +94,6 @@ from horsies.core.brokers.result_types import (
     BrokerWaitInsideTask,
     RawResultRecord,
 )
-from horsies.core.brokers.core_failure import CoreOperationFailed
 from horsies.core.manifest import schema_mode_of, to_producer_manifest
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import OrphanTaskAuditReport
@@ -103,6 +102,7 @@ from horsies.core.models.workflow_pg import (
     WorkflowModel as _WorkflowModel,
     WorkflowTaskModel as _WorkflowTaskModel,
 )
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.status import (
     TASK_TERMINAL_STATES,
@@ -3291,7 +3291,7 @@ class PostgresBroker:
                         ),
                         retryable=retryable,
                         exception=CoreOperationFailed(
-                            'PostgresBroker.requeue_stale_claimed', message,
+                            'PostgresBroker.requeue_stale_claimed', message, retryable,
                         ),
                     ),
                 )

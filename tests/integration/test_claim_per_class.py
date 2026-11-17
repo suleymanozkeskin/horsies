@@ -28,6 +28,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from horsies._core import CoreHandle
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import Execution
 from horsies.core.worker.claiming import ClaimMixin, ClaimPass
@@ -870,6 +871,11 @@ class _Probe(ClaimMixin):
             start_check_caps(self.cfg.prefetch_buffer, self.cfg.queue_max_concurrency),
         )
         self.dispatched: list[str] = []
+        self._broker = broker
+
+    @property
+    def core_handle(self) -> CoreHandle:
+        return self._broker._core_handle
 
     def _claim_slot_count(self) -> int:
         return self.cfg.processes
