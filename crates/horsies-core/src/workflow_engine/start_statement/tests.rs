@@ -255,6 +255,26 @@ fn a_subworkflow_root_whose_builder_fails_gets_a_failed_record() {
     );
 }
 
+/// Params that the client's params type does not decode as a whole:
+/// `WORKFLOW_ENQUEUE_FAILED` with Python's prefix and suffix around the
+/// decode's text, cut at 200 characters, with no exception class; the
+/// workflow id and the node in `data`.
+#[test]
+fn a_params_decode_failure_keeps_the_decode_text_without_a_class() {
+    let workflow_id = Uuid::new_v4();
+    let decode_text = format!(".: missing field `n` {}", "x".repeat(300));
+    let error = params_decode_failed_error(workflow_id, "parent", 2, &decode_text);
+    let kept: String = decode_text.chars().take(BUILD_FAILURE_TEXT_CHARS).collect();
+    let expected = format!("Subworkflow build failed: {kept} (workflow parent:2)");
+
+    assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
+    assert_eq!(error.message.as_deref(), Some(expected.as_str()));
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 2}))
+    );
+}
+
 #[test]
 fn a_task_node_without_a_resolved_queue_refuses_the_start() {
     let mut unresolved = task_node(0, vec![]);

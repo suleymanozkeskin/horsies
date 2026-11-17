@@ -24,10 +24,10 @@ use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use horsies_core::{
-    build_failed_error, merged_child_input, node_failure_result, params_refused_error,
-    subworkflow_load_failed_error, ChildSpecError, ChildSpecFuture, ChildSpecRequest,
-    ChildSpecSource, ChildSpecUnavailable, ClientChildSpec, ClientSpec, NodeInput, RefusedMember,
-    TaskError,
+    build_failed_error, merged_child_input, node_failure_result, params_decode_failed_error,
+    params_refused_error, subworkflow_load_failed_error, ChildSpecError, ChildSpecFuture,
+    ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ClientChildSpec, ClientSpec,
+    NodeInput, RefusedMember, TaskError,
 };
 use serde::de::DeserializeOwned;
 
@@ -63,9 +63,13 @@ pub(crate) enum ParamsBuildRefused {
     /// The params member `key` does not decode to the field of that name;
     /// `build_with` did not run. The node stores `WORKER_SERIALIZATION_ERROR`.
     Member { key: String, cause: String },
-    /// The params do not decode as a whole, `build_with` refused, or the
-    /// spec it built has another output type. The node stores
-    /// `WORKFLOW_ENQUEUE_FAILED`.
+    /// The params do not decode as a whole (a field with no member, for
+    /// one); `build_with` did not run. `text` is the decode's text. The node
+    /// stores `WORKFLOW_ENQUEUE_FAILED` with the text after Python's prefix
+    /// `Subworkflow build failed: `.
+    Undecodable { text: String },
+    /// `build_with` refused, or the spec it built has another output type.
+    /// The node stores `WORKFLOW_ENQUEUE_FAILED`.
     Failed(HorsiesError),
 }
 
@@ -388,8 +392,11 @@ impl WorkflowRegistry {
     /// 3. A definition without params gives its spec; one with params
     ///    decodes the input with its params type and runs `build_with`. A
     ///    member that does not decode fails the node with
-    ///    `WORKER_SERIALIZATION_ERROR`; a failed build, or a spec that the
-    ///    conversion refuses, with `WORKFLOW_ENQUEUE_FAILED`.
+    ///    `WORKER_SERIALIZATION_ERROR`; params that do not decode as a whole
+    ///    with `WORKFLOW_ENQUEUE_FAILED` and the decode's text
+    ///    ([`params_decode_failed_error`]); a failed build, or a spec that
+    ///    the conversion refuses, with `WORKFLOW_ENQUEUE_FAILED` and the
+    ///    class of the error.
     /// 4. The spec, converted to the core's spec data with the classes of
     ///    the app's queues.
     ///
@@ -437,6 +444,12 @@ impl WorkflowRegistry {
                 },
                 &input,
                 BUILD_WITH,
+            ),
+            Err(ParamsBuildRefused::Undecodable { text }) => params_decode_failed_error(
+                request.parent_workflow_id,
+                &request.parent_workflow_name,
+                request.task_index,
+                &text,
             ),
             Err(ParamsBuildRefused::Failed(error)) => built_failed(request, &error),
         };
@@ -539,6 +552,11 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
 
 /// The params of a definition, decoded from the params text with the params
 /// type. `()` reads `{}` and `null`, as a task with no parameters does.
+///
+/// Errors: [`ParamsBuildRefused::Member`] for a failure at a member, named
+/// by the first key of its path; [`ParamsBuildRefused::Undecodable`] for a
+/// failure of the params as a whole (a field with no member, for one).
+/// Pure.
 fn decode_params<P: DeserializeOwned + 'static>(text: &str) -> Result<P, ParamsBuildRefused> {
     let is_unit = TypeId::of::<P>() == TypeId::of::<()>();
     let text = match (is_unit, text.trim()) {
@@ -557,13 +575,12 @@ fn decode_params<P: DeserializeOwned + 'static>(text: &str) -> Result<P, ParamsB
                 key,
                 cause: failure.to_string(),
             },
-            None => ParamsBuildRefused::Failed(
-                HorsiesError::new(format!(
+            None => ParamsBuildRefused::Undecodable {
+                text: format!(
                     "the params do not decode as {}: {failure}",
                     std::any::type_name::<P>()
-                ))
-                .with_code(ErrorCode::WorkflowKwargsNotSerializable),
-            ),
+                ),
+            },
         }
     })
 }
@@ -587,6 +604,12 @@ fn child_for_check(
                         .with_code(ErrorCode::WorkflowKwargsNotSerializable)
                         .with_note(format!("node '{}': param '{key}': {cause}", node.node_id))
                         .with_help("fix the param, or the params type of the definition"),
+                );
+                None
+            }
+            Err(ParamsBuildRefused::Undecodable { text }) => {
+                findings.push(
+                    HorsiesError::new(text).with_code(ErrorCode::WorkflowKwargsNotSerializable),
                 );
                 None
             }

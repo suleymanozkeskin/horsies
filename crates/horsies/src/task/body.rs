@@ -892,6 +892,48 @@ mod tests {
         }
     }
 
+    /// An array input is one input value: a task of a `Vec` input decodes
+    /// the whole array, not one value per element.
+    #[test]
+    fn an_array_input_decodes_as_one_value() {
+        let decoded: Vec<i32> = decode_input(b"[1,2,3]").expect("an array input decodes");
+        assert_eq!(decoded, vec![1, 2, 3]);
+    }
+
+    /// The rules of a stored value hold at every depth of a returned value:
+    /// an engine key inside an array is refused, a value nested to the depth
+    /// bound is encoded, and a value one level deeper is refused.
+    #[test]
+    fn the_return_rules_hold_at_every_depth() {
+        for key in ["__h_task_result__", "__horsies_x", "__builtin_task_code__"] {
+            let value = json!({ "outer": [{ key: 1 }] });
+            match body_result::<serde_json::Value, ChargeCode>(Ok(value)) {
+                TaskResult::Ok(_) => panic!("the engine key {key} inside an array was encoded"),
+                TaskResult::Err(error) => assert_serialization_error(&error),
+            }
+        }
+        let nested = |depth: usize| {
+            let mut value = json!([1]);
+            for _ in 1..depth {
+                value = serde_json::Value::Array(vec![value]);
+            }
+            value
+        };
+        let bound = horsies_core::core::codec::MAX_VALUE_JSON_DEPTH;
+        match body_result::<serde_json::Value, ChargeCode>(Ok(nested(bound))) {
+            TaskResult::Ok(_) => {}
+            TaskResult::Err(error) => panic!("a value at the depth bound was refused: {error}"),
+        }
+        match body_result::<serde_json::Value, ChargeCode>(Ok(nested(bound + 1))) {
+            TaskResult::Ok(_) => panic!("a value past the depth bound was encoded"),
+            TaskResult::Err(error) => {
+                assert_serialization_error(&error);
+                let message = error.message.as_deref().unwrap_or_default();
+                assert!(message.contains("nested deeper than 200"), "{message}");
+            }
+        }
+    }
+
     #[test]
     fn a_non_finite_float_is_refused() {
         match body_result::<f64, ChargeCode>(Ok(f64::NAN)) {
