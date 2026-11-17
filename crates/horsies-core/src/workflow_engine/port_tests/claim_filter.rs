@@ -184,3 +184,52 @@ async fn one_batch_keeps_the_plain_claim_and_ends_the_paused_and_cancelled_ones(
     );
     db.drop().await;
 }
+
+/// The worker that holds the claims of
+/// [`another_workers_claim_in_a_paused_or_cancelled_workflow_is_left_alone`].
+const OTHER_WORKER: &str = "workflow-port-other-worker";
+
+/// `test_paused_workflow_does_not_reset_task_owned_by_another_worker` and
+/// `test_cancelled_workflow_does_not_reset_task_owned_by_another_worker`:
+/// this worker does not dispatch a claim that another worker holds in a
+/// PAUSED or CANCELLED workflow, and leaves that claim and its node as they
+/// are.
+#[tokio::test]
+#[serial]
+async fn another_workers_claim_in_a_paused_or_cancelled_workflow_is_left_alone() {
+    let db = IsolatedDatabase::create().await;
+    for workflow_status in ["PAUSED", "CANCELLED"] {
+        let (workflow_id, task_id, claimed_at) =
+            seed_claimed_node(&db.pool, workflow_status, "ENQUEUED").await;
+        sqlx::query("UPDATE horsies_tasks SET claimed_by_worker_id = $2 WHERE id = $1")
+            .bind(task_id)
+            .bind(OTHER_WORKER)
+            .execute(&db.pool)
+            .await
+            .expect("give the claim to another worker");
+
+        let filtered = broker(&db.pool)
+            .filter_non_runnable_workflow_tasks(&[(task_id, claimed_at)], WORKER)
+            .await
+            .expect("the claim filter");
+
+        assert_eq!(filtered, vec![task_id], "{workflow_status}: not dispatched");
+        assert_eq!(
+            live_status(&db.pool, task_id).await.as_deref(),
+            Some("CLAIMED"),
+            "{workflow_status}"
+        );
+        assert_eq!(
+            history_row(&db.pool, task_id).await,
+            None,
+            "{workflow_status}"
+        );
+        let kept = node(&db.pool, workflow_id, 0).await;
+        assert_eq!(
+            (kept.status.as_str(), kept.task_id),
+            ("ENQUEUED", Some(task_id)),
+            "{workflow_status}"
+        );
+    }
+    db.drop().await;
+}
