@@ -35,7 +35,12 @@ use crate::core::history::archive::attempts::{decode_attempt_snapshot, AttemptRe
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
-use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason, TaskTimeoutMs};
+use crate::worker::executor::protocol::{
+    FailureDetail, ProcessId, ResultEnvelopeText, RunEnd, StopReason, TaskTimeoutMs,
+};
+use crate::worker::executor::supervisor::{
+    ChildExit, ChildLost, LossCause, PartialFrame, ReapedExit,
+};
 use crate::worker::retry::read_stored_options;
 
 const WORKER: &str = "report-worker";
@@ -116,6 +121,114 @@ fn a_worker_failure_without_detail_records_the_fallback_text() {
             failed_reason: Some("Worker failure".to_owned()),
         }
     );
+}
+
+/// A child that died by itself with exit code 9, its exit seen.
+fn child_died_with_exit_code_9() -> ChildLost {
+    ChildLost {
+        cause: LossCause::ChildDied,
+        exit: ChildExit::Reaped(ReapedExit::ExitedWith(9)),
+        partial: PartialFrame::NoneAtHand,
+        pid: ProcessId::new(4242).expect("4242 is a process id"),
+    }
+}
+
+/// Python `_finalize_child_loss`: the crash reason of a lost child is
+/// `Worker child lost: ` and the loss description, which names the cause,
+/// the exit and a discarded partial result.
+#[test]
+fn a_lost_child_s_crash_reason_carries_python_s_prefix() {
+    let killed_mid_frame = ChildLost {
+        cause: LossCause::KilledByParent,
+        exit: ChildExit::Reaped(ReapedExit::KilledBySignal(libc::SIGKILL)),
+        partial: PartialFrame::Discarded,
+        ..child_died_with_exit_code_9()
+    };
+
+    assert_eq!(
+        AttemptEnd::of_lost_child(&child_died_with_exit_code_9()),
+        AttemptEnd::Crashed {
+            reason: FailureDetail::cut("Worker child lost: child died: exit code 9"),
+        }
+    );
+    assert_eq!(
+        AttemptEnd::of_lost_child(&killed_mid_frame),
+        AttemptEnd::Crashed {
+            reason: FailureDetail::cut(
+                "Worker child lost: killed by the worker: signal 9 (SIGKILL), \
+                 partial result discarded"
+            ),
+        }
+    );
+}
+
+/// Python `_write_ended_attempt`: the write of a child that the worker
+/// killed or lost records its message as the attempt's message and as the
+/// attempt's failed reason, for each code it writes. The task's failed
+/// reason is not written.
+#[test]
+fn a_killed_or_lost_child_records_its_message_as_the_attempt_reason() {
+    let claimed = claimed_plain();
+    let text = "Worker child lost: child died: exit code 9";
+    for code in [
+        OperationalErrorCode::WorkerCrashed,
+        LoopKillCode::TaskBlockedLoop.code(),
+        LoopKillCode::NeighbourBlockedLoop.code(),
+    ] {
+        let code_text = code.to_string();
+        let write = killed_child_write(
+            &claimed,
+            WORKER,
+            code.into(),
+            text.to_owned(),
+            RetryPlacement::SameClass,
+        );
+
+        assert_eq!(write.failed_reason, None, "{code_text}");
+        assert_eq!(
+            write.attempt,
+            AttemptFailure {
+                kind: AttemptFailureKind::Failed,
+                error_message: Some(text.to_owned()),
+                failed_reason: Some(text.to_owned()),
+            },
+            "{code_text}"
+        );
+    }
+}
+
+/// Python `_settle_timed_out_row` through `_write_ended_attempt`: a
+/// `TASK_TIMEOUT` write records `Task exceeded timeout_ms=<n>` as the
+/// attempt's message and as the attempt's failed reason, for every cancel
+/// end. The task's failed reason is not written.
+#[test]
+fn a_timeout_records_its_text_as_the_attempt_reason() {
+    let timeout = TaskTimeoutMs::new(1_000).expect("1 s is a valid task timeout");
+    for cancel in [
+        TimeoutCancel::NoSignal,
+        TimeoutCancel::Ended(CancelEnd::ReturnedAfterSignal),
+        TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
+        TimeoutCancel::Ended(CancelEnd::KilledWithChild),
+    ] {
+        let write = timeout_write(
+            &claimed_plain(),
+            WORKER,
+            timeout,
+            RetryPlacement::SameClass,
+            cancel,
+        );
+
+        assert_eq!(write.failed_reason, None, "{cancel:?}");
+        assert_eq!(
+            write.attempt,
+            AttemptFailure {
+                kind: AttemptFailureKind::Failed,
+                error_message: Some("Task exceeded timeout_ms=1000".to_owned()),
+                failed_reason: Some("Task exceeded timeout_ms=1000".to_owned()),
+            },
+            "{cancel:?}"
+        );
+    }
 }
 
 /// Python `TestFailures::test_string_error_codes_survive_unchanged` and
@@ -664,4 +777,125 @@ async fn a_workflow_success_completes_in_the_locked_write_and_finishes_its_node(
     );
     remove_task(&pool, task_id).await;
     remove_workflow(&pool, workflow_id).await;
+}
+
+/// Settle `end` on a RUNNING plain row with no retry policy, and read what
+/// history holds for it: the terminal facts and the archived attempts.
+async fn settle_on_a_running_row(end: AttemptEnd) -> (HistoryFacts, Vec<AttemptRecord>) {
+    let pool = migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation) = seed_task(&pool, &queue, RUNNING_PLAIN).await;
+
+    let settled = writer(&pool)
+        .settle(&claimed(task_id, &queue, generation, TaskKind::Plain), end)
+        .await;
+
+    let facts = history_facts(&pool, task_id).await;
+    let attempts = archived_attempts(&pool, task_id).await;
+    remove_task(&pool, task_id).await;
+    assert_eq!(settled, Settlement::Written);
+    (facts.expect("the task moved to history"), attempts)
+}
+
+/// The row failed with `code` and no task failed reason; its one attempt
+/// is FAILED with `code`, and with `text` as its message and its failed
+/// reason (Python `_write_ended_attempt`).
+fn assert_attempt_failed_with_reason(
+    facts: &HistoryFacts,
+    attempts: &[AttemptRecord],
+    code: &str,
+    text: &str,
+) {
+    let (status, _kind, error_code, final_failed_reason) = facts;
+    assert_eq!(status, "FAILED");
+    assert_eq!(error_code.as_deref(), Some(code));
+    assert_eq!(final_failed_reason, &None);
+    let [attempt] = attempts else {
+        panic!("one attempt, got {}", attempts.len());
+    };
+    assert_eq!(attempt.outcome(), "FAILED");
+    assert_eq!(attempt.error_code(), Some(code));
+    assert_eq!(attempt.error_message(), Some(text));
+    assert_eq!(attempt.failed_reason(), Some(text));
+}
+
+/// Python `_finalize_child_loss`: a child lost with its exit seen fails the
+/// running task with `WORKER_CRASHED`; the attempt stores
+/// `Worker child lost: child died: exit code 9` as its message and its
+/// failed reason.
+#[tokio::test]
+#[serial]
+async fn a_lost_child_stores_its_reason_on_the_attempt() {
+    let end = AttemptEnd::of_lost_child(&child_died_with_exit_code_9());
+
+    let (facts, attempts) = settle_on_a_running_row(end).await;
+
+    assert_attempt_failed_with_reason(
+        &facts,
+        &attempts,
+        "WORKER_CRASHED",
+        "Worker child lost: child died: exit code 9",
+    );
+}
+
+/// Python `_settle_timed_out_row`: a run past its deadline fails the
+/// running task with `TASK_TIMEOUT`; the attempt stores
+/// `Task exceeded timeout_ms=1000` as its message and its failed reason.
+#[tokio::test]
+#[serial]
+async fn a_timed_out_attempt_stores_its_reason() {
+    let end = AttemptEnd::TimedOut {
+        timeout: TaskTimeoutMs::new(1_000).expect("1 s is a valid task timeout"),
+        retry: RetryPlacement::SameClass,
+        cancel: TimeoutCancel::NoSignal,
+    };
+
+    let (facts, attempts) = settle_on_a_running_row(end).await;
+
+    assert_attempt_failed_with_reason(
+        &facts,
+        &attempts,
+        "TASK_TIMEOUT",
+        "Task exceeded timeout_ms=1000",
+    );
+}
+
+/// Python `_finalize_killed_run`, `BlockedTheLoop`: the run that held the
+/// event loop fails with `TASK_BLOCKED_LOOP`; the attempt stores the block
+/// message as its message and its failed reason.
+#[tokio::test]
+#[serial]
+async fn a_run_that_blocked_the_loop_stores_its_reason_on_the_attempt() {
+    let text = "Task held the event loop of its shared async child for 5200 ms, past the \
+                block limit, at app/tasks.py:12; the worker killed the child \
+                (pid=4242, signal 9 (SIGKILL))";
+    let end = AttemptEnd::KilledForLoop {
+        code: LoopKillCode::TaskBlockedLoop,
+        retry: RetryPlacement::Isolated,
+        reason: FailureDetail::cut(text),
+    };
+
+    let (facts, attempts) = settle_on_a_running_row(end).await;
+
+    assert_attempt_failed_with_reason(&facts, &attempts, "TASK_BLOCKED_LOOP", text);
+}
+
+/// Python `_finalize_killed_run`, `BesideBlockedLoop`: a run beside the
+/// run that held the event loop fails with `NEIGHBOUR_BLOCKED_LOOP`; the
+/// attempt stores the block message as its message and its failed reason.
+#[tokio::test]
+#[serial]
+async fn a_run_beside_a_blocked_loop_stores_its_reason_on_the_attempt() {
+    let text = "Task 00000000-0000-0000-0000-000000000001 held the event loop of the shared \
+                async child of this task for 5200 ms, past the block limit; the worker \
+                killed the child (pid=4242, signal 9 (SIGKILL))";
+    let end = AttemptEnd::KilledForLoop {
+        code: LoopKillCode::NeighbourBlockedLoop,
+        retry: RetryPlacement::SameClass,
+        reason: FailureDetail::cut(text),
+    };
+
+    let (facts, attempts) = settle_on_a_running_row(end).await;
+
+    assert_attempt_failed_with_reason(&facts, &attempts, "NEIGHBOUR_BLOCKED_LOOP", text);
 }
