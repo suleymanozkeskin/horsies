@@ -1656,7 +1656,7 @@ class FinalizeMixin:
                     task_name=task_name,
                     wake=QueueWake(
                         channel=f'task_queue_{queue_name or "default"}',
-                        payload=f'capacity:{task_id}',
+                        payload='capacity',
                     ),
                 )
                 # The COMMIT delivers the NOTIFYs of the transaction.
