@@ -11,3 +11,4 @@
 
 mod harness;
 mod history_functions_sql;
+mod history_maintenance_sql;
