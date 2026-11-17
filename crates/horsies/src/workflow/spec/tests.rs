@@ -346,22 +346,72 @@ fn a_member_that_a_lenient_input_type_does_not_read_is_refused() {
 }
 
 /// #571: a key inside a nested object that binds to no field, named by its
-/// key path.
+/// key path. Python's strict encode of the member's value refuses it with
+/// `HRS-031`.
 #[test]
 fn a_nested_member_that_binds_to_no_field_is_refused_with_its_key_path() {
     let refused = ship_refusal(r#"{"label": "a", "options": {"retriess": 3}, "parcels": []}"#);
-    assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
     assert!(refused.message.contains("options.retriess"), "{refused}");
 }
 
 /// #571: a key inside an element of a list that binds to no field, named by
-/// its key path.
+/// its key path, with `HRS-031`.
 #[test]
 fn a_list_element_member_that_binds_to_no_field_is_refused_with_its_key_path() {
     let refused =
         ship_refusal(r#"{"label": "a", "options": {}, "parcels": [{"weight": 1, "wieght": 2}]}"#);
-    assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
     assert!(refused.message.contains("parcels[0].wieght"), "{refused}");
+}
+
+/// The input of a task whose nested type refuses an unknown key on read
+/// (`deny_unknown_fields`), so serde refuses the key before the compare.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictShipInput {
+    label: String,
+    options: StrictShipOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictShipOptions {
+    retries: u32,
+}
+
+/// #571: a key that serde refuses inside a nested object is `HRS-031` with
+/// its key path; at the top level it is `HRS-019`.
+#[test]
+fn a_key_that_a_strict_type_refuses_has_the_code_of_its_depth() {
+    let strict_refusal = |input: &str| {
+        let mut builder = WorkflowSpecBuilder::new("ship");
+        builder.task(
+            task_node::<u32, StrictShipInput>("ship")
+                .input_json(input)
+                .unwrap(),
+        );
+        refusal(builder)
+    };
+    let nested = strict_refusal(r#"{"label": "a", "options": {"retries": 1, "retriess": 3}}"#);
+    assert_eq!(nested.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
+    assert!(nested.message.contains("options.retriess"), "{nested}");
+    let top = strict_refusal(r#"{"label": "a", "options": {"retries": 1}, "lable": "b"}"#);
+    assert_eq!(top.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+    assert!(top.message.contains("lable"), "{top}");
+}
+
+/// A member of the input of a task with no parameters binds to no
+/// parameter: `HRS-019`, as Python's check of the parameter names.
+#[test]
+fn a_member_of_the_input_of_a_task_with_no_parameters_is_refused() {
+    let mut builder = WorkflowSpecBuilder::new("unit");
+    builder.task(
+        task_node::<u32, ()>("tick")
+            .input_json(r#"{"count": 1}"#)
+            .unwrap(),
+    );
+    assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidKwargKey));
 }
 
 /// #572: a node whose static input misses a field of its input type.

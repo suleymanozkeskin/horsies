@@ -316,8 +316,9 @@ pub(crate) fn decode_check<A: Serialize + DeserializeOwned + 'static>(
 /// `extra='forbid'`): `bytes` is the input text that decoded as `decoded`.
 /// The members of `bytes` named in `compared` are compared with the
 /// encoding of `decoded` ([`unread_member`]). A member that the encoding
-/// does not hold, at any depth, is a [`DecodeFailure`] at its key path with
-/// serde's text for a key that binds to no field (`unknown field`). Pure.
+/// does not hold, at any depth, is a [`DecodeFailure`] at its key path and
+/// depth with serde's text for a key that binds to no field (`unknown
+/// field`). Pure.
 ///
 /// Errors: that failure; a decoded value that does not encode as JSON (the
 /// value-free text of the encoder). The input text decoded, so it reads as
@@ -329,6 +330,7 @@ fn unread_node_member<A: Serialize>(
 ) -> Result<(), DecodeFailure> {
     let encoded = to_json_bytes_strict(decoded).map_err(|error| DecodeFailure {
         path: ".".to_owned(),
+        depth: 0,
         text: format!(
             "the decoded value does not encode as JSON: {}",
             value_free_encode_text(&error)
@@ -346,6 +348,7 @@ fn unread_node_member<A: Serialize>(
         None => Ok(()),
         Some(member) => Err(DecodeFailure {
             path: member.path,
+            depth: member.depth,
             text: format!("unknown field `{}`", member.key),
         }),
     }
