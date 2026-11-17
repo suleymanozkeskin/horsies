@@ -27,6 +27,7 @@ pub enum LoggerName {
     Db,
     Lifecycle,
     Listener,
+    Monitoring,
     Scheduler,
     SchedulerState,
     Sql,
@@ -39,7 +40,7 @@ pub enum LoggerName {
 
 impl LoggerName {
     /// The number of loggers.
-    pub const COUNT: usize = 17;
+    pub const COUNT: usize = 18;
 
     /// Every logger, in declaration order.
     pub const ALL: [LoggerName; Self::COUNT] = [
@@ -52,6 +53,7 @@ impl LoggerName {
         Self::Db,
         Self::Lifecycle,
         Self::Listener,
+        Self::Monitoring,
         Self::Scheduler,
         Self::SchedulerState,
         Self::Sql,
@@ -74,6 +76,7 @@ impl LoggerName {
             Self::Db => "horsies.db",
             Self::Lifecycle => "horsies.lifecycle",
             Self::Listener => "horsies.listener",
+            Self::Monitoring => "horsies.monitoring",
             Self::Scheduler => "horsies.scheduler",
             Self::SchedulerState => "horsies.scheduler.state",
             Self::Sql => "horsies.sql",
@@ -94,7 +97,7 @@ impl LoggerName {
 /// Target prefixes and their loggers. A prefix matches a target that equals
 /// it or continues with `::`. The first match wins, so a longer prefix comes
 /// before a shorter one of the same module.
-const TARGET_ROUTES: [(&str, LoggerName); 22] = [
+const TARGET_ROUTES: [(&str, LoggerName); 23] = [
     (
         "horsies_core::broker::process_listener",
         LoggerName::Listener,
@@ -105,6 +108,7 @@ const TARGET_ROUTES: [(&str, LoggerName); 22] = [
     ("horsies_core::core::codec", LoggerName::Codec),
     ("horsies_core::core::config", LoggerName::App),
     ("horsies_core::core::app", LoggerName::App),
+    ("horsies_core::monitoring", LoggerName::Monitoring),
     ("horsies_core::web", LoggerName::Web),
     (
         "horsies_core::worker::scheduler::state",
@@ -214,6 +218,9 @@ mod tests {
             ),
             ("horsies::claim", LoggerName::Worker),
             ("_core::bridge::blocking", LoggerName::Bridge),
+            // Python `horsies.monitoring.queries` logs on
+            // `get_logger('monitoring')`: the cut of a bounded list.
+            ("horsies_core::monitoring::queries", LoggerName::Monitoring),
         ];
         for (target, logger) in cases {
             assert_eq!(route(target), Some(logger), "{target}");

@@ -80,6 +80,11 @@ unless it starts with "Added".
   `validate_queue` refuses with `HRS-103` and the valid names.
 - **`registry()`, `workflow_registry()`, `resolve_enqueue` and
   `ResolvedEnqueue` are no longer public.**
+- **`AppError` and `AppResult` are removed.** No function returns them.
+  `HorsiesError` stays the refusal of the config, of a registration and of
+  `provide`; every other fallible function returns its own closed error
+  type. Code that matched on `AppError` matches on the error type of the
+  call.
 - **`TaskError` becomes `TaskError<E>`.** Its code is
   `TaskErrorCode<E>`: `Library(BuiltInTaskCode)` for a code of the
   library's catalog, `User(E)` for a code of the task's own enum `E`. A body

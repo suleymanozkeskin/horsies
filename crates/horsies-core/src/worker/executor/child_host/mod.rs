@@ -17,6 +17,9 @@
 mod args;
 mod host;
 mod link;
+mod panic;
+mod producer;
+mod role;
 mod rss;
 mod run;
 mod run_work;
@@ -32,7 +35,12 @@ mod start_tests;
 mod tests;
 
 pub use args::{child_mode, ChildArgs, ChildArgsError, ChildMode, CHILD_MODE_ARGUMENT};
-pub use host::{child_command, run_child_host, ChildApp, ChildHostExit};
+pub use host::{
+    child_command, run_child_host, ChildApp, ChildHookFailure, ChildHostExit, ChildStartFuture,
+    ChildStartHook, CHILD_START_HOOK_BOUND,
+};
+pub use producer::{child_producer, ChildProducer};
+pub use role::{process_role, wait_inside_task_message, ProcessRole};
 pub use run_work::{
     run_cancel_signal, spawn_in_run, RunCancelSignal, RunSignalRefused, RunSpawnRefused,
     MAX_RUN_WORK,

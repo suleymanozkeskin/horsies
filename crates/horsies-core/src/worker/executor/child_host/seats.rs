@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinError;
 
+use super::panic::{CatchPanic, PanicRecord};
 use super::rss::read_rss;
 use super::run::{
     kind_mismatch_end, mark_finalizing, prepare, refusal_end, result_end, run_blocking_body,
@@ -49,9 +50,8 @@ use super::run_work::{
     WorkWait, ISOLATED_LEFTOVER_GRACE,
 };
 use crate::core::task::error::{OperationalErrorCode, TaskError};
-use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask};
+use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskModule};
 use crate::core::task::result::TaskResult;
-use crate::worker::execution::execute_task;
 use crate::worker::executor::protocol::{
     BodyEnd, BodyReturnedFrame, CancelGraceMs, ChildFrame, DispatchNumber, FailureDetail,
     IsolatedWork, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame, LeftoverCancelFrame,
@@ -171,7 +171,9 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
 }
 
 /// The body of an isolated run. An async body runs inside the run, so the
-/// work it starts with `spawn_in_run` belongs to the run.
+/// work it starts with `spawn_in_run` belongs to the run. A blocking body
+/// runs on a blocking thread of the runtime. A panic of either is
+/// `UNHANDLED_EXCEPTION` with its record.
 async fn isolated_body(
     scope: &RunScope,
     task_name: &str,
@@ -179,11 +181,29 @@ async fn isolated_body(
     input: Vec<u8>,
 ) -> RawTaskResult {
     match task {
-        RegisteredTask::Async { task, .. } => {
-            let body = async move { task.execute(&input).await };
-            joined_result(scope.spawn_body(task_name, body).await)
+        RegisteredTask::Async { task, meta } => {
+            let body = CatchPanic::new(async move { task.execute(&input).await });
+            joined_result(
+                task_name,
+                meta.module,
+                scope.spawn_body(task_name, body).await,
+            )
         }
-        blocking @ RegisteredTask::Blocking { .. } => execute_task(blocking, input, None).await,
+        RegisteredTask::Blocking { task, meta } => {
+            let name = task_name.to_owned();
+            let thread = tokio::task::spawn_blocking(move || {
+                run_blocking_body(&task, &input, &name, meta.module)
+            });
+            match thread.await {
+                Ok(result) => result,
+                Err(error) => TaskResult::Err(TaskError::builtin(
+                    OperationalErrorCode::UnhandledException,
+                    format!(
+                        "the thread of blocking task '{task_name}' ended with no result: {error}"
+                    ),
+                )),
+            }
+        }
     }
 }
 
@@ -364,12 +384,21 @@ async fn async_seat(
     in_flight.fetch_sub(1, Ordering::AcqRel);
 }
 
-fn joined_result(joined: Result<RawTaskResult, JoinError>) -> RawTaskResult {
+/// What the async body of task `task_name` (defined in `module`) ended
+/// with. Its panic is caught in its poll ([`CatchPanic`]) and is
+/// `UNHANDLED_EXCEPTION` with its record. A join error means the body ended
+/// with no result (the runtime shut down): `UNHANDLED_EXCEPTION`.
+fn joined_result(
+    task_name: &str,
+    module: TaskModule,
+    joined: Result<Result<RawTaskResult, PanicRecord>, JoinError>,
+) -> RawTaskResult {
     match joined {
-        Ok(result) => result,
+        Ok(Ok(result)) => result,
+        Ok(Err(record)) => TaskResult::Err(super::panic::panic_error(task_name, module, record)),
         Err(error) => TaskResult::Err(TaskError::builtin(
             OperationalErrorCode::UnhandledException,
-            format!("async task panicked: {error}"),
+            format!("the async body of task '{task_name}' ended with no result: {error}"),
         )),
     }
 }
@@ -383,13 +412,13 @@ async fn async_body(
     timeout: TaskTimeoutMs,
     grace: CancelGraceMs,
 ) -> (SeatEnd, Marker) {
-    let (task, input): (Arc<dyn AsyncTaskFn>, Vec<u8>) =
+    let (task, module, input): (Arc<dyn AsyncTaskFn>, TaskModule, Vec<u8>) =
         match prepare(&context.app, &facts.task_name, input) {
             Prepared::Ended(end) => return (SeatEnd::Finished(end), Marker::Write),
             Prepared::Body {
-                task: RegisteredTask::Async { task, .. },
+                task: RegisteredTask::Async { task, meta },
                 input,
-            } => (task, input),
+            } => (task, meta.module, input),
             Prepared::Body {
                 task: RegisteredTask::Blocking { .. },
                 ..
@@ -401,13 +430,13 @@ async fn async_body(
             }
         };
     let scope = RunScope::timed(watch.register(run_ref));
-    let body = async move { task.execute(&input).await };
+    let body = CatchPanic::new(async move { task.execute(&input).await });
     let mut handle = scope.spawn_body(&facts.task_name, body);
     let deadline = tokio::time::sleep(Duration::from_millis(timeout.get()));
     tokio::pin!(deadline);
     let outcome = tokio::select! {
         joined = &mut handle => {
-            let end = result_end(joined_result(joined));
+            let end = result_end(joined_result(&facts.task_name, module, joined));
             after_return(context, run_ref, &scope, end, grace).await
         }
         () = &mut deadline => {
@@ -744,12 +773,12 @@ fn thread_body(
     input: &TaskInputText,
     timeout: TaskTimeoutMs,
 ) -> SeatEnd {
-    let (task, input) = match prepare(&context.app, &facts.task_name, input) {
+    let (task, module, input) = match prepare(&context.app, &facts.task_name, input) {
         Prepared::Ended(end) => return SeatEnd::Finished(end),
         Prepared::Body {
-            task: RegisteredTask::Blocking { task, .. },
+            task: RegisteredTask::Blocking { task, meta },
             input,
-        } => (task, input),
+        } => (task, meta.module, input),
         Prepared::Body {
             task: RegisteredTask::Async { .. },
             ..
@@ -764,7 +793,7 @@ fn thread_body(
             writer.send(ChildFrame::DeadlineFired(run_ref)).await;
         }
     });
-    let result = run_blocking_body(&task, &input);
+    let result = run_blocking_body(&task, &input, &facts.task_name, module);
     match gate.finish() {
         GateEnd::Returned => {
             timer.abort();

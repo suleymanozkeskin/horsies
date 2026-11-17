@@ -589,8 +589,10 @@ fn the_retention_section_maps_to_the_config_field_by_field() {
     assert_eq!(config.worker_state_retention_hours, Some(168));
     assert_eq!(config.terminal_record_retention_hours, None);
     assert_eq!(
-        config.paused_workflow_auto_cancel_after,
-        Some(chrono::Duration::microseconds(86_400_000_001))
+        config
+            .paused_workflow_auto_cancel_after
+            .map(crate::core::config::PausedWorkflowAge::micros),
+        Some(86_400_000_001)
     );
     assert_eq!(config.history_leaf_horizon_days, 3);
     assert_eq!(config.heartbeat_leaf_horizon_hours, 6);

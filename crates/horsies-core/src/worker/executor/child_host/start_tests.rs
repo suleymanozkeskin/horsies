@@ -13,7 +13,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use super::host::ChildApp;
+use super::host::{ChildApp, ChildStartHook};
 use super::link::FrameWriter;
 use super::run::{mark_finalizing, start_attempt, HostContext, RunFacts, Started};
 use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
@@ -58,6 +58,8 @@ fn context_on(broker: PostgresBroker) -> (HostContext, UnixStream) {
         app: Arc::new(ChildApp {
             registry: Arc::new(TaskRegistry::new()),
             hostname: "start-host".to_owned(),
+            start_hook: ChildStartHook::NoHook,
+            producer_manifest: super::producer::test_producer_manifest(),
         }),
         pid: PID,
         writer,
