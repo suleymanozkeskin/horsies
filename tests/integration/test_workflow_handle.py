@@ -12,7 +12,7 @@ import psycopg
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
@@ -2542,3 +2542,165 @@ class TestListenerFallbackContract:
         ):
             with pytest.raises(TypeError, match='test bug'):
                 await handle.get_async(timeout_ms=1000)
+
+
+# =============================================================================
+# TestPausedExpiryAge
+# =============================================================================
+
+
+def _zone_with_daylight_start_before(now: datetime) -> str:
+    """A POSIX time zone: standard time is UTC, and daylight time (UTC+1)
+    starts 12 hours before ``now`` and lasts 180 days. In it, one day of
+    wall time before ``now`` is 23 hours."""
+    change = now.astimezone(timezone.utc) - timedelta(hours=12)
+    start_day = change.timetuple().tm_yday - 1
+    return f'STD0DST,{start_day}/{change:%H:%M:%S},{(start_day + 180) % 365}/0'
+
+
+async def _paused_workflow(
+    session: AsyncSession,
+    broker: PostgresBroker,
+    app: Horsies,
+    name: str,
+) -> str:
+    """A one-node workflow with ``on_error=PAUSE`` whose task failed: PAUSED."""
+    node = TaskNode(fn=make_failing_task(app, name))
+    spec = make_workflow_spec(
+        broker=broker, name=name, tasks=[node], on_error=OnError.PAUSE,
+    )
+    handle = await start_ok(spec, broker)
+    await finish_task(
+        session,
+        broker,
+        handle.workflow_id,
+        0,
+        TaskResult(err=TaskError(error_code='FAIL', message='pause')),
+    )
+    return handle.workflow_id
+
+
+async def _expire_at_one_now(
+    broker: PostgresBroker,
+    *,
+    older_than: timedelta,
+    paused_for: dict[str, timedelta],
+    daylight_start_in_last_day: bool,
+) -> tuple[int, dict[str, str]]:
+    """Run ``expire_paused_workflows`` with the setup and every statement of
+    it in one transaction on one connection, then roll the transaction back.
+
+    ``now()`` is the start of that transaction for all of them, so the
+    distance of each workflow to the age is exact. ``paused_for`` sets
+    ``updated_at`` to ``now()`` minus the value, sent as microseconds. With
+    ``daylight_start_in_last_day`` the session time zone is
+    ``_zone_with_daylight_start_before(now())``, checked before the call.
+
+    Returns the expired count and the status of each workflow, read before
+    the rollback.
+    """
+    engine = current_resources(broker).engine
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        try:
+            if daylight_start_in_last_day:
+                now = (await connection.execute(text('SELECT now()'))).scalar_one()
+                await connection.execute(
+                    text("SELECT set_config('TimeZone', :zone, true)"),
+                    {'zone': _zone_with_daylight_start_before(now)},
+                )
+                one_day_is_23_hours = (
+                    await connection.execute(
+                        text(
+                            "SELECT now() - interval '1 day'"
+                            " = now() - interval '23 hours'"
+                        ),
+                    )
+                ).scalar_one()
+                assert one_day_is_23_hours is True
+            for workflow_id, paused in paused_for.items():
+                await connection.execute(
+                    text(
+                        'UPDATE horsies_workflows SET updated_at = now()'
+                        " - CAST(:paused_us AS bigint) * interval '1 microsecond'"
+                        ' WHERE id = CAST(:wf_id AS uuid)'
+                    ),
+                    {
+                        'paused_us': paused // timedelta(microseconds=1),
+                        'wf_id': workflow_id,
+                    },
+                )
+            sessions = async_sessionmaker(
+                bind=connection,
+                join_transaction_mode='create_savepoint',
+                expire_on_commit=False,
+            )
+            expired = await expire_paused_workflows(
+                sessions, older_than=older_than, batch_size=10,
+            )
+            statuses: dict[str, str] = {}
+            for workflow_id in paused_for:
+                statuses[workflow_id] = (
+                    await connection.execute(
+                        text(
+                            'SELECT status FROM horsies_workflows'
+                            ' WHERE id = CAST(:wf_id AS uuid)'
+                        ),
+                        {'wf_id': workflow_id},
+                    )
+                ).scalar_one()
+            return expired, statuses
+        finally:
+            await transaction.rollback()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio(loop_scope='function')
+class TestPausedExpiryAge:
+    """The paused age goes to the database as exact microseconds."""
+
+    async def test_an_age_of_one_day_is_24_hours_across_a_daylight_saving_change(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        kept = await _paused_workflow(session, broker, app, 'expiry_dst_kept')
+        expired = await _paused_workflow(session, broker, app, 'expiry_dst_expired')
+
+        count, statuses = await _expire_at_one_now(
+            broker,
+            older_than=timedelta(days=1),
+            paused_for={
+                kept: timedelta(hours=23, minutes=30),
+                expired: timedelta(hours=24, minutes=30),
+            },
+            daylight_start_in_last_day=True,
+        )
+
+        assert count == 1
+        assert statuses == {kept: 'PAUSED', expired: 'EXPIRED'}
+
+    async def test_an_age_below_one_millisecond_is_exact(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        kept = await _paused_workflow(session, broker, app, 'expiry_us_kept')
+        expired = await _paused_workflow(session, broker, app, 'expiry_us_expired')
+
+        count, statuses = await _expire_at_one_now(
+            broker,
+            older_than=timedelta(microseconds=500),
+            paused_for={
+                kept: timedelta(microseconds=400),
+                expired: timedelta(microseconds=600),
+            },
+            daylight_start_in_last_day=False,
+        )
+
+        assert count == 1
+        assert statuses == {kept: 'PAUSED', expired: 'EXPIRED'}

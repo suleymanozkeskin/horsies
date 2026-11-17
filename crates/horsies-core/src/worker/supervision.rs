@@ -41,6 +41,15 @@ fn join_error_reason(error: JoinError) -> String {
     }
 }
 
+/// Why a service task ended with no shutdown request: it returned, panicked
+/// (with the panic message), or was aborted.
+pub(crate) fn unexpected_end_reason(result: Result<(), JoinError>) -> String {
+    match result {
+        Ok(()) => "exited without a shutdown request".to_owned(),
+        Err(join_error) => join_error_reason(join_error),
+    }
+}
+
 /// Watch a service loop's `JoinHandle` and escalate an unexpected exit.
 ///
 /// If the handle completes while `cancel` has fired, shutdown was requested
@@ -58,10 +67,7 @@ pub(crate) fn spawn_service_watchdog(
         if cancel.is_cancelled() {
             return;
         }
-        let reason = match result {
-            Ok(()) => "exited without a shutdown request".to_owned(),
-            Err(join_error) => join_error_reason(join_error),
-        };
+        let reason = unexpected_end_reason(result);
         tracing::error!(
             service,
             reason = %reason,

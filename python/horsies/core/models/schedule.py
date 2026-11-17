@@ -104,9 +104,49 @@ class HourlySchedule(BaseModel):
     )
 
 
+def _validate_time_of_day(
+    pattern_name: str,
+    value: datetime_time,
+    report: ValidationReport,
+) -> None:
+    """Add an error to `report` for each rule that a pattern's time breaks.
+
+    - The zone of a schedule comes only from `TaskSchedule.timezone`, so a
+      time with `tzinfo` is refused.
+    - Schedules fire at whole seconds, so a time with microseconds is refused.
+    """
+    if value.tzinfo is not None:
+        report.add(
+            ConfigurationError(
+                message=f'{pattern_name} time has a time zone',
+                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                notes=[f'time: {value.isoformat()}'],
+                help_text=(
+                    "give the time without tzinfo and set the zone in the schedule's "
+                    "'timezone' field"
+                ),
+            )
+        )
+    if value.microsecond != 0:
+        report.add(
+            ConfigurationError(
+                message=f'{pattern_name} time has microseconds',
+                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                notes=[f'time: {value.isoformat()}'],
+                help_text=(
+                    'schedules fire at whole seconds; give the time without microseconds'
+                ),
+            )
+        )
+
+
 class DailySchedule(BaseModel):
     """
     Run task every day at a specific time.
+
+    `time` is a time of day in the schedule's `timezone`, in whole seconds.
+    A time with `tzinfo` or with microseconds is refused with
+    `CONFIG_INVALID_SCHEDULE`.
 
     Examples:
         - Daily at 3:00 AM -> DailySchedule(time=time(3, 0, 0))
@@ -118,10 +158,22 @@ class DailySchedule(BaseModel):
     type: Literal['daily'] = 'daily'
     time: datetime_time = Field(description='Time of day to run (HH:MM:SS)')
 
+    @model_validator(mode='after')
+    def validate_time_of_day(self) -> Self:
+        """Refuse a time with tzinfo or with microseconds."""
+        report = ValidationReport('schedule')
+        _validate_time_of_day('DailySchedule', self.time, report)
+        raise_collected(report)
+        return self
+
 
 class WeeklySchedule(BaseModel):
     """
     Run task on specific days of the week at a specific time.
+
+    `time` is a time of day in the schedule's `timezone`, in whole seconds.
+    A time with `tzinfo` or with microseconds is refused with
+    `CONFIG_INVALID_SCHEDULE`.
 
     Examples:
         - Monday and Friday at 9 AM:
@@ -152,6 +204,14 @@ class WeeklySchedule(BaseModel):
         raise_collected(report)
         return self
 
+    @model_validator(mode='after')
+    def validate_time_of_day(self) -> Self:
+        """Refuse a time with tzinfo or with microseconds."""
+        report = ValidationReport('schedule')
+        _validate_time_of_day('WeeklySchedule', self.time, report)
+        raise_collected(report)
+        return self
+
 
 class MonthlySchedule(BaseModel):
     """
@@ -159,6 +219,10 @@ class MonthlySchedule(BaseModel):
 
     Note: If day > days in month (e.g., day=31 in February),
     the schedule will be skipped for that month.
+
+    `time` is a time of day in the schedule's `timezone`, in whole seconds.
+    A time with `tzinfo` or with microseconds is refused with
+    `CONFIG_INVALID_SCHEDULE`.
 
     Examples:
         - First day of month at midnight:
@@ -172,6 +236,14 @@ class MonthlySchedule(BaseModel):
     type: Literal['monthly'] = 'monthly'
     day: int = Field(ge=1, le=31, description='Day of month (1-31)')
     time: datetime_time = Field(description='Time of day to run (HH:MM:SS)')
+
+    @model_validator(mode='after')
+    def validate_time_of_day(self) -> Self:
+        """Refuse a time with tzinfo or with microseconds."""
+        report = ValidationReport('schedule')
+        _validate_time_of_day('MonthlySchedule', self.time, report)
+        raise_collected(report)
+        return self
 
 
 class Month(str, Enum):

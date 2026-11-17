@@ -273,7 +273,7 @@ LOCK_ORDER_CASES: Final = (
         held=('RESUMED',),
         contend=(
             'SELECT outcome, observed_status FROM horsies_workflow_expire_paused('
-            "'00000000-0000-7000-8000-00000000a071', 3600000, '{}')"
+            "'00000000-0000-7000-8000-00000000a071', 3600000000, '{}')"
         ),
         contended=('NOT_EXPIRED', 'RUNNING'),
         check=_TASK_AND_NODE.format(id='00000000-0000-7000-8000-00000000a071'),

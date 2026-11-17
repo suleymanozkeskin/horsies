@@ -978,6 +978,12 @@ async def expire_paused_workflows(
     reported ids. No parent-to-child cascade: pause already cascaded,
     so every paused child carries its own age and expires on it.
 
+    The age goes to the database as exact microseconds
+    (``older_than // timedelta(microseconds=1)``, multiplied by
+    ``interval '1 microsecond'``): a time interval with no day field, so
+    ``NOW()`` minus the age is the same span in any session time zone,
+    also across a daylight-saving change. The core sends the same value.
+
     Returns the number of workflows expired. One transaction per
     workflow keeps the pass bounded; a failure on one workflow leaves
     the remainder for the next tick.
@@ -1015,6 +1021,7 @@ async def expire_paused_workflows(
         ),
         'expired workflow error',
     )
+    age_us = older_than // timedelta(microseconds=1)
     expired_count = 0
     async with session_factory() as candidate_session:
         candidate_rows = (
@@ -1022,11 +1029,12 @@ async def expire_paused_workflows(
                 text("""
                     SELECT id FROM horsies_workflows
                     WHERE status = 'PAUSED'
-                      AND updated_at < NOW() - CAST(:age AS interval)
+                      AND updated_at < NOW()
+                          - CAST(:age_us AS bigint) * interval '1 microsecond'
                     ORDER BY updated_at
                     LIMIT :batch_size
                 """),
-                {'age': older_than, 'batch_size': batch_size},
+                {'age_us': age_us, 'batch_size': batch_size},
             )
         ).all()
     candidate_ids = [row.id for row in candidate_rows]
@@ -1060,13 +1068,14 @@ async def expire_paused_workflows(
                             updated_at = NOW()
                         WHERE id = :wf_id
                           AND status = 'PAUSED'
-                          AND updated_at < NOW() - CAST(:age AS interval)
+                          AND updated_at < NOW()
+                              - CAST(:age_us AS bigint) * interval '1 microsecond'
                         RETURNING id
                     """),
                     {
                         'wf_id': workflow_id,
                         'error': error_json,
-                        'age': older_than,
+                        'age_us': age_us,
                     },
                 )
             ).first()
