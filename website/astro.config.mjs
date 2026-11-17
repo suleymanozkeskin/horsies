@@ -7,6 +7,25 @@ import darkThemeS from './src/themes/dark-theme-s.json';
 export default defineConfig({
 	site: 'https://suleymanozkeskin.github.io',
 	base: '/horsies',
+	redirects: {
+		// A Rust page that stated behaviour of the core redirects to the shared page.
+		// Astro writes a destination as given, so each one starts with the base path.
+		'/rust/concepts/architecture': '/horsies/concepts/architecture/',
+		'/rust/concepts/queue-modes': '/horsies/concepts/queue-modes/',
+		'/rust/concepts/task-lifecycle': '/horsies/concepts/task-lifecycle/',
+		'/rust/concepts/workflows/workflow-semantics': '/horsies/concepts/workflows/workflow-semantics/',
+		'/rust/internals/database-schema': '/horsies/internals/database-schema/',
+		'/rust/internals/performance': '/horsies/internals/performance/',
+		'/rust/internals/operational-indexes': '/horsies/internals/operational-indexes/',
+		'/rust/monitoring/action-semantics': '/horsies/monitoring/action-semantics/',
+		'/rust/monitoring/web-ui-overview': '/horsies/monitoring/web-ui-overview/',
+		'/rust/monitoring/syce-overview': '/horsies/monitoring/syce-overview/',
+		'/rust/operations/autovacuum-tuning': '/horsies/operations/autovacuum-tuning/',
+		'/rust/workers/heartbeats-recovery': '/horsies/workers/heartbeats-recovery/',
+		'/rust/workers/worker-architecture': '/horsies/workers/worker-architecture/',
+		'/rust/scheduling/scheduler-overview': '/horsies/scheduling/scheduler-overview/',
+		'/rust/questions-and-answers': '/horsies/questions-and-answers/',
+	},
 	integrations: [
 		starlight({
 			title: 'Horsies',
@@ -129,6 +148,7 @@ export default defineConfig({
 								{ label: 'Database Schema', slug: 'internals/database-schema' },
 								{ label: 'Performance', slug: 'internals/performance' },
 								{ label: 'Serialization', slug: 'internals/serialization' },
+								{ label: 'Operational Indexes', slug: 'internals/operational-indexes' },
 							],
 						},
 						{ label: 'Questions & Answers', slug: 'questions-and-answers' },
@@ -222,21 +242,8 @@ export default defineConfig({
 							],
 						},
 						{
-							label: 'Q&A',
-							items: [
-								{ label: 'Questions & Answers', slug: 'rust/questions-and-answers' },
-							],
-						},
-						{
-							label: 'Concepts',
-							items: [
-								{ label: 'Architecture', slug: 'rust/concepts/architecture' },
-							],
-						},
-						{
 							label: 'Tasks',
 							items: [
-								{ label: 'Task Lifecycle', slug: 'rust/concepts/task-lifecycle' },
 								{ label: 'Result Handling', slug: 'rust/concepts/result-handling' },
 								{ label: 'Defining Tasks', slug: 'rust/tasks/defining-tasks' },
 								{ label: 'Sending Tasks', slug: 'rust/tasks/sending-tasks' },
@@ -249,7 +256,6 @@ export default defineConfig({
 						{
 							label: 'Workflows',
 							items: [
-								{ label: 'Workflow Semantics', slug: 'rust/concepts/workflows/workflow-semantics' },
 								{ label: 'Workflow API', slug: 'rust/concepts/workflows/workflow-api' },
 								{ label: 'Subworkflows', slug: 'rust/concepts/workflows/subworkflows' },
 							],
@@ -257,7 +263,6 @@ export default defineConfig({
 						{
 							label: 'Configuration',
 							items: [
-								{ label: 'Queue Modes', slug: 'rust/concepts/queue-modes' },
 								{ label: 'App Config', slug: 'rust/configuration/app-config' },
 								{ label: 'Broker Config', slug: 'rust/configuration/broker-config' },
 								{ label: 'Recovery Config', slug: 'rust/configuration/recovery-config' },
@@ -267,25 +272,19 @@ export default defineConfig({
 						{
 							label: 'Workers',
 							items: [
-								{ label: 'Worker Architecture', slug: 'rust/workers/worker-architecture' },
 								{ label: 'Concurrency', slug: 'rust/workers/concurrency' },
-								{ label: 'Heartbeats & Recovery', slug: 'rust/workers/heartbeats-recovery' },
 							],
 						},
 						{
 							label: 'Monitoring',
 							items: [
-								{ label: 'Web UI Overview', slug: 'rust/monitoring/web-ui-overview' },
 								{ label: 'Deployment & Authentication', slug: 'rust/monitoring/web-ui-deployment' },
-								{ label: 'Action Semantics', slug: 'rust/monitoring/action-semantics' },
-								{ label: 'Syce Overview', slug: 'rust/monitoring/syce-overview' },
 								{ label: 'Broker Methods', slug: 'rust/monitoring/broker-methods' },
 							],
 						},
 						{
 							label: 'Scheduling',
 							items: [
-								{ label: 'Scheduler Overview', slug: 'rust/scheduling/scheduler-overview' },
 								{ label: 'Schedule Patterns', slug: 'rust/scheduling/schedule-patterns' },
 								{ label: 'Schedule Config', slug: 'rust/scheduling/schedule-config' },
 							],
@@ -299,17 +298,13 @@ export default defineConfig({
 						{
 							label: 'Operations',
 							items: [
-								{ label: 'Autovacuum Tuning', slug: 'rust/operations/autovacuum-tuning' },
 								{ label: 'Task-history Cutover', slug: 'rust/operations/cutover-runbook' },
 							],
 						},
 						{
 							label: 'Internals',
 							items: [
-								{ label: 'Database Schema', slug: 'rust/internals/database-schema' },
 								{ label: 'Serialization', slug: 'rust/internals/serialization' },
-								{ label: 'Performance', slug: 'rust/internals/performance' },
-								{ label: 'Operational Indexes', slug: 'rust/internals/operational-indexes' },
 							],
 						},
 					],
