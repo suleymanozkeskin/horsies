@@ -1,7 +1,7 @@
 -- Cases for the monitoring read functions of 0007_scheduler_monitoring_functions.sql: the status counts, the
 -- breakdown, the workflow names, runs, run and node, and the schedule list.
 --
--- Preconditions, set up by the runner (test_baseline_scheduler_monitoring_sql.py):
+-- Preconditions, set up by the runner (crates/horsies-core/src/sql_tests/baseline_scheduler_monitoring_sql.rs):
 -- - a fresh database that holds the baseline migration;
 -- - the published history readers rendered for the forever leaf (horsies_task_detail_staged and
 --   horsies_task_provenance_staged);

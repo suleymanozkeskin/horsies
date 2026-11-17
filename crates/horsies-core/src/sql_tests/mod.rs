@@ -9,5 +9,9 @@
 //! - A case file runs as one simple-query message. A failed case raises, and
 //!   the server error fails the test with the case name in it.
 
+mod baseline_lifecycle_functions;
+mod baseline_scheduler_monitoring_sql;
+mod baseline_sql;
 mod harness;
 mod history_functions_sql;
+mod history_maintenance_sql;

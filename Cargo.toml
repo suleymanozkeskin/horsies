@@ -14,8 +14,6 @@ members = [
     "rust/tests/worker",
     "rust/tests/queue_mismatch",
 ]
-# syce has its own Cargo.lock and release line.
-exclude = ["syce"]
 
 [workspace.lints.rust]
 unused_must_use = "deny"

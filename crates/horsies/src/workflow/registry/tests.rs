@@ -332,12 +332,133 @@ fn the_child_build_answers_each_definition_from_the_node_input() {
 
 #[test]
 fn unit_params_read_an_empty_object() {
-    assert!(decode_params::<()>("{}").is_ok());
-    assert!(decode_params::<()>("null").is_ok());
+    assert!(decode_params::<()>("{}", &[]).is_ok());
+    assert!(decode_params::<()>("null", &[]).is_ok());
     assert!(matches!(
-        decode_params::<Level>("{}"),
-        Err(ParamsBuildRefused::Failed(_))
+        decode_params::<Level>("{}", &[]),
+        Err(ParamsBuildRefused::Undecodable { .. })
     ));
+}
+
+/// The data that a node error of the request of [`child_request`] holds.
+fn request_data() -> serde_json::Value {
+    serde_json::json!({
+        "workflow_id": uuid::Uuid::nil().to_string(),
+        "task_index": 0,
+    })
+}
+
+/// A member that no params field takes fails the node with
+/// `WORKER_SERIALIZATION_ERROR` and Python's prefix (Python
+/// `decode_subworkflow_kwargs`), although `Level` does not deny unknown
+/// fields; `build_with` does not run.
+#[test]
+fn a_member_that_no_params_field_takes_fails_the_node() {
+    let registry = registry();
+    registry
+        .register(Definition::with_params::<Countdown>())
+        .unwrap();
+    let error = node_error(registry.child_spec_answer(&child_request(
+        "tests.countdown.v1",
+        r#"{"n": 0, "colour": "red"}"#,
+    )));
+    assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
+    assert_eq!(
+        error.message.as_deref(),
+        Some(
+            "Typed decode of subworkflow kwargs failed for task 0: colour: unknown field `colour`"
+        )
+    );
+    assert_eq!(error.data, Some(request_data()));
+}
+
+/// A definition with params whose params are `()`.
+struct NoParams;
+
+impl WorkflowDefinition for NoParams {
+    type Output = OutputlessResults;
+    type Params = ();
+
+    fn name() -> &'static str {
+        "no_params"
+    }
+
+    fn definition_key() -> &'static str {
+        "tests.no_params.v1"
+    }
+
+    fn build_with(_params: ()) -> Result<WorkflowSpec, HorsiesError> {
+        spec_with::<NoParams>("no_params", "tests.no_params.v1", None)
+    }
+}
+
+/// `()` params take no member: a member fails the node with
+/// `WORKER_SERIALIZATION_ERROR`, Python's prefix, and the text of the static
+/// check for a type with no fields.
+#[test]
+fn a_member_for_unit_params_fails_the_node() {
+    let registry = registry();
+    registry
+        .register(Definition::with_params::<NoParams>())
+        .unwrap();
+    let error = node_error(
+        registry.child_spec_answer(&child_request("tests.no_params.v1", r#"{"colour": "red"}"#)),
+    );
+    assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
+    assert_eq!(
+        error.message.as_deref(),
+        Some(
+            "Typed decode of subworkflow kwargs failed for task 0: colour: unknown field \
+             `colour`, there are no fields"
+        )
+    );
+    assert_eq!(error.data, Some(request_data()));
+    match registry.child_spec_answer(&child_request("tests.no_params.v1", "{}")) {
+        Ok(ClientChildSpec::Built(client)) => assert_eq!(client.name(), "no_params"),
+        other => panic!("expected the no_params child, got {other:?}"),
+    }
+}
+
+/// The `args_from` members hold results: the read-back compare skips them.
+/// The same member as a static member is refused.
+#[test]
+fn the_compare_skips_the_args_from_members() {
+    let text = r#"{"n": 1, "source": {"ok": 5}}"#;
+    assert_eq!(
+        decode_params::<Level>(text, &["source".to_owned()]).ok(),
+        Some(Level { n: 1 })
+    );
+    assert!(matches!(
+        decode_params::<Level>(text, &[]),
+        Err(ParamsBuildRefused::Member { key, .. }) if key == "source"
+    ));
+}
+
+/// A params field with no member: `build_with` does not run, and the node
+/// stores `WORKFLOW_ENQUEUE_FAILED` with Python's prefix, the decode's text
+/// (no exception class) and Python's suffix, and the workflow id and the
+/// node in `data`.
+#[test]
+fn a_params_field_with_no_member_fails_the_build_with_the_decode_text() {
+    let registry = registry();
+    registry
+        .register(Definition::with_params::<Countdown>())
+        .unwrap();
+    let error = node_error(registry.child_spec_answer(&child_request("tests.countdown.v1", "{}")));
+    let expected = format!(
+        "Subworkflow build failed: the params do not decode as {}: .: missing field `n` \
+         (workflow parent:0)",
+        std::any::type_name::<Level>()
+    );
+    assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
+    assert_eq!(error.message.as_deref(), Some(expected.as_str()));
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({
+            "workflow_id": uuid::Uuid::nil().to_string(),
+            "task_index": 0,
+        }))
+    );
 }
 
 /// A recursive definition whose nesting ends stays valid.

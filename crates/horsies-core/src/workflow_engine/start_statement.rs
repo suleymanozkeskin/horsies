@@ -573,7 +573,9 @@ pub struct RefusedMember<'a> {
 
 /// The error of the sub-workflow node `task_index` of the workflow
 /// `workflow_id` whose input member `refused` does not decode to the builder
-/// parameter of that name: `WORKER_SERIALIZATION_ERROR` with the workflow id
+/// parameter of that name, or that no builder parameter takes (Python
+/// `decode_subworkflow_kwargs`, `core/codec/kwargs.py`):
+/// `WORKER_SERIALIZATION_ERROR` with the workflow id
 /// and the node in `data` (Python `_fail_enqueued_task`,
 /// `core/workflows/engine.py:474-512`). The message:
 /// - an `args_from` member of `input`:
@@ -639,6 +641,43 @@ pub fn build_failed_error(
     task_index: i32,
     error: &ChildSpecError,
 ) -> TaskError {
+    child_build_failure(
+        workflow_id,
+        workflow_name,
+        task_index,
+        &child_spec_failure_text(error),
+    )
+}
+
+/// The error of the sub-workflow node `task_index` of the workflow
+/// `workflow_id` (named `workflow_name`) whose builder input does not decode
+/// as the params type of the client's builder as a whole (a parameter with
+/// no member, for one): `WORKFLOW_ENQUEUE_FAILED`,
+/// `Subworkflow build failed: <decode text, 200 characters> (workflow <name>:<index>)`,
+/// with the workflow id and the node in `data`. Python gives the class of
+/// the exception that `build_with` raised (`TypeError: `) before the text; a
+/// decode has no exception class, so its text follows the prefix. Pure.
+pub fn params_decode_failed_error(
+    workflow_id: Uuid,
+    workflow_name: &str,
+    task_index: i32,
+    decode_text: &str,
+) -> TaskError {
+    let text: String = decode_text.chars().take(BUILD_FAILURE_TEXT_CHARS).collect();
+    child_build_failure(workflow_id, workflow_name, task_index, &text)
+}
+
+/// `WORKFLOW_ENQUEUE_FAILED` of the sub-workflow node `task_index` of the
+/// workflow `workflow_id` (named `workflow_name`):
+/// `Subworkflow build failed: <failure> (workflow <name>:<index>)`, with the
+/// workflow id and the node in `data` (Python `_fail_enqueued_task`,
+/// `core/workflows/engine.py:507-512`). Pure.
+fn child_build_failure(
+    workflow_id: Uuid,
+    workflow_name: &str,
+    task_index: i32,
+    failure: &str,
+) -> TaskError {
     TaskError {
         data: Some(serde_json::json!({
             "workflow_id": workflow_id.to_string(),
@@ -646,10 +685,7 @@ pub fn build_failed_error(
         })),
         ..TaskError::builtin(
             OperationalErrorCode::WorkflowEnqueueFailed,
-            format!(
-                "Subworkflow build failed: {} (workflow {workflow_name}:{task_index})",
-                child_spec_failure_text(error),
-            ),
+            format!("Subworkflow build failed: {failure} (workflow {workflow_name}:{task_index})"),
         )
     }
 }
