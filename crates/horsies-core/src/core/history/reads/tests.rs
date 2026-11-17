@@ -51,6 +51,7 @@ use super::result::{
 use super::{detail::read_task_detail, detail::TaskAbsenceReason, detail::TaskDetailResult};
 
 mod ports;
+mod reader_locks;
 
 fn timestamp(value: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(value)
