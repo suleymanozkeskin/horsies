@@ -2704,7 +2704,6 @@ class TestRunTaskEntryStoredTimeout:
                 _run_task_entry(
                     **_run_entry_defaults,
                     timeout=refusal,
-                    orphan_self_heal=True,
                 )
             )
 
@@ -2730,7 +2729,6 @@ class TestRunTaskEntryStoredTimeout:
                 _run_task_entry(
                     **_run_entry_defaults,
                     timeout=TimeoutValueInvalid(reason='stored timeout_ms is a bool'),
-                    orphan_self_heal=True,
                 )
             )
 
@@ -2755,7 +2753,6 @@ class TestRunTaskEntryStoredTimeout:
                     timeout=CancelGraceInvalid(
                         reason='stored cancel_grace_ms is absent'
                     ),
-                    orphan_self_heal=True,
                 )
             )
 
