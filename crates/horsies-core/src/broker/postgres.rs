@@ -1386,10 +1386,10 @@ impl PostgresBroker {
     }
 
     /// Rerun one retained terminal task in a broker-owned transaction on the
-    /// main core pool ([`CheckoutClass::Batch`]): the source read, the key
-    /// claim of a keyed rerun and the insert of the new row
-    /// (`core::history::rerun::operations`). A close waits for it as for a
-    /// write.
+    /// main core pool ([`CheckoutClass::Batch`]): the source read, then one
+    /// `horsies_enqueue_task` with the lineage `RERUN`, which claims the key
+    /// of a keyed rerun (`core::history::rerun::operations`). A close waits
+    /// for it as for a write.
     ///
     /// The handle checks its client family before the transaction: a
     /// database of another family, or with no family row, is
