@@ -370,6 +370,8 @@ See [Scheduler Overview](../../scheduling/scheduler-overview) for details.
 - `claim_lease_ms` is required when `prefetch_buffer > 0`
 - `claim_lease_ms` is optional when `prefetch_buffer = 0` (overrides the default 60s lease)
 - `cluster_wide_cap` cannot be combined with `prefetch_buffer > 0`
+- Each claim value is within the bound of the worker: `prefetch_buffer`, `cluster_wide_cap` and each queue's `max_concurrency` are at most 2,147,483,647, and `claim_lease_ms` and `max_claim_renew_age_ms` are at most 4,294,967,295. A larger value is refused with the code of its field: `HRS-202` for `prefetch_buffer`, `claim_lease_ms` and `max_claim_renew_age_ms`, `HRS-201` for `cluster_wide_cap`, `HRS-200` for `custom_queues[i].max_concurrency`
+- `payload.warn_bytes` and `payload.reject_bytes` are at most 18,446,744,073,709,551,615 (`ValidationError`)
 - Each worker profile has a valid name, at least one child, claim limits at or below its capacity (seats + `prefetch_buffer`; one seat per isolated child), and, when it sets `ParentPool(max_size=PoolSize(connections=N))`, an N of at least 3 (`PARENT_POOL_MIN_CONNECTIONS`). Each error names the profile and the field path (`ConfigurationError` `HRS-218`). Every profile is validated, not only the one a worker starts with
 
 Multiple validation errors within the same phase are collected and reported together (compiler-style), rather than stopping at the first error.

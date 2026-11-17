@@ -14,6 +14,12 @@ from horsies._catalog.manifest import (
     KEEPALIVE_SECONDS_MAX,
     TCP_USER_TIMEOUT_MS_MAX,
 )
+from horsies._catalog.worker_manifest import (
+    CLAIM_COUNT_MAX,
+    MILLISECONDS_MAX,
+    QUEUE_CONCURRENCY_MAX,
+    TASK_LIMIT_MAX,
+)
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -997,6 +1003,111 @@ class TestClusterWideCapBoundaries:
             cluster_wide_cap=1,
         )
         assert config.cluster_wide_cap == 1
+
+
+def _config_errors(**fields: object) -> list[HorsiesError]:
+    """The errors that AppConfig validation raises for `fields`, one or
+    collected; empty when the config is valid."""
+    try:
+        AppConfig.model_validate({'broker': BROKER, **fields})
+    except MultipleValidationErrors as collected:
+        return list(collected.report.errors)
+    except HorsiesError as error:
+        return [error]
+    return []
+
+
+@pytest.mark.unit
+class TestWorkerManifestBounds:
+    """A claim value above the bound of its worker manifest field is refused
+    at config time, with the code of the field's own checks."""
+
+    @pytest.mark.parametrize(
+        ('fields', 'path', 'maximum', 'code'),
+        [
+            (
+                {'prefetch_buffer': CLAIM_COUNT_MAX + 1, 'claim_lease_ms': 60_000},
+                'prefetch_buffer',
+                CLAIM_COUNT_MAX,
+                ErrorCode.CONFIG_INVALID_PREFETCH,
+            ),
+            (
+                {'claim_lease_ms': MILLISECONDS_MAX + 1},
+                'claim_lease_ms',
+                MILLISECONDS_MAX,
+                ErrorCode.CONFIG_INVALID_PREFETCH,
+            ),
+            (
+                {'max_claim_renew_age_ms': MILLISECONDS_MAX + 1},
+                'max_claim_renew_age_ms',
+                MILLISECONDS_MAX,
+                ErrorCode.CONFIG_INVALID_PREFETCH,
+            ),
+            (
+                {'cluster_wide_cap': TASK_LIMIT_MAX + 1},
+                'cluster_wide_cap',
+                TASK_LIMIT_MAX,
+                ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
+            ),
+            (
+                {
+                    'queue_mode': QueueMode.CUSTOM,
+                    'custom_queues': [
+                        CustomQueueConfig(name='a', max_concurrency=1),
+                        CustomQueueConfig(
+                            name='b', max_concurrency=QUEUE_CONCURRENCY_MAX + 1,
+                        ),
+                    ],
+                },
+                'custom_queues[1].max_concurrency',
+                QUEUE_CONCURRENCY_MAX,
+                ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+            ),
+        ],
+    )
+    def test_a_value_above_its_bound_is_refused_with_the_field_code(
+        self,
+        fields: dict[str, object],
+        path: str,
+        maximum: int,
+        code: ErrorCode,
+    ) -> None:
+        refusals = [
+            error
+            for error in _config_errors(**fields)
+            if error.message == f'{path} is above the bound that a worker takes'
+        ]
+
+        assert len(refusals) == 1, _config_errors(**fields)
+        [refusal] = refusals
+        assert isinstance(refusal, ConfigurationError)
+        assert refusal.code == code
+        assert refusal.notes == [
+            f'got {path}={maximum + 1}',
+            f'the bound of {path} is {maximum}',
+        ]
+        assert refusal.help_text == f'set {path} to {maximum} or less'
+
+    def test_the_largest_values_that_fit_are_accepted(self) -> None:
+        soft_cap = AppConfig(
+            broker=BROKER,
+            prefetch_buffer=CLAIM_COUNT_MAX,
+            claim_lease_ms=MILLISECONDS_MAX,
+            max_claim_renew_age_ms=MILLISECONDS_MAX,
+        )
+        hard_cap = AppConfig(
+            broker=BROKER,
+            cluster_wide_cap=TASK_LIMIT_MAX,
+            queue_mode=QueueMode.CUSTOM,
+            custom_queues=[
+                CustomQueueConfig(name='a', max_concurrency=QUEUE_CONCURRENCY_MAX),
+            ],
+        )
+
+        assert soft_cap.prefetch_buffer == CLAIM_COUNT_MAX
+        assert soft_cap.claim_lease_ms == MILLISECONDS_MAX
+        assert soft_cap.max_claim_renew_age_ms == MILLISECONDS_MAX
+        assert hard_cap.cluster_wide_cap == TASK_LIMIT_MAX
 
 
 @pytest.mark.unit
