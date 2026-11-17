@@ -1,9 +1,10 @@
 //! The Rust scenario binary of the parity runs.
 //!
 //! - `horsies-parity send <scenario>`: send the scenario on the database of
-//!   `HORSIES_PARITY_DATABASE_URL` and print one JSON line per send and per
-//!   workflow start (`tests/parity/send.py` prints the same lines). Exit 0,
-//!   1 on a refused send, 2 on bad arguments.
+//!   `HORSIES_PARITY_DATABASE_URL`, start its workflows and run its actions,
+//!   and print one JSON line per send and per workflow start
+//!   (`tests/parity/send.py` prints the same lines). Exit 0, 1 on a refused
+//!   step, 2 on bad arguments.
 //! - any other command goes to `horsies::cli::run`: `worker --profile <name>`
 //!   and the worker's children.
 
@@ -19,7 +20,7 @@ fn main() -> ExitCode {
         eprintln!("horsies-parity: {DATABASE_URL_ENV} is not set");
         return ExitCode::FAILURE;
     };
-    let (app, chain) = match build_app(&database_url) {
+    let parity = match build_app(&database_url) {
         Ok(built) => built,
         Err(error) => {
             eprintln!("horsies-parity: {error}");
@@ -43,7 +44,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match runtime.block_on(run_sends(&app, &chain, scenario)) {
+            match runtime.block_on(run_sends(&parity, scenario)) {
                 Ok(lines) => {
                     for line in lines {
                         println!("{line}");
@@ -56,6 +57,6 @@ fn main() -> ExitCode {
                 }
             }
         }
-        _ => horsies::cli::run(app),
+        _ => horsies::cli::run(parity.app),
     }
 }

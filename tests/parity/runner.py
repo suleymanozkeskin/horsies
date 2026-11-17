@@ -5,15 +5,16 @@ Rust and Python are not interoperable: the two sides never share a
 database. One side, on an empty `dualrun_` database:
 
 1. Read the database clock.
-2. Start the worker of the side with the scenario's profile. Its first
-   operation installs the schema, so the client family row is the side's.
+2. Start one worker of the side per profile of the scenario, before the
+   send process or after it (`WorkerStart`). The first operation of the
+   side installs the schema, so the client family row is the side's.
 3. Run the send process of the side (`python -m tests.parity.send`, or
-   `horsies-parity send`): it sends the tasks, then starts the workflows, and
-   prints their ids in order.
+   `horsies-parity send`): it sends the tasks, starts the workflows, runs
+   the actions on them, and prints the ids of the sends and starts in order.
 4. Wait until every sent task and every task of the started workflows has
    its history row and every started workflow ended, at most
    `TERMINAL_WAIT`.
-5. Stop the worker with `SIGTERM`; kill its process group after
+5. Stop each worker with `SIGTERM`; kill its process group after
    `STOP_WAIT`.
 6. Read the clock again, capture the snapshot with the whole-run catalog
    (`tests/dualrun/worker_run.py`), and read the report: the task of each
@@ -35,7 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import Enum
@@ -58,7 +59,7 @@ from tests.dualrun.normalize import NormalizedSnapshot
 from tests.dualrun.values import ExactValue, make_run_window
 from tests.dualrun.worker_run import WHOLE_RUN_CATALOG, compared_part
 from tests.parity.app import DATABASE_URL_ENV
-from tests.parity.scenarios import Scenario
+from tests.parity.scenarios import Scenario, WorkerStart
 
 REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 
@@ -275,13 +276,20 @@ def _all_ended(connection: psycopg.Connection[tuple[object, ...]], sent: SentIds
     return ended == (len(set(task_ids)),) and open_workflows == (0,)
 
 
-def _wait_until(process: subprocess.Popen[bytes], reached: Callable[[], bool]) -> str | None:
-    """`None` once `reached` holds; the reason when the worker exited first
-    or `TERMINAL_WAIT` passed."""
+def _wait_until(
+    workers: Sequence[subprocess.Popen[bytes]], reached: Callable[[], bool],
+) -> str | None:
+    """`None` once `reached` holds; the reason when a worker exited first or
+    `TERMINAL_WAIT` passed."""
     deadline = time.monotonic() + TERMINAL_WAIT.total_seconds()
     while not reached():
-        if process.poll() is not None:
-            return f'the worker exited with {process.returncode} first'
+        exited = [
+            f'worker {position} exited with {worker.returncode} first'
+            for position, worker in enumerate(workers)
+            if worker.poll() is not None
+        ]
+        if exited:
+            return '; '.join(exited)
         if time.monotonic() > deadline:
             return f'not every task and workflow ended within {TERMINAL_WAIT}'
         time.sleep(TERMINAL_POLL.total_seconds())
@@ -305,6 +313,59 @@ def _tail(path: Path, limit: int = 4_000) -> str:
     return path.read_bytes().decode('utf-8', errors='replace')[-limit:]
 
 
+@dataclass(frozen=True, slots=True)
+class StartedWorker:
+    process: subprocess.Popen[bytes]
+    log_path: Path
+
+
+def _start_workers(
+    worker_command: list[str], scenario: Scenario, env: dict[str, str], log_dir: Path,
+) -> list[StartedWorker]:
+    """One worker per profile of `scenario`, each with its own log file."""
+    started: list[StartedWorker] = []
+    for position, profile in enumerate(scenario.profiles):
+        log_path = log_dir / f'worker-{position}.log'
+        with log_path.open('wb') as log:
+            process = subprocess.Popen(
+                [*worker_command, f'--profile={profile}', '--loglevel=info'],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                env=env,
+                cwd=REPO_ROOT,
+            )
+        started.append(StartedWorker(process=process, log_path=log_path))
+    return started
+
+
+def _run_send(
+    send_command: list[str], scenario: Scenario, env: dict[str, str],
+) -> Result[SentIds, str]:
+    """The ids that the send process of the side printed, or why it failed."""
+    sending = subprocess.run(
+        [*send_command, scenario.name],
+        capture_output=True,
+        env=env,
+        cwd=REPO_ROOT,
+        timeout=SEND_WAIT.total_seconds(),
+        check=False,
+    )
+    match sending.returncode:
+        case 0:
+            return Ok(_parse_sent(sending.stdout.decode()))
+        case code:
+            return Err(f'send exited {code}: {sending.stderr.decode(errors="replace")}')
+
+
+def _tails(workers: Sequence[StartedWorker]) -> str:
+    return '\n'.join(
+        f'--- worker {position}\n{_tail(worker.log_path)}'
+        for position, worker in enumerate(workers)
+    )
+
+
 def run_side(
     client: Client, database: DualRunDatabase, scenario: Scenario,
 ) -> Result[SideRun, SideFailed]:
@@ -313,7 +374,7 @@ def run_side(
     worker_command, send_command = _commands(client)
     env = _environment(database)
     log_dir = Path(tempfile.mkdtemp(prefix=f'parity-{client.value.lower()}-'))
-    log_path = log_dir / 'worker.log'
+    workers: list[StartedWorker] = []
     try:
         with psycopg.connect(database.url, autocommit=True) as connection:
             match read_database_clock(connection):
@@ -321,41 +382,28 @@ def run_side(
                     pass
                 case Err(failed):
                     return Err(SideFailed(client=client, detail=f'clock: {failed}'))
-            with log_path.open('wb') as log:
-                worker = subprocess.Popen(
-                    [*worker_command, f'--profile={scenario.profile}', '--loglevel=info'],
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    stdin=subprocess.DEVNULL,
-                    start_new_session=True,
-                    env=env,
-                    cwd=REPO_ROOT,
-                )
             try:
-                sending = subprocess.run(
-                    [*send_command, scenario.name],
-                    capture_output=True,
-                    env=env,
-                    cwd=REPO_ROOT,
-                    timeout=SEND_WAIT.total_seconds(),
-                    check=False,
+                match scenario.worker_start:
+                    case WorkerStart.BEFORE_SENDS:
+                        workers = _start_workers(worker_command, scenario, env, log_dir)
+                        sent_ids = _run_send(send_command, scenario, env)
+                    case WorkerStart.AFTER_ACTIONS:
+                        sent_ids = _run_send(send_command, scenario, env)
+                        workers = _start_workers(worker_command, scenario, env, log_dir)
+                match sent_ids:
+                    case Ok(sent):
+                        pass
+                    case Err(detail):
+                        return Err(SideFailed(client=client, detail=detail))
+                waited = _wait_until(
+                    [worker.process for worker in workers],
+                    lambda: _all_ended(connection, sent),
                 )
-                if sending.returncode != 0:
-                    return Err(
-                        SideFailed(
-                            client=client,
-                            detail=(
-                                f'send exited {sending.returncode}: '
-                                f'{sending.stderr.decode(errors="replace")}'
-                            ),
-                        )
-                    )
-                sent = _parse_sent(sending.stdout.decode())
-                waited = _wait_until(worker, lambda: _all_ended(connection, sent))
             finally:
-                _stop(worker)
+                for worker in workers:
+                    _stop(worker.process)
             if waited is not None:
-                return Err(SideFailed(client=client, detail=f'{waited}\n{_tail(log_path)}'))
+                return Err(SideFailed(client=client, detail=f'{waited}\n{_tails(workers)}'))
             match read_database_clock(connection):
                 case Ok(ended):
                     pass
