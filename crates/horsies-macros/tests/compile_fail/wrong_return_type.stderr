@@ -1,4 +1,4 @@
-error: task functions must return Result<T, TaskError>
+error: task functions return Result<T, TaskError<E>>, with E the code type of the task's own errors
  --> tests/compile_fail/wrong_return_type.rs:4:24
   |
 4 | async fn bad(_: ()) -> String {
