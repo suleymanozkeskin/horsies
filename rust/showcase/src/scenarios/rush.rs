@@ -17,7 +17,7 @@ pub async fn run() -> ScenarioResult<()> {
         .await
         .map_err(|error| error.to_string())?;
     let catalog = load_catalog(&store).await?;
-    let (app, handles, workflows) = register_runtime(settings.sqlx_url())?;
+    let showcase = register_runtime(settings.sqlx_url())?;
     bullet(format!(
         "placing {} orders over {} seconds",
         tuning::RUSH_ORDER_COUNT,
@@ -25,15 +25,14 @@ pub async fn run() -> ScenarioResult<()> {
     ));
     for _ in 0..tuning::RUSH_ORDER_COUNT {
         let order = next_order(&store, &catalog).await?;
-        start_order(&workflows, order.clone()).await?;
-        send_standalone(&handles, &order).await?;
+        let _workflow = start_order(&showcase.workflows, order.clone()).await?;
+        send_standalone(&showcase.tasks, &order).await?;
         tokio::time::sleep(Duration::from_secs_f64(
             tuning::RUSH_WINDOW_SECONDS as f64 / tuning::RUSH_ORDER_COUNT as f64,
         ))
         .await;
     }
     say("rush orders submitted");
-    drop(app);
     store.close().await;
     Ok(())
 }

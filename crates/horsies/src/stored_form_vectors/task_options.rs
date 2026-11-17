@@ -1,8 +1,8 @@
 //! The task options vectors (`task_options.json`) through the client.
 //!
-//! The client's send stores `TaskOptions::stored_options_text` of the
-//! task's options (`send/function.rs`, `prepare`); a workflow node stores its
-//! task's options with its deadline merged as `good_until`
+//! The client's send stores `send_options_text` (`send/function.rs`): the
+//! task's options text, with the send's deadline as `good_until`; a workflow
+//! node stores its task's options with its deadline merged as `good_until`
 //! (`workflow/spec_data.rs`, `task_options_text`).
 
 use chrono::{DateTime, Utc};
@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{vector_file, RustCase, RustDrift};
+use crate::send::send_options_text;
 use crate::workflow::{task_options_text, NodeDeadline};
 
 #[derive(Deserialize)]
@@ -124,11 +125,14 @@ fn each_options_set_is_stored_as_its_text() {
         let expected = case
             .expected_text(&vector.text)
             .expect("every options set is expressible");
-        let task_text = task_options(&vector).stored_options_text();
+        let options = task_options(&vector);
+        let task_text = options.stored_options_text();
         let written = match vector.kind.as_str() {
-            // The send stores the task's options text; the deadline is the
-            // row's `good_until` column.
-            "task" | "send" => task_text,
+            "task" => task_text,
+            "send" => {
+                send_options_text(&options.task_name, Some(&options), Some(deadline(&vector)))
+                    .unwrap_or_else(|| panic!("{name}: a send with a deadline stores options"))
+            }
             "node" => task_options_text(
                 Some(task_text.as_str()),
                 NodeDeadline::At(deadline(&vector)),

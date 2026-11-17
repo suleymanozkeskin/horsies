@@ -38,6 +38,12 @@ class Turn:
         """Whether the turn sent ``sql`` as a simple query."""
         return f'Q:{sql}' in self.messages
 
+    def is_ping(self) -> bool:
+        """Whether the turn is a pre-ping of either client: the core's
+        ``SELECT 1`` or the empty statement of the Python engine, each a
+        simple query."""
+        return self.has_simple_query('SELECT 1') or self.has_simple_query(';')
+
     def executes(self) -> bool:
         """Whether the turn executes a statement of the extended protocol
         (an Execute message, after its Bind)."""

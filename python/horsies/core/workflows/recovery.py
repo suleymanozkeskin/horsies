@@ -989,6 +989,18 @@ async def _run_alone(pass_: _Pass, statement: Any, parameters: dict[str, object]
         return list((await connection.execute(statement, parameters)).fetchall())
 
 
+async def _execute_alone(pass_: _Pass, statement: Any, parameters: dict[str, object]) -> None:
+    """One statement that returns no rows, in autocommit on its own session.
+
+    Raises:
+        Exception: what the pool and the driver raise; after a lost reply the
+            statement may have committed.
+    """
+    async with pass_.session_factory() as session:
+        connection = await autocommit_connection(session)
+        _ = await connection.execute(statement, parameters)
+
+
 async def _recover_completion_candidate(
     pass_: _Pass, workflow_id: str, claim_token: str, report: RecoveryReport,
 ) -> _ClaimHold:
@@ -1160,7 +1172,7 @@ async def _recover_global_end_states(
     match hold:
         case _ClaimHold.HELD:
             try:
-                _ = await _run_alone(
+                await _execute_alone(
                     pass_,
                     RELEASE_GLOBAL_WORKFLOW_AUDIT_CLAIM_SQL,
                     {'claim_token': claim_token},
