@@ -13,8 +13,9 @@
 //! with `String` keys a Python `dict` of its values; their items are not
 //! containers. `horsies-codegen` renders [`PRODUCER_MANIFEST`] as
 //! `_catalog/manifest.py`, [`WORKER_MANIFEST`] as
-//! `_catalog/worker_manifest.py` and [`SCHEDULER_MANIFEST`] as
-//! `_catalog/scheduler_manifest.py`.
+//! `_catalog/worker_manifest.py`, [`SCHEDULER_MANIFEST`] as
+//! `_catalog/scheduler_manifest.py` and [`WORKFLOW_SPEC_DATA`] as
+//! `_catalog/workflow_spec.py`.
 
 use std::collections::BTreeMap;
 
@@ -38,6 +39,11 @@ use crate::worker_manifest::{
     SharedPoolManifest, SharedRecycleManifest, SharedThread, TaskLimit, TerminalRecordRetention,
     WorkerClaimManifest, WorkerDatabaseManifest, WorkerLogLevel, WorkerManifest,
     WorkerProfileManifest, WorkerStateRetention, WORKER_MANIFEST_VERSION,
+};
+use crate::workflow_engine::spec_data::{
+    SpecDefinitionKey, SpecJoin, SpecNode, SpecNodeBody, SpecOnError, SpecOutput,
+    SpecSubWorkflowParams, SpecSuccessCase, SpecSuccessPolicy, SpecTaskOptions, WorkflowSpecData,
+    WORKFLOW_SPEC_DATA_VERSION,
 };
 
 /// An inclusive integer range with the name of its Python constants
@@ -281,6 +287,28 @@ pub const SCHEDULER_MANIFEST: ManifestModule = ManifestModule {
         <ScheduleActivation as ManifestItem>::ITEM,
         <ScheduleManifest as ManifestItem>::ITEM,
         <SchedulerManifest as ManifestItem>::ITEM,
+    ],
+};
+
+/// A built workflow spec as data: what the Python client sends for a
+/// workflow start and for the child of a sub-workflow node.
+pub const WORKFLOW_SPEC_DATA: ManifestModule = ManifestModule {
+    root: "WorkflowSpecData",
+    version: WORKFLOW_SPEC_DATA_VERSION,
+    reader: "the core's spec data parser (`parse_workflow_spec_data`)",
+    reader_short: "`parse_workflow_spec_data`",
+    types: &[
+        <SpecDefinitionKey as ManifestItem>::ITEM,
+        <SpecOnError as ManifestItem>::ITEM,
+        <SpecOutput as ManifestItem>::ITEM,
+        <SpecSuccessCase as ManifestItem>::ITEM,
+        <SpecSuccessPolicy as ManifestItem>::ITEM,
+        <SpecJoin as ManifestItem>::ITEM,
+        <SpecTaskOptions as ManifestItem>::ITEM,
+        <SpecSubWorkflowParams as ManifestItem>::ITEM,
+        <SpecNodeBody as ManifestItem>::ITEM,
+        <SpecNode as ManifestItem>::ITEM,
+        <WorkflowSpecData as ManifestItem>::ITEM,
     ],
 };
 

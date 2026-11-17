@@ -283,7 +283,7 @@ pub async fn drive_phase2_recovery(
         over_attempt_bound,
         ..Phase2RecoverySummary::default()
     };
-    let build = ChildBuild {
+    let build = ChildBuild::Registry {
         registry,
         retention,
     };

@@ -180,6 +180,10 @@ impl CandidateFailure {
                 true => FailureClass::Transient,
                 false => FailureClass::Persistent,
             },
+            Self::Error(WorkflowError::ChildSpecSource(error)) => match error.is_retryable() {
+                true => FailureClass::Transient,
+                false => FailureClass::Persistent,
+            },
             Self::Error(
                 WorkflowError::Serialization(_)
                 | WorkflowError::WorkflowNotFound { .. }
@@ -201,6 +205,7 @@ impl CandidateFailure {
             Self::Error(WorkflowError::InvalidStatus(_)) => "InvalidStatus",
             Self::Error(WorkflowError::Validation(_)) => "Validation",
             Self::Error(WorkflowError::StepContract(_)) => "StepContract",
+            Self::Error(WorkflowError::ChildSpecSource(_)) => "ChildSpecSource",
             Self::Panic(_) => PANIC_ERROR_TYPE,
         }
     }

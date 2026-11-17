@@ -25,8 +25,10 @@ use crate::core::{OnError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
 use crate::db::CheckoutClass;
 use crate::test_support::terminal_writes;
 use crate::workflow_engine::bound_handle::WorkflowHandle;
+use crate::workflow_engine::child_spec::ChildSpecRequest;
 use crate::workflow_engine::lifecycle::{pause_workflow, resume_workflow};
 use crate::workflow_engine::start::start_workflow;
+use crate::workflow_engine::start_statement::{merged_child_input, NodeInput};
 use crate::workflow_engine::steps::{
     advance_parents, node_finish_in_transaction, ChildStartSource, NodeFinishDisposition,
     ParentAdvance,
@@ -42,6 +44,31 @@ const WORKER: &str = "child-start-worker";
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The host build of `owed`. The registry form awaits nothing, so the
+/// future ends on its first poll.
+fn host_build(
+    owed: &OwedChildStart,
+    build: ChildBuild<'_>,
+) -> Result<ChildStartKind, WorkflowError> {
+    futures::executor::block_on(child_start_kind(owed, build))
+}
+
+/// The request that the host build of `owed` makes for a child at depth
+/// `parent_depth + 1`.
+fn request_of(owed: &OwedChildStart) -> ChildSpecRequest {
+    ChildSpecRequest {
+        parent_workflow_id: owed.workflow_id,
+        parent_workflow_name: owed.workflow_name.clone(),
+        task_index: owed.task_index,
+        child_depth: owed.parent_depth + 1,
+        definition_key: owed.sub_definition_key.clone(),
+        params: owed.sub_workflow_params,
+        node_input: owed.node_input.clone(),
+        args_from: owed.args_from.clone(),
+        sources: owed.sources.clone(),
+    }
+}
 
 /// A registry with one static child of one task node under [`CHILD_KEY`].
 fn registry_with_child() -> WorkflowSpecRegistry {
@@ -293,12 +320,12 @@ fn a_registered_child_is_a_tree_under_its_node() {
     let workflow_id = Uuid::new_v4();
     let registry = registry_with_child();
     let retention = RetentionConfig::default();
-    let build = ChildBuild {
+    let build = ChildBuild::Registry {
         registry: &registry,
         retention: &retention,
     };
 
-    let kind = child_start_kind(&owed(workflow_id, 3, CHILD_KEY), build).expect("host build");
+    let kind = host_build(&owed(workflow_id, 3, CHILD_KEY), build).expect("host build");
 
     let ChildStartKind::Tree(arguments) = kind else {
         panic!("expected a TREE child start, got {kind:?}");
@@ -320,13 +347,13 @@ fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
     let workflow_id = Uuid::new_v4();
     let registry = registry_with_child();
     let retention = RetentionConfig::default();
-    let build = ChildBuild {
+    let build = ChildBuild::Registry {
         registry: &registry,
         retention: &retention,
     };
 
     let missing = failure_error(
-        child_start_kind(&owed(workflow_id, 0, "tests.child_start.missing.v1"), build)
+        host_build(&owed(workflow_id, 0, "tests.child_start.missing.v1"), build)
             .expect("host build"),
     );
     assert_eq!(missing.error_code.to_string(), "SUBWORKFLOW_LOAD_FAILED");
@@ -338,7 +365,7 @@ fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
         missing.data,
         Some(serde_json::json!({"definition_key": "tests.child_start.missing.v1"}))
     );
-    let too_deep = child_start_kind(
+    let too_deep = host_build(
         &owed(
             workflow_id,
             crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH,
@@ -377,7 +404,7 @@ fn the_depth_limit_is_checked_before_the_child_definition_is_resolved() {
     let workflow_id = Uuid::new_v4();
     let registry = registry_with_child();
     let retention = RetentionConfig::default();
-    let build = ChildBuild {
+    let build = ChildBuild::Registry {
         registry: &registry,
         retention: &retention,
     };
@@ -385,11 +412,10 @@ fn the_depth_limit_is_checked_before_the_child_definition_is_resolved() {
     let depth_limit = crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH;
 
     let past = failure_error(
-        child_start_kind(&owed(workflow_id, depth_limit, missing_key), build).expect("host build"),
+        host_build(&owed(workflow_id, depth_limit, missing_key), build).expect("host build"),
     );
     let at_limit = failure_error(
-        child_start_kind(&owed(workflow_id, depth_limit - 1, missing_key), build)
-            .expect("host build"),
+        host_build(&owed(workflow_id, depth_limit - 1, missing_key), build).expect("host build"),
     );
 
     assert_eq!(
@@ -410,9 +436,9 @@ fn an_args_from_key_that_names_a_static_member_fails_the_node() {
     conflicting.node_input = r#"{"value": 1}"#.to_owned();
     conflicting.args_from = Some(r#"{"value": 0}"#.to_owned());
 
-    let kind = child_start_kind(
+    let kind = host_build(
         &conflicting,
-        ChildBuild {
+        ChildBuild::Registry {
             registry: &registry,
             retention: &retention,
         },
@@ -476,7 +502,7 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
         })
         .expect("register the child");
     let retention = RetentionConfig::default();
-    let build = ChildBuild {
+    let build = ChildBuild::Registry {
         registry: &registry,
         retention: &retention,
     };
@@ -493,12 +519,12 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
     }];
 
     assert!(matches!(
-        child_start_kind(&merged, build).expect("host build"),
+        host_build(&merged, build).expect("host build"),
         ChildStartKind::Tree(_)
     ));
 
     merged.sources = Vec::new();
-    let error = failure_error(child_start_kind(&merged, build).expect("host build"));
+    let error = failure_error(host_build(&merged, build).expect("host build"));
     assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
     assert_eq!(
         error.message.as_deref(),
@@ -561,9 +587,9 @@ fn a_static_member_that_the_builder_refuses_fails_the_node_as_a_serialization_er
     refused.sub_workflow_params = SubWorkflowParams::Given;
 
     let error = failure_error(
-        child_start_kind(
+        host_build(
             &refused,
-            ChildBuild {
+            ChildBuild::Registry {
                 registry: &registry,
                 retention: &retention,
             },
@@ -628,9 +654,9 @@ fn an_args_from_value_that_the_builder_refuses_fails_the_node_as_a_serialization
     }];
 
     let error = failure_error(
-        child_start_kind(
+        host_build(
             &refused,
-            ChildBuild {
+            ChildBuild::Registry {
                 registry: &registry,
                 retention: &retention,
             },
@@ -670,7 +696,8 @@ fn a_source_with_no_stored_result_is_named_by_its_node_id() {
         result: None,
     }];
 
-    let NodeInput::Input(input) = merged_child_input(&merged).expect("the merge") else {
+    let NodeInput::Input(input) = merged_child_input(&request_of(&merged)).expect("the merge")
+    else {
         panic!("the merge failed the node");
     };
     let members: serde_json::Value =
@@ -743,7 +770,7 @@ async fn phase_two_commits_the_child_of_the_node_it_promotes() {
         &broker,
         task_id,
         false,
-        ChildBuild {
+        ChildBuild::Registry {
             registry: &registry,
             retention: &retention,
         },
@@ -777,7 +804,7 @@ async fn phase_two_fails_a_promoted_node_whose_child_cannot_load() {
         &broker,
         task_id,
         false,
-        ChildBuild {
+        ChildBuild::Registry {
             registry: &registry,
             retention: &retention,
         },
@@ -854,7 +881,7 @@ async fn a_parent_advance_commits_the_child_of_the_node_it_promotes() {
         OwedParentAdvances::of(ParentAdvance::Owed {
             child_workflow_id: ended_child,
         }),
-        ChildBuild {
+        ChildBuild::Registry {
             registry: &registry,
             retention: &retention,
         },

@@ -121,6 +121,11 @@ pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> Ha
             crate::broker::is_retryable_sqlx_error(error),
         ),
         WorkflowError::Broker(error) => (HandleErrorCode::DbOperationFailed, error.is_retryable()),
+        // The step rolled back: a build that did not run is retryable; an
+        // interrupted one is not, and its caller raises the interrupt.
+        WorkflowError::ChildSpecSource(error) => {
+            (HandleErrorCode::DbOperationFailed, error.is_retryable())
+        }
         WorkflowError::InvalidStatus(_) | WorkflowError::Serialization(_) => {
             (HandleErrorCode::StoredDataInvalid, false)
         }
@@ -401,7 +406,7 @@ pub async fn resume_workflow(
     retention: &RetentionConfig,
 ) -> HandleResult<bool> {
     admit_workflow_write(broker, workflow_id).await?;
-    let build = ChildBuild {
+    let build = ChildBuild::Registry {
         registry,
         retention,
     };

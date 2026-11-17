@@ -33,6 +33,7 @@ use crate::db::{
     BoundStatement, CheckoutClass, CorePool, IsolationLevel, NotSentCause, ParameterType,
     PooledConnection, Row, StatementFailure, TypedStatement,
 };
+use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::child_start::{run_child_starts, ChildStartsFailure};
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH;
@@ -343,22 +344,22 @@ pub(crate) struct StepOutcome<D> {
 /// result that an `args_from` member naming it takes, with the names that
 /// the member's wrap carries (`source_task_name`, `source_definition_key`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChildStartSource {
+pub struct ChildStartSource {
     /// The index of the dependency node.
-    pub(crate) task_index: i32,
+    pub task_index: i32,
     /// The node id of the dependency node; `None` for a node stored without
     /// one. The missing-result entry of a member names the node by it
     /// ([`crate::workflow_engine::args_merge::missing_result_error`]).
-    pub(crate) node_id: Option<String>,
+    pub node_id: Option<String>,
     /// Its status: `COMPLETED`, `FAILED` or `SKIPPED`.
-    pub(crate) status: String,
+    pub status: String,
     /// The task name of the dependency node.
-    pub(crate) task_name: String,
+    pub task_name: String,
     /// The definition key of a sub-workflow dependency; `None` for a task
     /// node.
-    pub(crate) definition_key: Option<String>,
+    pub definition_key: Option<String>,
     /// Its stored result text, copied; `None` when the node stores none.
-    pub(crate) result: Option<String>,
+    pub result: Option<String>,
 }
 
 /// A sub-workflow node that a step promoted and whose child start is owed in
@@ -458,13 +459,20 @@ pub(crate) struct CommittedStep<D> {
     pub(crate) parent_advances: OwedParentAdvances,
 }
 
-/// The values that the host build of an owed child start reads: the
-/// registry with the child definitions, and the retention policy that the
-/// typed facts of the child's task nodes take.
+/// Where the host build of a child gets the child's spec
+/// (`child_spec.rs`), and where the typed facts of the child's task nodes
+/// get the retention class of their queue.
 #[derive(Clone, Copy)]
-pub(crate) struct ChildBuild<'a> {
-    pub(crate) registry: &'a WorkflowSpecRegistry,
-    pub(crate) retention: &'a RetentionConfig,
+pub(crate) enum ChildBuild<'a> {
+    /// The registered definitions of the Rust client, and the retention
+    /// config of the process.
+    Registry {
+        registry: &'a WorkflowSpecRegistry,
+        retention: &'a RetentionConfig,
+    },
+    /// A client that builds the child in its own language and sends the
+    /// spec as data, with the class of each task queue.
+    Client(&'a dyn ChildSpecSource),
 }
 
 /// A parent advance failed at the level of `failed_child_workflow_id`. The

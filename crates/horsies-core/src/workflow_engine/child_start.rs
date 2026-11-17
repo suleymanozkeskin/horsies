@@ -19,7 +19,7 @@
 //! A child start can owe further child starts; they run in the same
 //! transaction, at most [`MAX_WORKFLOW_NODES`] per step.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -30,14 +30,10 @@ use crate::db::{
     BoundStatement, ParameterBinder, ParameterType, Row, StatementFailure, Transaction,
     TypedStatement,
 };
-use crate::workflow_engine::args_merge::{
-    child_build_input, merge_args_from_sync, ArgsFromMerge, DepResult, MergedNodeKind,
-};
 use crate::workflow_engine::error::WorkflowError;
-use crate::workflow_engine::start::ChildSpecError;
 use crate::workflow_engine::start_statement::{
-    build_child, build_failed_error, child_tree_arguments, node_failure_result, ChildBuildOutcome,
-    ChildOfNode, NodeInput, StartArguments,
+    build_child, child_tree_arguments, ChildBuildOutcome, ChildInput, ChildOfNode, ChildTree,
+    StartArguments,
 };
 use crate::workflow_engine::steps::{
     step_row_select, step_rows, ChildBuild, OwedChildStart, OwedParentAdvances, StepContractError,
@@ -191,7 +187,9 @@ pub(crate) async fn run_child_starts(
         .next()
         .map_err(|exceeded| ChildStartsFailure::Refused(exceeded.into()))?
     {
-        let kind = child_start_kind(&owed_start, build).map_err(ChildStartsFailure::Refused)?;
+        let kind = child_start_kind(&owed_start, build)
+            .await
+            .map_err(ChildStartsFailure::Refused)?;
         let rows = start_one_child(transaction, log, &owed_start, &kind)
             .await
             .map_err(ChildStartsFailure::Statement)?;
@@ -251,15 +249,17 @@ impl OwedChildStarts {
 /// `args_from` key, each the stored result of the named dependency (the
 /// `SOURCE` rows, which name terminal dependencies only; a dependency that is
 /// not terminal gets no member, as Python and the baseline input builder do).
-/// The built child gets a new
-/// id (`Uuid::new_v4()`) and its tree as [`child_tree_arguments`] builds it.
-/// Does no I/O; it runs the registered builder.
+/// The build of `build` makes the child ([`build_child`]). The built child
+/// gets a new id (`Uuid::new_v4()`) and its tree as [`child_tree_arguments`]
+/// builds it. Does no I/O; it runs the child's builder.
 ///
 /// Errors: [`WorkflowError::Serialization`] for an `args_from` text that does
 /// not parse or a value that does not encode; [`WorkflowError::Validation`]
 /// for a stored input that the `args_from` merge refuses, and for a child
-/// spec that the tree arguments refuse (as [`child_tree_arguments`]).
-pub(crate) fn child_start_kind(
+/// spec that the tree arguments refuse (as [`child_tree_arguments`]);
+/// [`WorkflowError::ChildSpecSource`] when the client's source gave no
+/// answer.
+pub(crate) async fn child_start_kind(
     owed: &OwedChildStart,
     build: ChildBuild<'_>,
 ) -> Result<ChildStartKind, WorkflowError> {
@@ -271,85 +271,49 @@ pub(crate) fn child_start_kind(
             parent_depth: owed.parent_depth,
             definition_key: owed.sub_definition_key.as_deref(),
         },
-        || merged_child_input(owed),
+        ChildInput {
+            node_input: owed.node_input.clone(),
+            args_from: owed.args_from.clone(),
+            sources: owed.sources.clone(),
+        },
         owed.sub_workflow_params,
-        build.registry,
-    )?;
+        build,
+    )
+    .await?;
     match built {
-        ChildBuildOutcome::Built { spec, depth } => Ok(ChildStartKind::Tree(child_tree_arguments(
-            &spec,
-            Uuid::new_v4(),
-            owed.workflow_id,
-            owed.task_index,
+        ChildBuildOutcome::Built {
+            spec,
             depth,
-            build.registry,
-            build.retention,
-        )?)),
-        ChildBuildOutcome::NodeFails(error) => {
+            classes,
+        } => Ok(ChildStartKind::Tree(
+            child_tree_arguments(
+                ChildTree {
+                    spec,
+                    classes,
+                    child_workflow_id: Uuid::new_v4(),
+                    parent_workflow_id: owed.workflow_id,
+                    parent_task_index: owed.task_index,
+                    depth,
+                },
+                build,
+            )
+            .await?,
+        )),
+        ChildBuildOutcome::NodeFails(failure) => {
             tracing::error!(
                 workflow_id = %owed.workflow_id,
                 workflow_name = %owed.workflow_name,
                 task_index = owed.task_index,
                 sub_workflow_name = ?owed.sub_workflow_name,
                 definition_key = ?owed.sub_definition_key,
-                error = ?error.message,
+                error = ?failure.message(),
                 "sub-workflow child not started; its node fails",
             );
             Ok(ChildStartKind::Failure {
-                failure_result: node_failure_result(error)?,
+                failure_result: failure.into_stored_result()?,
             })
         }
     }
-}
-
-/// The node input of an owed child start with its `args_from` members
-/// merged after its static members, each replaced by its `inner` envelope
-/// ([`child_build_input`]). An `args_from` key that names a static member
-/// fails the node (Python `core/workflows/engine.py:1111-1123`); so does a
-/// merged input from which the builder input cannot be made
-/// ([`ChildSpecError::of_stored_input`], `WORKFLOW_ENQUEUE_FAILED`).
-fn merged_child_input(owed: &OwedChildStart) -> Result<NodeInput, WorkflowError> {
-    let args_from = owed
-        .args_from
-        .as_deref()
-        .map(serde_json::from_str::<serde_json::Value>)
-        .transpose()?;
-    let dependency_results: HashMap<i32, DepResult> = owed
-        .sources
-        .iter()
-        .map(|source| {
-            (
-                source.task_index,
-                DepResult {
-                    node_id: source.node_id.clone(),
-                    task_name: source.task_name.clone(),
-                    sub_definition_key: source.definition_key.clone(),
-                    status: source.status.clone(),
-                    result: source.result.clone(),
-                },
-            )
-        })
-        .collect();
-    Ok(
-        match merge_args_from_sync(&owed.node_input, &args_from, &dependency_results)? {
-            ArgsFromMerge::Merged(input) => match child_build_input(input, args_from.as_ref()) {
-                Ok(input) => NodeInput::Input(input),
-                Err(refused) => NodeInput::NodeFails(build_failed_error(
-                    owed.workflow_id,
-                    &owed.workflow_name,
-                    owed.task_index,
-                    &ChildSpecError::of_stored_input(refused),
-                )),
-            },
-            ArgsFromMerge::StaticMemberConflict(conflict) => {
-                NodeInput::NodeFails(conflict.node_error(
-                    owed.workflow_id,
-                    owed.task_index,
-                    MergedNodeKind::SubWorkflow,
-                ))
-            }
-        },
-    )
 }
 
 /// Runs `horsies_workflow_child_start` for one owed child start in the
