@@ -1026,8 +1026,9 @@ pub enum WorkflowStopBeforeStart {
 /// - `pool` and `session_pool`: sqlx pools. They are the adapter for the
 ///   call sites that have not moved to the statement layer yet: the broker's
 ///   lifecycle statements, the worker, the workflow engine, the scheduler,
-///   the web layer, migrations and the listeners, which borrow them through
-///   [`PostgresBroker::pool`] and [`PostgresBroker::session_pool`].
+///   the web layer and the listeners, which borrow them through
+///   [`PostgresBroker::pool`] and [`PostgresBroker::session_pool`]. The
+///   schema install runs on the core pools.
 ///
 /// Every LISTEN of the broker goes through the process listener of its
 /// session URL: one connection, shared with the other brokers of the process
@@ -1305,15 +1306,36 @@ impl PostgresBroker {
         Ok(broker)
     }
 
-    /// Run embedded SQL migrations.
+    /// Install the schema: run the embedded migrations that the database
+    /// lacks, and record or check this handle's client family
+    /// ([`crate::broker::migrations`]). A broker built with
+    /// [`SchemaInitializationMode::ObserveOnly`] runs nothing.
     ///
-    /// Bookkeeps in the horsies-owned `horsies_migrations` table so it never
-    /// collides with an application's own `sqlx::migrate!()` runner.
+    /// Runs on the session-work core pool (the session pool, or the main
+    /// pool when the URLs are equal). Bookkeeps in the horsies-owned
+    /// `horsies_migrations` table, so it never collides with an
+    /// application's own migration runner. A close waits for it as for a
+    /// write.
+    ///
+    /// Errors: [`BrokerError::SchemaRefused`] and
+    /// [`BrokerError::ClientFamilyMismatch`] (nothing was changed; not
+    /// retryable); [`BrokerError::InstallLock`]; [`BrokerError::Statement`];
+    /// [`BrokerError::RowDecode`]; [`BrokerError::PoolSettings`] when a
+    /// closed handle cannot open its pools again.
     pub async fn migrate(&self) -> Result<(), BrokerError> {
-        if self.schema_initialization_mode == SchemaInitializationMode::ObserveOnly {
-            return Ok(());
+        match self.schema_initialization_mode {
+            SchemaInitializationMode::ObserveOnly => return Ok(()),
+            SchemaInitializationMode::MigrateAndValidate => {}
         }
-        crate::broker::migrations::install_schema(&self.session_pool, self.client_family).await
+        let (open, _write) = self.core.pools_for_write()?;
+        crate::broker::migrations::install_schema_on(
+            open.pools().session_work(),
+            self.client_family,
+            crate::broker::migrations::InstallLockPlan::fleet(),
+            self.statement_log,
+        )
+        .await
+        .map_err(BrokerError::from)
     }
 
     /// The same handle for a client of `family`. The install records it, and
@@ -1383,37 +1405,21 @@ impl PostgresBroker {
         Ok(recorded_family_from(stored))
     }
 
-    /// Ensure the embedded schema is initialized exactly once for this broker.
+    /// Install the schema once for this broker ([`PostgresBroker::migrate`]).
     ///
-    /// The first successful call runs embedded SQL migrations and verifies the
-    /// validated task-history cutover attestation. Later calls are a no-op. If
-    /// initialization fails, the guard remains unset so a future caller can
-    /// retry.
+    /// The first successful call installs or checks the schema; later calls
+    /// are a no-op. A failure is not kept, so a later call runs the install
+    /// again. The install ends only at this build's whole chain (a newer or
+    /// unknown schema is refused), and it records or checks this handle's
+    /// family, so writes of this handle need no second family read.
     pub async fn ensure_schema_initialized(&self) -> Result<(), BrokerError> {
-        if self.schema_initialization_mode == SchemaInitializationMode::ObserveOnly {
-            return Ok(());
+        match self.schema_initialization_mode {
+            SchemaInitializationMode::ObserveOnly => return Ok(()),
+            SchemaInitializationMode::MigrateAndValidate => {}
         }
         self.schema_initialized
             .get_or_try_init(|| async {
-                let expected = crate::broker::migrations::expected_schema_version();
-                let before =
-                    crate::broker::migrations::successful_schema_version(&self.session_pool)
-                        .await?;
-                if before.is_some_and(|actual| actual > expected) {
-                    return Err(BrokerError::SchemaVersionMismatch {
-                        expected,
-                        actual: before,
-                    });
-                }
                 self.migrate().await?;
-                let actual =
-                    crate::broker::migrations::successful_schema_version(&self.session_pool)
-                        .await?;
-                if actual != Some(expected) {
-                    return Err(BrokerError::SchemaVersionMismatch { expected, actual });
-                }
-                // The install recorded or checked the family: writes of this
-                // handle need no second read.
                 let _already_admitted = self.client_family_admitted.set(());
                 Ok::<(), BrokerError>(())
             })
@@ -1433,9 +1439,9 @@ impl PostgresBroker {
         &self.pool
     }
 
-    /// The sqlx pool on the session URL, used for schema work, partition
-    /// maintenance, and LISTEN/NOTIFY: the adapter for call sites that have
-    /// not moved to the statement layer.
+    /// The sqlx pool on the session URL, used for partition maintenance and
+    /// LISTEN/NOTIFY: the adapter for call sites that have not moved to the
+    /// statement layer.
     pub fn session_pool(&self) -> &PgPool {
         &self.session_pool
     }

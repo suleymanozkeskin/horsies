@@ -3843,6 +3843,12 @@ mod tests {
             crate::broker::migrations::run_horsies_migrations(&pool)
                 .await
                 .expect("migrate start test database");
+            // The install writes this client's family row; a start test
+            // records the family it needs itself.
+            sqlx::query("DELETE FROM horsies_client_family")
+                .execute(&pool)
+                .await
+                .expect("remove the family row of the install");
             Self {
                 admin,
                 pool,

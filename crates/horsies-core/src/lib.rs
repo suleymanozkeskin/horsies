@@ -65,13 +65,12 @@ pub use crate::core::{AppConfig, HorsiesError};
 
 // broker re-exports
 pub use crate::broker::{
-    expected_schema_version, run_horsies_migrations, BrokerError, BrokerErrorCode,
-    BrokerOperationError, BrokerResult, CheckInterruption, ClaimedTaskRow, DatabasePing,
-    ExpiredTaskRow, HeartbeatRow, ListenError, ListenerPlanError, PostgresBroker, RawResultRecord,
-    SchemaInitializationMode, SessionCheckFailure, StaleTaskRow, TaskAttemptRow, TaskHandle,
-    TaskInfoRow, TaskResultRow, TaskRunningContextRow, WorkerPingRequest, WorkerPong,
-    WorkerPongPayload, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE,
-    WORKER_PING_CHANNEL,
+    expected_schema_version, BrokerError, BrokerErrorCode, BrokerOperationError, BrokerResult,
+    CheckInterruption, ClaimedTaskRow, DatabasePing, ExpiredTaskRow, HeartbeatRow, ListenError,
+    ListenerPlanError, PostgresBroker, RawResultRecord, SchemaInitializationMode,
+    SessionCheckFailure, StaleTaskRow, TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow,
+    TaskRunningContextRow, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
+    WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 
@@ -105,6 +104,7 @@ pub use crate::broker::{
 };
 
 pub use crate::broker::client_family::{ClientFamily, FamilyCheckFailure};
+pub use crate::broker::migrations::SchemaRefusal;
 pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::rerun::{

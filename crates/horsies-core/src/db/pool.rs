@@ -47,8 +47,8 @@ use super::failure::{
 };
 use super::pooling_check::{run_pooling_check, PoolingCheckPassed};
 use super::statement::{
-    execute_count, query_rows, run_command, AttemptError, BoundStatement, Stage, StatementBound,
-    StatementProtocol, CANCEL_GRACE,
+    execute_count, query_rows, run_command, AttemptError, BoundStatement, SqlScript, Stage,
+    StatementBound, StatementProtocol, CANCEL_GRACE,
 };
 use super::transaction::TransactionCommand;
 
@@ -93,7 +93,8 @@ pub enum PoolRole {
     /// The main URL (`database_url`) of a producer or a handle.
     Main,
     /// The session URL (`session_database_url`): partition maintenance and
-    /// the install state read.
+    /// the schema install (its state reads, its advisory lock and its
+    /// migrations).
     Session,
     /// The worker parent's pool on the main URL: claim loop, batch writers,
     /// and the reserve.
@@ -842,6 +843,21 @@ impl PooledConnection {
             Bounding::ConnectionTimeouts,
         )
         .await;
+        self.settle(name, outcome)
+    }
+
+    /// Runs a script (simple query protocol, no parameters) with the same
+    /// three outcomes as a statement. [`crate::db::Transaction::run_script`]
+    /// is the public form: a script runs inside a transaction.
+    pub(crate) async fn run_script(
+        &mut self,
+        script: &SqlScript,
+        bound: StatementBound,
+    ) -> Result<(), StatementFailure> {
+        let name = script.name();
+        self.ensure_usable(name)?;
+        let bounding = self.bounding(bound);
+        let outcome = run_bounded(run_command(&self.object.client, script.sql()), bounding).await;
         self.settle(name, outcome)
     }
 
