@@ -27,6 +27,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Final, NoReturn, assert_never
 
+from horsies._core import core_state
 from horsies.core.logging import configure_logging, get_logger
 from horsies.core.worker.child_main import (
     BAD_ARGUMENTS_EXIT_CODE,
@@ -141,16 +142,39 @@ def _open_socket_fds(ctrl_fd: int) -> list[int]:
     return found
 
 
+def _os_thread_refusal() -> str | None:
+    """Return why the OS threads of this process make a fork unsafe, or None.
+
+    Threads that Python did not start (a native extension, the core runtime)
+    are not in ``threading.enumerate()``; ``/proc/self/task`` lists every one.
+    A count that cannot be read refuses, as the check cannot pass.
+    """
+    try:
+        count = len(os.listdir('/proc/self/task'))
+    except OSError as exc:
+        return f'the OS threads of this process cannot be counted: {exc}'
+    if count > 1:
+        return f'{count} OS threads run in this process; a fork copies only one'
+    return None
+
+
 def fork_refusal(ctrl_fd: int) -> str | None:
     """Return why a fork from this process is not safe, or None.
 
     A fork copies a lock in whatever state another thread left it, and every
-    child would share a socket on one connection.
+    child would share a socket on one connection. A started core refuses
+    every call in a fork child, so it must not have started here.
     """
     current = threading.current_thread()
     threads = [thread.name for thread in threading.enumerate() if thread is not current]
     if threads:
         return f'threads started during import: {threads}'
+    os_threads = _os_thread_refusal()
+    if os_threads is not None:
+        return os_threads
+    core = core_state()
+    if core != 'not_started':
+        return f'the core of horsies._core is {core} in this process'
     sockets = _open_socket_fds(ctrl_fd)
     if sockets:
         return f'sockets opened during import: descriptors {sockets}'

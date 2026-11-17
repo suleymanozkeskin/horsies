@@ -19,6 +19,7 @@ use tokio_postgres::error::{DbError, Severity, SqlState};
 
 use super::pool::PoolRole;
 use super::url::MaskedUrl;
+use crate::process_runtime::ProcessRuntimeRefusal;
 
 /// SQLSTATE classes whose errors may clear without a change by the user:
 /// connection exception (08), transaction rollback (40), insufficient
@@ -129,6 +130,10 @@ pub enum ConnectFailure {
         statement: &'static str,
         error: tokio_postgres::Error,
     },
+    /// The runtime of the process, which opens and drives every connection,
+    /// cannot be used: nothing was connected.
+    #[error("{0}")]
+    RuntimeUnavailable(ProcessRuntimeRefusal),
 }
 
 impl ConnectError {
@@ -158,6 +163,10 @@ impl ConnectError {
                 Some(server_error) => sqlstate_transience(server_error.code()),
                 None => Transience::Transient,
             },
+            ConnectFailure::RuntimeUnavailable(refusal) => match refusal {
+                ProcessRuntimeRefusal::ForkedAfterStart { .. } => Transience::Permanent,
+                ProcessRuntimeRefusal::StartFailed { .. } => Transience::Transient,
+            },
         }
     }
 
@@ -171,9 +180,9 @@ impl ConnectError {
                 TlsFailure::CertificateRefused | TlsFailure::OtherTls => PlainRetry::Allowed,
                 TlsFailure::NotTls => PlainRetry::NotAllowed,
             },
-            ConnectFailure::TimedOut { .. } | ConnectFailure::SessionSetupFailed { .. } => {
-                PlainRetry::NotAllowed
-            }
+            ConnectFailure::TimedOut { .. }
+            | ConnectFailure::SessionSetupFailed { .. }
+            | ConnectFailure::RuntimeUnavailable(_) => PlainRetry::NotAllowed,
         }
     }
 }

@@ -158,6 +158,7 @@ async fn the_boot_logs_the_memory_fit_then_the_connection_fit_and_the_worker_sta
     );
     let launch = ChildLaunch {
         command: idle_child_of_any_kind(),
+        preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
         program: ChildProgram::Rust,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new(app_config.broker.database_url.clone()),

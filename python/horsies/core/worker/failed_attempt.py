@@ -31,7 +31,6 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
 from enum import Enum
 from typing import Any, Final, Literal, assert_never
 
@@ -221,14 +220,14 @@ class FinishFailedAttempt:
 def finish_for(
     failure: FailLockedTask,
     *,
-    claimed_at: datetime,
     retry: RetryRequest,
     attempt: AttemptFailure,
 ) -> FinishFailedAttempt:
-    """The failed-attempt finish of a terminal failure. Pure."""
+    """The failed-attempt finish of a terminal failure, fenced on the claim
+    that the failure carries. Pure."""
     return FinishFailedAttempt(
         task_id=failure.task_id,
-        fence=OwnedClaim(worker_id=failure.fence.worker_id, claimed_at=claimed_at),
+        fence=failure.fence,
         retry=retry,
         result_json=failure.result_json,
         error_code=failure.error_code,

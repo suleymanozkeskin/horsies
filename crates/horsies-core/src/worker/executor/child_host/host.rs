@@ -24,6 +24,10 @@ use crate::core::config::PostgresConfig;
 use crate::core::TaskRegistry;
 use crate::db::KeptOpen;
 use crate::manifest::{PoolRecycle, ProducerManifest};
+use crate::process_runtime::{
+    process_runtime, shape_process_runtime, OsErrorCode, ProcessRuntimeRefusal, RuntimeShape,
+    ShapeOutcome, ThreadStart,
+};
 use crate::worker::executor::protocol::{
     decode_parent_frame, BootDetail, BootErrorName, BootFailedFrame, ChildConnection,
     ChildExitCode, ChildFrame, ChildKind, ChildPool, ChildProgram, FrameReader, InitFrame,
@@ -38,6 +42,12 @@ const INIT_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 /// marker writes and one async body at a time.
 const SMALL_RUNTIME_THREADS: usize = 2;
 const RUNTIME_THREAD_NAME: &str = "horsies-child-runtime";
+/// The most threads of the blocking pool of a child runtime (tokio's
+/// default).
+const CHILD_MAX_BLOCKING_THREADS: NonZeroUsize = match NonZeroUsize::new(512) {
+    Some(threads) => threads,
+    None => panic!("512 is not zero"),
+};
 /// The checkout wait of the child's pool, in seconds (Python
 /// `CHILD_POOL_CONNECTION_WAIT_S`).
 const CHILD_POOL_CHECKOUT_WAIT_SECONDS: u32 = 30;
@@ -230,12 +240,66 @@ fn read_init(socket: &UnixStream, reader: &mut FrameReader) -> Result<InitFrame,
 /// The cause of an `io::Error` of a boot step: a resource shortage for a
 /// clearable errno, else `step_cause`.
 fn shortage_or(error: &io::Error, step_cause: ReportedBootCause) -> ReportedBootCause {
-    match error.raw_os_error() {
-        Some(libc::EMFILE) => ReportedBootCause::ResourceShortage(ShortageErrno::Emfile),
-        Some(libc::ENFILE) => ReportedBootCause::ResourceShortage(ShortageErrno::Enfile),
-        Some(libc::ENOMEM) => ReportedBootCause::ResourceShortage(ShortageErrno::Enomem),
-        Some(libc::EAGAIN) => ReportedBootCause::ResourceShortage(ShortageErrno::Eagain),
-        _ => step_cause,
+    let os_error = match error.raw_os_error() {
+        Some(code) => OsErrorCode::Code(code),
+        None => OsErrorCode::NotAnOsError,
+    };
+    shortage_of(os_error, step_cause)
+}
+
+/// The cause of a boot step that failed with `os_error`: a resource
+/// shortage for a clearable errno, else `step_cause`.
+fn shortage_of(os_error: OsErrorCode, step_cause: ReportedBootCause) -> ReportedBootCause {
+    match os_error {
+        OsErrorCode::Code(libc::EMFILE) => {
+            ReportedBootCause::ResourceShortage(ShortageErrno::Emfile)
+        }
+        OsErrorCode::Code(libc::ENFILE) => {
+            ReportedBootCause::ResourceShortage(ShortageErrno::Enfile)
+        }
+        OsErrorCode::Code(libc::ENOMEM) => {
+            ReportedBootCause::ResourceShortage(ShortageErrno::Enomem)
+        }
+        OsErrorCode::Code(libc::EAGAIN) => {
+            ReportedBootCause::ResourceShortage(ShortageErrno::Eagain)
+        }
+        OsErrorCode::Code(_) | OsErrorCode::NotAnOsError => step_cause,
+    }
+}
+
+/// The runtime of the process, shaped for a child of `kind`: the child's
+/// async bodies, its writes and its connections run on it, so the child
+/// starts one runtime. A runtime that ran before child mode (code that
+/// `main` ran first) is used with the shape it started with.
+///
+/// Errors: the boot cause and the detail of a runtime that cannot start.
+fn start_child_runtime(
+    kind: ChildKind,
+) -> Result<&'static tokio::runtime::Runtime, (ReportedBootCause, String)> {
+    let shape = RuntimeShape {
+        worker_threads: NonZeroUsize::new(runtime_threads(kind)).unwrap_or(NonZeroUsize::MIN),
+        max_blocking_threads: CHILD_MAX_BLOCKING_THREADS,
+        thread_name: RUNTIME_THREAD_NAME,
+        on_thread_start: ThreadStart::Nothing,
+    };
+    match shape_process_runtime(shape) {
+        ShapeOutcome::Shaped => {}
+        ShapeOutcome::AlreadyRunning => tracing::warn!(
+            "the process runtime ran before child mode started; the child runs on it with the \
+             shape it started with",
+        ),
+    }
+    match process_runtime() {
+        Ok(process) => Ok(process.runtime()),
+        Err(ProcessRuntimeRefusal::StartFailed { cause, os_error }) => Err((
+            shortage_of(os_error, ReportedBootCause::ThreadStartRefused),
+            cause,
+        )),
+        // A child starts by exec, so it inherits no runtime; a refusal names
+        // the defect in the boot report.
+        Err(refusal @ ProcessRuntimeRefusal::ForkedAfterStart { .. }) => {
+            Err((ReportedBootCause::ThreadStartRefused, refusal.to_string()))
+        }
     }
 }
 
@@ -431,16 +495,10 @@ fn boot_and_serve(
         &app.producer_manifest,
         task_send_pool_of(init.child_kind),
     ));
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(runtime_threads(init.child_kind))
-        .thread_name(RUNTIME_THREAD_NAME)
-        .enable_all()
-        .build()
-    {
+    let runtime = match start_child_runtime(init.child_kind) {
         Ok(runtime) => runtime,
-        Err(error) => {
-            let cause = shortage_or(&error, ReportedBootCause::ThreadStartRefused);
-            return boot_failed(&socket, cause, "RuntimeStartFailed", &error.to_string());
+        Err((cause, detail)) => {
+            return boot_failed(&socket, cause, "RuntimeStartFailed", &detail);
         }
     };
     let broker = match runtime.block_on(connect(&init)) {
@@ -455,8 +513,7 @@ fn boot_and_serve(
         }
     };
     let start_hook = std::mem::replace(&mut app.start_hook, ChildStartHook::NoHook);
-    if let Err(exit) = run_start_hook(&runtime, start_hook, CHILD_START_HOOK_BOUND) {
-        runtime.shutdown_background();
+    if let Err(exit) = run_start_hook(runtime, start_hook, CHILD_START_HOOK_BOUND) {
         return exit;
     }
     let (writer, serving, mut frames) = match start_threads(&socket, reader, init.child_kind) {
@@ -490,8 +547,8 @@ fn boot_and_serve(
             }
         }
     });
-    // Work that still runs (a stuck body) must not hold the exit.
-    runtime.shutdown_background();
+    // The process runtime is never shut down: the binary exits with the
+    // code, so work that still runs (a stuck body) does not hold the exit.
     match end {
         ServeEnd::Stopped => ChildHostExit::Stopped,
         ServeEnd::BadParentFrame => ChildHostExit::BadParentFrame,

@@ -68,6 +68,7 @@ fn worker_on(broker: Arc<PostgresBroker>, resilience: WorkerResilienceConfig) ->
         },
         ChildLaunch {
             command: idle_child_of_any_kind(),
+            preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
             program: ChildProgram::Rust,
             log_level: ChildLogLevel::Info,
             database_url,
