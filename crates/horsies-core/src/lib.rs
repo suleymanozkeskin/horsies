@@ -116,7 +116,10 @@ pub use crate::worker::executor::child_host::{
 pub use crate::worker::{
     cli::LogLevel,
     config::WorkerConfig,
-    scheduler::service::{spawn_scheduler, SchedulerStartError},
+    scheduler::service::{
+        spawn_scheduler, ActiveScheduler, SchedulerService, SchedulerStartError, SchedulerStarted,
+        SchedulerStop, SchedulerTickError,
+    },
     worker::Worker,
     WorkerError,
 };
