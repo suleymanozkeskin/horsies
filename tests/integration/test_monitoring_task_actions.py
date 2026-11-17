@@ -38,7 +38,7 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.lifecycle.persistence import apply_async
 from horsies.core.models.tasks import TaskResult
-from horsies.core.types.core_failure import CoreOperationFailed
+from horsies._core import CoreConnectionError
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.url import to_psycopg_url
@@ -770,5 +770,5 @@ class TestDatabaseFailure:
         error = result.err_value
         assert isinstance(error, TaskActionDbOperationFailed)
         assert error.retryable is True
-        assert isinstance(error.exception, CoreOperationFailed)
+        assert isinstance(error.exception, CoreConnectionError)
         assert error.exception.retryable is True

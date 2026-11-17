@@ -68,7 +68,7 @@ from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.typed import encode_task_result
 from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.types.core_failure import CoreOperationFailed
+from horsies._core import CoreConnectionError
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.history.errors import HistoryContractError
@@ -3033,9 +3033,9 @@ class TestDatabaseFailure:
         assert isinstance(error, MonitoringQueryDbOperationFailed)
         assert error.retryable is True
         assert 'task list query failed' in error.message
-        # The driver error of Python's read, or the core's failure record
-        # (the interim class of #1363) of the read on the core.
-        assert isinstance(error.exception, SQLAlchemyError | CoreOperationFailed)
+        # The driver error of Python's read, or the core's class of the cause
+        # of the read on the core: no answer from the server.
+        assert isinstance(error.exception, SQLAlchemyError | CoreConnectionError)
 
     async def test_detail_failure_is_not_confused_with_absence(
         self, unreachable_broker: PostgresBroker
