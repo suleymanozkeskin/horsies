@@ -143,7 +143,7 @@ A worker profile sets the children of each mode. A profile can mix the modes. Fo
 
 The app has one task of each mode. A worker with the `io` profile runs the `SHARED_ASYNC` task on a shared async seat. It runs the `SHARED_THREAD` task and the `ISOLATED` task in its isolated children, because the profile has no shared thread children. A worker with the `compute` profile runs the `SHARED_THREAD` task on a seat thread, and the `SHARED_ASYNC` task in an isolated child.
 
-The Python example is in [Mix the Modes](/horsies/workers/worker-profiles/#mix-the-modes). The Rust worker setup page is not written yet.
+The Python example is in [Mix the Modes](/horsies/workers/worker-profiles/#mix-the-modes). The Rust profile types are in [Worker Setup](/horsies/rust/workers/worker-setup/#define-a-profile).
 
 A profile can also hold only shared children. Its worker claims no `ISOLATED` rows, so another worker must have isolated children for them. The fleet check reports a class that no live worker serves. See [Does a live worker serve every pending class?](/horsies/monitoring/worker-health/#does-a-live-worker-serve-every-pending-class)
 

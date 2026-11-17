@@ -46,7 +46,7 @@ Enqueue stores a `timeout_ms` on every `SHARED_THREAD` row. A row without a usab
 
 Declare the task with the `SHARED_THREAD` class and a `timeout_ms`. A thread cannot be cancelled, so a thread task takes no `cancel_grace_ms`. Start a worker whose profile has shared thread children. A profile with 2 isolated children and 2 shared thread children of 4 seats runs `ISOLATED` tasks in the 2 isolated children and `SHARED_THREAD` tasks on 2 × 4 = 8 seats.
 
-The API is on the client pages: [Choose the Execution Class](/horsies/tasks/defining-tasks/#choose-the-execution-class) and [Run Shared Tasks](/horsies/workers/worker-profiles/#run-shared-tasks) (Python), and [Attributes](/horsies/rust/tasks/defining-tasks/#attributes) (Rust). The Rust worker setup page is not written yet.
+The API is on the client pages: [Choose the Execution Class](/horsies/tasks/defining-tasks/#choose-the-execution-class) and [Run Shared Tasks](/horsies/workers/worker-profiles/#run-shared-tasks) (Python), and [Attributes](/horsies/rust/tasks/defining-tasks/#attributes) and [Worker Setup](/horsies/rust/workers/worker-setup/) (Rust).
 
 ## The Timeout
 

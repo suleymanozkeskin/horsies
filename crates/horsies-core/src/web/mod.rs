@@ -1,6 +1,7 @@
-//! Optional axum transport for the monitoring API, and the
-//! framework-neutral handler that a host framework mounts over the same
-//! routes ([`MonitoringHandler`]).
+//! The framework-neutral monitoring handler that a host framework mounts
+//! ([`MonitoringHandler`]): the routes of the monitoring API, their access
+//! guards, the event frames and the embedded UI. The host runs the user's
+//! access policy and passes its verdicts with each request.
 
 mod app;
 mod auth;
@@ -15,11 +16,7 @@ mod task_stats_cache;
 mod uuid_text;
 
 pub use crate::monitoring::ResumeChildren;
-pub use app::{create_monitoring_router, MetaResponse};
-pub use auth::{
-    AllowAll, MonitoringAuthPolicy, MonitoringRequest, TrustedHeader, ViewOnly, INTENT_HEADER,
-    INTENT_VALUE,
-};
+pub use auth::{INTENT_HEADER, INTENT_VALUE};
 /// The HTTP types of the handler's request and response parts.
 pub use axum::body::Bytes;
 pub use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
