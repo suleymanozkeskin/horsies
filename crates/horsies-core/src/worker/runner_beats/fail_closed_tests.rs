@@ -559,11 +559,60 @@ async fn with_recovery_off_failing_writes_never_stop_the_worker() {
     end_child(spawner, spawned).await;
 }
 
+/// The writer of a dead-writer test: a defect at its first poll (Python
+/// `_ScriptedWriter(defect)`).
+async fn defective_writer() {
+    panic!("scripted defect in the beat writer");
+}
+
+/// The beats of a dead-writer test: the watchdog and the supervised task of
+/// [`launch_with_writer`], whose writer is [`defective_writer`].
+fn launch_defective(live: &LiveDispatches, stale_running: StaleRunningRecovery) -> Launched {
+    let worker_stop = CancellationToken::new();
+    let beats_cancel = CancellationToken::new();
+    let fail_closed_stop = FailClosedStop::new(worker_stop.clone());
+    let (watch, writer) = launch_with_writer(
+        INTERVAL,
+        stale_running,
+        live.clone(),
+        beats_cancel.clone(),
+        fail_closed_stop.clone(),
+        |_coverage| defective_writer(),
+    )
+    .expect("the watchdog thread starts");
+    Launched {
+        watch,
+        writer,
+        beats_cancel,
+        worker_stop,
+        fail_closed_stop,
+    }
+}
+
+/// Wait until the watchdog logs a dead writer; returns its lines so far.
+async fn dead_writer_lines(capture: &LogCapture) -> Vec<CapturedEvent> {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let lines = capture.lines_starting(tracing::Level::ERROR, DEAD_WRITER_LINE);
+        match lines.is_empty() {
+            false => return lines,
+            true => assert!(
+                Instant::now() < deadline,
+                "the watchdog logged no dead writer in time"
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Python `test_with_recovery_off_a_dead_beat_thread_is_logged_and_the_worker_runs`:
-/// a dead writer does not stop the worker, and the watchdog logs, once per
-/// log interval, that no beat lands and the worker runs on.
+/// with stale running recovery off, a writer that dies is logged once by the
+/// watchdog, with Python's text, and the watchdog ends. The task that the
+/// worker supervises does not end before the beats stop, so its supervision
+/// stops nothing: the worker is not asked to stop, the held child runs on,
+/// and the registry takes new holds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn with_recovery_off_a_dead_writer_leaves_the_worker_running() {
+async fn with_recovery_off_a_dead_writer_is_logged_once_and_the_worker_runs() {
     let capture = LogCapture::new();
     let _default = capture.set_default();
     let spawner = Spawner::start().expect("the spawner starts");
@@ -573,20 +622,122 @@ async fn with_recovery_off_a_dead_writer_leaves_the_worker_running() {
         .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::Child(child))
         .expect("the registry is open");
 
-    let launched = launch(refusing_pool(), &live, StaleRunningRecovery::Off);
-    launched.writer.abort();
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
-
-    let late = one_late_line(&capture);
-    let cause = late.field("cause").expect("the late line names its cause");
-    assert!(
-        cause.ends_with("the last write has not returned"),
-        "{cause}"
+    let Launched {
+        watch,
+        writer,
+        beats_cancel,
+        worker_stop,
+        fail_closed_stop,
+    } = launch_defective(&live, StaleRunningRecovery::Off);
+    let (fatal_tx, mut fatal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let supervision = crate::worker::supervision::spawn_service_watchdog(
+        "runner-heartbeat",
+        writer,
+        worker_stop.clone(),
+        fatal_tx,
     );
-    launched.still_watching();
+    let _first = dead_writer_lines(&capture).await;
+    // Four watch intervals more: a second line would come within them.
+    tokio::time::sleep(WATCH_INTERVAL * 4).await;
+
+    let lines = capture.lines_starting(tracing::Level::ERROR, DEAD_WRITER_LINE);
+    let [line] = lines.as_slice() else {
+        panic!("one dead-writer line, got {lines:?}");
+    };
+    assert_eq!(
+        line.message,
+        "the runner heartbeat writer died: panicked: scripted defect in the beat writer. The \
+         worker runs on without runner heartbeats, because no reaper fails a RUNNING row \
+         (auto_fail_stale_running is off, or no recovery config)"
+    );
+    assert_eq!(
+        line.field("cause"),
+        Some("panicked: scripted defect in the beat writer")
+    );
+    assert!(
+        watch.watch.is_finished(),
+        "the watchdog ends after the line"
+    );
+    assert_eq!(fail_closed_stop.state(), FailClosedState::Watching);
+    assert!(
+        !worker_stop.is_cancelled(),
+        "the worker is not asked to stop"
+    );
+    assert!(!supervision.is_finished(), "the supervised task runs on");
+    assert!(
+        matches!(
+            fatal_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "no service death is reported"
+    );
     assert_eq!(*spawned.exit.borrow(), ExitState::Running);
-    launched.stop().await;
+    assert!(live
+        .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::WorkerProcess)
+        .is_ok());
+
+    // The stop of the worker: its token, then the beats after the drain.
+    worker_stop.cancel();
+    beats_cancel.cancel();
+    tokio::time::timeout(WAIT, supervision)
+        .await
+        .expect("the supervised task ends at the stop")
+        .expect("the supervision does not panic");
+    assert!(fatal_rx.try_recv().is_err(), "the stop is no service death");
+    tokio::time::timeout(WAIT, tokio::task::spawn_blocking(move || watch.stop()))
+        .await
+        .expect("the watchdog stops in time")
+        .expect("the watchdog thread joins");
     end_child(spawner, spawned).await;
+}
+
+/// With stale running recovery on, a writer that dies stays fatal (Python
+/// fails closed on a dead beat thread): the supervised task is the writer
+/// itself, so its supervision reports the panic and stops the worker. The
+/// watchdog logs no dead-writer line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_recovery_on_a_dead_writer_stops_the_worker_through_its_supervision() {
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
+    let live = LiveDispatches::default();
+    let Launched {
+        watch,
+        writer,
+        beats_cancel,
+        worker_stop,
+        fail_closed_stop,
+    } = launch_defective(&live, recovery_on(Duration::from_secs(30)));
+    let (fatal_tx, mut fatal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let supervision = crate::worker::supervision::spawn_service_watchdog(
+        "runner-heartbeat",
+        writer,
+        worker_stop.clone(),
+        fatal_tx,
+    );
+
+    tokio::time::timeout(WAIT, supervision)
+        .await
+        .expect("the supervision sees the writer end")
+        .expect("the supervision does not panic");
+    let exit = fatal_rx
+        .try_recv()
+        .expect("the dead writer is a service death");
+    assert_eq!(exit.service, "runner-heartbeat");
+    assert_eq!(exit.reason, "panicked: scripted defect in the beat writer");
+    assert!(
+        worker_stop.is_cancelled(),
+        "the supervision stops the worker"
+    );
+    assert_eq!(fail_closed_stop.state(), FailClosedState::Watching);
+    assert!(capture
+        .lines_starting(tracing::Level::ERROR, DEAD_WRITER_LINE)
+        .is_empty());
+
+    beats_cancel.cancel();
+    tokio::time::timeout(WAIT, tokio::task::spawn_blocking(move || watch.stop()))
+        .await
+        .expect("the watchdog stops in time")
+        .expect("the watchdog thread joins");
 }
 
 /// Python `test_with_recovery_off_a_late_beat_is_logged`: a write that never
