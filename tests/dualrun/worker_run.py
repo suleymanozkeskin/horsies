@@ -33,9 +33,11 @@ out of the compare: their row counts follow the run time, not a decision of
 the code. Run times inside the run window compare as ``DuringRun``, the
 worker id as its label. Speed numbers never come from these pairs.
 
-Before the worker switch both sides start ``horsies worker``: a pair then
-proves that the harness itself is stable. The switch points
-``REFERENCE_WORKER`` at the copy of the Python worker parent.
+The reference side starts the Python worker parent and its version-1 child
+from their copy (``tests.dualrun.reference.worker_parent``, made by
+``scripts/make_reference_worker.py`` from the base before the worker
+switch). The candidate side starts ``horsies worker``: the core worker parent
+with the version-2 Python child.
 """
 
 from __future__ import annotations
@@ -119,7 +121,7 @@ class WorkerCommand:
 
 REFERENCE_WORKER: Final = WorkerCommand(
     name='reference',
-    argv=(sys.executable, '-m', 'horsies.core.cli', 'worker'),
+    argv=(sys.executable, '-m', 'tests.dualrun.reference.worker_parent.cli', 'worker'),
 )
 CANDIDATE_WORKER: Final = WorkerCommand(
     name='candidate',

@@ -1,0 +1,355 @@
+"""The seat program of a shared async child: its start, and one task run.
+
+``PostgresSeatProgram.start`` runs on the task loop of the child, after the
+sync boot (the app import and the ``on_child_process_start`` hooks): it opens
+the async connection pool of the child, then runs the
+``on_shared_async_child_start`` hooks, each bounded. ``PostgresSeats.run``
+runs one task as a coroutine on that loop: the RUNNING transition and the
+task body. ``PostgresSeats.mark_finalizing`` writes the finalizing marker,
+which the seat loop asks for at the end of the run. Every write goes through
+the async pool (``shared_lifecycle``), so no write blocks the loop.
+"""
+
+# pyright: reportPrivateUsage=false
+
+from __future__ import annotations
+
+import asyncio
+import os
+from collections.abc import Callable, Coroutine
+from typing import Any, Final, assert_never
+
+from psycopg import AsyncConnection
+from psycopg_pool import AsyncConnectionPool
+
+from horsies.core.logging import get_logger
+from horsies.core.models.boot_failure import (
+    ChildPoolSetupFailed,
+    ThreadStartRefusedError,
+)
+from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.worker_profile import ResolvedPool
+from horsies.core.task_decorator import await_task_call_in_worker
+from horsies.core.types.result import Err, Ok, Result
+from tests.dualrun.reference.worker_parent.worker.child_main import (
+    boot_failure_from_exception,
+    flush_output,
+)
+from tests.dualrun.reference.worker_parent.worker.child_pool import open_shared_async_pool
+from tests.dualrun.reference.worker_parent.worker.child_protocol import (
+    BootFailedFrame,
+    InitFrame,
+    SeatRefusal,
+    SeatTask,
+    SharedRunFrame,
+    ThreadSeatTask,
+    WireResult,
+)
+from tests.dualrun.reference.worker_parent.worker import child_runner
+from tests.dualrun.reference.worker_parent.worker.child_runner import (
+    CHILD_HOOK_FAILURE_EXIT_CODE,
+    OnSharedSeat,
+    _encode_task_outcome,
+    _prepare_task_call,
+    _PreparedCall,
+    _stored_timeout_refusal_response,
+    _task_exception_response,
+)
+from tests.dualrun.reference.worker_parent.worker.current import get_current_app
+from tests.dualrun.reference.worker_parent.worker.shared_child import (
+    MarkerBeforeDeadline,
+    MarkerWindow,
+    MarkerWithoutDeadline,
+    SeatReturn,
+    SetRunning,
+    StartedSeats,
+    StoppedBeforeRunning,
+)
+from tests.dualrun.reference.worker_parent.worker.shared_lifecycle import (
+    confirm_until_not_resumed,
+    mark_task_finalizing,
+)
+
+logger = get_logger('worker')
+
+SHARED_POOL_CLOSE_TIMEOUT_S: Final = 1.0
+"""The longest wait for the async pool to close at the stop. With the loop
+close and the writer drain it stays under the 10 s that the parent gives a
+child after its stop frame."""
+
+
+class PostgresSeats:
+    """The seats of a started shared async child, with its async pool."""
+
+    def __init__(self, pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
+        self._pool = pool
+
+    async def run(self, frame: SharedRunFrame) -> SeatReturn:
+        """Run the task of ``frame``. The same steps and outcomes as
+        ``child_runner._run_task_entry`` but the marker, through the core
+        handle of the child."""
+        return await run_seat_task(frame)
+
+    async def mark_finalizing(
+        self, frame: SharedRunFrame, window: MarkerWindow
+    ) -> None:
+        """Write the finalizing marker of the run of ``frame``
+        (``mark_seat_finalizing``)."""
+        await mark_seat_finalizing(self._pool, frame, window)
+
+    async def stop(self) -> None:
+        """Close the async pool, bounded by ``SHARED_POOL_CLOSE_TIMEOUT_S``.
+        A failed close is logged: the process exits next."""
+        try:
+            await self._pool.close(timeout=SHARED_POOL_CLOSE_TIMEOUT_S)
+        except Exception as exc:
+            logger.warning('Closing the async pool of the child failed: %s', exc)
+
+
+class PostgresSeatProgram:
+    """The seat program of a worker's shared async child."""
+
+    async def start(
+        self,
+        init: InitFrame,
+        pool: ResolvedPool,
+    ) -> Result[StartedSeats, BootFailedFrame]:
+        """Open the async pool with the bounds of ``pool``, then run the async
+        start hooks.
+
+        ``Err``: the pool could not be set up (``ChildPoolSetupFailed``, or a
+        ``ResourceShortage`` for an errno that can clear), or the OS refused
+        the watchdog of a hook (``ThreadStartRefused``). A hook that fails or
+        hangs ends the process with ``CHILD_HOOK_FAILURE_EXIT_CODE``.
+        """
+        try:
+            async_pool = await open_shared_async_pool(
+                init.database_url,
+                connect_kwargs=init.connect_kwargs,
+                min_size=pool.min_size,
+                max_size=pool.max_size,
+                check_on_checkout=pool.check,
+            )
+        except Exception as exc:
+            return Err(boot_failure_from_exception(exc, ChildPoolSetupFailed()))
+        try:
+            await run_shared_async_start_hooks()
+        except ThreadStartRefusedError as exc:
+            return Err(boot_failure_from_exception(exc, ChildPoolSetupFailed()))
+        return Ok(PostgresSeats(async_pool))
+
+
+async def run_shared_async_start_hooks() -> None:
+    """Run each ``on_shared_async_child_start`` hook of the app, in order.
+
+    Each hook is bounded by ``CHILD_HOOK_TIMEOUT_SECONDS``, by a thread that
+    ends the process: a hook that blocks the loop cannot stop that thread.
+    A hook that raises ends the process at once. Both exits use
+    ``CHILD_HOOK_FAILURE_EXIT_CODE``, so the parent stops the worker.
+
+    Raises:
+        ThreadStartRefusedError: the OS refused the watchdog of a hook,
+            before that hook ran.
+    """
+    for hook in get_current_app().get_shared_async_child_start_hooks():
+        hook_name = getattr(hook, '__qualname__', repr(hook))
+        watchdog = child_runner.start_hook_watchdog(hook_name)
+        try:
+            await hook()
+        except BaseException as exc:
+            watchdog.cancel()
+            logger.critical(
+                "on_shared_async_child_start hook '%s' failed in child %s: %s",
+                hook_name,
+                os.getpid(),
+                exc,
+            )
+            flush_output()
+            os._exit(CHILD_HOOK_FAILURE_EXIT_CODE)
+        watchdog.cancel()
+        logger.debug(
+            "[child %s] on_shared_async_child_start hook '%s' completed",
+            os.getpid(),
+            hook_name,
+        )
+
+
+type _TaskCall = (
+    TaskResult[Any, TaskError] | Coroutine[Any, Any, TaskResult[Any, TaskError]]
+)
+"""What a call of a task wrapper returns: a result, or a coroutine of one."""
+
+
+async def _seat_call_result(
+    task_name: str,
+    called: _TaskCall,
+    map_exception: Callable[[BaseException], TaskResult[Any, TaskError]],
+) -> TaskResult[Any, TaskError]:
+    """Await the coroutine of an ``async def`` task call on the running loop.
+
+    ``await_task_call_in_worker`` maps each exception that it takes from
+    the body (a ``CancelledError``, a ``GeneratorExit``) through
+    ``map_exception``, the mapping of the task. A call that returned while a
+    cancel request is left on the seat task ends as a cancel too
+    (``_without_left_cancel``). A seat runs only ``async def`` tasks, whose
+    wrapper returns a coroutine; ``_prepare_task_call`` refused the others.
+    Another value is a defect: ``AssertionError``.
+    """
+    match called:
+        case Coroutine():
+            mapped: list[BaseException] = []
+
+            def map_and_note(exc: BaseException) -> TaskResult[Any, TaskError]:
+                mapped.append(exc)
+                return map_exception(exc)
+
+            out = await await_task_call_in_worker(called, map_and_note)
+            match mapped:
+                case []:
+                    return _without_left_cancel(out, map_exception)
+                case _:
+                    return out
+        case _:
+            raise AssertionError(
+                f'task wrapper of {task_name!r} returned {type(called).__name__} '
+                'on a shared async seat',
+            )
+
+
+def _without_left_cancel(
+    out: TaskResult[Any, TaskError],
+    map_exception: Callable[[BaseException], TaskResult[Any, TaskError]],
+) -> TaskResult[Any, TaskError]:
+    """Clear a cancel request that a returned call left on the seat task.
+
+    A body can cancel its own task (``asyncio.current_task().cancel()``, or
+    a ``call_later`` of that cancel) and return before an ``await`` takes
+    the cancel. The seat task would then end cancelled before its deadline.
+    The requests (``Task.cancelling()``) are cleared here, and the call
+    ends as a cancel of the body: ``map_exception`` maps a
+    ``CancelledError``, as for a cancel that reached the body at an
+    ``await``. A body that caught a cancel and did not call ``uncancel()``
+    leaves its request too, and ends the same way. A request of a deadline
+    cancel changes nothing: the seat loop ends that run with the timeout.
+    With no request left, ``out`` returns unchanged.
+    """
+    seat_task = asyncio.current_task()
+    assert seat_task is not None, 'a seat call runs in its seat task'
+    left_requests = seat_task.cancelling()
+    if left_requests == 0:
+        return out
+    for _ in range(left_requests):
+        _ = seat_task.uncancel()
+    return map_exception(asyncio.CancelledError())
+
+
+async def run_seat_task(frame: SharedRunFrame) -> SeatReturn:
+    """Run one task on a seat, up to its wire tuple.
+
+    The steps of ``_run_task_entry`` but the finalizing marker: the RUNNING
+    transition with the first runner heartbeat through the core handle of
+    the child, then the task call and the result encode
+    (``_run_after_running``). A stop before the RUNNING
+    update commits returns ``StoppedBeforeRunning``; every other end returns
+    ``SetRunning``. The seat loop writes the marker at the end of the run
+    (``PostgresSeats.mark_finalizing``). A cancel during the RUNNING
+    transition propagates, and the seat loop reports it.
+    """
+    logger.info(f'Starting task execution: {frame.task_name} ({frame.task_id})')
+    ownership_result = await confirm_until_not_resumed(
+        frame.task_id,
+        frame.worker_id,
+        frame.is_workflow_task,
+        frame.claimed_at,
+        orphan_self_heal=frame.orphan_self_heal,
+    )
+    if ownership_result is not None:
+        return StoppedBeforeRunning(ownership_result)
+    return SetRunning(await _run_after_running(frame))
+
+
+async def _run_after_running(frame: SharedRunFrame) -> WireResult:
+    """The steps of a run after its RUNNING update, as in
+    ``_run_task_entry``.
+
+    A ``SeatRefusal`` returns ``WORKER_SERIALIZATION_ERROR`` before it
+    resolves the task, as ``_run_task_entry`` does for a refused stored
+    timeout. The body runs through ``_seat_call_result``, which maps a
+    cancel of the body; the seat loop reports a cancel of its deadline as
+    the timeout. Any other exception becomes ``TASK_EXCEPTION``.
+    """
+    try:
+        match frame.work:
+            case SeatRefusal(refusal=refusal):
+                return _stored_timeout_refusal_response(frame.task_name, refusal)
+            case SeatTask():
+                pass
+            case ThreadSeatTask():
+                # The seat loop ends the child before such a run starts.
+                raise AssertionError(
+                    f'run {frame.dispatch} of a shared thread child reached a '
+                    'shared async seat',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+        prepared = _prepare_task_call(
+            frame.task_name,
+            frame.args_json,
+            frame.kwargs_json,
+            OnSharedSeat(),
+        )
+        match prepared:
+            case _PreparedCall(task=task, args=args, kwargs=kwargs):
+                pass
+            case tuple():
+                return prepared
+        out = await _seat_call_result(
+            frame.task_name,
+            task(*args, **kwargs),
+            task._map_exception,
+        )
+        logger.info(f'Task execution completed: {frame.task_name} ({frame.task_id})')
+        return _encode_task_outcome(frame.task_name, task, out)
+    except BaseException as e:
+        return _task_exception_response(frame.task_name, e)
+
+
+async def mark_seat_finalizing(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    frame: SharedRunFrame,
+    window: MarkerWindow,
+) -> None:
+    """Write the finalizing marker of a run that ended, within ``window``.
+
+    ``mark_task_finalizing`` bounds the write by
+    ``FINALIZING_MARKER_TIMEOUT_S``; ``MarkerBeforeDeadline`` bounds it as
+    well by the time left before the deadline of the run. A write cut at
+    that bound is logged and skipped: the marker is best effort, and the
+    end of the run follows at once. Nothing escapes but a cancel of the
+    calling task.
+    """
+    match window:
+        case MarkerWithoutDeadline():
+            await mark_task_finalizing(
+                pool,
+                frame.task_id,
+                frame.worker_id,
+                frame.claimed_at,
+            )
+        case MarkerBeforeDeadline(seconds=seconds):
+            try:
+                async with asyncio.timeout(seconds):
+                    await mark_task_finalizing(
+                        pool,
+                        frame.task_id,
+                        frame.worker_id,
+                        frame.claimed_at,
+                    )
+            except TimeoutError:
+                logger.warning(
+                    'Finalizing marker of task %s skipped: it did not end '
+                    'before the deadline of the task',
+                    frame.task_id,
+                )
+        case _ as unreachable:
+            assert_never(unreachable)
