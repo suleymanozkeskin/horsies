@@ -4,6 +4,11 @@ A monitoring read writes nothing, so both sides read the same database and
 their answers compare as they are, with no id labels. The raw snapshot of
 every catalog table is read before and after all reads; the two snapshots
 are equal when neither side wrote.
+
+Monitoring times are UTC in the public answer (decided). Python's reference
+reads wrote the offset of the database session, which follows the server's
+``TimeZone``; so a time of the reference report equals the same instant in
+UTC. A time of the candidate report is compared as written.
 """
 
 from __future__ import annotations
@@ -12,10 +17,11 @@ import asyncio
 import typing
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Final, LiteralString
 
 import psycopg
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, SecretStr, TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from horsies.core.brokers.postgres import PostgresBroker
@@ -212,10 +218,41 @@ def _open_spans(item: Mapping[str, object]) -> frozenset[str]:
     return frozenset(open_fields)
 
 
+_TIME_TEXT: Final = TypeAdapter(datetime)
+"""pydantic's writer of a datetime: the text of a time in a report."""
+
+
+def _candidate_is_reference_time_in_utc(reference: str, candidate: str) -> bool:
+    """Whether ``reference`` is a time that pydantic wrote at an offset other
+    than UTC, and ``candidate`` is the same instant as pydantic writes it in
+    UTC. Pure.
+
+    Only the reference side may carry another offset: Python's reference
+    read wrote the offset of the database session. A UTC time of the
+    reference, and any time of the candidate, are compared as written.
+    """
+    try:
+        written = datetime.fromisoformat(reference)
+    except ValueError:
+        return False
+    match written.utcoffset():
+        case None:
+            return False
+        case offset if offset == timedelta(0):
+            return False
+        case _:
+            pass
+    if _TIME_TEXT.dump_python(written, mode='json') != reference:
+        return False
+    return _TIME_TEXT.dump_python(written.astimezone(UTC), mode='json') == candidate
+
+
 def report_difference(reference: object, candidate: object) -> list[str]:
     """The paths where two reports differ. An open span of the candidate may
     be up to ``COUNTING_SPAN_TOLERANCE_S`` seconds longer than the
-    reference's: the candidate reads after the reference."""
+    reference's: the candidate reads after the reference. A time of the
+    reference at another offset equals the same instant in UTC on the
+    candidate (``_candidate_is_reference_time_in_utc``)."""
     differences: list[str] = []
     _difference('$', reference, candidate, differences, depth=0)
     return differences
@@ -248,6 +285,10 @@ def _difference(
                 return
             for index, (left_item, right_item) in enumerate(zip(left_items, right_items, strict=True)):
                 _difference(f'{path}[{index}]', left_item, right_item, differences, depth=depth + 1)
+        case (str() as left_text, str() as right_text) if _candidate_is_reference_time_in_utc(
+            left_text, right_text,
+        ):
+            return
         case _:
             if reference != candidate or type(reference) is not type(candidate):
                 differences.append(f'{path}: {reference!r} != {candidate!r}')

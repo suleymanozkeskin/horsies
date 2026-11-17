@@ -10,6 +10,7 @@ mod handler;
 mod routes;
 mod schema;
 mod spa;
+mod stdlib_uuid_text;
 mod task_stats_cache;
 mod uuid_text;
 

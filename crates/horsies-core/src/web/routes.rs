@@ -25,6 +25,7 @@ use crate::monitoring::{
     TaskStatsQuery, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowRunsQuery,
 };
 use crate::monitoring::{class_report_info, slot_health_info, ClassReportInfo};
+use crate::monitoring::{ActionBody, ActionOutcome, INTERNAL_SERVER_ERROR_TEXT};
 
 use super::app::WebState;
 use super::common::{
@@ -34,6 +35,7 @@ use super::common::{
     QueryValues,
 };
 use super::events::{data_frame, degraded_frame};
+use super::stdlib_uuid_text::parse_stdlib_uuid_text;
 
 pub(crate) fn read_router() -> Router<WebState> {
     Router::new()
@@ -440,14 +442,15 @@ fn workflow_task_not_found() -> ApiError {
     ApiError::detail(StatusCode::NOT_FOUND, "Workflow task not found.")
 }
 
-/// One run's DAG. The Python route takes the id as text, and an id text that
-/// is not a UUID names no run (`get_workflow_run`): 404, with no database
-/// call.
+/// One run's DAG. The Python route takes the id as text, and
+/// `get_workflow_run` reads it with `uuid.UUID(text)`
+/// ([`parse_stdlib_uuid_text`]): a text that it reads names the run of that
+/// UUID, and any other text names no run: 404, with no database call.
 async fn read_workflow(
     State(state): State<WebState>,
     Path(workflow_id): Path<String>,
 ) -> Result<Json<crate::monitoring::WorkflowRunDetail>, ApiError> {
-    let Ok(workflow_id) = Uuid::parse_str(&workflow_id) else {
+    let Some(workflow_id) = parse_stdlib_uuid_text(&workflow_id) else {
         return Err(workflow_run_not_found());
     };
     get_workflow_run(&state.broker, workflow_id)
@@ -459,9 +462,10 @@ async fn read_workflow(
 
 /// One node's detail. The Python route takes the id as text and the index
 /// as an integer: an index text that pydantic does not read as an integer
-/// is the 422 of FastAPI. An id text that is not a UUID, or an integer
-/// index outside the 32-bit node index column, names no node
-/// (`get_workflow_node`): 404, with no database call.
+/// is the 422 of FastAPI. `get_workflow_node` reads the id text with
+/// `uuid.UUID(text)` ([`parse_stdlib_uuid_text`]). An id text that it
+/// refuses, or an integer index outside the 32-bit node index column, names
+/// no node: 404, with no database call.
 async fn read_workflow_task(
     State(state): State<WebState>,
     Path((workflow_id, task_index)): Path<(String, String)>,
@@ -486,7 +490,8 @@ async fn read_workflow_task(
             )]))
         }
     };
-    let (Ok(workflow_id), Some(task_index)) = (Uuid::parse_str(&workflow_id), task_index) else {
+    let (Some(workflow_id), Some(task_index)) = (parse_stdlib_uuid_text(&workflow_id), task_index)
+    else {
         return Err(workflow_task_not_found());
     };
     get_workflow_node(&state.broker, workflow_id, task_index)
@@ -685,12 +690,10 @@ async fn read_events(State(state): State<WebState>) -> Response {
 
 /// The response of an action, with its log line (Python `_respond`,
 /// `tests/dualrun/reference/web_routes/actions.py`): `monitoring action route=...
-/// id=... http=... result=...`, at INFO on `horsies.web`.
-fn action_response(
-    route: &'static str,
-    entity_id: Uuid,
-    outcome: crate::monitoring::ActionOutcome,
-) -> Response {
+/// id=... http=... result=...`, at INFO on `horsies.web`. Every body is JSON
+/// but [`ActionBody::InternalServerError`], which is
+/// [`INTERNAL_SERVER_ERROR_TEXT`] as `text/plain; charset=utf-8`.
+fn action_response(route: &'static str, entity_id: Uuid, outcome: ActionOutcome) -> Response {
     tracing::info!(
         "monitoring action route={route} id={entity_id} http={} result={}",
         outcome.status_code(),
@@ -698,7 +701,13 @@ fn action_response(
     );
     let status =
         StatusCode::from_u16(outcome.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    (status, Json(outcome.into_body())).into_response()
+    match outcome.into_body() {
+        ActionBody::InternalServerError => (status, INTERNAL_SERVER_ERROR_TEXT).into_response(),
+        body @ (ActionBody::Success(_)
+        | ActionBody::Conflict { .. }
+        | ActionBody::Code { .. }
+        | ActionBody::Detail { .. }) => (status, Json(body)).into_response(),
+    }
 }
 
 async fn cancel_task(

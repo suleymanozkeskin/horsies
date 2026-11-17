@@ -128,6 +128,24 @@ def test_each_refused_text_is_refused_by_the_read(refused: dict[str, object]) ->
 @pytest.mark.unit
 @pytest.mark.parametrize(
     'refused',
+    [row for row in rows(_FORM, 'refused_texts') if 'refusal_text' in row],
+    ids=lambda refused: text_of(refused, 'name'),
+)
+def test_each_refusal_text_is_the_text_of_the_read(refused: dict[str, object]) -> None:
+    """Python's reader words these refusals itself; the core writes the same
+    text (``StrictJsonError``)."""
+    match loads_json(text_of(refused, 'text')):
+        case Err(err_value=error):
+            assert str(error) == f'JSON parse failed: {text_of(refused, "refusal_text")}'
+        case Ok(ok_value=value):
+            raise AssertionError(f'the read accepted a refused text: {value!r}')
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    'refused',
     rows(_FORM, 'typed_refused_texts'),
     ids=lambda refused: text_of(refused, 'name'),
 )

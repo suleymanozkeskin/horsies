@@ -168,6 +168,14 @@ pub enum ChildSpecUnavailable {
     /// `SystemExit`). Not retryable: the caller raises the interrupt again.
     #[error("{subject} was interrupted: {cause}")]
     Interrupted { subject: String, cause: String },
+    /// The build raised an exception of the client that is not an interrupt
+    /// (the Python client's `Exception`, such as `SerializationError` for task
+    /// options of a child root that do not parse). It is not a defect of the
+    /// core. Not retryable: the same build raises again. `cause` is the type
+    /// and the text of the exception; a client that keeps the exception
+    /// raises it again to the caller of the operation.
+    #[error("{subject} raised {cause}")]
+    Raised { subject: String, cause: String },
 }
 
 impl ChildSpecUnavailable {
@@ -175,7 +183,7 @@ impl ChildSpecUnavailable {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::NotRun { .. } => true,
-            Self::Interrupted { .. } => false,
+            Self::Interrupted { .. } | Self::Raised { .. } => false,
         }
     }
 }
@@ -224,14 +232,6 @@ pub(crate) enum NodeFailure {
 }
 
 impl NodeFailure {
-    /// The error text, for the log.
-    pub(crate) fn message(&self) -> Option<&str> {
-        match self {
-            Self::Core(error) => error.message.as_deref(),
-            Self::Client { message, .. } => Some(message),
-        }
-    }
-
     /// The result envelope that the node stores.
     ///
     /// Errors: [`WorkflowError::Serialization`] when a core error does not
@@ -242,6 +242,17 @@ impl NodeFailure {
                 crate::workflow_engine::start_statement::node_failure_result(error)
             }
             Self::Client { failure_result, .. } => Ok(failure_result),
+        }
+    }
+}
+
+/// The error text of a node failure, for the log: the core's error with its
+/// code (`[CODE] message`), or the client's text.
+impl std::fmt::Display for NodeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Core(error) => write!(f, "{error}"),
+            Self::Client { message, .. } => f.write_str(message),
         }
     }
 }
@@ -270,6 +281,20 @@ mod tests {
     }
 
     #[test]
+    fn a_build_that_raised_is_not_retryable_and_names_the_exception() {
+        let raised = ChildSpecUnavailable::Raised {
+            subject: "build of the child of nightly:0 (definition report.v1)".to_owned(),
+            cause: "SerializationError: Corrupt task_options".to_owned(),
+        };
+        assert!(!raised.is_retryable());
+        assert_eq!(
+            raised.to_string(),
+            "build of the child of nightly:0 (definition report.v1) raised SerializationError: \
+             Corrupt task_options"
+        );
+    }
+
+    #[test]
     fn a_client_queue_without_a_class_is_refused() {
         let classes = BTreeMap::from([("default".to_owned(), "standard_30d".to_owned())]);
         let client = QueueClasses::Client(Cow::Owned(classes));
@@ -290,8 +315,8 @@ mod tests {
             failure_result: r#"{"err":{"error_code":"SUBWORKFLOW_LOAD_FAILED"}}"#.to_owned(),
         };
         assert_eq!(
-            failure.message(),
-            Some("Failed to load subworkflow definition for parent:1")
+            failure.to_string(),
+            "Failed to load subworkflow definition for parent:1"
         );
         assert_eq!(
             failure.into_stored_result().expect("stored"),

@@ -19,6 +19,14 @@ per recovery case:
 Each side publishes the history readers, finishes the nodes that the seed
 started, and runs one global pass.
 
+The one named difference of this pair is the ``enqueued_at`` of the tasks
+that the pass enqueues (cases 0, 1 and the root of the case 1.5 child): a
+task enqueued by recovery carries the time of its own candidate's
+transaction. The session engine runs cases 0 to 1.6 in one transaction, so
+these tasks share one ``now()``; the candidate commits each candidate in
+its own transaction, so each task has its own time, in the order of the
+cases. The first of them keeps the rank of the reference.
+
 The orphan pair holds a RUNNING workflow with no node (case 4). Its stored
 error is the one named difference: the catalog code
 ``WORKFLOW_START_INCOMPLETE`` in place of Python's ``E400``, which is not a
@@ -56,10 +64,11 @@ from horsies.core.workflows.recovery import recover_stuck_workflows_global
 from horsies.core.workflows.registry import register_workflow_definition
 from tests.dualrun.capture import Connection
 from tests.dualrun.clients import open_broker
-from tests.dualrun.compare import ColumnDifference, render_diff
+from tests.dualrun.compare import ColumnDifference, SnapshotDiff, render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationSide, dual_run
 from tests.dualrun.reference import workflow_recovery_pass as reference
+from tests.dualrun.values import TimeRank
 from tests.dualrun.workflow_seeds import (
     ChildOf,
     OnError,
@@ -315,6 +324,34 @@ def _candidate(database: DualRunDatabase, seed: _Seed) -> dict[str, object]:
     return asyncio.run(_candidate_async(database))
 
 
+def _assert_times_of_own_transactions(diff: SnapshotDiff) -> None:
+    """The named difference of the pass pair, and no other: the
+    ``enqueued_at`` of the two tasks that the pass enqueues after its first
+    one. On the reference both have the rank of the one transaction of the
+    session engine; on the candidate each has its own rank, later than
+    that one, from the transaction of its own candidate."""
+    match diff.entries:
+        case (
+            ColumnDifference(
+                table='horsies_tasks',
+                column='enqueued_at',
+                reference=TimeRank(rank=first_reference),
+                candidate=TimeRank(rank=first_candidate),
+            ),
+            ColumnDifference(
+                table='horsies_tasks',
+                column='enqueued_at',
+                reference=TimeRank(rank=second_reference),
+                candidate=TimeRank(rank=second_candidate),
+            ),
+        ):
+            assert first_reference == second_reference, render_diff(diff)
+            assert first_candidate != second_candidate, render_diff(diff)
+            assert min(first_candidate, second_candidate) > first_reference, render_diff(diff)
+        case _:
+            raise AssertionError(render_diff(diff))
+
+
 def test_the_recovery_pass_writes_what_the_session_engine_wrote(
     empty_database: MakeDatabase,
 ) -> None:
@@ -327,7 +364,7 @@ def test_the_recovery_pass_writes_what_the_session_engine_wrote(
         )
     )
 
-    assert run.diff.entries == (), render_diff(run.diff)
+    _assert_times_of_own_transactions(run.diff)
     assert run.reference.report == run.candidate.report
     assert run.candidate.report['recovered'] == 6
     assert run.candidate.report['errors'] == 0

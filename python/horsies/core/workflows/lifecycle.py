@@ -283,11 +283,15 @@ async def start_workflow_async(
 
     Raises:
         SerializationError: a value of the node rows does not serialize (a
-            defect of values that the process built and validated).
+            defect of values that the process built and validated); or the
+            build of a sub-workflow child raised it (task options of a child
+            root that do not parse), and the start rolled back.
         PanicException: a row outside a function's contract, or spec data
             that the core refuses (a defect).
         KeyboardInterrupt, SystemExit: raised by a child's ``build_with``;
             the start rolled back.
+        Exception: another exception that the build of a sub-workflow child
+            raised; the start rolled back.
 
     Notes:
         If workflow_id is provided and already exists with the same name,
@@ -716,6 +720,9 @@ async def resume_workflow(
             that the core refuses (a defect); nothing committed.
         KeyboardInterrupt, SystemExit: raised by a child's ``build_with``;
             the resume rolled back.
+        Exception: an exception that the build of a sub-workflow child raised
+            in a resume that failed with it, such as ``SerializationError``
+            for task options of a child root that do not parse.
     """
     from horsies._core import (
         CoreError,

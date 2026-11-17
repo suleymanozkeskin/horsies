@@ -161,7 +161,7 @@ mod tests {
                         "coverage": {"kind": "served", "workers": 2, "capacity": 6},
                         "wait": {
                             "kind": "waiting",
-                            "oldest_due_at": "2026-11-10T11:58:29.500Z",
+                            "oldest_due_at": "2026-11-10T11:58:29.500000Z",
                             "wait_s": 90,
                         },
                     },

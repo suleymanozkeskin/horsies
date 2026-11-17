@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from collections.abc import Coroutine
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 from uuid import UUID
 
@@ -80,7 +80,11 @@ from tests.dualrun.reference.worker_parent.worker.worker import (
     MemoryBaselineExceedsThresholdError,
     ServiceLoopDiedError,
 )
-from horsies.core.models.recovery import OrphanTaskAuditReport, RecoveryConfig
+from horsies.core.models.recovery import (
+    DEFAULT_WORKFLOW_RECOVERY_FAILURE_LIMIT,
+    OrphanTaskAuditReport,
+    RecoveryConfig,
+)
 from horsies.core.models.tasks import Execution, OperationalErrorCode
 from horsies.core.models.boot_failure import (
     ResourceShortage,
@@ -922,14 +926,14 @@ class TestReaperRetentionPass:
                 self._core_handle.delete_expired_workflows_async = delete_workflows
                 created_brokers.append(self)
 
+        # The pass runs workflow recovery through the core
+        # (``ReaperMixin._recover_workflows``, ``recover_workflows_async``);
+        # its record conversion is tested in test_reaper_workflow_core_calls.
         recover_mock = AsyncMock(return_value=_empty_workflow_recovery_report())
         monkeypatch.setattr(
             'horsies.core.brokers.postgres.PostgresBroker', _FakeBroker
         )
-        monkeypatch.setattr(
-            'horsies.core.workflows.recovery.recover_stuck_workflows_global',
-            recover_mock,
-        )
+        monkeypatch.setattr(worker, '_recover_workflows', recover_mock)
 
         _install_reaper_gate_session(worker)
         await worker._reaper_loop()
@@ -955,6 +959,7 @@ class TestReaperRetentionPass:
             for stmt in executed
         )
         assert recover_mock.await_args is not None
+        assert recover_mock.await_args.args == (created_brokers[0],)
         assert recover_mock.await_args.kwargs['failure_limit'] == 7
         assert len(created_brokers) == 1
         created_brokers[0].close_async.assert_awaited_once()
@@ -4357,12 +4362,14 @@ def _make_reaper_worker(
         'horsies.core.brokers.postgres.PostgresBroker',
         _FakeBroker,
     )
-    monkeypatch.setattr(
-        'horsies.core.workflows.recovery.recover_stuck_workflows_global',
-        AsyncMock(return_value=_empty_workflow_recovery_report()),
-    )
+    # The pass runs workflow recovery through the core
+    # (``ReaperMixin._recover_workflows``); its record conversion is tested
+    # in test_reaper_workflow_core_calls.
+    recover_workflows = AsyncMock(return_value=_empty_workflow_recovery_report())
+    monkeypatch.setattr(worker, '_recover_workflows', recover_workflows)
 
     worker._test_created_brokers = created_brokers  # type: ignore[attr-defined]
+    worker._test_recover_workflows = recover_workflows  # type: ignore[attr-defined]
     _install_reaper_gate_session(worker)
     return worker
 
@@ -4603,6 +4610,11 @@ class TestReaperMatchArms:
         assert created[0].config.pool_size == worker.cfg.parent_pool_size
         assert created[0].config.max_overflow == 0
         created[0].close_async.assert_awaited_once()
+        # The workflow recovery step of the pass runs on the temp broker.
+        recover_workflows = cast(AsyncMock, worker._test_recover_workflows)  # type: ignore[attr-defined]
+        recover_workflows.assert_awaited_once_with(
+            created[0], failure_limit=DEFAULT_WORKFLOW_RECOVERY_FAILURE_LIMIT,
+        )
 
     # --- U-6f: loop-level exception → logged, continues ---
 
@@ -4655,22 +4667,32 @@ class TestReaperMatchArms:
                 self.close_async = AsyncMock(return_value=Ok(None))
                 self.requeue_stale_claimed = _requeue_with_boom
                 self.mark_stale_tasks_as_failed = AsyncMock(return_value=Ok(0))
+                self.audit_orphaned_workflow_tasks = AsyncMock(
+                    return_value=Ok(_orphan_task_audit_report()),
+                )
+                self.expire_pending_tasks = AsyncMock(return_value=Ok(0))
                 self.app: Any = None
 
         monkeypatch.setattr(
             'horsies.core.brokers.postgres.PostgresBroker',
             _BoomBroker,
         )
-        monkeypatch.setattr(
-            'horsies.core.workflows.recovery.recover_stuck_workflows_global',
-            AsyncMock(return_value=_empty_workflow_recovery_report()),
-        )
+        recover_workflows = AsyncMock(return_value=_empty_workflow_recovery_report())
+        monkeypatch.setattr(worker, '_recover_workflows', recover_workflows)
 
         with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
             await worker._reaper_loop()
 
-        assert 'reaper loop error' in caplog.text.lower()
+        loop_errors = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith('Reaper loop error')
+        ]
+        assert loop_errors == ['Reaper loop error: unexpected boom']
         assert loop_call_count >= 2  # continued after error
+        # The raise ended the first pass at its requeue step; the second
+        # pass ran on to the workflow recovery step.
+        recover_workflows.assert_awaited_once()
 
     # --- U-6g: CancelledError → clean exit ---
 
@@ -4710,15 +4732,16 @@ class TestReaperMatchArms:
             'horsies.core.brokers.postgres.PostgresBroker',
             _CancelBroker,
         )
-        monkeypatch.setattr(
-            'horsies.core.workflows.recovery.recover_stuck_workflows_global',
-            AsyncMock(return_value=_empty_workflow_recovery_report()),
-        )
+        recover_workflows = AsyncMock(return_value=_empty_workflow_recovery_report())
+        monkeypatch.setattr(worker, '_recover_workflows', recover_workflows)
 
         with caplog.at_level(logging.INFO, logger=self._LOGGER_NAME):
             await worker._reaper_loop()
 
         assert 'cancelled' in caplog.text.lower()
+        # The cancel ended the pass at its requeue step: the workflow
+        # recovery step after it did not run.
+        recover_workflows.assert_not_awaited()
 
     # --- U-6h: temp broker close error → logged ---
 
@@ -6375,15 +6398,16 @@ def _error_records(
 
 
 async def _run_pass(worker: Worker, broker: MagicMock, state: _ReaperPassState) -> None:
-    from unittest.mock import patch as _patch
-
-    with _patch(
-        'horsies.core.workflows.recovery.recover_stuck_workflows_global',
-        AsyncMock(return_value=_empty_workflow_recovery_report()),
-    ):
+    """One reaper pass with the default configs. The workflow recovery step
+    of the pass (``ReaperMixin._recover_workflows``, a core call) answers
+    an empty report, and the pass runs it once."""
+    recover_workflows = AsyncMock(return_value=_empty_workflow_recovery_report())
+    with patch.object(worker, '_recover_workflows', recover_workflows):
         await worker._run_reaper_pass(
             broker, await resources_of(broker), RecoveryConfig(), RetentionConfig(), state
         )
+
+    recover_workflows.assert_awaited_once()
 
 
 @pytest.mark.unit
@@ -6396,11 +6420,8 @@ async def test_orphan_audit_has_its_own_cadence() -> None:
         next_partition_maintenance_at=float('inf'),
     )
     config = RecoveryConfig(orphan_task_audit_interval_ms=60_000)
-    report = _empty_workflow_recovery_report()
-    with patch(
-        'horsies.core.workflows.recovery.recover_stuck_workflows_global',
-        AsyncMock(return_value=report),
-    ):
+    recover_workflows = AsyncMock(return_value=_empty_workflow_recovery_report())
+    with patch.object(worker, '_recover_workflows', recover_workflows):
         await worker._run_reaper_pass(
             broker,
             await resources_of(broker),
@@ -6417,6 +6438,8 @@ async def test_orphan_audit_has_its_own_cadence() -> None:
         )
 
     broker.audit_orphaned_workflow_tasks.assert_awaited_once()
+    # The workflow recovery step runs on every pass.
+    assert recover_workflows.await_count == 2
 
 
 @pytest.mark.unit
@@ -6482,17 +6505,19 @@ async def test_workflow_recovery_failure_publishes_partial_health() -> None:
     )
     report = RecoveryReport(errors=1)
     report.metrics['case_0'].errors = 1
-    failure = RecoveryPassFailure(report, RuntimeError('discovery failed'))
+    failure = RecoveryPassFailure(
+        report, CoreOperationFailed('recover_workflows', 'discovery failed', False),
+    )
     config = RecoveryConfig(
         auto_requeue_stale_claimed=False,
         auto_fail_stale_running=False,
         auto_terminate_orphaned_workflow_tasks=False,
     )
 
-    with patch(
-        'horsies.core.workflows.recovery.recover_stuck_workflows_global',
-        AsyncMock(side_effect=failure),
-    ):
+    # The pass runs workflow recovery through the core
+    # (``ReaperMixin._recover_workflows``), which raises RecoveryPassFailure
+    # for a ``RecoveryPassFailed`` record (test_reaper_workflow_core_calls).
+    with patch.object(worker, '_recover_workflows', AsyncMock(side_effect=failure)):
         await worker._run_reaper_pass(
             broker,
             await resources_of(broker),
@@ -6632,13 +6657,11 @@ async def test_orphan_audit_permanent_failures_never_stop_the_audit(
     )
     state = _fresh_reaper_state()
     config = RecoveryConfig()
+    recover_workflows = AsyncMock(return_value=_empty_workflow_recovery_report())
 
     with (
         caplog.at_level(logging.ERROR, logger='horsies.worker'),
-        patch(
-            'horsies.core.workflows.recovery.recover_stuck_workflows_global',
-            AsyncMock(return_value=_empty_workflow_recovery_report()),
-        ),
+        patch.object(worker, '_recover_workflows', recover_workflows),
     ):
         for _ in range(_FAILING_PASSES):
             # The audit is due: its schedule time has passed.
@@ -6652,6 +6675,8 @@ async def test_orphan_audit_permanent_failures_never_stop_the_audit(
             )
 
     assert broker.audit_orphaned_workflow_tasks.await_count == _FAILING_PASSES
+    # A failed audit does not stop the workflow recovery step of its pass.
+    assert recover_workflows.await_count == _FAILING_PASSES
     records = _error_records(caplog, 'orphan workflow-task audit failed and runs again')
     assert len(records) == _FAILING_PASSES
     health = worker._orphan_task_recovery_health  # pyright: ignore[reportPrivateUsage]

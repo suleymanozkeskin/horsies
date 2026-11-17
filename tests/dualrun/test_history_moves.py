@@ -10,8 +10,10 @@ two-argument provenance reader (``reference/lifecycle_history_calls.sql``).
 Candidate side: the baseline, where each single write passes the row it
 locked to ``horsies_move_task_to_history(horsies_tasks, ...)``, each batch
 write calls ``horsies_move_tasks_to_history``, and each miss passes its kind
-and fence kind to the classifier of 0008. The function-call script calls
-each of the 17 terminal writes on a path that moves its rows.
+and fence kind to the classifier of 0008. The function-call script
+(``tests/integration/baseline_function_calls.sql``) calls 15 terminal writes
+on a path that moves their rows: each moves one task, and the pending expiry
+moves two, so history holds 16 rows.
 """
 
 from __future__ import annotations
@@ -39,6 +41,11 @@ pytestmark = [pytest.mark.integration]
 
 BOUNDARY_RETRY_LIMIT: Final = 1
 """A pair whose run window crosses an hour boundary runs again once."""
+
+MOVED_TASKS: Final = 16
+"""The history rows of the function-call script: one per terminal write,
+and two for ``horsies_expire_pending_tasks`` (a plain task and a workflow
+task)."""
 
 BEFORE_THE_SWITCH: Final = FrozenDefinitions(
     paths=(
@@ -100,7 +107,7 @@ def test_the_terminal_writes_store_what_they_stored_before_the_switch(
     assert diff.entries == (), render_diff(diff)
     history = candidate.snapshot.table('horsies_task_history')
     pending = candidate.snapshot.table('horsies_workflow_phase2_pending')
-    assert len(history.rows) >= 17
+    assert len(history.rows) == MOVED_TASKS
     assert len(pending.rows) >= 1
 
 

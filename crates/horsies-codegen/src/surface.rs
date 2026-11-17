@@ -731,13 +731,13 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         name: "start_workflow_async",
         parameters: START_WORKFLOW_PARAMETERS,
         returns: TypeText::FutureOf(START_WORKFLOW_OUTCOME),
-        doc: "Start one workflow. Writes; the children of its sub-workflow roots come from the child\nspec source. A build that raised KeyboardInterrupt or SystemExit raises it again. With no\nchild spec source it raises RuntimeError.",
+        doc: "Start one workflow. Writes; the children of its sub-workflow roots come from the child\nspec source. A build that raised (KeyboardInterrupt, SystemExit, or an Exception such as\nSerializationError) rolls the start back and raises it again. With no child spec source it\nraises RuntimeError.",
     },
     StubFunction {
         name: "resume_workflow_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(RESUME_WORKFLOW_OUTCOME),
-        doc: "Resume one workflow tree. Writes; the child starts it owes build their children through\nthe child spec source. A build that raised KeyboardInterrupt or SystemExit raises it\nagain. With no child spec source it raises RuntimeError.",
+        doc: "Resume one workflow tree. Writes; the child starts it owes build their children through\nthe child spec source. A build that raised KeyboardInterrupt or SystemExit raises it\nagain; one that raised an Exception raises it again when the resume failed with it. With\nno child spec source it raises RuntimeError.",
     },
     StubFunction {
         name: "finish_workflow_node_async",

@@ -195,8 +195,9 @@ impl RawResultRead {
 /// live table nor the task history holds it.
 #[derive(Debug, Clone)]
 pub enum TaskInfoRead {
-    /// Boxed: the info is many times larger than the reason.
-    Found(Box<TaskInfo>),
+    /// Boxed: the info is many times larger than the reason. The stored
+    /// result is the envelope text as stored, with no typed decode.
+    Found(Box<TaskInfo<StoredEnvelopeText>>),
     /// `reason` as in [`RawResultRead::Absent`].
     Absent { reason: TaskAbsenceReason },
 }
@@ -204,7 +205,7 @@ pub enum TaskInfoRead {
 #[cfg(test)]
 impl TaskInfoRead {
     /// The info of a read that found the task. Panics on an absent task.
-    pub(crate) fn expect_found(self) -> TaskInfo {
+    pub(crate) fn expect_found(self) -> TaskInfo<StoredEnvelopeText> {
         match self {
             Self::Found(info) => *info,
             Self::Absent { reason } => panic!("the task is absent: {}", reason.as_str()),

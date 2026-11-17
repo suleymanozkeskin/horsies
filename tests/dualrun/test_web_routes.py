@@ -352,6 +352,93 @@ def test_the_workflow_reads_answer_as_python_did(empty_database: MakeDatabase) -
     assert _differences(answers) == {}
 
 
+_ZERO_LED_RUN: Final = str(uuid.UUID('00' + uuid.uuid4().hex[2:]))
+"""A run id whose first two hex digits are 0: ``int(text, 16)`` reads the
+same value with ``0x``, a sign or a space in their place."""
+
+
+def _id_form_rows() -> tuple[SeedRow, ...]:
+    run = WorkflowRow(
+        id=_ZERO_LED_RUN,
+        name='web.forms',
+        status='RUNNING',
+        on_error='fail',
+        definition_key=None,
+        parent=None,
+        sent_at=_NOW - timedelta(seconds=60),
+        created_at=_NOW - timedelta(seconds=60),
+        completed_at=None,
+    )
+    node = NodeRow(
+        id=str(uuid.uuid4()),
+        workflow_id=_ZERO_LED_RUN,
+        task_index=0,
+        node_id='node-0',
+        task_name='web.step',
+        status='PENDING',
+        dependencies=(),
+        allow_failed_deps=False,
+        kind=TaskNode(task_id=None),
+        result=None,
+        created_at=_NOW - timedelta(seconds=60),
+        started_at=None,
+        completed_at=None,
+    )
+    return (run, node)
+
+
+def _id_forms_read(run_id: str) -> tuple[str, ...]:
+    """Texts of ``run_id`` that Python's ``uuid.UUID(text)`` reads as it. The
+    ``uuid`` crate refuses each one but the first two."""
+    digits = uuid.UUID(run_id).hex
+    return (
+        run_id,
+        f'urn:uuid:{run_id}',
+        f'uuid:{run_id}',
+        f'{{{digits}}}',
+        f'{digits[:2]}-{digits[2:4]}-{digits[4:]}',
+        f'0x{digits[2:]}',
+        f'+{digits[1:]}',
+        f' {digits[1:]}',
+        f'{digits[1:16]}_{digits[16:]}',
+        f'٠{digits[1:]}',
+    )
+
+
+def _id_forms_refused(run_id: str) -> tuple[str, ...]:
+    """Texts of ``run_id`` that ``uuid.UUID(text)`` refuses. The ``uuid``
+    crate reads the first one."""
+    digits = uuid.UUID(run_id).hex
+    return (f'URN:UUID:{run_id}', f'{digits[1:]}_')
+
+
+def test_the_workflow_reads_take_the_id_forms_that_python_took(
+    empty_database: MakeDatabase,
+) -> None:
+    """``get_workflow_run`` and ``get_workflow_node`` read the path text with
+    ``uuid.UUID(text)``: a text that it reads names the run, any other names
+    none (404)."""
+    read = _id_forms_read(_ZERO_LED_RUN)
+    refused = _id_forms_refused(_ZERO_LED_RUN)
+    paths = [
+        path
+        for form in (*read, *refused)
+        for path in (f'/api/workflows/{form}', f'/api/workflows/{form}/tasks/0')
+    ]
+
+    answers = read_dual_run(
+        empty_database, _id_form_rows(), [_read_pair('GET', path) for path in paths],
+    )
+
+    statuses = {each.name: each.reference['status'] for each in answers}
+    assert statuses == {
+        f'GET {path}': 200 if form in read else 404
+        for form in (*read, *refused)
+        for path in (f'/api/workflows/{form}', f'/api/workflows/{form}/tasks/0')
+    }, 'the reference reads each form that uuid.UUID reads'
+    assert _differences(answers) == {}
+
+
 _WORKER_STATES: Final[LiteralString] = """
     INSERT INTO horsies_worker_states (
         worker_id, snapshot_at, hostname, pid, processes,
@@ -398,6 +485,138 @@ def test_the_worker_reads_answer_as_python_did(empty_database: MakeDatabase) -> 
         empty_database, _schedule_rows(), pairs, seed_statements=(_WORKER_STATES,),
     )
 
+    assert _differences(answers) == {}
+
+
+# --------------------------------------------------------------------------- #
+# Time text
+# --------------------------------------------------------------------------- #
+_SECOND: Final = _NOW.replace(microsecond=0)
+"""A whole second near the seed time."""
+_TIMED_TASK: Final = str(uuid.uuid4())
+_TIMED_RUN: Final = str(uuid.uuid4())
+_TIMED_WORKER: Final = 'web-timed-worker'
+
+
+def _at(seconds_before: int, microsecond: int) -> datetime:
+    """``seconds_before`` whole seconds before ``_SECOND``, at ``microsecond``."""
+    return _SECOND - timedelta(seconds=seconds_before) + timedelta(microseconds=microsecond)
+
+
+def _timed_rows() -> tuple[SeedRow, ...]:
+    """Rows whose times have a microsecond that is a multiple of 1,000, or 0.
+
+    pydantic writes 6 fraction digits for a microsecond other than 0 and none
+    for 0 (``...:14.500000Z``, ``...:14Z``). A writer that drops the trailing
+    zero digits (``...:14.500Z``) differs on these times only.
+    """
+    task = task_row(
+        task_id=_TIMED_TASK,
+        task_name='web.timed',
+        queue_name='default',
+        status=TaskStatus.COMPLETED,
+        priority=100,
+        retry_count=0,
+        max_retries=3,
+        is_workflow_task=False,
+        enqueued_at=_at(120, 500_000),
+        claimed_at=None,
+        started_at=None,
+        completed_at=_at(20, 120_000),
+        failed_at=None,
+        good_until=None,
+        error_code=None,
+        failed_reason=None,
+        worker_id=None,
+        worker_hostname=None,
+        worker_pid=None,
+        worker_process_name=None,
+        claim_expires_at=None,
+    )
+    run = WorkflowRow(
+        id=_TIMED_RUN,
+        name='web.timed.flow',
+        status='COMPLETED',
+        on_error='fail',
+        definition_key=None,
+        parent=None,
+        sent_at=_at(300, 0),
+        created_at=_at(300, 0),
+        completed_at=_at(100, 250_000),
+    )
+    node = NodeRow(
+        id=str(uuid.uuid4()),
+        workflow_id=_TIMED_RUN,
+        task_index=0,
+        node_id='node-0',
+        task_name='web.step',
+        status='COMPLETED',
+        dependencies=(),
+        allow_failed_deps=False,
+        kind=TaskNode(task_id=None),
+        result=None,
+        created_at=_at(300, 0),
+        started_at=_at(290, 500_000),
+        completed_at=_at(280, 1_000),
+    )
+    schedule = ScheduleRow(
+        schedule_name='timed',
+        next_run_at=_SECOND + timedelta(minutes=5, milliseconds=500),
+        last_run=LastRun(at=_at(55, 750_000), task_id=str(uuid.uuid4()), run_count=1),
+    )
+    return (task, run, node, schedule)
+
+
+_TIMED_WORKER_STATE: Final[LiteralString] = """
+    INSERT INTO horsies_worker_states (
+        worker_id, snapshot_at, hostname, pid, processes,
+        max_claim_batch, max_claim_per_worker, queues,
+        queue_priorities, queue_max_concurrency, recovery_config,
+        tasks_running, tasks_claimed, worker_started_at,
+        slots_down, class_capacity
+    ) VALUES
+    ('web-timed-worker', date_trunc('second', now()) - interval '4.5 seconds', 'web-host', 4243,
+     2, 0, 2, ARRAY['default'], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+     0, 0, date_trunc('second', now()) - interval '1 hour' + interval '120 milliseconds',
+     '[]'::jsonb, '{}'::jsonb)
+"""
+
+
+def _body_value(record: Record, *keys: str) -> object:
+    """The value at ``keys`` in the JSON body of ``record``."""
+    value: object = record['body']
+    for key in keys:
+        match value:
+            case dict():
+                value = typing.cast(dict[str, object], value)[key]
+            case _:
+                raise AssertionError(f'no object holds {key!r}: {value!r}')
+    return value
+
+
+def test_the_times_of_an_answer_are_written_as_python_wrote_them(
+    empty_database: MakeDatabase,
+) -> None:
+    pairs = [
+        _read_pair('GET', '/api/tasks'),
+        _read_pair('GET', f'/api/tasks/{_TIMED_TASK}'),
+        _read_pair('GET', '/api/workflows'),
+        _read_pair('GET', f'/api/workflows/{_TIMED_RUN}'),
+        _read_pair('GET', f'/api/workflows/{_TIMED_RUN}/tasks/0'),
+        _read_pair('GET', '/api/workers'),
+        _read_pair('GET', f'/api/workers/{_TIMED_WORKER}/history'),
+        _read_pair('GET', '/api/workers/schedules'),
+    ]
+
+    answers = read_dual_run(
+        empty_database, _timed_rows(), pairs, seed_statements=(_TIMED_WORKER_STATE,),
+    )
+
+    detail = next(each for each in answers if each.name == f'GET /api/tasks/{_TIMED_TASK}')
+    enqueued_at = _body_value(detail.reference, 'leaf', 'enqueued_at')
+    assert enqueued_at == _at(120, 500_000).strftime('%Y-%m-%dT%H:%M:%S.500000Z'), (
+        'the seed holds a time whose microsecond is a multiple of 1,000'
+    )
     assert _differences(answers) == {}
 
 

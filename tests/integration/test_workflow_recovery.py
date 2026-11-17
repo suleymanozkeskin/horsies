@@ -1192,8 +1192,11 @@ class TestWorkflowRecovery:
         recovered = await _recover(session, broker)
         await session.commit()
 
-        # 2 recoveries: Case 0 skips B, then Case 2+3 finalizes workflow (all tasks terminal)
-        assert recovered == 2
+        # 1 recovery: Case 0 skips B, and its step
+        # (horsies_workflow_node_reevaluate) ends the workflow in the same
+        # transaction (horsies_workflow_try_complete), so Case 2+3 finds no
+        # RUNNING workflow with every node terminal.
+        assert recovered == 1
 
         result = await session.execute(
             text("""

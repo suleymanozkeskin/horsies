@@ -57,7 +57,10 @@ pub(crate) fn input_object(
                 WorkflowError::Validation(format!("stored node input refused: {refusal}"))
             }
             JsonReadError::Decode(error) => {
-                tracing::error!(error = %error, "failed to parse a node input for a member merge");
+                tracing::error!(
+                    error = %error,
+                    "failed to parse a node input for a member merge: {error}",
+                );
                 WorkflowError::Serialization(error)
             }
         })?;
@@ -312,7 +315,7 @@ fn dependency_result(dep_idx: i32, dep: &DepResult) -> Option<TaskResult<serde_j
         ("SKIPPED", _) => Some(TaskResult::Err(upstream_skipped_error(dep_idx))),
         ("COMPLETED" | "FAILED", Some(text)) if !text.is_empty() => Some(
             serde_json::from_str::<TaskResult<serde_json::Value>>(text).unwrap_or_else(|e| {
-                tracing::warn!(dep_idx, error = %e, "failed to parse dep result JSON");
+                tracing::warn!(dep_idx, error = %e, "failed to parse dep result JSON: {e}");
                 TaskResult::Err(dep_parse_error(dep_idx, &e))
             }),
         ),

@@ -3,7 +3,9 @@
 
 use chrono::{DateTime, Utc};
 use horsies_core::catalog::CodeEnum;
-use horsies_core::{BrokerErrorCode, ExecutionClass, TaskAttemptInfo, TaskInfo, TaskInfoRead};
+use horsies_core::{
+    BrokerErrorCode, ExecutionClass, StoredEnvelopeText, TaskAttemptInfo, TaskInfo, TaskInfoRead,
+};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -60,9 +62,9 @@ impl From<TaskAttemptInfo> for TaskAttemptRecord {
 }
 
 /// The metadata of one task, with the fields of Python's `TaskInfo`.
-/// `result_json` is the stored result envelope as JSON text, when the read
-/// asked for it and the task has one; `attempts` is a list when the read
-/// asked for attempts. `execution` is the stored class of a live task
+/// `result_json` is the stored result envelope as JSON text, as stored, when
+/// the read asked for it and the task has one; `attempts` is a list when the
+/// read asked for attempts. `execution` is the stored class of a live task
 /// (`ISOLATED`, `SHARED_ASYNC` or `SHARED_THREAD`), and `None` for a task
 /// read from history, which does not keep the class (Python
 /// `TaskInfo.execution`).
@@ -95,17 +97,15 @@ pub struct TaskInfoRecord {
 }
 
 impl TaskInfoRecord {
-    /// The record of a core `TaskInfo`. Fails only when the result does not
-    /// serialize, which a value read from JSON cannot do.
-    fn from_core(info: TaskInfo) -> Result<Self, serde_json::Error> {
-        let result_json = match &info.result {
-            Some(result) => Some(serde_json::to_string(result)?),
-            None => None,
-        };
+    /// The record of a core `TaskInfo`. The stored result passes as its
+    /// stored text: the typed decode is the app's (Python
+    /// `Horsies.get_task_info_async`). Pure.
+    fn from_core(info: TaskInfo<StoredEnvelopeText>) -> Self {
+        let result_json = info.result.map(|envelope| envelope.as_str().to_owned());
         let attempts = info
             .attempts
             .map(|attempts| attempts.into_iter().map(TaskAttemptRecord::from).collect());
-        Ok(Self {
+        Self {
             task_id: info.task_id,
             task_name: info.task_name,
             status: info.status.wire_value().to_owned(),
@@ -128,7 +128,7 @@ impl TaskInfoRecord {
             result_json,
             attempts,
             execution: execution_of(info.execution),
-        })
+        }
     }
 }
 
@@ -194,14 +194,9 @@ pub async fn task_info_operation(
         .get_task_info_with_attempts(task_id, parts.result, parts.failed_reason, parts.attempts)
         .await;
     match read {
-        Ok(TaskInfoRead::Found(info)) => match TaskInfoRecord::from_core(*info) {
-            Ok(record) => TaskInfoOutcome::Found(Box::new(record)),
-            Err(error) => TaskInfoOutcome::Failed(BrokerFailure {
-                code: BrokerErrorCode::InvalidJsonPayload.to_string(),
-                message: format!("the stored result of task {task_id} does not serialize: {error}"),
-                retryable: false,
-            }),
-        },
+        Ok(TaskInfoRead::Found(info)) => {
+            TaskInfoOutcome::Found(Box::new(TaskInfoRecord::from_core(*info)))
+        }
         Ok(TaskInfoRead::Absent { reason: _ }) => {
             TaskInfoOutcome::NotFound(TaskInfoNotFound { task_id })
         }
@@ -211,9 +206,52 @@ pub async fn task_info_operation(
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::Execution;
+    use horsies_core::{Execution, TaskStatus};
 
     use super::*;
+
+    fn history_info(result: Option<StoredEnvelopeText>) -> TaskInfo<StoredEnvelopeText> {
+        TaskInfo {
+            task_id: Uuid::nil(),
+            task_name: "failed_task".to_owned(),
+            status: TaskStatus::Failed,
+            queue_name: "default".to_owned(),
+            priority: 100,
+            retry_count: 0,
+            max_retries: 0,
+            next_retry_at: None,
+            sent_at: None,
+            enqueued_at: Utc::now(),
+            claimed_at: None,
+            started_at: None,
+            completed_at: None,
+            failed_at: Some(Utc::now()),
+            worker_hostname: None,
+            worker_pid: None,
+            worker_process_name: None,
+            error_code: Some("E2".to_owned()),
+            failed_reason: None,
+            result,
+            attempts: None,
+            execution: ExecutionClass::NotKeptInHistory,
+        }
+    }
+
+    /// The stored result passes as stored: an error without its null keys
+    /// keeps its keys, and nothing is written back.
+    #[test]
+    fn the_stored_result_passes_as_its_stored_text() {
+        let stored = r#"{"__h_task_result__":true,"ok":null,"err":{"error_code":"E2"}}"#;
+        let envelope = StoredEnvelopeText::parse(stored.to_owned())
+            .expect("the text is strict JSON")
+            .expect("the text is an object");
+        let record = TaskInfoRecord::from_core(history_info(Some(envelope)));
+        assert_eq!(record.result_json.as_deref(), Some(stored));
+        assert_eq!(
+            TaskInfoRecord::from_core(history_info(None)).result_json,
+            None
+        );
+    }
 
     #[test]
     fn a_live_task_reports_its_stored_class() {

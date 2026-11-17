@@ -8,14 +8,25 @@ use super::*;
 
 /// A stored envelope whose input holds `Infinity`, a number outside the
 /// binary64 range, or a lone UTF-16 surrogate is input corrupt, and the rerun
-/// writes no task.
+/// writes no task. The detail carries the text of Python's reader
+/// (`python/horsies/core/codec/json_value.py:156, 180, 294`).
 #[tokio::test]
 #[serial]
 async fn a_refused_value_in_a_stored_envelope_fails_closed() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let broker = PostgresBroker::from_pool(pool.clone());
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
-    for input in ["{\"x\":Infinity}", "{\"x\":1e9999}", "{\"x\":\"\\ud800\"}"] {
+    for (input, python_text) in [
+        (
+            "{\"x\":Infinity}",
+            "Non-standard JSON constant is not allowed: Infinity",
+        ),
+        (
+            "{\"x\":1e9999}",
+            "JSON number is outside the finite binary64 range",
+        ),
+        ("{\"x\":\"\\ud800\"}", "JSON string holds a lone surrogate"),
+    ] {
         let payload = format!("{{\"input\":{input},\"options\":null}}").into_bytes();
         let digest = Sha256::digest(&payload).to_vec();
         sqlx::query(
@@ -38,7 +49,11 @@ async fn a_refused_value_in_a_stored_envelope_fails_closed() {
             .await
             .expect("rerun outcome");
         assert!(
-            matches!(outcome, RerunOutcome::InputCorrupt { task_id, .. } if task_id == source),
+            matches!(
+                &outcome,
+                RerunOutcome::InputCorrupt { task_id, detail }
+                    if *task_id == source && detail.contains(python_text)
+            ),
             "{input}: {outcome:?}"
         );
     }

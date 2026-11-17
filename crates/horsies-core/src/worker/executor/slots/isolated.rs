@@ -39,6 +39,7 @@ use super::pool::{Answer, ExitNotSeen, MemoryLimit, PoolShared, QueuedRun, TaskL
 use super::route::IsolatedDeadline;
 use super::seat_runs::SHARED_BACKSTOP_MARGIN;
 use crate::broker::attempt_writes::RetryPlacement;
+use crate::broker::child_writes::{longer, FINALIZING_MARKER_END};
 use crate::db::CANCEL_REQUEST_BOUND;
 use crate::worker::executor::protocol::{
     BodyEnd, ChildFrame, FailureDetail, ParentFrame, ProcessId, RssReading, RunEnd, RunFrame,
@@ -66,20 +67,40 @@ pub const LEFT_WORK_MARKER_END: Duration = LEFT_WORK_MARKER_CONNECTION_WAIT
     .saturating_add(LEFT_WORK_MARKER_STATEMENTS)
     .saturating_add(CANCEL_REQUEST_BOUND);
 
-/// After a body returned with work left on its loop, the child reports how
-/// that work ended within this time, or it is killed: the grace
+/// After a body returned with work left on its loop, the longest time until
+/// a version-1 Python isolated child (the reference copy of the whole-run
+/// pairs) reports how that work ended: the grace
 /// ([`ISOLATED_LEFTOVER_GRACE`], 1 s), the cancel rounds
-/// ([`STUCK_REPORT_DELAY`], 0.3 s), the marker of a version-1 Python child
-/// ([`LEFT_WORK_MARKER_END`], 15 s), and the margin
-/// ([`SHARED_BACKSTOP_MARGIN`], 10 s) (Python
-/// `ISOLATED_LEFTOVER_BACKSTOP_S` of the reference copy). The marker of a
-/// core child and of a version-2 Python child goes through the core and
-/// ends within [`crate::broker::child_writes::FINALIZING_MARKER_END`]
-/// (20 s), which the margin covers.
-pub const ISOLATED_LEFTOVER_BACKSTOP: Duration = ISOLATED_LEFTOVER_GRACE
+/// ([`STUCK_REPORT_DELAY`], 0.3 s) and its marker
+/// ([`LEFT_WORK_MARKER_END`], 15 s): 16.3 s.
+pub const PYTHON_CHILD_LEFTOVER_END: Duration = ISOLATED_LEFTOVER_GRACE
     .saturating_add(STUCK_REPORT_DELAY)
-    .saturating_add(LEFT_WORK_MARKER_END)
-    .saturating_add(SHARED_BACKSTOP_MARGIN);
+    .saturating_add(LEFT_WORK_MARKER_END);
+
+/// After a body returned with work left on its loop, the longest time until
+/// a core child or a version-2 Python child reports how that work ended: the
+/// grace, the cancel rounds and its finalizing marker, which goes through the
+/// core ([`FINALIZING_MARKER_END`], 20 s): 21.3 s.
+pub const CORE_CHILD_LEFTOVER_END: Duration = ISOLATED_LEFTOVER_GRACE
+    .saturating_add(STUCK_REPORT_DELAY)
+    .saturating_add(FINALIZING_MARKER_END);
+
+/// The longest time until a child of any kind reports how the work left
+/// after a return ended: the longer of [`PYTHON_CHILD_LEFTOVER_END`] and
+/// [`CORE_CHILD_LEFTOVER_END`].
+pub const LONGEST_LEFTOVER_END: Duration =
+    longer(PYTHON_CHILD_LEFTOVER_END, CORE_CHILD_LEFTOVER_END);
+
+/// After a body returned with work left on its loop, the child reports how
+/// that work ended within this time, or it is killed: the longest end of a
+/// child of any kind ([`LONGEST_LEFTOVER_END`], 21.3 s) and the margin
+/// ([`SHARED_BACKSTOP_MARGIN`], 10 s): 31.3 s. The backstop never fires
+/// before a child's own report, as the refusal backstop never fires before
+/// a child's own refusal. Python `ISOLATED_LEFTOVER_BACKSTOP_S` of the
+/// reference copy (26.3 s) counts only the version-1 Python child, the one
+/// kind that its Python parent runs.
+pub const ISOLATED_LEFTOVER_BACKSTOP: Duration =
+    LONGEST_LEFTOVER_END.saturating_add(SHARED_BACKSTOP_MARGIN);
 
 /// What the slot does after one task.
 enum AfterRun {
@@ -403,7 +424,11 @@ async fn run_one(
         Err(SendFailure::Encode(error)) => {
             // Nothing reached the child: the frame failed in the slot's
             // own path, which is a defect (Python `_serve_slot`).
-            tracing::error!(task_id = %task_id, error = %error, "the run frame could not be encoded");
+            tracing::error!(
+                task_id = %task_id,
+                error = %error,
+                "the run frame could not be encoded: {error}",
+            );
             drop(held);
             let lost = defect_kill(channel).await;
             answer.send(end_of_loss(shared, channel, lost).await);

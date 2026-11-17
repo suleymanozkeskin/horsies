@@ -6,10 +6,12 @@
 //! The outcome is one class per answer: `WorkflowStarted`,
 //! `WorkflowExists`, `WorkflowIdTaken` or `WorkflowStartFailed`. The Python
 //! client maps them to the `WorkflowStartResult` of `start_workflow_async`.
-//! A build that raised `KeyboardInterrupt` or `SystemExit` rolls the start
-//! back and the same object is raised again; a row outside a function's
-//! contract and spec data that the core refuses raise `PanicException`, as
-//! Python raises `OutcomeDecodeError` and `SerializationError`.
+//! A build that raised rolls the start back and the same object is raised
+//! again: `KeyboardInterrupt` or `SystemExit`, or an `Exception` such as
+//! `SerializationError` for task options of a child root that do not parse,
+//! as Python's start lets it propagate. A row outside a function's contract
+//! and spec data that the core refuses raise `PanicException`, as Python
+//! raises `OutcomeDecodeError` and `SerializationError`.
 
 use std::sync::Arc;
 
@@ -114,8 +116,9 @@ pub enum WorkflowStartOutcome {
     Exists(WorkflowExists),
     IdTaken(WorkflowIdTaken),
     Failed(WorkflowStartFailed),
-    /// A child build raised this `BaseException`; the start rolled back.
-    Interrupted(PyErr),
+    /// A child build raised this `BaseException` (an interrupt or an
+    /// `Exception`); the start rolled back.
+    BuildRaised(PyErr),
 }
 
 impl<'py> IntoPyObject<'py> for WorkflowStartOutcome {
@@ -129,21 +132,22 @@ impl<'py> IntoPyObject<'py> for WorkflowStartOutcome {
             Self::Exists(exists) => exists.into_bound_py_any(py),
             Self::IdTaken(taken) => taken.into_bound_py_any(py),
             Self::Failed(failed) => failed.into_bound_py_any(py),
-            Self::Interrupted(exception) => Err(exception),
+            Self::BuildRaised(exception) => Err(exception),
         }
     }
 }
 
 /// The outcome of a start's answer. `interrupt` takes the interrupt that a
-/// child build raised.
+/// child build raised; `exception` takes the `Exception` that it raised.
 ///
 /// Panics: a row outside a function's contract, spec data that the core
-/// refuses at the tree build, and the errors that a start never gives (each
-/// a defect).
+/// refuses at the tree build, the errors that a start never gives, and a
+/// build that raised with nothing kept (each a defect).
 fn start_outcome(
     workflow_id: Uuid,
     answer: Result<ClientStartOutcome, ClientStartError>,
     interrupt: impl FnOnce() -> Option<PyErr>,
+    exception: impl FnOnce() -> Option<PyErr>,
 ) -> WorkflowStartOutcome {
     let error = match answer {
         Ok(ClientStartOutcome::Started) => {
@@ -170,10 +174,19 @@ fn start_outcome(
         ClientStartError::Start(WorkflowError::ChildSpecSource(
             ChildSpecUnavailable::Interrupted { .. },
         )) => match interrupt() {
-            Some(exception) => WorkflowStartOutcome::Interrupted(exception),
+            Some(raised) => WorkflowStartOutcome::BuildRaised(raised),
             None => panic!(
                 "the start of workflow {workflow_id} was interrupted by a child build that kept \
                  no interrupt (a defect): {error}"
+            ),
+        },
+        ClientStartError::Start(WorkflowError::ChildSpecSource(ChildSpecUnavailable::Raised {
+            ..
+        })) => match exception() {
+            Some(raised) => WorkflowStartOutcome::BuildRaised(raised),
+            None => panic!(
+                "the start of workflow {workflow_id} failed in a child build that kept no \
+                 exception (a defect): {error}"
             ),
         },
         ClientStartError::Start(
@@ -221,7 +234,12 @@ pub async fn start_workflow_operation(
             &source,
         )
         .await;
-    start_outcome(parts.workflow_id, answer, || source.take_interrupt())
+    start_outcome(
+        parts.workflow_id,
+        answer,
+        || source.take_interrupt(),
+        || source.take_exception(),
+    )
 }
 
 #[cfg(test)]
@@ -230,7 +248,7 @@ mod tests {
 
     use super::*;
 
-    fn no_interrupt() -> Option<PyErr> {
+    fn no_raise() -> Option<PyErr> {
         None
     }
 
@@ -238,11 +256,11 @@ mod tests {
     fn each_answer_has_its_record() {
         let id = Uuid::nil();
         assert!(matches!(
-            start_outcome(id, Ok(ClientStartOutcome::Started), no_interrupt),
+            start_outcome(id, Ok(ClientStartOutcome::Started), no_raise, no_raise),
             WorkflowStartOutcome::Started(_)
         ));
         assert!(matches!(
-            start_outcome(id, Ok(ClientStartOutcome::Exists), no_interrupt),
+            start_outcome(id, Ok(ClientStartOutcome::Exists), no_raise, no_raise),
             WorkflowStartOutcome::Exists(_)
         ));
         match start_outcome(
@@ -250,7 +268,8 @@ mod tests {
             Ok(ClientStartOutcome::IdTaken {
                 existing_name: "other".to_owned(),
             }),
-            no_interrupt,
+            no_raise,
+            no_raise,
         ) {
             WorkflowStartOutcome::IdTaken(taken) => assert_eq!(taken.existing_name, "other"),
             _ => panic!("an id taken under another name is WorkflowIdTaken"),
@@ -265,7 +284,7 @@ mod tests {
                 cause: "queue full".to_owned(),
             },
         )));
-        match start_outcome(Uuid::nil(), answer, no_interrupt) {
+        match start_outcome(Uuid::nil(), answer, no_raise, no_raise) {
             WorkflowStartOutcome::Failed(failed) => {
                 assert!(failed.retryable);
                 assert!(failed.message.contains("queue full"), "{}", failed.message);
@@ -279,7 +298,7 @@ mod tests {
         let answer = Err(ClientStartError::SchemaInstall(
             BrokerError::ConnectionFailed("refused".to_owned()),
         ));
-        match start_outcome(Uuid::nil(), answer, no_interrupt) {
+        match start_outcome(Uuid::nil(), answer, no_raise, no_raise) {
             WorkflowStartOutcome::Failed(failed) => {
                 assert!(failed.message.starts_with("Schema initialization failed: "));
             }
@@ -296,14 +315,43 @@ mod tests {
                 cause: "KeyboardInterrupt: ".to_owned(),
             },
         )));
-        let outcome = start_outcome(Uuid::nil(), answer, || {
-            Some(pyo3::exceptions::PyKeyboardInterrupt::new_err(()))
-        });
+        let outcome = start_outcome(
+            Uuid::nil(),
+            answer,
+            || Some(pyo3::exceptions::PyKeyboardInterrupt::new_err(())),
+            no_raise,
+        );
         Python::attach(|py| match outcome.into_pyobject(py) {
             Err(error) => {
                 assert!(error.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py));
             }
             Ok(_) => panic!("an interrupt is raised again"),
+        });
+    }
+
+    /// An `Exception` of a child build (a `SerializationError` for task
+    /// options of a child root that do not parse) is no defect of the core:
+    /// the start rolled back, and the caller gets the same object, as
+    /// Python's start lets it propagate.
+    #[test]
+    fn an_exception_of_a_child_build_is_raised_again() {
+        Python::initialize();
+        let answer = Err(ClientStartError::Start(WorkflowError::ChildSpecSource(
+            ChildSpecUnavailable::Raised {
+                subject: "build".to_owned(),
+                cause: "SerializationError: Corrupt task_options".to_owned(),
+            },
+        )));
+        let outcome = start_outcome(Uuid::nil(), answer, no_raise, || {
+            Some(pyo3::exceptions::PyValueError::new_err(
+                "Corrupt task_options",
+            ))
+        });
+        Python::attach(|py| match outcome.into_pyobject(py) {
+            Err(error) => {
+                assert!(error.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            }
+            Ok(_) => panic!("the exception of a child build is raised again"),
         });
     }
 
@@ -313,6 +361,6 @@ mod tests {
         let answer = Err(ClientStartError::Start(WorkflowError::Validation(
             "refused".to_owned(),
         )));
-        let _outcome = start_outcome(Uuid::nil(), answer, no_interrupt);
+        let _outcome = start_outcome(Uuid::nil(), answer, no_raise, no_raise);
     }
 }

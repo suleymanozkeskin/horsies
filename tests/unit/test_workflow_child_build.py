@@ -417,12 +417,18 @@ class TestBuildChildSpec:
         assert isinstance(answer, ChildSpecRefused)
         assert answer.message == 'Failed to load subworkflow definition for parent:3'
         envelope = json.loads(answer.failure_result)
-        assert envelope['err']['error_code'] == 'SUBWORKFLOW_LOAD_FAILED'
+        assert envelope['err']['error_code'] == {
+            '__builtin_task_code__': OperationalErrorCode.SUBWORKFLOW_LOAD_FAILED.value,
+        }
         assert envelope['err']['data'] == {'definition_key': 'child_build.missing.v1'}
 
     def test_a_build_that_raises_answers_the_node_failure(self) -> None:
+        """The node gives the child no params: ``BrokenChild.build_with``
+        declares none, so a node input with a member would be refused by
+        the typed decode before the build runs."""
         answer = build_child_spec(
-            cast(Any, _broker()), _request(definition_key=BrokenChild.definition_key),
+            cast(Any, _broker()),
+            _request(definition_key=BrokenChild.definition_key, node_input='{}'),
         )
 
         assert isinstance(answer, ChildSpecRefused)
@@ -430,13 +436,16 @@ class TestBuildChildSpec:
 
     def test_a_child_whose_spec_data_does_not_encode_answers_the_node_failure(self) -> None:
         answer = build_child_spec(
-            cast(Any, _broker()), _request(definition_key=SurrogateNameChild.definition_key),
+            cast(Any, _broker()),
+            _request(definition_key=SurrogateNameChild.definition_key, node_input='{}'),
         )
 
         assert isinstance(answer, ChildSpecRefused)
         assert 'does not encode as spec data' in answer.message
         envelope = json.loads(answer.failure_result)
-        assert envelope['err']['error_code'] == 'WORKFLOW_ENQUEUE_FAILED'
+        assert envelope['err']['error_code'] == {
+            '__builtin_task_code__': OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED.value,
+        }
         assert envelope['err']['data'] == {
             'workflow_id': str(_request().parent_workflow_id),
             'task_index': 3,

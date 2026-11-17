@@ -1600,6 +1600,38 @@ async fn a_workflow_read_path_id_that_is_not_a_uuid_is_not_found() {
     assert_eq!(issues[0]["type"], "int_parsing");
 }
 
+/// The read routes take the workflow id text as Python's `uuid.UUID(text)`
+/// does. It refuses `urn:uuid:` in uppercase, which the `uuid` crate reads:
+/// such a text names no run, 404 with no database call (the router's pool
+/// is lazy and unreachable).
+#[tokio::test]
+async fn a_workflow_read_path_id_that_python_refuses_is_not_found() {
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        true,
+    );
+    let id = "URN:UUID:00345678-abcd-4f12-8456-7890abcdef12";
+    for (path, detail) in [
+        (format!("/api/workflows/{id}"), "Workflow run not found."),
+        (
+            format!("/api/workflows/{id}/tasks/0"),
+            "Workflow task not found.",
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request(Method::GET, &path))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(
+            json(response).await,
+            serde_json::json!({ "detail": detail })
+        );
+    }
+}
+
 /// A workflow path id that is not a UUID on an action route answers 400
 /// `INVALID_INPUT`, as the task cancel route and the Python web app do
 /// (`require_path_uuid`), with no database call (the router's pool is lazy
@@ -1956,6 +1988,142 @@ async fn a_cancel_of_stored_data_that_does_not_parse_is_a_server_error() {
         body["detail"].as_str().unwrap().contains("NOT_KNOWN"),
         "{body}"
     );
+}
+
+/// The subject of the build in [`RaisingChildBuild`].
+const RAISED_BUILD_SUBJECT: &str = "build of the child of web_resume_parent:0";
+
+/// The cause of the build in [`RaisingChildBuild`]: an exception type and a
+/// text that holds user data.
+const RAISED_BUILD_CAUSE: &str = "SerializationError: options of user@example.com";
+
+/// A client whose build of every child raises an exception
+/// (`ChildSpecUnavailable::Raised`), as the Python client's `build_with`
+/// does for task options of a child root that do not parse. It keeps each
+/// request.
+#[derive(Default)]
+struct RaisingChildBuild {
+    requests: std::sync::Mutex<Vec<crate::ChildSpecRequest>>,
+}
+
+impl crate::ChildSpecSource for RaisingChildBuild {
+    fn child_spec(&self, request: crate::ChildSpecRequest) -> crate::ChildSpecFuture<'_> {
+        self.requests
+            .lock()
+            .expect("the request list is not poisoned")
+            .push(request);
+        let answer: Result<crate::ClientChildSpec, crate::ChildSpecUnavailable> =
+            Err(crate::ChildSpecUnavailable::Raised {
+                subject: RAISED_BUILD_SUBJECT.to_owned(),
+                cause: RAISED_BUILD_CAUSE.to_owned(),
+            });
+        Box::pin(async move { answer })
+    }
+}
+
+/// A PAUSED top-level workflow named `<prefix>parent` whose node 0 is a READY
+/// sub-workflow node with no child, so a resume owes its child start.
+/// Returns the workflow id.
+async fn seed_paused_parent_of_a_ready_child(pool: &PgPool, prefix: &str) -> Uuid {
+    let workflow_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO horsies_workflows (
+             id, name, status, on_error, definition_key, depth,
+             root_workflow_id, sent_at, created_at, started_at,
+             completed_at, updated_at
+         ) VALUES (
+             $1, $2, 'PAUSED', 'fail', 'web.resume.parent.v1', 0, $1,
+             NOW(), NOW(), NOW(), NULL, NOW()
+         )",
+    )
+    .bind(workflow_id)
+    .bind(format!("{prefix}parent"))
+    .execute(pool)
+    .await
+    .expect("seed the PAUSED workflow");
+    sqlx::query(
+        "INSERT INTO horsies_workflow_tasks (
+             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+             dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type,
+             min_success, task_options, max_retries, execution, good_until,
+             retention_class_key, status, task_id, is_subworkflow, sub_workflow_id,
+             sub_workflow_name, sub_definition_key, sub_workflow_params,
+             downstream_subworkflow, sub_workflow_summary, result,
+             created_at, started_at, completed_at
+         ) VALUES (
+             $1, $2, 0, 'node_0', 'web_resume_child', '{}', 'default', 100,
+             '{}', NULL, NULL, FALSE, 'all',
+             NULL, NULL, NULL, NULL, NULL,
+             NULL, 'READY', NULL, TRUE, NULL,
+             'web_resume_child', 'web.resume.child.v1', 'NOT_GIVEN',
+             'NONE', NULL, NULL,
+             NOW(), NULL, NULL
+         )",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workflow_id)
+    .execute(pool)
+    .await
+    .expect("seed the READY sub-workflow node");
+    workflow_id
+}
+
+/// Python's resume route let an exception of a child build propagate, and
+/// Starlette answered 500 with the text `Internal Server Error`. A resume
+/// whose owed child build raised answers the same, with nothing of the
+/// exception, and commits nothing: the workflow stays PAUSED and its node
+/// READY. The build was asked once.
+#[tokio::test]
+#[serial]
+async fn a_resume_whose_child_build_raised_is_python_s_internal_server_error() {
+    let mut state = migrated_state().await;
+    let build = Arc::new(RaisingChildBuild::default());
+    let source: Arc<dyn crate::ChildSpecSource> = build.clone();
+    state.children = crate::monitoring::ResumeChildren::Client(source);
+    let pool = state.broker.pool().clone();
+    let prefix = format!("web_resume_raised_{}__", Uuid::new_v4().simple());
+    clean_w4(&pool, &prefix).await;
+    let workflow_id = seed_paused_parent_of_a_ready_child(&pool, &prefix).await;
+
+    let response = build_router(state)
+        .oneshot(action_request(&format!(
+            "/api/workflows/{workflow_id}/resume"
+        )))
+        .await
+        .unwrap();
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .map(|value| value.to_str().expect("an ASCII header").to_owned());
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let (workflow_status, node_status): (String, String) = sqlx::query_as(
+        "SELECT w.status, t.status
+         FROM horsies_workflows w
+         JOIN horsies_workflow_tasks t ON t.workflow_id = w.id AND t.task_index = 0
+         WHERE w.id = $1",
+    )
+    .bind(workflow_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let asked = build
+        .requests
+        .lock()
+        .expect("the request list is not poisoned")
+        .len();
+    clean_w4(&pool, &prefix).await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(content_type.as_deref(), Some("text/plain; charset=utf-8"));
+    assert_eq!(&body[..], b"Internal Server Error");
+    assert_eq!(
+        (workflow_status.as_str(), node_status.as_str()),
+        ("PAUSED", "READY")
+    );
+    assert_eq!(asked, 1);
 }
 
 /// The horsies relations and functions of the database that `client`

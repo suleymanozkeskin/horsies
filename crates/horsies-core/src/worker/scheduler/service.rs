@@ -447,8 +447,8 @@ impl SchedulerService {
             }
             Err(error) => tracing::error!(
                 %error,
-                "the scheduler pools could not open at start; the existence heal creates \
-                 missing rows",
+                "the scheduler pools could not open at start: {error}; the existence heal \
+                 creates missing rows",
             ),
         }
         let existence_cadence = ExistenceCheckCadence::new(plan.check_interval_seconds);
@@ -519,7 +519,7 @@ impl ActiveScheduler {
         let check_interval = Duration::from_secs(u64::from(self.check_interval_seconds));
         while !self.stop.is_cancelled() {
             if let Err(error) = self.tick().await {
-                tracing::error!(error = %error, "scheduler check failed");
+                tracing::error!(error = %error, "Error in scheduler loop: {error}");
             }
             tokio::select! {
                 _ = self.stop.cancelled() => break,
@@ -755,7 +755,8 @@ async fn initialize_schedules(
         Err(e) => {
             tracing::error!(
                 error = %e,
-                "failed to read schedule states at start; the existence heal creates missing rows",
+                "Failed to read schedule state rows at start: {e}; the tick loop creates missing \
+                 rows",
             );
             return Ok(());
         }
@@ -790,7 +791,8 @@ async fn initialize_schedules(
         Ok(written) => log_start_writes(&writes, &written, &stored),
         Err(e) => tracing::error!(
             error = %e,
-            "failed to store schedule states at start; the existence heal creates missing rows",
+            "Failed to store schedule state rows at start: {e}; the tick loop creates missing \
+             rows",
         ),
     }
     Ok(())
@@ -921,7 +923,7 @@ async fn ensure_states_exist(
         }
         Err(e) => {
             // The unhealthy verdict makes the next tick run the heal again.
-            tracing::warn!(error = %e, "schedule self-heal failed, will retry next tick");
+            tracing::warn!(error = %e, "schedule self-heal failed, will retry next tick: {e}");
             false
         }
     }
@@ -986,7 +988,12 @@ async fn check_and_enqueue(
         match fired {
             FireEnded::Returned(Ok(())) => {}
             FireEnded::Returned(Err(error)) => {
-                tracing::error!(schedule = %schedule.name, %error, "error checking schedule");
+                tracing::error!(
+                    schedule = %schedule.name,
+                    %error,
+                    "Error checking schedule '{}': {error}",
+                    schedule.name,
+                );
             }
             FireEnded::Panicked { cause } => tracing::error!(
                 schedule = %schedule.name,
@@ -1139,7 +1146,8 @@ async fn fire_due_schedule(
             tracing::warn!(
                 schedule = %schedule.name,
                 error = %cause,
-                "schedule fire failed (transient), will retry next tick",
+                "Schedule '{}' fire failed (transient), will retry next tick: {cause}",
+                schedule.name,
             );
             Ok(())
         }
@@ -1148,7 +1156,10 @@ async fn fire_due_schedule(
                 schedule = %schedule.name,
                 skip_to = %plan.skip_to,
                 error = %cause,
-                "schedule fire refused (permanent), moving past it with no run recorded",
+                "Schedule '{}' fire refused (permanent), moving to {} with no run recorded: \
+                 {cause}",
+                schedule.name,
+                plan.skip_to,
             );
             move_past_refused(pool, log, schedule, command, due, &plan).await;
             Ok(())
@@ -1337,7 +1348,8 @@ async fn move_past_refused(
         Err(error) => tracing::error!(
             schedule = %schedule.name,
             %error,
-            "schedule could not move past the refused slot, will retry next tick",
+            "Schedule '{}' could not move past the refused slot, will retry next tick: {error}",
+            schedule.name,
         ),
     }
 }

@@ -145,6 +145,12 @@ written in Rust, on a new baseline schema.
   `stale` and `uptime_s` of `GET /api/workers` are measured to the time of
   the database read; 0.7 measured them to the clock of the web host.
 
+- **Monitoring and web times are in UTC.** The times of the
+  `horsies.monitoring` reads and of the web API answers are UTC (`Z` in
+  JSON), whatever the `TimeZone` of the database server or role is. 0.7
+  wrote them in the zone of the database session, so their offset followed
+  that setting; the instants are the same.
+
 - **A web request body over 1 MiB is refused with 413.** The task cancel
   route, the one route that reads a body, takes `{"include_running": bool}`.
 
@@ -196,6 +202,16 @@ written in Rust, on a new baseline schema.
   "Path parameter workflow_id: ..."}` before any statement, as the task
   cancel route does; they answered 503 with the driver's text. A
   `urn:uuid:` or braced id is read as its UUID.
+
+- **A workflow id text of a read names the run that `uuid.UUID(text)`
+  reads.** `horsies.monitoring.get_workflow_run` and `get_workflow_node`,
+  and the web routes `GET /api/workflows/{workflow_id}` and
+  `GET /api/workflows/{workflow_id}/tasks/{task_index}`, read the id text
+  as Python's `uuid.UUID` does. A text that it refuses names no run: `None`,
+  or 404 on the web. 0.7 passed the text to PostgreSQL, which refuses some
+  forms that `uuid.UUID` reads (for example `uuid:<id>`, or a `-` that does
+  not follow a group of four digits). Such a read failed with
+  `DB_OPERATION_FAILED`, or 503 on the web.
 
 - **`ping_workers` refuses a `timeout_seconds` of NaN.** It answers
   `INVALID_INPUT` (`timeout_seconds must be positive, got nan`) before any
@@ -264,6 +280,17 @@ written in Rust, on a new baseline schema.
   is refused before the core call: the start returns
   `WorkflowStartValidationFailed`, and a child build fails its node with
   `WORKFLOW_ENQUEUE_FAILED`.
+
+- **A log record of the core holds its fields as attributes.** The core
+  logs to the `horsies.*` loggers through Python `logging`. The message of
+  such a record is the text of the event alone, and each other field of the
+  event is an attribute of the `LogRecord`, as `extra` sets it: a bool, an
+  integer or a float as a Python `bool`, `int` or `float`, any other value
+  as its text. For example, the warning of a monitoring list cut at its
+  bound has `read` and `bound`. A field whose name `LogRecord` already uses
+  (`name`, `created`, `asctime`, ...) is set as `field_<name>`. The horsies
+  log format writes the message only; a handler with its own formatter can
+  read the attributes.
 
 ### Fixed
 
@@ -719,6 +746,11 @@ unless it starts with "Added".
   workflow definitions registered on the app. The query types take a
   `HistoryWindow` from `resolve_monitoring_window`; the error catalogs are
   Python's (`HISTORY_CONTRACT_VIOLATION`, `STORED_DATA_INVALID`).
+- **The times of the monitoring models serialize in pydantic's JSON
+  form.** A time with a microsecond other than 0 has 6 fraction digits
+  (`2026-11-17T13:59:14.500000Z`), and one with 0 has none; chrono's form
+  wrote `.500Z` for a whole millisecond. The web answers of the Python and
+  Rust apps carry this text. The read accepts any count of fraction digits.
 - **`web::create_monitoring_router` becomes `web::router(&app,
   MonitoringConfig, policy)`** (feature `web`), an axum mount of the core's
   monitoring handler: the core serves every route, the event frames and

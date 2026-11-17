@@ -170,7 +170,11 @@ pub fn run_child_host(app: ChildApp, args: ChildArgs) -> ChildHostExit {
     let socket = match open_socket(args.socket_fd) {
         Ok(socket) => socket,
         Err(error) => {
-            tracing::error!(fd = args.socket_fd, error = %error, "the child socket descriptor is not open");
+            tracing::error!(
+                fd = args.socket_fd,
+                error = %error,
+                "the child socket descriptor is not open: {error}",
+            );
             return ChildHostExit::BadArguments;
         }
     };
@@ -192,7 +196,8 @@ fn watch_parent(worker_pid: ProcessId) -> Result<(), ChildHostExit> {
         // unsigned long the kernel reads.
         let set = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) };
         if set == -1 {
-            tracing::error!(error = %io::Error::last_os_error(), "the parent-death signal could not be set");
+            let error = io::Error::last_os_error();
+            tracing::error!(%error, "the parent-death signal could not be set: {error}");
             return Err(ChildHostExit::ParentGone);
         }
     }
@@ -231,7 +236,7 @@ fn read_init(socket: &UnixStream, reader: &mut FrameReader) -> Result<InitFrame,
         Ok(raw) => raw,
         Err(ReadEnd::Eof | ReadEnd::Failed(_)) => return Err(ChildHostExit::ParentGone),
         Err(ReadEnd::OverBound(over)) => {
-            tracing::error!(error = %over, "the parent sent a frame over the bounds");
+            tracing::error!(error = %over, "Parent sent a frame over the bounds: {over}");
             return Err(ChildHostExit::BadParentFrame);
         }
     };
@@ -245,11 +250,14 @@ fn read_init(socket: &UnixStream, reader: &mut FrameReader) -> Result<InitFrame,
             return Err(ChildHostExit::BadParentFrame);
         }
         Err(ParentFrameRefusal::ProtocolMismatch(mismatch)) => {
-            tracing::error!(error = %mismatch, "the worker speaks another protocol version");
+            tracing::error!(
+                error = %mismatch,
+                "the worker speaks another protocol version: {mismatch}",
+            );
             return Err(ChildHostExit::ProtocolMismatch);
         }
         Err(ParentFrameRefusal::Malformed(malformed)) => {
-            tracing::error!(error = %malformed, "the parent sent a bad init frame");
+            tracing::error!(error = %malformed, "Parent sent a bad frame: {malformed}");
             return Err(ChildHostExit::BadParentFrame);
         }
     };

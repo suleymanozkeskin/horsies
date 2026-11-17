@@ -116,6 +116,15 @@ impl RecoveryCase {
             Self::TerminalWorkflowRunning => None,
         }
     }
+
+    /// The node of the candidate as Python's log lines write it: the index,
+    /// or `None` for the workflow-level case.
+    pub(crate) fn task_index_text(self) -> String {
+        match self.task_index() {
+            Some(task_index) => task_index.to_string(),
+            None => "None".to_owned(),
+        }
+    }
 }
 
 /// Whether failures of a pass count toward the bound.
@@ -186,6 +195,12 @@ impl CandidateFailure {
             Self::Error(WorkflowError::ChildSpecSource(
                 ChildSpecUnavailable::NotRun { .. } | ChildSpecUnavailable::Interrupted { .. },
             )) => FailureClass::Transient,
+            // A build that raised raises again on the next pass: it counts, as
+            // Python counts every exception of a candidate that is not a
+            // connection error.
+            Self::Error(WorkflowError::ChildSpecSource(ChildSpecUnavailable::Raised {
+                ..
+            })) => FailureClass::Persistent,
             Self::Error(
                 WorkflowError::Serialization(_)
                 | WorkflowError::WorkflowNotFound { .. }
@@ -305,7 +320,12 @@ where
         task_index = ?case.task_index(),
         error_type = failure.error_type(),
         error = %failure.detail(),
-        "workflow recovery candidate failed",
+        "Workflow recovery candidate failed: case={} workflow_id={workflow_id} task_index={} \
+         exception_type={} exception={}",
+        case.stored_name(),
+        case.task_index_text(),
+        failure.error_type(),
+        failure.detail(),
     );
     CandidateOutcome::Failed(
         record_candidate_failure(broker, policy, workflow_id, case, &failure).await,
@@ -355,7 +375,8 @@ pub(crate) async fn record_candidate_failure(
                     tracing::error!(
                         workflow_id = %workflow_id,
                         %error,
-                        "workflow recovery count write failed",
+                        "Workflow recovery count write failed: workflow_id={workflow_id} \
+                         exception={error}",
                     );
                     FailureRecord::NotCounted
                 }
@@ -487,7 +508,13 @@ fn failure_record(
                 task_index = ?case.task_index(),
                 error_type = failure.error_type(),
                 error = %failure.detail(),
-                "workflow recovery limit reached",
+                "Workflow recovery limit reached: workflow_id={workflow_id} \
+                 failed_passes={failed_passes} case={} task_index={} exception_type={} \
+                 exception={}",
+                case.stored_name(),
+                case.task_index_text(),
+                failure.error_type(),
+                failure.detail(),
             );
             FailureRecord::LimitReached
         }
@@ -767,11 +794,18 @@ mod tests {
             validation("bad stored data"),
             CandidateFailure::Error(WorkflowError::InvalidStatus("BOGUS".to_owned())),
             CandidateFailure::Panic("index out of bounds".to_owned()),
+            CandidateFailure::Error(WorkflowError::ChildSpecSource(
+                ChildSpecUnavailable::Raised {
+                    subject: "build of the child of nightly:0 (definition report.v1)".to_owned(),
+                    cause: "SerializationError: Corrupt task_options".to_owned(),
+                },
+            )),
         ];
         for failure in &failures {
             assert_eq!(failure.class(), FailureClass::Persistent);
         }
         assert_eq!(failures[3].error_type(), "Panic");
+        assert_eq!(failures[4].error_type(), "ChildSpecSource");
     }
 
     #[test]

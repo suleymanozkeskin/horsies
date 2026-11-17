@@ -86,6 +86,16 @@ impl WriteStage {
             Self::CrashRecovery => CRASH_RECOVERY_MAX_RETRIES,
         }
     }
+
+    /// The stage name of the log lines: the value of Python's
+    /// `FinalizeStage` for this stage.
+    pub(crate) fn log_name(self) -> &'static str {
+        match self {
+            Self::PhaseOne => "phase1_persist",
+            Self::TimeoutWrite => "timeout_write",
+            Self::CrashRecovery => "future",
+        }
+    }
 }
 
 /// What one write of phase 1 did.
@@ -373,7 +383,7 @@ fn release_failed(
     tracing::error!(
         task_id = %task.task_id,
         error = %error,
-        "DB error while requeueing task {} ({reason}); its claim lease returns the row",
+        "DB error while requeueing task {} ({reason}): {error}",
         task.task_id,
     );
     match retryable {
@@ -687,16 +697,19 @@ impl OutcomeWriter {
             match (error.retryable, retries_done < max_retries) {
                 (true, true) => {
                     retries_done += 1;
+                    let delay = phase_retry_delay(retries_done);
                     tracing::warn!(
                         task_id = %task.task_id,
                         stage = ?stage,
                         retry = retries_done,
                         max = max_retries,
                         error = %error,
-                        "the outcome write failed; sending it again",
+                        "Finalize retry scheduled for task {} stage={} \
+                         ({retries_done}/{max_retries}) in {delay:.1}s: {error}",
+                        task.task_id,
+                        stage.log_name(),
                     );
-                    tokio::time::sleep(Duration::from_secs_f64(phase_retry_delay(retries_done)))
-                        .await;
+                    tokio::time::sleep(Duration::from_secs_f64(delay)).await;
                 }
                 (true, false) => {
                     tracing::error!(
@@ -704,7 +717,10 @@ impl OutcomeWriter {
                         stage = ?stage,
                         retries = max_retries,
                         error = %error,
-                        "every retry of the outcome write failed",
+                        "Finalize retries exhausted for task {} stage={} after {max_retries} \
+                         attempts: {error}",
+                        task.task_id,
+                        stage.log_name(),
                     );
                     return Settlement::RetriesExhausted;
                 }
@@ -713,8 +729,9 @@ impl OutcomeWriter {
                         task_id = %task.task_id,
                         stage = ?stage,
                         error = %error,
-                        "the outcome write failed with an error no retry can clear; the row \
-                         waits for recovery",
+                        "Finalize stage will not be re-attempted ({}) stage={}: {error}",
+                        task.task_id,
+                        stage.log_name(),
                     );
                     return Settlement::WriteFailed;
                 }
@@ -801,7 +818,7 @@ impl OutcomeWriter {
                         send = sends,
                         max = RELEASE_SENDS,
                         error = %error,
-                        "the release of the claim failed; sending it again",
+                        "the release of the claim failed: {error}; sending it again",
                     );
                     tokio::time::sleep(Duration::from_secs_f64(phase_retry_delay(sends))).await;
                     sends += 1;
