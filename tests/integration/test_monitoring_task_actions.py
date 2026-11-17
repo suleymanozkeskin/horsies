@@ -23,7 +23,6 @@ import pytest_asyncio
 from psycopg import sql
 from pydantic import SecretStr
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
@@ -39,6 +38,7 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.lifecycle.persistence import apply_async
 from horsies.core.models.tasks import TaskResult
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.url import to_psycopg_url
@@ -770,4 +770,5 @@ class TestDatabaseFailure:
         error = result.err_value
         assert isinstance(error, TaskActionDbOperationFailed)
         assert error.retryable is True
-        assert isinstance(error.exception, SQLAlchemyError)
+        assert isinstance(error.exception, CoreOperationFailed)
+        assert error.exception.retryable is True

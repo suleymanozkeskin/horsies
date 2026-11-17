@@ -157,6 +157,24 @@ async def open_proxied_worker(
     return ProxiedWorker(worker=worker, broker=broker)
 
 
+# The largest threshold that the core's stale CLAIMED requeue takes: no
+# claim of a test is that old.
+_WARM_UP_REQUEUE_THRESHOLD_MS: Final = 2_147_483_647
+
+
+async def warm_core_handle(opened: ProxiedWorker) -> None:
+    """Run one core write that changes nothing: a stale CLAIMED requeue
+    pass that finds no claim. The worker's core handle has then read its
+    client family and holds an open pooled connection, so a drop that the
+    test arms next hits the test's own statement, not the family read or
+    the connect."""
+    match await opened.broker.requeue_stale_claimed(_WARM_UP_REQUEUE_THRESHOLD_MS):
+        case Ok(0):
+            return
+        case other:
+            raise AssertionError(f'the warm-up requeue: {other!r}')
+
+
 async def insert_task(
     session: AsyncSession,
     *,
