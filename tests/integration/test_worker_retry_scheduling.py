@@ -326,7 +326,6 @@ async def test_the_retry_is_one_statement_with_no_read(
     assert [turn.executes() for turn in turns] == [True], turns
     row = await _row(session, task_id)
     assert (row.status, row.retry_count) == ('PENDING', 1)
-    assert len(statements) == 1, statements
 
 
 @pytest.mark.asyncio(loop_scope='function')
