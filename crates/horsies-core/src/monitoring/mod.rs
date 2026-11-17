@@ -13,6 +13,7 @@ mod history_window;
 mod models;
 mod queries;
 mod task_actions;
+mod time_text;
 
 pub use actions::{
     cancel_task_action, cancel_workflow_action, connect_failed_action, pause_workflow_action,

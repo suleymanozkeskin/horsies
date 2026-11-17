@@ -1,8 +1,9 @@
 //! Python's text of a stored value, for the messages that keep Python's
 //! wording: a stored status, outcome or kind that does not parse is named
 //! as Python's `repr` names it (`'NOT_KNOWN'`), not as Rust's `Debug` does
-//! (`"NOT_KNOWN"`); and an instant as Python's `isoformat()` writes it, for
-//! the stored JSON that holds one.
+//! (`"NOT_KNOWN"`); an instant as Python's `isoformat()` writes it, for
+//! the stored JSON that holds one; and an instant as pydantic writes it in
+//! JSON, for the answers of the monitoring web app.
 
 use chrono::{DateTime, Utc};
 
@@ -16,6 +17,19 @@ pub fn python_isoformat_utc(value: DateTime<Utc>) -> String {
     match value.timestamp_subsec_micros() {
         0 => value.format("%Y-%m-%dT%H:%M:%S+00:00").to_string(),
         _ => value.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string(),
+    }
+}
+
+/// An instant as pydantic writes an aware UTC `datetime` in JSON: `Z`, and
+/// the fraction with 6 digits when the microsecond is not 0, else none
+/// (`2026-08-12T09:10:12.500000Z`, `2026-08-12T09:10:12Z`). chrono's serde
+/// form writes a whole millisecond with 3 digits (`.500Z`). A nanosecond
+/// part below the microsecond is dropped, as Python holds microseconds.
+/// Pure.
+pub fn pydantic_json_utc(value: DateTime<Utc>) -> String {
+    match value.timestamp_subsec_micros() {
+        0 => value.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        _ => value.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string(),
     }
 }
 
@@ -141,6 +155,38 @@ mod isoformat_tests {
         assert_eq!(
             python_isoformat_utc(below_a_microsecond),
             "2026-08-12T09:10:12+00:00"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pydantic_json_tests {
+    use chrono::{TimeZone, Utc};
+
+    use super::pydantic_json_utc;
+
+    /// The texts of pydantic 2.13.4 (`TypeAdapter(datetime).dump_json`) of
+    /// the same aware UTC instants.
+    #[test]
+    fn an_instant_is_written_as_pydantic_writes_it_in_json() {
+        let second = Utc
+            .with_ymd_and_hms(2026, 8, 12, 9, 10, 12)
+            .single()
+            .expect("a valid time");
+        for (micros, pydantic) in [
+            (0, "2026-08-12T09:10:12Z"),
+            (654_321, "2026-08-12T09:10:12.654321Z"),
+            (500_000, "2026-08-12T09:10:12.500000Z"),
+            (120_000, "2026-08-12T09:10:12.120000Z"),
+            (1, "2026-08-12T09:10:12.000001Z"),
+        ] {
+            let instant = second + chrono::Duration::microseconds(micros);
+            assert_eq!(pydantic_json_utc(instant), pydantic, "{micros}");
+        }
+        let below_a_microsecond = second + chrono::Duration::nanoseconds(999);
+        assert_eq!(
+            pydantic_json_utc(below_a_microsecond),
+            "2026-08-12T09:10:12Z"
         );
     }
 }

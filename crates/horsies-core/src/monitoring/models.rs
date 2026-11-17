@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::time_text;
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::task::Execution;
 
@@ -55,7 +56,9 @@ pub struct TaskAttemptInfo {
     pub error_message: Option<String>,
     pub failed_reason: Option<String>,
     pub worker_hostname: Option<String>,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub started_at: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub finished_at: Option<DateTime<Utc>>,
 }
 
@@ -71,13 +74,18 @@ pub struct LeafTaskInfo {
     pub failed_reason: Option<String>,
     pub retry_count: i32,
     pub max_retries: i32,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub enqueued_at: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub started_at: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub completed_at: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub failed_at: Option<DateTime<Utc>>,
     pub queue_s: Option<i64>,
     pub exec_s: Option<i64>,
     pub worker_hostname: Option<String>,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub good_until: Option<DateTime<Utc>>,
     pub execution: Option<Execution>,
 }
@@ -185,9 +193,13 @@ pub struct TaskSummary {
     pub error_category: Option<String>,
     pub worker_hostname: Option<String>,
     pub worker_id: Option<String>,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub enqueued_at: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub started_at: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub completed_at: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub failed_at: Option<DateTime<Utc>>,
     pub queue_s: Option<i64>,
     pub exec_s: Option<i64>,
@@ -239,7 +251,9 @@ pub struct WorkflowRunSummary {
     pub name: String,
     pub definition_key: Option<String>,
     pub status: String,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub created_at: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub completed_at: Option<DateTime<Utc>>,
     pub wall_s: Option<i64>,
 }
@@ -254,7 +268,9 @@ pub struct WorkflowNodeInfo {
     pub is_subworkflow: bool,
     pub sub_workflow_id: Option<Uuid>,
     pub allow_failed_deps: bool,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub started_at: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub completed_at: Option<DateTime<Utc>>,
     pub exec_s: Option<i64>,
     pub child_total: Option<i64>,
@@ -302,6 +318,7 @@ pub struct DownSlotInfo {
     pub slot: u32,
     pub cause: String,
     pub detail: String,
+    #[serde(serialize_with = "time_text::utc")]
     pub down_since: DateTime<Utc>,
     pub failed_boots: u64,
 }
@@ -327,9 +344,11 @@ pub struct WorkerStateInfo {
     pub worker_id: String,
     pub hostname: String,
     pub pid: i32,
+    #[serde(serialize_with = "time_text::utc")]
     pub snapshot_at: DateTime<Utc>,
     pub snapshot_age_s: Option<i64>,
     pub stale: bool,
+    #[serde(serialize_with = "time_text::utc")]
     pub worker_started_at: DateTime<Utc>,
     pub uptime_s: Option<i64>,
     pub processes: i32,
@@ -367,6 +386,7 @@ pub struct BudgetLoadInfo {
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkerClassLoadInfo {
     pub worker_id: String,
+    #[serde(serialize_with = "time_text::utc")]
     pub snapshot_at: DateTime<Utc>,
     pub budgets: Vec<BudgetLoadInfo>,
 }
@@ -399,11 +419,15 @@ pub enum StreamWaitInfo {
     /// At least one row is due. `wait_s` is the wait of the oldest due row,
     /// in whole seconds.
     Waiting {
+        #[serde(serialize_with = "time_text::utc")]
         oldest_due_at: DateTime<Utc>,
         wait_s: i64,
     },
     /// Every row is due later; `next_due_at` is the earliest due time.
-    NoneDue { next_due_at: DateTime<Utc> },
+    NoneDue {
+        #[serde(serialize_with = "time_text::utc")]
+        next_due_at: DateTime<Utc>,
+    },
 }
 
 /// The `PENDING` rows of one queue and one execution class.
@@ -425,6 +449,7 @@ pub struct PendingStreamInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ClassReportInfo {
+    #[serde(serialize_with = "time_text::utc")]
     pub checked_at: DateTime<Utc>,
     pub live_window_s: u64,
     pub streams: Vec<PendingStreamInfo>,
@@ -451,6 +476,7 @@ pub struct LivenessReport {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkerHistoryPoint {
+    #[serde(serialize_with = "time_text::utc")]
     pub snapshot_at: DateTime<Utc>,
     pub tasks_running: i32,
     pub tasks_claimed: i32,
@@ -467,10 +493,13 @@ pub struct WorkerHistoryPoint {
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ScheduleStateInfo {
     pub schedule_name: String,
+    #[serde(serialize_with = "time_text::optional_utc")]
     pub last_run_at: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "time_text::utc")]
     pub next_run_at: DateTime<Utc>,
     pub last_task_id: Option<Uuid>,
     pub run_count: i32,
+    #[serde(serialize_with = "time_text::utc")]
     pub updated_at: DateTime<Utc>,
 }
 
