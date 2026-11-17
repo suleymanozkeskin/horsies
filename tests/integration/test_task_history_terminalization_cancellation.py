@@ -42,15 +42,17 @@ async def cancel_admin(
     connection: AsyncConnection,
     task_id: str,
     *,
-    permitted: tuple[str, ...] = ('PENDING', 'CLAIMED', 'RUNNING'),
+    include_running: bool,
 ) -> Any:
+    """The administrative cancel (``horsies_cancel_task``); a RUNNING row
+    only with ``include_running``."""
     return (
         await connection.execute(
             text(
-                'SELECT * FROM horsies_cancel_locked_task('
-                'CAST(:task_id AS uuid), :permitted)'
+                'SELECT * FROM horsies_cancel_task('
+                'CAST(:task_id AS uuid), CAST(:include_running AS BOOLEAN))'
             ),
-            {'task_id': task_id, 'permitted': list(permitted)},
+            {'task_id': task_id, 'include_running': include_running},
         )
     ).one()
 
@@ -108,7 +110,7 @@ class TestAdministrativeCancel:
             task_id = await insert_live_task(
                 connection, class_key=CLASS_KEY, worker=WORKER
             )
-            outcome = await cancel_admin(connection, task_id)
+            outcome = await cancel_admin(connection, task_id, include_running=True)
             assert outcome.outcome == 'APPLIED'
             assert outcome.terminalization_kind == 'CANCEL_ADMIN'
             row = (
@@ -131,19 +133,18 @@ class TestAdministrativeCancel:
             assert row.final_failed_reason == 'Cancelled via monitoring API'
 
     @pytest.mark.asyncio
-    async def test_permitted_source_set_is_the_callers(
+    async def test_a_running_task_is_cancelled_only_when_the_caller_permits_it(
         self, terminalization_schema: HistorySchema
     ) -> None:
+        """Whether a RUNNING row may be cancelled is the caller's choice."""
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY)
             task_id = await insert_live_task(
                 connection, class_key=CLASS_KEY, worker=WORKER
             )
-            refused = await cancel_admin(
-                connection, task_id, permitted=('PENDING', 'CLAIMED')
-            )
+            refused = await cancel_admin(connection, task_id, include_running=False)
             assert refused.outcome == 'SOURCE_STATE_CONFLICT'
-            applied = await cancel_admin(connection, task_id)
+            applied = await cancel_admin(connection, task_id, include_running=True)
             assert applied.outcome == 'APPLIED'
 
     @pytest.mark.asyncio
@@ -158,7 +159,7 @@ class TestAdministrativeCancel:
                 worker=WORKER,
                 is_workflow_task=True,
             )
-            refused = await cancel_admin(connection, task_id)
+            refused = await cancel_admin(connection, task_id, include_running=True)
             assert refused.outcome == 'SOURCE_STATE_CONFLICT'
             live = (
                 await connection.execute(

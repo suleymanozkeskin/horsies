@@ -60,6 +60,7 @@ from tests.integration.task_history_harness import (
     prepare_move_storage,
     terminalization_schema_fixture,
 )
+from tests.integration.terminal_writes import fail_running_task, task_failure
 
 from tests.integration.test_monitoring_queries import make_task
 from tests.rerun_envelope_support import frame_rerun_envelope
@@ -114,22 +115,26 @@ async def seed_failed_source(
     return task_id
 
 
-async def fail_running(connection: AsyncConnection, task_id: str) -> None:
-    outcome = (
-        await connection.execute(
-            text(
-                'SELECT outcome FROM horsies_fail_locked_task('
-                'CAST(:task_id AS uuid), :worker, :result, '
-                "'BOOM', 'exploded')"
-            ),
-            {
-                'task_id': task_id,
-                'worker': WORKER,
-                'result': '{"error":{"code":"BOOM"}}',
-            },
-        )
-    ).one()
-    assert outcome.outcome == 'APPLIED'
+async def fail_running(
+    connection: AsyncConnection,
+    task_id: str,
+    *,
+    result_json: str = '{"error":{"code":"BOOM"}}',
+    error_code: str = 'BOOM',
+    failed_reason: str = 'exploded',
+) -> None:
+    """The worker's failure of the RUNNING task of ``WORKER``."""
+    outcome = await fail_running_task(
+        connection,
+        task_id,
+        worker_id=WORKER,
+        failure=task_failure(
+            result_json=result_json,
+            error_code=error_code,
+            failed_reason=failed_reason,
+        ),
+    )
+    assert outcome == 'APPLIED'
 
 
 async def live_row(connection: AsyncConnection, task_id: str) -> Any:
@@ -206,12 +211,16 @@ class TestRerunEndToEnd:
             after = await history_row_bytes(connection, source)
             assert before == after
 
-            # The rerun's own move stores the source's envelope bytes.
+            # The rerun's own move stores the source's envelope bytes. The
+            # row runs under WORKER with the claim and process facts of its
+            # start.
             await connection.execute(
                 text(
                     'UPDATE horsies_tasks '
                     "SET status = 'RUNNING', "
-                    'claimed_by_worker_id = :worker '
+                    'claimed_by_worker_id = :worker, claimed_at = NOW(), '
+                    'started_at = NOW(), worker_pid = 4242, '
+                    "worker_hostname = 'it-host', worker_process_name = 'it-proc' "
                     'WHERE id = CAST(:task_id AS uuid)'
                 ),
                 {'task_id': str(outcome.new_task_id), 'worker': WORKER},
@@ -264,22 +273,25 @@ class TestRerunEndToEnd:
                 policy(),
             )
             assert isinstance(first, RerunEnqueued)
-            # Fail the first rerun for real, then rerun it.
+            # Fail the first rerun for real, then rerun it. The row runs
+            # under WORKER with the claim and process facts of its start.
             await connection.execute(
                 text(
                     'UPDATE horsies_tasks '
                     "SET status = 'RUNNING', "
-                    'claimed_by_worker_id = :worker '
+                    'claimed_by_worker_id = :worker, claimed_at = NOW(), '
+                    'started_at = NOW(), worker_pid = 4242, '
+                    "worker_hostname = 'it-host', worker_process_name = 'it-proc' "
                     'WHERE id = CAST(:task_id AS uuid)'
                 ),
                 {'task_id': str(first.new_task_id), 'worker': WORKER},
             )
-            await connection.execute(
-                text(
-                    'SELECT outcome FROM horsies_fail_locked_task('
-                    "CAST(:task_id AS uuid), :worker, '{}', 'X', 'x')"
-                ),
-                {'task_id': str(first.new_task_id), 'worker': WORKER},
+            await fail_running(
+                connection,
+                str(first.new_task_id),
+                result_json='{}',
+                error_code='X',
+                failed_reason='x',
             )
             second = await rerun_task(
                 connection,
@@ -469,12 +481,12 @@ class TestTypedRefusals:
                 workflow_id=workflow_id,
                 node_status='RUNNING',
             )
-            await connection.execute(
-                text(
-                    'SELECT outcome FROM horsies_fail_locked_task('
-                    "CAST(:task_id AS uuid), :worker, '{}', 'X', 'x')"
-                ),
-                {'task_id': task_id, 'worker': WORKER},
+            await fail_running(
+                connection,
+                task_id,
+                result_json='{}',
+                error_code='X',
+                failed_reason='x',
             )
             outcome = await rerun_task(
                 connection,
@@ -498,12 +510,12 @@ class TestTypedRefusals:
                 worker=WORKER,
                 retain=False,
             )
-            await connection.execute(
-                text(
-                    'SELECT outcome FROM horsies_fail_locked_task('
-                    "CAST(:task_id AS uuid), :worker, '{}', 'X', 'x')"
-                ),
-                {'task_id': source, 'worker': WORKER},
+            await fail_running(
+                connection,
+                source,
+                result_json='{}',
+                error_code='X',
+                failed_reason='x',
             )
             outcome = await rerun_task(
                 connection,

@@ -6,7 +6,7 @@ TERMINAL with `expires_at = terminal_at + reservation_window`. Until then a send
 with the same key and command returns the task that holds the key.
 
 The terminal move here is the administrative cancel of a PENDING task
-(`horsies_cancel_locked_task`): it runs the same move as every other kind.
+(`horsies_cancel_task`): it runs the same move as every other kind.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from tests.broker_resources_support import current_resources
+from tests.integration.terminal_writes import cancel_live_task
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -138,15 +139,9 @@ async def reservations(engine: AsyncEngine, *task_ids: str) -> int:
 async def move_to_history(engine: AsyncEngine, task_id: str) -> None:
     """Cancel the PENDING task: the move writes its history row."""
     async with engine.begin() as connection:
-        outcome = (
-            await connection.execute(
-                text(
-                    'SELECT outcome FROM horsies_cancel_locked_task('
-                    "CAST(:task_id AS uuid), ARRAY['PENDING'])"
-                ),
-                {'task_id': task_id},
-            )
-        ).scalar_one()
+        outcome = await cancel_live_task(
+            connection, task_id, include_running=False
+        )
     assert outcome == 'APPLIED'
 
 

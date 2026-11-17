@@ -26,6 +26,7 @@ from tests.integration.task_history_harness import (
     prepare_move_storage,
     terminalization_schema_fixture,
 )
+from tests.integration.terminal_writes import complete_workflow_task
 
 pytestmark = [pytest.mark.integration]
 
@@ -154,14 +155,10 @@ class TestDeferredDigestReuse:
                 workflow_id=await create_workflow(connection, status='RUNNING'),
                 node_status='RUNNING',
             )
-            outcome = (await connection.execute(
-                text(
-                    'SELECT * FROM horsies_complete_locked_task('
-                    'CAST(:task_id AS uuid), :worker, :result)'
-                ),
-                {'task_id': task_id, 'worker': WORKER, 'result': result},
-            )).one()
-            assert outcome.outcome == 'APPLIED'
+            outcome = await complete_workflow_task(
+                connection, task_id, worker_id=WORKER, result_json=result
+            )
+            assert outcome == 'APPLIED'
             digests = (await connection.execute(
                 text("""
                     SELECT h.result_digest AS history_digest,

@@ -30,6 +30,7 @@ from tests.integration.task_history_harness import (
     register_class,
     terminalization_schema_fixture,
 )
+from tests.integration.terminal_writes import TaskFailure, fail_running_task
 from tests.rerun_envelope_support import frame_rerun_envelope
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -126,37 +127,20 @@ async def insert_refused(
     return refused_constraint(raised.value)
 
 
-async def seed_attempt(connection: AsyncConnection, task_id: str) -> None:
-    await connection.execute(
-        text(
-            """
-            INSERT INTO horsies_task_attempts (
-                task_id, attempt, outcome, will_retry, started_at,
-                finished_at, error_code, error_message, failed_reason,
-                worker_id, worker_hostname, worker_pid, worker_process_name
-            ) VALUES (
-                CAST(:task_id AS uuid), 1, 'FAILED', FALSE, now(),
-                now(), 'BOOM', 'exploded', 'exploded',
-                :worker, 'it-host', 4242, 'it-proc'
-            )
-            """
+async def fail_running(connection: AsyncConnection, task_id: str) -> str:
+    """The worker's failure of the RUNNING task of ``WORKER``: it writes
+    attempt 1 (FAILED, ``BOOM``, ``exploded``) and moves the row."""
+    return await fail_running_task(
+        connection,
+        task_id,
+        worker_id=WORKER,
+        failure=TaskFailure(
+            result_json=FAILURE_RESULT,
+            error_code='BOOM',
+            failed_reason='exploded',
+            attempt_message='exploded',
+            attempt_reason='exploded',
         ),
-        {'task_id': task_id, 'worker': WORKER},
-    )
-
-
-async def fail_locked(connection: AsyncConnection, task_id: str) -> str:
-    return str(
-        (
-            await connection.execute(
-                text(
-                    'SELECT outcome FROM horsies_fail_locked_task('
-                    'CAST(:task_id AS uuid), :worker, :result, '
-                    "'BOOM', 'exploded')"
-                ),
-                {'task_id': task_id, 'worker': WORKER, 'result': FAILURE_RESULT},
-            )
-        ).scalar_one()
     )
 
 
@@ -176,9 +160,7 @@ async def test_a_retained_failure_moves_one_envelope_copy_into_its_class_leaf(
             retain=True,
             input_text=input_text,
         )
-        await seed_attempt(connection, task_id)
-
-        assert await fail_locked(connection, task_id) == 'APPLIED'
+        assert await fail_running(connection, task_id) == 'APPLIED'
 
         row = (
             await connection.execute(
@@ -339,7 +321,7 @@ async def test_a_move_with_no_leaf_for_its_row_keeps_the_task_and_its_reservatio
 
         with pytest.raises(DBAPIError, match='no partition of relation'):
             async with connection.begin_nested():
-                await fail_locked(connection, task_id)
+                await fail_running(connection, task_id)
 
         state = (
             await connection.execute(
@@ -370,7 +352,7 @@ async def seed_pending_row(connection: AsyncConnection) -> str:
     await link_workflow_node(
         connection, task_id, workflow_id=workflow_id, node_status='RUNNING'
     )
-    assert await fail_locked(connection, task_id) == 'APPLIED'
+    assert await fail_running(connection, task_id) == 'APPLIED'
     return task_id
 
 
