@@ -16,18 +16,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.types.result import is_ok
-from horsies.core.worker.child_pool import _get_child_core_handle, _initialize_worker_pool
+from horsies.core.worker.child_pool import _get_child_core_handle
 from horsies.core.worker.child_runner import (
     _WorkflowResumedBeforeStart,
     _after_missed_start,
     _confirm_until_not_resumed,
 )
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.run_return import StoppedBeforeRunning
 from horsies.core.worker.sql import COUNT_IN_FLIGHT_FOR_WORKER_SQL
 from horsies.core.worker.worker import Worker
 from tests.dispatch_claim_support import claim_at
 from tests.integration.conftest import compute_test_command_fingerprint
-from tests.broker_resources_support import current_resources, listener_of
+from tests.broker_resources_support import current_resources
 
 # The claim generation of every row seeded here, which the fences of the
 # worker check.
@@ -194,12 +195,10 @@ async def test_the_stop_before_start_cancels_an_orphan_and_frees_budget(
     )
     assert await _in_flight_for_worker(session, worker_id) == 1
     worker = _orphan_worker(broker, db_url, worker_id, self_heal=True)
-    _initialize_worker_pool(listener_of(broker).database_url)
 
     stopped = _confirm_until_not_resumed(
         task_id,
         worker_id,
-        True,
         CLAIMED_AT,
         orphan_self_heal=worker.cfg.orphan_self_heal(),
     )
@@ -215,7 +214,7 @@ async def test_the_stop_before_start_cancels_an_orphan_and_frees_budget(
         claim=claim_at(CLAIMED_AT),
     )
 
-    assert stopped == (False, '', 'ORPHAN_CANCELLED')
+    assert stopped == StoppedBeforeRunning('ORPHAN_CANCELLED')
     assert is_ok(result)
     assert await _task_status(session, task_id) == 'CANCELLED'
     assert await _terminalization_kind(session, task_id) == 'CANCEL_ORPHAN'
@@ -272,16 +271,14 @@ async def test_workflow_check_failed_disabled_leaves_orphan_claimed(
     worker_id = 'worker-orphan-disabled'
     task_id = await _seed_orphaned_claimed_workflow_task(session, worker_id=worker_id)
     worker = _orphan_worker(broker, db_url, worker_id, self_heal=False)
-    _initialize_worker_pool(listener_of(broker).database_url)
 
     stopped = _confirm_until_not_resumed(
         task_id,
         worker_id,
-        True,
         CLAIMED_AT,
         orphan_self_heal=worker.cfg.orphan_self_heal(),
     )
-    assert stopped == (False, '', 'WORKFLOW_CHECK_FAILED')
+    assert stopped == StoppedBeforeRunning('NODE_NOT_LINKED')
     result = await worker._persist_task_terminal_state(
         task_id=task_id,
         now=datetime.now(timezone.utc),

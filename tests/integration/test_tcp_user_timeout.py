@@ -2,7 +2,8 @@
 
 Keepalives do not probe while sent data is unacknowledged, so a write to a
 dead connection is bounded only by tcp_user_timeout. The value is read back
-from each open connection's libpq parameters.
+from each open connection's libpq parameters. The connections of a child
+are the core's: the init frame carries the timeout to them.
 """
 
 from __future__ import annotations
@@ -21,11 +22,6 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import is_err
 from horsies.core.utils.url import to_psycopg_url
-from horsies.core.worker.child_pool import (
-    _cleanup_worker_pool,  # pyright: ignore[reportPrivateUsage]
-    _get_worker_pool,  # pyright: ignore[reportPrivateUsage]
-    _initialize_worker_pool,  # pyright: ignore[reportPrivateUsage]
-)
 from tests.dualrun.reference.web_events import EventBroadcaster
 from tests.broker_resources_support import current_resources, listener_of
 
@@ -113,17 +109,3 @@ async def test_the_monitoring_listener_carries_the_timeout(db_url: str) -> None:
         assert _timeout_of(connection) == str(TIMEOUT_MS)
     finally:
         await listener.close()
-
-
-def test_child_pool_connections_carry_the_timeout(db_url: str) -> None:
-    config = _split_config(db_url)
-    _cleanup_worker_pool()
-    _initialize_worker_pool(
-        to_psycopg_url(db_url),
-        connect_kwargs=config.pooled_connect_args,
-    )
-    try:
-        with _get_worker_pool().connection() as connection:
-            assert _timeout_of(connection) == str(TIMEOUT_MS)
-    finally:
-        _cleanup_worker_pool()

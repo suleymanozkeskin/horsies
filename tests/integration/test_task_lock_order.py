@@ -44,10 +44,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Final
 from unittest.mock import MagicMock
 
-import psycopg
 import pytest
 import pytest_asyncio
-from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 from sqlalchemy import TextClause, text
 from sqlalchemy.exc import DBAPIError
@@ -78,12 +76,8 @@ from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.types.result import Ok, is_ok
 from horsies.core.types.status import TASK_TERMINAL_STATES
 from horsies.core.worker import child_runner
-from horsies.core.worker.child_pool import (
-    _initialize_worker_pool,
-    open_shared_async_pool,
-)
-from horsies.core.worker.child_protocol import WireResult
 from horsies.core.worker.child_runner import DeadlineBeforeStart
+from horsies.core.worker.run_return import StoppedBeforeRunning
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.shared_lifecycle import confirm_until_not_resumed
 from horsies.core.worker.worker import Worker
@@ -93,7 +87,6 @@ from horsies.core.worker.workflow_success import (
 )
 from horsies.monitoring.task_actions import CANCEL_TASK_SQL
 from tests.dispatch_claim_support import claim_at
-from tests.broker_resources_support import listener_of
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.test_pause_abandon_after_resume import (
     WORKER_ID as PAUSE_WORKER_ID,
@@ -124,12 +117,10 @@ TASK_ROW_FOR_UPDATE_SQL: Final = text(
 TASK_TERMINAL_VALUES: Final = [status.value for status in TASK_TERMINAL_STATES]
 START_END_S: Final = 10.0
 """Bounds the wait for a child start to end once the holder commits."""
-POOL_CLOSE_S: Final = 5.0
-"""Bounds the close of the async pool of a shared async child."""
 OLDER_CLAIM: Final = timedelta(seconds=30)
 """How much older the claim of a child is than the claim on its row."""
 
-type StartResult = WireResult | DeadlineBeforeStart | None
+type StartResult = StoppedBeforeRunning | DeadlineBeforeStart | None
 """What the start of a child returns: None starts the task."""
 
 _APP_CACHE: dict[str, Horsies] = {}
@@ -511,25 +502,6 @@ async def test_a_failure_finalize_waits_for_a_monitoring_cancel_that_holds_its_l
     assert await _history(engine, task_id) == [('CANCELLED', 'CANCEL_ADMIN')]
 
 
-@pytest_asyncio.fixture(loop_scope='function')
-async def shared_child_pool(
-    broker: PostgresBroker,
-) -> AsyncIterator[AsyncConnectionPool[psycopg.AsyncConnection[Any]]]:
-    """The async pool of a shared async child, on the loop of the test. The
-    sync pool of the child opens as well: the reference start of a dual-run
-    runs on it."""
-    _initialize_worker_pool(listener_of(broker).database_url)
-    pool = await open_shared_async_pool(
-        listener_of(broker).database_url,
-        connect_kwargs={},
-        min_size=0,
-        max_size=2,
-        check_on_checkout=True,
-    )
-    yield pool
-    await pool.close(timeout=POOL_CLOSE_S)
-
-
 async def _lock_error(
     holder: AsyncConnection,
     statement: TextClause,
@@ -613,14 +585,13 @@ async def test_the_row_lock_of_an_isolated_start_ends_before_its_miss_path(
     lock then locks the row: the holder gets the row at once and commits,
     and the expiry then ends the start with TASK_EXPIRED."""
     task_id, child_claimed_at = await _seed_expired_workflow_task(session)
-    _initialize_worker_pool(listener_of(broker).database_url)
+    _ = broker
 
     async def start() -> StartResult:
         return await asyncio.to_thread(
             child_runner._confirm_until_not_resumed,
             task_id,
             NODE_WORKER_ID,
-            True,
             child_claimed_at,
             orphan_self_heal=True,
         )
@@ -634,7 +605,7 @@ async def test_the_row_lock_of_an_isolated_start_ends_before_its_miss_path(
 
     assert row_lock_error is None
     assert _deadlocks(caplog) == []
-    assert started == (False, '', 'TASK_EXPIRED')
+    assert started == StoppedBeforeRunning('TASK_EXPIRED')
     assert [status for status, _ in await _history(engine, task_id)] == ['EXPIRED']
 
 
@@ -642,19 +613,18 @@ async def test_the_row_lock_of_an_isolated_start_ends_before_its_miss_path(
 async def test_the_row_lock_of_a_shared_async_start_ends_before_its_miss_path(
     engine: AsyncEngine,
     session: AsyncSession,
-    shared_child_pool: AsyncConnectionPool[psycopg.AsyncConnection[Any]],
+    broker: PostgresBroker,  # noqa: ARG001 - the schema and history leaves
     clean_workflow_tables: None,  # noqa: ARG001
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The same case as the isolated start, on the async pool of a shared
-    async child."""
+    """The same case as the isolated start, through the awaitable methods of
+    the core handle of a shared async child."""
     task_id, child_claimed_at = await _seed_expired_workflow_task(session)
 
     async def start() -> StartResult:
         return await confirm_until_not_resumed(
             task_id,
             NODE_WORKER_ID,
-            True,
             child_claimed_at,
             orphan_self_heal=True,
         )
@@ -668,7 +638,7 @@ async def test_the_row_lock_of_a_shared_async_start_ends_before_its_miss_path(
 
     assert row_lock_error is None
     assert _deadlocks(caplog) == []
-    assert started == (False, '', 'TASK_EXPIRED')
+    assert started == StoppedBeforeRunning('TASK_EXPIRED')
     assert [status for status, _ in await _history(engine, task_id)] == ['EXPIRED']
 
 
@@ -732,14 +702,13 @@ async def test_an_isolated_abandon_waits_for_the_workflow_without_task_locks(
         session,
         claimed_at,
     )
-    _initialize_worker_pool(listener_of(broker).database_url)
+    _ = broker
 
     async def start() -> StartResult:
         return await asyncio.to_thread(
             child_runner._confirm_until_not_resumed,
             task_id,
             PAUSE_WORKER_ID,
-            True,
             claimed_at,
             orphan_self_heal=True,
         )
@@ -753,7 +722,7 @@ async def test_an_isolated_abandon_waits_for_the_workflow_without_task_locks(
 
     assert backing_lock_error is None
     assert _deadlocks(caplog) == []
-    assert started == (False, '', 'WORKFLOW_STOPPED')
+    assert started == StoppedBeforeRunning('WORKFLOW_STOPPED')
     assert await _node_and_task(session, workflow_id, task_id) == (
         'READY',
         None,
@@ -767,12 +736,12 @@ async def test_an_isolated_abandon_waits_for_the_workflow_without_task_locks(
 async def test_a_shared_async_abandon_waits_for_the_workflow_without_task_locks(
     engine: AsyncEngine,
     session: AsyncSession,
-    shared_child_pool: AsyncConnectionPool[psycopg.AsyncConnection[Any]],
+    broker: PostgresBroker,  # noqa: ARG001 - the schema and history leaves
     clean_workflow_tables: None,  # noqa: ARG001
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The same case as the isolated abandon, on the async pool of a shared
-    async child."""
+    """The same case as the isolated abandon, through the awaitable methods
+    of the core handle of a shared async child."""
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     workflow_id, task_id = await _seed_paused_workflow_with_claimed_node(
         session,
@@ -783,7 +752,6 @@ async def test_a_shared_async_abandon_waits_for_the_workflow_without_task_locks(
         return await confirm_until_not_resumed(
             task_id,
             PAUSE_WORKER_ID,
-            True,
             claimed_at,
             orphan_self_heal=True,
         )
@@ -797,7 +765,7 @@ async def test_a_shared_async_abandon_waits_for_the_workflow_without_task_locks(
 
     assert backing_lock_error is None
     assert _deadlocks(caplog) == []
-    assert started == (False, '', 'WORKFLOW_STOPPED')
+    assert started == StoppedBeforeRunning('WORKFLOW_STOPPED')
     assert await _node_and_task(session, workflow_id, task_id) == (
         'READY',
         None,

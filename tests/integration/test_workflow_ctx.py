@@ -24,12 +24,11 @@ from horsies.core.models.workflow import (
     WorkflowValidationError,
 )
 from horsies.core.worker.current import set_current_app
-from horsies.core.worker.worker import _run_task_entry, _initialize_worker_pool
+from horsies.core.worker.child_runner import _run_task_entry
 from horsies.core.worker.task_loop import TaskLoop
 
 from .conftest import make_simple_task, make_no_ctx_task, make_workflow_spec, start_ok
 from tests.integration.conftest import finish_task
-from tests.broker_resources_support import listener_of
 from horsies.core.worker.child_runner import RunTheTask
 from tests.fixtures.run_return import wire_of
 
@@ -507,8 +506,6 @@ class TestWorkflowCtx:
         claimed_at = await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = listener_of(broker).database_url
-        _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
@@ -579,8 +576,6 @@ class TestWorkflowCtx:
         claimed_at = await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = listener_of(broker).database_url
-        _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
@@ -654,8 +649,6 @@ class TestWorkflowCtx:
         claimed_at = await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = listener_of(broker).database_url
-        _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
@@ -944,8 +937,6 @@ class TestWorkflowCtx:
         claimed_at = await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = listener_of(broker).database_url
-        _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,

@@ -45,13 +45,21 @@ from horsies.core.models.workflow import (
 )
 from horsies._core import CoreHandle
 from horsies.core.brokers.postgres import PostgresBroker, WorkerProcessBroker
-from horsies.core.worker.child_pool import (
-    _cleanup_worker_pool,
-    _drop_child_core_handle,
-    _initialize_child_core_handle,
+from tests.dualrun.reference.worker_parent.worker import (
+    child_pool as reference_child_pool,
 )
-from tests.fixtures.child_core import TEST_CHILD_POOL
+from tests.dualrun.reference.worker_parent.worker.child_pool import (
+    _cleanup_worker_pool,
+)
+from tests.fixtures.child_core import (
+    TEST_CHILD_POOL,
+    drop_child_core_handle,
+    install_child_core_handle,
+)
 from horsies.core.worker.worker import Worker
+from tests.dualrun.reference.worker_parent.worker.worker import (
+    Worker as ReferenceWorker,
+)
 from horsies.core.workflows.engine import start_workflow_async
 from horsies.core.types.result import is_err
 from horsies.core.utils.url import sqlalchemy_url
@@ -127,6 +135,8 @@ def app(app_config: AppConfig, broker: PostgresBroker) -> Horsies:
 def worker_core_handle(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Give a ``Worker`` built without a broker the core handle of a worker
     broker on the suite database; a worker built with a broker keeps its own.
+    The same for the ``Worker`` of the reference copy, which the parent-rule
+    tests build.
 
     A running worker always has its broker (``run_forever`` refuses to start
     without one), and production raises for a worker without one. Tests
@@ -137,7 +147,7 @@ def worker_core_handle(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None,
     handle_broker = WorkerProcessBroker(PostgresConfig(database_url=SecretStr(DB_URL)))
     handle = handle_broker._core_handle  # pyright: ignore[reportPrivateUsage]
 
-    def core_handle(worker: Worker) -> CoreHandle:
+    def core_handle(worker: Worker | ReferenceWorker) -> CoreHandle:
         match worker.broker:
             case None:
                 return handle
@@ -145,13 +155,15 @@ def worker_core_handle(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None,
                 return broker._core_handle  # pyright: ignore[reportPrivateUsage]
 
     monkeypatch.setattr(Worker, 'core_handle', property(core_handle))
+    monkeypatch.setattr(ReferenceWorker, 'core_handle', property(core_handle))
     yield
     _ = handle.close()
 
 
 @pytest.fixture(scope='session', autouse=True)
 def cleanup_worker_pool_at_teardown() -> Generator[None, None, None]:
-    """Close the per-process ConnectionPool created by _initialize_worker_pool()."""
+    """Close the psycopg pool of the version-1 child of the reference copy,
+    which the parent-rule tests open (``_initialize_worker_pool``)."""
     yield
     _cleanup_worker_pool()
 
@@ -159,15 +171,26 @@ def cleanup_worker_pool_at_teardown() -> Generator[None, None, None]:
 @pytest.fixture(scope='session', autouse=True)
 def child_core_handle() -> Generator[None, None, None]:
     """The core handle of a worker's child for the suite database, for the
-    tests that run the start of a child in this process
-    (``_initialize_child_core_handle``). A test that needs another database
-    puts its own in place for a block (``child_core_handle_for``)."""
-    _initialize_child_core_handle(
+    tests that run the writes of a child in this process
+    (``install_child_core_handle``). A test that needs another database puts
+    its own in place for a block (``child_core_handle_for``)."""
+    install_child_core_handle(DB_URL)
+    yield
+    drop_child_core_handle()
+
+
+@pytest.fixture(scope='session', autouse=True)
+def reference_child_core_handle() -> Generator[None, None, None]:
+    """The core handle of the version-1 child of the reference copy for the
+    suite database, for the parent-rule tests that run the start of the
+    reference child in this process (``_run_task_entry`` of
+    ``tests.dualrun.reference.worker_parent``)."""
+    reference_child_pool._initialize_child_core_handle(  # pyright: ignore[reportPrivateUsage]
         PostgresConfig(database_url=SecretStr(DB_URL)),
         TEST_CHILD_POOL,
     )
     yield
-    _drop_child_core_handle()
+    reference_child_pool._drop_child_core_handle()  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest_asyncio.fixture

@@ -11,11 +11,12 @@ a write that accepts a call without a claim time again fails the check.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 
 from horsies.core.lifecycle.fences import OwnedClaim, OwnedClaimBatch
 from horsies.core.worker.child_protocol import RunFrame, SeatTask, SharedRunFrame
-from horsies.core.worker.child_runner import mark_finalizing_params
+from horsies.core.worker.child_runner import mark_run_finalizing
 from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.stored_timeout import NoTimeout
 from horsies.core.worker.worker import Worker
@@ -43,8 +44,8 @@ async def writes(worker: Worker, claimed_at: datetime) -> None:
     )
     DispatchClaim(retry_count=0, max_retries=0, task_options=None)  # pyright: ignore[reportCallIssue]
     DispatchClaim(None, 0, 0, None)  # pyright: ignore[reportArgumentType]
-    mark_finalizing_params('t', 'w', claimed_at)
-    mark_finalizing_params('t', 'w', None)  # pyright: ignore[reportArgumentType]
+    mark_run_finalizing(uuid.UUID(int=1), 'w', claimed_at)
+    mark_run_finalizing(uuid.UUID(int=1), 'w', None)  # pyright: ignore[reportArgumentType]
     await worker._requeue_claimed_task('t', 'reason', claim)
     await worker._requeue_claimed_task('t', 'reason', claimed_at)  # pyright: ignore[reportArgumentType]
     await worker._requeue_claimed_task('t', 'reason')  # pyright: ignore[reportCallIssue]

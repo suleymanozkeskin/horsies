@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
-from typing import Any, Final
+from typing import Any, Final, LiteralString
 
 import psycopg
 import pytest
@@ -23,10 +23,6 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from horsies.core.worker.child_runner import (
-    MARK_FINALIZING_SQL,
-    mark_finalizing_params,
-)
 from tests.integration.autocommit_support import QUEUE, TASK_NAME, WORKER_ID, psycopg_url
 from tests.integration.conftest import compute_test_command_fingerprint
 
@@ -37,6 +33,11 @@ PRIMARY_KEY: Final = 'horsies_tasks_pkey'
 # A claim time for the fence parameter. The plan is generic, so its value
 # does not change the plan.
 CLAIMED_AT: Final = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+MARK_FINALIZING_SQL: Final[LiteralString] = (
+    'SELECT outcome FROM horsies_mark_finalizing(%s::uuid, %s, %s::timestamptz)'
+)
+"""The call of the finalizing marker, with the task, the worker and the
+claim generation, as the core handle of a child sends it."""
 
 
 @pytest_asyncio.fixture(loop_scope='function')
@@ -154,7 +155,7 @@ async def test_the_finalizing_marker_reads_its_row_through_the_primary_key(
     plans = await _nested_generic_plans(
         probe,
         MARK_FINALIZING_SQL,
-        mark_finalizing_params(task_id, WORKER_ID, CLAIMED_AT),
+        (task_id, WORKER_ID, CLAIMED_AT),
     )
 
     assert 'horsies_tasks t' in plans, plans

@@ -32,7 +32,7 @@ from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.types.result import is_ok
 from horsies.core.utils.url import to_psycopg_url
 from horsies.core.worker import child_runner
-from horsies.core.worker.child_pool import _get_child_core_handle, _initialize_worker_pool
+from horsies.core.worker.child_pool import _get_child_core_handle
 from horsies._core import CoreChildHandle, CoreHandle
 from horsies.core.worker.claiming import ClaimMixin
 from horsies.core.worker.config import WorkerConfig
@@ -40,7 +40,7 @@ from horsies.core.worker.queue_cap_hold import QueueCapHold, start_check_caps
 from horsies.core.workflows.lifecycle import resume_workflow
 from horsies.core.utils.db import PooledStatements
 from tests.integration.conftest import DB_URL, compute_test_command_fingerprint
-from tests.broker_resources_support import current_resources, listener_of
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration]
 
@@ -360,14 +360,13 @@ async def test_child_starts_a_task_resumed_before_its_abandon(
         session,
         claimed_at,
     )
-    _initialize_worker_pool(listener_of(broker).database_url)
+    _ = broker
     handle = _ResumeBeforeStop(_get_child_core_handle(), workflow_id)
     monkeypatch.setattr(child_runner, '_get_child_core_handle', lambda: handle)
 
     result = child_runner._confirm_until_not_resumed(
         task_id,
         WORKER_ID,
-        True,
         claimed_at,
         orphan_self_heal=True,
     )

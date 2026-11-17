@@ -4,13 +4,12 @@ Each test drives the real entry point through a ``RoundTripProxy`` and
 counts client turns in the steady state of psycopg's prepared statements
 (``WARM_RUNS``). The worker's engine is the one the CLI builds
 (``worker_process_config``): ``worker_pool_pre_ping`` is off unless a test
-turns it on. The child pools are the pools a child opens: autocommit, with
-the checkout check off.
+turns it on.
 
 A one-statement write is one round trip: no pre-ping, no BEGIN, no COMMIT.
-The start of a run in a child and its miss path go through the core handle
-of the child (``proxied_child_core``): one statement for the start, and one
-for the path of a miss.
+Every write of a child goes through the core handle of the child
+(``proxied_child_core``): one statement for the start, one for the path of a
+miss, and one for the finalizing marker.
 """
 
 # pyright: reportPrivateUsage=false
@@ -25,30 +24,21 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
-from psycopg import AsyncConnection
-from psycopg_pool import AsyncConnectionPool
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import Execution
 from horsies.core.types.result import Ok
-from horsies.core.worker.child_pool import (
-    _cleanup_worker_pool,
-    _initialize_worker_pool,
-    open_shared_async_pool,
-)
 from horsies.core.worker.child_runner import (
     StartAllowed,
     StartCheck,
     StartWithin,
-    StatementsBound,
-    StatementsLimit,
-    StatementsUnbounded,
     _confirm_until_not_resumed,
-    _mark_task_finalizing,
+    mark_run_finalizing,
 )
 from horsies.core.worker.claiming import ClaimPass
+from horsies.core.worker.run_return import StoppedBeforeRunning
 from horsies.core.worker.shared_lifecycle import (
     confirm_until_not_resumed,
     mark_task_finalizing,
@@ -64,7 +54,6 @@ from tests.integration.autocommit_support import (
     ok_result_json,
     open_proxied_worker,
     proxied_url,
-    psycopg_url,
     recorded_turns,
     steady_state_turns,
     upstream_of,
@@ -106,41 +95,10 @@ async def proxied(
     await opened.close()
 
 
-@pytest_asyncio.fixture(loop_scope='function')
-async def async_child_pool(
-    proxy: RoundTripProxy,
-    db_url: str,
-) -> AsyncGenerator[AsyncConnectionPool[AsyncConnection[Any]]]:
-    pool = await open_shared_async_pool(
-        psycopg_url(proxied_url(db_url, proxy)),
-        connect_kwargs={},
-        min_size=0,
-        max_size=2,
-        check_on_checkout=False,
-    )
-    yield pool
-    await pool.close(timeout=5.0)
-
-
 @pytest.fixture
-def sync_child_pool(proxy: RoundTripProxy, db_url: str) -> Generator[None]:
-    """The per-process sync pool of an isolated or shared thread child."""
-    _cleanup_worker_pool()
-    _initialize_worker_pool(psycopg_url(proxied_url(db_url, proxy)))
-    yield
-    _cleanup_worker_pool()
-
-
-@pytest.fixture
-def proxied_child_core(
-    proxy: RoundTripProxy,
-    db_url: str,
-    sync_child_pool: None,  # noqa: ARG001
-) -> Generator[None]:
+def proxied_child_core(proxy: RoundTripProxy, db_url: str) -> Generator[None]:
     """The core handle of a child, on the proxy. The handle of the suite
-    comes back after the test. The sync pool of the child is on the proxy as
-    well, for the reference start of a dual-run; it opens no connection
-    unless that start runs."""
+    comes back after the test."""
     with child_core_handle_for(proxied_url(db_url, proxy)):
         yield
 
@@ -151,13 +109,6 @@ def _allowed() -> StartCheck:
 
 def _within_a_minute() -> StartCheck:
     return StartWithin(milliseconds=60_000)
-
-
-SYNC_CHILD_KINDS: Final = pytest.mark.parametrize(
-    'statements',
-    [StatementsUnbounded(), StatementsBound(seconds=5.0)],
-    ids=['isolated', 'shared_thread_refusal'],
-)
 
 
 async def _row(session: AsyncSession, task_id: str) -> Any:
@@ -315,11 +266,10 @@ async def test_a_stop_before_start_is_one_statement_after_the_start(
         stopped = _confirm_until_not_resumed(
             task_id,
             WORKER_ID,
-            True,
             claimed_at,
             orphan_self_heal=True,
         )
-        assert stopped == (False, '', 'ORPHAN_CANCELLED')
+        assert stopped == StoppedBeforeRunning('ORPHAN_CANCELLED')
 
     (task_id, _), turns = await steady_state_turns(proxy, arrange, act)
 
@@ -406,7 +356,6 @@ async def test_a_shared_async_running_update_is_one_statement(
         started = await confirm_until_not_resumed(
             task_id,
             WORKER_ID,
-            False,
             claimed_at,
             orphan_self_heal=True,
         )
@@ -421,17 +370,20 @@ async def test_a_shared_async_running_update_is_one_statement(
 
 async def test_a_shared_async_finalizing_marker_is_one_statement(
     proxy: RoundTripProxy,
-    async_child_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    proxied_child_core: None,  # noqa: ARG001
     broker: PostgresBroker,  # noqa: ARG001
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
+    """The marker of a seat is one round trip through the awaitable method
+    of the core handle of the child."""
+
     async def arrange() -> Case:
         return await insert_task(session, status='RUNNING')
 
     async def act(case: Case) -> None:
         task_id, claimed_at = case
-        await mark_task_finalizing(async_child_pool, task_id, WORKER_ID, claimed_at)
+        await mark_task_finalizing(uuid.UUID(task_id), WORKER_ID, claimed_at)
 
     (task_id, _), turns = await steady_state_turns(proxy, arrange, act)
 
@@ -458,7 +410,6 @@ async def test_a_shared_async_workflow_start_is_one_statement(
         started = await confirm_until_not_resumed(
             case[0],
             NODE_WORKER_ID,
-            True,
             case[1],
             orphan_self_heal=True,
         )
@@ -472,7 +423,7 @@ async def test_a_shared_async_workflow_start_is_one_statement(
 
 
 # ---------------------------------------------------------------------------
-# Isolated and shared thread children (the sync pool)
+# Isolated and shared thread children (the sync calls of the core handle)
 # ---------------------------------------------------------------------------
 
 
@@ -497,7 +448,6 @@ async def test_a_sync_running_update_is_one_statement(
         started = _confirm_until_not_resumed(
             task_id,
             WORKER_ID,
-            False,
             claimed_at,
             orphan_self_heal=True,
             start_check=start_check,
@@ -511,21 +461,22 @@ async def test_a_sync_running_update_is_one_statement(
     assert row is not None and row.status == 'RUNNING'
 
 
-@SYNC_CHILD_KINDS
 async def test_a_sync_finalizing_marker_is_one_statement(
     proxy: RoundTripProxy,
-    sync_child_pool: None,  # noqa: ARG001
+    proxied_child_core: None,  # noqa: ARG001
     broker: PostgresBroker,  # noqa: ARG001
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
-    statements: StatementsLimit,
 ) -> None:
+    """The marker of an isolated run or of a thread seat, task or refusal
+    alike, is one round trip through the core handle of the child."""
+
     async def arrange() -> Case:
         return await insert_task(session, status='RUNNING')
 
     async def act(case: Case) -> None:
         task_id, claimed_at = case
-        _mark_task_finalizing(task_id, WORKER_ID, claimed_at, statements=statements)
+        mark_run_finalizing(uuid.UUID(task_id), WORKER_ID, claimed_at)
 
     (task_id, _), turns = await steady_state_turns(proxy, arrange, act)
 
@@ -550,7 +501,6 @@ async def test_a_sync_workflow_start_is_one_statement(
         started = _confirm_until_not_resumed(
             case[0],
             NODE_WORKER_ID,
-            True,
             case[1],
             orphan_self_heal=True,
         )

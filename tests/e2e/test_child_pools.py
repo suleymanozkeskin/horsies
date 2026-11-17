@@ -1,12 +1,13 @@
-"""E2E: each child kind opens the pool that its profile sets, task code in
-each child kind opens the task-send pool of its kind, and a shared async
-child sizes its default executor.
+"""E2E: task code in each child kind opens the task-send pool of its kind,
+and a shared async child sizes its default executor.
 
 One worker of ``set-pools-1-1x4-1x4`` runs an isolated child, a shared async
 child and a shared thread child, each with a pool or an executor size that
 differs from every default. A task on each child reports what its child
-opened: the profile reaches the child through the CLI, the worker config,
-the init frame and the boot of the child.
+opened: the profile reaches the child through the CLI, the worker manifest,
+the init frame and the boot of the child. The pool of each child kind is
+the pool of the core handle of the child, which task code cannot read; the
+core tests its path from the profile to the handle.
 """
 
 from __future__ import annotations
@@ -27,9 +28,7 @@ from tests.e2e.tasks.profiles import (
     SET_POOLS,
     SET_POOLS_ASYNC_TASK_SEND_POOL,
     SET_POOLS_EXECUTOR_THREADS,
-    SET_POOLS_ISOLATED_BOUNDS,
     SET_POOLS_ISOLATED_TASK_SEND_POOL,
-    SET_POOLS_THREAD_BOUNDS,
     SET_POOLS_THREAD_TASK_SEND_POOL,
 )
 
@@ -57,7 +56,7 @@ async def _value[Value](handle: TaskHandle[Value]) -> Value:
 
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
-async def test_each_child_kind_opens_the_pool_and_executor_of_its_profile(
+async def test_a_shared_async_child_sizes_the_executor_of_its_profile(
     broker: PostgresBroker,
 ) -> None:
     _ = broker
@@ -66,20 +65,12 @@ async def test_each_child_kind_opens_the_pool_and_executor_of_its_profile(
         profile=SET_POOLS,
         ready_check=_make_ready_check(),
     ):
-        isolated = await _value(
-            unwrap_send(await basic_tasks.child_pool_bounds.send_async()),
-        )
-        thread = await _value(
-            unwrap_send(await shared_thread_tasks.thread_pool_bounds.send_async()),
-        )
         executor_threads = await _value(
             unwrap_send(
                 await shared_async_tasks.shared_executor_threads.send_async(),
             ),
         )
 
-    assert isolated == '{}:{}'.format(*SET_POOLS_ISOLATED_BOUNDS)
-    assert thread == '{}:{}'.format(*SET_POOLS_THREAD_BOUNDS)
     assert executor_threads == SET_POOLS_EXECUTOR_THREADS
     assert executor_threads < shared_async_tasks.HELD_EXECUTOR_CALLS
 

@@ -2,7 +2,8 @@
 """Dual-run of the finalizing marker: the fenced update against ``horsies_mark_finalizing``.
 
 Reference: ``tests/dualrun/reference/finalizing.py``. Candidate: the
-isolated child's ``_mark_task_finalizing`` on its sync pool. The seed holds
+child's ``mark_run_finalizing`` through the core handle of the child
+(``CoreChildHandle.mark_finalizing``). The seed holds
 one row per marker case; both sides must mark the same rows, leave the
 others as they were, and report the same outcome. The candidate's outcome is
 what its log records say: the debug record of a changed claim is
@@ -23,7 +24,6 @@ import pytest
 
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import child_runner
-from horsies.core.worker.child_pool import _cleanup_worker_pool, _initialize_worker_pool
 from tests.dualrun.capture import Connection
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
@@ -31,6 +31,7 @@ from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
 from tests.dualrun.reference import finalizing as reference
 from tests.dualrun.seeds import SeedStatus, TaskSeed, insert_task
 from tests.dualrun.selfcheck import SelfCheckStepFailed
+from tests.fixtures.child_core import child_core_handle_for
 
 pytestmark = [pytest.mark.integration]
 
@@ -132,18 +133,15 @@ def _candidate_mark(
     caplog: pytest.LogCaptureFixture,
 ) -> Callable[[DualRunDatabase, tuple[_Mark, ...]], dict[str, str]]:
     def act(database: DualRunDatabase, marks: tuple[_Mark, ...]) -> dict[str, str]:
-        _initialize_worker_pool(database.url)
-        try:
+        with child_core_handle_for(database.url):
             report: dict[str, str] = {}
             for each in marks:
                 caplog.clear()
-                child_runner._mark_task_finalizing(
-                    each.task_id, each.worker_id, each.claimed_at
+                child_runner.mark_run_finalizing(
+                    uuid.UUID(each.task_id), each.worker_id, each.claimed_at
                 )
                 report[each.name] = _logged_outcome(caplog.records, each.task_id)
             return report
-        finally:
-            _cleanup_worker_pool()
 
     return act
 
