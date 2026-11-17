@@ -148,6 +148,10 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::attempt_records::AttemptTaskAbsent>()?;
     module.add_class::<operations::attempt_records::AttemptWriteFailed>()?;
     module.add_class::<operations::attempt_records::PhaseTwoOwedRecord>()?;
+    module.add_class::<operations::claim::ClaimPassRequest>()?;
+    module.add_class::<operations::claim::ClaimedRowRecord>()?;
+    module.add_class::<operations::claim::ClaimPassRecord>()?;
+    module.add_class::<operations::claim::ClaimPassFailed>()?;
     module.add_class::<operations::enqueue::EnqueueRequest>()?;
     module.add_class::<operations::enqueue::Enqueued>()?;
     module.add_class::<operations::enqueue::SendSuppressed>()?;
