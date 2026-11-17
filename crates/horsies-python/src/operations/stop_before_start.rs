@@ -11,7 +11,7 @@
 
 use chrono::{DateTime, Utc};
 use horsies_core::core::lifecycle::OwnedClaim;
-use horsies_core::{BrokerError, OrphanSelfHeal, StopBeforeStart, StopMove};
+use horsies_core::{BrokerError, OrphanSelfHeal, StopBeforeStart};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -27,8 +27,8 @@ use crate::handle::BrokerConnection;
 #[derive(Clone, Debug)]
 pub struct StoppedBeforeStart {
     pub task_id: Uuid,
-    pub outcome: &'static str,
-    pub move_outcome: Option<&'static str>,
+    pub outcome: String,
+    pub move_outcome: Option<String>,
 }
 
 /// A resume came first: the claim is still startable and a node links it
@@ -102,8 +102,10 @@ fn stop_record(task_id: Uuid, stop: Result<StopBeforeStart, BrokerError>) -> Sto
         Ok(StopBeforeStart::Resumed) => StopRecord::Resumed(ResumedBeforeStart { task_id }),
         Ok(stopped) => StopRecord::Stopped(StoppedBeforeStart {
             task_id,
-            outcome: stopped.outcome_str(),
-            move_outcome: stopped.move_outcome().map(StopMove::as_str),
+            outcome: stopped.outcome_str().to_owned(),
+            move_outcome: stopped
+                .move_outcome()
+                .map(|moved| moved.as_str().to_owned()),
         }),
         Err(error) => failed(task_id, &error),
     }
@@ -132,6 +134,8 @@ pub async fn stop_before_start_operation(
 
 #[cfg(test)]
 mod tests {
+    use horsies_core::StopMove;
+
     use super::*;
 
     fn task() -> Uuid {
@@ -148,7 +152,7 @@ mod tests {
         };
         assert_eq!(stopped.task_id, task());
         assert_eq!(stopped.outcome, "ORPHAN_CANCELLED");
-        assert_eq!(stopped.move_outcome, Some("APPLIED"));
+        assert_eq!(stopped.move_outcome.as_deref(), Some("APPLIED"));
 
         let StopRecord::Stopped(not_linked) =
             stop_record(task(), Ok(StopBeforeStart::NodeNotLinked))
