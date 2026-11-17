@@ -80,6 +80,8 @@ pub use crate::broker::{
     WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
+// The bounded limit of a result wait; a client checks it before the read.
+pub use crate::broker::wait_limit::{BoundedWait, WaitLimit, WaitLimitRefused, MAX_WAIT_LIMIT_MS};
 
 // partition maintenance of a client handle (`PostgresBroker::ensure_partition_coverage`,
 // `PostgresBroker::prune_expired_partitions`)

@@ -131,6 +131,18 @@ pub mod __private {
         }
     }
 
+    /// The refusal of `name::send` and `name::schedule` before
+    /// `name::register(&mut app)` in this process: `VALIDATION_FAILED`,
+    /// nothing written.
+    pub fn send_before_register(task_name: &str) -> crate::TaskSendError {
+        crate::TaskSendError::ValidationFailed {
+            message: format!(
+                "task '{task_name}' is not registered in this process; call \
+                 {task_name}::register(&mut app) when main builds the app"
+            ),
+        }
+    }
+
     /// The refusal of `name::node()` before `name::register(&mut app)`.
     pub fn node_before_register(task_name: &str) -> crate::HorsiesError {
         crate::HorsiesError::new(format!(

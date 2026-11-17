@@ -207,6 +207,55 @@ unless it starts with "Added".
   (before: `r#type`). `#[derive(WorkflowInput)]` makes no token for a
   `#[serde(skip)]` or `#[serde(skip_deserializing)]` field, and refuses a
   `#[serde(flatten)]` field at compile time.
+- **`TaskFunction<A, T, E>` sends with Python's rules.** `send`,
+  `schedule`, `send_with_options`, `schedule_with_options` and
+  `with_options` return `Result<TaskHandle<T, E>, TaskSendError>`. A send
+  encodes its input, decodes the text with `A`, encodes it again and
+  refuses the send with `VALIDATION_FAILED` when the two texts differ,
+  before any statement. An input over `payload.reject_bytes` is
+  `PAYLOAD_TOO_LARGE`. In a worker child a send goes through the child's
+  own producer pool.
+- **`TaskSendError` is the closed catalog of Python's send codes:**
+  `SendSuppressed`, `ValidationFailed`, `EnqueueFailed { retryable }` (the
+  row may or may not exist), `PayloadMismatch`, `IdempotencyKeyConflict {
+  owner_task_id }` and `PayloadTooLarge { size_bytes, limit_bytes }`, each
+  with only the facts of its state. `retry_send` and `retry_schedule`
+  accept only `EnqueueFailed` and `IdempotencyKeyConflict`, send the same
+  task id and payload, and refuse the error of another task or of the
+  other method.
+- **A resend is a repeat.** With `resend_on_transient_err`, a retryable
+  `ENQUEUE_FAILED` is sent again up to 3 times after 200, 400 and 800 ms,
+  as `SendKind::Repeat`: a send whose commit reply was lost answers with
+  its task id, and a task that already finished does not run again.
+- **`TaskSendPayload` holds one `input_json`.** `args_json`, `kwargs_json`
+  and `enqueue_sha` are removed; a `null` input stays `null`. The payload
+  holds the retention of the send.
+- **Send retention is a period, `Forever`, or the queue's.**
+  `TaskSendOptions::retention` takes `SendRetention::FromQueueOrDefault`,
+  `Forever` or `Period(RetentionDays)`; a period that this deployment does
+  not register is refused with the allowed periods. `retention_class` is
+  removed.
+- **`schedule` takes `WholeSeconds`** in place of a `Duration`, whose
+  sub-second part was dropped.
+- **`TaskHandle::get` takes a `WaitLimit` and returns
+  `Result<TaskOutcome<T, E>, ReadError>`.** `TaskResult<T>` is removed. The
+  outer error is the read failing: `WaitTimedOut`, `TaskNotFound`,
+  `ResultNotAvailable`, `StoredResultUnreadable`, `UnknownUserCode` (a
+  stored user code that `E` does not name), `WaitInsideTask` and
+  `Database`, each with Python's code from `ReadError::code`. The inner
+  value is `Succeeded(T)` or `Failed(TaskError<E>)`; a cancelled task is
+  `Failed` with `TASK_CANCELLED`. `WaitLimit::parse` refuses a limit above
+  about 49.7 days before any read. The handle keeps an outcome and the
+  failures of the stored data, as Python; a timeout, an absent task and a
+  database failure are read again.
+- **A result wait in a worker child is refused** with `WaitInsideTask` and
+  sends no statement, as in Python.
+- **Reads by task id are on the app:** `get_result::<T, E>`,
+  `get_raw_result` (the stored envelope as JSON text with the status),
+  `get_task_info` with `TaskInfoParts`, and `task_handle_of` for a handle of
+  a task sent elsewhere. Task info lists attempts newest first.
+- **`TaskRuntime::task_handle` returns `TaskFunctionNotFound`**
+  (`NotRegistered`, `OtherTypes`) in place of a `TaskError`.
 - **The CLI types and `fetch_docs` are no longer public.** `Cli`, `Command`,
   `LogLevel`, `execute_web`, `WebArgs`, `WebAuthMode`,
   `WebCliError`, `execute_cutover`, `CutoverArgs`, `CutoverCliError`,

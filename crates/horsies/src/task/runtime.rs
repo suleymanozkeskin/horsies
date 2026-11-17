@@ -9,9 +9,13 @@ use std::future::Future;
 use std::sync::Arc;
 
 use horsies_core::{run_cancel_signal, spawn_in_run, RunSignalRefused, RunSpawnRefused};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use tokio::task::JoinHandle;
 
 use crate::app::{AppState, StateNotProvided};
+use crate::send::TaskFunctions;
+use crate::{TaskFunction, TaskFunctionNotFound, UserErrorCode};
 
 /// What a task body reads while it runs.
 ///
@@ -30,11 +34,30 @@ use crate::app::{AppState, StateNotProvided};
 #[derive(Clone)]
 pub struct TaskRuntime {
     state: Arc<AppState>,
+    functions: Arc<TaskFunctions>,
 }
 
 impl TaskRuntime {
-    pub(crate) fn new(state: Arc<AppState>) -> Self {
-        Self { state }
+    pub(crate) fn new(state: Arc<AppState>, functions: Arc<TaskFunctions>) -> Self {
+        Self { state, functions }
+    }
+
+    /// The typed function of task `task_name` in this app, as its
+    /// `register` returned it. The generated `name::handle(&runtime)` calls
+    /// it.
+    ///
+    /// Errors: [`TaskFunctionNotFound`] for a name that no task attribute
+    /// registered on this app, or one registered with other types.
+    pub fn task_handle<A, T, E>(
+        &self,
+        task_name: &str,
+    ) -> Result<TaskFunction<A, T, E>, TaskFunctionNotFound>
+    where
+        A: Serialize + DeserializeOwned + 'static,
+        T: Serialize + DeserializeOwned + 'static,
+        E: UserErrorCode,
+    {
+        self.functions.get::<A, T, E>(task_name)
     }
 
     /// The value of type `T` that the app provides
