@@ -12,6 +12,7 @@ use super::outcome::{
     worker_failure_write, WriteStage,
 };
 use super::pool::Answer;
+use super::scripted::{drop_bytes, exit_at_stop, ScriptCount};
 use super::*;
 use crate::broker::attempt_writes::{AttemptFailureKind, RetryPlacement, RetryRequest};
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
@@ -637,10 +638,10 @@ fn scripted_child(claimed: &ClaimedTask, after_run: &str) -> ChildCommand {
     .unwrap()
     .to_bytes();
     let script = format!(
-        r#"head -c {init} <&"$0" >/dev/null; printf '{ready}' >&"$0"; head -c {run} <&"$0" >/dev/null; {after_run}"#,
-        init = init.len(),
+        r#"{init}printf '{ready}' >&"$0"; {run}{after_run}"#,
+        init = drop_bytes(ScriptCount::Known(init.len())),
         ready = printf_bytes(&ready),
-        run = run_frame_bytes(claimed).len(),
+        run = drop_bytes(ScriptCount::Known(run_frame_bytes(claimed).len())),
     );
     ChildCommand {
         program: "/bin/sh".into(),
@@ -708,8 +709,9 @@ async fn an_isolated_slot_reports_the_result_of_its_child() {
     .unwrap()
     .to_bytes();
     let after_run = format!(
-        r#"printf '{}' >&"$0"; head -c 27 <&"$0" >/dev/null; exit 0"#,
-        printf_bytes(&result)
+        r#"printf '{}' >&"$0"; {}"#,
+        printf_bytes(&result),
+        exit_at_stop(),
     );
     assert_eq!(
         run_through_pool(&after_run, IsolatedDeadline::NoDeadline).await,

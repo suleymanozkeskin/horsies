@@ -2572,10 +2572,16 @@ mod tests {
 
     /// Python `Scheduler._resolve_schedule_queue` and #480: a schedule
     /// without a queue fires on the task's declared queue, and every fired
-    /// slot carries the task's options text.
+    /// slot carries the task's options text. The text is the one a send of
+    /// the task stores: the five keys of Python `serialize_task_options`
+    /// (`horsies/core/codec/task_options.py:27-50`), as
+    /// `TaskOptions::serialize_retry_options` writes them since #622.
     #[test]
     fn prepare_schedules_uses_the_task_queue_and_options() {
         use crate::core::config::schedule::ScheduleConfig;
+        const STORED_OPTIONS: &str = "{\"retry_policy\":null,\"good_until\":null,\
+                                      \"timeout_ms\":5000,\"execution\":\"ISOLATED\",\
+                                      \"cancel_grace_ms\":null}";
         let mut config = custom_config();
         config.schedule = Some(ScheduleConfig::new(vec![
             interval_schedule("on_task_queue", None),
@@ -2598,13 +2604,13 @@ mod tests {
             prepared["on_task_queue"],
             ScheduleSendFacts {
                 queue_name: "slow".to_owned(),
-                task_options: Some("{\"timeout_ms\":5000}".to_owned()),
+                task_options: Some(STORED_OPTIONS.to_owned()),
             },
         );
         assert_eq!(prepared["on_own_queue"].queue_name, "fast");
         assert_eq!(
             prepared["on_own_queue"].task_options.as_deref(),
-            Some("{\"timeout_ms\":5000}")
+            Some(STORED_OPTIONS)
         );
     }
 

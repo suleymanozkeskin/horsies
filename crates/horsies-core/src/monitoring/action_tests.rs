@@ -67,6 +67,9 @@ async fn clean_w3(pool: &PgPool) {
     }
 }
 
+/// Insert one live row. Only a CLAIMED row holds a claim lease
+/// (`horsies_tasks_status_live`; Python
+/// `tests/integration/monitoring_seeding.py:268-274`).
 async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
     sqlx::query(
         "INSERT INTO horsies_tasks (
@@ -78,7 +81,7 @@ async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
             $1, $2, 'default', 100, 'null', $3, NOW(), NOW() - INTERVAL '60 seconds',
             CASE WHEN $3 = 'RUNNING' THEN NOW() - INTERVAL '30 seconds' END,
             CASE WHEN $4::text IS NOT NULL THEN NOW() - INTERVAL '40 seconds' END, $4,
-            CASE WHEN $4::text IS NOT NULL THEN NOW() + INTERVAL '1 minute' END, $5, 0, 3,
+            CASE WHEN $3 = 'CLAIMED' THEN NOW() + INTERVAL '1 minute' END, $5, 0, 3,
             CASE WHEN $5 THEN NULL ELSE 1 END,
             CASE WHEN $5 THEN NULL ELSE decode(repeat('0c', 32), 'hex') END, 'forever', FALSE,
             NOW(), NOW(), 'ISOLATED'

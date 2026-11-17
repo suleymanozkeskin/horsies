@@ -2,7 +2,7 @@
 //! and `TestLeftWork`: the runs of an isolated slot with scripted children,
 //! and the end of a task whose body returned with work left on its loop.
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot::error::TryRecvError;
@@ -110,7 +110,9 @@ async fn a_queued_task_waits_for_the_busy_child_and_runs_on_the_next() {
     stop_pool(pool, spawner).await;
 }
 
-/// Python `TestTaskRuns::test_tasks_run_in_submit_order_on_one_slot`.
+/// Python `TestTaskRuns::test_tasks_run_in_submit_order_on_one_slot`. The
+/// pool queues every task, as the Python pool of that test does (its
+/// pending limit is 100 000); the limit is not what this test checks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tasks_run_in_submit_order_on_one_slot() {
     let tasks: Vec<ClaimedTask> = (1..=20)
@@ -123,7 +125,11 @@ async fn tasks_run_in_submit_order_on_one_slot() {
         .collect();
     let script = format!("{}{}", boot(&isolated_init()), ordered_runs(&answers));
     let spawner = Spawner::start().unwrap();
-    let (pool, _board) = start_isolated(&spawner, 1, isolated_config(shell(&script)));
+    let config = IsolatedPoolConfig {
+        pending_limit: NonZeroUsize::new(tasks.len()).unwrap(),
+        ..isolated_config(shell(&script))
+    };
+    let (pool, _board) = start_isolated(&spawner, 1, config);
 
     let receivers: Vec<_> = tasks
         .iter()
