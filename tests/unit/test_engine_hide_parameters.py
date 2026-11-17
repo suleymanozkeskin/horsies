@@ -19,6 +19,8 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.worker_profile import IsolatedChildren, WorkerProfile
+from horsies.core.worker.profile_fit import ServerConnectionLimit
 
 RUNTIME_URL = SecretStr('postgresql://u:p@pooler:6432/db')
 SESSION_URL = SecretStr('postgresql://u:p@direct:5432/db')
@@ -60,26 +62,30 @@ class TestEngineKwargsHideParameters:
             await engine.dispose()
 
     def test_live_check_engine_hides_parameters(self) -> None:
+        """The live check's one engine of its own reads the server
+        connection limit for the worker profiles; the connectivity step runs
+        in the core and builds no engine."""
         app = Horsies(
-            config=AppConfig(broker=PostgresConfig(database_url=RUNTIME_URL)),
+            config=AppConfig(
+                broker=PostgresConfig(database_url=RUNTIME_URL),
+                worker_profiles={
+                    'small': WorkerProfile(isolated=IsolatedChildren(count=1)),
+                },
+            ),
         )
         mock_engine = mock.MagicMock()
         mock_engine.dispose = mock.AsyncMock()
-        mock_session = mock.AsyncMock()
-        mock_session.__aenter__ = mock.AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = mock.AsyncMock(return_value=None)
-        mock_session.execute = mock.AsyncMock(return_value=None)
-        mock_session_factory = mock.MagicMock(return_value=mock_session)
+        reader = mock.AsyncMock(
+            return_value=ServerConnectionLimit(max_connections=100, reserved=3),
+        )
 
         with (
             mock.patch(
                 'sqlalchemy.ext.asyncio.create_async_engine',
                 return_value=mock_engine,
             ) as mock_create_engine,
-            mock.patch(
-                'sqlalchemy.ext.asyncio.async_sessionmaker',
-                return_value=mock_session_factory,
-            ),
+            mock.patch.object(app, '_check_broker_connectivity', return_value=[]),
+            mock.patch('horsies.core.app.read_server_connection_limit', reader),
         ):
             _ = app.check(live=True)
 

@@ -194,6 +194,20 @@ written in Rust, on a new baseline schema.
   timestamp (4714-11-24 BC). 0.7.0 accepted any positive `timedelta`, and
   such an age failed every sweep with `timestamp out of range`.
 
+- **`check(live=True)` runs the core's connectivity check.** The check
+  builds a core handle of its own (observe-only, producer pools) and calls
+  `CoreHandle.check_connectivity`, the rule of the Python and Rust clients:
+  `SELECT 1` on `database_url`, then on `session_database_url` when it
+  differs from `database_url`, then, with `pgbouncer_transaction_mode`, a
+  LISTEN on the session URL that must receive a NOTIFY (sent through
+  `database_url`) within 2 s. It opens no SQLAlchemy engine and no psycopg
+  connection of its own. The first checkout of each URL runs the core's
+  statement-pooling check, so a statement-pooled URL is refused here too
+  (before: only at worker start). The refusals keep their codes and texts
+  (`HRS-203`, "broker connectivity check failed" with the cause, "broker
+  listener capability check failed"); the listener refusal adds the core's
+  cause as a second note.
+
 ### Fixed
 
 - **A stored retry policy that does not validate fails the task at claim.**
