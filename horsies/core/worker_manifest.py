@@ -24,9 +24,16 @@ from datetime import timedelta
 from typing import Final, assert_never
 
 from horsies._catalog import worker_manifest as wire
-from horsies.core.manifest import core_database_url, reservation_window_micros
+from horsies.core.manifest import reservation_window_micros
+from horsies.core.manifest_database import (
+    core_database_url,
+    pool_recycle_with,
+    session_database_with,
+    tcp_keepalives_with,
+    tcp_user_timeout_with,
+)
 from horsies.core.models.app import AppConfig
-from horsies.core.models.broker import SQLALCHEMY_NEVER_RECYCLE, PostgresConfig
+from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.tasks import Execution
 from horsies.core.models.worker_profile import (
@@ -404,78 +411,38 @@ def _queue_concurrency(
 
 
 def _session_database(config: PostgresConfig) -> wire.SessionDatabase:
-    match config.session_database_url:
-        case None:
-            return wire.SessionDatabaseSameAsDatabaseUrl()
-        case session_url:
-            return wire.SessionDatabaseSeparate(
-                url=core_database_url(session_url.get_secret_value()),
-            )
+    return session_database_with(
+        config,
+        same_as_database_url=wire.SessionDatabaseSameAsDatabaseUrl,
+        separate=wire.SessionDatabaseSeparate,
+    )
 
 
 def _pool_recycle(value: int) -> wire.PoolRecycle:
-    """The typed form of a validated `pool_recycle` (as
-    `horsies.core.manifest.pool_recycle_of`, with the classes of this module).
-    """
-    match value:
-        case _ if value == SQLALCHEMY_NEVER_RECYCLE:
-            return wire.PoolRecycleNever()
-        case _:
-            assert value >= 0, (
-                f'pool_recycle={value} passed the PostgresConfig validator, which '
-                'admits only -1 and a number of seconds'
-            )
-            return wire.PoolRecycleAfterSeconds(seconds=value)
+    """`pool_recycle_with` with the classes of the worker manifest."""
+    return pool_recycle_with(
+        value,
+        never=wire.PoolRecycleNever,
+        after_seconds=wire.PoolRecycleAfterSeconds,
+    )
 
 
 def tcp_keepalives_of(config: PostgresConfig) -> wire.TcpKeepalivesConfig:
-    """The typed form of the validated keepalive settings (as
-    `horsies.core.manifest.tcp_keepalives_of`, with the classes of this
-    module): off, or on with the idle time, the interval and the probe
-    count. The three values are not read when `tcp_keepalives` is False.
-
-    The `PostgresConfig` validator admits only values of at least 1 when
-    keepalives are on, so another value is a defect and raises
-    `AssertionError`. Pure.
-    """
-    match config.tcp_keepalives:
-        case False:
-            return wire.TcpKeepalivesConfigOff()
-        case True:
-            values = (
-                config.tcp_keepalives_idle,
-                config.tcp_keepalives_interval,
-                config.tcp_keepalives_count,
-            )
-            assert min(values) >= 1, (
-                f'keepalive values {values} passed the PostgresConfig validator, '
-                'which admits only values of at least 1 when tcp_keepalives is True'
-            )
-            return wire.TcpKeepalivesConfigOn(
-                idle_seconds=config.tcp_keepalives_idle,
-                interval_seconds=config.tcp_keepalives_interval,
-                probes=config.tcp_keepalives_count,
-            )
+    """`tcp_keepalives_with` with the classes of the worker manifest."""
+    return tcp_keepalives_with(
+        config,
+        off=wire.TcpKeepalivesConfigOff,
+        on=wire.TcpKeepalivesConfigOn,
+    )
 
 
 def tcp_user_timeout_of(milliseconds: int) -> wire.TcpUserTimeoutConfig:
-    """The typed form of a validated `tcp_user_timeout_ms` (as
-    `horsies.core.manifest.tcp_user_timeout_of`, with the classes of this
-    module): `0` is the operating system's timeout, any other value a number
-    of milliseconds.
-
-    The `PostgresConfig` validator admits only values of at least 0, so
-    another value is a defect and raises `AssertionError`. Pure.
-    """
-    match milliseconds:
-        case 0:
-            return wire.TcpUserTimeoutConfigSystemDefault()
-        case _:
-            assert milliseconds > 0, (
-                f'tcp_user_timeout_ms={milliseconds} passed the PostgresConfig '
-                'validator, which admits only values of at least 0'
-            )
-            return wire.TcpUserTimeoutConfigAfter(milliseconds=milliseconds)
+    """`tcp_user_timeout_with` with the classes of the worker manifest."""
+    return tcp_user_timeout_with(
+        milliseconds,
+        system_default=wire.TcpUserTimeoutConfigSystemDefault,
+        after=wire.TcpUserTimeoutConfigAfter,
+    )
 
 
 def _task_limit(setting: TaskLimit | NoTaskLimit) -> wire.TaskLimit:
