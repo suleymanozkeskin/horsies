@@ -397,7 +397,7 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
     },
 ];
 
-const CORE_HANDLE_METHODS: [StubFunction; 30] = [
+const CORE_HANDLE_METHODS: [StubFunction; 31] = [
     StubFunction {
         name: "close",
         parameters: &[],
