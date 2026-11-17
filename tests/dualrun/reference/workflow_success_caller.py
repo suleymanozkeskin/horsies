@@ -23,7 +23,6 @@ from horsies.core.lifecycle.outcomes import (
     TaskAbsent,
 )
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.finalize import (
     FinalizeMixin,
     _NodeFinishOwed,
@@ -39,7 +38,6 @@ async def finish_workflow_success(
     self: FinalizeMixin,
     completion: CompleteLockedTask,
     *,
-    claim: DispatchClaim,
     child: _Phase1Input,
 ) -> Result[_NodeFinishOwed | None, _FinalizeError]:
     """Phase 1 of a workflow task's success: one statement in autocommit on
@@ -47,7 +45,7 @@ async def finish_workflow_success(
     try:
         outcome = await finish_on_engine(
             self.sf,
-            success_for(completion, claimed_at=claim.claimed_at),
+            success_for(completion),
         )
     except Exception as exc:
         return Err(

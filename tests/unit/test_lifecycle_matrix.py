@@ -192,12 +192,9 @@ class TestDeclaredGuardsMatchTheStatements:
                 # Deliberately generation-free: the deadline guard makes the
                 # outcome correct for whichever generation holds the row.
                 assert 'p_claimed_at' not in sql, row.writer_id
-            case Fence.PRIOR_LOCKED_SELECT:
-                assert _WORKER_FENCE_RE.search(sql) is not None, row.writer_id
-                assert 'FOR UPDATE' in sql, row.writer_id
-                assert _GENERATION_FENCE_RE.search(sql) is not None, row.writer_id
             case Fence.WORKER_AND_GENERATION:
                 assert _WORKER_FENCE_RE.search(sql) is not None, row.writer_id
+                assert 'FOR UPDATE' in sql, row.writer_id
                 assert _GENERATION_FENCE_RE.search(sql) is not None, row.writer_id
             case Fence.WORKER_AND_GENERATION_PAIRWISE:
                 assert _WORKER_FENCE_RE.search(sql) is not None, row.writer_id
