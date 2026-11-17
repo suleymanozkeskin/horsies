@@ -2248,8 +2248,8 @@ fn body_json(response: &ResponseParts) -> serde_json::Value {
 /// `can_act` on `/api/meta` and on the action routes, only `can_view` on an
 /// action route while actions are disabled, and none on the page, its
 /// assets and every other path.
-#[test]
-fn the_handler_asks_the_verdicts_of_the_python_routes() {
+#[tokio::test]
+async fn the_handler_asks_the_verdicts_of_the_python_routes() {
     let handler = granted_handler(true);
     let id = Uuid::nil();
     for (method, path, need) in [
@@ -2559,8 +2559,8 @@ async fn a_body_over_the_bound_is_refused_after_the_verdicts() {
 }
 
 /// The free `route_access` is the handler's answer for the same switch.
-#[test]
-fn route_access_follows_the_actions_switch() {
+#[tokio::test]
+async fn route_access_follows_the_actions_switch() {
     let path = format!("/api/workflows/{}/resume", Uuid::nil());
     assert_eq!(
         super::handler::route_access(true, &Method::POST, &path),
