@@ -116,6 +116,13 @@ impl BrokerConnection {
         self.handle.schema_mode()
     }
 
+    /// The rerun-input posture of a send that does not choose one: the
+    /// manifest's `retain_rerun_input_default`, which the handle's broker is
+    /// built with. Starts nothing.
+    pub fn retain_rerun_input_default(&self) -> bool {
+        self.handle.manifest().send.retain_rerun_input_default
+    }
+
     /// The manifest of the handle.
     fn manifest(&self) -> &ProducerManifest {
         self.handle.manifest()
