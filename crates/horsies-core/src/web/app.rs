@@ -64,7 +64,16 @@ pub(crate) struct WebState {
     pub payload: PayloadPolicy,
     pub retention: RetentionConfig,
     pub heartbeat: std::time::Duration,
+    /// The version that `/api/meta` reports: the package version of the
+    /// client that serves the app.
+    pub client_version: String,
 }
+
+/// The mount path of a request that the framework-neutral handler serves:
+/// the base path that its host framework gave. When present, it is the base
+/// path of the page and of `/api/meta` in place of axum's nested path.
+#[derive(Debug, Clone)]
+pub(crate) struct MountPath(pub(crate) String);
 
 /// Build a monitoring router for an already connected broker.
 ///
@@ -97,6 +106,7 @@ where
         payload: app.config().payload.clone(),
         retention: app.config().retention.clone(),
         heartbeat: HEARTBEAT,
+        client_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
     build_router(state)
 }
@@ -181,6 +191,9 @@ fn forbidden(detail: &str) -> Response {
 }
 
 fn base_path(request: &Request<Body>, api_route: bool) -> String {
+    if let Some(MountPath(mount)) = request.extensions().get::<MountPath>() {
+        return normalize_base_path(mount);
+    }
     let nested = request
         .extensions()
         .get::<NestedPath>()
@@ -209,7 +222,7 @@ async fn read_meta(State(state): State<WebState>, request: Request) -> Response 
         }
     };
     Json(MetaResponse {
-        horsies_version: env!("CARGO_PKG_VERSION").to_owned(),
+        horsies_version: state.client_version.clone(),
         base_path,
         actions_enabled: state.actions_enabled && schema.compatible(),
         can_act,
