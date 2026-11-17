@@ -22,11 +22,9 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.boot_failure import ThreadStartRefused, ThreadStartRefusedError
 from horsies.core.types.result import Err, Ok
 from horsies.core.models.worker_profile import ResolvedPool
-from horsies.core.worker.child_protocol import (
-    InitFrame,
-    SharedAsyncChild,
-    boot_failed_frame,
-)
+from horsies import _core as core
+from horsies.core.worker.child_frames import boot_failed_frame
+from tests.fixtures.core_frames import init_frame, shared_async_kind
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.worker import child_runner, shared_runner
 from horsies.core.worker.child_runner import (
@@ -42,26 +40,9 @@ _SEAT_POOL = ResolvedPool(min_size=0, max_size=1, check=False)
 """A pool that opens with no connection."""
 
 
-def _seat_init() -> InitFrame:
-    """The init frame of a shared async child whose pool opens with no
-    connection."""
-    return InitFrame(
-        app_locator='unused',
-        imports=(),
-        sys_path_roots=(),
-        parent_sys_path=(),
-        parent_argv=('pytest',),
-        loglevel=30,
-        database_url='postgresql://user:pass@localhost/db',
-        connect_kwargs={},
-        process_name='test-child',
-        child_kind=SharedAsyncChild(
-            seats=1,
-            pool=_SEAT_POOL,
-            executor_threads=2,
-            task_send_pool=2,
-        ),
-    )
+def _seat_init() -> core.InitFrame:
+    """The init frame of a shared async child."""
+    return init_frame(child_kind=shared_async_kind(seats=1))
 
 
 def _make_app() -> Horsies:
@@ -437,7 +418,8 @@ class TestRunSharedAsyncHooks:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The start opens the async pool of the child with the bounds and
-        the check of the pool that the parent sent for its kind."""
+        the check of the pool that the parent sent for its kind, on the URL
+        and the connection settings of the app's broker config."""
         monkeypatch.setattr(shared_runner, 'get_current_app', _make_app)
         opened: list[dict[str, object]] = []
 
@@ -456,7 +438,7 @@ class TestRunSharedAsyncHooks:
         assert opened == [
             {
                 'database_url': 'postgresql://user:pass@localhost/db',
-                'connect_kwargs': {},
+                'connect_kwargs': _make_app().config.broker.pooled_connect_args,
                 'min_size': 2,
                 'max_size': 7,
                 'check_on_checkout': False,

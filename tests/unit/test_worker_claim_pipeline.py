@@ -270,7 +270,6 @@ def _start(handle: Any, start_check: Any = StartAllowed) -> Any:
         return _confirm_ownership_and_set_running(
             TASK_ID,
             'worker-A',
-            is_workflow_task=False,
             claimed_at=CLAIMED_AT,
             orphan_self_heal=True,
             start_check=start_check,

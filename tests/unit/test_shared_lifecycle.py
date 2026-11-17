@@ -29,6 +29,7 @@ import pytest
 import horsies._core as core
 from horsies.core.models.tasks import OutcomeCode
 from horsies.core.worker import shared_lifecycle, slots, thread_runner
+from horsies.core.worker.run_return import StopReason, StoppedBeforeRunning
 from horsies.core.worker.child_pool import (
     CHILD_POOL_CONNECTION_WAIT_S,
     SHARED_POOL_CONNECTION_WAIT_S,
@@ -208,7 +209,6 @@ class _HangingHandle(_Handle):
 def _confirm(
     handle: Any,
     *,
-    is_workflow_task: bool = False,
     orphan_self_heal: bool = True,
 ) -> Any:
     with patch.object(shared_lifecycle, '_get_child_core_handle', return_value=handle):
@@ -216,7 +216,6 @@ def _confirm(
             shared_lifecycle.confirm_until_not_resumed(
                 TASK_ID,
                 'worker-1',
-                is_workflow_task,
                 CLAIMED_AT,
                 orphan_self_heal=orphan_self_heal,
             ),
@@ -248,7 +247,7 @@ class TestSetRunning:
         writes the node in the same statement."""
         handle = _Handle(starts=[_STARTED])
 
-        assert _confirm(handle, is_workflow_task=True) is None
+        assert _confirm(handle) is None
 
         assert handle.names() == ['start_attempt_async']
 
@@ -263,13 +262,13 @@ class TestSetRunning:
             ],
         )
 
-        assert _confirm(handle) == (False, '', 'OWNERSHIP_UNCONFIRMED')
+        assert _confirm(handle) == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
     def test_a_core_that_cannot_run_the_call_is_ownership_unconfirmed(self) -> None:
         handle = MagicMock()
         handle.start_attempt_async.side_effect = core.TooManyPendingCalls('the queue is full')
 
-        assert _confirm(handle) == (False, '', 'OWNERSHIP_UNCONFIRMED')
+        assert _confirm(handle) == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
     def test_a_record_outside_the_catalog_is_a_defect(self) -> None:
         with pytest.raises(AssertionError):
@@ -283,7 +282,6 @@ class TestSetRunning:
                 shared_lifecycle.confirm_until_not_resumed(
                     TASK_ID,
                     'worker-1',
-                    False,
                     CLAIMED_AT,
                     orphan_self_heal=True,
                 ),
@@ -319,7 +317,6 @@ class TestSetRunning:
                 shared_lifecycle.confirm_until_not_resumed(
                     TASK_ID,
                     'worker-1',
-                    False,
                     CLAIMED_AT,
                     orphan_self_heal=True,
                 ),
@@ -330,7 +327,7 @@ class TestSetRunning:
         with patch.object(shared_lifecycle, '_get_child_core_handle', return_value=handle):
             result, elapsed_s = asyncio.run(run())
 
-        assert result == (False, '', 'OWNERSHIP_UNCONFIRMED')
+        assert result == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
         assert elapsed_s < 1.0
         assert 'did not finish within' in caplog.text
 
@@ -396,7 +393,7 @@ class TestMissedStart:
 
         result = _confirm(handle)
 
-        assert result == (False, '', OutcomeCode.TASK_EXPIRED.value)
+        assert result == StoppedBeforeRunning('TASK_EXPIRED')
         name, task_id, arguments = handle.calls[1]
         assert (name, task_id, _attempt_elapsed_ms(arguments)) == (
             'expire_owned_claim_async',
@@ -417,7 +414,7 @@ class TestMissedStart:
             ],
         )
 
-        assert _confirm(handle) == (False, '', 'CLAIM_LOST')
+        assert _confirm(handle) == StoppedBeforeRunning('CLAIM_LOST')
 
     @pytest.mark.parametrize('reason', ['NOT_HELD', 'LEASE_EXPIRED'])
     def test_a_claim_that_is_not_held_or_expired_is_lost_with_no_write(
@@ -425,7 +422,7 @@ class TestMissedStart:
     ) -> None:
         handle = _Handle(starts=[_missed(reason)])
 
-        assert _confirm(handle) == (False, '', 'CLAIM_LOST')
+        assert _confirm(handle) == StoppedBeforeRunning('CLAIM_LOST')
         assert handle.names() == ['start_attempt_async']
 
     def test_a_paused_workflow_stops_the_task_in_one_call(self) -> None:
@@ -436,9 +433,9 @@ class TestMissedStart:
             stops=[_stopped('ABANDONED', 'APPLIED')],
         )
 
-        result = _confirm(handle, is_workflow_task=True)
+        result = _confirm(handle)
 
-        assert result == (False, '', 'WORKFLOW_STOPPED')
+        assert result == StoppedBeforeRunning('WORKFLOW_STOPPED')
         assert handle.names() == [
             'start_attempt_async',
             'stop_workflow_task_before_start_async',
@@ -450,9 +447,9 @@ class TestMissedStart:
             stops=[_stopped('CANCELLED', 'APPLIED')],
         )
 
-        result = _confirm(handle, is_workflow_task=True)
+        result = _confirm(handle)
 
-        assert result == (False, '', 'WORKFLOW_STOPPED')
+        assert result == StoppedBeforeRunning('WORKFLOW_STOPPED')
         assert _attempt_elapsed_ms(handle.calls[1][2]) == {
             'worker_id': 'worker-1',
             'claimed_at': CLAIMED_AT,
@@ -462,7 +459,7 @@ class TestMissedStart:
     @pytest.mark.parametrize(
         ('orphan_self_heal', 'outcome', 'move_outcome', 'reason'),
         [
-            (False, 'NODE_NOT_LINKED', None, 'WORKFLOW_CHECK_FAILED'),
+            (False, 'NODE_NOT_LINKED', None, 'NODE_NOT_LINKED'),
             (True, 'ORPHAN_CANCELLED', 'APPLIED', 'ORPHAN_CANCELLED'),
         ],
     )
@@ -471,16 +468,16 @@ class TestMissedStart:
         orphan_self_heal: bool,
         outcome: str,
         move_outcome: str | None,
-        reason: str,
+        reason: StopReason,
     ) -> None:
         handle = _Handle(
             starts=[_missed('NODE_NOT_LINKED')],
             stops=[_stopped(outcome, move_outcome)],
         )
 
-        result = _confirm(handle, is_workflow_task=True, orphan_self_heal=orphan_self_heal)
+        result = _confirm(handle, orphan_self_heal=orphan_self_heal)
 
-        assert result == (False, '', reason)
+        assert result == StoppedBeforeRunning(reason)
         assert handle.calls[1][2]['orphan_self_heal'] is orphan_self_heal
 
     def test_a_resume_before_the_stop_starts_the_task_on_the_next_attempt(
@@ -491,7 +488,7 @@ class TestMissedStart:
             stops=[_record(core.ResumedBeforeStart)],
         )
 
-        result = _confirm(handle, is_workflow_task=True)
+        result = _confirm(handle)
 
         assert result is None
         assert handle.names() == [
@@ -507,9 +504,9 @@ class TestMissedStart:
             stops=[resumed, resumed],
         )
 
-        result = _confirm(handle, is_workflow_task=True)
+        result = _confirm(handle)
 
-        assert result == (False, '', 'OWNERSHIP_UNCONFIRMED')
+        assert result == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
     def test_a_failed_stop_is_ownership_unconfirmed(self) -> None:
         handle = _Handle(
@@ -519,7 +516,7 @@ class TestMissedStart:
             ],
         )
 
-        assert _confirm(handle, is_workflow_task=True) == (False, '', 'OWNERSHIP_UNCONFIRMED')
+        assert _confirm(handle) == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
 
 class TestFinalizingMarker:

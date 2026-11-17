@@ -24,7 +24,7 @@ from horsies.core.models.boot_failure import (
 )
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.loop_runner import in_running_event_loop
-from horsies.core.worker.child_protocol import (
+from horsies.core.worker.child_frames import (
     MAX_LEFTOVER_NAME_CHARS,
     MAX_LEFTOVER_TASK_NAMES,
     LeftWorkEnd,

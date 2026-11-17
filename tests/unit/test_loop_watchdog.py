@@ -14,10 +14,12 @@ import ctypes
 import threading
 import time
 
+import uuid
+
 import pytest
 
 from horsies.core.worker import loop_watchdog
-from horsies.core.worker.child_protocol import (
+from horsies.core.worker.child_frames import (
     BlockingRun,
     CulpritUnknown,
     LoopBlockedFrame,
@@ -27,6 +29,11 @@ from horsies.core.worker.loop_watchdog import LoopWatchdog
 from horsies.core.worker.run_mark import RUN_MARK, RunMark
 
 pytestmark = [pytest.mark.unit]
+
+
+def _task_id(dispatch: int) -> uuid.UUID:
+    """The task id of the run with ``dispatch``."""
+    return uuid.UUID(int=dispatch)
 
 LIMIT_MS = 300
 WAIT_S = 5.0
@@ -74,13 +81,13 @@ def _watch(blocker_context: contextvars.Context | None) -> list[LoopBlockedFrame
 
 def test_a_blocked_loop_is_reported_with_the_run_that_holds_it() -> None:
     context = contextvars.copy_context()
-    _ = context.run(RUN_MARK.set, RunMark(dispatch=3, task_id='task-3'))
+    _ = context.run(RUN_MARK.set, RunMark(dispatch=3, task_id=_task_id(3)))
 
     reports = _watch(context)
 
     assert len(reports) == 1
     report = reports[0]
-    assert report.culprit == BlockingRun(dispatch=3, task_id='task-3')
+    assert report.culprit == BlockingRun(dispatch=3, task_id=_task_id(3))
     assert report.blocked_ms >= LIMIT_MS
     assert 'test_loop_watchdog.py' in report.where
     assert '_block_the_loop' in report.where
@@ -130,7 +137,7 @@ def _busy(seconds: float) -> None:
 def _marked(dispatch: int) -> contextvars.Context:
     context = contextvars.copy_context()
     _ = context.run(
-        RUN_MARK.set, RunMark(dispatch=dispatch, task_id=f'task-{dispatch}')
+        RUN_MARK.set, RunMark(dispatch=dispatch, task_id=_task_id(dispatch))
     )
     return context
 
@@ -195,7 +202,7 @@ def test_a_call_that_holds_the_gil_and_returns_names_its_run() -> None:
     asyncio.run(scenario())
 
     assert [report.culprit for report in reports] == [
-        BlockingRun(dispatch=7, task_id='task-7'),
+        BlockingRun(dispatch=7, task_id=_task_id(7)),
     ]
     assert reports[0].blocked_ms >= 1_000
 
@@ -231,7 +238,7 @@ def test_samples_of_an_earlier_turn_do_not_count(
     asyncio.run(scenario())
 
     assert [report.culprit for report in reports] == [
-        BlockingRun(dispatch=2, task_id='task-2'),
+        BlockingRun(dispatch=2, task_id=_task_id(2)),
     ]
 
 
@@ -251,7 +258,7 @@ class TestTheSamplesOfABlock:
             await task
             return loop_watchdog.culprit_of(samples)
 
-        assert asyncio.run(scenario()) == BlockingRun(dispatch=4, task_id='task-4')
+        assert asyncio.run(scenario()) == BlockingRun(dispatch=4, task_id=_task_id(4))
 
     def test_two_tasks_name_no_culprit(self) -> None:
         async def scenario() -> LoopCulprit:
