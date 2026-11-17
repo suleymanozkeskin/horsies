@@ -508,8 +508,13 @@ unless it starts with "Added".
 - **`check` and `check_live` return `Result<CheckPassed, CheckReport>`.**
   The report holds the refusals of the first phase that refused: the task
   options of a task registered by hand, then the schedules (not for a
-  worker). `check_live` adds a connect with one `SELECT 1` and the
-  connection fit of each worker profile. `validate_schedules` and
+  worker). `check_live` adds the core's connectivity check, the rule of
+  both clients (`SELECT 1` on `database_url`, then on
+  `session_database_url` when it differs, then, in PgBouncer transaction
+  mode, a LISTEN probe on the session URL that must receive a NOTIFY within
+  2 s), and the connection fit of each worker profile. A refused step is
+  Python's `HRS-203`: "broker connectivity check failed", or "broker
+  listener capability check failed" for the probe. `validate_schedules` and
   `validate_task_runtime_policies` are part of `check`.
 - **The workflow DSL is the client's, and it builds a spec as data.**
   `WorkflowSpecBuilder`, `WorkflowSpec`, `TaskNode`, `SubWorkflowNode`,
