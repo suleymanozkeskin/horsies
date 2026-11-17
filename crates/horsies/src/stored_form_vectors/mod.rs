@@ -27,8 +27,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::StoredDateTime;
+
 /// The text of the vector file `name` of the core's vector folder.
-fn vector_file(name: &str) -> String {
+pub(crate) fn vector_file(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../horsies-core/tests/fixtures/stored_forms")
         .join(name);
@@ -39,14 +41,14 @@ fn vector_file(name: &str) -> String {
 /// The text that the client writes today in place of Python's, and the name
 /// of the finding in the README.
 #[derive(Debug, Clone, Deserialize)]
-struct RustDrift {
+pub(crate) struct RustDrift {
     text: String,
     finding: String,
 }
 
 /// What the client does with a vector.
 #[derive(Debug, Clone)]
-enum RustCase {
+pub(crate) enum RustCase {
     /// It writes Python's text.
     Same,
     /// It writes `RustDrift::text`.
@@ -58,7 +60,7 @@ enum RustCase {
 impl RustCase {
     /// The case of a vector row from its two optional notes. A row with both
     /// is a defect of the file.
-    fn of(name: &str, cannot_express: Option<String>, drift: Option<RustDrift>) -> Self {
+    pub(crate) fn of(name: &str, cannot_express: Option<String>, drift: Option<RustDrift>) -> Self {
         match (cannot_express, drift) {
             (None, None) => Self::Same,
             (None, Some(drift)) => {
@@ -81,7 +83,7 @@ impl RustCase {
 
     /// The text that the client writes for a vector whose Python text is
     /// `python`; `None` when it cannot express the value.
-    fn expected_text<'a>(&'a self, python: &'a str) -> Option<&'a str> {
+    pub(crate) fn expected_text<'a>(&'a self, python: &'a str) -> Option<&'a str> {
         match self {
             Self::Same => Some(python),
             Self::Drift(drift) => Some(drift.text.as_str()),
@@ -196,9 +198,13 @@ fn check_typed(name: &str, type_name: &str, notation: &Value, check: &mut impl T
         "u128" => check.check(parsed::<u128>(name, notation)),
         "f64" => check.check(parsed::<f64>(name, notation)),
         "str" => check.check(notation_text(name, notation).to_owned()),
-        "datetime_utc" => check.check(offset_datetime(name, notation).with_timezone(&Utc)),
-        "datetime_offset" => check.check(offset_datetime(name, notation)),
-        "datetime_naive" => check.check(naive_datetime(name, notation)),
+        // chrono's own serde form writes a whole millisecond with 3 digits;
+        // `StoredDateTime` writes Python's text.
+        "datetime_utc" => check.check(StoredDateTime(
+            offset_datetime(name, notation).with_timezone(&Utc),
+        )),
+        "datetime_offset" => check.check(StoredDateTime(offset_datetime(name, notation))),
+        "datetime_naive" => check.check(StoredDateTime(naive_datetime(name, notation))),
         "date" => check.check(parsed::<NaiveDate>(name, notation)),
         "uuid" => check.check(parsed::<Uuid>(name, notation)),
         "str_enum" => check.check(color(name, notation)),

@@ -1,12 +1,11 @@
 //! The task options vectors (`task_options.json`) through the core.
 //!
-//! The core writes the options text of a task (`TaskOptions::stored_options_text`)
-//! and of a workflow node with its deadline merged
-//! (`merge_good_until_into_options`). It reads every text at enqueue
+//! The core writes the options text of a task (`TaskOptions::stored_options_text`),
+//! of a send with its deadline (`TaskOptions::stored_send_options_text`, which
+//! the Rust client's send calls) and of a workflow node with its deadline
+//! merged (`merge_good_until_into_options`). It reads every text at enqueue
 //! (`prepare_enqueue_facts`: the execution class; `stored_max_retries`) and
-//! at dispatch (`read_stored_options`: the timeout). A send's options with
-//! its deadline are written by a client: the Rust client's text is a
-//! `rust_drift` of the vector, tested by the client.
+//! at dispatch (`read_stored_options`: the timeout).
 
 use std::time::Duration;
 
@@ -132,12 +131,18 @@ fn deadline(vector: &OptionsVector) -> DateTime<Utc> {
 }
 
 #[test]
-fn each_task_and_node_options_set_encodes_to_its_text() {
+fn each_task_send_and_node_options_set_encodes_to_its_text() {
     for vector in form().vectors {
         let name = vector.name.as_str();
-        let task_text = core_options(&vector).stored_options_text();
+        let options = core_options(&vector);
+        let task_text = options.stored_options_text();
         match vector.kind.as_str() {
             "task" => assert_eq!(task_text, vector.text, "{name}"),
+            "send" => assert_eq!(
+                options.stored_send_options_text(deadline(&vector)),
+                vector.text,
+                "{name}"
+            ),
             "node" => assert_eq!(
                 merge_good_until_into_options(
                     0,
@@ -149,7 +154,6 @@ fn each_task_and_node_options_set_encodes_to_its_text() {
                 Some(vector.text.clone()),
                 "{name}"
             ),
-            "send" => {}
             other => panic!("{name}: unknown kind {other}"),
         }
     }

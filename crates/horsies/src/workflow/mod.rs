@@ -43,6 +43,9 @@ pub(crate) mod tests_support {
     }
 }
 pub(crate) use start::{new_workflow_id, WorkflowStarter};
+// The workflow spec data vectors of the stored forms, through the DSL.
+#[cfg(test)]
+mod stored_form_vector_tests;
 // The stored options text of a node with its deadline, for the stored-form
 // vectors (`crate::stored_form_vectors::task_options`).
 #[cfg(test)]

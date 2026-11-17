@@ -28,6 +28,7 @@ encoder, and the Python tests check that it still does.
 | `result_envelope.json` | Result envelope (`{"__h_task_result__": true, "ok": ..., "err": ...}`) |
 | `error_data.json` | Library errors with `data`, as stored |
 | `task_options.json` | Task options text (`task_options` column) |
+| `workflow_spec_data.json` | Workflow spec data, the text a client sends the core at a workflow start |
 
 ## Rows
 
@@ -53,6 +54,18 @@ A vector file holds no lone UTF-16 surrogate: the Rust readers refuse the file
 itself, and a Rust `String` cannot hold one. Python refuses one at its encoder
 (`tests/unit/test_typed_codec.py`).
 
+Every form that holds user text has a vector with text outside ASCII, which
+every writer stores as the characters, not as `\u` escapes:
+
+| Form | Vectors |
+|---|---|
+| Task input | `str_unicode` |
+| Result envelope | `ok_str_unicode`, `err_user_code_with_data` |
+| Error data | `result_deserialization_error_non_ascii_task_name` (the message), `workflow_output_skipped_non_ascii_task_name` (the data) |
+
+The task options hold no user text: an error code of `auto_retry_for` is
+UPPER_SNAKE_CASE ASCII in both clients.
+
 ## Value notation
 
 A typed value is `{"type": <name>, "value": <notation>}` (a task input
@@ -66,9 +79,9 @@ file rounds one.
 | `big_int` | decimal text | `int` | none (above `u128::MAX`) |
 | `f64` | float text, `nan`, `inf`, `-inf` | `float` | `f64` |
 | `str` | JSON string | `str` | `String` |
-| `datetime_utc` | ISO 8601 text | aware `datetime` | `DateTime<Utc>` |
-| `datetime_offset` | ISO 8601 text | aware `datetime` | `DateTime<FixedOffset>` |
-| `datetime_naive` | ISO 8601 text | naive `datetime` | `NaiveDateTime` |
+| `datetime_utc` | ISO 8601 text | aware `datetime` | `StoredDateTime<DateTime<Utc>>` |
+| `datetime_offset` | ISO 8601 text | aware `datetime` | `StoredDateTime<DateTime<FixedOffset>>` |
+| `datetime_naive` | ISO 8601 text | naive `datetime` | `StoredDateTime<NaiveDateTime>` |
 | `date` | ISO 8601 date | `date` | `NaiveDate` |
 | `uuid` | hyphenated text | `UUID` | `Uuid` |
 | `decimal` | decimal text | `Decimal` | none |
@@ -80,6 +93,12 @@ file rounds one.
 | `map_str_i64` | object of decimal texts, in order | `dict[str, int]` | `BTreeMap<String, i64>` (sorted keys only) |
 | `json` | the JSON value | `JsonValue` | `serde_json::Value` |
 | `record_order` | `{"id": <decimal>, "amount": <float>}` | `Order(BaseModel)` | `Order` struct, same field order |
+
+A date-time's Rust type is `horsies::StoredDateTime`
+(`crates/horsies/src/task/stored_datetime.rs`), which writes Python's
+fraction: 6 digits when the microsecond is not 0, else none. chrono's own
+serde form of `DateTime` and `NaiveDateTime` writes a whole millisecond with
+3 digits (`.500Z`); both clients read either text to the same value.
 
 ## Task input (`task_input.json`)
 
@@ -96,10 +115,13 @@ Encoders:
   then `dumps_json` (`python/horsies/core/codec/json_io.py:43`); the send path
   is `python/horsies/core/task_decorator.py:2426-2432`.
 - Rust client: the `Input` struct of the task attribute
-  (`crates/horsies-macros/src/codegen.rs:482`, `input_struct`), encoded by
-  `encode_read_back` (`crates/horsies/src/task/body.rs:186`) through the core's
-  `to_json_bytes_strict` (`crates/horsies-core/src/core/codec/strict.rs:26`);
-  the send path is `crates/horsies/src/send/function.rs:343`.
+  (`crates/horsies-macros/src/codegen.rs`, `input_struct`), encoded by
+  `encode_send_input` (`crates/horsies/src/task/body.rs`): `{}` for a task
+  with no parameters (the input `()`), else `encode_read_back` through the
+  core's `to_json_bytes_strict` (`crates/horsies-core/src/core/codec/strict.rs`);
+  the send path is `crates/horsies/src/send/function.rs` (`encoded_input`). A
+  schedule without input stores `{}` (`schedule_input_text`,
+  `crates/horsies/src/config/scheduler_manifest.rs`).
 - Core: none. The send checks the text with the strict read rule
   (`crates/horsies-core/src/core/history/enqueue.rs:198`, `check_json_text` at
   `crates/horsies-core/src/core/codec/strict_read.rs:131`) and stores it as
@@ -185,8 +207,8 @@ test calls the writer itself.
 | `WORKER_CRASHED`, killed child | `task_id`, `worker_id` | `python/horsies/core/worker/dispatch.py:333-339` | `crates/horsies-core/src/worker/executor/slots/outcome.rs:212` (`killed_child_write`) |
 | `WORKER_CRASHED`, stale | `stale_threshold_ms`, `stale_threshold_seconds`, `worker_pid`, `worker_hostname`, `worker_id`, `started_at`, `detected_at` | `python/horsies/core/brokers/stale_running.py:178` (`crash_result_json`) | `crates/horsies-core/src/worker/recovery.rs:1450` (`stale_attempt_command`) |
 | `UPSTREAM_SKIPPED` | `dependency_index` | `python/horsies/core/workflows/engine.py:2496-2499` | `crates/horsies-core/src/workflow_engine/args_merge.rs:330`; SQL `horsies_task_error_envelope` |
-| `RESULT_DESERIALIZATION_ERROR`, dependency without a result | `dependency_index` | `python/horsies/core/workflows/engine.py:186-193` | `crates/horsies-core/src/workflow_engine/args_merge.rs:345` |
-| `WORKFLOW_OUTPUT_SKIPPED` | `workflow_id`, `output_node_id`, `output_task_index`, `output_task_name` | `python/horsies/core/workflows/engine.py:3398-3420` | SQL `horsies_workflow_output_error_data` (`crates/horsies-core/baseline/0005_workflow_functions.sql:1309`) |
+| `RESULT_DESERIALIZATION_ERROR`, dependency without a result (2 vectors: an ASCII and a non-ASCII task name in the message) | `dependency_index` | `python/horsies/core/workflows/engine.py:186-193` | `crates/horsies-core/src/workflow_engine/args_merge.rs:345` |
+| `WORKFLOW_OUTPUT_SKIPPED` (2 vectors: an ASCII and a non-ASCII `output_task_name`) | `workflow_id`, `output_node_id`, `output_task_index`, `output_task_name` | `python/horsies/core/workflows/engine.py:3398-3420` | SQL `horsies_workflow_output_error_data` (`crates/horsies-core/baseline/0005_workflow_functions.sql:1309`) |
 | `WORKFLOW_ENQUEUE_FAILED`, `args_from` conflict | `workflow_id`, `task_index` | `python/horsies/core/workflows/engine.py:545-551` | `crates/horsies-core/src/workflow_engine/args_merge.rs:111` (`node_error`); SQL |
 | `SUBWORKFLOW_DEPTH_LIMIT_REACHED` | `workflow_id`, `task_index` | `python/horsies/core/workflows/engine.py:1068-1078` | `crates/horsies-core/src/workflow_engine/start.rs:193`; SQL |
 | `SUBWORKFLOW_LOAD_FAILED` | `definition_key` | `python/horsies/core/workflows/engine.py:616-619` | `crates/horsies-core/src/workflow_engine/start_statement.rs:707` |
@@ -213,7 +235,8 @@ null>}`, in this order; the policy holds `max_retries`, `intervals`,
 `backoff_strategy`, `jitter`, `max_delay_seconds` (only when set) and
 `auto_retry_for`, codes by name. Every task stores the text, nulls included.
 A vector's `kind` is `task` (the options of a task), `send` (a send with a
-deadline: Python writes the deadline in `good_until`) or `node` (a workflow
+deadline: the task's text with the deadline in `good_until`, in
+`isoformat()`) or `node` (a workflow
 node: the task's text with the node's deadline merged as `good_until`, in
 `isoformat()`). `options` holds the stored facts (a `SHARED_ASYNC` task's
 grace as resolved at definition).
@@ -226,13 +249,15 @@ Encoders:
   `python/horsies/core/workflows/child_build.py:574` and
   `python/horsies/core/workflows/engine.py:464`.
 - Core: `TaskOptions::stored_options_text`
-  (`crates/horsies-core/src/core/task/options.rs:294`);
-  `merge_good_until_into_options` for a node
-  (`crates/horsies-core/src/workflow_engine/mod.rs:117`).
-- Rust client: its send stores `stored_options_text`
-  (`crates/horsies/src/send/function.rs:322`), with the deadline only in the
-  row's `good_until` column; a node merges its deadline in
-  `task_options_text` (`crates/horsies/src/workflow/spec_data.rs:168`).
+  (`crates/horsies-core/src/core/task/options.rs`); a send with a deadline,
+  `TaskOptions::stored_send_options_text`; `merge_good_until_into_options`
+  for a node (`crates/horsies-core/src/workflow_engine/mod.rs`).
+- Rust client: its send stores `send_options_text`
+  (`crates/horsies/src/send/function.rs`), the core's text with the
+  deadline in `good_until`, and the deadline also in the row's `good_until`
+  column; a node merges its deadline in
+  `task_options_text` (`crates/horsies/src/workflow/spec_data.rs`), written
+  with the core's `python_isoformat_utc`.
 
 Decoders:
 
@@ -242,6 +267,30 @@ Decoders:
   the execution class), `stored_max_retries`
   (`crates/horsies-core/src/worker/retry.rs:481`), `read_stored_options`
   (`:222`, the timeout and the policy at dispatch).
+
+## Workflow spec data (`workflow_spec_data.json`)
+
+The facts of a built spec that a client sends the core, as JSON text: the
+core stores its workflow row and node rows from it. A vector's `document` is
+the spec data; its `text` is Python's. Each object's members are in the order
+of the generated dataclasses (`kind` first in a tagged union). The vectors are
+ASCII: see the finding `spec-data-non-ascii-escapes`.
+
+- Python: `workflow_spec_data` and `workflow_spec_json`
+  (`python/horsies/core/workflows/spec_data.py:181`, `:199`), which call
+  `dump_workflow_spec_data` (`python/horsies/_catalog/workflow_spec.py:313`,
+  generated by `crates/horsies-codegen/src/manifest.rs:67`).
+- Core: reads only, `parse_workflow_spec_data`
+  (`crates/horsies-core/src/workflow_engine/spec_data.rs:282`).
+- Rust client: `spec_data_text` (`crates/horsies/src/workflow/spec_data.rs:49`),
+  read back by `client_spec` (`:36`).
+
+The Python test builds the dataclasses from each document; the core test
+reads each text into its spec and each refused text at its field path
+(`core_field_path`); the Rust client test builds the first three vectors with
+its DSL. The fourth (`args_from`, workflow context, encoded options, a
+sub-workflow node) is read by the core test; the Rust DSL writes those members
+with the same keys, in the same order.
 
 ## Findings
 
@@ -256,7 +305,9 @@ Differences that the vectors found. A fixed one names its PR; an open one is a
 | instants in stored data | error data, task options | the stale-crash `started_at` and `detected_at` and a node's merged `good_until` used `to_rfc3339()` (`.500`); Python's `isoformat()` writes `.500000` | fixed, #1623 |
 | result read of a big integer | result envelope | the core's result read parsed the envelope into a `serde_json::Map`: `2**64` came back as `1.8446744073709552e+19`, which Python's and the Rust client's typed reads refuse | fixed, #1617 |
 | options of a default task | task options | the core's encoder wrote no text for an isolated task with no policy, timeout or grace; Python stores the text with nulls | fixed, #1629 |
-| `send-deadline-in-options` | task options | a send with a deadline: Python writes it in the options' `good_until`; the Rust client writes `null` there (the deadline is in the row's column) | open |
-| `no-parameter-input` | task input | a task with no parameters: Python stores `{}`, the Rust client stores `null` (its input is `()`) | open |
-| `datetime-milliseconds` | task input, result, task options | chrono writes a fraction of whole milliseconds with 3 digits (`.500Z`); Python writes 6 (`.500000Z`). Microseconds and whole seconds agree. The Rust client's node deadline (`to_rfc3339`) too | open |
+| `send-deadline-in-options` | task options | a send with a deadline: Python writes it in the options' `good_until`; the Rust client wrote `null` there (the deadline was only in the row's column) | fixed: the client's send writes `TaskOptions::stored_send_options_text` |
+| `spec-data-queue-class-order` | workflow spec data | `queue_classes`: Python writes the queues in the order of the nodes; the Rust client wrote them sorted (`BTreeMap`). The core reads both | fixed: the client collects them in a `serde_json::Map`, in the order of the nodes that first name them |
+| `spec-data-non-ascii-escapes` | workflow spec data | Python's `dump_workflow_spec_data` keeps `json.dumps`' default `ensure_ascii=True` and writes `\u00dc` for `Ü`; every other Python stored-form encoder (`dumps_json`) and the Rust client write the character. The core reads both. Not pinned by a vector | open |
+| `no-parameter-input` | task input | a task with no parameters: Python stores `{}`, the Rust client stored `null` (its input is `()`) | fixed, the client's send stores `{}` |
+| `datetime-milliseconds` | task input, result, task options | chrono writes a fraction of whole milliseconds with 3 digits (`.500Z`); Python writes 6 (`.500000Z`). Microseconds and whole seconds agree. The Rust client's node deadline (`to_rfc3339`) too | fixed: `StoredDateTime` writes Python's text for a user value, and the node deadline uses `python_isoformat_utc`; chrono's own serde form is unchanged |
 | not expressible in Rust | task input, result | `big_int`, `decimal`, `bytes`, `int_enum`, a typed map in insertion order: the client depends on no type that writes Python's text | listed per row |

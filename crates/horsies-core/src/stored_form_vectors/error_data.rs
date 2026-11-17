@@ -117,19 +117,25 @@ fn the_engine_merge_errors_are_python_s_texts() {
         ),
         skipped.text
     );
-    let missing = vector("result_deserialization_error_dependency_without_result");
-    assert_eq!(
-        stored_text(
-            &missing,
-            missing_result_error(
-                input_i32(&missing, "dependency_index"),
-                Some(input_text(&missing, "node_id")),
-                input_text(&missing, "task_name"),
-                input_text(&missing, "status"),
-            )
-        ),
-        missing.text
-    );
+    for name in [
+        "result_deserialization_error_dependency_without_result",
+        "result_deserialization_error_non_ascii_task_name",
+    ] {
+        let missing = vector(name);
+        assert_eq!(
+            stored_text(
+                &missing,
+                missing_result_error(
+                    input_i32(&missing, "dependency_index"),
+                    Some(input_text(&missing, "node_id")),
+                    input_text(&missing, "task_name"),
+                    input_text(&missing, "status"),
+                )
+            ),
+            missing.text,
+            "{name}"
+        );
+    }
     let conflict = vector("workflow_enqueue_failed_args_from_conflict");
     let workflow_id = Uuid::parse_str(input_text(&conflict, "workflow_id")).expect("a UUID");
     let error = ArgsFromConflict {
@@ -146,7 +152,8 @@ fn the_engine_merge_errors_are_python_s_texts() {
 /// The SQL writer of the engine's errors (`horsies_task_error_envelope`, and
 /// `horsies_workflow_output_error_data` for the data of
 /// `WORKFLOW_OUTPUT_SKIPPED`), given the code, the message and the data text
-/// of each vector.
+/// of each vector. The non-ASCII vectors pin that Postgres writes the
+/// characters as Python does, not as `\u` escapes.
 #[tokio::test]
 #[serial]
 async fn the_sql_writer_builds_python_s_engine_errors() {
@@ -154,7 +161,9 @@ async fn the_sql_writer_builds_python_s_engine_errors() {
     for name in [
         "upstream_skipped",
         "result_deserialization_error_dependency_without_result",
+        "result_deserialization_error_non_ascii_task_name",
         "workflow_output_skipped",
+        "workflow_output_skipped_non_ascii_task_name",
         "workflow_enqueue_failed_args_from_conflict",
         "subworkflow_depth_limit_reached",
         "workflow_recovery_limit_reached",
@@ -177,18 +186,24 @@ async fn the_sql_writer_builds_python_s_engine_errors() {
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(written, vector.text, "{name}");
     }
-    let output = vector("workflow_output_skipped");
-    let data: String =
-        sqlx::query_scalar("SELECT horsies_workflow_output_error_data($1, $2, $3, $4)")
-            .bind(Uuid::parse_str(input_text(&output, "workflow_id")).expect("a UUID"))
-            .bind(input_text(&output, "node_id"))
-            .bind(input_i32(&output, "task_index"))
-            .bind(input_text(&output, "task_name"))
-            .fetch_one(&pool)
-            .await
-            .expect("the output error data");
-    assert_eq!(
-        data,
-        to_json_string(&output.error["data"]).expect("the data encodes")
-    );
+    for name in [
+        "workflow_output_skipped",
+        "workflow_output_skipped_non_ascii_task_name",
+    ] {
+        let output = vector(name);
+        let data: String =
+            sqlx::query_scalar("SELECT horsies_workflow_output_error_data($1, $2, $3, $4)")
+                .bind(Uuid::parse_str(input_text(&output, "workflow_id")).expect("a UUID"))
+                .bind(input_text(&output, "node_id"))
+                .bind(input_i32(&output, "task_index"))
+                .bind(input_text(&output, "task_name"))
+                .fetch_one(&pool)
+                .await
+                .expect("the output error data");
+        assert_eq!(
+            data,
+            to_json_string(&output.error["data"]).expect("the data encodes"),
+            "{name}"
+        );
+    }
 }

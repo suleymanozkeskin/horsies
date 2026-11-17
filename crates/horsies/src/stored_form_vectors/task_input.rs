@@ -1,7 +1,8 @@
 //! The task input vectors (`task_input.json`) through the client's encoder
 //! and decoder.
 //!
-//! The send encodes the input with `encode_read_back`; the child reads it with
+//! The send encodes the input with `encode_send_input` (`encode_read_back`,
+//! and `{}` for a task with no parameters); the child reads it with
 //! `decode_input` (`decode_unit_input` for a task with no parameters). The
 //! input of a task is the struct that the task attribute generates: one field
 //! per parameter, keyed by its name, unknown keys refused. A one-parameter
@@ -20,7 +21,7 @@ use super::{
     check_typed, notation_text, order, parsed, vector_file, Color, Order, RustCase, RustDrift,
     TypedCheck,
 };
-use crate::task::body::{decode_input, decode_unit_input, encode_read_back};
+use crate::task::body::{decode_input, decode_unit_input, encode_read_back, encode_send_input};
 use crate::TaskError;
 
 #[derive(Deserialize)]
@@ -122,6 +123,13 @@ fn written<T: Serialize + DeserializeOwned>(name: &str, value: &T) -> String {
     String::from_utf8(bytes).expect("the encoder writes UTF-8")
 }
 
+/// The text that a send of a task of the attribute stores for `input`.
+fn sent<A: Serialize + DeserializeOwned + 'static>(name: &str, input: &A) -> String {
+    let bytes = encode_send_input(input)
+        .unwrap_or_else(|cause| panic!("{name}: the send refused the input: {cause}"));
+    String::from_utf8(bytes).expect("the encoder writes UTF-8")
+}
+
 /// The client's read of Python's text.
 fn read<T: DeserializeOwned>(name: &str, text: &str) -> T {
     decode_input::<T>(text.as_bytes())
@@ -183,7 +191,7 @@ fn check_attribute_task(vector: &Vector) {
                 crate::TaskFunction<(), (), Infallible>,
                 crate::HorsiesError,
             > = no_parameters::register;
-            assert_eq!(written(name, &()), expected(vector), "{name}");
+            assert_eq!(sent(name, &()), expected(vector), "{name}");
             decode_unit_input(vector.text.as_bytes())
                 .unwrap_or_else(|refused| panic!("{name}: refused Python's text: {refused}"));
         }
@@ -192,7 +200,7 @@ fn check_attribute_task(vector: &Vector) {
             let input = record_parameter::Input {
                 order: value.clone(),
             };
-            assert_eq!(written(name, &input), expected(vector), "{name}");
+            assert_eq!(sent(name, &input), expected(vector), "{name}");
             let record_parameter::Input { order: read_back } =
                 read::<record_parameter::Input>(name, &vector.text);
             assert_eq!(read_back, value, "{name}");
@@ -206,7 +214,7 @@ fn check_attribute_task(vector: &Vector) {
                 b: b_value,
                 a: a_value.clone(),
             };
-            assert_eq!(written(name, &input), expected(vector), "{name}");
+            assert_eq!(sent(name, &input), expected(vector), "{name}");
             let two_parameters::Input { b, a } = read::<two_parameters::Input>(name, &vector.text);
             assert_eq!((b, a), (b_value, a_value), "{name}");
         }

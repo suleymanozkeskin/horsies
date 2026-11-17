@@ -13,6 +13,8 @@
 //! `core/codec/validation_errors.py`). Its `data` holds `expected_type` and
 //! `validation_error`, the same text.
 
+use std::any::TypeId;
+
 use horsies_core::core::codec::{
     check_json_bytes, check_json_bytes_with, to_json_bytes_strict, TextRule,
 };
@@ -35,6 +37,10 @@ const UNNAMED_DECODE_FAILURE: &str = "the value does not fit the declared type";
 /// The text of an encode failure whose message may hold a value.
 const UNNAMED_ENCODE_FAILURE: &str =
     "the value does not encode as JSON (a Serialize impl refused it)";
+
+/// The stored input of a task with no parameters: no keyword arguments, as
+/// Python stores them and as a workflow node gives them.
+const NO_PARAMETERS_INPUT: &[u8] = b"{}";
 
 /// The stored form of a task error: the core's `TaskError`.
 pub type StoredTaskError = horsies_core::TaskError;
@@ -101,10 +107,10 @@ fn unread_member(input: &[u8], encoded: &[u8]) -> Option<String> {
         .map(|(key, _)| key)
 }
 
-/// The input of a task with no parameters: `null`, the input that a send
-/// of `()` stores, or `{}`, the input of a workflow node (a node's input is
-/// an object, and the child removes the engine members from it before the
-/// decode).
+/// The input of a task with no parameters: `{}`, the input that a send of
+/// `()` and a workflow node store (a node's input is an object, and the
+/// child removes the engine members from it before the decode), or `null`,
+/// which the core also takes as a task input at enqueue.
 ///
 /// Pure. Fails with `WORKER_SERIALIZATION_ERROR` naming `()` when `input`
 /// breaks the strict read rule of a stored text, and for any other value.
@@ -210,6 +216,23 @@ where
              (a field that serde writes and does not read, or reads in another form)"
                 .to_owned(),
         ),
+    }
+}
+
+/// The stored text of the input of a send (Python
+/// `encode_kwargs_read_back`): `{}` for a task with no parameters (the input
+/// type `()`), as Python stores no keyword arguments; else
+/// [`encode_read_back`] of `input`. Pure.
+///
+/// Errors: the value-free cause of [`encode_read_back`]. The input `()`
+/// does not fail.
+pub(crate) fn encode_send_input<A>(input: &A) -> Result<Vec<u8>, String>
+where
+    A: Serialize + DeserializeOwned + 'static,
+{
+    match TypeId::of::<A>() == TypeId::of::<()>() {
+        true => Ok(NO_PARAMETERS_INPUT.to_vec()),
+        false => encode_read_back(input),
     }
 }
 
@@ -453,8 +476,8 @@ mod tests {
         assert!(map.is_empty());
     }
 
-    /// A task with no parameters reads `null` (a send) and `{}` (a workflow
-    /// node); any other input is refused with its kind and no value.
+    /// A task with no parameters reads `{}` (a send, a workflow node) and
+    /// `null`; any other input is refused with its kind and no value.
     #[test]
     fn a_unit_input_reads_null_and_an_empty_object() {
         decode_unit_input(b"null").unwrap();
@@ -473,6 +496,26 @@ mod tests {
         assert_serialization_error(&number);
         assert!(!number.message.as_deref().unwrap().contains(MARKER));
         assert_serialization_error(&decode_unit_input(b"{").unwrap_err());
+    }
+
+    /// Python stores a send with no keyword arguments as `{}`.
+    #[test]
+    fn a_send_of_a_task_with_no_parameters_stores_an_empty_object() {
+        assert_eq!(encode_send_input(&()).unwrap(), b"{}".to_vec());
+    }
+
+    #[test]
+    fn a_send_of_any_other_input_stores_the_read_back_text() {
+        let order = Order {
+            id: 7,
+            items: vec![],
+        };
+        assert_eq!(
+            encode_send_input(&order).unwrap(),
+            br#"{"id":7,"items":[]}"#.to_vec()
+        );
+        assert!(encode_send_input(&f64::NAN).is_err());
+        assert_eq!(encode_send_input(&json!(null)).unwrap(), b"null".to_vec());
     }
 
     #[test]

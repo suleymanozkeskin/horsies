@@ -455,6 +455,12 @@ def registered_definitions() -> None:
     register_workflow_definition(WebResumeChild)
 
 
+_MISSING_TASK: Final = uuid.UUID('7b0c2f4e-5a61-4d8e-9f13-2c6a8b1d4e70')
+"""A task id that no seed writes: both sides ask for the same absent task."""
+_MISSING_WORKFLOW: Final = uuid.UUID('3e9d1a72-8c4b-4f05-a6e2-91b7d0c5f838')
+"""A workflow id that no seed writes."""
+
+
 @dataclass(frozen=True, slots=True)
 class _ActionSeed:
     pending: uuid.UUID
@@ -522,7 +528,7 @@ def _action_requests(seed: _ActionSeed) -> tuple[tuple[str, str], ...]:
     return (
         ('POST', f'/api/tasks/{seed.pending}/cancel'),
         ('POST', f'/api/tasks/{seed.pending}/cancel'),
-        ('POST', f'/api/tasks/{uuid.uuid4()}/cancel'),
+        ('POST', f'/api/tasks/{_MISSING_TASK}/cancel'),
         ('POST', '/api/tasks/not-a-uuid/cancel'),
         ('POST', f'/api/workflows/{seed.running}/pause'),
         ('POST', f'/api/workflows/{seed.running}/pause'),
@@ -530,7 +536,7 @@ def _action_requests(seed: _ActionSeed) -> tuple[tuple[str, str], ...]:
         ('POST', f'/api/workflows/{seed.running}/cancel'),
         ('POST', f'/api/workflows/{seed.running}/cancel'),
         ('POST', f'/api/workflows/{seed.tree}/resume'),
-        ('POST', f'/api/workflows/{uuid.uuid4()}/resume'),
+        ('POST', f'/api/workflows/{_MISSING_WORKFLOW}/resume'),
         ('POST', '/api/workflows/not-a-uuid/pause'),
     )
 
