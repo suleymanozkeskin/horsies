@@ -637,10 +637,8 @@ async def get_workflow_node(
     validates the JSON text of the core's model.
     ``MonitoringQueryEventLoopLimit`` is not an answer of this read: it
     uses no SQLAlchemy resource set.
-    An id text that is not a UUID names no node: ``Ok(None)``, with no
-    call. An index outside the integer column of the node index is
-    ``MonitoringQueryDbOperationFailed``, not retryable, with no call: the
-    answer of Python's read, whose statement failed on the cast.
+    An id text that is not a UUID, or an index outside the integer column
+    of the node index, names no node: ``Ok(None)``, with no call.
     """
     operation = 'workflow node detail query'
     match _workflow_uuid(workflow_id):
@@ -649,16 +647,7 @@ async def get_workflow_node(
         case None:
             return Ok(None)
     if not _INT4_MIN <= task_index <= _INT4_MAX:
-        cause = ValueError(
-            f'task_index {task_index} is outside the integer range of a node index'
-        )
-        return Err(
-            MonitoringQueryDbOperationFailed(
-                message=f'{operation} failed: {cause}',
-                retryable=False,
-                exception=cause,
-            )
-        )
+        return Ok(None)
     try:
         outcome = await broker._core_handle.monitoring_workflow_node_async(  # pyright: ignore[reportPrivateUsage]
             run_id, task_index=task_index,
