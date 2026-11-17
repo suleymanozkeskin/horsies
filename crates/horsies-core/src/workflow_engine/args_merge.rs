@@ -1153,8 +1153,7 @@ mod tests {
     #[test]
     fn an_entry_gives_the_text_of_its_inner_envelope() {
         let entry: &RawValue = serde_json::from_str(
-            r#"{"__h_taskresult_envelope__": true, "source_task_name": "produce",
-                "source_definition_key": "app.child", "inner": {"ok": 1.2300}}"#,
+            r#"{"__h_taskresult_envelope__": true, "source_task_name": "produce", "source_definition_key": "app.child", "inner": {"ok": 1.2300}}"#,
         )
         .unwrap();
         let inner = args_from_inner_text("dep", entry)
