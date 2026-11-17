@@ -36,9 +36,10 @@ use crate::broker::enqueue_task::{
 };
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError, EnqueueRefusal};
 use crate::broker::health::{
-    checked_history_limit, read_listed_worker_states, read_worker_snapshot, read_worker_snapshots,
-    DatabasePing, ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload,
-    WorkerStateSnapshot, WORKER_PING_CHANNEL,
+    checked_history_limit, ping_min_responses_refused, ping_timeout_refused,
+    read_listed_worker_states, read_worker_snapshot, read_worker_snapshots, DatabasePing,
+    ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
+    WORKER_PING_CHANNEL,
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::result_types::{
@@ -2145,7 +2146,9 @@ impl PostgresBroker {
     /// broker with no listener is `LISTENER_DISABLED`, not retryable. A
     /// refused subscription is `WORKER_PING_FAILED` with the listener's
     /// retryable flag. Replies lost to a listener gap or a full reply queue
-    /// are not waited for: the window goes on.
+    /// are not waited for: the window goes on. The window starts when the
+    /// ping NOTIFY has committed, as Python's. A reply that does not decode
+    /// is logged and left out, as Python's (`_decode_pong`).
     pub async fn ping_workers(
         &self,
         target_worker_id: Option<&str>,
@@ -2153,14 +2156,10 @@ impl PostgresBroker {
         min_responses: Option<usize>,
     ) -> BrokerResult<Vec<WorkerPong>> {
         if timeout.is_zero() {
-            return Err(invalid_input(
-                "ping_workers timeout must be positive, got 0".to_owned(),
-            ));
+            return Err(ping_timeout_refused(&0));
         }
         if min_responses == Some(0) {
-            return Err(invalid_input(
-                "ping_workers min_responses must be >= 1 when set, got 0".to_owned(),
-            ));
+            return Err(ping_min_responses_refused(&0));
         }
 
         let correlation_id = Uuid::new_v4().simple().to_string();
@@ -2183,7 +2182,6 @@ impl PostgresBroker {
             retryable: false,
         })?;
 
-        let start = std::time::Instant::now();
         let _notified = self
             .execute_main(
                 &NOTIFY_WORKER_PING
@@ -2194,6 +2192,10 @@ impl PostgresBroker {
             )
             .await
             .map_err(|error| worker_ping_statement_error("ping notify", error))?;
+        // The window and each round trip start when the NOTIFY has committed
+        // (Python's `sent_at`); a reply that arrived before waits in the
+        // reply queue.
+        let start = std::time::Instant::now();
 
         let mut pongs: Vec<WorkerPong> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -3077,7 +3079,26 @@ fn decode_pong(
     correlation_id: &str,
     elapsed: std::time::Duration,
 ) -> Option<WorkerPong> {
-    let payload: WorkerPongPayload = serde_json::from_str(raw_payload).ok()?;
+    // Python's `_decode_pong`: text that is not JSON and an object that is
+    // not a pong are logged; a value that is not an object and a reply of
+    // another round are left out without a record.
+    let body: serde_json::Value = match serde_json::from_str(raw_payload) {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!("Discarding unparseable pong payload: {error}");
+            return None;
+        }
+    };
+    if !body.is_object() {
+        return None;
+    }
+    let payload: WorkerPongPayload = match serde_json::from_value(body) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!("Discarding invalid pong payload: {error}");
+            return None;
+        }
+    };
     if payload.correlation_id != correlation_id {
         return None;
     }

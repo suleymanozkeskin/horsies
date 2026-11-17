@@ -59,6 +59,7 @@ use crate::operations::task_info::{task_info_operation, TaskInfoParts};
 use crate::operations::task_lists::{
     expired_tasks_operation, stale_tasks_operation, stale_threshold,
 };
+use crate::operations::worker_ping::{ping_request, ping_workers_operation};
 use crate::operations::worker_reads::{
     class_coverage_operation, class_report_operation, history_limit,
     worker_state_history_operation, worker_state_operation, worker_states_operation,
@@ -1151,6 +1152,38 @@ impl CoreHandle {
             "CoreHandle.expired_tasks_async",
             CallKind::Read,
             expired_tasks_operation(self.connection()),
+        )
+    }
+
+    /// Ping the workers and collect the distinct replies within the window
+    /// (`PostgresBroker::ping_workers`, on the process listener):
+    /// `WorkerPongsRecord`, or `BrokerFailure` with `INVALID_INPUT`,
+    /// `LISTENER_DISABLED` (an `ASSUME_INITIALIZED` handle has no listener)
+    /// or `WORKER_PING_FAILED`. The arguments follow Python's rules
+    /// (`ping_request`); a refused argument answers in a future that is
+    /// already done, before any core call. Sends one NOTIFY; writes no row.
+    /// Awaitable only: the sync facade of `Horsies` runs the async method
+    /// on the broker's loop runner. A cancelled await drops the wait and the
+    /// reply subscription.
+    #[pyo3(signature = (*, target_worker_id, timeout_seconds, min_responses))]
+    fn ping_workers_async<'py>(
+        &self,
+        py: Python<'py>,
+        target_worker_id: &Bound<'_, PyAny>,
+        timeout_seconds: &Bound<'_, PyAny>,
+        min_responses: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let request = match ping_request(target_worker_id, timeout_seconds, min_responses)? {
+            Ok(request) => request,
+            Err(refused) => return done_future(py, refused),
+        };
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.ping_workers_async",
+            CallKind::Read,
+            ping_workers_operation(self.connection(), request),
         )
     }
 

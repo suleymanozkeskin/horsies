@@ -33,7 +33,6 @@ from pydantic_core._pydantic_core import list_all_errors  # pyright: ignore[repo
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import (
-    PostgresBroker,
     _operation_failed,  # pyright: ignore[reportPrivateUsage]
 )
 from horsies.core.brokers.result_types import BrokerErrorCode
@@ -62,6 +61,9 @@ from horsies.core.models.workflow import WorkflowDefinition, WorkflowSpec
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.result import is_err
 from horsies.core.worker.health import HealthMixin
+from tests.dualrun.reference.broker_monitoring import (
+    _decode_pong as reference_decode_pong,  # pyright: ignore[reportPrivateUsage]
+)
 
 pytestmark = pytest.mark.unit
 
@@ -573,7 +575,7 @@ class TestHealthPayloadLogs:
         broker_like = cast(Any, SimpleNamespace(logger=get_logger('broker')))
 
         with caplog.at_level(logging.WARNING):
-            pong = PostgresBroker._decode_pong(broker_like, payload, 'c-1', 0.0)  # pyright: ignore[reportPrivateUsage]
+            pong = reference_decode_pong(broker_like, payload, 'c-1', 0.0)
 
         assert pong is None
         assert 'Discarding invalid pong payload' in caplog.text
