@@ -40,3 +40,6 @@ pub async fn log_connection_fit_at_boot(
     log_boot_connection_fit(&record);
     record
 }
+
+#[cfg(test)]
+mod tests;
