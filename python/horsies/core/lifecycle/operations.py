@@ -23,11 +23,14 @@ import re
 from enum import Enum
 from typing import assert_never
 
+from ..history.terminalization.move import (
+    FINISH_FAILED_ATTEMPT_FUNCTION,
+    FINISH_WORKFLOW_SUCCESS_FUNCTION,
+)
 from .commands import (
     AbandonNodesOfPausedWorkflows,
     AbandonOwnedNode,
     AbandonOwnedNodes,
-    CancelLockedTask,
     CancelNodesOfCancelledWorkflow,
     CancelOrphanedTasks,
     CancelOwnedNode,
@@ -38,7 +41,6 @@ from .commands import (
     ExpireOwnedClaim,
     ExpirePendingTasks,
     FailLockedTask,
-    FailStaleTask,
     TerminalizationCommand,
 )
 
@@ -144,14 +146,10 @@ def kind_of(command: TerminalizationCommand) -> TerminalizationKind:
             return TerminalizationKind.COMPLETE_FUSED
         case FailLockedTask():
             return TerminalizationKind.FAIL_RUNNING
-        case FailStaleTask():
-            return TerminalizationKind.FAIL_STALE
         case ExpireOwnedClaim():
             return TerminalizationKind.EXPIRE_CLAIMED
         case ExpirePendingTasks():
             return TerminalizationKind.EXPIRE_PENDING
-        case CancelLockedTask():
-            return TerminalizationKind.CANCEL_ADMIN
         case CancelOwnedOrphan():
             return TerminalizationKind.CANCEL_ORPHAN
         case CancelOrphanedTasks():
@@ -180,6 +178,27 @@ def function_name_of(command: TerminalizationCommand) -> str:
 
     Derived rather than tabulated so the two cannot drift: a variant without a
     function fails the conformance test, and a function without a variant has
-    no name that maps to it.
+    no name that maps to it. The two finalize decisions are executed by the
+    attempt writers, whose names are not derived from theirs.
     """
-    return 'horsies_' + _CAMEL_BOUNDARY.sub('_', type(command).__name__).lower()
+    match command:
+        case CompleteLockedTask():
+            return FINISH_WORKFLOW_SUCCESS_FUNCTION
+        case FailLockedTask():
+            return FINISH_FAILED_ATTEMPT_FUNCTION
+        case (
+            CompleteTaskFused()
+            | ExpireOwnedClaim()
+            | ExpirePendingTasks()
+            | CancelOwnedOrphan()
+            | CancelOrphanedTasks()
+            | AbandonOwnedNode()
+            | AbandonOwnedNodes()
+            | AbandonNodesOfPausedWorkflows()
+            | CancelOwnedNode()
+            | CancelOwnedNodes()
+            | CancelNodesOfCancelledWorkflow()
+        ):
+            return 'horsies_' + _CAMEL_BOUNDARY.sub('_', type(command).__name__).lower()
+        case _ as unreachable:
+            assert_never(unreachable)

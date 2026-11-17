@@ -277,7 +277,7 @@ async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_chec
     // one of those properties, or any function that updates live storage to a
     // terminal status, is an unreviewed terminal writer and changes the
     // catalog-wide inventory.
-    const EXPECTED_WRITERS: [(&str, bool, bool); 21] = [
+    const EXPECTED_WRITERS: [(&str, bool, bool); 17] = [
         (
             "horsies_move_task_to_history(horsies_tasks,text,text,timestamp with time zone,text,text,text)",
             false,
@@ -314,32 +314,12 @@ async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_chec
             false,
         ),
         (
-            "horsies_complete_locked_task(uuid,text,text)",
-            true,
-            false,
-        ),
-        (
-            "horsies_fail_locked_task(uuid,text,text,text,text)",
-            true,
-            false,
-        ),
-        (
-            "horsies_fail_stale_task(uuid,integer,integer,text,text,text)",
-            true,
-            false,
-        ),
-        (
             "horsies_expire_owned_claim(uuid,text,text,text)",
             true,
             false,
         ),
         (
             "horsies_expire_pending_tasks(integer,text,text)",
-            true,
-            false,
-        ),
-        (
-            "horsies_cancel_locked_task(uuid,text[])",
             true,
             false,
         ),

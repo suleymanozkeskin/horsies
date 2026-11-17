@@ -23,10 +23,11 @@ use crate::core::history::maintenance::coverage::{ensure_partition_coverage, Cov
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::lifecycle::outcomes::GuardEvidence;
 use crate::core::lifecycle::{
-    BatchSize, CallerHoldsRowLock, OwnedClaim, OwnedClaimBatch, PriorLockedRead,
-    TerminalizationCommand, TerminalizationKind, TerminalizationOutcome, WorkerOwned,
+    BatchSize, OwnedClaim, OwnedClaimBatch, TerminalizationCommand, TerminalizationKind,
+    TerminalizationOutcome, WorkerOwned,
 };
 use crate::core::types::status::TaskStatus;
+use crate::test_support::terminal_writes::{self, StaleFailure, TerminalFailure};
 
 pub(super) const WIRE_PHASE2_EXPECTATIONS: [(&str, bool); 15] = [
     ("COMPLETE_LOCKED", true),
@@ -434,34 +435,31 @@ async fn seeded_generation(pool: &PgPool, id: &str) -> DateTime<Utc> {
 // COMPLETED family
 // ---------------------------------------------------------------------------
 
+/// The writer of COMPLETE_LOCKED is phase 1 of a workflow task's success
+/// (`horsies_finish_workflow_success`).
 #[tokio::test]
 #[serial]
 async fn complete_locked_moves_to_history_and_preserves_last_claim_evidence() {
     let pool = migrated_pool().await;
     let id = Uuid::new_v4().to_string();
+    let workflow_id = Uuid::new_v4().to_string();
     let claimed_at = Utc::now();
+    seed_workflow(&pool, &workflow_id, "RUNNING").await;
     seed_task(
         &pool,
         &id,
         Seed {
             claimed_at: Some(claimed_at),
+            is_workflow_task: true,
             ..Seed::default()
         },
     )
     .await;
+    seed_wf_task(&pool, &workflow_id, &id, "RUNNING").await;
 
-    let outcomes = terminalize(
-        &pool,
-        &TerminalizationCommand::CompleteLockedTask {
-            task_id: uuid(&id),
-            fence: PriorLockedRead {
-                worker_id: "w1".to_owned(),
-            },
-            result_json: "{\"Ok\":1}".to_owned(),
-        },
-    )
-    .await
-    .expect("terminalize");
+    let outcomes = terminal_writes::complete_workflow_task(&pool, uuid(&id), "w1", "{\"Ok\":1}")
+        .await
+        .expect("workflow success");
 
     assert!(matches!(
         outcomes.as_slice(),
@@ -482,6 +480,7 @@ async fn complete_locked_moves_to_history_and_preserves_last_claim_evidence() {
     assert_eq!(image.claimed_by_worker_id.as_deref(), Some("w1"));
 
     cleanup(&pool, &[&id]).await;
+    cleanup_workflow(&pool, &workflow_id).await;
 }
 
 #[tokio::test]
@@ -490,29 +489,24 @@ async fn complete_replay_within_class_is_already_applied() {
     let pool = migrated_pool().await;
     let id = Uuid::new_v4().to_string();
     seed_task(&pool, &id, Seed::default()).await;
+    let generation = seeded_generation(&pool, &id).await;
     terminalize(
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
             task_id: uuid(&id),
-            fence: owned("w1", seeded_generation(&pool, &id).await),
+            fence: owned("w1", generation),
             result_json: "{}".to_owned(),
         },
     )
     .await
     .expect("first completion");
 
-    let outcomes = terminalize(
-        &pool,
-        &TerminalizationCommand::CompleteLockedTask {
-            task_id: uuid(&id),
-            fence: PriorLockedRead {
-                worker_id: "w1".to_owned(),
-            },
-            result_json: "{}".to_owned(),
-        },
-    )
-    .await
-    .expect("terminalize");
+    // The other writer of the completion class, under the same claim: its
+    // miss is classified before it asks whether the task is a workflow task.
+    let outcomes =
+        terminal_writes::complete_workflow_task_at(&pool, uuid(&id), "w1", generation, "{}")
+            .await
+            .expect("workflow success");
 
     assert!(matches!(
         outcomes.as_slice(),
@@ -530,20 +524,22 @@ async fn complete_replay_within_class_is_already_applied() {
 async fn complete_locked_wrong_worker_is_lost_claim_and_absent_is_absent() {
     let pool = migrated_pool().await;
     let id = Uuid::new_v4().to_string();
-    seed_task(&pool, &id, Seed::default()).await;
-
-    let outcomes = terminalize(
+    let workflow_id = Uuid::new_v4().to_string();
+    seed_workflow(&pool, &workflow_id, "RUNNING").await;
+    seed_task(
         &pool,
-        &TerminalizationCommand::CompleteLockedTask {
-            task_id: uuid(&id),
-            fence: PriorLockedRead {
-                worker_id: "w-other".to_owned(),
-            },
-            result_json: "{}".to_owned(),
+        &id,
+        Seed {
+            is_workflow_task: true,
+            ..Seed::default()
         },
     )
-    .await
-    .expect("terminalize");
+    .await;
+    seed_wf_task(&pool, &workflow_id, &id, "RUNNING").await;
+
+    let outcomes = terminal_writes::complete_workflow_task(&pool, uuid(&id), "w-other", "{}")
+        .await
+        .expect("workflow success");
     assert!(matches!(
         outcomes.as_slice(),
         [TerminalizationOutcome::LostClaim { observed, .. }]
@@ -555,24 +551,17 @@ async fn complete_locked_wrong_worker_is_lost_claim_and_absent_is_absent() {
         "refusal must not mutate"
     );
 
-    let absent = terminalize(
-        &pool,
-        &TerminalizationCommand::CompleteLockedTask {
-            task_id: Uuid::new_v4(),
-            fence: PriorLockedRead {
-                worker_id: "w1".to_owned(),
-            },
-            result_json: "{}".to_owned(),
-        },
-    )
-    .await
-    .expect("terminalize");
+    let absent =
+        terminal_writes::complete_workflow_task_at(&pool, Uuid::new_v4(), "w1", Utc::now(), "{}")
+            .await
+            .expect("workflow success");
     assert!(matches!(
         absent.as_slice(),
         [TerminalizationOutcome::TaskAbsent { .. }]
     ));
 
     cleanup(&pool, &[&id]).await;
+    cleanup_workflow(&pool, &workflow_id).await;
 }
 
 #[tokio::test]
@@ -831,20 +820,14 @@ async fn fail_locked_assigns_failed_reason_unconditionally() {
     let id = Uuid::new_v4().to_string();
     seed_task(&pool, &id, Seed::default()).await;
 
-    let outcomes = terminalize(
+    let outcomes = terminal_writes::fail_running_task(
         &pool,
-        &TerminalizationCommand::FailLockedTask {
-            task_id: uuid(&id),
-            fence: PriorLockedRead {
-                worker_id: "w1".to_owned(),
-            },
-            result_json: "{\"Err\":{}}".to_owned(),
-            error_code: Some("TASK_EXCEPTION".to_owned()),
-            failed_reason: None,
-        },
+        uuid(&id),
+        "w1",
+        &TerminalFailure::of_task("{\"Err\":{}}", Some("TASK_EXCEPTION"), None),
     )
     .await
-    .expect("terminalize");
+    .expect("failed attempt");
     assert!(matches!(
         outcomes.as_slice(),
         [TerminalizationOutcome::Applied {
@@ -881,31 +864,19 @@ async fn cross_class_replay_names_the_foreign_kind() {
         },
     )
     .await;
-    terminalize(
-        &pool,
-        &TerminalizationCommand::CancelLockedTask {
-            task_id: uuid(&id),
-            fence: CallerHoldsRowLock,
-            permitted_source_statuses: vec![TaskStatus::Pending],
-        },
-    )
-    .await
-    .expect("first cancellation");
+    terminal_writes::cancel_live_task(&pool, uuid(&id), false)
+        .await
+        .expect("first cancellation");
 
-    let outcomes = terminalize(
+    let outcomes = terminal_writes::fail_running_task_at(
         &pool,
-        &TerminalizationCommand::FailLockedTask {
-            task_id: uuid(&id),
-            fence: PriorLockedRead {
-                worker_id: "w1".to_owned(),
-            },
-            result_json: "{}".to_owned(),
-            error_code: None,
-            failed_reason: None,
-        },
+        uuid(&id),
+        "w1",
+        Utc::now(),
+        &TerminalFailure::of_task("{}", None, None),
     )
     .await
-    .expect("terminalize");
+    .expect("failed attempt");
 
     let [TerminalizationOutcome::SourceStateConflict {
         evidence: GuardEvidence::ForeignTerminalization(foreign),
@@ -959,8 +930,7 @@ async fn fail_stale_applies_on_silence_and_refuses_on_heartbeat() {
     .await
     .expect("heartbeat");
 
-    let command = |task_id: &str| TerminalizationCommand::FailStaleTask {
-        task_id: uuid(task_id),
+    let failure = StaleFailure {
         stale_after_ms: 60_000,
         finalizing_stale_after_ms: 60_000,
         result_json: "{\"Err\":{}}".to_owned(),
@@ -968,9 +938,9 @@ async fn fail_stale_applies_on_silence_and_refuses_on_heartbeat() {
         failed_reason: "stale runner".to_owned(),
     };
 
-    let outcomes = terminalize(&pool, &command(&silent))
+    let outcomes = terminal_writes::fail_stale_task(&pool, uuid(&silent), &failure)
         .await
-        .expect("terminalize");
+        .expect("stale failure");
     assert!(matches!(
         outcomes.as_slice(),
         [TerminalizationOutcome::Applied {
@@ -982,9 +952,9 @@ async fn fail_stale_applies_on_silence_and_refuses_on_heartbeat() {
     assert_eq!(image.status, "FAILED");
     assert_eq!(image.failed_reason.as_deref(), Some("stale runner"));
 
-    let outcomes = terminalize(&pool, &command(&alive))
+    let outcomes = terminal_writes::fail_stale_task(&pool, uuid(&alive), &failure)
         .await
-        .expect("terminalize");
+        .expect("stale failure");
     let [TerminalizationOutcome::SourceStateConflict {
         evidence: GuardEvidence::Staleness(staleness),
         ..
@@ -1321,7 +1291,7 @@ fn projection_arm<'a>(definition: &'a str, kind: &str) -> Option<&'a str> {
 
 #[tokio::test]
 #[serial]
-async fn cancel_locked_applies_within_permitted_statuses_only() {
+async fn cancel_task_applies_and_refuses_a_running_task_without_the_opt_in() {
     let pool = migrated_pool().await;
     let pending = Uuid::new_v4().to_string();
     let running = Uuid::new_v4().to_string();
@@ -1338,16 +1308,9 @@ async fn cancel_locked_applies_within_permitted_statuses_only() {
     .await;
     seed_task(&pool, &running, Seed::default()).await;
 
-    let outcomes = terminalize(
-        &pool,
-        &TerminalizationCommand::CancelLockedTask {
-            task_id: uuid(&pending),
-            fence: CallerHoldsRowLock,
-            permitted_source_statuses: vec![TaskStatus::Pending, TaskStatus::Claimed],
-        },
-    )
-    .await
-    .expect("terminalize");
+    let outcomes = terminal_writes::cancel_live_task(&pool, uuid(&pending), false)
+        .await
+        .expect("cancel");
     assert!(matches!(
         outcomes.as_slice(),
         [TerminalizationOutcome::Applied {
@@ -1368,17 +1331,10 @@ async fn cancel_locked_applies_within_permitted_statuses_only() {
     );
     assert_phase2_presence(&pool, &pending, false).await;
 
-    // RUNNING outside the permitted set: the operator's opt-in is explicit.
-    let outcomes = terminalize(
-        &pool,
-        &TerminalizationCommand::CancelLockedTask {
-            task_id: uuid(&running),
-            fence: CallerHoldsRowLock,
-            permitted_source_statuses: vec![TaskStatus::Pending],
-        },
-    )
-    .await
-    .expect("terminalize");
+    // RUNNING without the opt-in: the operator's opt-in is explicit.
+    let outcomes = terminal_writes::cancel_live_task(&pool, uuid(&running), false)
+        .await
+        .expect("cancel");
     assert!(matches!(
         outcomes.as_slice(),
         [TerminalizationOutcome::SourceStateConflict { .. }]
@@ -1390,7 +1346,7 @@ async fn cancel_locked_applies_within_permitted_statuses_only() {
 
 #[tokio::test]
 #[serial]
-async fn cancel_locked_refuses_workflow_tasks_and_never_overwrites_terminal() {
+async fn cancel_task_refuses_workflow_tasks_and_never_overwrites_terminal() {
     let pool = migrated_pool().await;
     let wf_task = Uuid::new_v4().to_string();
     let done = Uuid::new_v4().to_string();
@@ -1418,16 +1374,9 @@ async fn cancel_locked_refuses_workflow_tasks_and_never_overwrites_terminal() {
     .await
     .expect("first completion");
 
-    let outcomes = terminalize(
-        &pool,
-        &TerminalizationCommand::CancelLockedTask {
-            task_id: uuid(&wf_task),
-            fence: CallerHoldsRowLock,
-            permitted_source_statuses: vec![TaskStatus::Pending],
-        },
-    )
-    .await
-    .expect("terminalize");
+    let outcomes = terminal_writes::cancel_live_task(&pool, uuid(&wf_task), false)
+        .await
+        .expect("cancel");
     assert!(matches!(
         outcomes.as_slice(),
         [TerminalizationOutcome::SourceStateConflict { .. }]
@@ -1435,18 +1384,11 @@ async fn cancel_locked_refuses_workflow_tasks_and_never_overwrites_terminal() {
     assert_eq!(post_image(&pool, &wf_task).await.status, "PENDING");
     assert_phase2_presence(&pool, &wf_task, false).await;
 
-    // Revert-proof: a malformed permitted array naming a terminal status
+    // Revert-proof: the cancel of a finished task, with the widest opt-in,
     // cannot resurrect or overwrite the row.
-    let outcomes = terminalize(
-        &pool,
-        &TerminalizationCommand::CancelLockedTask {
-            task_id: uuid(&done),
-            fence: CallerHoldsRowLock,
-            permitted_source_statuses: vec![TaskStatus::Completed],
-        },
-    )
-    .await
-    .expect("terminalize");
+    let outcomes = terminal_writes::cancel_live_task(&pool, uuid(&done), true)
+        .await
+        .expect("cancel");
     assert!(matches!(
         outcomes.as_slice(),
         [TerminalizationOutcome::SourceStateConflict {
@@ -2684,36 +2626,21 @@ async fn deferred_projection_table_mints_phase2_for_all_five_deferred_wire_kinds
     .await;
     seed_wf_task(&pool, &workflow_id, &expired_pending, "ENQUEUED").await;
 
-    terminalize(
+    terminal_writes::complete_workflow_task(&pool, uuid(&complete), "w1", "{}")
+        .await
+        .expect("deferred completion");
+    terminal_writes::fail_running_task(
         &pool,
-        &TerminalizationCommand::CompleteLockedTask {
-            task_id: uuid(&complete),
-            fence: PriorLockedRead {
-                worker_id: "w1".to_owned(),
-            },
-            result_json: "{}".to_owned(),
-        },
-    )
-    .await
-    .expect("deferred completion");
-    terminalize(
-        &pool,
-        &TerminalizationCommand::FailLockedTask {
-            task_id: uuid(&failed),
-            fence: PriorLockedRead {
-                worker_id: "w1".to_owned(),
-            },
-            result_json: "{}".to_owned(),
-            error_code: Some("TASK_EXCEPTION".to_owned()),
-            failed_reason: Some("failed".to_owned()),
-        },
+        uuid(&failed),
+        "w1",
+        &TerminalFailure::of_task("{}", Some("TASK_EXCEPTION"), Some("failed")),
     )
     .await
     .expect("deferred running failure");
-    terminalize(
+    terminal_writes::fail_stale_task(
         &pool,
-        &TerminalizationCommand::FailStaleTask {
-            task_id: uuid(&stale),
+        uuid(&stale),
+        &StaleFailure {
             stale_after_ms: 60_000,
             finalizing_stale_after_ms: 60_000,
             result_json: "{}".to_owned(),

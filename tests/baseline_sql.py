@@ -11,6 +11,7 @@ from horsies.core.baseline.migration import load_baseline_migration
 
 _FUNCTION_HEAD: Final = re.compile(r'^CREATE FUNCTION (\w+)\(', re.MULTILINE)
 _DOLLAR_QUOTE: Final = '$$'
+_RETURNS_TABLE: Final = 'RETURNS TABLE('
 
 
 def baseline_sql() -> str:
@@ -92,6 +93,24 @@ def baseline_function(name: str) -> str:
             return matches[0]
         case count:
             pytest.fail(f'the baseline defines {count} overloads of {name}; use baseline_overload')
+
+
+def baseline_returned_columns(name: str) -> tuple[tuple[str, str], ...]:
+    """``(column, type)`` of each column of the ``RETURNS TABLE`` of a baseline function with one overload, in order.
+
+    Fails the test when the function returns no table.
+    """
+    statement = baseline_function(name)
+    start = statement.find(_RETURNS_TABLE)
+    if start < 0:
+        pytest.fail(f'baseline function {name} returns no table')
+    declarations, _ = _parameter_list(name, statement, start + len(_RETURNS_TABLE))
+    return tuple(
+        (column, column_type)
+        for column, _, column_type in (
+            declaration.partition(' ') for declaration in declarations
+        )
+    )
 
 
 def baseline_overload(name: str, first_parameter: str, *later_parameters: str) -> str:
