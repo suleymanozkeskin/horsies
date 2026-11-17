@@ -660,7 +660,9 @@ unless it starts with "Added".
   `UnknownUserCode`); `summary_for` returns `&SubWorkflowSummary`, and
   `output_for` the child's output read as `T`.
 - **`UserErrorCode::code` returns `&str`.** Added: `UserCode` implements
-  `UserErrorCode`, with every user code as checked text.
+  `UserErrorCode`, with every user code as checked text. `UserCode` and
+  `UserCodeRefused` are exported at the crate root, so the outcome type of
+  `WorkflowHandle::get` can be named without a `horsies-core` dependency.
 - **A workflow start converts the spec to the core's spec data and runs
   on the core.** `register_workflow_definition::<D>()` (a definition without
   params) returns `WorkflowFunction<T>`; `workflow_template::<D>()` (a
