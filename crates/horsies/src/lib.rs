@@ -18,6 +18,9 @@ mod config;
 mod error;
 mod registry;
 mod signals;
+// The shared golden vectors of the stored JSON forms.
+#[cfg(test)]
+mod stored_form_vectors;
 
 // The `pub` items of these modules form the crate root API. Each of them
 // keeps its submodules private, so a submodule name never reaches the root.
