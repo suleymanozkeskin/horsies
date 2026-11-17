@@ -642,12 +642,14 @@ pub(crate) async fn recover_stuck_workflows_observed(
 ) -> Result<RecoveryReport, RecoveryPassFailure> {
     recover_stuck_workflows_in_scope(
         broker,
-        registry,
+        ChildBuild::Registry {
+            registry,
+            retention,
+        },
         RecoveryScope::Global {
             max_rows: GLOBAL_SCAN_ROW_CAP,
         },
         RecoveryFailurePolicy::Count(CountFailures::new_pass(failure_limit)),
-        retention,
     )
     .await
 }
@@ -663,10 +665,12 @@ pub(crate) async fn recover_stuck_workflows_with_cap(
 ) -> Result<RecoveryReport, WorkflowError> {
     recover_stuck_workflows_in_scope(
         broker,
-        registry,
+        ChildBuild::Registry {
+            registry,
+            retention,
+        },
         RecoveryScope::Global { max_rows },
         failure_policy,
-        retention,
     )
     .await
     .map_err(|failure| failure.error)
@@ -683,6 +687,24 @@ pub(crate) async fn recover_stuck_workflow_tree(
     root_workflow_id: Uuid,
     retention: &RetentionConfig,
 ) -> Result<RecoveryReport, WorkflowError> {
+    recover_workflow_tree(
+        broker,
+        ChildBuild::Registry {
+            registry,
+            retention,
+        },
+        root_workflow_id,
+    )
+    .await
+}
+
+/// [`recover_stuck_workflow_tree`] with the children of its cases built by
+/// `build`. Errors as [`recover_stuck_workflow_tree`].
+pub(crate) async fn recover_workflow_tree(
+    broker: &PostgresBroker,
+    build: ChildBuild<'_>,
+    root_workflow_id: Uuid,
+) -> Result<RecoveryReport, WorkflowError> {
     let rows = run_alone(
         broker,
         CheckoutClass::Reserved,
@@ -696,10 +718,9 @@ pub(crate) async fn recover_stuck_workflow_tree(
         .map_err(StepContractError::from)?;
     recover_stuck_workflows_in_scope(
         broker,
-        registry,
+        build,
         RecoveryScope::WorkflowTree(&workflow_ids),
         RecoveryFailurePolicy::LogOnly,
-        retention,
     )
     .await
     .map_err(|failure| failure.error)
@@ -709,18 +730,14 @@ pub(crate) async fn recover_stuck_workflow_tree(
 /// a debug build needs more than a 2 MiB thread stack for one pass.
 async fn recover_stuck_workflows_in_scope(
     broker: &PostgresBroker,
-    registry: &WorkflowSpecRegistry,
+    build: ChildBuild<'_>,
     scope: RecoveryScope<'_>,
     failure_policy: RecoveryFailurePolicy,
-    retention: &RetentionConfig,
 ) -> Result<RecoveryReport, RecoveryPassFailure> {
     let mut report = RecoveryReport::default();
     let pass = PassContext {
         broker,
-        build: ChildBuild::Registry {
-            registry,
-            retention,
-        },
+        build,
         scope,
         failure_policy,
     };

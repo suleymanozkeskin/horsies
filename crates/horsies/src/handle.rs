@@ -22,8 +22,8 @@ use horsies_core::core::codec::{task_result_from_json_str, JsonReadError};
 use horsies_core::handle::CoreHandle;
 use horsies_core::{
     process_role, wait_inside_task_message, BrokerError, BrokerErrorCode, BrokerOperationError,
-    BuiltInTaskCode, OperationalErrorCode, OutcomeCode, ProcessRole, RawResultRecord,
-    RetrievalCode, TaskResult,
+    BuiltInTaskCode, OperationalErrorCode, OutcomeCode, ProcessRole, RawResultRead,
+    RawResultRecord, RetrievalCode, TaskInfoRead, TaskResult,
 };
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
@@ -31,6 +31,8 @@ use uuid::Uuid;
 use crate::task::body::value_free_decode_text;
 use crate::{TaskError, UserErrorCode};
 
+/// Why neither the live table nor the task history holds a task.
+pub use horsies_core::TaskAbsenceReason;
 /// The limit of a result wait: `WaitLimit::parse(Some(duration))` refuses
 /// a limit above `MAX_WAIT_LIMIT_MS` (about 49.7 days) before any read.
 pub use horsies_core::{BoundedWait, WaitLimit, WaitLimitRefused, MAX_WAIT_LIMIT_MS};
@@ -59,10 +61,15 @@ pub enum ReadError {
     )]
     WaitTimedOut { task_id: Uuid, status: TaskStatus },
     /// `TASK_NOT_FOUND`: neither the live table nor the task history holds
-    /// the task. A handle built by id can race the commit of its send, so a
-    /// later read may find it.
-    #[error("task {task_id} not found in database")]
-    TaskNotFound { task_id: Uuid },
+    /// the task. `reason` tells a task that retention can have removed
+    /// (`PredatesRetainedHistory`) from an id that no retained history held
+    /// (`WithinRetainedHistory`). A handle built by id can race the commit of
+    /// its send, so a later read may find it.
+    #[error("task {task_id} not found in database ({})", .reason.as_str())]
+    TaskNotFound {
+        task_id: Uuid,
+        reason: TaskAbsenceReason,
+    },
     /// `RESULT_NOT_AVAILABLE`: the task reached a terminal status and stored
     /// no result.
     #[error(
@@ -250,10 +257,11 @@ where
             .await
             .map_err(|error| ReadError::of_operation(self.task_id, error))?;
         match record {
-            None => Err(ReadError::TaskNotFound {
+            RawResultRead::Absent { reason } => Err(ReadError::TaskNotFound {
                 task_id: self.task_id,
+                reason,
             }),
-            Some(record) => outcome_of_record(record),
+            RawResultRead::Found(record) => outcome_of_record(record),
         }
     }
 
@@ -279,11 +287,14 @@ pub(crate) async fn read_task_info(
         .initialized_broker()
         .await
         .map_err(|error| ReadError::of_broker(&error))?;
-    broker
+    let read = broker
         .get_task_info_with_attempts(task_id, parts.result, parts.failed_reason, parts.attempts)
         .await
-        .map_err(|error| ReadError::of_operation(task_id, error))?
-        .ok_or(ReadError::TaskNotFound { task_id })
+        .map_err(|error| ReadError::of_operation(task_id, error))?;
+    match read {
+        TaskInfoRead::Found(info) => Ok(*info),
+        TaskInfoRead::Absent { reason } => Err(ReadError::TaskNotFound { task_id, reason }),
+    }
 }
 
 /// The duration of a wait limit, as the core's read takes it.
@@ -552,7 +563,10 @@ mod tests {
                 task_id: task(),
                 status: TaskStatus::Running,
             },
-            ReadError::TaskNotFound { task_id: task() },
+            ReadError::TaskNotFound {
+                task_id: task(),
+                reason: TaskAbsenceReason::WithinRetainedHistory,
+            },
             ReadError::wait_inside_task("TaskHandle.get()"),
             ReadError::Database {
                 code: BrokerErrorCode::TaskInfoQueryFailed,
@@ -563,6 +577,21 @@ mod tests {
         assert!(!not_kept.iter().any(ReadError::is_final));
     }
 
+    /// Decision on #1405: the reason of the history read reaches the read
+    /// error, and the code stays Python's `TASK_NOT_FOUND`.
+    #[test]
+    fn a_task_not_found_names_its_absence_reason() {
+        let error = ReadError::TaskNotFound {
+            task_id: task(),
+            reason: TaskAbsenceReason::PredatesRetainedHistory,
+        };
+        assert_eq!(error.code().to_string(), "TASK_NOT_FOUND");
+        assert!(
+            error.to_string().ends_with("(PREDATES_RETAINED_HISTORY)"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn each_read_error_has_python_s_code() {
         let codes: Vec<String> = [
@@ -570,7 +599,10 @@ mod tests {
                 task_id: task(),
                 status: TaskStatus::Running,
             },
-            ReadError::TaskNotFound { task_id: task() },
+            ReadError::TaskNotFound {
+                task_id: task(),
+                reason: TaskAbsenceReason::WithinRetainedHistory,
+            },
             ReadError::ResultNotAvailable {
                 task_id: task(),
                 status: TaskStatus::Failed,

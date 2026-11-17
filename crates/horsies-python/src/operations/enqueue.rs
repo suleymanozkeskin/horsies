@@ -176,6 +176,16 @@ pub struct SendSuppressed {
     pub message: String,
 }
 
+/// A blocking send ran on a thread that runs an event loop or a tokio
+/// runtime (Python `TaskSendAsyncContext`). Nothing was written. A client
+/// produces it before the send, never the core's enqueue.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+#[derive(Clone, Debug)]
+pub struct SendAsyncContext {
+    pub task_id: Uuid,
+    pub message: String,
+}
+
 /// The core refused the send before any statement. Nothing was written.
 /// `code` is `INVALID_INPUT` (the input, or a fact of the call: the start,
 /// the sent instant, the idempotency key, the fingerprint) or
@@ -282,6 +292,9 @@ fn refusal_record(py: Python<'_>, error: TaskSendError) -> PyResult<Bound<'_, Py
         TaskSendError::SendSuppressed { message } => {
             SendSuppressed { message }.into_bound_py_any(py)
         }
+        TaskSendError::AsyncContext {
+            task_id, message, ..
+        } => SendAsyncContext { task_id, message }.into_bound_py_any(py),
         // The send catalog's refusals besides the core's own (`refused`
         // takes those): a reservation window or a value that does not
         // serialize. Both refuse a fact of the call, which the input carries.

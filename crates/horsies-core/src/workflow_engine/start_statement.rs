@@ -255,8 +255,6 @@ pub(crate) async fn start_arguments(
 /// Errors: those of [`start_arguments`], and
 /// [`WorkflowError::ChildSpecSource`] when `source` gave no answer for a
 /// root's child.
-// The workflow start of a client spec calls it; until then only its tests do.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn client_start_arguments(
     spec: &ClientSpec,
     workflow_id: Uuid,

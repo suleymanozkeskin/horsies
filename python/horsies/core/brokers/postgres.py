@@ -36,6 +36,7 @@ from horsies._core import (
     SendEnqueueFailed,
     SendKeyConflict,
     SendPayloadMismatch,
+    SendAsyncContext,
     SendPayloadTooLarge,
     SendSuppressed,
     SendValidationFailed,
@@ -1011,6 +1012,7 @@ type CoreEnqueueStart = CoreStartNow | CoreStartAfterDelay | CoreStartAt
 type CoreSendOutcome = (
     Enqueued
     | SendSuppressed
+    | SendAsyncContext
     | SendValidationFailed
     | SendEnqueueFailed
     | SendPayloadMismatch
@@ -1169,8 +1171,8 @@ def _enqueue_result(
     - ``SendPayloadMismatch``: ``PAYLOAD_MISMATCH``.
     - ``SendKeyConflict``: ``IDEMPOTENCY_KEY_CONFLICT`` with the owner.
 
-    The core's send never answers ``SendSuppressed`` or
-    ``SendPayloadTooLarge`` (the client checks both before the send):
+    The core's send never answers ``SendSuppressed``, ``SendAsyncContext``
+    or ``SendPayloadTooLarge`` (the client checks each before the send):
     ``AssertionError``.
     """
     match outcome:
@@ -1202,7 +1204,7 @@ def _enqueue_result(
             return Err(BrokerIdempotencyKeyConflict(
                 message=message, owner_task_id=owner_task_id,
             ))
-        case SendSuppressed() | SendPayloadTooLarge():
+        case SendSuppressed() | SendAsyncContext() | SendPayloadTooLarge():
             raise AssertionError(
                 f'the core send answered {type(outcome).__name__}, which the '
                 'client checks before the send',
@@ -1318,6 +1320,11 @@ class PostgresBroker:
             ),
             pool_profile=self._CORE_POOL_PROFILE,
         )
+        # The workflow operations of the core build each sub-workflow child
+        # through this source, which runs the child's build_with.
+        from horsies.core.workflows.child_spec_source import child_spec_source_of
+
+        self._core_handle.register_child_spec_source(child_spec_source_of(self))
 
         # Each worker child builds its own broker, so this fires on every
         # recycle (max_tasks_per_child); keep it at DEBUG in child processes.

@@ -8,12 +8,15 @@ stores. ``start_tree`` pre-builds the child of every sub-workflow root.
 from __future__ import annotations
 
 import json
+import uuid
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import SecretStr
 
+from horsies._core import ChildSpecBuilt, ChildSpecRefused, ChildSpecRequest
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
@@ -37,6 +40,7 @@ from horsies.core.workflows.child_build import (
     TaskNodeKind,
     build_child,
 )
+from horsies.core.workflows.child_spec_source import build_child_spec
 from horsies.core.workflows.registry import register_workflow_definition
 from horsies.core.workflows.start_tree import (
     ChildOfWorkflow,
@@ -355,3 +359,79 @@ class TestStartTree:
         }
         assert node_lengths == {5}
         assert parameters['failed_workflow_ids'] == []
+
+
+def _request(**values: Any) -> ChildSpecRequest:
+    """A stand-in for the core's ``ChildSpecRequest``: the source reads its attributes."""
+    defaults: dict[str, Any] = {
+        'parent_workflow_id': uuid.UUID('6f9d4c1e-2b7a-4e3f-9c8d-1a2b3c4d5e6f'),
+        'parent_workflow_name': 'parent',
+        'task_index': 3,
+        'child_depth': 1,
+        'definition_key': ValueChild.definition_key,
+        'params': 'GIVEN',
+        'node_input': '{"value": 4}',
+        'args_from': None,
+        'sources': [],
+    }
+    return cast(ChildSpecRequest, SimpleNamespace(**{**defaults, **values}))
+
+
+class TestBuildChildSpec:
+    """The child spec source of the core: ``build_child`` after the depth check."""
+
+    def test_a_child_that_builds_answers_its_spec_data(self) -> None:
+        answer = build_child_spec(cast(Any, _broker()), _request())
+
+        assert isinstance(answer, ChildSpecBuilt)
+        data = json.loads(answer.spec_json)
+        assert data['name'] == ValueChild.name
+        assert data['definition_key'] == {'kind': 'KEYED', 'key': ValueChild.definition_key}
+        assert [node['dependencies'] for node in data['nodes']] == [[], [0]]
+        assert [json.loads(node['input_json']) for node in data['nodes']] == [
+            {'value': 4}, {'value': 5},
+        ]
+        assert data['output'] == {'kind': 'NODE', 'index': 1}
+        assert data['queue_classes'] == {'default': 'standard_30d'}
+
+    def test_a_definition_that_does_not_load_answers_the_stored_error(self) -> None:
+        answer = build_child_spec(
+            cast(Any, _broker()), _request(definition_key='child_build.missing.v1'),
+        )
+
+        assert isinstance(answer, ChildSpecRefused)
+        assert answer.message == 'Failed to load subworkflow definition for parent:3'
+        envelope = json.loads(answer.failure_result)
+        assert envelope['err']['error_code'] == 'SUBWORKFLOW_LOAD_FAILED'
+        assert envelope['err']['data'] == {'definition_key': 'child_build.missing.v1'}
+
+    def test_a_build_that_raises_answers_the_node_failure(self) -> None:
+        answer = build_child_spec(
+            cast(Any, _broker()), _request(definition_key=BrokenChild.definition_key),
+        )
+
+        assert isinstance(answer, ChildSpecRefused)
+        assert answer.message.startswith('Subworkflow build failed: RuntimeError: cannot build')
+
+    def test_a_source_row_reaches_build_with_as_the_dependency_result(self) -> None:
+        source = SimpleNamespace(
+            task_index=0,
+            node_id='source',
+            status='COMPLETED',
+            task_name='child_build.value',
+            definition_key=None,
+            result='{"__h_task_result__":true,"ok":11,"err":null}',
+        )
+        answer = build_child_spec(
+            cast(Any, _broker()),
+            _request(
+                definition_key=ResultChild.definition_key,
+                node_input='{}',
+                args_from='{"source": 0}',
+                sources=[source],
+            ),
+        )
+
+        assert isinstance(answer, ChildSpecBuilt)
+        data = json.loads(answer.spec_json)
+        assert json.loads(data['nodes'][0]['input_json']) == {'value': 11}
