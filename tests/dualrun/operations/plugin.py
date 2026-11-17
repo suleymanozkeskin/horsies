@@ -149,6 +149,26 @@ def _record_counts(config: pytest.Config, node_id: str, counts: CallCounts) -> N
     by_test[base_id] = by_test.get(base_id, 0) + counts.total()
 
 
+def _isolate_process_registries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each run of a test its own copy of the workflow registries of
+    this process, so the second run does not see the definitions that the
+    first one registered (``HRS-017 ... already registered``). The teardown
+    of the run restores the registries from before it."""
+    import importlib
+    from weakref import WeakValueDictionary
+
+    registry = importlib.import_module('horsies.core.workflows.registry')
+    for name in ('_workflow_defs_by_key', '_active_specs'):
+        current: object = getattr(registry, name)
+        assert isinstance(current, dict), f'horsies.core.workflows.registry.{name} is a dict'
+        monkeypatch.setattr(registry, name, dict(current))
+    nodes: object = getattr(registry, '_nodes_by_spec')
+    assert isinstance(nodes, WeakValueDictionary), (
+        'horsies.core.workflows.registry._nodes_by_spec is a WeakValueDictionary'
+    )
+    monkeypatch.setattr(registry, '_nodes_by_spec', WeakValueDictionary(nodes))
+
+
 @pytest.fixture(autouse=True)
 def implementation(
     request: pytest.FixtureRequest,
@@ -164,6 +184,7 @@ def implementation(
             yield SingleRun()
             return
     operations = tuple(resolve_operation(each) for each in OPERATION_TABLES[switched])
+    _isolate_process_registries(monkeypatch)
     counts = CallCounts()
     match implementation_run:
         case Implementation.PYTHON_REFERENCE:
