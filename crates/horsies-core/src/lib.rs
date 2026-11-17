@@ -175,6 +175,13 @@ pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::rerun::{
     NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
 };
+// One core statement in a transaction that the caller owns: the Rust
+// client's adapters implement `CallerTransaction`; the core's own
+// `db::Transaction` implements it too.
+pub use crate::core::history::rerun::{
+    positional_sql, CallerColumn, CallerRow, CallerRowRefused, CallerStatement,
+    CallerStatementRefused, CallerTransaction, CallerType, OwnTransactionError, StatementValue,
+};
 pub use crate::workflow_engine::bound_handle::WorkflowHandle;
 pub use crate::workflow_engine::engine::{
     on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
