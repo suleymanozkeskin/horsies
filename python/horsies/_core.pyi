@@ -68,8 +68,11 @@ class PanicException(BaseException):
 
 @final
 class CoreHandle:
-    """The core handle of one producer manifest. Building it starts nothing."""
-    def __init__(self, manifest_json: str) -> None: ...
+    """The core handle of one producer manifest and the pool profile of its process: PRODUCER,
+    or WORKER (the main core pool keeps 2 connections free from batch checkouts for the
+    per-task writes). Building it starts nothing.
+    """
+    def __init__(self, manifest_json: str, *, pool_profile: Literal['PRODUCER', 'WORKER']) -> None: ...
     @property
     def manifest_version(self) -> int: ...
     def close(self) -> HandleClosed:
@@ -91,7 +94,9 @@ class CoreHandle:
     def schema_status_async(self) -> asyncio.Future[SchemaStatusRecord]:
         """The awaitable form of the method above."""
     def enqueue(self, request: EnqueueRequest) -> Enqueued | SendSuppressed | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict:
-        """Enqueue one task, in one statement. Writes; a resend with send_kind REPEAT is safe."""
+        """Enqueue one task, in one statement. Installs the schema once per handle first. Writes; a
+        resend with send_kind REPEAT is safe.
+        """
     def enqueue_async(self, request: EnqueueRequest) -> asyncio.Future[Enqueued | SendSuppressed | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict]:
         """The awaitable form of the method above."""
     def requeue_stale_claimed_async(self, stale_after_ms: int) -> asyncio.Future[StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed]:
@@ -134,6 +139,13 @@ class CoreHandle:
         """The info of one task. Installs the schema once per handle first; then reads only."""
     def task_info_async(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> asyncio.Future[TaskInfoRecord | TaskInfoNotFound | BrokerFailure]:
         """The awaitable form of the method above."""
+    def raw_result_record(self, task_id: uuid.UUID, *, timeout_ms: int | None) -> RawResultRecordRecord | RawResultAbsent | BrokerFailure:
+        """The result of one task, waiting up to timeout_ms (no limit for None) while it has not
+        finished. Installs the schema once per handle first; then reads only. Bounded by the limit
+        plus the bound of a blocking call; not bounded with no limit.
+        """
+    def raw_result_record_async(self, task_id: uuid.UUID, *, timeout_ms: int | None) -> asyncio.Future[RawResultRecordRecord | RawResultAbsent | BrokerFailure]:
+        """The awaitable form of the method above. A cancelled await drops the wait."""
 
 
 @final
@@ -159,32 +171,13 @@ class StartAt:
 
 
 @final
-class RetentionDefault:
-    """Keep the history record for the default period."""
-    def __init__(self) -> None: ...
-
-
-@final
-class RetentionForever:
-    """Keep the history record forever."""
-    def __init__(self) -> None: ...
-
-
-@final
-class RetentionPeriod:
-    """Keep the history record for a period of whole days (1 to 1825)."""
-    def __init__(self, days: int) -> None: ...
-    @property
-    def days(self) -> int: ...
-
-
-@final
 class EnqueueRequest:
     """One frozen send. None for good_until, task_options_json or idempotency_key
-    means no deadline, no options, no key. send_kind is FIRST for the first send of the task
-    id and REPEAT for a send retry: a task that finished then answers from history.
+    means no deadline, no options, no key. retention_class_key is 'forever' or
+    'standard_<days>d'; the core checks it at the send. send_kind is FIRST for the first send
+    of the task id and REPEAT for a send retry: a task that finished then answers from history.
     """
-    def __init__(self, *, task_id: uuid.UUID, task_name: str, queue_name: str, priority: int, input_json: str, sent_at: datetime.datetime, start: StartNow | StartAfterDelay | StartAt, good_until: datetime.datetime | None, task_options_json: str | None, idempotency_key: str | None, retention: RetentionDefault | RetentionForever | RetentionPeriod, rerun_input: Literal['APP_DEFAULT', 'KEEP', 'DROP'], send_kind: Literal['FIRST', 'REPEAT']) -> None: ...
+    def __init__(self, *, task_id: uuid.UUID, task_name: str, queue_name: str, priority: int, input_json: str, sent_at: datetime.datetime, start: StartNow | StartAfterDelay | StartAt, good_until: datetime.datetime | None, task_options_json: str | None, idempotency_key: str | None, retention_class_key: str, rerun_input: Literal['APP_DEFAULT', 'KEEP', 'DROP'], send_kind: Literal['FIRST', 'REPEAT']) -> None: ...
     @property
     def task_id(self) -> uuid.UUID: ...
 
@@ -320,9 +313,15 @@ class SendSuppressed:
 
 @final
 class SendValidationFailed:
-    """The input or the options were refused. Nothing was written."""
+    """The core refused the send before any statement. Nothing was written. cause_text is the
+    JSON reader's error when the refused text does not read.
+    """
+    @property
+    def code(self) -> Literal['INVALID_INPUT', 'INVALID_TASK_OPTIONS']: ...
     @property
     def message(self) -> str: ...
+    @property
+    def cause_text(self) -> str | None: ...
 
 
 @final
@@ -447,6 +446,28 @@ class TaskInfoRecord:
     def attempts(self) -> list[TaskAttemptRecord] | None: ...
     @property
     def execution(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'] | None: ...
+
+
+@final
+class RawResultRecordRecord:
+    """The status of one task and its stored result envelope as JSON text; result_json is None
+    for a task that had not finished when the limit passed.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def status(self) -> Literal['PENDING', 'CLAIMED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED']: ...
+    @property
+    def result_json(self) -> str | None: ...
+
+
+@final
+class RawResultAbsent:
+    """Neither the live table nor the task history holds the task."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
 
 
 @final
