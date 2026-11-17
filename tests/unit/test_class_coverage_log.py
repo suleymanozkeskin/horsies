@@ -193,7 +193,7 @@ class TestReaperCoverageCheck:
         """The workers that start together write their first snapshot before
         any of them checks, so a fleet start logs no unserved stream."""
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             recovery_config=RecoveryConfig(check_interval_ms=7_000),

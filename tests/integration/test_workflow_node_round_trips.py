@@ -1,4 +1,4 @@
-# pyright: reportPrivateUsage=false
+# pyright: reportPrivateUsage=false, reportUnusedFunction=false
 """Round trips of a workflow node's finalize, counted at the wire.
 
 Phase 1 and phase 2 are counted apart: ``_persist_task_terminal_state``,
@@ -13,7 +13,12 @@ SQL text. The worker's engine is the one the CLI builds, with
 Shapes: ``chain`` is A -> B (phase 2 of A promotes B), ``fanout`` is A with
 ``FANOUT`` dependents (phase 2 of A promotes all of them with the statements
 of ``chain``), ``single`` is A alone (phase 2 of A completes the workflow;
-A has no dependents, so phase 2 does not read them).
+A has no dependents, so phase 2 does not read them), ``subworkflow`` is A ->
+a sub-workflow node (phase 2 of A owes the child start).
+
+Phase 2 is ``horsies_workflow_node_finish`` in the form of the node facts
+that phase 1 read: one statement in autocommit when no sub-workflow node is
+below A, else a transaction with the owed child start.
 """
 
 from __future__ import annotations
@@ -34,10 +39,18 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.models.workflow import OnError, TaskNode
+from horsies.core.models.workflow import (
+    OnError,
+    SubWorkflowNode,
+    TaskNode,
+    WorkflowDefinition,
+    WorkflowSpec,
+)
 from horsies.core.types.result import Ok, is_ok
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.worker import Worker
 from horsies.core.workflows.lifecycle import start_workflow_async
+from horsies.core.workflows.registry import register_workflow_definition
 from tests.integration.autocommit_support import (
     WARM_RUNS,
     WORKER_ID,
@@ -69,72 +82,22 @@ PRE_PING = pytest.mark.parametrize(
 
 # The statements of each phase, in order, by the start of their SQL text.
 SUCCESS_PHASE1: Final = ('SELECT * FROM horsies_finish_workflow_success(',)
-FAILURE_PHASE1: Final = (
-    'SELECT CAST(status AS text) AS status, retry_count',
-    'SELECT * FROM horsies_finish_failed_attempt(',
-)
-NODE_WRITE: Final = 'WITH woken AS ( SELECT pg_notify('
-"""The node write, which sends the capacity wake of the task's queue."""
-DEPENDENTS: Final = 'SELECT d.task_index, d.dependencies'
-PROMOTION: Final = 'UPDATE horsies_workflow_tasks wt SET status = CASE'
-"""The promotion write: PENDING to ENQUEUED, or to READY for a skip-on-ready
-node, which the next statement skips."""
-COMPLETION_CHECK: Final = 'SELECT w.status, w.completed_at, w.error'
-FIRST_FAILURE: Final = 'SELECT task_name, result FROM horsies_workflow_tasks'
+FAILURE_PHASE1: Final = ('SELECT * FROM horsies_finish_failed_attempt(',)
+STEP: Final = 'SELECT r.row_kind, r.disposition, r.workflow_id'
+"""A step statement (``steps._step_statement``): the phase-2 call
+(``horsies_workflow_node_finish``: the node write, the capacity wake of the
+node's queue, the failure policy, promotion and the completion check), or
+the child start that it owes (``horsies_workflow_child_start``). The proxy
+keeps the first 90 characters of a statement, which do not reach the
+function's name; the order tells them apart."""
+ONE_STATEMENT: Final = (STEP,)
 PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
-    ('chain', True): (
-        'BEGIN',
-        NODE_WRITE,
-        DEPENDENTS,
-        PROMOTION,
-        'SELECT task_index, task_name, status, result',
-        'WITH inserted AS ( INSERT INTO horsies_tasks',
-        COMPLETION_CHECK,
-        'COMMIT',
-    ),
-    ('fanout', True): (
-        'BEGIN',
-        NODE_WRITE,
-        DEPENDENTS,
-        PROMOTION,
-        'SELECT task_index, task_name, status, result',
-        'WITH inserted AS ( INSERT INTO horsies_tasks',
-        COMPLETION_CHECK,
-        'COMMIT',
-    ),
-    ('single', True): (
-        'BEGIN',
-        NODE_WRITE,
-        COMPLETION_CHECK,
-        'SELECT task_index, dependencies FROM horsies_workflow_tasks',
-        'SELECT node_id, task_index, task_name, status, result',
-        "UPDATE horsies_workflows SET status = 'COMPLETED'",
-        'COMMIT',
-    ),
-    ('chain', False): (
-        'BEGIN',
-        NODE_WRITE,
-        FIRST_FAILURE,
-        'UPDATE horsies_workflows SET error',
-        DEPENDENTS,
-        PROMOTION,
-        "UPDATE horsies_workflow_tasks SET status = 'SKIPPED'",
-        DEPENDENTS,
-        COMPLETION_CHECK,
-        FIRST_FAILURE,
-        "UPDATE horsies_workflows SET status = 'FAILED'",
-        'COMMIT',
-    ),
-    ('single', False): (
-        'BEGIN',
-        NODE_WRITE,
-        FIRST_FAILURE,
-        'UPDATE horsies_workflows SET error',
-        COMPLETION_CHECK,
-        FIRST_FAILURE,
-        "UPDATE horsies_workflows SET status = 'FAILED'",
-        'COMMIT',
-    ),
+    ('chain', True): ONE_STATEMENT,
+    ('fanout', True): ONE_STATEMENT,
+    ('single', True): ONE_STATEMENT,
+    ('subworkflow', True): ('BEGIN', STEP, STEP, 'COMMIT'),
+    ('chain', False): ONE_STATEMENT,
+    ('single', False): ONE_STATEMENT,
 }
 
 
@@ -164,6 +127,24 @@ def _report(ok: bool) -> str:
     return dumps_json(encode_task_result(result, JsonValue)).unwrap()
 
 
+def _child_definition(fn: Any) -> type[WorkflowDefinition[int]]:
+    """A registered child definition of one task node of ``fn``."""
+    suffix = uuid.uuid4().hex[:8]
+
+    class RoundTripChild(WorkflowDefinition[int]):
+        name = f'node_rt_child_{suffix}'
+        definition_key = f'node-rt-child-{suffix}'
+
+        @classmethod
+        def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
+            _ = (args, params)
+            node = TaskNode(fn=fn, kwargs={'value': 3})
+            return app.workflow(cls.name, [node], output=node, definition_key=cls.definition_key)
+
+    register_workflow_definition(RoundTripChild)
+    return RoundTripChild
+
+
 async def _start(app: Horsies, broker: PostgresBroker, fn: Any, shape: str) -> str:
     a = TaskNode(fn=fn, kwargs={'value': 1})
     nodes: list[Any] = [a]
@@ -175,6 +156,8 @@ async def _start(app: Horsies, broker: PostgresBroker, fn: Any, shape: str) -> s
                 TaskNode(fn=fn, kwargs={'value': value}, waits_for=[a])
                 for value in range(FANOUT)
             )
+        case 'subworkflow':
+            nodes.append(SubWorkflowNode(workflow_def=_child_definition(fn), waits_for=[a]))
         case _:
             pass
     spec = app.workflow(
@@ -198,7 +181,9 @@ async def _run_node_a(
                 UPDATE horsies_tasks t
                 SET status = 'RUNNING',
                     claimed_by_worker_id = :worker, claimed_at = :claimed_at,
-                    started_at = NOW()
+                    claim_expires_at = NULL, started_at = NOW(),
+                    worker_pid = 4242, worker_hostname = 'host-1',
+                    worker_process_name = 'child-1'
                 FROM horsies_workflow_tasks wt
                 WHERE wt.workflow_id = :wf AND wt.task_index = 0
                   AND t.id = wt.task_id
@@ -236,19 +221,16 @@ async def _finalize_once(
         task_name=task_name,
         queue_name=queue_name,
         is_workflow_task=True,
-        claimed_at=claimed_at,
+        claim=DispatchClaim(
+            claimed_at=claimed_at, retry_count=0, max_retries=0, task_options=None,
+        ),
     )
     phase1 = proxy.stop_recording()
     assert is_ok(phase1_r), phase1_r
     persisted = phase1_r.ok_value
     assert persisted is not None
     proxy.start_recording()
-    phase2_r = await worker._finalize_workflow_phase(
-        task_id,
-        persisted.result,
-        queue_name=persisted.queue_name,
-        task_name=persisted.task_name,
-    )
+    phase2_r = await worker._finalize_workflow_phase(task_id, persisted)
     phase2 = proxy.stop_recording()
     assert phase2_r == Ok(None)
     return _Measured(phase1=phase1, phase2=phase2)
@@ -335,7 +317,7 @@ async def test_phase_one_of_a_success_is_one_statement(
 
 @PRE_PING
 @pytest.mark.parametrize('shape', ['chain', 'single'])
-async def test_phase_one_of_a_failure_is_one_read_and_one_statement(
+async def test_phase_one_of_a_failure_is_one_statement(
     proxy: RoundTripProxy,
     db_url: str,
     app: Horsies,
@@ -361,6 +343,7 @@ async def test_phase_one_of_a_failure_is_one_read_and_one_statement(
         ('chain', True),
         ('fanout', True),
         ('single', True),
+        ('subworkflow', True),
         ('chain', False),
         ('single', False),
     ],
@@ -368,6 +351,7 @@ async def test_phase_one_of_a_failure_is_one_read_and_one_statement(
         'chain-success',
         'fanout-success',
         'single-success',
+        'subworkflow-success',
         'chain-failure',
         'single-failure',
     ],
@@ -383,8 +367,9 @@ async def test_phase_two_statements(
     ok: bool,
     pre_ping: bool,
 ) -> None:
-    """Phase 2 is one transaction that holds the workflow row lock from its
-    first statement to its COMMIT."""
+    """Phase 2 is one statement in autocommit when no sub-workflow node is
+    below the node, and a transaction with the owed child start when one
+    is: the workflow row lock is held from the step to the COMMIT."""
     labelled, steady = await _measure(
         proxy, db_url, app, broker, session, shape=shape, ok=ok, pre_ping=pre_ping
     )

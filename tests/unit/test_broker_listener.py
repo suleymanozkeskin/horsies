@@ -1558,6 +1558,7 @@ class TestCallerUnwrapContract:
             BaselineCurrent,
             ClientFamily,
             FamilyRecorded,
+            ReadersPublished,
         )
 
         with (
@@ -1575,7 +1576,8 @@ class TestCallerUnwrapContract:
                 new=AsyncMock(
                     return_value=Ok(
                         BaselineCurrent(
-                            family=FamilyRecorded(family=ClientFamily.PYTHON)
+                            family=FamilyRecorded(family=ClientFamily.PYTHON),
+                            readers=ReadersPublished(),
                         )
                     )
                 ),
@@ -1588,7 +1590,7 @@ class TestCallerUnwrapContract:
             mock_listener_cls.return_value = mock_listener
 
             config = PostgresConfig(
-                database_url='postgresql+psycopg://u:p@localhost/db'
+                database_url='postgresql://u:p@localhost/db'
             )
             broker = PostgresBroker(config)
 
@@ -1621,7 +1623,7 @@ class TestCallerUnwrapContract:
         from horsies.core.worker.config import WorkerConfig
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://localhost/test',
+            dsn='postgresql://localhost/test',
             psycopg_dsn='postgresql://localhost/test',
             queues=['default'],
         )
@@ -1667,7 +1669,7 @@ class TestCallerUnwrapContract:
         from horsies.core.worker.config import WorkerConfig
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://localhost/test',
+            dsn='postgresql://localhost/test',
             psycopg_dsn='postgresql://localhost/test',
             queues=['default'],
         )

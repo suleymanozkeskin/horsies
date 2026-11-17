@@ -179,14 +179,15 @@ async def test_the_heartbeat_sweep_drops_leaves_across_a_fold(
             )
             assert isinstance(created, LeafCreated), created
 
-    swept = await sweep_expired_heartbeat_leaves(
+    sweep = await sweep_expired_heartbeat_leaves(
         PartitionMaintenanceDatabase(dst_heartbeats, connection_capacity=2),
         UnpublishedLoader(),
     )
 
-    assert [entry.leaf_name for entry in swept] == [
+    assert sweep.errors == ()
+    assert [entry.leaf_name for entry in sweep.swept] == [
         leaf.leaf_name for leaf in leaves
     ]
-    for entry in swept:
+    for entry in sweep.swept:
         assert isinstance(entry.detach, LeafDetached), entry
         assert entry.drop == LeafDropped(leaf_name=entry.leaf_name)

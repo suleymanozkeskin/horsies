@@ -1,5 +1,5 @@
 //! Coverage, pruning, and archive-gate ownership.
 
 pub mod coverage;
-mod coverage_probe;
+mod coverage_functions;
 pub mod pruning;

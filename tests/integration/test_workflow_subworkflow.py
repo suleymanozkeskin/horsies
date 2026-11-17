@@ -41,7 +41,6 @@ from horsies.core.models.workflow import (
 from horsies.core.workflows.engine import (
     drain_parent_propagations_in_session,
     on_subworkflow_complete,
-    on_workflow_task_complete,
 )
 from horsies.core.workflows.registry import (
     register_workflow_definition,
@@ -49,7 +48,7 @@ from horsies.core.workflows.registry import (
     unregister_workflow_spec,
 )
 
-from .conftest import make_failing_task, make_simple_task, start_ok
+from .conftest import finish_task, make_failing_task, make_simple_task, start_ok
 
 
 # =============================================================================
@@ -298,8 +297,6 @@ class MiddleWorkflow(WorkflowDefinition[int]):
         )
 
 
-
-
 class RootNestingWorkflow(WorkflowDefinition[int]):
     """Includes itself, one level deeper, as its only root node.
 
@@ -384,30 +381,6 @@ class TestSubworkflowIntegration:
         await session.commit()
         return session, broker, app
 
-    async def _complete_task(
-        self,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        workflow_id: str,
-        task_index: int,
-        result: TaskResult[Any, TaskError],
-    ) -> None:
-        res = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = :idx
-            """),
-            {'wf_id': workflow_id, 'idx': task_index},
-        )
-        row = res.fetchone()
-        if row and row[0]:
-            await on_workflow_task_complete(
-            session, row[0], result, broker,
-            task_name=await task_name_for(session, row[0]),
-        )
-            await drain_parent_propagations_in_session(session, broker)
-            await session.commit()
-
     async def _get_workflow_task_row(
         self,
         session: AsyncSession,
@@ -427,21 +400,6 @@ class TestSubworkflowIntegration:
             return None
         return tuple(row)
 
-    async def _get_child_task_id(
-        self, session: AsyncSession, child_workflow_id: str
-    ) -> str | None:
-        res = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': child_workflow_id},
-        )
-        row = res.fetchone()
-        if row and row[0]:
-            return row[0]
-        return None
-
     async def _complete_child_workflow(
         self,
         session: AsyncSession,
@@ -456,14 +414,7 @@ class TestSubworkflowIntegration:
         _, child_id, _ = row
         assert isinstance(child_id, str)
 
-        child_task_id = await self._get_child_task_id(session, child_id)
-        assert isinstance(child_task_id, str)
-        await on_workflow_task_complete(
-            session, child_task_id, child_result, broker,
-            task_name=await task_name_for(session, child_task_id),
-        )
-        await drain_parent_propagations_in_session(session, broker)
-        await session.commit()
+        await finish_task(session, broker, child_id, 0, child_result)
         return child_id
 
     # -----------------------------------------------------------------
@@ -491,7 +442,7 @@ class TestSubworkflowIntegration:
         )
 
         handle = await start_ok(spec, broker)
-        await self._complete_task(
+        await finish_task(
             session, broker, handle.workflow_id, 0, TaskResult(ok=4)
         )
 
@@ -596,7 +547,7 @@ class TestSubworkflowIntegration:
         handle = await start_ok(spec, broker)
         unregister_workflow_spec(spec.name)
 
-        await self._complete_task(
+        await finish_task(
             session, broker, handle.workflow_id, 0, TaskResult(ok=4)
         )
 
@@ -628,7 +579,7 @@ class TestSubworkflowIntegration:
         )
 
         handle = await start_ok(spec, broker)
-        await self._complete_task(
+        await finish_task(
             session, broker, handle.workflow_id, 0, TaskResult(ok=7)
         )
 
@@ -637,15 +588,7 @@ class TestSubworkflowIntegration:
         _, child_id, _ = row
         assert isinstance(child_id, str)
 
-        child_task_id = await self._get_child_task_id(session, child_id)
-        assert isinstance(child_task_id, str)
-
-        await on_workflow_task_complete(
-            session, child_task_id, TaskResult(ok=7), broker,
-            task_name=await task_name_for(session, child_task_id),
-        )
-        await drain_parent_propagations_in_session(session, broker)
-        await session.commit()
+        await finish_task(session, broker, child_id, 0, TaskResult(ok=7))
 
         row_after = await self._get_workflow_task_row(session, handle.workflow_id, 1)
         assert row_after is not None
@@ -678,7 +621,7 @@ class TestSubworkflowIntegration:
         )
 
         handle = await start_ok(spec, broker)
-        await self._complete_task(
+        await finish_task(
             session, broker, handle.workflow_id, 0, TaskResult(ok=-1)
         )
 
@@ -985,7 +928,7 @@ class TestSubworkflowIntegration:
         assert child_status == 'RUNNING'
         assert isinstance(child_id, str)
 
-        await self._complete_task(
+        await finish_task(
             session,
             broker,
             handle.workflow_id,
@@ -1087,22 +1030,8 @@ class TestSubworkflowIntegration:
         child2_id = row2[1]
         assert isinstance(child1_id, str) and isinstance(child2_id, str)
 
-        child1_task_id = await self._get_child_task_id(session, child1_id)
-        child2_task_id = await self._get_child_task_id(session, child2_id)
-        assert isinstance(child1_task_id, str) and isinstance(child2_task_id, str)
-
-        await on_workflow_task_complete(
-            session, child1_task_id, TaskResult(ok=1), broker,
-            task_name=await task_name_for(session, child1_task_id),
-        )
-        await drain_parent_propagations_in_session(session, broker)
-        await session.commit()
-        await on_workflow_task_complete(
-            session, child2_task_id, TaskResult(ok=5), broker,
-            task_name=await task_name_for(session, child2_task_id),
-        )
-        await drain_parent_propagations_in_session(session, broker)
-        await session.commit()
+        await finish_task(session, broker, child1_id, 0, TaskResult(ok=1))
+        await finish_task(session, broker, child2_id, 0, TaskResult(ok=5))
 
         # Post task should now be ENQUEUED
         post_row = await self._get_workflow_task_row(session, handle.workflow_id, 2)
@@ -1221,7 +1150,7 @@ class TestSubworkflowIntegration:
         deepest = await self._workflows_at_depth(session, MAX_SUBWORKFLOW_DEPTH)
         assert len(deepest) == 1
 
-        await self._complete_task(session, broker, deepest[0], 0, TaskResult(ok=2))
+        await finish_task(session, broker, deepest[0], 0, TaskResult(ok=2))
 
         assert await self._deeper_workflow_count(session, MAX_SUBWORKFLOW_DEPTH) == 0
         assert (
@@ -1302,7 +1231,7 @@ class TestSubworkflowIntegration:
             await session.commit()
 
             # Complete dependency → triggers subworkflow load → fails
-            await self._complete_task(
+            await finish_task(
                 session, broker, handle.workflow_id, 0, TaskResult(ok=1),
             )
 
@@ -1381,7 +1310,7 @@ class TestSubworkflowIntegration:
         handle = await start_ok(spec, broker)
 
         try:
-            await self._complete_task(
+            await finish_task(
                 session, broker, handle.workflow_id, 0, TaskResult(ok=1),
             )
 
@@ -1499,7 +1428,7 @@ class TestSubworkflowIntegration:
                 SerializationError,
                 match='Failed to serialize kwargs for child sub',
             ):
-                await self._complete_task(
+                await finish_task(
                     session, broker, handle.workflow_id, 0, TaskResult(ok=1),
                 )
             await session.rollback()
@@ -1660,7 +1589,7 @@ class TestSubworkflowIntegration:
         handle = await start_ok(spec, broker)
 
         # Complete task A with failure
-        await self._complete_task(
+        await finish_task(
             session, broker, handle.workflow_id, 0,
             TaskResult(err=TaskError(error_code='A_FAIL', message='upstream failed')),
         )
@@ -1699,7 +1628,7 @@ class TestSubworkflowIntegration:
         handle = await start_ok(spec, broker)
 
         # Complete only task A → join='any' should trigger subworkflow start
-        await self._complete_task(
+        await finish_task(
             session, broker, handle.workflow_id, 0, TaskResult(ok=10),
         )
 
@@ -1740,7 +1669,7 @@ class TestSubworkflowIntegration:
         handle = await start_ok(spec, broker)
 
         # Complete A → child starts
-        await self._complete_task(
+        await finish_task(
             session, broker, handle.workflow_id, 0, TaskResult(ok=6),
         )
 
@@ -1848,10 +1777,10 @@ class TestSubworkflowIntegration:
         handle = await start_ok(spec, broker)
 
         # Complete both upstream tasks
-        await self._complete_task(
+        await finish_task(
             session, broker, handle.workflow_id, 0, TaskResult(ok=10),
         )
-        await self._complete_task(
+        await finish_task(
             session, broker, handle.workflow_id, 1, TaskResult(ok=20),
         )
 
@@ -1954,7 +1883,7 @@ class TestSubworkflowIntegration:
         try:
             # Completing dep triggers subworkflow enqueue → broker.app is None.
             # Post-ENQUEUED failures are converted to FAILED state instead of raising.
-            await self._complete_task(
+            await finish_task(
                 session, broker, handle.workflow_id, 0, TaskResult(ok=1),
             )
         finally:
@@ -2140,21 +2069,7 @@ class TestSubworkflowRecovery:
         handle = await start_ok(spec, broker)
 
         # Complete task A to make child READY
-        res = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        task_row = res.fetchone()
-        assert task_row is not None and task_row[0] is not None
-        await on_workflow_task_complete(
-            session, task_row[0], TaskResult(ok=2), broker,
-            task_name=await task_name_for(session, task_row[0]),
-        )
-        await drain_parent_propagations_in_session(session, broker)
-        await session.commit()
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=2))
 
         # Verify child is RUNNING (started normally)
         child_row = await session.execute(
@@ -2258,7 +2173,6 @@ class TestSubworkflowRecovery:
 
 
 from pydantic import BaseModel  # noqa: E402
-from tests.integration.conftest import task_name_for
 
 
 class _TypedPayload(BaseModel):

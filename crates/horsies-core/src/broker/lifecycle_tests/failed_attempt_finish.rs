@@ -18,12 +18,11 @@ use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::attempt_writes::{
-    finish_failed_attempt, AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryPlacement,
-    RetryRequest,
+    AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryPlacement, RetryRequest,
 };
 use crate::core::lifecycle::{
     AfterFailure, AttemptWriteRefusal, FailedAttemptOutcome, OwnedClaim, PhaseTwoOwed,
-    RetryRefusal, TerminalizationKind,
+    PhaseTwoStep, RetryRefusal, TerminalizationKind,
 };
 use crate::core::types::status::TaskStatus;
 
@@ -82,7 +81,7 @@ mod terminal_failure {
         let mut wakes = Wakes::listen(&pool, CHANNEL).await;
         let task_id = seed_task(&pool, &running()).await;
 
-        let outcome = finish_failed_attempt(&pool, &failure(task_id, RetryRequest::NoRetry))
+        let outcome = write_failed_attempt(&pool, &failure(task_id, RetryRequest::NoRetry))
             .await
             .expect("failure write");
 
@@ -151,10 +150,7 @@ mod terminal_failure {
                 Some("lifecycle-process"),
             )
         );
-        assert_eq!(
-            wakes.payloads(&pool).await,
-            vec![format!("capacity:{task_id}")]
-        );
+        assert_eq!(wakes.payloads(&pool).await, vec!["capacity".to_owned()]);
         cleanup_tasks(&pool, &[task_id]).await;
     }
 
@@ -174,7 +170,7 @@ mod terminal_failure {
         .await;
         let workflow_id = link_workflow_task(&pool, task_id, "RUNNING", "RUNNING").await;
 
-        let outcome = finish_failed_attempt(&pool, &failure(task_id, RetryRequest::NoRetry))
+        let outcome = write_failed_attempt(&pool, &failure(task_id, RetryRequest::NoRetry))
             .await
             .expect("failure write");
 
@@ -183,6 +179,7 @@ mod terminal_failure {
                 AfterFailure::PhaseTwoOwed(PhaseTwoOwed {
                     task_name,
                     queue_name,
+                    step,
                 }),
             ..
         } = outcome
@@ -193,6 +190,7 @@ mod terminal_failure {
             (task_name.as_str(), queue_name.as_str()),
             ("lifecycle.test", QUEUE)
         );
+        assert_eq!(step, PhaseTwoStep::NoDependents);
         assert_eq!(
             history_row(&pool, task_id)
                 .await
@@ -223,7 +221,7 @@ mod terminal_failure {
             ..failure(task_id, RetryRequest::NoRetry)
         };
 
-        let outcome = finish_failed_attempt(&pool, &worker_failure)
+        let outcome = write_failed_attempt(&pool, &worker_failure)
             .await
             .expect("failure write");
 
@@ -268,7 +266,7 @@ mod retry {
         )
         .await;
 
-        let outcome = finish_failed_attempt(
+        let outcome = write_failed_attempt(
             &pool,
             &failure(
                 task_id,
@@ -302,7 +300,7 @@ mod retry {
         set_deadline(&pool, task_id, deadline).await;
         let seeded_good_until = good_until_of(&pool, task_id).await;
 
-        let outcome = finish_failed_attempt(&pool, &failure(task_id, retry_after(60.0)))
+        let outcome = write_failed_attempt(&pool, &failure(task_id, retry_after(60.0)))
             .await
             .expect("failure write");
 
@@ -332,10 +330,7 @@ mod retry {
             panic!("expected one attempt, got {records:?}");
         };
         assert!(!attempt.will_retry());
-        assert_eq!(
-            wakes.payloads(&pool).await,
-            vec![format!("capacity:{task_id}")]
-        );
+        assert_eq!(wakes.payloads(&pool).await, vec!["capacity".to_owned()]);
         cleanup_tasks(&pool, &[task_id]).await;
     }
 
@@ -364,7 +359,7 @@ mod retry {
         let task_id = seed_task(&pool, &running()).await;
         set_deadline(&pool, task_id, Deadline::AheadSeconds(3_600.0)).await;
 
-        let outcome = finish_failed_attempt(&pool, &failure(task_id, retry_after(60.0)))
+        let outcome = write_failed_attempt(&pool, &failure(task_id, retry_after(60.0)))
             .await
             .expect("retry write");
 
@@ -391,7 +386,7 @@ mod no_write {
         let mut wakes = Wakes::listen(&pool, CHANNEL).await;
         let task_id = seed_task(&pool, &running()).await;
         let command = failure(task_id, RetryRequest::NoRetry);
-        let first = finish_failed_attempt(&pool, &command)
+        let first = write_failed_attempt(&pool, &command)
             .await
             .expect("failure write");
         let FailedAttemptOutcome::FailureApplied {
@@ -401,14 +396,9 @@ mod no_write {
         else {
             panic!("expected a failure, got {first:?}");
         };
-        assert_eq!(
-            wakes.payloads(&pool).await,
-            vec![format!("capacity:{task_id}")]
-        );
+        assert_eq!(wakes.payloads(&pool).await, vec!["capacity".to_owned()]);
 
-        let replay = finish_failed_attempt(&pool, &command)
-            .await
-            .expect("replay");
+        let replay = write_failed_attempt(&pool, &command).await.expect("replay");
 
         let FailedAttemptOutcome::Refused(AttemptWriteRefusal::AlreadyApplied {
             terminal_at,
@@ -434,7 +424,7 @@ mod no_write {
         let pool = pool().await;
         let task_id = seed_task(&pool, &running()).await;
         let command = failure(task_id, retry_after(30.0));
-        let first = finish_failed_attempt(&pool, &command)
+        let first = write_failed_attempt(&pool, &command)
             .await
             .expect("retry write");
         assert!(
@@ -443,9 +433,7 @@ mod no_write {
         );
         let before = live_row(&pool, task_id).await;
 
-        let replay = finish_failed_attempt(&pool, &command)
-            .await
-            .expect("replay");
+        let replay = write_failed_attempt(&pool, &command).await.expect("replay");
 
         let FailedAttemptOutcome::Refused(AttemptWriteRefusal::LostClaim { observed, .. }) = replay
         else {
@@ -477,7 +465,7 @@ mod no_write {
                 ..failure(task_id, retry_after(30.0))
             };
 
-            let outcome = finish_failed_attempt(&pool, &command)
+            let outcome = write_failed_attempt(&pool, &command)
                 .await
                 .expect("retry write");
 
@@ -493,6 +481,140 @@ mod no_write {
             assert!(live_attempts(&pool, task_id).await.is_empty());
             cleanup_tasks(&pool, &[task_id]).await;
         }
+    }
+}
+
+/// The claimed-row rule `RELEASE` (#713): the write of a child that ended
+/// without a report returns a row that no child started to the queue, in the
+/// same statement, with no attempt row.
+mod claimed_row_release {
+    use super::*;
+    use crate::core::lifecycle::{ReleasedClaim, UnreportedAttemptOutcome};
+
+    fn claimed() -> TaskSeed {
+        TaskSeed {
+            queue_name: QUEUE,
+            max_retries: 3,
+            ..TaskSeed::claimed()
+        }
+    }
+
+    /// A CLAIMED row of this worker at this claim generation goes back to
+    /// PENDING with its claim fields cleared and no attempt row.
+    #[tokio::test]
+    #[serial]
+    async fn a_claimed_row_of_this_generation_is_released() {
+        let pool = pool().await;
+        let task_id = seed_task(&pool, &claimed()).await;
+
+        let outcome = write_unreported_attempt(&pool, &failure(task_id, retry_after(60.0)))
+            .await
+            .expect("release");
+
+        assert_eq!(
+            outcome,
+            UnreportedAttemptOutcome::Released(ReleasedClaim {
+                task_id,
+                queue_name: QUEUE.to_owned(),
+                observed: crate::core::lifecycle::ObservedTaskState {
+                    status: Some(TaskStatus::Claimed),
+                    worker_id: Some(WORKER.to_owned()),
+                    claimed_at: Some(generation()),
+                },
+            })
+        );
+        let row = live_row(&pool, task_id).await.expect("live row");
+        assert_eq!(row["status"], "PENDING");
+        assert_eq!(row["claimed_by_worker_id"], serde_json::Value::Null);
+        assert_eq!(row["claimed_at"], serde_json::Value::Null);
+        assert_eq!(row["claim_expires_at"], serde_json::Value::Null);
+        assert_eq!(row["retry_count"], 0);
+        assert!(live_attempts(&pool, task_id).await.is_empty());
+        cleanup_tasks(&pool, &[task_id]).await;
+    }
+
+    /// A CLAIMED row of an earlier claim generation of this worker is not
+    /// released and not written.
+    #[tokio::test]
+    #[serial]
+    async fn a_claimed_row_of_another_generation_is_not_released() {
+        let pool = pool().await;
+        let task_id = seed_task(
+            &pool,
+            &TaskSeed {
+                holder: Holder::Claim {
+                    worker_id: WORKER.to_owned(),
+                    claimed_at: generation() + Duration::seconds(1),
+                },
+                ..claimed()
+            },
+        )
+        .await;
+        let before = live_row(&pool, task_id).await;
+
+        let outcome = write_unreported_attempt(&pool, &failure(task_id, RetryRequest::NoRetry))
+            .await
+            .expect("write");
+
+        assert!(
+            matches!(
+                outcome,
+                UnreportedAttemptOutcome::Failed(FailedAttemptOutcome::Refused(_))
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(live_row(&pool, task_id).await, before);
+        assert!(live_attempts(&pool, task_id).await.is_empty());
+        cleanup_tasks(&pool, &[task_id]).await;
+    }
+
+    /// A row the child started is RUNNING: the rule `RELEASE` writes the
+    /// failure as the rule `REFUSE` does.
+    #[tokio::test]
+    #[serial]
+    async fn a_running_row_is_written_as_a_failure() {
+        let pool = pool().await;
+        let task_id = seed_task(&pool, &running()).await;
+
+        let outcome = write_unreported_attempt(&pool, &failure(task_id, RetryRequest::NoRetry))
+            .await
+            .expect("write");
+
+        assert!(
+            matches!(
+                outcome,
+                UnreportedAttemptOutcome::Failed(FailedAttemptOutcome::FailureApplied {
+                    after: AfterFailure::CapacityWoken,
+                    ..
+                })
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(live_row(&pool, task_id).await, None);
+        assert_eq!(status_of(&pool, task_id).await, "FAILED");
+        cleanup_tasks(&pool, &[task_id]).await;
+    }
+
+    /// The rule `REFUSE` leaves a CLAIMED row of this claim generation as it
+    /// is: the child reported, so the row must be RUNNING.
+    #[tokio::test]
+    #[serial]
+    async fn the_refuse_rule_leaves_a_claimed_row_in_place() {
+        let pool = pool().await;
+        let task_id = seed_task(&pool, &claimed()).await;
+        let before = live_row(&pool, task_id).await;
+
+        let outcome = write_failed_attempt(&pool, &failure(task_id, RetryRequest::NoRetry))
+            .await
+            .expect("write");
+
+        assert!(
+            matches!(outcome, FailedAttemptOutcome::Refused(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(live_row(&pool, task_id).await, before);
+        assert!(live_attempts(&pool, task_id).await.is_empty());
+        cleanup_tasks(&pool, &[task_id]).await;
     }
 }
 
@@ -515,7 +637,7 @@ mod arguments {
             name: "retry_without_delay",
             retry_count: Some(0),
             delay_seconds: None,
-            placement: Some("same_class"),
+            placement: Some("SAME_CLASS"),
             result: Some(ERROR_RESULT),
             attempt_outcome: "FAILED",
             sqlstate: "22023",
@@ -542,7 +664,7 @@ mod arguments {
             name: "negative_delay",
             retry_count: Some(0),
             delay_seconds: Some(-1.0),
-            placement: Some("same_class"),
+            placement: Some("SAME_CLASS"),
             result: Some(ERROR_RESULT),
             attempt_outcome: "FAILED",
             sqlstate: "22023",
@@ -551,7 +673,7 @@ mod arguments {
             name: "nan_delay",
             retry_count: Some(0),
             delay_seconds: Some(f64::NAN),
-            placement: Some("same_class"),
+            placement: Some("SAME_CLASS"),
             result: Some(ERROR_RESULT),
             attempt_outcome: "FAILED",
             sqlstate: "22023",
@@ -560,7 +682,7 @@ mod arguments {
             name: "infinite_delay",
             retry_count: Some(0),
             delay_seconds: Some(f64::INFINITY),
-            placement: Some("same_class"),
+            placement: Some("SAME_CLASS"),
             result: Some(ERROR_RESULT),
             attempt_outcome: "FAILED",
             sqlstate: "22023",
@@ -595,15 +717,22 @@ mod arguments {
             let task_id = seed_task(&pool, &running()).await;
             let before = live_row(&pool, task_id).await;
 
+            // A retry request names its three values; any other call is a
+            // call with no retry (as Python).
+            let retry_kind = match (call.retry_count, call.delay_seconds, call.placement) {
+                (None, None, None) => "NONE",
+                _ => "RETRY",
+            };
             let refused = sqlx::query(
                 "SELECT * FROM horsies_finish_failed_attempt(
-                    $1, $2, $3, $4::integer, $5::double precision, $6,
-                    $7, 'BOOM', NULL, $8, 'message', NULL
+                    $1, $2, $3, $4, $5::integer, $6::double precision, $7,
+                    $8, 'BOOM', NULL, $9, 'message', NULL, 'REFUSE', TRUE
                 )",
             )
             .bind(task_id)
             .bind(WORKER)
             .bind(generation())
+            .bind(retry_kind)
             .bind(call.retry_count)
             .bind(call.delay_seconds)
             .bind(call.placement)

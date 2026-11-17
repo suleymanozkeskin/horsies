@@ -19,6 +19,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.utils.url import to_psycopg_url
 from horsies.core.workflows.engine import (
     check_workflow_completion,
@@ -107,13 +108,13 @@ async def _seed_finished_workflow(
         await session.execute(
             text("""
                 INSERT INTO horsies_workflow_tasks
-                    (id, workflow_id, task_index, node_id, task_name, input,
+                    (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                      queue_name, priority, dependencies,
                      allow_failed_deps, join_type, is_subworkflow, status,
                      result, created_at,
                      max_retries, execution, retention_class_key)
                 VALUES
-                    (:id, :workflow_id, :index, :node_id, 'contract_task',
+                    ('NONE', :id, :workflow_id, :index, :node_id, 'contract_task',
                      '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
                      :status, :result, NOW(),
                      0, 'ISOLATED', 'standard_30d')
@@ -197,6 +198,7 @@ async def test_rolled_back_finalization_sends_no_notification(
 async def test_a_failed_child_gives_its_parent_a_summary_without_output(
     clean_workflow_tables: None,
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
 ) -> None:
     """The child's output node completed, but the child FAILED: the parent's
@@ -216,7 +218,7 @@ async def test_a_failed_child_gives_its_parent_a_summary_without_output(
 
     await check_workflow_completion(session, child_id)
     await session.commit()
-    await _make_worker(engine)._drive_parent_propagations([child_id])
+    await _make_worker(engine, broker)._drive_parent_propagations([child_id])
 
     summary_text = (await session.execute(
         text("""

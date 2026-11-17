@@ -1,6 +1,6 @@
 """Regression tests: resume must decode stored dependency results.
 
-``resume_workflow`` and ``cascade_resume_to_children`` previously called
+The resume (``resume_workflow`` and its cascade to paused children) called
 ``get_dependency_results`` without ``app``, so every COMPLETED dependency
 decoded to a ``RESULT_DESERIALIZATION_ERROR`` (stage='no_app') sentinel and
 resumed ``args_from`` consumers received error envelopes for genuinely
@@ -36,11 +36,11 @@ async def _get_linked_task_kwargs(
     workflow_id: str,
     task_index: int,
 ) -> str:
-    """Return the raw kwargs JSON of the backing task linked to a node."""
+    """Return the stored input (the kwargs JSON) of the backing task linked to a node."""
     row = (
         await session.execute(
             text("""
-                SELECT t.kwargs
+                SELECT t.input
                 FROM horsies_workflow_tasks wt
                 JOIN horsies_tasks t ON t.id = wt.task_id
                 WHERE wt.workflow_id = :wf_id AND wt.task_index = :idx

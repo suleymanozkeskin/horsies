@@ -17,6 +17,7 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerResult
 from horsies.core.models.broker import PostgresConfig
@@ -26,6 +27,7 @@ from tests.integration.test_task_history_schema_emission import (
     MakeDatabase,
     make_database,
 )
+from horsies.core.utils.url import sqlalchemy_url
 
 __all__ = ['make_database']
 
@@ -36,6 +38,7 @@ async def _enqueue(broker: PostgresBroker, task_options: str) -> BrokerResult[st
     return await broker.enqueue_async(
         'retry.limit.task',
         task_id=str(uuid.uuid4()),
+        send_kind=SendKind.FIRST,
         enqueue_sha='c' * 64,
         sent_at=datetime.now(timezone.utc),
         args_json='[]',
@@ -45,7 +48,7 @@ async def _enqueue(broker: PostgresBroker, task_options: str) -> BrokerResult[st
 
 
 async def _stored_limits(url: str) -> list[int]:
-    engine = create_async_engine(url)
+    engine = create_async_engine(sqlalchemy_url(url))
     try:
         async with engine.connect() as connection:
             return list(

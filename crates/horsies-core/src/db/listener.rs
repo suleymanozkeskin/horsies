@@ -658,6 +658,15 @@ impl Listener {
         })
     }
 
+    /// Whether the listener task still runs: it was not closed, and its
+    /// runtime has not dropped it.
+    pub fn is_running(&self) -> bool {
+        match &*lock(&self.owner.task) {
+            TaskSlot::Running(task) => !task.is_finished(),
+            TaskSlot::Joined => false,
+        }
+    }
+
     /// Stops the listener: every subscription reads `Stopped`, the connection
     /// closes, and later subscriptions are refused. Waits at most
     /// [`LISTENER_CLOSE_BOUND`] for the task, then aborts it.

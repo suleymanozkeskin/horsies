@@ -7,19 +7,17 @@
 //! (e) the revert-proof properties. This module is the behavioral safety
 //! net that must be green before any call site moves.
 //!
-//! Each test process owns a UUID-named disposable database. Within that
-//! process, global discovery batches (pending expiry, orphan sweep) are
-//! pre-drained before seeding so one serial test cannot affect another.
+//! Each test owns a copy of the test template (`crate::test_support`).
+//! Global discovery batches (pending expiry, orphan sweep) are still
+//! pre-drained before seeding.
 
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection, PgPool};
-use std::str::FromStr;
-use tokio::sync::OnceCell;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
@@ -124,339 +122,73 @@ fn relation_rows_examined(plan: &serde_json::Value, relation: &str) -> f64 {
     }
 }
 
-fn test_db_url() -> String {
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        return url;
-    }
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let root = std::path::Path::new(manifest_dir)
-        .ancestors()
-        .find(|p| p.join(".env").exists());
-    let pw = root
-        .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-        .and_then(|c| {
-            c.lines()
-                .filter_map(|l| l.trim().split_once('='))
-                .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                .map(|(_, v)| v.trim().to_owned())
-        })
-        .unwrap_or_else(|| "W0rklane".to_owned());
-    format!("postgresql://postgres:{pw}@localhost:5432/horsies-core")
-}
-
-struct P5TestDatabase {
-    name: String,
-    url: String,
-    _anchor: PgPool,
-}
-
+/// A copy of the test template with one coverage pass, owned by one test:
+/// dropped by [`IsolatedTerminalizationTestDatabase::drop`], or at the end of
+/// the test (`crate::test_support`).
 struct IsolatedTerminalizationTestDatabase {
-    admin: PgConnection,
+    database: crate::test_support::TestDatabase,
     pool: PgPool,
-    name: String,
-}
-
-const ISOLATED_TERMINALIZATION_DATABASE_PREFIX: &str = "core_term_iso_";
-
-enum IsolatedTerminalizationDatabaseDrop {
-    InactiveOnly,
-    OwnedForced,
-}
-
-async fn lock_isolated_terminalization_database_setup(admin: &mut PgConnection) {
-    sqlx::query("SELECT pg_advisory_lock(hashtext('horsies_terminalization_database_setup'))")
-        .execute(admin)
-        .await
-        .expect("lock isolated terminalization database setup");
-}
-
-async fn unlock_isolated_terminalization_database_setup(admin: &mut PgConnection) {
-    let unlocked: bool = sqlx::query_scalar(
-        "SELECT pg_advisory_unlock(hashtext('horsies_terminalization_database_setup'))",
-    )
-    .fetch_one(admin)
-    .await
-    .expect("unlock isolated terminalization database setup");
-    assert!(
-        unlocked,
-        "isolated terminalization database setup lock was held"
-    );
-}
-
-async fn drop_isolated_terminalization_database(
-    admin: &mut PgConnection,
-    name: &str,
-    mode: IsolatedTerminalizationDatabaseDrop,
-) {
-    let suffix = name
-        .strip_prefix(ISOLATED_TERMINALIZATION_DATABASE_PREFIX)
-        .expect("database query must enforce the generated prefix");
-    assert!(
-        suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "refuse to drop non-generated terminalization database {name:?}"
-    );
-    let statement = match mode {
-        IsolatedTerminalizationDatabaseDrop::InactiveOnly => {
-            format!("DROP DATABASE \"{name}\"")
-        }
-        IsolatedTerminalizationDatabaseDrop::OwnedForced => {
-            format!("DROP DATABASE \"{name}\" WITH (FORCE)")
-        }
-    };
-    sqlx::query(&statement)
-        .execute(admin)
-        .await
-        .expect("drop generated terminalization database");
-}
-
-async fn drop_inactive_isolated_terminalization_databases(admin: &mut PgConnection) {
-    let stale_databases: Vec<String> = sqlx::query_scalar(
-        "SELECT d.datname
-         FROM pg_database d
-         WHERE left(d.datname, length($1)) = $1
-           AND NOT EXISTS (
-               SELECT 1 FROM pg_stat_activity a
-               WHERE a.datname = d.datname
-           )
-         ORDER BY d.datname",
-    )
-    .bind(ISOLATED_TERMINALIZATION_DATABASE_PREFIX)
-    .fetch_all(&mut *admin)
-    .await
-    .expect("list inactive isolated terminalization databases");
-    for stale_database in stale_databases {
-        drop_isolated_terminalization_database(
-            admin,
-            &stale_database,
-            IsolatedTerminalizationDatabaseDrop::InactiveOnly,
-        )
-        .await;
-    }
 }
 
 impl IsolatedTerminalizationTestDatabase {
-    async fn create_empty() -> Self {
-        let base_options = PgConnectOptions::from_str(&test_db_url())
-            .expect("invalid terminalization database URL");
-        let mut admin = PgConnection::connect_with(&base_options.clone().database("postgres"))
-            .await
-            .expect("connect to terminalization admin database");
-        lock_isolated_terminalization_database_setup(&mut admin).await;
-        drop_inactive_isolated_terminalization_databases(&mut admin).await;
-        let name = format!(
-            "{ISOLATED_TERMINALIZATION_DATABASE_PREFIX}{}",
-            Uuid::new_v4().simple()
-        );
-        sqlx::query(&format!("CREATE DATABASE \"{name}\""))
-            .execute(&mut admin)
-            .await
-            .expect("create isolated terminalization database");
+    async fn create() -> Self {
+        let database = crate::test_support::TestDatabase::create().await;
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect_with(base_options.database(&name))
+            .connect(database.url())
             .await
             .expect("connect isolated terminalization database");
-        unlock_isolated_terminalization_database_setup(&mut admin).await;
-        Self { admin, pool, name }
+        run_coverage_pass(&pool).await;
+        Self { database, pool }
     }
 
-    async fn create() -> Self {
-        let database = Self::create_empty().await;
-        let pool = &database.pool;
-        crate::broker::migrations::install_schema(
-            pool,
-            crate::broker::client_family::ClientFamily::Rust,
-        )
-        .await
-        .expect("migrate isolated terminalization database");
-        let mut transaction = pool.begin().await.expect("coverage transaction");
-        let coverage =
-            ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
-                .await
-                .expect("partition coverage");
-        assert!(
-            matches!(coverage, CoverageOutcome::Ensured(_)),
-            "{coverage:?}"
-        );
-        transaction.commit().await.expect("commit coverage");
-        database
-    }
-
-    async fn drop(mut self) {
-        lock_isolated_terminalization_database_setup(&mut self.admin).await;
+    async fn drop(self) {
         self.pool.close().await;
-        drop_isolated_terminalization_database(
-            &mut self.admin,
-            &self.name,
-            IsolatedTerminalizationDatabaseDrop::OwnedForced,
-        )
-        .await;
-        unlock_isolated_terminalization_database_setup(&mut self.admin).await;
+        self.database.drop().await;
     }
 }
 
-static P5_DATABASE: OnceCell<P5TestDatabase> = OnceCell::const_new();
-
-pub(crate) async fn migrated_pool() -> PgPool {
-    let database = P5_DATABASE
-        .get_or_init(|| async {
-            let base_options =
-                PgConnectOptions::from_str(&test_db_url()).expect("invalid P5 database URL");
-            let admin_options = base_options.clone().database("postgres");
-            let database_name = format!("core_p5_matrix_{}", Uuid::new_v4().simple());
-            let mut admin = PgConnection::connect_with(&admin_options)
-                .await
-                .expect("connect to P5 admin database");
-            sqlx::query("SELECT pg_advisory_lock(hashtext('core_p5_matrix_setup'))")
-                .execute(&mut admin)
-                .await
-                .expect("lock P5 database setup");
-            let stale_databases: Vec<String> = sqlx::query_scalar(
-                "SELECT d.datname
-                 FROM pg_database d
-                 WHERE left(d.datname, length('core_p5_matrix_')) =
-                       'core_p5_matrix_'
-                   AND NOT EXISTS (
-                       SELECT 1 FROM pg_stat_activity a
-                       WHERE a.datname = d.datname
-                   )
-                 ORDER BY d.datname",
-            )
-            .fetch_all(&mut admin)
-            .await
-            .expect("list inactive P5 databases");
-            for stale_database in stale_databases {
-                let suffix = stale_database
-                    .strip_prefix("core_p5_matrix_")
-                    .expect("query enforces P5 database prefix");
-                assert!(
-                    suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()),
-                    "refuse to drop non-generated P5 database {stale_database:?}"
-                );
-                sqlx::query(&format!("DROP DATABASE \"{stale_database}\""))
-                    .execute(&mut admin)
-                    .await
-                    .expect("drop inactive P5 database");
-            }
-            sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
-                .execute(&mut admin)
-                .await
-                .expect("create P5 database");
-            let generated_options = base_options.database(&database_name);
-            let database_url = crate::broker::pools::test_url_of(&generated_options);
-            let anchor = PgPoolOptions::new()
-                .min_connections(1)
-                .max_connections(1)
-                .max_lifetime(None)
-                .idle_timeout(None)
-                .connect_with(generated_options)
-                .await
-                .expect("connect P5 database");
-            let unlocked: bool =
-                sqlx::query_scalar("SELECT pg_advisory_unlock(hashtext('core_p5_matrix_setup'))")
-                    .fetch_one(&mut admin)
-                    .await
-                    .expect("unlock P5 database setup");
-            assert!(unlocked, "P5 database setup lock was held");
-            crate::broker::migrations::install_schema(
-                &anchor,
-                crate::broker::client_family::ClientFamily::Rust,
-            )
-            .await
-            .expect("migrate P5 database");
-            let mut transaction = anchor.begin().await.expect("coverage transaction");
-            let coverage =
-                ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
-                    .await
-                    .expect("partition coverage");
-            assert!(
-                matches!(coverage, CoverageOutcome::Ensured(_)),
-                "{coverage:?}"
-            );
-            transaction.commit().await.expect("commit coverage");
-            P5TestDatabase {
-                url: database_url,
-                name: database_name,
-                _anchor: anchor,
-            }
-        })
-        .await;
-    let base_options = PgConnectOptions::from_str(&test_db_url())
-        .expect("invalid P5 database URL")
-        .database(&database.name);
-    PgPoolOptions::new()
-        .max_connections(5)
-        .connect_with(base_options)
+/// One coverage pass (history leaves for two days, heartbeat leaves for two
+/// hours) with the reader publication.
+async fn run_coverage_pass(pool: &PgPool) {
+    let mut transaction = pool.begin().await.expect("coverage transaction");
+    let coverage = ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
         .await
-        .expect("connect current P5 test runtime")
-}
-
-#[tokio::test]
-#[serial]
-async fn isolated_terminalization_setup_removes_an_inactive_generated_database() {
-    let base_options =
-        PgConnectOptions::from_str(&test_db_url()).expect("invalid terminalization database URL");
-    let mut admin = PgConnection::connect_with(&base_options.clone().database("postgres"))
-        .await
-        .expect("connect to terminalization admin database");
-    lock_isolated_terminalization_database_setup(&mut admin).await;
-    let stale_name = format!(
-        "{ISOLATED_TERMINALIZATION_DATABASE_PREFIX}{}",
-        Uuid::new_v4().simple()
+        .expect("partition coverage");
+    assert!(
+        matches!(coverage, CoverageOutcome::Ensured(_)),
+        "{coverage:?}"
     );
-    sqlx::query(&format!("CREATE DATABASE \"{stale_name}\""))
-        .execute(&mut admin)
-        .await
-        .expect("create inactive generated database");
-    unlock_isolated_terminalization_database_setup(&mut admin).await;
-    drop(admin);
-
-    let mut database = IsolatedTerminalizationTestDatabase::create().await;
-    let stale_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
-            .bind(&stale_name)
-            .fetch_one(&mut database.admin)
-            .await
-            .expect("check inactive generated database cleanup");
-    assert!(!stale_exists);
-    database.drop().await;
+    transaction.commit().await.expect("commit coverage");
 }
 
-#[tokio::test]
-#[serial]
-async fn owned_isolated_terminalization_drop_forces_a_remaining_session() {
-    let database = IsolatedTerminalizationTestDatabase::create().await;
-    let database_name = database.name.clone();
-    let base_options =
-        PgConnectOptions::from_str(&test_db_url()).expect("invalid terminalization database URL");
-    let remaining_session =
-        PgConnection::connect_with(&base_options.clone().database(&database_name))
-            .await
-            .expect("connect remaining isolated terminalization session");
-
-    database.drop().await;
-    drop(remaining_session);
-
-    let mut admin = PgConnection::connect_with(&base_options.database("postgres"))
+/// The database of the running test (`crate::test_support::database_of_this_test`):
+/// a copy of the test template, with one coverage pass at the first call in
+/// the test, as a sqlx pool for the tests of the sqlx broker paths. Every
+/// call in one test gets the same database; it is dropped when the test's
+/// runtime shuts down.
+pub(crate) async fn migrated_pool() -> PgPool {
+    let database = crate::test_support::database_of_this_test().await;
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(database.url())
         .await
-        .expect("connect to terminalization admin database");
-    let database_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
-            .bind(database_name)
-            .fetch_one(&mut admin)
-            .await
-            .expect("check owned generated database cleanup");
-    assert!(!database_exists);
+        .expect("connect the database of this test");
+    let _covered = database
+        .setup()
+        .get_or_init(|| run_coverage_pass(&pool))
+        .await;
+    pool
 }
 
+/// The URL of the database of the running test ([`migrated_pool`]), accepted
+/// by sqlx and by the core's URL parser.
 pub(crate) async fn migrated_database_url() -> String {
-    let pool = migrated_pool().await;
-    drop(pool);
-    P5_DATABASE
-        .get()
-        .expect("migrated_pool initializes the P5 database")
-        .url
-        .clone()
+    migrated_pool().await.close().await;
+    crate::test_support::database_of_this_test()
+        .await
+        .url()
+        .to_owned()
 }
 
 struct Seed {
@@ -546,11 +278,11 @@ async fn seed_workflow(pool: &PgPool, id: &str, status: &str) {
 async fn seed_wf_task(pool: &PgPool, wf_id: &str, task_id: &str, status: &str) {
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-            id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+            downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
             dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
             created_at, max_retries, execution, retention_class_key
         ) VALUES (
-            $1, $2,
+            'NONE', $1, $2,
             COALESCE((SELECT MAX(task_index) + 1 FROM horsies_workflow_tasks
                       WHERE workflow_id = $2), 0),
             'node_' || $1, 'matrix_task', 'null', 'default', 100, '{}', FALSE, 'all', $3,
@@ -764,8 +496,6 @@ async fn complete_replay_within_class_is_already_applied() {
             task_id: uuid(&id),
             fence: owned("w1", seeded_generation(&pool, &id).await),
             result_json: "{}".to_owned(),
-            notify_channel: "matrix_unused".to_owned(),
-            notify_payload: "x".to_owned(),
         },
     )
     .await
@@ -861,7 +591,9 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
     )
     .await;
 
-    let channel = format!("matrix_fused_{}", Uuid::new_v4().simple());
+    // The function builds the wake from the locked row: the queue of the
+    // matrix seed and the constant payload.
+    let channel = "task_queue_default";
     let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
         .await
         .expect("listener");
@@ -869,7 +601,7 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
         .listen("task_done")
         .await
         .expect("listen task_done");
-    listener.listen(&channel).await.expect("listen");
+    listener.listen(channel).await.expect("listen");
 
     let outcomes = terminalize(
         &pool,
@@ -877,8 +609,6 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
             task_id: uuid(&id),
             fence: owned("w1", claimed_at),
             result_json: "{\"Ok\":7}".to_owned(),
-            notify_channel: channel.clone(),
-            notify_payload: format!("capacity:{id}"),
         },
     )
     .await
@@ -899,21 +629,20 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
     );
     assert_phase2_presence(&pool, &id, false).await;
 
-    let (version, codec, content_type, snapshot, digest): (i16, String, String, Vec<u8>, Vec<u8>) =
-        sqlx::query_as(
-            "SELECT attempt_archive_version, attempt_snapshot_codec,
-                attempt_snapshot_content_type, attempt_snapshot,
-                attempt_snapshot_digest
+    // The baseline stores no codec or content type: archive format version 1
+    // implies the json-utf8 codec and the application/json content type.
+    let (version, snapshot, digest): (i16, Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT attempt_archive_version, attempt_snapshot, attempt_snapshot_digest
          FROM horsies_task_history WHERE task_id = $1",
-        )
-        .bind(Uuid::parse_str(&id).unwrap())
-        .fetch_one(&pool)
-        .await
-        .expect("history attempt snapshot");
+    )
+    .bind(Uuid::parse_str(&id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .expect("history attempt snapshot");
     let attempts = crate::core::history::archive::attempts::decode_attempt_snapshot(
         version,
-        &codec,
-        &content_type,
+        crate::core::history::archive::versions::JSON_UTF8_CODEC,
+        crate::core::history::archive::versions::JSON_CONTENT_TYPE,
         &snapshot,
         &digest,
     )
@@ -940,13 +669,12 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
         .await
         .expect("second notify within timeout")
         .expect("second notification");
-    let capacity_payload = format!("capacity:{id}");
     let notifications = [
         (first.channel(), first.payload()),
         (second.channel(), second.payload()),
     ];
     assert!(notifications.contains(&("task_done", id.as_str())));
-    assert!(notifications.contains(&(channel.as_str(), capacity_payload.as_str())));
+    assert!(notifications.contains(&(channel, "capacity")));
 
     cleanup(&pool, &[&id]).await;
 }
@@ -989,8 +717,6 @@ async fn move_terminalizes_the_key_reservation_at_the_history_anchor() {
             task_id: uuid(&id),
             fence: owned("w1", seeded_generation(&pool, &id).await),
             result_json: "{}".to_owned(),
-            notify_channel: "matrix_unused".to_owned(),
-            notify_payload: "x".to_owned(),
         },
     )
     .await
@@ -1035,8 +761,6 @@ async fn fused_stale_generation_is_lost_claim() {
             task_id: uuid(&id),
             fence: owned("w1", stale),
             result_json: "{}".to_owned(),
-            notify_channel: "matrix_unused".to_owned(),
-            notify_payload: "x".to_owned(),
         },
     )
     .await
@@ -1080,8 +804,6 @@ async fn fused_on_matching_claim_outside_source_state_is_conflict() {
             task_id: uuid(&id),
             fence: owned("w1", claimed_at),
             result_json: "{}".to_owned(),
-            notify_channel: "matrix_unused".to_owned(),
-            notify_payload: "x".to_owned(),
         },
     )
     .await
@@ -1117,7 +839,7 @@ async fn fail_locked_assigns_failed_reason_unconditionally() {
                 worker_id: "w1".to_owned(),
             },
             result_json: "{\"Err\":{}}".to_owned(),
-            error_code: Some("TASK_ERROR".to_owned()),
+            error_code: Some("TASK_EXCEPTION".to_owned()),
             failed_reason: None,
         },
     )
@@ -1133,7 +855,7 @@ async fn fail_locked_assigns_failed_reason_unconditionally() {
 
     let image = post_image(&pool, &id).await;
     assert_eq!(image.status, "FAILED");
-    assert_eq!(image.error_code.as_deref(), Some("TASK_ERROR"));
+    assert_eq!(image.error_code.as_deref(), Some("TASK_EXCEPTION"));
     assert_eq!(
         image.failed_reason, None,
         "the terminal writer owns the final-attempt summary; None clears \
@@ -1512,55 +1234,85 @@ async fn phase2_expectation_table_matches_every_installed_wire_projection() {
     expected_vocabulary.sort_unstable();
     assert_eq!(expected_vocabulary, vocabulary);
 
-    let move_definition: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-             'horsies_move_task_to_history(uuid,text,text,timestamptz,text,text,text)'
-             ::regprocedure
-         )",
+    // The single move (horsies_tasks overload) projects every single-row
+    // kind; the batch move projects every batch kind. The two batch-only
+    // kinds have no arm in the single move.
+    let single_move = function_definition(
+        &pool,
+        "horsies_move_task_to_history(horsies_tasks,text,text,timestamptz,text,text,text)",
     )
-    .fetch_one(&pool)
-    .await
-    .expect("shared move definition");
+    .await;
+    let batch_move = function_definition(
+        &pool,
+        "horsies_move_tasks_to_history(uuid[],text,text,timestamptz,text,text,text)",
+    )
+    .await;
     for (kind, deferred) in WIRE_PHASE2_EXPECTATIONS {
-        if matches!(kind, "EXPIRE_PENDING" | "CANCEL_ORPHAN_SWEEP") {
-            continue;
+        let single_arm = projection_arm(&single_move, kind);
+        let batch_arm = projection_arm(&batch_move, kind);
+        match kind {
+            "EXPIRE_PENDING" | "CANCEL_ORPHAN_SWEEP" => assert!(
+                single_arm.is_none(),
+                "{kind} is a batch-only kind; the single move has no arm for it"
+            ),
+            _ => assert!(single_arm.is_some(), "{kind} arm in the single move"),
         }
-        let marker = format!("WHEN '{kind}' THEN");
-        let start = move_definition
-            .find(&marker)
-            .expect("kind arm in shared move");
-        let tail = &move_definition[start + marker.len()..];
-        let end = tail
-            .find("WHEN '")
-            .or_else(|| tail.find("ELSE"))
-            .unwrap_or(tail.len());
-        let arm = &tail[..end];
+        assert!(
+            single_arm.is_some() || batch_arm.is_some(),
+            "{kind} arm in one of the moves"
+        );
         let assignment = if deferred {
             "v_requires_deferred_phase2 := TRUE"
         } else {
             "v_requires_deferred_phase2 := FALSE"
         };
-        assert!(
-            arm.contains(assignment),
-            "{kind} projection must set {assignment}"
-        );
+        for arm in [single_arm, batch_arm].into_iter().flatten() {
+            assert!(
+                arm.contains(assignment),
+                "{kind} projection must set {assignment}"
+            );
+        }
     }
 
-    for (function, deferred) in [
-        ("horsies_expire_pending_tasks(integer,text,text)", true),
-        ("horsies_cancel_orphaned_tasks(integer)", false),
+    // Each batch-only kind reaches the batch move from its sweep.
+    for (function, call) in [
+        (
+            "horsies_expire_pending_tasks(integer,text,text)",
+            "v_ids, 'EXPIRED', 'EXPIRE_PENDING', v_terminal_at",
+        ),
+        (
+            "horsies_cancel_orphaned_tasks(integer)",
+            "v_ids, 'CANCELLED', 'CANCEL_ORPHAN_SWEEP', v_terminal_at",
+        ),
     ] {
-        let definition: String = sqlx::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")
-            .bind(function)
-            .fetch_one(&pool)
-            .await
-            .expect("batch definition");
-        assert_eq!(
-            definition.contains("INSERT INTO horsies_workflow_phase2_pending"),
-            deferred,
-            "{function} phase2 projection"
+        let definition = function_definition(&pool, function).await;
+        assert!(
+            definition.contains("horsies_move_tasks_to_history(") && definition.contains(call),
+            "{function} moves its rows through the batch move with {call:?}"
         );
     }
+}
+
+/// The installed definition of `function` (a `regprocedure` text).
+async fn function_definition(pool: &PgPool, function: &str) -> String {
+    sqlx::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")
+        .bind(function)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|error| panic!("definition of {function}: {error}"))
+}
+
+/// The text of the `WHEN '<kind>' THEN` arm of a move's kind CASE, up to the
+/// next arm or the ELSE; `None` when the move has no arm for `kind`.
+fn projection_arm<'a>(definition: &'a str, kind: &str) -> Option<&'a str> {
+    let marker = format!("WHEN '{kind}' THEN");
+    let start = definition.find(&marker)?;
+    let tail = &definition[start + marker.len()..];
+    let end = tail
+        .find("WHEN '")
+        .or_else(|| tail.find("ELSE"))
+        .unwrap_or(tail.len());
+    Some(&tail[..end])
 }
 
 // ---------------------------------------------------------------------------
@@ -1661,8 +1413,6 @@ async fn cancel_locked_refuses_workflow_tasks_and_never_overwrites_terminal() {
             task_id: uuid(&done),
             fence: owned("w1", seeded_generation(&pool, &done).await),
             result_json: "{}".to_owned(),
-            notify_channel: "matrix_unused".to_owned(),
-            notify_payload: "x".to_owned(),
         },
     )
     .await
@@ -1975,12 +1725,12 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
              FROM generate_series(1, 50000) AS g
          )
          INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, node_id, task_name, input,
+             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps,
              join_type, status, is_subworkflow, max_retries, execution,
              retention_class_key, task_id, created_at
          )
-         SELECT node_row_id, $1, g, 'node_' || g, 'bounded_recovery_cursor_task', 'null',
+         SELECT 'NONE', node_row_id, $1, g, 'node_' || g, 'bounded_recovery_cursor_task', 'null',
                 'default', 100, '{}'::integer[], FALSE,
                 'all', 'PENDING', FALSE, 3, 'ISOLATED',
                 'standard_30d', task_id, NOW()
@@ -2191,8 +1941,10 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
             .contains("idx_horsies_tasks_orphan_recovery_scan"),
         "orphan audit must use the partial scan index: {plan}",
     );
+    // The baseline name of the unique task_id index (0002_indexes.sql).
     assert!(
-        plan.to_string().contains("idx_horsies_workflow_tasks_task"),
+        plan.to_string()
+            .contains("ix_horsies_workflow_tasks_task_id"),
         "orphan audit must use workflow-task index probes: {plan}",
     );
     assert!(
@@ -2952,7 +2704,7 @@ async fn deferred_projection_table_mints_phase2_for_all_five_deferred_wire_kinds
                 worker_id: "w1".to_owned(),
             },
             result_json: "{}".to_owned(),
-            error_code: Some("TASK_ERROR".to_owned()),
+            error_code: Some("TASK_EXCEPTION".to_owned()),
             failed_reason: Some("failed".to_owned()),
         },
     )
@@ -3130,8 +2882,24 @@ async fn assert_batch_snapshot_encoding(pool: &PgPool) {
                 seed_wf_task(pool, &workflow.to_string(), &id.to_string(), "ENQUEUED").await;
             }
             for attempt in 1..=index * 3 {
-                sqlx::query("INSERT INTO horsies_task_attempts(task_id, attempt, outcome, will_retry, started_at, finished_at, error_code, error_message, worker_id) VALUES ($1,$2,'FAILED',TRUE,NOW()-interval '2 minutes',NOW()-interval '1 minute','RETRY','retry once','w1')")
-                .bind(id).bind(attempt as i32).execute(pool).await.unwrap();
+                // Every column of the baseline attempt table: the worker
+                // identity is NOT NULL.
+                sqlx::query(
+                    "INSERT INTO horsies_task_attempts (
+                        task_id, attempt, outcome, will_retry, started_at, finished_at,
+                        error_code, error_message, failed_reason, worker_id,
+                        worker_hostname, worker_pid, worker_process_name
+                    ) VALUES (
+                        $1, $2, 'FAILED', TRUE, NOW() - interval '2 minutes', NOW() - interval '1 minute',
+                        'RETRY', 'retry once', NULL, 'w1',
+                        'matrix-host', 4242, 'matrix-process'
+                    )",
+                )
+                .bind(id)
+                .bind(attempt as i32)
+                .execute(pool)
+                .await
+                .unwrap();
             }
             let expected: Vec<u8> =
                 sqlx::query_scalar("SELECT test_encode_task_attempts_original($1)")
@@ -3246,20 +3014,26 @@ async fn assert_terminal_result_digests(pool: &PgPool) {
                 seed_wf_task(pool, &workflow.to_string(), &id.to_string(), "RUNNING").await;
             }
             let mut tx = pool.begin().await.unwrap();
-            sqlx::query("SELECT horsies_move_task_to_history($1,$2,$3,NOW(),$4,NULL,NULL)")
-                .bind(id)
-                .bind(match admin {
-                    true => "CANCELLED",
-                    false => "COMPLETED",
-                })
-                .bind(match admin {
-                    true => "CANCEL_ADMIN",
-                    false => "COMPLETE_LOCKED",
-                })
-                .bind(&payload)
-                .execute(tx.as_mut())
-                .await
-                .unwrap();
+            // The move takes the live row that its caller locked.
+            sqlx::query(
+                "SELECT horsies_move_task_to_history(
+                     (SELECT t FROM horsies_tasks AS t WHERE t.id = $1 FOR UPDATE),
+                     $2, $3, NOW(), $4, NULL, NULL
+                 )",
+            )
+            .bind(id)
+            .bind(match admin {
+                true => "CANCELLED",
+                false => "COMPLETED",
+            })
+            .bind(match admin {
+                true => "CANCEL_ADMIN",
+                false => "COMPLETE_LOCKED",
+            })
+            .bind(&payload)
+            .execute(tx.as_mut())
+            .await
+            .unwrap();
             let (result, digest): (Option<Vec<u8>>, Option<Vec<u8>>) = sqlx::query_as(
                 "SELECT result_payload, result_digest FROM horsies_task_history WHERE task_id=$1",
             )

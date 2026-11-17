@@ -23,18 +23,19 @@ predicate when a later ensure fails.
 from __future__ import annotations
 
 import asyncio
-import json
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any, Final
 
 from sqlalchemy import text
+from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from horsies.core.types.result import Err, Ok
+
 from ..commands import (
-    OPEN_END_ANCHOR,
-    CreateDailyHistoryLeaf,
     EnsureLeafCoverage,
     ForeverLeafRef,
     LeafBounds,
@@ -47,7 +48,7 @@ from ..ddl.classes import (
     DEFAULT_RETENTION_DURATION,
     register_finite_retention_class,
 )
-from ..ddl.tables import FOREVER_CLASS_KEY
+from ..errors import HistoryContractError
 from ..heartbeats.partitioning import (
     EnsureHeartbeatCoverage,
     HeartbeatClassRegistered,
@@ -55,45 +56,38 @@ from ..heartbeats.partitioning import (
     HeartbeatHorizonUpdated,
     ensure_heartbeat_coverage,
     hourly_leaf_ref,
-    create_hourly_heartbeat_leaf,
-    CreateHourlyHeartbeatLeaf,
     register_heartbeat_class,
 )
 from ..names import (
     FOREVER_LEAF,
     HEARTBEAT_CLASS_KEY,
-    HEARTBEATS_TABLE,
-    LEAF_CATALOG,
     RETENTION_CLASSES,
-    TASK_HISTORY_FOREVER,
-    TASK_HISTORY_PARENT,
-    TASK_LOOKUP_MANIFEST,
 )
 from ..outcomes import (
+    CatalogConflictKind,
     CoveredByOpenEndedLeaf,
     LeafAlreadyConformant,
+    LeafCatalogConflict,
     LeafCreated,
     LeafCreation,
     LeafIndexRepaired,
     LeafMaintenanceBusy,
+    RetentionClassAbsent,
 )
-from ..partitions.catalog import INDEX_SCHEMA_VERSION, database_now
-from ..partitions.manager import (
-    create_daily_leaf,
-    ensure_leaf_coverage,
-    verify_forever_leaf,
+from ..partitions.catalog import (
+    database_now,
+    heartbeat_probe_index_name,
+    leaf_id_index_name,
+    required_utc_timestamp,
 )
+from ..partitions.manager import ensure_leaf_coverage
 from ..partitions.locks import (
     LeafLockAttempt,
     try_lock_coverage_for_transaction,
 )
 from ..partitions.publication import UnpublishedLoader
-from ..reads.publisher import (
-    READERS_STAMPED_SQL,
-    StagedLoaderPublisher,
-    published_manifest_matches_catalog,
-    published_readers_stamped,
-)
+from ..periods import parse_retention_period, period_class_key
+from ..reads.publisher import StagedLoaderPublisher
 from .database import PartitionMaintenanceDatabase
 
 
@@ -101,385 +95,32 @@ _LEAF_MAINTENANCE_ATTEMPTS = 3
 _BUSY_RETRY_MIN_SECONDS = 0.02
 _BUSY_RETRY_MAX_SECONDS = 0.08
 
-_COVERAGE_PROBE_SQL = f"""
-WITH clock AS (
-    SELECT statement_timestamp() AS checked_at
-),
-expected_registration AS (
-    SELECT *
-    FROM jsonb_to_recordset(CAST(:registrations AS jsonb)) AS expected(
-        class_key text,
-        class_kind text,
-        retention_days integer,
-        heartbeat_horizon_hours integer
-    )
-),
-registration_health AS (
-    -- The kind CHECK of the table holds every row to its kind's shape, so
-    -- the probe compares only the expected rows and the forever row.
-    SELECT
-        NOT EXISTS (
-            SELECT 1
-            FROM expected_registration AS expected
-            LEFT JOIN {RETENTION_CLASSES} AS registered
-              ON registered.class_key = expected.class_key
-            WHERE registered.class_key IS NULL
-               OR registered.class_kind IS DISTINCT FROM expected.class_kind
-               OR registered.retention_days
-                    IS DISTINCT FROM expected.retention_days
-               OR registered.heartbeat_horizon_hours
-                    IS DISTINCT FROM expected.heartbeat_horizon_hours
-        )
-        AND EXISTS (
-            SELECT 1
-            FROM {RETENTION_CLASSES} AS registered
-            WHERE registered.class_key = :forever_class
-              AND registered.class_kind = 'FOREVER'
-        ) AS healthy
-),
-history_classes AS (
-    SELECT
-        registered.class_key,
-        CASE
-            WHEN registered.class_kind = 'FOREVER'
-                THEN CAST(:forever_parent AS text)
-            ELSE :history_parent || '_' || registered.class_key
-        END AS parent_name
-    FROM {RETENTION_CLASSES} AS registered
-    WHERE registered.class_kind IN ('FOREVER', 'PERIOD')
-),
-expected_history AS (
-    SELECT
-        'history'::text AS leaf_kind,
-        classes.class_key,
-        classes.parent_name,
-        classes.parent_name || '_' ||
-            to_char(day_bounds.lower_anchor AT TIME ZONE 'UTC', 'YYYY_MM_DD')
-            AS leaf_name,
-        'AT'::text AS lower_bound_kind,
-        day_bounds.lower_anchor,
-        day_bounds.lower_anchor + interval '1 day' AS upper_anchor
-    FROM history_classes AS classes
-    CROSS JOIN clock
-    CROSS JOIN LATERAL (
-        SELECT
-            (
-                date_trunc('day', clock.checked_at AT TIME ZONE 'UTC')
-                AT TIME ZONE 'UTC'
-            ) + day_offset * interval '1 day' AS lower_anchor
-        FROM generate_series(0, :history_horizon) AS day_offset
-    ) AS day_bounds
-    WHERE classes.class_key <> :forever_class
-),
--- The static forever leaf covers every time of `forever`: an OPEN lower
--- bound (MINVALUE) and the open end.
-expected_forever AS (
-    SELECT
-        'history'::text AS leaf_kind,
-        classes.class_key,
-        classes.parent_name,
-        CAST(:forever_leaf AS text) AS leaf_name,
-        'OPEN'::text AS lower_bound_kind,
-        NULL::timestamptz AS lower_anchor,
-        CAST(:open_end AS timestamptz) AS upper_anchor
-    FROM history_classes AS classes
-    WHERE classes.class_key = :forever_class
-),
-expected_heartbeats AS (
-    SELECT
-        'heartbeat'::text AS leaf_kind,
-        CAST(:heartbeat_class AS text) AS class_key,
-        CAST(:heartbeat_parent AS text) AS parent_name,
-        :heartbeat_parent || '_' ||
-            to_char(
-                hour_bounds.lower_anchor AT TIME ZONE 'UTC',
-                'YYYY_MM_DD_HH24'
-            )
-            AS leaf_name,
-        'AT'::text AS lower_bound_kind,
-        hour_bounds.lower_anchor,
-        hour_bounds.lower_anchor + interval '1 hour' AS upper_anchor
-    FROM clock
-    CROSS JOIN LATERAL (
-        SELECT
-            (
-                date_trunc('hour', clock.checked_at AT TIME ZONE 'UTC')
-                AT TIME ZONE 'UTC'
-            ) + hour_offset * interval '1 hour' AS lower_anchor
-        FROM generate_series(0, :heartbeat_horizon) AS hour_offset
-    ) AS hour_bounds
-),
-expected_leaves AS (
-    SELECT * FROM expected_history
-    UNION ALL
-    SELECT * FROM expected_forever
-    UNION ALL
-    SELECT * FROM expected_heartbeats
-),
-leaf_health AS (
-    SELECT
-        expected.*,
-        child.oid AS child_oid,
-        (
-            catalog.leaf_name IS NOT NULL
-            AND catalog.class_key = expected.class_key
-            AND catalog.lower_bound_kind = expected.lower_bound_kind
-            AND catalog.lower_anchor IS NOT DISTINCT FROM expected.lower_anchor
-            AND catalog.upper_anchor = expected.upper_anchor
-            AND catalog.index_schema_version = :index_schema_version
-            AND catalog.detached_at IS NULL
-            AND catalog.dropped_at IS NULL
-            AND child.oid IS NOT NULL
-            AND parent.oid IS NOT NULL
-            AND inheritance.inhrelid IS NOT NULL
-            AND NOT inheritance.inhdetachpending
-            AND pg_get_expr(child.relpartbound, child.oid) = format(
-                'FOR VALUES FROM (%s) TO (%L)',
-                CASE expected.lower_bound_kind
-                    WHEN 'OPEN' THEN 'MINVALUE'
-                    ELSE quote_literal(expected.lower_anchor)
-                END,
-                expected.upper_anchor
-            )
-            AND EXISTS (
-                SELECT 1
-                FROM pg_index AS task_index
-                JOIN pg_class AS task_index_relation
-                  ON task_index_relation.oid = task_index.indexrelid
-                JOIN pg_am AS task_index_method
-                  ON task_index_method.oid = task_index_relation.relam
-                WHERE task_index.indexrelid = to_regclass(
-                        expected.leaf_name || CASE expected.leaf_kind
-                            WHEN 'heartbeat' THEN '_probe_idx'
-                            ELSE '_task_idx'
-                        END
-                    )
-                  AND task_index.indrelid = child.oid
-                  AND task_index_method.amname = 'btree'
-                  AND task_index.indisvalid
-                  AND task_index.indisready
-                  AND task_index.indislive
-                  AND NOT task_index.indisunique
-                  AND NOT task_index.indisprimary
-                  AND NOT task_index.indisexclusion
-                  AND task_index.indpred IS NULL
-                  AND task_index.indexprs IS NULL
-                  AND (
-                      (
-                          expected.leaf_kind = 'history'
-                          AND task_index.indnkeyatts = 1
-                          AND task_index.indnatts = 1
-                          AND task_index.indkey[0] = (
-                              SELECT attribute.attnum
-                              FROM pg_attribute AS attribute
-                              WHERE attribute.attrelid = child.oid
-                                AND attribute.attname = 'task_id'
-                          )
-                          AND task_index.indcollation[0] = (
-                              SELECT attribute.attcollation
-                              FROM pg_attribute AS attribute
-                              WHERE attribute.attrelid = child.oid
-                                AND attribute.attname = 'task_id'
-                          )
-                          AND pg_get_indexdef(
-                              task_index.indexrelid, 1, false
-                          ) = 'task_id'
-                          AND pg_get_indexdef(task_index.indexrelid)
-                              LIKE '% USING btree (task_id)'
-                          AND task_index.indoption[0] = 0
-                      )
-                      OR (
-                          expected.leaf_kind = 'heartbeat'
-                          AND task_index.indnkeyatts = 3
-                          AND task_index.indnatts = 3
-                          AND task_index.indkey[0] = (
-                              SELECT attribute.attnum
-                              FROM pg_attribute AS attribute
-                              WHERE attribute.attrelid = child.oid
-                                AND attribute.attname = 'task_id'
-                          )
-                          AND task_index.indkey[1] = (
-                              SELECT attribute.attnum
-                              FROM pg_attribute AS attribute
-                              WHERE attribute.attrelid = child.oid
-                                AND attribute.attname = 'role'
-                          )
-                          AND task_index.indkey[2] = (
-                              SELECT attribute.attnum
-                              FROM pg_attribute AS attribute
-                              WHERE attribute.attrelid = child.oid
-                                AND attribute.attname = 'sent_at'
-                          )
-                          AND task_index.indcollation[0] = (
-                              SELECT attribute.attcollation
-                              FROM pg_attribute AS attribute
-                              WHERE attribute.attrelid = child.oid
-                                AND attribute.attname = 'task_id'
-                          )
-                          AND task_index.indcollation[1] = (
-                              SELECT attribute.attcollation
-                              FROM pg_attribute AS attribute
-                              WHERE attribute.attrelid = child.oid
-                                AND attribute.attname = 'role'
-                          )
-                          AND task_index.indcollation[2] = (
-                              SELECT attribute.attcollation
-                              FROM pg_attribute AS attribute
-                              WHERE attribute.attrelid = child.oid
-                                AND attribute.attname = 'sent_at'
-                          )
-                          AND pg_get_indexdef(
-                              task_index.indexrelid, 1, false
-                          ) = 'task_id'
-                          AND pg_get_indexdef(
-                              task_index.indexrelid, 2, false
-                          ) = 'role'
-                          AND pg_get_indexdef(
-                              task_index.indexrelid, 3, false
-                          ) = 'sent_at'
-                          AND pg_get_indexdef(task_index.indexrelid)
-                              LIKE '% USING btree '
-                                   '(task_id, role, sent_at DESC)'
-                          AND task_index.indoption[0] = 0
-                          AND task_index.indoption[1] = 0
-                          AND task_index.indoption[2] = 3
-                      )
-                  )
-            )
-            AND (
-                expected.leaf_kind = 'heartbeat'
-                OR EXISTS (
-                    SELECT 1
-                    FROM pg_index AS ordering_index
-                    JOIN pg_class AS ordering_class
-                      ON ordering_class.oid = ordering_index.indexrelid
-                    JOIN pg_am AS ordering_method
-                      ON ordering_method.oid = ordering_class.relam
-                    JOIN pg_attribute AS ordering_attribute
-                      ON ordering_attribute.attrelid = ordering_index.indrelid
-                     AND ordering_attribute.attnum
-                         = ordering_index.indkey[0]
-                    WHERE ordering_index.indrelid = child.oid
-                      AND ordering_method.amname = 'btree'
-                      AND ordering_index.indisvalid
-                      AND ordering_index.indisready
-                      AND ordering_index.indislive
-                      AND NOT ordering_index.indisunique
-                      AND NOT ordering_index.indisprimary
-                      AND NOT ordering_index.indisexclusion
-                      AND ordering_index.indpred IS NULL
-                      AND ordering_index.indexprs IS NULL
-                      AND ordering_index.indnkeyatts = 1
-                      AND ordering_index.indnatts = 1
-                      AND ordering_attribute.attname = 'enqueued_at'
-                      AND ordering_index.indcollation[0]
-                          = ordering_attribute.attcollation
-                      AND pg_get_indexdef(
-                          ordering_index.indexrelid, 1, false
-                      ) = 'enqueued_at'
-                      AND pg_get_indexdef(ordering_index.indexrelid)
-                          LIKE '% USING btree (enqueued_at)'
-                      AND ordering_index.indoption[0] = 0
-                )
-            )
-        ) AS conformant
-    FROM expected_leaves AS expected
-    LEFT JOIN {LEAF_CATALOG} AS catalog
-      ON catalog.leaf_name = expected.leaf_name
-    LEFT JOIN pg_class AS child
-      ON child.oid = to_regclass(expected.leaf_name)
-    LEFT JOIN pg_class AS parent
-      ON parent.oid = to_regclass(expected.parent_name)
-    LEFT JOIN pg_inherits AS inheritance
-      ON inheritance.inhrelid = child.oid
-     AND inheritance.inhparent = parent.oid
-),
-attached_history AS (
-    SELECT
-        catalog.leaf_name,
-        row_number() OVER (
-            ORDER BY catalog.lower_anchor NULLS FIRST, catalog.leaf_name
-        ) - 1 AS probe_position,
-        catalog.lower_bound_kind,
-        catalog.lower_anchor,
-        catalog.upper_anchor
-    FROM {LEAF_CATALOG} AS catalog
-    WHERE catalog.class_key <> :heartbeat_class
-      AND catalog.detached_at IS NULL
-      AND catalog.dropped_at IS NULL
-      AND to_regclass(catalog.leaf_name) IS NOT NULL
-),
-publication_health AS (
-    SELECT
-        {READERS_STAMPED_SQL}
-        AND NOT EXISTS (
-            SELECT 1
-            FROM {TASK_LOOKUP_MANIFEST} AS manifest
-            WHERE to_regclass(manifest.leaf_name) IS NULL
-        )
-        AND NOT EXISTS (
-            SELECT
-                leaf_name,
-                probe_position,
-                lower_bound_kind,
-                lower_anchor,
-                upper_anchor
-            FROM attached_history
-            EXCEPT
-            SELECT
-                leaf_name,
-                probe_position::bigint,
-                lower_bound_kind,
-                lower_anchor,
-                upper_anchor
-            FROM {TASK_LOOKUP_MANIFEST}
-        )
-        AND NOT EXISTS (
-            SELECT
-                leaf_name,
-                probe_position::bigint,
-                lower_bound_kind,
-                lower_anchor,
-                upper_anchor
-            FROM {TASK_LOOKUP_MANIFEST}
-            EXCEPT
-            SELECT
-                leaf_name,
-                probe_position,
-                lower_bound_kind,
-                lower_anchor,
-                upper_anchor
-            FROM attached_history
-        ) AS healthy,
-        ARRAY(
-            SELECT catalog.leaf_name
-            FROM {LEAF_CATALOG} AS catalog
-            WHERE catalog.class_key <> :heartbeat_class
-              AND catalog.detached_at IS NULL
-              AND catalog.dropped_at IS NULL
-              AND to_regclass(catalog.leaf_name) IS NULL
-            ORDER BY catalog.leaf_name
-        ) AS absent_leaves
+_COVERAGE_PROBE_SQL: Final = text(
+    'SELECT checked_at, leaf_kind, class_key, parent_name, leaf_name, lower_bound_kind, '
+    'lower_anchor, upper_anchor, conformant, registration_healthy, publication_healthy, '
+    'absent_leaves '
+    'FROM horsies_coverage_probe(CAST(:declared_days AS smallint[]), '
+    'CAST(:history_horizon AS smallint), CAST(:heartbeat_horizon AS smallint))'
 )
-SELECT
-    clock.checked_at,
-    leaves.leaf_kind,
-    leaves.class_key,
-    leaves.parent_name,
-    leaves.leaf_name,
-    leaves.lower_bound_kind,
-    leaves.lower_anchor,
-    leaves.upper_anchor,
-    leaves.conformant,
-    registration_health.healthy AS registration_healthy,
-    publication_health.healthy AS publication_healthy,
-    publication_health.absent_leaves
-FROM clock
-CROSS JOIN registration_health
-CROSS JOIN publication_health
-JOIN leaf_health AS leaves ON TRUE
-ORDER BY leaves.leaf_kind, leaves.class_key, leaves.lower_anchor NULLS FIRST
-"""
+"""The check of one coverage pass (0008_history_maintenance_functions.sql)."""
+
+_REGISTER_CLASSES_SQL: Final = text(
+    'SELECT class_key, class_kind, outcome '
+    'FROM horsies_register_retention_classes(CAST(:declared_days AS smallint[]), '
+    'CAST(:heartbeat_horizon AS smallint))'
+)
+"""Registration of the default, declared and heartbeat classes, in the caller's transaction."""
+
+_REGISTRATION_OUTCOMES: Final = frozenset({'REGISTERED', 'VERIFIED', 'HORIZON_UPDATED'})
+
+_CREATE_HISTORY_LEAF_SQL: Final = text(
+    'SELECT outcome, leaf_name, conflict_kind '
+    'FROM horsies_create_history_leaf(:class_key, :lower_anchor)'
+)
+_CREATE_HEARTBEAT_LEAF_SQL: Final = text(
+    'SELECT outcome, leaf_name, conflict_kind '
+    'FROM horsies_create_heartbeat_leaf(:lower_anchor)'
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -569,35 +210,30 @@ def _unresolved_coverage_detail(probe: _CoverageProbe) -> str:
     return 'unresolved coverage state: ' + ', '.join(unresolved)
 
 
-def _expected_registrations(
-    *,
-    heartbeat_horizon_hours: int,
+def declared_days(
     declared_classes: Sequence[tuple[str, timedelta]],
-) -> str:
-    classes = [
-        {
-            'class_key': HEARTBEAT_CLASS_KEY,
-            'class_kind': 'HEARTBEAT',
-            'retention_days': None,
-            'heartbeat_horizon_hours': heartbeat_horizon_hours,
-        },
-        {
-            'class_key': DEFAULT_RETENTION_CLASS_KEY,
-            'class_kind': 'PERIOD',
-            'retention_days': DEFAULT_RETENTION_DURATION.days,
-            'heartbeat_horizon_hours': None,
-        },
-    ]
-    classes.extend(
-        {
-            'class_key': class_key,
-            'class_kind': 'PERIOD',
-            'retention_days': duration.days,
-            'heartbeat_horizon_hours': None,
-        }
-        for class_key, duration in declared_classes
-    )
-    return json.dumps(classes, separators=(',', ':'), allow_nan=False)
+) -> list[int]:
+    """The day counts of the declared period classes, for the 0008 functions.
+
+    Each declared class is `(period_class_key(days), timedelta(days=days))`
+    (`RetentionConfig.registrable_classes`). A period that is not whole days
+    in bounds, or a key that is not the key of its period, raises
+    ``ValueError``: the functions derive every key from its day count.
+    """
+    days: list[int] = []
+    for class_key, duration in declared_classes:
+        match parse_retention_period(duration):
+            case Err(err_value=refused):
+                raise ValueError(f'declared class {class_key!r}: {refused.reason}')
+            case Ok(ok_value=period_days):
+                pass
+        if class_key != period_class_key(period_days):
+            raise ValueError(
+                f'declared class {class_key!r} is not the class of its period '
+                f'({period_class_key(period_days)!r})'
+            )
+        days.append(period_days)
+    return days
 
 
 async def _probe_complete_coverage(
@@ -607,28 +243,23 @@ async def _probe_complete_coverage(
     heartbeat_horizon_hours: int,
     declared_classes: Sequence[tuple[str, timedelta]],
 ) -> _CoverageProbe:
-    await connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+    """One probe statement (``horsies_coverage_probe``) and its rows as a
+    `_CoverageProbe`. Reads only; a database error raises."""
     rows = (
         await connection.execute(
-            text(_COVERAGE_PROBE_SQL),
+            _COVERAGE_PROBE_SQL,
             {
-                'registrations': _expected_registrations(
-                    heartbeat_horizon_hours=heartbeat_horizon_hours,
-                    declared_classes=declared_classes,
-                ),
+                'declared_days': declared_days(declared_classes),
                 'history_horizon': history_horizon_days,
                 'heartbeat_horizon': heartbeat_horizon_hours,
-                'index_schema_version': INDEX_SCHEMA_VERSION,
-                'heartbeat_class': HEARTBEAT_CLASS_KEY,
-                'heartbeat_parent': HEARTBEATS_TABLE,
-                'forever_class': FOREVER_CLASS_KEY,
-                'forever_parent': TASK_HISTORY_FOREVER,
-                'forever_leaf': FOREVER_LEAF,
-                'history_parent': TASK_HISTORY_PARENT,
-                'open_end': OPEN_END_ANCHOR,
             },
         )
     ).all()
+    return _coverage_probe_of(rows)
+
+
+def _coverage_probe_of(rows: Sequence[Row[Any]]) -> _CoverageProbe:
+    """The probe of the rows of one coverage probe statement, in probe order."""
     if not rows:
         raise AssertionError('coverage probe returned no expected leaves')
     damaged_history: list[LeafRef | ForeverLeafRef] = []
@@ -637,6 +268,9 @@ async def _probe_complete_coverage(
     history_covered_through: datetime | None = None
     heartbeats_covered_through: datetime | None = None
     for row in rows:
+        # The driver decodes timestamptz in the session time zone; the
+        # bounds and the reported coverage are UTC instants.
+        upper = required_utc_timestamp(row.upper_anchor, 'upper_anchor')
         match str(row.lower_bound_kind):
             case 'OPEN':
                 leaf: LeafRef | ForeverLeafRef = ForeverLeafRef(
@@ -648,8 +282,8 @@ async def _probe_complete_coverage(
                     leaf_name=str(row.leaf_name),
                     class_key=str(row.class_key),
                     bounds=LeafBounds(
-                        lower=row.lower_anchor,
-                        upper=row.upper_anchor,
+                        lower=required_utc_timestamp(row.lower_anchor, 'lower_anchor'),
+                        upper=upper,
                     ),
                 )
             case unknown:
@@ -658,8 +292,8 @@ async def _probe_complete_coverage(
             case 'history', False:
                 damaged_history.append(leaf)
                 history_covered_through = max(
-                    history_covered_through or row.upper_anchor,
-                    row.upper_anchor,
+                    history_covered_through or upper,
+                    upper,
                 )
             case 'heartbeat', False:
                 match leaf:
@@ -668,20 +302,20 @@ async def _probe_complete_coverage(
                     case ForeverLeafRef():
                         raise AssertionError('a heartbeat leaf has an open bound')
                 heartbeats_covered_through = max(
-                    heartbeats_covered_through or row.upper_anchor,
-                    row.upper_anchor,
+                    heartbeats_covered_through or upper,
+                    upper,
                 )
             case 'heartbeat', True:
                 heartbeats_covered_through = max(
-                    heartbeats_covered_through or row.upper_anchor,
-                    row.upper_anchor,
+                    heartbeats_covered_through or upper,
+                    upper,
                 )
                 if row.lower_anchor <= row.checked_at < row.upper_anchor:
                     heartbeat_covered_now = True
             case 'history', True:
                 history_covered_through = max(
-                    history_covered_through or row.upper_anchor,
-                    row.upper_anchor,
+                    history_covered_through or upper,
+                    upper,
                 )
             case unknown, _:
                 raise AssertionError(f'unknown coverage leaf kind {unknown!r}')
@@ -690,7 +324,7 @@ async def _probe_complete_coverage(
         raise AssertionError('coverage probe did not return both leaf types')
     absent = tuple(str(name) for name in first.absent_leaves)
     return _CoverageProbe(
-        checked_at=first.checked_at,
+        checked_at=required_utc_timestamp(first.checked_at, 'checked_at'),
         damaged_history=tuple(damaged_history),
         damaged_heartbeats=tuple(damaged_heartbeats),
         registration_healthy=bool(first.registration_healthy),
@@ -925,11 +559,7 @@ async def ensure_partition_coverage(
     # broken function.
     republished = False
     absent_leaves: tuple[str, ...] = ()
-    if (
-        created_history > 0
-        or not await published_manifest_matches_catalog(connection)
-        or not await published_readers_stamped(connection)
-    ):
+    if created_history > 0 or not await publisher.is_current(connection):
         republication = await publisher.republish(connection)
         republished = True
         absent_leaves = republication.absent_leaves
@@ -974,9 +604,14 @@ async def maintain_partition_coverage(
 ) -> CoverageOutcome:
     """Ensure the complete set through the maintenance database.
 
-    A healthy set uses one set-based probe. A damaged set opens one
-    transaction for each changed leaf. A busy lock ends that transaction
-    before the retry delay starts. Startup serializes damaged passes with
+    A healthy set uses one probe statement (``horsies_coverage_probe``). A
+    damaged set registers the classes (``horsies_register_retention_classes``)
+    when the probe finds the registration unhealthy, then opens one
+    transaction for each damaged leaf: one call of
+    ``horsies_create_history_leaf`` or ``horsies_create_heartbeat_leaf``,
+    which publishes a created history leaf in that transaction. The last
+    step publishes the readers only when the probe still finds them stale.
+    A busy lock ends the leaf's transaction before the retry delay starts. Startup serializes damaged passes with
     the coverage gate. The periodic reaper passes ``False`` because it
     already holds one pool connection for its cluster gate. Per-leaf try
     locks contain any overlap between a reaper pass and worker startup.
@@ -1050,14 +685,11 @@ async def _repair_partition_coverage(
 
     if not probe.registration_healthy:
         async with database.begin() as connection:
-            registration_failure = await _register_required_classes(
+            await _register_required_classes(
                 connection,
                 heartbeat_horizon_hours=heartbeat_horizon_hours,
                 declared_classes=declared_classes,
-                heartbeat_covered_now=probe.heartbeat_covered_now,
             )
-        if registration_failure is not None:
-            return registration_failure
         async with database.begin() as connection:
             probe = await _probe_complete_coverage(
                 connection,
@@ -1161,76 +793,125 @@ async def _register_required_classes(
     *,
     heartbeat_horizon_hours: int,
     declared_classes: Sequence[tuple[str, timedelta]],
-    heartbeat_covered_now: bool,
-) -> CoverageEnsureFailed | None:
-    heartbeat_registration = await register_heartbeat_class(
-        connection, horizon=timedelta(hours=heartbeat_horizon_hours)
-    )
-    match heartbeat_registration:
-        case (
-            HeartbeatClassRegistered()
-            | HeartbeatClassVerified()
-            | HeartbeatHorizonUpdated()
-        ):
-            pass
-        case _:
-            return CoverageEnsureFailed(
-                stage='register_heartbeat_class',
-                class_key=HEARTBEAT_CLASS_KEY,
-                refusal=repr(heartbeat_registration),
-                heartbeat_covered_now=heartbeat_covered_now,
-                absent_leaves=(),
+) -> None:
+    """Register the default, declared and heartbeat classes in the caller's transaction.
+
+    One call of ``horsies_register_retention_classes``: each class is
+    REGISTERED, VERIFIED or (heartbeat) HORIZON_UPDATED. The function
+    refuses illegal input with 22023 (the config bounds keep it legal); a
+    database error raises. A row with another outcome raises
+    ``HistoryContractError``. The coverage pass reads the result back
+    through the probe's ``registration_healthy``.
+    """
+    rows = (
+        await connection.execute(
+            _REGISTER_CLASSES_SQL,
+            {
+                'declared_days': declared_days(declared_classes),
+                'heartbeat_horizon': heartbeat_horizon_hours,
+            },
+        )
+    ).all()
+    for row in rows:
+        if row.outcome not in _REGISTRATION_OUTCOMES:
+            raise HistoryContractError(
+                f'class registration of {row.class_key!r} returned {row.outcome!r}'
             )
 
-    registrations = (
-        (DEFAULT_RETENTION_CLASS_KEY, DEFAULT_RETENTION_DURATION),
-        *declared_classes,
-    )
-    for class_key, duration in registrations:
-        registration = await register_finite_retention_class(
-            connection,
-            class_key=class_key,
-            duration=duration,
-        )
-        match registration:
-            case ClassRegistered() | ClassAlreadyRegistered():
-                pass
-            case _:
-                return CoverageEnsureFailed(
-                    stage=(
-                        'register_default_class'
-                        if class_key == DEFAULT_RETENTION_CLASS_KEY
-                        else 'register_declared_class'
-                    ),
-                    class_key=class_key,
-                    refusal=repr(registration),
-                    heartbeat_covered_now=heartbeat_covered_now,
-                    absent_leaves=(),
+
+_CONFLICT_KINDS: Final = {kind.value: kind for kind in CatalogConflictKind}
+
+
+def leaf_creation_of(
+    class_key: str, leaf_name: object, outcome: object, conflict_kind: object
+) -> LeafCreation:
+    """The outcome type of one ``horsies_create_history_leaf`` or
+    ``horsies_create_heartbeat_leaf`` row; an unknown value raises
+    ``HistoryContractError``."""
+    match outcome, leaf_name:
+        case 'CLASS_ABSENT', _:
+            return RetentionClassAbsent(class_key=class_key)
+        case _, name if not isinstance(name, str):
+            raise HistoryContractError(
+                f'leaf creation of class {class_key!r} returned {outcome!r} '
+                f'with leaf name {name!r}'
+            )
+        case 'CREATED', str() as name:
+            return LeafCreated(leaf_name=name, id_index_name=_id_index_name(class_key, name))
+        case 'INDEX_REPAIRED', str() as name:
+            return LeafIndexRepaired(
+                leaf_name=name, id_index_name=_id_index_name(class_key, name)
+            )
+        case 'ALREADY_CONFORMANT', str() as name:
+            return LeafAlreadyConformant(leaf_name=name)
+        case 'COVERED_BY_OPEN_ENDED', str() as name:
+            return CoveredByOpenEndedLeaf(leaf_name=name, open_ended_leaf_name=FOREVER_LEAF)
+        case 'BUSY', str() as name:
+            return LeafMaintenanceBusy(leaf_name=name)
+        case 'CATALOG_CONFLICT', str() as name:
+            kind = _CONFLICT_KINDS.get(conflict_kind) if isinstance(conflict_kind, str) else None
+            if kind is None:
+                raise HistoryContractError(
+                    f'leaf {name}: conflict_kind {conflict_kind!r} is not a known kind'
                 )
-    return None
+            return LeafCatalogConflict(
+                leaf_name=name, kind=kind, detail=f'leaf creation found {kind.value}'
+            )
+        case _, name:
+            raise HistoryContractError(f'leaf creation of {name} returned {outcome!r}')
+
+
+def _id_index_name(class_key: str, leaf_name: str) -> str:
+    """The task-ID index of a history leaf, the probe index of a heartbeat leaf."""
+    match class_key:
+        case value if value == HEARTBEAT_CLASS_KEY:
+            return heartbeat_probe_index_name(leaf_name)
+        case _:
+            return leaf_id_index_name(leaf_name)
 
 
 async def _create_history_leaf(
     connection: AsyncConnection,
     leaf: LeafRef | ForeverLeafRef,
 ) -> LeafCreation:
-    """Create one expected daily history leaf, or verify the static forever leaf."""
+    """Create, verify or repair one expected history leaf in the caller's
+    transaction: one call of ``horsies_create_history_leaf``.
+
+    A created leaf is published inside the call. The static forever leaf
+    (``ForeverLeafRef``) is verified, never created or repaired.
+    """
     match leaf:
         case ForeverLeafRef():
-            return await verify_forever_leaf(connection)
-        case LeafRef():
-            return await create_daily_leaf(
-                connection,
-                CreateDailyHistoryLeaf(leaf=leaf),
-                UnpublishedLoader(),
-            )
+            lower_anchor: datetime | None = None
+        case LeafRef(bounds=bounds):
+            lower_anchor = bounds.lower
+    row = (
+        await connection.execute(
+            _CREATE_HISTORY_LEAF_SQL,
+            {'class_key': leaf.class_key, 'lower_anchor': lower_anchor},
+        )
+    ).one()
+    return leaf_creation_of(leaf.class_key, row.leaf_name, row.outcome, row.conflict_kind)
+
+
+async def _create_heartbeat_leaf(connection: AsyncConnection, leaf: LeafRef) -> LeafCreation:
+    """Create, verify or repair one expected hourly heartbeat leaf in the
+    caller's transaction: one call of ``horsies_create_heartbeat_leaf``."""
+    row = (
+        await connection.execute(
+            _CREATE_HEARTBEAT_LEAF_SQL, {'lower_anchor': leaf.bounds.lower}
+        )
+    ).one()
+    return leaf_creation_of(leaf.class_key, row.leaf_name, row.outcome, row.conflict_kind)
 
 
 async def _maintain_history_leaf(
     database: PartitionMaintenanceDatabase,
     leaf: LeafRef | ForeverLeafRef,
 ) -> LeafCreation:
-    outcome = LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+    """One expected history leaf in its own transaction; `LeafMaintenanceBusy`
+    is retried `_LEAF_MAINTENANCE_ATTEMPTS` times with a random delay."""
+    outcome: LeafCreation = LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
     for attempt in range(_LEAF_MAINTENANCE_ATTEMPTS):
         async with database.begin() as connection:
             outcome = await _create_history_leaf(connection, leaf)
@@ -1251,13 +932,12 @@ async def _maintain_heartbeat_leaf(
     database: PartitionMaintenanceDatabase,
     leaf: LeafRef,
 ) -> LeafCreation:
-    outcome = LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+    """One expected heartbeat leaf in its own transaction; `LeafMaintenanceBusy`
+    is retried `_LEAF_MAINTENANCE_ATTEMPTS` times with a random delay."""
+    outcome: LeafCreation = LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
     for attempt in range(_LEAF_MAINTENANCE_ATTEMPTS):
         async with database.begin() as connection:
-            outcome = await create_hourly_heartbeat_leaf(
-                connection,
-                CreateHourlyHeartbeatLeaf(leaf=leaf),
-            )
+            outcome = await _create_heartbeat_leaf(connection, leaf)
         match outcome:
             case LeafMaintenanceBusy() if (attempt + 1 < _LEAF_MAINTENANCE_ATTEMPTS):
                 await asyncio.sleep(

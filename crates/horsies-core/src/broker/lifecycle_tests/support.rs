@@ -17,19 +17,30 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgConnection, PgPool};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_postgres::error::DbError;
 use uuid::Uuid;
 
-use crate::broker::terminalization::terminalize;
+use crate::broker::attempt_writes::{
+    finish_failed_attempt, finish_unreported_attempt, finish_workflow_success, FinishFailedAttempt,
+    FinishWorkflowSuccess,
+};
+use crate::broker::core_rows::StatementLog;
+use crate::broker::error::BrokerError;
+use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::archive::attempts::{
     decode_attempt_snapshot, encode_attempt_snapshot, AttemptRecord,
 };
+use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
 use crate::core::history::heartbeats::partitioning::{
     create_hourly_heartbeat_leaf, hourly_leaf_ref, CreateHourlyHeartbeatLeaf,
 };
 use crate::core::history::outcomes::LeafCreation;
 use crate::core::lifecycle::{
-    BatchSize, OwnedClaim, TerminalizationCommand, TerminalizationOutcome,
+    BatchSize, FailedAttemptOutcome, OwnedClaim, TerminalizationCommand, TerminalizationOutcome,
+    UnreportedAttemptOutcome, WorkflowSuccessOutcome,
 };
+use crate::db::{CheckoutClass, CorePool, StatementBound, StatementFailure, TypedStatement};
 
 /// The worker that holds the seeded claims.
 pub(super) const WORKER: &str = "lifecycle-test-worker";
@@ -494,18 +505,8 @@ pub(super) type AttemptSummary = (i32, String, Option<String>);
 
 /// The attempts that the history row archived, in attempt order.
 pub(super) async fn archived_attempts(pool: &PgPool, task_id: Uuid) -> Vec<AttemptSummary> {
-    let (version, codec, content_type, payload, digest): (i16, String, String, Vec<u8>, Vec<u8>) =
-        sqlx::query_as(
-            "SELECT attempt_archive_version, attempt_snapshot_codec,
-                    attempt_snapshot_content_type, attempt_snapshot, attempt_snapshot_digest
-             FROM horsies_task_history WHERE task_id = $1",
-        )
-        .bind(task_id)
-        .fetch_one(pool)
+    archived_attempt_records(pool, task_id)
         .await
-        .expect("read the archived attempt snapshot");
-    decode_attempt_snapshot(version, &codec, &content_type, &payload, &digest)
-        .expect("decode the archived attempt snapshot")
         .iter()
         .map(|record| {
             (
@@ -517,20 +518,27 @@ pub(super) async fn archived_attempts(pool: &PgPool, task_id: Uuid) -> Vec<Attem
         .collect()
 }
 
-/// The attempts that the history row archived, with every field.
+/// The attempts that the history row archived, with every field. The
+/// baseline stores no codec or content type: archive format version 1
+/// implies the json-utf8 codec and the application/json content type, as in
+/// the production read (`core/history/reads/detail.rs`).
 pub(super) async fn archived_attempt_records(pool: &PgPool, task_id: Uuid) -> Vec<AttemptRecord> {
-    let (version, codec, content_type, payload, digest): (i16, String, String, Vec<u8>, Vec<u8>) =
-        sqlx::query_as(
-            "SELECT attempt_archive_version, attempt_snapshot_codec,
-                    attempt_snapshot_content_type, attempt_snapshot, attempt_snapshot_digest
-             FROM horsies_task_history WHERE task_id = $1",
-        )
-        .bind(task_id)
-        .fetch_one(pool)
-        .await
-        .expect("read the archived attempt snapshot");
-    decode_attempt_snapshot(version, &codec, &content_type, &payload, &digest)
-        .expect("decode the archived attempt snapshot")
+    let (version, payload, digest): (i16, Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT attempt_archive_version, attempt_snapshot, attempt_snapshot_digest
+         FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read the archived attempt snapshot");
+    decode_attempt_snapshot(
+        version,
+        JSON_UTF8_CODEC,
+        JSON_CONTENT_TYPE,
+        &payload,
+        &digest,
+    )
+    .expect("decode the archived attempt snapshot")
 }
 
 /// The attempt rows still in the live attempt table.
@@ -592,14 +600,14 @@ pub(super) async fn try_seed_node(
     let node_row_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-            id, workflow_id, task_index, node_id, task_name, input, queue_name,
+            downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
             priority, dependencies, args_from, workflow_ctx_from, allow_failed_deps,
             join_type, min_success, task_options, max_retries, execution, good_until,
             retention_class_key, status, task_id, is_subworkflow, sub_workflow_id,
             sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error,
             created_at, started_at, completed_at
         ) VALUES (
-            $1, $2,
+            'NONE', $1, $2,
             COALESCE((SELECT MAX(task_index) + 1 FROM horsies_workflow_tasks
                       WHERE workflow_id = $2), 0),
             'node_' || $1::text, 'lifecycle.test', '{}', 'default',
@@ -759,6 +767,44 @@ pub(super) fn assert_refused<T: std::fmt::Debug>(
     }
 }
 
+/// The server error of a core statement that the database refused.
+pub(super) fn server_refusal<T: std::fmt::Debug>(result: Result<T, BrokerError>) -> DbError {
+    match result {
+        Err(BrokerError::Statement(StatementFailure::StatementRefused { cause, .. })) => {
+            cause.server_error().clone()
+        }
+        other => panic!("expected a statement that the database refused, got {other:?}"),
+    }
+}
+
+/// Assert that a refusal has `sqlstate` and a message that contains
+/// `fragment`.
+pub(super) fn assert_server_refusal(error: &DbError, sqlstate: &str, fragment: &str) {
+    assert_eq!(error.code().code(), sqlstate, "{error}");
+    assert!(error.message().contains(fragment), "{error}");
+}
+
+/// The backend pid of the connection that runs a statement.
+static BACKEND_PID: TypedStatement =
+    TypedStatement::new("backend_pid", "SELECT pg_backend_pid() AS pid", &[]);
+
+/// Open (or reuse) the one connection of a core pool and return its backend
+/// pid. The connection is back in the pool when this returns.
+pub(super) async fn core_pool_backend_pid(pool: &CorePool) -> i32 {
+    let rows = pool
+        .query(
+            CheckoutClass::Reserved,
+            &BACKEND_PID.bind().finish(),
+            StatementBound::ConnectionTimeouts,
+        )
+        .await
+        .expect("read the pooled backend pid");
+    let [row] = rows.as_slice() else {
+        panic!("expected one row, got {}", rows.len());
+    };
+    row.try_get("pid").expect("the pid column")
+}
+
 /// The backend pid of a connection.
 pub(super) async fn backend_pid(connection: &mut PgConnection) -> i32 {
     sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -900,10 +946,37 @@ const BACKEND_EXIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::fro
 const IDLE_POLLS: u32 = 100;
 const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
+/// The failed-attempt write of a task whose child reported a result
+/// (claimed-row rule `REFUSE`), on a core pool on the test database.
+pub(super) async fn write_failed_attempt(
+    pool: &PgPool,
+    command: &FinishFailedAttempt,
+) -> Result<FailedAttemptOutcome, BrokerError> {
+    finish_failed_attempt(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
+}
+
+/// The failed-attempt write of a task whose child ended without a report
+/// (claimed-row rule `RELEASE`), on a core pool on the test database.
+pub(super) async fn write_unreported_attempt(
+    pool: &PgPool,
+    command: &FinishFailedAttempt,
+) -> Result<UnreportedAttemptOutcome, BrokerError> {
+    finish_unreported_attempt(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
+}
+
+/// The success write of a workflow task, on a core pool on the test
+/// database.
+pub(super) async fn write_workflow_success(
+    pool: &PgPool,
+    command: &FinishWorkflowSuccess,
+) -> Result<WorkflowSuccessOutcome, BrokerError> {
+    finish_workflow_success(&core_pool_for_test_pool(pool), StatementLog::Off, command).await
+}
+
 /// A pool of one connection that does not ping a connection at checkout, so
 /// a dead pooled connection shows at its first statement (Python's worker
 /// pre-ping off).
-pub(super) async fn unpinged_single_connection_pool(options: PgConnectOptions) -> PgPool {
+pub(crate) async fn unpinged_single_connection_pool(options: PgConnectOptions) -> PgPool {
     PgPoolOptions::new()
         .max_connections(1)
         .test_before_acquire(false)
@@ -913,13 +986,13 @@ pub(super) async fn unpinged_single_connection_pool(options: PgConnectOptions) -
 }
 
 /// The connect options of the shared test database.
-pub(super) fn database_options(pool: &PgPool) -> PgConnectOptions {
+pub(crate) fn database_options(pool: &PgPool) -> PgConnectOptions {
     (*pool.connect_options()).clone()
 }
 
 /// Wait until the one connection of `pool` is back in the pool; the release
 /// check of the pool runs in the background after a query.
-pub(super) async fn wait_until_idle(pool: &PgPool) {
+pub(crate) async fn wait_until_idle(pool: &PgPool) {
     for _ in 0..IDLE_POLLS {
         if pool.num_idle() == 1 {
             return;
@@ -976,7 +1049,7 @@ const REPLY_DROP_SETTLE: std::time::Duration = std::time::Duration::from_millis(
 /// round trips, and it can drop the reply of the next request: the server
 /// receives and runs the request; the client gets no reply and then a closed
 /// connection.
-pub(super) struct WireProxy {
+pub(crate) struct WireProxy {
     port: u16,
     armed: Arc<AtomicBool>,
     dropped: Arc<AtomicBool>,
@@ -986,7 +1059,7 @@ pub(super) struct WireProxy {
 
 impl WireProxy {
     /// Listen on a free local port and relay to the server of `upstream`.
-    pub(super) async fn start(upstream: &PgConnectOptions) -> Self {
+    pub(crate) async fn start(upstream: &PgConnectOptions) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind the proxy");
@@ -1014,17 +1087,17 @@ impl WireProxy {
     }
 
     /// Connect options that reach the database through this proxy.
-    pub(super) fn options(&self, upstream: &PgConnectOptions) -> PgConnectOptions {
+    pub(crate) fn options(&self, upstream: &PgConnectOptions) -> PgConnectOptions {
         upstream.clone().host("127.0.0.1").port(self.port)
     }
 
     /// Drop the reply to the next request that a client sends.
-    pub(super) fn drop_next_reply(&self) {
+    pub(crate) fn drop_next_reply(&self) {
         self.armed.store(true, Ordering::SeqCst);
     }
 
     /// Whether a reply was dropped.
-    pub(super) fn reply_was_dropped(&self) -> bool {
+    pub(crate) fn reply_was_dropped(&self) -> bool {
         self.dropped.load(Ordering::SeqCst)
     }
 
@@ -1167,6 +1240,34 @@ pub(super) fn claim_pass(queue: &str) -> crate::broker::postgres::ClaimPassParam
     }
 }
 
+/// The request of one 0004 claim pass of `WORKER` over `queue`, with no
+/// cap: one `ISOLATED` budget of 10 that every class routes to.
+pub(super) fn claim_request(queue: &str) -> crate::broker::claims::ClaimPassRequest {
+    use crate::core::task::Execution;
+    crate::broker::claims::ClaimPassRequest {
+        worker_id: WORKER.to_owned(),
+        queues: vec![queue.to_owned()],
+        queue_priority: std::iter::once((queue.to_owned(), 100)).collect(),
+        queue_max_concurrency: std::collections::HashMap::new(),
+        hard_cap_mode: true,
+        classes: crate::broker::claims::ClaimClasses::new(
+            std::collections::HashMap::from([(Execution::Isolated, 10)]),
+            std::collections::HashMap::from([
+                (Execution::Isolated, Execution::Isolated),
+                (Execution::SharedAsync, Execution::Isolated),
+                (Execution::SharedThread, Execution::Isolated),
+            ]),
+        )
+        .expect("every route names the ISOLATED budget"),
+        prefetch_buffer: 0,
+        max_claim_per_worker: 0,
+        max_claim_batch: 0,
+        cluster_wide_cap: None,
+        claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("positive lease"),
+        lock_keys: Vec::new(),
+    }
+}
+
 /// Bound of the wait for the sentinel wake.
 const WAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Bound of the wakes read before the sentinel.
@@ -1280,7 +1381,9 @@ pub(super) fn sha256_of(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Call the internal move of a live task directly, as the deferred guard
-/// of every deferring family sees it.
+/// of every deferring family sees it. The move takes the live row that its
+/// caller locked (`horsies_move_task_to_history(horsies_tasks, ...)`), read
+/// here FOR UPDATE as Python's `baseline_function_calls.sql` reads it.
 pub(super) async fn move_to_history(
     pool: &PgPool,
     task_id: Uuid,
@@ -1288,14 +1391,19 @@ pub(super) async fn move_to_history(
     kind: &str,
     result: Option<&str>,
 ) -> Result<u64, sqlx::Error> {
-    sqlx::query("SELECT horsies_move_task_to_history($1, $2, $3, NOW(), $4, NULL, NULL)")
-        .bind(task_id)
-        .bind(status)
-        .bind(kind)
-        .bind(result)
-        .execute(pool)
-        .await
-        .map(|done| done.rows_affected())
+    sqlx::query(
+        "SELECT horsies_move_task_to_history(
+             (SELECT t FROM horsies_tasks AS t WHERE t.id = $1 FOR UPDATE),
+             $2, $3, NOW(), $4, NULL, NULL
+         )",
+    )
+    .bind(task_id)
+    .bind(status)
+    .bind(kind)
+    .bind(result)
+    .execute(pool)
+    .await
+    .map(|done| done.rows_affected())
 }
 
 /// Assert that the database refused a statement with `sqlstate` and a

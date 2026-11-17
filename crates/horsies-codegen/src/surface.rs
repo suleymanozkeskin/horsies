@@ -359,7 +359,7 @@ const RECORD_CLASSES: [StubClass; 16] = [
     },
     StubClass {
         name: "SchemaInstallNotRun",
-        doc: "The handle was built with the OBSERVE_ONLY schema mode, so the install ran nothing.",
+        doc: "The handle was built with the OBSERVE_ONLY or the ASSUME_INITIALIZED schema mode, so the install ran nothing.",
         constructor: Constructor::NoConstructor,
         properties: &[],
         methods: &[],
@@ -369,7 +369,10 @@ const RECORD_CLASSES: [StubClass; 16] = [
         doc: "The schema state of the database.",
         constructor: Constructor::NoConstructor,
         properties: &[
-            property("state", "Literal['MATCH', 'MISMATCH', 'ABSENT', 'UNKNOWN']"),
+            property(
+                "state",
+                "Literal['MATCH', 'MISMATCH', 'ABSENT', 'ZERO_X', 'UNKNOWN']",
+            ),
             property("version", "int | None"),
             property("expected_version", "int"),
         ],

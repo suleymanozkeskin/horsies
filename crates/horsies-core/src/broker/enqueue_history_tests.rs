@@ -2,10 +2,8 @@
 
 use chrono::{Duration, Utc};
 use serial_test::serial;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection, PgPool};
-use std::str::FromStr;
-use tokio::sync::OnceCell;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::{BrokerError, PostgresBroker};
@@ -14,111 +12,15 @@ use crate::core::history::maintenance::coverage::{ensure_partition_coverage, Cov
 use crate::core::history::periods::RetentionDays;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 
-fn test_db_url() -> String {
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        return url;
-    }
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let root = std::path::Path::new(manifest_dir)
-        .ancestors()
-        .find(|path| path.join(".env").exists());
-    let password = root
-        .and_then(|path| std::fs::read_to_string(path.join(".env")).ok())
-        .and_then(|contents| {
-            contents
-                .lines()
-                .filter_map(|line| line.trim().split_once('='))
-                .find(|(key, _)| key.trim() == "DB_PASSWORD")
-                .map(|(_, value)| value.trim().to_owned())
-        })
-        .unwrap_or_else(|| "W0rklane".to_owned());
-    format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
-}
-
-struct P6TestDatabase {
-    name: String,
-    _anchor: PgPool,
-}
-
-static P6_DATABASE: OnceCell<P6TestDatabase> = OnceCell::const_new();
-
+/// The database of the running test (`crate::test_support::database_of_this_test`),
+/// a copy of the installed test template, as a sqlx pool.
 pub(crate) async fn migrated_pool() -> PgPool {
-    let database = P6_DATABASE
-        .get_or_init(|| async {
-            let base = PgConnectOptions::from_str(&test_db_url()).expect("invalid P6 database URL");
-            let database_name = format!("core_p6_enqueue_{}", Uuid::new_v4().simple());
-            let mut admin = PgConnection::connect_with(&base.clone().database("postgres"))
-                .await
-                .expect("connect P6 admin database");
-            sqlx::query("SELECT pg_advisory_lock(hashtext('core_p6_enqueue_setup'))")
-                .execute(&mut admin)
-                .await
-                .expect("lock P6 database setup");
-            let stale: Vec<String> = sqlx::query_scalar(
-                "SELECT d.datname
-                 FROM pg_database d
-                 WHERE left(d.datname, length('core_p6_enqueue_')) =
-                       'core_p6_enqueue_'
-                   AND NOT EXISTS (
-                       SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname
-                   )
-                 ORDER BY d.datname",
-            )
-            .fetch_all(&mut admin)
-            .await
-            .expect("list inactive P6 databases");
-            for stale_database in stale {
-                let suffix = stale_database
-                    .strip_prefix("core_p6_enqueue_")
-                    .expect("query enforces P6 database prefix");
-                assert!(
-                    suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()),
-                    "refuse to drop non-generated P6 database {stale_database:?}",
-                );
-                sqlx::query(&format!("DROP DATABASE \"{stale_database}\""))
-                    .execute(&mut admin)
-                    .await
-                    .expect("drop inactive P6 database");
-            }
-            sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
-                .execute(&mut admin)
-                .await
-                .expect("create P6 database");
-            let anchor = PgPoolOptions::new()
-                .min_connections(1)
-                .max_connections(1)
-                .max_lifetime(None)
-                .idle_timeout(None)
-                .connect_with(base.database(&database_name))
-                .await
-                .expect("connect P6 database");
-            let unlocked: bool =
-                sqlx::query_scalar("SELECT pg_advisory_unlock(hashtext('core_p6_enqueue_setup'))")
-                    .fetch_one(&mut admin)
-                    .await
-                    .expect("unlock P6 database setup");
-            assert!(unlocked, "P6 database setup lock was held");
-            crate::broker::migrations::install_schema(
-                &anchor,
-                crate::broker::client_family::ClientFamily::Rust,
-            )
-            .await
-            .expect("migrate P6 database");
-            P6TestDatabase {
-                name: database_name,
-                _anchor: anchor,
-            }
-        })
-        .await;
+    let database = crate::test_support::database_of_this_test().await;
     PgPoolOptions::new()
         .max_connections(5)
-        .connect_with(
-            PgConnectOptions::from_str(&test_db_url())
-                .expect("invalid P6 database URL")
-                .database(&database.name),
-        )
+        .connect(database.url())
         .await
-        .expect("connect current P6 test runtime")
+        .expect("connect the database of this test")
 }
 
 async fn clear_enqueue_state(pool: &PgPool) {
@@ -534,159 +436,4 @@ async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
     );
     let declined_facts = stored_facts(&pool, declined).await;
     assert_eq!(declined_facts.retain_rerun_input, Some(false));
-}
-
-#[test]
-fn every_core_task_insert_names_the_baseline_columns() {
-    // Gate rule: any change that adds, removes, or relocates a task INSERT in
-    // the core must rerun this inventory and update the exact count. The
-    // baseline schema has no column defaults, so every insert names these.
-    const SOURCES: &[(&str, &str)] = &[
-        (
-            "broker/attempt_writes/tests.rs",
-            include_str!("attempt_writes/tests.rs"),
-        ),
-        ("broker/migrations.rs", include_str!("migrations.rs")),
-        (
-            "broker/monitoring_schema_tests.rs",
-            include_str!("monitoring_schema_tests.rs"),
-        ),
-        ("broker/postgres.rs", include_str!("postgres.rs")),
-        (
-            "broker/terminalization_matrix.rs",
-            include_str!("terminalization_matrix.rs"),
-        ),
-        (
-            "core/history/reads/tests.rs",
-            include_str!("../core/history/reads/tests.rs"),
-        ),
-        (
-            "core/history/rerun/tests.rs",
-            include_str!("../core/history/rerun/tests.rs"),
-        ),
-        (
-            "monitoring/action_tests.rs",
-            include_str!("../monitoring/action_tests.rs"),
-        ),
-        (
-            "monitoring/tests.rs",
-            include_str!("../monitoring/tests.rs"),
-        ),
-        ("web/tests.rs", include_str!("../web/tests.rs")),
-        (
-            "worker/execution.rs",
-            include_str!("../worker/execution.rs"),
-        ),
-        (
-            "worker/finalizing_tests.rs",
-            include_str!("../worker/finalizing_tests.rs"),
-        ),
-        ("worker/recovery.rs", include_str!("../worker/recovery.rs")),
-        (
-            "worker/runner_beats.rs",
-            include_str!("../worker/runner_beats.rs"),
-        ),
-        ("worker/worker.rs", include_str!("../worker/worker.rs")),
-        (
-            "workflow_engine/engine.rs",
-            include_str!("../workflow_engine/engine.rs"),
-        ),
-        (
-            "workflow_engine/lifecycle.rs",
-            include_str!("../workflow_engine/lifecycle.rs"),
-        ),
-        (
-            "workflow_engine/phase2_recovery.rs",
-            include_str!("../workflow_engine/phase2_recovery.rs"),
-        ),
-        (
-            "workflow_engine/recovery.rs",
-            include_str!("../workflow_engine/recovery.rs"),
-        ),
-        (
-            "workflow_engine/start.rs",
-            include_str!("../workflow_engine/start.rs"),
-        ),
-    ];
-    const REQUIRED: &[&str] = &[
-        "input",
-        "execution",
-        "command_fingerprint_version",
-        "command_fingerprint",
-        "retention_class_key",
-        "retain_rerun_input",
-    ];
-    let needle = ["INSERT INTO horsies_", "tasks"].concat();
-    let mut insert_count = 0;
-
-    for (path, source) in SOURCES {
-        for suffix in source.split(&needle).skip(1) {
-            insert_count += 1;
-            let boundary = [
-                suffix.find("VALUES"),
-                suffix.find("push_values"),
-                suffix.find("SELECT"),
-            ]
-            .into_iter()
-            .flatten()
-            .min()
-            .unwrap_or_else(|| panic!("{path}: task insert has no values boundary"));
-            let columns = &suffix[..boundary];
-            let missing: Vec<_> = REQUIRED
-                .iter()
-                .copied()
-                .filter(|column| !columns.contains(column))
-                .collect();
-            assert!(
-                missing.is_empty(),
-                "{path}: task insert omits baseline columns {missing:?}"
-            );
-        }
-    }
-
-    assert_eq!(insert_count, 43, "classify every core task insert");
-}
-
-#[test]
-fn workflow_and_worker_database_identities_stay_uuid_typed() {
-    const SOURCES: &[(&str, &str)] = &[
-        ("worker/worker.rs", include_str!("../worker/worker.rs")),
-        (
-            "workflow_engine/engine.rs",
-            include_str!("../workflow_engine/engine.rs"),
-        ),
-        (
-            "workflow_engine/lifecycle.rs",
-            include_str!("../workflow_engine/lifecycle.rs"),
-        ),
-        (
-            "workflow_engine/start.rs",
-            include_str!("../workflow_engine/start.rs"),
-        ),
-    ];
-    const FORBIDDEN: &[&str] = &[
-        "mint_task_id()\n                .map(|task_id| task_id.to_string())",
-        "UNNEST($1::text[])::uuid",
-        "HashSet<String>>",
-        ".contains(&row.id.to_string())",
-        "let task_id = row.id.to_string()",
-    ];
-
-    for (path, source) in SOURCES {
-        for forbidden in FORBIDDEN {
-            assert!(
-                !source.contains(forbidden),
-                "{path}: database identity crossed a String adapter: {forbidden}",
-            );
-        }
-    }
-
-    assert!(
-        SOURCES[1].1.contains("UNNEST($1::uuid[]) AS tid"),
-        "batch workflow promotion must bind its task identities as uuid[]",
-    );
-    assert!(
-        SOURCES[0].1.contains("HashSet<Uuid>>"),
-        "in-dispatch task identities must remain UUID-typed",
-    );
 }

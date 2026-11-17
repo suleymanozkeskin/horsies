@@ -9,8 +9,13 @@ use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC
 use crate::core::history::ddl::classes::PERIOD_CLASS_KIND;
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{LEAF_CATALOG, RETENTION_CLASSES, TASK_DETAIL_FUNCTION};
-use crate::core::history::reads::lookup_generation::CLOCK_BOUND_SECONDS;
+use crate::core::history::reads::result::FUNCTION_PUBLISHED_SQL;
 use crate::core::types::status::TaskStatus;
+
+/// The clock bound of a UUIDv7 birth, in seconds: the published readers
+/// probe from the birth minus this bound (`horsies_render_history_reader`,
+/// `0008_history_maintenance_functions.sql`).
+pub const CLOCK_BOUND_SECONDS: i64 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryTaskDetail {
@@ -84,7 +89,7 @@ impl TaskAbsenceReason {
         }
     }
 
-    fn parse(value: &str) -> Result<Self, HistoryError> {
+    pub(crate) fn parse(value: &str) -> Result<Self, HistoryError> {
         match value {
             "PREDATES_RETAINED_HISTORY" => Ok(Self::PredatesRetainedHistory),
             "WITHIN_RETAINED_HISTORY" => Ok(Self::WithinRetainedHistory),
@@ -108,53 +113,70 @@ pub enum TaskDetailResult {
     },
 }
 
+/// The history columns of a staged detail row, as stored.
 #[derive(FromRow)]
-struct HistoryDetailWireRow {
-    task_id: Uuid,
-    task_name: String,
-    queue_name: String,
-    priority: i32,
-    status: String,
-    terminalization_kind: String,
-    terminal_at: DateTime<Utc>,
-    retention_class_key: String,
-    enqueued_at: DateTime<Utc>,
-    created_at: DateTime<Utc>,
-    sent_at: Option<DateTime<Utc>>,
-    claimed_at: Option<DateTime<Utc>>,
-    started_at: Option<DateTime<Utc>>,
-    good_until: Option<DateTime<Utc>>,
-    retry_count: i32,
-    max_retries: i32,
-    last_claimed_worker_id: Option<String>,
-    last_worker_hostname: Option<String>,
-    last_worker_pid: Option<i32>,
-    result_envelope_version: i16,
-    result_payload: Option<Vec<u8>>,
-    result_digest: Option<Vec<u8>>,
-    error_code: Option<String>,
-    final_failed_reason: Option<String>,
-    rerun_of_task_id: Option<Uuid>,
-    rerun_root_task_id: Option<Uuid>,
-    workflow_id: Option<Uuid>,
-    is_workflow_task: bool,
-    rerun_input_disposition: String,
-    rerun_input_version: Option<i16>,
-    rerun_input_digest: Option<Vec<u8>>,
-    rerun_input_inline: Option<Vec<u8>>,
-    attempt_archive_version: i16,
-    attempt_snapshot: Vec<u8>,
-    attempt_snapshot_digest: Vec<u8>,
+pub(crate) struct HistoryDetailWireRow {
+    pub(crate) task_id: Uuid,
+    pub(crate) task_name: String,
+    pub(crate) queue_name: String,
+    pub(crate) priority: i32,
+    pub(crate) status: String,
+    pub(crate) terminalization_kind: String,
+    pub(crate) terminal_at: DateTime<Utc>,
+    pub(crate) retention_class_key: String,
+    pub(crate) enqueued_at: DateTime<Utc>,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) sent_at: Option<DateTime<Utc>>,
+    pub(crate) claimed_at: Option<DateTime<Utc>>,
+    pub(crate) started_at: Option<DateTime<Utc>>,
+    pub(crate) good_until: Option<DateTime<Utc>>,
+    pub(crate) retry_count: i32,
+    pub(crate) max_retries: i32,
+    pub(crate) last_claimed_worker_id: Option<String>,
+    pub(crate) last_worker_hostname: Option<String>,
+    pub(crate) last_worker_pid: Option<i32>,
+    pub(crate) result_envelope_version: i16,
+    pub(crate) result_payload: Option<Vec<u8>>,
+    pub(crate) result_digest: Option<Vec<u8>>,
+    pub(crate) error_code: Option<String>,
+    pub(crate) final_failed_reason: Option<String>,
+    pub(crate) rerun_of_task_id: Option<Uuid>,
+    pub(crate) rerun_root_task_id: Option<Uuid>,
+    pub(crate) workflow_id: Option<Uuid>,
+    pub(crate) is_workflow_task: bool,
+    pub(crate) rerun_input_disposition: String,
+    pub(crate) rerun_input_version: Option<i16>,
+    pub(crate) rerun_input_digest: Option<Vec<u8>>,
+    pub(crate) rerun_input_inline: Option<Vec<u8>>,
+    pub(crate) attempt_archive_version: i16,
+    pub(crate) attempt_snapshot: Vec<u8>,
+    pub(crate) attempt_snapshot_digest: Vec<u8>,
+}
+
+/// The staged detail read: one row for a live or history task, none
+/// otherwise. `$1` is the task id.
+pub(crate) fn task_detail_sql() -> String {
+    format!(
+        "SELECT location, (detail.task_row).*
+         FROM {TASK_DETAIL_FUNCTION}($1) AS detail"
+    )
+}
+
+/// The absence reason of the task id `$1`, as one text column.
+pub(crate) fn task_absence_reason_query_sql() -> String {
+    format!("SELECT {}", task_absence_reason_sql("$1"))
+}
+
+/// The `regprocedure` text of the staged detail function.
+pub(crate) fn task_detail_function_signature() -> String {
+    format!("{TASK_DETAIL_FUNCTION}(uuid)")
 }
 
 pub async fn read_task_detail(
     connection: &mut PgConnection,
     task_id: Uuid,
 ) -> Result<TaskDetailResult, HistoryError> {
-    let sql = format!(
-        "SELECT location, (detail.task_row).*
-         FROM {TASK_DETAIL_FUNCTION}($1) AS detail"
-    );
+    let sql = task_detail_sql();
     let Some(row) = sqlx::query(&sql)
         .bind(task_id)
         .fetch_optional(&mut *connection)
@@ -186,7 +208,15 @@ fn history_status(task_id: Uuid, value: &str) -> Result<TaskStatus, HistoryError
 }
 
 fn decode_history_detail(row: &sqlx::postgres::PgRow) -> Result<HistoryTaskDetail, HistoryError> {
-    let row = HistoryDetailWireRow::from_row(row)?;
+    history_detail_from_wire(HistoryDetailWireRow::from_row(row)?)
+}
+
+/// The detail of a history row from its stored columns: reads the stored
+/// status as a `TaskStatus`, decodes the attempt snapshot (digest first) and
+/// adds the codec and content type that the stored versions imply. Pure.
+pub(crate) fn history_detail_from_wire(
+    row: HistoryDetailWireRow,
+) -> Result<HistoryTaskDetail, HistoryError> {
     let status = history_status(row.task_id, &row.status)?;
     // Archive format version 1 implies the json-utf8 codec and the
     // application/json content type; the decode refuses any other version.
@@ -272,7 +302,7 @@ async fn classify_absence(
     connection: &mut PgConnection,
     task_id: Uuid,
 ) -> Result<TaskAbsenceReason, HistoryError> {
-    let reason: String = sqlx::query_scalar(&format!("SELECT {}", task_absence_reason_sql("$1")))
+    let reason: String = sqlx::query_scalar(&task_absence_reason_query_sql())
         .bind(task_id)
         .fetch_one(connection)
         .await?;
@@ -280,8 +310,8 @@ async fn classify_absence(
 }
 
 pub async fn staged_detail_published(connection: &mut PgConnection) -> Result<bool, HistoryError> {
-    Ok(sqlx::query_scalar("SELECT to_regprocedure($1) IS NOT NULL")
-        .bind(format!("{TASK_DETAIL_FUNCTION}(uuid)"))
+    Ok(sqlx::query_scalar(FUNCTION_PUBLISHED_SQL)
+        .bind(task_detail_function_signature())
         .fetch_one(connection)
         .await?)
 }

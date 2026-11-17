@@ -29,10 +29,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.sql.elements import TextClause
 
-from horsies.core.brokers.postgres import (
-    _EXPIRE_BATCH_SIZE,
-    SELECT_STALE_TASK_FOR_UPDATE_SQL,
-)
+from horsies.core.brokers.postgres import _EXPIRE_BATCH_SIZE
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.typed import encode_task_result
@@ -60,12 +57,11 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.lifecycle.persistence import LOCK_TASK_SQL
-from horsies.core.worker.sql import (
-    NOTIFY_TASK_QUEUE_SQL,
-    UPSERT_TASK_ATTEMPT_SQL,
-)
+from horsies.core.worker.sql import NOTIFY_TASK_QUEUE_SQL
 from horsies.core.workflows.engine import on_workflow_task_complete
 from tests.perf.legacy_terminalization_sql import (
+    SELECT_STALE_TASK_FOR_UPDATE_SQL,
+    UPSERT_TASK_ATTEMPT_SQL,
     EXPIRE_CLAIMED_TASK_BEFORE_START_SQL as _EXPIRE_CLAIMED_TASK_BEFORE_START_SQL,
     EXPIRE_PENDING_TASKS_SQL,
     FINALIZE_TASK_COMPLETED_SQL,
@@ -175,14 +171,14 @@ _INSERT_WORKFLOWS_SQL = text("""
 """)
 
 _INSERT_WORKFLOW_TASKS_SQL = text("""
-    INSERT INTO horsies_workflow_tasks (
+    INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
         id, workflow_id, task_index, node_id, task_name, input,
         queue_name, priority, dependencies, allow_failed_deps,
         join_type, is_subworkflow, status, task_id, created_at,
         max_retries, execution, retention_class_key
     )
     SELECT
-        'wt-' || :prefix || g, 'wf-' || :prefix || g, 0, 'node_0',
+        'NONE', 'wt-' || :prefix || g, 'wf-' || :prefix || g, 0, 'node_0',
         'perf.task', '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
         'RUNNING', :prefix || g, NOW(), 0, 'ISOLATED', 'standard_30d'
     FROM generate_series(1, :count) AS g
@@ -433,8 +429,6 @@ def _fused_invocation(
                     claimed_at=CLAIMED_AT,
                 ),
                 result_json=payload,
-                notify_channel='task_queue_default',
-                notify_payload=f'capacity:{task_id}',
             )
             statement, parameters = call_for(command)
             return Invocation(

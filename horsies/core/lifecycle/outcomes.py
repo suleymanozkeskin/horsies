@@ -51,6 +51,8 @@ class GuardKind(Enum):
     WORKFLOW_LINK_ABSENT = 'WORKFLOW_LINK_ABSENT'
     WORKFLOW_LINK_STATE = 'WORKFLOW_LINK_STATE'
     FOREIGN_TERMINALIZATION = 'FOREIGN_TERMINALIZATION'
+    WORKFLOW_TASK = 'WORKFLOW_TASK'
+    RETRY_COUNT = 'RETRY_COUNT'
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +139,23 @@ class ObservedForeignTerminalization:
     terminal_at: datetime | None
 
 
+@dataclass(frozen=True, slots=True)
+class ObservedWorkflowTask:
+    """The task belongs to a workflow, live or finished, and the operation
+    acts on plain tasks only. ``observed_status`` is the task's status."""
+
+    observed_status: TaskStatus
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedRetryCount:
+    """A retry request was computed from ``expected_retry_count``, and the
+    locked row holds ``retry_count``: another writer ended that attempt."""
+
+    expected_retry_count: int
+    retry_count: int
+
+
 type GuardEvidence = (
     ObservedClaim
     | ObservedDeadline
@@ -144,6 +163,8 @@ type GuardEvidence = (
     | ObservedWorkflowState
     | ObservedWorkflowLink
     | ObservedForeignTerminalization
+    | ObservedWorkflowTask
+    | ObservedRetryCount
 )
 
 
@@ -250,6 +271,8 @@ _GUARD_PAYLOAD_KEYS: dict[GuardKind, frozenset[str]] = {
     GuardKind.WORKFLOW_LINK_ABSENT: frozenset(),
     GuardKind.WORKFLOW_LINK_STATE: frozenset({'node_status'}),
     GuardKind.FOREIGN_TERMINALIZATION: frozenset(),
+    GuardKind.WORKFLOW_TASK: frozenset(),
+    GuardKind.RETRY_COUNT: frozenset({'expected_retry_count', 'retry_count'}),
 }
 
 
@@ -367,6 +390,18 @@ def _decode_evidence(
                 observed_status=observed.status,
                 committed_kind=_optional_kind(row),
                 terminal_at=_optional_datetime(row, 'terminal_at'),
+            )
+        case GuardKind.WORKFLOW_TASK:
+            if observed.status is None:
+                raise OutcomeDecodeError(
+                    'a workflow-task refusal without an observed status. The '
+                    'refusal names the status of the task it refused.'
+                )
+            return ObservedWorkflowTask(observed_status=observed.status)
+        case GuardKind.RETRY_COUNT:
+            return ObservedRetryCount(
+                expected_retry_count=_require_int(payload, 'expected_retry_count'),
+                retry_count=_require_int(payload, 'retry_count'),
             )
         case _ as unreachable:
             assert_never(unreachable)
@@ -570,9 +605,12 @@ def _require_payload(
 # The failed-attempt finish
 # ---------------------------------------------------------------------------
 #
-# ``horsies_finish_failed_attempt`` returns the ten shared columns and seven
-# more. A miss carries the shared classifier's row unchanged and the seven
+# ``horsies_finish_failed_attempt`` returns the ten shared columns and nine
+# more. A miss carries the shared classifier's row unchanged and the nine
 # columns NULL, so it decodes to the shared outcome types.
+# The node facts ``node_has_dependents`` and ``downstream_subworkflow`` are
+# set only on the APPLIED row of a workflow task; the decoder carries them as
+# ``PhaseTwoStep``, the form of its phase-2 step.
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,12 +635,32 @@ class CapacityWoken:
     """A plain task: the function sent its capacity wake. Nothing is owed."""
 
 
+class PhaseTwoStep(Enum):
+    """What the phase-2 step of a workflow task can do, from the node facts
+    that phase 1 reads after its move (``node_has_dependents``,
+    ``downstream_subworkflow``). The dependencies and the fact are fixed at
+    workflow start, so the answer holds for phase 2."""
+
+    NO_DEPENDENTS = 'NO_DEPENDENTS'
+    """No node lists this node as a dependency: the step finishes the node and
+    promotes nothing. One statement in autocommit."""
+
+    DEPENDENTS_WITHOUT_SUBWORKFLOW = 'DEPENDENTS_WITHOUT_SUBWORKFLOW'
+    """The node has dependents and no sub-workflow node is below it: the step
+    owes no child start. One statement in autocommit."""
+
+    SUBWORKFLOW_REACHABLE = 'SUBWORKFLOW_REACHABLE'
+    """A sub-workflow node is below the node: the step can owe a child start,
+    which commits with the step. A transaction."""
+
+
 @dataclass(frozen=True, slots=True)
 class PhaseTwoOwed:
     """A workflow task: phase 2 advances its node and sends its capacity wake."""
 
     task_name: str
     queue_name: str
+    step: PhaseTwoStep
 
 
 type AfterFailure = CapacityWoken | PhaseTwoOwed
@@ -652,7 +710,13 @@ _FAILED_ATTEMPT_COLUMNS: frozenset[str] = frozenset(
         'is_workflow_task',
         'queue_name',
         'task_name',
+        'node_has_dependents',
+        'downstream_subworkflow',
     }
+)
+
+_NODE_FACT_COLUMNS: frozenset[str] = frozenset(
+    {'node_has_dependents', 'downstream_subworkflow'}
 )
 
 
@@ -664,63 +728,147 @@ def decode_failed_attempt_row(row: Mapping[str, Any]) -> FailedAttemptOutcome:
             column is missing or unknown, or a column is set or NULL against
             its outcome.
     """
+    shared = _failed_attempt_shared(row, 'failed-attempt')
+    match row['outcome']:
+        case 'APPLIED':
+            task_id, terminal_at, observed = _applied_failure(
+                row, shared, TerminalizationKind.FAIL_RUNNING, 'failed-attempt'
+            )
+            return FailureApplied(
+                task_id=task_id,
+                terminal_at=terminal_at,
+                observed=observed,
+                retry=_decode_retry_refusal(row),
+                after=_decode_after_failure(row),
+            )
+        case 'RETRY_SCHEDULED':
+            return _decode_retry_scheduled(row, shared)
+        case _:
+            return _decode_failure_refusal(row, shared)
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimReleased:
+    """The row was CLAIMED by this worker at this claim generation: no task
+    code ran. It went back to PENDING with every claim and run field cleared
+    and no attempt row (the ``RELEASE`` rule)."""
+
+    task_id: str
+    queue_name: str
+    observed: ObservedTaskState
+
+
+def decode_ended_attempt_row(
+    row: Mapping[str, Any],
+) -> FailedAttemptOutcome | ClaimReleased:
+    """Decode the row of ``horsies_finish_failed_attempt`` called with the
+    ``RELEASE`` rule: ``RELEASED``, or any outcome of
+    ``decode_failed_attempt_row``.
+
+    Raises:
+        OutcomeDecodeError: the row does not satisfy the wire contract.
+    """
+    match row.get('outcome'):
+        case 'RELEASED':
+            return _decode_claim_released(row)
+        case _:
+            return decode_failed_attempt_row(row)
+
+
+def _decode_claim_released(row: Mapping[str, Any]) -> ClaimReleased:
+    shared = _failed_attempt_shared(row, 'ended-attempt')
+    _require_null_columns(
+        row,
+        frozenset(
+            {
+                'ordinality',
+                'terminal_at',
+                'terminalization_kind',
+                'guard_kind',
+                'observed_guard',
+                'retry_disposition',
+                'retry_count',
+                'next_retry_at',
+                'good_until',
+                'is_workflow_task',
+                'task_name',
+                'node_has_dependents',
+                'downstream_subworkflow',
+            }
+        ),
+    )
+    observed = ObservedTaskState(
+        status=_optional_status(shared, 'observed_status'),
+        worker_id=_optional_str(shared, 'observed_worker_id'),
+        claimed_at=_optional_datetime(shared, 'observed_claimed_at'),
+    )
+    if observed.status is not TaskStatus.CLAIMED:
+        raise OutcomeDecodeError(
+            f'RELEASED carries observed_status {observed.status!r}, not CLAIMED'
+        )
+    return ClaimReleased(
+        task_id=_require_identity_text(shared, 'task_id'),
+        queue_name=_require_str(row, 'queue_name'),
+        observed=observed,
+    )
+
+
+def _failed_attempt_shared(row: Mapping[str, Any], label: str) -> dict[str, Any]:
+    """The ten shared columns, after the check of the whole row shape."""
     present = frozenset(row.keys())
     expected = _ROW_COLUMNS | _FAILED_ATTEMPT_COLUMNS
     if present != expected:
         raise OutcomeDecodeError(
-            f'failed-attempt row shape does not match the wire contract. '
+            f'{label} row shape does not match the wire contract. '
             f'missing={sorted(expected - present)} '
             f'unexpected={sorted(present - expected)}'
         )
-    shared = {column: row[column] for column in _ROW_COLUMNS}
-    match row['outcome']:
-        case 'APPLIED':
-            return _decode_failure_applied(row, shared)
-        case 'RETRY_SCHEDULED':
-            return _decode_retry_scheduled(row, shared)
-        case _:
-            _require_null_columns(row, _FAILED_ATTEMPT_COLUMNS)
-            match decode_outcome_row(shared):
-                case (
-                    (
-                        AlreadyApplied()
-                        | LostClaim()
-                        | SourceStateConflict()
-                        | TaskAbsent()
-                    ) as refused
-                ):
-                    return refused
-                case Applied():
-                    raise AssertionError('APPLIED is decoded above')
-                case _ as unreachable:
-                    assert_never(unreachable)
+    return {column: row[column] for column in _ROW_COLUMNS}
 
 
-def _decode_failure_applied(
+def _decode_failure_refusal(
     row: Mapping[str, Any],
     shared: Mapping[str, Any],
-) -> FailureApplied:
+) -> AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent:
+    _require_null_columns(row, _FAILED_ATTEMPT_COLUMNS)
+    match decode_outcome_row(shared):
+        case (
+            (
+                AlreadyApplied()
+                | LostClaim()
+                | SourceStateConflict()
+                | TaskAbsent()
+            ) as refused
+        ):
+            return refused
+        case Applied():
+            raise AssertionError('APPLIED is decoded by the caller')
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _applied_failure(
+    row: Mapping[str, Any],
+    shared: Mapping[str, Any],
+    kind: TerminalizationKind,
+    label: str,
+) -> tuple[str, datetime, ObservedTaskState]:
+    """The shared facts of an APPLIED failure row whose move wrote ``kind``."""
     _require_null_columns(row, frozenset({'retry_count'}))
     match decode_outcome_row(shared):
         case Applied(
-            task_id=task_id, terminal_at=terminal_at, kind=kind, observed=observed
+            task_id=task_id, terminal_at=terminal_at, kind=written, observed=observed
         ):
             pass
         case AlreadyApplied() | LostClaim() | SourceStateConflict() | TaskAbsent():
             raise AssertionError('the shared decoder kept the APPLIED discriminant')
         case _ as unreachable:
             assert_never(unreachable)
-    if kind is not TerminalizationKind.FAIL_RUNNING:
+    if written is not kind:
         raise OutcomeDecodeError(
-            f'failed-attempt APPLIED carries kind {kind.value}, not FAIL_RUNNING'
+            f'{label} APPLIED carries kind {written.value}, not {kind.value}'
         )
-    return FailureApplied(
-        task_id=task_id,
-        terminal_at=terminal_at,
-        observed=observed,
-        retry=_decode_retry_refusal(row),
-        after=_decode_after_failure(row),
-    )
+    return task_id, terminal_at, observed
 
 
 def _decode_retry_refusal(row: Mapping[str, Any]) -> RetryRefusal:
@@ -740,15 +888,64 @@ def _decode_retry_refusal(row: Mapping[str, Any]) -> RetryRefusal:
 def _decode_after_failure(row: Mapping[str, Any]) -> AfterFailure:
     match row['is_workflow_task']:
         case True:
-            return PhaseTwoOwed(
-                task_name=_require_str(row, 'task_name'),
-                queue_name=_require_str(row, 'queue_name'),
-            )
+            return _decode_phase_two_owed(row)
         case False:
+            _require_null_columns(row, _NODE_FACT_COLUMNS)
             return CapacityWoken()
         case unknown:
             raise OutcomeDecodeError(
                 f'is_workflow_task must be a boolean, got {type(unknown).__name__}'
+            )
+
+
+def _decode_phase_two_owed(row: Mapping[str, Any]) -> PhaseTwoOwed:
+    """The phase 2 owed by the APPLIED row of a workflow task."""
+    return PhaseTwoOwed(
+        task_name=_require_str(row, 'task_name'),
+        queue_name=_require_str(row, 'queue_name'),
+        step=_decode_phase_two_step(row),
+    )
+
+
+def _decode_phase_two_step(row: Mapping[str, Any]) -> PhaseTwoStep:
+    """The phase-2 step of an applied workflow task, from its node facts.
+
+    - ``node_has_dependents`` FALSE: ``NO_DEPENDENTS``. ``downstream_subworkflow``
+      is ``NONE``, or NULL when no node links the task (phase 2 then finds no
+      node to finish). ``REACHABLE`` is refused: a sub-workflow node below the
+      node would be a dependent of it.
+    - TRUE: ``NONE`` gives ``DEPENDENTS_WITHOUT_SUBWORKFLOW``, ``REACHABLE``
+      gives ``SUBWORKFLOW_REACHABLE``. NULL is refused: a node with dependents
+      is linked, and the start stores the fact on every node.
+    - A ``node_has_dependents`` that is not a boolean, or another text, is
+      refused.
+
+    Raises:
+        OutcomeDecodeError: the facts are outside these pairs.
+    """
+    has_dependents = row['node_has_dependents']
+    downstream = row['downstream_subworkflow']
+    match (has_dependents, downstream):
+        case (False, None | 'NONE'):
+            return PhaseTwoStep.NO_DEPENDENTS
+        case (True, 'NONE'):
+            return PhaseTwoStep.DEPENDENTS_WITHOUT_SUBWORKFLOW
+        case (True, 'REACHABLE'):
+            return PhaseTwoStep.SUBWORKFLOW_REACHABLE
+        case (False, 'REACHABLE'):
+            raise OutcomeDecodeError(
+                'node_has_dependents is FALSE and downstream_subworkflow is REACHABLE'
+            )
+        case (True, None):
+            raise OutcomeDecodeError(
+                'node_has_dependents is TRUE and downstream_subworkflow is NULL'
+            )
+        case (bool(), unknown):
+            raise OutcomeDecodeError(f'unknown downstream_subworkflow {unknown!r}')
+        case (unknown, _):
+            raise OutcomeDecodeError(
+                f'an applied workflow task needs node_has_dependents as a '
+                f'boolean, got {type(unknown).__name__}'
             )
 
 
@@ -768,6 +965,8 @@ def _decode_retry_scheduled(
                 'good_until',
                 'is_workflow_task',
                 'task_name',
+                'node_has_dependents',
+                'downstream_subworkflow',
             }
         ),
     )
@@ -785,13 +984,99 @@ def _decode_retry_scheduled(
 
 
 # ---------------------------------------------------------------------------
+# The stale attempt finish
+# ---------------------------------------------------------------------------
+#
+# ``horsies_finish_stale_attempt`` returns the columns of
+# ``horsies_finish_failed_attempt``, never RELEASED. The terminal move writes
+# FAIL_STALE and sends no capacity wake; phase-2 recovery advances the node
+# of a workflow task.
+
+
+@dataclass(frozen=True, slots=True)
+class NothingOwed:
+    """A plain task after a stale failure: the statement sends no capacity wake
+    (as Python), and nothing is owed."""
+
+
+type AfterStaleFailure = NothingOwed | PhaseTwoOwed
+"""What is owed after the terminal failure of a stale RUNNING task. For a
+workflow task, phase 2: the move recorded it, and phase-2 recovery runs it."""
+
+
+@dataclass(frozen=True, slots=True)
+class StaleFailureApplied:
+    """The FAILED attempt row and the move of the stale task committed."""
+
+    task_id: str
+    terminal_at: datetime
+    observed: ObservedTaskState
+    retry: RetryRefusal
+    after: AfterStaleFailure
+
+
+type StaleAttemptOutcome = (
+    StaleFailureApplied
+    | RetryScheduled
+    | AlreadyApplied
+    | LostClaim
+    | SourceStateConflict
+    | TaskAbsent
+)
+
+
+def decode_stale_attempt_row(row: Mapping[str, Any]) -> StaleAttemptOutcome:
+    """Decode the row of ``horsies_finish_stale_attempt``.
+
+    Raises:
+        OutcomeDecodeError: the row does not satisfy the wire contract: a
+            column is missing or unknown, a column is set or NULL against its
+            outcome, or an APPLIED row carries a kind other than FAIL_STALE.
+    """
+    shared = _failed_attempt_shared(row, 'stale-attempt')
+    match row['outcome']:
+        case 'APPLIED':
+            task_id, terminal_at, observed = _applied_failure(
+                row, shared, TerminalizationKind.FAIL_STALE, 'stale-attempt'
+            )
+            return StaleFailureApplied(
+                task_id=task_id,
+                terminal_at=terminal_at,
+                observed=observed,
+                retry=_decode_retry_refusal(row),
+                after=_decode_after_stale_failure(row),
+            )
+        case 'RETRY_SCHEDULED':
+            return _decode_retry_scheduled(row, shared)
+        case _:
+            return _decode_failure_refusal(row, shared)
+
+
+def _decode_after_stale_failure(row: Mapping[str, Any]) -> AfterStaleFailure:
+    match row['is_workflow_task']:
+        case True:
+            return _decode_phase_two_owed(row)
+        case False:
+            _ = _require_str(row, 'queue_name')
+            _ = _require_str(row, 'task_name')
+            _require_null_columns(row, _NODE_FACT_COLUMNS)
+            return NothingOwed()
+        case unknown:
+            raise OutcomeDecodeError(
+                f'is_workflow_task must be a boolean, got {type(unknown).__name__}'
+            )
+
+
+# ---------------------------------------------------------------------------
 # The success of a workflow task
 # ---------------------------------------------------------------------------
 #
-# ``horsies_finish_workflow_success`` returns the ten shared columns and two
-# more, the routing facts of phase 2. A miss carries the shared classifier's
-# row unchanged and the two columns NULL, so it decodes to the shared outcome
-# types.
+# ``horsies_finish_workflow_success`` returns the ten shared columns and
+# four more: the routing facts of phase 2 and the node facts
+# (``node_has_dependents``, ``downstream_subworkflow``). A miss carries the
+# shared classifier's row unchanged and the four columns NULL, so it decodes to
+# the shared outcome types. The decoder carries the node facts as
+# ``PhaseTwoStep``.
 
 
 @dataclass(frozen=True, slots=True)
@@ -809,7 +1094,9 @@ type WorkflowSuccessOutcome = (
     SuccessApplied | AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent
 )
 
-_WORKFLOW_SUCCESS_COLUMNS: frozenset[str] = frozenset({'queue_name', 'task_name'})
+_WORKFLOW_SUCCESS_COLUMNS: frozenset[str] = frozenset(
+    {'queue_name', 'task_name', 'node_has_dependents', 'downstream_subworkflow'}
+)
 
 
 def decode_workflow_success_row(row: Mapping[str, Any]) -> WorkflowSuccessOutcome:
@@ -843,10 +1130,7 @@ def decode_workflow_success_row(row: Mapping[str, Any]) -> WorkflowSuccessOutcom
                 task_id=task_id,
                 terminal_at=terminal_at,
                 observed=observed,
-                phase_two=PhaseTwoOwed(
-                    task_name=_require_str(row, 'task_name'),
-                    queue_name=_require_str(row, 'queue_name'),
-                ),
+                phase_two=_decode_phase_two_owed(row),
             )
         case (
             AlreadyApplied()

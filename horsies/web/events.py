@@ -9,6 +9,11 @@ thousand status changes costs each connected browser one invalidation rather
 than a thousand. Past a per-window id cap the batch degrades to "invalidate
 the whole topic", which is cheaper than shipping an unbounded id list.
 
+Each stream's queue holds at most ``SUBSCRIBER_QUEUE_CAPACITY`` items. A
+stream whose client reads slower than events arrive drops its queued events
+and gets one "invalidate the whole topic" event per topic instead, so a slow
+client cannot grow the web process.
+
 This app owns its listener rather than borrowing the broker's: the broker's
 listener carries result-waiter subscriptions, and a monitoring stream must
 not be able to disturb them.
@@ -19,6 +24,7 @@ from __future__ import annotations
 import asyncio
 from asyncio import Queue
 from dataclasses import dataclass, field
+from typing import Final, assert_never
 
 from psycopg import Notify
 
@@ -51,6 +57,10 @@ DEBOUNCE_SECONDS = 0.25
 
 # Comment frames keep proxies from dropping an idle stream.
 HEARTBEAT_SECONDS = 15.0
+
+SUBSCRIBER_QUEUE_CAPACITY: Final = 256
+"""The most items one stream's queue holds. On overflow the queued items are
+dropped and the queue takes one event with no ids per topic."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +116,59 @@ class EventCoalescer:
         return events
 
 
+type StreamItem = TopicEvent | None
+"""One item of a stream's queue: an event, or ``None`` when the stream is
+degraded and ends."""
+
+
+def new_stream_queue() -> Queue[StreamItem]:
+    """The queue of one stream, bounded at ``SUBSCRIBER_QUEUE_CAPACITY``."""
+    return Queue(maxsize=SUBSCRIBER_QUEUE_CAPACITY)
+
+
+def refresh_events() -> list[TopicEvent]:
+    """One event with no ids per topic, in ``CHANNEL_TOPICS`` order."""
+    return [TopicEvent(topic=topic, ids=[]) for topic in CHANNEL_TOPICS.values()]
+
+
+def push_stream_item(queue: Queue[StreamItem], item: StreamItem) -> None:
+    """Queue one item for a stream; never waits and never raises.
+
+    A full queue drops its items and takes ``refresh_events()`` in their
+    place. A ``None`` among the dropped items, or ``item`` itself when it is
+    ``None``, is queued after the refresh events, so the stream still ends.
+    An event ``item`` is covered by the refresh events.
+    """
+    if not queue.full():
+        queue.put_nowait(item)
+        return
+    ends = False
+    while not queue.empty():
+        match queue.get_nowait():
+            case None:
+                ends = True
+            case TopicEvent():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+    for event in refresh_events():
+        queue.put_nowait(event)
+    match item:
+        case None:
+            ends = True
+        case TopicEvent():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    if ends:
+        queue.put_nowait(None)
+
+
+assert SUBSCRIBER_QUEUE_CAPACITY > len(CHANNEL_TOPICS), (
+    'an overflowed queue holds one refresh event per topic and an end marker'
+)
+
+
 class EventBroadcaster:
     """Owns the listener and fans coalesced events out to SSE subscribers.
 
@@ -125,7 +188,7 @@ class EventBroadcaster:
         self._debounce_seconds = debounce_seconds
         self._listener: PostgresListener | None = None
         self._coalescer = EventCoalescer()
-        self._subscribers: set[Queue[TopicEvent | None]] = set()
+        self._subscribers: set[Queue[StreamItem]] = set()
         self._tasks: list[asyncio.Task[None]] = []
         self._start_lock = asyncio.Lock()
         self._degraded = False
@@ -198,23 +261,24 @@ class EventBroadcaster:
                 self._publish(event)
 
     def _publish(self, event: TopicEvent) -> None:
-        """Hand an event to every subscriber, dropping none silently."""
+        """Hand an event to every subscriber (``push_stream_item``)."""
         for queue in list(self._subscribers):
-            queue.put_nowait(event)
+            push_stream_item(queue, event)
 
-    async def subscribe(self) -> Queue[TopicEvent | None]:
+    async def subscribe(self) -> Queue[StreamItem]:
         """Register an SSE stream.
 
-        The queue receives ``None`` when the stream is degraded and should be
-        closed; the caller reports that to its client.
+        The queue holds at most ``SUBSCRIBER_QUEUE_CAPACITY`` items. It
+        receives ``None`` when the stream is degraded and should be closed;
+        the caller reports that to its client.
         """
-        queue: Queue[TopicEvent | None] = Queue()
+        queue = new_stream_queue()
         self._subscribers.add(queue)
         if not await self._start():
-            queue.put_nowait(None)
+            push_stream_item(queue, None)
         return queue
 
-    def unsubscribe(self, queue: Queue[TopicEvent | None]) -> None:
+    def unsubscribe(self, queue: Queue[StreamItem]) -> None:
         """Drop a stream that has gone away."""
         self._subscribers.discard(queue)
 
@@ -229,7 +293,7 @@ class EventBroadcaster:
                 pass
         self._tasks.clear()
         for queue in list(self._subscribers):
-            queue.put_nowait(None)
+            push_stream_item(queue, None)
         self._subscribers.clear()
         if self._listener is not None:
             await self._listener.close()

@@ -34,6 +34,7 @@ import psycopg
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
@@ -66,6 +67,7 @@ from horsies.core.worker.runtime import FinalizeStage, _FinalizeError
 from horsies.core.worker.slots import Assigned, TaskFinished
 from horsies.core.worker.worker import Worker
 from horsies.core.utils.db import PooledStatements, StatementRunner
+from tests.dispatch_claim_support import claim_at
 from tests.fixtures.slots.handles import unbound_handle
 from tests.integration.autocommit_support import (
     QUEUE,
@@ -94,7 +96,9 @@ WAIT_POLL_S: Final = 0.05
 REPLY_DROP_WAIT_S: Final = 5.0
 OUTER_BOUND_S: Final = 30.0
 TASK_LOCK_SEED: Final = 731
-UNREGISTERED_CLASS: Final = 'batch_no_partition'
+UNREGISTERED_CLASS: Final = 'standard_1777d'
+"""A class of the baseline key form that no test registers: no history leaf
+covers it, so the move of its row raises."""
 QUEUE_ROOM: Final = 4 * BATCH_ROWS
 """The batch queue bound of the test workers. A worker's bound is twice its
 claim budget, which is 2 for the one-slot test worker; these tests finalize
@@ -230,8 +234,6 @@ def _command(task_id: str, claimed_at: datetime) -> CompleteTaskFused:
         task_id=task_id,
         fence=OwnedClaim(worker_id=WORKER_ID, claimed_at=claimed_at),
         result_json=ok_result_json(),
-        notify_channel=CHANNEL,
-        notify_payload=f'capacity:{task_id}',
     )
 
 
@@ -248,7 +250,7 @@ async def _finalize(
         queue_name=QUEUE,
         is_workflow_task=False,
         task_name=TASK_NAME,
-        claimed_at=claimed_at,
+        claim=claim_at(claimed_at),
     )
 
 
@@ -436,9 +438,8 @@ async def test_a_batch_applies_every_row_and_answers_each_finalizer(
     }
     for task_id in task_ids:
         assert len(await read_attempts(session, task_id)) == 1
-    assert sorted(await _capacity_payloads(listener, session)) == sorted(
-        f'capacity:{task_id}' for task_id in task_ids
-    )
+    # One statement wrote the batch: one capacity wake for the queue.
+    assert await _capacity_payloads(listener, session) == ['capacity']
 
 
 async def test_each_row_keeps_its_own_fence_in_one_batch(
@@ -550,47 +551,37 @@ async def test_a_claim_generation_keeps_its_microseconds_and_its_offset(
 def _batch_row(task_id: str, claimed_at: str | None) -> list[str | None]:
     """One row of the batch parameter, as ``_fused_batch_parameters`` builds
     it, with ``claimed_at`` as given."""
-    return [
-        task_id,
-        WORKER_ID,
-        claimed_at,
-        ok_result_json(),
-        CHANNEL,
-        f'capacity:{task_id}',
-    ]
+    return [task_id, claimed_at, ok_result_json()]
 
 
-async def test_the_stored_batch_function_fences_a_null_generation_on_its_worker(
+async def test_the_stored_batch_function_refuses_a_null_generation(
     direct: ProxiedWorker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """The stored function keeps its contract: a NULL claimed_at in the
-    array disables the generation half for its row only, as in the single
-    function. The worker never sends one: each command carries a claim
-    time, so this calls the statement with a hand-built parameter."""
+    """Every row needs its claim generation: a NULL claimed_at in the array
+    refuses the whole statement (22023) before any row is written. The
+    worker never sends one: each command carries a claim time, so this calls
+    the statement with a hand-built parameter."""
     (first, _), (second, second_at) = await _running_tasks(session, 2)
     batch = json.dumps(
         [_batch_row(first, None), _batch_row(second, second_at.isoformat())],
     )
 
-    async with direct.worker.sf() as statement_session:
-        result = await statement_session.execute(
-            _COMPLETE_TASKS_FUSED_SQL,
-            {'batch': batch},
-        )
-        rows = result.mappings().all()
-        await statement_session.commit()
+    with pytest.raises(DBAPIError) as raised:
+        async with direct.worker.sf() as statement_session:
+            await statement_session.execute(
+                _COMPLETE_TASKS_FUSED_SQL,
+                {'batch': batch, 'worker_id': WORKER_ID},
+            )
 
-    outcomes = {
-        outcome.task_id: type(outcome)
-        for outcome in (
-            decode_outcome_row({str(key): value for key, value in row.items()})
-            for row in rows
-        )
+    original = raised.value.orig
+    assert isinstance(original, psycopg.Error)
+    assert original.sqlstate == '22023'
+    assert await _live_statuses(session, [first, second]) == {
+        first: 'RUNNING',
+        second: 'RUNNING',
     }
-    assert outcomes == {first: Applied, second: Applied}
-    assert await _live_statuses(session, [first, second]) == {}
 
 
 async def test_a_replay_of_a_whole_batch_is_already_applied_and_writes_nothing(
@@ -604,7 +595,7 @@ async def test_a_replay_of_a_whole_batch_is_already_applied_and_writes_nothing(
     task_ids = [task_id for task_id, _ in rows]
     batch = [(task_id, at) for task_id, at in rows]
     assert await _finalize_together(direct.worker, batch) == [Ok(None)] * 4
-    assert len(await _capacity_payloads(listener, session)) == 4
+    assert await _capacity_payloads(listener, session) == ['capacity']
 
     replay = await _finalize_together(direct.worker, batch)
 
@@ -804,9 +795,9 @@ async def test_the_finalizer_end_and_the_capacity_wake_follow_the_commit(
     assert results == [Ok(None)] * 3
     assert worker._capacity_released.is_set()
     assert await _live_statuses(session, task_ids) == {}
-    assert sorted(await _capacity_payloads(listener, session)) == sorted(
-        f'capacity:{task_id}' for task_id in task_ids
-    )
+    # Each statement that wrote rows sends one constant capacity wake.
+    payloads = await _capacity_payloads(listener, session)
+    assert payloads and set(payloads) == {'capacity'}, payloads
 
 
 async def test_the_row_is_written_only_after_its_attempt_ended(
@@ -827,7 +818,7 @@ async def test_the_row_is_written_only_after_its_attempt_ended(
             queue_name=QUEUE,
             is_workflow_task=False,
             task_name=TASK_NAME,
-            claimed_at=claimed_at,
+            claim=claim_at(claimed_at),
         )
     )
     for _ in range(10):
@@ -1036,7 +1027,7 @@ async def test_two_flushers_and_workflow_node_finalizes_do_not_deadlock(
             queue_name=QUEUE,
             is_workflow_task=True,
             task_name=TASK_NAME,
-            claimed_at=claimed_at,
+            claim=claim_at(claimed_at),
         )
 
     first = asyncio.create_task(_finalize_together(worker, plain_first))
@@ -1086,12 +1077,12 @@ async def _seed_running_workflow_nodes(
         _ = await session.execute(
             text("""
                 INSERT INTO horsies_workflow_tasks
-                    (id, workflow_id, task_index, node_id, task_name, input,
+                    (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                      queue_name, priority, dependencies,
                      allow_failed_deps, join_type, is_subworkflow, status,
                      task_id, started_at, created_at,
                      max_retries, execution, retention_class_key)
-                VALUES (:id, :workflow_id, :index, :node_id, :task_name, '{}',
+                VALUES ('NONE', :id, :workflow_id, :index, :node_id, :task_name, '{}',
                         :queue, 100, '{}', FALSE, 'all', FALSE,
                         'RUNNING', :task_id, NOW(), NOW(),
                         0, 'ISOLATED', 'standard_30d')

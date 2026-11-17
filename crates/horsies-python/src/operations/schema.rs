@@ -22,8 +22,8 @@ pub struct SchemaInstalled {
     pub version: i64,
 }
 
-/// The handle was built with the `OBSERVE_ONLY` schema mode, so the install
-/// ran nothing.
+/// The handle was built with the `OBSERVE_ONLY` or the `ASSUME_INITIALIZED`
+/// schema mode, so the install ran nothing.
 #[pyclass(module = "horsies._core", frozen)]
 #[derive(Clone, Debug)]
 pub struct SchemaInstallNotRun {}
@@ -32,7 +32,7 @@ pub struct SchemaInstallNotRun {}
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct SchemaStatusRecord {
-    /// `MATCH`, `MISMATCH`, `ABSENT` or `UNKNOWN`.
+    /// `MATCH`, `MISMATCH`, `ABSENT`, `ZERO_X` or `UNKNOWN`.
     pub state: String,
     /// The stored version, when the database has one.
     pub version: Option<i64>,
@@ -46,6 +46,7 @@ impl From<SchemaStatus> for SchemaStatusRecord {
             SchemaState::Match => "MATCH",
             SchemaState::Mismatch => "MISMATCH",
             SchemaState::Absent => "ABSENT",
+            SchemaState::ZeroX => "ZERO_X",
             SchemaState::Unknown => "UNKNOWN",
         };
         Self {
@@ -80,8 +81,11 @@ impl<'py> IntoPyObject<'py> for InstallOutcome {
 /// Install the schema through the handle's broker. Writes. The broker keeps
 /// a success, so a second install on the same handle runs nothing.
 pub async fn install_operation(connection: BrokerConnection) -> InstallOutcome {
-    if connection.schema_mode() == SchemaMode::ObserveOnly {
-        return InstallOutcome::NotRun(SchemaInstallNotRun {});
+    match connection.schema_mode() {
+        SchemaMode::ObserveOnly | SchemaMode::AssumeInitialized => {
+            return InstallOutcome::NotRun(SchemaInstallNotRun {});
+        }
+        SchemaMode::MigrateAndValidate => {}
     }
     let broker = match connection.broker().await {
         Ok(broker) => broker,

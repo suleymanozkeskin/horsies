@@ -89,33 +89,13 @@ mod tests {
     use crate::worker::recovery::{new_reaper_health, spawn_reaper};
     use crate::worker::worker_state::spawn_worker_state_loop;
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        let pw = root
-            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| l.trim().split_once('='))
-                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                    .map(|(_, v)| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-core")
-    }
-
-    fn test_app_config() -> AppConfig {
+    fn test_app_config(database_url: &str) -> AppConfig {
         AppConfig {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: PostgresConfig {
-                database_url: test_db_url(),
+                database_url: database_url.to_owned(),
                 session_database_url: None,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
@@ -124,8 +104,10 @@ mod tests {
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
-                pool_recycle: 1800,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
+                tcp_keepalives: Default::default(),
+                tcp_user_timeout: Default::default(),
             },
             cluster_wide_cap: None,
             prefetch_buffer: 0,
@@ -207,7 +189,11 @@ mod tests {
     /// (leases silently stop renewing) must stop the worker.
     #[tokio::test]
     async fn claimer_heartbeat_death_stops_worker() {
-        let pool = PgPool::connect(&test_db_url()).await.expect("connect");
+        let url = crate::test_support::database_of_this_test()
+            .await
+            .url()
+            .to_owned();
+        let pool = PgPool::connect(&url).await.expect("connect");
         let cancel = CancellationToken::new();
         let handle = spawn_claimer_heartbeat(
             pool,
@@ -226,16 +212,23 @@ mod tests {
     /// recovery, no retention) must stop the worker.
     #[tokio::test]
     async fn reaper_death_stops_worker() {
-        let pool = PgPool::connect(&test_db_url()).await.expect("connect");
+        let url = crate::test_support::database_of_this_test()
+            .await
+            .url()
+            .to_owned();
+        let pool = PgPool::connect(&url).await.expect("connect");
         let cancel = CancellationToken::new();
         let config = RecoveryConfig {
             check_interval_ms: 3_600_000,
             ..RecoveryConfig::default()
         };
         let handle = spawn_reaper(
+            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
             pool.clone(),
             pool,
-            Arc::new(WorkflowSpecRegistry::new()),
+            Arc::new(WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
             config,
             crate::core::config::payload::PayloadPolicy::default(),
             crate::core::RetentionConfig::default(),
@@ -249,7 +242,11 @@ mod tests {
     /// (stale rows advertising a healthy worker) must stop the worker.
     #[tokio::test]
     async fn worker_state_loop_death_stops_worker() {
-        let pool = PgPool::connect(&test_db_url()).await.expect("connect");
+        let url = crate::test_support::database_of_this_test()
+            .await
+            .url()
+            .to_owned();
+        let pool = PgPool::connect(&url).await.expect("connect");
         let cancel = CancellationToken::new();
         let handle = spawn_worker_state_loop(
             pool,
@@ -257,9 +254,26 @@ mod tests {
             "host-1".to_owned(),
             std::process::id() as i32,
             WorkerConfig::default(),
-            test_app_config(),
+            test_app_config(&url),
             new_reaper_health(),
-            Arc::new(tokio::sync::Semaphore::new(1)),
+            crate::worker::children::ChildrenView::new(
+                Arc::new(crate::worker::executor::slots::PoolBoard::new(
+                    crate::worker::executor::slots::ChildLayout {
+                        isolated: 1,
+                        shared_async: 0,
+                        shared_thread: 0,
+                    },
+                )),
+                crate::worker::children::SeatsPerChild {
+                    shared_async: 0,
+                    shared_thread: 0,
+                },
+            ),
+            crate::worker::worker_state::ClaimColumns {
+                processes: 1,
+                max_claim_batch: 0,
+                max_claim_per_worker: 1,
+            },
             Utc::now(),
             cancel.clone(),
         );

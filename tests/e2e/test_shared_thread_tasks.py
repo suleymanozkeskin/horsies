@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from uuid import UUID
 
 import pytest
 from sqlalchemy import text
@@ -80,8 +81,8 @@ async def _value(handle: TaskHandle[str]) -> str:
 
 
 async def _rows(
-    broker: PostgresBroker, task_ids: list[str]
-) -> dict[str, tuple[str, str | None]]:
+    broker: PostgresBroker, task_ids: list[UUID]
+) -> dict[UUID, tuple[str, str | None]]:
     async with current_resources(broker).session_factory() as session:
         rows = await session.execute(
             text(
@@ -89,7 +90,7 @@ async def _rows(
             ),
             {'ids': task_ids},
         )
-        return {str(row.id): (str(row.status), row.error_code) for row in rows}
+        return {UUID(str(row.id)): (str(row.status), row.error_code) for row in rows}
 
 
 @pytest.mark.e2e

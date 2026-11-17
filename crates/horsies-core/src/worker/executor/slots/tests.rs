@@ -7,19 +7,24 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use uuid::Uuid;
 
-use super::outcome::{killed_child_write, retry_request, task_error_write, worker_failure_write};
+use super::outcome::{
+    killed_child_write, retry_request, task_error_write, timeout_recovery_write, timeout_write,
+    worker_failure_write, WriteStage,
+};
 use super::pool::Answer;
+use super::scripted::{drop_bytes, exit_at_stop, ScriptCount};
 use super::*;
 use crate::broker::attempt_writes::{AttemptFailureKind, RetryPlacement, RetryRequest};
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
+use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
-    encode_child_frame, encode_parent_frame, CancelGraceMs, ChildFrame, ChildKind, ChildLogLevel,
-    ChildPool, ChildProgram, DatabaseUrl, InitFrame, IsolatedChild, IsolatedWork, NoLeftWork,
-    ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ResultEnvelopeText, ResultFrame,
-    RssReading, RunEnd, RunFrame, SharedWork, StoredOptionsRefusal, TaskInputText, TaskSendPool,
-    TaskTimeoutMs,
+    encode_child_frame, encode_parent_frame, CancelGraceMs, ChildConnection, ChildFrame, ChildKind,
+    ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, InitFrame, IsolatedChild, IsolatedWork,
+    NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ResultEnvelopeText,
+    ResultFrame, RssReading, RunEnd, RunFrame, SharedWork, StoredOptionsRefusal, TaskInputText,
+    TaskSendPool, TaskTimeoutMs,
 };
-use crate::worker::executor::supervisor::{ChildCommand, Spawner};
+use crate::worker::executor::supervisor::{ChildCommand, Spawner, CHILD_KILL_WAIT};
 use crate::worker::retry::{read_stored_options, StoredOptions};
 use crate::worker::runner_beats::LiveDispatches;
 
@@ -44,6 +49,9 @@ fn task(execution: ExecutionClass, stored: &str) -> ClaimedTask {
         options: options(stored),
     }
 }
+
+mod deadline_tests;
+mod settle_tests;
 
 const RETRY_ON_TIMEOUT: &str = r#"{"timeout_ms": 1000, "retry_policy": {"max_retries": 2,
     "intervals": [5, 5], "backoff_strategy": "fixed", "jitter": false,
@@ -253,6 +261,165 @@ fn capacity_counts_what_can_serve() {
 }
 
 // ---------------------------------------------------------------------------
+// The budgets and routes of a claim pass
+// ---------------------------------------------------------------------------
+
+fn claim_classes_of(
+    budgets: &[(ExecutionClass, u32)],
+    routes: &[(ExecutionClass, ExecutionClass)],
+) -> crate::broker::claims::ClaimClasses {
+    crate::broker::claims::ClaimClasses::new(
+        budgets.iter().copied().collect(),
+        routes.iter().copied().collect(),
+    )
+    .expect("every expected route names a held budget")
+}
+
+fn booting_shared(count: usize, seats: u32) -> Vec<SharedSlotService> {
+    vec![
+        SharedSlotService {
+            service: SlotService::Booting,
+            seats,
+        };
+        count
+    ]
+}
+
+/// Python `test_claim_plan.py::TestEncodings::test_routes_name_only_served_classes`:
+/// a worker of shared async children routes only its own class; a worker
+/// of isolated children routes every class into the `ISOLATED` budget.
+#[test]
+fn the_routes_of_a_pass_name_only_the_served_classes() {
+    let shared_async_only = PoolService {
+        isolated: Vec::new(),
+        shared_async: booting_shared(1, 10),
+        shared_thread: Vec::new(),
+    };
+    assert_eq!(
+        shared_async_only.claim_classes(),
+        claim_classes_of(
+            &[(ExecutionClass::SharedAsync, 10)],
+            &[(ExecutionClass::SharedAsync, ExecutionClass::SharedAsync)],
+        )
+    );
+
+    let isolated_only = PoolService {
+        isolated: vec![SlotService::Booting; 2],
+        shared_async: Vec::new(),
+        shared_thread: Vec::new(),
+    };
+    assert_eq!(
+        isolated_only.claim_classes(),
+        claim_classes_of(
+            &[(ExecutionClass::Isolated, 2)],
+            &[
+                (ExecutionClass::Isolated, ExecutionClass::Isolated),
+                (ExecutionClass::SharedAsync, ExecutionClass::Isolated),
+                (ExecutionClass::SharedThread, ExecutionClass::Isolated),
+            ],
+        )
+    );
+}
+
+/// Python `test_claim_plan.py::TestEncodings::test_budgets_and_worker_state_capacity`
+/// (the budgets): the budget of each class is its capacity in service.
+#[test]
+fn the_budgets_of_a_pass_are_the_capacity_in_service() {
+    let pool = PoolService {
+        isolated: vec![SlotService::InService; 3],
+        shared_async: vec![SharedSlotService {
+            service: SlotService::InService,
+            seats: 40,
+        }],
+        shared_thread: Vec::new(),
+    };
+    assert_eq!(
+        pool.claim_classes(),
+        claim_classes_of(
+            &[
+                (ExecutionClass::Isolated, 3),
+                (ExecutionClass::SharedAsync, 40)
+            ],
+            &[
+                (ExecutionClass::Isolated, ExecutionClass::Isolated),
+                (ExecutionClass::SharedAsync, ExecutionClass::SharedAsync),
+                (ExecutionClass::SharedThread, ExecutionClass::Isolated),
+            ],
+        )
+    );
+}
+
+/// A down isolated slot leaves the `ISOLATED` budget; before the boot every
+/// seat counts. Every slot of a kind down leaves its budget at 0 and keeps
+/// its route: the plan follows the children the worker runs, not their
+/// state.
+#[test]
+fn a_down_slot_leaves_its_budget_and_keeps_the_routes() {
+    let pool = PoolService {
+        isolated: vec![SlotService::Down, SlotService::Booting],
+        shared_async: Vec::new(),
+        shared_thread: vec![SharedSlotService {
+            service: SlotService::Down,
+            seats: 4,
+        }],
+    };
+    assert_eq!(
+        pool.claim_classes(),
+        claim_classes_of(
+            &[
+                (ExecutionClass::Isolated, 1),
+                (ExecutionClass::SharedThread, 0)
+            ],
+            &[
+                (ExecutionClass::Isolated, ExecutionClass::Isolated),
+                (ExecutionClass::SharedAsync, ExecutionClass::Isolated),
+                (ExecutionClass::SharedThread, ExecutionClass::SharedThread),
+            ],
+        )
+    );
+}
+
+/// Python `test_claim_plan.py::TestRoutes::test_a_worker_without_children_serves_nothing`:
+/// no budget and no route.
+#[test]
+fn a_worker_without_children_sends_no_budget_and_no_route() {
+    assert_eq!(
+        PoolService::default().claim_classes(),
+        claim_classes_of(&[], &[])
+    );
+}
+
+/// Python `test_claim_plan.py::TestEncodings::test_the_log_line_names_each_route`.
+#[test]
+fn the_log_line_names_each_route() {
+    assert_eq!(
+        describe_claim_plan(ClaimPlan::for_children(0, 1, 0)),
+        "ISOLATED -> not served, SHARED_ASYNC -> SHARED_ASYNC budget, SHARED_THREAD -> not served"
+    );
+}
+
+/// Python `test_claim_plan.py::TestStartLog::test_unserved_classes_get_one_line`
+/// and `::test_a_worker_that_serves_every_class_logs_no_such_line` (the
+/// lines; the core tests have no log capture, so the worker start that logs
+/// them is checked by its source in `worker::worker::tests`).
+#[test]
+fn unserved_classes_get_one_line_and_a_full_plan_none() {
+    assert_eq!(
+        unserved_classes_line(ClaimPlan::for_children(0, 1, 0)).as_deref(),
+        Some(
+            "This worker claims no rows of class ISOLATED, SHARED_THREAD: it runs no children \
+             that can run them"
+        )
+    );
+    assert_eq!(
+        unserved_classes_line(ClaimPlan::for_children(1, 0, 0)),
+        None
+    );
+    assert!(describe_claim_plan(ClaimPlan::for_children(1, 0, 0))
+        .starts_with("ISOLATED -> ISOLATED budget"));
+}
+
+// ---------------------------------------------------------------------------
 // The writes of each end
 // ---------------------------------------------------------------------------
 
@@ -316,6 +483,55 @@ fn a_killed_child_write_names_its_code() {
     assert_eq!(loop_write.retry, RetryRequest::NoRetry);
 }
 
+/// Python `_max_retries_of`: the timeout write, crash recovery and phase 1
+/// are each sent again at most 3 times.
+#[test]
+fn each_write_stage_keeps_the_retry_bound_of_python() {
+    assert_eq!(WriteStage::PhaseOne.max_retries(), 3);
+    assert_eq!(WriteStage::TimeoutWrite.max_retries(), 3);
+    assert_eq!(WriteStage::CrashRecovery.max_retries(), 3);
+}
+
+/// Python `_recover_timed_out_row`: after the last retry of a TASK_TIMEOUT
+/// write, crash recovery writes TASK_TIMEOUT with the kept placement, and
+/// the policy decides the retry on that code.
+#[test]
+fn crash_recovery_of_a_timeout_keeps_its_code_and_placement() {
+    let claimed = task(ExecutionClass::SharedAsync, RETRY_ON_TIMEOUT);
+    let timeout = TaskTimeoutMs::new(1000).unwrap();
+    let first = timeout_write(&claimed, "worker-1", timeout, RetryPlacement::Isolated);
+    let recovery = timeout_recovery_write(&claimed, "worker-1", timeout, RetryPlacement::Isolated);
+    for write in [&first, &recovery] {
+        assert_eq!(write.error_code.as_deref(), Some("TASK_TIMEOUT"));
+        assert_eq!(write.fence.claimed_at, claimed.claimed_at);
+        match write.retry {
+            RetryRequest::RetryAfter { placement, .. } => {
+                assert_eq!(placement, RetryPlacement::Isolated);
+            }
+            RetryRequest::NoRetry => panic!("the policy names TASK_TIMEOUT"),
+        }
+    }
+    assert_eq!(
+        first.attempt.error_message.as_deref(),
+        Some("task exceeded timeout_ms=1000")
+    );
+    assert_eq!(
+        recovery.attempt.error_message.as_deref(),
+        Some("Task reached timeout_ms=1000, and the TASK_TIMEOUT write failed 4 times")
+    );
+    let spent = ClaimedTask {
+        retry: RetryFacts {
+            retry_count: 2,
+            max_retries: 2,
+        },
+        ..claimed
+    };
+    assert_eq!(
+        timeout_recovery_write(&spent, "worker-1", timeout, RetryPlacement::Isolated).retry,
+        RetryRequest::NoRetry
+    );
+}
+
 #[test]
 fn a_worker_failure_is_a_broker_error_that_never_retries() {
     let claimed = task(ExecutionClass::Isolated, RETRY_ON_TIMEOUT);
@@ -329,7 +545,7 @@ fn a_worker_failure_is_a_broker_error_that_never_retries() {
 #[test]
 fn a_reported_task_error_keeps_its_envelope_and_retries_by_policy() {
     let claimed = task(ExecutionClass::Isolated, RETRY_ON_TIMEOUT);
-    let error = TaskError::builtin(OperationalErrorCode::TaskError, "boom");
+    let error = TaskError::builtin(OperationalErrorCode::TaskException, "boom");
     let envelope = ResultEnvelopeText::new(
         serde_json::to_string(
             &crate::core::task::result::TaskResult::<serde_json::Value>::Err(error.clone()),
@@ -338,7 +554,7 @@ fn a_reported_task_error_keeps_its_envelope_and_retries_by_policy() {
     );
     let write = task_error_write(&claimed, "worker-1", &error, &envelope);
     assert_eq!(write.result_json, envelope.as_str());
-    assert_eq!(write.error_code.as_deref(), Some("TASK_ERROR"));
+    assert_eq!(write.error_code.as_deref(), Some("TASK_EXCEPTION"));
     assert_eq!(write.retry, RetryRequest::NoRetry);
 }
 
@@ -377,6 +593,7 @@ fn init_frame() -> InitFrame {
         program: ChildProgram::Rust,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+        connection: ChildConnection::default(),
         process_name: "horsies-test-child".to_owned(),
         child_kind: ChildKind::Isolated(IsolatedChild {
             pool: ChildPool {
@@ -421,10 +638,10 @@ fn scripted_child(claimed: &ClaimedTask, after_run: &str) -> ChildCommand {
     .unwrap()
     .to_bytes();
     let script = format!(
-        r#"head -c {init} <&"$0" >/dev/null; printf '{ready}' >&"$0"; head -c {run} <&"$0" >/dev/null; {after_run}"#,
-        init = init.len(),
+        r#"{init}printf '{ready}' >&"$0"; {run}{after_run}"#,
+        init = drop_bytes(ScriptCount::Known(init.len())),
         ready = printf_bytes(&ready),
-        run = run_frame_bytes(claimed).len(),
+        run = drop_bytes(ScriptCount::Known(run_frame_bytes(claimed).len())),
     );
     ChildCommand {
         program: "/bin/sh".into(),
@@ -434,7 +651,6 @@ fn scripted_child(claimed: &ClaimedTask, after_run: &str) -> ChildCommand {
 
 fn pool_config(command: ChildCommand) -> IsolatedPoolConfig {
     IsolatedPoolConfig {
-        children: NonZeroUsize::MIN,
         command,
         init: init_frame(),
         worker_id: "worker-1".to_owned(),
@@ -442,14 +658,22 @@ fn pool_config(command: ChildCommand) -> IsolatedPoolConfig {
         tasks_per_child: TaskLimit::Off,
         memory_per_child: MemoryLimit::Off,
         exit_not_seen: ExitNotSeen::LeaveToRecovery,
+        child_cpus: ChildCpus::Inherited,
+        kill_wait: CHILD_KILL_WAIT,
     }
 }
 
 async fn run_through_pool(after_run: &str, deadline: IsolatedDeadline) -> AttemptEnd {
     let claimed = task(ExecutionClass::Isolated, "{}");
     let spawner = Spawner::start().unwrap();
+    let board = std::sync::Arc::new(PoolBoard::new(ChildLayout {
+        isolated: 1,
+        shared_async: 0,
+        shared_thread: 0,
+    }));
     let pool = IsolatedPool::start(
         pool_config(scripted_child(&claimed, after_run)),
+        board,
         spawner.handle(),
         LiveDispatches::default(),
     );
@@ -485,8 +709,9 @@ async fn an_isolated_slot_reports_the_result_of_its_child() {
     .unwrap()
     .to_bytes();
     let after_run = format!(
-        r#"printf '{}' >&"$0"; head -c 27 <&"$0" >/dev/null; exit 0"#,
-        printf_bytes(&result)
+        r#"printf '{}' >&"$0"; {}"#,
+        printf_bytes(&result),
+        exit_at_stop(),
     );
     assert_eq!(
         run_through_pool(&after_run, IsolatedDeadline::NoDeadline).await,

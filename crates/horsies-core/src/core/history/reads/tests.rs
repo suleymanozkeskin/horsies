@@ -1,16 +1,14 @@
 //! P4 staged-read parity and disposable-database tests.
 
-use std::collections::HashSet;
-use std::str::FromStr;
-
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 use serial_test::serial;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection, PgPool, Row};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
-use crate::broker::migrations::run_horsies_migrations;
+use crate::broker::core_rows::StatementLog;
+use crate::broker::error::BrokerError;
 use crate::core::history::archive::attempts::{
     encode_attempt_snapshot, AttemptRecord, StoredAttemptSnapshot,
 };
@@ -26,12 +24,13 @@ use crate::core::history::errors::HistoryError;
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
 use crate::core::history::names::{LEAF_CATALOG, TASK_HISTORY_PARENT};
 use crate::core::history::outcomes::{LeafCreation, LeafDrop};
-use crate::core::history::partitions::catalog::{database_now, LeafCatalogRow, LeafLowerBound};
+use crate::core::history::partitions::catalog::database_now;
 use crate::core::history::partitions::manager::{
     create_daily_leaf, detach_expired_leaf, drop_detached_leaf, NoQuarantine,
 };
 use crate::core::history::partitions::publication::LoaderPublication;
 use crate::core::history::periods::RetentionDays;
+use crate::db::StatementFailure;
 
 use super::aggregates::{
     history_breakdown_statement, history_count_statement, history_estimate_statement,
@@ -40,11 +39,6 @@ use super::aggregates::{
     HistoryStatusAggregate, HISTORY_NONEMPTY_PROBE_SQL,
 };
 use super::detail::staged_detail_published;
-use super::identity_lookup::{decode_lookup_row, LookupWireRow, TaskIdentityLookup};
-use super::lookup_generation::{
-    manifest_from_catalog, render_staged_detail_function, render_staged_duplicate_guard_function,
-    render_staged_lookup_function, render_staged_provenance_function, LookupLeaf, LookupManifest,
-};
 use super::pages::{
     history_facet_statement, history_page_statement, history_sort_expression, HistoryBindValue,
     HistoryFacet, HistoryFacetQuery, HistoryPageQuery, HistoryScope, HistorySortField,
@@ -52,249 +46,16 @@ use super::pages::{
 };
 use super::publisher::{published_manifest_absent_leaves, StagedLoaderPublisher};
 use super::result::{
-    decode_result_row, read_task_result, staged_result_published, HistoryResultPayload,
-    LiveTaskResult, ResultWireRow, TaskResultRead,
+    decode_result_row, HistoryResultPayload, LiveTaskResult, ResultWireRow, TaskResultRead,
 };
 use super::{detail::read_task_detail, detail::TaskAbsenceReason, detail::TaskDetailResult};
 
-const PYTHON_STAGED_FIXTURE: &str =
-    include_str!("../../../../tests/fixtures/task_history/python-v052-staged-readers.json");
+mod ports;
 
 fn timestamp(value: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(value)
         .expect("fixture timestamp")
         .with_timezone(&Utc)
-}
-
-fn catalog_row(
-    leaf_name: impl Into<String>,
-    class_key: impl Into<String>,
-    lower: DateTime<Utc>,
-    upper: DateTime<Utc>,
-) -> LeafCatalogRow {
-    LeafCatalogRow {
-        leaf_name: leaf_name.into(),
-        class_key: class_key.into(),
-        lower_anchor: LeafLowerBound::At(lower),
-        upper_anchor: upper,
-        index_schema_version: 1,
-        created_at: lower,
-        detached_at: None,
-        dropped_at: None,
-    }
-}
-
-/// The Python fixture body without its birth-floor check. The baseline has no
-/// birth floor: the absence reason is derived from the detached leaves.
-fn without_birth_floor(body: &str) -> String {
-    let start = body
-        .find("\n            IF v_birth_at < ")
-        .expect("fixture body carries the birth-floor check");
-    let end_marker = "            END IF;\n";
-    let end = start
-        + body[start..]
-            .find(end_marker)
-            .expect("birth-floor check ends")
-        + end_marker.len();
-    format!("{}{}", &body[..start], &body[end..])
-}
-
-fn fixture_manifest() -> (LookupManifest, Value) {
-    let fixture: Value = serde_json::from_str(PYTHON_STAGED_FIXTURE).expect("parse P0 fixture");
-    let rows = fixture["fixture"]["catalog_rows"]
-        .as_array()
-        .expect("catalog rows")
-        .iter()
-        .map(|row| {
-            catalog_row(
-                row["leaf_name"].as_str().expect("leaf name"),
-                row["class_key"].as_str().expect("class key"),
-                timestamp(row["lower_anchor"].as_str().expect("lower")),
-                timestamp(row["upper_anchor"].as_str().expect("upper")),
-            )
-        })
-        .collect::<Vec<_>>();
-    let absent = fixture["fixture"]["absent_relations"]
-        .as_array()
-        .expect("absent relations")
-        .iter()
-        .map(|value| value.as_str().expect("absent relation").to_owned())
-        .collect::<HashSet<_>>();
-    (
-        manifest_from_catalog(&rows, &absent).expect("build fixture manifest"),
-        fixture,
-    )
-}
-
-#[test]
-fn staged_renderer_is_byte_identical_to_the_python_fixture() {
-    let (manifest, fixture) = fixture_manifest();
-    assert_eq!(
-        fixture["source_commit"].as_str(),
-        Some("a43b77808364868797c1d2ee6df0c96695e40122")
-    );
-    assert_eq!(manifest.leaves().len(), 2);
-    assert_eq!(
-        manifest
-            .leaves()
-            .iter()
-            .map(LookupLeaf::relation_name)
-            .collect::<Vec<_>>(),
-        vec![
-            "horsies_task_history_forever_2026_08_09",
-            "horsies_task_history_standard_30d_2026_08_10",
-        ]
-    );
-    assert_eq!(
-        render_staged_lookup_function(&manifest),
-        without_birth_floor(
-            fixture["functions"]["lookup"]
-                .as_str()
-                .expect("lookup body")
-        )
-    );
-    assert_eq!(
-        render_staged_provenance_function(&manifest),
-        without_birth_floor(
-            fixture["functions"]["provenance"]
-                .as_str()
-                .expect("provenance body")
-        )
-    );
-    assert_eq!(
-        render_staged_detail_function(&manifest),
-        without_birth_floor(
-            fixture["functions"]["detail"]
-                .as_str()
-                .expect("detail body")
-        )
-    );
-}
-
-#[test]
-fn manifest_validation_order_and_heartbeat_exclusion_are_fail_closed() {
-    let base = timestamp("2026-08-01T00:00:00Z");
-    assert!(LookupLeaf::new(
-        "unsafe;drop",
-        LeafLowerBound::At(base),
-        base + Duration::days(1)
-    )
-    .is_err());
-    assert!(LookupLeaf::new("safe_leaf", LeafLowerBound::At(base), base).is_err());
-    assert!(LookupLeaf::new("open_leaf", LeafLowerBound::Open, base).is_ok());
-    let early = catalog_row(
-        "history_early",
-        "standard_7d",
-        base,
-        base + Duration::days(1),
-    );
-    let late = catalog_row(
-        "history_late",
-        "standard_30d",
-        base + Duration::days(1),
-        base + Duration::days(2),
-    );
-    let heartbeat = catalog_row(
-        "heartbeat_leaf",
-        "heartbeats",
-        base,
-        base + Duration::hours(1),
-    );
-    let absent = HashSet::from([early.leaf_name.clone()]);
-    let manifest = manifest_from_catalog(&[late.clone(), heartbeat, early.clone()], &absent)
-        .expect("manifest");
-    assert_eq!(
-        manifest
-            .leaves()
-            .iter()
-            .map(LookupLeaf::relation_name)
-            .collect::<Vec<_>>(),
-        vec![late.leaf_name.as_str()]
-    );
-    assert!(manifest_from_catalog(&[late.clone(), late], &HashSet::new()).is_err());
-}
-
-#[test]
-fn staged_skeleton_covers_live_likely_fallback_legacy_and_boundary_scale() {
-    let base = timestamp("2026-08-01T00:00:00Z");
-    let leaves = (0..512)
-        .map(|offset| {
-            LookupLeaf::new(
-                format!("history_leaf_{offset:03}"),
-                LeafLowerBound::At(base + Duration::days(offset)),
-                base + Duration::days(offset + 1),
-            )
-            .expect("lookup leaf")
-        })
-        .collect();
-    let body = render_staged_lookup_function(&LookupManifest::new(leaves).expect("large manifest"));
-    assert_eq!(body.matches("IF v_effective_birth <").count(), 512);
-    assert_eq!(body.matches("FROM history_leaf_000\n").count(), 3);
-    assert_eq!(body.matches("FROM history_leaf_255\n").count(), 3);
-    assert_eq!(body.matches("FROM history_leaf_511\n").count(), 3);
-    assert!(body.find("FROM horsies_tasks\n").unwrap() < body.find("history_leaf_000").unwrap());
-    assert!(!body.contains("FROM horsies_task_history\n"));
-    assert!(body.contains("v_birth_at - INTERVAL '5 seconds'"));
-    assert!(body.contains("(get_byte(v_uuid_bytes, 8) & 192) = 128"));
-    let empty =
-        render_staged_lookup_function(&LookupManifest::new(Vec::new()).expect("empty manifest"));
-    assert!(empty.contains("FROM horsies_tasks\n"));
-    assert!(!empty.contains("uuid_send"));
-}
-
-#[test]
-fn staged_timestamp_literals_preserve_python_microsecond_rendering() {
-    let lower = timestamp("2026-08-01T00:00:00.001000Z");
-    let upper = timestamp("2026-08-02T00:00:00.123456Z");
-    let leaf = LookupLeaf::new("history_microseconds", LeafLowerBound::At(lower), upper)
-        .expect("microsecond leaf");
-    let body = render_staged_lookup_function(
-        &LookupManifest::new(vec![leaf]).expect("microsecond manifest"),
-    );
-    assert!(body.contains("TIMESTAMPTZ '2026-08-02T00:00:00.123456Z'"));
-}
-
-#[test]
-fn identity_wire_decode_is_typed_and_fail_closed() {
-    let task_id = Uuid::parse_str("0198c0de-0000-7000-8000-000000000001").unwrap();
-    assert_eq!(
-        decode_lookup_row(LookupWireRow {
-            found: false,
-            location: None,
-            task_id: None,
-            fingerprint_version: None,
-            command_fingerprint: None,
-        })
-        .unwrap(),
-        TaskIdentityLookup::Absent
-    );
-    assert!(matches!(
-        decode_lookup_row(LookupWireRow {
-            found: true,
-            location: Some("LIVE".to_owned()),
-            task_id: Some(task_id),
-            fingerprint_version: Some(1),
-            command_fingerprint: Some(vec![1; 32]),
-        })
-        .unwrap(),
-        TaskIdentityLookup::Live(_)
-    ));
-    assert!(decode_lookup_row(LookupWireRow {
-        found: false,
-        location: Some("LIVE".to_owned()),
-        task_id: None,
-        fingerprint_version: None,
-        command_fingerprint: None,
-    })
-    .is_err());
-    assert!(decode_lookup_row(LookupWireRow {
-        found: true,
-        location: Some("QUARANTINE".to_owned()),
-        task_id: Some(task_id),
-        fingerprint_version: Some(1),
-        command_fingerprint: Some(vec![1; 32]),
-    })
-    .is_err());
 }
 
 fn test_window() -> HistoryWindow {
@@ -449,79 +210,28 @@ fn every_facet_sort_and_aggregate_variant_has_a_bounded_statement() {
     );
 }
 
+/// A copy of the installed test template (`crate::test_support`) with a
+/// sqlx pool for the history reads that still take a sqlx connection.
 struct TestDatabase {
     pool: PgPool,
-    database_name: String,
-    admin_options: PgConnectOptions,
+    database: crate::test_support::TestDatabase,
 }
 
 impl TestDatabase {
     async fn create() -> Self {
-        let base = database_url();
-        let base_options = PgConnectOptions::from_str(&base).expect("invalid test database URL");
-        let admin_options = base_options.clone().database("postgres");
-        let database_name = format!("core_p4_{}", Uuid::new_v4().simple());
-        let mut admin = PgConnection::connect_with(&admin_options)
-            .await
-            .expect("connect to postgres admin database");
-        sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
-            .execute(&mut admin)
-            .await
-            .expect("create P4 test database");
+        let database = crate::test_support::TestDatabase::create().await;
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect_with(base_options.database(&database_name))
+            .connect(database.url())
             .await
             .expect("connect to P4 test database");
-        run_horsies_migrations(&pool)
-            .await
-            .expect("migrate P4 test database");
-        Self {
-            pool,
-            database_name,
-            admin_options,
-        }
+        Self { pool, database }
     }
 
     async fn drop(self) {
         self.pool.close().await;
-        let mut admin = PgConnection::connect_with(&self.admin_options)
-            .await
-            .expect("connect for P4 database cleanup");
-        sqlx::query(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-             WHERE datname = $1 AND pid <> pg_backend_pid()",
-        )
-        .bind(&self.database_name)
-        .execute(&mut admin)
-        .await
-        .expect("terminate P4 test database sessions");
-        sqlx::query(&format!(
-            "DROP DATABASE IF EXISTS \"{}\"",
-            self.database_name
-        ))
-        .execute(&mut admin)
-        .await
-        .expect("drop P4 test database");
+        self.database.drop().await;
     }
-}
-
-fn database_url() -> String {
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        return url;
-    }
-    // CARGO_MANIFEST_DIR is <workspace>/crates/horsies.
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root");
-    let contents = std::fs::read_to_string(root.join(".env")).expect("read workspace .env");
-    let password = contents
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .find_map(|(key, value)| (key.trim() == "DB_PASSWORD").then(|| value.trim()))
-        .expect("DB_PASSWORD in workspace .env");
-    format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
 }
 
 fn utc_day(value: DateTime<Utc>) -> DateTime<Utc> {
@@ -590,7 +300,7 @@ fn attempt_snapshot(anchor: DateTime<Utc>) -> StoredAttemptSnapshot {
         anchor - Duration::minutes(1),
         Some("BOOM".to_owned()),
         Some("exploded once".to_owned()),
-        Some("TASK_ERROR".to_owned()),
+        Some("TASK_EXCEPTION".to_owned()),
         Some("worker-p4".to_owned()),
         Some("host-p4".to_owned()),
         Some(42),
@@ -699,9 +409,23 @@ async fn seed_live_row(
     .expect("seed P4 live row");
 }
 
+/// One row of the provenance reader for `task_id`: history holds the id. The
+/// reader has no live probe.
+async fn provenance_found(connection: &mut PgConnection, task_id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM horsies_task_provenance_staged($1))")
+        .bind(task_id)
+        .fetch_one(connection)
+        .await
+        .expect("call the provenance reader")
+}
+
+/// One publication installs the four readers of
+/// `horsies_history_reader_signatures()`, each with one argument, and they
+/// resolve history ids of two classes (a birth-pruned id, a fast-clock id, a
+/// non-UUIDv7 id), a live id and an unknown id.
 #[tokio::test]
 #[serial]
-async fn publisher_atomically_installs_canonical_triple_and_resolves_all_identity_paths() {
+async fn publisher_installs_the_four_readers_and_resolves_live_history_and_absent_ids() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
     let mut transaction = database.pool.begin().await.expect("begin P4 lookup setup");
@@ -755,41 +479,21 @@ async fn publisher_atomically_installs_canonical_triple_and_resolves_all_identit
     .await;
     let live_id = v7_with_birth(today + Duration::hours(5));
     seed_live_row(&mut transaction, live_id, class_key, now).await;
-    sqlx::query(
-        "CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
-         RETURNS horsies_task_provenance LANGUAGE sql STABLE AS
-         $$ SELECT NULL::horsies_task_provenance $$",
-    )
-    .execute(&mut *transaction)
-    .await
-    .expect("plant superseded provenance signature");
     StagedLoaderPublisher
         .republish(&mut transaction)
         .await
-        .expect("publish staged triple");
+        .expect("publish the readers");
     transaction.commit().await.expect("commit P4 lookup setup");
 
     let mut connection = database.pool.acquire().await.expect("acquire P4 lookup");
-    assert!(matches!(
-        super::identity_lookup::lookup_task_identity(&mut connection, live_id)
-            .await
-            .expect("lookup live"),
-        TaskIdentityLookup::Live(_)
-    ));
     for task_id in [normal_id, future_id, legacy_id, other_class_id] {
-        assert!(matches!(
-            super::identity_lookup::lookup_task_identity(&mut connection, task_id)
-                .await
-                .expect("lookup retained history"),
-            TaskIdentityLookup::History(_)
-        ));
+        assert!(
+            provenance_found(&mut connection, task_id).await,
+            "retained history id {task_id}"
+        );
     }
-    assert_eq!(
-        super::identity_lookup::lookup_task_identity(&mut connection, Uuid::new_v4())
-            .await
-            .expect("lookup absent"),
-        TaskIdentityLookup::Absent
-    );
+    assert!(!provenance_found(&mut connection, live_id).await);
+    assert!(!provenance_found(&mut connection, Uuid::new_v4()).await);
     assert!(matches!(
         read_task_detail(&mut connection, live_id)
             .await
@@ -845,13 +549,14 @@ async fn publisher_atomically_installs_canonical_triple_and_resolves_all_identit
          ORDER BY procedure.proname, 2",
     )
     .bind(vec![
-        "horsies_task_lookup_staged",
+        "horsies_task_history_duplicate_staged",
         "horsies_task_provenance_staged",
         "horsies_task_detail_staged",
+        "horsies_task_result_staged",
     ])
     .fetch_all(&mut *connection)
     .await
-    .expect("read staged signatures");
+    .expect("read reader signatures");
     assert_eq!(
         signatures,
         vec![
@@ -860,22 +565,19 @@ async fn publisher_atomically_installs_canonical_triple_and_resolves_all_identit
                 "p_task_id uuid".to_owned(),
             ),
             (
-                "horsies_task_lookup_staged".to_owned(),
+                "horsies_task_history_duplicate_staged".to_owned(),
                 "p_task_id uuid".to_owned(),
             ),
             (
                 "horsies_task_provenance_staged".to_owned(),
-                "p_task_id uuid, p_include_live boolean".to_owned(),
+                "p_task_id uuid".to_owned(),
+            ),
+            (
+                "horsies_task_result_staged".to_owned(),
+                "p_task_id uuid".to_owned(),
             ),
         ]
     );
-    let live_excluded: bool =
-        sqlx::query_scalar("SELECT found FROM horsies_task_provenance_staged($1, FALSE)")
-            .bind(live_id)
-            .fetch_one(&mut *connection)
-            .await
-            .expect("exclude live provenance");
-    assert!(!live_excluded);
     drop(connection);
     database.drop().await;
 }
@@ -955,7 +657,7 @@ async fn missing_relation_is_detected_excluded_reported_and_not_misclassified_as
         .acquire()
         .await
         .expect("acquire missing probe");
-    let broken = super::identity_lookup::lookup_task_identity(&mut connection, task_id)
+    let broken = read_task_detail(&mut connection, task_id)
         .await
         .expect_err("published missing leaf must break execution");
     assert!(matches!(
@@ -1321,33 +1023,6 @@ async fn page_facet_aggregate_estimate_and_plans_are_window_and_index_bounded() 
     database.drop().await;
 }
 
-#[test]
-fn duplicate_guard_renders_pruned_and_legacy_probes_without_fallback_or_live() {
-    let (manifest, _) = fixture_manifest();
-    assert!(!manifest.leaves().is_empty());
-    let guard = render_staged_duplicate_guard_function(&manifest);
-    let provenance = render_staged_provenance_function(&manifest);
-    assert!(guard.contains("horsies_task_history_duplicate_staged(p_task_id uuid)"));
-    assert!(guard.contains("RETURNS boolean"));
-    assert!(guard.contains("IF v_effective_birth < "));
-    assert!(!guard.contains("IF v_effective_birth >= "));
-    assert!(!guard.contains("Birth time is an optimization hint"));
-    assert!(!guard.contains("horsies_tasks"));
-    assert!(provenance.contains("IF v_effective_birth >= "));
-    for leaf in manifest.leaves() {
-        let probe = format!(
-            "PERFORM 1 FROM {} h WHERE h.task_id = p_task_id;",
-            leaf.relation_name()
-        );
-        // One pruned probe and one legacy probe per leaf.
-        assert_eq!(guard.matches(&probe).count(), 2, "{}", leaf.relation_name());
-    }
-    assert!(guard.trim_end().ends_with("$function$"));
-    assert!(guard.contains(
-        "RETURN EXISTS (SELECT 1 FROM horsies_task_history_clock_exceptions WHERE task_id = p_task_id);"
-    ));
-}
-
 #[tokio::test]
 #[serial]
 async fn duplicate_guard_finds_a_recorded_clock_exception() {
@@ -1384,7 +1059,7 @@ async fn duplicate_guard_finds_a_recorded_clock_exception() {
     database.drop().await;
 }
 
-/// The stamp comment of every rendered reader, in signature order.
+/// The stamp comment of every published reader, in signature order.
 async fn reader_stamps(connection: &mut PgConnection) -> Vec<Option<String>> {
     let mut stamps = Vec::new();
     for signature in super::publisher::rendered_reader_signatures() {
@@ -1399,6 +1074,10 @@ async fn reader_stamps(connection: &mut PgConnection) -> Vec<Option<String>> {
     stamps
 }
 
+/// The publication stamps each of the four readers with
+/// `horsies_history_reader_stamp()`, which does not depend on the session
+/// time zone; the publisher reads them as current, and one reader with
+/// another stamp makes them need a publication.
 #[tokio::test]
 #[serial]
 async fn publication_stamps_every_rendered_reader_independent_of_the_time_zone() {
@@ -1412,28 +1091,22 @@ async fn publication_stamps_every_rendered_reader_independent_of_the_time_zone()
         "{coverage:?}"
     );
     let stamps = reader_stamps(&mut transaction).await;
-    let expected: String = sqlx::query_scalar(&format!(
-        "SELECT {}",
-        super::publisher::manifest_stamp_sql()
-    ))
-    .fetch_one(&mut *transaction)
-    .await
-    .expect("compute manifest stamp");
+    let expected: String = sqlx::query_scalar("SELECT horsies_history_reader_stamp()")
+        .fetch_one(&mut *transaction)
+        .await
+        .expect("compute manifest stamp");
     assert!(expected.starts_with("horsies:manifest:"));
-    assert_eq!(stamps, vec![Some(expected.clone()); 5]);
+    assert_eq!(stamps, vec![Some(expected.clone()); 4]);
     for timezone in ["Etc/GMT+12", "Etc/GMT-12"] {
         sqlx::query("SELECT set_config('timezone', $1, true)")
             .bind(timezone)
             .execute(&mut *transaction)
             .await
             .expect("set session time zone");
-        let stamp: String = sqlx::query_scalar(&format!(
-            "SELECT {}",
-            super::publisher::manifest_stamp_sql()
-        ))
-        .fetch_one(&mut *transaction)
-        .await
-        .expect("compute manifest stamp");
+        let stamp: String = sqlx::query_scalar("SELECT horsies_history_reader_stamp()")
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("compute manifest stamp");
         assert_eq!(stamp, expected, "{timezone}");
     }
     assert!(!StagedLoaderPublisher
@@ -1471,13 +1144,19 @@ async fn guard_marker(connection: &mut PgConnection) -> Option<String> {
     .expect("read duplicate guard marker")
 }
 
+/// The published guard probes only the birth-pruned leaves; the first
+/// version of 0003 (through the provenance reader) is replaced by the next
+/// publication. Migration 1000 publishes the readers before the install
+/// returns, so a fresh database already holds a stamped guard.
 #[tokio::test]
 #[serial]
 async fn duplicate_guard_probes_the_pruned_set_and_replaces_the_first_version() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
     let mut transaction = database.pool.begin().await.expect("begin guard setup");
-    assert_eq!(guard_marker(&mut transaction).await, None);
+    assert!(guard_marker(&mut transaction)
+        .await
+        .is_some_and(|stamp| stamp.starts_with("horsies:manifest:")));
     let now = database_now(&mut transaction).await.expect("database now");
     let today = utc_day(now);
     let parent = register_test_class(&mut transaction, class_key, 30).await;
@@ -1524,13 +1203,7 @@ async fn duplicate_guard_probes_the_pruned_set_and_replaces_the_first_version() 
     assert!(!duplicate_guard(&mut connection, absent_id).await);
     // The stated loss: the guard skips the older leaf; the reader still finds the row.
     assert!(!duplicate_guard(&mut connection, clock_violation_id).await);
-    let reader_found: bool =
-        sqlx::query_scalar("SELECT found FROM horsies_task_provenance_staged($1, FALSE)")
-            .bind(clock_violation_id)
-            .fetch_one(&mut *connection)
-            .await
-            .expect("provenance reader");
-    assert!(reader_found);
+    assert!(provenance_found(&mut connection, clock_violation_id).await);
 
     assert!(!StagedLoaderPublisher
         .needs_republication(&mut connection)
@@ -1571,39 +1244,10 @@ async fn duplicate_guard_probes_the_pruned_set_and_replaces_the_first_version() 
     database.drop().await;
 }
 
-#[test]
-fn open_ended_leaf_is_probed_in_the_pruned_and_legacy_passes_only() {
-    let daily_lower = timestamp("2026-09-25T00:00:00Z");
-    let open_lower = timestamp("2026-09-26T00:00:00Z");
-    let daily = "horsies_task_history_forever_2026_09_25";
-    let open = "horsies_task_history_forever_open_2026_09_26";
-    let manifest = LookupManifest::new(vec![
-        LookupLeaf::new(daily, LeafLowerBound::At(daily_lower), open_lower).unwrap(),
-        LookupLeaf::new(
-            open,
-            LeafLowerBound::At(open_lower),
-            crate::core::history::commands::open_end_anchor(),
-        )
-        .unwrap(),
-    ])
-    .unwrap();
-    let provenance = render_staged_provenance_function(&manifest);
-    let guard = render_staged_duplicate_guard_function(&manifest);
-    let probes = |text: &str, relation: &str| text.matches(&format!("FROM {relation}")).count();
-    // Daily leaf: pruned, fallback, legacy. Open-ended leaf: pruned, legacy.
-    assert_eq!(probes(&provenance, daily), 3);
-    assert_eq!(probes(&provenance, open), 2);
-    assert!(provenance.contains("IF v_effective_birth < TIMESTAMPTZ '9999-01-01T00:00:00Z' THEN"));
-    assert!(!provenance.contains("IF v_effective_birth >= TIMESTAMPTZ '9999-01-01T00:00:00Z' THEN"));
-    assert_eq!(probes(&guard, daily), 2);
-    assert_eq!(probes(&guard, open), 2);
-}
-
 fn result_wire_row(location: &str) -> ResultWireRow {
     ResultWireRow {
         location: location.to_owned(),
         status: Some("COMPLETED".to_owned()),
-        live_result: None,
         failed_reason: None,
         result_envelope_version: Some(1),
         result_payload: Some(b"1".to_vec()),
@@ -1620,7 +1264,10 @@ fn result_wire_decode_is_typed_and_fail_closed() {
             task_id,
             ResultWireRow {
                 status: Some("RUNNING".to_owned()),
-                live_result: Some("{}".to_owned()),
+                failed_reason: None,
+                result_envelope_version: None,
+                result_payload: None,
+                result_digest: None,
                 ..result_wire_row("LIVE")
             }
         )
@@ -1628,8 +1275,6 @@ fn result_wire_decode_is_typed_and_fail_closed() {
         TaskResultRead::Live(LiveTaskResult {
             task_name: "p4.history".to_owned(),
             status: "RUNNING".to_owned(),
-            result: Some("{}".to_owned()),
-            failed_reason: None,
         })
     );
     let TaskResultRead::History(stored) =
@@ -1686,6 +1331,26 @@ fn result_wire_decode_is_typed_and_fail_closed() {
     }
 }
 
+/// Reads one task's result with the broker's statement-layer reader
+/// (`broker::history_reads::read_task_result`) on a core handle of the test
+/// database, then closes the handle. Each call opens new connections, so no
+/// statement prepared before a reader change is reused.
+async fn core_result_read(
+    database: &TestDatabase,
+    task_id: Uuid,
+) -> Result<TaskResultRead, BrokerError> {
+    let handle = crate::test_support::core_handle(database.database.url());
+    let open = handle
+        .pools()
+        .expect("the statement layer accepts the test URL");
+    let read =
+        crate::broker::history_reads::read_task_result(open.main(), StatementLog::Off, task_id)
+            .await;
+    drop(open);
+    let _closed = handle.close().await;
+    read
+}
+
 #[tokio::test]
 #[serial]
 async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
@@ -1716,27 +1381,34 @@ async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
         completed_json.as_bytes(),
     )
     .await;
-    // A result reader rendered before the leaf existed: it probes no leaf.
-    let stale_reader = super::lookup_generation::render_staged_result_function(
-        &LookupManifest::new(Vec::new()).expect("empty manifest"),
-    );
-    sqlx::query(&stale_reader)
-        .execute(&mut *transaction)
-        .await
-        .expect("install a stale result reader");
+    // A result reader of a publication that ran before the leaf existed: it
+    // probes the live table and no leaf (Python `_STALE_RESULT_READER_SQL`,
+    // `tests/integration/test_task_result_history_fallback.py`).
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION horsies_task_result_staged(p_task_id uuid)
+         RETURNS TABLE(location text, status text, failed_reason text,
+                       result_envelope_version smallint, result_payload bytea,
+                       result_digest bytea, task_name text)
+         LANGUAGE sql STABLE STRICT AS $$
+             SELECT 'LIVE'::text, t.status::text, NULL::text, NULL::smallint, NULL::bytea,
+                 NULL::bytea, t.task_name::text
+             FROM horsies_tasks AS t WHERE t.id = p_task_id
+         $$",
+    )
+    .execute(&mut *transaction)
+    .await
+    .expect("install a stale result reader");
     transaction
         .commit()
         .await
         .expect("commit stale reader setup");
 
-    let mut connection = database.pool.acquire().await.expect("acquire result read");
     assert_eq!(
-        read_task_result(&mut connection, completed_id)
+        core_result_read(&database, completed_id)
             .await
             .expect("stale result read"),
         TaskResultRead::Absent
     );
-    drop(connection);
     let broker = PostgresBroker::from_pool(database.pool.clone());
     let confirmed = broker
         .get_result::<i32>(completed_id, None)
@@ -1792,17 +1464,15 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
 
     let mut connection = database.pool.acquire().await.expect("acquire result reads");
     assert_eq!(
-        read_task_result(&mut connection, live_id)
+        core_result_read(&database, live_id)
             .await
             .expect("read live result"),
         TaskResultRead::Live(LiveTaskResult {
             task_name: "p4.live".to_owned(),
             status: "PENDING".to_owned(),
-            result: None,
-            failed_reason: None,
         })
     );
-    let TaskResultRead::History(failed) = read_task_result(&mut connection, failed_id)
+    let TaskResultRead::History(failed) = core_result_read(&database, failed_id)
         .await
         .expect("read history result")
     else {
@@ -1823,7 +1493,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
     );
     for absent_id in [v7_with_birth(today + Duration::hours(5)), Uuid::new_v4()] {
         assert_eq!(
-            read_task_result(&mut connection, absent_id)
+            core_result_read(&database, absent_id)
                 .await
                 .expect("read absent result"),
             TaskResultRead::Absent
@@ -1842,7 +1512,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         .await
         .expect("drop only staged result function");
     assert_eq!(
-        read_task_result(&mut connection, failed_id)
+        core_result_read(&database, failed_id)
             .await
             .expect("read with unpublished result function"),
         TaskResultRead::NotPublished
@@ -1861,13 +1531,16 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         .republish(&mut connection)
         .await
         .expect("republish staged readers");
-    assert!(staged_result_published(&mut connection)
-        .await
-        .expect("result publication probe"));
+    assert!(matches!(
+        core_result_read(&database, failed_id)
+            .await
+            .expect("read with the republished result function"),
+        TaskResultRead::History(_)
+    ));
 
     sqlx::query(
         "CREATE OR REPLACE FUNCTION horsies_task_result_staged(p_task_id uuid)
-         RETURNS TABLE (location text, status text, live_result text, failed_reason text,
+         RETURNS TABLE (location text, status text, failed_reason text,
                         result_envelope_version smallint, result_payload bytea,
                         result_digest bytea, task_name text)
          LANGUAGE plpgsql STABLE AS
@@ -1877,9 +1550,9 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
     .await
     .expect("plant result function with an undefined inner call");
     assert!(matches!(
-        read_task_result(&mut connection, failed_id).await,
-        Err(HistoryError::Database(sqlx::Error::Database(ref error)))
-            if error.code().as_deref() == Some("42883")
+        core_result_read(&database, failed_id).await,
+        Err(BrokerError::Statement(StatementFailure::StatementRefused { ref cause, .. }))
+            if cause.server_error().code().code() == "42883"
     ));
     drop(connection);
     database.drop().await;

@@ -535,7 +535,7 @@ class TestCopyOnBuild:
 
 
 _REAL_BROKER = PostgresConfig(
-    database_url='postgresql+psycopg://user:pass@localhost/db',
+    database_url='postgresql://user:pass@localhost/db',
 )
 
 

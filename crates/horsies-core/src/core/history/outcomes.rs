@@ -2,11 +2,56 @@
 
 use chrono::{DateTime, Utc};
 
+use crate::core::history::errors::HistoryError;
+
+/// Why a leaf's catalog row and relation disagree with the expected leaf.
+/// The leaf-creation functions of `0008_history_maintenance_functions.sql`
+/// (`horsies_history_leaf_state`, `horsies_create_history_leaf`) name the
+/// same kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogConflictKind {
     RelationWithoutCatalog,
     MetadataMismatch,
     PhysicalNonconformant,
+    /// The parent relation does not exist.
+    ParentMissing,
+    /// Another relation holds a canonical index name of the leaf.
+    ForeignIndex,
+    /// The catalog row matches and the relation is gone.
+    CatalogWithoutRelation,
+    /// The static forever leaf has no catalog row and no relation.
+    StaticLeafMissing,
+}
+
+impl CatalogConflictKind {
+    /// The name the database functions use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RelationWithoutCatalog => "RELATION_WITHOUT_CATALOG",
+            Self::MetadataMismatch => "METADATA_MISMATCH",
+            Self::PhysicalNonconformant => "PHYSICAL_NONCONFORMANT",
+            Self::ParentMissing => "PARENT_MISSING",
+            Self::ForeignIndex => "FOREIGN_INDEX",
+            Self::CatalogWithoutRelation => "CATALOG_WITHOUT_RELATION",
+            Self::StaticLeafMissing => "STATIC_LEAF_MISSING",
+        }
+    }
+
+    /// The kind of a database name; another name is `HistoryError::Contract`.
+    pub fn parse(value: &str) -> Result<Self, HistoryError> {
+        match value {
+            "RELATION_WITHOUT_CATALOG" => Ok(Self::RelationWithoutCatalog),
+            "METADATA_MISMATCH" => Ok(Self::MetadataMismatch),
+            "PHYSICAL_NONCONFORMANT" => Ok(Self::PhysicalNonconformant),
+            "PARENT_MISSING" => Ok(Self::ParentMissing),
+            "FOREIGN_INDEX" => Ok(Self::ForeignIndex),
+            "CATALOG_WITHOUT_RELATION" => Ok(Self::CatalogWithoutRelation),
+            "STATIC_LEAF_MISSING" => Ok(Self::StaticLeafMissing),
+            unknown => Err(HistoryError::contract(format!(
+                "catalog conflict kind {unknown:?} is not a known kind"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,13 +169,21 @@ mod tests {
             CatalogConflictKind::RelationWithoutCatalog,
             CatalogConflictKind::MetadataMismatch,
             CatalogConflictKind::PhysicalNonconformant,
+            CatalogConflictKind::ParentMissing,
+            CatalogConflictKind::ForeignIndex,
+            CatalogConflictKind::CatalogWithoutRelation,
+            CatalogConflictKind::StaticLeafMissing,
         ];
         let attachments = [
             LeafAttachment::Attached,
             LeafAttachment::DetachInterrupted,
             LeafAttachment::Detached,
         ];
-        assert_eq!(conflict_kinds.len(), 3);
+        assert_eq!(conflict_kinds.len(), 7);
+        for kind in conflict_kinds {
+            assert_eq!(CatalogConflictKind::parse(kind.as_str()).unwrap(), kind);
+        }
+        assert!(CatalogConflictKind::parse("ABSENT").is_err());
         assert_eq!(attachments.len(), 3);
 
         let inspections = [

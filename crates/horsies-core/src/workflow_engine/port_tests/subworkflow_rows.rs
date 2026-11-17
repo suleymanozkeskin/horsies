@@ -18,7 +18,7 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::RegisteredWorkflowDefinition;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::{
-    AnyNode, HorsiesError, SubWorkflowSummary, TaskError, TaskResult, WorkflowSpec,
+    AnyNode, HorsiesError, SpecBuildError, SubWorkflowSummary, TaskError, TaskResult, WorkflowSpec,
     WorkflowSpecRegistry,
 };
 use crate::workflow_engine::engine::on_subworkflow_complete;
@@ -297,11 +297,15 @@ fn dependent_nesting(key: &'static str) -> RegisteredWorkflowDefinition {
     }
 }
 
-fn nesting_level(input: &str) -> Result<i64, HorsiesError> {
+fn nesting_level(input: &str) -> Result<i64, SpecBuildError> {
     serde_json::from_str::<serde_json::Value>(input)
         .ok()
         .and_then(|params| params.get("level").and_then(serde_json::Value::as_i64))
-        .ok_or_else(|| HorsiesError::new(format!("nesting params without a level: {input}")))
+        .ok_or_else(|| {
+            SpecBuildError::Failed(HorsiesError::new(format!(
+                "nesting params without a level: {input}"
+            )))
+        })
 }
 
 async fn workflows_at_depth(pool: &PgPool, depth: i32) -> Vec<Uuid> {
@@ -337,7 +341,8 @@ async fn failed_node_code(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> 
 async fn a_root_nesting_stops_at_the_depth_limit() {
     let db = IsolatedDatabase::create().await;
     let key = "tests.port.root_nesting.v1";
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry
         .register_definition(root_nesting(key))
         .expect("register the nesting definition");
@@ -387,7 +392,8 @@ async fn a_root_nesting_stops_at_the_depth_limit() {
 async fn a_dependent_nesting_stops_at_the_depth_limit() {
     let db = IsolatedDatabase::create().await;
     let key = "tests.port.dependent_nesting.v1";
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry
         .register_definition(dependent_nesting(key))
         .expect("register the nesting definition");
@@ -431,11 +437,11 @@ async fn a_dependent_nesting_stops_at_the_depth_limit() {
 /// row is kept.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #909"]
 async fn a_child_node_that_cannot_be_prepared_fails_the_parent_node_and_keeps_no_child() {
     let db = IsolatedDatabase::create().await;
     let key = "tests.port.later_node_prep_failure_child_workflow.v1";
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry
         .register_definition(RegisteredWorkflowDefinition {
             name: "later_node_prep_failure_child_workflow".to_owned(),
@@ -739,15 +745,19 @@ async fn a_failed_child_summary_holds_its_counts_and_error_summary() {
 async fn a_child_node_with_two_args_from_keys_starts() {
     let pool = shared_pool().await;
     let key = "tests.port.multi_param_child.v1";
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry
         .register_definition(RegisteredWorkflowDefinition {
             name: "multi_param_child_workflow".to_owned(),
             definition_key: key.to_owned(),
             declared_children: Vec::new(),
             spec_builder: Arc::new(move |input| {
-                let params: serde_json::Value = serde_json::from_str(input)
-                    .map_err(|error| HorsiesError::new(format!("params do not decode: {error}")))?;
+                let params: serde_json::Value = serde_json::from_str(input).map_err(|error| {
+                    SpecBuildError::Failed(HorsiesError::new(format!(
+                        "params do not decode: {error}"
+                    )))
+                })?;
                 match (params.get("first"), params.get("second")) {
                     (Some(_), Some(_)) => {
                         let mut child = spec(
@@ -758,9 +768,9 @@ async fn a_child_node_with_two_args_from_keys_starts() {
                         child.output_index = Some(0);
                         Ok(child)
                     }
-                    _ => Err(HorsiesError::new(format!(
+                    _ => Err(SpecBuildError::Failed(HorsiesError::new(format!(
                         "params miss first or second: {input}"
-                    ))),
+                    )))),
                 }
             }),
         })
