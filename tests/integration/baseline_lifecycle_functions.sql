@@ -797,6 +797,66 @@ SELECT lc_expect(
 );
 
 ------------------------------------------------------------------------------------------------------------------------
+-- horsies_mark_finalizing
+------------------------------------------------------------------------------------------------------------------------
+
+SELECT lc_task('00000000-0000-7000-8000-000000008001', 'RUNNING');
+SELECT lc_expect(
+    'marker: a held RUNNING row is marked',
+    (SELECT outcome FROM horsies_mark_finalizing(
+        '00000000-0000-7000-8000-000000008001', 'w1', now() - interval '1 second')),
+    'MARKED'
+);
+SELECT lc_expect(
+    'marker: the row carries the marker and stays RUNNING under its claim',
+    (SELECT concat_ws('|', status, finalizing_at = now(), finalizing_by_worker_id, updated_at = now(),
+        claimed_by_worker_id, claimed_at = now() - interval '1 second')
+     FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000008001'),
+    'RUNNING|t|w1|t|w1|t'
+);
+SELECT lc_task('00000000-0000-7000-8000-000000008002', 'RUNNING');
+UPDATE horsies_tasks SET updated_at = now() - interval '1 minute'
+WHERE id = '00000000-0000-7000-8000-000000008002';
+SELECT lc_expect(
+    'marker: another claim generation is not held',
+    (SELECT outcome FROM horsies_mark_finalizing(
+        '00000000-0000-7000-8000-000000008002', 'w1', now() - interval '2 seconds')),
+    'NOT_HELD'
+);
+SELECT lc_expect(
+    'marker: another worker does not hold it',
+    (SELECT outcome FROM horsies_mark_finalizing(
+        '00000000-0000-7000-8000-000000008002', 'w2', now() - interval '1 second')),
+    'NOT_HELD'
+);
+SELECT lc_expect(
+    'marker: a miss writes nothing',
+    (SELECT concat_ws('|', finalizing_at IS NULL, finalizing_by_worker_id IS NULL,
+        updated_at = now() - interval '1 minute')
+     FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000008002'),
+    't|t|t'
+);
+SELECT lc_task('00000000-0000-7000-8000-000000008003', 'CLAIMED');
+SELECT lc_expect(
+    'marker: a CLAIMED row is not held',
+    (SELECT outcome FROM horsies_mark_finalizing(
+        '00000000-0000-7000-8000-000000008003', 'w1', now() - interval '1 second')),
+    'NOT_HELD'
+);
+SELECT lc_expect(
+    'marker: an absent task is not held',
+    (SELECT outcome FROM horsies_mark_finalizing(
+        '00000000-0000-7000-8000-0000000080ff', 'w1', now() - interval '1 second')),
+    'NOT_HELD'
+);
+SELECT lc_expect_sqlstate('marker: a NULL claim generation', $q$SELECT * FROM horsies_mark_finalizing(
+    '00000000-0000-7000-8000-000000008002', 'w1', NULL)$q$, '22023');
+SELECT lc_expect_sqlstate('marker: a NULL worker', $q$SELECT * FROM horsies_mark_finalizing(
+    '00000000-0000-7000-8000-000000008002', NULL, now() - interval '1 second')$q$, '22023');
+SELECT lc_expect_sqlstate('marker: a NULL task', $q$SELECT * FROM horsies_mark_finalizing(
+    NULL, 'w1', now() - interval '1 second')$q$, '22023');
+
+------------------------------------------------------------------------------------------------------------------------
 -- Success: horsies_complete_task_fused, horsies_complete_tasks_fused, horsies_finish_workflow_success
 ------------------------------------------------------------------------------------------------------------------------
 

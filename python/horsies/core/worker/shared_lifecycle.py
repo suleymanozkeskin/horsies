@@ -57,10 +57,12 @@ from horsies.core.worker.child_runner import (
     _PRE_START_CONFIRM_ATTEMPTS,
     AttemptMissed,
     AttemptStarted,
+    FinalizingMark,
     StartMiss,
     _claim_lost,
     _WorkflowResumedBeforeStart,
     mark_finalizing_params,
+    read_finalizing_mark,
     read_start_outcome,
     start_attempt_params,
 )
@@ -397,12 +399,15 @@ async def mark_task_finalizing(
                     MARK_FINALIZING_SQL,
                     mark_finalizing_params(task_id, worker_id, claimed_at),
                 )
-                marked_rows = cursor.rowcount
+                row = await cursor.fetchone()
     except Exception as exc:
         logger.warning('Failed to mark task %s finalizing: %s', task_id, exc)
         return
-    if marked_rows == 0:
-        logger.debug(
-            'Finalizing marker for task %s skipped: the claim changed',
-            task_id,
-        )
+    match read_finalizing_mark(row, task_id):
+        case FinalizingMark.MARKED:
+            pass
+        case FinalizingMark.NOT_HELD:
+            logger.debug(
+                'Finalizing marker for task %s skipped: the claim changed',
+                task_id,
+            )

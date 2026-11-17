@@ -61,4 +61,11 @@ LIFECYCLE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=('finish_ended_attempt_async',),
     ),
+    DualRunOperation(
+        name='workflow task success',
+        production_path='horsies.core.worker.finalize:FinalizeMixin._finish_workflow_success',
+        reference_path='tests.dualrun.reference.workflow_success_caller:finish_workflow_success',
+        mode=PoolMode(),
+        core_methods=('finish_workflow_success_async',),
+    ),
 )

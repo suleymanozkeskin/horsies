@@ -745,26 +745,38 @@ BEGIN_SQL: Final[LiteralString] = 'BEGIN'
 """Opens a transaction on a connection of a child pool, which is in
 autocommit (``child_pool``)."""
 
+# The finalizing marker: one statement in autocommit. The function locks the
+# row by id alone (FOR NO KEY UPDATE) and writes the marker only when the row
+# is RUNNING under this worker at this claim generation.
 MARK_FINALIZING_SQL: Final[LiteralString] = """
-                WITH target AS MATERIALIZED (
-                    SELECT id,
-                           (
-                               status = 'RUNNING'
-                               AND claimed_by_worker_id = %s
-                               AND claimed_at = %s::timestamptz
-                           ) IS TRUE AS fenced
-                    FROM horsies_tasks
-                    WHERE id = %s
-                    FOR NO KEY UPDATE
-                )
-                UPDATE horsies_tasks t
-                SET finalizing_at = NOW(),
-                    finalizing_by_worker_id = %s,
-                    updated_at = NOW()
-                FROM target
-                WHERE t.id = target.id
-                  AND target.fenced
+                SELECT outcome
+                FROM horsies_mark_finalizing(%s::uuid, %s, %s::timestamptz)
                 """
+
+
+class FinalizingMark(Enum):
+    """What ``horsies_mark_finalizing`` found on the task row."""
+
+    MARKED = 'MARKED'
+    """The row is RUNNING under this worker's claim generation; the marker is
+    written."""
+    NOT_HELD = 'NOT_HELD'
+    """Absent, not RUNNING, or another owner or claim generation; nothing is
+    written."""
+
+
+def read_finalizing_mark(row: Sequence[object] | None, task_id: str) -> FinalizingMark:
+    """The outcome of ``MARK_FINALIZING_SQL``. A row outside the function's
+    contract is a defect (``AssertionError``). Pure."""
+    match row:
+        case ('MARKED',):
+            return FinalizingMark.MARKED
+        case ('NOT_HELD',):
+            return FinalizingMark.NOT_HELD
+        case _:
+            raise AssertionError(
+                f'horsies_mark_finalizing returned {row!r} for task {task_id}'
+            )
 
 
 def mark_finalizing_params(
@@ -772,10 +784,9 @@ def mark_finalizing_params(
     worker_id: str,
     claimed_at: datetime,
 ) -> tuple[object, ...]:
-    """The parameters of ``MARK_FINALIZING_SQL``, in order: the fence (the
-    worker and the claim generation), the task, and the marking worker. No
-    I/O."""
-    return (worker_id, claimed_at, task_id, worker_id)
+    """The parameters of ``MARK_FINALIZING_SQL``, in order: the task, the
+    worker and the claim generation. No I/O."""
+    return (task_id, worker_id, claimed_at)
 
 
 def _begin_workflow_stop(cursor: Cursor[Any]) -> None:
@@ -1148,15 +1159,18 @@ def _mark_task_finalizing(
                 MARK_FINALIZING_SQL,
                 mark_finalizing_params(task_id, worker_id, claimed_at),
             )
-            marked_rows = cursor.rowcount
+            row = cursor.fetchone()
     except Exception as exc:
         logger.warning('Failed to mark task %s finalizing: %s', task_id, exc)
         return
-    if marked_rows == 0:
-        logger.debug(
-            'Finalizing marker for task %s skipped: the claim changed',
-            task_id,
-        )
+    match read_finalizing_mark(row, task_id):
+        case FinalizingMark.MARKED:
+            pass
+        case FinalizingMark.NOT_HELD:
+            logger.debug(
+                'Finalizing marker for task %s skipped: the claim changed',
+                task_id,
+            )
 
 
 def mark_isolated_run_finalizing(
