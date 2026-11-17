@@ -301,6 +301,7 @@ async fn the_deadline_kills_a_child_that_spins() {
         AttemptEnd::TimedOut {
             timeout: timeout_ms(1_000),
             retry: RetryPlacement::SameClass,
+            cancel: TimeoutCancel::NoSignal,
         }
     );
     stop_pool(pool, spawner).await;
@@ -429,6 +430,7 @@ async fn the_deadline_kills_a_stopped_child() {
         AttemptEnd::TimedOut {
             timeout: timeout_ms(1_000),
             retry: RetryPlacement::SameClass,
+            cancel: TimeoutCancel::NoSignal,
         }
     );
     stop_pool(pool, spawner).await;

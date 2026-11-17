@@ -47,4 +47,18 @@ BROKER_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=('task_info',),
     ),
+    DualRunOperation(
+        name='result read and wait',
+        production_path='horsies.core.brokers.postgres:PostgresBroker.get_raw_result_record_async',
+        reference_path='tests.dualrun.reference.result_caller:get_raw_result_record_async',
+        mode=PoolMode(),
+        core_methods=('raw_result_record_async',),
+    ),
+    DualRunOperation(
+        name='result read and wait, blocking',
+        production_path='horsies.core.brokers.postgres:PostgresBroker.get_raw_result_record',
+        reference_path='tests.dualrun.reference.result_caller:get_raw_result_record',
+        mode=PoolMode(),
+        core_methods=('raw_result_record',),
+    ),
 )

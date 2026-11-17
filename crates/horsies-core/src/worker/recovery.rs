@@ -769,7 +769,7 @@ WHERE (worker_id, snapshot_at) IN (
 // budget is routinely smaller than $2 while backlog remains — the reaper
 // therefore drives this statement with DrainedWhen::EmptyBatch rather than
 // the short-batch heuristic the row-batched statements use.
-const DELETE_EXPIRED_WORKFLOWS_SQL: &str = "\
+pub(crate) const DELETE_EXPIRED_WORKFLOWS_SQL: &str = "\
 WITH live AS MATERIALIZED (
     SELECT DISTINCT wt.workflow_id
     FROM horsies_tasks t

@@ -775,7 +775,7 @@ class TestMigrationText:
 
 class TestMonitoringDetail:
     def test_a_live_task_shows_its_class(self) -> None:
-        from horsies.monitoring.queries import get_task_detail
+        from tests.dualrun.reference.monitoring_queries import get_task_detail
         from tests.monitoring_function_support import detail_row, function_broker
 
         task_id = uuid.UUID('00000000-0000-7000-8000-000000000001')
@@ -790,7 +790,7 @@ class TestMonitoringDetail:
                 raise AssertionError(f'the detail answered {result!r}')
 
     def test_a_history_task_shows_no_class(self) -> None:
-        from horsies.monitoring.queries import get_task_detail
+        from tests.dualrun.reference.monitoring_queries import get_task_detail
         from tests.monitoring_function_support import function_broker, history_row
 
         task_id = uuid.UUID('00000000-0000-7000-8000-000000000002')
