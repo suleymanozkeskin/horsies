@@ -3,27 +3,31 @@
 `to_worker_manifest` is the one place where the user config of a worker
 (Pydantic) meets the input of the core's worker (the manifest generated from
 horsies-core, `python/horsies/_catalog/worker_manifest.py`). It maps every worker
-profile, the database settings, the queue and claim settings, the
-registered task classes and the child launch. It does not pick the profile:
-the core checks the profile set and picks the requested profile, so each
-client sends the set and the `--profile` value as they are.
+profile, the database settings, the queue and claim settings, the recovery,
+retention, resilience and payload settings, the registered task classes and
+the child launch. It does not pick the profile: the core checks the profile
+set and picks the requested profile, so each client sends the set and the
+`--profile` value as they are.
 
 Pydantic refuses every user error first. The manifest bounds a few values
 that the config does not bound above (`prefetch_buffer`, the claim lease,
-the claim renew age, `cluster_wide_cap`, a queue's `max_concurrency`): a
-value above its manifest bound is a `ValueAboveManifestBound`, the only
-failure of `to_worker_manifest`. Any other refusal by the core is a defect
-of this module.
+the claim renew age, `cluster_wide_cap`, a queue's `max_concurrency`, the
+paused workflow age, the payload thresholds): a value above its manifest
+bound is a `ValueAboveManifestBound`, the only failure of
+`to_worker_manifest`. Any other refusal by the core is a defect of this
+module.
 """
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Final, assert_never
 
 from horsies._catalog import worker_manifest as wire
+from horsies.core.history.periods import parse_retention_period
 from horsies.core.manifest import reservation_window_micros
 from horsies.core.manifest_database import (
     core_database_url,
@@ -34,7 +38,11 @@ from horsies.core.manifest_database import (
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
+from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.resilience import WorkerResilienceConfig
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.tasks import Execution
 from horsies.core.models.worker_profile import (
     ExecutorThreads,
@@ -62,7 +70,12 @@ from horsies.core.worker.cpu_placement import ParentCpu
 CHILD_MAIN_MODULE: Final = 'horsies.core.worker.child_main'
 """The module that a Python child runs (`python -m <module> <fd> <worker pid>`)."""
 
+PRELOAD_MAIN_MODULE: Final = 'horsies.core.worker.preload_main'
+"""The module that the preload process runs
+(`python -m <module> <fd> <worker pid> <mode>`)."""
+
 _ONE_MILLISECOND: Final = timedelta(milliseconds=1)
+_ONE_MICROSECOND: Final = timedelta(microseconds=1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +93,14 @@ class ValueAboveManifestBound:
     maximum: int
 
 
+@dataclass(frozen=True, slots=True)
+class _UnboundedSections:
+    """The sections that hold a value Pydantic does not bound above."""
+
+    retention: wire.RetentionManifest
+    payload: wire.PayloadManifest
+
+
 def to_worker_manifest(
     config: AppConfig,
     *,
@@ -95,11 +116,20 @@ def to_worker_manifest(
     by name; `child_launch` comes from `python_child_launch`; the window is
     one that `validate_reservation_window` accepted.
 
-    Errors: `ValueAboveManifestBound` for the first claim value above its
-    manifest bound (`worker_claim_manifest`).
+    Errors: `ValueAboveManifestBound` for the first value above its
+    manifest bound: the claim values (`worker_claim_manifest`), then the
+    paused workflow age (`retention_manifest`), then the payload thresholds
+    (`payload_manifest`).
     """
     match worker_claim_manifest(config):
         case Ok(claim):
+            pass
+        case Err(above):
+            return Err(above)
+        case _ as unreachable:
+            assert_never(unreachable)
+    match _unbounded_sections(config):
+        case Ok(sections):
             pass
         case Err(above):
             return Err(above)
@@ -121,10 +151,35 @@ def to_worker_manifest(
             },
             profile=profile_request(profile),
             claim=claim,
+            recovery=recovery_manifest(config.recovery),
+            retention=sections.retention,
+            resilience=resilience_manifest(config.resilience),
+            payload=sections.payload,
             tasks={name: execution_of(execution) for name, execution in tasks.items()},
             child_launch=child_launch,
         ),
     )
+
+
+def _unbounded_sections(
+    config: AppConfig,
+) -> Result[_UnboundedSections, ValueAboveManifestBound]:
+    """The retention and payload sections, in that order of checks. Pure."""
+    match retention_manifest(config.retention):
+        case Ok(retention):
+            pass
+        case Err(above):
+            return Err(above)
+        case _ as unreachable:
+            assert_never(unreachable)
+    match payload_manifest(config.payload):
+        case Ok(payload):
+            pass
+        case Err(above):
+            return Err(above)
+        case _ as unreachable:
+            assert_never(unreachable)
+    return Ok(_UnboundedSections(retention=retention, payload=payload))
 
 
 def profile_request(profile: str | None) -> wire.ProfileRequest:
@@ -139,6 +194,7 @@ def profile_request(profile: str | None) -> wire.ProfileRequest:
 def python_child_launch(
     *,
     executable: str,
+    interpreter_flags: Sequence[str],
     app_locator: str,
     imports: Sequence[str],
     sys_path_roots: Sequence[str],
@@ -146,15 +202,25 @@ def python_child_launch(
     parent_argv: Sequence[str],
     log_level: wire.WorkerLogLevel,
 ) -> wire.ChildLaunchManifest:
-    """How a Python child of this worker starts: `executable -m
-    horsies.core.worker.child_main`, importing the app at `app_locator`.
+    """How a Python child of this worker and its preload process start:
+    `executable <interpreter_flags> -m horsies.core.worker.child_main` and
+    `executable <interpreter_flags> -m horsies.core.worker.preload_main`,
+    importing the app at `app_locator`.
 
-    Pure: the caller reads `sys.executable`, `sys.path` and `sys.argv`.
+    Pure: the caller reads `sys.executable`, the flags
+    (`current_interpreter_flags`), `sys.path` and `sys.argv`.
     """
+    flags = tuple(interpreter_flags)
     return wire.ChildLaunchManifest(
         command=wire.ChildCommandManifest(
             program=executable,
-            args=('-m', CHILD_MAIN_MODULE),
+            args=(*flags, '-m', CHILD_MAIN_MODULE),
+        ),
+        preload=wire.PreloadLaunchCommand(
+            command=wire.ChildCommandManifest(
+                program=executable,
+                args=(*flags, '-m', PRELOAD_MAIN_MODULE),
+            ),
         ),
         program=wire.ChildProgramPython(
             app_locator=app_locator,
@@ -165,6 +231,138 @@ def python_child_launch(
         ),
         log_level=log_level,
     )
+
+
+def current_interpreter_flags() -> tuple[str, ...]:
+    """The command-line flags of this interpreter, rebuilt from `sys.flags`
+    and `sys.warnoptions`.
+
+    A plain `exec` does not inherit them, and `-O` changes what `assert`
+    does in task code, so each child and the preload process start with
+    them. Reads process state; no I/O.
+    """
+    flags = sys.flags
+    args: list[str] = []
+    if flags.optimize:
+        args.append('-' + 'O' * flags.optimize)
+    if flags.dont_write_bytecode:
+        args.append('-B')
+    match flags.isolated:
+        case 0:
+            if flags.ignore_environment:
+                args.append('-E')
+            if flags.no_user_site:
+                args.append('-s')
+            if flags.safe_path:
+                args.append('-P')
+        case _:
+            args.append('-I')
+    if flags.no_site:
+        args.append('-S')
+    if flags.dev_mode:
+        args.extend(('-X', 'dev'))
+    args.extend(arg for option in sys.warnoptions for arg in ('-W', option))
+    return tuple(args)
+
+
+def recovery_manifest(config: RecoveryConfig) -> wire.RecoveryManifest:
+    """The recovery section: every field of `config`, each default as the
+    value it holds. Pure; Pydantic bounds every field.
+    """
+    return wire.RecoveryManifest(
+        auto_requeue_stale_claimed=config.auto_requeue_stale_claimed,
+        claimed_stale_threshold_ms=config.claimed_stale_threshold_ms,
+        auto_terminate_orphaned_workflow_tasks=config.auto_terminate_orphaned_workflow_tasks,
+        auto_fail_stale_running=config.auto_fail_stale_running,
+        running_stale_threshold_ms=config.running_stale_threshold_ms,
+        finalizing_stale_threshold_ms=config.finalizing_stale_threshold_ms,
+        crashed_worker_recovery_grace_ms=config.crashed_worker_recovery_grace_ms,
+        phase2_quarantine_after_attempts=config.phase2_quarantine_after_attempts,
+        workflow_recovery_failure_limit=config.workflow_recovery_failure_limit,
+        check_interval_ms=config.check_interval_ms,
+        orphan_task_audit_interval_ms=config.orphan_task_audit_interval_ms,
+        runner_heartbeat_interval_ms=config.runner_heartbeat_interval_ms,
+        claimer_heartbeat_interval_ms=config.claimer_heartbeat_interval_ms,
+        worker_state_snapshot_interval_ms=config.worker_state_snapshot_interval_ms,
+    )
+
+
+def retention_manifest(
+    config: RetentionConfig,
+) -> Result[wire.RetentionManifest, ValueAboveManifestBound]:
+    """The retention section of `config`. A `None` that turns pruning or the
+    paused expiry off is its own variant; a period is whole days. Pure.
+
+    Errors: `ValueAboveManifestBound` for a `paused_workflow_auto_cancel_after`
+    of more microseconds than `PAUSED_AGE_MICROS_MAX`.
+    """
+    match _paused_expiry(config.paused_workflow_auto_cancel_after):
+        case Ok(paused_expiry):
+            pass
+        case Err(above):
+            return Err(above)
+        case _ as unreachable:
+            assert_never(unreachable)
+    return Ok(
+        wire.RetentionManifest(
+            worker_state_retention=_worker_state_retention(
+                config.worker_state_retention_hours,
+            ),
+            terminal_record_retention=_terminal_record_retention(
+                config.terminal_record_retention_hours,
+            ),
+            paused_workflow_auto_cancel_after=paused_expiry,
+            history_leaf_horizon_days=config.history_leaf_horizon_days,
+            heartbeat_leaf_horizon_hours=config.heartbeat_leaf_horizon_hours,
+            retention_periods=tuple(
+                _period_days(period) for period in config.retention_periods
+            ),
+            queue_retention={
+                queue: _queue_retention(period)
+                for queue, period in config.queue_retention.items()
+            },
+            partition_maintenance_interval_s=config.partition_maintenance_interval_s,
+            retention_sweep_interval_s=config.retention_sweep_interval_s,
+            retention_delete_batch_size=config.retention_delete_batch_size,
+        ),
+    )
+
+
+def resilience_manifest(config: WorkerResilienceConfig) -> wire.ResilienceManifest:
+    """The resilience section of `config`; `db_retry_max_attempts=0` (no
+    limit) is its own variant. Pure.
+    """
+    return wire.ResilienceManifest(
+        db_retry_initial_ms=config.db_retry_initial_ms,
+        db_retry_max_ms=config.db_retry_max_ms,
+        db_retry_max_attempts=_retry_attempt_limit(config.db_retry_max_attempts),
+        notify_poll_interval_ms=config.notify_poll_interval_ms,
+    )
+
+
+def payload_manifest(
+    config: PayloadPolicy,
+) -> Result[wire.PayloadManifest, ValueAboveManifestBound]:
+    """The payload section of `config`; a `None` threshold is no limit. Pure.
+
+    Errors: `ValueAboveManifestBound` for the first threshold above
+    `PAYLOAD_BYTES_MAX`, `warn_bytes` before `reject_bytes`.
+    """
+    match _payload_limit('payload.warn_bytes', config.warn_bytes):
+        case Ok(warn_bytes):
+            pass
+        case Err(above):
+            return Err(above)
+        case _ as unreachable:
+            assert_never(unreachable)
+    match _payload_limit('payload.reject_bytes', config.reject_bytes):
+        case Ok(reject_bytes):
+            pass
+        case Err(above):
+            return Err(above)
+        case _ as unreachable:
+            assert_never(unreachable)
+    return Ok(wire.PayloadManifest(warn_bytes=warn_bytes, reject_bytes=reject_bytes))
 
 
 def worker_database_manifest(config: PostgresConfig) -> wire.WorkerDatabaseManifest:
@@ -404,6 +602,90 @@ def _queue_concurrency(
             match _at_most(path, limit, wire.QUEUE_CONCURRENCY_MAX):
                 case Ok(tasks):
                     return Ok(wire.QueueConcurrencyTasks(tasks=tasks))
+                case Err() as above:
+                    return above
+                case _ as unreachable:
+                    assert_never(unreachable)
+
+
+def _paused_expiry(
+    age: timedelta | None,
+) -> Result[wire.PausedWorkflowExpiry, ValueAboveManifestBound]:
+    match age:
+        case None:
+            return Ok(wire.PausedWorkflowExpiryNoExpiry())
+        case positive:
+            micros = positive // _ONE_MICROSECOND
+            path = 'retention.paused_workflow_auto_cancel_after'
+            match _at_most(path, micros, wire.PAUSED_AGE_MICROS_MAX):
+                case Ok(within):
+                    return Ok(wire.PausedWorkflowExpiryAfter(micros=within))
+                case Err() as above:
+                    return above
+                case _ as unreachable:
+                    assert_never(unreachable)
+
+
+def _worker_state_retention(hours: int | None) -> wire.WorkerStateRetention:
+    match hours:
+        case None:
+            return wire.WorkerStateRetentionNoPruning()
+        case kept:
+            return wire.WorkerStateRetentionHours(hours=kept)
+
+
+def _terminal_record_retention(hours: int | None) -> wire.TerminalRecordRetention:
+    match hours:
+        case None:
+            return wire.TerminalRecordRetentionNoPruning()
+        case kept:
+            return wire.TerminalRecordRetentionHours(hours=kept)
+
+
+def _period_days(period: timedelta) -> int:
+    """The days of a period that `RetentionConfig` validation accepted.
+
+    Validation refuses a period that is not whole days in bounds, so a
+    refusal here is a defect and raises `AssertionError`.
+    """
+    match parse_retention_period(period):
+        case Ok(days):
+            return days
+        case Err(refused):
+            raise AssertionError(
+                f'a validated retention period is whole days in bounds: {refused.reason}',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _queue_retention(period: timedelta | None) -> wire.QueueRetention:
+    match period:
+        case None:
+            return wire.QueueRetentionForever()
+        case finite:
+            return wire.QueueRetentionDays(days=_period_days(finite))
+
+
+def _retry_attempt_limit(attempts: int) -> wire.RetryAttemptLimit:
+    match attempts:
+        case 0:
+            return wire.RetryAttemptLimitNoLimit()
+        case limit:
+            return wire.RetryAttemptLimitAttempts(attempts=limit)
+
+
+def _payload_limit(
+    path: str,
+    threshold: int | None,
+) -> Result[wire.PayloadLimit, ValueAboveManifestBound]:
+    match threshold:
+        case None:
+            return Ok(wire.PayloadLimitNoLimit())
+        case limit:
+            match _at_most(path, limit, wire.PAYLOAD_BYTES_MAX):
+                case Ok(within):
+                    return Ok(wire.PayloadLimitBytes(bytes=within))
                 case Err() as above:
                     return above
                 case _ as unreachable:

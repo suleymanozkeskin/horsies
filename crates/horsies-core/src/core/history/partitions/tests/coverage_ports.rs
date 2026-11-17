@@ -73,11 +73,11 @@ async fn needs_republication(pool: &PgPool) -> bool {
 
 async fn settled_pool_pass(pool: &PgPool, history_days: u32, heartbeat_hours: u32) {
     let outcome = ensure_partition_coverage_in_pool(
-        pool,
+        &crate::broker::pools::core_pool_for_test_pool(pool),
+        crate::broker::core_rows::StatementLog::Off,
         history_days,
         heartbeat_hours,
         &[],
-        &StagedLoaderPublisher,
     )
     .await
     .expect("settling coverage pass");
@@ -110,14 +110,19 @@ fn ensured(outcome: CoverageOutcome) -> CoverageEnsured {
 #[serial]
 async fn coverage_creating_leaves_in_two_classes_leaves_the_readers_current() {
     let database = TestDatabase::create_with_connections(4).await;
-    let publisher = CountingStagedPublisher::default();
-    let outcome = ensure_partition_coverage_in_pool(&database.pool, 3, 3, &[period(7)], &publisher)
-        .await
-        .expect("coverage pass");
+    let outcome = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        3,
+        3,
+        &[period(7)],
+    )
+    .await
+    .expect("coverage pass");
     let report = ensured(outcome);
     assert_eq!(report.created_history_leaves, 8);
+    // The last step did not publish: the probe found the readers current.
     assert!(!report.republished);
-    assert_eq!(publisher.calls.load(Ordering::SeqCst), 0);
     assert_eq!(class_leaf_count(&database.pool, "standard_30d").await, 4);
     assert_eq!(class_leaf_count(&database.pool, "standard_7d").await, 4);
 
@@ -157,11 +162,11 @@ async fn a_returned_refusal_is_contained_like_a_raise() {
         .expect("take the leaf name");
     let horizon = 5_u32;
     let outcome = ensure_partition_coverage_in_pool(
-        &database.pool,
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
         horizon,
         3,
         &[period(10), period(7)],
-        &UnpublishedLoader,
     )
     .await
     .expect("contained coverage pass");
@@ -182,10 +187,15 @@ async fn a_returned_refusal_is_contained_like_a_raise() {
 async fn a_refusal_keeps_the_leaves_created_before_it() {
     let database = TestDatabase::create_with_connections(4).await;
     let class_key = "standard_7d";
-    let first =
-        ensure_partition_coverage_in_pool(&database.pool, 2, 3, &[period(7)], &UnpublishedLoader)
-            .await
-            .expect("first coverage pass");
+    let first = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        3,
+        &[period(7)],
+    )
+    .await
+    .expect("first coverage pass");
     let _ = ensured(first);
     assert_eq!(class_leaf_count(&database.pool, class_key).await, 3);
 
@@ -200,10 +210,15 @@ async fn a_refusal_keeps_the_leaves_created_before_it() {
         .await
         .expect("take the day+4 leaf name");
 
-    let second =
-        ensure_partition_coverage_in_pool(&database.pool, 4, 3, &[period(7)], &UnpublishedLoader)
-            .await
-            .expect("second coverage pass");
+    let second = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        4,
+        3,
+        &[period(7)],
+    )
+    .await
+    .expect("second coverage pass");
     let failure = failed(second);
     assert!(failure.refusal.contains(class_key), "{failure:?}");
     assert_eq!(
@@ -221,10 +236,15 @@ async fn a_refusal_keeps_the_leaves_created_before_it() {
 async fn a_heartbeat_horizon_retune_is_a_success_and_is_stored() {
     let database = TestDatabase::create_with_connections(4).await;
     settled_pool_pass(&database.pool, 2, 3).await;
-    let retuned =
-        ensure_partition_coverage_in_pool(&database.pool, 2, 6, &[], &StagedLoaderPublisher)
-            .await
-            .expect("retuned coverage pass");
+    let retuned = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        6,
+        &[],
+    )
+    .await
+    .expect("retuned coverage pass");
     let _ = ensured(retuned);
     let stored: i16 = sqlx::query_scalar(&format!(
         "SELECT heartbeat_horizon_hours FROM {RETENTION_CLASSES} WHERE class_key = $1"
@@ -244,9 +264,15 @@ async fn a_heartbeat_horizon_retune_is_a_success_and_is_stored() {
 #[serial]
 async fn the_probe_names_heartbeat_leaves_on_the_24_hour_clock() {
     let database = TestDatabase::create_with_connections(4).await;
-    let first = ensure_partition_coverage_in_pool(&database.pool, 2, 48, &[], &UnpublishedLoader)
-        .await
-        .expect("first coverage pass");
+    let first = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        48,
+        &[],
+    )
+    .await
+    .expect("first coverage pass");
     assert_eq!(ensured(first).created_heartbeat_leaves, 49);
     let leaves: Vec<(String, DateTime<Utc>)> = sqlx::query_as(&format!(
         "SELECT leaf_name, lower_anchor FROM {LEAF_CATALOG} WHERE class_key = $1"
@@ -262,9 +288,15 @@ async fn the_probe_names_heartbeat_leaves_on_the_24_hour_clock() {
             &hourly_leaf_name(*lower).expect("hourly leaf name")
         );
     }
-    let second = ensure_partition_coverage_in_pool(&database.pool, 2, 48, &[], &UnpublishedLoader)
-        .await
-        .expect("second coverage pass");
+    let second = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        48,
+        &[],
+    )
+    .await
+    .expect("second coverage pass");
     let report = ensured(second);
     assert_eq!(report.created_heartbeat_leaves, 0);
     assert_eq!(report.created_history_leaves, 0);
@@ -295,10 +327,15 @@ async fn coverage_repairs_descending_history_index_shapes() {
             .await
             .expect("plant a descending index");
     }
-    let outcome =
-        ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &StagedLoaderPublisher)
-            .await
-            .expect("repairing coverage pass");
+    let outcome = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("repairing coverage pass");
     let _ = ensured(outcome);
     assert!(index_definition(&database.pool, &id_index)
         .await
@@ -325,10 +362,15 @@ async fn stale_manifest_rows_are_republished() {
     .await
     .expect("move every manifest position");
     assert!(needs_republication(&database.pool).await);
-    let outcome =
-        ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &StagedLoaderPublisher)
-            .await
-            .expect("republishing coverage pass");
+    let outcome = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("republishing coverage pass");
     let report = ensured(outcome);
     assert_eq!(report.created_history_leaves, 0);
     assert!(report.republished);
@@ -363,10 +405,15 @@ async fn a_stale_index_schema_version_fails_the_heartbeat_class() {
     .await
     .expect("stale the current heartbeat leaf");
     assert_eq!(updated.rows_affected(), 1);
-    let outcome =
-        ensure_partition_coverage_in_pool(&database.pool, 3, 6, &[], &StagedLoaderPublisher)
-            .await
-            .expect("coverage pass");
+    let outcome = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        3,
+        6,
+        &[],
+    )
+    .await
+    .expect("coverage pass");
     let failure = failed(outcome);
     assert_eq!(failure.class_key.as_deref(), Some(HEARTBEAT_CLASS_KEY));
     assert!(failure.refusal.contains(&current), "{failure:?}");
@@ -429,10 +476,15 @@ async fn a_history_failure_does_not_stop_heartbeat_repair() {
     .await
     .expect("hold the history leaf lock");
 
-    let outcome =
-        ensure_partition_coverage_in_pool(&database.pool, 3, 6, &[], &StagedLoaderPublisher)
-            .await
-            .expect("coverage pass");
+    let outcome = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        3,
+        6,
+        &[],
+    )
+    .await
+    .expect("coverage pass");
     let released: bool = sqlx::query_scalar(&format!(
         "SELECT pg_advisory_unlock({LEAF_LOCK_KEY_FUNCTION}($1, $2))"
     ))
@@ -468,8 +520,14 @@ async fn startup_refuses_while_the_current_heartbeat_leaf_is_busy() {
     .execute(holder.as_mut())
     .await
     .expect("hold the current heartbeat leaf lock");
-    let outcome =
-        ensure_startup_coverage_in_pool(&database.pool, 3, 6, &[], &UnpublishedLoader).await;
+    let outcome = ensure_startup_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        3,
+        6,
+        &[],
+    )
+    .await;
     holder.rollback().await.expect("release the lock");
     match outcome.expect("startup coverage") {
         StartupCoverageOutcome::Refused(CoverageOutcome::Failed(failure)) => {
@@ -505,10 +563,15 @@ async fn a_pass_republishes_on_a_vanished_leaf_alone() {
         .expect("drop the old leaf out of band");
     assert!(needs_republication(&database.pool).await);
 
-    let outcome =
-        ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &StagedLoaderPublisher)
-            .await
-            .expect("coverage pass");
+    let outcome = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("coverage pass");
     let report = ensured(outcome);
     assert_eq!(report.created_history_leaves, 0);
     assert!(report.republished);
@@ -532,10 +595,15 @@ async fn an_in_horizon_loss_does_not_refuse_worker_startup() {
         .await
         .expect("drop the current leaf out of band");
 
-    let outcome =
-        ensure_startup_coverage_in_pool(&database.pool, 2, 2, &[], &StagedLoaderPublisher)
-            .await
-            .expect("startup coverage");
+    let outcome = ensure_startup_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("startup coverage");
     match outcome {
         StartupCoverageOutcome::Ready(CoverageOutcome::Failed(failure)) => {
             assert!(failure.heartbeat_covered_now);

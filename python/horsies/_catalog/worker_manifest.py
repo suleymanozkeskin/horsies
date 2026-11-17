@@ -75,8 +75,33 @@ __all__ = [
     'ClusterWideCapNoLimit',
     'ClusterWideCap',
     'WorkerClaimManifest',
+    'RecoveryManifest',
+    'WorkerStateRetentionHours',
+    'WorkerStateRetentionNoPruning',
+    'WorkerStateRetention',
+    'TerminalRecordRetentionHours',
+    'TerminalRecordRetentionNoPruning',
+    'TerminalRecordRetention',
+    'PausedWorkflowExpiryAfter',
+    'PausedWorkflowExpiryNoExpiry',
+    'PausedWorkflowExpiry',
+    'QueueRetentionDays',
+    'QueueRetentionForever',
+    'QueueRetention',
+    'RetentionManifest',
+    'RetryAttemptLimitAttempts',
+    'RetryAttemptLimitNoLimit',
+    'RetryAttemptLimit',
+    'ResilienceManifest',
+    'PayloadLimitBytes',
+    'PayloadLimitNoLimit',
+    'PayloadLimit',
+    'PayloadManifest',
     'Execution',
     'ChildCommandManifest',
+    'PreloadLaunchCommand',
+    'PreloadLaunchNoPreloadProgram',
+    'PreloadLaunch',
     'ChildProgramPython',
     'ChildProgramRust',
     'ChildProgram',
@@ -125,6 +150,50 @@ __all__ = [
     'MILLISECONDS_MAX',
     'CLAIM_COUNT_MIN',
     'CLAIM_COUNT_MAX',
+    'CLAIMED_STALE_THRESHOLD_MS_MIN',
+    'CLAIMED_STALE_THRESHOLD_MS_MAX',
+    'STALE_THRESHOLD_MS_MIN',
+    'STALE_THRESHOLD_MS_MAX',
+    'RECOVERY_GRACE_MS_MIN',
+    'RECOVERY_GRACE_MS_MAX',
+    'RECOVERY_PASS_LIMIT_MIN',
+    'RECOVERY_PASS_LIMIT_MAX',
+    'CHECK_INTERVAL_MS_MIN',
+    'CHECK_INTERVAL_MS_MAX',
+    'AUDIT_INTERVAL_MS_MIN',
+    'AUDIT_INTERVAL_MS_MAX',
+    'HEARTBEAT_INTERVAL_MS_MIN',
+    'HEARTBEAT_INTERVAL_MS_MAX',
+    'SNAPSHOT_INTERVAL_MS_MIN',
+    'SNAPSHOT_INTERVAL_MS_MAX',
+    'WORKER_STATE_RETENTION_HOURS_MIN',
+    'WORKER_STATE_RETENTION_HOURS_MAX',
+    'TERMINAL_RECORD_RETENTION_HOURS_MIN',
+    'TERMINAL_RECORD_RETENTION_HOURS_MAX',
+    'PAUSED_AGE_MICROS_MIN',
+    'PAUSED_AGE_MICROS_MAX',
+    'RETENTION_DAYS_MIN',
+    'RETENTION_DAYS_MAX',
+    'HISTORY_LEAF_HORIZON_DAYS_MIN',
+    'HISTORY_LEAF_HORIZON_DAYS_MAX',
+    'HEARTBEAT_LEAF_HORIZON_HOURS_MIN',
+    'HEARTBEAT_LEAF_HORIZON_HOURS_MAX',
+    'MAINTENANCE_INTERVAL_SECONDS_MIN',
+    'MAINTENANCE_INTERVAL_SECONDS_MAX',
+    'SWEEP_INTERVAL_SECONDS_MIN',
+    'SWEEP_INTERVAL_SECONDS_MAX',
+    'DELETE_BATCH_SIZE_MIN',
+    'DELETE_BATCH_SIZE_MAX',
+    'RETRY_ATTEMPTS_MIN',
+    'RETRY_ATTEMPTS_MAX',
+    'RETRY_INITIAL_MS_MIN',
+    'RETRY_INITIAL_MS_MAX',
+    'RETRY_MAX_MS_MIN',
+    'RETRY_MAX_MS_MAX',
+    'POLL_INTERVAL_MS_MIN',
+    'POLL_INTERVAL_MS_MAX',
+    'PAYLOAD_BYTES_MIN',
+    'PAYLOAD_BYTES_MAX',
     'MANIFEST_VERSION_MIN',
     'MANIFEST_VERSION_MAX',
 ]
@@ -191,6 +260,72 @@ MILLISECONDS_MAX: Final = 4294967295
 
 CLAIM_COUNT_MIN: Final = 0
 CLAIM_COUNT_MAX: Final = 2147483647
+
+CLAIMED_STALE_THRESHOLD_MS_MIN: Final = 1000
+CLAIMED_STALE_THRESHOLD_MS_MAX: Final = 3600000
+
+STALE_THRESHOLD_MS_MIN: Final = 1000
+STALE_THRESHOLD_MS_MAX: Final = 7200000
+
+RECOVERY_GRACE_MS_MIN: Final = 0
+RECOVERY_GRACE_MS_MAX: Final = 3600000
+
+RECOVERY_PASS_LIMIT_MIN: Final = 3
+RECOVERY_PASS_LIMIT_MAX: Final = 1000
+
+CHECK_INTERVAL_MS_MIN: Final = 1000
+CHECK_INTERVAL_MS_MAX: Final = 600000
+
+AUDIT_INTERVAL_MS_MIN: Final = 1000
+AUDIT_INTERVAL_MS_MAX: Final = 86400000
+
+HEARTBEAT_INTERVAL_MS_MIN: Final = 1000
+HEARTBEAT_INTERVAL_MS_MAX: Final = 120000
+
+SNAPSHOT_INTERVAL_MS_MIN: Final = 1000
+SNAPSHOT_INTERVAL_MS_MAX: Final = 60000
+
+WORKER_STATE_RETENTION_HOURS_MIN: Final = 1
+WORKER_STATE_RETENTION_HOURS_MAX: Final = 8760
+
+TERMINAL_RECORD_RETENTION_HOURS_MIN: Final = 1
+TERMINAL_RECORD_RETENTION_HOURS_MAX: Final = 43800
+
+PAUSED_AGE_MICROS_MIN: Final = 1
+PAUSED_AGE_MICROS_MAX: Final = 9223372036854775807
+
+RETENTION_DAYS_MIN: Final = 1
+RETENTION_DAYS_MAX: Final = 1825
+
+HISTORY_LEAF_HORIZON_DAYS_MIN: Final = 2
+HISTORY_LEAF_HORIZON_DAYS_MAX: Final = 14
+
+HEARTBEAT_LEAF_HORIZON_HOURS_MIN: Final = 2
+HEARTBEAT_LEAF_HORIZON_HOURS_MAX: Final = 48
+
+MAINTENANCE_INTERVAL_SECONDS_MIN: Final = 60
+MAINTENANCE_INTERVAL_SECONDS_MAX: Final = 3600
+
+SWEEP_INTERVAL_SECONDS_MIN: Final = 30
+SWEEP_INTERVAL_SECONDS_MAX: Final = 86400
+
+DELETE_BATCH_SIZE_MIN: Final = 50
+DELETE_BATCH_SIZE_MAX: Final = 10000
+
+RETRY_ATTEMPTS_MIN: Final = 1
+RETRY_ATTEMPTS_MAX: Final = 10000
+
+RETRY_INITIAL_MS_MIN: Final = 100
+RETRY_INITIAL_MS_MAX: Final = 60000
+
+RETRY_MAX_MS_MIN: Final = 500
+RETRY_MAX_MS_MAX: Final = 300000
+
+POLL_INTERVAL_MS_MIN: Final = 1000
+POLL_INTERVAL_MS_MAX: Final = 300000
+
+PAYLOAD_BYTES_MIN: Final = 1
+PAYLOAD_BYTES_MAX: Final = 18446744073709551615
 
 MANIFEST_VERSION_MIN: Final = 1
 MANIFEST_VERSION_MAX: Final = 1
@@ -762,6 +897,216 @@ class WorkerClaimManifest:
     cluster_wide_cap: ClusterWideCap
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RecoveryManifest:
+    """Stale task detection and crash recovery (Python `RecoveryConfig`)."""
+
+    auto_requeue_stale_claimed: bool
+
+    claimed_stale_threshold_ms: int
+
+    auto_terminate_orphaned_workflow_tasks: bool
+
+    auto_fail_stale_running: bool
+
+    running_stale_threshold_ms: int
+
+    finalizing_stale_threshold_ms: int
+
+    crashed_worker_recovery_grace_ms: int
+
+    phase2_quarantine_after_attempts: int
+
+    workflow_recovery_failure_limit: int
+
+    check_interval_ms: int
+
+    orphan_task_audit_interval_ms: int
+
+    runner_heartbeat_interval_ms: int
+
+    claimer_heartbeat_interval_ms: int
+
+    worker_state_snapshot_interval_ms: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class WorkerStateRetentionHours:
+    """Prune a snapshot after `hours` hours."""
+
+    kind: Literal['HOURS'] = 'HOURS'
+
+    hours: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class WorkerStateRetentionNoPruning:
+    """Never prune a snapshot."""
+
+    kind: Literal['NO_PRUNING'] = 'NO_PRUNING'
+
+
+type WorkerStateRetention = WorkerStateRetentionHours | WorkerStateRetentionNoPruning
+"""How long worker state snapshots are kept."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TerminalRecordRetentionHours:
+    """Prune a terminal workflow record after `hours` hours."""
+
+    kind: Literal['HOURS'] = 'HOURS'
+
+    hours: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TerminalRecordRetentionNoPruning:
+    """Never prune a terminal workflow record."""
+
+    kind: Literal['NO_PRUNING'] = 'NO_PRUNING'
+
+
+type TerminalRecordRetention = TerminalRecordRetentionHours | TerminalRecordRetentionNoPruning
+"""How long terminal workflow records are kept."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PausedWorkflowExpiryAfter:
+    """A workflow paused for longer than `micros` microseconds expires."""
+
+    kind: Literal['AFTER'] = 'AFTER'
+
+    micros: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PausedWorkflowExpiryNoExpiry:
+    """A paused workflow never expires."""
+
+    kind: Literal['NO_EXPIRY'] = 'NO_EXPIRY'
+
+
+type PausedWorkflowExpiry = PausedWorkflowExpiryAfter | PausedWorkflowExpiryNoExpiry
+"""When a paused workflow expires."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class QueueRetentionDays:
+    """`days` whole days."""
+
+    kind: Literal['DAYS'] = 'DAYS'
+
+    days: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class QueueRetentionForever:
+    """For ever."""
+
+    kind: Literal['FOREVER'] = 'FOREVER'
+
+
+type QueueRetention = QueueRetentionDays | QueueRetentionForever
+"""How long a task sent on a queue keeps its history record."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RetentionManifest:
+    """How long records live and how their storage is kept ahead (Python
+    `RetentionConfig`).
+    """
+
+    worker_state_retention: WorkerStateRetention
+
+    terminal_record_retention: TerminalRecordRetention
+
+    paused_workflow_auto_cancel_after: PausedWorkflowExpiry
+
+    history_leaf_horizon_days: int
+
+    heartbeat_leaf_horizon_hours: int
+
+    retention_periods: tuple[int, ...]
+    """Finite periods a send may choose besides the default and the mapped
+    periods.
+    """
+
+    queue_retention: dict[str, QueueRetention]
+    """The retention of each mapped queue, by queue name."""
+
+    partition_maintenance_interval_s: int
+
+    retention_sweep_interval_s: int
+
+    retention_delete_batch_size: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RetryAttemptLimitAttempts:
+    """At most `attempts` attempts."""
+
+    kind: Literal['ATTEMPTS'] = 'ATTEMPTS'
+
+    attempts: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RetryAttemptLimitNoLimit:
+    """No limit on the attempts (Python `db_retry_max_attempts=0`)."""
+
+    kind: Literal['NO_LIMIT'] = 'NO_LIMIT'
+
+
+type RetryAttemptLimit = RetryAttemptLimitAttempts | RetryAttemptLimitNoLimit
+"""How often the backoff after a database error tries again."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ResilienceManifest:
+    """Retry and backoff after database errors, and the poll interval (Python
+    `WorkerResilienceConfig`).
+    """
+
+    db_retry_initial_ms: int
+
+    db_retry_max_ms: int
+
+    db_retry_max_attempts: RetryAttemptLimit
+
+    notify_poll_interval_ms: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PayloadLimitBytes:
+    """A threshold of `bytes` bytes of UTF-8 text."""
+
+    kind: Literal['BYTES'] = 'BYTES'
+
+    bytes: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PayloadLimitNoLimit:
+    """No threshold (Python `None`)."""
+
+    kind: Literal['NO_LIMIT'] = 'NO_LIMIT'
+
+
+type PayloadLimit = PayloadLimitBytes | PayloadLimitNoLimit
+"""A payload size threshold."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PayloadManifest:
+    """The size guard of serialized payloads (Python `PayloadPolicy`)."""
+
+    warn_bytes: PayloadLimit
+    """Log a warning for a payload above this size."""
+
+    reject_bytes: PayloadLimit
+    """Refuse an enqueue whose payload is above this size."""
+
+
 type Execution = Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']
 """How a worker runs a task. The column `execution` holds one of these values.
 The executor of the worker uses this type too (`ExecutionClass` there):
@@ -782,13 +1127,41 @@ serializes as its stored value.
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ChildCommandManifest:
-    """The program that starts each child and its first arguments. The core
-    appends the descriptor number of the child's socket and the worker pid.
+    """The program that starts each child and its first arguments, the
+    interpreter flags included. The core appends the descriptor number of
+    the child's socket and the worker pid.
     """
 
     program: str
 
     args: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PreloadLaunchCommand:
+    """The program and its first arguments. The core appends the descriptor
+    number of the preload's socket, the worker pid and the preload mode
+    (`library` or `app`).
+    """
+
+    kind: Literal['COMMAND'] = 'COMMAND'
+
+    command: ChildCommandManifest
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PreloadLaunchNoPreloadProgram:
+    """The child program has no preload process: every child starts with
+    `exec`.
+    """
+
+    kind: Literal['NO_PRELOAD_PROGRAM'] = 'NO_PRELOAD_PROGRAM'
+
+
+type PreloadLaunch = PreloadLaunchCommand | PreloadLaunchNoPreloadProgram
+"""How the preload process of a worker starts (Linux). A profile whose
+`preload` is `LIBRARY` or `APP` runs it.
+"""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -836,6 +1209,8 @@ class ChildLaunchManifest:
 
     command: ChildCommandManifest
 
+    preload: PreloadLaunch
+
     program: ChildProgram
 
     log_level: WorkerLogLevel
@@ -861,6 +1236,14 @@ class WorkerManifest:
     """The profile that the start asks for (`horsies worker --profile`)."""
 
     claim: WorkerClaimManifest
+
+    recovery: RecoveryManifest
+
+    retention: RetentionManifest
+
+    resilience: ResilienceManifest
+
+    payload: PayloadManifest
 
     tasks: dict[str, Execution]
     """The execution class of each task that the worker registered, by task

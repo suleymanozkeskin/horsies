@@ -98,13 +98,35 @@ fn manifest(profiles: Value, request: Value) -> Value {
             "max_claim_renew_age_ms": 180_000,
             "cluster_wide_cap": {"kind": "TASKS", "tasks": 20}
         },
+        "recovery": recovery_section(),
+        "retention": retention_section(),
+        "resilience": {
+            "db_retry_initial_ms": 250,
+            "db_retry_max_ms": 20_000,
+            "db_retry_max_attempts": {"kind": "ATTEMPTS", "attempts": 7},
+            "notify_poll_interval_ms": 4_000
+        },
+        "payload": {
+            "warn_bytes": {"kind": "BYTES", "bytes": 1_048_576},
+            "reject_bytes": {"kind": "NO_LIMIT"}
+        },
         "tasks": {
             "app.tasks.add": "ISOLATED",
             "app.tasks.fetch": "SHARED_ASYNC",
             "app.tasks.resize": "SHARED_THREAD"
         },
         "child_launch": {
-            "command": {"program": "/usr/bin/python3", "args": ["-m", "horsies.core.worker.child_main"]},
+            "command": {
+                "program": "/usr/bin/python3",
+                "args": ["-X", "dev", "-m", "horsies.core.worker.child_main"]
+            },
+            "preload": {
+                "kind": "COMMAND",
+                "command": {
+                    "program": "/usr/bin/python3",
+                    "args": ["-X", "dev", "-m", "horsies.core.worker.preload_main"]
+                }
+            },
             "program": {
                 "kind": "PYTHON",
                 "app_locator": "app.main:app",
@@ -115,6 +137,45 @@ fn manifest(profiles: Value, request: Value) -> Value {
             },
             "log_level": "INFO"
         }
+    })
+}
+
+/// A recovery section with a value of its own in every field.
+fn recovery_section() -> Value {
+    json!({
+        "auto_requeue_stale_claimed": true,
+        "claimed_stale_threshold_ms": 120_000,
+        "auto_terminate_orphaned_workflow_tasks": false,
+        "auto_fail_stale_running": true,
+        "running_stale_threshold_ms": 300_000,
+        "finalizing_stale_threshold_ms": 400_000,
+        "crashed_worker_recovery_grace_ms": 0,
+        "phase2_quarantine_after_attempts": 25,
+        "workflow_recovery_failure_limit": 30,
+        "check_interval_ms": 30_000,
+        "orphan_task_audit_interval_ms": 60_000,
+        "runner_heartbeat_interval_ms": 20_000,
+        "claimer_heartbeat_interval_ms": 25_000,
+        "worker_state_snapshot_interval_ms": 15_000
+    })
+}
+
+/// A retention section with a value of its own in every field.
+fn retention_section() -> Value {
+    json!({
+        "worker_state_retention": {"kind": "HOURS", "hours": 168},
+        "terminal_record_retention": {"kind": "NO_PRUNING"},
+        "paused_workflow_auto_cancel_after": {"kind": "AFTER", "micros": 86_400_000_001_u64},
+        "history_leaf_horizon_days": 3,
+        "heartbeat_leaf_horizon_hours": 6,
+        "retention_periods": [7, 90],
+        "queue_retention": {
+            "high": {"kind": "DAYS", "days": 14},
+            "low": {"kind": "FOREVER"}
+        },
+        "partition_maintenance_interval_s": 900,
+        "retention_sweep_interval_s": 300,
+        "retention_delete_batch_size": 500
     })
 }
 
@@ -495,4 +556,180 @@ fn a_queue_priority_outside_one_to_a_hundred_is_refused() {
         // path ends at the enum.
         assert!(refused_path(&document).starts_with("claim.queues"));
     }
+}
+
+/// Every field of the recovery section reaches the config type.
+#[test]
+fn the_recovery_section_maps_to_the_config_field_by_field() {
+    let manifest = parsed(&manifest(json!({"batch": full_profile()}), named("batch")));
+    let config = manifest.recovery.to_config();
+    assert!(config.auto_requeue_stale_claimed);
+    assert_eq!(config.claimed_stale_threshold_ms, 120_000);
+    assert!(!config.auto_terminate_orphaned_workflow_tasks);
+    assert!(config.auto_fail_stale_running);
+    assert_eq!(config.running_stale_threshold_ms, 300_000);
+    assert_eq!(config.finalizing_stale_threshold_ms, 400_000);
+    assert_eq!(config.crashed_worker_recovery_grace_ms, 0);
+    assert_eq!(config.phase2_quarantine_after_attempts, 25);
+    assert_eq!(config.workflow_recovery_failure_limit, 30);
+    assert_eq!(config.check_interval_ms, 30_000);
+    assert_eq!(config.orphan_task_audit_interval_ms, 60_000);
+    assert_eq!(config.runner_heartbeat_interval_ms, 20_000);
+    assert_eq!(config.claimer_heartbeat_interval_ms, 25_000);
+    assert_eq!(config.worker_state_snapshot_interval_ms, 15_000);
+    assert!(config.validate().is_empty(), "{:?}", config.validate());
+}
+
+/// Every field of the retention section reaches the config type; a period
+/// is whole days and the paused age is exact to the microsecond.
+#[test]
+fn the_retention_section_maps_to_the_config_field_by_field() {
+    let manifest = parsed(&manifest(json!({"batch": full_profile()}), named("batch")));
+    let config = manifest.retention.to_config();
+    assert_eq!(config.worker_state_retention_hours, Some(168));
+    assert_eq!(config.terminal_record_retention_hours, None);
+    assert_eq!(
+        config.paused_workflow_auto_cancel_after,
+        Some(chrono::Duration::microseconds(86_400_000_001))
+    );
+    assert_eq!(config.history_leaf_horizon_days, 3);
+    assert_eq!(config.heartbeat_leaf_horizon_hours, 6);
+    assert_eq!(
+        config.retention_periods,
+        [chrono::Duration::days(7), chrono::Duration::days(90)]
+    );
+    assert_eq!(config.queue_retention.len(), 2);
+    assert_eq!(
+        config.queue_retention.get("high"),
+        Some(&Some(chrono::Duration::days(14)))
+    );
+    assert_eq!(config.queue_retention.get("low"), Some(&None));
+    assert_eq!(config.partition_maintenance_interval_s, 900);
+    assert_eq!(config.retention_sweep_interval_s, 300);
+    assert_eq!(config.retention_delete_batch_size, 500);
+    assert!(config.validate().is_empty(), "{:?}", config.validate());
+}
+
+/// The other variant of each retention choice.
+#[test]
+fn a_retention_rule_that_is_off_maps_to_none() {
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    document["retention"]["worker_state_retention"] = json!({"kind": "NO_PRUNING"});
+    document["retention"]["terminal_record_retention"] = json!({"kind": "HOURS", "hours": 43_800});
+    document["retention"]["paused_workflow_auto_cancel_after"] = json!({"kind": "NO_EXPIRY"});
+    let config = parsed(&document).retention.to_config();
+    assert_eq!(config.worker_state_retention_hours, None);
+    assert_eq!(config.terminal_record_retention_hours, Some(43_800));
+    assert_eq!(config.paused_workflow_auto_cancel_after, None);
+}
+
+/// A period outside 1 to 1825 days and a paused age of 0 are refused.
+#[test]
+fn a_retention_value_outside_its_bounds_is_refused() {
+    for days in [
+        0,
+        u32::from(crate::core::history::periods::MAX_RETENTION_DAYS) + 1,
+    ] {
+        let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+        document["retention"]["retention_periods"] = json!([days]);
+        assert!(
+            refused_path(&document).starts_with("retention.retention_periods"),
+            "{days}"
+        );
+    }
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    document["retention"]["paused_workflow_auto_cancel_after"] =
+        json!({"kind": "AFTER", "micros": 0});
+    assert!(refused_path(&document).starts_with("retention.paused_workflow_auto_cancel_after"));
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    document["retention"]["paused_workflow_auto_cancel_after"] =
+        json!({"kind": "AFTER", "micros": MAX_PAUSED_AGE_MICROS + 1});
+    assert!(refused_path(&document).starts_with("retention.paused_workflow_auto_cancel_after"));
+}
+
+/// The resilience section reaches the config type; no attempt limit is the
+/// config's 0.
+#[test]
+fn the_resilience_section_maps_to_the_config_and_no_limit_is_zero() {
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let config = parsed(&document).resilience.to_config();
+    assert_eq!(config.db_retry_initial_ms, 250);
+    assert_eq!(config.db_retry_max_ms, 20_000);
+    assert_eq!(config.db_retry_max_attempts, 7);
+    assert_eq!(config.notify_poll_interval_ms, 4_000);
+    document["resilience"]["db_retry_max_attempts"] = json!({"kind": "NO_LIMIT"});
+    assert_eq!(
+        parsed(&document)
+            .resilience
+            .to_config()
+            .db_retry_max_attempts,
+        0
+    );
+    document["resilience"]["db_retry_max_attempts"] = json!({"kind": "ATTEMPTS", "attempts": 0});
+    assert!(refused_path(&document).starts_with("resilience.db_retry_max_attempts"));
+}
+
+/// Each payload threshold maps to the config's `Option`; a threshold of 0
+/// bytes is refused.
+#[test]
+fn the_payload_section_maps_to_the_config_and_refuses_zero_bytes() {
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let config = parsed(&document).payload.to_config();
+    assert_eq!(config.warn_bytes, Some(1_048_576));
+    assert_eq!(config.reject_bytes, None);
+    document["payload"] = json!({
+        "warn_bytes": {"kind": "NO_LIMIT"},
+        "reject_bytes": {"kind": "BYTES", "bytes": MAX_PAYLOAD_BYTES}
+    });
+    let config = parsed(&document).payload.to_config();
+    assert_eq!(config.warn_bytes, None);
+    assert_eq!(config.reject_bytes, Some(MAX_PAYLOAD_BYTES));
+    document["payload"]["reject_bytes"] = json!({"kind": "BYTES", "bytes": 0});
+    assert!(refused_path(&document).starts_with("payload.reject_bytes"));
+}
+
+/// A missing section is refused with its name: no section has a default.
+#[test]
+fn a_missing_section_is_refused() {
+    for section in ["recovery", "retention", "resilience", "payload"] {
+        let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+        let removed = document
+            .as_object_mut()
+            .expect("a manifest is an object")
+            .remove(section);
+        assert!(removed.is_some(), "{section}");
+        assert!(
+            parse_worker_manifest(&document.to_string()).is_err(),
+            "a manifest without {section} is refused"
+        );
+    }
+}
+
+/// The preload command keeps its interpreter flags; a child program with no
+/// preload process parses too.
+#[test]
+fn the_preload_launch_parses_in_both_forms() {
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let preload = parsed(&document).child_launch.preload;
+    match preload {
+        PreloadLaunch::Command { command } => {
+            assert_eq!(command.program, "/usr/bin/python3");
+            assert_eq!(
+                command.args,
+                ["-X", "dev", "-m", "horsies.core.worker.preload_main"]
+            );
+        }
+        PreloadLaunch::NoPreloadProgram => panic!("the fixture has a preload command"),
+    }
+    document["child_launch"]["preload"] = json!({"kind": "NO_PRELOAD_PROGRAM"});
+    assert_eq!(
+        parsed(&document).child_launch.preload,
+        PreloadLaunch::NoPreloadProgram
+    );
+    let removed = document["child_launch"]
+        .as_object_mut()
+        .expect("the child launch is an object")
+        .remove("preload");
+    assert!(removed.is_some());
+    assert!(refused_path(&document).starts_with("child_launch"));
 }

@@ -35,7 +35,6 @@ from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.result import Err, is_err, is_ok
 from horsies.monitoring.task_actions import TaskActionEventLoopLimit
 from horsies.core.workflows.lifecycle import (
-    pause_workflow,
     resume_workflow,
     start_workflow_async,
 )
@@ -114,7 +113,7 @@ def _limited_handle() -> tuple[WorkflowHandle[Any], MagicMock]:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize('method', ['status_async', 'results_async', 'tasks_async', 'cancel_async'])
+@pytest.mark.parametrize('method', ['status_async', 'results_async', 'tasks_async'])
 def test_handle_wrap_methods_return_loop_limit(method: str) -> None:
     handle, broker = _limited_handle()
     loop_limit = broker.select_resources.return_value.err_value
@@ -171,12 +170,11 @@ def test_start_workflow_returns_loop_limit_before_any_attempt() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize('operation', [pause_workflow, resume_workflow])
-def test_pause_and_resume_return_loop_limit(operation: Any) -> None:
+def test_resume_returns_loop_limit() -> None:
     broker = MagicMock()
     loop_limit = attach_loop_limit(broker)
 
-    result = asyncio.run(operation(broker, WORKFLOW_ID))
+    result = asyncio.run(resume_workflow(broker, WORKFLOW_ID))
 
     assert is_err(result)
     assert result.err_value.code is HandleErrorCode.EVENT_LOOP_LIMIT

@@ -167,6 +167,12 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::claim::ClaimedRowRecord>()?;
     module.add_class::<operations::claim::ClaimPassRecord>()?;
     module.add_class::<operations::claim::ClaimPassFailed>()?;
+    module.add_class::<operations::coverage::CoverageRequestArgument>()?;
+    module.add_class::<operations::coverage::CoveredForeverRecord>()?;
+    module.add_class::<operations::coverage::CoveredUntilRecord>()?;
+    module.add_class::<operations::coverage::CoverageEnsuredRecord>()?;
+    module.add_class::<operations::coverage::CoverageEnsureFailedRecord>()?;
+    module.add_class::<operations::coverage::CoverageFailed>()?;
     module.add_class::<operations::enqueue::EnqueueRequest>()?;
     module.add_class::<operations::enqueue::Enqueued>()?;
     module.add_class::<operations::enqueue::SendSuppressed>()?;
@@ -229,6 +235,12 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::task_info::TaskInfoNotFound>()?;
     module.add_class::<operations::monitoring_window::MonitoringWindowRecord>()?;
     module.add_class::<operations::monitoring_window::WindowRefusedRecord>()?;
+    module.add_class::<operations::workflow_lifecycle::WorkflowPaused>()?;
+    module.add_class::<operations::workflow_lifecycle::WorkflowNotRunning>()?;
+    module.add_class::<operations::workflow_lifecycle::WorkflowCancelled>()?;
+    module.add_class::<operations::workflow_lifecycle::WorkflowNotCancellable>()?;
+    module.add_class::<operations::workflow_lifecycle::WorkflowAbsent>()?;
+    module.add_class::<operations::workflow_lifecycle::HandleFailed>()?;
     module.add_class::<scheduler::SchedulerStarted>()?;
     module.add_class::<scheduler::SchedulerStartRefused>()?;
     module.add_class::<scheduler::SchedulerStartFailed>()?;
