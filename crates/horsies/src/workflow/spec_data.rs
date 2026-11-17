@@ -325,9 +325,13 @@ mod tests {
         };
         let mut builder = WorkflowSpecBuilder::new("queues");
         builder.task(charge().queue("bulk"));
+        builder.task(charge().queue("bulk").priority(1));
         let spec = builder.build().unwrap();
         let client = client_spec(&spec, &custom).unwrap();
         assert_eq!(client.spec().tasks[0].queue.as_deref(), Some("bulk"));
         assert_eq!(client.spec().tasks[0].priority, Some(90));
+        // A node's own priority is kept on another queue.
+        assert_eq!(client.spec().tasks[1].queue.as_deref(), Some("bulk"));
+        assert_eq!(client.spec().tasks[1].priority, Some(1));
     }
 }

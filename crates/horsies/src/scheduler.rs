@@ -445,6 +445,43 @@ mod tests {
         let refusals = app.schedule_refusals(&schedule);
         assert_eq!(refusals[0].code, Some(ErrorCode::TaskNotRegistered));
         assert!(refusals[0].notes.iter().any(|note| note.contains("count")));
+        let text = refusals[0].to_string();
+        assert!(text.contains("schedule 'every'"), "{text}");
+        assert!(text.contains("task 'missing'"), "{text}");
+    }
+
+    /// A schedule on a queue that the app does not admit is refused before
+    /// any connection, with the schedule and the queue named.
+    #[test]
+    fn a_schedule_on_a_queue_that_the_app_does_not_admit_names_the_schedule_and_the_queue() {
+        let mut config = AppConfig::for_database_url("postgresql://localhost/horsies");
+        config.queue_mode = crate::QueueMode::Custom;
+        config.custom_queues = Some(vec![crate::CustomQueueConfig {
+            name: "fast".to_owned(),
+            priority: 1,
+            max_concurrency: Some(10),
+        }]);
+        let mut on_unknown = schedule("bad_queue_job", "count", json!({"count": 5}));
+        on_unknown.queue_name = Some("nonexistent_queue".to_owned());
+        config.schedule = Some(ScheduleConfig {
+            enabled: true,
+            schedules: vec![on_unknown],
+            ..ScheduleConfig::default()
+        });
+        let mut app = Horsies::new(config).unwrap();
+        app.register_with_queue(
+            "count",
+            crate::blocking_task_fn!(count_task, CountInput),
+            "fast",
+        )
+        .unwrap();
+        let schedule = app.config().schedule.clone().unwrap();
+        let refusals = app.schedule_refusals(&schedule);
+        assert_eq!(refusals.len(), 1);
+        assert_eq!(refusals[0].code, Some(ErrorCode::ConfigInvalidSchedule));
+        let text = refusals[0].to_string();
+        assert!(text.contains("bad_queue_job"), "{text}");
+        assert!(text.contains("nonexistent_queue"), "{text}");
     }
 
     #[test]

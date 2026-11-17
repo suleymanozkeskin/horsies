@@ -1,6 +1,6 @@
 -- The functions of 0004_lifecycle_functions.sql on a fresh install: each guarantee as a pass case and each refusal
 -- as a fail case. Single-session cases only; the two-session cases (lock order, a row that moves during a send)
--- are in test_baseline_lifecycle_functions.py. The caller runs the script in one transaction and rolls it back, so
+-- are in sql_tests/baseline_lifecycle_functions.rs. The caller runs the script in one transaction and rolls it back, so
 -- NOW() is one instant for the whole script: the cases place row times relative to it.
 --
 -- Every check calls lc_expect or lc_expect_sqlstate, which raise on a mismatch with the case label.
