@@ -239,6 +239,16 @@ written in Rust, on a new baseline schema.
   (`HRS-203`, "broker connectivity check failed" with the cause, "broker
   listener capability check failed"); the listener refusal adds the core's
   cause as a second note.
+- **`check(live=True)` compares the worker profiles through the core.**
+  The worker connection phase runs the core's check
+  (`CoreHandle.check_worker_connections`, the rule of the Python and Rust
+  clients) on the handle of the connectivity phase; the live check opens no
+  SQLAlchemy engine. The count is that of the core's worker: its listener
+  opens one connection (before: 2), and a `session_database_url` that
+  differs from `database_url` adds a session pool of the parent pool's size.
+  The errors keep `CHECK_WORKER_CONNECTIONS` (`HRS-219`) and their texts; a
+  limit that is not read, or a core that cannot run the call, is one error
+  with the cause as its note, as before.
 
 ### Fixed
 

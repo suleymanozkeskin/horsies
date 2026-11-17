@@ -747,3 +747,37 @@ fn the_preload_launch_parses_in_both_forms() {
     assert!(removed.is_some());
     assert!(refused_path(&document).starts_with("child_launch"));
 }
+
+// --- the profile set of the live check ----------------------------------------
+
+/// The profile set that the Python live check sends is read as the
+/// `profiles` member of a worker manifest is.
+#[test]
+fn a_profile_set_parses_as_the_profiles_of_a_manifest() {
+    let profiles = json!({"batch": full_profile(), "small": isolated_profile(1)});
+
+    let set = parse_worker_profiles(&profiles.to_string()).expect("a valid profile set");
+
+    let from_manifest = parsed(&manifest(profiles, named("batch"))).profile_set();
+    assert_eq!(set, from_manifest);
+}
+
+/// An empty object is the set of an app with no profile.
+#[test]
+fn an_empty_profile_set_parses_to_no_profile() {
+    let set = parse_worker_profiles("{}").expect("an empty profile set");
+    assert!(set.is_empty());
+}
+
+/// A profile with a field the manifest does not have is refused with its
+/// path, as in a worker manifest.
+#[test]
+fn a_profile_set_with_an_unknown_field_is_refused() {
+    let mut profile = isolated_profile(1);
+    profile["children"] = json!(3);
+
+    let refused = parse_worker_profiles(&json!({"small": profile}).to_string())
+        .expect_err("an unknown field is refused");
+
+    assert!(refused.field_path.starts_with("small"), "{refused}");
+}
