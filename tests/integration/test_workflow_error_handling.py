@@ -8,11 +8,13 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
+from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import (
     TaskNode,
@@ -44,7 +46,9 @@ from .conftest import (
 )
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
 from tests.integration.conftest import finish_task
-from tests.broker_resources_support import current_resources, replaced_resources
+
+UNREACHABLE_DATABASE_URL = 'postgresql://postgres:none@127.0.0.1:1/none'
+"""A port where no server listens: each core call fails at the connect."""
 
 
 # =============================================================================
@@ -2508,59 +2512,49 @@ class TestWorkflowStartErrors:
         self,
         setup: _SetupTuple,
     ) -> None:
-        """Schema init failure returns Err(ENQUEUE_FAILED)."""
-        from unittest.mock import AsyncMock, patch
+        """Schema init failure returns Err(ENQUEUE_FAILED).
 
-        from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
-        from horsies.core.types.result import Err as ResultErr
-
+        The start runs in the core, which installs the schema once per handle
+        before the first statement. The broker installs on a database that
+        refuses the connection."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'schema_fail')
-
         spec = make_workflow_spec('schema_fail_wf', [TaskNode(fn=task_a, kwargs={'value': 1})], broker)
+        unreachable = PostgresBroker(
+            PostgresConfig(database_url=SecretStr(UNREACHABLE_DATABASE_URL)),
+        )
 
-        mock_err = ResultErr(BrokerOperationFailed(
-            code=BrokerErrorCode.SCHEMA_INIT_FAILED,
-            message='connection refused',
-            retryable=True,
-            exception=ConnectionError('refused'),
-        ))
-
-        with patch.object(broker, 'ensure_schema_initialized', new_callable=AsyncMock, return_value=mock_err):
-            r = await start_workflow_async(spec, broker)
+        try:
+            r = await start_workflow_async(spec, unreachable)
+        finally:
+            _ = await unreachable.close_async()
 
         assert is_err(r)
         assert r.err_value.code == WorkflowStartErrorCode.ENQUEUE_FAILED
         assert r.err_value.retryable is True
-        assert 'connection refused' in r.err_value.message
+        assert 'Schema initialization failed' in r.err_value.message
+        assert 'connection refused' in r.err_value.message.lower()
         assert r.err_value.workflow_id  # always populated
 
     async def test_start_db_transient_error(
         self,
         setup: _SetupTuple,
     ) -> None:
-        """DB transient error returns Err(DB_OPERATION_FAILED, retryable=True)."""
-        from unittest.mock import AsyncMock, MagicMock
+        """DB transient error returns Err(ENQUEUE_FAILED, retryable=True).
 
-        from sqlalchemy.exc import OperationalError
-
+        The start runs in the core; its database refuses the connection."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'db_err')
-
         spec = make_workflow_spec('db_err_wf', [TaskNode(fn=task_a, kwargs={'value': 1})], broker)
+        unreachable = PostgresBroker(
+            PostgresConfig(database_url=SecretStr(UNREACHABLE_DATABASE_URL)),
+            assume_initialized=True,
+        )
 
-        # Mock session_factory to raise a retryable error
-        original_factory = current_resources(broker).session_factory
-
-        class _FailingFactory:
-            async def __aenter__(self) -> Any:
-                raise OperationalError('connection refused', params=None, orig=Exception())
-
-            async def __aexit__(self, *args: Any) -> None:
-                pass
-
-        with replaced_resources(broker, session_factory=MagicMock(return_value=_FailingFactory())):
-            r = await start_workflow_async(spec, broker)
+        try:
+            r = await start_workflow_async(spec, unreachable)
+        finally:
+            _ = await unreachable.close_async()
 
         assert is_err(r)
         assert r.err_value.code == WorkflowStartErrorCode.ENQUEUE_FAILED
@@ -2572,11 +2566,14 @@ class TestWorkflowStartErrors:
         setup: _SetupTuple,
     ) -> None:
         """A start that owes a child start runs in one transaction: a failure
-        of the child start after the start statement leaves no row."""
-        import uuid
-        from unittest.mock import MagicMock
+        of the child start after the start statement leaves no row.
 
-        from sqlalchemy.exc import OperationalError
+        The start runs in the core. The child of the broken root cannot be
+        built, so its node fails, and the start owes the start of the child
+        that waits for it (allow_failed_deps): the start statement and that
+        child start run in one transaction. A trigger refuses the insert of
+        the second child's workflow row."""
+        import uuid
 
         session, broker, app = setup
         task_a = make_simple_task(app, 'rollback_test')
@@ -2608,46 +2605,47 @@ class TestWorkflowStartErrors:
         spec = app.workflow(
             'rollback_wf', [broken, started_after], definition_key=f'rollback-wf-{suffix}',
         )
+        await session.execute(
+            text(f"""
+                CREATE FUNCTION it_refuse_child_start() RETURNS trigger
+                LANGUAGE plpgsql AS $body$
+                BEGIN
+                    IF NEW.name = '{RollbackChild.name}' THEN
+                        RAISE EXCEPTION 'child start refused by the test';
+                    END IF;
+                    RETURN NEW;
+                END
+                $body$
+            """),
+        )
+        await session.execute(
+            text(
+                'CREATE TRIGGER it_refuse_child_start BEFORE INSERT ON horsies_workflows '
+                'FOR EACH ROW EXECUTE FUNCTION it_refuse_child_start()'
+            ),
+        )
+        await session.commit()
 
-        # The start statement runs; the child start that it owes fails.
-        original_factory = current_resources(broker).session_factory
-
-        def _failing_session_factory() -> Any:
-            ctx = original_factory()
-            call_count = 0
-
-            class _Ctx:
-                async def __aenter__(self_inner) -> Any:
-                    sess = await ctx.__aenter__()
-                    original_execute = sess.execute
-
-                    async def patched_execute(*a: Any, **kw: Any) -> Any:
-                        nonlocal call_count
-                        call_count += 1
-                        if call_count >= 2:
-                            raise OperationalError(
-                                'child start', params=None,
-                                orig=Exception('Induced child start failure'),
-                            )
-                        return await original_execute(*a, **kw)
-
-                    sess.execute = patched_execute  # type: ignore[method-assign]
-                    return sess
-
-                async def __aexit__(self_inner, *args: Any) -> None:
-                    await ctx.__aexit__(*args)
-
-            return _Ctx()
-
-        with replaced_resources(broker, session_factory=MagicMock(side_effect=_failing_session_factory)):
+        try:
             r = await start_workflow_async(spec, broker)
+        finally:
+            await session.execute(
+                text('DROP TRIGGER it_refuse_child_start ON horsies_workflows'),
+            )
+            await session.execute(text('DROP FUNCTION it_refuse_child_start()'))
+            await session.commit()
 
         assert is_err(r)
         assert r.err_value.code == WorkflowStartErrorCode.ENQUEUE_FAILED
+        assert 'child start refused by the test' in r.err_value.message
 
         # Verify no rows persisted
         wf_check = await session.execute(
-            text("SELECT count(*) FROM horsies_workflows WHERE name = 'rollback_wf'"),
+            text(
+                'SELECT count(*) FROM horsies_workflows '
+                "WHERE name IN ('rollback_wf', :broken, :child)"
+            ),
+            {'broken': RollbackBroken.name, 'child': RollbackChild.name},
         )
         assert wf_check.scalar() == 0
 
