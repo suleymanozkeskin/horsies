@@ -14,6 +14,9 @@ use super::spec_support::{
     seed_failures, seed_live, seed_terminal, set_history_error_code, window, Ending, LiveTask,
     SpecDatabase,
 };
+use crate::broker::lifecycle_tests::support::{
+    database_options, unpinged_single_connection_pool, WireProxy,
+};
 use crate::broker::PostgresBroker;
 use crate::core::task::error::{ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode};
 use crate::monitoring::{
@@ -180,6 +183,43 @@ async fn facets_count_each_distinct_task_name_and_queue() {
         counts_of(&facets.queues),
         BTreeMap::from([("default".to_owned(), 1), ("fast".to_owned(), 2)])
     );
+    database.drop().await;
+}
+
+/// Python `TestTaskFacets::test_a_poll_runs_one_statement_for_both_sides`:
+/// one facets read is one round trip, for the live and the history side.
+/// The read runs through a proxy that counts round trips. A first read
+/// opens the connection and prepares the statement, so the counted read is
+/// the steady state of the statement cache; it runs within the idle ping
+/// limit of the pool, so no ping is sent before it.
+#[tokio::test]
+#[serial]
+async fn a_facets_poll_is_one_round_trip_for_both_sides() {
+    let database = SpecDatabase::create().await;
+    seed_live(&database.pool, &LiveTask::pending("alpha_task")).await;
+    seed_terminal(
+        &database.pool,
+        &LiveTask::pending("beta_task"),
+        Ending::failed("BOOM"),
+    )
+    .await;
+    let upstream = database_options(&database.pool);
+    let proxy = WireProxy::start(&upstream).await;
+    let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
+    let broker = PostgresBroker::from_pool(proxied.clone());
+    let query = TaskFacetsQuery::new(window());
+    let _warm_up = facets_of(&broker, &query).await;
+
+    proxy.reset_round_trips();
+    let facets = facets_of(&broker, &query).await;
+    let round_trips = proxy.round_trips();
+
+    assert_eq!(round_trips, 1);
+    assert_eq!(
+        counts_of(&facets.task_names),
+        BTreeMap::from([("alpha_task".to_owned(), 1), ("beta_task".to_owned(), 1)])
+    );
+    proxied.close().await;
     database.drop().await;
 }
 
