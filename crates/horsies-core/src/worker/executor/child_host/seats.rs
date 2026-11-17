@@ -14,8 +14,10 @@
 //!   child. A body that returns before its deadline with work alive waits
 //!   the cancel grace for it, then sends `leftover_cancel` and aborts it in
 //!   rounds, then `leftover_stuck`. A run that timed out or needed a cancel
-//!   writes no marker. A body that holds a runtime thread for 5 s in one
-//!   poll is reported with `loop_blocked`, and the parent kills the child.
+//!   writes no marker. A body, or work it started with `spawn_in_run`,
+//!   that holds a runtime thread for 5 s in one poll is reported with
+//!   `loop_blocked` and its run as the culprit, and the parent kills the
+//!   child.
 //! - Shared thread: up to `seats` blocking bodies at once, each on a seat
 //!   thread. A thread cannot be stopped: at the deadline `deadline_fired` is
 //!   sent and the body runs on; when it returns, its value is dropped and
@@ -26,12 +28,9 @@
 //! started with `spawn_in_run` belongs to the run (`run_work`).
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::io;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::task::{Context, Poll};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -44,19 +43,19 @@ use super::run::{
     start_attempt, HostContext, Prepared, RunFacts, Started,
 };
 use super::run_work::{
-    left_report, stuck_report, Alive, RoundsEnd, RunScope, WorkWait, ISOLATED_LEFTOVER_GRACE,
+    left_report, millis_since, stuck_report, Alive, PollsNow, RoundsEnd, RunPolls, RunScope,
+    WorkWait, ISOLATED_LEFTOVER_GRACE,
 };
 use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask};
 use crate::core::task::result::TaskResult;
 use crate::worker::execution::execute_task;
 use crate::worker::executor::protocol::{
-    BlockedWhere, BodyEnd, BodyReturnedFrame, CancelGraceMs, ChildFrame, DispatchNumber,
-    FailureDetail, IsolatedWork, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame,
-    LeftoverCancelFrame, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, NoLeftWork,
-    ParentFrame, ResultFrame, RunEnd, RunFrame, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
-    SharedRunFrame, SharedWork, StoredOptionsRefusal, TaskInputText, TaskTimeoutMs,
-    LOOP_BLOCK_LIMIT,
+    BodyEnd, BodyReturnedFrame, CancelGraceMs, ChildFrame, DispatchNumber, FailureDetail,
+    IsolatedWork, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame, LeftoverCancelFrame,
+    LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, NoLeftWork, ParentFrame, ResultFrame,
+    RunEnd, RunFrame, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame, SharedRunFrame,
+    SharedWork, StoredOptionsRefusal, TaskInputText, TaskTimeoutMs, LOOP_BLOCK_LIMIT,
 };
 
 /// How often the poll watch reads the polls in progress.
@@ -132,7 +131,6 @@ async fn run_isolated(context: &HostContext, run: RunFrame) {
         task_id,
         task_name,
         worker_id,
-        task_kind,
         claimed_at,
         work,
         input,
@@ -141,7 +139,6 @@ async fn run_isolated(context: &HostContext, run: RunFrame) {
         task_id,
         task_name,
         worker_id,
-        task_kind,
         claimed_at,
     };
     if let Started::Stopped(reason) = start_attempt(context, &facts).await {
@@ -247,7 +244,6 @@ fn facts_of(run: &SharedRunFrame) -> RunFacts {
         task_id: run.task_id,
         task_name: run.task_name.clone(),
         worker_id: run.worker_id.clone(),
-        task_kind: run.task_kind,
         claimed_at: run.claimed_at,
     }
 }
@@ -402,13 +398,9 @@ async fn async_body(
                 )
             }
         };
-    let scope = RunScope::new();
-    let poll_started = watch.register(run_ref, &facts.task_name);
+    let scope = RunScope::timed(watch.register(run_ref));
     let body = async move { task.execute(&input).await };
-    let mut handle = scope.spawn_body(
-        &facts.task_name,
-        Watched::new(body, poll_started, watch.epoch),
-    );
+    let mut handle = scope.spawn_body(&facts.task_name, body);
     let deadline = tokio::time::sleep(Duration::from_millis(timeout.get()));
     tokio::pin!(deadline);
     let outcome = tokio::select! {
@@ -505,40 +497,6 @@ async fn stop_after_deadline(
     }
 }
 
-/// The poll of an async body, timed for the poll watch.
-struct Watched<F> {
-    inner: Pin<Box<F>>,
-    poll_started: Arc<AtomicU64>,
-    epoch: Instant,
-}
-
-impl<F> Watched<F> {
-    fn new(inner: F, poll_started: Arc<AtomicU64>, epoch: Instant) -> Self {
-        Self {
-            inner: Box::pin(inner),
-            poll_started,
-            epoch,
-        }
-    }
-}
-
-fn millis_since(epoch: Instant) -> u64 {
-    u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
-impl<F: Future> Future for Watched<F> {
-    type Output = F::Output;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
-        // 0 means "no poll in progress", so a poll start is stored from 1.
-        let started = millis_since(self.epoch).saturating_add(1);
-        self.poll_started.store(started, Ordering::Release);
-        let polled = self.inner.as_mut().poll(cx);
-        self.poll_started.store(0, Ordering::Release);
-        polled
-    }
-}
-
 /// Whether a run's blocked poll was reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BlockReport {
@@ -548,8 +506,8 @@ enum BlockReport {
 
 struct WatchedRun {
     run: RunRef,
-    location: BlockedWhere,
-    poll_started: Arc<AtomicU64>,
+    /// The poll starts of the run's body and of each piece of its work.
+    polls: RunPolls,
     report: BlockReport,
 }
 
@@ -596,41 +554,47 @@ impl PollWatch {
         Ok(watch)
     }
 
-    pub(super) fn register(&self, run: RunRef, task_name: &str) -> Arc<AtomicU64> {
-        let poll_started = Arc::new(AtomicU64::new(0));
+    /// Watch the polls of `run`: the run's scope times its body and each
+    /// piece of its work in the returned polls.
+    pub(super) fn register(&self, run: RunRef) -> RunPolls {
+        let polls = RunPolls::new(self.epoch);
         lock_runs(&self.runs).insert(
             run.dispatch,
             WatchedRun {
                 run,
-                location: BlockedWhere::cut(task_name),
-                poll_started: Arc::clone(&poll_started),
+                polls: polls.clone(),
                 report: BlockReport::NotReported,
             },
         );
-        poll_started
+        polls
     }
 
     fn unregister(&self, dispatch: DispatchNumber) {
         let _removed = lock_runs(&self.runs).remove(&dispatch);
     }
 
-    /// The `loop_blocked` frames of runs whose current poll passed the
-    /// limit, each reported once.
+    /// The `loop_blocked` frames of runs whose body or work has a poll in
+    /// progress past the limit, each run reported once. The location is the
+    /// task name for the body, the work's name for work.
     pub(super) fn blocked_reports(&self) -> Vec<ChildFrame> {
         let now = millis_since(self.epoch).saturating_add(1);
         let limit = u64::try_from(LOOP_BLOCK_LIMIT.as_millis()).unwrap_or(u64::MAX);
         let mut runs = lock_runs(&self.runs);
         let mut frames = Vec::new();
         for watched in runs.values_mut() {
-            let started = watched.poll_started.load(Ordering::Acquire);
-            let blocked_ms = now.saturating_sub(started);
-            let blocked = started != 0 && blocked_ms >= limit;
-            if blocked && watched.report == BlockReport::NotReported {
+            let (blocked_ms, location) = match watched.polls.longest_poll(now) {
+                PollsNow::NoPollInProgress => continue,
+                PollsNow::Longest {
+                    blocked_ms,
+                    location,
+                } => (blocked_ms, location),
+            };
+            if blocked_ms >= limit && watched.report == BlockReport::NotReported {
                 watched.report = BlockReport::Reported;
                 frames.push(ChildFrame::LoopBlocked(LoopBlockedFrame {
                     culprit: LoopCulprit::Run(watched.run),
                     blocked_ms,
-                    location: watched.location.clone(),
+                    location,
                 }));
             }
         }

@@ -137,6 +137,7 @@ const ENQUEUE_REQUEST_PARAMETERS: &[StubParameter] = &[
         "RetentionDefault | RetentionForever | RetentionPeriod",
     ),
     keyword("rerun_input", "Literal['APP_DEFAULT', 'KEEP', 'DROP']"),
+    keyword("send_kind", "Literal['FIRST', 'REPEAT']"),
 ];
 
 const ENQUEUE_PARAMETERS: &[StubParameter] = &[positional("request", "EnqueueRequest")];
@@ -148,6 +149,10 @@ const RELEASE_CLAIMS_REQUEST_PARAMETERS: &[StubParameter] = &[
 const RELEASE_CLAIMS_PARAMETERS: &[StubParameter] =
     &[positional("request", "ReleaseClaimsRequest")];
 const REQUEUE_STALE_CLAIMED_PARAMETERS: &[StubParameter] = &[positional("stale_after_ms", "int")];
+const MARK_STALE_RUNNING_PARAMETERS: &[StubParameter] = &[
+    positional("stale_after_ms", "int"),
+    positional("finalizing_stale_after_ms", "int"),
+];
 const CANCEL_TASK_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("include_running", "bool"),
@@ -167,10 +172,12 @@ const TASK_INFO_OUTCOME: &str = "TaskInfoRecord | TaskInfoNotFound | BrokerFailu
 const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
     "StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed";
 const RELEASE_CLAIMS_OUTCOME: &str = "ClaimsReleased | ReleaseFailed";
+const MARK_STALE_RUNNING_OUTCOME: &str =
+    "StaleRunningRecovered | StaleRunningScanFull | StaleRunningScanFailed";
 const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
      CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
 
-const CORE_HANDLE_METHODS: [StubFunction; 15] = [
+const CORE_HANDLE_METHODS: [StubFunction; 16] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -223,7 +230,7 @@ const CORE_HANDLE_METHODS: [StubFunction; 15] = [
         name: "enqueue",
         parameters: ENQUEUE_PARAMETERS,
         returns: TypeText::Plain(SEND_OUTCOME),
-        doc: "Enqueue one task. Writes; a resend of the same request is safe.",
+        doc: "Enqueue one task, in one statement. Writes; a resend with send_kind REPEAT is safe.",
     },
     StubFunction {
         name: "enqueue_async",
@@ -236,6 +243,12 @@ const CORE_HANDLE_METHODS: [StubFunction; 15] = [
         parameters: REQUEUE_STALE_CLAIMED_PARAMETERS,
         returns: TypeText::FutureOf(REQUEUE_STALE_CLAIMED_OUTCOME),
         doc: "One stale CLAIMED requeue pass. Writes; each batch commits alone. A threshold that\ndoes not fit in 64 bits raises OverflowError.",
+    },
+    StubFunction {
+        name: "mark_stale_running_async",
+        parameters: MARK_STALE_RUNNING_PARAMETERS,
+        returns: TypeText::FutureOf(MARK_STALE_RUNNING_OUTCOME),
+        doc: "One stale RUNNING recovery pass. Writes; each candidate commits alone. A threshold\nthat does not fit in 64 bits raises OverflowError.",
     },
     StubFunction {
         name: "release_claims_async",
@@ -361,7 +374,7 @@ const ARGUMENT_CLASSES: [StubClass; 8] = [
     },
     StubClass {
         name: "EnqueueRequest",
-        doc: "One frozen send. None for good_until, task_options_json or idempotency_key\nmeans no deadline, no options, no key.",
+        doc: "One frozen send. None for good_until, task_options_json or idempotency_key\nmeans no deadline, no options, no key. send_kind is FIRST for the first send of the task\nid and REPEAT for a send retry: a task that finished then answers from history.",
         constructor: Constructor::Parameters(ENQUEUE_REQUEST_PARAMETERS),
         properties: &[property("task_id", "uuid.UUID")],
         methods: &[],
@@ -375,7 +388,7 @@ const ARGUMENT_CLASSES: [StubClass; 8] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 30] = [
+const RECORD_CLASSES: [StubClass; 33] = [
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -589,6 +602,27 @@ const RECORD_CLASSES: [StubClass; 30] = [
         methods: &[],
     },
     StubClass {
+        name: "StaleRunningRecovered",
+        doc: "The stale RUNNING pass ended; its scan read fewer candidates than its batch. recovered\ncounts the candidates whose crash retry or failure committed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("recovered", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "StaleRunningScanFull",
+        doc: "The stale RUNNING pass ended, and its scan read a full batch of scan_batch candidates:\nstale rows can remain for the next pass.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("recovered", "int"), property("scan_batch", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "StaleRunningScanFailed",
+        doc: "The stale RUNNING pass did not run: a threshold out of range, a failed connect or family\ncheck, or a failed scan. Nothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
         name: "ClaimsReleased",
         doc: "The release statement ran: one row outcome per claim, in the request order.",
         constructor: Constructor::NoConstructor,
@@ -690,8 +724,8 @@ const HANDLE_CLASSES: [StubClass; 1] = [StubClass {
     methods: &CORE_HANDLE_METHODS,
 }];
 
-const CLASSES: [StubClass; 39] = {
-    let mut classes = [HANDLE_CLASSES[0]; 39];
+const CLASSES: [StubClass; 42] = {
+    let mut classes = [HANDLE_CLASSES[0]; 42];
     let mut position = 0;
     while position < ARGUMENT_CLASSES.len() {
         classes[1 + position] = ARGUMENT_CLASSES[position];

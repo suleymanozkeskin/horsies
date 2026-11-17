@@ -8,9 +8,14 @@
 //! - [`release_claims`]: `horsies_release_claims`, the return of claimed rows
 //!   that no child started.
 //!
+//! And one read with no 0004 function:
+//! - [`count_queue_starts`]: the start check of soft-cap mode, the count of
+//!   each capped queue that has held rows (Python `COUNT_QUEUE_STARTS_SQL`,
+//!   `horsies/core/worker/sql.py`).
+//!
 //! Each is one statement in autocommit on a [`CorePool`], so its locks end
-//! with the statement. The claim pass is batch work ([`CheckoutClass::Batch`]);
-//! the start and the release are per-task writes
+//! with the statement. The claim pass and the start check are batch work
+//! ([`CheckoutClass::Batch`]); the start and the release are per-task writes
 //! ([`CheckoutClass::Reserved`]).
 //!
 //! A row that breaks the function's row contract is
@@ -18,6 +23,7 @@
 //! [`BrokerError::RowDecode`]; a failed statement is
 //! [`BrokerError::Statement`].
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 
@@ -83,6 +89,32 @@ static RELEASE_CLAIMS: TypedStatement = TypedStatement::new(
         ParameterType::TimestamptzArray,
         ParameterType::Text,
         ParameterType::Text,
+    ],
+);
+
+/// The start check of soft-cap mode, one row per queue that has a row it
+/// counts: the queue's RUNNING rows on every worker, and its rows CLAIMED by
+/// the worker at one of the given claims. Parameters in order: the queues,
+/// the worker id, the task ids and the claim generations of the claims.
+static COUNT_QUEUE_STARTS: TypedStatement = TypedStatement::new(
+    "count_queue_starts",
+    "SELECT t.queue_name::text AS queue_name, \
+            count(*) FILTER (WHERE t.status = 'RUNNING') AS running, \
+            count(*) FILTER (WHERE t.status = 'CLAIMED') AS started_not_running \
+     FROM horsies_tasks t \
+     WHERE t.queue_name = ANY($1::text[]) \
+       AND (t.status = 'RUNNING' \
+            OR (t.status = 'CLAIMED' \
+                AND t.claimed_by_worker_id = $2 \
+                AND (t.id, t.claimed_at) IN ( \
+                    SELECT s.id, s.claimed_at \
+                    FROM unnest($3::uuid[], $4::timestamptz[]) AS s(id, claimed_at)))) \
+     GROUP BY t.queue_name",
+    &[
+        ParameterType::TextArray,
+        ParameterType::Text,
+        ParameterType::UuidArray,
+        ParameterType::TimestamptzArray,
     ],
 );
 
@@ -368,12 +400,18 @@ fn decode_claimed_row(row: ClaimWireRow) -> Result<ClaimedRow, String> {
         return Err("a CLAIMED row of horsies_claim carries short_by".to_owned());
     }
     let required = |name: &str| format!("a CLAIMED row of horsies_claim has no {name}");
+    let id = row.id.ok_or_else(|| required("id"))?;
     let execution_text = row.execution.ok_or_else(|| required("execution"))?;
+    // Python `parse_row_class` (`horsies/core/worker/row_class.py:75-88`):
+    // the refusal names the task and the stored value.
     let execution = Execution::from_stored(&execution_text).ok_or_else(|| {
-        format!("a CLAIMED row of horsies_claim has execution {execution_text:?}")
+        format!(
+            "a CLAIMED row of horsies_claim: claimed task {id} has execution \
+             {execution_text:?}, which is not an Execution value"
+        )
     })?;
     Ok(ClaimedRow {
-        id: row.id.ok_or_else(|| required("id"))?,
+        id,
         task_name: row.task_name.ok_or_else(|| required("task_name"))?,
         queue_name: row.queue_name.ok_or_else(|| required("queue_name"))?,
         input: row.input.ok_or_else(|| required("input"))?,
@@ -553,6 +591,127 @@ fn decode_start(
             "outcome {outcome:?} with miss_reason {miss_reason:?} and started_at {started_at:?}"
         )),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Start check
+// ---------------------------------------------------------------------------
+
+/// The arguments of one start check of soft-cap mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueStartCheck {
+    pub worker_id: String,
+    /// The capped queues that have held rows.
+    pub queues: Vec<String>,
+    /// The claims (task id, claim generation) of capped queues that the
+    /// worker submitted and whose outcome write has not ended.
+    pub started: Vec<(Uuid, DateTime<Utc>)>,
+}
+
+/// The count of each queue of a start check: its RUNNING rows on every
+/// worker, plus the started claims of the check that are still CLAIMED
+/// because their child has not set them RUNNING yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueueStarts {
+    counts: HashMap<String, u64>,
+}
+
+impl QueueStarts {
+    /// The counts of the queues that have one. A queue with no counted row
+    /// is absent.
+    pub fn new(counts: HashMap<String, u64>) -> QueueStarts {
+        QueueStarts { counts }
+    }
+
+    /// The count of `queue_name`; 0 when the statement counted no row of it.
+    pub fn of(&self, queue_name: &str) -> u64 {
+        self.counts.get(queue_name).copied().unwrap_or(0)
+    }
+}
+
+/// Count the queues of `check`: one statement on `pool`, as batch work.
+/// Reads only; locks nothing. The counts are read without a lock, so a
+/// start of another worker in the same instant is not seen.
+///
+/// Errors: [`BrokerError::Statement`]; [`BrokerError::RowDecode`];
+/// [`BrokerError::ClaimContract`] for a queue counted twice, a queue that
+/// the check did not name, or a negative count.
+pub(crate) async fn count_queue_starts(
+    pool: &CorePool,
+    log: StatementLog,
+    check: &QueueStartCheck,
+) -> Result<QueueStarts, BrokerError> {
+    let task_ids: Vec<Uuid> = check.started.iter().map(|(task_id, _)| *task_id).collect();
+    let claimed_ats: Vec<DateTime<Utc>> = check
+        .started
+        .iter()
+        .map(|(_, claimed_at)| *claimed_at)
+        .collect();
+    let statement = &COUNT_QUEUE_STARTS;
+    let bound = statement
+        .bind()
+        .value(&check.queues)
+        .value(&check.worker_id)
+        .value(&task_ids)
+        .value(&claimed_ats)
+        .finish();
+    log.log(statement);
+    let rows = pool
+        .query(
+            CheckoutClass::Batch,
+            &bound,
+            StatementBound::ConnectionTimeouts,
+        )
+        .await?;
+    let wire = rows
+        .iter()
+        .map(|row| -> Result<(String, i64, i64), BrokerError> {
+            Ok((
+                column::<String>(row, statement, "queue_name")?,
+                column::<i64>(row, statement, "running")?,
+                column::<i64>(row, statement, "started_not_running")?,
+            ))
+        })
+        .collect::<Result<Vec<_>, BrokerError>>()?;
+    decode_queue_starts(&check.queues, wire).map_err(BrokerError::ClaimContract)
+}
+
+/// The count of each queue: RUNNING plus started and not RUNNING. Pure.
+///
+/// Errors: the contract breach as text: a queue counted twice, a queue that
+/// `queues` does not name, a negative count.
+fn decode_queue_starts(
+    queues: &[String],
+    rows: Vec<(String, i64, i64)>,
+) -> Result<QueueStarts, String> {
+    let mut counts: HashMap<String, u64> = HashMap::with_capacity(rows.len());
+    for (queue_name, running, started_not_running) in rows {
+        if !queues.contains(&queue_name) {
+            return Err(format!(
+                "count_queue_starts counted queue {queue_name:?}, which the check did not name"
+            ));
+        }
+        let (Ok(running_rows), Ok(started_rows)) =
+            (u64::try_from(running), u64::try_from(started_not_running))
+        else {
+            return Err(format!(
+                "count_queue_starts counted {running} RUNNING and {started_not_running} started \
+                 rows of queue {queue_name:?}"
+            ));
+        };
+        match counts.entry(queue_name) {
+            Entry::Occupied(counted) => {
+                return Err(format!(
+                    "count_queue_starts counted queue {:?} twice",
+                    counted.key()
+                ))
+            }
+            Entry::Vacant(counted) => {
+                let _count = counted.insert(running_rows + started_rows);
+            }
+        }
+    }
+    Ok(QueueStarts { counts })
 }
 
 // ---------------------------------------------------------------------------

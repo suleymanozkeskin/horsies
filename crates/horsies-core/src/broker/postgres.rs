@@ -3,7 +3,7 @@ use std::time::Duration;
 use chrono::{DateTime, Timelike, Utc};
 use serde::de::DeserializeOwned;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
-use sqlx::{ConnectOptions, Postgres, Transaction};
+use sqlx::ConnectOptions;
 use std::str::FromStr;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -11,24 +11,28 @@ use uuid::Uuid;
 use crate::core::history::archive::results::decode_result_envelope;
 use crate::core::history::enqueue::prepare_enqueue_facts;
 use crate::core::history::identity::keys::{
-    validate_reservation_window, IDEMPOTENCY_SCOPE_VERSION, IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
+    validate_reservation_window, IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
 };
-use crate::core::history::identity::reservations::ReservationClaim;
 use crate::core::history::reads::detail::{HistoryTaskDetail, TaskDetailResult};
 use crate::core::history::reads::result::{
     HistoryResultPayload, HistoryTaskResult, TaskResultRead,
 };
 use crate::core::history::rerun::operations::{
-    rerun_task_in_tx, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
+    rerun_first_statement, rerun_task_in_transaction, RerunEnqueuePolicy, RerunError, RerunOutcome,
+    RerunTask,
 };
 use crate::core::{
     EnqueueRetention, OutcomeCode, PostgresConfig, RetrievalCode, TaskError, TaskInfo, TaskResult,
 };
 
 use crate::broker::core_rows::{
-    checkout_batch, column, execute_in, expired_list_row, listed_worker_state_row, one_row,
-    query_in, query_on, read_rows, roll_back, scalar, stale_list_row, stored_worker_state,
-    task_attempt_row, task_info_row, task_result_row, RowDecodeError, StatementLog,
+    column, expired_list_row, listed_worker_state_row, one_row, read_rows, scalar, stale_list_row,
+    stored_worker_state, task_attempt_row, task_info_row, task_result_row, RowDecodeError,
+    StatementLog,
+};
+use crate::broker::enqueue_task::{
+    decode_enqueue_outcome, enqueue_result, EnqueueKey, EnqueueStart, EnqueueTaskOutcome, SendKind,
+    ENQUEUE_TASK,
 };
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::health::{
@@ -37,14 +41,14 @@ use crate::broker::health::{
     WORKER_PING_CHANNEL,
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result};
-use crate::broker::key_reservation::{claim_key_reservation, KeyClaim};
 use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
 };
 use crate::broker::row::task::{
     ClaimedId, ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow,
-    TaskResultRow, TaskRunningContextRow,
+    TaskResultRow,
 };
+use crate::broker::workflow_claim_settle::{settle_claimed_workflow_tasks, ClaimDisposition};
 
 use crate::broker::client_family::{
     admit_family, recorded_family_from, ClientFamily, FamilyCheckError, FamilyCheckFailure,
@@ -67,8 +71,8 @@ use crate::broker::pools::{
     CloseOutcome, CoreHandle, OpenPools, PoolProfile, SessionPool, WriteInFlight,
 };
 use crate::db::{
-    BoundStatement, CheckoutClass, IsolationLevel, ParameterType, Row, StatementBound,
-    Transaction as CoreTransaction, TypedStatement, WORKER_RESERVED_CONNECTIONS,
+    BoundStatement, CheckoutClass, IsolationLevel, NotSentCause, ParameterType, Row,
+    StatementBound, StatementFailure, TypedStatement, WORKER_RESERVED_CONNECTIONS,
 };
 
 /// Refuse a sent task input that breaks the rules of a user value (Python `.send()` refuses it as
@@ -133,139 +137,6 @@ fn test_uuid(value: &str) -> Uuid {
 // ---------------------------------------------------------------------------
 // SQL constants
 // ---------------------------------------------------------------------------
-
-// Every NOT NULL column is named: the baseline schema has no column defaults.
-// A first-run send has no rerun lineage and is not a workflow task.
-const ENQUEUE_SQL: &str = "\
-INSERT INTO horsies_tasks (
-    id, task_name, queue_name, priority, input, task_options, execution,
-    retention_class_key, sent_at, created_at,
-    command_fingerprint_version, command_fingerprint, idempotency_key_digest,
-    status, enqueued_at, retry_count, max_retries, good_until,
-    is_workflow_task, updated_at,
-    retain_rerun_input, rerun_of_task_id, rerun_root_task_id
-)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), $10, $11, $12, 'PENDING',
-        CASE WHEN $13::timestamptz IS NOT NULL THEN $13
-             WHEN $14::bigint IS NOT NULL
-             THEN NOW() + make_interval(secs => $14::double precision)
-             ELSE NOW() END,
-        0, $15, $16, FALSE, NOW(), $17, NULL, NULL)
-ON CONFLICT (id) DO NOTHING
-RETURNING id";
-
-// The exact-id resend check reads what the send compares: the command
-// fingerprint and the stored send call time.
-const READ_SEND_IDENTITY_SQL: &str = "\
-SELECT command_fingerprint_version, command_fingerprint, sent_at
-FROM horsies_tasks WHERE id = $1";
-
-const READ_SEND_IDENTITY_FOR_KEY_SQL: &str = "\
-SELECT command_fingerprint_version, command_fingerprint, sent_at, idempotency_key_digest
-FROM horsies_tasks WHERE id = $1 FOR UPDATE";
-
-/// The enqueue insert. Parameters in order: id, task name, queue name,
-/// priority, input, task options, execution, retention class key, sent at,
-/// fingerprint version, fingerprint, key digest, enqueued at, delay
-/// seconds, max retries, good until, retain rerun input.
-static ENQUEUE: TypedStatement = TypedStatement::new(
-    "enqueue",
-    ENQUEUE_SQL,
-    &[
-        ParameterType::Uuid,
-        ParameterType::Text,
-        ParameterType::Text,
-        ParameterType::Int4,
-        ParameterType::Text,
-        ParameterType::Text,
-        ParameterType::Text,
-        ParameterType::Text,
-        ParameterType::Timestamptz,
-        ParameterType::Int2,
-        ParameterType::Bytea,
-        ParameterType::Bytea,
-        ParameterType::Timestamptz,
-        ParameterType::Int8,
-        ParameterType::Int4,
-        ParameterType::Timestamptz,
-        ParameterType::Bool,
-    ],
-);
-
-static READ_SEND_IDENTITY: TypedStatement = TypedStatement::new(
-    "read_send_identity",
-    READ_SEND_IDENTITY_SQL,
-    &[ParameterType::Uuid],
-);
-
-static READ_SEND_IDENTITY_FOR_KEY: TypedStatement = TypedStatement::new(
-    "read_send_identity_for_key",
-    READ_SEND_IDENTITY_FOR_KEY_SQL,
-    &[ParameterType::Uuid],
-);
-
-/// Binds a key digest (`$1`) to a task (`$2`) that has none.
-static BIND_IDEMPOTENCY_KEY: TypedStatement = TypedStatement::new(
-    "bind_idempotency_key",
-    "UPDATE horsies_tasks SET idempotency_key_digest = $1 WHERE id = $2",
-    &[ParameterType::Bytea, ParameterType::Uuid],
-);
-
-// Eligibility split into two CTE arms — PENDING and expired-CLAIMED — each with
-// its own ORDER BY + FOR UPDATE SKIP LOCKED + LIMIT, merged and re-limited. The
-// selected set is provably identical to a single OR-predicate scan: any row in
-// the global top-N is within the top-N of its own arm, so merging both arms'
-// top-N and re-limiting yields the same N rows. The arms let the planner use a
-// dedicated partial index per status instead of a filtered scan over both. The
-// one behavioral delta (matching Python) is that up to $2 extra candidate rows
-// of the losing arm stay row-locked for the short claim transaction.
-const CLAIM_SQL: &str = "\
-WITH pending AS (
-    SELECT id, priority, enqueued_at
-    FROM horsies_tasks
-    WHERE queue_name = $1
-      AND status = 'PENDING'
-      AND enqueued_at <= now()
-      AND (next_retry_at IS NULL OR next_retry_at <= now())
-      AND (good_until IS NULL OR good_until > now())
-    ORDER BY priority ASC, enqueued_at ASC, id ASC
-    FOR UPDATE SKIP LOCKED
-    LIMIT $2
-),
-expired AS (
-    SELECT id, priority, enqueued_at
-    FROM horsies_tasks
-    WHERE queue_name = $1
-      AND status = 'CLAIMED' AND claim_expires_at IS NOT NULL AND claim_expires_at < now()
-      AND enqueued_at <= now()
-      AND (next_retry_at IS NULL OR next_retry_at <= now())
-      AND (good_until IS NULL OR good_until > now())
-    ORDER BY priority ASC, enqueued_at ASC, id ASC
-    FOR UPDATE SKIP LOCKED
-    LIMIT $2
-),
-next AS (
-    SELECT id
-    FROM (
-        SELECT id, priority, enqueued_at FROM pending
-        UNION ALL
-        SELECT id, priority, enqueued_at FROM expired
-    ) candidates
-    ORDER BY priority ASC, enqueued_at ASC, id ASC
-    LIMIT $2
-)
-UPDATE horsies_tasks t
-SET status = 'CLAIMED',
-    claimed = TRUE,
-    claimed_at = now(),
-    claimed_by_worker_id = $3,
-    claim_expires_at = $4,
-    finalizing_at = NULL,
-    finalizing_by_worker_id = NULL,
-    updated_at = now()
-FROM next
-WHERE t.id = next.id
-RETURNING t.id, t.task_name, t.input, t.queue_name, t.is_workflow_task, t.task_options, t.claimed_at";
 
 // One server-side call performs advisory-lock acquisition + cap counts + the
 // windowed claim (see horsies_claim, migrations/0027_claim_function_v12.sql;
@@ -436,41 +307,11 @@ WHERE status = 'RUNNING' \
    OR (status = 'CLAIMED' \
        AND (claim_expires_at IS NULL OR claim_expires_at > now()))";
 
-/// Count only RUNNING tasks for a specific worker.
-const COUNT_RUNNING_FOR_WORKER_SQL: &str = "\
-SELECT COUNT(*) FROM horsies_tasks \
-WHERE claimed_by_worker_id = $1 AND status = 'RUNNING'";
-
-/// Cluster-wide RUNNING count per queue, for the given queues. Mirrors the
-/// soft-mode per-queue cap accounting in `horsies_claim` (RUNNING only), so a
-/// buffered-dispatch re-check against these counts matches the claim function's
-/// view of a queue's `max_concurrency` cap (C17).
-const COUNT_RUNNING_BY_QUEUE_SQL: &str = "\
-SELECT queue_name, COUNT(*) FROM horsies_tasks \
-WHERE queue_name = ANY($1) AND status = 'RUNNING' \
-GROUP BY queue_name";
-
-/// Load CLAIMED tasks owned by a specific worker (for prefetch buffer dispatch).
-/// `$2` bounds the fetch to at most the available semaphore permits, since no
-/// more than that can be dispatched this pass (P7). `claimed_at` rides along so
-/// the buffered dispatch fences on the claim generation it acts for.
-const LOAD_BUFFERED_CLAIMED_SQL: &str = "\
-SELECT id, task_name, input, queue_name, is_workflow_task, task_options, claimed_at \
-FROM horsies_tasks \
-WHERE claimed_by_worker_id = $1 AND status = 'CLAIMED' \
-ORDER BY priority ASC, enqueued_at ASC, id ASC \
-LIMIT $2";
-
 /// Get the workflow status for a task (if it belongs to a workflow).
 const GET_WORKFLOW_STATUS_FOR_TASK_SQL: &str = "\
 SELECT w.status FROM horsies_workflows w \
 JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id \
 WHERE wt.task_id = $1";
-
-/// Find tasks from a batch that belong to PAUSED or CANCELLED workflows.
-/// Returns (task_id, workflow_status) to allow split handling.
-const FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL: &str =
-    "SELECT id, status FROM horsies_find_non_runnable_workflow_tasks($1)";
 
 /// Skip workflow_tasks for tasks belonging to CANCELLED workflows.
 const SKIP_CANCELLED_WORKFLOW_TASKS_SQL: &str = "\
@@ -528,45 +369,9 @@ SET status = 'READY', task_id = NULL, started_at = NULL \
 WHERE task_id = ANY($1) \
   AND status IN ('ENQUEUED', 'RUNNING')";
 
-/// Count active CLAIMED tasks for a specific worker (excludes expired leases).
-const COUNT_CLAIMED_FOR_WORKER_SQL: &str = "\
-SELECT COUNT(*) FROM horsies_tasks \
-WHERE claimed_by_worker_id = $1 AND status = 'CLAIMED' \
-  AND (claim_expires_at IS NULL OR claim_expires_at > now())";
-
 // ---------------------------------------------------------------------------
 // Task attempt SQL
 // ---------------------------------------------------------------------------
-
-/// Lock the RUNNING task row and extract context for attempt recording.
-const SELECT_RUNNING_TASK_CONTEXT_SQL: &str = "\
-SELECT retry_count, started_at, claimed_by_worker_id,
-       worker_hostname, worker_pid, worker_process_name
-FROM horsies_tasks
-WHERE id = $1 AND status = 'RUNNING'
-FOR UPDATE";
-
-/// Upsert a task attempt row (idempotent via ON CONFLICT). Public so recovery can reuse it.
-pub const UPSERT_TASK_ATTEMPT_SQL: &str = "\
-INSERT INTO horsies_task_attempts (
-    task_id, attempt, outcome, will_retry,
-    started_at, finished_at,
-    error_code, error_message, failed_reason,
-    worker_id, worker_hostname, worker_pid, worker_process_name
-)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-ON CONFLICT (task_id, attempt) DO UPDATE SET
-    outcome = EXCLUDED.outcome,
-    will_retry = EXCLUDED.will_retry,
-    started_at = EXCLUDED.started_at,
-    finished_at = EXCLUDED.finished_at,
-    error_code = EXCLUDED.error_code,
-    error_message = EXCLUDED.error_message,
-    failed_reason = EXCLUDED.failed_reason,
-    worker_id = EXCLUDED.worker_id,
-    worker_hostname = EXCLUDED.worker_hostname,
-    worker_pid = EXCLUDED.worker_pid,
-    worker_process_name = EXCLUDED.worker_process_name";
 
 /// Query task attempts for a specific task (most recent first).
 const SELECT_TASK_ATTEMPTS_SQL: &str = "\
@@ -1514,13 +1319,22 @@ impl PostgresBroker {
         self.pgbouncer_transaction_mode
     }
 
-    /// Rerun one retained terminal task in a broker-owned transaction.
+    /// Rerun one retained terminal task in a broker-owned transaction on the
+    /// main core pool ([`CheckoutClass::Batch`]): the source read, the key
+    /// claim of a keyed rerun and the insert of the new row
+    /// (`core::history::rerun::operations`). A close waits for it as for a
+    /// write.
     ///
     /// The handle checks its client family before the transaction: a
     /// database of another family, or with no family row, is
     /// `RerunError::ClientFamilyMismatch`; a family row that could not be
     /// read is `RerunError::FamilyCheckFailed`. In both cases nothing is
     /// written.
+    ///
+    /// Errors: as the rerun in its transaction, and
+    /// [`RerunError::PoolSettings`] when a closed handle cannot open its
+    /// pools again. After an error nothing committed, except after
+    /// `OutcomeUnknown` at `COMMIT`.
     pub async fn rerun_task(
         &self,
         command: RerunTask,
@@ -1529,8 +1343,19 @@ impl PostgresBroker {
         self.check_client_family_for_write()
             .await
             .map_err(rerun_family_error)?;
-        let mut transaction = self.pool.begin().await?;
-        let outcome = rerun_task_in_tx(transaction.as_mut(), &command, &policy).await?;
+        let (open, _write) = self.core.pools_for_write()?;
+        let mut connection = open
+            .main()
+            .checkout(CheckoutClass::Batch)
+            .await
+            .map_err(|cause| StatementFailure::NotSent {
+                statement: rerun_first_statement().name(),
+                cause: NotSentCause::Checkout(cause),
+            })?;
+        let mut transaction = connection.begin(IsolationLevel::ServerDefault).await?;
+        let outcome =
+            rerun_task_in_transaction(&mut transaction, self.statement_log, &command, &policy)
+                .await?;
         transaction.commit().await?;
         Ok(outcome)
     }
@@ -1546,14 +1371,33 @@ impl PostgresBroker {
     // Task lifecycle operations
     // -----------------------------------------------------------------------
 
-    /// Enqueue a new task. Returns the task ID (UUIDv7 at the public send funnel).
+    /// Enqueue a new task: one `horsies_enqueue_task` statement in
+    /// autocommit on the main core pool, checked out as batch work, after
+    /// the client family check (Python `PostgresBroker.enqueue_async`).
+    /// Returns the id of the task that holds the send: the sent id (minted
+    /// here when `predetermined_task_id` is `None`), or the task that holds
+    /// the idempotency key with the same command.
     ///
     /// `input` is the encoded task input as one JSON value; it is stored as
     /// written. The input follows the rules of a user value
-    /// (`check_sent_input`); a refusal is `EnqueueContract`, which the send maps
-    /// to `VALIDATION_FAILED`. Uses ON CONFLICT DO NOTHING; a taken task id is
-    /// compared by the version-1 command fingerprint and the stored `sent_at`
-    /// (the exact-id resend check).
+    /// (`check_sent_input`); a refusal is `EnqueueContract`, which the send
+    /// maps to `VALIDATION_FAILED`. A task id that is taken answers by the
+    /// stored version-1 command fingerprint and `sent_at` (the exact-id
+    /// resend check). `send_kind` is [`SendKind::Repeat`] for a send retry:
+    /// a task that finished then answers from history and does not run
+    /// again; [`SendKind::First`] does not read history.
+    ///
+    /// Errors: `EnqueueContract` (refused before any statement: both
+    /// `enqueued_at` and `enqueue_delay_seconds`, a future `sent_at` with
+    /// neither, an input or options that the rules refuse);
+    /// `IdempotencyKeyConflict`, `PayloadMismatch` and
+    /// `EnqueueConflictUnverifiable` (nothing written, no reservation left);
+    /// the client family check's errors; `PoolSettings`; `Statement` (nothing
+    /// written, or `OutcomeUnknown`: a resend of the same send with
+    /// [`SendKind::Repeat`] answers with the task id); `RowDecode`.
+    ///
+    /// Panics: when the function returns other than one row, or an outcome
+    /// it does not define (Python raises `AssertionError`).
     #[allow(clippy::too_many_arguments)]
     pub async fn enqueue(
         &self,
@@ -1570,15 +1414,11 @@ impl PostgresBroker {
         idempotency_key: Option<&str>,
         retention: EnqueueRetention,
         retain_rerun_input: Option<bool>,
+        send_kind: SendKind,
     ) -> Result<Uuid, BrokerError> {
-        if enqueued_at.is_some() && enqueue_delay_seconds.is_some() {
-            return Err(BrokerError::EnqueueContract(
-                "cannot specify both enqueued_at and enqueue_delay_seconds".to_owned(),
-            ));
-        }
+        let start = EnqueueStart::of(enqueued_at, enqueue_delay_seconds)?;
         if sent_at.is_some_and(|value| value > Utc::now() + chrono::Duration::seconds(5))
-            && enqueued_at.is_none()
-            && enqueue_delay_seconds.is_none()
+            && matches!(start, EnqueueStart::Now)
         {
             return Err(BrokerError::EnqueueContract(
                 "sent_at is in the future without enqueued_at or enqueue_delay_seconds; sent_at is a call-site timestamp".to_owned(),
@@ -1608,217 +1448,83 @@ impl PostgresBroker {
             idempotency_key,
         )
         .map_err(|error| BrokerError::EnqueueContract(error.to_string()))?;
+        let key = EnqueueKey::of(
+            facts.idempotency_key_digest,
+            self.idempotency_reservation_window_seconds,
+        );
         self.ensure_client_family_for_write().await?;
-        let sent = SendIdentity {
-            fingerprint_version: Some(facts.command_fingerprint_version),
-            fingerprint: Some(facts.command_fingerprint.to_vec()),
-            sent_at: effective_sent_at,
-        };
         let (open, _write) = self.core.pools_for_write()?;
-        let mut connection = checkout_batch(open.main(), &ENQUEUE).await?;
-        let mut transaction = connection.begin(IsolationLevel::ServerDefault).await?;
-        if let Some(key_digest) = facts.idempotency_key_digest {
-            let claim = claim_key_reservation(
-                &mut transaction,
-                self.statement_log,
-                &KeyClaim {
-                    key_digest: &key_digest,
-                    key_scope_version: IDEMPOTENCY_SCOPE_VERSION,
-                    reservation_window_seconds: self.idempotency_reservation_window_seconds,
-                    fingerprint_version: facts.command_fingerprint_version,
-                    fingerprint: &facts.command_fingerprint,
-                    task_id,
-                },
-            )
-            .await?;
-            match claim {
-                ReservationClaim::Applied { .. } => {}
-                ReservationClaim::Replay { task_id } => {
-                    roll_back(transaction).await?;
-                    return Ok(task_id);
-                }
-                ReservationClaim::Conflict { task_id, .. } => {
-                    roll_back(transaction).await?;
-                    return Err(BrokerError::IdempotencyKeyConflict {
-                        task_name: task_name.to_owned(),
-                        task_id,
-                    });
-                }
-            }
-        }
 
         let execution = facts.execution.as_str();
         let fingerprint: &[u8] = facts.command_fingerprint.as_slice();
-        let bound_key_digest: Option<&[u8]> = facts
-            .idempotency_key_digest
-            .as_ref()
-            .map(<[u8; 32]>::as_slice);
-        let inserted = query_in(
-            &mut transaction,
-            self.statement_log,
-            &ENQUEUE
-                .bind()
-                .value(&task_id)
-                .value(&task_name)
-                .value(&queue_name)
-                .value(&priority)
-                .value(&input)
-                .value(&task_options)
-                .value(&execution)
-                .value(&facts.retention_class_key)
-                .value(&effective_sent_at)
-                .value(&facts.command_fingerprint_version)
-                .value(&fingerprint)
-                .value(&bound_key_digest)
-                .value(&enqueued_at)
-                .value(&enqueue_delay_seconds)
-                .value(&max_retries)
-                .value(&good_until)
-                .value(&facts.retain_rerun_input)
-                .finish(),
-        )
-        .await?;
-
-        if !inserted.is_empty() {
-            transaction.commit().await?;
-            tracing::debug!(task_id = %task_id, task_name, queue = queue_name, "task enqueued");
-            return Ok(task_id);
-        }
-
-        if let Some(key_digest) = facts.idempotency_key_digest {
-            return self
-                .bind_key_after_task_id_conflict(
-                    transaction,
-                    task_id,
-                    task_name,
-                    &sent,
-                    &key_digest,
-                )
-                .await;
-        }
-
-        roll_back(transaction).await?;
-
-        // Conflict: task_id already exists. Compare the fingerprint and sent_at.
-        tracing::debug!(task_id = %task_id, task_name, "enqueue conflict — comparing the send identity");
-
-        let stored_rows = query_on(
-            &mut connection,
-            self.statement_log,
-            &READ_SEND_IDENTITY.bind().value(&task_id).finish(),
-        )
-        .await?;
-        let stored = match stored_rows.first() {
-            Some(row) => Some(SendIdentity {
-                fingerprint_version: column(
-                    row,
-                    &READ_SEND_IDENTITY,
-                    "command_fingerprint_version",
-                )?,
-                fingerprint: column(row, &READ_SEND_IDENTITY, "command_fingerprint")?,
-                sent_at: column(row, &READ_SEND_IDENTITY, "sent_at")?,
-            }),
-            None => None,
-        };
-
-        let outcome = classify_enqueue_conflict(stored, &sent, task_id, task_name);
-        if matches!(
-            outcome,
-            Err(BrokerError::EnqueueConflictUnverifiable { .. })
-        ) {
-            tracing::warn!(
-                task_id = %task_id,
-                task_name,
-                "enqueue conflict but row disappeared before verification — cannot verify payload identity",
-            );
-        }
-        outcome
-    }
-
-    /// The keyed enqueue whose task id already exists: in the same
-    /// transaction, lock the row, compare its send identity, and bind the key
-    /// when the row has none.
-    async fn bind_key_after_task_id_conflict(
-        &self,
-        mut transaction: CoreTransaction<'_>,
-        task_id: Uuid,
-        task_name: &str,
-        sent: &SendIdentity,
-        key_digest: &[u8; 32],
-    ) -> Result<Uuid, BrokerError> {
-        let statement: &TypedStatement = &READ_SEND_IDENTITY_FOR_KEY;
-        let existing = query_in(
-            &mut transaction,
-            self.statement_log,
-            &statement.bind().value(&task_id).finish(),
-        )
-        .await?;
-        let Some(row) = existing.first() else {
-            roll_back(transaction).await?;
-            return Err(BrokerError::EnqueueConflictUnverifiable {
-                task_id,
-                task_name: task_name.to_owned(),
-            });
-        };
-        let stored = SendIdentity {
-            fingerprint_version: column(row, statement, "command_fingerprint_version")?,
-            fingerprint: column(row, statement, "command_fingerprint")?,
-            sent_at: column(row, statement, "sent_at")?,
-        };
-        let bound_digest: Option<Vec<u8>> = column(row, statement, "idempotency_key_digest")?;
-        if &stored != sent {
-            roll_back(transaction).await?;
-            return Err(BrokerError::PayloadMismatch { task_id });
-        }
-        // The task id is bound to another key: the same command with a changed
-        // key is a payload mismatch, not a key conflict that names the task
-        // itself (Python `horsies/core/brokers/postgres.py:2838-2848`).
-        if bound_digest
-            .as_deref()
-            .is_some_and(|digest| digest != key_digest.as_slice())
-        {
-            roll_back(transaction).await?;
-            return Err(BrokerError::PayloadMismatch { task_id });
-        }
-        if bound_digest.is_none() {
-            let key: &[u8] = key_digest.as_slice();
-            let _bound = execute_in(
-                &mut transaction,
-                self.statement_log,
-                &BIND_IDEMPOTENCY_KEY
-                    .bind()
-                    .value(&key)
-                    .value(&task_id)
-                    .finish(),
+        let (start_kind, start_at, start_delay_seconds) = start.columns();
+        let (key_kind, key_scope_version, key_window_seconds) = key.columns();
+        let key_digest = key.digest();
+        let send_kind_text = send_kind.as_sql();
+        let statement = &ENQUEUE_TASK;
+        let bound = statement
+            .bind()
+            .value(&task_id)
+            .value(&task_name)
+            .value(&queue_name)
+            .value(&priority)
+            .value(&input)
+            .value(&task_options)
+            .value(&execution)
+            .value(&facts.retention_class_key)
+            .value(&facts.retain_rerun_input)
+            .value(&max_retries)
+            .value(&good_until)
+            .value(&effective_sent_at)
+            .value(&start_kind)
+            .value(&start_at)
+            .value(&start_delay_seconds)
+            .value(&facts.command_fingerprint_version)
+            .value(&fingerprint)
+            .value(&key_kind)
+            .value(&key_digest)
+            .value(&key_scope_version)
+            .value(&key_window_seconds)
+            .value(&send_kind_text)
+            .finish();
+        self.log_statement(statement);
+        let rows = open
+            .main()
+            .query(
+                CheckoutClass::Batch,
+                &bound,
+                StatementBound::ConnectionTimeouts,
             )
             .await?;
+        let [row] = rows.as_slice() else {
+            panic!(
+                "horsies_enqueue_task returned {} rows for task {task_id}; it returns one",
+                rows.len()
+            );
+        };
+        let outcome_text: String = column(row, statement, "outcome")?;
+        let answering_task_id: Uuid = column(row, statement, "task_id")?;
+        let outcome = match decode_enqueue_outcome(&outcome_text, answering_task_id) {
+            Ok(outcome) => outcome,
+            Err(contract) => panic!("{contract} for task {task_id}"),
+        };
+        match outcome {
+            EnqueueTaskOutcome::Inserted => {
+                tracing::debug!(task_id = %task_id, task_name, queue = queue_name, "task enqueued");
+            }
+            EnqueueTaskOutcome::ConflictUnverifiable => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    task_name,
+                    "enqueue conflict but row disappeared before verification — cannot verify payload identity",
+                );
+            }
+            EnqueueTaskOutcome::SameCommand
+            | EnqueueTaskOutcome::KeyReplay { .. }
+            | EnqueueTaskOutcome::KeyConflict { .. }
+            | EnqueueTaskOutcome::PayloadMismatch => {}
         }
-        transaction.commit().await?;
-        Ok(task_id)
-    }
-
-    /// Claim up to `limit` tasks from the given queue.
-    ///
-    /// Uses `SELECT FOR UPDATE SKIP LOCKED` to avoid contention.
-    /// Already-claimed tasks with expired `claim_expires_at` are reclaimed.
-    pub async fn claim(
-        &self,
-        queue_name: &str,
-        limit: i32,
-        worker_id: &str,
-        claim_expires_at: Option<DateTime<Utc>>,
-    ) -> Result<Vec<ClaimedTaskRow>, BrokerError> {
-        let rows: Vec<ClaimedTaskRow> = sqlx::query_as(CLAIM_SQL)
-            .bind(queue_name)
-            .bind(limit)
-            .bind(worker_id)
-            .bind(claim_expires_at)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-
-        tracing::debug!(count = rows.len(), queue = queue_name, "tasks claimed");
-        Ok(rows)
+        enqueue_result(outcome, task_id, task_name)
     }
 
     /// Run one collapsed claim pass via `horsies_claim` (parity with horsies
@@ -1973,40 +1679,6 @@ impl PostgresBroker {
         })
     }
 
-    /// Requeue a task for retry (transactional variant).
-    ///
-    /// `retry_count` is incremented from the CAS-locked row itself, so the
-    /// caller supplies no count. `started_at` fences the CAS to a specific claim
-    /// generation (`Some` from the attempt's `set_running`); `None` disables the
-    /// fence (C10).
-    pub async fn requeue_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        task_id: Uuid,
-        next_retry_at: Option<DateTime<Utc>>,
-        worker_id: &str,
-        started_at: Option<DateTime<Utc>>,
-    ) -> Result<bool, BrokerError> {
-        let row: Option<ClaimedId> = sqlx::query_as(REQUEUE_SQL)
-            .bind(task_id)
-            .bind(next_retry_at)
-            .bind(worker_id)
-            .bind(started_at)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(BrokerError::Database)?;
-
-        if row.is_some() {
-            tracing::debug!(task_id = %task_id, "task requeued");
-        } else {
-            tracing::warn!(
-                task_id = %task_id,
-                "task requeue skipped: task no longer RUNNING or not owned by this worker"
-            );
-        }
-        Ok(row.is_some())
-    }
-
     /// Requeue a task for retry with an optional delay.
     ///
     /// `retry_count` is incremented from the CAS-locked row itself.
@@ -2038,65 +1710,6 @@ impl PostgresBroker {
             );
         }
         Ok(row.is_some())
-    }
-
-    // -----------------------------------------------------------------------
-    // Task attempt recording
-    // -----------------------------------------------------------------------
-
-    /// Lock the RUNNING task row and extract context for attempt recording.
-    ///
-    /// Returns None if the task is no longer RUNNING (reaper reclaimed it).
-    pub async fn get_running_task_context(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        task_id: Uuid,
-    ) -> Result<Option<TaskRunningContextRow>, BrokerError> {
-        let row: Option<TaskRunningContextRow> = sqlx::query_as(SELECT_RUNNING_TASK_CONTEXT_SQL)
-            .bind(task_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(row)
-    }
-
-    /// Record a task attempt (upsert, idempotent).
-    #[allow(clippy::too_many_arguments)]
-    pub async fn upsert_task_attempt(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        task_id: Uuid,
-        attempt: i32,
-        outcome: &str,
-        will_retry: bool,
-        started_at: DateTime<Utc>,
-        finished_at: DateTime<Utc>,
-        error_code: Option<&str>,
-        error_message: Option<&str>,
-        failed_reason: Option<&str>,
-        worker_id: Option<&str>,
-        worker_hostname: Option<&str>,
-        worker_pid: Option<i32>,
-        worker_process_name: Option<&str>,
-    ) -> Result<(), BrokerError> {
-        sqlx::query(UPSERT_TASK_ATTEMPT_SQL)
-            .bind(task_id)
-            .bind(attempt)
-            .bind(outcome)
-            .bind(will_retry)
-            .bind(started_at)
-            .bind(finished_at)
-            .bind(error_code)
-            .bind(error_message)
-            .bind(failed_reason)
-            .bind(worker_id)
-            .bind(worker_hostname)
-            .bind(worker_pid)
-            .bind(worker_process_name)
-            .execute(tx.as_mut())
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(())
     }
 
     /// Get task attempts for a specific task (most recent first).
@@ -2395,59 +2008,6 @@ impl PostgresBroker {
         Ok(count.0)
     }
 
-    /// Count only RUNNING tasks for a specific worker.
-    ///
-    /// Used in soft-cap / prefetch mode where budget is based on running
-    /// tasks only (claimed-but-not-yet-running tasks are intentionally
-    /// excluded to allow prefetch buffering).
-    pub async fn count_running_for_worker(&self, worker_id: &str) -> Result<i64, BrokerError> {
-        let count: (i64,) = sqlx::query_as(COUNT_RUNNING_FOR_WORKER_SQL)
-            .bind(worker_id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(count.0)
-    }
-
-    /// Cluster-wide RUNNING count per queue, for the given queues.
-    ///
-    /// Backs the soft-cap buffered-dispatch cap re-check: queues with no RUNNING
-    /// task are simply absent from the map (count 0). Returns an empty map when
-    /// `queues` is empty (no query issued).
-    pub async fn count_running_by_queue(
-        &self,
-        queues: &[String],
-    ) -> Result<std::collections::HashMap<String, i64>, BrokerError> {
-        if queues.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-        let rows: Vec<(String, i64)> = sqlx::query_as(COUNT_RUNNING_BY_QUEUE_SQL)
-            .bind(queues)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(rows.into_iter().collect())
-    }
-
-    /// Load CLAIMED tasks owned by a specific worker that are ready to dispatch.
-    ///
-    /// In prefetch/soft-cap mode, a worker may have CLAIMED tasks buffered
-    /// in the database. When a semaphore permit becomes available, these
-    /// buffered tasks can be dispatched without a new claim round-trip.
-    pub async fn load_buffered_claimed(
-        &self,
-        worker_id: &str,
-        limit: i64,
-    ) -> Result<Vec<ClaimedTaskRow>, BrokerError> {
-        let rows: Vec<ClaimedTaskRow> = sqlx::query_as(LOAD_BUFFERED_CLAIMED_SQL)
-            .bind(worker_id)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(rows)
-    }
-
     /// Get the workflow status for a task if it belongs to a workflow.
     ///
     /// Returns `None` if the task does not belong to any workflow.
@@ -2599,18 +2159,34 @@ impl PostgresBroker {
         Ok(WorkflowStopBeforeStart::Stopped)
     }
 
-    /// Filter out CLAIMED tasks belonging to non-runnable (PAUSED/CANCELLED) workflows.
+    /// The claimed tasks of a claim pass that must not be dispatched because
+    /// their workflow is PAUSED or CANCELLED, after the settle wrote what
+    /// each of them needs (Python `_filter_nonrunnable_workflow_tasks`,
+    /// `core/worker/claiming.py:649-760`), through
+    /// `horsies_workflow_claimed_tasks_settle`
+    /// ([`crate::broker::workflow_claim_settle`]):
+    /// - PAUSED: this worker's claim at its claim generation is abandoned,
+    ///   and the node of an abandoned task goes back to READY with no task;
+    /// - CANCELLED: the claim is cancelled, and the node of a cancelled task
+    ///   is skipped.
     ///
-    /// Post-claim guard that handles two cases:
-    /// - PAUSED: unclaim task → PENDING, reset workflow_task → READY
-    /// - CANCELLED: cancel task → CANCELLED, skip workflow_task → SKIPPED
+    /// The workflow status is read under the workflow row lock, so the
+    /// tasks of a workflow that a resume made RUNNING first are dispatched.
+    /// A blocked task is never dispatched, whether its move applied or found
+    /// the row moved on: that row belongs to its current owner. The moves are
+    /// fenced to `worker_id` and each claim's generation, so one worker never
+    /// ends another worker's claim, or a later claim of its own.
     ///
-    /// Returns the IDs of all filtered tasks (both paused and cancelled) so the
-    /// caller can exclude them from dispatch. The cleanup mutations (unclaim /
-    /// cancel + workflow_task reset / skip) are scoped to rows this worker
-    /// actually owns, so one worker cannot clear or cancel another worker's
-    /// claimed rows (mirrors Python's `_filter_non_runnable_workflow_tasks()` /
-    /// PR #51).
+    /// Returns the blocked task ids, in input order. One statement per
+    /// [`crate::broker::workflow_claim_settle::MAX_SETTLED_CLAIMS`] claims,
+    /// each its own transaction, on the main core pool. No claim sends no
+    /// statement.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] when a closed handle cannot open
+    /// its pools again; [`BrokerError::Statement`];
+    /// [`BrokerError::RowDecode`]; [`BrokerError::ClaimContract`] for rows
+    /// that do not answer each claim once, in order. The statements before a
+    /// failed one stay committed.
     pub async fn filter_non_runnable_workflow_tasks(
         &self,
         claims: &[(Uuid, DateTime<Utc>)],
@@ -2619,141 +2195,17 @@ impl PostgresBroker {
         if claims.is_empty() {
             return Ok(Vec::new());
         }
-        let task_ids: Vec<Uuid> = claims.iter().map(|(id, _)| *id).collect();
-
-        // Find which claimed tasks belong to PAUSED or CANCELLED workflows.
-        let rows: Vec<(Uuid, String)> = sqlx::query_as(FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL)
-            .bind(&task_ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-
-        let mut paused_ids: Vec<Uuid> = Vec::new();
-        let mut cancelled_ids: Vec<Uuid> = Vec::new();
-        for (task_id, wf_status) in &rows {
-            match wf_status.as_str() {
-                "PAUSED" => paused_ids.push(*task_id),
-                "CANCELLED" => cancelled_ids.push(*task_id),
-                _ => {}
-            }
-        }
-
-        // Each batch fences pairwise on (task_id, claimed_at): the batch came
-        // from claim rows that can span claim transactions, so generations
-        // travel with their ids. The coupled node writes commit in the same
-        // transaction as the transitions they prove (C15): a crash between
-        // the task-cancel and the node write would otherwise leave a terminal
-        // CANCELLED task linked to a live node, which outbox recovery would
-        // then complete as a node failure.
-        //
-        // A batch is built from the claim list itself, filtered by the ids
-        // the lookup named, so every fenced id carries the generation its
-        // claim returned: no id can enter a batch without one.
-        let claims_in = |ids: &[Uuid]| -> Vec<(Uuid, DateTime<Utc>)> {
-            claims
-                .iter()
-                .filter(|(claim_id, _)| ids.contains(claim_id))
-                .copied()
-                .collect()
-        };
-
-        // PAUSED: abandon this worker's own claimed-but-not-started rows
-        // (terminal), then reset the nodes of applied rows to READY so resume
-        // enqueues a fresh row. The cancelled row is never re-claimable, so
-        // it can't run as a duplicate of the node after resume.
-        if !paused_ids.is_empty() {
-            let fence = crate::core::lifecycle::OwnedClaimBatch::new(
-                worker_id.to_owned(),
-                claims_in(paused_ids.as_slice()),
-            )
-            .map_err(|e| BrokerError::TerminalizationContract(e.to_string()))?;
-            let mut tx = self.pool.begin().await.map_err(BrokerError::Database)?;
-            let outcomes = crate::broker::terminalization::terminalize_in_tx(
-                &mut tx,
-                &crate::core::lifecycle::TerminalizationCommand::AbandonOwnedNodes { fence },
-            )
-            .await?;
-            let owned: Vec<Uuid> = outcomes
-                .iter()
-                .filter(|o| {
-                    matches!(
-                        o,
-                        crate::core::lifecycle::TerminalizationOutcome::Applied { .. }
-                    )
-                })
-                .map(|o| o.task_id())
-                .collect();
-
-            if !owned.is_empty() {
-                sqlx::query(RESET_WORKFLOW_TASKS_SQL)
-                    .bind(&owned)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(BrokerError::Database)?;
-            }
-            tx.commit().await.map_err(BrokerError::Database)?;
-
-            tracing::debug!(
-                count = owned.len(),
-                "abandoned own claimed-but-not-started tasks belonging to PAUSED workflows",
-            );
-        }
-
-        // CANCELLED: cancel this worker's own claimed rows and skip only the
-        // nodes of rows whose transition applied.
-        if !cancelled_ids.is_empty() {
-            let fence = crate::core::lifecycle::OwnedClaimBatch::new(
-                worker_id.to_owned(),
-                claims_in(cancelled_ids.as_slice()),
-            )
-            .map_err(|e| BrokerError::TerminalizationContract(e.to_string()))?;
-            let mut tx = self.pool.begin().await.map_err(BrokerError::Database)?;
-            let outcomes = crate::broker::terminalization::terminalize_in_tx(
-                &mut tx,
-                &crate::core::lifecycle::TerminalizationCommand::CancelOwnedNodes { fence },
-            )
-            .await?;
-            let owned: Vec<Uuid> = outcomes
-                .iter()
-                .filter(|o| {
-                    matches!(
-                        o,
-                        crate::core::lifecycle::TerminalizationOutcome::Applied { .. }
-                    )
-                })
-                .map(|o| o.task_id())
-                .collect();
-
-            if !owned.is_empty() {
-                sqlx::query(SKIP_CANCELLED_WORKFLOW_TASKS_SQL)
-                    .bind(&owned)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(BrokerError::Database)?;
-            }
-            tx.commit().await.map_err(BrokerError::Database)?;
-
-            tracing::debug!(
-                count = owned.len(),
-                "cancelled own tasks belonging to CANCELLED workflows",
-            );
-        }
-
-        let mut all_filtered: Vec<Uuid> = paused_ids;
-        all_filtered.extend(cancelled_ids);
-        Ok(all_filtered)
-    }
-
-    /// Count CLAIMED tasks for a specific worker (not yet RUNNING).
-    ///
-    /// Used for `max_claim_per_worker` guard to prevent over-claiming.
-    pub async fn count_claimed_for_worker(&self, worker_id: &str) -> Result<i64, BrokerError> {
-        let count: (i64,) = sqlx::query_as(COUNT_CLAIMED_FOR_WORKER_SQL)
-            .bind(worker_id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(count.0)
+        let (open, _write) = self.core_pools_for_write()?;
+        let settled =
+            settle_claimed_workflow_tasks(open.main(), self.statement_log, worker_id, claims)
+                .await?;
+        Ok(settled
+            .into_iter()
+            .filter_map(|(task_id, disposition)| match disposition {
+                ClaimDisposition::Blocked => Some(task_id),
+                ClaimDisposition::Dispatch => None,
+            })
+            .collect())
     }
 
     /// Unclaim a single task, resetting it from CLAIMED back to PENDING.
@@ -4431,99 +3883,6 @@ mod tests {
         assert_sync::<Arc<PostgresBroker>>();
     }
 
-    // Enqueue-conflict classification (parity with horsies PR #48).
-
-    fn send_identity(fingerprint: u8, sent_at: DateTime<Utc>) -> SendIdentity {
-        SendIdentity {
-            fingerprint_version: Some(1),
-            fingerprint: Some(vec![fingerprint; 32]),
-            sent_at,
-        }
-    }
-
-    #[test]
-    fn enqueue_conflict_matching_identity_is_idempotent_ok() {
-        let task_id = Uuid::new_v4();
-        let sent_at = Utc::now();
-        let out = classify_enqueue_conflict(
-            Some(send_identity(1, sent_at)),
-            &send_identity(1, sent_at),
-            task_id,
-            "my_task",
-        );
-        assert_eq!(out.unwrap(), task_id);
-    }
-
-    #[test]
-    fn enqueue_conflict_differing_fingerprint_is_payload_mismatch() {
-        let task_id = Uuid::new_v4();
-        let sent_at = Utc::now();
-        let out = classify_enqueue_conflict(
-            Some(send_identity(2, sent_at)),
-            &send_identity(1, sent_at),
-            task_id,
-            "my_task",
-        );
-        assert!(matches!(
-            out,
-            Err(BrokerError::PayloadMismatch { task_id: actual }) if actual == task_id
-        ));
-    }
-
-    #[test]
-    fn enqueue_conflict_differing_sent_at_is_payload_mismatch() {
-        let task_id = Uuid::new_v4();
-        let sent_at = Utc::now();
-        let out = classify_enqueue_conflict(
-            Some(send_identity(1, sent_at - chrono::Duration::seconds(1))),
-            &send_identity(1, sent_at),
-            task_id,
-            "my_task",
-        );
-        assert!(matches!(
-            out,
-            Err(BrokerError::PayloadMismatch { task_id: actual }) if actual == task_id
-        ));
-    }
-
-    #[test]
-    fn enqueue_conflict_with_an_engine_minted_row_is_payload_mismatch() {
-        let task_id = Uuid::new_v4();
-        let sent_at = Utc::now();
-        let minted = SendIdentity {
-            fingerprint_version: None,
-            fingerprint: None,
-            sent_at,
-        };
-        let out =
-            classify_enqueue_conflict(Some(minted), &send_identity(1, sent_at), task_id, "my_task");
-        assert!(matches!(
-            out,
-            Err(BrokerError::PayloadMismatch { task_id: actual }) if actual == task_id
-        ));
-    }
-
-    #[test]
-    fn enqueue_conflict_missing_row_is_non_retryable_unverifiable() {
-        // Row disappeared before verification: must NOT be treated as idempotent Ok.
-        let out = classify_enqueue_conflict(
-            None,
-            &send_identity(1, Utc::now()),
-            Uuid::new_v4(),
-            "my_task",
-        );
-        match out {
-            Err(err @ BrokerError::EnqueueConflictUnverifiable { .. }) => {
-                assert!(!err.is_retryable(), "must be non-retryable");
-                assert!(
-                    err.to_string().contains("cannot verify payload identity"),
-                    "message should explain the unverifiable conflict, got: {err}",
-                );
-            }
-            other => panic!("expected EnqueueConflictUnverifiable, got: {other:?}"),
-        }
-    }
-
     #[test]
     fn sent_at_is_cut_to_whole_microseconds() {
         let sent_at = DateTime::parse_from_rfc3339("2026-11-16T12:00:00.123456789Z")
@@ -4535,17 +3894,6 @@ mod tests {
     }
 }
 
-/// What the exact-id resend check compares: the version-1 command fingerprint
-/// and the send call time. A resend of one send call carries both unchanged; a
-/// different send with the same task id differs in at least one. A row that
-/// the workflow engine minted has no fingerprint, so a send never matches it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SendIdentity {
-    fingerprint_version: Option<i16>,
-    fingerprint: Option<Vec<u8>>,
-    sent_at: DateTime<Utc>,
-}
-
 /// `sent_at` at the precision that PostgreSQL stores (whole microseconds), so
 /// the stored value equals the value that a resend of the same call carries.
 fn sent_at_at_stored_precision(sent_at: DateTime<Utc>) -> Result<DateTime<Utc>, BrokerError> {
@@ -4555,30 +3903,6 @@ fn sent_at_at_stored_precision(sent_at: DateTime<Utc>) -> Result<DateTime<Utc>, 
         .ok_or_else(|| {
             BrokerError::EnqueueContract(format!("sent_at {sent_at} has no whole-microsecond form"))
         })
-}
-
-/// Classify the outcome of an `INSERT ... ON CONFLICT DO NOTHING` enqueue
-/// conflict by comparing the stored send identity against the sent one.
-///
-/// - `None` (row gone before verification): cannot prove payload identity, so
-///   fail non-retryably rather than assume the original send succeeded
-///   (parity with horsies PR #48).
-/// - equal identity: idempotent success.
-/// - other identity: same task_id, different command or send call.
-fn classify_enqueue_conflict(
-    stored: Option<SendIdentity>,
-    sent: &SendIdentity,
-    task_id: Uuid,
-    task_name: &str,
-) -> Result<Uuid, BrokerError> {
-    match stored {
-        None => Err(BrokerError::EnqueueConflictUnverifiable {
-            task_id,
-            task_name: task_name.to_owned(),
-        }),
-        Some(existing) if &existing == sent => Ok(task_id),
-        Some(_) => Err(BrokerError::PayloadMismatch { task_id }),
-    }
 }
 
 #[cfg(test)]
@@ -5303,33 +4627,6 @@ mod fused_finalize_tests {
 
         cleanup(&pool, &id).await;
     }
-
-    /// P7: `load_buffered_claimed` bounds its fetch to the requested limit, since
-    /// no more than the available permits can be dispatched in one pass.
-    #[tokio::test]
-    #[serial]
-    async fn load_buffered_claimed_respects_limit() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
-        broker.ensure_schema_initialized().await.expect("schema");
-        let pool = broker.pool().clone();
-        let mut ids = Vec::new();
-        for _ in 0..5 {
-            let id = Uuid::new_v4().to_string();
-            seed(&pool, &id, "CLAIMED", Some("p7_worker"), 0).await;
-            ids.push(id);
-        }
-
-        let rows = broker
-            .load_buffered_claimed("p7_worker", 2)
-            .await
-            .expect("load buffered");
-        assert_eq!(rows.len(), 2, "fetch must be bounded by the limit");
-
-        for id in &ids {
-            cleanup(&pool, id).await;
-        }
-    }
 }
 
 #[cfg(test)]
@@ -5766,6 +5063,11 @@ mod filter_non_runnable_tests {
     use super::*;
     use serial_test::serial;
     use uuid::Uuid;
+
+    /// The bounded lookup of the interim function, which Python's claim
+    /// filter calls (`core/worker/sql.py:234-239`).
+    const FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL: &str =
+        "SELECT id, status FROM horsies_find_non_runnable_workflow_tasks($1)";
 
     #[tokio::test]
     #[serial]
