@@ -591,7 +591,7 @@ fn the_retention_section_maps_to_the_config_field_by_field() {
     assert_eq!(
         config
             .paused_workflow_auto_cancel_after
-            .map(|age| age.micros()),
+            .map(crate::core::config::PausedWorkflowAge::micros),
         Some(86_400_000_001)
     );
     assert_eq!(config.history_leaf_horizon_days, 3);
@@ -656,7 +656,7 @@ fn a_retention_value_outside_its_bounds_is_refused() {
     assert_eq!(
         config
             .paused_workflow_auto_cancel_after
-            .map(|age| age.micros()),
+            .map(crate::core::config::PausedWorkflowAge::micros),
         Some(crate::core::config::PausedWorkflowAge::MAX_MICROS)
     );
 }

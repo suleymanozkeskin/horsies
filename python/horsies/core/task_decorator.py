@@ -84,7 +84,7 @@ from horsies.core.utils.loop_runner import (
     async_context_message,
     in_running_event_loop,
 )
-from horsies.core.history.identity.uuid7 import mint_task_id
+from horsies._core import IdMintRefused, mint_task_id as core_mint_task_id
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 from horsies.core.types.error_detail import NoCause
@@ -215,6 +215,21 @@ type _RetentionStamp = _FromQueueMapping | _ExplicitClass
 _SEND_RETRY_COUNT: Final[int] = 3
 _SEND_RETRY_INITIAL_MS: Final[int] = 200
 _SEND_RETRY_MAX_MS: Final[int] = 2000
+
+
+def _mint_send_task_id() -> UUID:
+    """The task id of a new send: a UUIDv7 from the core's process-monotonic
+    source (``horsies._core.mint_task_id``).
+
+    Raises ``ValueError`` with the source's cause when it refuses (the
+    millisecond clock is outside the 48-bit range), as the Python generator
+    raised.
+    """
+    match core_mint_task_id():
+        case UUID() as task_id:
+            return task_id
+        case IdMintRefused(cause=cause):
+            raise ValueError(cause)
 
 
 def _send_kind_of_attempt(first: SendKind, attempt: int) -> SendKind:
@@ -2354,11 +2369,11 @@ def create_task_wrapper(
                 exception=exc,
             ))
 
-        # Process-monotonic UUIDv7: the embedded birth time prunes the
-        # staged history lookup. Schedule-derived tasks keep their
-        # deterministic uuid5 slot identity — that id IS the schedule's
-        # idempotency — and resolve through the legacy walk.
-        task_id = mint_task_id()
+        # Process-monotonic UUIDv7 from the core: the embedded birth time
+        # prunes the staged history lookup. Schedule-derived tasks keep
+        # their deterministic slot identity, which is the schedule's
+        # idempotency.
+        task_id = _mint_send_task_id()
         sent_at = datetime.now(timezone.utc)
         options_result = _serialize_options_for_send(good_until_override)
         if is_err(options_result):

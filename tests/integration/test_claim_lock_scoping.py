@@ -18,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.worker import Worker
 from horsies.core.utils.db import PooledStatements
 
@@ -29,8 +30,11 @@ _PASS_TIMEOUT_S = 3.0
 _BLOCK_PROOF_TIMEOUT_S = 1.0
 
 
-def _make_worker(engine: AsyncEngine, *, queues: dict[str, int]) -> Worker:
-    """Worker claiming the given capped queues (name -> max_concurrency)."""
+def _make_worker(
+    engine: AsyncEngine, broker: PostgresBroker, *, queues: dict[str, int],
+) -> Worker:
+    """Worker claiming the given capped queues (name -> max_concurrency).
+    Its claim pass runs in the core, on ``broker``'s handle."""
     cfg = WorkerConfig(
         dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
@@ -43,6 +47,7 @@ def _make_worker(engine: AsyncEngine, *, queues: dict[str, int]) -> Worker:
         listener=MagicMock(),
         cfg=cfg,
     )
+    worker.broker = broker
     # Claim semantics: one checkout per claim statement.
     worker._claim_runner = PooledStatements(worker.sf)  # pyright: ignore[reportPrivateUsage]
     # No slot pool: every configured slot counts.
@@ -58,12 +63,13 @@ class TestClaimLockScoping:
         self,
         clean_workflow_tables: None,
         engine: AsyncEngine,
+        broker: PostgresBroker,
     ) -> None:
         """Holding capped queue A's lock must not block a pass over capped
         queue B — the regression this scoping exists to prevent (the old
         single global key serialized them)."""
-        holder = _make_worker(engine, queues={'lock_qa': 1})
-        passer = _make_worker(engine, queues={'lock_qb': 1})
+        holder = _make_worker(engine, broker, queues={'lock_qa': 1})
+        passer = _make_worker(engine, broker, queues={'lock_qb': 1})
         sf = async_sessionmaker(engine, expire_on_commit=False)
 
         async with sf() as holding_session:
@@ -82,10 +88,11 @@ class TestClaimLockScoping:
         self,
         clean_workflow_tables: None,
         engine: AsyncEngine,
+        broker: PostgresBroker,
     ) -> None:
         """Holding the SAME capped queue's lock must block the pass —
         proves the cap-accounting serialization is still real."""
-        passer = _make_worker(engine, queues={'lock_qc': 1})
+        passer = _make_worker(engine, broker, queues={'lock_qc': 1})
         sf = async_sessionmaker(engine, expire_on_commit=False)
 
         async with sf() as holding_session:
@@ -109,6 +116,7 @@ class TestClaimLockScoping:
         self,
         clean_workflow_tables: None,
         engine: AsyncEngine,
+        broker: PostgresBroker,
     ) -> None:
         """cluster_wide_cap keeps the single global key: a pass over any
         queue blocks while the global key is held (the invariant is
@@ -124,6 +132,7 @@ class TestClaimLockScoping:
             listener=MagicMock(),
             cfg=cfg,
         )
+        passer.broker = broker
         # Claim semantics: one checkout per claim statement.
         passer._claim_runner = PooledStatements(passer.sf)  # pyright: ignore[reportPrivateUsage]
         # No slot pool: every configured slot counts.

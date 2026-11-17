@@ -46,7 +46,7 @@ def test_config_default_is_false_and_never_an_engine_kwarg() -> None:
 async def _enqueue(
     broker: PostgresBroker, *, retain: bool | None
 ) -> str:
-    task_id = str(uuid.uuid4())
+    task_id = uuid.uuid4()
     outcome = await broker.enqueue_async(
         'policy.task',
         task_id=task_id,
@@ -56,7 +56,7 @@ async def _enqueue(
         retain_rerun_input=retain,
     )
     assert not is_err(outcome), outcome
-    return task_id
+    return str(task_id)
 
 
 @pytest.mark.asyncio

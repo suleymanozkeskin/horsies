@@ -140,20 +140,26 @@ impl PausedAgeMicros {
         self.0
     }
 
-    /// The age as the paused-workflow age of the retention config, exact to
-    /// the microsecond. Total: the manifest bound is the bound of
-    /// [`PausedWorkflowAge`].
-    pub fn as_age(self) -> PausedWorkflowAge {
-        let age = i64::try_from(self.0)
-            .map_err(|refused| refused.to_string())
-            .and_then(|micros| {
-                PausedWorkflowAge::parse(chrono::Duration::microseconds(micros))
-                    .map_err(|refused| refused.to_string())
-            });
-        match age {
+    /// The age as the duration type of the retention config, exact to the
+    /// microsecond.
+    pub fn as_duration(self) -> chrono::Duration {
+        match i64::try_from(self.0) {
+            Ok(micros) => chrono::Duration::microseconds(micros),
+            Err(refused) => unreachable!(
+                "a parsed paused age of {} microseconds fits an i64: {refused}",
+                self.0
+            ),
+        }
+    }
+
+    /// The age as the paused age of the retention config. Total: 1 to
+    /// [`MAX_PAUSED_AGE_MICROS`] whole microseconds is the range that
+    /// [`PausedWorkflowAge::parse`] admits.
+    pub fn as_paused_age(self) -> PausedWorkflowAge {
+        match PausedWorkflowAge::parse(self.as_duration()) {
             Ok(age) => age,
             Err(refused) => unreachable!(
-                "a parsed manifest paused age of {} microseconds is a paused workflow age: {refused}",
+                "a parsed paused age of {} microseconds is a paused workflow age: {refused}",
                 self.0
             ),
         }
@@ -411,7 +417,7 @@ impl RetentionManifest {
                 TerminalRecordRetention::NoPruning => None,
             },
             paused_workflow_auto_cancel_after: match self.paused_workflow_auto_cancel_after {
-                PausedWorkflowExpiry::After { micros } => Some(micros.as_age()),
+                PausedWorkflowExpiry::After { micros } => Some(micros.as_paused_age()),
                 PausedWorkflowExpiry::NoExpiry => None,
             },
             history_leaf_horizon_days: self.history_leaf_horizon_days.0.get(),

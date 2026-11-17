@@ -187,6 +187,33 @@ class CoreHandle:
         """The facets of one scope: the JSON text of the core's Facets. Reads only, in one
         statement. A cancelled await drops the read.
         """
+    def monitoring_task_stats_async(self, query: TaskStatsQuery) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+        """The count of each task status: the JSON text of the core's list of StatusCount. Reads
+        only, in one statement.
+        """
+    def monitoring_task_breakdown_async(self, query: TaskBreakdownQuery) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+        """The task counts per group: the JSON text of the core's Breakdown. Reads only, in one
+        statement.
+        """
+    def monitoring_workflow_names_async(self) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+        """The names of the root runs: the JSON text of a list of str. Reads only, in one statement."""
+    def monitoring_workflow_runs_async(self, query: WorkflowRunsQuery) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+        """The newest root runs: the JSON text of the core's list of WorkflowRunSummary. Reads only,
+        in one statement.
+        """
+    def monitoring_workflow_run_async(self, workflow_id: uuid.UUID) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+        """One run with its nodes and edges: the JSON text of the core's WorkflowRunDetail, or null
+        when no run has the id. Reads only, in one statement.
+        """
+    def monitoring_workflow_node_async(self, workflow_id: uuid.UUID, *, task_index: int) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+        """One node with its task: the JSON text of the core's WorkflowTaskDetail, or null when the
+        run has no node at the index. Reads only, in one statement. An index outside 32 bits
+        raises OverflowError.
+        """
+    def monitoring_schedules_async(self) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+        """Every schedule state: the JSON text of the core's list of ScheduleStateInfo. Reads only,
+        in one statement.
+        """
     def stale_tasks_async(self, threshold_minutes: object) -> asyncio.Future[TaskListComplete | TaskListTruncated | BrokerFailure]:
         """The RUNNING tasks whose latest runner beat, or their start, is older than the
         threshold. A bool, a value that is not an int, or one outside 0 to 525600 minutes is
@@ -1254,6 +1281,30 @@ class TaskFacetsQuery:
     bound raises TypeError.
     """
     def __init__(self, *, window_lower: datetime.datetime, window_upper: datetime.datetime, statuses: list[str], error_categories: list[str], retried_only: bool) -> None: ...
+
+
+@final
+class TaskStatsQuery:
+    """One frozen task stats read: the window and every filter but the status. A value outside
+    its rule raises ValueError; a naive bound raises TypeError.
+    """
+    def __init__(self, *, window_lower: datetime.datetime, window_upper: datetime.datetime, task_names: list[str], queues: list[str], workers: list[str], error_codes: list[str], error_categories: list[str], retried_only: bool) -> None: ...
+
+
+@final
+class TaskBreakdownQuery:
+    """One frozen task breakdown read: the window, the group column, the filters and the group
+    limit. A value outside its rule raises ValueError; a naive bound raises TypeError.
+    """
+    def __init__(self, *, window_lower: datetime.datetime, window_upper: datetime.datetime, group_by: str, statuses: list[str], task_names: list[str], queues: list[str], workers: list[str], error_codes: list[str], error_categories: list[str], retried_only: bool, limit: int) -> None: ...
+
+
+@final
+class WorkflowRunsQuery:
+    """One frozen workflow runs read: the exact name and status filters (None for none) and the
+    limit. A limit outside 1 to 200 raises ValueError.
+    """
+    def __init__(self, *, name: str | None, status: str | None, limit: int) -> None: ...
 
 
 @final

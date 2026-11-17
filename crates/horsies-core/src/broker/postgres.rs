@@ -5625,6 +5625,8 @@ mod enqueue_task_options_tests {
             )]),
             retry_policy: Some(crate::core::RetryPolicy::exponential(30, 4, true).unwrap()),
             timeout_ms: Some(1_000),
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
         let text = options.serialize_retry_options().expect("options are set");
 
@@ -5681,6 +5683,53 @@ mod client_family_tests {
         ));
         assert!(!refused.is_retryable());
         assert_eq!(family_row(&pool).await.as_deref(), Some("RUST"));
+    }
+
+    /// A handle with migrations off (observe only) runs no install, so its
+    /// first send checks the family: on a database of the other family the
+    /// send is refused before the insert, not retryable, and writes no row.
+    #[tokio::test]
+    #[serial]
+    async fn a_send_of_a_handle_with_migrations_off_into_the_other_family_is_refused() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let broker = PostgresBroker::from_pool_observe_only(pool.clone())
+            .with_client_family(ClientFamily::Python);
+        let task_id = Uuid::new_v4();
+
+        let refused = broker
+            .enqueue(
+                "family.send",
+                "{}",
+                "default",
+                50,
+                Some(Utc::now()),
+                None,
+                None,
+                None,
+                Some(task_id),
+                None,
+                None,
+                EnqueueRetention::Default,
+                None,
+                SendKind::First,
+            )
+            .await
+            .expect_err("a Python handle does not send into a Rust database");
+
+        assert!(matches!(
+            refused,
+            BrokerError::ClientFamilyMismatch {
+                own: ClientFamily::Python,
+                ..
+            }
+        ));
+        assert!(!refused.is_retryable());
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count the rows of the refused send");
+        assert_eq!(rows, 0);
     }
 }
 

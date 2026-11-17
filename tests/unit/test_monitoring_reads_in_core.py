@@ -1,7 +1,6 @@
 """The monitoring reads that run in the core: the record of the core decides the answer.
 
-``list_tasks``, ``get_task_detail`` and ``task_facets`` call the broker's core
-handle. The tests run on a mocked handle: the record of each call is the
+Every read of ``horsies.monitoring`` calls the broker's core handle. The tests run on a mocked handle: the record of each call is the
 seam. ``MonitoringJson`` is validated into the response model; a failure
 record maps to its variant; a core boundary error of the call is a database
 failure. The decoding of the function rows is the core's, and its tests
@@ -21,10 +20,13 @@ from horsies._core import (
     CoreStopped,
     MonitoringFailed,
     MonitoringJson,
+    TaskBreakdownQuery,
     TaskDetailAbsent,
     TaskFacetsQuery,
     TaskListQuery,
+    TaskStatsQuery,
     TooManyPendingCalls,
+    WorkflowRunsQuery,
 )
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.models.tasks import Execution
@@ -32,6 +34,10 @@ from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
 from horsies.monitoring import (
+    Breakdown,
+    BreakdownLimit,
+    BreakdownUnclaimedGroup,
+    BreakdownValueGroup,
     ErrorCategory,
     Facets,
     MonitoringQueryDbOperationFailed,
@@ -43,9 +49,21 @@ from horsies.monitoring import (
     TaskDetailNotFound,
     TaskListPage,
     TaskPage,
+    ScheduleStateInfo,
+    StatusCount,
+    WorkflowRunDetail,
+    WorkflowRunsLimit,
+    WorkflowRunSummary,
     get_task_detail,
+    get_workflow_node,
+    get_workflow_run,
+    list_schedules,
     list_tasks,
+    list_workflow_names,
+    list_workflow_runs,
+    task_breakdown,
     task_facets,
+    task_stats,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -251,3 +269,169 @@ class TestFailures:
                 assert error.message.startswith('task list query failed: ')
             case _:
                 raise AssertionError(f'expected a database failure: {result!r}')
+
+
+RUN_ID: Final = '0190a1b2-c3d4-7e5f-8a6b-000000000001'
+STATS_JSON: Final = '[{"status": "PENDING", "count": 2}, {"status": "FAILED", "count": 1}]'
+BREAKDOWN_JSON: Final = (
+    '{"group_by": "worker", "groups": [{"total": 2, "pending": 1, "claimed": 0, "running": 1, '
+    '"completed": 0, "failed": 0, "cancelled": 0, "expired": 0, "retried": 0, '
+    '"group": {"kind": "value", "value": "worker-1"}}, {"total": 1, "pending": 1, "claimed": 0, '
+    '"running": 0, "completed": 0, "failed": 0, "cancelled": 0, "expired": 0, "retried": 0, '
+    '"group": {"kind": "unclaimed"}}], "total": {"total": 3, "pending": 2, "claimed": 0, '
+    '"running": 1, "completed": 0, "failed": 0, "cancelled": 0, "expired": 0, "retried": 0}, '
+    '"group_count": 2}'
+)
+RUNS_JSON: Final = (
+    '[{"id": "0190a1b2-c3d4-7e5f-8a6b-000000000001", "name": "alpha.flow", '
+    '"definition_key": null, "status": "RUNNING", "created_at": "2026-11-17T11:00:00Z", '
+    '"completed_at": null, "wall_s": 60}]'
+)
+RUN_JSON: Final = (
+    '{"run": {"id": "0190a1b2-c3d4-7e5f-8a6b-000000000001", "name": "alpha.flow", '
+    '"definition_key": null, "status": "RUNNING", "created_at": "2026-11-17T11:00:00Z", '
+    '"completed_at": null, "wall_s": 60}, "nodes": [], "edges": [], "failed_count": 0, '
+    '"failed_indices": []}'
+)
+SCHEDULES_JSON: Final = (
+    '[{"schedule_name": "nightly", "last_run_at": null, "next_run_at": "2026-11-18T00:00:00Z", '
+    '"last_task_id": null, "run_count": 0, "updated_at": "2026-11-17T11:00:00Z"}]'
+)
+
+
+class TestAggregateAndWorkflowAnswers:
+    @pytest.mark.asyncio
+    async def test_the_stats_are_the_json_list_of_the_core(self) -> None:
+        broker, call = _broker('monitoring_task_stats_async', _record(MonitoringJson, json=STATS_JSON))
+
+        result = await task_stats(
+            broker,
+            window=WINDOW,
+            task_names=[],
+            queues=[],
+            workers=[],
+            error_codes=[],
+            error_categories=[],
+            retried_only=False,
+        )
+
+        assert result == Ok([StatusCount(status='PENDING', count=2), StatusCount(status='FAILED', count=1)])
+        assert _only_argument(call).__class__ is TaskStatsQuery
+
+    @pytest.mark.asyncio
+    async def test_the_breakdown_keeps_both_group_kinds(self) -> None:
+        broker, call = _broker(
+            'monitoring_task_breakdown_async', _record(MonitoringJson, json=BREAKDOWN_JSON),
+        )
+
+        result = await task_breakdown(
+            broker,
+            window=WINDOW,
+            group_by='worker',
+            statuses=[],
+            task_names=[],
+            queues=[],
+            workers=[],
+            error_codes=[],
+            error_categories=[],
+            retried_only=False,
+            limit=BreakdownLimit(value=50),
+        )
+
+        match result:
+            case Ok(Breakdown(groups=[first, second], group_count=2)):
+                assert first.group == BreakdownValueGroup(value='worker-1')
+                assert second.group == BreakdownUnclaimedGroup()
+            case _:
+                raise AssertionError(f'expected two groups: {result!r}')
+        assert _only_argument(call).__class__ is TaskBreakdownQuery
+
+    @pytest.mark.asyncio
+    async def test_the_names_runs_and_schedules_are_the_json_lists_of_the_core(self) -> None:
+        names_broker, _ = _broker(
+            'monitoring_workflow_names_async', _record(MonitoringJson, json='["alpha.flow"]'),
+        )
+        runs_broker, runs_call = _broker(
+            'monitoring_workflow_runs_async', _record(MonitoringJson, json=RUNS_JSON),
+        )
+        schedules_broker, _ = _broker(
+            'monitoring_schedules_async', _record(MonitoringJson, json=SCHEDULES_JSON),
+        )
+
+        names = await list_workflow_names(names_broker)
+        runs = await list_workflow_runs(
+            runs_broker, name='alpha.flow', status=None, limit=WorkflowRunsLimit(value=30),
+        )
+        schedules = await list_schedules(schedules_broker)
+
+        assert names == Ok(['alpha.flow'])
+        match runs:
+            case Ok([WorkflowRunSummary(id=run_id, wall_s=60)]):
+                assert run_id == RUN_ID
+            case _:
+                raise AssertionError(f'expected one run: {runs!r}')
+        assert _only_argument(runs_call).__class__ is WorkflowRunsQuery
+        match schedules:
+            case Ok([ScheduleStateInfo(schedule_name='nightly', last_task_id=None)]):
+                pass
+            case _:
+                raise AssertionError(f'expected one schedule: {schedules!r}')
+
+    @pytest.mark.asyncio
+    async def test_a_run_is_its_json_and_null_is_no_run(self) -> None:
+        found_broker, found_call = _broker(
+            'monitoring_workflow_run_async', _record(MonitoringJson, json=RUN_JSON),
+        )
+        absent_broker, _ = _broker(
+            'monitoring_workflow_run_async', _record(MonitoringJson, json='null'),
+        )
+
+        found = await get_workflow_run(found_broker, RUN_ID)
+        absent = await get_workflow_run(absent_broker, RUN_ID)
+
+        assert found == Ok(WorkflowRunDetail.model_validate_json(RUN_JSON))
+        found_call.assert_awaited_once_with(uuid.UUID(RUN_ID))
+        assert absent == Ok(None)
+
+    @pytest.mark.asyncio
+    async def test_an_id_text_that_is_not_a_uuid_names_no_run_or_node_and_calls_nothing(
+        self,
+    ) -> None:
+        run_broker, run_call = _broker(
+            'monitoring_workflow_run_async', _record(MonitoringJson, json='null'),
+        )
+        node_broker, node_call = _broker(
+            'monitoring_workflow_node_async', _record(MonitoringJson, json='null'),
+        )
+
+        assert await get_workflow_run(run_broker, 'not-a-uuid') == Ok(None)
+        assert await get_workflow_node(node_broker, 'not-a-uuid', 0) == Ok(None)
+        run_call.assert_not_awaited()
+        node_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_node_index_reaches_the_core_and_null_is_no_node(self) -> None:
+        broker, call = _broker('monitoring_workflow_node_async', _record(MonitoringJson, json='null'))
+
+        result = await get_workflow_node(broker, RUN_ID, 7)
+
+        assert result == Ok(None)
+        call.assert_awaited_once_with(uuid.UUID(RUN_ID), task_index=7)
+
+    @pytest.mark.parametrize('task_index', [-(2**31) - 1, 2**31, 10**30])
+    @pytest.mark.asyncio
+    async def test_a_node_index_outside_the_integer_column_is_python_database_failure(
+        self, task_index: int,
+    ) -> None:
+        """Python's statement failed on the cast; the answer is the same, with no call."""
+        broker, call = _broker('monitoring_workflow_node_async', _record(MonitoringJson, json='null'))
+
+        result = await get_workflow_node(broker, RUN_ID, task_index)
+
+        match result:
+            case Err(MonitoringQueryDbOperationFailed() as error):
+                assert error.retryable is False
+                assert error.message.startswith('workflow node detail query failed: ')
+            case _:
+                raise AssertionError(f'expected a database failure: {result!r}')
+        call.assert_not_awaited()
