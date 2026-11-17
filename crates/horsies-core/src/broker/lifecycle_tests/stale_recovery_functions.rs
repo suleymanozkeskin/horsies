@@ -867,10 +867,12 @@ mod round_trips {
         cleanup_tasks(&pool, &[task_id]).await;
     }
 
-    /// A batch of the reaper's pending expiry is one statement.
+    /// A batch of the reaper's pending expiry is one transaction of three
+    /// round trips: `BEGIN`, the batch statement and `COMMIT`. The commit
+    /// waits for the check of the batch's outcomes.
     #[tokio::test]
     #[serial]
-    async fn a_pending_expiry_batch_is_one_statement() {
+    async fn a_pending_expiry_batch_is_one_transaction_of_three_round_trips() {
         let pool = pool().await;
         drain_pending_expiry(&pool).await;
         let counted = counted_pool(&pool).await;
@@ -885,7 +887,7 @@ mod round_trips {
             .await
             .expect("pending expiry");
 
-        assert_eq!(counted.proxy.round_trips(), 1);
+        assert_eq!(counted.proxy.round_trips(), 3);
         assert_eq!(expired, 1);
         assert_eq!(status_of(&pool, task_id).await, "EXPIRED");
         counted.pool.close();

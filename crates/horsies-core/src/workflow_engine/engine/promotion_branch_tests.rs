@@ -22,30 +22,30 @@ use crate::core::{AnyNode, OnError, WorkflowSpec, WorkflowStartErrorCode};
 use crate::workflow_engine::args_merge::{merge_args_from_sync, ARGS_FROM_ENVELOPE_KEY};
 
 /// The queue of every seeded task node and of the child task nodes.
-const QUEUE: &str = "promotion_branch_q";
+pub(super) const QUEUE: &str = "promotion_branch_q";
 
 /// The definition key of the child workflow of the sub-workflow node.
-const CHILD_KEY: &str = "tests.promotion_branch.child.v1";
+pub(super) const CHILD_KEY: &str = "tests.promotion_branch.child.v1";
 
 /// A retry policy of Python's shape (`_policy` of
 /// `tests/unit/test_stored_max_retries.py`) with `max_retries`.
-fn retry_options(max_retries: i64) -> String {
+pub(super) fn retry_options(max_retries: i64) -> String {
     format!(
         r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals": [5],
             "backoff_strategy": "exponential", "jitter": true, "auto_retry_for": ["TRANSIENT"]}}}}"#
     )
 }
 
-fn empty_registry() -> WorkflowSpecRegistry {
+pub(super) fn empty_registry() -> WorkflowSpecRegistry {
     WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER)
 }
 
-async fn shared_pool() -> PgPool {
+pub(super) async fn shared_pool() -> PgPool {
     crate::broker::terminalization_matrix::migrated_pool().await
 }
 
 /// A RUNNING top-level workflow with `on_error = fail`.
-async fn seed_workflow(pool: &PgPool) -> Uuid {
+pub(super) async fn seed_workflow(pool: &PgPool) -> Uuid {
     let workflow_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_workflows (
@@ -64,7 +64,7 @@ async fn seed_workflow(pool: &PgPool) -> Uuid {
 
 /// A task node `node_<index>` of task `promotion_branch_task` on [`QUEUE`]
 /// with the input `{}`, no options and no `args_from`.
-async fn seed_task_node(
+pub(super) async fn seed_task_node(
     pool: &PgPool,
     workflow_id: Uuid,
     task_index: i32,
@@ -115,7 +115,7 @@ async fn seed_completed_root_and_dependent(pool: &PgPool) -> Uuid {
 }
 
 /// Runs `statement` with the workflow id as `$1` and checks that it wrote one row.
-async fn update_node(pool: &PgPool, workflow_id: Uuid, statement: &str) {
+pub(super) async fn update_node(pool: &PgPool, workflow_id: Uuid, statement: &str) {
     let updated = sqlx::query(statement)
         .bind(workflow_id)
         .execute(pool)
@@ -125,7 +125,7 @@ async fn update_node(pool: &PgPool, workflow_id: Uuid, statement: &str) {
 }
 
 /// The status, the linked task and the stored result of a node.
-async fn node_state(
+pub(super) async fn node_state(
     pool: &PgPool,
     workflow_id: Uuid,
     task_index: i32,
@@ -142,7 +142,7 @@ async fn node_state(
 }
 
 /// The error of a stored node result that must be an error envelope.
-fn stored_node_error(result: Option<&str>) -> TaskError {
+pub(super) fn stored_node_error(result: Option<&str>) -> TaskError {
     let text = result.expect("the node stores a result");
     match serde_json::from_str::<TaskResult<serde_json::Value>>(text).expect("a result envelope") {
         TaskResult::Err(error) => error,
@@ -160,7 +160,7 @@ async fn queued_task_count(pool: &PgPool) -> i64 {
 }
 
 /// Child workflows of `workflow_id`.
-async fn child_count(pool: &PgPool, workflow_id: Uuid) -> i64 {
+pub(super) async fn child_count(pool: &PgPool, workflow_id: Uuid) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM horsies_workflows WHERE parent_workflow_id = $1")
         .bind(workflow_id)
         .fetch_one(pool)
@@ -170,7 +170,7 @@ async fn child_count(pool: &PgPool, workflow_id: Uuid) -> i64 {
 
 /// Removes the task rows of the workflow tree of `workflow_id`, then the tree
 /// (its nodes and child workflows go with it).
-async fn remove_tree(pool: &PgPool, workflow_id: Uuid) {
+pub(super) async fn remove_tree(pool: &PgPool, workflow_id: Uuid) {
     sqlx::query(
         "DELETE FROM horsies_tasks WHERE id IN (
              SELECT n.task_id FROM horsies_workflow_tasks n
@@ -189,7 +189,7 @@ async fn remove_tree(pool: &PgPool, workflow_id: Uuid) {
         .expect("remove the workflow tree");
 }
 
-async fn recover(
+pub(super) async fn recover(
     pool: &PgPool,
     workflow_id: Uuid,
     task_index: i32,
@@ -363,12 +363,14 @@ async fn the_recovery_of_a_node_that_is_not_pending_promotes_nothing() {
     assert_eq!(tasks_after, tasks_before);
 }
 
-/// `TestCheckAndPromoteTask::test_no_dependencies_returns`: a PENDING node
-/// with no dependencies is not promoted; it stays PENDING with no task row.
+/// `TestCheckAndPromoteTask::test_no_dependencies_returns`, with the core's
+/// rule (#1224): a PENDING node with no dependencies meets its join `all`
+/// (0 of 0 dependencies terminal), so recovery promotes it and mints its task
+/// row. Python leaves such a node PENDING; the core keeps its rule, because it
+/// recovers a root that a start left PENDING.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1224"]
-async fn a_pending_node_without_dependencies_is_not_promoted() {
+async fn a_pending_node_without_dependencies_is_promoted() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool).await;
     seed_task_node(&pool, workflow_id, 0, &[], "PENDING").await;
@@ -377,9 +379,9 @@ async fn a_pending_node_without_dependencies_is_not_promoted() {
 
     let (status, task_id, _result) = node_state(&pool, workflow_id, 0).await;
     remove_tree(&pool, workflow_id).await;
-    assert!(matches!(promoted, Ok(false)), "{promoted:?}");
-    assert_eq!(status, "PENDING");
-    assert_eq!(task_id, None);
+    assert!(matches!(promoted, Ok(true)), "{promoted:?}");
+    assert_eq!(status, "ENQUEUED");
+    assert!(task_id.is_some(), "the promoted node links its task row");
 }
 
 /// Stored task options of the promoted node 1 that do not read, with
@@ -509,7 +511,7 @@ async fn a_promoted_node_whose_stored_input_does_not_parse_fails_alone() {
 }
 
 /// A task node of a child spec: index 0, no dependency, on [`QUEUE`].
-fn child_task_node(
+pub(super) fn child_task_node(
     task_options: Option<&str>,
     good_until: Option<chrono::DateTime<chrono::Utc>>,
 ) -> AnyNode {
@@ -536,7 +538,7 @@ fn child_task_node(
 }
 
 /// A registry that resolves [`CHILD_KEY`] to a child with the one task node `child_root`.
-fn child_registry(child_root: AnyNode) -> WorkflowSpecRegistry {
+pub(super) fn child_registry(child_root: AnyNode) -> WorkflowSpecRegistry {
     let mut registry = empty_registry();
     registry
         .register(RegisteredWorkflowSpec {
@@ -555,9 +557,16 @@ fn child_registry(child_root: AnyNode) -> WorkflowSpecRegistry {
 }
 
 /// Node 0 COMPLETED, and node 1, a sub-workflow node of [`CHILD_KEY`] that
-/// waits for node 0, PENDING. Returns the workflow id.
-async fn seed_sub_workflow_dependent(pool: &PgPool) -> Uuid {
+/// waits for node 0, PENDING, in a new top-level workflow. Returns the
+/// workflow id.
+pub(super) async fn seed_sub_workflow_dependent(pool: &PgPool) -> Uuid {
     let workflow_id = seed_workflow(pool).await;
+    seed_sub_workflow_nodes(pool, workflow_id).await;
+    workflow_id
+}
+
+/// The nodes of [`seed_sub_workflow_dependent`] in `workflow_id`.
+pub(super) async fn seed_sub_workflow_nodes(pool: &PgPool, workflow_id: Uuid) {
     seed_task_node(pool, workflow_id, 0, &[], "COMPLETED").await;
     let ok = serde_json::to_string(&TaskResult::Ok(serde_json::json!(7))).unwrap();
     sqlx::query(
@@ -584,7 +593,6 @@ async fn seed_sub_workflow_dependent(pool: &PgPool) -> Uuid {
     .execute(pool)
     .await
     .expect("seed the sub-workflow node");
-    workflow_id
 }
 
 /// `TestChildStartReadsTheTaskFunctionOptions::test_valid_options_of_a_fast_root_reach_the_insert`

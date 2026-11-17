@@ -6966,7 +6966,6 @@ mod task_info_code_tests {
     /// `arbitrary_precision` feature), and a repeated key (read in every
     /// build).
     #[test]
-    #[ignore = "waits on #1233"]
     fn a_stored_result_past_the_strict_rule_is_invalid_json_payload_in_every_build() {
         let long_integer = format!("{{\"x\":{}}}", "1".repeat(5000));
         for payload in [
