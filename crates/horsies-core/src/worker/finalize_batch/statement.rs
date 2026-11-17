@@ -218,6 +218,7 @@ impl SuccessBatchWrite for WorkerPoolSuccessWrite {
                         false => Transience::Permanent,
                     },
                     detail: error.to_string(),
+                    cause: error.failure_cause(),
                 })?;
         complete_plain_successes(
             open.main(),

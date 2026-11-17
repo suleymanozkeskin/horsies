@@ -679,6 +679,7 @@ mod tests {
                 code: BrokerErrorCode::InvalidJsonPayload,
                 message: "digest mismatch".to_owned(),
                 retryable: false,
+                cause: horsies_core::FailureCause::ContractViolation,
             },
         );
         assert!(matches!(
@@ -691,6 +692,7 @@ mod tests {
                 code: BrokerErrorCode::TaskInfoQueryFailed,
                 message: "timeout".to_owned(),
                 retryable: true,
+                cause: horsies_core::FailureCause::Connection,
             },
         );
         assert!(matches!(

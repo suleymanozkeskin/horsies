@@ -482,6 +482,7 @@ mod tests {
         let BatchRecord::NotSent(not_sent) = batch_record(Err(BatchWriteError::NotSent {
             transience: Transience::Transient,
             detail: "pool timeout".to_owned(),
+            cause: horsies_core::FailureCause::Connection,
         })) else {
             panic!("a batch that was not sent is BatchNotSent");
         };
@@ -494,6 +495,10 @@ mod tests {
         let BatchRecord::Refused(refused) = batch_record(Err(BatchWriteError::Refused {
             transience: Transience::Permanent,
             detail: "22023".to_owned(),
+            server_error: horsies_core::ServerErrorFacts::of_code(
+                "22023",
+                "invalid parameter".to_owned(),
+            ),
         })) else {
             panic!("a refused batch is BatchRefused");
         };
@@ -506,6 +511,7 @@ mod tests {
         assert!(matches!(
             batch_record(Err(BatchWriteError::CommitUnknown {
                 detail: "connection lost".to_owned(),
+                cause: horsies_core::FailureCause::Connection,
             })),
             BatchRecord::CommitUnknown(_)
         ));

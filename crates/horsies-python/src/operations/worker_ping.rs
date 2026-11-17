@@ -12,7 +12,7 @@ use std::time::Duration;
 use horsies_core::handle::HandleListener;
 use horsies_core::{
     ping_listener_disabled, ping_min_responses_refused, ping_timeout_refused, BrokerErrorCode,
-    BrokerOperationError, WorkerPong,
+    BrokerOperationError, FailureCause, WorkerPong,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyInt, PyList, PyString};
@@ -169,6 +169,7 @@ fn ping_target(value: &Bound<'_, PyAny>) -> PyResult<Result<Option<String>, Brok
                      not {type_name}"
                 ),
                 retryable: false,
+                cause: FailureCause::PreconditionFailed,
             })))
         }
     }

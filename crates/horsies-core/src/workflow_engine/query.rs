@@ -735,6 +735,7 @@ fn stored_summary(
         message,
         retryable: false,
         workflow_id,
+        cause: crate::failure_cause::FailureCause::ContractViolation,
     };
     let value = crate::core::codec::from_json_str::<serde_json::Value>(text).map_err(|error| {
         invalid(format!(
