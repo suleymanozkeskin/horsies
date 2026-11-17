@@ -109,9 +109,9 @@ def test_a_keyed_send_on_the_calling_thread_writes_its_key(
 
     assert result == Ok(TASK_ID)
     match rows:
-        case [EnqueueRow(key=Keyed(digest=digest, window_s=window_s))]:
+        case [EnqueueRow(key=Keyed(digest=digest, window=window))]:
             assert digest == ScopedIdempotencyKey(task_name='my_task', key='order-17').digest
-            assert window_s == int(broker.idempotency_reservation_window.total_seconds())
+            assert window == broker.idempotency_reservation_window
         case _:
             raise AssertionError(f'expected one keyed row, got {rows!r}')
 

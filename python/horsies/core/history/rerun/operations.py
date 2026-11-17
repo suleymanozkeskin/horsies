@@ -456,9 +456,7 @@ async def rerun_task(
             connection,
             key_digest=scoped.digest,
             key_scope_version=IDEMPOTENCY_SCOPE_VERSION,
-            reservation_window_seconds=int(
-                policy.reservation_window.total_seconds()
-            ),
+            reservation_window=policy.reservation_window,
             fingerprint_version=1,
             fingerprint=fingerprint,
             task_id=new_task_id,
