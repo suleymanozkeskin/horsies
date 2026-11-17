@@ -430,7 +430,10 @@ pub(crate) async fn resume_client_workflow(
 }
 
 /// The body of [`resume_workflow`] with the children built by `build`.
-async fn resume_with(
+/// Outcomes and panics as [`resume_workflow`]; with a client build, as
+/// [`resume_client_workflow`]. The monitoring resume action calls it with
+/// the build of its process.
+pub(crate) async fn resume_with(
     broker: &PostgresBroker,
     workflow_id: Uuid,
     build: ChildBuild<'_>,

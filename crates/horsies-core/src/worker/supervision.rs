@@ -232,8 +232,8 @@ mod tests {
             Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
             pool.clone(),
             pool,
-            Arc::new(WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
+                WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             )),
             config,
             crate::core::RetentionConfig::default(),

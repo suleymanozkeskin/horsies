@@ -2852,13 +2852,14 @@ class PreloadRefusedFrame:
 class PreparedWorker:
     """The worker of one worker manifest, not run yet. host.on_started() runs once per run on
     the callback thread, after the start and before the first claim; an exception from it is
-    logged at ERROR and the worker runs on.
+    logged at ERROR and the worker runs on. host.build_child_spec(request) builds each
+    sub-workflow child that a workflow step of the worker starts, on the callback thread.
     """
     def run(self) -> WorkerStopped | WorkerBootFailed | WorkerFailed:
         """Build the worker and run it until a stop request or a failure. Main thread only: the
         signal handlers run between wait slices, and there is no total bound. Raises
-        NotMainThread off the main thread, RuntimeError for a second run, and the exception of
-        a signal handler after the run ended.
+        NotMainThread off the main thread, RuntimeError for a second run, and, after the run
+        ended, the exception of a signal handler or the interrupt that a child build raised.
         """
     def request_stop(self) -> StopRequested:
         """Ask the run to stop: the claim loop ends and the children drain within the profile's
@@ -2948,8 +2949,9 @@ def prepare_rerun_write(read: PreparedStatement, row: tuple[object, ...], comman
 
 
 def prepare_worker(manifest_json: str, *, host: object) -> PreparedWorker | WorkerProfileRefused:
-    """Parse a worker manifest and pick its profile. Pure: starts no runtime. host has an
-    on_started() method. A refused manifest raises ManifestRefused.
+    """Parse a worker manifest and pick its profile. Pure: starts no runtime. host has the
+    methods on_started() and build_child_spec(request). A refused manifest raises
+    ManifestRefused.
     """
 
 

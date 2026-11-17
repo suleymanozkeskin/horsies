@@ -619,7 +619,7 @@ async fn detail_refuses_a_stored_status_that_is_not_a_task_status() {
         read_task_detail(&mut transaction, task_id)
             .await
             .expect_err("an unknown status must refuse detail"),
-        HistoryError::Contract(ref detail) if detail.contains("\"BOGUS\"")
+        HistoryError::Contract(ref detail) if detail.contains("'BOGUS'")
     ));
     transaction
         .rollback()

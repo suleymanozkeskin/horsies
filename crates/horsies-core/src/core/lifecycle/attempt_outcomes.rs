@@ -840,10 +840,12 @@ fn refusal_of(outcome: TerminalizationOutcome) -> Result<AttemptWriteRefusal, Ou
 fn observed_of(raw: &RawOutcomeRow) -> Result<ObservedTaskState, OutcomeDecodeError> {
     let status = match raw.observed_status.as_deref() {
         None => None,
-        Some(text) => Some(
-            text.parse::<TaskStatus>()
-                .map_err(|error| OutcomeDecodeError(format!("observed_status {error}")))?,
-        ),
+        Some(text) => Some(text.parse::<TaskStatus>().map_err(|_| {
+            OutcomeDecodeError(format!(
+                "observed_status is not a task status: {}",
+                crate::core::python_text::python_repr(text)
+            ))
+        })?),
     };
     Ok(ObservedTaskState {
         status,
