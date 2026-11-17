@@ -1,26 +1,9 @@
-use crate::broker::BrokerError;
-use crate::core::HorsiesError;
-use crate::worker::WorkerError;
+//! Diagnostics of the app's configuration, registration and checks.
+//!
+//! A refusal names its cause with an [`ErrorCode`] (`HRS-xxx`) and the
+//! code's [`ErrorCategory`], with notes and help text, as the Python client
+//! does. A [`ValidationReport`] collects the refusals of one phase. The types
+//! are the core's: both clients print the same codes.
 
-#[derive(Debug, thiserror::Error)]
-pub enum AppError {
-    #[error(transparent)]
-    Validation(#[from] HorsiesError),
-
-    #[error(transparent)]
-    Broker(#[from] BrokerError),
-
-    #[error(transparent)]
-    Worker(#[from] WorkerError),
-
-    #[error("invalid worker configuration: {0}")]
-    InvalidWorkerConfig(String),
-
-    #[error("scheduler configuration error: {0}")]
-    SchedulerConfig(String),
-
-    #[error("scheduler task join error: {0}")]
-    SchedulerJoin(#[from] tokio::task::JoinError),
-}
-
-pub type AppResult<T> = Result<T, AppError>;
+pub use horsies_core::core::error::diagnostic::{format_diagnostic, format_report_diagnostic};
+pub use horsies_core::{ErrorCategory, ErrorCode, HorsiesError, ValidationReport};
