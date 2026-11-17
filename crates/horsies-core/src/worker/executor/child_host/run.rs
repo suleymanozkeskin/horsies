@@ -325,8 +325,12 @@ pub(super) async fn mark_finalizing(context: &HostContext, facts: &RunFacts) {
 
 /// The envelope of a task error.
 fn error_envelope(error: TaskError) -> RunEnd {
-    let text = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))
-        .expect("a task error holds only JSON values, so its envelope encodes");
+    // The codec's encoder writes each float of `data` as Python's
+    // `json.dumps` does.
+    let text = crate::core::codec::task_result_to_json_string(
+        &TaskResult::<serde_json::Value>::Err(error),
+    )
+    .expect("a task error holds only JSON values, so its envelope encodes");
     RunEnd::Result(ResultEnvelopeText::new(text))
 }
 
