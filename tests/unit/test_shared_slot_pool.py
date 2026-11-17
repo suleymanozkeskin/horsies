@@ -202,6 +202,7 @@ def _request(
         is_workflow_task=False,
         claim=CLAIM,
         work=SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=grace_ms),
+        orphan_self_heal=True,
     )
 
 
@@ -1139,6 +1140,7 @@ class TestStartAndStop:
                 is_workflow_task=False,
                 timeout=NoTimeout(),
                 claimed_at=CLAIMED_AT,
+                orphan_self_heal=True,
             ),
         )
         shared = pool.submit_shared(_request('pid'))

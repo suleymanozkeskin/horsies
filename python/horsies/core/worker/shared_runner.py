@@ -86,8 +86,9 @@ class PostgresSeats:
 
     async def run(self, frame: SharedRunFrame) -> SeatReturn:
         """Run the task of ``frame``. The same steps and outcomes as
-        ``child_runner._run_task_entry`` but the marker, on the async pool."""
-        return await run_seat_task(self._pool, frame)
+        ``child_runner._run_task_entry`` but the marker, through the core
+        handle of the child."""
+        return await run_seat_task(frame)
 
     async def mark_finalizing(
         self, frame: SharedRunFrame, window: MarkerWindow
@@ -242,15 +243,13 @@ def _without_left_cancel(
     return map_exception(asyncio.CancelledError())
 
 
-async def run_seat_task(
-    pool: AsyncConnectionPool[AsyncConnection[Any]],
-    frame: SharedRunFrame,
-) -> SeatReturn:
+async def run_seat_task(frame: SharedRunFrame) -> SeatReturn:
     """Run one task on a seat, up to its wire tuple.
 
     The steps of ``_run_task_entry`` but the finalizing marker: the RUNNING
-    transition with the first runner heartbeat, then the task call and the
-    result encode (``_run_after_running``). A stop before the RUNNING
+    transition with the first runner heartbeat through the core handle of
+    the child, then the task call and the result encode
+    (``_run_after_running``). A stop before the RUNNING
     update commits returns ``StoppedBeforeRunning``; every other end returns
     ``SetRunning``. The seat loop writes the marker at the end of the run
     (``PostgresSeats.mark_finalizing``). A cancel during the RUNNING
@@ -258,11 +257,11 @@ async def run_seat_task(
     """
     logger.info(f'Starting task execution: {frame.task_name} ({frame.task_id})')
     ownership_result = await confirm_until_not_resumed(
-        pool,
         frame.task_id,
         frame.worker_id,
         frame.is_workflow_task,
         frame.claimed_at,
+        orphan_self_heal=frame.orphan_self_heal,
     )
     if ownership_result is not None:
         return StoppedBeforeRunning(ownership_result)

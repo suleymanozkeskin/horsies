@@ -10,21 +10,30 @@ Each has the bounds of the ``pool`` of the child kind in the worker profile
 
 Every connection of these pools is in autocommit: a statement is its own
 transaction, and a one-statement write is one round trip, with no BEGIN and
-no COMMIT. A write that needs several statements to commit together opens a
-transaction itself with an explicit ``BEGIN`` and ends it with ``commit()``
-or ``rollback()`` (``child_runner``, ``shared_lifecycle``).
+no COMMIT.
+
+Each child also builds one core handle (``_initialize_child_core_handle``)
+with the same bounds: the start of each run and its miss path go through it
+(``CoreChildHandle``). The finalizing marker stays on the pools above.
 """
 
 from __future__ import annotations
 
 import atexit
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any, Final
 
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool, ConnectionPool
 
+from horsies._catalog.manifest import ProducerManifest, dump_producer_manifest
+from horsies._core import CoreChildHandle
+from horsies.core.history.identity.keys import IDEMPOTENCY_WINDOW_DEFAULT
+from horsies.core.manifest import pool_recycle_of, to_producer_manifest
 from horsies.core.models.boot_failure import ThreadStartRefusedError
+from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.worker_profile import ResolvedPool
 
 CHILD_POOL_MAX_LIFETIME_S: Final = 300.0
 """Each pooled connection of a child is replaced after this time."""
@@ -180,4 +189,89 @@ async def open_shared_async_pool(
     return pool
 
 
-_CHILD_POOL_API = (_get_worker_pool, _initialize_worker_pool)
+# ---------- Per-process core handle (built in child processes) ----------
+_child_core_handle: CoreChildHandle | None = None
+
+
+def child_core_manifest(config: PostgresConfig, pool: ResolvedPool) -> ProducerManifest:
+    """The producer manifest of the core pool of a worker's child.
+
+    The connection settings of ``config`` (the URL, the session database,
+    PgBouncer transaction mode, TCP keepalives and user timeout, ``echo``)
+    with the shape of the sync pool of the child: ``pool.max_size``
+    connections with no overflow, ``CHILD_POOL_CONNECTION_WAIT_S`` as the
+    checkout wait, ``CHILD_POOL_MAX_LIFETIME_S`` as the connection age, and
+    ``pool.check`` as the ping. A child applies no migration
+    (``ASSUME_INITIALIZED``). The send section is the producer default: the
+    child handle sends no task. Pure.
+    """
+    producer = to_producer_manifest(
+        config,
+        schema='ASSUME_INITIALIZED',
+        idempotency_reservation_window=IDEMPOTENCY_WINDOW_DEFAULT,
+    )
+    return replace(
+        producer,
+        database=replace(
+            producer.database,
+            pool_pre_ping=pool.check,
+            pool_size=pool.max_size,
+            max_overflow=0,
+            pool_timeout=int(CHILD_POOL_CONNECTION_WAIT_S),
+            pool_recycle=pool_recycle_of(int(CHILD_POOL_MAX_LIFETIME_S)),
+        ),
+    )
+
+
+def _get_child_core_handle() -> CoreChildHandle:
+    """The core handle of this child process.
+
+    Raises:
+        RuntimeError: the process built no handle; a defect of the caller,
+            which runs outside a child worker process.
+    """
+    if _child_core_handle is None:
+        raise RuntimeError(
+            'The core handle of the child is not built. '
+            'This function must be called from a child worker process.'
+        )
+    return _child_core_handle
+
+
+def _initialize_child_core_handle(config: PostgresConfig, pool: ResolvedPool) -> None:
+    """Build the core handle of this child process (``child_core_manifest``).
+
+    The handle keeps ``pool.min_size`` connections open and, with
+    ``pool.check``, pings each connection at checkout, as the sync pool.
+    Building it starts nothing: the first call starts the core of this
+    process and connects. A process that has a handle keeps it.
+
+    Raises:
+        ManifestRefused: the core refused the manifest, a defect of
+            ``child_core_manifest``.
+    """
+    global _child_core_handle
+    if _child_core_handle is not None:
+        return
+    _child_core_handle = CoreChildHandle(
+        dump_producer_manifest(child_core_manifest(config, pool)),
+        kept_open=pool.min_size,
+        check_at_checkout=pool.check,
+    )
+
+
+def _drop_child_core_handle() -> None:
+    """Forget the core handle of this process, so that a test can build one
+    for another database. Closes nothing: the pools of the handle close when
+    the core drops it."""
+    global _child_core_handle
+    _child_core_handle = None
+
+
+_CHILD_POOL_API = (
+    _get_worker_pool,
+    _initialize_worker_pool,
+    _get_child_core_handle,
+    _initialize_child_core_handle,
+    _drop_child_core_handle,
+)

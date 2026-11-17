@@ -1,5 +1,9 @@
-"""The orphan self-heal of the worker's finalize through the core: the call it
-sends and the outcome it builds from each record of ``horsies._core``.
+"""The single-row end records of the core and the orphan self-heal of the
+child's stop before start: the outcome Python builds from each record of
+``horsies._core`` (``task_row_end_of``), and the wire reason of each step of
+``horsies_workflow_task_stop_before_start`` (``stopped_before_start_of``).
+The worker's finalize sends no orphan cancel: the child's stop cancels the
+orphan when the self-heal of its run is on.
 
 The records have no Python constructor, so each test stands in a record with
 a ``MagicMock`` of its class: a class pattern matches it, and its fields are
@@ -10,14 +14,12 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 import horsies._core as core
-from horsies.core.lifecycle.commands import CancelOwnedOrphan
 from horsies.core.lifecycle.core_records import task_row_end_of
-from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
@@ -32,7 +34,11 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.status import TaskStatus
-from horsies.core.worker.finalize import FinalizeMixin
+from horsies.core.worker.child_protocol import WireResult
+from horsies.core.worker.child_runner import (
+    _WorkflowResumedBeforeStart,  # pyright: ignore[reportPrivateUsage]
+    stopped_before_start_of,
+)
 
 pytestmark = [pytest.mark.unit]
 
@@ -40,7 +46,7 @@ TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e02'
 CLAIMED_AT = datetime(2026, 11, 17, 11, 0, tzinfo=timezone.utc)
 NOW = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
 WORKER_ID = 'worker-1'
-SUBJECT = 'FinalizeMixin._cancel_owned_orphan'
+SUBJECT = 'CoreChildHandle.expire_owned_claim'
 OBSERVED = ObservedTaskState(status=TaskStatus.CLAIMED, worker_id=WORKER_ID, claimed_at=CLAIMED_AT)
 
 
@@ -115,29 +121,39 @@ def test_a_kind_outside_the_catalog_is_a_decode_error() -> None:
         task_row_end_of(_record(core.TaskRowEnded, terminal_at=NOW, kind='NOT_A_KIND'), SUBJECT)
 
 
-class _Probe(FinalizeMixin):
-    def __init__(self, handle: MagicMock) -> None:
-        self._handle = handle
+@pytest.mark.parametrize(
+    ('outcome', 'move_outcome', 'wire'),
+    [
+        ('EXPIRED', 'APPLIED', (False, '', 'TASK_EXPIRED')),
+        ('EXPIRED', 'ALREADY_APPLIED', (False, '', 'TASK_EXPIRED')),
+        ('ABANDONED', 'APPLIED', (False, '', 'WORKFLOW_STOPPED')),
+        ('ABANDONED', 'LOST_CLAIM', (False, '', 'WORKFLOW_STOPPED')),
+        ('CANCELLED', 'APPLIED', (False, '', 'WORKFLOW_STOPPED')),
+        ('CANCELLED', 'TASK_ABSENT', (False, '', 'WORKFLOW_STOPPED')),
+        ('ORPHAN_CANCELLED', 'APPLIED', (False, '', 'ORPHAN_CANCELLED')),
+        ('ORPHAN_CANCELLED', 'SOURCE_STATE_CONFLICT', (False, '', 'ORPHAN_CANCELLED')),
+        ('NODE_NOT_LINKED', None, (False, '', 'WORKFLOW_CHECK_FAILED')),
+        ('NOT_HELD', 'LOST_CLAIM', (False, '', 'CLAIM_LOST')),
+    ],
+)
+def test_each_step_of_the_stop_gives_its_wire_reason(
+    outcome: str,
+    move_outcome: str | None,
+    wire: WireResult,
+) -> None:
+    record = _record(core.StoppedBeforeStart, outcome=outcome, move_outcome=move_outcome)
 
-    @property
-    def core_handle(self) -> core.CoreHandle:
-        return self._handle  # pyright: ignore[reportReturnType]
+    assert stopped_before_start_of(TASK_ID, record) == wire
 
 
-@pytest.mark.asyncio
-async def test_the_self_heal_sends_the_task_and_its_claim_fence() -> None:
-    handle = MagicMock()
-    handle.cancel_owned_orphan_async = AsyncMock(
-        return_value=_record(core.TaskRowEnded, terminal_at=NOW, kind='CANCEL_ORPHAN'),
+def test_a_resume_that_came_first_runs_the_start_again() -> None:
+    assert (
+        stopped_before_start_of(TASK_ID, _record(core.ResumedBeforeStart))
+        == _WorkflowResumedBeforeStart()
     )
-    command = CancelOwnedOrphan(
-        task_id=TASK_ID,
-        fence=OwnedClaim(worker_id=WORKER_ID, claimed_at=CLAIMED_AT),
-    )
 
-    outcome = await _Probe(handle)._cancel_owned_orphan(command)  # pyright: ignore[reportPrivateUsage]
 
-    assert isinstance(outcome, Applied)
-    handle.cancel_owned_orphan_async.assert_awaited_once_with(
-        uuid.UUID(TASK_ID), worker_id=WORKER_ID, claimed_at=CLAIMED_AT,
-    )
+def test_a_failed_stop_is_an_unconfirmed_start() -> None:
+    record = _record(core.StopBeforeStartFailed, message='connection lost', retryable=True)
+
+    assert stopped_before_start_of(TASK_ID, record) == (False, '', 'OWNERSHIP_UNCONFIRMED')

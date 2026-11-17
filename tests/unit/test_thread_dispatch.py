@@ -127,6 +127,7 @@ def _request(work: ThreadSeatWork | None = None) -> ThreadRunRequest:
         is_workflow_task=False,
         claim=CLAIM,
         work=work or ThreadSeatTask(timeout_ms=MIN_TASK_TIMEOUT_MS),
+        orphan_self_heal=True,
     )
 
 
@@ -248,6 +249,7 @@ class TestDispatch:
             is_workflow_task=False,
             claim=replace(CLAIM, task_options=THREAD_OPTIONS),
             work=ThreadSeatTask(timeout_ms=2000),
+            orphan_self_heal=False,
         )
         worker._finalize_shared_after.assert_called_once_with(
             worker._slots.submit_shared.return_value,
