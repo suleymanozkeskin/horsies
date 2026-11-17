@@ -18,6 +18,7 @@ pub use horsies_core::manifest::SchemaMode;
 use crate::config::{producer_manifest, rust_config_refusals};
 use crate::registry::{check_queue, queue_priority, register_task, valid_queue_names, QueueSource};
 use crate::send::TaskFunctions;
+use crate::workflow::WorkflowRegistry;
 use crate::{AppConfig, HorsiesError, TaskRuntime, ValidationReport};
 
 /// The environment variable that suppresses sends in this process when its
@@ -65,6 +66,7 @@ pub struct Horsies {
     role: AppRole,
     sends: SendSuppression,
     functions: Arc<TaskFunctions>,
+    workflows: Arc<WorkflowRegistry>,
 }
 
 impl Horsies {
@@ -99,6 +101,7 @@ impl Horsies {
 
     fn from_parts(config: AppConfig, handle: Arc<CoreHandle>) -> Self {
         Self {
+            workflows: Arc::new(WorkflowRegistry::new(config.clone())),
             config,
             handle,
             tasks: TaskRegistry::new(),
@@ -252,6 +255,21 @@ impl Horsies {
         &self.functions
     }
 
+    /// The workflow definitions registered on this app.
+    pub(crate) fn workflows(&self) -> &Arc<WorkflowRegistry> {
+        &self.workflows
+    }
+
+    /// The findings of the workflow check (Python's check of the registered
+    /// workflows): each definition without params and each check case of a
+    /// workflow builder, built, checked against the registered definitions
+    /// and the app's queues, and walked into its sub-workflows; a nesting
+    /// is reported only when it reaches the depth limit for certain. Empty
+    /// when every workflow passes.
+    pub(crate) fn workflow_check_findings(&self) -> Vec<HorsiesError> {
+        self.workflows.check_findings()
+    }
+
     /// The suppression of this process's sends, for a send path that lives
     /// apart from the app.
     pub(crate) fn send_suppression(&self) -> SendSuppression {
@@ -265,6 +283,7 @@ impl std::fmt::Debug for Horsies {
             .field("role", &self.role)
             .field("queues", &self.get_valid_queue_names())
             .field("tasks", &self.tasks.len())
+            .field("workflows", &self.workflows)
             .finish()
     }
 }
