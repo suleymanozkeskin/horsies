@@ -274,18 +274,19 @@ async fn each_cancel_outcome_reads_into_its_variant() {
     );
 }
 
+/// A step row outside its function's contract has no handle catalog entry:
+/// the handle operation panics with the cause, where Python raises
+/// `OutcomeDecodeError`.
 #[test]
-fn a_step_contract_error_is_internal_and_not_retryable() {
-    let workflow_id = Uuid::new_v4();
-    let error = crate::workflow_engine::lifecycle::handle_operation_error(
+#[should_panic(expected = "returned the outcome \"SUSPENDED\", which is outside its contract")]
+fn a_step_contract_error_has_no_handle_catalog_entry_and_panics() {
+    let _error = crate::workflow_engine::lifecycle::handle_operation_error(
         &WorkflowError::StepContract(StepContractError::UnknownOutcome {
             function: "horsies_workflow_pause",
             outcome: "SUSPENDED".to_owned(),
         }),
-        workflow_id,
+        Uuid::new_v4(),
     );
-    assert_eq!(error.code, HandleErrorCode::InternalFailed);
-    assert!(!error.retryable);
 }
 
 // ---------------------------------------------------------------------------

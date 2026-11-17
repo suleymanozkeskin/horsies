@@ -54,8 +54,3 @@ class HandleErrorCode(str, Enum):
     """A sync handle method was called on a thread that runs an event loop. Its wait would stall that
     loop, so nothing ran. Python client only.
     """
-
-    INTERNAL_FAILED = 'INTERNAL_FAILED'
-    """Internal / unexpected error. Not in Python's catalog: the workflow engine still folds some errors
-    into it.
-    """
