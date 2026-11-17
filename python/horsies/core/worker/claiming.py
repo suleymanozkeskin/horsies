@@ -22,24 +22,14 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Final, Optional, assert_never
 
 from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
-from horsies.core.lifecycle.commands import AbandonOwnedNodes, CancelOwnedNodes
-from horsies.core.lifecycle.fences import OwnedClaimBatch
-from horsies.core.lifecycle.outcomes import (
-    AlreadyApplied,
-    Applied,
-    LostClaim,
-    ObservedWorkflowState,
-    SourceStateConflict,
-    TaskAbsent,
-    TerminalizationOutcome,
-)
-from horsies.core.lifecycle.persistence import apply_batch_async
+from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import Execution
 from horsies.core.utils.db import (
     SingleStatement,
     StatementRunner,
     rows_or_raise,
+    run_in_autocommit_result,
 )
 from horsies.core.worker.claim_plan import (
     BudgetCapacity,
@@ -79,10 +69,9 @@ from horsies.core.worker.sql import (
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
     COUNT_QUEUE_STARTS_SQL,
     COUNT_RUNNING_FOR_WORKER_SQL,
-    GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL,
     HORSIES_CLAIM_SQL,
-    RESET_PAUSED_WORKFLOW_TASKS_SQL,
-    SKIP_CANCELLED_WORKFLOW_TASKS_SQL,
+    SETTLE_CLAIMED_WORKFLOW_TASKS_BOUND,
+    SETTLE_CLAIMED_WORKFLOW_TASKS_SQL,
 )
 
 if TYPE_CHECKING:
@@ -95,54 +84,45 @@ if TYPE_CHECKING:
 logger = get_logger('worker')
 
 
-def _newly_terminalized_task_ids(
-    outcomes: list[TerminalizationOutcome],
-) -> list[str]:
-    """Rows whose coupled workflow-task write belongs to this transaction."""
-    task_ids: list[str] = []
-    for outcome in outcomes:
-        match outcome:
-            case Applied(task_id=task_id):
-                task_ids.append(task_id)
-            case (
-                AlreadyApplied()
-                | LostClaim()
-                | SourceStateConflict()
-                | TaskAbsent()
-            ):
-                continue
-            case _ as unreachable:
-                assert_never(unreachable)
-    return task_ids
-
-
-def _resumed_before_abandon_task_ids(
-    outcomes: list[TerminalizationOutcome],
+def blocked_claims_of(
+    task_ids: Sequence[str],
+    rows: Sequence[Mapping[str, Any]],
 ) -> set[str]:
-    """Claims the pause abandon refused because the workflow runs again.
+    """The blocked task ids of one ``horsies_workflow_claimed_tasks_settle``
+    call, from its rows. Pure.
 
-    A refusal whose workflow is CANCELLED stays blocked: the cancellation
-    path owns that row.
+    ``task_ids`` is the input of the call, in order. The function answers
+    each input task once, in input order, with ``DISPATCH`` or ``BLOCKED``.
+
+    Raises:
+        OutcomeDecodeError: another row count, a row that names another
+            task, or another disposition (the client and the installed
+            function disagree).
     """
-    task_ids: set[str] = set()
-    for outcome in outcomes:
-        match outcome:
-            case SourceStateConflict(
-                task_id=task_id,
-                evidence=ObservedWorkflowState(workflow_status=status),
-            ) if status != 'CANCELLED':
-                task_ids.add(task_id)
-            case (
-                Applied()
-                | AlreadyApplied()
-                | LostClaim()
-                | SourceStateConflict()
-                | TaskAbsent()
-            ):
-                continue
-            case _ as unreachable:
-                assert_never(unreachable)
-    return task_ids
+    if len(rows) != len(task_ids):
+        raise OutcomeDecodeError(
+            f'horsies_workflow_claimed_tasks_settle returned {len(rows)} rows '
+            f'for {len(task_ids)} claims; expected one row per claim'
+        )
+    blocked: set[str] = set()
+    for position, (expected, row) in enumerate(zip(task_ids, rows, strict=True), start=1):
+        task_id = str(row['task_id'])
+        if task_id != expected:
+            raise OutcomeDecodeError(
+                f'horsies_workflow_claimed_tasks_settle row {position} names task '
+                f'{task_id}; the input holds {expected} there'
+            )
+        match row['disposition']:
+            case 'DISPATCH':
+                pass
+            case 'BLOCKED':
+                blocked.add(task_id)
+            case other:
+                raise OutcomeDecodeError(
+                    f'horsies_workflow_claimed_tasks_settle returned disposition '
+                    f'{other!r} for task {task_id}; expected DISPATCH or BLOCKED'
+                )
+    return blocked
 
 
 # The most claim passes in a row that run again with no wait because each
@@ -655,19 +635,29 @@ class ClaimMixin:
     async def _filter_nonrunnable_workflow_tasks(
         self, rows: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """
-        Filter out tasks belonging to non-runnable workflows (PAUSED/CANCELLED).
+        """Settle the claimed tasks of PAUSED and CANCELLED workflows, and
+        return the rows to dispatch, in their order.
 
-        Post-claim guard:
-        - PAUSED workflow: cancel claimed task row, reset workflow_task to READY
-        - CANCELLED workflow: hard-cancel task + mark workflow_task SKIPPED
-
-        Returns the filtered list of rows that should be dispatched.
+        One ``horsies_workflow_claimed_tasks_settle`` per
+        ``SETTLE_CLAIMED_WORKFLOW_TASKS_BOUND`` workflow tasks, each in
+        autocommit. Under the lock of each workflow row the function reads
+        the workflow status again:
+        - PAUSED: this worker's claim at its claim generation is abandoned,
+          and the node of an abandoned task goes back to READY with no task;
+        - CANCELLED: the claim is cancelled, and the node of a cancelled
+          task is SKIPPED.
+        A task of a PAUSED or CANCELLED workflow is never dispatched, also
+        when its move found the row moved on (that row belongs to its
+        current owner). A resume that committed before the lock makes the
+        workflow RUNNING, and its tasks are dispatched. Plain tasks send
+        nothing.
 
         Raises:
-            Exception: DB errors propagate to the main loop (runs after the
-                claim transaction committed; the claimed batch is recovered
-                by lease expiry if this step fails).
+            OutcomeDecodeError: rows outside the function's contract.
+            Exception: what the pool and the driver raise; it propagates to
+                the main loop. The statements before a failed one stay
+                committed; the claims of the failed one are recovered by
+                lease expiry (a lost reply may have committed its moves).
         """
         if not rows:
             return rows
@@ -678,98 +668,31 @@ class ClaimMixin:
         if not workflow_rows:
             return rows
 
-        task_ids = [row['id'] for row in workflow_rows]
-        # The claim generation each row was dispatched from. This guard runs
-        # after the claim transaction committed, so it fences the abandon to
-        # that generation; without it a lapsed-and-re-claimed row is still
-        # CLAIMED by this worker and would be cancelled out from under its
-        # new claim.
-        claimed_at_by_task_id: dict[str, datetime] = {
-            row['id']: claim_time_of(row) for row in workflow_rows
-        }
-        paused_task_ids: set[str] = set()
-        cancelled_task_ids: set[str] = set()
-
-        # Find tasks belonging to non-runnable workflows.
-        async with self.sf() as s:
-            res = await s.execute(
-                GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL,
-                {'ids': task_ids},
+        blocked_task_ids: set[str] = set()
+        for start in range(
+            0, len(workflow_rows), SETTLE_CLAIMED_WORKFLOW_TASKS_BOUND,
+        ):
+            chunk = workflow_rows[start:start + SETTLE_CLAIMED_WORKFLOW_TASKS_BOUND]
+            task_ids = [str(row['id']) for row in chunk]
+            # The claim generation each row was dispatched from: the moves
+            # are fenced to it, so a lapsed-and-re-claimed row of this
+            # worker is not ended under its new claim.
+            settled = rows_or_raise(
+                await run_in_autocommit_result(
+                    self.sf,
+                    SingleStatement(
+                        statement=SETTLE_CLAIMED_WORKFLOW_TASKS_SQL,
+                        parameters={
+                            'ids': task_ids,
+                            'claimed_ats': [claim_time_of(row) for row in chunk],
+                            'worker_id': self.worker_instance_id,
+                        },
+                    ),
+                ),
             )
-            for row in res.fetchall():
-                task_id = row.id
-                wf_status = row.status
-                if wf_status == 'PAUSED':
-                    paused_task_ids.add(task_id)
-                elif wf_status == 'CANCELLED':
-                    cancelled_task_ids.add(task_id)
+            blocked_task_ids |= blocked_claims_of(task_ids, settled.mappings())
 
-            if paused_task_ids:
-                # Unclaim paused-workflow tasks so they can be picked up on resume.
-                paused_ids = list(paused_task_ids)
-                paused_outcomes = await apply_batch_async(
-                    await s.connection(),
-                    AbandonOwnedNodes(
-                        fence=OwnedClaimBatch(
-                            worker_id=self.worker_instance_id,
-                            claim_generations=tuple(
-                                (
-                                    task_id,
-                                    claimed_at_by_task_id[task_id],
-                                )
-                                for task_id in paused_ids
-                            ),
-                        ),
-                    ),
-                )
-                unclaimed_paused_task_ids = _newly_terminalized_task_ids(
-                    paused_outcomes,
-                )
-                # A resume that committed after the lookup makes the abandon
-                # refuse; those claims are runnable again and are dispatched.
-                paused_task_ids -= _resumed_before_abandon_task_ids(
-                    paused_outcomes,
-                )
-                # Keep workflow_task metadata consistent with unclaimed tasks.
-                if unclaimed_paused_task_ids:
-                    await s.execute(
-                        RESET_PAUSED_WORKFLOW_TASKS_SQL,
-                        {'ids': unclaimed_paused_task_ids},
-                    )
-
-            if cancelled_task_ids:
-                # Cancel this worker's claimed task rows so they are no longer claimable.
-                cancelled_ids = list(cancelled_task_ids)
-                cancelled_outcomes = await apply_batch_async(
-                    await s.connection(),
-                    CancelOwnedNodes(
-                        fence=OwnedClaimBatch(
-                            worker_id=self.worker_instance_id,
-                            claim_generations=tuple(
-                                (
-                                    task_id,
-                                    claimed_at_by_task_id[task_id],
-                                )
-                                for task_id in cancelled_ids
-                            ),
-                        ),
-                    ),
-                )
-                cancelled_owned_task_ids = _newly_terminalized_task_ids(
-                    cancelled_outcomes,
-                )
-                # Ensure workflow_task rows no longer sit in enqueueable states.
-                if cancelled_owned_task_ids:
-                    await s.execute(
-                        SKIP_CANCELLED_WORKFLOW_TASKS_SQL,
-                        {'ids': cancelled_owned_task_ids},
-                    )
-
-            if paused_task_ids or cancelled_task_ids:
-                await s.commit()
-
-        blocked_task_ids = paused_task_ids | cancelled_task_ids
-        return [row for row in rows if row['id'] not in blocked_task_ids]
+        return [row for row in rows if str(row['id']) not in blocked_task_ids]
 
     def _ordered_claim_queues(self) -> list[str]:
         """Queues this pass claims from, in claim order.

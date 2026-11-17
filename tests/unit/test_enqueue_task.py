@@ -16,12 +16,15 @@ from horsies.core.brokers.enqueue_task import (
     EnqueueKey,
     EnqueueOutcome,
     EnqueueRow,
+    EnqueueLineage,
     EnqueueStart,
+    FirstRun,
     Inserted,
     KeyConflict,
     Keyed,
     KeyReplay,
     PayloadMismatch,
+    RerunOf,
     SameCommand,
     SendKind,
     StartAfterDelay,
@@ -45,9 +48,15 @@ pytestmark = [pytest.mark.unit]
 
 _AT = datetime(2030, 1, 1, tzinfo=timezone.utc)
 _DIGEST = b'\x02' * 32
+_SOURCE = uuid.UUID('0190f0f0-0000-7000-8000-0000000000a1')
+_ROOT = uuid.UUID('0190f0f0-0000-7000-8000-0000000000a0')
 
 
-def _row(start: EnqueueStart = StartNow(), key: EnqueueKey = Unkeyed()) -> EnqueueRow:
+def _row(
+    start: EnqueueStart = StartNow(),
+    key: EnqueueKey = Unkeyed(),
+    lineage: EnqueueLineage = FirstRun(),
+) -> EnqueueRow:
     return EnqueueRow(
         task_id=uuid.UUID('0190f0f0-0000-7000-8000-000000000001'),
         task_name='probe',
@@ -64,6 +73,7 @@ def _row(start: EnqueueStart = StartNow(), key: EnqueueKey = Unkeyed()) -> Enque
         start=start,
         command_fingerprint=b'\x01' * 32,
         key=key,
+        lineage=lineage,
     )
 
 
@@ -116,6 +126,28 @@ class TestParameters:
             params['key_digest'],
             params['key_scope_version'],
             params['key_window_us'],
+        ) == expected
+
+    @pytest.mark.parametrize(
+        ('lineage', 'expected'),
+        [
+            (FirstRun(), ('FIRST_RUN', None, None)),
+            (
+                RerunOf(source_task_id=_SOURCE, root_task_id=_ROOT),
+                ('RERUN', str(_SOURCE), str(_ROOT)),
+            ),
+        ],
+        ids=['first_run', 'rerun'],
+    )
+    def test_each_lineage_fills_only_its_own_slots(
+        self, lineage: EnqueueLineage, expected: tuple[str, str | None, str | None],
+    ) -> None:
+        params = enqueue_task_params(_row(lineage=lineage), SendKind.FIRST)
+
+        assert (
+            params['lineage_kind'],
+            params['rerun_of_task_id'],
+            params['rerun_root_task_id'],
         ) == expected
 
     @pytest.mark.parametrize('send_kind', [SendKind.FIRST, SendKind.REPEAT])

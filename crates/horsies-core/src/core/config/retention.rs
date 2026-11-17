@@ -92,11 +92,84 @@ pub struct RetentionClassKeyRefused {
     pub key: String,
 }
 
+/// The age past which a PAUSED workflow expires: a whole number of
+/// microseconds from 1 to `i64::MAX` (Python
+/// `RetentionConfig.paused_workflow_auto_cancel_after`, a positive
+/// `timedelta`, which holds whole microseconds only).
+///
+/// Only [`PausedWorkflowAge::parse`] builds it, and the config reader calls
+/// it when the value enters. The expiry sweep sends the age to the database
+/// as a count of microseconds, so it takes this type and has no refusal of
+/// its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PausedWorkflowAge {
+    micros: i64,
+}
+
+impl PausedWorkflowAge {
+    /// The age of `age`. Pure.
+    ///
+    /// Errors: [`PausedAgeRefused`] for an age of zero or less, an age with
+    /// a part below one microsecond, or an age above `i64::MAX`
+    /// microseconds.
+    pub fn parse(age: Duration) -> Result<Self, PausedAgeRefused> {
+        if age <= Duration::zero() {
+            return Err(PausedAgeRefused::NotPositive { age });
+        }
+        if age.subsec_nanos() % NANOS_PER_MICROSECOND != 0 {
+            return Err(PausedAgeRefused::NotWholeMicroseconds { age });
+        }
+        match age.num_microseconds() {
+            Some(micros) => Ok(Self { micros }),
+            None => Err(PausedAgeRefused::TooLong { age }),
+        }
+    }
+
+    /// The age in microseconds, above zero.
+    pub fn micros(self) -> i64 {
+        self.micros
+    }
+
+    /// The age as a duration.
+    pub fn duration(self) -> Duration {
+        Duration::microseconds(self.micros)
+    }
+}
+
+impl Serialize for PausedWorkflowAge {
+    /// The duration form that the config reader reads.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.duration().serialize(serializer)
+    }
+}
+
+/// Nanoseconds in one microsecond.
+const NANOS_PER_MICROSECOND: i32 = 1_000;
+
+/// Why a duration is not a paused-workflow age. Nothing reads the value.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PausedAgeRefused {
+    #[error("paused_workflow_auto_cancel_after must be positive, got {age}; use None to disable the sweep")]
+    NotPositive { age: Duration },
+    #[error(
+        "paused_workflow_auto_cancel_after ({age}) has a part below one microsecond; the expiry compares ages in whole microseconds"
+    )]
+    NotWholeMicroseconds { age: Duration },
+    #[error(
+        "paused_workflow_auto_cancel_after ({age}) is too long: its count of microseconds does not fit in a 64-bit integer"
+    )]
+    TooLong { age: Duration },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RetentionConfig {
     pub worker_state_retention_hours: Option<u32>,
     pub terminal_record_retention_hours: Option<u32>,
-    pub paused_workflow_auto_cancel_after: Option<Duration>,
+    /// `None` turns the expiry sweep off.
+    pub paused_workflow_auto_cancel_after: Option<PausedWorkflowAge>,
     pub history_leaf_horizon_days: u32,
     pub heartbeat_leaf_horizon_hours: u32,
     /// Finite periods a send may choose besides the 30-day default and the
@@ -187,7 +260,9 @@ struct RetentionConfigWire {
 
 impl<'de> Deserialize<'de> for RetentionConfig {
     /// Refuses `retention_classes`: a configuration that still declares named
-    /// classes is corrected, never silently ignored.
+    /// classes is corrected, never silently ignored. Refuses a paused age
+    /// that [`PausedWorkflowAge::parse`] refuses
+    /// ([`RetentionConfigError::PausedExpiryRefused`]).
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -200,10 +275,16 @@ impl<'de> Deserialize<'de> for RetentionConfig {
             return Err(D::Error::custom(RETENTION_CLASSES_REMOVED));
         }
         let wire: RetentionConfigWire = serde_json::from_value(value).map_err(D::Error::custom)?;
+        let paused_workflow_auto_cancel_after = match wire.paused_workflow_auto_cancel_after {
+            None => None,
+            Some(age) => Some(PausedWorkflowAge::parse(age).map_err(|refused| {
+                D::Error::custom(RetentionConfigError::PausedExpiryRefused { refused })
+            })?),
+        };
         Ok(Self {
             worker_state_retention_hours: wire.worker_state_retention_hours,
             terminal_record_retention_hours: wire.terminal_record_retention_hours,
-            paused_workflow_auto_cancel_after: wire.paused_workflow_auto_cancel_after,
+            paused_workflow_auto_cancel_after,
             history_leaf_horizon_days: wire.history_leaf_horizon_days,
             heartbeat_leaf_horizon_hours: wire.heartbeat_leaf_horizon_hours,
             retention_periods: wire.retention_periods,
@@ -224,8 +305,9 @@ pub enum RetentionConfigError {
         min: u64,
         max: u64,
     },
-    #[error("paused_workflow_auto_cancel_after must be positive; use None to disable the sweep")]
-    NonPositivePausedExpiry,
+    /// The config reader refused the paused-workflow age.
+    #[error("{refused}")]
+    PausedExpiryRefused { refused: PausedAgeRefused },
     #[error(
         "queue {queue:?} maps to a period that is not one: {refused}; use whole days from 1 to 1825, or None to keep records forever"
     )]
@@ -299,13 +381,6 @@ impl RetentionConfig {
             50,
             10_000,
         );
-        if self
-            .paused_workflow_auto_cancel_after
-            .is_some_and(|duration| duration <= Duration::zero())
-        {
-            errors.push(RetentionConfigError::NonPositivePausedExpiry);
-        }
-
         // A queue name is only a lookup key: the class key holds the period
         // alone, so any configured queue name can be mapped.
         let mut mappings: Vec<_> = self.queue_retention.iter().collect();
@@ -519,11 +594,14 @@ mod tests {
         assert_eq!(config.partition_maintenance_interval_s, 900);
         assert_eq!(config.retention_sweep_interval_s, 300);
         assert_eq!(config.retention_delete_batch_size, 500);
+        assert_eq!(config.paused_workflow_auto_cancel_after, None);
 
+        // The paused age is not here: its type holds its bound, and the
+        // config reader refuses an age outside it
+        // (`a_paused_age_outside_its_bound_is_refused_when_the_config_is_read`).
         let invalid = RetentionConfig {
             worker_state_retention_hours: Some(0),
             terminal_record_retention_hours: Some(43_801),
-            paused_workflow_auto_cancel_after: Some(Duration::zero()),
             history_leaf_horizon_days: 1,
             heartbeat_leaf_horizon_hours: 49,
             partition_maintenance_interval_s: 59,
@@ -531,7 +609,96 @@ mod tests {
             retention_delete_batch_size: 49,
             ..Default::default()
         };
-        assert_eq!(invalid.validate().len(), 8);
+        assert_eq!(invalid.validate().len(), 7);
+    }
+
+    /// A paused age is a whole number of microseconds above zero, kept
+    /// exact: a part below one millisecond stays, and one day is
+    /// 86 400 000 000 microseconds.
+    #[test]
+    fn a_paused_age_is_whole_microseconds_above_zero() {
+        for (age, micros) in [
+            (Duration::microseconds(1), 1),
+            (Duration::microseconds(500), 500),
+            (Duration::microseconds(1_500), 1_500),
+            (Duration::hours(1), 3_600_000_000),
+            (Duration::days(1), 86_400_000_000),
+        ] {
+            let parsed = PausedWorkflowAge::parse(age).expect("an age of whole microseconds");
+            assert_eq!(parsed.micros(), micros, "{age}");
+            assert_eq!(parsed.duration(), age, "{age}");
+        }
+    }
+
+    /// An age that the expiry cannot compare exactly in microseconds is
+    /// refused, each with its own reason.
+    #[test]
+    fn a_paused_age_outside_its_bound_is_refused() {
+        for age in [Duration::zero(), Duration::microseconds(-1)] {
+            assert_eq!(
+                PausedWorkflowAge::parse(age),
+                Err(PausedAgeRefused::NotPositive { age }),
+            );
+        }
+        for age in [
+            Duration::nanoseconds(1),
+            Duration::microseconds(1_500) + Duration::nanoseconds(1),
+            Duration::hours(1) + Duration::nanoseconds(999),
+        ] {
+            assert_eq!(
+                PausedWorkflowAge::parse(age),
+                Err(PausedAgeRefused::NotWholeMicroseconds { age }),
+            );
+        }
+        assert_eq!(
+            PausedWorkflowAge::parse(Duration::MAX),
+            Err(PausedAgeRefused::TooLong { age: Duration::MAX }),
+        );
+    }
+
+    /// The config reader is where the paused age enters: an age with a part
+    /// of 1 ns is refused there, with the named error, before any worker
+    /// starts. A whole-microsecond age reads back exactly, and the written
+    /// config reads back equal.
+    #[test]
+    fn a_paused_age_outside_its_bound_is_refused_when_the_config_is_read() {
+        // chrono's duration form is [seconds, nanoseconds].
+        let refused = serde_json::from_value::<RetentionConfig>(serde_json::json!({
+            "paused_workflow_auto_cancel_after": [3_600, 1],
+        }))
+        .unwrap_err();
+        let expected = RetentionConfigError::PausedExpiryRefused {
+            refused: PausedAgeRefused::NotWholeMicroseconds {
+                age: Duration::hours(1) + Duration::nanoseconds(1),
+            },
+        };
+        assert!(
+            refused.to_string().contains(&expected.to_string()),
+            "{refused}"
+        );
+        assert!(
+            refused.to_string().contains("below one microsecond"),
+            "{refused}"
+        );
+
+        let zero = serde_json::from_value::<RetentionConfig>(serde_json::json!({
+            "paused_workflow_auto_cancel_after": [0, 0],
+        }))
+        .unwrap_err();
+        assert!(zero.to_string().contains("must be positive"), "{zero}");
+
+        let read: RetentionConfig = serde_json::from_value(serde_json::json!({
+            "paused_workflow_auto_cancel_after": [3_600, 250_000],
+        }))
+        .expect("an age of whole microseconds");
+        let age = read
+            .paused_workflow_auto_cancel_after
+            .expect("the age is set");
+        assert_eq!(age.micros(), 3_600_000_250);
+        let written = serde_json::to_value(&read).expect("a config writes");
+        let read_again: RetentionConfig =
+            serde_json::from_value(written).expect("the written config reads");
+        assert_eq!(read_again, read);
     }
 
     #[test]

@@ -253,6 +253,21 @@ SKIP_CANCELLED_WORKFLOW_TASKS_SQL = text("""
       AND status IN ('PENDING', 'READY', 'ENQUEUED')
 """)
 
+# The claim-time workflow check of a claim pass: one row per input task, in
+# input order, with DISPATCH or BLOCKED. A task of a PAUSED workflow is
+# abandoned and its node goes back to READY; a task of a CANCELLED workflow
+# is cancelled and its node is SKIPPED; both are fenced to this worker and
+# each claim generation. At most SETTLE_CLAIMED_WORKFLOW_TASKS_BOUND tasks.
+SETTLE_CLAIMED_WORKFLOW_TASKS_SQL = text("""
+    SELECT task_id, disposition
+    FROM horsies_workflow_claimed_tasks_settle(
+        CAST(:ids AS uuid[]), CAST(:claimed_ats AS timestamptz[]), :worker_id
+    )
+""")
+
+SETTLE_CLAIMED_WORKFLOW_TASKS_BOUND = 1000
+"""The most tasks one ``horsies_workflow_claimed_tasks_settle`` call takes."""
+
 NOTIFY_TASK_QUEUE_SQL = text("""
     SELECT pg_notify(:c2, :p)
 """)
