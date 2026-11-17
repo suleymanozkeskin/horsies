@@ -1983,4 +1983,65 @@ mod workflow_scoped_batches {
         cleanup_tasks(&pool, &[live_workflow_task, ready_link_task]).await;
         cleanup_workflows(&pool, &[live_workflow_id, ready_link_workflow]).await;
     }
+
+    /// Python `test_lifecycle_commands.py::TestIllegalStatesAreUnrepresentable::test_required_workflow_status_is_implied_by_the_variant`:
+    /// no command names the workflow status that its guard needs; the variant
+    /// means it. The pause sweep acts only under a PAUSED workflow and the
+    /// cancel sweep only under a CANCELLED one, so neither acts for the other.
+    #[tokio::test]
+    #[serial]
+    async fn each_workflow_sweep_acts_only_under_the_status_of_its_variant() {
+        let pool = pool().await;
+        let paused_task = seed_task(&pool, &claimed_workflow_task()).await;
+        let paused = link_workflow_task(&pool, paused_task, "ENQUEUED", "PAUSED").await;
+        let cancelled_task = seed_task(&pool, &claimed_workflow_task()).await;
+        let cancelled = link_workflow_task(&pool, cancelled_task, "ENQUEUED", "CANCELLED").await;
+
+        let pause_of_cancelled = terminalize(&pool, &pause_sweep(cancelled))
+            .await
+            .expect("pause sweep of a cancelled workflow");
+        let cancel_of_paused = terminalize(&pool, &cancel_sweep(paused))
+            .await
+            .expect("cancel sweep of a paused workflow");
+
+        assert!(pause_of_cancelled.is_empty(), "{pause_of_cancelled:?}");
+        assert!(cancel_of_paused.is_empty(), "{cancel_of_paused:?}");
+        for task_id in [paused_task, cancelled_task] {
+            assert_eq!(
+                live_row(&pool, task_id).await.expect("live row")["status"],
+                "CLAIMED"
+            );
+        }
+        let pause_of_paused = terminalize(&pool, &pause_sweep(paused))
+            .await
+            .expect("pause sweep of a paused workflow");
+        let cancel_of_cancelled = terminalize(&pool, &cancel_sweep(cancelled))
+            .await
+            .expect("cancel sweep of a cancelled workflow");
+        let both = [paused_task, cancelled_task];
+        assert_eq!(
+            outcome_ids_among(&pause_of_paused, &both),
+            vec![paused_task]
+        );
+        assert_eq!(
+            outcome_ids_among(&cancel_of_cancelled, &both),
+            vec![cancelled_task]
+        );
+        cleanup_tasks(&pool, &both).await;
+        cleanup_workflows(&pool, &[paused, cancelled]).await;
+    }
+
+    /// The pause sweep of one workflow.
+    fn pause_sweep(workflow_id: Uuid) -> TerminalizationCommand {
+        TerminalizationCommand::AbandonNodesOfPausedWorkflows {
+            workflow_ids: vec![workflow_id],
+        }
+    }
+
+    /// The cancel sweep of one workflow.
+    fn cancel_sweep(workflow_id: Uuid) -> TerminalizationCommand {
+        TerminalizationCommand::CancelNodesOfCancelledWorkflow {
+            workflow_ids: vec![workflow_id],
+        }
+    }
 }

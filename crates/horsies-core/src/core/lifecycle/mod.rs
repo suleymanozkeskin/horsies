@@ -311,4 +311,96 @@ pub(crate) mod tests {
         }
         assert_eq!(TerminalizationKind::parse("NOT_A_KIND"), None);
     }
+
+    /// What a command acts on, by its variant.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Subject {
+        /// One task, named by its id.
+        OneTask,
+        /// The tasks of a claim batch, each at its own generation.
+        ClaimBatch,
+        /// The tasks of whole workflows.
+        Workflows,
+        /// The rows that a bounded sweep finds.
+        Sweep,
+    }
+
+    /// The subject of `command`. Exhaustive, so a new variant must be given
+    /// its subject here before the tests below compile.
+    fn subject_of(command: &TerminalizationCommand) -> Subject {
+        match command {
+            TerminalizationCommand::CompleteLockedTask { .. }
+            | TerminalizationCommand::CompleteTaskFused { .. }
+            | TerminalizationCommand::FailLockedTask { .. }
+            | TerminalizationCommand::FailStaleTask { .. }
+            | TerminalizationCommand::ExpireOwnedClaim { .. }
+            | TerminalizationCommand::CancelLockedTask { .. }
+            | TerminalizationCommand::CancelOwnedOrphan { .. }
+            | TerminalizationCommand::AbandonOwnedNode { .. }
+            | TerminalizationCommand::CancelOwnedNode { .. } => Subject::OneTask,
+            TerminalizationCommand::AbandonOwnedNodes { .. }
+            | TerminalizationCommand::CancelOwnedNodes { .. } => Subject::ClaimBatch,
+            TerminalizationCommand::AbandonNodesOfPausedWorkflows { .. }
+            | TerminalizationCommand::CancelNodesOfCancelledWorkflow { .. } => Subject::Workflows,
+            TerminalizationCommand::ExpirePendingTasks { .. }
+            | TerminalizationCommand::CancelOrphanedTasks { .. } => Subject::Sweep,
+        }
+    }
+
+    fn has_batch_fence(command: &TerminalizationCommand) -> bool {
+        matches!(command.fence(), Some(TerminalFence::OwnedClaimBatch(_)))
+    }
+
+    /// The variant names of the sample commands that `keep` selects.
+    fn variants_where(keep: impl Fn(&TerminalizationCommand) -> bool) -> Vec<&'static str> {
+        sample_commands()
+            .into_iter()
+            .filter(|(_, command)| keep(command))
+            .map(|(variant, _)| variant)
+            .collect()
+    }
+
+    /// Python `test_lifecycle_commands.py::TestIllegalStatesAreUnrepresentable::test_batch_fences_belong_only_to_batch_commands`:
+    /// a claim batch fence guards only the commands of a claim batch, which
+    /// name no single task.
+    #[test]
+    fn a_batch_fence_guards_only_a_command_of_a_claim_batch() {
+        assert_eq!(
+            variants_where(has_batch_fence),
+            variants_where(|command| subject_of(command) == Subject::ClaimBatch)
+        );
+        assert_eq!(
+            variants_where(has_batch_fence),
+            ["AbandonOwnedNodes", "CancelOwnedNodes"]
+        );
+    }
+
+    /// `TestIllegalStatesAreUnrepresentable::test_single_task_commands_do_not_carry_a_batch`:
+    /// no command of one task carries a claim batch fence.
+    #[test]
+    fn a_command_of_one_task_carries_no_batch_fence() {
+        let single = variants_where(|command| subject_of(command) == Subject::OneTask);
+        assert_eq!(single.len(), 9, "{single:?}");
+        for (variant, command) in sample_commands() {
+            match subject_of(&command) {
+                Subject::OneTask => assert!(!has_batch_fence(&command), "{variant}"),
+                Subject::ClaimBatch | Subject::Workflows | Subject::Sweep => {}
+            }
+        }
+    }
+
+    /// `TestIllegalStatesAreUnrepresentable::test_workflow_scoped_commands_carry_no_task_ids`:
+    /// a command of whole workflows names no task and carries no ownership
+    /// fence; the workflow's status is its guard.
+    #[test]
+    fn a_command_of_whole_workflows_has_no_fence() {
+        let scoped = variants_where(|command| subject_of(command) == Subject::Workflows);
+        assert_eq!(scoped.len(), 2, "{scoped:?}");
+        for (variant, command) in sample_commands() {
+            match subject_of(&command) {
+                Subject::Workflows => assert!(command.fence().is_none(), "{variant}"),
+                Subject::OneTask | Subject::ClaimBatch | Subject::Sweep => {}
+            }
+        }
+    }
 }
