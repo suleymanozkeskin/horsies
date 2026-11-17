@@ -1586,5 +1586,11 @@ async def test_requeue_db_error_age_guard_recovery(
                     _kill_requeue_worker(worker_b)
                 os.environ.pop('E2E_REQUEUE_GUARD_LOG_DIR', None)
                 kill_stale_workers()
+                # pytest shows this output when the test fails.
+                for name, output in (('A', worker_a_output), ('B', worker_b_output)):
+                    if output.exists():
+                        print(f'--- worker {name} ---')
+                        print(output.read_text(encoding='utf-8')[-6000:])
+                print(f'--- proxy refusals: {proxy.refused_statements()}')
     finally:
         proxy.stop()
