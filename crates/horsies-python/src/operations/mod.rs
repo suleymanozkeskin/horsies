@@ -4,5 +4,7 @@
 
 pub mod arguments;
 pub mod enqueue;
+pub mod release;
 pub mod schema;
+pub mod stale_claims;
 pub mod task_info;
