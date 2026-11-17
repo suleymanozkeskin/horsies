@@ -12,6 +12,18 @@ tags: [monitoring, web, fastapi, authentication, api]
 
 ## How To
 
+### Install the Extra
+
+```bash
+pip install "horsies[web]"
+```
+
+```bash
+uv add "horsies[web]"
+```
+
+The extra adds `fastapi` and `uvicorn`. The query package `horsies.monitoring` imports neither and is available without the extra.
+
 ### Mount the App
 
 ```python
