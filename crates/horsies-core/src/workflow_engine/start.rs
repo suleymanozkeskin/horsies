@@ -345,7 +345,10 @@ async fn start_workflow_inner(
             workflow_id = %wf_id,
             child_workflow_id = %failure.failed_child_workflow_id,
             error = %failure.error,
-            "parent advance after the workflow start failed; workflow recovery advances it",
+            "Parent advance after the start of workflow {wf_id} failed at child workflow {}: \
+             {}; workflow recovery advances it",
+            failure.failed_child_workflow_id,
+            failure.error,
         );
     }
     Ok(outcome)

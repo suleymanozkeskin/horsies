@@ -426,7 +426,7 @@ impl SpawnerLoop {
             panic!("a fork request ended while none was in flight");
         };
         if let Err(error) = set_subreaper(false) {
-            tracing::error!(error = %error, "Could not clear the subreaper flag");
+            tracing::error!(error = %error, "Could not clear the subreaper flag: {error}");
         }
         // A forked child enters the registry before the sweep, so the sweep
         // never takes its exit status.
@@ -811,7 +811,7 @@ impl SpawnerLoop {
             PreloadState::Ready { process, .. } => stopping(process.child),
             PreloadState::Forking { process, fork, .. } => {
                 if let Err(error) = set_subreaper(false) {
-                    tracing::error!(error = %error, "Could not clear the subreaper flag");
+                    tracing::error!(error = %error, "Could not clear the subreaper flag: {error}");
                 }
                 self.answer_spawn(fork.reply, Err(SpawnError::SpawnerStopped));
                 stopping(process.child)

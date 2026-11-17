@@ -1000,7 +1000,11 @@ async fn step_up(shared: &Arc<Shared>, mut up: UpState, snapshot: &Snapshot) -> 
         end = &mut up.ended => {
             match end {
                 Ok(LinkEnd::Failed(error)) => {
-                    tracing::warn!(target: LOG_TARGET, %error, "the listener connection failed");
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        %error,
+                        "the listener connection failed: {error}",
+                    );
                 }
                 Ok(LinkEnd::Closed) | Err(_) => {
                     tracing::warn!(target: LOG_TARGET, "the listener connection closed");

@@ -244,7 +244,7 @@ impl SchemaProbe {
                 status
             }
             Err(error) => {
-                tracing::warn!(error = %error, "monitoring schema probe failed");
+                tracing::warn!(error = %error, "Schema version probe failed: {error}");
                 self.cached
                     .read()
                     .await
