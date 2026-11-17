@@ -254,6 +254,15 @@ unless it starts with "Added".
   `get_raw_result` (the stored envelope as JSON text with the status),
   `get_task_info` with `TaskInfoParts`, and `task_handle_of` for a handle of
   a task sent elsewhere. Task info lists attempts newest first.
+- **The health reads are on the app**, as in Python: `ping_database`,
+  `ping_workers` (with `PingTarget`), `list_worker_states`,
+  `get_worker_state`, `get_worker_state_history` (with
+  `WorkerHistoryLimit`), `get_stale_tasks`, `get_expired_tasks`, and,
+  added, `get_class_coverage` and `get_class_report`. A failure is
+  `BrokerOperationError` with Python's broker code.
+- **The stale and expired task lists are bounded.** Each returns
+  `BoundedTaskList::Complete(rows)`, or `Truncated` at 10,000 rows. The
+  stale threshold is `StaleMinutes`, whole minutes from 0 to 525,600.
 - **`TaskRuntime::task_handle` returns `TaskFunctionNotFound`**
   (`NotRegistered`, `OtherTypes`) in place of a `TaskError`.
 - **The CLI types and `fetch_docs` are no longer public.** `Cli`, `Command`,

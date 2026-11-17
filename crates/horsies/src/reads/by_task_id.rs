@@ -1,10 +1,8 @@
 //! Reads by task id on the app, as the Python app offers them:
 //! `get_result`, `get_raw_result` and `get_task_info`.
 //!
-//! In a worker child a read goes through the child's producer handle, as a
-//! send does; anywhere else through the app's handle. A result wait in a
-//! process that runs task bodies is refused with `WaitInsideTask` before any
-//! statement; the task info is not a wait.
+//! A result wait in a process that runs task bodies is refused with
+//! `WaitInsideTask` before any statement; the task info is not a wait.
 
 use std::sync::Arc;
 
@@ -104,7 +102,7 @@ impl Horsies {
 
     /// The handle a read goes through: the child's producer handle in a
     /// worker child, else the app's.
-    fn reads_handle(&self) -> Arc<CoreHandle> {
+    pub(crate) fn reads_handle(&self) -> Arc<CoreHandle> {
         match child_producer() {
             ChildProducer::InChild(handle) => handle,
             ChildProducer::NotInAChild => Arc::clone(self.handle()),
