@@ -31,7 +31,7 @@ pub use operations::{
 };
 pub use outcomes::{
     decode_outcome_pg_row, decode_outcome_row, GuardEvidence, GuardKind, ObservedTaskState,
-    OutcomeDecodeError, TerminalizationOutcome,
+    ObservedWorkflowTask, OutcomeDecodeError, TerminalizationOutcome,
 };
 
 /// A command or fence could not be constructed from the given data.

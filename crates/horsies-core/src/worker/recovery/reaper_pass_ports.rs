@@ -560,7 +560,6 @@ fn a_pending_expiry_batch_with_an_outcome_other_than_applied_is_a_contract_error
 /// that writes a marker row and reports a TASK_ABSENT row.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1230"]
 async fn a_pending_expiry_batch_with_an_outcome_other_than_applied_commits_nothing() {
     let pool = migrated_pool().await;
     sqlx::raw_sql(
@@ -674,7 +673,6 @@ async fn an_orphan_audit_cancels_and_counts_only_unlinked_workflow_tasks() {
 /// and reports a TASK_ABSENT row.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1230"]
 async fn an_orphan_audit_with_an_outcome_other_than_applied_fails_and_commits_nothing() {
     let pool = migrated_pool().await;
     sqlx::raw_sql(
