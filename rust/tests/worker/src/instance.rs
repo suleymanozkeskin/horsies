@@ -43,6 +43,9 @@ pub const SOFT_CAP_CLAIM_LEASE_MS: u32 = 2_000;
 pub const CUSTOM_QUEUES: [(&str, u32, u32); 3] =
     [("high", 1, 5), ("normal", 50, 10), ("low", 100, 20)];
 
+/// The custom queues of [`Instance::RecoveryQueues`]: name, priority, cap.
+pub const RECOVERY_QUEUES: [(&str, u32, u32); 2] = [("default", 1, 5), ("recovery", 1, 1)];
+
 /// How long a stopping worker of a test profile waits for its tasks.
 pub const TEST_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -77,6 +80,9 @@ pub enum Instance {
     /// A prefetch buffer with a short claim lease (Python
     /// `instance_softcap.py`).
     SoftCap,
+    /// The custom queues `default` and `recovery` (cap 1), with the short
+    /// thresholds of [`Instance::Recovery`] (Python `instance_recovery.py`).
+    RecoveryQueues,
     /// The schedules of the scheduler tests (Python
     /// `instance_scheduler.py`).
     Scheduler,
@@ -84,12 +90,13 @@ pub enum Instance {
 
 impl Instance {
     /// Every instance.
-    pub const ALL: [Instance; 6] = [
+    pub const ALL: [Instance; 7] = [
         Instance::Default,
         Instance::CustomQueues,
         Instance::ClusterCap,
         Instance::Recovery,
         Instance::SoftCap,
+        Instance::RecoveryQueues,
         Instance::Scheduler,
     ];
 
@@ -101,6 +108,7 @@ impl Instance {
             Self::ClusterCap => "cluster_cap",
             Self::Recovery => "recovery",
             Self::SoftCap => "soft_cap",
+            Self::RecoveryQueues => "recovery_queues",
             Self::Scheduler => "scheduler",
         }
     }
@@ -127,9 +135,12 @@ impl Instance {
     pub const fn ready_queue(self) -> &'static str {
         match self {
             Self::CustomQueues => "high",
-            Self::Default | Self::ClusterCap | Self::Recovery | Self::SoftCap | Self::Scheduler => {
-                "default"
-            }
+            Self::Default
+            | Self::ClusterCap
+            | Self::Recovery
+            | Self::SoftCap
+            | Self::RecoveryQueues
+            | Self::Scheduler => "default",
         }
     }
 
@@ -150,16 +161,7 @@ impl Instance {
             Self::Default => {}
             Self::CustomQueues => {
                 config.queue_mode = QueueMode::Custom;
-                config.custom_queues = Some(
-                    CUSTOM_QUEUES
-                        .into_iter()
-                        .map(|(name, priority, cap)| CustomQueueConfig {
-                            name: name.to_owned(),
-                            priority,
-                            max_concurrency: Some(cap),
-                        })
-                        .collect(),
-                );
+                config.custom_queues = Some(custom_queues(&CUSTOM_QUEUES));
             }
             Self::ClusterCap => config.cluster_wide_cap = Some(CLUSTER_WIDE_CAP),
             Self::Recovery => config.recovery = fast_recovery(),
@@ -171,10 +173,27 @@ impl Instance {
                     ..RecoveryConfig::default()
                 };
             }
+            Self::RecoveryQueues => {
+                config.queue_mode = QueueMode::Custom;
+                config.custom_queues = Some(custom_queues(&RECOVERY_QUEUES));
+                config.recovery = fast_recovery();
+            }
             Self::Scheduler => config.schedule = Some(schedules()),
         }
         config
     }
+}
+
+/// The custom queue configs of `queues`: name, priority, cap.
+fn custom_queues(queues: &[(&str, u32, u32)]) -> Vec<CustomQueueConfig> {
+    queues
+        .iter()
+        .map(|(name, priority, cap)| CustomQueueConfig {
+            name: (*name).to_owned(),
+            priority: *priority,
+            max_concurrency: Some(*cap),
+        })
+        .collect()
 }
 
 /// Python `instance_recovery.py`: 1 s heartbeats and checks, the smallest
