@@ -66,7 +66,7 @@ ENQUEUE_TASK_SQL = text("""
         :key_kind,
         CAST(:key_digest AS BYTEA),
         CAST(:key_scope_version AS SMALLINT),
-        CAST(:key_window AS INTERVAL),
+        CAST(:key_window_us AS BIGINT) * INTERVAL '1 microsecond',
         :send_kind
     )
 """)
@@ -124,8 +124,9 @@ class Unkeyed:
 @dataclass(frozen=True, slots=True)
 class Keyed:
     """The send reserves its scoped key digest for ``window`` after its task
-    finishes. The window is sent as an ``interval``, exact to the
-    microsecond."""
+    finishes. The window is sent as its count of microseconds and made into a
+    time ``interval`` by the statement: exact, and with no day field, whose
+    addition would depend on the session time zone."""
 
     digest: bytes
     scope_version: int
@@ -175,14 +176,14 @@ def _key_params(key: EnqueueKey) -> dict[str, Any]:
                 'key_kind': 'UNKEYED',
                 'key_digest': None,
                 'key_scope_version': None,
-                'key_window': None,
+                'key_window_us': None,
             }
         case Keyed(digest=digest, scope_version=scope_version, window=window):
             return {
                 'key_kind': 'KEYED',
                 'key_digest': digest,
                 'key_scope_version': scope_version,
-                'key_window': window,
+                'key_window_us': window // timedelta(microseconds=1),
             }
         case _ as unreachable:
             assert_never(unreachable)

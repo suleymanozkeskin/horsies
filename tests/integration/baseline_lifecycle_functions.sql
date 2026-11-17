@@ -501,7 +501,11 @@ SELECT lc_expect_sqlstate('enqueue: a NULL input', $q$SELECT * FROM horsies_enqu
 SELECT lc_expect_sqlstate('enqueue: a window over 30 days (key claim)', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'NOW', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'KEYED', sha256('k31'::bytea),
-    1::smallint, interval '30 days 1 microsecond', 'FIRST')$q$, '22023');
+    1::smallint, interval '720:00:00.000001', 'FIRST')$q$, '22023');
+SELECT lc_expect_sqlstate('enqueue: a window with a day field (key claim)', $q$SELECT * FROM horsies_enqueue_task(
+    gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
+    'NOW', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'KEYED', sha256('kday'::bytea),
+    1::smallint, interval '1 day', 'FIRST')$q$, '22023');
 -- A column shape that the table refuses: the queue name over 52 bytes (CHECK, 23514).
 SELECT lc_expect_sqlstate('enqueue: a queue name over 52 bytes', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', repeat('q', 53), 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),

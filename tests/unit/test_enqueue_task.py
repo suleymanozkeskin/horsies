@@ -101,13 +101,13 @@ class TestParameters:
             (Unkeyed(), ('UNKEYED', None, None, None)),
             (
                 Keyed(digest=_DIGEST, scope_version=1, window=timedelta(seconds=1.5)),
-                ('KEYED', _DIGEST, 1, timedelta(seconds=1.5)),
+                ('KEYED', _DIGEST, 1, 1_500_000),
             ),
         ],
         ids=['unkeyed', 'keyed'],
     )
     def test_each_key_kind_fills_only_its_own_slots(
-        self, key: EnqueueKey, expected: tuple[str, bytes | None, int | None, timedelta | None],
+        self, key: EnqueueKey, expected: tuple[str, bytes | None, int | None, int | None],
     ) -> None:
         params = enqueue_task_params(_row(key=key), SendKind.FIRST)
 
@@ -115,7 +115,7 @@ class TestParameters:
             params['key_kind'],
             params['key_digest'],
             params['key_scope_version'],
-            params['key_window'],
+            params['key_window_us'],
         ) == expected
 
     @pytest.mark.parametrize('send_kind', [SendKind.FIRST, SendKind.REPEAT])

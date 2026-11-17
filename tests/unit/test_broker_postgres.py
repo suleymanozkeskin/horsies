@@ -1281,7 +1281,9 @@ class TestEnqueueOutcomes:
         assert params['key_kind'] == 'KEYED'
         assert params['key_digest'] == ScopedIdempotencyKey(task_name='my_task', key='key').digest
         assert params['key_scope_version'] == IDEMPOTENCY_SCOPE_VERSION
-        assert params['key_window'] == broker.idempotency_reservation_window
+        assert params['key_window_us'] == (
+            broker.idempotency_reservation_window // timedelta(microseconds=1)
+        )
 
 
 # ---------------------------------------------------------------------------

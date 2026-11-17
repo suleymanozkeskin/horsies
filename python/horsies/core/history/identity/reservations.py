@@ -94,14 +94,14 @@ async def claim_key_reservation(
                 f'SELECT outcome, task_id, observed_fingerprint_version '
                 f'FROM {KEY_RESERVATION_CLAIM_FUNCTION}('
                 f':key_digest, CAST(:key_scope_version AS smallint), '
-                f'CAST(:reservation_window AS interval), '
+                f"CAST(:reservation_window_us AS bigint) * interval '1 microsecond', "
                 f'CAST(:fingerprint_version AS smallint), :fingerprint, '
                 f'CAST(:task_id AS uuid))'
             ),
             {
                 'key_digest': key_digest,
                 'key_scope_version': key_scope_version,
-                'reservation_window': reservation_window,
+                'reservation_window_us': reservation_window // timedelta(microseconds=1),
                 'fingerprint_version': fingerprint_version,
                 'fingerprint': fingerprint,
                 'task_id': str(task_id),
