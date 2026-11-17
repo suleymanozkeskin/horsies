@@ -67,6 +67,9 @@ pub enum ErrorCode {
     WorkflowMissingRequiredParams,
     /// A node's input object and its `args_from` name the same member.
     WorkflowKwargsArgsFromOverlap,
+    /// A sub-workflow node gives params to a child workflow whose definition
+    /// takes none.
+    WorkflowSubworkflowParamsRequireBuildWith,
     WorkflowOutputTypeMismatch,
     /// A node's input is positional (not a JSON object) while the node takes
     /// `args_from` or `workflow_ctx_from` members, which merge only into an
@@ -76,6 +79,16 @@ pub enum ErrorCode {
     WorkflowCheckCaseInvalid,
     WorkflowCheckBuilderException,
     WorkflowCheckUndecoratedBuilder,
+    /// A node's static input does not encode, or does not read back with the
+    /// input type of its task or child workflow.
+    WorkflowKwargsNotSerializable,
+    /// A node's priority is outside 1 to 100.
+    WorkflowInvalidPriority,
+    /// A nesting of sub-workflows passes the depth limit for certain.
+    WorkflowSubworkflowDepthLimit,
+    /// A sub-workflow includes its own definition with the same params, and
+    /// no node between the two waits for other nodes.
+    WorkflowSubworkflowSelfNesting,
     /// A workflow spec has more than `MAX_WORKFLOW_NODES` (10,000) nodes.
     WorkflowTooManyNodes,
 
@@ -139,12 +152,17 @@ impl ErrorCode {
             Self::WorkflowInvalidKwargKey => "HRS-019",
             Self::WorkflowMissingRequiredParams => "HRS-020",
             Self::WorkflowKwargsArgsFromOverlap => "HRS-021",
+            Self::WorkflowSubworkflowParamsRequireBuildWith => "HRS-022",
             Self::WorkflowOutputTypeMismatch => "HRS-025",
             Self::WorkflowPositionalArgsNotSupported => "HRS-026",
             Self::WorkflowCheckCasesRequired => "HRS-027",
             Self::WorkflowCheckCaseInvalid => "HRS-028",
             Self::WorkflowCheckBuilderException => "HRS-029",
             Self::WorkflowCheckUndecoratedBuilder => "HRS-030",
+            Self::WorkflowKwargsNotSerializable => "HRS-031",
+            Self::WorkflowInvalidPriority => "HRS-034",
+            Self::WorkflowSubworkflowDepthLimit => "HRS-036",
+            Self::WorkflowSubworkflowSelfNesting => "HRS-037",
             Self::WorkflowTooManyNodes => "HRS-038",
             Self::TaskNoReturnType => "HRS-100",
             Self::TaskInvalidReturnType => "HRS-101",
@@ -200,12 +218,17 @@ impl ErrorCode {
             | Self::WorkflowInvalidKwargKey
             | Self::WorkflowMissingRequiredParams
             | Self::WorkflowKwargsArgsFromOverlap
+            | Self::WorkflowSubworkflowParamsRequireBuildWith
             | Self::WorkflowOutputTypeMismatch
             | Self::WorkflowPositionalArgsNotSupported
             | Self::WorkflowCheckCasesRequired
             | Self::WorkflowCheckCaseInvalid
             | Self::WorkflowCheckBuilderException
             | Self::WorkflowCheckUndecoratedBuilder
+            | Self::WorkflowKwargsNotSerializable
+            | Self::WorkflowInvalidPriority
+            | Self::WorkflowSubworkflowDepthLimit
+            | Self::WorkflowSubworkflowSelfNesting
             | Self::WorkflowTooManyNodes => ErrorCategory::Workflow,
 
             Self::TaskNoReturnType
@@ -260,12 +283,17 @@ impl ErrorCode {
                 | Self::WorkflowInvalidKwargKey
                 | Self::WorkflowMissingRequiredParams
                 | Self::WorkflowKwargsArgsFromOverlap
+                | Self::WorkflowSubworkflowParamsRequireBuildWith
                 | Self::WorkflowOutputTypeMismatch
                 | Self::WorkflowPositionalArgsNotSupported
                 | Self::WorkflowCheckCasesRequired
                 | Self::WorkflowCheckCaseInvalid
                 | Self::WorkflowCheckBuilderException
                 | Self::WorkflowCheckUndecoratedBuilder
+                | Self::WorkflowKwargsNotSerializable
+                | Self::WorkflowInvalidPriority
+                | Self::WorkflowSubworkflowDepthLimit
+                | Self::WorkflowSubworkflowSelfNesting
                 | Self::WorkflowTooManyNodes
         )
     }
@@ -561,6 +589,26 @@ mod tests {
             ErrorCode::WorkflowKwargsArgsFromOverlap,
             ErrorCode::WorkflowPositionalArgsNotSupported,
         ] {
+            assert_eq!(code.category(), ErrorCategory::Workflow, "{code}");
+            assert!(code.is_workflow_error(), "{code}");
+        }
+    }
+
+    /// Python `python/horsies/core/errors.py`: the codes of the workflow
+    /// builder checks of a client, with Python's numbers.
+    #[test]
+    fn the_workflow_builder_codes_have_python_numbers() {
+        for (code, text) in [
+            (
+                ErrorCode::WorkflowSubworkflowParamsRequireBuildWith,
+                "HRS-022",
+            ),
+            (ErrorCode::WorkflowKwargsNotSerializable, "HRS-031"),
+            (ErrorCode::WorkflowInvalidPriority, "HRS-034"),
+            (ErrorCode::WorkflowSubworkflowDepthLimit, "HRS-036"),
+            (ErrorCode::WorkflowSubworkflowSelfNesting, "HRS-037"),
+        ] {
+            assert_eq!(code.as_code_str(), text);
             assert_eq!(code.category(), ErrorCategory::Workflow, "{code}");
             assert!(code.is_workflow_error(), "{code}");
         }
