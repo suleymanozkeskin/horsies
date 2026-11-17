@@ -1434,7 +1434,9 @@ impl Worker {
     /// hold, the watch of the pool failure and the new-kind baseline guard.
     /// Each of them and `ping_responder` runs under a watchdog: one that ends
     /// with no stop request stops the worker with `ServiceLoopDied`
-    /// (C11-inverse).
+    /// (C11-inverse). With stale running recovery off, no task depends on a
+    /// runner beat: a beat writer that dies is logged once and the worker
+    /// runs on ([`launch_runner_beats`]).
     ///
     /// Errors: [`WorkerError::Config`] when the runner heartbeat pool is
     /// refused, or its watchdog thread does not start.
