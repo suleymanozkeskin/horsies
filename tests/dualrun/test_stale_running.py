@@ -1,10 +1,19 @@
-"""Dual-run of the stale RUNNING recovery switch: the scan and per-task transaction against the two functions.
+"""Dual-runs of the stale RUNNING recovery.
 
-Reference: ``tests/dualrun/reference/stale_running.py``. Candidate:
-``PostgresBroker.mark_stale_tasks_as_failed``. The seed holds one RUNNING
-row per staleness case, crash retries (scheduled, past the deadline, spent),
-a workflow task, and rows the recovery must not touch. Both sides must write
-the same attempts, retries and history rows.
+The seed holds one RUNNING row per staleness case, crash retries (scheduled,
+past the deadline, spent), a workflow task, and rows the recovery must not
+touch. Two pairs, with the same seed:
+
+1. The SQL redesign: the scan and per-task transaction against the two
+   functions. Reference: ``tests/dualrun/reference/stale_running.py``.
+   Candidate: ``PostgresBroker.mark_stale_tasks_as_failed``. Both sides must
+   write the same attempts, retries and history rows.
+2. The caller switch: the Python caller of the two functions against the
+   core. Reference: ``tests/dualrun/reference/stale_running_caller.py``, the
+   method's body before the switch (the crash result built in Python).
+   Candidate: the method as shipped, which runs the pass in the core with
+   the crash result that the core builds. The snapshots (the stored results
+   compared as JSON) and the results must be equal.
 """
 
 from __future__ import annotations
@@ -12,14 +21,16 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Callable
-from dataclasses import replace
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Final
 
 import psycopg
 import pytest
 
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerResult
 from horsies.core.types.result import Err, Ok, Result
 from tests.dualrun.capture import Connection
 from tests.dualrun.clients import open_broker
@@ -27,6 +38,7 @@ from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
 from tests.dualrun.reference import stale_running as reference
+from tests.dualrun.reference import stale_running_caller
 from tests.dualrun.seeds import (
     BeatRole,
     SeedCoverage,
@@ -177,4 +189,101 @@ def test_stale_recovery_writes_what_the_per_task_transaction_wrote(
 
     assert run.diff.entries == (), render_diff(run.diff)
     assert run.reference.report == 8
+    assert run.candidate.report == run.reference.report
+
+
+# ---- The caller switch: the Python caller against the core ----
+
+REFUSED_STALE_AFTER_MS: Final = -1
+"""A threshold that ``horsies_stale_running_scan`` and the core both refuse."""
+
+
+@dataclass(frozen=True, slots=True)
+class _PassRecovered:
+    recovered: int
+
+
+@dataclass(frozen=True, slots=True)
+class _PassFailed:
+    code: BrokerErrorCode
+    retryable: bool
+
+
+type _PassReport = _PassRecovered | _PassFailed
+
+type _StaleCall = Callable[[PostgresBroker, int, int], Awaitable[BrokerResult[int]]]
+
+
+async def _python_caller(
+    broker: PostgresBroker, stale_after_ms: int, finalizing_stale_after_ms: int
+) -> BrokerResult[int]:
+    return await stale_running_caller.mark_stale_tasks_as_failed(
+        broker, stale_after_ms, finalizing_stale_after_ms
+    )
+
+
+async def _core_caller(
+    broker: PostgresBroker, stale_after_ms: int, finalizing_stale_after_ms: int
+) -> BrokerResult[int]:
+    return await broker.mark_stale_tasks_as_failed(
+        stale_threshold_ms=stale_after_ms,
+        finalizing_stale_threshold_ms=finalizing_stale_after_ms,
+    )
+
+
+async def _caller_pass_async(
+    database: DualRunDatabase, call: _StaleCall, stale_after_ms: int
+) -> _PassReport:
+    async with open_broker(database) as broker:
+        match await call(broker, stale_after_ms, FINALIZING_STALE_AFTER_MS):
+            case Ok(recovered):
+                return _PassRecovered(recovered=recovered)
+            case Err(failed):
+                return _PassFailed(code=failed.code, retryable=failed.retryable)
+
+
+def _caller_side(
+    name: str, call: _StaleCall, stale_after_ms: int
+) -> OperationSide[None, _PassReport]:
+    def act(database: DualRunDatabase, _seed: None) -> _PassReport:
+        return asyncio.run(_caller_pass_async(database, call, stale_after_ms))
+
+    return OperationSide(name=name, act=act)
+
+
+def _caller_pair(
+    empty_database: MakeDatabase, stale_after_ms: int
+) -> OperationDualRun[_PassReport, _PassReport]:
+    match dual_run(
+        empty_database,
+        _seed,
+        _caller_side('Python caller on SQLAlchemy', _python_caller, stale_after_ms),
+        _caller_side('CoreHandle.mark_stale_running_async', _core_caller, stale_after_ms),
+        SeedCoverage.HISTORY_AND_BEATS,
+    ):
+        case Ok(run):
+            return run
+        case Err(failed):
+            pytest.fail(f'{failed.step}: {failed.cause}')
+
+
+def test_the_core_recovery_writes_what_the_python_caller_wrote(
+    empty_database: MakeDatabase,
+) -> None:
+    run = _caller_pair(empty_database, STALE_AFTER_MS)
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    assert run.reference.report == _PassRecovered(recovered=8)
+    assert run.candidate.report == run.reference.report
+
+
+def test_a_refused_threshold_fails_alike_and_writes_nothing(
+    empty_database: MakeDatabase,
+) -> None:
+    run = _caller_pair(empty_database, REFUSED_STALE_AFTER_MS)
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    assert run.reference.report == _PassFailed(
+        code=BrokerErrorCode.CLEANUP_FAILED, retryable=False,
+    )
     assert run.candidate.report == run.reference.report

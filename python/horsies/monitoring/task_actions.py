@@ -1,6 +1,7 @@
 """The cancel action for individual tasks.
 
-The action is one statement in autocommit, ``horsies_cancel_task``: it
+The action is one statement, ``horsies_cancel_task``, that the core runs and
+commits (``CoreHandle.cancel_task_async`` of the broker's core handle): it
 takes the task advisory lock and the row lock, moves a cancellable row to
 history as CANCELLED, or classifies the refusal from the row it locked or,
 for a task absent from the live table, from history. A concurrent claim
@@ -28,28 +29,25 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, assert_never
+from typing import TYPE_CHECKING, ClassVar, Final, assert_never
 
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 
 from horsies._catalog.monitoring import TaskActionErrorCode as TaskActionErrorCode
-from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.lifecycle.outcomes import (
-    AlreadyApplied,
-    Applied,
-    LostClaim,
-    ObservedTaskState,
-    ObservedWorkflowTask,
-    OutcomeDecodeError,
-    SourceStateConflict,
-    TaskAbsent,
-    TerminalizationOutcome,
-    decode_outcome_row,
+from horsies._core import (
+    CancelFailed,
+    CancelRefusedStatus,
+    CancelRefusedWorkflowTask,
+    CancelStoredDataInvalid,
+    CancelTaskAbsent,
+    CoreError,
+    TaskCancelledRecord,
 )
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.lifecycle.outcomes import OutcomeDecodeError
+from horsies.core.types.core_failure import CoreOperationFailed, core_error_retryable
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
-from horsies.core.utils.db import autocommit_connection, is_retryable_connection_error
 
 
 if TYPE_CHECKING:
@@ -103,11 +101,13 @@ class TaskActionWorkflowTask:
 
 @dataclass(slots=True, frozen=True)
 class TaskActionDbOperationFailed:
-    """The cancel statement failed with a database or driver error.
+    """The cancel statement failed with a database or driver error, or the
+    core of this process could not run it.
 
-    ``retryable`` is the driver classification of the cause: ``True`` when
+    ``retryable`` is the core's classification of the cause: ``True`` when
     the condition may clear, for example a lost connection. ``exception``
-    is the ``SQLAlchemyError``. The statement wrote nothing, or it
+    is a ``CoreOperationFailed`` with the core's message, or the
+    ``CoreError`` of the core boundary. The statement wrote nothing, or it
     committed and its reply was lost: a repeated cancel tells which,
     because a committed cancel answers ``TaskActionNotCancellable`` with
     ``CANCELLED``.
@@ -140,9 +140,9 @@ class TaskActionEventLoopLimit:
 class TaskActionStoredDataInvalid:
     """Stored task data does not parse. Nothing changed: the cancel refused the task.
 
-    ``exception`` is the ``OutcomeDecodeError`` of the cancel outcome row,
-    for example a history status that is not a ``TaskStatus`` member. A
-    repeat gives the same result until the stored row changes.
+    ``exception`` is an ``OutcomeDecodeError`` with the core's message, for
+    example a history status that is not a task status. A repeat gives the
+    same result until the stored row changes.
     """
 
     code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.STORED_DATA_INVALID
@@ -173,10 +173,14 @@ class TaskCancelled:
 
 # One statement in autocommit. The function takes the task advisory lock,
 # then the row lock, and either moves the row or classifies the refusal; the
-# statement commits when it returns.
+# statement commits when it returns. The core sends it; the lock-order tests
+# and the Python reference of the dual-run send this text.
 CANCEL_TASK_SQL = text("""
     SELECT * FROM horsies_cancel_task(CAST(:task_id AS uuid), :include_running)
 """)
+
+CANCEL_SUBJECT: Final = 'cancel_task'
+"""The subject of a ``CoreOperationFailed`` of the cancel."""
 
 def _not_found(task_id: uuid.UUID) -> Err[TaskActionNotFound]:
     """The row does not exist — retention may have removed it."""
@@ -221,28 +225,16 @@ def _not_cancellable(
 
 
 def _db_err(
-    action: str, task_id: uuid.UUID, exc: SQLAlchemyError,
+    task_id: uuid.UUID,
+    message: str,
+    retryable: bool,
+    exc: BaseException,
 ) -> Err[TaskActionDbOperationFailed]:
-    """Wrap a transaction failure, classifying transient errors."""
+    """The cancel statement failed, or the core could not run it."""
     return Err(
         TaskActionDbOperationFailed(
-            message=f'{action} failed: {exc}',
-            retryable=is_retryable_connection_error(exc),
-            task_id=task_id,
-            exception=exc,
-        )
-    )
-
-
-def _stored_data_err(
-    action: str,
-    task_id: uuid.UUID,
-    exc: OutcomeDecodeError,
-) -> Err[TaskActionStoredDataInvalid]:
-    """Wrap stored data that does not parse. The transaction did not commit."""
-    return Err(
-        TaskActionStoredDataInvalid(
-            message=f'{action} failed: stored data does not parse: {exc}',
+            message=f'Task cancel failed: {message}',
+            retryable=retryable,
             task_id=task_id,
             exception=exc,
         )
@@ -251,43 +243,42 @@ def _stored_data_err(
 
 def _cancel_answer(
     task_id: uuid.UUID,
-    outcome: TerminalizationOutcome,
-) -> Result[
-    TaskCancelled,
-    TaskActionNotFound | TaskActionWorkflowTask | TaskActionNotCancellable,
-]:
-    """The answer of the cancel to its caller, from the decoded outcome. Pure.
+    outcome: TaskCancelledRecord
+    | CancelRefusedWorkflowTask
+    | CancelRefusedStatus
+    | CancelTaskAbsent
+    | CancelFailed
+    | CancelStoredDataInvalid,
+) -> Result[TaskCancelled, TaskActionError]:
+    """The answer of the cancel to its caller, from the core's record. Pure.
 
     A finished task is refused as it was when it was live: a workflow task
     with the workflow-bound refusal, a plain task as not cancellable from
-    its terminal status (an earlier cancel included, ``AlreadyApplied``).
-
-    Raises:
-        RuntimeError: an outcome that contradicts the function: a lost
-            claim (the cancel has no claim fence), or an applied, replayed
-            or refused cancel with no observed status.
+    its terminal status (an earlier cancel included).
     """
     match outcome:
-        case Applied(observed=ObservedTaskState(status=TaskStatus() as was_status)):
-            return Ok(TaskCancelled(task_id=task_id, was_status=was_status))
-        case SourceStateConflict(evidence=ObservedWorkflowTask(observed_status=status)):
-            return _workflow_bound(task_id, status)
-        case (
-            SourceStateConflict(observed=ObservedTaskState(status=TaskStatus() as status))
-            | AlreadyApplied(observed=ObservedTaskState(status=TaskStatus() as status))
-        ):
-            return _not_cancellable(task_id, status)
-        case TaskAbsent():
+        case TaskCancelledRecord(was_status=was_status):
+            return Ok(TaskCancelled(task_id=task_id, was_status=TaskStatus(was_status)))
+        case CancelRefusedWorkflowTask(current_status=status):
+            return _workflow_bound(task_id, TaskStatus(status))
+        case CancelRefusedStatus(current_status=status):
+            return _not_cancellable(task_id, TaskStatus(status))
+        case CancelTaskAbsent():
             return _not_found(task_id)
-        case Applied() | AlreadyApplied() | SourceStateConflict():
-            raise RuntimeError(
-                f'administrative cancellation of task {task_id} '
-                'reported no observed status'
+        case CancelFailed(message=message, retryable=retryable):
+            return _db_err(
+                task_id,
+                message,
+                retryable,
+                CoreOperationFailed(CANCEL_SUBJECT, message, retryable),
             )
-        case LostClaim():
-            raise RuntimeError(
-                f'administrative cancellation of task {task_id} reported a '
-                'lost claim; the cancel has no claim fence'
+        case CancelStoredDataInvalid(message=message):
+            return Err(
+                TaskActionStoredDataInvalid(
+                    message=f'Task cancel failed: stored data does not parse: {message}',
+                    task_id=task_id,
+                    exception=OutcomeDecodeError(message),
+                )
             )
         case _ as unreachable:
             assert_never(unreachable)
@@ -309,41 +300,20 @@ async def cancel_task(
 
     Waiting result handles unblock on commit: the move fires ``task_done``
     and a CANCELLED row is reported as TASK_CANCELLED, so no result payload
-    is written here. One ``horsies_cancel_task`` statement in autocommit.
+    is written here. One ``horsies_cancel_task`` statement that the core
+    runs on the broker's core handle; a cancel of the caller does not stop
+    it. ``TaskActionEventLoopLimit`` is not an answer of this action: it
+    uses no SQLAlchemy resource set.
 
     Raises:
-        RuntimeError: the cancel outcome contradicts the function (a lost
-            claim, or no observed status). These are defects, not outcomes.
+        PanicException: the cancel outcome contradicts the function (a lost
+            claim, or no observed status). These are defects of the core,
+            not outcomes.
     """
-    match await broker.select_resources():
-        case Err(loop_limit):
-            return Err(
-                TaskActionEventLoopLimit(
-                    message=f'Task cancel of {task_id}: {loop_limit.describe()}',
-                    task_id=task_id,
-                    loop_limit=loop_limit,
-                )
-            )
-        case Ok(resources):
-            pass
-
     try:
-        async with resources.session_factory() as session:
-            connection = await autocommit_connection(session)
-            rows = (
-                await connection.execute(
-                    CANCEL_TASK_SQL,
-                    {'task_id': str(task_id), 'include_running': include_running},
-                )
-            ).mappings().all()
-            assert len(rows) == 1, (
-                f'horsies_cancel_task returned {len(rows)} rows for task {task_id}'
-            )
-            outcome = decode_outcome_row(
-                {str(key): value for key, value in rows[0].items()}
-            )
-    except SQLAlchemyError as exc:
-        return _db_err('Task cancel', task_id, exc)
-    except OutcomeDecodeError as exc:
-        return _stored_data_err('Task cancel', task_id, exc)
+        outcome = await broker._core_handle.cancel_task_async(  # pyright: ignore[reportPrivateUsage]
+            task_id, include_running=include_running,
+        )
+    except CoreError as exc:
+        return _db_err(task_id, str(exc), core_error_retryable(exc), exc)
     return _cancel_answer(task_id, outcome)

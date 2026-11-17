@@ -16,6 +16,7 @@ from sqlalchemy.exc import (
     TimeoutError as SATimeoutError,
 )
 
+from horsies._core import CoreStopped, ForkedAfterCoreStart, TooManyPendingCalls
 from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.db import (
@@ -95,6 +96,14 @@ class TestIsRetryableConnectionError:
         refused = CoreOperationFailed('release_claims', 'repeated task id', False)
         assert is_retryable_connection_error(retryable) is True
         assert is_retryable_connection_error(refused) is False
+
+    def test_a_core_boundary_error_is_retryable_only_when_it_clears(self) -> None:
+        busy = TooManyPendingCalls('CoreHandle.release_claims_async', 65_536)
+        stopped = CoreStopped('core task', 'panic')
+        forked = ForkedAfterCoreStart(100, 101, 'exec the child')
+        assert is_retryable_connection_error(busy) is True
+        assert is_retryable_connection_error(stopped) is False
+        assert is_retryable_connection_error(forked) is False
 
     def test_sqlalchemy_pool_timeout_retryable(self) -> None:
         """Engine pool checkout timeout is transient, never a permanent failure.
