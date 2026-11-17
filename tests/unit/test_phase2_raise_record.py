@@ -1,9 +1,9 @@
 # pyright: reportPrivateUsage=false
 """The record of a persistent phase-2 raise: one ``horsies_workflow_phase2_record_raise`` call.
 
-``_record_raised_row`` reads the workflow and node of the record, then sends
-the function with the limit error on an autocommit connection. Each
-outcome of the function maps to one result.
+``_record_raised_row`` sends the function with the limit error on an
+autocommit connection; the record's workflow and node come from discovery.
+Each outcome of the function maps to one result.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from sqlalchemy.exc import OperationalError
 
 from horsies.core.workflows.functions import PHASE2_RECORD_RAISE_FUNCTION_SQL
 from horsies.core.workflows.phase2_recovery import (
-    RAISED_ROW_CONTEXT_SQL,
     _RaisedRowNotRecorded,
     _RaisedRowRecorded,
     _record_raised_row,
@@ -33,18 +32,14 @@ BOUND = 3
 
 def _sessions(
     *,
-    context: object,
     raise_row: object,
     error: Exception | None = None,
 ) -> tuple[MagicMock, AsyncMock]:
-    """A session factory whose autocommit connection answers the context
-    read with ``context`` and the function with ``raise_row``."""
+    """A session factory whose autocommit connection answers the function
+    with ``raise_row``."""
 
     def execute(statement: Any, _params: Any) -> MagicMock:
         result = MagicMock()
-        if statement is RAISED_ROW_CONTEXT_SQL:
-            result.first.return_value = context
-            return result
         assert statement is PHASE2_RECORD_RAISE_FUNCTION_SQL
         if error is not None:
             raise error
@@ -59,10 +54,6 @@ def _sessions(
     cm.__aenter__ = AsyncMock(return_value=session)
     cm.__aexit__ = AsyncMock(return_value=False)
     return MagicMock(return_value=cm), connection
-
-
-def _context() -> SimpleNamespace:
-    return SimpleNamespace(workflow_id=WORKFLOW_ID, task_index=0)
 
 
 def _row(
@@ -83,6 +74,8 @@ async def _record(factory: MagicMock) -> object:
     return await _record_raised_row(
         factory,
         task_id=TASK_ID,
+        workflow_id=WORKFLOW_ID,
+        task_index=0,
         exc=RuntimeError('boom'),
         quarantine_after_attempts=BOUND,
     )
@@ -90,12 +83,12 @@ async def _record(factory: MagicMock) -> object:
 
 @pytest.mark.asyncio
 async def test_a_counted_raise_is_recorded_and_sends_the_limit_error() -> None:
-    factory, connection = _sessions(context=_context(), raise_row=_row('COUNTED', 1))
+    factory, connection = _sessions(raise_row=_row('COUNTED', 1))
 
     recorded = await _record(factory)
 
     assert recorded == _RaisedRowRecorded(quarantined=False, quarantine_refusal=None)
-    statement, params = connection.execute.await_args_list[1].args
+    statement, params = connection.execute.await_args_list[0].args
     assert statement is PHASE2_RECORD_RAISE_FUNCTION_SQL
     assert params['task_id'] == TASK_ID
     assert params['attempt_bound'] == BOUND
@@ -107,23 +100,15 @@ async def test_a_counted_raise_is_recorded_and_sends_the_limit_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_gone_row_is_not_recorded_and_sends_no_function() -> None:
-    factory, connection = _sessions(context=None, raise_row=_row('COUNTED', 1))
-
-    assert await _record(factory) == _RaisedRowNotRecorded()
-    assert connection.execute.await_count == 1
-
-
-@pytest.mark.asyncio
 async def test_pending_absent_is_not_recorded() -> None:
-    factory, _ = _sessions(context=_context(), raise_row=_row('PENDING_ABSENT'))
+    factory, _ = _sessions(raise_row=_row('PENDING_ABSENT'))
 
     assert await _record(factory) == _RaisedRowNotRecorded()
 
 
 @pytest.mark.asyncio
 async def test_a_refused_limit_is_not_recorded() -> None:
-    factory, _ = _sessions(context=_context(), raise_row=_row('NOT_RECORDED', 2))
+    factory, _ = _sessions(raise_row=_row('NOT_RECORDED', 2))
 
     assert await _record(factory) == _RaisedRowNotRecorded()
 
@@ -131,7 +116,6 @@ async def test_a_refused_limit_is_not_recorded() -> None:
 @pytest.mark.asyncio
 async def test_the_limit_with_a_repointed_record_is_quarantined() -> None:
     factory, _ = _sessions(
-        context=_context(),
         raise_row=_row('LIMIT_REACHED', BOUND, 'LIMIT_REACHED_FAILED', 'REPOINTED'),
     )
 
@@ -143,7 +127,6 @@ async def test_the_limit_with_a_repointed_record_is_quarantined() -> None:
 @pytest.mark.asyncio
 async def test_the_limit_with_a_refused_quarantine_reports_the_verdict() -> None:
     factory, _ = _sessions(
-        context=_context(),
         raise_row=_row(
             'LIMIT_REACHED', BOUND, 'LIMIT_REACHED_LIVE_NODES', 'SOURCE_ABSENT: no history row',
         ),
@@ -158,7 +141,6 @@ async def test_the_limit_with_a_refused_quarantine_reports_the_verdict() -> None
 @pytest.mark.asyncio
 async def test_a_statement_error_is_not_recorded() -> None:
     factory, _ = _sessions(
-        context=_context(),
         raise_row=_row('COUNTED', 1),
         error=OperationalError('SELECT 1', {}, Exception('limit write failed')),
     )

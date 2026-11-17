@@ -140,5 +140,5 @@ class TestDecodePhase2Raise:
             decode_phase2_raise([_raise_row('LIMIT_REACHED', 3, 'REFUSED', 'REPOINTED')])
 
     def test_a_verdict_that_is_not_a_text_is_refused(self) -> None:
-        with pytest.raises(OutcomeDecodeError, match='quarantine_verdict None'):
+        with pytest.raises(OutcomeDecodeError, match='quarantine verdict None'):
             decode_phase2_raise([_raise_row('LIMIT_REACHED', 3, 'LIMIT_REACHED_FAILED')])

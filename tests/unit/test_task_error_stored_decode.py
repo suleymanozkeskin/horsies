@@ -67,9 +67,6 @@ from horsies.core.workflows.engine import (
     _parse_child_output,  # pyright: ignore[reportPrivateUsage]
     get_workflow_failure_error,
 )
-from horsies.core.workflows.phase2_recovery import (
-    _recovered_failure_result,  # pyright: ignore[reportPrivateUsage]
-)
 from horsies.core.workflows.sql import (
     GET_FIRST_FAILED_REQUIRED_TASK_SQL,
     GET_FIRST_FAILED_TASK_RESULT_SQL,
@@ -239,23 +236,6 @@ class TestStoredTextThatDoesNotParse:
 
         assert session.execute.await_args.args[0] is GET_FIRST_FAILED_REQUIRED_TASK_SQL
         _assert_stored_workflow_error(stored_error, cause)
-
-    @_NOT_AN_ENVELOPE
-    def test_phase2_recovery_gives_the_stored_data_error(
-        self, stored: str, cause: str,
-    ) -> None:
-        result = _recovered_failure_result('FAILED', stored)
-        _assert_stored_data_error(result, cause)
-        assert result.unwrap_err().data == {'task_status': 'FAILED'}
-
-    @_NOT_AN_ENVELOPE
-    def test_the_recovered_error_encodes_for_the_failure_handler(
-        self, stored: str, cause: str,
-    ) -> None:
-        result = _recovered_failure_result('FAILED', stored)
-        encoded = encode_task_error(result.unwrap_err())
-        assert isinstance(encoded, dict)
-        assert cause in str(encoded['message'])
 
     @_NOT_AN_ENVELOPE
     def test_a_child_output_stays_unreadable(self, stored: str, cause: str) -> None:
@@ -464,14 +444,6 @@ class TestErrorWithNoMessage:
         decoded = decode_task_error(loads_json(stored_error).unwrap())
         assert decoded.error_code == 'RATE_LIMITED'
         assert decoded.message is None
-
-    @_NO_MESSAGE
-    def test_phase2_recovery_returns_the_error(
-        self, err_slot: dict[str, Json],
-    ) -> None:
-        _assert_code_without_message(
-            _recovered_failure_result('FAILED', _stored(err_slot)),
-        )
 
     @_NO_MESSAGE
     def test_a_child_output_is_an_error(self, err_slot: dict[str, Json]) -> None:
@@ -824,34 +796,6 @@ class TestEngineReaders:
 
 class TestRecoveryReaders:
     """The readers of a recovery path: a stored value must not raise out."""
-
-    @_REFUSED
-    def test_phase2_recovery_gives_the_stored_data_error(
-        self, err_slot: dict[str, Json], cause: str,
-    ) -> None:
-        result = _recovered_failure_result('FAILED', _stored(err_slot))
-        _assert_stored_data_error(result, cause)
-        assert result.unwrap_err().data == {'task_status': 'FAILED'}
-
-    @_REFUSED
-    def test_the_recovered_error_encodes_for_the_failure_handler(
-        self, err_slot: dict[str, Json], cause: str,
-    ) -> None:
-        result = _recovered_failure_result('FAILED', _stored(err_slot))
-        encoded = encode_task_error(result.unwrap_err())
-        assert isinstance(encoded, dict)
-        assert cause in str(encoded['message'])
-
-    def test_phase2_recovery_escapes_a_lone_surrogate_in_the_cause(self) -> None:
-        """An encode refusal in the failure handler repeats on each pass."""
-        refusal = ValueValidationError(f'bad {chr(0xd800)}')
-        with patch(
-            'horsies.core.workflows.phase2_recovery.decode_task_error',
-            side_effect=refusal,
-        ):
-            result = _recovered_failure_result('FAILED', _stored(_DECLARED))
-
-        encode_task_error(result.unwrap_err())
 
     @_REFUSED
     @pytest.mark.asyncio

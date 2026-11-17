@@ -5,6 +5,8 @@ rows. No test patches the function under test. Three stored rows raise on
 every pass:
 
 - ``BAD_GOOD_UNTIL`` on a node: the INSERT of the task refuses it (DataError).
+  Phase-2 recovery copies the node's typed facts instead, so its tests refuse
+  the INSERT of the workflow's task rows with a trigger (DataError).
 - ``BAD_POLICY`` on a workflow: the success evaluation raises
   StoredSuccessPolicyError (the stored success policy does not parse).
 - An output index with no node row: the final result raises AssertionError.
@@ -373,11 +375,38 @@ async def _stop_raising_on_update(harness: Harness, *, table: str) -> None:
     await _execute(harness, 'DROP FUNCTION limit_test_refuse()')
 
 
+async def _refuse_task_inserts(harness: Harness, workflow_id: str) -> None:
+    """Make every INSERT of a task row of this workflow refuse with a
+    DataError (22007), as a stored ``good_until`` that does not parse did."""
+    await _execute(
+        harness,
+        f"""
+        CREATE FUNCTION limit_test_refuse_task() RETURNS trigger
+        LANGUAGE plpgsql AS $body$
+        BEGIN
+            IF NEW.input::jsonb -> '__h_workflow_meta__' ->> 'workflow_id' = '{workflow_id}' THEN
+                RAISE EXCEPTION 'refused by the test' USING ERRCODE = '22007';
+            END IF;
+            RETURN NEW;
+        END
+        $body$
+        """,
+    )
+    await _execute(
+        harness,
+        """
+        CREATE TRIGGER limit_test_refuse_task BEFORE INSERT ON horsies_tasks
+        FOR EACH ROW EXECUTE FUNCTION limit_test_refuse_task()
+        """,
+    )
+
+
 async def _start_a_then_b(harness: Harness) -> tuple[str, str]:
-    """Start A then B for real, make B poison, and put A's task in history.
+    """Start A then B for real, refuse the task row of B, and put A's task in
+    history.
 
     Returns the workflow id and the task id of A. Phase-2 recovery then owes
-    the progression of A, and that progression raises on B.
+    the progression of A, and that progression raises on the task row of B.
     """
     from tests.integration.history_seeding import force_terminal
 
@@ -401,14 +430,8 @@ async def _start_a_then_b(harness: Harness) -> tuple[str, str]:
     started = await start_workflow_async(spec, harness.broker)
     assert not is_err(started), started
     workflow_id = started.ok_value.workflow_id
+    await _refuse_task_inserts(harness, workflow_id)
     async with harness.sessions() as session:
-        await session.execute(
-            text(
-                'UPDATE horsies_workflow_tasks SET task_options = :options '
-                'WHERE workflow_id = :id AND task_index = 1',
-            ),
-            {'options': BAD_GOOD_UNTIL, 'id': workflow_id},
-        )
         task_id = (
             await session.execute(
                 text(
@@ -1187,6 +1210,8 @@ class TestPhase2PauseWindow:
         row = await _record_raised_row(
             harness.sessions,
             task_id=task_id,
+            workflow_id=workflow_id,
+            task_index=0,
             exc=RuntimeError('raised before the pause'),
             quarantine_after_attempts=LIMIT,
         )
