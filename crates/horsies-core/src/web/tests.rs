@@ -39,7 +39,9 @@ use super::routes::task_not_found_text;
 use super::schema::{
     SchemaProbe, SchemaReader, SchemaState, SchemaStatus, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
 };
-use super::spa::{inject, safe_asset_path, EmbeddedAssets, MemoryAssets, MonitoringUiConfig};
+use super::spa::{
+    inject, runtime_config_json, safe_asset_path, EmbeddedAssets, MemoryAssets, MonitoringUiConfig,
+};
 use super::task_stats_cache::{ReadCache, TaskStatsCache};
 
 fn lazy_pool() -> PgPool {
@@ -163,13 +165,16 @@ fn action_request(uri: &str) -> Request<Body> {
         .expect("action request")
 }
 
-/// The 400 body of a task path id that is not a UUID: Python's
-/// `PathIdNotUuid.detail` with pydantic's message.
-fn task_path_id_refusal(raw: &str) -> serde_json::Value {
-    let reason = Uuid::parse_str(raw).expect_err("the text is not a UUID");
+/// pydantic's message for the path id text `not-a-uuid` (pydantic 2.13.4:
+/// `TypeAdapter(UUID).validate_python('not-a-uuid')`).
+const NOT_A_UUID_MESSAGE: &str = "Input should be a valid UUID, invalid character: found `n` at 1";
+
+/// The 400 body of the path id `not-a-uuid` in the path parameter `field`:
+/// Python's `PathIdNotUuid.detail` with pydantic's message.
+fn not_a_uuid_refusal(field: &str) -> serde_json::Value {
     serde_json::json!({
         "code": "INVALID_INPUT",
-        "detail": format!("Path parameter task_id: Input should be a valid UUID, {reason}."),
+        "detail": format!("Path parameter {field}: {NOT_A_UUID_MESSAGE}."),
     })
 }
 
@@ -329,10 +334,7 @@ async fn task_action_body_defaults_when_absent_and_malformed_json_is_422() {
     // The absent body is accepted; the refusal is the path id's.
     let absent_response = router.clone().oneshot(absent).await.unwrap();
     assert_eq!(absent_response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        json(absent_response).await,
-        task_path_id_refusal("not-a-uuid")
-    );
+    assert_eq!(json(absent_response).await, not_a_uuid_refusal("task_id"));
 
     let task_id = Uuid::new_v4();
     let malformed = Request::builder()
@@ -687,7 +689,7 @@ async fn spa_is_public_mountable_injected_and_traversal_safe() {
     )
     .unwrap();
     assert!(page.contains("<base href=\"/\">"));
-    assert!(page.contains(r#"{"basePath":"/","apiBase":"/api"}"#));
+    assert!(page.contains(r#"{"basePath": "/", "apiBase": "/api"}"#));
     assert!(page.find("window.__HORSIES_UI__").unwrap() < page.find("override.css").unwrap());
 
     let asset = router
@@ -727,7 +729,7 @@ async fn spa_is_public_mountable_injected_and_traversal_safe() {
         mounted.contains("<base href=\"/monitoring/\">"),
         "{mounted}"
     );
-    assert!(mounted.contains(r#"{"basePath":"/monitoring","apiBase":"/monitoring/api"}"#));
+    assert!(mounted.contains(r#"{"basePath": "/monitoring", "apiBase": "/monitoring/api"}"#));
     let mounted_meta = host
         .oneshot(
             Request::builder()
@@ -753,6 +755,22 @@ async fn spa_is_public_mountable_injected_and_traversal_safe() {
     }
     let mixed_head = inject("<HTML><HEAD></HeAd   ><BODY>", "/x", None);
     assert!(mixed_head.find("window.__HORSIES_UI__").unwrap() < mixed_head.find("</HeAd").unwrap());
+}
+
+/// The runtime config of the page is the text of Python's
+/// `json.dumps(config)`: a space after each `:` and `,`, and every
+/// character outside printable ASCII escaped (the texts come from
+/// `json.dumps` on Python 3.13).
+#[test]
+fn the_runtime_config_is_the_text_of_python_json_dumps() {
+    assert_eq!(
+        runtime_config_json("/monitoring", "/monitoring/api"),
+        r#"{"basePath": "/monitoring", "apiBase": "/monitoring/api"}"#
+    );
+    assert_eq!(
+        runtime_config_json("/m\u{f6}n \"x\"", "/m\u{f6}n \"x\"/api"),
+        r#"{"basePath": "/m\u00f6n \"x\"", "apiBase": "/m\u00f6n \"x\"/api"}"#
+    );
 }
 
 #[tokio::test]
@@ -1521,14 +1539,14 @@ async fn a_task_path_id_that_is_not_a_uuid_is_invalid_input() {
         .await
         .unwrap();
     assert_eq!(read.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json(read).await, task_path_id_refusal("not-a-uuid"));
+    assert_eq!(json(read).await, not_a_uuid_refusal("task_id"));
 
     let cancel = router
         .oneshot(action_request("/api/tasks/not-a-uuid/cancel"))
         .await
         .unwrap();
     assert_eq!(cancel.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json(cancel).await, task_path_id_refusal("not-a-uuid"));
+    assert_eq!(json(cancel).await, not_a_uuid_refusal("task_id"));
 }
 
 /// A workflow id text that is not a UUID names no run on the two read
@@ -1594,11 +1612,7 @@ async fn a_workflow_action_path_id_that_is_not_a_uuid_is_invalid_input() {
         status(SchemaState::Match, Some(crate::expected_schema_version())),
         true,
     );
-    let reason = uuid::Uuid::parse_str("not-a-uuid").expect_err("not a UUID");
-    let refusal = serde_json::json!({
-        "code": "INVALID_INPUT",
-        "detail": format!("Path parameter workflow_id: Input should be a valid UUID, {reason}."),
-    });
+    let refusal = not_a_uuid_refusal("workflow_id");
     for path in [
         "/api/workflows/not-a-uuid/pause",
         "/api/workflows/not-a-uuid/resume",
@@ -2206,7 +2220,7 @@ async fn the_handler_serves_the_routes_with_the_verdicts_of_the_grant() {
         )
         .await;
     assert_eq!(read.status, StatusCode::BAD_REQUEST);
-    assert_eq!(body_json(&read), task_path_id_refusal("not-a-uuid"));
+    assert_eq!(body_json(&read), not_a_uuid_refusal("task_id"));
 
     let meta = handler
         .handle(
