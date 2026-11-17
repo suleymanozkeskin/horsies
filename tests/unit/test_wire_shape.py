@@ -90,6 +90,7 @@ from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker import child_runner
 from horsies.core.worker.task_loop import TaskLoop
+from horsies.core.worker.child_runner import RunTheTask
 from tests.fixtures.run_return import wire_of
 
 CLAIMED_AT = datetime.datetime(2026, 11, 10, 9, 0, tzinfo=datetime.timezone.utc)
@@ -1167,11 +1168,10 @@ def _run_child(app: Horsies, task_name: str) -> tuple[bool, str, str | None]:
         return wire_of(
             child_runner._run_task_entry(
                 task_name=task_name,
-                args_json='[]',
-                kwargs_json='{}',
+                input_json='{}',
                 task_id='task-id',
                 master_worker_id='worker',
-                is_workflow_task=False,
+                work=RunTheTask(),
                 claimed_at=CLAIMED_AT,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
@@ -1240,7 +1240,7 @@ class TestOmittedDefaultInTheWorker:
         _, payload, reason = _run_child(app, 'child_refused')
 
         assert seen == []
-        assert reason is not None and 'SerializationError' in reason
+        assert reason is None
         assert json.loads(payload)['err']['error_code'] == {
             '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
         }

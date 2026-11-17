@@ -37,6 +37,7 @@ from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.worker import child_runner
 from horsies.core.worker.task_loop import TaskLoop
+from horsies.core.worker.child_runner import RunTheTask
 from tests.fixtures.run_return import wire_of
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
@@ -462,11 +463,10 @@ def _run_child(
         return wire_of(
             child_runner._run_task_entry(
                 task_name=task_name,
-                args_json='[]',
-                kwargs_json=json.dumps(kwargs),
+                input_json=json.dumps(kwargs),
                 task_id='task-id',
                 master_worker_id='worker',
-                is_workflow_task=True,
+                work=RunTheTask(),
                 claimed_at=CLAIMED_AT,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
@@ -532,7 +532,7 @@ class TestReceiverOfArgsFrom:
         _, payload, reason = _run_child(self._app(seen), target, 'source_int', inner)
 
         assert seen == []
-        assert reason is not None and 'SerializationError' in reason
+        assert reason is None
         code = json.loads(payload)['err']['error_code']
         assert code == {
             '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,

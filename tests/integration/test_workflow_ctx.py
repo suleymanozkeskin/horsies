@@ -30,6 +30,7 @@ from horsies.core.worker.task_loop import TaskLoop
 from .conftest import make_simple_task, make_no_ctx_task, make_workflow_spec, start_ok
 from tests.integration.conftest import finish_task
 from tests.broker_resources_support import listener_of
+from horsies.core.worker.child_runner import RunTheTask
 from tests.fixtures.run_return import wire_of
 
 
@@ -511,10 +512,10 @@ class TestWorkflowCtx:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=None,
-                kwargs_json=kwargs_json,
+                input_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
+                work=RunTheTask(),
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
@@ -583,10 +584,10 @@ class TestWorkflowCtx:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=None,
-                kwargs_json=kwargs_json,
+                input_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
+                work=RunTheTask(),
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
@@ -658,10 +659,10 @@ class TestWorkflowCtx:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=None,
-                kwargs_json=kwargs_json,
+                input_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
+                work=RunTheTask(),
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
@@ -948,10 +949,10 @@ class TestWorkflowCtx:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=None,
-                kwargs_json=modified_kwargs_json,
+                input_json=modified_kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
+                work=RunTheTask(),
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,

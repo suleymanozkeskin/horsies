@@ -31,6 +31,7 @@ from .conftest import (
     start_ok,
 )
 from tests.broker_resources_support import listener_of
+from horsies.core.worker.child_runner import RunTheTask
 from tests.fixtures.run_return import wire_of
 
 
@@ -473,10 +474,10 @@ class TestArgsFromInjection:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=None,
-                kwargs_json=kwargs_json,
+                input_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
+                work=RunTheTask(),
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
@@ -562,10 +563,10 @@ class TestArgsFromInjection:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=None,
-                kwargs_json=kwargs_json,
+                input_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
+                work=RunTheTask(),
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
@@ -730,10 +731,10 @@ class TestArgsFromInjection:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=None,
-                kwargs_json=kwargs_json,
+                input_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
+                work=RunTheTask(),
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
@@ -816,10 +817,10 @@ class TestArgsFromInjection:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                args_json=None,
-                kwargs_json=kwargs_json,
+                input_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
+                work=RunTheTask(),
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,

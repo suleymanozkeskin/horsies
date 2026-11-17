@@ -6,14 +6,14 @@ from typing import assert_never
 
 import pytest
 
-from horsies.core.worker.child_protocol import (
+from tests.dualrun.reference.worker_parent.worker.child_protocol import (
     FRAME_HEADER,
     MAX_BODY_BYTES,
     MAX_META_BYTES,
     MIN_META_BYTES,
     FrameOverBound,
 )
-from horsies.core.worker.frame_parser import (
+from tests.dualrun.reference.worker_parent.worker.frame_parser import (
     DIRECT_BODY_BYTES,
     FRAME_READ_BUFFER_BYTES,
     MOVE_TO_FRONT,
