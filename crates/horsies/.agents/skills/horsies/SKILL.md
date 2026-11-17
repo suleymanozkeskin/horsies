@@ -1,452 +1,320 @@
 ---
-name: horsies-rust-quick-reference
-description: Quick orientation for the horsies Rust task queue and workflow engine. Use when users need a concise overview and routing to detailed guidance for tasks, workflows, and configuration.
+name: horsies
+description: Guidance for the horsies Rust crate, the Rust client of the horsies task queue and workflow engine (PostgreSQL broker). Use when code has `use horsies::...`, `#[horsies::task]`, `#[horsies::blocking_task]`, `TaskError<E>`, `TaskOutcome`, `WorkflowDefinition`, `WorkflowSpecBuilder` or `horsies::cli::run`, or when the user works on horsies tasks, workflows, configuration, workers, scheduling or monitoring in Rust.
 ---
 
-# horsies-rust — Quick Reference
+# horsies (Rust) — Quick Reference
 
-PostgreSQL-backed background task queue and workflow engine for Rust.
-Port of the Python `horsies` library with the same mental model.
+The `horsies` crate is the Rust client of the horsies core (`horsies-core`).
+The Python package runs on the same core, so the behaviour and the
+guarantees are the same for both clients.
 
-This is an **introductory quick reference** — it covers core concepts and
-patterns at a glance. For production-level guidance, see the dedicated
-skill files in this directory:
+This file is an introductory reference. Open a reference file of this
+folder only when the task needs it:
 
 | File | When to open |
 |---|---|
-| `tasks.md` | `#[horsies::task]`, send and schedule options, UUID task IDs, idempotency, retention, history reads, and rerun |
-| `workflows.md` | workflow builders, DAG behavior, `EXPIRED`, pause relocation, and node timing |
-| `configs.md` | `AppConfig`, `RetentionConfig`, recovery, queues, scheduling, checks, and PgBouncer split URLs |
+| `tasks.md` | `#[horsies::task]`, the stored input, `TaskError<E>`, `TaskRuntime`, the cancel at the deadline, sends, `TaskOutcome` and `ReadError`, the blocking API, rerun |
+| `workflows.md` | `WorkflowDefinition`, `WorkflowSpecBuilder`, `TaskNode`, `arg_from`, the workflow context, sub-workflows, starts, `WorkflowHandle` |
+| `configs.md` | `Horsies::new`, `AppConfig`, queues, worker profiles, child start hooks, schedules, `check`, `horsies::cli::run`, the shipped `horsies` binary |
+| `monitoring.md` | `horsies::monitoring` queries, `cancel_task`, workflow actions, the axum mount `horsies::web::router`, `horsies web` |
 
-## Package architecture
+All public items are at the crate root (`use horsies::Name`), except the
+modules `horsies::blocking`, `horsies::cli`, `horsies::monitoring`,
+`horsies::rerun` and `horsies::web`.
 
-| Package / module | Role |
-|---|---|
-| `horsies` | Unified public app facade. Also contains the internal `core`, `broker`, `workflow_engine`, and `worker` modules. |
-| `horsies-macros` | `#[task]` / `#[blocking_task]` proc macros. |
-| `horsies::core` | Internal, mostly IO-free types, config, registries, and validation. |
-| `horsies::broker` | Internal broker implementation and row/handle types, re-exported via `horsies::`. |
-| `horsies::workflow_engine` | Internal workflow runtime, binding, start/query/lifecycle, re-exported via `horsies::`. |
-| `horsies::worker` | Internal worker runtime, recovery, scheduler service, re-exported via `horsies::`. |
+For the full API reference, run `horsies get-docs` (the shipped binary) to
+download the Rust pages and the shared pages of the installed version, or
+read `https://suleymanozkeskin.github.io/horsies/rust/llms.txt`.
 
-## Alpha.26 storage model
+## Deployment facts
 
-`horsies_tasks` stores live work only. Its statuses are `PENDING`, `CLAIMED`,
-and `RUNNING`.
+- Use a dedicated PostgreSQL instance for the broker. Ownership,
+  finalization and workflow transitions are transactional state changes in
+  that database.
+- A database belongs to one client. The core refuses a database that the
+  Python client installed.
+- 0.8.0 starts on a new database. The core refuses a database of
+  `horsies-rust` 0.1.0-alpha (migrations up to 65) and changes nothing in
+  it. Drain the old fleet, then start 0.8.0 on a new database.
+- Task bodies never run in the worker process. The worker starts the app's
+  own binary again in child mode for each child. Every line of `main`
+  before `horsies::cli::run(app)` runs in each child too.
+- Pre-1.0: breaking API changes may land in minor releases.
 
-A terminal task moves to partitioned `horsies_task_history`. The move and the
-terminal outcome use one transaction. Result and task-info APIs read both
-locations.
+## Crate features
 
-Task and workflow IDs are `uuid::Uuid`. New task IDs use UUIDv7.
+| Feature | Default | Gives |
+|---|---|---|
+| `cli` | on | `horsies::cli::run` and the shipped `horsies` binary |
+| `web` | off | `horsies::web::router` (axum mount) and `horsies web` |
+| `tokio-postgres` | off | `horsies::rerun::TokioPostgresCaller` |
+| `sqlx` | off | `horsies::rerun::SqlxCaller` |
 
-Each enqueue fixes a retention class. The default is `standard_30d`. An
-explicit forever choice prevents pruning. Idempotency keys deduplicate equal
-requests and reject unequal requests under the same key.
-
-Rerun creates a new task from retained terminal input. It records source and
-root lineage. It never edits the terminal source.
-
-Existing databases at migration 0032 need the offline cutover. Stop all
-processes and take a named backup first. Follow the
-[cutover runbook](https://suleymanozkeskin.github.io/horsies-rust/operations/cutover-runbook/).
+Minimum Rust version: 1.91.
 
 ## Define a Task
 
 ```rust
-use horsies::{task, TaskError, TaskResult};
-use serde::{Serialize, Deserialize};
+use std::convert::Infallible;
 
-#[derive(Serialize, Deserialize)]
-struct AddNumbersInput { a: i32, b: i32 }
+use horsies::{task, TaskError};
 
 #[task("add_numbers")]
-async fn add_numbers(args: AddNumbersInput) -> Result<i32, TaskError> {
-    Ok(args.a + args.b)
+async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
+    Ok(a + b)
 }
 ```
 
-Every task function returns `Result<T, TaskError>` where `T: Serialize + DeserializeOwned`.
-The `#[task]` macro generates a `register()` function for one-line registration.
-Tasks may take:
-- one typed input value
-- multiple typed parameters
-- optional leading `TaskRuntime`
+- A task is an `async fn` with `#[horsies::task]`, or a `fn` with
+  `#[horsies::blocking_task]`.
+- It returns `Result<T, TaskError<E>>`. `T` is the output type. `E` is the
+  code type of the task's own errors (`#[derive(horsies::UserErrorCode)]`),
+  or `std::convert::Infallible` when the task has no codes of its own.
+- Every parameter is stored under its name, as Python stores keyword
+  arguments: `add_numbers` stores `{"a": 2, "b": 3}`, and a single
+  parameter `order: Order` stores `{"order": {...}}`. A task with no
+  parameters stores `{}`. See `tasks.md`, The Stored Input.
+- The attribute generates a module with the name of the function:
+  `add_numbers::register(&mut app)` returns the typed
+  `TaskFunction<add_numbers::Input, i64, Infallible>`.
 
-## Register and Send
+## Run the App
 
-```rust
-use horsies::Horsies;
-
-let mut app = Horsies::new(config)?;
-
-let add_numbers_task = add_numbers::register(&mut app)?;
-
-match add_numbers_task.send(AddNumbersInput { a: 5, b: 3 }).await {
-    Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(30))).await;
-        match result {
-            TaskResult::Ok(value) => println!("result: {value}"),
-            TaskResult::Err(err) => eprintln!("task failed or timed out: {:?}", err),
-        }
-    }
-    Err(err) => {
-        eprintln!("send failed: {}", err.message);
-    }
-}
-```
-
-### Schedule with delay
+The app's own binary runs the worker, the scheduler and the check. Build the
+app in one function and hand it to `horsies::cli::run` from a plain
+`fn main`:
 
 ```rust
-match add_numbers_task.schedule(Duration::from_secs(60), args).await {
-    Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(90))).await;
-        match result {
-            TaskResult::Ok(value) => println!("result: {value}"),
-            TaskResult::Err(err) => eprintln!("task failed or timed out: {:?}", err),
-        }
-    }
-    Err(err) => {
-        eprintln!("schedule failed: {}", err.message);
-    }
-}
-```
+use std::collections::BTreeMap;
+use std::convert::Infallible;
+use std::process::ExitCode;
 
-### Retry a failed send
-
-```rust
-match add_numbers_task.send(args).await {
-    Ok(handle) => { /* use handle */ }
-    Err(err) if err.retryable => {
-        let handle = add_numbers_task.retry_send(&err).await?;
-    }
-    Err(err) => { /* permanent failure */ }
-}
-```
-
-### Send with identity and retention controls
-
-```rust
-use horsies::TaskSendOptions;
-
-let handle = add_numbers_task
-    .with_options(
-        TaskSendOptions::new()
-            .idempotency_key("request:42")
-            .retention_class("audit_7d"),
-    )
-    .send(args)
-    .await?;
-
-let task_id: uuid::Uuid = handle.task_id();
-```
-
-Use `.retain_forever()` instead of `.retention_class(...)` when the terminal
-record must not age out.
-
-## Define and Start a Workflow
-
-### Reusable definition (primary path)
-
-```rust
 use horsies::{
-    Horsies, HorsiesError, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+    task, AppConfig, ChildPreload, Horsies, IsolatedChildCount, IsolatedChildren,
+    IsolatedSetting, TaskError, WorkerProfile,
 };
 
-let mut app = Horsies::new(config)?;
+#[task("add_numbers")]
+async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
+    Ok(a + b)
+}
 
-struct ETLPipeline;
+fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
+    let profile = WorkerProfile {
+        isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
+            IsolatedChildCount::try_from(4)?,
+        )),
+        preload: ChildPreload::NoPreload,
+        ..WorkerProfile::default()
+    };
+    let config = AppConfig {
+        worker_profiles: BTreeMap::from([("default".to_owned(), profile)]),
+        ..AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies")
+    };
+    let mut app = Horsies::new(config)?;
+    let _add = add_numbers::register(&mut app)?;
+    Ok(app)
+}
 
-impl WorkflowDefinition for ETLPipeline {
-    type Output = Processed;
+fn main() -> ExitCode {
+    match build_app() {
+        Ok(app) => horsies::cli::run(app),
+        Err(refused) => {
+            eprintln!("{refused}");
+            ExitCode::FAILURE
+        }
+    }
+}
+```
+
+```bash
+./myapp worker --profile default
+./myapp scheduler
+./myapp check --live
+```
+
+- `Horsies::new` does no I/O. The app connects at its first operation.
+- A Rust worker profile needs `preload: ChildPreload::NoPreload`.
+  `Horsies::new` refuses another value with `HRS-218`.
+- `run` blocks its thread. Inside a tokio runtime it prints why and
+  returns exit code 1.
+
+See `configs.md` for worker profiles, a binary that owns its `main`, and
+the exit codes.
+
+## Send a Task and Read the Result
+
+A producer process builds the same app and registers the same tasks:
+
+```rust
+use std::convert::Infallible;
+use std::time::Duration;
+
+use horsies::{task, AppConfig, Horsies, TaskError, TaskOutcome, WaitLimit};
+
+#[task("add_numbers")]
+async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
+    Ok(a + b)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = Horsies::new(AppConfig::for_database_url(
+        "postgresql://app:secret@db.example.com:5432/horsies",
+    ))?;
+    let add = add_numbers::register(&mut app)?;
+
+    let handle = add.send(add_numbers::Input { a: 2, b: 3 }).await?;
+    let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
+    match handle.get(limit).await? {
+        TaskOutcome::Succeeded(sum) => println!("sum = {sum}"),
+        TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
+    }
+    Ok(())
+}
+```
+
+- `send` returns `Result<TaskHandle<T, E>, TaskSendError>`.
+- `get` returns `Result<TaskOutcome<T, E>, ReadError>`. The outer error is
+  the read that failed (the wait limit passed, the task is held nowhere,
+  the stored data does not read, the database failed). The inner value is
+  what the task ended with.
+- The generated `add_numbers::send(2, 3)` takes the parameters and sends
+  through the function of the first `register` in the process.
+- A result wait in a worker child, the process that runs task bodies, is
+  refused with `WaitInsideTask` before any statement. Compose tasks with a
+  workflow.
+
+## Blocking Calls
+
+A program with no tokio runtime uses the blocking views:
+
+```rust
+use std::convert::Infallible;
+
+use horsies::{task, AppConfig, Horsies, TaskError, TaskOutcome, WaitLimit};
+
+#[task("add_numbers")]
+async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
+    Ok(a + b)
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = Horsies::new(AppConfig::for_database_url(
+        "postgresql://app:secret@db.example.com:5432/horsies",
+    ))?;
+    let add = add_numbers::register(&mut app)?;
+
+    let handle = add.blocking().send(add_numbers::Input { a: 2, b: 3 })?;
+    match handle.blocking().get(WaitLimit::NoLimit)? {
+        TaskOutcome::Succeeded(sum) => println!("sum = {sum}"),
+        TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
+    }
+    Ok(())
+}
+```
+
+On a thread that runs a tokio runtime, a blocking call runs nothing and
+returns `ASYNC_CONTEXT` (`TaskSendError::AsyncContext`,
+`ReadError::AsyncContext`). See `tasks.md`, Blocking API.
+
+## Define a Workflow
+
+```rust
+use std::convert::Infallible;
+
+use horsies::{
+    task, HorsiesError, TaskError, TaskOutcome, WorkflowDefConfig, WorkflowDefinition,
+    WorkflowSpecBuilder,
+};
+
+#[task("fetch_report")]
+async fn fetch_report(region: String) -> Result<String, TaskError<Infallible>> {
+    Ok(format!("report of {region}"))
+}
+
+#[task("publish_report")]
+async fn publish_report(
+    report: TaskOutcome<String, Infallible>,
+) -> Result<usize, TaskError<Infallible>> {
+    match report {
+        TaskOutcome::Succeeded(text) => Ok(text.len()),
+        TaskOutcome::Failed(_error) => Ok(0),
+    }
+}
+
+struct DailyReport;
+
+impl WorkflowDefinition for DailyReport {
+    type Output = usize;
     type Params = ();
 
-    fn name() -> &'static str { "etl_pipeline" }
-    fn definition_key() -> &'static str { "myapp.etl_pipeline.v1" }
+    fn name() -> &'static str {
+        "daily_report"
+    }
+
+    fn definition_key() -> &'static str {
+        "reports.daily_report.v1"
+    }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        let fetch = builder.task(fetch_data::node()?.node_id("fetch"));
-        let process = builder.task(
-            process_data::node()?
-                .waits_for(fetch)
-                .arg_from(ProcessDataInput::field_data(), fetch)
-                .node_id("process"),
+        let fetched = builder.task(
+            fetch_report::node()?.set(fetch_report::params::region(), "eu".to_owned())?,
         );
-        let save = builder.task(
-            save_result::node()?
-                .waits_for(process)
-                .arg_from(SaveResultInput::field_result(), process)
-                .node_id("save"),
+        let published = builder.task(
+            publish_report::node()?.arg_from(publish_report::params::report(), fetched),
         );
-        Ok(WorkflowDefConfig::new().output(save))
-    }
-}
-
-let workflow = app.register_workflow_definition::<ETLPipeline>()?;
-match workflow.start().await {
-    Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await;
-    }
-    Err(err) => {
-        eprintln!("start failed: {}", err.message);
+        Ok(WorkflowDefConfig::new().output(published))
     }
 }
 ```
 
-### Parameterized reusable definition
-
-```rust
-let child = app.workflow_template::<ChildPipeline>();
-match child.start("https://example.com/data.json".to_owned()).await {
-    Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await;
-    }
-    Err(err) => {
-        eprintln!("start failed: {}", err.message);
-    }
-}
-```
-
-For child workflows whose params come from a parent workflow, prefer
-`app.register_parameterized_workflow(...)`. It returns a `WorkflowTemplate<P, T>`
-that can both `start(params)` and create a child node via `template.node()`.
-If the builder may emit nested child workflows, use
-`register_parameterized_workflow_with_children(...)` and declare those child
-definition keys so cycle checks can run before runtime.
-
-### Dynamic (runtime-built spec)
-
-```rust
-let spec = WorkflowSpecBuilder::new("child_pipeline")
-    .task(node_a)
-    .task(node_b)
-    .definition_key("myapp.child_pipeline.dynamic.v1")
-    .build()?;
-
-match app.start::<Output>(spec).await {
-    Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await;
-    }
-    Err(err) => {
-        eprintln!("start failed: {}", err.message);
-    }
-}
-```
-
-### Inside a worker (dynamic workflow start)
-
-```rust
-use horsies::{task, TaskError, TaskRuntime};
-
-#[task("build_child_workflow")]
-async fn build_child_workflow(
-    rt: TaskRuntime,
-    input: ChildInput,
-) -> Result<(), TaskError> {
-    if let Some(spec) = build_child_spec(&input)? {
-        match rt.start::<Output>(spec).await {
-            Ok(handle) => {
-                tracing::info!(workflow_id = %handle.workflow_id(), "started child workflow");
-            }
-            Err(err) => {
-                tracing::warn!(error = %err.message, "failed to start child workflow");
-            }
-        }
-    }
-    Ok(())
-}
-```
-
-`TaskRuntime` is the primary path for starting dynamic workflows from inside a
-running task.
-
-`builder.task(...)` returns `TypedNodeRef<T>`. Keep refs typed when possible;
-use `.into()` only when you need a heterogeneous `Vec<NodeRef>` for mixed
-output types.
-
-### Checked dynamic workflow builders
-
-Use `app.check_workflow_builder(...)` for representative-case validation of
-runtime-built workflow specs during `app.check()`:
-
-```rust
-fetch_data::register(&mut app)?;
-process_data::register(&mut app)?;
-
-let mut registration = app.check_workflow_builder(
-    "build_child_workflow",
-    move |source_url: &String| {
-        let mut builder = WorkflowSpecBuilder::new("child_pipeline");
-        builder.definition_key("myapp.child_pipeline.v1");
-        let fetch_ref = builder.task(fetch_data::node()?.set_input(FetchDataInput {
-            source: source_url.clone(),
-        })?);
-        let process_ref = builder.task(
-            process_data::node()?
-                .waits_for(fetch_ref)
-                .arg_from(ProcessInput::field_data(), fetch_ref),
-        );
-        builder.output(process_ref);
-        builder.build()
-    },
-)?;
-
-registration.cases([
-    "https://example.com/source-a.json".to_owned(),
-    "https://example.com/source-b.json".to_owned(),
-]);
-registration.register()?;
-app.check()?;
-```
-
-`app.check()` also dry-runs schedule and workflow-node static input against each
-task's declared input type, surfacing type mismatches at check-time rather than
-at execution (details in `configs.md` and `workflows.md`).
-
-For workflow data flow, prefer multi-parameter receiving tasks plus
-`task_name::params::*` tokens. Use `#[derive(WorkflowInput)]` only when you
-intentionally want a named receiving struct.
-
-### Task dispatch from anywhere
-
-Register once at startup, then call `task_name::send(args)` or
-`task_name::schedule(delay, args)` from anywhere:
-
-```rust
-use horsies::{task, TaskError, TaskRuntime};
-
-#[task("enqueue_add_numbers")]
-async fn enqueue_add_numbers(rt: TaskRuntime) -> Result<(), TaskError> {
-    match add_numbers::send(AddNumbersInput { a: 2, b: 3 }).await {
-        Ok(handle) => {
-            tracing::info!(task_id = %handle.task_id(), "sent add_numbers");
-        }
-        Err(err) => {
-            tracing::warn!(error = %err.message, "failed to send add_numbers");
-        }
-    }
-
-    match add_numbers::schedule(
-        std::time::Duration::from_secs(30),
-        AddNumbersInput { a: 5, b: 8 },
-    )
-    .await
-    {
-        Ok(handle) => {
-            tracing::info!(task_id = %handle.task_id(), "scheduled add_numbers");
-        }
-        Err(err) => {
-            tracing::warn!(error = %err.message, "failed to schedule add_numbers");
-        }
-    }
-
-    // Explicit handle-based path (testing / advanced):
-    let add_numbers_task = add_numbers::handle(&rt)?;
-    match add_numbers_task.send(AddNumbersInput { a: 13, b: 21 }).await {
-        Ok(handle) => {
-            tracing::info!(task_id = %handle.task_id(), "sent add_numbers via handle");
-        }
-        Err(err) => {
-            tracing::warn!(error = %err.message, "failed to send add_numbers via handle");
-        }
-    }
-    Ok(())
-}
-
-add_numbers::register(&mut app)?;
-enqueue_add_numbers::register(&mut app)?;
-```
-
-### Workflow dispatch from anywhere
-
-Register once at startup, then start from anywhere:
-
-```rust
-// Zero-param workflow (after app.register_workflow_definition::<ETLPipeline>()):
-match horsies::start_workflow::<ETLPipeline>().await {
-    Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await;
-    }
-    Err(err) => {
-        eprintln!("start failed: {}", err.message);
-    }
-}
-
-// Parameterized workflow (after app.workflow_template::<ChildPipeline>()):
-match horsies::start_workflow_with::<ChildPipeline>("https://example.com/data.json".to_owned()).await {
-    Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(60))).await;
-    }
-    Err(err) => {
-        eprintln!("start failed: {}", err.message);
-    }
-}
-```
-
-### Inside a worker (typed runtime state)
-
-Use `app.provide(...)` for arbitrary app-owned runtime state such as config,
-clients, or domain services:
-
-```rust
-struct AppSettings {
-    bundesland: String,
-}
-
-app.provide(AppSettings {
-    bundesland: "berlin".to_owned(),
-})?;
-
-#[task("use_settings")]
-async fn use_settings(rt: TaskRuntime) -> Result<(), TaskError> {
-    let settings = rt.state::<AppSettings>()?;
-    tracing::info!(bundesland = %settings.bundesland);
-    Ok(())
-}
-```
-
-### Retry a failed start
-
-```rust
-match workflow.start().await {
-    Ok(handle) => { /* ... */ }
-    Err(err) if err.retryable => {
-        let handle = workflow.retry_start(&err).await?;
-    }
-    Err(err) => { /* permanent failure */ }
-}
-```
-
-### Reconnect to an existing workflow
-
-```rust
-let handle = workflow.handle(known_workflow_uuid).await?;
-let status = handle.status().await?;
-```
-
-## Blessed Start Patterns
-
-- Global dispatch: `horsies::start_workflow::<D>()` and `horsies::start_workflow_with::<D>(params)` after startup registration
-- Reusable setup/HTTP starts: `WorkflowFunction<T>` and `WorkflowTemplate<P, T>`
-- Ad hoc external dynamic starts: `app.start::<T>(spec)`
-- In-task dynamic starts: `TaskRuntime::start::<T>(spec)`
+- `arg_from` gives the dependency's outcome to a parameter of type
+  `TaskOutcome<S, E>`, and the node waits for the dependency.
+- Register the definition in `build_app` with
+  `app.register_workflow_definition::<DailyReport>()?`, after the tasks.
+- Start it with `function.start().await` or
+  `horsies::start_workflow::<DailyReport>().await`. See `workflows.md`.
 
 ## Result Types
 
-| Operation | Result type | Ok | Err |
-|---|---|---|---|
-| Task execution | `Result<T, TaskError>` | value `T` | `TaskError` |
-| `task.send()` | `TaskSendResult<TaskHandle<T>>` | `TaskHandle` | `TaskSendError` |
-| `TaskHandle::get()` | `TaskResult<T>` | `TaskResult::Ok(T)` | `TaskResult::Err(TaskError)` |
-| `workflow.start()` | `WorkflowStartResult<WorkflowHandle<T>>` | `WorkflowHandle` | `WorkflowStartError` |
-| `WorkflowHandle::get()` / `result_for()` | `TaskResult<T>` | `TaskResult::Ok(T)` | `TaskResult::Err(TaskError)` |
-| `WorkflowHandle` query ops | `HandleResult<T>` | value `T` | `HandleOperationError` |
-| Broker infra | `BrokerResult<T>` | value `T` | `BrokerOperationError` |
+| Operation | Returns |
+|---|---|
+| Task body | `Result<T, TaskError<E>>` |
+| `send`, `schedule`, `retry_send`, `retry_schedule` | `Result<TaskHandle<T, E>, TaskSendError>` |
+| `TaskHandle::get`, `Horsies::get_result` | `Result<TaskOutcome<T, E>, ReadError>` |
+| `TaskHandle::info`, `Horsies::get_task_info` | `Result<TaskInfo, ReadError>` |
+| Workflow start | `Result<WorkflowHandle<T>, WorkflowStartError>` |
+| `WorkflowHandle::get` | `Result<TaskOutcome<T, UserCode>, WorkflowReadError>` |
+| `WorkflowHandle::status`, `cancel`, `pause`, `resume` | `HandleResult<_>` (`Result<_, HandleOperationError>`) |
+| Health reads on the app | `Result<_, BrokerOperationError>` |
+| Config, registration, `provide` | `Result<_, HorsiesError>` (`HRS-xxx` codes) |
+| `check`, `check_live` | `Result<CheckPassed, CheckReport>` |
 
-## Error Code Families
+Every error type is a closed catalog. Match on the variant or on the code.
+`retryable: true` means the cause may clear; it does not mean that a repeat
+is safe. The codes and their meaning are on the shared docs page
+`tasks/errors`.
 
-- `OperationalErrorCode` — infra failures (UnhandledError, BrokerError, WorkerCrashed, etc.)
-- `ContractCode` — API contract violations (ReturnTypeMismatch, ArgumentTypeMismatch)
-- `RetrievalCode` — result retrieval (WaitTimeout, TaskNotFound, ResultNotReady)
-- `OutcomeCode` — terminal lifecycle outcomes (TaskCancelled, TaskExpired, WorkflowPaused)
+## Rerun a Terminal Task
+
+A terminal record is immutable. A rerun is a new task with a new id and a
+recorded lineage: `app.rerun_task(command, policy)` in a transaction of the
+app, or `horsies::rerun::rerun_task_in` in a transaction that the caller
+owns. See `tasks.md`, Rerun a Terminal Task.
+
+## CLI
+
+```bash
+./myapp worker --profile <name> [--loglevel LEVEL]   # the app's own binary
+./myapp scheduler [--loglevel LEVEL]
+./myapp check [--live] [--loglevel LEVEL]
+horsies web --database-url URL                       # the shipped binary (feature web)
+horsies get-docs [--output DIR] [--ref main]
+horsies skills install --target DIR [--force]        # copy this skill folder to DIR/horsies/
+```
+
+The shipped `horsies` binary refuses `worker`, `scheduler` and `check` with
+exit code 2: the tasks are compiled into the app's own binary. See
+`configs.md`, CLI.

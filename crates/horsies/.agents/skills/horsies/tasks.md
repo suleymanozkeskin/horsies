@@ -1,549 +1,687 @@
----
-name: horsies-rust-tasks
-description: Task authoring, registration, and producing guidance for horsies-rust, including #[horsies::task], send and schedule options, retries, idempotency, retention, task history, and rerun. Use when implementing, debugging, or reviewing task-related code.
----
+# horsies (Rust) — Tasks
 
-# horsies-rust — Tasks
+Reference for defining, sending and reading tasks with the `horsies`
+crate: the task attributes, the stored input, `TaskError<E>`,
+`TaskRuntime`, the cancel at the deadline, the sends, the reads, the
+blocking API and rerun.
 
-Detailed reference for defining, registering, sending, and handling tasks.
-
-## Define a Task
-
-Annotate an async function with `#[horsies::task]`:
+## Task Attributes
 
 ```rust
-use horsies::{task, TaskError, TaskResult};
-use serde::{Serialize, Deserialize};
+use horsies::{blocking_task, task, TaskError};
 
-#[derive(Serialize, Deserialize)]
-struct AddNumbersInput {
-    a: i32,
-    b: i32,
+#[task("import_feed", execution = shared_async, timeout_ms = 30_000, cancel_grace_ms = 2_000)]
+async fn import_feed(feed_url: String) -> Result<usize, TaskError<std::convert::Infallible>> {
+    Ok(feed_url.len())
 }
 
-#[task("add_numbers", queue = "urgent")]
-async fn add_numbers(input: AddNumbersInput) -> Result<i32, TaskError> {
-    Ok(input.a + input.b)
+#[blocking_task("resize_image", execution = shared_thread, timeout_ms = 60_000)]
+fn resize_image(path: String, width: u32) -> Result<String, TaskError<std::convert::Infallible>> {
+    Ok(format!("{path} at {width}px"))
 }
 ```
 
-Supported task shapes:
-- `async fn task(input: A) -> Result<T, TaskError>` for a single typed input
-- `async fn task(param_a: A, param_b: B, ...) -> Result<T, TaskError>` for multi-parameter tasks
-- `async fn task(rt: TaskRuntime, ...) -> Result<T, TaskError>` when task-time runtime access is needed
+`#[horsies::task]` takes an `async fn`. `#[horsies::blocking_task]` takes a
+`fn`, which runs on a thread of its worker child. The task name comes
+first. The attributes after it:
 
-Requirements:
-- User input types must be serializable/deserializable.
-- Returns `Result<T, TaskError>` where `T: Serialize + DeserializeOwned`.
-- Must be `async fn` for `#[task]`, or `fn` for `#[blocking_task]`.
-
-### `#[horsies::task]` Attribute
-
-```rust
-#[horsies::task(
-    "task_name",                                          // required
-    queue = "queue_name",                                 // optional
-    retry_policy = RetryPolicy::fixed(vec![60, 300], true).unwrap(),  // optional
-    auto_retry_for = ["RATE_LIMITED", "TIMEOUT"],          // optional
-    timeout_ms = 30000,                                    // optional, must be >= 1000
-    workflow_ctx,                                          // optional flag
-)]
-async fn my_task(args: MyArgs) -> Result<MyOutput, TaskError> { ... }
-```
-
-| Attribute | Type | Description |
+| Attribute | Value | Rule |
 |---|---|---|
-| First positional | string literal | Required: unique task name |
-| `queue` | string literal | Target queue (validated at registration) |
-| `retry_policy` | Rust expression | Retry timing/backoff configuration |
-| `auto_retry_for` | string array | Error codes that trigger automatic retries |
-| `timeout_ms` | integer literal | Per-task execution timeout in milliseconds; must be `>= 1000` |
-| `workflow_ctx` | bare flag (no `=`) | Opt into workflow-context injection; the function must take a `workflow_ctx: Option<WorkflowContext>` parameter (see `workflows.md`) |
+| `queue` | `"name"` | A queue of `Custom` queue mode. In `Default` mode a task that names a queue is refused (`HRS-200`) |
+| `execution` | `isolated` (default), `shared_async`, `shared_thread` | An `async fn` takes `isolated` or `shared_async`; a `fn` takes `isolated` or `shared_thread`. Another class is a compile error |
+| `timeout_ms` | `1000..=4294967295` | The deadline of a run. A shared class without `timeout_ms` is a compile error |
+| `cancel_grace_ms` | `100..=10000`, default 1,000 | `shared_async` only. The time from the cancel at the deadline to the drop of the body. On another class it is a compile error |
+| `retry_policy` | a `RetryPolicy` expression | Goes with `auto_retry_for` |
+| `auto_retry_for` | `["CODE", ...]` | Goes with `retry_policy`, with at least one code. Each entry is a built-in code or a code of `E`; another entry is a compile error |
+| `workflow_ctx` | no value | The task takes the workflow context in its parameter `workflow_ctx` (see `workflows.md`) |
 
-`good_until` is intentionally rejected on `#[task]` because it would be
-evaluated at registration time, not per send. Use
-`TaskSendOptions::new().good_until(deadline)` with `.with_options(...)` for
-ad-hoc sends, or `.good_until(deadline)` on workflow nodes.
+- An unknown attribute is a compile error that lists the known ones.
+- `good_until` is not a task attribute. Set a deadline per send with
+  `TaskSendOptions::good_until`.
+- A generic function, a method with `self`, a lifetime parameter and a
+  missing return type are compile errors.
+- The class and the options are stored with every send. The behaviour of
+  each class is on the shared docs page `workers/execution-modes`.
 
-### `#[horsies::blocking_task]`
+## The Stored Input
 
-For CPU-bound work that runs on `spawn_blocking`:
+The parameters form the input. The attribute generates a struct `Input`
+with one public field per parameter, keyed by the parameter's name, as
+Python stores keyword arguments.
+
+| Signature | Input type `A` | Stored input |
+|---|---|---|
+| `fn ping()` | `()` | `{}` |
+| `fn ping(_: ())` | `()` | `{}` |
+| `fn double(x: i64)` | `double::Input` | `{"x": 2}` |
+| `fn validate_order(order: Order)` | `validate_order::Input` | `{"order": {"order_id": "...", "total_cents": 900}}` |
+| `fn add(a: i64, b: i64)` | `add::Input` | `{"a": 2, "b": 3}` |
+| `fn sync_feed(rt: TaskRuntime, feed_url: String)` | `sync_feed::Input` | `{"feed_url": "..."}` |
+
+- A single parameter is wrapped, whatever its type. `validate_order` does
+  not store the fields of `Order` at the top level.
+- A parameter whose value is stored needs a name. `_` is a compile error
+  for it; it is allowed only for a single `()` parameter.
+- A first parameter of type `horsies::TaskRuntime` is not input.
+- The generated `Input` refuses an unknown key. A stored input that does
+  not decode with `A` fails the run with `WORKER_SERIALIZATION_ERROR`.
+- A raw identifier is stored without `r#`: `r#type` is the key `type`.
+- A schedule's `input` and a workflow node's `input_json` text use this
+  stored form.
+- A date-time of type `horsies::StoredDateTime<T>` (`T` is a chrono
+  `DateTime<Tz>` or `NaiveDateTime`) is stored in Python's text
+  (`2026-08-12T09:10:12.500000Z`). A plain chrono value keeps chrono's serde
+  text (`…12.500Z`). Both clients read either text to the same value.
+
+## The Generated Module
+
+`#[task("validate_order")] async fn validate_order(order: Order)`
+generates the module `validate_order`:
+
+| Item | Does |
+|---|---|
+| `validate_order::Input` | The input struct: `Input { order }` |
+| `validate_order::register(&mut app)` | Registers the task. Returns `Result<TaskFunction<validate_order::Input, T, E>, HorsiesError>` |
+| `validate_order::send(order)` | Sends now through the function of the first `register` in the process |
+| `validate_order::schedule(delay, order)` | Sends to start after `delay: WholeSeconds` |
+| `validate_order::with_options(options).send(order)` | Sends with `TaskSendOptions`; `.schedule(delay, order)` too |
+| `validate_order::node()` | `Result<TaskNode<T, validate_order::Input>, HorsiesError>`: a workflow node |
+| `validate_order::params::order()` | The field token `InputField<validate_order::Input, Order>` of a workflow node |
+| `validate_order::handle(&runtime)` | `Result<TaskFunction<..>, TaskFunctionNotFound>` from a `TaskRuntime` |
+
+- `send`, `schedule` and `with_options` before `register` in the process
+  return `TaskSendError::ValidationFailed`, which names the task.
+  `node()` before `register` returns a `HorsiesError`.
+- `register` refuses a code type whose `CODES` holds a built-in or reserved
+  name (`HRS-212`). Only a hand-written `UserErrorCode` impl can have one.
+- `TaskFunctionNotFound` is `NotRegistered { task_name }` or
+  `OtherTypes { task_name, registered, asked }`.
+
+## `TaskError<E>`
 
 ```rust
-#[horsies::blocking_task("cpu_heavy", queue = "background")]
-fn cpu_heavy(input: HeavyInput) -> Result<HeavyOutput, TaskError> { ... }
-```
+use horsies::{task, OperationalErrorCode, TaskError, UserErrorCode};
 
-### Compile-time validation
+#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+enum ChargeCode {
+    CardDeclined, // CARD_DECLINED
+    RateLimited,  // RATE_LIMITED
+}
 
-The macro rejects invalid signatures at compile time:
-- Methods with `self` → "must be free functions"
-- Generic or lifetime parameters → "not supported"
-- Wrong return type → "must return Result<T, TaskError>"
-- Missing return type → error
-- Sync fn with `#[task]` → "use #[blocking_task]"
-- Async fn with `#[blocking_task]` → "use #[task]"
-
-## Register Tasks
-
-### Primary path: `my_task::register(&mut app)`
-
-```rust
-use horsies::Horsies;
-
-let mut app = Horsies::new(config)?;
-
-let add_numbers_task = add_numbers::register(&mut app)?;
-let fetch_data_task = fetch_data::register(&mut app)?;
-let process_data_task = process_data::register(&mut app)?;
-```
-
-Each `#[task]` generates a companion module with a `register()` function.
-That function calls the builder API internally and returns a `TaskFunction<A, T>`.
-For multi-parameter tasks, the macro generates the internal input type for you.
-
-#### Strict input for multi-parameter tasks
-
-The generated multi-parameter input struct carries `#[serde(deny_unknown_fields)]`.
-An unknown or misspelled kwarg is therefore **rejected at execution** with an
-`ARGUMENT_TYPE_MISMATCH` `TaskError`, rather than being silently dropped. This
-applies only to multi-parameter (macro-generated "Wrapped") tasks; a
-single-parameter task deserializes into your own struct, which keeps whatever
-serde behavior that struct declares (lenient unless you add `deny_unknown_fields`
-yourself). The same typed deserialize is dry-run at `check()` time for schedule
-and workflow-node payloads — see "Check-time input validation" below.
-
-### Registrar module pattern
-
-```rust
-// tasks.rs
-pub fn register(app: &mut Horsies) -> Result<Tasks, HorsiesError> {
-    Ok(Tasks {
-        fetch_data: fetch_data::register(app)?,
-        process_data: process_data::register(app)?,
-        save_result: save_result::register(app)?,
-    })
+#[task("charge_card")]
+async fn charge_card(amount_cents: u64) -> Result<String, TaskError<ChargeCode>> {
+    if amount_cents == 0 {
+        return Err(TaskError::library(OperationalErrorCode::TaskException, "nothing to charge"));
+    }
+    Err(TaskError::user(ChargeCode::CardDeclined, "the issuer declined the card")
+        .with_data(serde_json::json!({ "amount_cents": amount_cents })))
 }
 ```
 
-### Manual builder path (advanced)
+`#[derive(UserErrorCode)]` goes on an enum of unit variants. Each variant's
+code is its name in UPPER_SNAKE_CASE. These are compile errors: a variant
+with fields, two variants with one code, a generic enum, a code with the
+name of a built-in code or of the reserved code `WORKFLOW_STOPPED`.
 
-For cases where the proc macro is not used:
+| Item | Returns |
+|---|---|
+| `TaskError::user(code, message)` | An error with a code of `E` |
+| `TaskError::library(code, message)` | An error with a library code: `BuiltInTaskCode` or a family (`OperationalErrorCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) |
+| `.with_data(value)` | This error with `data`. Never fails |
+| `.code()` | `&TaskErrorCode<E>`: `Library(BuiltInTaskCode)` or `User(E)` |
+| `.code().text()` | The stored code text |
+| `.message()` | `Option<&str>` |
+| `.data()` | `Option<&serde_json::Value>`, as stored |
+| `.exception()` | `Option<&ExceptionRecord>`: set by the library for a panic of the body |
+| `.sub_workflow()` | `Option<&SubWorkflowFailure>`: the failed child of a sub-workflow node |
+
+- The fields are private. The exception record and the sub-workflow
+  failure are set only by the library.
+- `with_data(value)` takes any `Serialize` value. A value that cannot be
+  stored is replaced with `{"data_refused": "<cause>"}`, and the replacement
+  is logged at ERROR. The code and the message are kept. A value cannot be
+  stored when it is not JSON-native (a non-finite float, a map key that is
+  not a string, a `Serialize` impl that fails), when it holds a key that
+  only the engine writes (`__h_...`, `__horsies_...`,
+  `__builtin_task_code__`), or when it is nested deeper than the error
+  bound.
+- A `BuiltInTaskCode` is `Operational(..)`, `Contract(..)`, `Retrieval(..)`
+  or `Outcome(..)`. Match a stored timeout as
+  `TaskErrorCode::Library(BuiltInTaskCode::Outcome(OutcomeCode::TaskTimeout))`.
+
+What the library records:
+
+| Event | Stored error |
+|---|---|
+| The stored input does not decode with `A` | `WORKER_SERIALIZATION_ERROR`. The message names the type, the field path and the kind of failure; a part that comes from the input is written as `<input>` |
+| The returned value does not read back with `T` | `WORKER_SERIALIZATION_ERROR`. The child encodes the value, decodes the text with `T`, encodes it again, and stores it only when the two texts are equal |
+| The body panics | `.exception()` holds the record of the panic |
+| Timeout, crash, cancel, expiry | The library code: `TASK_TIMEOUT`, `WORKER_CRASHED`, `TASK_CANCELLED`, `TASK_EXPIRED`, ... (shared docs page `tasks/errors`) |
+
+## `TaskRuntime`
+
+A first parameter of type `horsies::TaskRuntime` gives the body the app's
+state, the cancel signal of its run, and work that belongs to its run.
 
 ```rust
-let task = app
-    .task::<MyArgs, MyOutput>("name", async_task_fn!(my_fn, MyArgs))?
-    .queue("processing")
-    .task_options(opts)
-    .register()?;
-```
+use horsies::{task, Horsies, HorsiesError, TaskError, TaskRuntime, UserErrorCode};
 
-### Low-level core path (internal)
-
-```rust
-let mut core = horsies::core::Horsies::new(config)?;
-core.register("my_task", async_task_fn!(my_task, MyArgs))?;
-let (config, registry, wf_registry) = core.into_parts();
-```
-
-## `TaskFunction<A, T>`
-
-The Rust equivalent of Python's `TaskFunction[P, T]`. Returned by
-`my_task::register(&mut app)`. Holds task identity, lazy broker,
-queue/priority defaults, task options.
-
-Prefer explicit branching around `.send()` / `.schedule()` in docs and app
-code when the failure path matters operationally:
-
-```rust
-match add_numbers_task.send(AddNumbersInput { a: 5, b: 3 }).await {
-    Ok(handle) => {
-        let result = handle.get(Some(Duration::from_secs(30))).await;
-        match result {
-            TaskResult::Ok(value) => tracing::info!(value, "add_numbers completed"),
-            TaskResult::Err(err) => tracing::warn!(error = ?err, "add_numbers failed or timed out"),
-        }
-    }
-    Err(err) if err.retryable => {
-        let handle = add_numbers_task.retry_send(&err).await?;
-        let result = handle.get(Some(Duration::from_secs(30))).await;
-        match result {
-            TaskResult::Ok(value) => tracing::info!(value, "add_numbers completed after retry"),
-            TaskResult::Err(err) => tracing::warn!(error = ?err, "add_numbers failed or timed out"),
-        }
-    }
-    Err(err) => {
-        tracing::warn!(error = %err.message, "failed to send add_numbers");
-    }
+struct Mailer {
+    sender: String,
 }
-```
 
-### Methods
+#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+enum MailCode {
+    NotConfigured,
+}
 
-```rust
-// Sending
-async fn send(&self, args: A) -> TaskSendResult<TaskHandle<T>>
-async fn schedule(&self, delay: Duration, args: A) -> TaskSendResult<TaskHandle<T>>
-fn with_options(&self, options: TaskSendOptions) -> TaskFunctionSendOptions<'_, A, T>
+#[task("send_welcome")]
+async fn send_welcome(rt: TaskRuntime, address: String) -> Result<String, TaskError<MailCode>> {
+    let mailer = rt
+        .state::<Mailer>()
+        .map_err(|missing| TaskError::user(MailCode::NotConfigured, missing.to_string()))?;
+    Ok(format!("{} -> {address}", mailer.sender))
+}
 
-// Retry (with cross-method guards)
-async fn retry_send(&self, err: &TaskSendError) -> TaskSendResult<TaskHandle<T>>
-async fn retry_schedule(&self, err: &TaskSendError) -> TaskSendResult<TaskHandle<T>>
-
-// Workflow integration
-fn node(&self) -> TaskNode<T, A>
-
-// Accessors
-fn task_name(&self) -> &str
-fn queue_name(&self) -> &str
-fn priority(&self) -> u32
-fn task_options(&self) -> Option<&TaskOptions>
-```
-
-### `send()` behavior
-
-1. Checks send suppression → `SendSuppressed` if active.
-2. Serializes `A` → args/kwargs JSON (struct→kwargs, null→nothing, scalar→args).
-3. Builds payload once (task_id, sent_at, SHA).
-4. If `resend_on_transient_err` enabled: retries up to 3 times (4 total) with exponential backoff (200ms, 400ms, 800ms, cap 2000ms). Same payload identity across all attempts.
-5. Returns `TaskHandle<T>` with `.get()` ready to call.
-
-### `schedule()` behavior
-
-Same as `send()` but with `enqueued_at = now() + delay`. The scheduled time is fixed at the first attempt, not recomputed on retry.
-
-### Per-send options
-
-Use `TaskSendOptions` for deadlines, idempotency, and retention:
-
-```rust
-use chrono::{Duration, Utc};
-use horsies::TaskSendOptions;
-
-let deadline = Utc::now() + Duration::minutes(5);
-
-let handle = my_task
-    .with_options(
-        TaskSendOptions::new()
-            .good_until(deadline)
-            .idempotency_key("order:123")
-            .retention_class("audit_7d"),
-    )
-    .send(input)
-    .await?;
-```
-
-Generated task modules expose the same pattern:
-
-```rust
-let handle = my_task::with_options(
-    TaskSendOptions::new().good_until(deadline),
-)
-.send(input)
-.await?;
-```
-
-For workflow tasks, prefer node-level `.good_until(deadline)` while building
-the workflow spec.
-
-An idempotency key is scoped to the task name. The same key and same canonical
-request replay the first task. The same key with a different request returns a
-typed conflict.
-
-Retention precedence is explicit send choice, queue mapping, then
-`standard_30d`.
-
-```rust
-let finite = TaskSendOptions::new().retention_class("audit_7d");
-let forever = TaskSendOptions::new().retain_forever();
-```
-
-The class must be `standard_30d`, a declared class, or a queue-derived class.
-`retain_forever()` stores the terminal record in the non-pruned class.
-
-The resolved choice is stored as `retention_class_key` on the live task and
-its history record. `retain_forever()` resolves that field to `forever`.
-
-### `retry_send()` / `retry_schedule()` guards
-
-- `retry_send` **rejects** errors with `enqueue_delay_seconds` → "use retry_schedule instead"
-- `retry_schedule` **requires** `enqueue_delay_seconds` → "use retry_send instead"
-- Both reject non-`ENQUEUE_FAILED` errors and cross-task replays.
-
-### `node()` behavior
-
-Returns `TaskNode<T, A>` pre-configured with task name, queue, priority, and retry task_options. Bridges registered tasks to workflow construction.
-
-Use:
-
-- `node().set_input(args)?` when you have the full explicit input value at workflow-build time
-- `node().set(task_name::params::field(), value)?` when you are binding one explicit parameter on a multi-parameter task
-- `node().arg_from(task_name::params::field(), dep)` when that parameter should receive an upstream `TaskResult<_>`
-
-Example:
-
-```rust
-let fetch = builder.task(
-    fetch_data::node()?
-        .set_input(FetchDataInput { source: source_url })?
-);
-
-let notify = builder.task(
-    notify_user::node()?
-        .waits_for(fetch)
-        .arg_from(notify_user::params::data(), fetch)
-        .set(notify_user::params::urgent(), true)?
-);
-```
-
-For workflow-injected inputs, prefer multi-parameter tasks plus generated
-`task_name::params::*` tokens:
-
-```rust
-#[task("notify_user")]
-async fn notify_user(
-    data: TaskResult<String>,
-    urgent: bool,
-) -> Result<(), TaskError> {
-    let _ = data;
-    let _ = urgent;
+fn register_mail(app: &mut Horsies) -> Result<(), HorsiesError> {
+    app.provide(Mailer { sender: "noreply@example.com".to_owned() })?;
+    let _welcome = send_welcome::register(app)?;
     Ok(())
 }
 ```
 
-`#[derive(WorkflowInput)]` remains useful when you intentionally want a named
-input struct for the receiving task, but it is no longer the default pattern
-for `arg_from(...)`.
-
-The generated task module helpers are fallible wrappers around the registered handle:
-
-```rust
-fn add_numbers::node() -> Result<TaskNode<i32, AddNumbersInput>, HorsiesError>
-```
-
-They fail if `add_numbers::register(&mut app)?` has not populated the generated module handle.
-
-## `TaskHandle<T>`
-
-```rust
-fn task_id(&self) -> uuid::Uuid
-async fn get(&self, timeout: Option<Duration>) -> TaskResult<T>
-async fn info(
-    &self,
-    include_result: bool,
-    include_failed_reason: bool,
-    include_attempts: bool,
-) -> BrokerResult<Option<TaskInfo>>
-```
-
-Task IDs are `uuid::Uuid` values. New task IDs are UUIDv7.
-
-Task handles do **not** return `HandleResult`. Retrieval outcomes are represented as `TaskResult<T>`:
-
-- `TaskResult::Ok(value)` — task completed successfully.
-- `TaskResult::Err(TaskError)` — task failed, timed out while waiting, was not found, or hit a broker/result retrieval error.
-
-This differs from `WorkflowHandle<T>` only partly:
-
-- `WorkflowHandle::get()` and `WorkflowHandle::result_for()` also fold retrieval and infrastructure failures into `TaskResult::Err(TaskError)`.
-- `WorkflowHandle::status()`, `results()`, `tasks()`, `cancel()`, `pause()`, and `resume()` use `HandleResult<...>`.
-
-## Serialization Rules
-
-### Args encoding (at `send()` time)
-
-| `serde_json::to_value(&args)` | Sent as |
+| Method | Returns |
 |---|---|
-| Object (`{...}`) | `kwargs_json` |
-| Null (unit `()`) | No args, no kwargs |
-| Anything else (scalar, array) | `args_json` |
+| `state::<T>()` | `Result<Arc<T>, StateNotProvided>`: the value that `Horsies::provide` gave. The first read freezes the app's state |
+| `cancelled()` | A future that completes when the run is cancelled at its deadline |
+| `is_cancelled()` | Whether the run is cancelled; `false` outside the async body of a run |
+| `spawn(name, future)` | `Result<tokio::task::JoinHandle<_>, RunSpawnRefused>`: starts `future` as work of the run |
+| `task_handle::<A, T, E>(task_name)` | `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>` |
+| `start::<T>(&spec)`, `start_with_id::<T>(&spec, workflow_id)` | Starts a workflow that the task built (see `workflows.md`) |
 
-### Output validation (at execution time)
+- Each process builds its own state: every worker child runs `main` again.
+- `provide` refuses a second value of one type (wrap it in a newtype) and a
+  value provided after a body read the state.
 
-The macro validates the return value round-trips through the declared `T`: the
-serialized bytes are deserialized back via the codec (`from_json_bytes::<T>`),
-and if that fails → `RETURN_TYPE_MISMATCH`.
+## The Cancel at the Deadline
 
-### Check-time input validation
-
-Macro-generated tasks expose a `validate_input` hook (default `Ok(())` for
-hand-rolled task fns). `app.check()` uses it to dry-run a payload against the
-task's declared input type **without executing the task**:
-
-- `validate_schedules()` (check Phase 2) dry-runs each enabled schedule's
-  `args`/`kwargs`.
-- `check()` Phase 2.11 dry-runs each fully-static workflow node's kwargs (nodes
-  with `args_from` or node-level `workflow_ctx_from` are skipped — their static
-  payload is intentionally partial).
-
-A mismatch (wrong type, missing required field, or — for multi-parameter tasks —
-an unknown field) is reported at check-time instead of only failing at
-execution. See `configs.md` (schedules) and `workflows.md` (nodes).
-
-## `TaskResult<T>`
+The cancel signal fires only for a `shared_async` run, at its `timeout_ms`.
 
 ```rust
-pub enum TaskResult<T> {
-    Ok(T),
-    Err(TaskError),
+use horsies::{task, TaskError, TaskRuntime, UserErrorCode};
+
+#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+enum FeedCode {
+    Interrupted,
+    WorkRefused,
+    WorkFailed,
+}
+
+async fn fetch_items(feed_url: &str) -> usize {
+    feed_url.len()
+}
+
+#[task("sync_feed", execution = shared_async, timeout_ms = 30_000)]
+async fn sync_feed(rt: TaskRuntime, feed_url: String) -> Result<usize, TaskError<FeedCode>> {
+    tokio::select! {
+        count = fetch_items(&feed_url) => Ok(count),
+        () = rt.cancelled() => Err(TaskError::user(FeedCode::Interrupted, "cancelled at the deadline")),
+    }
+}
+
+#[task("index_feed", execution = shared_async, timeout_ms = 30_000)]
+async fn index_feed(rt: TaskRuntime, feed_urls: Vec<String>) -> Result<usize, TaskError<FeedCode>> {
+    let work = rt
+        .spawn("count-feeds", async move { feed_urls.len() })
+        .map_err(|refused| TaskError::user(FeedCode::WorkRefused, refused.to_string()))?;
+    work.await
+        .map_err(|join_error| TaskError::user(FeedCode::WorkFailed, join_error.to_string()))
 }
 ```
 
-| Method | Description |
+- At the deadline the run ends as `TASK_TIMEOUT`, whatever the body returns
+  after the signal.
+- The body and the work it started with `spawn` have `cancel_grace_ms` to
+  end. Then the child drops them.
+- In an `isolated` run the worker kills the child at the deadline, so the
+  signal never fires. Outside the async body of a run (a blocking body, a
+  direct call in a test) `cancelled()` never completes.
+- Work started with `spawn` belongs to the run: the child waits for it when
+  the body returns, cancels it after the grace, and reports work that does
+  not stop. Work started with plain `tokio::spawn` is not tracked.
+- `spawn` refuses with `RunSpawnRefused` outside the async body of a run in
+  a worker child (`NotInARun`), after the run ended (`RunEnded`), and past
+  10,000 pieces of live work (`TooMuchWork`). Nothing starts then.
+  `RunSpawnRefused` is a type of `horsies-core`; read it through `Display`.
+
+The `data` of a `TASK_TIMEOUT` error has `task_id` and `timeout_ms`. A
+`shared_async` run on a shared async child also has `cancel_end`:
+
+| `cancel_end` | The run |
 |---|---|
-| `is_ok()` / `is_err()` | Check variant |
-| `unwrap()` | Panics on Err |
-| `is_transient()` | True if error is retrieval-class or broker error (safe to retry) |
-| `is_terminal()` | True if `!is_transient()` |
+| `RETURNED_AFTER_SIGNAL` | Ended within `cancel_grace_ms` after the cancel at the deadline |
+| `DROPPED_AFTER_GRACE` | Was alive after the grace: the child sent the second cancel and dropped it |
+| `KILLED_WITH_CHILD` | Ended when the worker killed its child, before the child reported the end |
 
-### Caching in `TaskHandle`
-
-- Terminal results are cached after first retrieval.
-- Transient errors (`WAIT_TIMEOUT`, broker errors) are never cached — caller can retry.
-
-## `TaskError`
+An `isolated` or `shared_thread` timeout has no `cancel_end`. Read it from
+the stored error:
 
 ```rust
-pub struct TaskError {
-    pub error_code: Option<TaskErrorCode>,
-    pub message: Option<String>,
-    pub cause: Option<serde_json::Value>,  // #[serde(rename = "exception")]
-    pub data: Option<serde_json::Value>,
+use horsies::{BuiltInTaskCode, OutcomeCode, TaskError, TaskErrorCode, UserErrorCode};
+
+fn cancel_end<E: UserErrorCode>(error: &TaskError<E>) -> Option<String> {
+    match error.code() {
+        TaskErrorCode::Library(BuiltInTaskCode::Outcome(OutcomeCode::TaskTimeout)) => error
+            .data()
+            .and_then(|data| data.get("cancel_end"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        _ => None,
+    }
 }
 ```
 
-### Construction helpers
+The whole timeout sequence is on the shared docs page
+`workers/shared-async-tasks` ("The Timeout").
+
+## Retry Policy
 
 ```rust
-TaskError::builtin(OperationalErrorCode::BrokerError, "connection refused")
-TaskError::new("MY_CUSTOM_CODE", "something went wrong")
-```
+use horsies::{task, RetryPolicy, TaskError, UserErrorCode};
 
-## `TaskSendResult` / `TaskSendError`
+#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+enum FetchCode {
+    RateLimited,
+}
 
-```rust
-pub type TaskSendResult<T> = Result<T, TaskSendError>;
-
-pub struct TaskSendError {
-    pub code: TaskSendErrorCode,
-    pub message: String,
-    pub retryable: bool,
-    pub task_id: Option<uuid::Uuid>,
-    pub payload: Option<TaskSendPayload>,
+#[task(
+    "fetch_prices",
+    retry_policy = RetryPolicy::fixed(vec![30, 60, 120], true).expect("a valid policy"),
+    auto_retry_for = ["RATE_LIMITED", "TASK_TIMEOUT", "WORKER_CRASHED"],
+    timeout_ms = 5_000
+)]
+async fn fetch_prices(symbol: String) -> Result<String, TaskError<FetchCode>> {
+    Err(TaskError::user(FetchCode::RateLimited, format!("rate limited for {symbol}")))
 }
 ```
 
-### `TaskSendErrorCode`
+| Constructor | Policy |
+|---|---|
+| `RetryPolicy::fixed(intervals, jitter)` | One delay per retry, in seconds. The number of intervals is the number of retries |
+| `RetryPolicy::exponential(base_seconds, max_retries, jitter)` | Delay `base_seconds * 2^(attempt - 1)` |
+| `.with_max_delay_seconds(seconds)` | A cap on the delay, after backoff and jitter |
 
-| Code | Retryable | When |
+Each interval is 1 to 86,400 s, and a policy has 1 to 20 retries. A value
+outside is `RetryPolicyError`. A built-in name in `auto_retry_for` is stored
+as the built-in code. When a retry starts is on the shared docs page
+`tasks/retry-policy`.
+
+## `TaskFunction<A, T, E>` — Sends
+
+`register` returns the typed function: input `A`, output `T`, code type
+`E`. Clones share one app.
+
+| Method | Sends |
+|---|---|
+| `send(input)` | Now |
+| `schedule(delay, input)` | To start after `delay: WholeSeconds` (`WholeSeconds::from_secs(300)`) |
+| `send_with_options(options, input)` | Now, with `TaskSendOptions` |
+| `schedule_with_options(options, delay, input)` | After `delay`, with `TaskSendOptions` |
+| `with_options(options)` | A `TaskFunctionSendOptions` with `send(input)` and `schedule(delay, input)` |
+| `retry_send(&error)`, `retry_schedule(&error)` | The task of a failed send again (below) |
+| `node()` | A workflow node (see `workflows.md`) |
+| `blocking()` | The blocking view (see Blocking API) |
+
+`task_name()`, `queue_name()`, `priority()` and `task_options()` read the
+registration.
+
+A send runs these steps in order and stops at the first refusal:
+
+1. Send suppression: a suppressed send returns `SendSuppressed`.
+2. The retention of the send.
+3. The read-back of the input: encode it, decode the text with `A`, encode
+   that value again. Two different texts refuse the send with
+   `ValidationFailed` before any statement.
+4. The payload size: an input over `AppConfig.payload.reject_bytes` is
+   `PayloadTooLarge`.
+5. A new task id and the sent instant.
+6. One enqueue through the core.
+
+In a worker child a send goes through the child's own producer handle.
+
+### Send options
+
+```rust
+use chrono::{Duration, Utc};
+use horsies::{SendRetention, TaskSendOptions};
+
+fn invoice_options(invoice_id: u64) -> TaskSendOptions {
+    TaskSendOptions::new()
+        .good_until(Utc::now() + Duration::hours(1))
+        .idempotency_key(format!("invoice-{invoice_id}"))
+        .retention(SendRetention::Forever)
+}
+```
+
+| Option | Does |
+|---|---|
+| `good_until(deadline)` | The task expires (`TASK_EXPIRED`) when no worker started it by `deadline` |
+| `idempotency_key(key)` | Stores the task once per key within the reservation window (24 hours). A second send of the same command answers with the task that holds the key |
+| `retention(SendRetention)` | The retention of the task's history record |
+| `retain_forever()` | `retention(SendRetention::Forever)` |
+
+| `SendRetention` | History record kept |
+|---|---|
+| `FromQueueOrDefault` (default) | For the period that `RetentionConfig.queue_retention` maps the queue to, else 30 days |
+| `Forever` | Forever |
+| `Period(RetentionDays)` | For a registered period of whole days. Build it with `RetentionDays::parse_period(chrono::Duration::days(n))`. Another period is refused with the allowed periods |
+
+### `TaskSendError`
+
+| Variant | Code | Fields | Retry methods |
+|---|---|---|---|
+| `SendSuppressed` | `SEND_SUPPRESSED` | `message` | Refused |
+| `AsyncContext` | `ASYNC_CONTEXT` | `task_id`, `payload`, `message` | Accepted |
+| `ValidationFailed` | `VALIDATION_FAILED` | `message` | Refused |
+| `EnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable` | Accepted |
+| `PayloadMismatch` | `PAYLOAD_MISMATCH` | `task_id`, `payload`, `message` | Refused |
+| `PayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` | Refused |
+| `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Accepted |
+
+- `EnqueueFailed`: the row may or may not exist. `retryable` is the
+  classification of the cause.
+- `AsyncContext`: a blocking send on a thread that runs a tokio runtime.
+  Nothing was written. The async sends never return it.
+- `PayloadMismatch`: the task id exists with another command or key.
+  Nothing was written.
+- `IdempotencyKeyConflict`: another task (`owner_task_id`) holds the key
+  with another command. Nothing was written.
+- `error.code()` returns the `TaskSendErrorCode`.
+
+```rust
+use horsies::{task, TaskError, TaskFunction, TaskHandle, TaskSendError};
+
+#[task("send_receipt")]
+async fn send_receipt(order_id: String) -> Result<(), TaskError<std::convert::Infallible>> {
+    let _sent = order_id;
+    Ok(())
+}
+
+async fn send_with_one_retry(
+    receipt: &TaskFunction<send_receipt::Input, (), std::convert::Infallible>,
+    order_id: String,
+) -> Result<TaskHandle<(), std::convert::Infallible>, TaskSendError> {
+    match receipt.send(send_receipt::Input { order_id }).await {
+        Err(error @ TaskSendError::EnqueueFailed { retryable: true, .. }) => {
+            receipt.retry_send(&error).await
+        }
+        other => other,
+    }
+}
+```
+
+`retry_send` and `retry_schedule` send the same task id and payload again,
+as a repeat. A task that an earlier call wrote answers with its id, also
+after it finished, and does not run again. Both refuse with
+`ValidationFailed` an error with no payload, the error of another task, and
+the error of the other method.
+
+With `AppConfig.resend_on_transient_err`, a retryable `EnqueueFailed` is
+sent again up to 3 times, after 200, 400 and 800 ms, as a repeat.
+
+## `TaskHandle<T, E>` — Reads
+
+```rust
+use std::time::Duration;
+
+use horsies::{ReadError, TaskHandle, TaskOutcome, WaitLimit};
+
+async fn print_outcome(
+    handle: &TaskHandle<String, std::convert::Infallible>,
+) -> Result<(), ReadError> {
+    let limit = WaitLimit::parse(Some(Duration::from_secs(30))).expect("30 s is within the limit");
+    match handle.get(limit).await? {
+        TaskOutcome::Succeeded(order_id) => println!("validated {order_id}"),
+        TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
+    }
+    Ok(())
+}
+```
+
+| `WaitLimit` | Wait |
+|---|---|
+| `WaitLimit::NoLimit` | Until the task ends |
+| `WaitLimit::parse(Some(duration))` | Up to `duration`. Above `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms) it is `WaitLimitRefused`, before any read |
+| `WaitLimit::parse(None)` | `NoLimit` |
+
+| `TaskOutcome<T, E>` | The task |
+|---|---|
+| `Succeeded(T)` | Returned this value |
+| `Failed(TaskError<E>)` | Returned this error, or the library recorded a code (`TASK_CANCELLED`, `TASK_EXPIRED`, `TASK_TIMEOUT`, `WORKER_CRASHED`, ...) |
+
+| `ReadError` | Code | When | Kept by the handle |
+|---|---|---|---|
+| `WaitTimedOut { task_id, status }` | `WAIT_TIMEOUT` | The task had not ended when the limit passed | No |
+| `TaskNotFound { task_id, reason }` | `TASK_NOT_FOUND` | Neither the live table nor the history holds the task | No |
+| `ResultNotAvailable { task_id, status }` | `RESULT_NOT_AVAILABLE` | Terminal status with no stored result | Yes |
+| `StoredResultUnreadable { task_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored result does not read with `T` and `E` | Yes |
+| `UnknownUserCode { task_id, code, code_type }` | `RESULT_DESERIALIZATION_ERROR` | The stored user code is not a code of `E` | Yes |
+| `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A result wait in a worker child. Nothing was read | No |
+| `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking read on a thread that runs a tokio runtime. Nothing was read | No |
+| `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed | No |
+
+- `ReadError::code()` returns the library code of the failure.
+- `reason` is a `TaskAbsenceReason`: `PredatesRetainedHistory` (retention
+  can have removed the task), `WithinRetainedHistory` (no removed history
+  leaf can have held it), `NotClassified` (the id is not a UUIDv7).
+- The handle keeps its first final read (an outcome, or a failure marked
+  "Yes"). A later `get` returns it with no read. Clones share one kept read.
+- `handle.task_id()` returns the `Uuid`.
+
+`handle.info(TaskInfoParts { result, failed_reason, attempts })` returns the
+`TaskInfo`: status and times, plus the parts asked for (attempts newest
+first). The info is not kept. Its errors are `TaskNotFound`,
+`StoredResultUnreadable` and `Database`.
+
+Reads by task id, on the app:
+
+| Method | Returns |
+|---|---|
+| `app.task_handle_of::<T, E>(task_id)` | A `TaskHandle<T, E>`. No I/O |
+| `app.get_result::<T, E>(task_id, limit)` | `Result<TaskOutcome<T, E>, ReadError>`. Nothing is kept |
+| `app.get_raw_result(task_id, limit)` | `Result<StoredResult, ReadError>`: `task_id`, `task_name`, `status`, `envelope_json` |
+| `app.get_task_info(task_id, parts)` | `Result<TaskInfo, ReadError>` |
+
+## Blocking API
+
+`horsies::blocking` gives blocking views for a program with no tokio
+runtime. A view method has the name, the arguments and the result type of
+the async method. It runs on the core's process runtime and blocks the
+calling thread.
+
+| View | From | Methods |
 |---|---|---|
-| `SendSuppressed` | No | `send()` during check-time builder execution |
-| `ValidationFailed` | No | Serialization failure, bad queue, cross-method retry |
-| `EnqueueFailed` | Yes | Broker/DB failure |
-| `PayloadMismatch` | No | Retry payload SHA mismatch |
+| `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `schedule`, `schedule_with_options`, `with_options(..).send/.schedule`, `retry_send`, `retry_schedule` |
+| `TaskHandleView` | `handle.blocking()` | `get`, `info` |
+| `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_class_coverage`, `get_class_report`, `check_live` |
 
-## `RetryPolicy`
+- On a thread that runs a tokio runtime, a blocking call runs nothing and
+  returns the `ASYNC_CONTEXT` member of its catalog:
+  `TaskSendError::AsyncContext` (with the prepared task id and payload, so
+  `retry_send(&error).await` completes the same send),
+  `ReadError::AsyncContext`, a `BrokerOperationError` with
+  `BrokerErrorCode::AsyncContext`, or a `CheckReport` with `HRS-217`.
+- The thread of a `#[blocking_task]` body in a worker child drives no async
+  task, so a blocking send works there. A result wait in a worker child is
+  still `WaitInsideTask`.
+- A refused input is refused before the thread check: a suppressed send is
+  `SendSuppressed` on any thread.
+- The workflow start and the workflow handle have no blocking view.
 
-```rust
-RetryPolicy::fixed(vec![60, 300, 900], true)?   // 3 retries, jitter on
-RetryPolicy::exponential(30, 5, false)?          // 5 retries, base 30s, no jitter
-RetryPolicy::exponential(30, 5, true)?.with_max_delay_seconds(600)  // cap delay at 600s
-```
+## Rerun a Terminal Task
 
-Validation: max_retries 1–20, intervals 1–86400s, fixed requires `len == max_retries`, exponential requires exactly 1 interval.
+A rerun reads a terminal source task and, for an eligible source with a
+retained input, writes one new task with the lineage `RERUN`. Every outcome
+but `Enqueued` writes nothing.
 
-`with_max_delay_seconds(secs)` caps the computed retry delay (applied **after**
-jitter); `secs` must be `> 0`.
-
-## Error Code Families
-
-### `OperationalErrorCode`
-
-`UnhandledError`, `TaskError`, `WorkerCrashed`, `BrokerError`, `WorkerResolutionError`, `WorkerSerializationError`, `ResultDeserializationError`, `WorkflowEnqueueFailed`, `SubworkflowLoadFailed`
-
-### `ContractCode`
-
-`ReturnTypeMismatch`, `ArgumentTypeMismatch`, `WorkflowCtxMissingId`
-
-### `RetrievalCode`
-
-`WaitTimeout`, `TaskNotFound`, `WorkflowNotFound`, `ResultNotAvailable`, `ResultNotReady`
-
-### `OutcomeCode`
-
-`TaskCancelled`, `TaskExpired`, `WorkflowPaused`, `WorkflowFailed`, `WorkflowCancelled`, `UpstreamSkipped`, `SubworkflowFailed`, `WorkflowSuccessCaseNotMet`, `WorkflowStopped`, `SendSuppressed`
-
-## `TaskStatus`
-
-```
-PENDING → CLAIMED → RUNNING → COMPLETED | FAILED | CANCELLED | EXPIRED
-```
-
-Terminal: `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED`.
-
-A terminal task leaves `horsies_tasks` in the same transaction that records
-its outcome. Its immutable record lives in `horsies_task_history`.
-
-`TaskHandle::get()`, `TaskHandle::info()`, `PostgresBroker::get_result()`, and
-`PostgresBroker::get_task_info()` resolve live and history storage. Callers do
-not need to select the table.
-
-## Rerun a terminal task
-
-Rerun creates a new task. It never changes the source history row.
+In a transaction of the app:
 
 ```rust
-use chrono::Duration;
-use horsies::{rerun_task, RerunEnqueuePolicy, RerunOutcome, RerunTask};
+use horsies::rerun::{AppRerunError, RerunEnqueuePolicy, RerunOutcome, RerunTask};
+use horsies::Horsies;
+use uuid::Uuid;
 
-let command = RerunTask::new(source_task_id, None, Some("case:123".into()));
-let policy = RerunEnqueuePolicy::new(
-    "standard_30d",
-    true,
-    Duration::hours(24),
-)?;
-
-match rerun_task(&broker, command, policy).await? {
-    RerunOutcome::Enqueued { new_task_id, .. } => use_task(new_task_id),
-    RerunOutcome::SourceLive { .. }
-    | RerunOutcome::SourceAbsent { .. }
-    | RerunOutcome::NotEligible { .. }
-    | RerunOutcome::InputUnavailable { .. }
-    | RerunOutcome::InputCorrupt { .. }
-    | RerunOutcome::KeyConflict { .. }
-    | RerunOutcome::KeyReplay { .. } => handle_refusal(),
+async fn rerun_failed(app: &Horsies, source_task_id: Uuid) -> Result<Option<Uuid>, AppRerunError> {
+    let command = RerunTask::new(source_task_id, None, None);
+    let policy = RerunEnqueuePolicy::standard(true);
+    match app.rerun_task(command, policy).await? {
+        RerunOutcome::Enqueued { new_task_id, .. } => Ok(Some(new_task_id)),
+        RerunOutcome::KeyReplay { existing_task_id } => Ok(Some(existing_task_id)),
+        RerunOutcome::SourceLive { .. }
+        | RerunOutcome::SourceAbsent { .. }
+        | RerunOutcome::SourceCorrupt { .. }
+        | RerunOutcome::NotEligible { .. }
+        | RerunOutcome::InputUnavailable { .. }
+        | RerunOutcome::InputCorrupt { .. }
+        | RerunOutcome::KeyConflict { .. } => Ok(None),
+    }
 }
 ```
 
-Match every `RerunOutcome` variant. A completed source and a workflow backing
-task are not eligible. Other terminal sources require retained canonical
-input. `PostgresConfig::retain_rerun_input_default` controls that enqueue-time
-choice.
+In a transaction that the caller owns (feature `sqlx`; feature
+`tokio-postgres` gives `TokioPostgresCaller::new(&mut transaction)` for a
+`tokio_postgres::Transaction`):
+
+```rust
+use chrono::Utc;
+use horsies::rerun::{rerun_task_in, RerunEnqueuePolicy, RerunOutcome, RerunTask, SqlxCaller};
+use sqlx::PgPool;
+use uuid::Uuid;
+
+async fn rerun_with_audit(
+    pool: &PgPool,
+    source_task_id: Uuid,
+) -> Result<RerunOutcome, Box<dyn std::error::Error>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("INSERT INTO audit_log (action, task_id) VALUES ('rerun', $1)")
+        .bind(source_task_id)
+        .execute(&mut *transaction)
+        .await?;
+    let outcome = rerun_task_in(
+        &mut SqlxCaller::new(&mut transaction),
+        &RerunTask::new(source_task_id, None, None),
+        &RerunEnqueuePolicy::standard(true),
+        Utc::now(),
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(outcome)
+}
+```
+
+- `RerunTask::new(source_task_id, deadline, caller_key)`: `deadline` is an
+  `Option<DateTime<Utc>>` for the new task; `caller_key` is an
+  `Option<String>` idempotency key of the rerun.
+- `RerunEnqueuePolicy::new(retention_class_key, retain_rerun_input,
+  reservation_window)` returns `Result<_, RerunError>`.
+  `RerunEnqueuePolicy::standard(retain_rerun_input)` uses the class
+  `standard_30d` and a 24-hour window.
+- `rerun_task_in` commits nothing. The caller's commit keeps the new task
+  and the key claim; its rollback drops them. After an error the
+  transaction may hold the key claim or the new row: do not commit it.
+- `AppRerunError`: `Connect(BrokerError)` (nothing ran) or
+  `Rerun(RerunError)`.
+- `CallerRerunError<E>`: `Driver(E)`, `ClassNotRegistered { key }`,
+  `ClientFamilyMismatch { stored }`, `CallerKeyRefused`, `IdMintRefused`,
+  `Row`.
+
+| `RerunOutcome` | Meaning |
+|---|---|
+| `Enqueued { new_task_id, source_task_id, rerun_root_task_id }` | The new task is written |
+| `SourceLive { task_id }` | The source has not ended |
+| `SourceAbsent { task_id, reason }` | No record has the id; `reason` is a `TaskAbsenceReason` |
+| `SourceCorrupt { task_id, detail }` | The source history row does not decode |
+| `NotEligible { task_id, reason }` | `NotEligibleReason::CompletedSource` or `WorkflowTask` |
+| `InputUnavailable { task_id, disposition }` | The source stores no input; `disposition` is the stored reason (`DECLINED_BY_POLICY`, `OVER_BOUND`) |
+| `InputCorrupt { task_id, detail }` | The stored input fails its integrity or shape check |
+| `KeyConflict { task_id, reserved_by_task_id }` | The caller key is held by another command |
+| `KeyReplay { existing_task_id }` | The caller key already holds this rerun command; the existing task answers |
+
+The rules are on the shared docs page `monitoring/action-semantics`
+("Task rerun").
+
+## Register by Hand
+
+`async_task_fn!(function, InputType)` and
+`blocking_task_fn!(function, InputType)` build a `RegisteredTask` from a
+function that takes one input value. `app.register(name, task)` registers
+it; `RegisteredTask::with_task_options(options)` sets its options. Prefer
+the attributes: a task registered by hand has no generated module and no
+typed function.
+
+## Common Pitfalls
+
+**Start nothing in `main` before `horsies::cli::run(app)`.** Every worker
+child runs `main` again. A server, a thread or a loop started there starts
+again in each child.
+
+**Wait for no result in a task body.** A result wait in a worker child is
+refused with `WaitInsideTask`. Pass the result with a workflow (`arg_from`).
+
+```rust
+// WRONG: in a task body
+let total = other_task_handle.get(WaitLimit::NoLimit).await;
+
+// CORRECT: a workflow node receives the dependency's outcome
+// fn report(total: TaskOutcome<u64, Infallible>) ...
+// report::node()?.arg_from(report::params::total(), totals_node)
+```
+
+**Rename a parameter only when nothing stored holds the old name.** The
+parameter name is the stored key. A queued task, a schedule or a workflow
+node with the old key fails with `WORKER_SERIALIZATION_ERROR`.
+
+**Write the stored form in schedule input and `input_json`.** A task
+`fn validate_order(order: Order)` reads `{"order": {...}}`, not the fields
+of `Order`.
+
+**Use the async forms on a runtime thread.** A blocking call on a thread
+that runs a tokio runtime returns `ASYNC_CONTEXT` and runs nothing.
+
+**Start run work with `rt.spawn`, not `tokio::spawn`, in a `shared_async`
+body.** Plain `tokio::spawn` work is not tracked, not waited for and not
+cancelled with the run.
+
+**Register before you send.** The generated `send`, `schedule`,
+`with_options` and `node` use the function of the first `register` in the
+process. Before it, they refuse.
+
+**Do not name a code type without its code.** `TaskError` without `<E>` is
+a compile error. Use `TaskError<std::convert::Infallible>` for a task with
+no codes of its own.
 
 ## All Key Imports
 
 ```rust
 use horsies::{
-    // App
-    Horsies, AppConfig, PostgresConfig,
-    // Proc macro
-    task, blocking_task,
-    // Declarative macros (advanced/internal)
-    async_task_fn, blocking_task_fn,
-    // Task types
-    TaskFunction, TaskResult, TaskError, TaskErrorCode, TaskHandle, TaskInfo, TaskOptions,
-    TaskSendError, TaskSendErrorCode, TaskSendOptions, TaskSendPayload, TaskSendResult,
-    RegisteredTask,
-    // Retry
-    RetryPolicy, ResolvedEnqueue,
-    // Error code families
-    OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
-    // Status
-    TaskStatus, TaskAttemptOutcome, TaskAttemptInfo,
-    // History rerun
-    rerun_task, NotEligibleReason, RerunEnqueuePolicy, RerunError,
-    RerunOutcome, RerunTask,
-    // Broker result (for handle.info())
-    BrokerResult, BrokerOperationError, BrokerErrorCode,
+    // Task definition
+    blocking_task, task, UserErrorCode, TaskError, TaskErrorCode, TaskRuntime,
+    StoredDateTime, RetryPolicy, RetryPolicyError, Execution, TaskOptions,
+    RegisteredTask, async_task_fn, blocking_task_fn,
+    // Library codes
+    BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
+    ExceptionRecord, SubWorkflowFailure, UserCode, UserCodeRefused, UnknownUserCode,
+    // Sends
+    TaskFunction, TaskFunctionSendOptions, TaskFunctionNotFound, TaskSendOptions,
+    SendRetention, RetentionDays, WholeSeconds, TaskSendError, TaskSendErrorCode,
+    TaskSendPayload,
+    // Reads
+    TaskHandle, TaskOutcome, ReadError, WaitLimit, WaitLimitRefused, MAX_WAIT_LIMIT_MS,
+    TaskInfo, TaskInfoParts, TaskAttemptInfo, TaskStatus, TaskAbsenceReason, StoredResult,
+};
+use horsies::blocking::{HorsiesView, TaskFunctionView, TaskHandleView};
+use horsies::rerun::{
+    rerun_task_in, AppRerunError, CallerRerunError, CallerTransaction, NotEligibleReason,
+    RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
 };
 ```
