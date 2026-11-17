@@ -133,7 +133,7 @@ pub fn stale_threshold(
 
 /// The failure of a list whose broker did not connect: no statement ran.
 /// The message names the read, as the core's read failures do.
-fn connect_failed(operation: &str, error: &BrokerError) -> BrokerFailure {
+pub(crate) fn connect_failed(operation: &str, error: &BrokerError) -> BrokerFailure {
     BrokerFailure {
         code: BrokerErrorCode::MonitoringQueryFailed.to_string(),
         message: format!("{operation} failed: {error}"),

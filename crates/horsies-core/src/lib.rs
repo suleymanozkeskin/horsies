@@ -155,7 +155,8 @@ pub use crate::worker::{
 
 // worker state snapshot values
 pub use crate::broker::{
-    ClassBudget, ClassBudgets, ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
+    checked_history_limit, worker_history_limit_refused, ClassBudget, ClassBudgets,
+    ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
     MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
 
