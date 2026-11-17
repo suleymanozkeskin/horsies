@@ -584,6 +584,41 @@ pub(super) async fn seed_node_task(
     .expect("seed the workflow task row")
 }
 
+/// The process id that [`start_claimed_task`] records.
+const START_WORKER_PID: i32 = 4343;
+
+/// The start write of the child host for a task that [`WORKER`] claimed at
+/// `claimed_at` (`broker::claims::start_attempt`, the statement of
+/// `worker::executor::child_host::run::start_attempt`). Every task start of
+/// the worker goes through it.
+pub(super) async fn start_claimed_task(
+    pool: &PgPool,
+    task_id: Uuid,
+    claimed_at: DateTime<Utc>,
+) -> crate::broker::claims::StartOutcome {
+    let broker = broker(pool);
+    let (open, _write) = broker
+        .core_pools_for_write()
+        .expect("the core pools of the broker");
+    crate::broker::claims::start_attempt(
+        open.main(),
+        broker.statement_log(),
+        &crate::broker::claims::StartAttempt {
+            task_id,
+            fence: crate::core::lifecycle::OwnedClaim {
+                worker_id: WORKER.to_owned(),
+                claimed_at,
+            },
+            worker_pid: START_WORKER_PID,
+            worker_hostname: SEEDED_WORKER_HOSTNAME.to_owned(),
+            worker_process_name: SEEDED_WORKER_PROCESS_NAME.to_owned(),
+            beat_sender_id: format!("{WORKER}:{START_WORKER_PID}"),
+        },
+    )
+    .await
+    .expect("the start statement")
+}
+
 // ---------------------------------------------------------------------------
 // Engine drivers
 // ---------------------------------------------------------------------------
