@@ -8,6 +8,7 @@ members = [
     "crates/horsies-python",
     "rust/examples",
     "rust/showcase",
+    "rust/tests/docs-check",
     "rust/tests/parity",
     "rust/tests/support",
     "rust/tests/worker",

@@ -342,7 +342,9 @@ jobs:
           fi
           base="$(git merge-base "$BASE_SHA" HEAD)"
           # The rust job checks and tests every crate of the workspace.
-          if git diff --quiet "$base" HEAD -- crates/ rust/ Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml clippy.toml; then
+          # The Rust pages of the docs site hold the code blocks that
+          # horsies-docs-check builds.
+          if git diff --quiet "$base" HEAD -- crates/ rust/ website/src/content/docs/rust/ Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml clippy.toml; then
             echo 'run_rust=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run_rust=true' >> "$GITHUB_OUTPUT"
@@ -438,7 +440,13 @@ jobs:
       # Cargo unifies the features of the checked crates: horsies-python turns
       # on the `web` feature of horsies-core here.
       - name: Check the workspace
-        run: cargo check --workspace --all-targets --exclude horsies-test-worker
+        run: cargo check --workspace --all-targets --exclude horsies-test-worker --exclude horsies-docs-check
+
+      # Every `rust` block of website/src/content/docs/rust/ and of the Rust
+      # skill files, as a module of the crate; the error names the page.
+      # The block markers: rust/tests/docs-check/src/lib.rs.
+      - name: Build the Rust code blocks of the docs and the skill files
+        run: cargo check -p horsies-docs-check --all-targets
 
       - name: Check the core without the web feature
         run: cargo check -p horsies-core --all-targets
