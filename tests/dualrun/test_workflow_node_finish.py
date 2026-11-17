@@ -21,6 +21,12 @@ with no retry) and runs phase 2 of that task:
   sub-workflow node below it;
 - a transaction with no phase-1 facts: a phase-2 retry, then a replay of the
   applied phase 2.
+
+The caller pair runs the same seeds with the Python steps that the worker
+called before the switch (``finish_node`` and ``advance_parents``) against the
+core operations that it calls now (``CoreHandle.finish_workflow_node_async``
+and ``advance_workflow_parents_async``), whose owed child starts build their
+children through the broker's child spec source.
 """
 
 from __future__ import annotations
@@ -30,13 +36,14 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import horsies._core as core
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import dumps_json
@@ -578,3 +585,82 @@ def test_transaction_without_phase_one_facts(empty_database: MakeDatabase) -> No
         FinishReport(step=None, disposition='ALREADY_APPLIED'),
     )
 
+
+
+# ---------------------------------------------------------------------------
+# The caller pair: the Python steps against the core operations
+# ---------------------------------------------------------------------------
+
+
+def _facts_text(
+    facts: PhaseTwoStep | FactsUnknown,
+) -> Literal['NO_DEPENDENTS', 'DEPENDENTS_WITHOUT_SUBWORKFLOW', 'SUBWORKFLOW_REACHABLE', 'UNKNOWN']:
+    match facts:
+        case PhaseTwoStep.NO_DEPENDENTS:
+            return 'NO_DEPENDENTS'
+        case PhaseTwoStep.DEPENDENTS_WITHOUT_SUBWORKFLOW:
+            return 'DEPENDENTS_WITHOUT_SUBWORKFLOW'
+        case PhaseTwoStep.SUBWORKFLOW_REACHABLE:
+            return 'SUBWORKFLOW_REACHABLE'
+        case FactsUnknown():
+            return 'UNKNOWN'
+
+
+async def _core_async(
+    database: DualRunDatabase, finishes: Sequence[Finish],
+) -> tuple[FinishReport, ...]:
+    reports: list[FinishReport] = []
+    async with open_broker(database) as broker:
+        _attach(broker)
+        session_factory = await _resources(broker)
+        handle = broker._core_handle  # pyright: ignore[reportPrivateUsage]
+        for finish in finishes:
+            task = await _task_of(session_factory, finish)
+            match finish.run:
+                case PhaseTwoRun.AFTER_PHASE_ONE:
+                    phase_one = await _phase_one(session_factory, task.task_id, finish.ending)
+                    step: PhaseTwoStep | None = phase_one
+                    facts: PhaseTwoStep | FactsUnknown = phase_one
+                case PhaseTwoRun.RETRY:
+                    step = await _phase_one(session_factory, task.task_id, finish.ending)
+                    facts = FactsUnknown()
+                case PhaseTwoRun.REPLAY:
+                    step = None
+                    facts = FactsUnknown()
+            finished = await handle.finish_workflow_node_async(
+                core.NodeFinishRequest(
+                    task_id=uuid.UUID(task.task_id), facts=_facts_text(facts), wake='SEND',
+                ),
+            )
+            assert isinstance(finished, core.NodeFinished), finished
+            advanced = await handle.advance_workflow_parents_async(finished.parent_advances)
+            assert isinstance(advanced, core.ParentsAdvanced), advanced
+            reports.append(FinishReport(step=step, disposition=finished.disposition))
+    return tuple(reports)
+
+
+@pytest.mark.parametrize(
+    ('seed', 'finishes'),
+    [
+        (_seed_no_dependents, _finishes_no_dependents),
+        (_seed_dependents, _finishes_dependents),
+        (_seed_reachable, _finishes_reachable),
+        (_seed_retry, _finishes_retry),
+    ],
+)
+def test_phase_two_on_the_core_writes_what_the_python_steps_wrote(
+    empty_database: MakeDatabase,
+    seed: Callable[[Connection], Any],
+    finishes: Callable[[Any], Sequence[Finish]],
+) -> None:
+    run = run_or_fail(
+        dual_run(
+            empty_database,
+            seed,
+            OperationSide(name='python steps', act=_side(finishes, _candidate_async)),
+            OperationSide(name='core operations', act=_side(finishes, _core_async)),
+        )
+    )
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    assert run.candidate.report == run.reference.report

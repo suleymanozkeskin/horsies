@@ -28,6 +28,20 @@ WORKFLOW_ENGINE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         core_methods=('resume_workflow_async',),
     ),
     DualRunOperation(
+        name='workflow phase 2',
+        production_path='horsies.core.worker.finalize:FinalizeMixin._finalize_workflow_phase',
+        reference_path='tests.dualrun.reference.workflow_phase2_caller:finalize_workflow_phase',
+        mode=PoolMode(),
+        core_methods=('finish_workflow_node_async',),
+    ),
+    DualRunOperation(
+        name='workflow parent advance',
+        production_path='horsies.core.worker.finalize:FinalizeMixin._drive_parent_propagations',
+        reference_path='tests.dualrun.reference.workflow_phase2_caller:drive_parent_propagations',
+        mode=PoolMode(),
+        core_methods=('advance_workflow_parents_async',),
+    ),
+    DualRunOperation(
         name='workflow pause',
         production_path='horsies.core.workflows.lifecycle:pause_workflow',
         reference_path='tests.dualrun.reference.workflow_pause_caller:pause_workflow',
