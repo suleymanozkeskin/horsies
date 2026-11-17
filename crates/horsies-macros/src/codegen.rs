@@ -747,8 +747,8 @@ fn is_own_input(ty: &Type) -> bool {
     let mut current = ty;
     for _level in 0..=MAX_TRANSPARENT_DEPTH {
         match current {
-            Type::Paren(inner) => current = &inner.elem,
-            Type::Group(inner) => current = &inner.elem,
+            Type::Paren(inner) => current = inner.elem.as_ref(),
+            Type::Group(inner) => current = inner.elem.as_ref(),
             Type::Tuple(tuple) => return tuple.elems.is_empty(),
             Type::Path(path) => {
                 let Some(segment) = path.path.segments.last() else {
@@ -758,7 +758,9 @@ fn is_own_input(ty: &Type) -> bool {
                 if TRANSPARENT.contains(&name.as_str()) {
                     match generic_types(&segment.arguments).as_slice() {
                         [inner] => {
-                            current = inner;
+                            // Copy the `&Type` out of the temporary list: it
+                            // borrows from `ty`, not from the list.
+                            current = *inner;
                             continue;
                         }
                         _ => return false,

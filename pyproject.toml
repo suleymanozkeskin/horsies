@@ -63,12 +63,11 @@ module-name = "horsies._core"
 python-source = "python"
 features = ["extension-module"]
 # maturin packs every file under python/horsies/ that .gitignore does not
-# exclude. The built web UI is git-ignored, so it is listed here; the skill
-# files are listed so that the package data is stated, not implied. The
-# baseline SQL files are compiled into horsies._core; the sdist carries them
-# so that a build from the sdist can compile them.
+# exclude. The skill files are listed so that the package data is stated, not
+# implied. The baseline SQL files and the web UI build
+# (crates/horsies-core/webui-dist) are compiled into horsies._core; the sdist
+# carries the SQL files so that a build from the sdist can compile them.
 include = [
-    { path = "python/horsies/web/static/**/*", format = ["sdist", "wheel"] },
     { path = "python/horsies/.agents/skills/horsies/*.md", format = ["sdist", "wheel"] },
     { path = "crates/horsies-core/baseline/*.sql", format = "sdist" },
 ]
