@@ -109,10 +109,11 @@ fn stack_margin_probe() {
                 .enable_all()
                 .build()
                 .expect("the probe runtime builds");
-            runtime.block_on(Box::pin(tokio::time::timeout(
-                PROBE_BOUND,
-                Box::pin(every_path()),
-            )))
+            // The timeout is built inside the runtime: its timer needs the
+            // runtime's context.
+            runtime.block_on(Box::pin(async {
+                tokio::time::timeout(PROBE_BOUND, Box::pin(every_path())).await
+            }))
         })
         .expect("the probe thread starts");
     let ended = paths.join().expect("the paths end without a panic");
