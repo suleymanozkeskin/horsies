@@ -747,11 +747,9 @@ class TestEnqueueAsync:
             'my_task',
             'default',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
-            args_json='[]',
-            kwargs_json='{"key": "val"}',
+            input_json='{"key": "val"}',
         )
 
         assert is_ok(result)
@@ -772,7 +770,6 @@ class TestEnqueueAsync:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=custom_ts,
         )
@@ -800,7 +797,6 @@ class TestEnqueueAsync:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             task_options=task_options,
@@ -825,7 +821,6 @@ class TestEnqueueAsync:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             task_options='NOT_VALID_JSON{{',
@@ -849,7 +844,6 @@ class TestEnqueueAsync:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             task_options='{"x":1e9999}',
@@ -874,10 +868,9 @@ class TestEnqueueAsync:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             sent_at=datetime.now(timezone.utc),
             send_kind=SendKind.FIRST,
-            kwargs_json='{"x":1,"x":2}',
+            input_json='{"x":1,"x":2}',
         )
 
         assert is_err(result)
@@ -902,10 +895,9 @@ class TestEnqueueAsync:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
-            kwargs_json=r'{"x":"\ud800"}',
+            input_json=r'{"x":"\ud800"}',
         )
 
         assert is_err(result)
@@ -928,10 +920,9 @@ class TestEnqueueAsync:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
-            kwargs_json='{"x":' + '[' * 1_100 + ']' * 1_100 + '}',
+            input_json='{"x":' + '[' * 1_100 + ']' * 1_100 + '}',
         )
 
         assert is_err(result)
@@ -954,10 +945,9 @@ class TestEnqueueAsync:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
-            kwargs_json='{"x":1e9999}',
+            input_json='{"x":1e9999}',
         )
 
         assert is_err(result)
@@ -980,7 +970,6 @@ class TestEnqueueAsync:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             enqueued_at=datetime.now(timezone.utc),
@@ -997,31 +986,6 @@ class TestEnqueueAsync:
         session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_corrupt_args_json_is_refused_as_invalid_input_with_the_cause(self) -> None:
-        """Malformed args JSON → INVALID_INPUT with the parse error as the cause; nothing is written."""
-        broker = _make_broker()
-        session = _make_enqueue_session()
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-
-        result = await broker.enqueue_async(
-            'my_task',
-            task_id='test-task-id',
-            enqueue_sha='test-sha',
-            send_kind=SendKind.FIRST,
-            sent_at=datetime.now(timezone.utc),
-            args_json='NOT_VALID_JSON{{',
-        )
-
-        assert is_err(result)
-        match result.err_value:
-            case BrokerInvalidInput(message=message, exception=cause):
-                assert 'args JSON corrupt' in message
-                assert isinstance(cause, SerializationError)
-            case other:
-                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
-        session.execute.assert_not_awaited()
-
-    @pytest.mark.asyncio
     async def test_with_good_until_passes_expiry(self) -> None:
         """good_until should be accepted and enqueue should succeed."""
         broker = _make_broker()
@@ -1032,7 +996,6 @@ class TestEnqueueAsync:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             good_until=expiry,
@@ -1052,7 +1015,6 @@ class TestEnqueueAsync:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             task_options=task_options,
@@ -1078,7 +1040,6 @@ class TestEnqueueAsync:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             task_options=task_options,
@@ -1105,7 +1066,6 @@ class TestEnqueueAsync:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=future,
         )
@@ -1130,7 +1090,6 @@ class TestEnqueueAsync:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=future,
             enqueued_at=future,
@@ -1150,7 +1109,6 @@ class TestEnqueueAsync:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=future,
             enqueue_delay_seconds=600,
@@ -1183,7 +1141,6 @@ class TestEnqueueOutcomes:
         result = await broker.enqueue_async(
             'my_task',
             task_id=_SENT_TASK_ID,
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
         )
@@ -1199,7 +1156,6 @@ class TestEnqueueOutcomes:
         result = await broker.enqueue_async(
             'my_task',
             task_id=_SENT_TASK_ID,
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             idempotency_key='key',
@@ -1216,7 +1172,6 @@ class TestEnqueueOutcomes:
         result = await broker.enqueue_async(
             'my_task',
             task_id=_SENT_TASK_ID,
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             idempotency_key='key',
@@ -1237,7 +1192,6 @@ class TestEnqueueOutcomes:
         result = await broker.enqueue_async(
             'my_task',
             task_id=_SENT_TASK_ID,
-            enqueue_sha='test-sha',
             send_kind=SendKind.REPEAT,
             sent_at=datetime.now(timezone.utc),
         )
@@ -1255,7 +1209,6 @@ class TestEnqueueOutcomes:
         result = await broker.enqueue_async(
             'my_task',
             task_id=_SENT_TASK_ID,
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
         )
@@ -1276,7 +1229,6 @@ class TestEnqueueOutcomes:
         _ = await broker.enqueue_async(
             'my_task',
             task_id='t',
-            enqueue_sha='test-sha',
             send_kind=send_kind,
             sent_at=datetime.now(timezone.utc),
         )
@@ -1297,7 +1249,6 @@ class TestEnqueueOutcomes:
         _ = await broker.enqueue_async(
             'my_task',
             task_id='t',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             idempotency_key='key',
@@ -2757,10 +2708,9 @@ class TestSyncFacades:
             'my_task',
             'queue',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
-            kwargs_json='{"k": "v"}',
+            input_json='{"k": "v"}',
             priority=50,
             idempotency_key='order-17',
         )
@@ -2791,10 +2741,8 @@ class TestSyncFacades:
             'my_task',
             'queue',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
-            args_json='[1]',
-            kwargs_json='{"k": "v"}',
+            input_json='{"k": "v"}',
             priority=50,
             sent_at=None,
             good_until=None,
@@ -3254,7 +3202,6 @@ class TestEnqueueAsyncErrorPaths:
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
         )
@@ -3758,7 +3705,6 @@ class _DatabaseMustNotRun:
         self.session.execute.assert_not_awaited()
 
 
-REFUSED_ARGS = ['5', '"abc"', '{"a":1}', '0', 'false', '""', '{}', '[1]', '[null]', '']
 REFUSED_KWARGS = ['5', '"a"', '[1]', 'true', '0', 'false', '""', '[]', '']
 
 
@@ -3767,26 +3713,12 @@ class TestEnqueueInputRefusal:
     """A refused input is refused before the database, with its own code."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize('args_json', REFUSED_ARGS)
-    async def test_args_shape_is_refused(self, args_json: str) -> None:
+    @pytest.mark.parametrize('input_json', REFUSED_KWARGS)
+    async def test_kwargs_shape_is_refused(self, input_json: str) -> None:
         wiring = _DatabaseMustNotRun()
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), args_json=args_json,
-        )
-
-        assert is_err(result)
-        assert isinstance(result.err_value, BrokerInvalidInput)
-        assert 'args JSON' in result.err_value.message
-        wiring.assert_nothing_ran()
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize('kwargs_json', REFUSED_KWARGS)
-    async def test_kwargs_shape_is_refused(self, kwargs_json: str) -> None:
-        wiring = _DatabaseMustNotRun()
-
-        result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), kwargs_json=kwargs_json,
+            'my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), input_json=input_json,
         )
 
         assert is_err(result)
@@ -3799,7 +3731,7 @@ class TestEnqueueInputRefusal:
         wiring = _DatabaseMustNotRun()
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), kwargs_json='"secret-value"',
+            'my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), input_json='"secret-value"',
         )
 
         assert is_err(result)
@@ -3830,7 +3762,7 @@ class TestEnqueueInputRefusal:
         values.update(overrides)
 
         result = await wiring.broker.enqueue_async(
-            task_id='t', enqueue_sha='s', send_kind=SendKind.FIRST, **values,
+            task_id='t', send_kind=SendKind.FIRST, **values,
         )
 
         assert is_err(result)
@@ -3854,7 +3786,7 @@ class TestEnqueueInputRefusal:
         wiring = _DatabaseMustNotRun()
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), idempotency_key=key,
+            'my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), idempotency_key=key,
         )
 
         assert is_err(result)
@@ -3877,7 +3809,6 @@ class TestEnqueueInputRefusal:
         result = await wiring.broker.enqueue_async(
             'my_task',
             task_id='t',
-            enqueue_sha='s',
             send_kind=SendKind.FIRST,
             **instants,
         )
@@ -3925,7 +3856,7 @@ class TestEnqueueInputRefusal:
         )
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), priority=0,
+            'my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), priority=0,
         )
 
         assert is_err(result)
@@ -3938,7 +3869,7 @@ class TestEnqueueInputRefusal:
         wiring.broker._ensure_initialized = AsyncMock()
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), task_options='{bad',
+            'my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), task_options='{bad',
         )
 
         assert is_err(result)
@@ -3950,19 +3881,19 @@ class TestEnqueueInputRefusal:
 class TestEnqueueAcceptedInput:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ('args_json', 'kwargs_json', 'expected_input'),
+        ('input_json', 'expected_input'),
         [
-            (None, None, '{}'),
-            ('null', 'null', '{}'),
-            ('[]', '{}', '{}'),
-            ('[ ]', '{"a":1}', '{"a":1}'),
-            (None, '{ "z": 1, "a": 2 }', '{ "z": 1, "a": 2 }'),
+            (None, '{}'),
+            ('null', '{}'),
+            ('{}', '{}'),
+            ('{"a":1}', '{"a":1}'),
+            ('{ "z": 1, "a": 2 }', '{ "z": 1, "a": 2 }'),
         ],
     )
     async def test_the_row_stores_the_kwargs_text_as_its_input(
-        self, args_json: str | None, kwargs_json: str | None, expected_input: str,
+        self, input_json: str | None, expected_input: str,
     ) -> None:
-        """The input is the kwargs text exactly as sent; no kwargs store ``{}``.
+        """The input is the kwargs text exactly as sent; no input stores ``{}``.
         The fingerprint covers the stored input in its kwargs element and
         null in its args element."""
         from horsies.core.history.identity.fingerprint import EnqueueCommandV1
@@ -3974,11 +3905,9 @@ class TestEnqueueAcceptedInput:
         result = await broker.enqueue_async(
             'my_task',
             task_id='t',
-            enqueue_sha='s',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
-            args_json=args_json,
-            kwargs_json=kwargs_json,
+            input_json=input_json,
             retain_rerun_input=True,
         )
 
@@ -4023,7 +3952,7 @@ class TestEnqueueCatch:
         state = RuntimeError(message)
         broker._ensure_initialized = AsyncMock(side_effect=state)
 
-        result = await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc))
+        result = await broker.enqueue_async('my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc))
 
         assert is_err(result)
         match result.err_value:
@@ -4058,7 +3987,7 @@ class TestEnqueueCatch:
         _set_resources(broker, engine=engine)
         conn.execute = AsyncMock(side_effect=error)
 
-        result = await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc))
+        result = await broker.enqueue_async('my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc))
 
         assert is_err(result)
         match result.err_value:
@@ -4076,7 +4005,7 @@ class TestEnqueueCatch:
         conn.execute = AsyncMock(side_effect=TypeError('defect'))
 
         with pytest.raises(TypeError, match='defect'):
-            await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc))
+            await broker.enqueue_async('my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc))
 
     @pytest.mark.asyncio
     async def test_defect_in_the_keyed_write_crashes_loud(self) -> None:
@@ -4087,7 +4016,7 @@ class TestEnqueueCatch:
 
         with pytest.raises(TypeError, match='defect'):
             await broker.enqueue_async(
-                'my_task', task_id='t', enqueue_sha='s', send_kind=SendKind.FIRST,
+                'my_task', task_id='t', send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc), idempotency_key='key',
             )
 
@@ -4099,6 +4028,6 @@ class TestEnqueueCatch:
 
         with pytest.raises(AssertionError, match='SOMETHING_ELSE'):
             await broker.enqueue_async(
-                'my_task', task_id='dup', enqueue_sha='s', send_kind=SendKind.FIRST,
+                'my_task', task_id='dup', send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
             )

@@ -36,7 +36,7 @@ from horsies.core.models.task_pg import ScheduleStateModel
 from horsies.core.scheduler.calculator import calculate_next_run, should_run_now
 from tests.dualrun.reference.scheduler_loop_caller import Scheduler
 from horsies.core.types.result import Err, Ok, Result, is_err
-from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
+from horsies.core.utils.fingerprint import schedule_slot_task_id
 
 SCHEDULE_ADVISORY_LOCK_SQL = text('SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))')
 
@@ -124,25 +124,12 @@ async def enqueue_slot(
     priority = effective_priority(scheduler.app, queue_name)
     task_id = schedule_slot_task_id(schedule.name, slot_time)
     prepared = scheduler._prepared_schedule(schedule)
-    enqueue_sha = enqueue_fingerprint(
-        task_name=schedule.task_name,
-        queue_name=queue_name,
-        priority=priority,
-        args_json=None,
-        kwargs_json=kwargs_json,
-        sent_at=slot_time,
-        good_until=None,
-        enqueue_delay_seconds=None,
-        task_options=prepared.task_options_json,
-    )
     result = await broker.enqueue_async(
         task_name=schedule.task_name,
         queue_name=queue_name,
         task_id=task_id,
-        enqueue_sha=enqueue_sha,
         send_kind=SendKind.FIRST,
-        args_json=None,
-        kwargs_json=kwargs_json,
+        input_json=kwargs_json,
         priority=priority,
         sent_at=slot_time,
         task_options=prepared.task_options_json,

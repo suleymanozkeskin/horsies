@@ -49,11 +49,9 @@ async def _sync_enqueue(
         broker.enqueue,
         'parity.task',
         task_id=task_id,
-        enqueue_sha='c' * 64,
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
-        args_json='[]',
-        kwargs_json='{}',
+        input_json='{}',
         **keywords,
     )
     assert not is_err(outcome), outcome

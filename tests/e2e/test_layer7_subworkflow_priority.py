@@ -102,10 +102,9 @@ async def test_subworkflow_child_binds_queue_priority_and_claim_order(
             task_name='pb_blocker',
             queue_name='serial',
             task_id=uuid4(),
-            enqueue_sha=f'pb-blocker-{uuid4().hex[:8]}',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
-            kwargs_json=dumps_json({'duration_ms': 6000}).unwrap(),
+            input_json=dumps_json({'duration_ms': 6000}).unwrap(),
         )).unwrap()
         await wait_for_status(
             current_resources(broker).session_factory, blocker_id, 'RUNNING', timeout_s=15.0,

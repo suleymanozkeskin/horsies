@@ -307,10 +307,8 @@ class TestStagedResultReader:
                 'result.reader.task',
                 task_id=task_id,
                 send_kind=SendKind.FIRST,
-                enqueue_sha='d' * 64,
                 sent_at=datetime.now(timezone.utc),
-                args_json='[]',
-                kwargs_json='{}',
+                input_json='{}',
             )
             assert not is_err(enqueued), enqueued
             warm = await result_caller.get_raw_result_record_async(

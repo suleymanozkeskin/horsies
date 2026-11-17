@@ -31,7 +31,6 @@ from horsies.core.brokers.result_types import (
 from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import Err, Ok, is_ok
-from horsies.core.utils.fingerprint import enqueue_fingerprint
 from tests.broker_resources_support import current_resources
 from tests.integration.terminal_writes import cancel_live_task
 
@@ -75,18 +74,7 @@ async def enqueue(
         TASK_NAME,
         task_id=send.task_id,
         send_kind=SendKind.FIRST,
-        enqueue_sha=enqueue_fingerprint(
-            task_name=TASK_NAME,
-            queue_name='default',
-            priority=100,
-            args_json=None,
-            kwargs_json=send.kwargs_json,
-            sent_at=send.sent_at,
-            good_until=None,
-            enqueue_delay_seconds=None,
-            task_options=None,
-        ),
-        kwargs_json=send.kwargs_json,
+        input_json=send.kwargs_json,
         sent_at=send.sent_at,
         idempotency_key=key,
     )
