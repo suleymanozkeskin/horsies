@@ -128,6 +128,14 @@ RESUME_WORKFLOW_FUNCTION_SQL: Final = _step_statement(
 )
 """The resume of a PAUSED workflow tree, in the caller's transaction."""
 
+PHASE2_RECOVER_FUNCTION_SQL: Final = _step_statement(
+    'horsies_workflow_phase2_recover(CAST(:task_id AS uuid), '
+    'CAST(:attempt_bound AS integer))'
+)
+"""Phase-2 recovery of one record, in the caller's transaction: the body of
+the node finish with no wake, and one attempt with the quarantine at the
+bound for a record that it keeps."""
+
 MAX_PARENT_ADVANCES: Final = MAX_SUBWORKFLOW_DEPTH + 1
 """The most parent advance levels of one drive: the levels of a tree, depth
 0 to ``MAX_SUBWORKFLOW_DEPTH``."""
@@ -193,6 +201,36 @@ class ResumeDisposition(Enum):
 
     NOT_FOUND = 'NOT_FOUND'
     """No workflow has this id; nothing written."""
+
+
+class NodeFinishDisposition(Enum):
+    """The disposition of ``horsies_workflow_node_finish`` and
+    ``horsies_workflow_phase2_recover`` (those of ``horsies_workflow_node_apply``)."""
+
+    APPLIED = 'APPLIED'
+    """The node was written and the workflow is live: the failure policy,
+    promotion and completion ran."""
+
+    APPLIED_WORKFLOW_ENDED = 'APPLIED_WORKFLOW_ENDED'
+    """The node was written; the workflow had ended, so nothing more ran."""
+
+    ALREADY_APPLIED = 'ALREADY_APPLIED'
+    """The node was terminal already: nothing written."""
+
+    PENDING_ABSENT = 'PENDING_ABSENT'
+    """No phase-2 record, and the node is not terminal: nothing written."""
+
+    SOURCE_ABSENT = 'SOURCE_ABSENT'
+    """No history row at the locator and no quarantine copy: the record is kept."""
+
+    SOURCE_STATE_CONFLICT = 'SOURCE_STATE_CONFLICT'
+    """The source row belongs to another task: the record is kept."""
+
+    SOURCE_VERSION_CONFLICT = 'SOURCE_VERSION_CONFLICT'
+    """The history schema version differs: the record is kept."""
+
+    SOURCE_DIGEST_MISMATCH = 'SOURCE_DIGEST_MISMATCH'
+    """The digest of the stored bytes differs: the record is kept."""
 
 
 @dataclass(frozen=True, slots=True)

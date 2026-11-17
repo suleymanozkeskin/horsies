@@ -945,17 +945,20 @@ BEGIN
 END;
 $$;
 
--- The failure policy of a workflow after one of its nodes went FAILED. Returns TRUE when progression goes on
--- (on_error fail, or a workflow that is not RUNNING with fail), FALSE when it stops (on_error pause).
+-- The failure policy of a workflow after one of its nodes went FAILED. p_error is the error of this failure, as the
+-- bare error object text (NULL: no readable error): the err slot of the node's stored result, or for a node whose
+-- child workflow ended FAILED, CANCELLED or EXPIRED the error of horsies_workflow_child_node_result. Returns TRUE when
+-- progression goes on (on_error fail, or a workflow that is not RUNNING with fail), FALSE when it stops (on_error
+-- pause).
 -- - fail: the workflow error becomes the err slot of the first FAILED node by index, only while RUNNING; a node with
---   no readable error keeps the stored error.
--- - pause: RUNNING to PAUSED with the err slot of this node's stored result (a second failure keeps the first
---   error: the write needs RUNNING), and every RUNNING descendant to PAUSED. Claimed tasks of the paused tree are
---   abandoned later, at their start or claim-time check.
+--   no readable error keeps the stored error. p_error is not used.
+-- - pause: RUNNING to PAUSED with p_error (NULL keeps the stored error; a second failure keeps the first error: the
+--   write needs RUNNING), and every RUNNING descendant to PAUSED. Claimed tasks of the paused tree are abandoned
+--   later, at their start or claim-time check.
 -- Precondition: the caller holds the workflow row FOR UPDATE and wrote the node FAILED.
--- Python: _handle_workflow_task_failure (core/workflows/engine.py:3990-4088).
+-- Python: _handle_workflow_task_failure (core/workflows/engine.py:4002-4100), which stores the error it is given.
 -- Locks: the workflow row (held), then the RUNNING descendant rows level by level in (depth, id) order.
-CREATE FUNCTION horsies_workflow_record_failure(p_workflow_id uuid, p_task_index integer) RETURNS boolean
+CREATE FUNCTION horsies_workflow_record_failure(p_workflow_id uuid, p_error text) RETURNS boolean
     LANGUAGE plpgsql
     SET plan_cache_mode TO 'force_generic_plan'
 AS $$
@@ -976,11 +979,8 @@ BEGIN
             WHERE id = p_workflow_id AND status = 'RUNNING';
             RETURN TRUE;
         WHEN 'pause' THEN
-            SELECT horsies_workflow_err_slot(n.result) INTO v_error
-            FROM horsies_workflow_tasks n
-            WHERE n.workflow_id = p_workflow_id AND n.task_index = p_task_index;
             UPDATE horsies_workflows
-            SET status = 'PAUSED', error = coalesce(v_error, error), updated_at = now()
+            SET status = 'PAUSED', error = coalesce(p_error, error), updated_at = now()
             WHERE id = p_workflow_id AND status = 'RUNNING';
             IF FOUND THEN
                 PERFORM horsies_workflow_move_descendants(p_workflow_id, 'RUNNING', 'PAUSED');
@@ -1262,7 +1262,11 @@ BEGIN
             v_enqueued := v_enqueued || v_new;
             v_failed := horsies_workflow_fail_unbuildable(p_workflow_id, v_new, v_wf.on_error);
             IF cardinality(v_failed) > 0 THEN
-                IF NOT horsies_workflow_record_failure(p_workflow_id, v_failed[1]) THEN
+                IF NOT horsies_workflow_record_failure(
+                    p_workflow_id,
+                    (SELECT horsies_workflow_err_slot(n.result) FROM horsies_workflow_tasks n
+                     WHERE n.workflow_id = p_workflow_id AND n.task_index = v_failed[1])
+                ) THEN
                     UPDATE horsies_workflow_tasks n
                     SET status = 'READY', started_at = NULL
                     WHERE n.workflow_id = p_workflow_id
@@ -1629,30 +1633,20 @@ BEGIN
 END;
 $$;
 
--- Everything a workflow does after one of its nodes was written terminal: the failure policy for a FAILED node
--- (horsies_workflow_record_failure; a pause stops here), the paused guard, promotion of the node's dependents
--- (skipped when p_dependents is 'NONE': the caller knows that no node depends on this one), and the completion
--- check. Returns the owed child starts. p_dependents is 'NONE' or 'READ' (22023 otherwise).
+-- What a workflow does after one of its nodes was written terminal and the failure policy let progression go on:
+-- the paused guard, promotion of the node's dependents (skipped when p_dependents is 'NONE': the caller knows that no
+-- node depends on this one), and the completion check. Returns the owed child starts. p_dependents is 'NONE' or
+-- 'READ' (22023 otherwise).
 -- Precondition: the caller holds the workflow row FOR UPDATE and wrote the node.
--- Python: apply_node_progression (core/workflows/engine.py:1995-2060).
--- Locks: as horsies_workflow_record_failure and horsies_workflow_promote, under the caller's workflow lock.
-CREATE FUNCTION horsies_workflow_progress(p_workflow_id uuid, p_task_index integer, p_dependents text)
+-- Python: apply_node_progression after _handle_workflow_task_failure (core/workflows/engine.py:1973-2040).
+-- Locks: as horsies_workflow_promote, under the caller's workflow lock.
+CREATE FUNCTION horsies_workflow_promote_and_complete(p_workflow_id uuid, p_task_index integer, p_dependents text)
     RETURNS SETOF horsies_workflow_step_row
     LANGUAGE plpgsql
     SET plan_cache_mode TO 'force_generic_plan'
 AS $$
-DECLARE
-    v_node_status text;
 BEGIN
     PERFORM horsies_workflow_require(p_dependents IN ('NONE', 'READ'), 'dependents must be NONE or READ');
-    SELECT n.status INTO v_node_status
-    FROM horsies_workflow_tasks n
-    WHERE n.workflow_id = p_workflow_id AND n.task_index = p_task_index;
-    IF v_node_status = 'FAILED' THEN
-        IF NOT horsies_workflow_record_failure(p_workflow_id, p_task_index) THEN
-            RETURN;
-        END IF;
-    END IF;
     IF NOT EXISTS (SELECT 1 FROM horsies_workflows w WHERE w.id = p_workflow_id AND w.status = 'RUNNING') THEN
         RETURN;
     END IF;
@@ -1660,6 +1654,33 @@ BEGIN
         RETURN QUERY SELECT * FROM horsies_workflow_promote(p_workflow_id, ARRAY[p_task_index], NULL, NULL);
     END IF;
     PERFORM horsies_workflow_try_complete(p_workflow_id);
+END;
+$$;
+
+-- Everything a workflow does after one of its nodes was written terminal: for a FAILED node the failure policy with
+-- the err slot of the node's stored result as the error of the failure (horsies_workflow_record_failure; a pause
+-- stops here), then horsies_workflow_promote_and_complete. Returns the owed child starts. p_dependents is 'NONE' or
+-- 'READ' (22023 otherwise).
+-- Precondition: the caller holds the workflow row FOR UPDATE and wrote the node.
+-- Python: apply_node_progression (core/workflows/engine.py:1973-2040).
+-- Locks: as horsies_workflow_record_failure and horsies_workflow_promote, under the caller's workflow lock.
+CREATE FUNCTION horsies_workflow_progress(p_workflow_id uuid, p_task_index integer, p_dependents text)
+    RETURNS SETOF horsies_workflow_step_row
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+DECLARE
+    v_node record;
+BEGIN
+    PERFORM horsies_workflow_require(p_dependents IN ('NONE', 'READ'), 'dependents must be NONE or READ');
+    SELECT n.status, n.result INTO v_node
+    FROM horsies_workflow_tasks n
+    WHERE n.workflow_id = p_workflow_id AND n.task_index = p_task_index;
+    IF v_node.status = 'FAILED'
+       AND NOT horsies_workflow_record_failure(p_workflow_id, horsies_workflow_err_slot(v_node.result)) THEN
+        RETURN;
+    END IF;
+    RETURN QUERY SELECT * FROM horsies_workflow_promote_and_complete(p_workflow_id, p_task_index, p_dependents);
 END;
 $$;
 
@@ -1698,10 +1719,15 @@ $$;
 -- - FAILED, CANCELLED or EXPIRED child: FAILED, SUBWORKFLOW_FAILED with sub_workflow_id and sub_workflow_summary.
 -- The summary: status, output (the ok value of a value envelope, else null), the node counts, error_summary (the
 -- message of a stored error object, the first 200 characters of a stored error that is not JSON, else null).
--- Locks: none (the child is terminal and does not change). Returns node_status, node_result and summary.
+-- failure_error: the error that the failure policy of the parent records for a FAILED node, as the bare error object
+-- text. For a FAILED, CANCELLED or EXPIRED child it is SUBWORKFLOW_FAILED with the message "Subworkflow <id> failed"
+-- and the same sub_workflow_id and summary (Python: the error of _ParentNodeFailed); for a FAILED node of a COMPLETED
+-- child, the err slot of node_result; NULL for a COMPLETED node.
+-- Locks: none (the child is terminal and does not change). Returns node_status, node_result, summary and
+-- failure_error.
 CREATE FUNCTION horsies_workflow_child_node_result(
     p_child_workflow_id uuid,
-    OUT node_status text, OUT node_result text, OUT summary text
+    OUT node_status text, OUT node_result text, OUT summary text, OUT failure_error text
 )
     LANGUAGE plpgsql STABLE
     SET plan_cache_mode TO 'force_generic_plan'
@@ -1748,6 +1774,10 @@ BEGIN
             format('Subworkflow %s failed with status %s', p_child_workflow_id, v_child.status),
             NULL, p_child_workflow_id, summary
         );
+        failure_error := (horsies_task_error_envelope(
+            'SUBWORKFLOW_FAILED', format('Subworkflow %s failed', p_child_workflow_id), NULL, p_child_workflow_id,
+            summary
+        )::json -> 'err')::text;
         RETURN;
     END IF;
     CASE v_kind
@@ -1769,6 +1799,7 @@ BEGIN
                 NULL, NULL
             );
     END CASE;
+    failure_error := horsies_workflow_err_slot(node_result);
 END;
 $$;
 
@@ -1777,7 +1808,9 @@ $$;
 -- the same body inside their own statement (they drop its OUTCOME row).
 -- Steps: read the child (not locked: it is terminal and does not change); lock the parent workflow row FOR UPDATE;
 -- write the parent node where it is not terminal (status and result of horsies_workflow_child_node_result, the
--- summary, completed_at); then horsies_workflow_progress for the parent node.
+-- summary, completed_at); for a FAILED node the failure policy of the parent with the failure_error of
+-- horsies_workflow_child_node_result (horsies_workflow_record_failure; a pause stops here); then
+-- horsies_workflow_promote_and_complete for the parent node.
 -- Dispositions: APPLIED; ALREADY_APPLIED (the parent node is terminal; nothing written); CHILD_ABSENT; NOT_A_CHILD
 -- (the workflow has no parent); CHILD_NOT_TERMINAL (nothing written); PARENT_ABSENT (nothing written).
 -- Lock order: parent workflow row, parent node row, then the promotion locks.
@@ -1822,7 +1855,14 @@ BEGIN
         RETURN NEXT horsies_workflow_outcome_row('ALREADY_APPLIED', v_child.parent_workflow_id, FALSE, NULL);
         RETURN;
     END IF;
-    RETURN QUERY SELECT * FROM horsies_workflow_progress(v_child.parent_workflow_id, v_child.parent_task_index, 'READ');
+    IF v_node.node_status = 'FAILED'
+       AND NOT horsies_workflow_record_failure(v_child.parent_workflow_id, v_node.failure_error) THEN
+        RETURN NEXT horsies_workflow_outcome_row('APPLIED', v_child.parent_workflow_id, TRUE, NULL);
+        RETURN;
+    END IF;
+    RETURN QUERY SELECT * FROM horsies_workflow_promote_and_complete(
+        v_child.parent_workflow_id, v_child.parent_task_index, 'READ'
+    );
     RETURN NEXT horsies_workflow_outcome_row('APPLIED', v_child.parent_workflow_id, TRUE, NULL);
 END;
 $$;
@@ -2456,20 +2496,20 @@ BEGIN
 END;
 $$;
 
--- Internal: inserts the node rows of a starting tree. A sub-workflow root with a pre-built child (a workflow row whose
--- parent pair names the node) goes in RUNNING, linked to the child, with started_at; any other node without
--- dependencies goes in READY; the rest PENDING. dependencies is a JSON array of indexes, workflow_ctx_from a JSON
--- array of node ids, args_from a JSON object of key to index. sub_workflow_params is the params choice of a
--- sub-workflow node (GIVEN or NOT_GIVEN; NULL on a task node; the table CHECK refuses another pairing).
+-- Internal: inserts the node rows of the workflows in p_level (workflows of a starting tree; the node arrays hold the
+-- whole tree). A node without dependencies goes in READY, the rest PENDING. A sub-workflow root with a pre-built child
+-- goes in READY too: horsies_workflow_start_child_row links it when the child row goes in. dependencies is a JSON
+-- array of indexes, workflow_ctx_from a JSON array of node ids, args_from a JSON object of key to index.
+-- sub_workflow_params is the params choice of a sub-workflow node (GIVEN or NOT_GIVEN; NULL on a task node; the
+-- table CHECK refuses another pairing).
 -- downstream_subworkflow is computed here, once, from the static graph: REACHABLE for every node from which a
 -- sub-workflow node of the same workflow is reachable along the dependency edges (an ancestor of one), NONE for the
 -- rest. The walk goes up from each sub-workflow node through the dependencies; UNION keeps each node once, so it
--- ends after at most the node count of steps. Refuses (22023) a child workflow row that names no sub-workflow
--- root node.
+-- ends after at most the node count of steps.
 -- Locks: the new node rows. Returns nothing. Python: INSERT_WORKFLOW_TASKS_BULK_SQL (core/workflows/sql.py:46-58;
--- core/workflows/lifecycle.py:699) and LINK_SUB_WORKFLOW_SQL (core/workflows/sql.py:271-276).
+-- core/workflows/lifecycle.py:699).
 CREATE FUNCTION horsies_workflow_start_nodes(
-    p_workflow_ids uuid[], p_parent_workflow_ids uuid[], p_parent_task_indexes integer[],
+    p_level uuid[],
     p_node_workflow_ids uuid[], p_node_task_indexes integer[], p_node_ids text[], p_node_task_names text[],
     p_node_inputs text[], p_node_queue_names text[], p_node_priorities integer[], p_node_dependencies text[],
     p_node_args_from text[], p_node_workflow_ctx_from text[], p_node_allow_failed_deps boolean[],
@@ -2499,6 +2539,7 @@ BEGIN
                     args_from, ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries,
                     execution, good_until, retention_class_key, is_subworkflow, sub_workflow_name,
                     sub_definition_key, sub_workflow_params)
+        WHERE u.workflow_id = ANY(p_level)
     ),
     edge AS MATERIALIZED (
         SELECT n.workflow_id, n.task_index, d.dependency
@@ -2532,39 +2573,22 @@ BEGIN
            CASE WHEN EXISTS (
                SELECT 1 FROM upstream r WHERE r.workflow_id = n.workflow_id AND r.task_index = n.task_index
            ) THEN 'REACHABLE' ELSE 'NONE' END,
-           CASE WHEN c.id IS NOT NULL THEN 'RUNNING' WHEN cardinality(n.dependencies) = 0 THEN 'READY'
-                ELSE 'PENDING' END,
-           NULL, n.is_subworkflow, c.id, n.sub_workflow_name, n.sub_definition_key, n.sub_workflow_params,
-           NULL, NULL, NULL, now(),
-           CASE WHEN c.id IS NOT NULL THEN now() END, NULL
+           CASE WHEN cardinality(n.dependencies) = 0 THEN 'READY' ELSE 'PENDING' END,
+           NULL, n.is_subworkflow, NULL, n.sub_workflow_name, n.sub_definition_key, n.sub_workflow_params,
+           NULL, NULL, NULL, now(), NULL, NULL
     FROM n
-    LEFT JOIN unnest(p_workflow_ids, p_parent_workflow_ids, p_parent_task_indexes) AS c(id, parent_id, parent_index)
-      ON c.parent_id = n.workflow_id AND c.parent_index = n.task_index
     ORDER BY n.workflow_id, n.task_index;
-    PERFORM horsies_workflow_require(
-        NOT EXISTS (
-            SELECT 1
-            FROM unnest(p_workflow_ids, p_parent_workflow_ids, p_parent_task_indexes)
-                 WITH ORDINALITY AS c(id, parent_id, parent_index, position)
-            WHERE c.position > 1
-              AND NOT EXISTS (
-                  SELECT 1 FROM horsies_workflow_tasks n
-                  WHERE n.workflow_id = c.parent_id AND n.task_index = c.parent_index
-                    AND n.is_subworkflow AND n.sub_workflow_id = c.id AND cardinality(n.dependencies) = 0
-              )
-        ),
-        'a child workflow row names no sub-workflow root node of its parent'
-    );
 END;
 $$;
 
--- Internal: inserts the workflow rows of a starting tree, every row RUNNING with p_root_workflow_id (the top-level
--- id for a top-level start, the root of the parent's tree for a child start) and the start call time. The top row
--- (the first) goes in with ON CONFLICT (id) DO NOTHING; when it exists already, nothing is written and the function
--- returns FALSE. Else the other rows go in and it returns TRUE.
--- Locks: the new rows and the unique index entry of the top id. Python: INSERT_WORKFLOW_SQL and
--- INSERT_CHILD_WORKFLOW_SQL (core/workflows/sql.py:23-34, 260-270; core/workflows/lifecycle.py:420-442).
-CREATE FUNCTION horsies_workflow_start_workflows(
+-- Internal: inserts the top row of a starting tree (the first of the workflow arrays), RUNNING, with
+-- p_root_workflow_id (the top-level id for a top-level start, the root of the parent's tree for a child start) and
+-- the start call time, with ON CONFLICT (id) DO NOTHING. Returns FALSE when the id exists already (nothing written),
+-- else TRUE. The other workflow rows go in one at a time, as their parent's roots are taken
+-- (horsies_workflow_start_child_row).
+-- Locks: the new row and the unique index entry of its id. Python: INSERT_WORKFLOW_SQL and INSERT_CHILD_WORKFLOW_SQL
+-- (core/workflows/sql.py:23-34, 260-270; core/workflows/lifecycle.py:420-442).
+CREATE FUNCTION horsies_workflow_start_top_row(
     p_workflow_ids uuid[], p_names text[], p_definition_keys text[], p_on_errors text[],
     p_output_task_indexes integer[], p_success_policies text[], p_parent_workflow_ids uuid[],
     p_parent_task_indexes integer[], p_depths integer[], p_sent_at timestamp with time zone,
@@ -2574,7 +2598,6 @@ CREATE FUNCTION horsies_workflow_start_workflows(
     SET plan_cache_mode TO 'force_generic_plan'
 AS $$
 DECLARE
-    v_top uuid := p_workflow_ids[1];
     v_inserted uuid;
 BEGIN
     INSERT INTO horsies_workflows (
@@ -2582,106 +2605,261 @@ BEGIN
         parent_workflow_id, parent_task_index, root_workflow_id, depth, sent_at, created_at, started_at,
         completed_at, updated_at
     ) VALUES (
-        v_top, p_names[1], p_definition_keys[1], 'RUNNING', p_on_errors[1], p_output_task_indexes[1],
+        p_workflow_ids[1], p_names[1], p_definition_keys[1], 'RUNNING', p_on_errors[1], p_output_task_indexes[1],
         p_success_policies[1]::jsonb, NULL, NULL, p_parent_workflow_ids[1], p_parent_task_indexes[1],
         p_root_workflow_id, p_depths[1], p_sent_at, now(), now(), NULL, now()
     )
     ON CONFLICT (id) DO NOTHING
     RETURNING id INTO v_inserted;
-    IF v_inserted IS NULL THEN
-        RETURN FALSE;
-    END IF;
+    RETURN v_inserted IS NOT NULL;
+END;
+$$;
+
+-- Internal: the pre-built child at position p_position of the workflow arrays (a position after the first). The child
+-- row goes in (RUNNING, p_root_workflow_id, the start call time), and its sub-workflow root node goes from READY to
+-- RUNNING, linked to the child, with started_at.
+-- Precondition: the parent workflow is RUNNING (horsies_workflow_start_tree reads it before the call).
+-- horsies_workflow_tree_check refused a child row that names no sub-workflow root of its parent, or a node that
+-- another child row names, so the link writes one row; another count raises internal_error (a defect).
+-- Locks: the new child row and the linked node row (rows of this statement). Returns the child id.
+-- Python: ENQUEUE_SUBWORKFLOW_TASK_SQL (READY to ENQUEUED, started_at), INSERT_CHILD_WORKFLOW_SQL and
+-- LINK_SUB_WORKFLOW_SQL (core/workflows/sql.py:368-404).
+CREATE FUNCTION horsies_workflow_start_child_row(
+    p_position integer, p_workflow_ids uuid[], p_names text[], p_definition_keys text[], p_on_errors text[],
+    p_output_task_indexes integer[], p_success_policies text[], p_parent_workflow_ids uuid[],
+    p_parent_task_indexes integer[], p_depths integer[], p_sent_at timestamp with time zone,
+    p_root_workflow_id uuid
+) RETURNS uuid
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+DECLARE
+    v_child uuid := p_workflow_ids[p_position];
+    v_linked integer;
+BEGIN
     INSERT INTO horsies_workflows (
         id, name, definition_key, status, on_error, output_task_index, success_policy, result, error,
         parent_workflow_id, parent_task_index, root_workflow_id, depth, sent_at, created_at, started_at,
         completed_at, updated_at
-    )
-    SELECT c.id, c.name, c.definition_key, 'RUNNING', c.on_error, c.output_index, c.policy::jsonb, NULL, NULL,
-           c.parent_id, c.parent_index, p_root_workflow_id, c.depth, p_sent_at, now(), now(), NULL, now()
-    FROM unnest(p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
-                p_parent_workflow_ids, p_parent_task_indexes, p_depths)
-         WITH ORDINALITY AS c(id, name, definition_key, on_error, output_index, policy, parent_id, parent_index,
-                              depth, position)
-    WHERE c.position > 1
-    ORDER BY c.depth, c.id;
-    RETURN TRUE;
+    ) VALUES (
+        v_child, p_names[p_position], p_definition_keys[p_position], 'RUNNING', p_on_errors[p_position],
+        p_output_task_indexes[p_position], p_success_policies[p_position]::jsonb, NULL, NULL,
+        p_parent_workflow_ids[p_position], p_parent_task_indexes[p_position], p_root_workflow_id,
+        p_depths[p_position], p_sent_at, now(), now(), NULL, now()
+    );
+    UPDATE horsies_workflow_tasks n
+    SET status = 'RUNNING', sub_workflow_id = v_child, started_at = now()
+    WHERE n.workflow_id = p_parent_workflow_ids[p_position] AND n.task_index = p_parent_task_indexes[p_position]
+      AND n.status = 'READY' AND n.is_subworkflow AND n.sub_workflow_id IS NULL AND cardinality(n.dependencies) = 0;
+    GET DIAGNOSTICS v_linked = ROW_COUNT;
+    IF v_linked <> 1 THEN
+        RAISE EXCEPTION 'the start linked % nodes to child workflow %', v_linked, v_child
+            USING ERRCODE = 'internal_error';
+    END IF;
+    RETURN v_child;
 END;
 $$;
 
--- Internal: everything after the inserts of a start. Each failed-node record, deepest workflow first: the root node
--- goes FAILED with its envelope, then progression. Each RUNNING workflow: its READY nodes are enqueued with their task
--- rows minted (a workflow that a failure paused keeps them READY: the pause gate). Each workflow with a terminal node,
--- deepest first: the completion check, and the parent advance of a child that ended. Refuses (22023) a record that
--- names no sub-workflow root of the tree without a child. Returns the owed child starts.
--- Locks: the rows of the new tree only. Python: the slow-root loop, the drain and the root task insert or revert of
--- start_workflow_async (core/workflows/lifecycle.py:706-762).
-CREATE FUNCTION horsies_workflow_start_progress(
-    p_workflow_ids uuid[], p_failed_workflow_ids uuid[], p_failed_task_indexes integer[], p_failed_results text[]
-) RETURNS SETOF horsies_workflow_step_row
+-- Internal: the failed-node record of one sub-workflow root of a starting tree: the node goes from READY to FAILED
+-- with p_result, started_at and completed_at, then progression (failure policy, promotion of its dependents,
+-- completion: horsies_workflow_progress).
+-- horsies_workflow_tree_check refused a record that names no sub-workflow root of the tree, or a root that a child row
+-- names, so the write changes one row; another count raises internal_error (a defect).
+-- Locks: the node row, then the progression locks. Returns the owed child starts.
+-- Python: ENQUEUE_SUBWORKFLOW_TASK_SQL (READY to ENQUEUED, started_at), then _fail_enqueued_task
+-- (core/workflows/engine.py:514-597).
+CREATE FUNCTION horsies_workflow_start_failed_node(p_workflow_id uuid, p_task_index integer, p_result text)
+    RETURNS SETOF horsies_workflow_step_row
     LANGUAGE plpgsql
     SET plan_cache_mode TO 'force_generic_plan'
 AS $$
 DECLARE
     v_failed integer;
-    v_row record;
 BEGIN
     UPDATE horsies_workflow_tasks n
-    SET status = 'FAILED', result = f.result, completed_at = now()
-    FROM unnest(p_failed_workflow_ids, p_failed_task_indexes, p_failed_results) AS f(workflow_id, task_index, result)
-    WHERE n.workflow_id = f.workflow_id AND n.task_index = f.task_index AND n.status = 'READY'
+    SET status = 'FAILED', result = p_result, started_at = now(), completed_at = now()
+    WHERE n.workflow_id = p_workflow_id AND n.task_index = p_task_index AND n.status = 'READY'
       AND n.is_subworkflow AND n.sub_workflow_id IS NULL AND cardinality(n.dependencies) = 0;
     GET DIAGNOSTICS v_failed = ROW_COUNT;
-    PERFORM horsies_workflow_require(
-        v_failed = coalesce(cardinality(p_failed_workflow_ids), 0),
-        'a failed-node record names no sub-workflow root of the tree without a child'
-    );
-    FOR v_row IN
-        SELECT f.workflow_id, f.task_index
-        FROM unnest(p_failed_workflow_ids, p_failed_task_indexes) AS f(workflow_id, task_index)
-        JOIN horsies_workflows w ON w.id = f.workflow_id
-        ORDER BY w.depth DESC, f.workflow_id, f.task_index
-    LOOP
-        RETURN QUERY SELECT * FROM horsies_workflow_progress(v_row.workflow_id, v_row.task_index, 'READ');
-    END LOOP;
+    IF v_failed <> 1 THEN
+        RAISE EXCEPTION 'the start failed % nodes for the record of workflow % node %', v_failed, p_workflow_id,
+            p_task_index USING ERRCODE = 'internal_error';
+    END IF;
+    RETURN QUERY SELECT * FROM horsies_workflow_progress(p_workflow_id, p_task_index, 'READ');
+END;
+$$;
 
-    FOR v_row IN
-        SELECT w.id FROM horsies_workflows w
-        WHERE w.id = ANY(p_workflow_ids) AND w.status = 'RUNNING'
-        ORDER BY w.depth, w.id
-    LOOP
-        RETURN QUERY SELECT * FROM horsies_workflow_promote(
-            v_row.id, NULL, NULL,
-            ARRAY(SELECT n.task_index FROM horsies_workflow_tasks n
-                  WHERE n.workflow_id = v_row.id AND n.status = 'READY' ORDER BY n.task_index)
-        );
-    END LOOP;
-
-    -- Completion, deepest first, only for a workflow that has a terminal node (a failed record, or a build failure
-    -- in the promotion above). A child that is COMPLETED or FAILED here ended in this statement: its parent node is
-    -- advanced.
-    FOR v_row IN
-        SELECT w.id FROM horsies_workflows w
-        WHERE w.id = ANY(p_workflow_ids)
-          AND EXISTS (
-              SELECT 1 FROM horsies_workflow_tasks n
-              WHERE n.workflow_id = w.id AND n.status IN ('COMPLETED', 'FAILED', 'SKIPPED')
-          )
-        ORDER BY w.depth DESC, w.id
-    LOOP
-        PERFORM horsies_workflow_try_complete(v_row.id);
-        IF v_row.id <> p_workflow_ids[1] AND EXISTS (
-            SELECT 1 FROM horsies_workflows w WHERE w.id = v_row.id AND w.status IN ('COMPLETED', 'FAILED')
-        ) THEN
-            RETURN QUERY SELECT * FROM horsies_workflow_child_finish(v_row.id) AS r WHERE r.row_kind <> 'OUTCOME';
+-- Internal: the parent advance of a workflow of a starting tree after its roots, as Python's in-session drain
+-- (drain_parent_propagations_in_session) after the root loop of each workflow. While the workflow is COMPLETED or
+-- FAILED, is not p_top_workflow_id, and its parent node is not terminal, the parent node is advanced
+-- (horsies_workflow_child_finish); a parent that the advance ends is advanced in turn. The advance stops at the top
+-- row of the start: a top-level row has no parent, and the TREE child start advances its own node. At most 33
+-- levels (depth 0 to 32); more raises internal_error (the tree check bounds the depth).
+-- Locks: as horsies_workflow_child_finish, per level. Returns the owed child starts of the advances (no OUTCOME row).
+CREATE FUNCTION horsies_workflow_start_advance(p_workflow_id uuid, p_top_workflow_id uuid)
+    RETURNS SETOF horsies_workflow_step_row
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+DECLARE
+    c_max_levels CONSTANT integer := 33;
+    v_child uuid := p_workflow_id;
+    v_next uuid;
+    v_levels integer := 0;
+    v_row horsies_workflow_step_row;
+BEGIN
+    WHILE v_child IS NOT NULL AND v_child <> p_top_workflow_id AND EXISTS (
+        SELECT 1
+        FROM horsies_workflows w
+        JOIN horsies_workflow_tasks n ON n.workflow_id = w.parent_workflow_id AND n.task_index = w.parent_task_index
+        WHERE w.id = v_child AND w.status IN ('COMPLETED', 'FAILED')
+          AND n.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+    ) LOOP
+        v_levels := v_levels + 1;
+        IF v_levels > c_max_levels THEN
+            RAISE EXCEPTION 'the parent advance of workflow % passed % levels', p_workflow_id, c_max_levels
+                USING ERRCODE = 'internal_error';
         END IF;
+        v_next := NULL;
+        FOR v_row IN SELECT * FROM horsies_workflow_child_finish(v_child) LOOP
+            CASE v_row.row_kind
+                WHEN 'OUTCOME' THEN
+                    v_next := v_row.advance_child_workflow_id;
+                ELSE
+                    RETURN NEXT v_row;
+            END CASE;
+        END LOOP;
+        v_child := v_next;
     END LOOP;
+END;
+$$;
+
+-- Internal: everything after the row of p_workflow_id (the top row of the start, or a pre-built child that
+-- horsies_workflow_start_child_row wrote), in the order of Python's start of one workflow:
+-- 1. The node rows of the workflow (horsies_workflow_start_nodes): a node without dependencies READY, the rest PENDING.
+-- 2. Its sub-workflow roots one at a time, in index order, each only while the workflow is RUNNING (Python's READY to
+--    ENQUEUED write requires it). Once a failure pauses the workflow, the later roots stay READY with no child, no
+--    error and no started_at; the resume builds and starts them.
+--    - A root with a failed-node record goes FAILED, then progression (horsies_workflow_start_failed_node).
+--    - A root with a pre-built child: the child row goes in and the root is linked
+--      (horsies_workflow_start_child_row), then this function starts the child: its nodes, its own roots and their
+--      children, its parent advance and its task rows, before the next root of this workflow.
+--    - A root with neither stays READY; step 4 enqueues it and owes its child start.
+-- 3. When the workflow is COMPLETED or FAILED now, its parent advance (horsies_workflow_start_advance). Python ran the
+--    drain only after a loop over at least one sub-workflow root; a workflow without one cannot end at its start.
+-- 4. When the workflow is still RUNNING: its READY nodes are enqueued, with their task rows minted
+--    (horsies_workflow_promote). A workflow that a failed record or an ended child paused keeps them READY with no
+--    task row (Python: the root task insert, or its revert to READY). The promotion at start enqueues roots only (a
+--    root has no args_from), so no node goes terminal in it.
+-- So the task rows of a child's roots go in before a later root of its parent fails and pauses the parent and the
+-- child, as in Python.
+-- p_level counts the levels of this start (1 for its top row); more than 33 raises internal_error (depth 0 to 32;
+-- the tree check refuses a deeper tree).
+-- Locks: the rows of the new tree, then the progression and advance locks. Returns the owed child starts.
+-- Python: start_workflow_async after the top row (core/workflows/lifecycle.py, before the switch: the reference in
+-- tests/dualrun/reference/workflow_start.py) and enqueue_subworkflow_task after its link
+-- (core/workflows/engine.py:1531-1602).
+CREATE FUNCTION horsies_workflow_start_tree(
+    p_workflow_id uuid, p_level integer, p_top_workflow_id uuid,
+    p_workflow_ids uuid[], p_names text[], p_definition_keys text[], p_on_errors text[],
+    p_output_task_indexes integer[], p_success_policies text[], p_parent_workflow_ids uuid[],
+    p_parent_task_indexes integer[], p_depths integer[], p_sent_at timestamp with time zone,
+    p_root_workflow_id uuid,
+    p_node_workflow_ids uuid[], p_node_task_indexes integer[], p_node_ids text[], p_node_task_names text[],
+    p_node_inputs text[], p_node_queue_names text[], p_node_priorities integer[], p_node_dependencies text[],
+    p_node_args_from text[], p_node_workflow_ctx_from text[], p_node_allow_failed_deps boolean[],
+    p_node_join_types text[], p_node_min_successes integer[], p_node_task_options text[],
+    p_node_max_retries integer[], p_node_executions text[], p_node_good_untils timestamp with time zone[],
+    p_node_retention_class_keys text[], p_node_is_subworkflow boolean[], p_node_sub_workflow_names text[],
+    p_node_sub_definition_keys text[], p_node_sub_workflow_params text[],
+    p_failed_workflow_ids uuid[], p_failed_task_indexes integer[], p_failed_results text[]
+) RETURNS SETOF horsies_workflow_step_row
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+AS $$
+DECLARE
+    c_max_levels CONSTANT integer := 33;
+    v_root record;
+    v_child uuid;
+BEGIN
+    IF p_level > c_max_levels THEN
+        RAISE EXCEPTION 'the start of workflow % passed % levels', p_top_workflow_id, c_max_levels
+            USING ERRCODE = 'internal_error';
+    END IF;
+    PERFORM horsies_workflow_start_nodes(
+        ARRAY[p_workflow_id], p_node_workflow_ids, p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs,
+        p_node_queue_names, p_node_priorities, p_node_dependencies, p_node_args_from, p_node_workflow_ctx_from,
+        p_node_allow_failed_deps, p_node_join_types, p_node_min_successes, p_node_task_options,
+        p_node_max_retries, p_node_executions, p_node_good_untils, p_node_retention_class_keys,
+        p_node_is_subworkflow, p_node_sub_workflow_names, p_node_sub_definition_keys, p_node_sub_workflow_params
+    );
+
+    FOR v_root IN
+        SELECT n.task_index,
+               (SELECT f.result
+                FROM unnest(p_failed_workflow_ids, p_failed_task_indexes, p_failed_results) AS f(workflow_id, task_index,
+                                                                                                 result)
+                WHERE f.workflow_id = p_workflow_id AND f.task_index = n.task_index) AS failed_result,
+               (SELECT c.position
+                FROM unnest(p_parent_workflow_ids, p_parent_task_indexes)
+                     WITH ORDINALITY AS c(parent_id, parent_index, position)
+                WHERE c.position > 1 AND c.parent_id = p_workflow_id AND c.parent_index = n.task_index) AS child_position
+        FROM horsies_workflow_tasks n
+        WHERE n.workflow_id = p_workflow_id AND n.is_subworkflow AND cardinality(n.dependencies) = 0
+        ORDER BY n.task_index
+    LOOP
+        EXIT WHEN NOT EXISTS (
+            SELECT 1 FROM horsies_workflows w WHERE w.id = p_workflow_id AND w.status = 'RUNNING'
+        );
+        CASE
+            WHEN v_root.failed_result IS NOT NULL THEN
+                RETURN QUERY SELECT * FROM horsies_workflow_start_failed_node(
+                    p_workflow_id, v_root.task_index, v_root.failed_result
+                );
+            WHEN v_root.child_position IS NOT NULL THEN
+                v_child := horsies_workflow_start_child_row(
+                    v_root.child_position::integer, p_workflow_ids, p_names, p_definition_keys, p_on_errors,
+                    p_output_task_indexes, p_success_policies, p_parent_workflow_ids, p_parent_task_indexes, p_depths,
+                    p_sent_at, p_root_workflow_id
+                );
+                RETURN QUERY SELECT * FROM horsies_workflow_start_tree(
+                    v_child, p_level + 1, p_top_workflow_id,
+                    p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes,
+                    p_success_policies, p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at,
+                    p_root_workflow_id,
+                    p_node_workflow_ids, p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs,
+                    p_node_queue_names, p_node_priorities, p_node_dependencies, p_node_args_from,
+                    p_node_workflow_ctx_from, p_node_allow_failed_deps, p_node_join_types, p_node_min_successes,
+                    p_node_task_options, p_node_max_retries, p_node_executions, p_node_good_untils,
+                    p_node_retention_class_keys, p_node_is_subworkflow, p_node_sub_workflow_names,
+                    p_node_sub_definition_keys, p_node_sub_workflow_params,
+                    p_failed_workflow_ids, p_failed_task_indexes, p_failed_results
+                );
+            ELSE
+                NULL;
+        END CASE;
+    END LOOP;
+
+    RETURN QUERY SELECT * FROM horsies_workflow_start_advance(p_workflow_id, p_top_workflow_id);
+
+    IF EXISTS (SELECT 1 FROM horsies_workflows w WHERE w.id = p_workflow_id AND w.status = 'RUNNING') THEN
+        RETURN QUERY SELECT * FROM horsies_workflow_promote(
+            p_workflow_id, NULL, NULL,
+            ARRAY(SELECT n.task_index FROM horsies_workflow_tasks n
+                  WHERE n.workflow_id = p_workflow_id AND n.status = 'READY' ORDER BY n.task_index)
+        );
+    END IF;
 END;
 $$;
 
 -- Internal: the argument check of a tree (horsies_workflow_start_check over the lengths and NULL elements of every
 -- array), for a top-level start (p_top_parent_workflow_id and p_top_parent_task_index NULL, p_top_depth 0) and for a
 -- child start (the sub-workflow node; horsies_workflow_child_start checks the depth of the child row against the
--- parent workflow after it locks that row). Refuses with 22023.
+-- parent workflow after it locks that row). Also refuses a child row that names no sub-workflow root node (no
+-- dependencies) of its parent, two child rows that name one node, and a failed-node record that names no sub-workflow
+-- root of the tree or a root that a child row names. These checks read the arrays, not the written rows, so they
+-- hold for a child or record that the start does not write (under a workflow that a failed record paused).
+-- Refuses with 22023.
 -- Locks: none. Returns nothing.
 CREATE FUNCTION horsies_workflow_tree_check(
     p_top_parent_workflow_id uuid,
@@ -2749,6 +2927,48 @@ BEGIN
         coalesce(p_failed_workflow_ids, ARRAY[]::uuid[]), coalesce(p_failed_task_indexes, ARRAY[]::integer[]),
         coalesce(p_failed_results, ARRAY[]::text[])
     );
+    PERFORM horsies_workflow_require(
+        NOT EXISTS (
+            SELECT 1
+            FROM unnest(p_parent_workflow_ids, p_parent_task_indexes)
+                 WITH ORDINALITY AS c(parent_id, parent_index, position)
+            WHERE c.position > 1
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM unnest(p_node_workflow_ids, p_node_task_indexes, p_node_is_subworkflow, p_node_dependencies)
+                       AS n(workflow_id, task_index, is_subworkflow, dependencies)
+                  WHERE n.workflow_id = c.parent_id AND n.task_index = c.parent_index
+                    AND n.is_subworkflow AND n.dependencies::jsonb = '[]'::jsonb
+              )
+        )
+        AND cardinality(p_workflow_ids) - 1 = (
+            SELECT count(DISTINCT (c.parent_id, c.parent_index))
+            FROM unnest(p_parent_workflow_ids, p_parent_task_indexes)
+                 WITH ORDINALITY AS c(parent_id, parent_index, position)
+            WHERE c.position > 1
+        ),
+        'a child workflow row names no sub-workflow root node of its parent, or a node that another child row names'
+    );
+    PERFORM horsies_workflow_require(
+        NOT EXISTS (
+            SELECT 1
+            FROM unnest(p_failed_workflow_ids, p_failed_task_indexes) AS f(workflow_id, task_index)
+            WHERE NOT EXISTS (
+                      SELECT 1
+                      FROM unnest(p_node_workflow_ids, p_node_task_indexes, p_node_is_subworkflow, p_node_dependencies)
+                           AS n(workflow_id, task_index, is_subworkflow, dependencies)
+                      WHERE n.workflow_id = f.workflow_id AND n.task_index = f.task_index
+                        AND n.is_subworkflow AND n.dependencies::jsonb = '[]'::jsonb
+                  )
+               OR EXISTS (
+                      SELECT 1
+                      FROM unnest(p_parent_workflow_ids, p_parent_task_indexes)
+                           WITH ORDINALITY AS c(parent_id, parent_index, position)
+                      WHERE c.position > 1 AND c.parent_id = f.workflow_id AND c.parent_index = f.task_index
+                  )
+        ),
+        'a failed-node record names no sub-workflow root of the tree without a child'
+    );
 END;
 $$;
 
@@ -2762,20 +2982,22 @@ $$;
 -- 1. Insert the top-level row with ON CONFLICT (id) DO NOTHING. No row: return EXISTS with the stored name in
 --    detail and write nothing (the core maps the same name to the existing handle and another name to
 --    WORKFLOW_ID_CONFLICT). The unique key makes a concurrent second start wait for the first commit.
--- 2. Insert the child workflow rows (RUNNING, root id of the tree) and every node row: a sub-workflow node with a
---    pre-built child goes in RUNNING, linked, with started_at; any other node without dependencies goes in READY;
---    the rest PENDING. Node row ids come from horsies_uuidv7(). Each node gets downstream_subworkflow from the
---    static graph (horsies_workflow_start_nodes).
--- 3. Each failed-node record, deepest workflow first: the node goes FAILED with its envelope, then progression (the
---    failure policy, promotion of its dependents, completion).
--- 4. Each workflow of the tree that is still RUNNING: its READY nodes are enqueued, with their task rows minted
---    (horsies_workflow_promote). A workflow that a failure paused keeps its READY nodes with no task (the pause gate).
--- 5. Each workflow with a terminal node, deepest first: the completion check; a child that is COMPLETED or FAILED
---    now advances its parent node (horsies_workflow_child_finish), as Python's in-session drain does.
--- 6. Return STARTED.
--- Owed work: CHILD_START rows come only from step 3 or from a sub-workflow root with neither a child nor a failed
--- record; a caller that passes failed records runs this call inside BEGIN, then horsies_workflow_child_start per row,
--- then COMMIT. Any other start is one statement in autocommit.
+-- 2. The rest of the tree, depth first from the top row, as Python's start (horsies_workflow_start_tree): the node
+--    rows of a workflow (a node without dependencies READY, the rest PENDING; node row ids from horsies_uuidv7();
+--    downstream_subworkflow from the static graph); then its sub-workflow roots one at a time in index order, each
+--    only while the workflow is RUNNING: a failed-node record makes the node FAILED with its envelope, started_at and
+--    completed_at, then progression (the failure policy, promotion of its dependents, completion); a pre-built child
+--    goes in (RUNNING, root id of the tree), its node goes RUNNING, linked, with started_at, and the child is started
+--    the same way before the next root. A later root of a workflow that a failure paused stays READY with no child:
+--    the resume builds and starts it.
+-- 3. After the roots of a workflow: its parent advance when it is COMPLETED or FAILED now
+--    (horsies_workflow_child_finish; a parent that ends is advanced in turn, as Python's in-session drain does); then,
+--    when it is still RUNNING, its READY nodes are enqueued, with their task rows minted (horsies_workflow_promote).
+--    A workflow that a failed record or an ended child paused keeps its READY nodes with no task (the pause gate).
+-- 4. Return STARTED.
+-- Owed work: CHILD_START rows come only from the progression of a failed record or from a sub-workflow root with
+-- neither a child nor a failed record; a caller that passes failed records runs this call inside BEGIN, then
+-- horsies_workflow_child_start per row, then COMMIT. Any other start is one statement in autocommit.
 -- Locks: the new rows only, and the unique index entry of the top-level id.
 -- Python: start_workflow_async (core/workflows/lifecycle.py:250-803) and, per sub-workflow root,
 -- enqueue_subworkflow_task (core/workflows/engine.py:989-1627).
@@ -2834,7 +3056,7 @@ BEGIN
         p_node_sub_workflow_params, p_failed_workflow_ids, p_failed_task_indexes, p_failed_results
     );
 
-    IF NOT horsies_workflow_start_workflows(
+    IF NOT horsies_workflow_start_top_row(
         p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
         p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at, v_top
     ) THEN
@@ -2842,16 +3064,16 @@ BEGIN
         RETURN NEXT horsies_workflow_outcome_row('EXISTS', v_top, FALSE, v_name);
         RETURN;
     END IF;
-    PERFORM horsies_workflow_start_nodes(
-        p_workflow_ids, p_parent_workflow_ids, p_parent_task_indexes,
+    RETURN QUERY SELECT * FROM horsies_workflow_start_tree(
+        v_top, 1, v_top,
+        p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
+        p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at, v_top,
         p_node_workflow_ids, p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs, p_node_queue_names,
         p_node_priorities, p_node_dependencies, p_node_args_from, p_node_workflow_ctx_from,
         p_node_allow_failed_deps, p_node_join_types, p_node_min_successes, p_node_task_options, p_node_max_retries,
         p_node_executions, p_node_good_untils, p_node_retention_class_keys, p_node_is_subworkflow,
-        p_node_sub_workflow_names, p_node_sub_definition_keys, p_node_sub_workflow_params
-    );
-    RETURN QUERY SELECT * FROM horsies_workflow_start_progress(
-        p_workflow_ids, p_failed_workflow_ids, p_failed_task_indexes, p_failed_results
+        p_node_sub_workflow_names, p_node_sub_definition_keys, p_node_sub_workflow_params,
+        p_failed_workflow_ids, p_failed_task_indexes, p_failed_results
     );
     RETURN NEXT horsies_workflow_outcome_row('STARTED', v_top, FALSE, NULL);
 END;
@@ -2879,12 +3101,12 @@ $$;
 -- 3. The parent workflow is not RUNNING (a failure earlier in the same step paused it): the node goes back to READY
 --    with started_at NULL, so the resume or recovery case 1.5 starts it later. WORKFLOW_NOT_RUNNING (detail: the
 --    status). Without this the node would stay ENQUEUED with no child, which no recovery case selects.
--- 4. TREE: insert the child workflow rows (RUNNING, the root id of the parent's tree) and every node row
---    (horsies_workflow_start_workflows, horsies_workflow_start_nodes), link the node (RUNNING, sub_workflow_id), then
---    run the progression of a start for the child tree (horsies_workflow_start_progress: failed records, READY nodes
---    enqueued with their task rows, the pause gate, completion deepest first). A child that is COMPLETED or FAILED
---    now advances the node in this statement (horsies_workflow_child_finish), as Python's in-session drain does.
---    STARTED.
+-- 4. TREE: insert the child row (RUNNING, the root id of the parent's tree; horsies_workflow_start_top_row), link
+--    the node (RUNNING, sub_workflow_id), then write the rest of the child tree as a start does
+--    (horsies_workflow_start_tree: depth first, the roots of each workflow in index order while it is RUNNING, the
+--    parent advance of a workflow that ends, then the task rows of the READY nodes of a workflow that is still
+--    RUNNING). A child that is COMPLETED or FAILED now advances the node in this statement
+--    (horsies_workflow_child_finish), as Python's in-session drain does. STARTED.
 -- 5. FAILURE: the node goes FAILED with the envelope and completed_at, then horsies_workflow_progress for it
 --    (failure policy, promotion of its dependents, completion). NODE_FAILED.
 -- A refused argument raises 22023; a child id that exists already raises unique_violation (23505): the core mints
@@ -3017,25 +3239,25 @@ BEGIN
                 p_depths[1] = v_parent.depth + 1,
                 'the child row must have the depth of its parent workflow plus one'
             );
-            IF NOT horsies_workflow_start_workflows(
+            IF NOT horsies_workflow_start_top_row(
                 p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
                 p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at, v_parent.root_workflow_id
             ) THEN
                 RAISE EXCEPTION 'child workflow % of workflow % node % exists already', v_child, p_parent_workflow_id,
                     p_parent_task_index USING ERRCODE = 'unique_violation';
             END IF;
-            PERFORM horsies_workflow_start_nodes(
-                p_workflow_ids, p_parent_workflow_ids, p_parent_task_indexes,
+            UPDATE horsies_workflow_tasks n SET status = 'RUNNING', sub_workflow_id = v_child WHERE n.id = v_node.id;
+            RETURN QUERY SELECT * FROM horsies_workflow_start_tree(
+                v_child, 1, v_child,
+                p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
+                p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at, v_parent.root_workflow_id,
                 p_node_workflow_ids, p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs,
                 p_node_queue_names, p_node_priorities, p_node_dependencies, p_node_args_from,
                 p_node_workflow_ctx_from, p_node_allow_failed_deps, p_node_join_types, p_node_min_successes,
                 p_node_task_options, p_node_max_retries, p_node_executions, p_node_good_untils,
                 p_node_retention_class_keys, p_node_is_subworkflow, p_node_sub_workflow_names,
-                p_node_sub_definition_keys, p_node_sub_workflow_params
-            );
-            UPDATE horsies_workflow_tasks n SET status = 'RUNNING', sub_workflow_id = v_child WHERE n.id = v_node.id;
-            RETURN QUERY SELECT * FROM horsies_workflow_start_progress(
-                p_workflow_ids, p_failed_workflow_ids, p_failed_task_indexes, p_failed_results
+                p_node_sub_definition_keys, p_node_sub_workflow_params, p_failed_workflow_ids, p_failed_task_indexes,
+                p_failed_results
             );
             IF EXISTS (SELECT 1 FROM horsies_workflows w WHERE w.id = v_child AND w.status IN ('COMPLETED', 'FAILED'))
             THEN

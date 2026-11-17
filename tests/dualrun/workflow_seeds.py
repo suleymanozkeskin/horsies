@@ -385,3 +385,31 @@ def run_or_fail[RR, CR](
             return value
         case Err(failed):
             raise AssertionError(f'{failed.step}: {failed.cause}')
+
+
+_PHASE_ONE_SQL: Final[LiteralString] = """
+    SELECT outcome FROM horsies_finish_workflow_success(
+        %(task)s, %(worker)s,
+        (SELECT claimed_at FROM horsies_tasks WHERE id = %(task)s), %(result)s
+    )
+"""
+
+
+def finish_phase_one(
+    connection: Connection,
+    workflow_id: uuid.UUID,
+    index: int,
+    worker_id: str,
+    result_json: str,
+) -> uuid.UUID:
+    """The success of phase 1 alone for the RUNNING task of node ``index``: the
+    task moves to history and the phase-2 record waits for recovery, as after
+    a worker crash between the two phases."""
+    task_id = node_task_id(connection, workflow_id, index)
+    finished = connection.execute(
+        _PHASE_ONE_SQL, {'task': task_id, 'worker': worker_id, 'result': result_json},
+    ).fetchone()
+    assert finished is not None and finished[0] == 'APPLIED', (
+        f'the success of node {index} of {workflow_id} returned {finished}'
+    )
+    return task_id
