@@ -54,6 +54,9 @@ use crate::operations::success::{
     SuccessBatchRequest,
 };
 use crate::operations::task_info::{task_info_operation, TaskInfoParts};
+use crate::operations::task_lists::{
+    expired_tasks_operation, stale_tasks_operation, stale_threshold,
+};
 use crate::operations::workflow_lifecycle::{cancel_workflow_operation, pause_workflow_operation};
 use crate::operations::workflow_retention::delete_expired_workflows_operation;
 use crate::process_core::{core_for_call, Core};
@@ -895,6 +898,52 @@ impl CoreHandle {
             "CoreHandle.monitoring_task_facets_async",
             CallKind::Read,
             task_facets_operation(self.connection(), query.get().query()),
+        )
+    }
+
+    /// The RUNNING tasks whose latest runner beat, or their start when they
+    /// have no beat, is older than `threshold_minutes`
+    /// (`horsies_list_stale_tasks`): `TaskListComplete`,
+    /// `TaskListTruncated`, or `BrokerFailure` with `INVALID_INPUT` or
+    /// `MONITORING_QUERY_FAILED`. The threshold follows Python's rule: a
+    /// `bool`, a value that is not an `int`, or one outside 0 to 525,600
+    /// minutes is `INVALID_INPUT` in a future that is already done, before
+    /// any core call. Reads only, in one statement. Awaitable only: its
+    /// caller, `PostgresBroker.get_stale_tasks`, is a coroutine. A cancelled
+    /// await drops the read.
+    fn stale_tasks_async<'py>(
+        &self,
+        py: Python<'py>,
+        threshold_minutes: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let threshold = match stale_threshold(threshold_minutes)? {
+            Ok(threshold) => threshold,
+            Err(refused) => return done_future(py, BrokerFailure::from(refused.error())),
+        };
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.stale_tasks_async",
+            CallKind::Read,
+            stale_tasks_operation(self.connection(), threshold),
+        )
+    }
+
+    /// The PENDING tasks whose `good_until` passed before a worker took them
+    /// (`horsies_list_expired_tasks`): `TaskListComplete`,
+    /// `TaskListTruncated`, or `BrokerFailure` with
+    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement. Awaitable
+    /// only: its caller, `PostgresBroker.get_expired_tasks`, is a coroutine.
+    /// A cancelled await drops the read.
+    fn expired_tasks_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.expired_tasks_async",
+            CallKind::Read,
+            expired_tasks_operation(self.connection()),
         )
     }
 }

@@ -268,7 +268,7 @@ fn expired_task_row(
         sent_at: column(row, statement, "sent_at")?,
         enqueued_at: column(row, statement, "enqueued_at")?,
         good_until: column(row, statement, "good_until")?,
-        expired_for_ms: column(row, statement, "expired_for_ms")?,
+        expired_for_us: column(row, statement, "expired_for_us")?,
     })
 }
 

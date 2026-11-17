@@ -1,13 +1,10 @@
 //! Post-terminal rerun as a fresh, lineage-bearing enqueue.
 
-use std::sync::LazyLock;
-
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
-use crate::broker::core_rows::{
-    column, execute_in, one_row, query_in, RowDecodeError, StatementLog,
-};
+use crate::broker::core_rows::{column, one_row, query_in, RowDecodeError, StatementLog};
+use crate::broker::enqueue_task::{decode_enqueue_outcome, EnqueueKey, EnqueueTaskOutcome};
 use crate::broker::pools::PoolSettingsError;
 use crate::core::history::archive::attempts::decode_attempt_snapshot;
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
@@ -15,14 +12,8 @@ use crate::core::history::ddl::classes::DEFAULT_RETENTION_CLASS_KEY;
 use crate::core::history::enqueue::{prepare_enqueue_facts_with_lineage, EnqueuePreparationError};
 use crate::core::history::errors::HistoryError;
 use crate::core::history::identity::fingerprint::FingerprintError;
-use crate::core::history::identity::keys::{
-    validate_reservation_window, IdempotencyKeyError, IDEMPOTENCY_SCOPE_VERSION,
-};
-use crate::core::history::identity::reservations::{
-    decode_reservation_row, key_reservation_claim_sql, ReservationClaim,
-};
+use crate::core::history::identity::keys::{validate_reservation_window, IdempotencyKeyError};
 use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
-use crate::core::history::names::LIVE_TASKS;
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::history::rerun::input_envelope::{
     decode_framed_rerun_input, InputEnvelopeDecodeError,
@@ -233,83 +224,44 @@ pub(crate) fn rerun_first_statement() -> &'static TypedStatement {
     &RERUN_SOURCE_READ
 }
 
-/// The new PENDING row of a rerun. Every NOT NULL column is named: the
-/// baseline schema has no column defaults. The row carries the source's
-/// exact input and options texts and stores no envelope: the move builds it
-/// from `input` and `task_options`.
-static INSERT_RERUN_SQL: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        "INSERT INTO {LIVE_TASKS} (
-             id, task_name, queue_name, priority, input, task_options, execution,
-             retention_class_key, sent_at, created_at,
-             command_fingerprint_version, command_fingerprint, idempotency_key_digest,
-             status, enqueued_at, retry_count, max_retries, good_until,
-             is_workflow_task, updated_at,
-             retain_rerun_input, rerun_of_task_id, rerun_root_task_id
-         ) VALUES (
-             $1, $2, $3, $4, $5, $6, $7, $8, $9, statement_timestamp(), $10, $11, $12,
-             'PENDING', statement_timestamp(), 0, $13, $14, FALSE, statement_timestamp(),
-             $15, $16, $17
-         )"
-    )
-});
-
-static INSERT_RERUN: LazyLock<TypedStatement> = LazyLock::new(|| {
-    TypedStatement::new(
-        "insert_rerun",
-        INSERT_RERUN_SQL.as_str(),
-        &[
-            ParameterType::Uuid,
-            ParameterType::Text,
-            ParameterType::Text,
-            ParameterType::Int4,
-            ParameterType::Text,
-            ParameterType::Text,
-            ParameterType::Text,
-            ParameterType::Text,
-            ParameterType::Timestamptz,
-            ParameterType::Int2,
-            ParameterType::Bytea,
-            ParameterType::Bytea,
-            ParameterType::Int4,
-            ParameterType::Timestamptz,
-            ParameterType::Bool,
-            ParameterType::Uuid,
-            ParameterType::Uuid,
-        ],
-    )
-});
-
-static KEY_RESERVATION_CLAIM_SQL: LazyLock<String> = LazyLock::new(key_reservation_claim_sql);
-
-/// `horsies_key_reservation_claim`, with the SQL text of
-/// [`key_reservation_claim_sql`]. Parameters in order: key digest, key scope
-/// version, window in microseconds, fingerprint version, fingerprint, task id.
-static KEY_RESERVATION_CLAIM: LazyLock<TypedStatement> = LazyLock::new(|| {
-    TypedStatement::new(
-        "key_reservation_claim",
-        KEY_RESERVATION_CLAIM_SQL.as_str(),
-        &[
-            ParameterType::Bytea,
-            ParameterType::Int2,
-            ParameterType::Int8,
-            ParameterType::Int2,
-            ParameterType::Bytea,
-            ParameterType::Uuid,
-        ],
-    )
-});
-
-/// The key of a keyed rerun, claimed for the new task.
-struct RerunKeyClaim<'a> {
-    key_digest: &'a [u8],
-    /// The reservation window in microseconds, the unit of the `interval`
-    /// that the claim stores.
-    window_micros: i64,
-    fingerprint_version: i16,
-    fingerprint: &'a [u8],
-    task_id: Uuid,
-}
+/// `horsies_enqueue_task` for a rerun, in the caller's transaction (Python
+/// `rerun_task`): start `NOW`, lineage `RERUN`, send kind `FIRST`; a keyed
+/// rerun claims its key inside the call. Parameters in order: task id, task
+/// name, queue name, priority, input, task options, execution, retention
+/// class key, retain rerun input, max retries, good until, sent at,
+/// fingerprint version, fingerprint, source task id, root task id, key kind,
+/// key digest, key scope version, key window in microseconds (made into the
+/// exact `interval`; NULL for an unkeyed rerun). The row carries the
+/// source's exact input and options texts and stores no envelope: the move
+/// builds it from `input` and `task_options`.
+static RERUN_ENQUEUE: TypedStatement = TypedStatement::new(
+    "rerun_enqueue",
+    "SELECT outcome, task_id FROM horsies_enqueue_task(\
+     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'NOW', NULL, NULL, $13, $14, \
+     'RERUN', $15, $16, $17, $18, $19, $20::bigint * interval '1 microsecond', 'FIRST')",
+    &[
+        ParameterType::Uuid,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Int4,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Bool,
+        ParameterType::Int4,
+        ParameterType::Timestamptz,
+        ParameterType::Timestamptz,
+        ParameterType::Int2,
+        ParameterType::Bytea,
+        ParameterType::Uuid,
+        ParameterType::Uuid,
+        ParameterType::Text,
+        ParameterType::Bytea,
+        ParameterType::Int2,
+        ParameterType::Int8,
+    ],
+);
 
 /// The facts of a history source that the rerun decides on and copies
 /// (Python `RerunSource`). The stored status is a [`TaskStatus`] and the
@@ -342,11 +294,11 @@ enum SourceRead {
 }
 
 /// Run one rerun inside the caller's transaction (Python `rerun_task`,
-/// `core/history/rerun/operations.py:346`).
+/// `python/horsies/core/history/rerun/operations.py`).
 ///
 /// Statements: the source read (`horsies_rerun_source_read`); for a source
-/// with an inline input and a caller key, the key reservation claim; the
-/// insert of the new PENDING row. Each outcome but `Enqueued` writes
+/// with an inline input, one `horsies_enqueue_task` with the lineage `RERUN`,
+/// which claims a caller key first. Each outcome but `Enqueued` writes
 /// nothing. The caller's commit or rollback decides whether the claim and
 /// the row stay.
 ///
@@ -459,44 +411,20 @@ pub(crate) async fn rerun_task_in_transaction(
         Err(other) => return Err(other.into()),
     };
 
-    if let Some(key_digest) = facts.idempotency_key_digest.as_ref() {
-        let claim = RerunKeyClaim {
-            key_digest: key_digest.as_slice(),
-            // The policy was checked at construction (`validate_reservation_window`):
-            // at most 30 days, a whole number of microseconds.
-            window_micros: policy
-                .reservation_window
-                .num_microseconds()
-                .expect("a checked window of at most 30 days fits an i64 count of microseconds"),
-            fingerprint_version: facts.command_fingerprint_version,
-            fingerprint: facts.command_fingerprint.as_slice(),
-            task_id: new_task_id,
-        };
-        match claim_rerun_key(transaction, log, &claim).await? {
-            ReservationClaim::Replay { task_id } => {
-                return Ok(RerunOutcome::KeyReplay {
-                    existing_task_id: task_id,
-                });
-            }
-            ReservationClaim::Conflict { task_id, .. } => {
-                return Ok(RerunOutcome::KeyConflict {
-                    task_id: command.source_task_id,
-                    reserved_by_task_id: task_id,
-                });
-            }
-            ReservationClaim::Applied { .. } => {}
-        }
-    }
-
+    // The policy was checked at construction (`validate_reservation_window`):
+    // at most 30 days, a whole number of microseconds.
+    let window_micros = policy
+        .reservation_window
+        .num_microseconds()
+        .expect("a checked window of at most 30 days fits an i64 count of microseconds");
+    let key = EnqueueKey::of(facts.idempotency_key_digest, window_micros);
+    let (key_kind, key_scope_version, key_window_micros) = key.columns();
+    let key_digest = key.digest();
     let sent_at = Utc::now();
     let execution = facts.execution.as_str();
-    let key_digest = facts
-        .idempotency_key_digest
-        .as_ref()
-        .map(<[u8; 32]>::as_slice);
     let fingerprint = facts.command_fingerprint.as_slice();
-    let statement: &TypedStatement = &INSERT_RERUN;
-    let _inserted = execute_in(
+    let statement = &RERUN_ENQUEUE;
+    let rows = query_in(
         transaction,
         log,
         &statement
@@ -509,24 +437,72 @@ pub(crate) async fn rerun_task_in_transaction(
             .value(&framed.options)
             .value(&execution)
             .value(&facts.retention_class_key)
+            .value(&facts.retain_rerun_input)
+            .value(&source.max_retries)
+            .value(&command.deadline)
             .value(&sent_at)
             .value(&facts.command_fingerprint_version)
             .value(&fingerprint)
-            .value(&key_digest)
-            .value(&source.max_retries)
-            .value(&command.deadline)
-            .value(&facts.retain_rerun_input)
             .value(&source.task_id)
             .value(&root_task_id)
+            .value(&key_kind)
+            .value(&key_digest)
+            .value(&key_scope_version)
+            .value(&key_window_micros)
             .finish(),
     )
     .await?;
-
-    Ok(RerunOutcome::Enqueued {
+    let row = one_row(rows, statement)?;
+    let outcome_text: String = column(&row, statement, "outcome")?;
+    let answering_task_id: Uuid = column(&row, statement, "task_id")?;
+    let written = match decode_enqueue_outcome(&outcome_text, answering_task_id) {
+        Ok(written) => written,
+        Err(defect) => panic!(
+            "statement `{}` returned a row outside the enqueue contract: {defect}",
+            statement.name(),
+        ),
+    };
+    Ok(rerun_write_outcome(
+        written,
         new_task_id,
-        source_task_id: source.task_id,
-        rerun_root_task_id: root_task_id,
-    })
+        source.task_id,
+        root_task_id,
+    ))
+}
+
+/// The rerun outcome of the write of `new_task_id` (Python
+/// `_rerun_write_outcome`). Pure.
+///
+/// `SAME_COMMAND` is the write of this id that already ran in the caller's
+/// transaction: the rerun is enqueued.
+///
+/// Panics on `PAYLOAD_MISMATCH` and `CONFLICT_UNVERIFIABLE`: `new_task_id`
+/// was minted for this write, so no other row can hold it; either answer is
+/// a defect of the id mint or of the function.
+fn rerun_write_outcome(
+    written: EnqueueTaskOutcome,
+    new_task_id: Uuid,
+    source_task_id: Uuid,
+    rerun_root_task_id: Uuid,
+) -> RerunOutcome {
+    match written {
+        EnqueueTaskOutcome::Inserted | EnqueueTaskOutcome::SameCommand => RerunOutcome::Enqueued {
+            new_task_id,
+            source_task_id,
+            rerun_root_task_id,
+        },
+        EnqueueTaskOutcome::KeyReplay { holder } => RerunOutcome::KeyReplay {
+            existing_task_id: holder,
+        },
+        EnqueueTaskOutcome::KeyConflict { owner } => RerunOutcome::KeyConflict {
+            task_id: source_task_id,
+            reserved_by_task_id: owner,
+        },
+        EnqueueTaskOutcome::PayloadMismatch | EnqueueTaskOutcome::ConflictUnverifiable => panic!(
+            "the rerun write of the minted task id {new_task_id} answered {written:?}: \
+             no other row can hold a minted id"
+        ),
+    }
 }
 
 /// Read the source of a rerun and the class of the new task: one statement
@@ -631,50 +607,69 @@ fn history_source(row: &Row, statement: &TypedStatement) -> Result<SourceRead, R
     }))
 }
 
-/// Claim the reservation of a rerun's key in the caller's transaction (Python
-/// `claim_key_reservation`). Writes the reservation row when the outcome is
-/// `Applied`; the caller's commit or rollback decides whether it stays.
-///
-/// Errors: [`RerunError::Statement`]; [`RerunError::RowDecode`] for a row
-/// that is not one row of the function's columns.
-///
-/// Panics when the outcome row breaks the claim contract (an unknown
-/// outcome, no task id, or an observed fingerprint version that does not fit
-/// the outcome): that is a defect of `horsies_key_reservation_claim`, not a
-/// refusal of the rerun. The panic names the statement and the row (the
-/// rule of #1231).
-async fn claim_rerun_key(
-    transaction: &mut Transaction<'_>,
-    log: StatementLog,
-    claim: &RerunKeyClaim<'_>,
-) -> Result<ReservationClaim, RerunError> {
-    let statement: &TypedStatement = &KEY_RESERVATION_CLAIM;
-    let rows = query_in(
-        transaction,
-        log,
-        &statement
-            .bind()
-            .value(&claim.key_digest)
-            .value(&IDEMPOTENCY_SCOPE_VERSION)
-            .value(&claim.window_micros)
-            .value(&claim.fingerprint_version)
-            .value(&claim.fingerprint)
-            .value(&claim.task_id)
-            .finish(),
-    )
-    .await?;
-    let row = one_row(rows, statement)?;
-    let outcome: Option<String> = column(&row, statement, "outcome")?;
-    let task_id: Option<Uuid> = column(&row, statement, "task_id")?;
-    let observed_fingerprint_version: Option<i16> =
-        column(&row, statement, "observed_fingerprint_version")?;
-    match decode_reservation_row(outcome.as_deref(), task_id, observed_fingerprint_version) {
-        Ok(claimed) => Ok(claimed),
-        Err(error) => panic!(
-            "statement `{}` returned a row outside the claim contract \
-             (outcome {outcome:?}, task_id {task_id:?}, \
-             observed_fingerprint_version {observed_fingerprint_version:?}): {error}",
-            statement.name(),
-        ),
+#[cfg(test)]
+mod write_outcome_tests {
+    use super::*;
+
+    const NEW: Uuid = Uuid::from_u128(0x0190_f0f0_0000_7000_8000_0000_0000_00e1);
+    const SOURCE: Uuid = Uuid::from_u128(0x0190_f0f0_0000_7000_8000_0000_0000_00e0);
+    const ROOT: Uuid = Uuid::from_u128(0x0190_f0f0_0000_7000_8000_0000_0000_00d0);
+    const HOLDER: Uuid = Uuid::from_u128(0x0190_f0f0_0000_7000_8000_0000_0000_00f0);
+
+    /// Python `_rerun_write_outcome`: an insert and a repeat of this write
+    /// are the enqueued rerun; the key answers name the task that holds the
+    /// key.
+    #[test]
+    fn each_write_answer_maps_onto_its_rerun_outcome() {
+        let enqueued = RerunOutcome::Enqueued {
+            new_task_id: NEW,
+            source_task_id: SOURCE,
+            rerun_root_task_id: ROOT,
+        };
+        assert_eq!(
+            rerun_write_outcome(EnqueueTaskOutcome::Inserted, NEW, SOURCE, ROOT),
+            enqueued
+        );
+        assert_eq!(
+            rerun_write_outcome(EnqueueTaskOutcome::SameCommand, NEW, SOURCE, ROOT),
+            enqueued
+        );
+        assert_eq!(
+            rerun_write_outcome(
+                EnqueueTaskOutcome::KeyReplay { holder: HOLDER },
+                NEW,
+                SOURCE,
+                ROOT
+            ),
+            RerunOutcome::KeyReplay {
+                existing_task_id: HOLDER
+            }
+        );
+        assert_eq!(
+            rerun_write_outcome(
+                EnqueueTaskOutcome::KeyConflict { owner: HOLDER },
+                NEW,
+                SOURCE,
+                ROOT
+            ),
+            RerunOutcome::KeyConflict {
+                task_id: SOURCE,
+                reserved_by_task_id: HOLDER,
+            }
+        );
+    }
+
+    /// A minted id that another row holds is a defect, not an outcome.
+    #[test]
+    #[should_panic(expected = "no other row can hold a minted id")]
+    fn a_payload_mismatch_on_a_minted_id_panics() {
+        let _outcome = rerun_write_outcome(EnqueueTaskOutcome::PayloadMismatch, NEW, SOURCE, ROOT);
+    }
+
+    #[test]
+    #[should_panic(expected = "no other row can hold a minted id")]
+    fn a_conflict_that_cannot_be_verified_on_a_minted_id_panics() {
+        let _outcome =
+            rerun_write_outcome(EnqueueTaskOutcome::ConflictUnverifiable, NEW, SOURCE, ROOT);
     }
 }
