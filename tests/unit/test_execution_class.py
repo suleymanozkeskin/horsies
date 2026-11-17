@@ -729,8 +729,9 @@ class TestEveryInsertPathWritesTheColumn:
                 found.setdefault(str(source.relative_to(_PACKAGE_ROOT)), []).append(
                     'execution' if 'execution' in columns else 'MISSING',
                 )
+        # The rerun writes its task through horsies_enqueue_task, which
+        # takes the execution class as p_execution.
         assert found == {
-            'core/history/rerun/operations.py': ['execution'],
             'core/workflows/sql.py': ['execution'],
         }
 
