@@ -73,6 +73,41 @@ pub const CHILD_REFUSAL_WRITES_BOUND: Duration = START_ATTEMPT_END
     .saturating_mul(PRE_START_CONFIRM_ATTEMPTS)
     .saturating_add(FINALIZING_MARKER_END);
 
+/// The longest time of the finalizing marker of a refusal in a Python shared
+/// thread child, which the child writes on its own pool: the wait for a
+/// pooled connection, the statement, and the cancel request of a statement
+/// past its bound (Python `CHILD_POOL_CONNECTION_WAIT_S`,
+/// `REFUSAL_STATEMENTS_TIMEOUT_S`, `CANCEL_REQUEST_TIMEOUT_S`).
+pub const THREAD_CHILD_MARKER_END: Duration = CHILD_WRITE_CHECKOUT_WAIT
+    .saturating_add(CHILD_STATEMENT_BOUND)
+    .saturating_add(CANCEL_REQUEST_BOUND);
+
+/// The longest time of the writes of a refusal in a Python shared thread
+/// child: each start attempt, with the end of a statement cancelled at its
+/// bound, and the finalizing marker of the child
+/// ([`THREAD_CHILD_MARKER_END`]) (Python `THREAD_REFUSAL_WRITES_BOUND_S`).
+pub const THREAD_CHILD_REFUSAL_WRITES_BOUND: Duration = START_ATTEMPT_END
+    .saturating_mul(PRE_START_CONFIRM_ATTEMPTS)
+    .saturating_add(THREAD_CHILD_MARKER_END);
+
+/// The longest time of the writes of a refusal in a child of any kind: a
+/// core child and a Python shared async child
+/// ([`CHILD_REFUSAL_WRITES_BOUND`]), a Python shared thread child
+/// ([`THREAD_CHILD_REFUSAL_WRITES_BOUND`]). The refusal backstop of the
+/// parent comes after it, so it never fires before a child's own refusal.
+pub const LONGEST_REFUSAL_WRITES_BOUND: Duration = longer(
+    CHILD_REFUSAL_WRITES_BOUND,
+    THREAD_CHILD_REFUSAL_WRITES_BOUND,
+);
+
+/// The longer of two times, for a constant. Pure.
+const fn longer(first: Duration, second: Duration) -> Duration {
+    match first.as_nanos() >= second.as_nanos() {
+        true => first,
+        false => second,
+    }
+}
+
 /// The end of the time of one child write: its checkouts and its
 /// statements end by it. Each constructor takes a bound of at most
 /// [`START_ATTEMPT_BOUND`].
@@ -197,6 +232,31 @@ mod tests {
         assert_eq!(START_ATTEMPT_END, Duration::from_secs(50));
         assert_eq!(FINALIZING_MARKER_END, Duration::from_secs(20));
         assert_eq!(CHILD_REFUSAL_WRITES_BOUND, Duration::from_secs(120));
+        assert_eq!(THREAD_CHILD_MARKER_END, Duration::from_secs(45));
+        assert_eq!(THREAD_CHILD_REFUSAL_WRITES_BOUND, Duration::from_secs(145));
+        assert_eq!(LONGEST_REFUSAL_WRITES_BOUND, Duration::from_secs(145));
+    }
+
+    /// Python `test_shared_lifecycle.py::TestRefusalBound::test_the_writes_of_a_thread_refusal_have_a_named_bound`
+    /// and `test_the_refusal_backstop_comes_after_the_writes_and_a_block_report`:
+    /// the longest refusal bound is that of the child kind whose writes take
+    /// longest, and no child kind's bound passes it.
+    #[test]
+    fn the_longest_refusal_bound_covers_every_child_kind() {
+        for bound in [
+            CHILD_REFUSAL_WRITES_BOUND,
+            THREAD_CHILD_REFUSAL_WRITES_BOUND,
+        ] {
+            assert!(LONGEST_REFUSAL_WRITES_BOUND >= bound, "{bound:?}");
+        }
+        assert_eq!(
+            longer(Duration::from_secs(2), Duration::from_secs(3)),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            longer(Duration::from_secs(3), Duration::from_secs(2)),
+            Duration::from_secs(3)
+        );
     }
 
     #[test]
