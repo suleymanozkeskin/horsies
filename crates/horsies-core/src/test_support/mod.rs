@@ -8,12 +8,19 @@ pub(crate) use database::{
     server_url, with_database, TestDatabase, DATABASE_PREFIX_VARIABLE, DEFAULT_DATABASE_PREFIX,
 };
 
+use std::sync::{Arc, Mutex, PoisonError};
+
+use tokio_postgres::AsyncMessage;
+
 use crate::broker::client_family::ClientFamily;
 use crate::broker::core_rows::StatementLog;
 use crate::broker::migrations::{install_schema_on, InstallLockPlan};
 use crate::broker::pools::{CoreHandle, PoolProfile};
 use crate::core::PostgresConfig;
-use crate::db::ConnectionEnvironment;
+use crate::db::{
+    open_connection, parse_connection_url, ConnectPlan, ConnectionEnvironment,
+    DEFAULT_SOCKET_SETTINGS,
+};
 
 /// A core handle (producer pools) on the database of `url`. The caller
 /// closes it ([`CoreHandle::close`]) before the database is dropped, or
@@ -25,6 +32,47 @@ pub(crate) fn core_handle(url: &str) -> CoreHandle {
         ConnectionEnvironment::capture().expect("read the connection environment of the test"),
     )
     .expect("the statement layer accepts the test database URL")
+}
+
+/// Opens one direct connection to `url` whose server notices are collected
+/// in arrival order (for example the plans that `auto_explain` sends with
+/// `log_level = notice`). Its driver runs as a task of the current runtime
+/// and ends with it. The driver hands a notice to the collector before it
+/// reads the messages after it, so the notices of a statement are in the
+/// list when the call of that statement returns.
+///
+/// # Panics
+///
+/// When the URL is refused or the server cannot be reached: the test cannot
+/// run.
+pub(crate) async fn connect_collecting_notices(
+    url: &str,
+) -> (tokio_postgres::Client, Arc<Mutex<Vec<String>>>) {
+    let environment =
+        ConnectionEnvironment::capture().expect("read the connection environment of the test");
+    let settings = parse_connection_url(url, &environment)
+        .unwrap_or_else(|error| panic!("the test database URL is refused: {error}"));
+    let plan = ConnectPlan::load(&settings, &environment, &DEFAULT_SOCKET_SETTINGS)
+        .unwrap_or_else(|error| panic!("the test connection plan does not load: {error}"));
+    let (client, mut connection) = open_connection(&plan)
+        .await
+        .unwrap_or_else(|error| panic!("connecting to the test server failed: {error}"));
+    let notices = Arc::new(Mutex::new(Vec::new()));
+    let collected = Arc::clone(&notices);
+    drop(tokio::spawn(async move {
+        while let Some(Ok(message)) =
+            std::future::poll_fn(|context| connection.poll_message(context)).await
+        {
+            match message {
+                AsyncMessage::Notice(notice) => collected
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(notice.message().to_owned()),
+                _ => {}
+            }
+        }
+    }));
+    (client, notices)
 }
 
 /// Installs the schema into the template of this process: the
