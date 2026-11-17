@@ -237,6 +237,7 @@ export default defineConfig({
 						{
 							label: 'Monitoring',
 							items: [
+								{ label: 'Health Reads', slug: 'monitoring/health-reads' },
 								{ label: 'Broker Methods', slug: 'monitoring/broker-methods' },
 							],
 						},

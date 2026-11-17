@@ -15,7 +15,11 @@ use tokio::task::JoinHandle;
 
 use crate::app::{AppState, StateNotProvided};
 use crate::send::TaskFunctions;
-use crate::{TaskFunction, TaskFunctionNotFound, UserErrorCode};
+use crate::workflow::WorkflowStarter;
+use crate::{
+    TaskFunction, TaskFunctionNotFound, UserErrorCode, WorkflowHandle, WorkflowSpec,
+    WorkflowStartError,
+};
 
 /// What a task body reads while it runs.
 ///
@@ -35,11 +39,55 @@ use crate::{TaskFunction, TaskFunctionNotFound, UserErrorCode};
 pub struct TaskRuntime {
     state: Arc<AppState>,
     functions: Arc<TaskFunctions>,
+    workflows: WorkflowStarter,
 }
 
 impl TaskRuntime {
-    pub(crate) fn new(state: Arc<AppState>, functions: Arc<TaskFunctions>) -> Self {
-        Self { state, functions }
+    pub(crate) fn new(
+        state: Arc<AppState>,
+        functions: Arc<TaskFunctions>,
+        workflows: WorkflowStarter,
+    ) -> Self {
+        Self {
+            state,
+            functions,
+            workflows,
+        }
+    }
+
+    /// Start `spec`, a workflow that the task built, with a new id and the
+    /// result type `T`: the start of `Horsies::start`, through the child's
+    /// producer handle in a worker child. The task does not wait for the
+    /// workflow: a wait in a task body is refused (`WAIT_INSIDE_TASK`).
+    ///
+    /// Errors: the start errors of `WorkflowStartErrorCode`.
+    pub async fn start<T>(
+        &self,
+        spec: &WorkflowSpec,
+    ) -> Result<WorkflowHandle<T>, WorkflowStartError>
+    where
+        T: DeserializeOwned + 'static,
+    {
+        self.workflows
+            .start(spec, crate::workflow::new_workflow_id())
+            .await
+    }
+
+    /// Start `spec` with the id `workflow_id`, as [`Self::start`]. A start
+    /// again with the same id, after a retry of the task, finds the
+    /// workflow and starts nothing.
+    ///
+    /// Errors: as [`Self::start`]; `WORKFLOW_ID_CONFLICT` for an id of
+    /// another workflow name.
+    pub async fn start_with_id<T>(
+        &self,
+        spec: &WorkflowSpec,
+        workflow_id: uuid::Uuid,
+    ) -> Result<WorkflowHandle<T>, WorkflowStartError>
+    where
+        T: DeserializeOwned + 'static,
+    {
+        self.workflows.start(spec, workflow_id).await
     }
 
     /// The typed function of task `task_name` in this app, as its
@@ -167,5 +215,26 @@ mod tests {
         let runtime = app().task_runtime();
         let refused = runtime.spawn("work", async {}).unwrap_err();
         assert_eq!(refused, RunSpawnRefused::NotInARun);
+    }
+
+    /// A start from a task body takes the start path of the app: a spec
+    /// without a definition key is refused before any I/O.
+    #[tokio::test]
+    async fn a_start_from_the_runtime_checks_the_spec_first() {
+        let runtime = app().task_runtime();
+        let mut builder = crate::WorkflowSpecBuilder::new("keyless");
+        let tick = builder.task(crate::workflow::tests_support::unit_task_node("tick"));
+        builder.output(tick);
+        let spec = builder.build().unwrap();
+        let refused = runtime.start::<u32>(&spec).await.unwrap_err();
+        assert_eq!(
+            refused.code,
+            crate::WorkflowStartErrorCode::ValidationFailed
+        );
+        let refused = runtime
+            .start_with_id::<u32>(&spec, uuid::Uuid::nil())
+            .await
+            .unwrap_err();
+        assert_eq!(refused.workflow_id, Some(uuid::Uuid::nil()));
     }
 }

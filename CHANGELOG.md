@@ -561,6 +561,40 @@ unless it starts with "Added".
   `output_for` the child's output read as `T`.
 - **`UserErrorCode::code` returns `&str`.** Added: `UserCode` implements
   `UserErrorCode`, with every user code as checked text.
+- **A workflow start converts the spec to the core's spec data and runs
+  on the core.** `register_workflow_definition::<D>()` (a definition without
+  params) returns `WorkflowFunction<T>`; `workflow_template::<D>()` (a
+  definition with params) returns `Result<WorkflowTemplate<P, T>,
+  HorsiesError>`; `Horsies::start::<T>(&spec)` and `start_with_id` take
+  `&self` and need no registration of the spec; `TaskRuntime::start::<T>`
+  and `start_with_id` take `&WorkflowSpec`. A start refuses with
+  `VALIDATION_FAILED`, before any I/O, a spec without a definition key, an
+  output type that is not the handle's (`HRS-025`), a sub-workflow node of a
+  definition that is not registered (`HRS-020`), and params given to a
+  definition without params (`HRS-022`). `register_workflow`,
+  `register_workflow_spec`, `register_parameterized_workflow`,
+  `register_parameterized_workflow_with_children`, the `workflow::<T>(name)`
+  builder, `WorkflowRegistrationBuilder` and `check_workflow_builder0` are
+  removed; `check_workflow_builder` takes `&self`. `INTERNAL_FAILED` is no
+  longer a start code.
+- **A recursive workflow definition is valid.** Registration refuses no
+  cycle; `check()` reports a nesting that reaches the depth limit 32 for
+  certain (`HRS-036`) or repeats a definition with the same params at once
+  (`HRS-037`), as Python's check, and the core fails a node whose child
+  would be deeper than the limit.
+- **`WorkflowHandle<T>::get` takes a `WaitLimit` and returns
+  `Result<TaskOutcome<T, UserCode>, WorkflowReadError>`.** The outer error is
+  the read failing (`WaitTimedOut`, `WorkflowNotFound`,
+  `StoredResultUnreadable`, `UnknownUserCode`, `WaitInsideTask`, `Database`);
+  the inner value is the workflow's outcome, with its user codes as checked
+  text; a PAUSED workflow is `Failed` with `WORKFLOW_PAUSED`. A workflow with
+  no output node is read as `OutputlessResults`. `result_for::<V, E>(&key)`
+  reads one node with its types and returns `ResultNotReady` while the node
+  stores no result; `result_for_key` is removed. `results()` returns the
+  stored result of each node as `NodeResult`, `tasks()` returns
+  `WorkflowNodeInfo`, `cancel()` returns `HandleResult<()>`.
+  `WorkflowFunction::handle` and `Horsies::workflow_handle` return the
+  handle with no I/O.
 
 ## [0.7.0] - 2026-11-15
 

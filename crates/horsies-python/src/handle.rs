@@ -29,6 +29,7 @@ use crate::errors::{refusal_error, ManifestRefused};
 use crate::operations::arguments::utc_instant;
 use crate::operations::cancel::cancel_task_operation;
 use crate::operations::claim::{claim_pass_operation, ClaimPassRequest};
+use crate::operations::claim_settle::{settle_claimed_workflow_tasks_operation, SettleRequest};
 use crate::operations::coverage::{ensure_partition_coverage_operation, CoverageRequestArgument};
 use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
 use crate::operations::expiry_and_orphans::{
@@ -844,6 +845,26 @@ impl CoreHandle {
             "CoreHandle.recover_workflows_async",
             CallKind::Write,
             recover_workflows_operation(self.connection(), failure_limit, source),
+        )
+    }
+
+    /// Settle the claimed workflow tasks of one claim pass
+    /// (`horsies_workflow_claimed_tasks_settle`): `ClaimsSettled` with the
+    /// tasks of PAUSED and CANCELLED workflows, never to dispatch, or
+    /// `SettleFailed`. Writes, one statement per 1000 claims. A claim with no
+    /// task sends nothing.
+    fn settle_claimed_workflow_tasks_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'py, SettleRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.settle_claimed_workflow_tasks_async",
+            CallKind::Write,
+            settle_claimed_workflow_tasks_operation(self.connection(), request.get().parts()),
         )
     }
 
