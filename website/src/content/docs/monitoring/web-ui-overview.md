@@ -1,15 +1,14 @@
 ---
 title: Web UI Overview
 section: shared
-summary: Browser dashboard for tasks, workflows, and workers, shipped in the horsies[web] extra.
-related: [web-ui-deployment, action-semantics, syce-overview, worker-health]
+summary: Browser dashboard for tasks, workflows, and workers, served by the monitoring app of each client.
+related: [web-ui-deployment, web-ui-mount, action-semantics, syce-overview, worker-health]
 tags: [monitoring, web, dashboard, ui, sse]
 ---
 
-The web UI is a browser dashboard for a single horsies deployment. It ships as
-`horsies.web`, a FastAPI sub-app behind the `[web]` extra, which serves both the
-JSON API under `/api` and the single-page app that consumes it. The dashboard
-reads through `horsies.monitoring`, a query package in core that needs no extra.
+The web UI is a browser dashboard for a single horsies deployment. The
+monitoring app serves both the JSON API under `/api` and the single-page app
+that consumes it.
 
 The UI is read-only unless a deployment enables actions. See
 [Deployment & Authentication](/horsies/monitoring/web-ui-deployment/) for how to turn them on and
@@ -17,16 +16,11 @@ The UI is read-only unless a deployment enables actions. See
 
 ## Installation
 
-```bash
-pip install "horsies[web]"
-```
-
-```bash
-uv add "horsies[web]"
-```
-
-The extra adds `fastapi` and `uvicorn`. `horsies.monitoring` imports neither and
-is available without the extra.
+Each client ships the monitoring app as an option of its package: the
+`horsies[web]` extra of the Python package, and the `web` feature of the Rust
+crate. The install is on the client pages:
+[Install the Extra](/horsies/monitoring/web-ui-mount/#install-the-extra)
+(Python). The Rust page is not written yet.
 
 ## Surfaces
 

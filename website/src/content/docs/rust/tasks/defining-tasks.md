@@ -35,7 +35,8 @@ async fn validate_order(order: Order) -> Result<String, TaskError<OrderCode>> {
 }
 ```
 
-- The parameters form the input: no parameter is `()`, one parameter is its own type, several parameters are a generated `Input` struct.
+- The parameters form the input, stored as Python stores keyword arguments: a generated `Input` struct with one field per parameter, keyed by the parameter's name, a single parameter of any type included. `validate_order` stores `{"order": {"order_id": "...", "total_cents": ...}}`; `fn double(x: i64)` stores `{"x": 2}`. No parameter, or one parameter written `()`, is the input `()`: a send stores `null`, a workflow node `{}`.
+- A parameter whose value is stored needs a name: `_` is a compile error for it.
 - A first parameter of type `horsies::TaskRuntime` is not input: the body gets the runtime of the app. See [Task Runtime](#task-runtime).
 - A task with no codes of its own uses `TaskError<std::convert::Infallible>`. `TaskError` without its code type is a compile error.
 
@@ -109,11 +110,12 @@ The attribute generates a module with the name of the function:
 
 | Item | Does |
 |------|------|
-| `validate_order::register(&mut app)` | Registers the task and returns its `TaskFunction<A, T, E>`. Refuses a code type that names a built-in or reserved code (`HRS-212`); this happens only with a hand-written `UserErrorCode` impl |
+| `validate_order::register(&mut app)` | Registers the task and returns its `TaskFunction<validate_order::Input, String, OrderCode>`. Refuses a code type that names a built-in or reserved code (`HRS-212`); this happens only with a hand-written `UserErrorCode` impl |
 | `validate_order::send(input)` | Sends the task through the function of the first `register` in this process |
 | `validate_order::schedule(delay, input)` | Sends the task to start after `delay: WholeSeconds` |
 | `validate_order::with_options(options)` | The two sends with `TaskSendOptions` |
 | `validate_order::handle(&runtime)` | The `TaskFunction` from a `TaskRuntime`; `Err(TaskFunctionNotFound)` when the app did not register the task with these types |
+| `validate_order::params::order()` | The field token of the parameter `order` (`InputField<validate_order::Input, Order>`), for a workflow node's `set` and `arg_from` |
 
 A send before `register` in the process returns `TaskSendError::ValidationFailed`, which names the task. See [Sending Tasks](/horsies/rust/tasks/sending-tasks/).
 

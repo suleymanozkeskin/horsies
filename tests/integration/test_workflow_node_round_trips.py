@@ -5,10 +5,11 @@ Phase 1 and phase 2 are counted apart: ``_persist_task_terminal_state``,
 then ``_finalize_workflow_phase``, which are the two halves of
 ``_finalize_task_result``. Each case starts a real workflow and runs node A
 as the claim and the child's start leave it. The count is taken on the
-``WARM_RUNS``-th run, in the steady state of psycopg's prepared statements;
-the statements are named from an earlier run, whose turns still carry the
-SQL text. The worker's engine is the one the CLI builds, with
-``worker_pool_pre_ping`` off unless a test turns it on.
+``WARM_RUNS``-th run, in the steady state of the core's prepared statements:
+each statement is one Bind/Execute turn, and the transaction control
+(``BEGIN``, ``COMMIT``) and the core's ping are simple queries. The core's
+count is never higher than Python's. The worker's engine is the one the CLI
+builds, with ``worker_pool_pre_ping`` off unless a test turns it on.
 
 Shapes: ``chain`` is A -> B (phase 2 of A promotes B), ``fanout`` is A with
 ``FANOUT`` dependents (phase 2 of A promotes all of them with the statements
@@ -63,24 +64,28 @@ from tests.integration.round_trip_proxy import RoundTripProxy, Turn
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
 PING: Final = 1
-"""The pre-ping of a checkout, when ``worker_pool_pre_ping`` is on. These
-tests set the idle limit to 0, so every reused connection is pinged."""
+"""The pre-ping of a checkout, when ``worker_pool_pre_ping`` is on. Python
+pinged every reused connection with these tests' idle limit of 0. The core
+pings a connection that waited in its pool past its own idle limit (1 s), so
+it sends the ping or not."""
+
+CORE_PING: Final = 'SELECT 1'
+"""The simple query of the core's ping."""
 
 
 @pytest.fixture(autouse=True)
 def _ping_every_reused_connection(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With ``worker_pool_pre_ping`` on, the count does not depend on how
-    long a connection waited in the pool."""
+    """The worker's own engine pings every reused connection. The measured
+    phases run on the core's pool, which keeps its own idle limit."""
     monkeypatch.setattr(postgres_module, 'PRE_PING_AFTER_IDLE_S', 0.0)
 FANOUT: Final = 5
-LABEL_RUN: Final = 2
-"""A run whose statements are not prepared yet, so each turn shows its SQL."""
 
 PRE_PING = pytest.mark.parametrize(
     'pre_ping', [False, True], ids=['pre_ping_off', 'pre_ping_on']
 )
 
-# The statements of each phase, in order, by the start of their SQL text.
+# The statements of each phase, in Python's order, by the start of their SQL
+# text. The tests count each kind; the texts name them.
 SUCCESS_PHASE1: Final = ('SELECT * FROM horsies_finish_workflow_success(',)
 FAILURE_PHASE1: Final = ('SELECT * FROM horsies_finish_failed_attempt(',)
 STEP: Final = 'SELECT r.row_kind, r.disposition, r.workflow_id'
@@ -236,25 +241,31 @@ async def _finalize_once(
     return _Measured(phase1=phase1, phase2=phase2)
 
 
-def _statements(turns: tuple[Turn, ...]) -> list[str]:
-    """The statement each turn sent: a simple query or a parsed text."""
-    named: list[str] = []
-    for turn in turns:
-        texts = [
-            message.split(':', 1)[1]
-            for message in turn.messages
-            if message.startswith(('Q:', 'P:'))
-        ]
-        assert len(texts) == 1, turn
-        named.append(texts[0].removesuffix(' ISOLATION LEVEL READ COMMITTED'))
-    return named
+TRANSACTION_CONTROL: Final = frozenset({'BEGIN', 'COMMIT'})
+"""The entries of an expected list that the core sends as simple queries."""
 
 
-def _assert_statements(turns: tuple[Turn, ...], expected: tuple[str, ...]) -> None:
-    named = _statements(turns)
-    assert len(named) == len(expected), named
-    for sent, start in zip(named, expected, strict=True):
-        assert sent.startswith(start), (sent, start)
+def _simple_query(turn: Turn) -> str:
+    """The text of the one simple query of ``turn``."""
+    texts = [message.removeprefix('Q:') for message in turn.messages if message.startswith('Q:')]
+    assert len(texts) == 1, turn
+    return texts[0]
+
+
+def _assert_turns(turns: tuple[Turn, ...], expected: tuple[str, ...], *, pre_ping: bool) -> None:
+    """One Bind/Execute turn per statement of ``expected``, its transaction
+    control as simple queries in its order, and with the pre-ping on at most
+    ``PING`` more turns, each the core's ping."""
+    executed = [turn for turn in turns if turn.executes()]
+    pings = [turn for turn in turns if turn.has_simple_query(CORE_PING)]
+    control = [
+        turn for turn in turns if not turn.executes() and not turn.has_simple_query(CORE_PING)
+    ]
+    assert len(executed) == len([each for each in expected if each not in TRANSACTION_CONTROL]), turns
+    assert [_simple_query(turn) for turn in control] == [
+        each for each in expected if each in TRANSACTION_CONTROL
+    ], turns
+    assert len(pings) <= (PING if pre_ping else 0), turns
 
 
 async def _measure(
@@ -267,8 +278,8 @@ async def _measure(
     shape: str,
     ok: bool,
     pre_ping: bool,
-) -> tuple[_Measured, _Measured]:
-    """The labelled run and the steady-state run of one case."""
+) -> _Measured:
+    """The steady-state run of one case."""
 
     @app.task(task_name=f'node_rt_{uuid.uuid4().hex[:8]}')
     def node_task(*, value: int) -> TaskResult[int, TaskError]:
@@ -277,21 +288,15 @@ async def _measure(
     opened = await open_proxied_worker(proxied_url(db_url, proxy), pre_ping=pre_ping)
     opened.worker._app = app
     opened.broker.app = app
-    labelled: _Measured | None = None
     steady: _Measured | None = None
     try:
-        for run in range(1, WARM_RUNS + 1):
+        for _ in range(WARM_RUNS):
             workflow_id = await _start(app, broker, node_task, shape)
-            measured = await _finalize_once(
-                proxy, opened.worker, session, workflow_id, ok
-            )
-            if run == LABEL_RUN:
-                labelled = measured
-            steady = measured
+            steady = await _finalize_once(proxy, opened.worker, session, workflow_id, ok)
     finally:
         await opened.close()
-    assert labelled is not None and steady is not None
-    return labelled, steady
+    assert steady is not None
+    return steady
 
 
 @PRE_PING
@@ -306,13 +311,11 @@ async def test_phase_one_of_a_success_is_one_statement(
     shape: str,
     pre_ping: bool,
 ) -> None:
-    labelled, steady = await _measure(
+    steady = await _measure(
         proxy, db_url, app, broker, session, shape=shape, ok=True, pre_ping=pre_ping
     )
 
-    assert len(steady.phase1) == len(SUCCESS_PHASE1) + (PING if pre_ping else 0)
-    if not pre_ping:
-        _assert_statements(labelled.phase1, SUCCESS_PHASE1)
+    _assert_turns(steady.phase1, SUCCESS_PHASE1, pre_ping=pre_ping)
 
 
 @PRE_PING
@@ -327,13 +330,11 @@ async def test_phase_one_of_a_failure_is_one_statement(
     shape: str,
     pre_ping: bool,
 ) -> None:
-    labelled, steady = await _measure(
+    steady = await _measure(
         proxy, db_url, app, broker, session, shape=shape, ok=False, pre_ping=pre_ping
     )
 
-    assert len(steady.phase1) == len(FAILURE_PHASE1) + (PING if pre_ping else 0)
-    if not pre_ping:
-        _assert_statements(labelled.phase1, FAILURE_PHASE1)
+    _assert_turns(steady.phase1, FAILURE_PHASE1, pre_ping=pre_ping)
 
 
 @PRE_PING
@@ -370,13 +371,8 @@ async def test_phase_two_statements(
     """Phase 2 is one statement in autocommit when no sub-workflow node is
     below the node, and a transaction with the owed child start when one
     is: the workflow row lock is held from the step to the COMMIT."""
-    labelled, steady = await _measure(
+    steady = await _measure(
         proxy, db_url, app, broker, session, shape=shape, ok=ok, pre_ping=pre_ping
     )
-    expected = PHASE2[(shape, ok)]
 
-    assert len(steady.phase2) == len(expected) + (PING if pre_ping else 0)
-    # The insert of a fan-out runs FANOUT times a run, so it is prepared, and
-    # sends no text, before the labelled run; chain names the same statements.
-    if not pre_ping and shape != 'fanout':
-        _assert_statements(labelled.phase2, expected)
+    _assert_turns(steady.phase2, PHASE2[(shape, ok)], pre_ping=pre_ping)

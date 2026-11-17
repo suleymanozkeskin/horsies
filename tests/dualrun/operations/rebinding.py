@@ -41,6 +41,13 @@ REBOUND_PACKAGES: Final = ('horsies', 'tests')
 CORE_HANDLE_MODULE: Final = 'horsies._core'
 """The module of ``CoreHandle``."""
 
+HANDLE_TAKING_CLASSES: Final = ('CoreScheduler',)
+"""The classes of ``horsies._core`` whose constructor takes a ``CoreHandle``.
+A native constructor refuses the Python wrapper of the Python run, so in
+that run it gets the native handle that the wrapper holds. Native code calls
+the core directly, never a Python method of the handle, so the wrapper would
+trip nothing there."""
+
 type AnyFunction = Callable[..., object]
 
 
@@ -170,11 +177,38 @@ class TripwireCoreHandle:
         self._tripped = tripped
         """Method name to operation name."""
 
+    @property
+    def native_handle(self) -> object:
+        """The ``CoreHandle`` that this wrapper holds."""
+        return self._handle
+
     def __getattr__(self, name: str) -> object:
         operation = self._tripped.get(name)
         if operation is not None:
             return tripwire(operation, Implementation.PYTHON_REFERENCE)
         return getattr(self._handle, name)
+
+
+def _native_argument(value: object) -> object:
+    """``value``, or the native handle of a ``TripwireCoreHandle``."""
+    match value:
+        case TripwireCoreHandle():
+            return value.native_handle
+        case _:
+            return value
+
+
+def given_the_native_handle(native_class: AnyFunction) -> AnyFunction:
+    """A constructor of ``native_class`` that passes the native handle of
+    each ``TripwireCoreHandle`` argument."""
+
+    def build(*args: object, **kwargs: object) -> object:
+        return native_class(
+            *(_native_argument(value) for value in args),
+            **{name: _native_argument(value) for name, value in kwargs.items()},
+        )
+
+    return build
 
 
 def install_python_run(
@@ -205,6 +239,10 @@ def install_python_run(
         return TripwireCoreHandle(core_handle_class(*args, **kwargs), tripped)
 
     _ = rebind(core_handle_class, build_tripwire_handle, monkeypatch)
+    for class_name in HANDLE_TAKING_CLASSES:
+        native_class: object = getattr(core_module, class_name)
+        assert callable(native_class), f'horsies._core.{class_name} is a class'
+        _ = rebind(native_class, given_the_native_handle(native_class), monkeypatch)
     for resolved in operations:
         for function_name in resolved.operation.core_functions:
             core_function: object = getattr(core_module, function_name)
