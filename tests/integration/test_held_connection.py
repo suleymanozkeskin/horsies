@@ -44,6 +44,11 @@ from horsies.core.utils.db import (
 from tests.integration.autocommit_support import ProxiedWorker, open_proxied_worker
 from horsies.core.utils.url import sqlalchemy_url
 
+from horsies.core.worker.claiming import ClaimMixin
+from tests.dualrun.operations.plugin import DualRunCase, ImplementationRun, SingleRun
+from tests.dualrun.operations.table import Implementation
+from tests.dualrun.reference import claim_caller
+
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
 POOL_SIZE: Final = 3
@@ -255,9 +260,22 @@ async def worker(
 
 async def test_the_claim_passes_of_a_worker_share_one_checkout(
     worker: ProxiedWorker,
+    implementation: ImplementationRun,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Entered through the claim pass: two passes, one checkout of the
-    worker pool, which the worker's stop gives back."""
+    worker pool, which the worker's stop gives back.
+
+    The claim pass of the core checks out a core pool connection per pass;
+    the held connection is the Python claim statement's, kept as the
+    dual-run reference, which this test runs. The core run of
+    ``--dual-run=broker`` has no held connection: skipped."""
+    match implementation:
+        case DualRunCase(implementation=Implementation.CORE):
+            pytest.skip('the held claim connection is the Python claim statement\'s')
+        case DualRunCase() | SingleRun():
+            pass
+    monkeypatch.setattr(ClaimMixin, '_claim_rows', claim_caller.claim_rows)
     engine = worker.worker.sf.kw['bind']
     assert isinstance(engine, AsyncEngine)
     seen: list[int] = []

@@ -166,6 +166,7 @@ def _soft_cap_worker(
         listener=MagicMock(),
         cfg=cfg,
     )
+    worker.broker = broker
     worker._claim_runner = PooledStatements(worker.sf)  # pyright: ignore[reportPrivateUsage]
     worker._claim_slot_count = lambda: cfg.processes  # type: ignore[method-assign]
     dispatch = _RecordedDispatch(slots)

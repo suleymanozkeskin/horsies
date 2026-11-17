@@ -18,7 +18,8 @@ from datetime import datetime, timedelta, timezone
 import json
 import logging
 from itertools import combinations
-from typing import Any
+from typing import Any, Final
+from uuid import UUID
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -49,7 +50,18 @@ from horsies.core.worker.claim_plan import (
     isolated_children_plan,
     routes_json,
 )
-from horsies.core.worker.claiming import ClaimPass
+from horsies._core import (
+    ClaimedRowRecord,
+    ClaimPassFailed,
+    ClaimPassRecord,
+    QueueStartsFailed,
+    QueueStartsRecord,
+)
+from horsies.core.types.core_failure import CoreOperationFailed
+from horsies.core.worker.claiming import ClaimMixin, ClaimPass
+from horsies.core.worker.dispatch_claim import dispatch_claim_of
+from horsies.core.worker.queue_cap_hold import StartedClaim
+from tests.dualrun.reference import claim_caller
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.row_class import (
     RowClassFits,
@@ -502,6 +514,12 @@ def _core_release(
 
 
 class TestClaimPassWithClasses:
+    @pytest.fixture(autouse=True)
+    def python_claim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The claim statement of the Python worker, kept as the dual-run
+        reference: these tests drive it through a mocked session."""
+        monkeypatch.setattr(ClaimMixin, '_claim_rows', claim_caller.claim_rows)
+
     @pytest.mark.asyncio
     async def test_the_pass_sends_the_budgets_and_the_routes(self) -> None:
         worker = _worker(processes=1)
@@ -701,3 +719,148 @@ class TestClassCapacityOfAProfile:
             ),
         )
         assert parse_class_capacity(stored) == Ok(ClassBudgets(budgets))
+
+
+# ---- The claim pass and the start count through the core handle ----
+
+CORE_TASK_ID: Final = UUID('0198c0de-0000-7000-8000-0000000000c1')
+
+
+def _core_worker(handle: MagicMock, **cfg: Any) -> Worker:
+    """A worker of ``_worker`` whose broker's core handle is ``handle``."""
+    worker = _worker(**cfg)
+    broker = MagicMock()
+    broker._core_handle = handle
+    worker.broker = broker
+    return worker
+
+
+def _claimed_record(task_name: str, execution: str) -> MagicMock:
+    return MagicMock(
+        spec=ClaimedRowRecord,
+        id=CORE_TASK_ID,
+        task_name=task_name,
+        queue_name='default',
+        input='{"x":1}',
+        task_options=None,
+        execution=execution,
+        is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
+        retry_count=1,
+        max_retries=3,
+    )
+
+
+class TestClaimPassThroughCore:
+    @pytest.mark.asyncio
+    async def test_the_request_holds_the_plan_and_the_limits(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        handle = MagicMock()
+        handle.claim_pass_async = AsyncMock(
+            return_value=MagicMock(spec=ClaimPassRecord, claimed=[], short_of_plan=0),
+        )
+        worker = _core_worker(handle, processes=1, max_claim_batch=5)
+        request_class = MagicMock()
+        monkeypatch.setattr('horsies.core.worker.claiming.ClaimPassRequest', request_class)
+
+        _ = await worker._claim_rows()
+
+        built = request_class.call_args.kwargs
+        assert built['worker_id'] == worker.worker_instance_id
+        assert built['queues'] == ['default']
+        assert built['budgets'] == {'ISOLATED': 1}
+        assert built['routes'] == {
+            'ISOLATED': 'ISOLATED',
+            'SHARED_ASYNC': 'ISOLATED',
+            'SHARED_THREAD': 'ISOLATED',
+        }
+        assert built['hard_cap_mode'] is True
+        assert built['max_claim_batch'] == 5
+        assert built['lock_keys'] == []
+        handle.claim_pass_async.assert_awaited_once_with(request_class.return_value)
+
+    @pytest.mark.asyncio
+    async def test_a_claimed_record_is_a_claim_row(self) -> None:
+        handle = MagicMock()
+        handle.claim_pass_async = AsyncMock(
+            return_value=MagicMock(
+                spec=ClaimPassRecord,
+                claimed=[_claimed_record('iso', 'ISOLATED')],
+                short_of_plan=2,
+            ),
+        )
+        worker = _core_worker(handle, processes=1)
+
+        rows = await worker._claim_rows()
+
+        assert rows.short_of_plan == 2
+        assert rows.tasks == [{
+            'id': str(CORE_TASK_ID),
+            'task_name': 'iso',
+            'input': '{"x":1}',
+            'queue_name': 'default',
+            'is_workflow_task': False,
+            'task_options': None,
+            'claimed_at': CLAIMED_AT,
+            'retry_count': 1,
+            'max_retries': 3,
+            'execution': 'ISOLATED',
+        }]
+        assert dispatch_claim_of(rows.tasks[0]).claimed_at == CLAIMED_AT
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('retryable', [True, False])
+    async def test_a_failed_pass_raises_with_the_core_classification(
+        self, retryable: bool,
+    ) -> None:
+        handle = MagicMock()
+        handle.claim_pass_async = AsyncMock(
+            return_value=MagicMock(
+                spec=ClaimPassFailed, message='connection lost', retryable=retryable,
+            ),
+        )
+        worker = _core_worker(handle, processes=1)
+
+        with pytest.raises(CoreOperationFailed) as raised:
+            await worker._claim_rows()
+
+        assert raised.value.retryable is retryable
+        assert raised.value.subject == 'ClaimMixin._claim_rows'
+
+    @pytest.mark.asyncio
+    async def test_the_start_count_sends_each_started_claim_generation(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        handle = MagicMock()
+        handle.count_queue_starts_async = AsyncMock(
+            return_value=MagicMock(spec=QueueStartsRecord, starts={'capped': 2}),
+        )
+        worker = _core_worker(handle, processes=1)
+        request_class = MagicMock()
+        monkeypatch.setattr('horsies.core.worker.claiming.QueueStartsRequest', request_class)
+
+        starts = await worker._count_queue_starts(
+            ['capped'], [StartedClaim(task_id=str(CORE_TASK_ID), claimed_at=CLAIMED_AT)],
+        )
+
+        assert starts == {'capped': 2}
+        assert request_class.call_args.kwargs == {
+            'worker_id': worker.worker_instance_id,
+            'queues': ['capped'],
+            'started': [(CORE_TASK_ID, CLAIMED_AT)],
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_failed_start_count_raises_with_the_core_classification(self) -> None:
+        handle = MagicMock()
+        handle.count_queue_starts_async = AsyncMock(
+            return_value=MagicMock(spec=QueueStartsFailed, message='lost', retryable=True),
+        )
+        worker = _core_worker(handle, processes=1)
+
+        with pytest.raises(CoreOperationFailed) as raised:
+            await worker._count_queue_starts(['capped'], [])
+
+        assert raised.value.retryable is True
+        assert raised.value.subject == 'ClaimMixin._count_queue_starts'
