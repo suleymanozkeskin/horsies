@@ -12,9 +12,9 @@
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
 
-use horsies_core::core::lifecycle::OwnedClaim;
 use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
+use horsies_core::worker_manifest::parse_worker_profiles;
 use horsies_core::{BrokerError, BrokerErrorCode, ClientFamily, PoolProfile, PostgresBroker};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -26,7 +26,6 @@ use crate::bridge::completion_queue::{call_async, done_future};
 use crate::bridge::CallKind;
 use crate::child_spec::{PythonChildSpecSource, RegisteredSource};
 use crate::errors::{refusal_error, ManifestRefused};
-use crate::operations::arguments::utc_instant;
 use crate::operations::cancel::cancel_task_operation;
 use crate::operations::claim::{claim_pass_operation, ClaimPassRequest};
 use crate::operations::claim_settle::{settle_claimed_workflow_tasks_operation, SettleRequest};
@@ -34,8 +33,7 @@ use crate::operations::connectivity::check_connectivity_operation;
 use crate::operations::coverage::{ensure_partition_coverage_operation, CoverageRequestArgument};
 use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
 use crate::operations::expiry_and_orphans::{
-    audit_orphaned_workflow_tasks_operation, cancel_owned_orphan_operation,
-    expire_pending_tasks_operation,
+    audit_orphaned_workflow_tasks_operation, expire_pending_tasks_operation,
 };
 use crate::operations::failed_attempt::{
     finish_ended_attempt_operation, finish_failed_attempt_operation, FinishFailedAttemptRequest,
@@ -62,6 +60,7 @@ use crate::operations::task_info::{task_info_operation, TaskInfoParts};
 use crate::operations::task_lists::{
     expired_tasks_operation, stale_tasks_operation, stale_threshold,
 };
+use crate::operations::worker_connections::check_worker_connections_operation;
 use crate::operations::worker_ping::{ping_request, ping_workers_operation};
 use crate::operations::worker_reads::{
     class_coverage_operation, class_report_operation, history_limit,
@@ -120,6 +119,12 @@ impl BrokerConnection {
     /// The manifest of the handle.
     fn manifest(&self) -> &ProducerManifest {
         self.handle.manifest()
+    }
+
+    /// The core's lazy handle, for a core function that connects only when
+    /// its rule needs a read.
+    pub fn lazy_handle(&self) -> &LazyHandle {
+        &self.handle
     }
 
     /// Whether a connect succeeded on this handle. Starts nothing and waits
@@ -295,6 +300,30 @@ impl CoreHandle {
             "CoreHandle.check_connectivity",
             CallKind::Read,
             check_connectivity_operation(self.connection()),
+        )
+    }
+
+    /// The worker connection step of the live check
+    /// (`check_handle_worker_connections`, the rule of both clients): one
+    /// `WorkerConnectionError` per profile of `profiles_json` whose worker
+    /// needs more connections than the server has usable slots, or one when
+    /// the limit was not read; an empty list when every profile fits. No
+    /// profile, or PgBouncer transaction mode in the handle's manifest,
+    /// connects nothing. Reads only; no schema step. Blocking only: its
+    /// caller, `Horsies.check(live=True)`, is sync.
+    ///
+    /// `profiles_json` is the `profiles` member of a worker manifest. A
+    /// refused text raises `ManifestRefused`, a defect of the client.
+    fn check_worker_connections(&self, py: Python<'_>, profiles_json: &str) -> PyResult<Py<PyAny>> {
+        let profiles = parse_worker_profiles(profiles_json)
+            .map_err(|refused| ManifestRefused::new_err((refused.field_path, refused.cause)))?;
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.check_worker_connections",
+            CallKind::Read,
+            check_worker_connections_operation(self.connection(), profiles),
         )
     }
 
@@ -667,36 +696,6 @@ impl CoreHandle {
             "CoreHandle.audit_orphaned_workflow_tasks_async",
             CallKind::Write,
             audit_orphaned_workflow_tasks_operation(self.connection()),
-        )
-    }
-
-    /// Cancel one claimed workflow task that this claim (`worker_id`,
-    /// `claimed_at`) holds and that no runnable node links
-    /// (`horsies_cancel_owned_orphan`): `TaskRowEnded`, a refusal
-    /// (`AttemptAlreadyApplied`, `AttemptLostClaim`,
-    /// `AttemptSourceStateConflict`, `AttemptTaskAbsent`), or
-    /// `AttemptWriteFailed`. Writes, in one statement. Awaitable only: its
-    /// caller, the worker's finalize, runs on the worker's event loop. A
-    /// naive `claimed_at` raises `TypeError`.
-    #[pyo3(signature = (task_id, *, worker_id, claimed_at))]
-    fn cancel_owned_orphan_async<'py>(
-        &self,
-        py: Python<'py>,
-        task_id: Uuid,
-        worker_id: String,
-        claimed_at: &Bound<'_, PyAny>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let fence = OwnedClaim {
-            worker_id,
-            claimed_at: utc_instant(claimed_at)?,
-        };
-        let core = checked_core(py)?;
-        call_async(
-            py,
-            core,
-            "CoreHandle.cancel_owned_orphan_async",
-            CallKind::Write,
-            cancel_owned_orphan_operation(self.connection(), task_id, fence),
         )
     }
 

@@ -13,6 +13,7 @@ use horsies_core::frame_protocol::{
     ParentFrameRefusal, ProtocolMismatch, ReceivedProtocol, RunFrame, SharedRunFrame, SharedWork,
     StoredOptionsRefusal, PROTOCOL_VERSION,
 };
+use horsies_core::OrphanSelfHeal;
 use pyo3::prelude::*;
 use pyo3::types::PyString;
 use pyo3::IntoPyObjectExt;
@@ -96,6 +97,10 @@ pub struct RunFrameRecord {
     worker_id: String,
     /// The claim generation; each write of the attempt is fenced on it.
     claimed_at: DateTime<Utc>,
+    /// Whether the stop before start of a workflow task cancels the task
+    /// when no node links it live (the app's
+    /// `auto_terminate_orphaned_workflow_tasks`).
+    orphan_self_heal: bool,
     /// `'RUN'`, or `StoredOptionsRefused`.
     work: Py<PyAny>,
     /// The JSON text of the task input.
@@ -125,6 +130,8 @@ pub struct SharedRunFrameRecord {
     task_name: String,
     worker_id: String,
     claimed_at: DateTime<Utc>,
+    /// As `RunFrame.orphan_self_heal`.
+    orphan_self_heal: bool,
     /// `AsyncTaskWork`, `ThreadTaskWork` or `StoredOptionsRefused`.
     work: Py<PyAny>,
     input: Py<PyString>,
@@ -284,6 +291,15 @@ fn shared_work_object(py: Python<'_>, work: SharedWork) -> PyResult<Py<PyAny>> {
     }
 }
 
+/// The `orphan_self_heal` argument of the stop before start: `True` for on.
+/// Pure.
+fn self_heal_flag(self_heal: OrphanSelfHeal) -> bool {
+    match self_heal {
+        OrphanSelfHeal::On => true,
+        OrphanSelfHeal::Off => false,
+    }
+}
+
 fn run_object(py: Python<'_>, run: RunFrame) -> PyResult<Py<PyAny>> {
     let input = PyString::new(py, run.input.as_str()).unbind();
     RunFrameRecord {
@@ -291,6 +307,7 @@ fn run_object(py: Python<'_>, run: RunFrame) -> PyResult<Py<PyAny>> {
         task_name: run.task_name,
         worker_id: run.worker_id,
         claimed_at: run.claimed_at,
+        orphan_self_heal: self_heal_flag(run.orphan_self_heal),
         work: isolated_work_object(py, run.work)?,
         input,
     }
@@ -305,6 +322,7 @@ fn shared_run_object(py: Python<'_>, run: SharedRunFrame) -> PyResult<Py<PyAny>>
         task_name: run.task_name,
         worker_id: run.worker_id,
         claimed_at: run.claimed_at,
+        orphan_self_heal: self_heal_flag(run.orphan_self_heal),
         work: shared_work_object(py, run.work)?,
         input,
     }

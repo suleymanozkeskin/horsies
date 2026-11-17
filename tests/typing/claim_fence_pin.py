@@ -30,11 +30,11 @@ def fences(claimed_at: datetime) -> None:
 
 
 def frames(claimed_at: datetime) -> None:
-    RunFrame('t', 'n', None, None, 'w', False, NoTimeout(), claimed_at)
+    RunFrame('t', 'n', None, None, 'w', False, NoTimeout(), claimed_at, True)
     RunFrame('t', 'n', None, None, 'w', False, NoTimeout())  # pyright: ignore[reportCallIssue]
-    RunFrame('t', 'n', None, None, 'w', False, NoTimeout(), None)  # pyright: ignore[reportArgumentType]
-    SharedRunFrame(1, 't', 'n', None, None, 'w', False, claimed_at, SeatTask(1000, 100))
-    SharedRunFrame(1, 't', 'n', None, None, 'w', False, None, SeatTask(1000, 100))  # pyright: ignore[reportArgumentType]
+    RunFrame('t', 'n', None, None, 'w', False, NoTimeout(), None, True)  # pyright: ignore[reportArgumentType]
+    SharedRunFrame(1, 't', 'n', None, None, 'w', False, claimed_at, SeatTask(1000, 100), True)
+    SharedRunFrame(1, 't', 'n', None, None, 'w', False, None, SeatTask(1000, 100), True)  # pyright: ignore[reportArgumentType]
 
 
 async def writes(worker: Worker, claimed_at: datetime) -> None:

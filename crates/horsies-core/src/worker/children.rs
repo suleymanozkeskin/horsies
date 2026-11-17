@@ -26,6 +26,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+use crate::broker::OrphanSelfHeal;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::worker_profile::{
     ChildPreload, IsolatedSetting, MemoryLimitSetting, ParentCpu, SharedAsyncSetting,
@@ -251,6 +252,8 @@ fn init_frame(launch: &ChildLaunch, child_kind: ChildKind) -> InitFrame {
 #[derive(Debug, Clone)]
 pub struct PoolFacts {
     pub worker_id: String,
+    /// The orphan self-heal of the app's recovery config, for each run frame.
+    pub orphan_self_heal: OrphanSelfHeal,
     pub pending_limit: NonZeroUsize,
     pub exit_not_seen: ExitNotSeen,
     pub placement: CpuPlacement,
@@ -330,6 +333,7 @@ pub fn isolated_pool_config(
         command: launch.command.clone(),
         init: init_frame(launch, kind),
         worker_id: facts.worker_id.clone(),
+        orphan_self_heal: facts.orphan_self_heal,
         pending_limit: facts.pending_limit,
         tasks_per_child: task_limit(children.recycle.after),
         memory_per_child: memory_limit(children.recycle.above),
@@ -354,6 +358,7 @@ pub fn shared_async_pool_config(
         command: launch.command.clone(),
         init: init_frame(launch, kind),
         worker_id: facts.worker_id.clone(),
+        orphan_self_heal: facts.orphan_self_heal,
         pending_limit: facts.pending_limit,
         tasks_per_seat: task_limit(children.recycle.after_per_seat),
         memory_per_child: memory_limit(children.recycle.above),
@@ -378,6 +383,7 @@ pub fn shared_thread_pool_config(
         command: launch.command.clone(),
         init: init_frame(launch, kind),
         worker_id: facts.worker_id.clone(),
+        orphan_self_heal: facts.orphan_self_heal,
         pending_limit: facts.pending_limit,
         tasks_per_seat: task_limit(children.recycle.after_per_seat),
         memory_per_child: memory_limit(children.recycle.above),

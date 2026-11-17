@@ -404,6 +404,7 @@ async fn the_row_lock_of_a_start_ends_before_its_miss_path() {
                 4242,
                 "lifecycle-host".to_owned(),
             ),
+            crate::broker::child_writes::WriteDeadline::start_attempt(),
         ),
     )
     .await

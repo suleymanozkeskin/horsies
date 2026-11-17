@@ -90,6 +90,10 @@ class CoreHandle:
         """The connectivity step of the live check: SELECT 1 on the main URL, then on the session URL
         when it differs, then the LISTEN probe in PgBouncer transaction mode. Reads only.
         """
+    def check_worker_connections(self, profiles_json: str) -> list[WorkerConnectionError]:
+        """The worker connection step of the live check: each profile against the server connection
+        limit. No profile, or PgBouncer transaction mode, connects nothing. Reads only.
+        """
     def install_schema(self) -> SchemaInstalled | SchemaInstallNotRun | BrokerFailure:
         """Apply the embedded migrations and check the schema version, once per handle. Writes."""
     def install_schema_async(self) -> asyncio.Future[SchemaInstalled | SchemaInstallNotRun | BrokerFailure]:
@@ -152,10 +156,6 @@ class CoreHandle:
         """One pending expiry pass. Writes; each batch commits alone."""
     def audit_orphaned_workflow_tasks_async(self) -> asyncio.Future[OrphanPageAudited | OrphanAuditLockBusy | OrphanAuditFailed]:
         """One page of the orphan sweep and its cursor counts, in one transaction. Writes."""
-    def cancel_owned_orphan_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime) -> asyncio.Future[TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed]:
-        """Cancel one claimed workflow task that this claim holds and that no runnable node
-        links. Writes, in one statement. A naive claimed_at raises TypeError.
-        """
     def register_child_spec_source(self, source: Callable[[ChildSpecRequest], ChildSpecBuilt | ChildSpecRefused]) -> None:
         """Register the child spec source of the handle's workflow operations. The core calls it
         on the callback thread for each sub-workflow child that an operation builds. A second
@@ -329,19 +329,30 @@ class CoreChildHandle:
     def start_attempt(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, worker_pid: int, worker_hostname: str, deadline_in_ms: int | None) -> AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed:
         """Start one claimed task. Writes, in one statement. deadline_in_ms is the time left before
         the deadline of the run, or None: when it has passed by the time the pool gives the
-        connection, no statement runs. A naive claimed_at raises TypeError.
+        connection, no statement runs. The call begins a start attempt of 40 s: a statement past
+        its time gets a cancel request and does not commit later. A naive claimed_at raises
+        TypeError.
         """
     def start_attempt_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, worker_pid: int, worker_hostname: str, deadline_in_ms: int | None) -> asyncio.Future[AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed]:
         """The awaitable form of the method above."""
-    def expire_owned_claim(self, task_id: uuid.UUID, *, worker_id: str) -> TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed:
+    def expire_owned_claim(self, task_id: uuid.UUID, *, worker_id: str, attempt_elapsed_ms: int) -> TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed:
         """Expire one claimed row of this worker whose deadline passed before its start. Writes,
-        in one statement.
+        in one statement, by the end of the start attempt that began attempt_elapsed_ms ago.
         """
-    def expire_owned_claim_async(self, task_id: uuid.UUID, *, worker_id: str) -> asyncio.Future[TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed]:
+    def expire_owned_claim_async(self, task_id: uuid.UUID, *, worker_id: str, attempt_elapsed_ms: int) -> asyncio.Future[TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed]:
+        """The awaitable form of the method above."""
+    def stop_workflow_task_before_start(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, orphan_self_heal: bool, attempt_elapsed_ms: int) -> StoppedBeforeStart | ResumedBeforeStart | StopBeforeStartFailed:
+        """Stop one claimed workflow task whose start missed. Writes, in one statement, which judges
+        the task again under its locks; with orphan_self_heal it cancels a task that no node
+        links live. It ends by the end of the start attempt that began attempt_elapsed_ms ago.
+        A naive claimed_at raises TypeError.
+        """
+    def stop_workflow_task_before_start_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, orphan_self_heal: bool, attempt_elapsed_ms: int) -> asyncio.Future[StoppedBeforeStart | ResumedBeforeStart | StopBeforeStartFailed]:
         """The awaitable form of the method above."""
     def mark_finalizing(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime) -> FinalizingMarked | FinalizingNotHeld | MarkFinalizingFailed:
-        """Write the finalizing marker of a run whose body ended. Writes, in one statement, with
-        the pool's bounds. A naive claimed_at raises TypeError.
+        """Write the finalizing marker of a run whose body ended. Writes, in one statement, within
+        10 s: a marker cancelled at the bound is not written later. A naive claimed_at raises
+        TypeError.
         """
     def mark_finalizing_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime) -> asyncio.Future[FinalizingMarked | FinalizingNotHeld | MarkFinalizingFailed]:
         """The awaitable form of the method above."""
@@ -505,6 +516,19 @@ class ConnectivityRefused:
     def step(self) -> Literal['CONNECT', 'POOL_SETTINGS', 'MAIN_URL', 'SESSION_URL', 'LISTENER']: ...
     @property
     def message(self) -> str: ...
+
+
+@final
+class WorkerConnectionError:
+    """One refusal of the worker connection check: the core's error as data."""
+    @property
+    def message(self) -> str: ...
+    @property
+    def code(self) -> str | None: ...
+    @property
+    def notes(self) -> list[str]: ...
+    @property
+    def help_text(self) -> str | None: ...
 
 
 @final
@@ -859,8 +883,8 @@ class OrphanAuditFailed:
 
 @final
 class TaskRowEnded:
-    """The row moved to history: kind is EXPIRE_CLAIMED or CANCEL_ORPHAN. The observed fields
-    are the row as the statement locked it.
+    """The row moved to history: kind is EXPIRE_CLAIMED. The observed fields are the row as the
+    statement locked it.
     """
     @property
     def task_id(self) -> uuid.UUID: ...
@@ -1221,6 +1245,41 @@ class FinalizingNotHeld:
 class MarkFinalizingFailed:
     """The finalizing marker failed. It wrote nothing, or it committed and its reply was lost:
     the marker may be written.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class StoppedBeforeStart:
+    """The stop ran a step that ends the start of this claim: outcome is the step, move_outcome
+    the outcome of its move, None for NODE_NOT_LINKED, which writes nothing.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def outcome(self) -> Literal['EXPIRED', 'ABANDONED', 'CANCELLED', 'ORPHAN_CANCELLED', 'NODE_NOT_LINKED', 'NOT_HELD']: ...
+    @property
+    def move_outcome(self) -> Literal['APPLIED', 'ALREADY_APPLIED', 'LOST_CLAIM', 'SOURCE_STATE_CONFLICT', 'TASK_ABSENT'] | None: ...
+
+
+@final
+class ResumedBeforeStart:
+    """A resume came first: the claim is still startable. Nothing is written; the caller runs
+    the start once more.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class StopBeforeStartFailed:
+    """The stop failed. It wrote nothing, or it committed and its reply was lost: the same stop
+    sent again reports a committed move as ALREADY_APPLIED, or the row as not held.
     """
     @property
     def task_id(self) -> uuid.UUID: ...
@@ -2675,6 +2734,8 @@ class RunFrame:
     @property
     def claimed_at(self) -> datetime.datetime: ...
     @property
+    def orphan_self_heal(self) -> bool: ...
+    @property
     def work(self) -> Literal['RUN'] | StoredOptionsRefused: ...
     @property
     def input(self) -> str: ...
@@ -2709,6 +2770,8 @@ class SharedRunFrame:
     def worker_id(self) -> str: ...
     @property
     def claimed_at(self) -> datetime.datetime: ...
+    @property
+    def orphan_self_heal(self) -> bool: ...
     @property
     def work(self) -> AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused: ...
     @property

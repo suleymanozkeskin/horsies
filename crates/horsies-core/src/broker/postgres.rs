@@ -8,7 +8,7 @@ use std::str::FromStr;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use crate::core::history::archive::results::decode_result_envelope;
+use crate::core::history::archive::results::{decode_result_envelope, decode_result_envelope_text};
 use crate::core::history::enqueue::{parse_optional_object, prepare_enqueue_facts, SendPart};
 use crate::core::history::identity::keys::{
     reservation_window_micros, IDEMPOTENCY_WINDOW_DEFAULT_HOURS, IDEMPOTENCY_WINDOW_DEFAULT_MICROS,
@@ -44,7 +44,7 @@ use crate::broker::health::{
 use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRead, RawResultRecord,
-    TaskInfoRead,
+    StoredEnvelopeText, TaskInfoRead,
 };
 use crate::broker::row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskResultRow};
 use crate::broker::workflow_claim_settle::{settle_claimed_workflow_tasks, ClaimDisposition};
@@ -246,24 +246,6 @@ SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
        NULL::text AS failed_reason, NULL::text AS result, execution
 FROM horsies_tasks
 WHERE id = $1";
-
-/// Skip workflow_tasks for tasks belonging to CANCELLED workflows.
-const SKIP_CANCELLED_WORKFLOW_TASKS_SQL: &str = "\
-UPDATE horsies_workflow_tasks \
-SET status = 'SKIPPED', \
-    completed_at = NOW() \
-WHERE task_id = ANY($1) AND status IN ('PENDING', 'READY', 'ENQUEUED')";
-
-/// Reset the nodes of abandoned tasks of PAUSED workflows to READY, so a
-/// resume enqueues a fresh task. Only an ENQUEUED or RUNNING node is reset;
-/// a node in another state keeps its state and its task link (Python
-/// `RESET_PAUSED_WORKFLOW_TASKS_SQL`, `python/horsies/core/worker/sql.py:291-296`,
-/// and `RESET_PAUSED_NODE_SQL`, `python/horsies/core/worker/child_runner.py:684-691`).
-const RESET_WORKFLOW_TASKS_SQL: &str = "\
-UPDATE horsies_workflow_tasks \
-SET status = 'READY', task_id = NULL, started_at = NULL \
-WHERE task_id = ANY($1) \
-  AND status IN ('ENQUEUED', 'RUNNING')";
 
 // ---------------------------------------------------------------------------
 // Task attempt SQL
@@ -628,26 +610,6 @@ pub enum SchemaInitializationMode {
     /// gates. The broker keeps its listener, as Python's web tool, which runs
     /// with `run_schema_migrations=False`.
     ObserveOnly,
-}
-
-/// Why a claimed workflow task stops before it starts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkflowStop {
-    /// The workflow is PAUSED: the row is abandoned and its node reset.
-    Paused,
-    /// The workflow is CANCELLED: the row is cancelled and its node skipped.
-    Cancelled,
-}
-
-/// What [`PostgresBroker::stop_workflow_task_before_start`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkflowStopBeforeStart {
-    /// The stop committed, or found nothing of this claim to stop.
-    Stopped,
-    /// The workflow was resumed between the start and the abandon: nothing
-    /// was written, and the task may start (Python
-    /// `_WorkflowResumedBeforeStart`).
-    Resumed,
 }
 
 /// The stored values of one send command, checked: only the database can
@@ -1530,20 +1492,24 @@ impl PostgresBroker {
     /// fences on worker ownership but deliberately not on the claim
     /// generation: once the deadline has passed, expiry is the correct
     /// outcome for whichever generation holds the row. One statement on the
-    /// main core pool, checked out as reserved work. An end and a replay of
-    /// the expiry both mean the task is expired, as Python's
+    /// main core pool, checked out as reserved work, within `deadline`, the
+    /// deadline of the start attempt whose miss path it is
+    /// ([`crate::broker::child_writes`]). An end and a replay of the expiry
+    /// both mean the task is expired, as Python's
     /// `_expire_claimed_task_before_start` (`core/worker/child_runner.py`)
     /// reads them; any other outcome is logged with its evidence at the
     /// adapter boundary. The stored error is Python's: `TASK_EXPIRED` with
     /// its message and the task and worker ids as `data`.
     ///
-    /// Errors: [`BrokerError::Statement`], or
-    /// [`BrokerError::TerminalizationContract`] for a row outside the wire
-    /// contract.
+    /// Errors: [`BrokerError::Statement`] (nothing sent when `deadline`
+    /// passed first; nothing written, a cancel at the bound included; or
+    /// `OutcomeUnknown`), or [`BrokerError::TerminalizationContract`] for a
+    /// row outside the wire contract.
     pub async fn expire_claimed_task_before_start(
         &self,
         task_id: Uuid,
         worker_id: &str,
+        deadline: crate::broker::child_writes::WriteDeadline,
     ) -> Result<PrestartExpiry, BrokerError> {
         let (open, _write) = self.core_pools_for_write()?;
         let end = crate::broker::expiry_and_orphans::expire_owned_claim(
@@ -1551,6 +1517,7 @@ impl PostgresBroker {
             self.statement_log,
             task_id,
             worker_id,
+            deadline,
         )
         .await?;
         Ok(match end {
@@ -1935,116 +1902,6 @@ impl PostgresBroker {
                 }
             }
         }
-    }
-
-    /// Stop a claimed workflow task before it started because its workflow
-    /// stopped (Python `_handle_workflow_stop_before_start`,
-    /// `python/horsies/core/worker/child_runner.py`), in one transaction:
-    /// - [`WorkflowStop::Paused`]: abandon the claimed row, then reset its
-    ///   node to READY, only when the abandon applied (or was applied). A
-    ///   refusal because the workflow is no longer PAUSED rolls back and
-    ///   answers [`WorkflowStopBeforeStart::Resumed`]: nothing is written,
-    ///   and the caller starts the task again.
-    /// - [`WorkflowStop::Cancelled`]: cancel the row (a row already requeued
-    ///   to PENDING is accepted), then mark its node SKIPPED, only when the
-    ///   cancel applied (or was applied).
-    ///
-    /// Both arms carry the claim fence (`worker_id`, `claimed_at`).
-    ///
-    /// Errors: [`BrokerError`] of the transaction; nothing is committed.
-    pub async fn stop_workflow_task_before_start(
-        &self,
-        task_id: Uuid,
-        stop: WorkflowStop,
-        worker_id: &str,
-        claimed_at: DateTime<Utc>,
-    ) -> Result<WorkflowStopBeforeStart, BrokerError> {
-        use crate::core::lifecycle::{
-            GuardEvidence, OwnedClaim, TerminalizationCommand, TerminalizationOutcome,
-        };
-
-        let mut tx = self.pool.begin().await.map_err(BrokerError::Database)?;
-        let task_ids = vec![task_id];
-        let fence = OwnedClaim {
-            worker_id: worker_id.to_owned(),
-            claimed_at,
-        };
-
-        // The coupled node write commits only with a transition that applied
-        // (or was already applied by the same event class, whose coupled
-        // write is then proven committed).
-        let (command, applied) = match stop {
-            WorkflowStop::Paused => {
-                // Abandon the claimed-but-not-started row (terminal) instead
-                // of returning it to PENDING, then reset the node to READY so
-                // resume enqueues a fresh row (parity with horsies PR #96).
-                let command = TerminalizationCommand::AbandonOwnedNode { task_id, fence };
-                let outcomes =
-                    crate::broker::terminalization::terminalize_in_tx(&mut tx, &command).await?;
-                match outcomes.first() {
-                    Some(TerminalizationOutcome::SourceStateConflict {
-                        evidence: GuardEvidence::WorkflowState(observed),
-                        ..
-                    }) => {
-                        tracing::info!(
-                            task_id = %task_id,
-                            observed = ?observed,
-                            "the abandon was refused: the workflow is no longer PAUSED",
-                        );
-                        tx.rollback().await.map_err(BrokerError::Database)?;
-                        return Ok(WorkflowStopBeforeStart::Resumed);
-                    }
-                    Some(
-                        TerminalizationOutcome::Applied { .. }
-                        | TerminalizationOutcome::AlreadyApplied { .. },
-                    ) => {
-                        sqlx::query(RESET_WORKFLOW_TASKS_SQL)
-                            .bind(&task_ids)
-                            .execute(tx.as_mut())
-                            .await
-                            .map_err(BrokerError::Database)?;
-                        ("abandon", true)
-                    }
-                    Some(_) | None => ("abandon", false),
-                }
-            }
-            WorkflowStop::Cancelled => {
-                // A row already requeued to PENDING is accepted: it carries no
-                // claim to fence, and the workflow's cancellation — final,
-                // unlike a pause — is the guard (the Python carve-out).
-                let command = TerminalizationCommand::CancelOwnedNode {
-                    task_id,
-                    fence,
-                    accepts_requeued_pending: true,
-                };
-                let outcomes =
-                    crate::broker::terminalization::terminalize_in_tx(&mut tx, &command).await?;
-                let applied = matches!(
-                    outcomes.first(),
-                    Some(
-                        TerminalizationOutcome::Applied { .. }
-                            | TerminalizationOutcome::AlreadyApplied { .. }
-                    )
-                );
-                if applied {
-                    sqlx::query(SKIP_CANCELLED_WORKFLOW_TASKS_SQL)
-                        .bind(&task_ids)
-                        .execute(tx.as_mut())
-                        .await
-                        .map_err(BrokerError::Database)?;
-                }
-                ("cancel", applied)
-            }
-        };
-
-        tx.commit().await.map_err(BrokerError::Database)?;
-        tracing::info!(
-            task_id = %task_id,
-            arm = command,
-            applied,
-            "handled workflow stop before task start"
-        );
-        Ok(WorkflowStopBeforeStart::Stopped)
     }
 
     /// The claimed tasks of a claim pass that must not be dispatched because
@@ -2780,9 +2637,9 @@ fn raw_result_from_history_detail(
                     format!("history task {task_id} has non-terminal status {status}"),
                 )));
             }
-            let raw_result = decode_history_result_value(&detail)
+            let raw_result = history_result_text(&detail)
                 .map_err(raw_result_operation_error)?
-                .map(decode_raw_result_value)
+                .map(stored_envelope_text)
                 .transpose()?
                 .flatten();
             Ok(RawResultProbe::Record(RawResultRecord {
@@ -2795,28 +2652,10 @@ fn raw_result_from_history_detail(
     }
 }
 
-fn decode_raw_result_value(
-    value: serde_json::Value,
-) -> BrokerResult<Option<serde_json::Map<String, serde_json::Value>>> {
-    match value {
-        serde_json::Value::Null => Ok(None),
-        serde_json::Value::Object(object) => Ok(Some(object)),
-        other => Err(invalid_raw_result(format!(
-            "result JSON must be an object, got {}",
-            json_value_kind(&other),
-        ))),
-    }
-}
-
-fn json_value_kind(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "boolean",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
-    }
+/// The envelope text of a stored result: `None` for the JSON `null`; any
+/// other value than an object is `INVALID_JSON_PAYLOAD`.
+fn stored_envelope_text(text: String) -> BrokerResult<Option<StoredEnvelopeText>> {
+    StoredEnvelopeText::parse(text).map_err(|refused| invalid_raw_result(refused.to_string()))
 }
 
 fn invalid_raw_result(message: String) -> BrokerOperationError {
@@ -2864,10 +2703,31 @@ fn decode_history_result_value(
     .map_err(|error| BrokerError::HistoryReadContract(error.to_string()))
 }
 
+/// The text of the stored result of a history row, as stored: an integer
+/// keeps every digit (`decode_result_envelope_text`).
+fn history_result_text(detail: &HistoryTaskDetail) -> Result<Option<String>, BrokerError> {
+    let Some(payload) = detail.result_payload.as_deref() else {
+        return Ok(None);
+    };
+    let digest = detail.result_digest.as_deref().ok_or_else(|| {
+        BrokerError::HistoryReadContract(format!(
+            "history result digest is absent for task {}",
+            detail.task_id
+        ))
+    })?;
+    decode_result_envelope_text(
+        detail.result_envelope_version,
+        &detail.result_codec,
+        &detail.result_content_type,
+        payload,
+        digest,
+    )
+    .map(Some)
+    .map_err(|error| BrokerError::HistoryReadContract(error.to_string()))
+}
+
 fn history_result_row(detail: HistoryTaskDetail) -> Result<TaskResultRow, BrokerError> {
-    let result = decode_history_result_value(&detail)?
-        .map(|value| serde_json::to_string(&value))
-        .transpose()?;
+    let result = history_result_text(&detail)?;
     Ok(TaskResultRow {
         id: detail.task_id,
         status: detail.status.to_string(),
@@ -2883,7 +2743,7 @@ fn history_task_result_row(
     let result = match &history.payload {
         HistoryResultPayload::Absent => None,
         HistoryResultPayload::Stored { payload, digest } => {
-            let value = decode_result_envelope(
+            let text = decode_result_envelope_text(
                 history.envelope_version,
                 &history.codec,
                 &history.content_type,
@@ -2891,7 +2751,7 @@ fn history_task_result_row(
                 digest,
             )
             .map_err(|error| BrokerError::HistoryReadContract(error.to_string()))?;
-            Some(serde_json::to_string(&value)?)
+            Some(text)
         }
     };
     Ok(TaskResultRow {
@@ -4125,7 +3985,11 @@ mod prestart_expiry_tests {
         seed_claimed(&pool, &id, "w1").await;
 
         let not_due = broker
-            .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
+            .expire_claimed_task_before_start(
+                Uuid::parse_str(&id).unwrap(),
+                "w1",
+                crate::broker::child_writes::WriteDeadline::start_attempt(),
+            )
             .await
             .expect("expire");
         assert_eq!(
@@ -4141,7 +4005,11 @@ mod prestart_expiry_tests {
         .await
         .expect("age good_until");
         let expired = broker
-            .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
+            .expire_claimed_task_before_start(
+                Uuid::parse_str(&id).unwrap(),
+                "w1",
+                crate::broker::child_writes::WriteDeadline::start_attempt(),
+            )
             .await
             .expect("expire");
         assert_eq!(
@@ -4151,7 +4019,11 @@ mod prestart_expiry_tests {
         );
         // Python counts a replay as expired too.
         let replayed = broker
-            .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
+            .expire_claimed_task_before_start(
+                Uuid::parse_str(&id).unwrap(),
+                "w1",
+                crate::broker::child_writes::WriteDeadline::start_attempt(),
+            )
             .await
             .expect("expire replay");
         assert_eq!(replayed, PrestartExpiry::Expired);
@@ -4692,7 +4564,11 @@ mod terminal_at_stamp_tests {
         let before = database_now(&pool).await;
 
         let expired = broker
-            .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
+            .expire_claimed_task_before_start(
+                Uuid::parse_str(&id).unwrap(),
+                "w1",
+                crate::broker::child_writes::WriteDeadline::start_attempt(),
+            )
             .await
             .expect("expire");
         assert_eq!(expired, PrestartExpiry::Expired);
@@ -5696,7 +5572,7 @@ mod enqueue_task_options_tests {
             execution: crate::core::task::Execution::Isolated,
             cancel_grace_ms: None,
         };
-        let text = options.serialize_retry_options().expect("options are set");
+        let text = options.stored_options_text();
 
         assert_eq!(enqueue_max_retries("t", Some(&text)).expect("accepted"), 4);
     }

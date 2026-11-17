@@ -933,6 +933,11 @@ impl Worker {
     fn pool_facts(&self, placement: crate::worker::executor::placement::CpuPlacement) -> PoolFacts {
         PoolFacts {
             worker_id: self.worker_id.clone(),
+            orphan_self_heal: OrphanSelfHeal::of_recovery_flag(
+                self.app_config
+                    .recovery
+                    .auto_terminate_orphaned_workflow_tasks,
+            ),
             pending_limit: pending_task_limit(
                 &self.profile.profile,
                 self.app_config.prefetch_buffer,
@@ -1508,11 +1513,6 @@ impl Worker {
             self.app_config.payload.clone(),
             self.app_config.retention.clone(),
             batcher.clone(),
-            OrphanSelfHeal::of_recovery_flag(
-                self.app_config
-                    .recovery
-                    .auto_terminate_orphaned_workflow_tasks,
-            ),
         ));
         let stops = ChildrenStopCell::default();
         let services = match self.spawn_services(&children, &live, &stops, ping_responder) {
@@ -3222,13 +3222,15 @@ mod tests {
     }
 
     /// The end that the run of the claimed row `task_id` reports, run as an
-    /// isolated child runs it (in this process): the start write, the refusal
-    /// of the stored options or the body, the result envelope, the
-    /// finalizing marker. The parent's route decides the refusal.
+    /// isolated child runs it (in this process) under the orphan rule
+    /// `self_heal`: the start write, the refusal of the stored options or the
+    /// body, the result envelope, the finalizing marker. The parent's route
+    /// decides the refusal.
     async fn run_in_process(
         broker: &Arc<PostgresBroker>,
         task_fn: RegisteredTask,
         claimed: &Claimed,
+        self_heal: OrphanSelfHeal,
     ) -> crate::worker::executor::protocol::RunEnd {
         let task = &claimed.task;
         let mut registry = crate::core::registry::task::TaskRegistry::new();
@@ -3248,6 +3250,7 @@ mod tests {
             task_name: task.task_name.clone(),
             worker_id: "worker-1".to_owned(),
             claimed_at: task.claimed_at,
+            orphan_self_heal: self_heal,
             work,
             input: claimed.input.clone(),
         };
@@ -3260,9 +3263,9 @@ mod tests {
     }
 
     /// Run the claimed row `task_id` as the worker does: the isolated run
-    /// ([`run_in_process`]), then the outcome writer with the reported end,
-    /// phase 2 included, under the orphan rule `self_heal`. Returns the end
-    /// and the settlement.
+    /// ([`run_in_process`]) under the orphan rule `self_heal`, then the
+    /// outcome writer with the reported end, phase 2 included. Returns the
+    /// end and the settlement.
     async fn run_finalize_with(
         broker: &Arc<PostgresBroker>,
         task_fn: RegisteredTask,
@@ -3273,7 +3276,7 @@ mod tests {
         crate::worker::executor::slots::Settlement,
     ) {
         let claimed = claimed_from_database(broker.pool(), task_id).await;
-        let end = run_in_process(broker, task_fn, &claimed).await;
+        let end = run_in_process(broker, task_fn, &claimed, self_heal).await;
         let writer = OutcomeWriter::new(
             Arc::clone(broker),
             crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
@@ -3283,7 +3286,6 @@ mod tests {
             crate::core::config::payload::PayloadPolicy::default(),
             crate::core::RetentionConfig::default(),
             crate::worker::executor::slots::test_successes(broker, "worker-1"),
-            self_heal,
         );
         let settled = writer
             .settle(&claimed.task, AttemptEnd::Reported(end.clone()))
@@ -3315,7 +3317,7 @@ mod tests {
         task_id: Uuid,
     ) -> Phase2Work {
         let claimed = claimed_from_database(broker.pool(), task_id).await;
-        let value = match run_in_process(broker, task_fn, &claimed).await {
+        let value = match run_in_process(broker, task_fn, &claimed, OrphanSelfHeal::Off).await {
             crate::worker::executor::protocol::RunEnd::Result(envelope) => {
                 let envelope: serde_json::Value =
                     serde_json::from_str(envelope.as_str()).expect("the envelope is JSON");

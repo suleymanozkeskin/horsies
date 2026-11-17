@@ -16,7 +16,9 @@ use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use super::*;
+use crate::broker::client_family::ClientFamily;
 use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
+use crate::broker::PoolProfile;
 use crate::core::config::bounded::BoundedU32;
 use crate::core::config::child_sizing::{
     parent_pool_connections, shared_async_pool_connections, shared_thread_pool_connections,
@@ -26,6 +28,8 @@ use crate::core::config::worker_profile::{
     IsolatedChildren, ParentPool, PoolSizeSetting, SharedAsyncChildren, SharedPool,
     SharedThreadChildren, MAX_CHILD_POOL_CONNECTIONS,
 };
+use crate::handle::HandleConnection;
+use crate::manifest::parse_producer_manifest;
 use crate::worker::children::{
     isolated_pool_config, shared_async_pool_config, shared_thread_pool_config, ChildLaunch,
     PoolFacts,
@@ -399,6 +403,88 @@ async fn an_unreadable_limit_is_one_error_and_no_profile_is_compared() {
     assert!(
         note.starts_with("reading the server connection limit failed"),
         "{note}"
+    );
+    assert_eq!(error.help_text.as_deref(), Some(LIMIT_UNREADABLE_HELP));
+}
+
+// --- the check on a lazy handle (the Python bridge) ---------------------------
+
+/// A Python handle of an unreachable server. In PgBouncer transaction mode
+/// the session URL is a separate, also unreachable, server.
+fn unreachable_handle(pgbouncer_transaction_mode: bool) -> CoreHandle {
+    let session_database = match pgbouncer_transaction_mode {
+        true => json!({"kind": "SEPARATE", "url": "postgresql://postgres:none@127.0.0.1:2/none"}),
+        false => json!({"kind": "SAME_AS_DATABASE_URL"}),
+    };
+    let manifest = json!({
+        "manifest_version": 1,
+        "database": {
+            "database_url": "postgresql://postgres:none@127.0.0.1:1/none",
+            "session_database": session_database,
+            "pgbouncer_transaction_mode": pgbouncer_transaction_mode,
+            "pool_pre_ping": true,
+            "pool_size": 2,
+            "max_overflow": 0,
+            "pool_timeout": 1,
+            "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
+            "echo": false,
+            "tcp_keepalives": {"kind": "OFF"},
+            "tcp_user_timeout": {"kind": "SYSTEM_DEFAULT"}
+        },
+        "schema": "OBSERVE_ONLY",
+        "send": {
+            "retain_rerun_input_default": false,
+            "idempotency_reservation_window": 86400000000_u64
+        }
+    });
+    let manifest =
+        parse_producer_manifest(&manifest.to_string()).expect("the manifest is complete");
+    CoreHandle::new(manifest, PoolProfile::Producer, ClientFamily::Python)
+}
+
+/// The rule of [`check_worker_connections`] on a handle: with no profiles,
+/// or through a transaction pooler, the handle never connects.
+#[tokio::test]
+async fn on_a_handle_no_profile_or_transaction_mode_connects_nothing() {
+    let direct = unreachable_handle(false);
+    assert!(check_handle_worker_connections(&BTreeMap::new(), &direct)
+        .await
+        .is_empty());
+    assert!(matches!(
+        direct.connection(),
+        HandleConnection::NeverConnected
+    ));
+
+    let pooled = unreachable_handle(true);
+    let profiles = BTreeMap::from([("default".to_owned(), isolated_only(1))]);
+    assert!(check_handle_worker_connections(&profiles, &pooled)
+        .await
+        .is_empty());
+    assert!(matches!(
+        pooled.connection(),
+        HandleConnection::NeverConnected
+    ));
+}
+
+/// A server that does not answer is the one error of an unreadable limit,
+/// and no profile is compared.
+#[tokio::test]
+async fn on_a_handle_an_unreachable_server_is_one_unreadable_limit_error() {
+    let handle = unreachable_handle(false);
+    let profiles = BTreeMap::from([
+        ("a".to_owned(), isolated_only(1)),
+        ("b".to_owned(), isolated_only(1)),
+    ]);
+
+    let errors = check_handle_worker_connections(&profiles, &handle).await;
+
+    let [error] = errors.as_slice() else {
+        panic!("expected one error, got {errors:?}");
+    };
+    assert_eq!(error.code, Some(ErrorCode::CheckWorkerConnections));
+    assert_eq!(
+        error.message,
+        "the server connection limit could not be read"
     );
     assert_eq!(error.help_text.as_deref(), Some(LIMIT_UNREADABLE_HELP));
 }
@@ -784,6 +870,7 @@ fn task_send_pool_of_the_init_frame(profile: &WorkerProfile) -> u64 {
     };
     let facts = PoolFacts {
         worker_id: "worker-1".to_owned(),
+        orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         pending_limit: NonZeroUsize::new(8).expect("a test pending limit above 0"),
         exit_not_seen: ExitNotSeen::LeaveToRecovery,
         placement: CpuPlacement::SharedCpus,

@@ -213,6 +213,7 @@ fn scripted_child(kind: SharedChildKindOfTest, frames: &[ChildFrame], after: &st
         task_name: task.task_name.clone(),
         worker_id: "worker-1".to_owned(),
         claimed_at: task.claimed_at,
+        orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work: work_of(kind),
         input: TaskInputText::new("{}".to_owned()),
     }))
@@ -253,6 +254,7 @@ async fn run_one(
             command: scripted_child(kind, frames, after),
             init: init_frame(kind),
             worker_id: "worker-1".to_owned(),
+            orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
             pending_limit: NonZeroUsize::new(4).unwrap(),
             tasks_per_seat: TaskLimit::Off,
             memory_per_child: MemoryLimit::Off,
@@ -444,6 +446,7 @@ async fn the_free_seats_of_an_open_child_less_the_submitted_tasks() {
             command: scripted_child(kind, &[], "exec sleep 60"),
             init: init_frame(kind),
             worker_id: "worker-1".to_owned(),
+            orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
             pending_limit: NonZeroUsize::new(4).unwrap(),
             tasks_per_seat: TaskLimit::Off,
             memory_per_child: MemoryLimit::Off,

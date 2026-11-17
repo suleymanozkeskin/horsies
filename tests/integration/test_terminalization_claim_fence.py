@@ -27,12 +27,12 @@ pre-arms generations kept passing.
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock
 
-import psycopg
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -42,7 +42,8 @@ from horsies.core.lifecycle.commands import (
     CancelNodesOfCancelledWorkflow,
 )
 from horsies.core.lifecycle.persistence import apply_batch_async
-from horsies.core.worker.child_runner import _handle_workflow_stop_before_start
+from horsies.core.worker.child_pool import _get_child_core_handle
+from horsies.core.worker.child_runner import StartMissReason, _after_missed_start
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.worker import Worker
@@ -417,12 +418,28 @@ async def test_real_claim_path_arms_the_fence(
 
 
 # ---------------------------------------------------------------------------
-# Child pre-start branches, raw psycopg
+# Child pre-start branches: the stop before start of the child, on the core
 # ---------------------------------------------------------------------------
 
 
-def _psycopg_dsn(db_url: str) -> str:
-    return db_url
+def _stop_dispatched(task_id: str, wf_status: str, dispatched: datetime) -> None:
+    """The miss path of a child whose start missed for ``wf_status``, under
+    the claim of the dispatch that carries ``dispatched``: one
+    ``horsies_workflow_task_stop_before_start`` through the core handle of
+    the suite, with the orphan self-heal off."""
+    reasons: dict[str, StartMissReason] = {
+        'PAUSED': 'WORKFLOW_PAUSED',
+        'CANCELLED': 'WORKFLOW_CANCELLED',
+    }
+    _ = _after_missed_start(
+        _get_child_core_handle(),
+        task_id,
+        _WORKER_ID,
+        reasons[wf_status],
+        dispatched,
+        orphan_self_heal=False,
+        attempt_began=time.monotonic(),
+    )
 
 
 @pytest.mark.parametrize(
@@ -489,14 +506,8 @@ async def test_child_prestart_fences_on_claim_generation(
     )
     await session.commit()
 
-    with psycopg.connect(_psycopg_dsn(db_url)) as conn:
-        with conn.cursor() as cursor:
-            _handle_workflow_stop_before_start(
-                cursor, conn, stale_id, wf_status, _WORKER_ID, dispatched,
-            )
-            _handle_workflow_stop_before_start(
-                cursor, conn, fresh_id, wf_status, _WORKER_ID, dispatched,
-            )
+    _stop_dispatched(stale_id, wf_status, dispatched)
+    _stop_dispatched(fresh_id, wf_status, dispatched)
 
     await session.commit()
     assert await _status_of(session, stale_id) == 'CLAIMED'
@@ -538,11 +549,7 @@ async def test_child_prestart_still_cancels_requeued_pending_row(
     )
     await session.commit()
 
-    with psycopg.connect(_psycopg_dsn(db_url)) as conn:
-        with conn.cursor() as cursor:
-            _handle_workflow_stop_before_start(
-                cursor, conn, task_id, 'CANCELLED', _WORKER_ID, dispatched,
-            )
+    _stop_dispatched(task_id, 'CANCELLED', dispatched)
 
     await session.commit()
     assert await _status_of(session, task_id) == 'CANCELLED'

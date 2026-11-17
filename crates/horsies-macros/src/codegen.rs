@@ -33,7 +33,8 @@ struct Param {
 #[derive(Clone)]
 enum InputShape {
     /// No parameter, or one parameter of type `()`: the input is `()`, sent
-    /// as `null`; a workflow node gives `{}`.
+    /// as `{}` (no keyword arguments, as Python stores them), as a workflow
+    /// node gives it.
     Unit(UnitParameter),
     /// One or more parameters, any one that is not a single `()`: a
     /// generated `Input` struct with one field per parameter, keyed by the
@@ -434,7 +435,7 @@ fn registered_task(
 
 /// The decode of `input` (a byte slice or a vector in scope) into the
 /// bindings that the call takes. A refusal returns the stored error. A task
-/// whose input is `()` reads `null` (a send) and `{}` (a workflow node).
+/// whose input is `()` reads `{}` (a send, a workflow node) and `null`.
 fn decode_statement(signature: &Signature, input_type: &Type) -> TokenStream {
     let pattern = match &signature.input {
         InputShape::Unit(_) => quote! { () },

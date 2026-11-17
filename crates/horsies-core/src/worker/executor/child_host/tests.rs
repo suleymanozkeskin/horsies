@@ -234,3 +234,21 @@ fn a_blocking_read_takes_one_frame_and_names_the_eof() {
         Err(ReadEnd::Eof)
     ));
 }
+
+/// Python `test_isolated_left_work.py::TestMarkerBounds::test_the_parent_waits_past_the_child_bound_after_a_return`,
+/// for the core child: after a body returned with work left, the child
+/// ends that work (the grace and the cancel rounds) and writes the
+/// finalizing marker, whose statement a cancel ends at its bound, before
+/// the parent's backstop kills it.
+#[test]
+fn the_parent_waits_past_the_end_of_left_work_and_the_marker() {
+    let rounds =
+        super::run_work::CANCEL_ROUND_INTERVAL * (1 + super::run_work::EXTRA_CANCEL_ROUNDS);
+    let child_end = super::run_work::ISOLATED_LEFTOVER_GRACE
+        + rounds
+        + crate::broker::child_writes::FINALIZING_MARKER_END;
+    assert!(
+        crate::worker::executor::slots::isolated::ISOLATED_LEFTOVER_BACKSTOP > child_end,
+        "{child_end:?}"
+    );
+}

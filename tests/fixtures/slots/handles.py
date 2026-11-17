@@ -24,6 +24,7 @@ def _run_frame(task_id: str) -> RunFrame:
         is_workflow_task=False,
         timeout=NoTimeout(),
         claimed_at=HANDLE_CLAIMED_AT,
+        orphan_self_heal=True,
     )
 
 

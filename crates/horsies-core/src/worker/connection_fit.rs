@@ -50,6 +50,7 @@ use crate::core::config::worker_profile::{
 use crate::core::config::{AppConfig, PostgresConfig};
 use crate::core::error::{ErrorCode, HorsiesError};
 use crate::db::{CheckoutClass, CorePool, StatementBound, TypedStatement};
+use crate::handle::CoreHandle;
 
 /// Connections of the process listener of a worker: one connection carries
 /// every LISTEN of the process.
@@ -561,8 +562,41 @@ pub fn connection_limit_unreadable_error(cause: &ConnectionLimitUnreadable) -> H
         .with_help(LIMIT_UNREADABLE_HELP)
 }
 
-/// The live connection check of `horsies check --live` (Python
-/// `Horsies._check_worker_connections`, `python/horsies/core/app.py:1421-1478`).
+/// Whether the live connection check reads the server limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LimitRead {
+    /// No worker profile, or PgBouncer transaction mode: nothing is read.
+    NotNeeded,
+    /// At least one profile on a direct or session-pooled URL.
+    Needed,
+}
+
+/// The rule of both clients: no profile to compare, or connections that go
+/// through a transaction pooler, read nothing. Pure.
+fn limit_read(profiles: &BTreeMap<String, WorkerProfile>, broker: &PostgresConfig) -> LimitRead {
+    match (profiles.is_empty(), broker.pgbouncer_transaction_mode) {
+        (true, _) | (_, true) => LimitRead::NotNeeded,
+        (false, false) => LimitRead::Needed,
+    }
+}
+
+/// Reads the limit once through `broker` and compares each profile with it:
+/// one error per profile that does not fit, in name order, or one error
+/// when the limit was not read. Writes nothing. Does not retry the read.
+async fn read_and_compare(
+    profiles: &BTreeMap<String, WorkerProfile>,
+    broker_config: &PostgresConfig,
+    broker: &PostgresBroker,
+) -> Vec<HorsiesError> {
+    match read_server_connection_limit(broker).await {
+        Ok(limit) => worker_connection_errors(profiles, broker_config, limit),
+        Err(cause) => vec![connection_limit_unreadable_error(&cause)],
+    }
+}
+
+/// The live connection check of `horsies check --live` on a connected
+/// broker (the Rust client's `check_live`; Python
+/// `Horsies._check_worker_connections`).
 ///
 /// - No worker profile, or PgBouncer transaction mode: reads nothing and
 ///   returns no error.
@@ -575,14 +609,43 @@ pub async fn check_worker_connections(
     config: &AppConfig,
     broker: &PostgresBroker,
 ) -> Vec<HorsiesError> {
-    match (
-        config.worker_profiles.is_empty(),
-        config.broker.pgbouncer_transaction_mode,
-    ) {
-        (true, _) | (_, true) => Vec::new(),
-        (false, false) => match read_server_connection_limit(broker).await {
-            Ok(limit) => worker_connection_errors(&config.worker_profiles, &config.broker, limit),
-            Err(cause) => vec![connection_limit_unreadable_error(&cause)],
+    match limit_read(&config.worker_profiles, &config.broker) {
+        LimitRead::NotNeeded => Vec::new(),
+        LimitRead::Needed => {
+            read_and_compare(&config.worker_profiles, &config.broker, broker).await
+        }
+    }
+}
+
+/// The live connection check of `horsies check --live` on a lazy handle:
+/// the profile set `profiles` against the database of `handle`'s manifest
+/// (the Python client's `Horsies._check_worker_connections`, through the
+/// bridge). The same rule as [`check_worker_connections`]:
+///
+/// - No worker profile, or PgBouncer transaction mode in the manifest:
+///   connects nothing, reads nothing, returns no error.
+/// - Otherwise connects the handle's broker (a connect that fails is the
+///   one error of an unreadable limit), reads the limit once, and returns
+///   one error per profile that does not fit, in name order, or one error
+///   when the limit was not read.
+///
+/// Writes nothing; installs no schema. Does not retry the connect or the
+/// read. Every error has the code `CHECK_WORKER_CONNECTIONS`.
+pub async fn check_handle_worker_connections(
+    profiles: &BTreeMap<String, WorkerProfile>,
+    handle: &CoreHandle,
+) -> Vec<HorsiesError> {
+    let manifest = handle.manifest();
+    let broker_config = manifest
+        .database
+        .to_postgres_config(manifest.send.retain_rerun_input_default);
+    match limit_read(profiles, &broker_config) {
+        LimitRead::NotNeeded => Vec::new(),
+        LimitRead::Needed => match handle.broker().await {
+            Ok(broker) => read_and_compare(profiles, &broker_config, &broker).await,
+            Err(error) => vec![connection_limit_unreadable_error(
+                &ConnectionLimitUnreadable::Database(error),
+            )],
         },
     }
 }

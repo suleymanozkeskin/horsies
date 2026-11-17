@@ -16,7 +16,9 @@
 //! Each is one statement in autocommit on a [`CorePool`], so its locks end
 //! with the statement. The claim pass and the start check are batch work
 //! ([`CheckoutClass::Batch`]); the start and the release are per-task writes
-//! ([`CheckoutClass::Reserved`]).
+//! ([`CheckoutClass::Reserved`]). The start, and the release after a failed
+//! start ([`release_claims_within`]), are child writes with the bounds of
+//! [`crate::broker::child_writes`].
 //!
 //! A row that breaks the function's row contract is
 //! [`BrokerError::ClaimContract`]; a column that does not decode is
@@ -30,13 +32,13 @@ use std::num::NonZeroU32;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use crate::broker::child_writes::{connection_for, query_within, WriteDeadline};
 use crate::broker::core_rows::{column, StatementLog};
 use crate::broker::error::BrokerError;
 use crate::core::lifecycle::OwnedClaim;
 use crate::core::task::Execution;
 use crate::db::{
-    CheckoutClass, CheckoutFailure, CorePool, NotSentCause, ParameterType, PooledConnection, Row,
-    StatementBound, StatementFailure, TypedStatement,
+    CheckoutClass, CorePool, ParameterType, PooledConnection, Row, StatementBound, TypedStatement,
 };
 
 /// The most rows one release statement takes (the bound of
@@ -583,68 +585,64 @@ pub enum WindowedStart {
     WindowClosed,
 }
 
-/// Start one claimed task: `horsies_start_attempt` on `pool`, as a per-task
-/// write. Writes the RUNNING row, the first runner beat and the node write
-/// in one statement, or nothing on a miss. Does not expire the row or stop
-/// the task on a miss; that is the caller's next step.
+/// Start one claimed task: `horsies_start_attempt` on `pool`, as a child
+/// write within `deadline`, the deadline of its start attempt
+/// ([`crate::broker::child_writes::connection_for`]). Writes the RUNNING
+/// row, the first runner beat and the node write in one statement, or
+/// nothing on a miss. Does not expire the row or stop the task on a miss;
+/// that is the caller's next step, within the same deadline.
 ///
-/// Errors: [`BrokerError::Statement`]; [`BrokerError::RowDecode`];
-/// [`BrokerError::ClaimContract`] when the function does not return exactly
-/// one row of its contract. After `OutcomeUnknown` the row may be RUNNING;
-/// the same start sent again misses with `NotHeld` (the row is no longer
-/// CLAIMED).
+/// Errors: [`BrokerError::Statement`]: nothing sent (a failed checkout, or
+/// `deadline` passed first); refused, a cancel at the bound included
+/// (nothing written: the cancelled start does not commit later); or
+/// `OutcomeUnknown` (the row may be RUNNING; the same start sent again
+/// misses with `NotHeld`, the row being no longer CLAIMED).
+/// [`BrokerError::RowDecode`]; [`BrokerError::ClaimContract`] when the
+/// function does not return exactly one row of its contract.
 pub(crate) async fn start_attempt(
     pool: &CorePool,
     log: StatementLog,
     command: &StartAttempt,
+    deadline: WriteDeadline,
 ) -> Result<StartOutcome, BrokerError> {
-    let mut connection = pool
-        .checkout(CheckoutClass::Reserved)
-        .await
-        .map_err(start_not_sent)?;
-    start_on(&mut connection, log, command).await
+    let (mut connection, statement_bound) =
+        connection_for(pool, START_ATTEMPT.name(), deadline).await?;
+    start_on(&mut connection, log, command, statement_bound).await
 }
 
 /// [`start_attempt`] with a window: after the pool gave the connection, a
 /// closed window ends the start with no statement
 /// ([`WindowedStart::WindowClosed`]).
 ///
-/// Errors: as [`start_attempt`]; a failed checkout is
-/// [`BrokerError::Statement`] with nothing sent.
+/// Errors: as [`start_attempt`].
 pub(crate) async fn start_attempt_within(
     pool: &CorePool,
     log: StatementLog,
     command: &StartAttempt,
     window: StartWindow,
+    deadline: WriteDeadline,
 ) -> Result<WindowedStart, BrokerError> {
-    let mut connection = pool
-        .checkout(CheckoutClass::Reserved)
-        .await
-        .map_err(start_not_sent)?;
+    let (mut connection, statement_bound) =
+        connection_for(pool, START_ATTEMPT.name(), deadline).await?;
     match window {
-        StartWindow::Until(deadline) if std::time::Instant::now() >= deadline => {
+        StartWindow::Until(run_deadline) if std::time::Instant::now() >= run_deadline => {
             Ok(WindowedStart::WindowClosed)
         }
-        StartWindow::Until(_) | StartWindow::Open => start_on(&mut connection, log, command)
-            .await
-            .map(WindowedStart::Ran),
+        StartWindow::Until(_) | StartWindow::Open => {
+            start_on(&mut connection, log, command, statement_bound)
+                .await
+                .map(WindowedStart::Ran)
+        }
     }
 }
 
-/// The failure of a start whose checkout failed: nothing was sent.
-fn start_not_sent(cause: CheckoutFailure) -> BrokerError {
-    BrokerError::Statement(StatementFailure::NotSent {
-        statement: START_ATTEMPT.name(),
-        cause: NotSentCause::Checkout(cause),
-    })
-}
-
-/// Run `horsies_start_attempt` on a checked-out connection and decode its
-/// row. Errors: as [`start_attempt`].
+/// Run `horsies_start_attempt` on a checked-out connection with
+/// `statement_bound` and decode its row. Errors: as [`start_attempt`].
 async fn start_on(
     connection: &mut PooledConnection,
     log: StatementLog,
     command: &StartAttempt,
+    statement_bound: StatementBound,
 ) -> Result<StartOutcome, BrokerError> {
     let statement = &START_ATTEMPT;
     let bound = statement
@@ -658,9 +656,7 @@ async fn start_on(
         .value(&command.beat_sender_id)
         .finish();
     log.log(statement);
-    let rows = connection
-        .query(&bound, StatementBound::ConnectionTimeouts)
-        .await?;
+    let rows = connection.query(&bound, statement_bound).await?;
     let [row] = rows.as_slice() else {
         return Err(BrokerError::ClaimContract(format!(
             "horsies_start_attempt returned {} rows for task {}; it returns one",
@@ -909,8 +905,8 @@ pub enum ReleaseOutcome {
 }
 
 /// Release claimed rows: `horsies_release_claims` on `pool`, as a per-task
-/// write. Writes no attempt row. Returns one outcome per input row, in the
-/// input order.
+/// write with the bounds of the pool and the connection. Writes no attempt
+/// row. Returns one outcome per input row, in the input order.
 ///
 /// Errors: [`BrokerError::Statement`]; [`BrokerError::RowDecode`];
 /// [`BrokerError::ClaimContract`] when the rows do not answer each input
@@ -920,6 +916,42 @@ pub(crate) async fn release_claims(
     pool: &CorePool,
     log: StatementLog,
     command: &ReleaseClaims,
+) -> Result<Vec<(Uuid, ReleaseOutcome)>, BrokerError> {
+    release_on(pool, log, command, ReleaseRun::PoolBounds).await
+}
+
+/// [`release_claims`] as a child write within `deadline`
+/// ([`crate::broker::child_writes::query_within`]): the release of the
+/// claim of a start that failed, within the deadline of its start attempt.
+///
+/// Errors: as [`release_claims`]; [`BrokerError::Statement`] with nothing
+/// sent when `deadline` passed first, and refused when the cancel at the
+/// bound ended the statement (nothing released).
+pub(crate) async fn release_claims_within(
+    pool: &CorePool,
+    log: StatementLog,
+    command: &ReleaseClaims,
+    deadline: WriteDeadline,
+) -> Result<Vec<(Uuid, ReleaseOutcome)>, BrokerError> {
+    release_on(pool, log, command, ReleaseRun::ChildWrite(deadline)).await
+}
+
+/// The bounds of one release statement.
+#[derive(Debug, Clone, Copy)]
+enum ReleaseRun {
+    /// The checkout wait of the pool and the connection's own timeouts.
+    PoolBounds,
+    /// A child write within this deadline.
+    ChildWrite(WriteDeadline),
+}
+
+/// Run one release with the bounds of `run` and decode its rows. Errors:
+/// as [`release_claims`].
+async fn release_on(
+    pool: &CorePool,
+    log: StatementLog,
+    command: &ReleaseClaims,
+    run: ReleaseRun,
 ) -> Result<Vec<(Uuid, ReleaseOutcome)>, BrokerError> {
     let placement = command.placement.as_sql();
     let statement = &RELEASE_CLAIMS;
@@ -931,13 +963,17 @@ pub(crate) async fn release_claims(
         .value(&placement)
         .finish();
     log.log(statement);
-    let rows = pool
-        .query(
-            CheckoutClass::Reserved,
-            &bound,
-            StatementBound::ConnectionTimeouts,
-        )
-        .await?;
+    let rows = match run {
+        ReleaseRun::PoolBounds => {
+            pool.query(
+                CheckoutClass::Reserved,
+                &bound,
+                StatementBound::ConnectionTimeouts,
+            )
+            .await?
+        }
+        ReleaseRun::ChildWrite(deadline) => query_within(pool, &bound, deadline).await?,
+    };
     let wire = rows
         .iter()
         .map(|row| -> Result<(i64, Uuid, String), BrokerError> {

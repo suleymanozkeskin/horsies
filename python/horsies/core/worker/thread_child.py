@@ -15,10 +15,10 @@ fired, whatever the task returned, else ``SeatFinished``. A run whose task
 returned has no deadline left. A ``SeatRefusal`` runs no task code and has no
 deadline.
 
-A seat thread that waited for a pooled connection past the deadline of its
-run does not start the task: right before the RUNNING update it asks the
-table (``start_check``), and the row stays CLAIMED for the worker to return
-to the queue.
+A seat thread does not start the task of a run whose deadline passed:
+right before the RUNNING update it asks the table (``start_check``) for the
+time left, and the core checks that time again once the pool gave a
+connection. The row stays CLAIMED for the worker to return to the queue.
 
 After the return, a run that set its row RUNNING and returned before its
 deadline writes its finalizing marker, at most until that deadline; the seat
@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import functools
 import gc
+import math
 import os
 import queue
 import socket
@@ -97,6 +98,7 @@ from horsies.core.worker.child_runner import (
     DeadlineBeforeStart,
     StartAllowed,
     StartCheck,
+    StartWithin,
 )
 from horsies.core.worker.task_loop import TaskLoop
 
@@ -200,6 +202,14 @@ def _deadline_at(work: ThreadSeatWork, now: float) -> _DeadlineAt | _NoDeadline:
             return _NoDeadline()
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def _milliseconds_left(seconds: float) -> int:
+    """The time left before a deadline in whole milliseconds, rounded up and
+    1 at least: the core's check of the start then never passes before the
+    deadline on the clock of the table, which is the monotonic clock that
+    the core reads too. Pure."""
+    return max(1, math.ceil(seconds * 1000.0))
 
 
 def _end_at_return(run: _ThreadRun, returned: ThreadSeatReturn) -> SeatEnd:
@@ -309,19 +319,29 @@ class ThreadRunTable:
             self._changed.notify_all()
 
     def start_check(self, dispatch: int) -> StartCheck:
-        """Whether run ``dispatch`` may still set its row RUNNING. Its seat
-        thread asks right before the update, after the wait for a pooled
-        connection. Fires every deadline that is due first, so a deadline
-        that the deadline thread has not reached yet counts too."""
+        """Whether run ``dispatch`` may still set its row RUNNING, and until
+        when. Its seat thread asks right before the update. Fires every
+        deadline that is due first, so a deadline that the deadline thread
+        has not reached yet counts too.
+
+        ``StartWithin`` gives the time left before the deadline, rounded up
+        to a whole millisecond, so the check of the core never passes before
+        the deadline of this table; a run with no deadline is
+        ``StartAllowed``.
+        """
         with self._lock:
             _ = self._fire_due()
             run = self._runs[dispatch]
-            match run.state:
-                case _Deadline.PENDING:
+            match run.state, run.deadline_at:
+                case _Deadline.PENDING, _DeadlineAt(seconds=deadline_at):
+                    return StartWithin(
+                        milliseconds=_milliseconds_left(deadline_at - self._clock()),
+                    )
+                case _Deadline.PENDING, _NoDeadline():
                     return StartAllowed()
-                case _Deadline.FIRED:
+                case _Deadline.FIRED, _:
                     return DeadlineBeforeStart()
-                case _Returned():
+                case _Returned(), _:
                     raise AssertionError(
                         f'run {dispatch} asked to start after its return',
                     )
@@ -336,8 +356,13 @@ class ThreadRunTable:
         """Fix the end of run ``dispatch``, whose task returned ``returned``
         (``_end_at_return``): the run has no deadline left. Returns whether
         its seat writes the finalizing marker, and within what time
-        (``_marker_window``). Called once per run, by its seat thread."""
+        (``_marker_window``). Called once per run, by its seat thread.
+
+        Fires every deadline that is due first: a start that the core refused
+        at the deadline (``DeadlineBeforeStart``) can return before the
+        deadline thread reached that deadline."""
         with self._lock:
+            _ = self._fire_due()
             run = self._runs[dispatch]
             end = _end_at_return(run, returned)
             run.state = _Returned(end)

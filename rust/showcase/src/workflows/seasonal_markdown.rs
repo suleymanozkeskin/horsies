@@ -1,30 +1,56 @@
-use horsies::{HorsiesError, WorkflowSpec};
-use serde_json::json;
+//! The seasonal markdown: mark each SKU down, then roll the sales of the
+//! campaign up.
 
-use super::{builder, finish, WorkflowTasks};
+use horsies::{HorsiesError, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder};
 
-pub fn build(
-    tasks: &WorkflowTasks,
-    campaign_id: &str,
-    skus: Vec<String>,
-) -> Result<WorkflowSpec, HorsiesError> {
-    let mut builder = builder("seasonal_markdown", "acme.seasonal_markdown.v1");
-    let mut refs = Vec::new();
-    for (index, sku) in skus.iter().enumerate() {
-        refs.push(builder.task(tasks.node(
-            "update_price",
-            &format!("update_price_{index:02}"),
-            json!({"sku": sku, "campaign_id": campaign_id}),
-        )?));
+use crate::domain::SalesRollup;
+use crate::tasks::analytics::sales_rollup;
+use crate::tasks::promotions::update_price;
+
+/// The campaign that the definition marks down.
+pub const CAMPAIGN_ID: &str = "MARKDOWN-CHECK";
+/// The SKUs that the definition marks down: `ACME-SKU-0001` to this one.
+pub const LAST_SKU: usize = 6;
+
+/// The seasonal markdown workflow. Its result is the rollup.
+pub struct SeasonalMarkdown;
+
+impl WorkflowDefinition for SeasonalMarkdown {
+    type Output = SalesRollup;
+    type Params = ();
+
+    fn name() -> &'static str {
+        "seasonal_markdown"
     }
-    builder.task(
-        tasks
-            .node(
-                "sales_rollup",
-                "sales_rollup",
-                json!({"window": format!("markdown-{campaign_id}")}),
-            )?
-            .waits_for_all(refs),
-    );
-    finish(builder, Some("sales_rollup"), &[], &[], None)
+
+    fn definition_key() -> &'static str {
+        "acme.seasonal_markdown.v1"
+    }
+
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        let mut markdowns = Vec::new();
+        for (index, sku_number) in (1..=LAST_SKU).enumerate() {
+            markdowns.push(
+                builder.task(
+                    update_price::node()?
+                        .node_id(format!("update_price_{index:02}"))
+                        .set(
+                            update_price::params::sku(),
+                            format!("ACME-SKU-{sku_number:04}"),
+                        )?
+                        .set(update_price::params::campaign_id(), CAMPAIGN_ID.to_owned())?,
+                ),
+            );
+        }
+        let rollup = builder.task(
+            sales_rollup::node()?
+                .node_id("sales_rollup")
+                .set(
+                    sales_rollup::params::window(),
+                    format!("markdown-{CAMPAIGN_ID}"),
+                )?
+                .waits_for_all(markdowns),
+        );
+        Ok(WorkflowDefConfig::new().output(rollup))
+    }
 }

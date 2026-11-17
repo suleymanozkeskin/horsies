@@ -16,7 +16,7 @@ use std::num::NonZeroU32;
 use chrono::{DateTime, Utc};
 use horsies_core::db::KeptOpen;
 use horsies_core::manifest::parse_producer_manifest;
-use horsies_core::PoolProfile;
+use horsies_core::{PoolProfile, WriteDeadline};
 use pyo3::prelude::*;
 use uuid::Uuid;
 
@@ -28,7 +28,10 @@ use crate::handle::{checked_core, BrokerConnection};
 use crate::operations::arguments::utc_instant;
 use crate::operations::expiry_and_orphans::expire_owned_claim_operation;
 use crate::operations::finalizing::{mark_finalizing_operation, marker_fence};
-use crate::operations::start::{start_attempt_operation, start_command, start_window};
+use crate::operations::start::{
+    miss_path_deadline, start_attempt_operation, start_command, start_window,
+};
+use crate::operations::stop_before_start::{self_heal_of, stop_before_start_operation, stop_fence};
 
 /// The pool profile of a child: `kept_open` connections kept open (0 keeps
 /// none) and, with `check_at_checkout`, a ping of every pooled connection at
@@ -76,8 +79,12 @@ impl CoreChildHandle {
     /// one statement, checked out as reserved work. `deadline_in_ms` is the
     /// time left before the deadline of the run at the call, or `None` for a
     /// run with no deadline: when it has passed by the time the pool gives
-    /// the connection, no statement runs. Blocking, for the isolated child
-    /// and the seats of a shared thread child. A naive `claimed_at` raises
+    /// the connection, no statement runs. The call begins a start attempt
+    /// (`START_ATTEMPT_BOUND`, 40 s): the checkout waits at most 30 s, and
+    /// the statement gets a cancel request after 10 s or at the end of the
+    /// attempt, so a start that waits on a row lock ends `StartFailed` and
+    /// does not commit later. Blocking, for the isolated child and the
+    /// seats of a shared thread child. A naive `claimed_at` raises
     /// `TypeError`.
     #[pyo3(signature = (
         task_id,
@@ -101,6 +108,7 @@ impl CoreChildHandle {
     ) -> PyResult<Py<PyAny>> {
         let claimed_at: DateTime<Utc> = utc_instant(claimed_at)?;
         let window = start_window(deadline_in_ms);
+        let deadline = WriteDeadline::start_attempt();
         let command = start_command(task_id, worker_id, claimed_at, worker_pid, worker_hostname);
         let core = checked_core(py)?;
         call_blocking(
@@ -108,7 +116,7 @@ impl CoreChildHandle {
             core,
             "CoreChildHandle.start_attempt",
             CallKind::Write,
-            start_attempt_operation(self.connection.clone(), command, window),
+            start_attempt_operation(self.connection.clone(), command, window, deadline),
         )
     }
 
@@ -135,6 +143,7 @@ impl CoreChildHandle {
     ) -> PyResult<Bound<'py, PyAny>> {
         let claimed_at: DateTime<Utc> = utc_instant(claimed_at)?;
         let window = start_window(deadline_in_ms);
+        let deadline = WriteDeadline::start_attempt();
         let command = start_command(task_id, worker_id, claimed_at, worker_pid, worker_hostname);
         let core = checked_core(py)?;
         call_async(
@@ -142,7 +151,7 @@ impl CoreChildHandle {
             core,
             "CoreChildHandle.start_attempt_async",
             CallKind::Write,
-            start_attempt_operation(self.connection.clone(), command, window),
+            start_attempt_operation(self.connection.clone(), command, window, deadline),
         )
     }
 
@@ -152,49 +161,129 @@ impl CoreChildHandle {
     /// (`AttemptAlreadyApplied`, `AttemptLostClaim`,
     /// `AttemptSourceStateConflict`, `AttemptTaskAbsent`), or
     /// `AttemptWriteFailed`. Writes, in one statement, checked out as
-    /// reserved work. Blocking, for the isolated child and the seats of a
-    /// shared thread child.
-    #[pyo3(signature = (task_id, *, worker_id))]
+    /// reserved work. `attempt_elapsed_ms` is the time since the start
+    /// attempt began, as the caller measured it: the expiry ends by the end
+    /// of that attempt, and an attempt with no time left sends nothing
+    /// (`AttemptWriteFailed`, retryable). Blocking, for the isolated child
+    /// and the seats of a shared thread child.
+    #[pyo3(signature = (task_id, *, worker_id, attempt_elapsed_ms))]
     fn expire_owned_claim(
         &self,
         py: Python<'_>,
         task_id: Uuid,
         worker_id: String,
+        attempt_elapsed_ms: u64,
     ) -> PyResult<Py<PyAny>> {
+        let deadline = miss_path_deadline(attempt_elapsed_ms);
         let core = checked_core(py)?;
         call_blocking(
             py,
             core,
             "CoreChildHandle.expire_owned_claim",
             CallKind::Write,
-            expire_owned_claim_operation(self.connection.clone(), task_id, worker_id),
+            expire_owned_claim_operation(self.connection.clone(), task_id, worker_id, deadline),
         )
     }
 
     /// The awaitable form of `expire_owned_claim`, for a shared async child.
-    #[pyo3(signature = (task_id, *, worker_id))]
+    #[pyo3(signature = (task_id, *, worker_id, attempt_elapsed_ms))]
     fn expire_owned_claim_async<'py>(
         &self,
         py: Python<'py>,
         task_id: Uuid,
         worker_id: String,
+        attempt_elapsed_ms: u64,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let deadline = miss_path_deadline(attempt_elapsed_ms);
         let core = checked_core(py)?;
         call_async(
             py,
             core,
             "CoreChildHandle.expire_owned_claim_async",
             CallKind::Write,
-            expire_owned_claim_operation(self.connection.clone(), task_id, worker_id),
+            expire_owned_claim_operation(self.connection.clone(), task_id, worker_id, deadline),
+        )
+    }
+
+    /// Stop a claimed workflow task whose start missed
+    /// (`horsies_workflow_task_stop_before_start`): `StoppedBeforeStart`,
+    /// `ResumedBeforeStart`, or `StopBeforeStartFailed`. Writes, in one
+    /// statement, checked out as reserved work. The function judges the task
+    /// again under its own locks: the expiry, the abandon of a PAUSED
+    /// workflow, the cancel of a CANCELLED one, a resume that came first,
+    /// and, with `orphan_self_heal`, the cancel of a task that no node links
+    /// live. `attempt_elapsed_ms` is the time since the start attempt began,
+    /// as the caller measured it: the stop ends by the end of that attempt,
+    /// and an attempt with no time left sends nothing
+    /// (`StopBeforeStartFailed`, retryable). Blocking, for the isolated child
+    /// and the seats of a shared thread child. A naive `claimed_at` raises
+    /// `TypeError`.
+    #[pyo3(signature = (task_id, *, worker_id, claimed_at, orphan_self_heal, attempt_elapsed_ms))]
+    fn stop_workflow_task_before_start(
+        &self,
+        py: Python<'_>,
+        task_id: Uuid,
+        worker_id: String,
+        claimed_at: &Bound<'_, PyAny>,
+        orphan_self_heal: bool,
+        attempt_elapsed_ms: u64,
+    ) -> PyResult<Py<PyAny>> {
+        let fence = stop_fence(worker_id, utc_instant(claimed_at)?);
+        let deadline = miss_path_deadline(attempt_elapsed_ms);
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreChildHandle.stop_workflow_task_before_start",
+            CallKind::Write,
+            stop_before_start_operation(
+                self.connection.clone(),
+                task_id,
+                fence,
+                self_heal_of(orphan_self_heal),
+                deadline,
+            ),
+        )
+    }
+
+    /// The awaitable form of `stop_workflow_task_before_start`, for a shared
+    /// async child.
+    #[pyo3(signature = (task_id, *, worker_id, claimed_at, orphan_self_heal, attempt_elapsed_ms))]
+    fn stop_workflow_task_before_start_async<'py>(
+        &self,
+        py: Python<'py>,
+        task_id: Uuid,
+        worker_id: String,
+        claimed_at: &Bound<'_, PyAny>,
+        orphan_self_heal: bool,
+        attempt_elapsed_ms: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let fence = stop_fence(worker_id, utc_instant(claimed_at)?);
+        let deadline = miss_path_deadline(attempt_elapsed_ms);
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreChildHandle.stop_workflow_task_before_start_async",
+            CallKind::Write,
+            stop_before_start_operation(
+                self.connection.clone(),
+                task_id,
+                fence,
+                self_heal_of(orphan_self_heal),
+                deadline,
+            ),
         )
     }
 
     /// Write the finalizing marker of a run whose body ended
     /// (`horsies_mark_finalizing`): `FinalizingMarked`, `FinalizingNotHeld`,
     /// or `MarkFinalizingFailed`. Writes, in one statement, checked out as
-    /// reserved work; the wait for the connection and the statement have the
-    /// pool's bounds. Blocking, for the isolated child and the seats of a
-    /// shared thread child. A naive `claimed_at` raises `TypeError`.
+    /// reserved work; the wait for the connection and the statement end
+    /// within `FINALIZING_MARKER_BOUND` (10 s), and a marker cancelled at
+    /// the bound is not written later. Blocking, for the isolated child and
+    /// the seats of a shared thread child. A naive `claimed_at` raises
+    /// `TypeError`.
     #[pyo3(signature = (task_id, *, worker_id, claimed_at))]
     fn mark_finalizing(
         &self,

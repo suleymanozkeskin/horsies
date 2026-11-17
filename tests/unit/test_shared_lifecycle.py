@@ -1,9 +1,12 @@
-"""The lifecycle writes of a shared async child, on fake async connections.
+"""The lifecycle writes of a shared async child.
 
-Each test drives the async pre-start transition or the finalizing marker
-through a fake pool, connection and cursor that record what the child sends.
-The terminalization commands are replaced at ``apply_psycopg_async``; their
-own statements are covered by the integration tests.
+The pre-start transition goes through the awaitable methods of the core
+handle of the child: each test stands in that handle with a fake that
+answers scripted records and keeps each call. The records of
+``horsies._core`` have no Python constructor, so a ``MagicMock`` of the
+record class stands in for each; a class pattern matches it. The finalizing
+marker runs on a fake pool, connection and cursor that record what the child
+sends.
 """
 
 # pyright: reportPrivateUsage=false
@@ -12,25 +15,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import socket
+import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from horsies.core.lifecycle.commands import (
-    AbandonOwnedNode,
-    CancelOwnedNode,
-    ExpireOwnedClaim,
-)
-from horsies.core.lifecycle.outcomes import (
-    Applied,
-    LostClaim,
-    ObservedWorkflowState,
-    SourceStateConflict,
-)
+import horsies._core as core
 from horsies.core.models.tasks import OutcomeCode
 from horsies.core.worker import shared_lifecycle, slots, thread_runner
 from horsies.core.worker.child_pool import (
@@ -38,20 +34,16 @@ from horsies.core.worker.child_pool import (
     SHARED_POOL_CONNECTION_WAIT_S,
 )
 from horsies.core.worker.child_runner import (
-    BEGIN_SQL,
     CANCEL_REQUEST_TIMEOUT_S,
     _PRE_START_CONFIRM_ATTEMPTS,
     MARK_FINALIZING_SQL,
-    RESET_PAUSED_NODE_SQL,
-    SKIP_CANCELLED_NODE_SQL,
-    START_ATTEMPT_SQL,
     mark_finalizing_params,
-    start_attempt_params,
 )
 
 pytestmark = [pytest.mark.unit]
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e02'
 # A test of a bound fails, not hangs, when the bound is gone.
 OUTER_BOUND_S = 5.0
 
@@ -98,19 +90,6 @@ class _Conn:
         self.rollbacks += 1
 
 
-class _OrderedConn(_Conn):
-    """Records each commit and rollback among the statements of its cursor,
-    so a test sees where a transaction ends."""
-
-    async def commit(self) -> None:
-        await super().commit()
-        self.cursor_.queries.append(('COMMIT', ()))
-
-    async def rollback(self) -> None:
-        await super().rollback()
-        self.cursor_.queries.append(('ROLLBACK', ()))
-
-
 class _Pool:
     """Hands out ``conns`` in order, one per ``connection()``."""
 
@@ -134,92 +113,179 @@ def _pool(fake: _Pool | _BrokenPool) -> Any:
     return fake
 
 
-def _apply_recording(outcomes: list[Any]) -> AsyncMock:
-    """An ``apply_psycopg_async`` that records each command by its class name
-    among the statements of the cursor, and returns ``outcomes`` in order."""
+def _record(record_class: type, **fields: object) -> MagicMock:
+    """A stand-in for a record of ``horsies._core`` of the task of these
+    tests, with ``fields`` as its attributes."""
+    record = MagicMock(spec=record_class)
+    record.task_id = uuid.UUID(TASK_ID)
+    for name, value in fields.items():
+        setattr(record, name, value)
+    return record
 
-    async def apply(cursor: _Cursor, command: object) -> Any:
-        cursor.queries.append((type(command).__name__, ()))
-        return outcomes.pop(0)
 
-    return AsyncMock(side_effect=apply)
+# The most time that a miss path of these tests may report as spent in its
+# start attempt: the fakes answer at once.
+_MOST_ELAPSED_MS = 5_000
 
 
-def _confirm(pool: _Pool | _BrokenPool, *, is_workflow_task: bool = False) -> Any:
-    return asyncio.run(
-        shared_lifecycle.confirm_until_not_resumed(
-            _pool(pool),
-            'task-1',
-            'worker-1',
-            is_workflow_task,
-            CLAIMED_AT,
-        ),
+def _attempt_elapsed_ms(arguments: dict[str, object]) -> dict[str, object]:
+    """The arguments of a miss path call without its ``attempt_elapsed_ms``,
+    after a check that it is the whole milliseconds of a start attempt that
+    began right before the call."""
+    rest = dict(arguments)
+    elapsed = rest.pop('attempt_elapsed_ms')
+    assert isinstance(elapsed, int)
+    assert 0 <= elapsed <= _MOST_ELAPSED_MS
+    return rest
+
+
+_STARTED = _record(core.AttemptStarted)
+
+
+def _missed(reason: str) -> MagicMock:
+    return _record(core.AttemptMissed, reason=reason)
+
+
+def _stopped(outcome: str, move_outcome: str | None) -> MagicMock:
+    return _record(core.StoppedBeforeStart, outcome=outcome, move_outcome=move_outcome)
+
+
+def _expired() -> MagicMock:
+    return _record(
+        core.TaskRowEnded,
+        terminal_at=CLAIMED_AT,
+        kind='EXPIRE_CLAIMED',
+        observed_status='CLAIMED',
+        observed_worker_id='worker-1',
+        observed_claimed_at=CLAIMED_AT,
     )
 
 
-_STARTED = ('STARTED', None)
+class _Handle:
+    """A stand-in for ``CoreChildHandle``: each awaitable method answers the
+    next record of its queue, and each call is kept with its arguments, in
+    order."""
+
+    def __init__(
+        self,
+        *,
+        starts: list[Any],
+        stops: list[Any] | None = None,
+        expiries: list[Any] | None = None,
+    ) -> None:
+        self._starts = starts
+        self._stops = stops or []
+        self._expiries = expiries or []
+        self.calls: list[tuple[str, uuid.UUID, dict[str, object]]] = []
+
+    async def start_attempt_async(self, task_id: uuid.UUID, **kwargs: object) -> Any:
+        self.calls.append(('start_attempt_async', task_id, kwargs))
+        return self._starts.pop(0)
+
+    async def stop_workflow_task_before_start_async(
+        self, task_id: uuid.UUID, **kwargs: object,
+    ) -> Any:
+        self.calls.append(('stop_workflow_task_before_start_async', task_id, kwargs))
+        return self._stops.pop(0)
+
+    async def expire_owned_claim_async(self, task_id: uuid.UUID, **kwargs: object) -> Any:
+        self.calls.append(('expire_owned_claim_async', task_id, kwargs))
+        return self._expiries.pop(0)
+
+    def names(self) -> list[str]:
+        return [name for name, _, _ in self.calls]
 
 
-def _missed(reason: str) -> tuple[str, str]:
-    return ('MISSED', reason)
+class _HangingHandle(_Handle):
+    """A handle whose start never answers: a start that waits on a row lock,
+    or a server that does not answer."""
+
+    async def start_attempt_async(self, task_id: uuid.UUID, **kwargs: object) -> Any:
+        self.calls.append(('start_attempt_async', task_id, kwargs))
+        await asyncio.Event().wait()
+
+
+def _confirm(
+    handle: Any,
+    *,
+    is_workflow_task: bool = False,
+    orphan_self_heal: bool = True,
+) -> Any:
+    with patch.object(shared_lifecycle, '_get_child_core_handle', return_value=handle):
+        return asyncio.run(
+            shared_lifecycle.confirm_until_not_resumed(
+                TASK_ID,
+                'worker-1',
+                is_workflow_task,
+                CLAIMED_AT,
+                orphan_self_heal=orphan_self_heal,
+            ),
+        )
 
 
 class TestSetRunning:
-    def test_a_started_row_runs_the_task_after_one_statement(self) -> None:
-        cursor = _Cursor([_STARTED])
-        conn = _Conn(cursor)
+    def test_a_started_row_runs_the_task_after_one_call(self) -> None:
+        handle = _Handle(starts=[_STARTED])
 
-        assert _confirm(_Pool(conn)) is None
+        assert _confirm(handle) is None
 
-        assert cursor.queries == [
-            (START_ATTEMPT_SQL, start_attempt_params('task-1', 'worker-1', CLAIMED_AT)),
+        assert handle.calls == [
+            (
+                'start_attempt_async',
+                uuid.UUID(TASK_ID),
+                {
+                    'worker_id': 'worker-1',
+                    'claimed_at': CLAIMED_AT,
+                    'worker_pid': os.getpid(),
+                    'worker_hostname': socket.gethostname(),
+                    'deadline_in_ms': None,
+                },
+            ),
         ]
-        assert (conn.commits, conn.rollbacks) == (0, 0)
 
-    def test_a_workflow_task_starts_with_the_same_statement(self) -> None:
+    def test_a_workflow_task_starts_with_the_same_call(self) -> None:
         """The function reads is_workflow_task from the locked row and
         writes the node in the same statement."""
-        cursor = _Cursor([_STARTED])
-        conn = _Conn(cursor)
+        handle = _Handle(starts=[_STARTED])
 
-        assert _confirm(_Pool(conn), is_workflow_task=True) is None
+        assert _confirm(handle, is_workflow_task=True) is None
 
-        assert [sql for sql, _ in cursor.queries] == [START_ATTEMPT_SQL]
+        assert handle.names() == ['start_attempt_async']
 
-    def test_a_node_that_is_not_linked_fails_the_workflow_check(self) -> None:
-        cursor = _Cursor([_missed('NODE_NOT_LINKED')])
-        conn = _Conn(cursor)
-
-        assert _confirm(_Pool(conn), is_workflow_task=True) == (
-            False,
-            '',
-            'WORKFLOW_CHECK_FAILED',
+    def test_a_failed_start_is_ownership_unconfirmed(self) -> None:
+        handle = _Handle(
+            starts=[
+                _record(
+                    core.StartFailed,
+                    message='horsies_start_attempt returned 0 rows',
+                    retryable=False,
+                ),
+            ],
         )
-        assert [sql for sql, _ in cursor.queries] == [START_ATTEMPT_SQL]
 
-    def test_a_row_outside_the_contract_is_ownership_unconfirmed(self) -> None:
-        cursor = _Cursor([_missed('SOMETHING_ELSE')])
+        assert _confirm(handle) == (False, '', 'OWNERSHIP_UNCONFIRMED')
 
-        assert _confirm(_Pool(_Conn(cursor))) == (False, '', 'OWNERSHIP_UNCONFIRMED')
+    def test_a_core_that_cannot_run_the_call_is_ownership_unconfirmed(self) -> None:
+        handle = MagicMock()
+        handle.start_attempt_async.side_effect = core.TooManyPendingCalls('the queue is full')
 
-    def test_a_pool_error_is_ownership_unconfirmed(self) -> None:
-        assert _confirm(_BrokenPool()) == (False, '', 'OWNERSHIP_UNCONFIRMED')
+        assert _confirm(handle) == (False, '', 'OWNERSHIP_UNCONFIRMED')
+
+    def test_a_record_outside_the_catalog_is_a_defect(self) -> None:
+        with pytest.raises(AssertionError):
+            _confirm(_Handle(starts=[object()]))
 
     def test_a_cancel_during_the_transition_propagates(self) -> None:
         """The deadline of the seat must end the run, not become a result."""
 
-        class _HangingCursor(_Cursor):
-            async def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
-                await asyncio.Event().wait()
-
         async def cancel_it() -> None:
             run = asyncio.ensure_future(
                 shared_lifecycle.confirm_until_not_resumed(
-                    _pool(_Pool(_Conn(_HangingCursor([])))),
-                    'task-1',
+                    TASK_ID,
                     'worker-1',
                     False,
                     CLAIMED_AT,
+                    orphan_self_heal=True,
                 ),
             )
             await asyncio.sleep(0.01)
@@ -227,41 +293,42 @@ class TestSetRunning:
             with pytest.raises(asyncio.CancelledError):
                 await run
 
-        asyncio.run(cancel_it())
+        with patch.object(
+            shared_lifecycle,
+            '_get_child_core_handle',
+            return_value=_HangingHandle(starts=[]),
+        ):
+            asyncio.run(cancel_it())
 
     def test_a_transition_that_hangs_ends_at_its_bound(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """An UPDATE that waits on a row lock, or a server that does not
-        answer, ends each attempt at its bound with OWNERSHIP_UNCONFIRMED:
-        the run stops before user code, and the refusal backstop of the
-        parent never fires for it."""
-
-        class _HangingCursor(_Cursor):
-            async def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
-                await asyncio.Event().wait()
-
+        """A start that waits on a row lock, or a server that does not
+        answer, ends the wait of each attempt at its bound with
+        OWNERSHIP_UNCONFIRMED: the run stops before user code, and the
+        refusal backstop of the parent never fires for it."""
         monkeypatch.setattr(shared_lifecycle, 'RUNNING_ATTEMPT_TIMEOUT_S', 0.05)
-        pool = _Pool(*(_Conn(_HangingCursor([])) for _ in range(2)))
+        handle = _HangingHandle(starts=[])
 
         async def run() -> tuple[Any, float]:
             loop = asyncio.get_running_loop()
             started = loop.time()
             result = await asyncio.wait_for(
                 shared_lifecycle.confirm_until_not_resumed(
-                    _pool(pool),
-                    'task-1',
+                    TASK_ID,
                     'worker-1',
                     False,
                     CLAIMED_AT,
+                    orphan_self_heal=True,
                 ),
                 OUTER_BOUND_S,
             )
             return result, loop.time() - started
 
-        result, elapsed_s = asyncio.run(run())
+        with patch.object(shared_lifecycle, '_get_child_core_handle', return_value=handle):
+            result, elapsed_s = asyncio.run(run())
 
         assert result == (False, '', 'OWNERSHIP_UNCONFIRMED')
         assert elapsed_s < 1.0
@@ -291,14 +358,21 @@ class TestRefusalBound:
         )
 
     def test_the_writes_of_a_thread_refusal_have_a_named_bound(self) -> None:
-        write_s = (
+        """Each start attempt has the bound of the core, with the end of a
+        statement that the core cancelled; the marker has the bounds of the
+        sync pool of the child."""
+        attempt_s = (
+            shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S
+            + shared_lifecycle.CANCELLED_WRITE_END_S
+        )
+        marker_s = (
             CHILD_POOL_CONNECTION_WAIT_S
             + thread_runner.REFUSAL_STATEMENTS_TIMEOUT_S
             + CANCEL_REQUEST_TIMEOUT_S
         )
 
         assert thread_runner.THREAD_REFUSAL_WRITES_BOUND_S == (
-            (_PRE_START_CONFIRM_ATTEMPTS + 1) * write_s
+            _PRE_START_CONFIRM_ATTEMPTS * attempt_s + marker_s
         )
 
     def test_the_refusal_backstop_comes_after_the_writes_and_a_block_report(
@@ -318,132 +392,134 @@ class TestRefusalBound:
 
 class TestMissedStart:
     def test_a_passed_deadline_expires_the_claim(self) -> None:
-        cursor = _Cursor([_missed('DEADLINE_PASSED')])
-        conn = _Conn(cursor)
-        with patch.object(
-            shared_lifecycle,
-            'apply_psycopg_async',
-            AsyncMock(return_value=MagicMock(spec=Applied)),
-        ) as apply:
-            result = _confirm(_Pool(conn))
+        handle = _Handle(starts=[_missed('DEADLINE_PASSED')], expiries=[_expired()])
+
+        result = _confirm(handle)
 
         assert result == (False, '', OutcomeCode.TASK_EXPIRED.value)
-        command = apply.call_args.args[1]
-        assert isinstance(command, ExpireOwnedClaim)
-        assert command.fence.worker_id == 'worker-1'
-        assert conn.commits == 1
+        name, task_id, arguments = handle.calls[1]
+        assert (name, task_id, _attempt_elapsed_ms(arguments)) == (
+            'expire_owned_claim_async',
+            uuid.UUID(TASK_ID),
+            {'worker_id': 'worker-1'},
+        )
 
     def test_a_refused_expiry_is_a_lost_claim(self) -> None:
-        cursor = _Cursor([_missed('DEADLINE_PASSED')])
-        conn = _Conn(cursor)
-        with patch.object(
-            shared_lifecycle,
-            'apply_psycopg_async',
-            AsyncMock(return_value=MagicMock(spec=LostClaim)),
-        ):
-            result = _confirm(_Pool(conn))
+        handle = _Handle(
+            starts=[_missed('DEADLINE_PASSED')],
+            expiries=[
+                _record(
+                    core.AttemptLostClaim,
+                    observed_status='CLAIMED',
+                    observed_worker_id='worker-2',
+                    observed_claimed_at=CLAIMED_AT,
+                ),
+            ],
+        )
 
-        assert result == (False, '', 'CLAIM_LOST')
-        assert (conn.commits, conn.rollbacks) == (0, 0)
+        assert _confirm(handle) == (False, '', 'CLAIM_LOST')
 
     @pytest.mark.parametrize('reason', ['NOT_HELD', 'LEASE_EXPIRED'])
     def test_a_claim_that_is_not_held_or_expired_is_lost_with_no_write(
         self, reason: str,
     ) -> None:
-        cursor = _Cursor([_missed(reason)])
-        conn = _Conn(cursor)
-        apply = AsyncMock()
-        with patch.object(shared_lifecycle, 'apply_psycopg_async', apply):
-            result = _confirm(_Pool(conn))
+        handle = _Handle(starts=[_missed(reason)])
 
-        assert result == (False, '', 'CLAIM_LOST')
-        assert [sql for sql, _ in cursor.queries] == [START_ATTEMPT_SQL]
-        apply.assert_not_awaited()
+        assert _confirm(handle) == (False, '', 'CLAIM_LOST')
+        assert handle.names() == ['start_attempt_async']
 
-    def test_a_paused_workflow_abandons_the_claim_and_resets_the_node(self) -> None:
-        """The stop runs in its own transaction after the start, whose row
-        lock ended with its statement."""
-        cursor = _Cursor([_missed('WORKFLOW_PAUSED')])
-        conn = _OrderedConn(cursor)
-        with patch.object(
-            shared_lifecycle,
-            'apply_psycopg_async',
-            _apply_recording([MagicMock(spec=Applied)]),
-        ):
-            result = _confirm(_Pool(conn), is_workflow_task=True)
+    def test_a_paused_workflow_stops_the_task_in_one_call(self) -> None:
+        """The stop is one statement after the start, whose row lock ended
+        with its statement."""
+        handle = _Handle(
+            starts=[_missed('WORKFLOW_PAUSED')],
+            stops=[_stopped('ABANDONED', 'APPLIED')],
+        )
+
+        result = _confirm(handle, is_workflow_task=True)
 
         assert result == (False, '', 'WORKFLOW_STOPPED')
-        assert [sql for sql, _ in cursor.queries] == [
-            START_ATTEMPT_SQL,
-            BEGIN_SQL,
-            AbandonOwnedNode.__name__,
-            RESET_PAUSED_NODE_SQL,
-            'COMMIT',
+        assert handle.names() == [
+            'start_attempt_async',
+            'stop_workflow_task_before_start_async',
         ]
 
-    def test_a_cancelled_workflow_cancels_the_task_and_skips_the_node(self) -> None:
-        cursor = _Cursor([_missed('WORKFLOW_CANCELLED')])
-        conn = _Conn(cursor)
-        with patch.object(
-            shared_lifecycle,
-            'apply_psycopg_async',
-            AsyncMock(return_value=MagicMock(spec=Applied)),
-        ) as apply:
-            result = _confirm(_Pool(conn), is_workflow_task=True)
+    def test_a_cancelled_workflow_stops_the_task_under_the_claim_fence(self) -> None:
+        handle = _Handle(
+            starts=[_missed('WORKFLOW_CANCELLED')],
+            stops=[_stopped('CANCELLED', 'APPLIED')],
+        )
+
+        result = _confirm(handle, is_workflow_task=True)
 
         assert result == (False, '', 'WORKFLOW_STOPPED')
-        cancel = apply.call_args.args[1]
-        assert isinstance(cancel, CancelOwnedNode)
-        assert cancel.accepts_requeued_pending is True
-        assert cancel.fence.claimed_at == CLAIMED_AT
-        assert cursor.queries[-1][0] == SKIP_CANCELLED_NODE_SQL
+        assert _attempt_elapsed_ms(handle.calls[1][2]) == {
+            'worker_id': 'worker-1',
+            'claimed_at': CLAIMED_AT,
+            'orphan_self_heal': True,
+        }
 
-    def test_a_resume_before_the_abandon_starts_the_task_on_the_next_attempt(
+    @pytest.mark.parametrize(
+        ('orphan_self_heal', 'outcome', 'move_outcome', 'reason'),
+        [
+            (False, 'NODE_NOT_LINKED', None, 'WORKFLOW_CHECK_FAILED'),
+            (True, 'ORPHAN_CANCELLED', 'APPLIED', 'ORPHAN_CANCELLED'),
+        ],
+    )
+    def test_a_node_that_is_not_linked_follows_the_orphan_self_heal(
+        self,
+        orphan_self_heal: bool,
+        outcome: str,
+        move_outcome: str | None,
+        reason: str,
+    ) -> None:
+        handle = _Handle(
+            starts=[_missed('NODE_NOT_LINKED')],
+            stops=[_stopped(outcome, move_outcome)],
+        )
+
+        result = _confirm(handle, is_workflow_task=True, orphan_self_heal=orphan_self_heal)
+
+        assert result == (False, '', reason)
+        assert handle.calls[1][2]['orphan_self_heal'] is orphan_self_heal
+
+    def test_a_resume_before_the_stop_starts_the_task_on_the_next_attempt(
         self,
     ) -> None:
-        resumed = SourceStateConflict(
-            task_id='task-1',
-            ordinality=None,
-            observed=MagicMock(),
-            evidence=ObservedWorkflowState(
-                workflow_id='wf-1',
-                workflow_status='RUNNING',
-            ),
+        handle = _Handle(
+            starts=[_missed('WORKFLOW_PAUSED'), _STARTED],
+            stops=[_record(core.ResumedBeforeStart)],
         )
-        first = _Conn(_Cursor([_missed('WORKFLOW_PAUSED')]))
-        second_cursor = _Cursor([_STARTED])
-        second = _Conn(second_cursor)
-        with patch.object(
-            shared_lifecycle,
-            'apply_psycopg_async',
-            AsyncMock(side_effect=[resumed]),
-        ):
-            result = _confirm(_Pool(first, second), is_workflow_task=True)
+
+        result = _confirm(handle, is_workflow_task=True)
 
         assert result is None
-        # The refused abandon rolls back its transaction.
-        assert (first.commits, first.rollbacks) == (0, 1)
-        assert [sql for sql, _ in second_cursor.queries] == [START_ATTEMPT_SQL]
+        assert handle.names() == [
+            'start_attempt_async',
+            'stop_workflow_task_before_start_async',
+            'start_attempt_async',
+        ]
 
     def test_a_resume_on_every_attempt_leaves_the_claim_to_its_lease(self) -> None:
-        resumed = SourceStateConflict(
-            task_id='task-1',
-            ordinality=None,
-            observed=MagicMock(),
-            evidence=ObservedWorkflowState(
-                workflow_id='wf-1',
-                workflow_status='RUNNING',
-            ),
+        resumed = _record(core.ResumedBeforeStart)
+        handle = _Handle(
+            starts=[_missed('WORKFLOW_PAUSED'), _missed('WORKFLOW_PAUSED')],
+            stops=[resumed, resumed],
         )
-        conns = [_Conn(_Cursor([_missed('WORKFLOW_PAUSED')])) for _ in range(2)]
-        with patch.object(
-            shared_lifecycle,
-            'apply_psycopg_async',
-            AsyncMock(side_effect=[resumed] * len(conns)),
-        ):
-            result = _confirm(_Pool(*conns), is_workflow_task=True)
+
+        result = _confirm(handle, is_workflow_task=True)
 
         assert result == (False, '', 'OWNERSHIP_UNCONFIRMED')
+
+    def test_a_failed_stop_is_ownership_unconfirmed(self) -> None:
+        handle = _Handle(
+            starts=[_missed('WORKFLOW_PAUSED')],
+            stops=[
+                _record(core.StopBeforeStartFailed, message='connection lost', retryable=True),
+            ],
+        )
+
+        assert _confirm(handle, is_workflow_task=True) == (False, '', 'OWNERSHIP_UNCONFIRMED')
 
 
 class TestFinalizingMarker:

@@ -621,7 +621,9 @@ pub(crate) fn merge_kwarg_value(
 
     map.insert(field_name.to_owned(), value);
     check_node_input(&[], &map)?;
-    Ok(serde_json::Value::Object(map).to_string())
+    // The codec's encoder writes each float as Python's `json.dumps` does.
+    crate::core::codec::to_json_string(&map)
+        .map_err(|error| HorsiesError::new(format!("node input does not encode: {error}")))
 }
 
 /// The rules of a user value on a node input: no engine key at any depth or as a kwarg name, and at most 200
