@@ -75,6 +75,8 @@ mod start_tests;
 #[cfg(test)]
 mod stop_and_loss_tests;
 #[cfg(test)]
+mod stored_form_vector_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod timeout_order_tests;

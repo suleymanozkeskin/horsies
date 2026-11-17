@@ -1,7 +1,23 @@
 //! Python's text of a stored value, for the messages that keep Python's
 //! wording: a stored status, outcome or kind that does not parse is named
 //! as Python's `repr` names it (`'NOT_KNOWN'`), not as Rust's `Debug` does
-//! (`"NOT_KNOWN"`).
+//! (`"NOT_KNOWN"`); and an instant as Python's `isoformat()` writes it, for
+//! the stored JSON that holds one.
+
+use chrono::{DateTime, Utc};
+
+/// An instant as Python's `datetime.isoformat()` writes an aware UTC
+/// datetime: `+00:00`, and the fraction with 6 digits when the microsecond
+/// is not 0, else none (`2026-08-12T09:10:12.500000+00:00`,
+/// `2026-08-12T09:10:12+00:00`). chrono's `to_rfc3339` writes 3 digits for
+/// a whole millisecond (`.500`). A nanosecond part below the microsecond is
+/// dropped, as Python holds microseconds. Pure.
+pub fn python_isoformat_utc(value: DateTime<Utc>) -> String {
+    match value.timestamp_subsec_micros() {
+        0 => value.format("%Y-%m-%dT%H:%M:%S+00:00").to_string(),
+        _ => value.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string(),
+    }
+}
 
 /// A text as Python's `repr` of a `str` shows it. Pure.
 ///
@@ -98,5 +114,33 @@ mod tests {
     #[test]
     fn a_printable_character_outside_ascii_is_kept() {
         assert_eq!(python_repr("café 日本"), "'café 日本'");
+    }
+}
+
+#[cfg(test)]
+mod isoformat_tests {
+    use chrono::{TimeZone, Utc};
+
+    use super::python_isoformat_utc;
+
+    /// The texts of Python 3.13's `datetime.isoformat()` of the same aware
+    /// UTC instants.
+    #[test]
+    fn an_instant_is_written_as_python_isoformat_writes_it() {
+        let second = Utc.with_ymd_and_hms(2026, 8, 12, 9, 10, 12).unwrap();
+        for (micros, python) in [
+            (0, "2026-08-12T09:10:12+00:00"),
+            (654_321, "2026-08-12T09:10:12.654321+00:00"),
+            (500_000, "2026-08-12T09:10:12.500000+00:00"),
+            (1, "2026-08-12T09:10:12.000001+00:00"),
+        ] {
+            let instant = second + chrono::Duration::microseconds(micros);
+            assert_eq!(python_isoformat_utc(instant), python, "{micros}");
+        }
+        let below_a_microsecond = second + chrono::Duration::nanoseconds(999);
+        assert_eq!(
+            python_isoformat_utc(below_a_microsecond),
+            "2026-08-12T09:10:12+00:00"
+        );
     }
 }

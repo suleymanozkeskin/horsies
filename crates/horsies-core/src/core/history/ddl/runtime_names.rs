@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 
 use crate::core::history::commands::{is_safe_identifier, HistoryCommandError, LeafRef};
 use crate::core::history::errors::HistoryError;
+use crate::core::python_text::python_isoformat_utc;
 
 pub const ORDERING_INDEX_COLUMN: &str = "enqueued_at";
 
@@ -71,14 +72,6 @@ fn require_safe_identifier(value: &str, label: &str) -> Result<(), HistoryError>
         Err(HistoryError::contract(format!(
             "{label} {value:?} is not a safe PostgreSQL identifier"
         )))
-    }
-}
-
-fn python_isoformat_utc(value: DateTime<Utc>) -> String {
-    if value.timestamp_subsec_nanos() == 0 {
-        value.format("%Y-%m-%dT%H:%M:%S+00:00").to_string()
-    } else {
-        value.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string()
     }
 }
 
