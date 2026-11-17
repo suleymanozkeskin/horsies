@@ -335,6 +335,26 @@ fn running_loop_queue(py: Python<'_>) -> PyResult<(Bound<'_, PyAny>, Arc<LoopQue
     }
 }
 
+/// An asyncio future of the running loop of this thread that is already
+/// done with `value`: the awaitable form of an operation that has nothing
+/// to run, such as the close of a handle that never connected. Starts
+/// nothing on the core runtime.
+///
+/// Failure exits: `RuntimeError` (no running loop), the error of the value
+/// conversion, and errors of the loop methods.
+pub fn done_future<'py, T>(py: Python<'py>, value: T) -> PyResult<Bound<'py, PyAny>>
+where
+    T: IntoPyObject<'py>,
+{
+    let event_loop = GET_RUNNING_LOOP
+        .import(py, "asyncio", "get_running_loop")?
+        .call0()?;
+    let future = event_loop.call_method0("create_future")?;
+    let value = value.into_bound_py_any(py)?;
+    let _done = future.call_method1("set_result", (value,))?;
+    Ok(future)
+}
+
 /// Start `op` on the core runtime and return an asyncio future of its
 /// outcome, bound to the running loop of this thread.
 ///
