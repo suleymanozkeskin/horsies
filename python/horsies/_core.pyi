@@ -1942,6 +1942,156 @@ class PruneFailed:
 
 
 @final
+class RerunCommandRecord:
+    """One rerun request: the source task id, the deadline of the new task (aware, or None
+    for no deadline) and the caller key. A naive deadline raises TypeError.
+    """
+    def __init__(self, *, source_task_id: uuid.UUID, deadline: datetime.datetime | None, caller_key: str | None) -> None: ...
+
+
+@final
+class RerunPolicyRecord:
+    """The enqueue policy of the new task: its retention class key, whether it keeps its input
+    for a rerun, and the reservation window of a caller key in microseconds. A window not
+    above 0 or above 30 days, or an empty class key, raises ValueError.
+    """
+    def __init__(self, *, retention_class_key: str, retain_rerun_input: bool, reservation_window_us: int) -> None: ...
+
+
+@final
+class PreparedStatement:
+    """One statement for the caller's connection: sql with a named bind and a cast for each
+    parameter, parameters (one value per bind, p1 first), and the result columns as (name,
+    SQL type) in row order.
+    """
+    @property
+    def name(self) -> str: ...
+    @property
+    def sql(self) -> str: ...
+    @property
+    def parameters(self) -> dict[str, object]: ...
+    @property
+    def columns(self) -> list[tuple[str, str]]: ...
+
+
+@final
+class RerunWriteRecord:
+    """The write of a rerun: run statement, then pass its row to decode_rerun_write.
+    new_task_id is the id minted for the new task.
+    """
+    @property
+    def statement(self) -> PreparedStatement: ...
+    @property
+    def new_task_id(self) -> uuid.UUID: ...
+
+
+@final
+class RerunSourceLiveRecord:
+    """The source is live; its own lifecycle owns its retry. Nothing written."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class RerunSourceAbsentRecord:
+    """No live or history record has the source id. Nothing written."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def reason(self) -> Literal['PREDATES_RETAINED_HISTORY', 'WITHIN_RETAINED_HISTORY', 'NOT_CLASSIFIED']: ...
+
+
+@final
+class RerunSourceCorruptRecord:
+    """The source history row does not decode; detail names why. Nothing written."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def detail(self) -> str: ...
+
+
+@final
+class RerunNotEligibleRecord:
+    """The source is not eligible for a rerun. Nothing written."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def reason(self) -> Literal['COMPLETED_SOURCE', 'WORKFLOW_TASK']: ...
+
+
+@final
+class RerunInputUnavailableRecord:
+    """The source stores no input envelope; disposition is its stored reason. Nothing written."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def disposition(self) -> str: ...
+
+
+@final
+class RerunInputCorruptRecord:
+    """The stored envelope, its input or its options fail their checks; detail names why.
+    Nothing written.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def detail(self) -> str: ...
+
+
+@final
+class RerunClassNotRegistered:
+    """The new task's retention class has no class row. Nothing written."""
+    @property
+    def class_key(self) -> str: ...
+
+
+@final
+class RerunClientFamilyMismatch:
+    """The database records the other client family, or none (stored is None). Nothing
+    written. message names both.
+    """
+    @property
+    def stored(self) -> Literal['PYTHON', 'RUST'] | None: ...
+    @property
+    def message(self) -> str: ...
+
+
+@final
+class RerunCallerKeyRefused:
+    """The caller key is not a valid idempotency key; cause names why. Nothing written."""
+    @property
+    def cause(self) -> str: ...
+
+
+@final
+class RerunEnqueuedRecord:
+    """The new task exists: this write, or this write already run in the caller's transaction."""
+    @property
+    def new_task_id(self) -> uuid.UUID: ...
+    @property
+    def source_task_id(self) -> uuid.UUID: ...
+    @property
+    def rerun_root_task_id(self) -> uuid.UUID: ...
+
+
+@final
+class RerunKeyReplayRecord:
+    """The caller key already holds this rerun command, as existing_task_id."""
+    @property
+    def existing_task_id(self) -> uuid.UUID: ...
+
+
+@final
+class RerunKeyConflictRecord:
+    """The caller key holds another command (the source's own included)."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def reserved_by_task_id(self) -> uuid.UUID: ...
+
+
+@final
 class PythonProgram:
     """What a Python child imports before it reports ready."""
     @property
@@ -2374,6 +2524,13 @@ def decode_parent_frame(meta: bytes, body: bytes) -> InitFrame | RunFrame | Shar
     """Decode one parent frame from its metadata and its body. Pure."""
 
 
+def decode_rerun_write(write: RerunWriteRecord, row: tuple[object, ...]) -> RerunEnqueuedRecord | RerunKeyReplayRecord | RerunKeyConflictRecord:
+    """The outcome of the row of a rerun write (a tuple in column order). Pure. A row that does
+    not fit the columns raises CoreDefect; an answer that contradicts the minted id raises
+    PanicException.
+    """
+
+
 def encode_child_frame(frame: ReadyFrame | BootFailedFrame | ResultFrame | BodyReturnedFrame | LeftWorkEndedFrame | LeftWorkStuckFrame | SharedResultFrame | DeadlineFiredFrame | SecondCancelFrame | RunStuckFrame | LeftoverCancelFrame | LeftoverStuckFrame | LoopBlockedFrame) -> bytes | FrameTooLarge:
     """Encode a child frame: its bytes, or FrameTooLarge when it is over a bound of the
     header. Pure.
@@ -2388,6 +2545,13 @@ def mint_task_id() -> uuid.UUID | IdMintRefused:
     """Mint a new task id (UUIDv7). Starts no runtime."""
 
 
+def prepare_rerun_write(read: PreparedStatement, row: tuple[object, ...], command: RerunCommandRecord, policy: RerunPolicyRecord, *, sent_at: datetime.datetime) -> RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunCallerKeyRefused | IdMintRefused:
+    """Decide the rerun from the row of its read (a tuple in column order): the write, or the
+    answer that ends it with nothing written. Pure apart from the id mint. A row that does not
+    fit the columns raises CoreDefect.
+    """
+
+
 def prepare_worker(manifest_json: str, *, host: object) -> PreparedWorker | WorkerProfileRefused:
     """Parse a worker manifest and pick its profile. Pure: starts no runtime. host has an
     on_started() method. A refused manifest raises ManifestRefused.
@@ -2400,6 +2564,10 @@ def protocol_numbers() -> ProtocolNumbers:
 
 def refresh_log_levels() -> None:
     """Read the effective level of every horsies logger again."""
+
+
+def rerun_read(command: RerunCommandRecord, policy: RerunPolicyRecord) -> PreparedStatement:
+    """The source read of a rerun as a PreparedStatement. Pure: starts no runtime."""
 
 
 def resolve_monitoring_window(*, since: datetime.datetime | None, until: datetime.datetime | None, now: datetime.datetime | None) -> MonitoringWindowRecord | WindowRefusedRecord:
