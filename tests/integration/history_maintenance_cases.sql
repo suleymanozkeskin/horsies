@@ -1,4 +1,4 @@
--- Cases for horsies/core/baseline/sql/0008_history_maintenance_functions.sql, one session.
+-- Cases for crates/horsies-core/baseline/0008_history_maintenance_functions.sql, one session.
 --
 -- Run on a database that holds the baseline migration, in one transaction that the caller rolls back:
 --   psql -v ON_ERROR_STOP=1 --single-transaction -f history_maintenance_cases.sql
@@ -227,8 +227,8 @@ SELECT fixture_check(
          FROM horsies_task_lookup_manifest) = ARRAY['horsies_task_history_forever_open:0:OPEN']
 );
 SELECT fixture_check(
-    'publication: the stamp is horsies:manifest:1:<sha256 of the manifest>, on all four readers',
-    (SELECT manifest_stamp ~ '^horsies:manifest:1:[0-9a-f]{64}$' FROM publication_first)
+    'publication: the stamp is horsies:manifest:2:<sha256 of the manifest>, on all four readers',
+    (SELECT manifest_stamp ~ '^horsies:manifest:2:[0-9a-f]{64}$' FROM publication_first)
     AND (SELECT bool_and(obj_description(to_regprocedure(s.signature), 'pg_proc')
                          = (SELECT manifest_stamp FROM publication_first))
          FROM horsies_history_reader_signatures() AS s)
@@ -245,11 +245,13 @@ SELECT fixture_check(
     AND fixture_reader_versions() = current_setting('fixture.versions_first')
 );
 SELECT fixture_check(
-    'publication: the provenance reader has one argument and plain columns with is_workflow_task',
+    'publication: the provenance reader has one argument and plain columns with is_workflow_task, the fingerprint '
+    'and sent_at',
     pg_get_function_identity_arguments(to_regprocedure('horsies_task_provenance_staged(uuid)')) = 'p_task_id uuid'
     AND pg_get_function_result(to_regprocedure('horsies_task_provenance_staged(uuid)'))
         = 'TABLE(task_id uuid, status text, terminal_at timestamp with time zone, terminalization_kind text, '
-          'is_workflow_task boolean)'
+          'is_workflow_task boolean, command_fingerprint_version smallint, command_fingerprint bytea, '
+          'sent_at timestamp with time zone)'
     AND (SELECT count(*) FROM pg_proc AS p WHERE p.proname = 'horsies_task_provenance_staged') = 1
     AND to_regprocedure('horsies_task_lookup_staged(uuid)') IS NULL
 );
@@ -852,6 +854,16 @@ SELECT fixture_check(
          FROM horsies_task_provenance_staged((SELECT id FROM ids WHERE name = 'workflow'))) = 'CANCELLED:CANCEL_ORPHAN:true'
 );
 SELECT fixture_check(
+    'provenance: the fingerprint version, fingerprint and sent_at of the history row, from the same probe',
+    (SELECT (p.command_fingerprint_version, p.command_fingerprint, p.sent_at)
+            IS NOT DISTINCT FROM (h.command_fingerprint_version, h.command_fingerprint, h.sent_at)
+            AND p.command_fingerprint IS NOT NULL
+     FROM horsies_task_provenance_staged((SELECT id FROM ids WHERE name = 'moved')) AS p
+     JOIN horsies_task_history AS h ON h.task_id = p.task_id)
+    AND (SELECT p.command_fingerprint IS NULL AND p.command_fingerprint_version IS NULL AND p.sent_at IS NOT NULL
+         FROM horsies_task_provenance_staged((SELECT id FROM ids WHERE name = 'workflow')) AS p)
+);
+SELECT fixture_check(
     'provenance: no live probe; a live id and an unknown id have no row',
     NOT EXISTS (SELECT 1 FROM horsies_task_provenance_staged((SELECT id FROM ids WHERE name = 'live')))
     AND NOT EXISTS (SELECT 1 FROM horsies_task_provenance_staged((SELECT id FROM ids WHERE name = 'unknown')))
@@ -972,4 +984,58 @@ SELECT fixture_check(
     'miss: pg_proc holds one horsies_terminalization_miss, the overload that takes the kind and the fence kind',
     (SELECT array_agg(p.oid::regprocedure::text) FROM pg_proc AS p WHERE p.proname = 'horsies_terminalization_miss')
         = ARRAY['horsies_terminalization_miss(uuid,text,text,text,timestamp with time zone)']
+);
+
+------------------------------------------------------------------------------------------------------------------------
+-- A leaf detached out of band, through retention
+------------------------------------------------------------------------------------------------------------------------
+
+-- An expired standard_7d leaf that horsies_create_history_leaf created and published, then detached outside
+-- maintenance: the catalog records no detach, and the published manifest names the leaf.
+SELECT set_config(
+    'fixture.out_of_band', horsies_history_leaf_name('standard_7d', fixture_today() - interval '10 days'), true
+);
+SELECT fixture_check(
+    'out-of-band detach: the expired leaf is CREATED and published',
+    fixture_create('standard_7d', fixture_today() - interval '10 days') = 'CREATED'
+);
+DO $$
+BEGIN
+    EXECUTE format('ALTER TABLE horsies_task_history_standard_7d DETACH PARTITION %I',
+                   current_setting('fixture.out_of_band'));
+END
+$$;
+SELECT fixture_check(
+    'out-of-band detach: the candidate is DETACHED with no record, and the manifest and the readers name it',
+    (SELECT c.attachment = 'DETACHED' AND NOT c.detach_recorded
+     FROM horsies_prune_candidates(100) AS c WHERE c.leaf_name = current_setting('fixture.out_of_band'))
+    AND EXISTS (SELECT 1 FROM horsies_task_lookup_manifest WHERE leaf_name = current_setting('fixture.out_of_band'))
+    AND fixture_reader_names('horsies_task_history_duplicate_staged(uuid)', current_setting('fixture.out_of_band'))
+);
+-- The next pruning pass reaches the leaf through horsies_begin_leaf_detach.
+CREATE TEMP TABLE out_of_band_begin AS
+    SELECT * FROM horsies_begin_leaf_detach(current_setting('fixture.out_of_band'));
+SELECT fixture_check(
+    'out-of-band detach: the next pass begins with DETACHED and records the detach',
+    (SELECT b.outcome = 'DETACHED' FROM out_of_band_begin AS b)
+    AND (SELECT detached_at IS NOT NULL AND dropped_at IS NULL FROM horsies_task_history_leaf_catalog
+         WHERE leaf_name = current_setting('fixture.out_of_band'))
+    AND (SELECT c.detach_recorded
+         FROM horsies_prune_candidates(100) AS c WHERE c.leaf_name = current_setting('fixture.out_of_band'))
+);
+SELECT fixture_check(
+    'out-of-band detach: the publication of the same call leaves the leaf out of the manifest and the readers',
+    NOT EXISTS (SELECT 1 FROM horsies_task_lookup_manifest WHERE leaf_name = current_setting('fixture.out_of_band'))
+    AND NOT fixture_reader_names('horsies_task_history_duplicate_staged(uuid)',
+                                 current_setting('fixture.out_of_band'))
+    AND horsies_history_readers_current()
+);
+CREATE TEMP TABLE out_of_band_drop AS
+    SELECT * FROM horsies_drop_detached_leaf(current_setting('fixture.out_of_band'));
+SELECT fixture_check(
+    'out-of-band detach: the drop is DROPPED, the relation is gone, and the catalog keeps both times',
+    (SELECT d.outcome = 'DROPPED' FROM out_of_band_drop AS d)
+    AND to_regclass(current_setting('fixture.out_of_band')) IS NULL
+    AND (SELECT detached_at IS NOT NULL AND dropped_at IS NOT NULL FROM horsies_task_history_leaf_catalog
+         WHERE leaf_name = current_setting('fixture.out_of_band'))
 );

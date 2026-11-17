@@ -19,7 +19,6 @@ use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 
 use super::{new_reaper_health, spawn_reaper};
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::commands::LeafRef;
@@ -165,7 +164,6 @@ async fn a_started_reaper_drops_an_overdue_heartbeat_leaf() {
             crate::core::registry::BuilderHookName::SPEC_BUILDER,
         )),
         maintenance_only_recovery(),
-        PayloadPolicy::default(),
         RetentionConfig::default(),
         new_reaper_health(),
         cancel.clone(),

@@ -21,7 +21,7 @@ pub enum MonitoringQueryErrorCode {
     /// Stored history data does not decode: a status that is not a task
     /// status, an attempt snapshot or archive envelope that does not decode.
     /// Not retryable: a repeat gives the same result until the stored row
-    /// changes (Python `horsies/monitoring/errors.py:26-98`).
+    /// changes (Python `python/horsies/monitoring/errors.py:26-98`).
     HistoryContractViolation,
 }
 
@@ -46,15 +46,6 @@ pub struct MonitoringQueryError {
 }
 
 impl MonitoringQueryError {
-    pub(crate) fn database(operation: &str, error: sqlx::Error) -> Self {
-        Self {
-            code: MonitoringQueryErrorCode::DbOperationFailed,
-            message: format!("{operation} failed: {error}"),
-            retryable: is_retryable_sqlx_error(&error),
-            source: MonitoringQueryErrorSource::Database(error),
-        }
-    }
-
     /// A history read failure: a database error keeps its driver
     /// classification; every other history error is stored data that does
     /// not decode.

@@ -1,23 +1,22 @@
 //! Contained finalize-first pruning driver.
 
-use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::core::history::commands::{
     DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf, FinalizeInterruptedLeafDetach,
-    InspectHistoryLeaf, LeafBounds, LeafRef, DETACH_STATEMENT_TIMEOUT_MS,
+    InspectHistoryLeaf, LeafRef, DETACH_STATEMENT_TIMEOUT_MS,
 };
 use crate::core::history::errors::HistoryError;
-use crate::core::history::heartbeats::partitioning::{
-    sweep_expired_heartbeat_leaves, HeartbeatLeafSwept,
-};
-use crate::core::history::names::{HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_CLASSES};
+use crate::core::history::heartbeats::partitioning::{sweep_heartbeat_leaves, HeartbeatLeafSwept};
 use crate::core::history::outcomes::{LeafDrop, LeafInspection};
 use crate::core::history::partitions::manager::{
     detach_expired_leaf, drop_detached_leaf, finalize_interrupted_detach, inspect_leaf,
     DetachExpiredLeafOutcome, FinalizeInterruptedLeafOutcome,
 };
 use crate::core::history::partitions::publication::LoaderPublication;
+use crate::core::history::partitions::retirement::{
+    read_prune_candidates, CandidateAttachment, PruneCandidates, RetiredClassKind,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryLeafSwept {
@@ -117,144 +116,81 @@ impl PrunePass {
     }
 }
 
-/// Which expired leaves a candidate read of a pruning pass selects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CandidateScope {
-    /// Period-class leaves, for the history sweep. Python
-    /// `EXPIRED_HISTORY_LEAVES_SQL` (`horsies/core/history/maintenance/pruning.py:77-87`).
-    History,
-    /// Period and heartbeat leaves, for the finalize pre-phase, which must see
-    /// every parent. Python `EXPIRED_FINITE_LEAVES_SQL` (`pruning.py:92-106`).
-    Finite,
+/// The candidates of one pass: one `horsies_prune_candidates` read of at most
+/// `MAX_PRUNE_CANDIDATES_PER_PASS` leaves. Reads only.
+async fn pass_candidates(pool: &PgPool) -> Result<PruneCandidates, HistoryError> {
+    let mut connection = pool.acquire().await?;
+    read_prune_candidates(&mut connection, MAX_PRUNE_CANDIDATES_PER_PASS).await
 }
 
-impl CandidateScope {
-    fn filter(self) -> &'static str {
-        match self {
-            Self::History => "c.class_key <> $1 AND r.class_kind = 'PERIOD'",
-            Self::Finite => "r.class_kind IN ('PERIOD', 'HEARTBEAT')",
-        }
+/// `Truncated` when any part of a pass was truncated.
+fn combined_reach(reaches: &[PruneReach]) -> PruneReach {
+    match reaches
+        .iter()
+        .any(|reach| matches!(reach, PruneReach::Truncated))
+    {
+        true => PruneReach::Truncated,
+        false => PruneReach::WithinBounds,
     }
 }
 
-/// How long a leaf of the joined class `r` stays after its upper bound. NULL
-/// for `forever`, so a forever leaf never expires.
-const CLASS_RETENTION_SQL: &str = "CASE r.class_kind
-             WHEN 'PERIOD' THEN make_interval(days => r.retention_days)
-             WHEN 'HEARTBEAT' THEN make_interval(hours => r.heartbeat_horizon_hours)
-         END";
-
-/// The candidate read that a pruning pass sends for `scope`: leaves whose
-/// class period has passed and that the catalog has not recorded as dropped,
-/// oldest first, at most `MAX_PRUNE_CANDIDATES_PER_PASS + 1` rows (one more
-/// than the bound shows that the pass is truncated). `History` takes `$1`, the
-/// heartbeat class key. The `dropped_at IS NULL` predicate lets the read use
-/// the partial index `horsies_task_history_leaf_catalog_active`.
-pub(crate) fn expired_candidates_sql(scope: CandidateScope) -> String {
-    format!(
-        "SELECT c.leaf_name, c.class_key, c.lower_anchor, c.upper_anchor
-         FROM {LEAF_CATALOG} AS c JOIN {RETENTION_CLASSES} AS r
-           ON r.class_key = c.class_key
-         WHERE {} AND c.dropped_at IS NULL
-           AND c.upper_anchor + {CLASS_RETENTION_SQL} <= statement_timestamp()
-         ORDER BY c.lower_anchor
-         LIMIT {}",
-        scope.filter(),
-        MAX_PRUNE_CANDIDATES_PER_PASS + 1
-    )
+/// The finalized leaves, refusals and errors of the finalize phase.
+struct Finalized {
+    leaves: Vec<String>,
+    refusals: Vec<String>,
+    errors: Vec<String>,
 }
 
-/// The oldest expired leaves of `scope`, at most
-/// `MAX_PRUNE_CANDIDATES_PER_PASS`, and whether more remain.
-async fn expired_candidates(
-    pool: &PgPool,
-    scope: CandidateScope,
-) -> Result<(Vec<LeafRef>, PruneReach), HistoryError> {
-    let sql = expired_candidates_sql(scope);
-    let rows: Vec<(String, String, DateTime<Utc>, DateTime<Utc>)> = match scope {
-        CandidateScope::History => {
-            sqlx::query_as(&sql)
-                .bind(HEARTBEAT_CLASS_KEY)
-                .fetch_all(pool)
-                .await?
-        }
-        CandidateScope::Finite => sqlx::query_as(&sql).fetch_all(pool).await?,
-    };
-    let reach = match rows.len() > MAX_PRUNE_CANDIDATES_PER_PASS {
-        true => PruneReach::Truncated,
-        false => PruneReach::WithinBounds,
-    };
-    let leaves = rows
-        .into_iter()
-        .take(MAX_PRUNE_CANDIDATES_PER_PASS)
-        .map(|(name, class, lower, upper)| {
-            let bounds = LeafBounds::new(lower, upper)
-                .map_err(|error| HistoryError::contract(error.to_string()))?;
-            LeafRef::new(name, class, bounds)
-                .map_err(|error| HistoryError::contract(error.to_string()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((leaves, reach))
-}
-
+/// Finalize every candidate whose concurrent detach is pending
+/// (`CandidateAttachment::DetachPending`), PERIOD and HEARTBEAT leaves alike.
+///
+/// A finalization that does not end detached is a refusal, for example a
+/// blocked leaf that stays pending until its blockers drain. A database
+/// error of one leaf is reported as `finalize leaf: cause`. Finalizations do
+/// not count toward the acted-leaf bound.
 async fn finalize_interrupted_detaches<P: LoaderPublication>(
     pool: &PgPool,
     publisher: &P,
-) -> (Vec<String>, Vec<String>, Vec<String>, PruneReach) {
-    let (candidates, reach) = match expired_candidates(pool, CandidateScope::Finite).await {
-        Ok(candidates) => candidates,
-        Err(error) => {
-            return (
-                Vec::new(),
-                Vec::new(),
-                vec![format!("discover finalize: {error}")],
-                PruneReach::WithinBounds,
-            )
-        }
+    candidates: &PruneCandidates,
+) -> Finalized {
+    let mut finalized = Finalized {
+        leaves: Vec::new(),
+        refusals: Vec::new(),
+        errors: Vec::new(),
     };
-    let mut interrupted = Vec::new();
-    let mut errors = Vec::new();
-    match pool.acquire().await {
-        Ok(mut connection) => {
-            for leaf in candidates {
-                match inspect_leaf(&mut connection, &InspectHistoryLeaf::new(leaf.clone())).await {
-                    Ok(LeafInspection::DetachInterrupted { .. }) => interrupted.push(leaf),
-                    Ok(_) => {}
-                    Err(error) => errors.push(format!("inspect {}: {error}", leaf.leaf_name())),
-                }
-            }
+    for candidate in &candidates.leaves {
+        match candidate.attachment {
+            CandidateAttachment::DetachPending => {}
+            CandidateAttachment::Attached
+            | CandidateAttachment::Detached
+            | CandidateAttachment::Missing => continue,
         }
-        Err(error) => {
-            return (
-                Vec::new(),
-                Vec::new(),
-                vec![format!("connect: {error}")],
-                reach,
-            )
-        }
-    }
-    let mut finalized = Vec::new();
-    let mut refusals = Vec::new();
-    for leaf in interrupted {
+        let leaf = &candidate.leaf;
         let command = match FinalizeInterruptedLeafDetach::new(
             leaf.clone(),
             Some(DETACH_STATEMENT_TIMEOUT_MS),
         ) {
             Ok(command) => command,
             Err(error) => {
-                errors.push(format!("finalize {}: {error}", leaf.leaf_name()));
+                finalized
+                    .errors
+                    .push(format!("finalize {}: {error}", leaf.leaf_name()));
                 continue;
             }
         };
         match finalize_interrupted_detach(pool, &command, publisher).await {
             Ok(FinalizeInterruptedLeafOutcome::Inspection(LeafInspection::Detached { .. })) => {
-                finalized.push(leaf.leaf_name().to_owned());
+                finalized.leaves.push(leaf.leaf_name().to_owned());
             }
-            Ok(outcome) => refusals.push(format!("finalize {}: {outcome:?}", leaf.leaf_name())),
-            Err(error) => errors.push(format!("finalize {}: {error}", leaf.leaf_name())),
+            Ok(outcome) => finalized
+                .refusals
+                .push(format!("finalize {}: {outcome:?}", leaf.leaf_name())),
+            Err(error) => finalized
+                .errors
+                .push(format!("finalize {}: {error}", leaf.leaf_name())),
         }
     }
-    (finalized, refusals, errors, reach)
+    finalized
 }
 
 /// Detach one expired period-class leaf and drop it once detached. A leaf
@@ -285,7 +221,6 @@ async fn sweep_history_leaf<P: LoaderPublication>(
             let outcome = drop_detached_leaf(
                 &mut transaction,
                 &DropDetachedHistoryLeaf::new(leaf.clone()),
-                publisher,
             )
             .await?;
             transaction.commit().await?;
@@ -301,38 +236,27 @@ async fn sweep_history_leaf<P: LoaderPublication>(
     })
 }
 
-/// Detach and drop expired period-class leaves, oldest first, until
-/// `max_acted_leaves` leaves count toward the bound. A leaf whose sweep fails
-/// counts, since its effects are unknown; its error goes to the error list and
-/// the sweep goes on with the next leaf. A failed discovery sweeps nothing.
-/// `Truncated` when expired leaves remain for the next pass.
-pub async fn sweep_expired_history_leaves<P: LoaderPublication>(
+/// Detach and drop the given expired period-class leaves, in the given
+/// order, until `max_acted_leaves` leaves count toward the bound. A leaf
+/// whose sweep fails counts, since its effects are unknown; its error goes to
+/// the error list and the sweep goes on with the next leaf. `Truncated` when
+/// the bound left leaves for the next pass.
+pub(crate) async fn sweep_history_leaves<P: LoaderPublication>(
     pool: &PgPool,
     publisher: &P,
+    leaves: &[LeafRef],
     max_acted_leaves: usize,
 ) -> LeafSweep<HistoryLeafSwept> {
-    let (candidates, candidate_reach) =
-        match expired_candidates(pool, CandidateScope::History).await {
-            Ok(candidates) => candidates,
-            Err(error) => {
-                return LeafSweep {
-                    swept: Vec::new(),
-                    errors: vec![format!("discover history: {error}")],
-                    acted: 0,
-                    reach: PruneReach::WithinBounds,
-                }
-            }
-        };
     let mut swept = Vec::new();
     let mut errors = Vec::new();
     let mut acted = 0;
-    let mut reach = candidate_reach;
-    for leaf in candidates {
+    let mut reach = PruneReach::WithinBounds;
+    for leaf in leaves {
         if acted >= max_acted_leaves {
             reach = PruneReach::Truncated;
             break;
         }
-        match sweep_history_leaf(pool, &leaf, publisher).await {
+        match sweep_history_leaf(pool, leaf, publisher).await {
             Ok(entry) => {
                 acted += usize::from(sweep_counts_toward_bound(
                     &entry.detach,
@@ -354,50 +278,90 @@ pub async fn sweep_expired_history_leaves<P: LoaderPublication>(
     }
 }
 
-/// Prune expired partitions through a direct or session-capable pool.
+/// Read the candidates of one pass and sweep its period-class leaves, oldest
+/// first, until `max_acted_leaves` leaves count toward the bound. A failed
+/// candidate read sweeps nothing and is reported as
+/// `discover history: cause`. `Truncated` when the candidate read or the
+/// leaf bound left expired leaves for the next pass.
+pub async fn sweep_expired_history_leaves<P: LoaderPublication>(
+    pool: &PgPool,
+    publisher: &P,
+    max_acted_leaves: usize,
+) -> LeafSweep<HistoryLeafSwept> {
+    let candidates = match pass_candidates(pool).await {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            return LeafSweep {
+                swept: Vec::new(),
+                errors: vec![format!("discover history: {error}")],
+                acted: 0,
+                reach: PruneReach::WithinBounds,
+            }
+        }
+    };
+    let sweep = sweep_history_leaves(
+        pool,
+        publisher,
+        &candidates.of_kind(RetiredClassKind::Period),
+        max_acted_leaves,
+    )
+    .await;
+    LeafSweep {
+        reach: combined_reach(&[candidates.reach, sweep.reach]),
+        ..sweep
+    }
+}
+
+/// One pruning pass through a direct or session-capable pool: one candidate
+/// read (`horsies_prune_candidates`), then the finalization of the
+/// interrupted detaches, then the heartbeat and the period-class sweeps.
+///
+/// The finalize phase runs first across every finite class, because one
+/// pending finalization blocks all further detaches on its parent. The
+/// sweeps act on at most `MAX_PRUNE_LEAVES_PER_PASS` leaves, heartbeat leaves
+/// first. A database error of one leaf is reported and the pass goes on with
+/// the next leaf. A failed candidate read acts on nothing and is reported as
+/// `candidates: cause`.
 pub async fn prune_expired_partitions<P: LoaderPublication>(
     pool: &PgPool,
     publisher: &P,
 ) -> PrunePass {
-    let (finalized_leaves, mut refusals, mut errors, finalize_reach) =
-        finalize_interrupted_detaches(pool, publisher).await;
-    let heartbeat =
-        match sweep_expired_heartbeat_leaves(pool, publisher, MAX_PRUNE_LEAVES_PER_PASS).await {
-            Ok(sweep) => sweep,
-            Err(error) => {
-                errors.push(format!("discover heartbeat: {error}"));
-                LeafSweep {
-                    swept: Vec::new(),
-                    errors: Vec::new(),
-                    acted: 0,
-                    reach: PruneReach::WithinBounds,
-                }
+    let candidates = match pass_candidates(pool).await {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            return PrunePass {
+                finalized_leaves: Vec::new(),
+                heartbeat_swept: Vec::new(),
+                history_swept: Vec::new(),
+                refusals: Vec::new(),
+                errors: vec![format!("candidates: {error}")],
+                reach: PruneReach::WithinBounds,
             }
-        };
-    errors.extend(
-        heartbeat
-            .errors
-            .into_iter()
-            .map(|error| format!("heartbeat {error}")),
-    );
-    let heartbeat_swept = heartbeat.swept;
-    let heartbeat_reach = heartbeat.reach;
-    let history_budget = MAX_PRUNE_LEAVES_PER_PASS.saturating_sub(heartbeat.acted);
-    let history = sweep_expired_history_leaves(pool, publisher, history_budget).await;
-    errors.extend(history.errors);
-    let history_swept = history.swept;
-    let history_reach = history.reach;
-    let reach = match (finalize_reach, heartbeat_reach, history_reach) {
-        (PruneReach::WithinBounds, PruneReach::WithinBounds, PruneReach::WithinBounds) => {
-            PruneReach::WithinBounds
         }
-        _ => PruneReach::Truncated,
     };
-    for entry in heartbeat_swept
+    let finalized = finalize_interrupted_detaches(pool, publisher, &candidates).await;
+    let heartbeat = sweep_heartbeat_leaves(
+        pool,
+        publisher,
+        &candidates.of_kind(RetiredClassKind::Heartbeat),
+        MAX_PRUNE_LEAVES_PER_PASS,
+    )
+    .await;
+    let history = sweep_history_leaves(
+        pool,
+        publisher,
+        &candidates.of_kind(RetiredClassKind::Period),
+        MAX_PRUNE_LEAVES_PER_PASS.saturating_sub(heartbeat.acted),
+    )
+    .await;
+    let mut refusals = finalized.refusals;
+    for entry in heartbeat
+        .swept
         .iter()
         .map(|entry| (entry.leaf_name.as_str(), &entry.detach, entry.drop.as_ref()))
         .chain(
-            history_swept
+            history
+                .swept
                 .iter()
                 .map(|entry| (entry.leaf_name.as_str(), &entry.detach, entry.drop.as_ref())),
         )
@@ -408,13 +372,21 @@ pub async fn prune_expired_partitions<P: LoaderPublication>(
             (leaf, detach, None) => refusals.push(format!("{leaf}: {detach:?}")),
         }
     }
+    let mut errors = finalized.errors;
+    errors.extend(
+        heartbeat
+            .errors
+            .into_iter()
+            .map(|error| format!("heartbeat {error}")),
+    );
+    errors.extend(history.errors);
     PrunePass {
-        finalized_leaves,
-        heartbeat_swept,
-        history_swept,
+        finalized_leaves: finalized.leaves,
+        heartbeat_swept: heartbeat.swept,
+        history_swept: history.swept,
         refusals,
         errors,
-        reach,
+        reach: combined_reach(&[candidates.reach, heartbeat.reach, history.reach]),
     }
 }
 
@@ -423,12 +395,14 @@ mod tests {
     //! Python specification: `tests/integration/test_history_catalog_active_index.py`.
 
     use std::collections::BTreeSet;
+    use std::sync::PoisonError;
 
     use serde_json::Value;
     use serial_test::serial;
 
-    use super::{expired_candidates_sql, CandidateScope};
-    use crate::core::history::names::{HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_CLASSES};
+    use super::MAX_PRUNE_CANDIDATES_PER_PASS;
+    use crate::core::history::names::{LEAF_CATALOG, RETENTION_CLASSES};
+    use crate::test_support::connect_collecting_notices;
 
     const ACTIVE_INDEX: &str = "horsies_task_history_leaf_catalog_active";
     const CLASS_KEY: &str = "standard_30d";
@@ -437,6 +411,16 @@ mod tests {
     /// Upper bound of the plan nodes the walk reads; a larger plan fails the
     /// test.
     const MAX_PLAN_NODES: usize = 256;
+    /// The text before the JSON plan in an `auto_explain` message.
+    const PLAN_MARKER: &str = "plan:\n";
+    /// The session settings that send the plan of each statement inside a
+    /// function to the client as a notice.
+    const AUTO_EXPLAIN_SETTINGS: &str = "LOAD 'auto_explain';
+         SET LOCAL auto_explain.log_min_duration = 0;
+         SET LOCAL auto_explain.log_nested_statements = on;
+         SET LOCAL auto_explain.log_analyze = on;
+         SET LOCAL auto_explain.log_format = 'json';
+         SET LOCAL client_min_messages = log;";
 
     /// Every node of the plan tree under `root`.
     fn plan_nodes(root: &Value) -> Vec<&Value> {
@@ -478,56 +462,95 @@ mod tests {
             .collect()
     }
 
+    /// The root plan node of every `auto_explain` message.
+    fn logged_plans(messages: &[String]) -> Vec<Value> {
+        messages
+            .iter()
+            .filter_map(|message| message.split_once(PLAN_MARKER))
+            .map(|(_, plan)| {
+                let document: Value =
+                    serde_json::from_str(plan).expect("an auto_explain plan is JSON");
+                document["Plan"].clone()
+            })
+            .collect()
+    }
+
     /// `test_expired_leaf_scan_examines_only_active_records`: with 6,000
     /// dropped catalog records and 20 active ones of one class, analyzed,
-    /// every catalog scan of each candidate read that a pruning pass sends
-    /// reads through the active-record index, so the read examines no dropped
-    /// record. Rows are not counted: EXPLAIN gives a scan's rows as a rounded
-    /// mean per loop.
+    /// every catalog scan of the statement inside `horsies_prune_candidates`
+    /// reads through the active-record index, so the read examines no
+    /// dropped record. A plain `EXPLAIN` of a PL/pgSQL call shows a Function
+    /// Scan only; the plan of the statement inside comes from `auto_explain`
+    /// with `log_nested_statements`, as a notice. Rows are not counted:
+    /// EXPLAIN gives a scan's rows as a rounded mean per loop.
     #[tokio::test]
     #[serial]
-    async fn the_candidate_reads_scan_only_active_catalog_records() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let mut transaction = pool.begin().await.expect("begin");
-        sqlx::query(&format!(
-            "INSERT INTO {RETENTION_CLASSES} (
-                class_key, class_kind, retention_days, heartbeat_horizon_hours, created_at
-             ) VALUES ($1, 'PERIOD', 30, NULL, statement_timestamp())
-             ON CONFLICT (class_key) DO NOTHING"
-        ))
-        .bind(CLASS_KEY)
-        .execute(transaction.as_mut())
-        .await
-        .expect("register the class");
-        sqlx::query(&format!(
-            "INSERT INTO {LEAF_CATALOG} (
-                leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor,
-                index_schema_version, created_at, detached_at, dropped_at
-             )
-             SELECT 'catalog_probe_leaf_' || day, $1, 'AT',
-                    TIMESTAMPTZ '2000-01-01 00:00:00+00' + day * interval '1 day',
-                    TIMESTAMPTZ '2000-01-02 00:00:00+00' + day * interval '1 day',
-                    1, NOW(),
-                    CASE WHEN day < $2 THEN NOW() END,
-                    CASE WHEN day < $2 THEN NOW() END
-             FROM generate_series(0, $3 - 1) AS day"
-        ))
-        .bind(CLASS_KEY)
-        .bind(DROPPED_RECORDS)
-        .bind(DROPPED_RECORDS + ACTIVE_RECORDS)
-        .execute(transaction.as_mut())
-        .await
-        .expect("seed the catalog");
-        sqlx::query(&format!("ANALYZE {LEAF_CATALOG}"))
-            .execute(transaction.as_mut())
+    async fn the_candidate_read_scans_only_active_catalog_records() {
+        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let (client, notices) = connect_collecting_notices(&url).await;
+        client.batch_execute("BEGIN").await.expect("begin");
+        client
+            .execute(
+                &format!(
+                    "INSERT INTO {RETENTION_CLASSES} (
+                        class_key, class_kind, retention_days, heartbeat_horizon_hours, created_at
+                     ) VALUES ($1, 'PERIOD', 30, NULL, statement_timestamp())
+                     ON CONFLICT (class_key) DO NOTHING"
+                ),
+                &[&CLASS_KEY],
+            )
+            .await
+            .expect("register the class");
+        client
+            .execute(
+                &format!(
+                    "INSERT INTO {LEAF_CATALOG} (
+                        leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor,
+                        index_schema_version, created_at, detached_at, dropped_at
+                     )
+                     SELECT 'catalog_probe_leaf_' || day, $1, 'AT',
+                            TIMESTAMPTZ '2000-01-01 00:00:00+00' + day * interval '1 day',
+                            TIMESTAMPTZ '2000-01-02 00:00:00+00' + day * interval '1 day',
+                            1, NOW(),
+                            CASE WHEN day < $2 THEN NOW() END,
+                            CASE WHEN day < $2 THEN NOW() END
+                     FROM generate_series(0, $3 - 1) AS day"
+                ),
+                &[
+                    &CLASS_KEY,
+                    &DROPPED_RECORDS,
+                    &(DROPPED_RECORDS + ACTIVE_RECORDS),
+                ],
+            )
+            .await
+            .expect("seed the catalog");
+        client
+            .batch_execute(&format!("ANALYZE {LEAF_CATALOG}"))
             .await
             .expect("analyze the catalog");
-        let definition: Option<String> =
-            sqlx::query_scalar("SELECT pg_get_indexdef(to_regclass($1))")
-                .bind(ACTIVE_INDEX)
-                .fetch_one(transaction.as_mut())
-                .await
-                .expect("read the index definition");
+        let definition: Option<String> = client
+            .query_one("SELECT pg_get_indexdef(to_regclass($1))", &[&ACTIVE_INDEX])
+            .await
+            .expect("read the index definition")
+            .get(0);
+        client
+            .batch_execute(AUTO_EXPLAIN_SETTINGS)
+            .await
+            .expect("send the nested plans as notices");
+        let limit = i32::try_from(MAX_PRUNE_CANDIDATES_PER_PASS + 1).expect("candidate limit");
+        let candidates: i64 = client
+            .query_one(
+                "SELECT count(*) FROM horsies_prune_candidates($1)",
+                &[&limit],
+            )
+            .await
+            .expect("read the candidates")
+            .get(0);
+        client.batch_execute("ROLLBACK").await.expect("rollback");
+        let messages = notices
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
 
         // The index holds only records whose leaf is not dropped.
         assert!(
@@ -536,40 +559,21 @@ mod tests {
                 .is_some_and(|text| text.ends_with(" WHERE (dropped_at IS NULL)")),
             "{definition:?}"
         );
-        for scope in [CandidateScope::History, CandidateScope::Finite] {
-            let explain = format!(
-                "EXPLAIN (ANALYZE, FORMAT JSON) {}",
-                expired_candidates_sql(scope)
-            );
-            let plan: Value = match scope {
-                CandidateScope::History => {
-                    sqlx::query_scalar(&explain)
-                        .bind(HEARTBEAT_CLASS_KEY)
-                        .fetch_one(transaction.as_mut())
-                        .await
-                }
-                CandidateScope::Finite => {
-                    sqlx::query_scalar(&explain)
-                        .fetch_one(transaction.as_mut())
-                        .await
-                }
-            }
-            .expect("explain the candidate read");
-            let root = &plan[0]["Plan"];
-            let scans = catalog_scan_indexes(root);
-            assert!(!scans.is_empty(), "{scope:?}: {plan}");
-            assert!(
-                scans
-                    .iter()
-                    .all(|scan| scan.len() == 1 && scan.contains(ACTIVE_INDEX)),
-                "{scope:?}: {plan}"
-            );
-            // The seeded active records are expired, so the read returns them.
-            assert!(
-                root["Actual Rows"].as_f64().expect("actual rows") >= f64::from(ACTIVE_RECORDS),
-                "{scope:?}: {plan}"
-            );
-        }
-        transaction.rollback().await.expect("rollback");
+        let scans: Vec<BTreeSet<String>> = logged_plans(&messages)
+            .iter()
+            .flat_map(catalog_scan_indexes)
+            .collect();
+        assert!(!scans.is_empty(), "{messages:?}");
+        assert!(
+            scans
+                .iter()
+                .all(|scan| scan.len() == 1 && scan.contains(ACTIVE_INDEX)),
+            "{messages:?}"
+        );
+        // The seeded active records are expired, so the read returns them.
+        assert!(
+            candidates >= i64::from(ACTIVE_RECORDS),
+            "{candidates} candidates"
+        );
     }
 }

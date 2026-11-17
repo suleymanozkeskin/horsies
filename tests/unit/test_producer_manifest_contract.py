@@ -1,12 +1,14 @@
 """Contract between the Pydantic broker config and the core's producer manifest.
 
 `to_producer_manifest` maps `PostgresConfig` into the manifest generated
-from horsies-core (`horsies/_catalog/manifest.py`). These tests pin that
+from horsies-core (`python/horsies/_catalog/manifest.py`). These tests pin that
 every config field is mapped or named as outside the producer manifest,
 that every manifest field has a source, that the mapping copies each value,
 and which SQLAlchemy pool values the config keeps: each meaning that the
 core can honor is accepted and reaches the manifest as a typed value; an
-unlimited size and a value without meaning are refused.
+unlimited size and a value without meaning are refused. The TCP keepalive
+and user timeout values have the core's bounds: a value at a bound reaches
+the manifest, and a value past it is refused by the config.
 """
 
 from __future__ import annotations
@@ -19,10 +21,15 @@ import pytest
 from pydantic import SecretStr
 
 from horsies._catalog.manifest import (
+    KEEPALIVE_PROBES_MAX,
+    KEEPALIVE_PROBES_MIN,
+    KEEPALIVE_SECONDS_MAX,
+    KEEPALIVE_SECONDS_MIN,
     MANIFEST_VERSION,
     POOL_CONNECTIONS_MAX,
     RESERVATION_WINDOW_MICROS_MAX,
     POOL_SIZE_MAX,
+    TCP_USER_TIMEOUT_MS_MAX,
     WHOLE_SECONDS_MAX,
     DatabaseManifest,
     PoolRecycleAfterSeconds,
@@ -326,13 +333,63 @@ def test_a_keepalive_value_that_the_validator_refuses_is_a_defect_here() -> None
         tcp_keepalives_of(unvalidated)
 
 
+@pytest.mark.parametrize(
+    ('seconds', 'probes'),
+    [
+        (KEEPALIVE_SECONDS_MIN, KEEPALIVE_PROBES_MIN),
+        (KEEPALIVE_SECONDS_MAX, KEEPALIVE_PROBES_MAX),
+    ],
+    ids=['lower-bounds', 'upper-bounds'],
+)
+def test_keepalive_values_at_the_core_bounds_reach_the_manifest(
+    seconds: int,
+    probes: int,
+) -> None:
+    config = PostgresConfig(
+        database_url=SecretStr(MAIN_URL),
+        tcp_keepalives=True,
+        tcp_keepalives_idle=seconds,
+        tcp_keepalives_interval=seconds,
+        tcp_keepalives_count=probes,
+    )
+    manifest = to_producer_manifest(
+        config,
+        schema='MIGRATE_AND_VALIDATE',
+        idempotency_reservation_window=timedelta(seconds=60),
+    )
+    assert manifest.database.tcp_keepalives == TcpKeepalivesConfigOn(
+        idle_seconds=seconds,
+        interval_seconds=seconds,
+        probes=probes,
+    )
+
+
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('tcp_keepalives_idle', KEEPALIVE_SECONDS_MAX + 1),
+        ('tcp_keepalives_interval', KEEPALIVE_SECONDS_MAX + 1),
+        ('tcp_keepalives_count', KEEPALIVE_PROBES_MAX + 1),
+        ('tcp_user_timeout_ms', TCP_USER_TIMEOUT_MS_MAX + 1),
+    ],
+)
+def test_a_tcp_value_past_the_core_bound_is_refused_by_the_config(
+    field: str,
+    value: int,
+) -> None:
+    with pytest.raises(ConfigurationError) as raised:
+        PostgresConfig.model_validate({'database_url': MAIN_URL, field: value})
+    assert raised.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+    assert f'got: {field}={value}' in raised.value.notes
+
+
 def test_a_tcp_user_timeout_of_zero_is_the_system_default() -> None:
     assert _database_of('tcp_user_timeout_ms', 0).tcp_user_timeout == (
         TcpUserTimeoutConfigSystemDefault()
     )
 
 
-@pytest.mark.parametrize('milliseconds', [1, 30_000])
+@pytest.mark.parametrize('milliseconds', [1, 30_000, TCP_USER_TIMEOUT_MS_MAX])
 def test_a_tcp_user_timeout_is_a_number_of_milliseconds(milliseconds: int) -> None:
     assert _database_of('tcp_user_timeout_ms', milliseconds).tcp_user_timeout == (
         TcpUserTimeoutConfigAfter(milliseconds=milliseconds)

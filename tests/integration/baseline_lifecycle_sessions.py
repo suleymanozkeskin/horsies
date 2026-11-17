@@ -47,12 +47,21 @@ LISTEN_SQL: Final[tuple[LiteralString, ...]] = (
 
 PREPARE_SQL: Final[LiteralString] = """
 CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
-RETURNS TABLE (task_id uuid, status text, terminal_at timestamptz, terminalization_kind text, is_workflow_task boolean)
+RETURNS TABLE (
+    task_id uuid, status text, terminal_at timestamptz, terminalization_kind text, is_workflow_task boolean,
+    command_fingerprint_version smallint, command_fingerprint bytea, sent_at timestamptz
+)
 LANGUAGE sql STABLE AS $$
-    SELECT h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text, h.is_workflow_task
+    SELECT h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text, h.is_workflow_task,
+        h.command_fingerprint_version, h.command_fingerprint, h.sent_at
     FROM horsies_task_history h
     WHERE h.task_id = p_task_id
     LIMIT 1
+$$;
+CREATE FUNCTION horsies_task_history_duplicate_staged(p_task_id uuid)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (SELECT 1 FROM horsies_task_provenance_staged(p_task_id))
+        OR EXISTS (SELECT 1 FROM horsies_task_history_clock_exceptions AS e WHERE e.task_id = p_task_id)
 $$;
 DO $$
 BEGIN
@@ -65,7 +74,8 @@ $$;
 CREATE INDEX horsies_heartbeats_lc_sessions_probe ON horsies_heartbeats_lc_sessions (task_id, role, sent_at DESC);
 """
 """Fixtures that the published history readers and the partition manager provide at run time: a provenance
-stand-in that reads the history parent, and one heartbeat leaf around now."""
+stand-in that reads the history parent, a duplicate guard stand-in on top of it, and one heartbeat leaf around
+now."""
 
 _INSERT_TASK_SQL: Final[LiteralString] = """
 INSERT INTO horsies_tasks (

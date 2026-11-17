@@ -1,7 +1,7 @@
 /// Typed error types for WorkflowHandle operations.
 use uuid::Uuid;
 ///
-/// Mirrors Python's `horsies/core/models/workflow/handle_types.py`.
+/// Mirrors Python's `python/horsies/core/models/workflow/handle_types.py`.
 ///
 /// Two error strategies by return type:
 ///
@@ -37,9 +37,6 @@ pub enum HandleErrorCode {
     /// A sync handle method was called on a thread that runs an event loop. Its wait would stall that
     /// loop, so nothing ran. Python client only.
     AsyncContext,
-    /// Internal / unexpected error. Not in Python's catalog: the workflow engine still folds some errors
-    /// into it.
-    InternalFailed,
 }
 
 impl std::fmt::Display for HandleErrorCode {
@@ -52,7 +49,6 @@ impl std::fmt::Display for HandleErrorCode {
             Self::LoopRunnerFailed => write!(f, "LOOP_RUNNER_FAILED"),
             Self::EventLoopLimit => write!(f, "EVENT_LOOP_LIMIT"),
             Self::AsyncContext => write!(f, "ASYNC_CONTEXT"),
-            Self::InternalFailed => write!(f, "INTERNAL_FAILED"),
         }
     }
 }
@@ -105,10 +101,6 @@ mod tests {
         assert_eq!(
             HandleErrorCode::DbOperationFailed.to_string(),
             "DB_OPERATION_FAILED"
-        );
-        assert_eq!(
-            HandleErrorCode::InternalFailed.to_string(),
-            "INTERNAL_FAILED"
         );
         assert_eq!(
             HandleErrorCode::StoredDataInvalid.to_string(),

@@ -9,6 +9,7 @@
 //! its statements on it one by one, in autocommit, as the sqlx reads did on
 //! one acquired connection.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
 
 use uuid::Uuid;
@@ -19,8 +20,8 @@ use crate::broker::core_rows::{
 use crate::broker::error::BrokerError;
 use crate::core::history::errors::HistoryError;
 use crate::core::history::reads::detail::{
-    history_detail_from_wire, task_detail_function_signature, task_detail_sql,
-    HistoryDetailWireRow, TaskAbsenceReason, TaskDetailResult, TASK_ABSENCE_REASON_SQL,
+    history_detail_from_wire, task_detail_sql, HistoryDetailWireRow, TaskAbsenceReason,
+    TaskDetailResult, TASK_ABSENCE_REASON_SQL,
 };
 use crate::core::history::reads::result::{
     decode_result_row, task_result_function_signature, task_result_sql, ResultWireRow,
@@ -60,11 +61,42 @@ static FUNCTION_PUBLISHED: TypedStatement = TypedStatement::new(
     &[ParameterType::Text],
 );
 
+/// Whether a broker saw the staged result function published. One value per
+/// broker; it starts not seen.
+///
+/// Only a publication probe that finds the function marks it seen. A `42883`
+/// refusal of the result read clears it, so the next read probes again.
+/// Python: `PostgresBroker._staged_result_reader_published`.
+#[derive(Debug, Default)]
+pub(crate) struct ResultReaderSeen(AtomicBool);
+
+impl ResultReaderSeen {
+    fn is_seen(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn mark_seen(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    fn forget(&self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 /// The result columns of one task through the staged result function.
 ///
-/// A `42883` refusal is confirmed with `to_regprocedure` on the same
-/// connection: an absent function is `NotPublished`; a present function
-/// returns the refusal. Reads only.
+/// Python's rule (`PostgresBroker._probe_result_row`):
+/// - While `reader` is not seen, the call first probes the function with
+///   `to_regprocedure` on the same connection. An absent function is
+///   `NotPublished`, and the result read is not sent. A present function
+///   marks `reader` seen.
+/// - A `42883` refusal of the result read clears `reader` and returns the
+///   refusal, which names the function. So a reader dropped out of band
+///   after a call saw it fails one call; the next call probes and answers
+///   `NotPublished` until the readers are published again.
+///
+/// Reads only. Changes only `reader`.
 ///
 /// Errors: [`BrokerError::Statement`], [`BrokerError::RowDecode`], and
 /// [`BrokerError::HistoryReadContract`] for a row that breaks the read
@@ -72,10 +104,22 @@ static FUNCTION_PUBLISHED: TypedStatement = TypedStatement::new(
 pub(crate) async fn read_task_result(
     pool: &CorePool,
     log: StatementLog,
+    reader: &ResultReaderSeen,
     task_id: Uuid,
 ) -> Result<TaskResultRead, BrokerError> {
-    let mut connection = checkout_batch(pool, &TASK_RESULT).await?;
+    let seen = reader.is_seen();
+    let first_statement: &TypedStatement = match seen {
+        true => &*TASK_RESULT,
+        false => &FUNCTION_PUBLISHED,
+    };
+    let mut connection = checkout_batch(pool, first_statement).await?;
     let connection = &mut connection;
+    if !seen {
+        match function_published(connection, log, &task_result_function_signature()).await? {
+            true => reader.mark_seen(),
+            false => return Ok(TaskResultRead::NotPublished),
+        }
+    }
     let read = query_on(
         connection,
         log,
@@ -90,33 +134,33 @@ pub(crate) async fn read_task_result(
             }
         },
         Err(failure) if is_undefined_function(&failure) => {
-            match function_published(connection, log, &task_result_function_signature()).await? {
-                true => Err(BrokerError::Statement(failure)),
-                false => Ok(TaskResultRead::NotPublished),
-            }
+            reader.forget();
+            Err(BrokerError::Statement(failure))
         }
         Err(failure) => Err(BrokerError::Statement(failure)),
     }
 }
 
-/// The staged detail of one task, or `None` while the staged detail
-/// function is not published.
+/// The staged detail of one task: live, history, or absent with its reason.
 ///
-/// Statements: the publication probe, the detail read, and for a task that
-/// neither the live table nor the history holds, the absence reason. Reads
-/// only.
+/// Statements: the detail read and, for a task that neither the live table
+/// nor the history holds, the absence reason. Reads only. The install and
+/// every coverage pass publish the detail reader, so the read sends no
+/// publication probe.
 ///
-/// Errors: as [`read_task_result`].
+/// Errors: [`BrokerError::Statement`], [`BrokerError::RowDecode`], and
+/// [`BrokerError::HistoryReadContract`] for a row that breaks the read
+/// contract. A detail reader removed out of band is a
+/// [`BrokerError::Statement`] refusal with SQLSTATE `42883` that names
+/// `horsies_task_detail_staged`. The next coverage pass publishes the
+/// reader again, and the call after it finds the reader.
 pub(crate) async fn read_history_detail(
     pool: &CorePool,
     log: StatementLog,
     task_id: Uuid,
-) -> Result<Option<TaskDetailResult>, BrokerError> {
-    let mut connection = checkout_batch(pool, &FUNCTION_PUBLISHED).await?;
+) -> Result<TaskDetailResult, BrokerError> {
+    let mut connection = checkout_batch(pool, &TASK_DETAIL).await?;
     let connection = &mut connection;
-    if !function_published(connection, log, &task_detail_function_signature()).await? {
-        return Ok(None);
-    }
     let rows = query_on(
         connection,
         log,
@@ -125,13 +169,13 @@ pub(crate) async fn read_history_detail(
     .await?;
     let Some(row) = first_row(rows) else {
         let reason = absence_reason(connection, log, task_id).await?;
-        return Ok(Some(TaskDetailResult::Absent { task_id, reason }));
+        return Ok(TaskDetailResult::Absent { task_id, reason });
     };
     let location: String = column(&row, &TASK_DETAIL, "location")?;
     match location.as_str() {
-        "LIVE" => Ok(Some(TaskDetailResult::Live { task_id })),
+        "LIVE" => Ok(TaskDetailResult::Live { task_id }),
         "HISTORY" => history_detail_from_wire(history_detail_wire_row(&row)?)
-            .map(|detail| Some(TaskDetailResult::History(detail)))
+            .map(TaskDetailResult::History)
             .map_err(history_contract),
         other => Err(history_contract(HistoryError::contract(format!(
             "staged detail returned unknown location {other:?}"

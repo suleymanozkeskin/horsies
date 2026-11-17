@@ -7,7 +7,8 @@ called ``horsies_monitoring_task_detail`` and
 live read, the staged history read, the absence rule, the attempt rows and
 the workflow link. The decided changes of these reads are applied (the
 absence reason from the detached leaves, the node error from the stored
-result), so the reference and the functions answer the same.
+result, the task id as ``uuid.UUID``), so the reference and the functions
+answer the same.
 """
 
 from __future__ import annotations
@@ -31,13 +32,13 @@ from horsies.core.history.reads.detail import (
     LiveTaskLocation,
     TaskDetailAbsent,
     read_task_detail,
-    staged_detail_published,
 )
 from horsies.core.models.task_pg import TaskAttemptModel, TaskModel
 from horsies.core.models.tasks import Execution
 from horsies.core.models.workflow_pg import WorkflowTaskModel
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
+from horsies.core.utils.db import uuid_column_value
 from horsies.monitoring.errors import MonitoringResult
 from horsies.monitoring.models import (
     LeafTaskInfo,
@@ -78,12 +79,12 @@ _LEAF_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
 )
 
 
-def _live_task_statement(task_id: str) -> Select[tuple[TaskModel]]:
+def _live_task_statement(task_id: uuid.UUID) -> Select[tuple[TaskModel]]:
     """The live row of one task, with the leaf columns only."""
     return (
         select(TaskModel)
         .options(load_only(*_LEAF_COLUMNS, raiseload=True))
-        .where(TaskModel.id == task_id)
+        .where(TaskModel.id == str(task_id))
     )
 
 
@@ -95,7 +96,7 @@ def _leaf_task(task: TaskModel) -> LeafTaskInfo:
     """
     queue_s, exec_s = _task_spans(task)
     return LeafTaskInfo(
-        task_id=task.id,
+        task_id=uuid_column_value(task.id, column='horsies_tasks.id'),
         status=task.status.value,
         error_code=None,
         failed_reason=None,
@@ -128,7 +129,7 @@ type _AttemptRow = tuple[
 worker_hostname, started_at, finished_at`` of one attempt row."""
 
 
-def _attempts_statement(task_id: str) -> Select[_AttemptRow]:
+def _attempts_statement(task_id: uuid.UUID) -> Select[_AttemptRow]:
     """The attempt rows of one task, oldest first, with the read columns only."""
     return (
         select(
@@ -142,7 +143,7 @@ def _attempts_statement(task_id: str) -> Select[_AttemptRow]:
             TaskAttemptModel.started_at,
             TaskAttemptModel.finished_at,
         )
-        .where(TaskAttemptModel.task_id == task_id)
+        .where(TaskAttemptModel.task_id == str(task_id))
         .order_by(TaskAttemptModel.attempt)
     )
 
@@ -210,7 +211,7 @@ def _history_leaf(detail: 'HistoryTaskDetail') -> LeafTaskInfo:
     )
     exec_s = span_s(detail.started_at, end, live=False)
     return LeafTaskInfo(
-        task_id=str(detail.task_id),
+        task_id=detail.task_id,
         status=detail.status.value,
         error_code=nz(detail.error_code),
         failed_reason=nz(detail.final_failed_reason),
@@ -230,7 +231,7 @@ def _history_leaf(detail: 'HistoryTaskDetail') -> LeafTaskInfo:
 
 async def get_task_detail(
     broker: PostgresBroker,
-    task_id: str,
+    task_id: uuid.UUID,
 ) -> MonitoringResult[TaskDetail | TaskDetailNotFound]:
     """A single task with its attempt history.
 
@@ -248,10 +249,6 @@ async def get_task_detail(
 
     Every read runs in one REPEATABLE READ snapshot.
     """
-    if not _is_uuid_text(task_id):
-        return Ok(TaskDetailNotFound(
-            task_id=task_id, reason=TaskAbsenceReason.NOT_CLASSIFIED,
-        ))
     task_stmt = _live_task_statement(task_id)
     attempts_stmt = _attempts_statement(task_id)
     # One indexed hop to the node this task backs, if any. Kept as its own
@@ -259,7 +256,7 @@ async def get_task_detail(
     # the common case and this returns nothing for it.
     node_stmt = select(
         WorkflowTaskModel.workflow_id, WorkflowTaskModel.task_index
-    ).where(WorkflowTaskModel.task_id == task_id)
+    ).where(WorkflowTaskModel.task_id == str(task_id))
 
     match await broker.select_resources():
         case Err(loop_limit):
@@ -361,15 +358,14 @@ _ABSENCE_REASON_SQL = text("""
 
 
 async def _history_detail(
-    session: AsyncSession, task_id: str
+    session: AsyncSession, task_id: uuid.UUID
 ) -> HistoryTaskDetail | TaskAbsenceReason:
     """The history side of a detail read, after the live read found no row.
 
     Terminalization moves finished rows out of the live table, so an
-    absent live row is the normal terminal case, not an error. A database
-    without the staged detail function has no history to read:
-    ``NOT_CLASSIFIED``. A task in neither place gets its reason from the
-    detached leaves (``_ABSENCE_REASON_SQL``). The session reads in one snapshot
+    absent live row is the normal terminal case, not an error. A task in
+    neither place gets its reason from the detached leaves
+    (``_ABSENCE_REASON_SQL``). The session reads in one snapshot
     (``_begin_one_snapshot``), so the staged read cannot find the task live.
 
     Raises:
@@ -378,15 +374,15 @@ async def _history_detail(
             live read found no row.
     """
     connection = await session.connection()
-    if not await staged_detail_published(connection):
-        return TaskAbsenceReason.NOT_CLASSIFIED
-    detail = await read_task_detail(connection, task_id=uuid.UUID(task_id))
+    detail = await read_task_detail(connection, task_id=task_id)
     match detail:
         case HistoryTaskDetail():
             return detail
         case TaskDetailAbsent():
             reason = (
-                await connection.execute(_ABSENCE_REASON_SQL, {'task_id': task_id})
+                await connection.execute(
+                    _ABSENCE_REASON_SQL, {'task_id': str(task_id)},
+                )
             ).scalar_one()
             return TaskAbsenceReason(reason)
         case LiveTaskLocation():
@@ -458,18 +454,21 @@ async def get_workflow_node(
             history: HistoryTaskDetail | None = None
             attempt_rows: list[_AttemptRow] = []
             if node.task_id is not None:
+                node_task_id = uuid_column_value(
+                    node.task_id, column='horsies_workflow_tasks.task_id',
+                )
                 task = (
-                    await session.execute(_live_task_statement(node.task_id))
+                    await session.execute(_live_task_statement(node_task_id))
                 ).scalar_one_or_none()
                 if task is None:
-                    match await _history_detail(session, str(node.task_id)):
+                    match await _history_detail(session, node_task_id):
                         case HistoryTaskDetail() as found:
                             history = found
                         case TaskAbsenceReason():
                             history = None
                 attempt_rows = list(
                     (
-                        await session.execute(_attempts_statement(node.task_id))
+                        await session.execute(_attempts_statement(node_task_id))
                     )
                     .tuples()
                     .all()

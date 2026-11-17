@@ -18,7 +18,7 @@ import sys
 import time
 from collections.abc import Callable
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 from datetime import datetime, timezone
 
 import pytest
@@ -108,7 +108,7 @@ class TestTaskDoneFanout:
             task_name='e2e_simple',
             kwargs_json='{"x": 0}',
             queue_name='default',
-            task_id=str(uuid4()),
+            task_id=uuid4(),
             send_kind=SendKind.FIRST,
             enqueue_sha='test-sha',
             sent_at=datetime.now(timezone.utc),
@@ -165,7 +165,7 @@ class TestTaskDoneFanout:
             task_name='e2e_simple',
             kwargs_json='{"x": 0}',
             queue_name='default',
-            task_id=str(uuid4()),
+            task_id=uuid4(),
             send_kind=SendKind.FIRST,
             enqueue_sha='test-sha',
             sent_at=datetime.now(timezone.utc),
@@ -245,13 +245,13 @@ class TestTaskDoneFanout:
         sample_notify_size = 0
 
         # Enqueue M tasks
-        task_ids: list[str] = []
+        task_ids: list[UUID] = []
         for i in range(M_COMPLETIONS):
             tid = (await broker.enqueue_async(
                 task_name='e2e_simple',
                 kwargs_json=f'{{"x": {i}}}',
                 queue_name='default',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 send_kind=SendKind.FIRST,
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
@@ -335,13 +335,13 @@ class TestTaskDoneFanout:
                 queues.append(q)
 
             # Enqueue M tasks
-            task_ids: list[str] = []
+            task_ids: list[UUID] = []
             for i in range(M):
                 tid = (await broker.enqueue_async(
                     task_name='e2e_simple',
                     kwargs_json=f'{{"x": {i}}}',
                     queue_name='default',
-                    task_id=str(uuid4()),
+                    task_id=uuid4(),
                     send_kind=SendKind.FIRST,
                     enqueue_sha='test-sha',
                     sent_at=datetime.now(timezone.utc),
@@ -420,7 +420,7 @@ class TestFanoutBoundary:
             task_name='e2e_simple',
             kwargs_json='{"x": 0}',
             queue_name='default',
-            task_id=str(uuid4()),
+            task_id=uuid4(),
             send_kind=SendKind.FIRST,
             enqueue_sha='test-sha',
             sent_at=datetime.now(timezone.utc),
@@ -441,7 +441,7 @@ class TestFanoutBoundary:
                 task_name='e2e_simple',
                 kwargs_json='{"x": 1}',
                 queue_name='default',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 send_kind=SendKind.FIRST,
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
@@ -469,7 +469,7 @@ class TestFanoutBoundary:
                 task_name='e2e_simple',
                 kwargs_json='{"x": 0}',
                 queue_name='default',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 send_kind=SendKind.FIRST,
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
@@ -511,13 +511,13 @@ class TestFanoutBoundary:
         removed = queues[:N // 2]
         remaining = queues[N // 2:]
 
-        pre_ids: list[str] = []
+        pre_ids: list[UUID] = []
         for i in range(20):
             tid = (await broker.enqueue_async(
                 task_name='e2e_simple',
                 kwargs_json=f'{{"x": {i}}}',
                 queue_name='default',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 send_kind=SendKind.FIRST,
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
@@ -528,13 +528,13 @@ class TestFanoutBoundary:
             task_name='e2e_simple',
             kwargs_json='{"x": 99}',
             queue_name='default',
-            task_id=str(uuid4()),
+            task_id=uuid4(),
             send_kind=SendKind.FIRST,
             enqueue_sha='test-sha',
             sent_at=datetime.now(timezone.utc),
         )).unwrap()
 
-        async def _complete_inflight(ids: list[str]) -> None:
+        async def _complete_inflight(ids: list[UUID]) -> None:
             for tid in ids:
                 await session.execute(
                     text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
@@ -674,13 +674,13 @@ class TestFanoutErrorPaths:
 
         try:
             # Fire 3 notifications to exceed maxsize
-            task_ids: list[str] = []
+            task_ids: list[UUID] = []
             for i in range(3):
                 tid = (await broker.enqueue_async(
                     task_name='e2e_simple',
                     kwargs_json=f'{{"x": {i}}}',
                     queue_name='default',
-                    task_id=str(uuid4()),
+                    task_id=uuid4(),
                     send_kind=SendKind.FIRST,
                     enqueue_sha='test-sha',
                     sent_at=datetime.now(timezone.utc),
@@ -729,7 +729,7 @@ class TestFanoutContracts:
                 task_name='e2e_simple',
                 kwargs_json='{"x": 0}',
                 queue_name='default',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 send_kind=SendKind.FIRST,
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
@@ -747,7 +747,7 @@ class TestFanoutContracts:
             assert got_notification and q.qsize() >= 1, 'Expected at least 1 notification'
 
             notification = await q.get()
-            assert notification.payload == task_id, (
+            assert notification.payload == str(task_id), (
                 f'Expected payload {task_id!r}, got {notification.payload!r}'
             )
         finally:
@@ -768,7 +768,7 @@ class TestFanoutContracts:
                 task_name='e2e_simple',
                 kwargs_json='{"x": 0}',
                 queue_name='default',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 send_kind=SendKind.FIRST,
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),
@@ -819,7 +819,7 @@ class TestFanoutContracts:
                 task_name='e2e_simple',
                 kwargs_json='{"x": 0}',
                 queue_name='default',
-                task_id=str(uuid4()),
+                task_id=uuid4(),
                 send_kind=SendKind.FIRST,
                 enqueue_sha='test-sha',
                 sent_at=datetime.now(timezone.utc),

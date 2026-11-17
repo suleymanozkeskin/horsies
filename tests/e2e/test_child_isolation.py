@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import psutil
 import pytest
@@ -112,7 +113,7 @@ async def _until(predicate: Callable[[], bool], timeout_s: float) -> None:
         await asyncio.sleep(0.05)
 
 
-async def _row(broker: PostgresBroker, task_id: str) -> Any:
+async def _row(broker: PostgresBroker, task_id: UUID) -> Any:
     async with current_resources(broker).session_factory() as session:
         result = await session.execute(
             text("""
@@ -120,12 +121,12 @@ async def _row(broker: PostgresBroker, task_id: str) -> Any:
                 FROM itest_task_rows
                 WHERE id = CAST(:id AS uuid)
             """),
-            {'id': task_id},
+            {'id': str(task_id)},
         )
         return result.fetchone()
 
 
-async def _running_child(broker: PostgresBroker, task_id: str) -> int:
+async def _running_child(broker: PostgresBroker, task_id: UUID) -> int:
     session_factory = current_resources(broker).session_factory
     await wait_for_status(session_factory, task_id, 'RUNNING', timeout_s=SLOW_START_S)
     row = await _row(broker, task_id)
@@ -133,7 +134,7 @@ async def _running_child(broker: PostgresBroker, task_id: str) -> int:
     return int(row.worker_pid)
 
 
-async def _assert_error(broker: PostgresBroker, task_id: str, code: str) -> None:
+async def _assert_error(broker: PostgresBroker, task_id: UUID, code: str) -> None:
     row = await _row(broker, task_id)
     assert (row.status, row.error_code) == ('FAILED', code)
 
@@ -154,11 +155,15 @@ def _seconds(start: Any, end: Any) -> str:
     return f'{(end - start).total_seconds():.3f}s'
 
 
-async def _task_times(broker: PostgresBroker, task_ids: list[str]) -> str:
+async def _task_times(broker: PostgresBroker, task_ids: list[UUID]) -> str:
     """One line per task: status, code, claim to RUNNING, RUNNING to terminal."""
     async with current_resources(broker).session_factory() as session:
-        rows = (await session.execute(_TASK_TIMES_SQL, {'ids': task_ids})).all()
-    order = {task_id: index for index, task_id in enumerate(task_ids)}
+        rows = (
+            await session.execute(
+                _TASK_TIMES_SQL, {'ids': [str(task_id) for task_id in task_ids]},
+            )
+        ).all()
+    order = {str(task_id): index for index, task_id in enumerate(task_ids)}
     lines = [
         f'task {order.get(row.id, -1) + 1} {row.id[:8]} {row.status} {row.error_code} '
         f'claim->running={_seconds(row.claimed_at, row.started_at)} '
@@ -168,7 +173,7 @@ async def _task_times(broker: PostgresBroker, task_ids: list[str]) -> str:
     return '\n'.join(lines)
 
 
-async def _wait_all(broker: PostgresBroker, task_ids: list[str], status: str) -> None:
+async def _wait_all(broker: PostgresBroker, task_ids: list[UUID], status: str) -> None:
     session_factory = current_resources(broker).session_factory
     for task_id in task_ids:
         await wait_for_status(session_factory, task_id, status, timeout_s=FINISH_TIMEOUT_S)
@@ -276,7 +281,7 @@ async def test_child_stops_when_the_parent_dies(
         await _until(lambda: not _alive(child), timeout_s=5.0)
 
 
-async def _beats_from_the_worker_process(broker: PostgresBroker, task_id: str) -> int:
+async def _beats_from_the_worker_process(broker: PostgresBroker, task_id: UUID) -> int:
     """Runner beats that the worker process wrote. The child's first beat
     names the child pid in its sender id; the worker's beats name the worker."""
     async with current_resources(broker).session_factory() as session:
@@ -287,7 +292,7 @@ async def _beats_from_the_worker_process(broker: PostgresBroker, task_id: str) -
                   AND role = 'runner'
                   AND position(':' IN sender_id) = 0
             """),
-            {'id': task_id},
+            {'id': str(task_id)},
         )
     assert isinstance(count, int)
     return count

@@ -101,7 +101,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     /// This is a wrap-strategy method: infrastructure/query failures are
     /// returned as `HandleResult::Err(HandleOperationError)`.
     pub async fn status(&self) -> HandleResult<WorkflowStatus> {
-        crate::workflow_engine::query::get_workflow_status(self.broker.pool(), self.workflow_id)
+        crate::workflow_engine::query::get_workflow_status(&self.broker, self.workflow_id)
             .await
             .map_err(|e| self.wrap_error(&e))
     }
@@ -111,7 +111,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     /// This is a wrap-strategy method: DB/query failures return
     /// `HandleResult::Err(...)`.
     pub async fn results(&self) -> HandleResult<HashMap<String, TaskResult<serde_json::Value>>> {
-        crate::workflow_engine::query::get_workflow_results(self.broker.pool(), self.workflow_id)
+        crate::workflow_engine::query::get_workflow_results(&self.broker, self.workflow_id)
             .await
             .map_err(|e| self.wrap_error(&e))
     }
@@ -123,7 +123,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     /// `TaskResult::Err(TaskError)`.
     pub async fn result_for<V: DeserializeOwned>(&self, node_id: &str) -> TaskResult<V> {
         match crate::workflow_engine::query::get_workflow_result_for(
-            self.broker.pool(),
+            &self.broker,
             self.workflow_id,
             node_id,
         )
@@ -147,9 +147,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     /// This is a wrap-strategy method: DB/query failures return
     /// `HandleResult::Err(...)`.
     pub async fn tasks(&self) -> HandleResult<Vec<WorkflowTaskInfo>> {
-        crate::workflow_engine::query::get_workflow_tasks(self.broker.pool(), self.workflow_id)
-            .await
-            .map_err(|e| self.wrap_error(&e))
+        crate::workflow_engine::query::get_workflow_tasks(&self.broker, self.workflow_id).await
     }
 
     /// Cancel the workflow.

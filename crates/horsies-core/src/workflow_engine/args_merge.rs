@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use serde::Serialize;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::core::codec::JsonReadError;
@@ -119,15 +118,19 @@ impl ArgsFromConflict {
             MergedNodeKind::Task => format!("task {task_index}"),
             MergedNodeKind::SubWorkflow => format!("subworkflow task {task_index}"),
         };
-        crate::workflow_engine::engine::node_not_prepared_error(
-            workflow_id,
-            task_index,
-            OperationalErrorCode::WorkflowEnqueueFailed,
-            format!(
-                "args_from key '{}' conflicts with static kwarg ({node})",
-                self.key
-            ),
-        )
+        TaskError {
+            data: Some(serde_json::json!({
+                "workflow_id": workflow_id.to_string(),
+                "task_index": task_index,
+            })),
+            ..TaskError::builtin(
+                OperationalErrorCode::WorkflowEnqueueFailed,
+                format!(
+                    "args_from key '{}' conflicts with static kwarg ({node})",
+                    self.key
+                ),
+            )
+        }
     }
 }
 
@@ -146,7 +149,7 @@ fn static_member_conflict(
         .map(|key| ArgsFromConflict { key: key.clone() })
 }
 
-/// Merge args_from dependency results into the node's input (synchronous variant).
+/// Merge args_from dependency results into the node's input.
 ///
 /// With no args_from the input is returned unchanged. An `args_from` key that the static input
 /// also sets gives [`ArgsFromMerge::StaticMemberConflict`] and merges nothing. Otherwise, for each
@@ -177,71 +180,6 @@ pub(crate) fn merge_args_from_sync(
     Ok(ArgsFromMerge::Merged(serde_json::to_string(&object)?))
 }
 
-#[derive(Debug, sqlx::FromRow)]
-struct DepRow {
-    task_index: i32,
-    node_id: Option<String>,
-    task_name: String,
-    sub_definition_key: Option<String>,
-    status: String,
-    result: Option<String>,
-}
-
-/// Merge args_from dependency results into the node's input (async variant).
-///
-/// Fetches dependency results from the database, then applies the same
-/// conflict check and wrapping logic as the synchronous variant.
-pub(crate) async fn merge_args_from_async(
-    pool: &PgPool,
-    workflow_id: Uuid,
-    input: &str,
-    args_from: &Option<serde_json::Value>,
-    dep_indices: &[i32],
-) -> Result<ArgsFromMerge, WorkflowError> {
-    let args_from_map = match args_from {
-        Some(v) => match v.as_object() {
-            Some(obj) if !obj.is_empty() => obj,
-            _ => return Ok(ArgsFromMerge::Merged(input.to_owned())),
-        },
-        None => return Ok(ArgsFromMerge::Merged(input.to_owned())),
-    };
-
-    let rows: Vec<DepRow> = sqlx::query_as(
-        "SELECT task_index, node_id, task_name, sub_definition_key, status, result \
-         FROM horsies_workflow_tasks \
-         WHERE workflow_id = $1 AND task_index = ANY($2)",
-    )
-    .bind(workflow_id)
-    .bind(dep_indices)
-    .fetch_all(pool)
-    .await?;
-
-    let dep_map: HashMap<i32, DepResult> = rows
-        .into_iter()
-        .map(|r| {
-            (
-                r.task_index,
-                DepResult {
-                    node_id: r.node_id,
-                    task_name: r.task_name,
-                    sub_definition_key: r.sub_definition_key,
-                    status: r.status,
-                    result: r.result,
-                },
-            )
-        })
-        .collect();
-
-    let mut object = input_object(input)?;
-    if let Some(conflict) = static_member_conflict(&object, args_from_map) {
-        return Ok(ArgsFromMerge::StaticMemberConflict(conflict));
-    }
-
-    insert_args_from_entries(&mut object, args_from_map, &dep_map)?;
-
-    Ok(ArgsFromMerge::Merged(serde_json::to_string(&object)?))
-}
-
 /// Insert one `args_from` entry per kwarg of `args_from_map` into `kwargs`.
 fn insert_args_from_entries(
     kwargs: &mut serde_json::Map<String, serde_json::Value>,
@@ -250,19 +188,26 @@ fn insert_args_from_entries(
 ) -> Result<(), WorkflowError> {
     for (kwarg_name, dep_idx_value) in args_from_map {
         let dep_idx = dep_idx_value.as_i64().unwrap_or(-1) as i32;
+        // No row in the read: the child start reads terminal dependencies only (its `SOURCE` rows), so a
+        // dependency that is not terminal is absent here too; an index with no node row is left out the same way.
         let Some(dep) = dep_results.get(&dep_idx) else {
-            tracing::error!(
+            tracing::debug!(
                 dep_idx,
                 kwarg = %kwarg_name,
-                "args_from names a dependency index with no node row; the kwarg is left out",
+                "args_from names a dependency with no terminal row in the read; the kwarg is left out",
             );
+            continue;
+        };
+        // A dependency that is not terminal (join `any` or `quorum` promoted the node first) gets no kwarg:
+        // the receiving task uses its default (Python `core/workflows/engine.py:841`).
+        let Some(inner) = dependency_result(dep_idx, dep) else {
             continue;
         };
         let entry = ArgsFromEntry {
             marker: true,
             source_task_name: &dep.task_name,
             source_definition_key: dep.sub_definition_key.as_deref(),
-            inner: dependency_result(dep_idx, dep),
+            inner,
         };
         kwargs.insert(kwarg_name.clone(), serde_json::to_value(&entry)?);
     }
@@ -356,24 +301,25 @@ pub(crate) struct StoredInputRefused {
 ///   not read gives `RESULT_DESERIALIZATION_ERROR`.
 /// - COMPLETED or FAILED with a NULL or empty stored result: [`missing_result_error`] (decided: no writer stores
 ///   such a node, so it is stored data that does not parse).
-/// - A dependency that is not terminal: `UPSTREAM_SKIPPED`. Python leaves the key out for such a dependency
-///   (workflow ledger row 18).
-fn dependency_result(dep_idx: i32, dep: &DepResult) -> TaskResult<serde_json::Value> {
+/// - A dependency that is not terminal: `None`, and the key is left out. Python reads the dependency results
+///   from terminal rows only (`core/workflows/sql.py:523-530`), and the baseline input builder
+///   (`horsies_workflow_task_input`) does the same.
+fn dependency_result(dep_idx: i32, dep: &DepResult) -> Option<TaskResult<serde_json::Value>> {
     match (dep.status.as_str(), dep.result.as_deref()) {
-        ("SKIPPED", _) => TaskResult::Err(upstream_skipped_error(dep_idx)),
-        ("COMPLETED" | "FAILED", Some(text)) if !text.is_empty() => {
+        ("SKIPPED", _) => Some(TaskResult::Err(upstream_skipped_error(dep_idx))),
+        ("COMPLETED" | "FAILED", Some(text)) if !text.is_empty() => Some(
             serde_json::from_str::<TaskResult<serde_json::Value>>(text).unwrap_or_else(|e| {
                 tracing::warn!(dep_idx, error = %e, "failed to parse dep result JSON");
                 TaskResult::Err(dep_parse_error(dep_idx, &e))
-            })
-        }
-        (status @ ("COMPLETED" | "FAILED"), _) => TaskResult::Err(missing_result_error(
+            }),
+        ),
+        (status @ ("COMPLETED" | "FAILED"), _) => Some(TaskResult::Err(missing_result_error(
             dep_idx,
             dep.node_id.as_deref(),
             &dep.task_name,
             status,
-        )),
-        (_, _) => TaskResult::Err(upstream_skipped_error(dep_idx)),
+        ))),
+        (_, _) => None,
     }
 }
 
@@ -753,16 +699,23 @@ mod tests {
         assert_eq!(result, "{}");
     }
 
+    /// Python reads dependency results from terminal rows only (`core/workflows/sql.py:523-530`): a dependency
+    /// that is not terminal when join `any` or `quorum` promotes the node gets no kwarg, and the kwargs of the
+    /// terminal dependencies stay (#892).
     #[test]
-    fn a_dependency_that_is_not_terminal_gives_upstream_skipped() {
+    fn a_dependency_that_is_not_terminal_gets_no_kwarg() {
+        let stored = serde_json::to_string(&TaskResult::Ok(json!(1))).unwrap();
         for status in ["PENDING", "READY", "ENQUEUED", "RUNNING"] {
             let mut deps = HashMap::new();
             deps.insert(0, dep(status, None));
-            let result = merged("{}", &Some(json!({"answer": 0})), &deps);
-            let TaskResult::Err(error) = inner_of(&result, "answer") else {
-                panic!("a {status} dependency must give an error entry");
-            };
-            assert_eq!(error.error_code.to_string(), "UPSTREAM_SKIPPED");
+            deps.insert(1, dep("COMPLETED", Some(stored.clone())));
+            let result = merged("{}", &Some(json!({"waiting": 0, "done": 1})), &deps);
+            let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+            assert!(parsed.get("waiting").is_none(), "{status}: {result}");
+            assert!(
+                matches!(inner_of(&result, "done"), TaskResult::Ok(value) if value == json!(1)),
+                "{status}: {result}"
+            );
         }
     }
 

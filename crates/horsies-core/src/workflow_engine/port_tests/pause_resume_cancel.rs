@@ -355,7 +355,6 @@ async fn pause_and_resume_of_an_unknown_id_are_workflow_not_found() {
 /// whole resume back.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #872"]
 async fn a_database_error_before_the_resume_commit_keeps_the_workflow_paused() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running().status("PAUSED")).await;

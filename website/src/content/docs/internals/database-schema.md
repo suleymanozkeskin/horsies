@@ -8,7 +8,7 @@ tags: [internals, database, schema, PostgreSQL, task-history]
 ## Schema Creation
 
 The schema is one migration, version 1000: the SQL files in
-`horsies/core/baseline/sql/`, run in name order in one transaction.
+`crates/horsies-core/baseline/`, run in name order in one transaction.
 
 | File | Holds |
 | ---- | ----- |
@@ -269,5 +269,5 @@ byte-identical.)
 
 ## File Location
 
-`horsies/core/baseline/sql/` (the schema); `horsies/core/baseline/install.py` (the install);
-`horsies/core/models/task_pg.py` and `horsies/core/models/workflow_pg.py` (query models).
+`crates/horsies-core/baseline/` (the schema); `python/horsies/core/baseline/install.py` (the install);
+`python/horsies/core/models/task_pg.py` and `python/horsies/core/models/workflow_pg.py` (query models).

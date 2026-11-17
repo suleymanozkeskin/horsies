@@ -1,7 +1,6 @@
 //! Transport-free decisions for monitoring actions.
 
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::PostgresBroker;
@@ -114,7 +113,7 @@ fn task_action_failed(error: TaskActionError) -> ActionOutcome {
         // Python answers it with 503 too; the core never produces it.
         TaskActionErrorCode::EventLoopLimit => detail(503, error.message),
         // The request was valid, and a repeat gives the same answer until the
-        // stored row changes (Python `horsies/web/routes/actions.py:110-130`).
+        // stored row changes (Python `python/horsies/web/routes/actions.py:110-130`).
         TaskActionErrorCode::StoredDataInvalid => detail(500, error.message),
     }
 }
@@ -125,8 +124,7 @@ fn handle_failed(error: HandleOperationError) -> ActionOutcome {
         HandleErrorCode::DbOperationFailed
         | HandleErrorCode::LoopRunnerFailed
         | HandleErrorCode::EventLoopLimit
-        | HandleErrorCode::ResumeRecoveryFailed
-        | HandleErrorCode::InternalFailed => detail(503, error.message),
+        | HandleErrorCode::ResumeRecoveryFailed => detail(503, error.message),
         // Stored data that does not parse: the request was valid, and a repeat gets the same answer
         // (Python `_handle_failed`, `web/routes/actions.py`).
         HandleErrorCode::StoredDataInvalid => detail(500, error.message),
@@ -155,8 +153,12 @@ fn status_failed(workflow_id: Uuid, error: WorkflowError) -> ActionOutcome {
     }
 }
 
-async fn current_status(pool: &PgPool, workflow_id: Uuid) -> Result<WorkflowStatus, ActionOutcome> {
-    crate::workflow_engine::query::get_workflow_status(pool, workflow_id)
+/// The current status of a workflow, read on the main core pool of `broker`.
+async fn current_status(
+    broker: &PostgresBroker,
+    workflow_id: Uuid,
+) -> Result<WorkflowStatus, ActionOutcome> {
+    crate::workflow_engine::query::get_workflow_status(broker, workflow_id)
         .await
         .map_err(|error| status_failed(workflow_id, error))
 }
@@ -179,7 +181,7 @@ pub async fn cancel_task_action(
 pub async fn pause_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) -> ActionOutcome {
     match crate::workflow_engine::lifecycle::pause_workflow(broker, workflow_id).await {
         Ok(true) => succeeded("paused", None, None),
-        Ok(false) => match current_status(broker.pool(), workflow_id).await {
+        Ok(false) => match current_status(broker, workflow_id).await {
             Ok(status) => conflict(ActionConflictCode::StateConflict, Some(status.to_string())),
             Err(outcome) => outcome,
         },
@@ -188,7 +190,7 @@ pub async fn pause_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) -
 }
 
 /// The answer of a failed resume, from the error alone, as Python's resume
-/// route (`horsies/web/routes/actions.py:234-258`): `RESUME_RECOVERY_FAILED`
+/// route (`python/horsies/web/routes/actions.py:234-258`): `RESUME_RECOVERY_FAILED`
 /// means the resume committed and only its recovery pass failed, so the
 /// workflow was resumed and the answer says so with a warning. Every other
 /// error is answered as for the other workflow actions. No second status read
@@ -203,8 +205,7 @@ fn resume_failure(error: HandleOperationError) -> ActionOutcome {
         | HandleErrorCode::StoredDataInvalid
         | HandleErrorCode::LoopRunnerFailed
         | HandleErrorCode::EventLoopLimit
-        | HandleErrorCode::AsyncContext
-        | HandleErrorCode::InternalFailed => handle_failed(error),
+        | HandleErrorCode::AsyncContext => handle_failed(error),
     }
 }
 
@@ -225,7 +226,7 @@ pub async fn resume_workflow_action(
     .await
     {
         Ok(true) => succeeded("resumed", None, None),
-        Ok(false) => match current_status(broker.pool(), workflow_id).await {
+        Ok(false) => match current_status(broker, workflow_id).await {
             Ok(status) => conflict(ActionConflictCode::StateConflict, Some(status.to_string())),
             Err(outcome) => outcome,
         },
@@ -235,7 +236,7 @@ pub async fn resume_workflow_action(
 
 pub async fn cancel_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) -> ActionOutcome {
     match crate::workflow_engine::lifecycle::cancel_workflow(broker, workflow_id).await {
-        Ok(_) => match current_status(broker.pool(), workflow_id).await {
+        Ok(_) => match current_status(broker, workflow_id).await {
             Ok(WorkflowStatus::Cancelled) => succeeded("cancelled", None, None),
             Ok(status) => conflict(ActionConflictCode::StateConflict, Some(status.to_string())),
             Err(outcome) => outcome,
@@ -265,7 +266,6 @@ mod tests {
             HandleErrorCode::LoopRunnerFailed,
             HandleErrorCode::EventLoopLimit,
             HandleErrorCode::ResumeRecoveryFailed,
-            HandleErrorCode::InternalFailed,
         ] {
             assert_eq!(handle_failed(error(code)).status_code(), 503);
         }
@@ -293,7 +293,6 @@ mod tests {
             HandleErrorCode::DbOperationFailed,
             HandleErrorCode::LoopRunnerFailed,
             HandleErrorCode::EventLoopLimit,
-            HandleErrorCode::InternalFailed,
         ] {
             let outcome = resume_failure(error(code));
             assert_eq!(outcome.status_code(), 503);

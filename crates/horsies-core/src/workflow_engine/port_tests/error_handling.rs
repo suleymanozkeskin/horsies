@@ -15,14 +15,12 @@ use super::support::{
     workflow_error_code, workflow_status, IsolatedDatabase, LiveStatus, NodeSeed, WorkflowSeed,
     POISON_TASK_OPTIONS,
 };
-use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::RegisteredWorkflowDefinition;
 use crate::core::{
     AnyNode, HorsiesError, OnError, SpecBuildError, TaskResult, WorkflowSpec, WorkflowSpecRegistry,
     WorkflowStartErrorCode,
 };
-use crate::workflow_engine::engine::{fail_workflow_node, subworkflow_load_failed_error};
+use crate::workflow_engine::start_statement::{node_failure_result, subworkflow_load_failed_error};
 
 fn after(index: usize, task_name: &str, dependencies: &[usize]) -> AnyNode {
     let mut node = task_node(index, task_name);
@@ -62,11 +60,19 @@ async fn fail(pool: &PgPool, workflow_id: Uuid, index: i32, error_code: &str) {
 
 /// `test_subworkflow_load_failure_does_not_overwrite_terminal_task`: the
 /// load-failure mark of a sub-workflow node changes nothing on a node that
-/// is already COMPLETED, FAILED or SKIPPED.
+/// is already COMPLETED, FAILED or SKIPPED. The core writes the mark through
+/// the `FAILURE` child start (`horsies_workflow_child_start`), which answers
+/// `STALE` for a terminal node and keeps its result.
 #[tokio::test]
 #[serial]
 async fn a_load_failure_mark_does_not_overwrite_a_terminal_node() {
     let pool = shared_pool().await;
+    let failure = node_failure_result(subworkflow_load_failed_error(
+        "subworkflow_terminal_guard_workflow",
+        0,
+        Some("tests.unregistered_child.v1"),
+    ))
+    .expect("encode the load failure");
     for terminal in ["COMPLETED", "FAILED", "SKIPPED"] {
         let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
         let stored = format!(
@@ -83,28 +89,32 @@ async fn a_load_failure_mark_does_not_overwrite_a_terminal_node() {
         sub.result = Some(stored.clone());
         seed_node(&pool, &sub).await;
 
-        let _step = fail_workflow_node(
-            &pool,
-            workflow_id,
-            0,
-            subworkflow_load_failed_error(
-                "subworkflow_terminal_guard_workflow",
-                0,
-                Some("tests.unregistered_child.v1"),
-            ),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
-        )
-        .await
-        .expect("the failure mark");
+        let disposition: String = sqlx::query_scalar(LOAD_FAILURE_MARK_SQL)
+            .bind(workflow_id)
+            .bind(0_i32)
+            .bind(&failure)
+            .fetch_one(&pool)
+            .await
+            .expect("the failure mark");
 
+        assert_eq!(disposition, "STALE", "{terminal}");
         let row = node(&pool, workflow_id, 0).await;
         assert_eq!(row.status, terminal);
         assert_eq!(row.result, Some(stored));
         super::support::end_workflows(&pool, &[workflow_id]).await;
     }
 }
+
+/// The `FAILURE` child start of node `$2` of workflow `$1` with the node
+/// error envelope `$3`: NULL for the call time and for the 34 tree arrays
+/// (`child_start::failure_statement` binds the same).
+const LOAD_FAILURE_MARK_SQL: &str = "\
+SELECT disposition FROM horsies_workflow_child_start($1, $2, 'FAILURE', $3, NULL,
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL)
+WHERE row_kind = 'OUTCOME'";
 
 /// `test_fail_with_allow_failed_deps_output` and `test_allow_failed_deps_can_recover`:
 /// the recovering output node keeps its result; the FAILED workflow stores none.
@@ -216,7 +226,6 @@ async fn a_ready_node_of_a_paused_workflow_is_not_enqueued() {
 /// `args_from` key that names a member of the node's input fails the node.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #680"]
 async fn an_args_from_key_that_names_an_input_member_fails_the_node() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -326,10 +335,10 @@ async fn store_node_options(pool: &PgPool, workflow_id: Uuid, task_index: i32, o
 }
 
 /// Python `_build_enqueued_task_params` and `_fail_enqueued_task`
-/// (`horsies/core/workflows/engine.py:513-597, 752-820`): a task node whose stored retry policy does not read
+/// (`python/horsies/core/workflows/engine.py:513-597, 752-820`): a task node whose stored retry policy does not read
 /// at promotion fails alone with `WORKER_SERIALIZATION_ERROR` and Python's text, which names the node index
 /// (`Invalid retry_policy for task <index>: <detail>`, the detail of `stored_max_retries`,
-/// `horsies/core/codec/task_options.py:103`), with the node index and the workflow id in `data`. It gets no
+/// `python/horsies/core/codec/task_options.py:103`), with the node index and the workflow id in `data`. It gets no
 /// task row, and its failure is applied: with `on_error = fail` and no other node left, the workflow fails.
 /// The node is not left READY, and the step that promoted it is not rolled back. The baseline step writes the
 /// same error (`horsies_workflow_unbuildable_nodes`, `horsies_workflow_task_options_refusal`).
@@ -386,12 +395,12 @@ async fn a_task_node_that_cannot_be_prepared_at_promotion_fails_alone() {
 }
 
 /// Python `_fail_enqueued_task` returns "stop" when `on_error = pause` paused the workflow, and the promotion
-/// promotes no other node (`horsies/core/workflows/engine.py:513-597`). The node that cannot be prepared
+/// promotes no other node (`python/horsies/core/workflows/engine.py:513-597`). The node that cannot be prepared
 /// fails; the workflow is PAUSED; its sibling of the same level holds no live task row and is not ENQUEUED.
 /// The node stores task options that are not an object, which Python refuses at promotion
-/// (`horsies/core/workflows/engine.py:798-805`). A stored `good_until` that the database cannot read does not
+/// (`python/horsies/core/workflows/engine.py:798-805`). A stored `good_until` that the database cannot read does not
 /// fail the node: Python passes its text to the task insert, which raises, and the step rolls back
-/// (`horsies/core/workflows/engine.py:832-835`; the baseline `horsies_workflow_node_tasks_insert`).
+/// (`python/horsies/core/workflows/engine.py:832-835`; the baseline `horsies_workflow_node_tasks_insert`).
 #[tokio::test]
 #[serial]
 async fn a_node_that_cannot_be_prepared_pauses_the_workflow_and_promotes_no_sibling() {

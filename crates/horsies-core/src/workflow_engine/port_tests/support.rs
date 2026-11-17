@@ -1,7 +1,7 @@
 //! Seeds, databases and engine drivers that the workflow engine ports share.
 //!
 //! Every seed names every column of its baseline table
-//! (`horsies/core/baseline/sql/0001_tables.sql`), and the two node columns that
+//! (`crates/horsies-core/baseline/0001_tables.sql`), and the two node columns that
 //! #788 adds (`sub_workflow_params`, `downstream_subworkflow`). The node
 //! `error` column is not named: the baseline drops it (decision "The node
 //! `error` column", rule-following row 13).
@@ -30,12 +30,17 @@ use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::{AnyNode, OnError, TaskError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
+use crate::db::CheckoutClass;
 use crate::test_support::{server_url, with_database, TestDatabase};
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::engine::{
     on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
 };
+use crate::workflow_engine::recovery::{complete_in_tree, TreeCompletion};
 use crate::workflow_engine::start::start_workflow;
+use crate::workflow_engine::steps::{
+    advance_parents, ChildBuild, OwedParentAdvances, ParentAdvance,
+};
 
 /// The worker that holds every task a test runs.
 pub(super) const WORKER: &str = "workflow-port-worker";
@@ -49,11 +54,11 @@ pub(super) const PORT_QUEUE: &str = "port_workflow_q";
 /// uses `[]` too):
 /// - stored on a promoted task node, they fail that node alone with
 ///   `WORKER_SERIALIZATION_ERROR` (Python `_build_enqueued_task_params`,
-///   `horsies/core/workflows/engine.py:798-805`; the baseline
+///   `python/horsies/core/workflows/engine.py:798-805`; the baseline
 ///   `horsies_workflow_task_options_refusal`);
 /// - on the task of a child node that has a `good_until`, the merge of the
 ///   deadline into them raises at each child start (Python
-///   `_child_task_options_json`, `horsies/core/workflows/engine.py:425-475`).
+///   `_child_task_options_json`, `python/horsies/core/workflows/engine.py:425-475`).
 pub(super) const POISON_TASK_OPTIONS: &str = "[]";
 
 /// The process facts that the start write (`horsies_start_attempt`) records
@@ -584,6 +589,41 @@ pub(super) async fn seed_node_task(
     .expect("seed the workflow task row")
 }
 
+/// The process id that [`start_claimed_task`] records.
+const START_WORKER_PID: i32 = 4343;
+
+/// The start write of the child host for a task that [`WORKER`] claimed at
+/// `claimed_at` (`broker::claims::start_attempt`, the statement of
+/// `worker::executor::child_host::run::start_attempt`). Every task start of
+/// the worker goes through it.
+pub(super) async fn start_claimed_task(
+    pool: &PgPool,
+    task_id: Uuid,
+    claimed_at: DateTime<Utc>,
+) -> crate::broker::claims::StartOutcome {
+    let broker = broker(pool);
+    let (open, _write) = broker
+        .core_pools_for_write()
+        .expect("the core pools of the broker");
+    crate::broker::claims::start_attempt(
+        open.main(),
+        broker.statement_log(),
+        &crate::broker::claims::StartAttempt {
+            task_id,
+            fence: crate::core::lifecycle::OwnedClaim {
+                worker_id: WORKER.to_owned(),
+                claimed_at,
+            },
+            worker_pid: START_WORKER_PID,
+            worker_hostname: SEEDED_WORKER_HOSTNAME.to_owned(),
+            worker_process_name: SEEDED_WORKER_PROCESS_NAME.to_owned(),
+            beat_sender_id: format!("{WORKER}:{START_WORKER_PID}"),
+        },
+    )
+    .await
+    .expect("the start statement")
+}
+
 // ---------------------------------------------------------------------------
 // Engine drivers
 // ---------------------------------------------------------------------------
@@ -851,6 +891,69 @@ pub(super) async fn finish_node(
         .unwrap_or_else(|| panic!("node {task_index} of {workflow_id} has no task"));
     finish_task(pool, task_id, outcome, registry).await;
     task_id
+}
+
+/// The completion check of `workflow_id` as the tree recovery pass runs it
+/// (`recovery::complete_in_tree`): the workflow row `FOR UPDATE`, then
+/// `horsies_workflow_try_complete`, in one transaction. Then the parent
+/// advance that a child it ends owes ([`advance_parent_of`]). Python:
+/// `check_workflow_completion`, which queues the parent propagation of a
+/// child that it ends.
+pub(super) async fn complete_workflow(
+    pool: &PgPool,
+    workflow_id: Uuid,
+    registry: &WorkflowSpecRegistry,
+) {
+    let broker = broker(pool);
+    let advance = match complete_in_tree(&broker, workflow_id)
+        .await
+        .expect("the completion check")
+    {
+        TreeCompletion::Written { advance } => advance,
+        TreeCompletion::Unchanged => ParentAdvance::NotOwed,
+    };
+    drive_parent_advances(&broker, OwedParentAdvances::of(advance), registry).await;
+}
+
+/// Advances the parent node above the terminal child `child_workflow_id`,
+/// and each level above that the advance ends: `horsies_workflow_child_finish`,
+/// one transaction per level (`steps::advance_parents`), as phase 2 and
+/// recovery case 1.6 run it. Python: `on_subworkflow_complete`.
+pub(super) async fn advance_parent_of(
+    pool: &PgPool,
+    child_workflow_id: Uuid,
+    registry: &WorkflowSpecRegistry,
+) {
+    drive_parent_advances(
+        &broker(pool),
+        OwedParentAdvances::of(ParentAdvance::Owed { child_workflow_id }),
+        registry,
+    )
+    .await;
+}
+
+async fn drive_parent_advances(
+    broker: &PostgresBroker,
+    owed: OwedParentAdvances,
+    registry: &WorkflowSpecRegistry,
+) {
+    let retention = RetentionConfig::default();
+    advance_parents(
+        broker,
+        CheckoutClass::Reserved,
+        owed,
+        ChildBuild {
+            registry,
+            retention: &retention,
+        },
+    )
+    .await
+    .unwrap_or_else(|failure| {
+        panic!(
+            "the parent advance of child workflow {} failed: {:?}",
+            failure.failed_child_workflow_id, failure.error
+        )
+    });
 }
 
 /// A failure outcome with a user error code.

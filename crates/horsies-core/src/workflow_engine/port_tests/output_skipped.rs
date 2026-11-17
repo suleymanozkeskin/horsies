@@ -17,16 +17,15 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    args_from_inner, child_of, code, ctx_result, err, error_of, finish_node, handle, node,
-    node_status, node_task_input, ok, registry_of, required, seed_node, seed_workflow, shared_pool,
-    spec, start, sub_workflow_node, task_node, workflow, workflow_error_code, workflow_status,
-    IsolatedDatabase, NodeSeed, ParentLink, WorkflowSeed,
+    advance_parent_of, args_from_inner, child_of, code, ctx_result, err, error_of, finish_node,
+    handle, node, node_status, node_task_input, ok, registry_of, required, seed_node,
+    seed_workflow, shared_pool, spec, start, sub_workflow_node, task_node, workflow,
+    workflow_error_code, workflow_status, IsolatedDatabase, NodeSeed, ParentLink, WorkflowSeed,
 };
-use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::workflow::node::JoinType;
-use crate::core::{OnError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
-use crate::workflow_engine::engine::on_subworkflow_complete;
+use crate::core::{
+    OnError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowSpecRegistry, WorkflowStatus,
+};
 
 /// The code of the failure that the driver gives a child node.
 const FAILED_CODE: &str = "DELIBERATE_FAIL";
@@ -216,7 +215,7 @@ async fn an_err_output_fails_the_node_and_skips_a_default_dependent() {
                 .expect("the node stores its child's summary"),
         )
         .expect("the summary decodes");
-        assert_eq!(summary.status, "COMPLETED");
+        assert_eq!(summary.status, WorkflowStatus::Completed);
         assert_eq!(summary.output, None);
         let skipped = node(&pool, workflow_id, 1).await;
         assert_eq!(skipped.status, "SKIPPED");
@@ -595,28 +594,6 @@ async fn seed_parent_of_a_completed_child(
     (parent_id, child_id)
 }
 
-async fn advance_parent(
-    pool: &PgPool,
-    parent_id: Uuid,
-    child_id: Uuid,
-    stored: Option<&str>,
-    registry: &WorkflowSpecRegistry,
-) {
-    on_subworkflow_complete(
-        pool,
-        parent_id,
-        0,
-        child_id,
-        "COMPLETED",
-        stored,
-        registry,
-        &PayloadPolicy::default(),
-        &RetentionConfig::default(),
-    )
-    .await
-    .expect("the parent node advances");
-}
-
 /// `test_child_text_that_does_not_parse_fails_the_node`: the node holds an
 /// envelope that names the cause, and the raw text stays on the child row.
 #[tokio::test]
@@ -641,7 +618,7 @@ async fn child_result_text_that_does_not_parse_fails_the_node() {
         dependent.task_name = "output_skipped_stored_data_recover".to_owned();
         seed_node(&pool, &dependent).await;
 
-        advance_parent(&pool, parent_id, child_id, stored, &registry).await;
+        advance_parent_of(&pool, child_id, &registry).await;
 
         let sub = node(&pool, parent_id, 0).await;
         assert_eq!(sub.status, "FAILED", "{stored:?}");
@@ -681,7 +658,7 @@ async fn a_required_unreadable_node_reports_the_cause_at_get() {
             .policy(serde_json::to_value(required(&[&[0]])).expect("encode the policy"));
         let (parent_id, child_id) = seed_parent_of_a_completed_child(&pool, parent, stored).await;
 
-        advance_parent(&pool, parent_id, child_id, stored, &registry).await;
+        advance_parent_of(&pool, child_id, &registry).await;
 
         assert_eq!(
             workflow_status(&pool, parent_id).await,

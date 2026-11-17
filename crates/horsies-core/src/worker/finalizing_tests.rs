@@ -1,7 +1,7 @@
 use super::{mark_task_finalizing, FinalizingMark, MARK_FINALIZING_SQL};
+use crate::broker::PostgresBroker;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
@@ -47,6 +47,11 @@ async fn snapshot(pool: &PgPool, id: Uuid) -> serde_json::Value {
         .unwrap()
 }
 
+/// A broker on the test database: the marker runs on its main core pool.
+fn broker(pool: &PgPool) -> PostgresBroker {
+    PostgresBroker::from_pool(pool.clone())
+}
+
 async fn remove(pool: &PgPool, id: Uuid) {
     sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
         .bind(id)
@@ -65,7 +70,7 @@ async fn finalizing_handoff_rejects_stale_owner_and_generation() {
         ("stale-worker", generation),
         ("current-worker", generation - ChronoDuration::seconds(1)),
     ] {
-        let mark = mark_task_finalizing(&pool, id, worker, claimed_at)
+        let mark = mark_task_finalizing(&broker(&pool), id, worker, claimed_at)
             .await
             .unwrap();
         assert_eq!(
@@ -85,7 +90,7 @@ async fn finalizing_handoff_commits_for_current_claim_and_blocks_stale_recovery(
     let (id, generation) = seed(&pool).await;
     let before = snapshot(&pool, id).await;
     assert_eq!(
-        mark_task_finalizing(&pool, id, "current-worker", generation)
+        mark_task_finalizing(&broker(&pool), id, "current-worker", generation)
             .await
             .unwrap(),
         FinalizingMark::Marked
@@ -195,7 +200,7 @@ async fn finalizing_handoff_ignores_non_running_and_missing_tasks() {
         .unwrap();
         let before = snapshot(&pool, id).await;
         assert_eq!(
-            mark_task_finalizing(&pool, id, "current-worker", generation)
+            mark_task_finalizing(&broker(&pool), id, "current-worker", generation)
                 .await
                 .unwrap(),
             FinalizingMark::NotHeld
@@ -204,7 +209,7 @@ async fn finalizing_handoff_ignores_non_running_and_missing_tasks() {
     }
     remove(&pool, id).await;
     assert_eq!(
-        mark_task_finalizing(&pool, id, "current-worker", generation)
+        mark_task_finalizing(&broker(&pool), id, "current-worker", generation)
             .await
             .unwrap(),
         FinalizingMark::NotHeld
@@ -215,15 +220,7 @@ async fn finalizing_handoff_ignores_non_running_and_missing_tasks() {
 #[serial]
 async fn finalizing_handoff_rechecks_owner_and_generation_after_lock_wait() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let waiting_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with((*pool.connect_options()).clone())
-        .await
-        .unwrap();
-    let waiting_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&waiting_pool)
-        .await
-        .unwrap();
+    let waiting_broker = std::sync::Arc::new(broker(&pool));
 
     for (replacement_worker, generation_delta) in [("new-worker", 0), ("current-worker", 1)] {
         let (id, generation) = seed(&pool).await;
@@ -251,18 +248,22 @@ async fn finalizing_handoff_rechecks_owner_and_generation_after_lock_wait() {
                 .await
                 .unwrap();
 
-        let waiter_pool = waiting_pool.clone();
+        let waiter_broker = std::sync::Arc::clone(&waiting_broker);
         let waiter = tokio::spawn(async move {
-            mark_task_finalizing(&waiter_pool, id, "current-worker", generation).await
+            mark_task_finalizing(&waiter_broker, id, "current-worker", generation).await
         });
+        // The tests are serial: the only session that the owner can block
+        // is the marker's.
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let blocked: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
-                    .bind(owner_pid)
-                    .bind(waiting_pid)
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                     WHERE $1 = ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(owner_pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
                 if blocked {
                     break;
                 }
@@ -281,5 +282,4 @@ async fn finalizing_handoff_rechecks_owner_and_generation_after_lock_wait() {
         assert_eq!(snapshot(&pool, id).await, replacement);
         remove(&pool, id).await;
     }
-    waiting_pool.close().await;
 }

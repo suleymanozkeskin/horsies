@@ -98,34 +98,6 @@ impl LoaderPublication for CatalogPublisher {
 }
 
 #[derive(Debug, Default)]
-struct ReferencingPublisher;
-
-impl LoaderPublication for ReferencingPublisher {
-    async fn republish(
-        &self,
-        _connection: &mut PgConnection,
-    ) -> Result<LoaderRepublished, crate::core::history::errors::HistoryError> {
-        Ok(LoaderRepublished {
-            absent_leaves: Vec::new(),
-        })
-    }
-
-    async fn references_leaf(
-        &self,
-        _connection: &mut PgConnection,
-        _leaf_name: &str,
-    ) -> Result<bool, crate::core::history::errors::HistoryError> {
-        Ok(true)
-    }
-}
-
-#[derive(Debug, Default)]
-struct FailFirstRepublish {
-    calls: AtomicUsize,
-    reference_calls: AtomicUsize,
-}
-
-#[derive(Debug, Default)]
 struct FailFirstStagedPublisher {
     calls: AtomicUsize,
 }
@@ -161,37 +133,6 @@ impl LoaderPublication for BlockingPublisher {
         _leaf_name: &str,
     ) -> Result<bool, crate::core::history::errors::HistoryError> {
         Ok(false)
-    }
-}
-
-impl LoaderPublication for FailFirstRepublish {
-    async fn needs_republication(
-        &self,
-        _connection: &mut PgConnection,
-    ) -> Result<bool, crate::core::history::errors::HistoryError> {
-        Ok(true)
-    }
-
-    async fn republish(
-        &self,
-        _connection: &mut PgConnection,
-    ) -> Result<LoaderRepublished, crate::core::history::errors::HistoryError> {
-        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            return Err(crate::core::history::errors::HistoryError::contract(
-                "injected first-leaf publication failure",
-            ));
-        }
-        Ok(LoaderRepublished {
-            absent_leaves: Vec::new(),
-        })
-    }
-
-    async fn references_leaf(
-        &self,
-        _connection: &mut PgConnection,
-        _leaf_name: &str,
-    ) -> Result<bool, crate::core::history::errors::HistoryError> {
-        Ok(self.reference_calls.fetch_add(1, Ordering::SeqCst) == 0)
     }
 }
 
@@ -261,6 +202,8 @@ impl TestDatabase {
 mod pruning_ports;
 
 mod read_round_trips;
+
+mod retirement_ports;
 
 #[derive(Clone)]
 struct StatementPause {
@@ -671,6 +614,25 @@ fn leaf_ref(parent: &str, class_key: &str, lower: chrono::DateTime<Utc>) -> Leaf
         LeafBounds::new(lower, lower + Duration::days(1)).expect("daily bounds"),
     )
     .expect("daily leaf ref")
+}
+
+/// An open transaction that holds the catalog row of `leaf_name` with
+/// `FOR UPDATE`. While it is held, `horsies_record_leaf_detached` of the leaf
+/// waits for the row and fails at the 2 s DDL lock timeout of the detach
+/// session (`55P03`): the leaf's sweep fails after its detach statement ran.
+async fn hold_catalog_row(
+    pool: &PgPool,
+    leaf_name: &str,
+) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut holder = pool.begin().await.expect("begin catalog row holder");
+    sqlx::query(&format!(
+        "SELECT 1 FROM {LEAF_CATALOG} WHERE leaf_name = $1 FOR UPDATE"
+    ))
+    .bind(leaf_name)
+    .execute(&mut *holder)
+    .await
+    .expect("hold the catalog row");
+    holder
 }
 
 async fn create_leaf(pool: &PgPool, leaf: &LeafRef) -> LeafCreation {
@@ -1101,6 +1063,14 @@ async fn cancelled_detach_closes_its_connection_and_releases_the_session_lock() 
         create_leaf(&database.pool, &leaf).await,
         LeafCreation::Created { .. }
     ));
+    // The published manifest names the leaf, so the detach record publishes
+    // the readers while the session holds the leaf lock.
+    let mut publication = database.pool.acquire().await.expect("acquire publication");
+    StagedLoaderPublisher
+        .republish(&mut publication)
+        .await
+        .expect("publish the readers over the leaf");
+    drop(publication);
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let publisher = BlockingPublisher {
@@ -2014,7 +1984,6 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
     let dropped = drop_detached_leaf(
         &mut transaction,
         &DropDetachedHistoryLeaf::new(leaf.clone()),
-        &UnpublishedLoader,
     )
     .await
     .expect("drop detached leaf");
@@ -2032,6 +2001,15 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
         create_leaf(&database.pool, &referenced_leaf).await,
         LeafCreation::Created { .. }
     ));
+    // The published manifest names the leaf. The detach record says so and
+    // calls the publisher, which publishes nothing here, so the manifest
+    // still names the detached leaf and its drop is refused.
+    let mut publication = database.pool.acquire().await.expect("acquire publication");
+    StagedLoaderPublisher
+        .republish(&mut publication)
+        .await
+        .expect("publish the readers over the referenced leaf");
+    drop(publication);
     let referenced_detach = DetachExpiredHistoryLeaf::new(referenced_leaf.clone(), Some(5_000))
         .expect("referenced detach command");
     assert!(matches!(
@@ -2044,7 +2022,6 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
     let refused = drop_detached_leaf(
         &mut transaction,
         &DropDetachedHistoryLeaf::new(referenced_leaf.clone()),
-        &ReferencingPublisher,
     )
     .await
     .expect("loader-reference drop refusal");
@@ -2114,13 +2091,9 @@ async fn dropping_a_leaf_deletes_the_clock_exceptions_of_its_rows() {
     ));
     let mut transaction = database.pool.begin().await.expect("begin drop");
     assert!(matches!(
-        drop_detached_leaf(
-            &mut transaction,
-            &DropDetachedHistoryLeaf::new(leaf),
-            &UnpublishedLoader,
-        )
-        .await
-        .expect("drop detached leaf"),
+        drop_detached_leaf(&mut transaction, &DropDetachedHistoryLeaf::new(leaf),)
+            .await
+            .expect("drop detached leaf"),
         LeafDrop::Dropped { .. }
     ));
     transaction.commit().await.expect("commit drop");
@@ -2139,7 +2112,7 @@ async fn dropping_a_leaf_deletes_the_clock_exceptions_of_its_rows() {
 #[tokio::test]
 #[serial]
 async fn heartbeat_sweep_reports_one_leaf_error_and_sweeps_the_next_leaf() {
-    let database = TestDatabase::create().await;
+    let database = TestDatabase::create_with_connections(3).await;
     let mut transaction = database.pool.begin().await.expect("begin heartbeat setup");
     let _registration = register_heartbeat_class(&mut transaction, hours(2))
         .await
@@ -2165,19 +2138,20 @@ async fn heartbeat_sweep_reports_one_leaf_error_and_sweeps_the_next_leaf() {
     }
     transaction.commit().await.expect("commit heartbeat setup");
 
-    let publisher = FailFirstRepublish::default();
+    let holder = hold_catalog_row(&database.pool, older.leaf_name()).await;
     let LeafSweep {
         swept,
         errors,
         reach,
         ..
-    } = sweep_expired_heartbeat_leaves(&database.pool, &publisher, 64)
+    } = sweep_expired_heartbeat_leaves(&database.pool, &UnpublishedLoader, 64)
         .await
         .expect("discover expired heartbeats");
+    holder.rollback().await.expect("release the catalog row");
     assert_eq!(reach, PruneReach::WithinBounds);
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(errors[0].starts_with(older.leaf_name()));
-    assert!(errors[0].contains("injected first-leaf publication failure"));
+    assert!(errors[0].contains("lock timeout"), "{errors:?}");
     assert_eq!(swept.len(), 1);
     assert_eq!(swept[0].leaf_name, newer.leaf_name());
     assert!(matches!(
@@ -2598,7 +2572,7 @@ async fn a_refused_leaf_does_not_count_toward_the_leaf_bound() {
 #[tokio::test]
 #[serial]
 async fn pruning_contains_one_leaf_error_and_one_drop_refusal_then_keeps_going() {
-    let database = TestDatabase::create().await;
+    let database = TestDatabase::create_with_connections(4).await;
     let class_key = "standard_1d";
     let parent = register_class(&database.pool, class_key, 1).await;
     let mut clock = database
@@ -2608,25 +2582,40 @@ async fn pruning_contains_one_leaf_error_and_one_drop_refusal_then_keeps_going()
         .expect("acquire pruning clock");
     let now = database_now(&mut clock).await.expect("database now");
     drop(clock);
-    let base = (now - Duration::days(8))
-        .with_hour(0)
-        .and_then(|value| value.with_minute(0))
-        .and_then(|value| value.with_second(0))
-        .and_then(|value| value.with_nanosecond(0))
-        .expect("truncate prune base day");
-    for offset in 0..3 {
-        let leaf = leaf_ref(&parent, class_key, base + Duration::days(offset));
+    let base = utc_day_start(now - Duration::days(8));
+    let leaves: Vec<LeafRef> = (0..3)
+        .map(|offset| leaf_ref(&parent, class_key, base + Duration::days(offset)))
+        .collect();
+    // Only the middle leaf is in the published manifest. The pass publisher
+    // publishes nothing, so the manifest still names it after its detach and
+    // its drop is refused.
+    assert!(matches!(
+        create_leaf(&database.pool, &leaves[1]).await,
+        LeafCreation::Created { .. }
+    ));
+    let mut publication = database.pool.acquire().await.expect("acquire publication");
+    StagedLoaderPublisher
+        .republish(&mut publication)
+        .await
+        .expect("publish the readers over the middle leaf");
+    drop(publication);
+    for leaf in [&leaves[0], &leaves[2]] {
         assert!(matches!(
-            create_leaf(&database.pool, &leaf).await,
+            create_leaf(&database.pool, leaf).await,
             LeafCreation::Created { .. }
         ));
     }
-    let publisher = FailFirstRepublish::default();
-    let pass = prune_expired_partitions(&database.pool, &publisher).await;
+    // The detach record of the oldest leaf fails at the lock timeout.
+    let holder = hold_catalog_row(&database.pool, leaves[0].leaf_name()).await;
+    let pass = prune_expired_partitions(&database.pool, &UnpublishedLoader).await;
+    holder.rollback().await.expect("release the catalog row");
+
     assert_eq!(pass.history_swept.len(), 2);
-    assert_eq!(pass.errors.len(), 1);
-    assert!(pass.errors[0].contains("injected first-leaf publication failure"));
-    assert_eq!(pass.refusals.len(), 1);
+    assert_eq!(pass.errors.len(), 1, "{:?}", pass.errors);
+    assert!(pass.errors[0].starts_with(leaves[0].leaf_name()));
+    assert!(pass.errors[0].contains("lock timeout"), "{:?}", pass.errors);
+    assert_eq!(pass.refusals.len(), 1, "{:?}", pass.refusals);
+    assert!(pass.refusals[0].starts_with(leaves[1].leaf_name()));
     assert!(pass.refusals[0].contains("RefusedLoaderReferences"));
     assert_eq!(pass.detached_count(), 2);
     assert_eq!(pass.dropped_count(), 1);

@@ -20,6 +20,7 @@ pub mod catalog;
 #[doc(hidden)]
 pub mod core;
 pub mod db;
+pub mod log_targets;
 pub mod manifest;
 pub mod manifest_schema;
 pub mod monitoring;
@@ -51,11 +52,11 @@ pub use crate::core::{
     NodeKey, NodeRef, OnError, OperationalErrorCode, OutcomeCode, PayloadPolicy, PostgresConfig,
     PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
     RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec, ResilienceConfigError, ResolvedEnqueue,
-    RetentionChoice, RetentionConfig, RetentionConfigError, RetrievalCode, RetryPolicy,
-    RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowFailure,
-    SubWorkflowNode, SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy,
-    TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind, TaskInfo,
-    TaskNode, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
+    RetentionChoice, RetentionClassKeyRefused, RetentionConfig, RetentionConfigError,
+    RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn,
+    SubWorkflowFailure, SubWorkflowNode, SubWorkflowParams, SubWorkflowSummary, SuccessCase,
+    SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind,
+    TaskInfo, TaskNode, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
     TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, TypedNodeRef, UserCode,
     UserCodeRefused, ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig,
     WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta, WorkflowSpec,
@@ -71,22 +72,37 @@ pub use crate::broker::{
     CheckInterruption, ClaimedTaskRow, DatabasePing, ExpiredTaskRow, HeartbeatRow, ListenError,
     ListenerPlanError, PostgresBroker, RawResultRecord, SchemaInitializationMode,
     SessionCheckFailure, StaleTaskRow, TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow,
-    TaskRunningContextRow, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
-    WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WorkflowRow,
+    WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 
+// The baseline SQL files, which horsies._core hands to the Python install.
+pub use crate::broker::migrations::BASELINE_SQL_FILE_TEXTS;
+
 // lifecycle operations of a client handle (`PostgresBroker::release_claims`,
 // `PostgresBroker::requeue_stale_claimed`, `PostgresBroker::cancel_task`)
+pub use crate::broker::attempt_writes::{
+    AttemptFailure, AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement,
+    RetryRequest,
+};
 pub use crate::broker::claims::{
-    ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement,
-    MAX_RELEASED_CLAIMS,
+    ClaimClasses, ClaimPass, ClaimPassRequest, ClaimTake, ClaimedRow, QueueStartCheck, QueueStarts,
+    ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement, StartAttempt,
+    StartMiss, StartOutcome, StartWindow, UnheldBudget, WindowedStart, MAX_RELEASED_CLAIMS,
 };
 pub use crate::broker::stale_recovery::{
-    StaleClaimsRequeueFailed, StaleClaimsRequeuePass, ThresholdMs, ThresholdOutOfRange,
-    STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
+    StaleClaimsRequeueFailed, StaleClaimsRequeuePass, StaleRunningPass, StaleRunningThresholds,
+    ThresholdMs, ThresholdOutOfRange, STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
 };
-pub use crate::broker::{CancelAnswer, CancelTaskError};
+pub use crate::broker::{
+    CancelAnswer, CancelTaskError, EnqueueRefusal, EnqueueRefusalCause, SendKind,
+};
+pub use crate::core::history::enqueue::SendPart;
+pub use crate::worker::finalize_batch::{
+    BatchOutcomes, BatchWriteError, PlainSuccess, SuccessBatch, SuccessBatchError,
+    FUSED_BATCH_MAX_ROWS,
+};
 
 // Child mode of a Rust worker binary: the entry checks `child_mode` first
 // and, in child mode, exits with the code of `run_child_host`. Task bodies
@@ -100,7 +116,10 @@ pub use crate::worker::executor::child_host::{
 pub use crate::worker::{
     cli::LogLevel,
     config::WorkerConfig,
-    scheduler::service::{spawn_scheduler, SchedulerStartError},
+    scheduler::service::{
+        spawn_scheduler, ActiveScheduler, SchedulerService, SchedulerStartError, SchedulerStarted,
+        SchedulerStop, SchedulerTickError,
+    },
     worker::Worker,
     WorkerError,
 };
@@ -126,8 +145,7 @@ pub use crate::core::history::rerun::{
 };
 pub use crate::workflow_engine::bound_handle::WorkflowHandle;
 pub use crate::workflow_engine::engine::{
-    on_subworkflow_complete, on_workflow_task_complete, WorkflowTaskCompletion,
-    WorkflowTaskCompletionError,
+    on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
 };
 pub use crate::workflow_engine::error::WorkflowError;
 pub use crate::workflow_engine::info::WorkflowTaskInfo;

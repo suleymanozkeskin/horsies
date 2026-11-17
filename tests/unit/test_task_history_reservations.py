@@ -79,7 +79,7 @@ class TestClaimFunctionDdl:
 
     def test_expired_terminal_rows_are_reused_by_deletion(self) -> None:
         assert (
-            "disposition = 'TERMINAL'\n      AND expires_at <= "
+            "disposition = 'TERMINAL'\n          AND expires_at <= "
             'statement_timestamp()'
         ) in KEY_RESERVATION_CLAIM_FUNCTION_DDL
 

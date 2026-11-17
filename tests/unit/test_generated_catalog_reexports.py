@@ -1,7 +1,7 @@
 """Public catalog paths re-export the classes generated from horsies-core.
 
 `horsies-codegen` renders the code enums of horsies-core into
-`horsies/_catalog/`. A public module re-exports a generated class only when
+`python/horsies/_catalog/`. A public module re-exports a generated class only when
 the core catalog holds exactly the members of the Python catalog it
 replaces. This test pins both facts for each re-exported class: the public
 name is the generated class itself, and its members and values are the
@@ -22,11 +22,12 @@ import horsies._catalog.monitoring
 import horsies._catalog.status
 import horsies._catalog.task_codes
 import horsies._catalog.task_send
+import horsies._catalog.workflow_handle
 import horsies._catalog.workflow_start
 from horsies.core.brokers import result_types
 from horsies.core.history.reads import detail
 from horsies.core.models import task_send_types, tasks
-from horsies.core.models.workflow import enums
+from horsies.core.models.workflow import enums, handle_types
 from horsies.core.types import status
 from horsies.core.workflows import start_types
 from horsies.monitoring import errors, task_actions
@@ -87,6 +88,19 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
             'VALIDATION_FAILED',
             'WORKFLOW_ID_CONFLICT',
             'ENQUEUE_FAILED',
+            'LOOP_RUNNER_FAILED',
+            'EVENT_LOOP_LIMIT',
+            'ASYNC_CONTEXT',
+        ),
+    ),
+    (
+        handle_types.HandleErrorCode,
+        horsies._catalog.workflow_handle.HandleErrorCode,
+        (
+            'WORKFLOW_NOT_FOUND',
+            'DB_OPERATION_FAILED',
+            'STORED_DATA_INVALID',
+            'RESUME_RECOVERY_FAILED',
             'LOOP_RUNNER_FAILED',
             'EVENT_LOOP_LIMIT',
             'ASYNC_CONTEXT',

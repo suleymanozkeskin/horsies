@@ -26,7 +26,7 @@ use crate::worker::execution::{
 };
 use crate::worker::executor::protocol::{
     FailureDetail, ResultEnvelopeText, RunEnd, StopReason, StoredOptionsRefusal, TaskInputText,
-    TaskKind, MAX_BODY_BYTES,
+    MAX_BODY_BYTES,
 };
 
 /// What every run of one child shares.
@@ -44,7 +44,6 @@ pub(super) struct RunFacts {
     pub(super) task_id: Uuid,
     pub(super) task_name: String,
     pub(super) worker_id: String,
-    pub(super) task_kind: TaskKind,
     pub(super) claimed_at: DateTime<Utc>,
 }
 
@@ -82,17 +81,15 @@ enum MissedStart {
 /// A database error of the start or of its miss path releases the claim at
 /// once with the fenced release, and the run ends `OWNERSHIP_UNCONFIRMED`.
 pub(super) async fn start_attempt(context: &HostContext, facts: &RunFacts) -> Started {
-    let command = StartAttempt {
-        task_id: facts.task_id,
-        fence: OwnedClaim {
+    let command = StartAttempt::of_process(
+        facts.task_id,
+        OwnedClaim {
             worker_id: facts.worker_id.clone(),
             claimed_at: facts.claimed_at,
         },
-        worker_pid: context.pid,
-        worker_hostname: context.app.hostname.clone(),
-        worker_process_name: format!("worker-{}", context.pid),
-        beat_sender_id: format!("{}:{}", facts.worker_id, context.pid),
-    };
+        context.pid,
+        context.app.hostname.clone(),
+    );
     for _ in 0..PRE_START_CONFIRM_ATTEMPTS {
         let outcome = match context.broker.core_pools_for_write() {
             Ok((open, _write)) => {
@@ -209,7 +206,7 @@ async fn stop_for_workflow(
 
 /// The stop of a workflow task start whose node is not linked to the task.
 /// Logs an error and writes nothing (Python
-/// `horsies/core/worker/child_runner.py:1233-1247`, the node check of
+/// `python/horsies/core/worker/child_runner.py:1233-1247`, the node check of
 /// `_confirm_ownership_and_set_running`). The worker's outcome writer
 /// cancels the owned orphan when the app's
 /// `auto_terminate_orphaned_workflow_tasks` is on
@@ -282,7 +279,7 @@ async fn release_after_start_error(context: &HostContext, facts: &RunFacts) {
 /// is logged: the parent's write is fenced on its own.
 pub(super) async fn mark_finalizing(context: &HostContext, facts: &RunFacts) {
     match mark_task_finalizing(
-        context.broker.pool(),
+        &context.broker,
         facts.task_id,
         &facts.worker_id,
         facts.claimed_at,

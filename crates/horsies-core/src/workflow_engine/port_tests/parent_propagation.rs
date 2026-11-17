@@ -5,26 +5,23 @@
 //!
 //! Python drives the parent advance after the child's transaction
 //! (`_drive_parent_propagations`), with a retry stage of its own. The core
-//! advances the parent in the transaction that ends the child (phase 2, or
-//! recovery case 1.6 through `on_subworkflow_complete`), so a failed parent
-//! write rolls back the child's end too, and the retry of that transaction
-//! is the retry of the parent advance.
+//! advances the parent after the commit that ends the child, one
+//! transaction per level (`horsies_workflow_child_finish`, from phase 2 and
+//! from recovery case 1.6).
 
 use serial_test::serial;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    execute, finish_phase1, node, ok, seed_node, seed_node_task, seed_workflow, shared_pool,
-    stored_result, workflow_status, IsolatedDatabase, LiveStatus, NodeSeed, ParentLink,
-    WorkflowSeed,
+    advance_parent_of, execute, finish_phase1, node, ok, seed_node, seed_node_task, seed_workflow,
+    shared_pool, stored_result, workflow_status, IsolatedDatabase, LiveStatus, NodeSeed,
+    ParentLink, WorkflowSeed,
 };
 use crate::broker::PostgresBroker;
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::{TaskResult, WorkflowSpecRegistry};
 use crate::worker::execution::{run_phase2, Phase2Work, PhaseTwoForm};
-use crate::workflow_engine::engine::on_subworkflow_complete;
 use crate::workflow_engine::recovery::recover_stuck_workflows;
 
 /// The definition key that the parent nodes name (the tests resolve no child).
@@ -79,21 +76,13 @@ fn completed_twice() -> (String, String) {
 async fn a_completed_child_advances_and_completes_its_parent() {
     let pool = shared_pool().await;
     let (parent, child) = seed_parent_of_a_completed_child(&pool).await;
-    let stored = child_result();
 
-    on_subworkflow_complete(
+    advance_parent_of(
         &pool,
-        parent,
-        0,
         child,
-        "COMPLETED",
-        Some(&stored),
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        &PayloadPolicy::default(),
-        &RetentionConfig::default(),
     )
-    .await
-    .expect("the parent advances");
+    .await;
 
     assert_eq!(statuses(&pool, parent).await, completed_twice());
     let parent_node = node(&pool, parent, 0).await;
@@ -140,11 +129,9 @@ async fn recovery_contains_a_failing_parent_advance_and_completes_the_next_paren
     .await;
 
     let report = recover_stuck_workflows(
-        &db.pool,
+        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        0,
         RECOVERY_FAILURE_LIMIT,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await

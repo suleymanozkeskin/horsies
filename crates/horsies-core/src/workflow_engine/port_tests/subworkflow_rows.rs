@@ -9,20 +9,16 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    child_of, code, err, execute, finish_node, node, node_status, ok, registry_of, shared_pool,
-    spec, start, stored_result, stored_result_error, sub_workflow_node, task_node, try_finish_task,
-    workflow, workflow_status, IsolatedDatabase,
+    advance_parent_of, child_of, code, err, execute, finish_node, node, node_status, ok,
+    registry_of, shared_pool, spec, start, stored_result, stored_result_error, sub_workflow_node,
+    task_node, try_finish_task, workflow, workflow_status, IsolatedDatabase,
 };
-use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::RegisteredWorkflowDefinition;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::{
     AnyNode, HorsiesError, SpecBuildError, SubWorkflowSummary, TaskError, TaskResult, WorkflowSpec,
-    WorkflowSpecRegistry,
+    WorkflowSpecRegistry, WorkflowStatus,
 };
-use crate::workflow_engine::engine::on_subworkflow_complete;
-use crate::workflow_engine::recovery::recover_stuck_workflows;
 use crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH;
 
 /// A child with one task node that is its output (Python `StartChildWorkflow`).
@@ -197,19 +193,7 @@ async fn a_replayed_child_completion_does_not_rewrite_a_terminal_parent_node() {
         .await
         .expect("end the child");
 
-        on_subworkflow_complete(
-            &pool,
-            parent_id,
-            0,
-            child_id,
-            child_status,
-            child_result.as_deref(),
-            &registry,
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
-        )
-        .await
-        .expect("the replay");
+        advance_parent_of(&pool, child_id, &registry).await;
 
         let replayed = node(&pool, parent_id, 0).await;
         assert_eq!(replayed.status, "COMPLETED", "{child_status}");
@@ -337,7 +321,6 @@ async fn failed_node_code(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> 
 /// root workflow.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #887"]
 async fn a_root_nesting_stops_at_the_depth_limit() {
     let db = IsolatedDatabase::create().await;
     let key = "tests.port.root_nesting.v1";
@@ -356,21 +339,10 @@ async fn a_root_nesting_stops_at_the_depth_limit() {
         )],
     );
     parent.output_index = Some(0);
+    // The start builds the whole nesting in one statement: the depth-32
+    // workflow fails its root node, and the start advances each parent node
+    // up to the root workflow before it commits (`horsies_workflow_start_advance`).
     let root_id = start(&db.pool, &parent, &registry).await;
-
-    // Each pass advances the parents of the children that ended (case 1.6).
-    for _level in 0..=MAX_SUBWORKFLOW_DEPTH {
-        let _report = recover_stuck_workflows(
-            &db.pool,
-            &registry,
-            0,
-            3,
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
-        )
-        .await
-        .expect("a recovery pass");
-    }
 
     let deepest = workflows_at_depth(&db.pool, MAX_SUBWORKFLOW_DEPTH).await;
     assert_eq!(deepest.len(), 1);
@@ -731,7 +703,7 @@ async fn a_failed_child_summary_holds_its_counts_and_error_summary() {
             .expect("the node stores the child summary"),
     )
     .expect("the summary decodes");
-    assert_eq!(summary.status, "FAILED");
+    assert_eq!(summary.status, WorkflowStatus::Failed);
     assert!(summary.failed_tasks >= 1);
     assert!(summary.total_tasks >= 1);
     assert!(summary.error_summary.is_some_and(|text| !text.is_empty()));

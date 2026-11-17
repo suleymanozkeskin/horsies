@@ -12,11 +12,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.types.status import TaskStatus
+from horsies.core.utils.db import uuid_column_value
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +33,7 @@ class TaskRow:
     count it terminalized with.
     """
 
-    id: str
+    id: UUID
     task_name: str
     queue_name: str
     status: TaskStatus
@@ -63,19 +65,19 @@ _READ_TASK_SQL = text("""
 """)
 
 
-async def read_task(session: AsyncSession, task_id: str) -> TaskRow | None:
+async def read_task(session: AsyncSession, task_id: UUID) -> TaskRow | None:
     """Read one task from whichever lifecycle side holds it.
 
     ``None`` means the task is on neither side — genuinely absent, not
     merely terminal.
     """
     row = (
-        await session.execute(_READ_TASK_SQL, {'id': task_id})
+        await session.execute(_READ_TASK_SQL, {'id': str(task_id)})
     ).fetchone()
     if row is None:
         return None
     return TaskRow(
-        id=str(row.id),
+        id=uuid_column_value(row.id, column='itest_task_rows.id'),
         task_name=row.task_name,
         queue_name=row.queue_name,
         status=TaskStatus(row.status),
@@ -138,7 +140,7 @@ async def poll_max_during(
 
 async def wait_for_all_terminal(
     session_factory: Callable[[], Any],
-    task_ids: list[str],
+    task_ids: list[UUID],
     timeout_s: float = 30.0,
     poll_interval: float = 0.2,
 ) -> None:
@@ -153,7 +155,7 @@ async def wait_for_all_terminal(
                     WHERE id = ANY(CAST(:ids AS uuid[]))
                     AND status NOT IN ('COMPLETED', 'FAILED', 'ERROR')
                 """),
-                {'ids': task_ids},
+                {'ids': [str(task_id) for task_id in task_ids]},
             )
             pending = result.scalar() or 0
             if pending == 0:
@@ -165,7 +167,7 @@ async def wait_for_all_terminal(
 
 async def wait_for_status(
     session_factory: Callable[[], Any],
-    task_id: str,
+    task_id: UUID,
     target_status: str,
     timeout_s: float = 15.0,
     poll_interval: float = 0.2,
@@ -180,7 +182,7 @@ async def wait_for_status(
                     SELECT status FROM itest_task_rows
                     WHERE id = CAST(:id AS uuid)
                 """),
-                {'id': task_id},
+                {'id': str(task_id)},
             )
             row = result.fetchone()
             if row is not None and row[0] == target_status:
@@ -194,7 +196,7 @@ async def wait_for_status(
 
 async def wait_for_any_status(
     session_factory: Callable[[], Any],
-    task_ids: list[str],
+    task_ids: list[UUID],
     target_status: str,
     timeout_s: float = 15.0,
     poll_interval: float = 0.2,
@@ -209,7 +211,10 @@ async def wait_for_any_status(
                     SELECT COUNT(*) FROM itest_task_rows
                     WHERE id = ANY(CAST(:ids AS uuid[])) AND status = :status
                 """),
-                {'ids': task_ids, 'status': target_status},
+                {
+                    'ids': [str(task_id) for task_id in task_ids],
+                    'status': target_status,
+                },
             )
             count = result.scalar() or 0
             if count > 0:

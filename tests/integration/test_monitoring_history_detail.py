@@ -6,8 +6,7 @@ through the staged detail read when the live side is empty. Proven on
 installed databases with seeded history rows: the same response shapes
 come back with the history-side values — the terminal instant landing
 in the status-appropriate end stamp, the failure reason from the
-recorded terminal context, attempts decoded from the snapshot — and a
-pre-coverage database keeps absent-means-absent semantics.
+recorded terminal context, attempts decoded from the snapshot.
 """
 
 from __future__ import annotations
@@ -53,7 +52,7 @@ class TestTaskDetailFromHistory:
             await broker.ensure_schema_initialized()
             completed, cancelled = await populated_history(url)
 
-            outcome = await get_task_detail(broker, completed)
+            outcome = await get_task_detail(broker, uuid.UUID(completed))
             assert not is_err(outcome), outcome
             detail = outcome.ok_value
             assert isinstance(detail, TaskDetail)
@@ -62,14 +61,14 @@ class TestTaskDetailFromHistory:
             assert detail.leaf.completed_at is not None
             assert detail.leaf.failed_at is None
 
-            outcome = await get_task_detail(broker, cancelled)
+            outcome = await get_task_detail(broker, uuid.UUID(cancelled))
             assert not is_err(outcome), outcome
             detail = outcome.ok_value
             assert isinstance(detail, TaskDetail)
             assert detail.leaf.status == 'CANCELLED'
             assert detail.leaf.failed_at is not None
 
-            missing = await get_task_detail(broker, str(uuid.uuid4()))
+            missing = await get_task_detail(broker, uuid.uuid4())
             assert not is_err(missing), missing
             assert isinstance(missing.ok_value, TaskDetailNotFound)
         finally:

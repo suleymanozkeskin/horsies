@@ -8,6 +8,8 @@
 //! `PostgresBroker.requeue_stale_claimed` (`CLEANUP_FAILED` for a failure).
 
 use horsies_core::{StaleClaimsRequeueFailed as PassFailed, StaleClaimsRequeuePass, ThresholdMs};
+
+use super::arguments::threshold_ms;
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
@@ -76,10 +78,7 @@ impl<'py> IntoPyObject<'py> for RequeueOutcome {
 
 /// The threshold of a pass, or the refusal as text. Pure.
 fn stale_threshold(value_ms: i64) -> Result<ThresholdMs, String> {
-    let millis = u64::try_from(value_ms).map_err(|_| {
-        format!("the stale threshold of {value_ms} ms is negative; it must be 0 ms or more")
-    })?;
-    ThresholdMs::from_millis(millis).map_err(|refused| refused.to_string())
+    threshold_ms("stale threshold", value_ms)
 }
 
 /// The record of a pass whose threshold was refused: nothing ran, and the

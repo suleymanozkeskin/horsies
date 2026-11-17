@@ -1,6 +1,6 @@
 //! The start of a run in a Rust child on the test database: one
 //! `horsies_start_attempt` statement, and the stop of each miss (Python
-//! `horsies/core/worker/child_runner.py`, `_confirm_ownership_and_set_running`,
+//! `python/horsies/core/worker/child_runner.py`, `_confirm_ownership_and_set_running`,
 //! `_after_missed_start`).
 
 use std::os::unix::net::UnixStream;
@@ -21,7 +21,7 @@ use crate::broker::{PostgresBroker, PrestartExpiry};
 use crate::core::config::PostgresConfig;
 use crate::core::registry::task::TaskRegistry;
 use crate::db::{CheckoutClass, CorePool, KeptOpen};
-use crate::worker::executor::protocol::{StopReason, TaskKind};
+use crate::worker::executor::protocol::StopReason;
 
 const WORKER_ID: &str = "start-attempt-worker";
 const OTHER_WORKER_ID: &str = "start-attempt-other-worker";
@@ -133,7 +133,6 @@ fn facts(task_id: Uuid, claimed_at: DateTime<Utc>) -> RunFacts {
         task_id,
         task_name: "app.tasks.start".to_owned(),
         worker_id: WORKER_ID.to_owned(),
-        task_kind: TaskKind::Plain,
         claimed_at,
     }
 }
@@ -160,12 +159,10 @@ async fn remove_task(pool: &PgPool, task_id: Uuid) {
     }
 }
 
-/// The facts of the run of a workflow task.
+/// The facts of the run of a workflow task. The run frames carry no task
+/// kind; the workflow linkage of the seeded row makes it a workflow task.
 fn workflow_facts(task_id: Uuid, claimed_at: DateTime<Utc>) -> RunFacts {
-    RunFacts {
-        task_kind: TaskKind::WorkflowTask,
-        ..facts(task_id, claimed_at)
-    }
+    facts(task_id, claimed_at)
 }
 
 /// Make the seeded row of `task_id` a workflow task. A workflow task has no

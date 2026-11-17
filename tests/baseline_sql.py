@@ -8,19 +8,14 @@ from typing import Final
 import pytest
 
 from horsies.core.baseline.migration import load_baseline_migration
-from horsies.core.types.result import Err, Ok
 
 _FUNCTION_HEAD: Final = re.compile(r'^CREATE FUNCTION (\w+)\(', re.MULTILINE)
 _DOLLAR_QUOTE: Final = '$$'
 
 
 def baseline_sql() -> str:
-    """The SQL text that the install runs; fails the test if it is unreadable."""
-    match load_baseline_migration():
-        case Ok(migration):
-            return migration.sql
-        case Err(unreadable):
-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
+    """The SQL text that the install runs."""
+    return load_baseline_migration().sql
 
 
 def _parameter_list(name: str, sql: str, list_start: int) -> tuple[tuple[str, ...], int]:

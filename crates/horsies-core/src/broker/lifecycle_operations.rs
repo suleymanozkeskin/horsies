@@ -1,10 +1,26 @@
 //! Lifecycle operations of a client handle on its main core pool, one 0004
-//! function each (`horsies/core/baseline/sql/0004_lifecycle_functions.sql`):
+//! function each (`crates/horsies-core/baseline/0004_lifecycle_functions.sql`):
 //!
 //! - [`PostgresBroker::requeue_stale_claimed`]: the stale CLAIMED requeue
 //!   pass, `horsies_requeue_stale_claims` in bounded batches.
 //! - [`PostgresBroker::release_claims`]: `horsies_release_claims`, the return
 //!   of claimed rows that no child started.
+//! - [`PostgresBroker::mark_stale_running_as_failed`]: one stale RUNNING
+//!   pass, `horsies_stale_running_scan` and one `horsies_finish_stale_attempt`
+//!   per candidate.
+//! - [`PostgresBroker::finish_failed_attempt`] and
+//!   [`PostgresBroker::finish_ended_attempt`]: `horsies_finish_failed_attempt`
+//!   under the claimed-row rules `REFUSE` and `RELEASE`.
+//! - [`PostgresBroker::complete_successes`]: `horsies_complete_tasks_fused`,
+//!   the plain successes of one worker (1 to 64 rows) in one statement.
+//! - [`PostgresBroker::finish_workflow_success`]:
+//!   `horsies_finish_workflow_success`, phase 1 of a workflow task's success.
+//! - [`PostgresBroker::claim_pass`]: `horsies_claim`, one claim pass of one
+//!   worker.
+//! - [`PostgresBroker::count_queue_starts`]: the count of the soft-cap
+//!   start check (a plain read, not a 0004 function).
+//! - [`PostgresBroker::start_attempt`]: `horsies_start_attempt`, the start
+//!   of a run in a worker's child, with the window of its deadline.
 //! - [`PostgresBroker::cancel_task`]: `horsies_cancel_task`, the
 //!   administrative cancel of one plain task (Python
 //!   `horsies.monitoring.task_actions.cancel_task`, and the core's monitoring
@@ -15,24 +31,35 @@
 //! in place of its own statements. The core worker calls the same statement
 //! functions on its worker pool.
 //!
-//! Each one checks the client family once per handle before its first write
-//! ([`PostgresBroker::ensure_client_family_for_write`]) and holds a write
-//! token, so [`PostgresBroker::close`] waits for it.
+//! Each write checks the client family once per handle before its first
+//! write ([`PostgresBroker::ensure_client_family_for_write`]) and holds a
+//! write token, so [`PostgresBroker::close`] waits for it. The read checks
+//! no family and holds no token.
 
 use uuid::Uuid;
 
-use crate::broker::claims::{release_claims, ReleaseClaims, ReleaseOutcome};
+use crate::broker::attempt_writes::{self, FinishFailedAttempt, FinishWorkflowSuccess};
+use crate::broker::claims::{
+    claim_pass, count_queue_starts, release_claims, start_attempt_within, ClaimPass,
+    ClaimPassRequest, QueueStartCheck, QueueStarts, ReleaseClaims, ReleaseOutcome, StartAttempt,
+    StartWindow, WindowedStart,
+};
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::stale_recovery::{
-    requeue_stale_claimed_pass, StaleClaimsRequeueFailed, StaleClaimsRequeuePass, ThresholdMs,
+    requeue_stale_claimed_pass, StaleClaimsRequeueFailed, StaleClaimsRequeuePass, StaleRunningPass,
+    StaleRunningThresholds, ThresholdMs, STALE_RUNNING_SCAN_BATCH,
 };
 use crate::core::lifecycle::{
-    decode_outcome_row, GuardEvidence, ObservedTaskState, ObservedWorkflowTask, OutcomeDecodeError,
-    TerminalizationOutcome,
+    decode_outcome_row, FailedAttemptOutcome, GuardEvidence, ObservedTaskState,
+    ObservedWorkflowTask, OutcomeDecodeError, TerminalizationOutcome, UnreportedAttemptOutcome,
+    WorkflowSuccessOutcome,
 };
 use crate::core::types::status::TaskStatus;
-use crate::db::{CheckoutClass, ParameterType, StatementBound, TypedStatement};
+use crate::db::{CheckoutClass, ParameterType, StatementBound, Transience, TypedStatement};
+use crate::worker::finalize_batch::statement::complete_plain_successes;
+use crate::worker::finalize_batch::{BatchOutcomes, BatchWriteError, SuccessBatch};
+use crate::worker::recovery::stale_running_pass;
 
 /// `horsies_cancel_task`. Parameters in order: task id, whether a RUNNING
 /// row may be cancelled.
@@ -133,6 +160,212 @@ impl PostgresBroker {
         self.ensure_client_family_for_write().await?;
         let (open, _write) = self.core_pools_for_write()?;
         release_claims(open.main(), self.statement_log(), command).await
+    }
+
+    /// One stale RUNNING pass (Python `PostgresBroker.mark_stale_tasks_as_failed`):
+    /// `horsies_stale_running_scan` reads at most 1000 candidates with no
+    /// lock; each candidate is then one `horsies_finish_stale_attempt`, which
+    /// judges the row again under its locks and writes the crash retry that
+    /// the task's policy admits for `WORKER_CRASHED`, or the terminal failure
+    /// (`FAIL_STALE`), or nothing. A scheduled retry wakes its queue (best
+    /// effort). Each statement commits alone, on the main core pool, checked
+    /// out as reserved work.
+    ///
+    /// A candidate whose statement fails is logged and skipped, and the pass
+    /// goes on, as Python does. [`StaleRunningPass::ScanFull`] says that the
+    /// scan read a full batch, so stale rows can remain for the next pass.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); the scan's [`BrokerError::Statement`] or
+    /// [`BrokerError::RowDecode`] (nothing written).
+    pub async fn mark_stale_running_as_failed(
+        &self,
+        thresholds: StaleRunningThresholds,
+    ) -> Result<StaleRunningPass, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        stale_running_pass(
+            open.main(),
+            self.statement_log(),
+            thresholds,
+            STALE_RUNNING_SCAN_BATCH,
+        )
+        .await
+    }
+
+    /// Write the failed attempt of a task whose child reported a result
+    /// (Python `horsies.core.worker.failed_attempt.finish_failed_attempt`,
+    /// claimed-row rule `REFUSE`): `horsies_finish_failed_attempt`, one
+    /// statement in autocommit on the main core pool, checked out as
+    /// reserved work. Under the full fence (worker, claim generation, and
+    /// the retry count of a retry) it writes the attempt row and the retry,
+    /// or the terminal failure with its capacity wake (a plain task), or
+    /// nothing on a refusal. The retry request is the caller's.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); [`BrokerError::Statement`] (nothing written,
+    /// or `OutcomeUnknown`: the same command sent again reports a committed
+    /// failure as `AlreadyApplied` and a committed retry as `LostClaim`);
+    /// [`BrokerError::TerminalizationContract`] for a row outside the wire
+    /// contract.
+    pub async fn finish_failed_attempt(
+        &self,
+        command: &FinishFailedAttempt,
+    ) -> Result<FailedAttemptOutcome, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        attempt_writes::finish_failed_attempt(open.main(), self.statement_log(), command).await
+    }
+
+    /// Write the end of an attempt whose child ended without a result
+    /// (Python `horsies.core.worker.failed_attempt.finish_ended_attempt`,
+    /// claimed-row rule `RELEASE`): a row still CLAIMED by this worker at
+    /// this claim generation goes back to the queue with no attempt row
+    /// (`Released`); any other row is written or refused as
+    /// [`PostgresBroker::finish_failed_attempt`] does. One statement, as
+    /// there.
+    ///
+    /// Errors: as [`PostgresBroker::finish_failed_attempt`]; after
+    /// `OutcomeUnknown` a committed release is reported as a refusal.
+    pub async fn finish_ended_attempt(
+        &self,
+        command: &FinishFailedAttempt,
+    ) -> Result<UnreportedAttemptOutcome, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        attempt_writes::finish_unreported_attempt(open.main(), self.statement_log(), command).await
+    }
+
+    /// Write the plain successes of one worker (Python
+    /// `horsies.core.lifecycle.persistence.apply_fused_batch`):
+    /// `horsies_complete_tasks_fused`, one statement in autocommit for 1 to
+    /// 64 rows, on the main core pool, checked out as batch work. Each row
+    /// keeps its own fence (`worker_id` and its claim generation) and
+    /// outcome; an `Applied` row committed with the statement, a refused row
+    /// wrote nothing; the rows of one queue send one capacity wake. A batch
+    /// of one row runs the same function with one row; Python runs
+    /// `horsies_complete_task_fused` for it, with the same effects.
+    ///
+    /// Errors: [`BatchWriteError::NotSent`] (the pools, the client family
+    /// check, or the checkout failed: no row changed);
+    /// [`BatchWriteError::Refused`] (no row changed);
+    /// [`BatchWriteError::CommitUnknown`] (each row may have committed; a
+    /// replay of a row finds it `AlreadyApplied` when it did);
+    /// [`BatchWriteError::ContractBroken`] (rows outside the function's
+    /// contract).
+    pub async fn complete_successes(
+        &self,
+        worker_id: &str,
+        batch: &SuccessBatch,
+    ) -> Result<BatchOutcomes, BatchWriteError> {
+        let not_sent = |error: BrokerError| BatchWriteError::NotSent {
+            transience: match error.is_retryable() {
+                true => Transience::Transient,
+                false => Transience::Permanent,
+            },
+            detail: error.to_string(),
+        };
+        self.ensure_client_family_for_write()
+            .await
+            .map_err(not_sent)?;
+        let (open, _write) = self.core_pools_for_write().map_err(not_sent)?;
+        complete_plain_successes(open.main(), self.statement_log(), worker_id, batch).await
+    }
+
+    /// Write phase 1 of a workflow task's success (Python
+    /// `horsies.core.worker.workflow_success.finish_workflow_success`):
+    /// `horsies_finish_workflow_success`, one statement in autocommit on the
+    /// main core pool, checked out as reserved work. Under the full fence it
+    /// writes the attempt row, the move to history and the phase-2 record of
+    /// the node, or nothing on a refusal. Sends no capacity wake: phase 2
+    /// sends it, and phase 2 stays with the caller.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); [`BrokerError::Statement`] (nothing written, or
+    /// `OutcomeUnknown`: the same command sent again reports a committed
+    /// success as `AlreadyApplied`); [`BrokerError::TerminalizationContract`]
+    /// for a row outside the wire contract.
+    pub async fn finish_workflow_success(
+        &self,
+        command: &FinishWorkflowSuccess,
+    ) -> Result<WorkflowSuccessOutcome, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        attempt_writes::finish_workflow_success(open.main(), self.statement_log(), command).await
+    }
+
+    /// One claim pass of one worker (Python `ClaimMixin._claim_and_dispatch_all`,
+    /// the claim statement only): `horsies_claim`, one statement in
+    /// autocommit on the main core pool, checked out as batch work, so its
+    /// cap locks end with the statement. It claims rows (CLAIMED, a new claim
+    /// generation, a lease) within the class budgets, the per-worker limit,
+    /// the queue caps and the cluster cap, and writes nothing else. The
+    /// dispatch of the claimed rows is the caller's.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); [`BrokerError::InvalidClaimArgument`] for a
+    /// count above the function's integer range (nothing sent);
+    /// [`BrokerError::Statement`] (after `OutcomeUnknown` the pass may have
+    /// claimed rows; they return to the queue when their lease expires);
+    /// [`BrokerError::RowDecode`] and [`BrokerError::ClaimContract`] for rows
+    /// outside the function's contract.
+    pub async fn claim_pass(&self, request: &ClaimPassRequest) -> Result<ClaimPass, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        claim_pass(open.main(), self.statement_log(), request).await
+    }
+
+    /// Count the capped queues of one soft-cap start check of one worker
+    /// (Python `ClaimMixin._start_held_rows`, the count statement only): one
+    /// statement on the main core pool, checked out as batch work. Each queue
+    /// of `check` counts its RUNNING rows on every worker, plus the started
+    /// claims of `check` that are still CLAIMED by its worker at their claim
+    /// generation. A queue with no counted row is absent. Reads only and
+    /// locks nothing, so a start of another worker in the same instant is
+    /// not seen. A check with no queue sends nothing, as Python sends no
+    /// statement when no row is held.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] (nothing sent);
+    /// [`BrokerError::Statement`]; [`BrokerError::RowDecode`] and
+    /// [`BrokerError::ClaimContract`] for rows outside the statement's
+    /// contract (a queue counted twice, a queue that the check did not
+    /// name, a negative count).
+    pub async fn count_queue_starts(
+        &self,
+        check: &QueueStartCheck,
+    ) -> Result<QueueStarts, BrokerError> {
+        if check.queues.is_empty() {
+            return Ok(QueueStarts::default());
+        }
+        let open = self.core_pools_for_read()?;
+        count_queue_starts(open.main(), self.statement_log(), check).await
+    }
+
+    /// Start one claimed task in a worker's child (Python
+    /// `child_runner._confirm_ownership_and_set_running` and
+    /// `shared_lifecycle._set_running_on_a_connection`, the start statement
+    /// only): `horsies_start_attempt`, one statement in autocommit on the
+    /// main core pool, checked out as reserved work. Under the claim fence
+    /// it writes the RUNNING row, the first runner beat and, for a workflow
+    /// task, the node, or nothing on a miss. When `window` has closed by the
+    /// time the pool gives the connection, no statement runs and the row
+    /// stays CLAIMED ([`WindowedStart::WindowClosed`]). The path after a miss
+    /// (the expiry, the workflow stop) is the caller's.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); [`BrokerError::Statement`] (nothing sent for a
+    /// failed checkout; nothing written, or `OutcomeUnknown`: the row may be
+    /// RUNNING, and the same start sent again misses with `NotHeld`);
+    /// [`BrokerError::RowDecode`] and [`BrokerError::ClaimContract`] for a
+    /// row outside the function's contract.
+    pub async fn start_attempt(
+        &self,
+        command: &StartAttempt,
+        window: StartWindow,
+    ) -> Result<WindowedStart, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        start_attempt_within(open.main(), self.statement_log(), command, window).await
     }
 
     /// Cancel one plain task (Python `horsies.monitoring.task_actions.cancel_task`):
@@ -267,6 +500,28 @@ mod tests {
             worker_id: None,
             claimed_at: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_start_check_with_no_queue_sends_nothing() {
+        // No server listens on port 1: a check that reached the pool would
+        // fail instead of answering.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(1))
+            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
+            .expect("a lazy pool opens no connection");
+        let broker = PostgresBroker::from_pool(pool);
+        let check = QueueStartCheck {
+            worker_id: "worker-1".to_owned(),
+            queues: Vec::new(),
+            started: vec![(task(), Utc::now())],
+        };
+        let starts = broker
+            .count_queue_starts(&check)
+            .await
+            .expect("a check with no queue sends nothing, so it cannot fail");
+        assert_eq!(starts, QueueStarts::default());
     }
 
     #[test]

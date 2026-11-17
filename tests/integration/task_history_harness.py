@@ -30,7 +30,6 @@ from horsies.core.history.ddl.classes import (
     register_finite_retention_class,
 )
 from horsies.core.history.names import FOREVER_LEAF
-from horsies.core.types.result import Err, Ok
 from tests.attempt_snapshot_support import encode_attempt_snapshot
 from horsies.core.utils.url import sqlalchemy_url
 
@@ -59,11 +58,7 @@ async def install_baseline_schema(connection: AsyncConnection) -> None:
     psycopg sends it with the simple query protocol and reads no
     placeholders in it. It joins the caller's transaction.
     """
-    match load_baseline_migration():
-        case Ok(migration):
-            pass
-        case Err(unreadable):
-            raise AssertionError(f'baseline SQL unreadable: {unreadable}')
+    migration = load_baseline_migration()
     raw = await connection.get_raw_connection()
     driver = raw.driver_connection
     assert driver is not None, 'the engine has a driver connection'

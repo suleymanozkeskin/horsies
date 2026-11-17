@@ -12,6 +12,7 @@ import asyncio
 import json
 import re
 import textwrap
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -59,7 +60,7 @@ from tests.baseline_sql import baseline_sql
 
 pytestmark = [pytest.mark.unit]
 
-_PACKAGE_ROOT = Path(__file__).resolve().parents[2] / 'horsies'
+_PACKAGE_ROOT = Path(__file__).resolve().parents[2] / 'python' / 'horsies'
 
 
 def _app() -> Horsies:
@@ -777,8 +778,8 @@ class TestMonitoringDetail:
         from horsies.monitoring.queries import get_task_detail
         from tests.monitoring_function_support import detail_row, function_broker
 
-        task_id = '00000000-0000-7000-8000-000000000001'
-        broker, _ = function_broker([detail_row(task_id, execution='SHARED_THREAD')])
+        task_id = uuid.UUID('00000000-0000-7000-8000-000000000001')
+        broker, _ = function_broker([detail_row(str(task_id), execution='SHARED_THREAD')])
 
         result = asyncio.run(get_task_detail(broker, task_id))
 
@@ -792,8 +793,8 @@ class TestMonitoringDetail:
         from horsies.monitoring.queries import get_task_detail
         from tests.monitoring_function_support import function_broker, history_row
 
-        task_id = '00000000-0000-7000-8000-000000000002'
-        broker, _ = function_broker([history_row(task_id)])
+        task_id = uuid.UUID('00000000-0000-7000-8000-000000000002')
+        broker, _ = function_broker([history_row(str(task_id))])
 
         result = asyncio.run(get_task_detail(broker, task_id))
 

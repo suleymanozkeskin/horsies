@@ -2,64 +2,88 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
-use sqlx::PgPool;
 use tokio::time::Instant;
 use uuid::Uuid;
 
+use crate::broker::core_rows::{column, first_row, RowDecodeError};
 use crate::broker::postgres::RESULT_WAIT_REPOLL;
 use crate::broker::process_listener::{fixed_channel, ListenError, WORKFLOW_DONE_CHANNEL};
 use crate::broker::{BrokerError, PostgresBroker};
+use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
+use crate::core::workflow::summary::SubWorkflowSummary;
 use crate::core::{
     OperationalErrorCode, OutcomeCode, RetrievalCode, TaskError, TaskResult, WorkflowStatus,
     WorkflowTaskStatus,
 };
-use crate::db::{PayloadFilter, WakeEvent, WakeSubscription};
+use crate::db::{
+    CheckoutClass, FromSql, ParameterType, PayloadFilter, Row, TypedStatement, WakeEvent,
+    WakeSubscription,
+};
 
 use crate::core::task::result::TASK_RESULT_ENVELOPE_KEY;
-use crate::workflow_engine::engine::OUTPUTLESS_TERMINALS_KEY;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::info::WorkflowTaskInfo;
+use crate::workflow_engine::lifecycle::handle_operation_error;
+use crate::workflow_engine::steps::run_alone;
+
+/// The marker key of the result of a workflow with no output node (Python `__h_outputless_terminals__`,
+/// `core/workflows/engine.py:3973-3983`; the baseline writes it in `horsies_workflow_outputless_result`).
+const OUTPUTLESS_TERMINALS_KEY: &str = "__h_outputless_terminals__";
 
 // ---------------------------------------------------------------------------
-// SQL constants
+// Statements
 // ---------------------------------------------------------------------------
 
-const GET_WORKFLOW_STATUS_SQL: &str = "\
-SELECT status FROM horsies_workflows WHERE id = $1";
+// Every read runs alone in autocommit on the main core pool of the broker, as
+// handle work ([`CheckoutClass::Batch`]).
 
-const GET_WORKFLOW_RESULT_SQL: &str = "\
-SELECT status, result, error FROM horsies_workflows WHERE id = $1";
+/// The status of one workflow.
+static WORKFLOW_STATUS: TypedStatement = TypedStatement::new(
+    "workflow_status",
+    "SELECT status FROM horsies_workflows WHERE id = $1",
+    &[ParameterType::Uuid],
+);
 
-const GET_ALL_TASK_RESULTS_SQL: &str = "\
-SELECT node_id, task_index, task_name, status, result, started_at, completed_at,
-       sub_workflow_id, sub_workflow_summary
-FROM horsies_workflow_tasks
-WHERE workflow_id = $1
-ORDER BY task_index";
+/// The status, the stored result and the stored error of one workflow.
+static WORKFLOW_RESULT: TypedStatement = TypedStatement::new(
+    "workflow_result",
+    "SELECT status, result, error FROM horsies_workflows WHERE id = $1",
+    &[ParameterType::Uuid],
+);
 
-const GET_TASK_RESULT_BY_NODE_ID_SQL: &str = "\
-SELECT result
-FROM horsies_workflow_tasks
-WHERE workflow_id = $1 AND node_id = $2
-  AND result IS NOT NULL";
+/// Every node of one workflow, in index order.
+static WORKFLOW_NODES: TypedStatement = TypedStatement::new(
+    "workflow_nodes",
+    "SELECT node_id, task_index, task_name, status, result, started_at, completed_at,
+            sub_workflow_id, sub_workflow_summary
+     FROM horsies_workflow_tasks
+     WHERE workflow_id = $1
+     ORDER BY task_index",
+    &[ParameterType::Uuid],
+);
+
+/// The stored result of the node `$2` of the workflow `$1`, when it has one.
+static NODE_RESULT: TypedStatement = TypedStatement::new(
+    "workflow_node_result",
+    "SELECT result
+     FROM horsies_workflow_tasks
+     WHERE workflow_id = $1 AND node_id = $2
+       AND result IS NOT NULL",
+    &[ParameterType::Uuid, ParameterType::Text],
+);
 
 // ---------------------------------------------------------------------------
 // Row types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, sqlx::FromRow)]
-struct StatusRow {
-    status: String,
-}
-
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 struct WorkflowResultRow {
     status: String,
     result: Option<String>,
     error: Option<String>,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 struct TaskResultRow {
     node_id: Option<String>,
     task_index: i32,
@@ -72,33 +96,102 @@ struct TaskResultRow {
     sub_workflow_summary: Option<String>,
 }
 
-#[derive(Debug, sqlx::FromRow)]
-struct NodeResultRow {
-    result: Option<String>,
+/// Runs one read with the workflow id as `$1` and returns its rows.
+///
+/// Errors: [`WorkflowError::Broker`] for a failed checkout or statement (the
+/// outcomes of the statement layer).
+async fn read_rows(
+    broker: &PostgresBroker,
+    statement: &TypedStatement,
+    workflow_id: Uuid,
+) -> Result<Vec<Row>, WorkflowError> {
+    Ok(run_alone(
+        broker,
+        CheckoutClass::Batch,
+        &statement.bind().value(&workflow_id).finish(),
+    )
+    .await?)
+}
+
+/// A column of a read row. A value that does not decode breaks the read's
+/// contract with its table: [`WorkflowError::StepContract`].
+fn read_column<'row, T: FromSql<'row>>(
+    row: &'row Row,
+    statement: &TypedStatement,
+    name: &'static str,
+) -> Result<T, WorkflowError> {
+    column(row, statement, name)
+        .map_err(|error: RowDecodeError| WorkflowError::StepContract(error.into()))
+}
+
+/// The workflow row of [`WORKFLOW_RESULT`]. Pure.
+fn workflow_result_row(row: &Row) -> Result<WorkflowResultRow, WorkflowError> {
+    Ok(WorkflowResultRow {
+        status: read_column(row, &WORKFLOW_RESULT, "status")?,
+        result: read_column(row, &WORKFLOW_RESULT, "result")?,
+        error: read_column(row, &WORKFLOW_RESULT, "error")?,
+    })
+}
+
+/// One node row of [`WORKFLOW_NODES`]. Pure.
+fn task_result_row(row: &Row) -> Result<TaskResultRow, WorkflowError> {
+    Ok(TaskResultRow {
+        node_id: read_column(row, &WORKFLOW_NODES, "node_id")?,
+        task_index: read_column(row, &WORKFLOW_NODES, "task_index")?,
+        task_name: read_column(row, &WORKFLOW_NODES, "task_name")?,
+        status: read_column(row, &WORKFLOW_NODES, "status")?,
+        result: read_column(row, &WORKFLOW_NODES, "result")?,
+        started_at: read_column(row, &WORKFLOW_NODES, "started_at")?,
+        completed_at: read_column(row, &WORKFLOW_NODES, "completed_at")?,
+        sub_workflow_id: read_column(row, &WORKFLOW_NODES, "sub_workflow_id")?,
+        sub_workflow_summary: read_column(row, &WORKFLOW_NODES, "sub_workflow_summary")?,
+    })
+}
+
+/// The node rows of `workflow_id`, in index order.
+async fn workflow_nodes(
+    broker: &PostgresBroker,
+    workflow_id: Uuid,
+) -> Result<Vec<TaskResultRow>, WorkflowError> {
+    read_rows(broker, &WORKFLOW_NODES, workflow_id)
+        .await?
+        .iter()
+        .map(task_result_row)
+        .collect()
+}
+
+/// The stored status text of `workflow_id`, or `None` when no workflow has
+/// this id.
+async fn stored_status(
+    broker: &PostgresBroker,
+    workflow_id: Uuid,
+) -> Result<Option<String>, WorkflowError> {
+    match first_row(read_rows(broker, &WORKFLOW_STATUS, workflow_id).await?) {
+        Some(row) => Ok(Some(read_column(&row, &WORKFLOW_STATUS, "status")?)),
+        None => Ok(None),
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Get the current status of a workflow.
+/// Get the current status of a workflow: one read on the main core pool of `broker`.
+///
+/// Errors: [`WorkflowError::WorkflowNotFound`]; [`WorkflowError::InvalidStatus`] for a stored status
+/// outside the enum; [`WorkflowError::Broker`] for a failed read.
 pub async fn get_workflow_status(
-    pool: &PgPool,
+    broker: &PostgresBroker,
     workflow_id: Uuid,
 ) -> Result<WorkflowStatus, WorkflowError> {
-    let row: Option<StatusRow> = sqlx::query_as(GET_WORKFLOW_STATUS_SQL)
-        .bind(workflow_id)
-        .fetch_optional(pool)
-        .await?;
-
-    match row {
-        Some(r) => parse_workflow_status(&r.status),
+    match stored_status(broker, workflow_id).await? {
+        Some(status) => parse_workflow_status(&status),
         None => Err(WorkflowError::WorkflowNotFound { workflow_id }),
     }
 }
 
 /// Repoll interval of a workflow result wait with no listener (Python's
-/// 1 s, `horsies/core/models/workflow/handle.py`, `WorkflowHandle.get`).
+/// 1 s, `python/horsies/core/models/workflow/handle.py`, `WorkflowHandle.get`).
 pub(crate) const WORKFLOW_RESULT_REPOLL_POLLING: Duration = Duration::from_secs(1);
 
 /// Get the typed result of a workflow, optionally waiting for completion.
@@ -120,10 +213,9 @@ pub async fn get_workflow_result<T: DeserializeOwned>(
     timeout: Option<Duration>,
 ) -> Result<TaskResult<T>, WorkflowError> {
     let start = Instant::now();
-    let pool = broker.pool();
 
     // Quick check.
-    match try_fetch_terminal_result(pool, workflow_id).await? {
+    match try_fetch_terminal_result(broker, workflow_id).await? {
         TerminalFetch::Terminal(result) => {
             return Ok(parse_workflow_result::<T>(workflow_id, &result));
         }
@@ -139,7 +231,7 @@ pub async fn get_workflow_result<T: DeserializeOwned>(
     let wait_mode = WorkflowWaitMode::subscribe(broker, workflow_id).await;
 
     // Re-check after subscribing (race guard).
-    match try_fetch_terminal_result(pool, workflow_id).await? {
+    match try_fetch_terminal_result(broker, workflow_id).await? {
         TerminalFetch::Terminal(result) => {
             return Ok(parse_workflow_result::<T>(workflow_id, &result));
         }
@@ -158,7 +250,7 @@ pub async fn get_workflow_result<T: DeserializeOwned>(
         // For a timed wait, stop once the deadline has passed.
         if let Some(d) = deadline {
             if Instant::now() >= d {
-                return final_poll_or_timeout(pool, workflow_id, start).await;
+                return final_poll_or_timeout(broker, workflow_id, start).await;
             }
         }
 
@@ -174,7 +266,7 @@ pub async fn get_workflow_result<T: DeserializeOwned>(
         // A wake, a gap or the end of the interval reads again; a stopped
         // listener fails the wait.
         wait_mode.pause(wait).await?;
-        match try_fetch_terminal_result(pool, workflow_id).await? {
+        match try_fetch_terminal_result(broker, workflow_id).await? {
             TerminalFetch::Terminal(result) => {
                 return Ok(parse_workflow_result::<T>(workflow_id, &result));
             }
@@ -251,15 +343,12 @@ impl WorkflowWaitMode {
     }
 }
 
-/// Get all task results keyed by node_id.
+/// Get all task results keyed by node_id: one read on the main core pool of `broker`.
 pub async fn get_workflow_results(
-    pool: &PgPool,
+    broker: &PostgresBroker,
     workflow_id: Uuid,
 ) -> Result<HashMap<String, TaskResult<serde_json::Value>>, WorkflowError> {
-    let rows: Vec<TaskResultRow> = sqlx::query_as(GET_ALL_TASK_RESULTS_SQL)
-        .bind(workflow_id)
-        .fetch_all(pool)
-        .await?;
+    let rows = workflow_nodes(broker, workflow_id).await?;
 
     let mut results = HashMap::new();
     for row in rows {
@@ -281,20 +370,30 @@ pub async fn get_workflow_results(
     Ok(results)
 }
 
-/// Get a single typed result by node key.
+/// Get a single typed result by node key: the node read, and the workflow read when the node has no
+/// result, on the main core pool of `broker`.
 pub async fn get_workflow_result_for<T: DeserializeOwned>(
-    pool: &PgPool,
+    broker: &PostgresBroker,
     workflow_id: Uuid,
     node_id: &str,
 ) -> Result<TaskResult<T>, WorkflowError> {
-    let row: Option<NodeResultRow> = sqlx::query_as(GET_TASK_RESULT_BY_NODE_ID_SQL)
-        .bind(workflow_id)
-        .bind(node_id)
-        .fetch_optional(pool)
-        .await?;
+    let rows = run_alone(
+        broker,
+        CheckoutClass::Batch,
+        &NODE_RESULT
+            .bind()
+            .value(&workflow_id)
+            .value(&node_id)
+            .finish(),
+    )
+    .await?;
+    let stored: Option<Option<String>> = match first_row(rows) {
+        Some(row) => Some(read_column(&row, &NODE_RESULT, "result")?),
+        None => None,
+    };
 
-    let Some(row) = row else {
-        if !workflow_exists(pool, workflow_id).await? {
+    let Some(stored) = stored else {
+        if stored_status(broker, workflow_id).await?.is_none() {
             return Ok(TaskResult::Err(TaskError::builtin(
                 RetrievalCode::WorkflowNotFound,
                 format!("workflow {} not found", workflow_id),
@@ -309,7 +408,7 @@ pub async fn get_workflow_result_for<T: DeserializeOwned>(
         )));
     };
 
-    if let Some(json) = row.result {
+    if let Some(json) = stored {
         let parsed: TaskResult<serde_json::Value> = match serde_json::from_str(&json) {
             Ok(value) => value,
             Err(e) => {
@@ -334,34 +433,78 @@ pub async fn get_workflow_result_for<T: DeserializeOwned>(
     )))
 }
 
-/// Get all tasks in a workflow with their metadata.
+/// Get all tasks in a workflow with their metadata (Python `WorkflowHandle.tasks_async`).
+///
+/// Errors (the handle catalog):
+/// - `DB_OPERATION_FAILED`: the read failed (retryable by the core's rule).
+/// - `STORED_DATA_INVALID`, not retryable: a stored node status outside the enum, or a stored sub-workflow
+///   summary that is not JSON (`sub_workflow_summary JSON corrupt for node ...`) or that breaks Python's
+///   summary rules (`sub_workflow_summary invalid for node ...`, [`SubWorkflowSummary::from_stored_value`]).
+///   A summary is never read as another status.
 pub async fn get_workflow_tasks(
-    pool: &PgPool,
+    broker: &PostgresBroker,
     workflow_id: Uuid,
-) -> Result<Vec<WorkflowTaskInfo>, WorkflowError> {
-    let rows: Vec<TaskResultRow> = sqlx::query_as(GET_ALL_TASK_RESULTS_SQL)
-        .bind(workflow_id)
-        .fetch_all(pool)
-        .await?;
+) -> HandleResult<Vec<WorkflowTaskInfo>> {
+    let rows = workflow_nodes(broker, workflow_id)
+        .await
+        .map_err(|error| handle_operation_error(&error, workflow_id))?;
 
     rows.into_iter()
-        .map(|row| {
-            let result = row
-                .result
-                .and_then(|json| serde_json::from_str::<TaskResult<serde_json::Value>>(&json).ok());
-            Ok(WorkflowTaskInfo {
-                node_id: row.node_id,
-                index: row.task_index,
-                name: row.task_name,
-                status: parse_task_status(&row.status)?,
-                result,
-                started_at: row.started_at,
-                completed_at: row.completed_at,
-                sub_workflow_id: row.sub_workflow_id,
-                sub_workflow_summary: row.sub_workflow_summary,
-            })
-        })
+        .map(|row| workflow_task_info(workflow_id, row))
         .collect()
+}
+
+/// One node row as a [`WorkflowTaskInfo`]. Errors as [`get_workflow_tasks`]. Pure.
+fn workflow_task_info(workflow_id: Uuid, row: TaskResultRow) -> HandleResult<WorkflowTaskInfo> {
+    let status = parse_task_status(&row.status)
+        .map_err(|error| handle_operation_error(&error, workflow_id))?;
+    // Python reads a summary only when the column is a non-empty text (`if row.sub_workflow_summary:`).
+    let sub_workflow_summary = match row.sub_workflow_summary.as_deref() {
+        None | Some("") => None,
+        Some(text) => Some(stored_summary(workflow_id, row.node_id.as_deref(), text)?),
+    };
+    let result = row
+        .result
+        .and_then(|json| serde_json::from_str::<TaskResult<serde_json::Value>>(&json).ok());
+    Ok(WorkflowTaskInfo {
+        node_id: row.node_id,
+        index: row.task_index,
+        name: row.task_name,
+        status,
+        result,
+        started_at: row.started_at,
+        completed_at: row.completed_at,
+        sub_workflow_id: row.sub_workflow_id,
+        sub_workflow_summary,
+    })
+}
+
+/// A stored sub-workflow summary, read with Python's rules (`WorkflowHandle.tasks_async`,
+/// `core/models/workflow/handle.py`). A text that is not JSON or a value that the rules refuse is
+/// `STORED_DATA_INVALID` (`HandleStoredDataInvalid`), not retryable. Pure.
+fn stored_summary(
+    workflow_id: Uuid,
+    node_id: Option<&str>,
+    text: &str,
+) -> HandleResult<SubWorkflowSummary> {
+    // Python formats a node with no id as `None`.
+    let node = node_id.unwrap_or("None");
+    let invalid = |message: String| HandleOperationError {
+        code: HandleErrorCode::StoredDataInvalid,
+        message,
+        retryable: false,
+        workflow_id,
+    };
+    let value = crate::core::codec::from_json_str::<serde_json::Value>(text).map_err(|error| {
+        invalid(format!(
+            "sub_workflow_summary JSON corrupt for node {node}: {error}"
+        ))
+    })?;
+    SubWorkflowSummary::from_stored_value(&value).map_err(|refused| {
+        invalid(format!(
+            "sub_workflow_summary invalid for node {node}: {refused}"
+        ))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -377,13 +520,13 @@ enum TerminalFetch {
 
 /// Try to fetch a terminal workflow result. Returns None if not terminal yet.
 async fn try_fetch_terminal_result(
-    pool: &PgPool,
+    broker: &PostgresBroker,
     workflow_id: Uuid,
 ) -> Result<TerminalFetch, WorkflowError> {
-    let row: Option<WorkflowResultRow> = sqlx::query_as(GET_WORKFLOW_RESULT_SQL)
-        .bind(workflow_id)
-        .fetch_optional(pool)
-        .await?;
+    let row = match first_row(read_rows(broker, &WORKFLOW_RESULT, workflow_id).await?) {
+        Some(row) => Some(workflow_result_row(&row)?),
+        None => None,
+    };
 
     match row {
         Some(r) => match parse_workflow_status(&r.status)? {
@@ -400,11 +543,11 @@ async fn try_fetch_terminal_result(
 
 /// Final poll before timeout — check one more time, then timeout.
 async fn final_poll_or_timeout<T: DeserializeOwned>(
-    pool: &PgPool,
+    broker: &PostgresBroker,
     workflow_id: Uuid,
     start: Instant,
 ) -> Result<TaskResult<T>, WorkflowError> {
-    match try_fetch_terminal_result(pool, workflow_id).await? {
+    match try_fetch_terminal_result(broker, workflow_id).await? {
         TerminalFetch::Terminal(result) => Ok(parse_workflow_result(workflow_id, &result)),
         TerminalFetch::NotFound => Ok(TaskResult::Err(TaskError::builtin(
             RetrievalCode::WorkflowNotFound,
@@ -421,57 +564,41 @@ async fn final_poll_or_timeout<T: DeserializeOwned>(
     }
 }
 
-async fn workflow_exists(pool: &PgPool, workflow_id: Uuid) -> Result<bool, WorkflowError> {
-    let row: Option<StatusRow> = sqlx::query_as(GET_WORKFLOW_STATUS_SQL)
-        .bind(workflow_id)
-        .fetch_optional(pool)
-        .await?;
-    Ok(row.is_some())
-}
-
-/// Parse a terminal workflow result into a typed TaskResult.
+/// Parse a terminal workflow result into a typed TaskResult, with Python's codes
+/// (`WorkflowHandle._get_result` and `_get_error`, `core/models/workflow/handle.py`):
+///
+/// - COMPLETED with a NULL or empty result: `RESULT_DESERIALIZATION_ERROR` with
+///   `data.workflow_id` (the library always stores a result with COMPLETED).
+/// - FAILED, CANCELLED or EXPIRED: the stored error ([`stored_workflow_error`]).
+/// - PAUSED: `WORKFLOW_PAUSED`. Any other status: `RESULT_NOT_READY`.
 fn parse_workflow_result<T: DeserializeOwned>(
     workflow_id: Uuid,
     row: &WorkflowResultRow,
 ) -> TaskResult<T> {
     match row.status.as_str() {
-        "COMPLETED" => {
-            let Some(json) = row.result.as_deref() else {
-                return TaskResult::Err(TaskError::builtin(
-                    RetrievalCode::ResultNotAvailable,
-                    "workflow completed but result is null",
-                ));
-            };
-            match read_completed_result(workflow_id, json) {
+        "COMPLETED" => match row.result.as_deref() {
+            None => TaskResult::Err(completed_without_stored_result(workflow_id, "NULL")),
+            Some("") => TaskResult::Err(completed_without_stored_result(workflow_id, "empty")),
+            Some(json) => match read_completed_result(workflow_id, json) {
                 Ok(raw) => map_task_result_value(raw, workflow_id, None),
                 Err(error) => TaskResult::Err(error),
-            }
-        }
-        "FAILED" => {
-            let err = match row.error.as_deref() {
-                Some(json) => serde_json::from_str::<TaskError>(json).unwrap_or_else(|_| {
-                    TaskError::builtin(OperationalErrorCode::BrokerError, "workflow failed")
-                }),
-                None => TaskError::builtin(OperationalErrorCode::BrokerError, "workflow failed"),
-            };
-            TaskResult::Err(err)
-        }
-        "CANCELLED" => TaskResult::Err(TaskError::builtin(
-            OutcomeCode::WorkflowCancelled,
-            "workflow was cancelled",
+            },
+        },
+        "FAILED" => TaskResult::Err(stored_workflow_error(
+            workflow_id,
+            TerminalErrorStatus::Failed,
+            row.error.as_deref(),
         )),
-        "EXPIRED" => {
-            let err = match row.error.as_deref() {
-                Some(json) => serde_json::from_str::<TaskError>(json).unwrap_or_else(|error| {
-                    TaskError::builtin(
-                        OperationalErrorCode::ResultDeserializationError,
-                        format!("failed to deserialize expired workflow error: {error}"),
-                    )
-                }),
-                None => TaskError::builtin(OutcomeCode::WorkflowExpired, "workflow expired"),
-            };
-            TaskResult::Err(err)
-        }
+        "CANCELLED" => TaskResult::Err(stored_workflow_error(
+            workflow_id,
+            TerminalErrorStatus::Cancelled,
+            row.error.as_deref(),
+        )),
+        "EXPIRED" => TaskResult::Err(stored_workflow_error(
+            workflow_id,
+            TerminalErrorStatus::Expired,
+            row.error.as_deref(),
+        )),
         "PAUSED" => TaskResult::Err(TaskError::builtin(
             OutcomeCode::WorkflowPaused,
             "workflow is paused awaiting intervention",
@@ -480,6 +607,96 @@ fn parse_workflow_result<T: DeserializeOwned>(
             RetrievalCode::ResultNotReady,
             format!("workflow {} result not ready", workflow_id),
         )),
+    }
+}
+
+/// A terminal workflow status whose `get()` answer is an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalErrorStatus {
+    Failed,
+    Cancelled,
+    Expired,
+}
+
+impl TerminalErrorStatus {
+    /// The code of the status when no error is stored (Python `_terminal_outcome_code`).
+    fn outcome_code(self) -> OutcomeCode {
+        match self {
+            Self::Failed => OutcomeCode::WorkflowFailed,
+            Self::Cancelled => OutcomeCode::WorkflowCancelled,
+            Self::Expired => OutcomeCode::WorkflowExpired,
+        }
+    }
+
+    /// Python's message for the status with no stored error (`f'Workflow {status.value.lower()}'`).
+    fn no_error_message(self) -> &'static str {
+        match self {
+            Self::Failed => "Workflow failed",
+            Self::Cancelled => "Workflow cancelled",
+            Self::Expired => "Workflow expired",
+        }
+    }
+}
+
+/// `RESULT_DESERIALIZATION_ERROR` for a COMPLETED workflow whose stored result is NULL or empty
+/// (Python `_completed_without_stored_result`). `stored_form` is `NULL` or `empty`.
+fn completed_without_stored_result(workflow_id: Uuid, stored_form: &str) -> TaskError {
+    unreadable_workflow_value(
+        workflow_id,
+        format!("Workflow {workflow_id} is COMPLETED and its stored result is {stored_form}"),
+    )
+}
+
+/// The `get()` error of a FAILED, CANCELLED or EXPIRED workflow (Python `_get_error` and
+/// `_decode_stored_workflow_error`):
+///
+/// - no stored error: the code of `status` ([`TerminalErrorStatus::outcome_code`]);
+/// - an empty stored error: `RESULT_DESERIALIZATION_ERROR`;
+/// - an error object that decodes ([`TaskError::from_stored_value`]): that error, for every status, a
+///   cancel included;
+/// - a text that is not JSON, JSON that is not an object, or an object that does not decode:
+///   `RESULT_DESERIALIZATION_ERROR` with the cause. The plain expiry text of 0.5.0 and 0.5.1 is refused like
+///   any other text: the clean slate keeps no 0.x stored values.
+///
+/// Every `RESULT_DESERIALIZATION_ERROR` carries `data.workflow_id`. Pure, except for one warning log record
+/// per refused stored error.
+fn stored_workflow_error(
+    workflow_id: Uuid,
+    status: TerminalErrorStatus,
+    stored: Option<&str>,
+) -> TaskError {
+    match stored {
+        None => TaskError::builtin(status.outcome_code(), status.no_error_message()),
+        Some("") => {
+            tracing::warn!(%workflow_id, "workflow error payload is empty");
+            unreadable_workflow_value(workflow_id, "Workflow error payload is empty".to_owned())
+        }
+        Some(text) => decode_stored_workflow_error(workflow_id, text),
+    }
+}
+
+/// Decodes a stored workflow error that is not NULL and not empty. See [`stored_workflow_error`].
+fn decode_stored_workflow_error(workflow_id: Uuid, text: &str) -> TaskError {
+    let refusal = match crate::core::codec::from_json_str::<serde_json::Value>(text) {
+        Err(error) => format!("Workflow error payload corrupt: {error}"),
+        Ok(value @ serde_json::Value::Object(_)) => match TaskError::from_stored_value(value) {
+            Ok(error) => return error,
+            Err(refused) => format!("Workflow error payload validation failed: {refused}"),
+        },
+        Ok(other) => format!(
+            "Workflow error payload is not a JSON object: got {}",
+            crate::core::workflow::summary::python_type_name(Some(&other)),
+        ),
+    };
+    tracing::warn!(%workflow_id, cause = %refusal, "workflow error payload does not decode");
+    unreadable_workflow_value(workflow_id, refusal)
+}
+
+/// `RESULT_DESERIALIZATION_ERROR` with `message` and `data.workflow_id`.
+fn unreadable_workflow_value(workflow_id: Uuid, message: String) -> TaskError {
+    TaskError {
+        data: Some(serde_json::json!({ "workflow_id": workflow_id.to_string() })),
+        ..TaskError::builtin(OperationalErrorCode::ResultDeserializationError, message)
     }
 }
 
@@ -733,7 +950,6 @@ mod tests {
     /// result with COMPLETED, so a NULL or empty one is stored data that does
     /// not parse.
     #[test]
-    #[ignore = "waits on #855"]
     fn completed_with_null_result() {
         let workflow_id = Uuid::new_v4();
         for stored in [None, Some("")] {
@@ -798,7 +1014,6 @@ mod tests {
     /// Python `_decode_stored_workflow_error`: a stored error that is not JSON,
     /// not an object, or not a `TaskError` is `RESULT_DESERIALIZATION_ERROR`.
     #[test]
-    #[ignore = "waits on #855"]
     fn failed_with_malformed_error_json() {
         let workflow_id = Uuid::new_v4();
         for stored in ["{garbage", "[1]", r#"{"error_code": 5}"#] {
@@ -821,7 +1036,6 @@ mod tests {
     /// Python `_terminal_outcome_code`: a FAILED workflow with no stored
     /// error is `WORKFLOW_FAILED`, not a broker error.
     #[test]
-    #[ignore = "waits on #855"]
     fn failed_with_null_error() {
         let r = row("FAILED", None, None);
 
@@ -831,6 +1045,34 @@ mod tests {
             err.error_code,
             TaskErrorCode::from(OutcomeCode::WorkflowFailed),
         );
+    }
+
+    /// Python `_decode_stored_workflow_error`: the stored error of a terminal
+    /// workflow is its answer for every status, a cancel included; an empty one
+    /// is `RESULT_DESERIALIZATION_ERROR`.
+    #[test]
+    fn a_stored_error_is_the_answer_of_every_terminal_error_status() {
+        let workflow_id = Uuid::new_v4();
+        let stored = TaskError::new("STOPPED_BY_OPERATOR", "stopped").unwrap();
+        let stored_json = serde_json::to_string(&stored).unwrap();
+        for status in ["FAILED", "CANCELLED", "EXPIRED"] {
+            let result: TaskResult<i32> =
+                parse_workflow_result(workflow_id, &row(status, None, Some(&stored_json)));
+            assert_eq!(result.unwrap_err(), stored, "{status}");
+
+            let empty: TaskResult<i32> =
+                parse_workflow_result(workflow_id, &row(status, None, Some("")));
+            let empty = empty.unwrap_err();
+            assert_eq!(
+                empty.error_code,
+                TaskErrorCode::from(OperationalErrorCode::ResultDeserializationError),
+                "{status}",
+            );
+            assert_eq!(
+                empty.data,
+                Some(serde_json::json!({"workflow_id": workflow_id.to_string()})),
+            );
+        }
     }
 
     #[test]
@@ -1139,7 +1381,11 @@ mod wait_tests {
             .message
             .as_deref()
             .unwrap()
-            .contains("failed to deserialize expired workflow error"));
+            .contains("Workflow error payload corrupt"));
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({"workflow_id": workflow_id.to_string()})),
+        );
 
         sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)

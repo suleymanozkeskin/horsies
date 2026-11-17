@@ -21,7 +21,7 @@ export default defineConfig({
   build: {
     // The wheel ships this directory as package data; CI builds it before the
     // wheel build. It lives outside the Vite root, hence the explicit empty.
-    outDir: '../horsies/web/static',
+    outDir: '../python/horsies/web/static',
     emptyOutDir: true,
   },
   server: {

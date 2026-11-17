@@ -8,8 +8,8 @@
 //! [`CLASS_COVERAGE_LOG_INTERVAL`], and a failed check at most once per the
 //! same interval.
 //!
-//! Python reference: `horsies/core/worker/class_coverage_log.py` and
-//! `ReaperMixin._check_class_coverage` (`horsies/core/worker/reaper.py:630-664`).
+//! Python reference: `python/horsies/core/worker/class_coverage_log.py` and
+//! `ReaperMixin._check_class_coverage` (`python/horsies/core/worker/reaper.py:630-664`).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -187,7 +187,7 @@ impl CoverageLogBound {
 
 /// The fleet check state of one reaper loop (Python
 /// `_ReaperPassState.class_coverage_checks_from` and `coverage_log`,
-/// `horsies/core/worker/runtime.py:173-177`).
+/// `python/horsies/core/worker/runtime.py:173-177`).
 #[derive(Debug)]
 pub(crate) struct ClassCoverageLog {
     /// The loop reads the fleet check from this time on.

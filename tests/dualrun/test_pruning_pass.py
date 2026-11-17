@@ -15,8 +15,6 @@ with ``StagedLoaderPublisher``:
 Seeded leaves (period leaves of ``standard_30d``, created and published by
 ``horsies_create_history_leaf``):
 
-- 43 days old, detached out of band without a catalog record, so the
-  published manifest still names it: its drop is refused;
 - 42 days old, a concurrent detach interrupted by a statement timeout: the
   pass finalizes it, then drops it;
 - 41 days old, pinned by a pending phase-2 locator: refused;
@@ -24,8 +22,10 @@ Seeded leaves (period leaves of ``standard_30d``, created and published by
 - today's leaf: not expired, untouched;
 - an hourly heartbeat leaf 6 h old: detached and dropped.
 
-The snapshots must be equal and the pass reports must be equal. Two cases pin
-the rule differences of the switch.
+The snapshots must be equal and the pass reports must be equal. Three cases
+pin the rule differences of the switch; one of them seeds a 43-day-old leaf
+detached out of band without a catalog record, so the published manifest
+still names it.
 """
 
 from __future__ import annotations
@@ -105,14 +105,18 @@ class Seeds:
     """Which states one pair seeds besides today's leaf and the expired heartbeat leaf."""
 
     expired_history: bool
-    """The four expired period leaves (43 to 40 days old) and their states."""
+    """The three expired period leaves (42 to 40 days old) and their states."""
+    out_of_band_detach: bool
+    """A 43-day-old period leaf, detached out of band without a catalog record."""
     blocked_interrupted: bool
     """A pending locator also pins the interrupted detach (42 days old)."""
     unpublished_leaf: bool
     """Tomorrow's leaf, created without a reader publication."""
 
 
-STANDARD: Final = Seeds(expired_history=True, blocked_interrupted=False, unpublished_leaf=False)
+STANDARD: Final = Seeds(
+    expired_history=True, out_of_band_detach=False, blocked_interrupted=False, unpublished_leaf=False
+)
 
 
 def _anchors() -> Anchors:
@@ -251,13 +255,12 @@ async def _create_unpublished_leaf(database: DualRunDatabase, lower: datetime) -
 def _seed_expired_history(
     database: DualRunDatabase, connection: Connection, anchors: Anchors, seeds: Seeds
 ) -> None:
-    for days_ago in (43, 42, 41, 40):
+    for days_ago in (42, 41, 40):
         _created(
             connection,
             _CREATE_HISTORY_LEAF_SQL,
             {'class_key': CLASS_KEY, 'lower': anchors.history(days_ago)},
         )
-    _ = connection.execute(_detach_sql(anchors.history(43), concurrently=False))
     _interrupt_detach(database, anchors.history(42))
     _pin(connection, anchors.history(41))
     if seeds.blocked_interrupted:
@@ -272,6 +275,15 @@ def _seed_expired_history(
     )
 
 
+def _seed_out_of_band_detach(connection: Connection, anchors: Anchors) -> None:
+    _created(
+        connection,
+        _CREATE_HISTORY_LEAF_SQL,
+        {'class_key': CLASS_KEY, 'lower': anchors.history(43)},
+    )
+    _ = connection.execute(_detach_sql(anchors.history(43), concurrently=False))
+
+
 def _seed(
     database: DualRunDatabase, connection: Connection, anchors: Anchors, seeds: Seeds
 ) -> None:
@@ -283,6 +295,8 @@ def _seed(
     _created(connection, _CREATE_HEARTBEAT_LEAF_SQL, {'lower': anchors.heartbeat_hour})
     if seeds.expired_history:
         _seed_expired_history(database, connection, anchors, seeds)
+    if seeds.out_of_band_detach:
+        _seed_out_of_band_detach(connection, anchors)
     if seeds.unpublished_leaf:
         asyncio.run(_create_unpublished_leaf(database, anchors.history(-1)))
 
@@ -402,13 +416,10 @@ def test_the_pruning_pass_acts_as_the_statements_before_the_switch(
     assert diff.entries == (), render_diff(diff)
     assert candidate.report == reference.report
     anchors = _anchors()
-    assert reference.unrecorded_after_pass == candidate.unrecorded_after_pass == (
-        _leaf_name(anchors.history(43)),
-    )
+    assert reference.unrecorded_after_pass == candidate.unrecorded_after_pass == ()
     assert candidate.report.finalized_leaves == (_leaf_name(anchors.history(42)),)
     assert _entries(candidate.report) == [
         (f'horsies_heartbeats_{anchors.heartbeat_hour:%Y_%m_%d_%H}', 'LeafDetached', 'LeafDropped'),
-        (_leaf_name(anchors.history(43)), 'LeafDetached', 'DropRefusedLoaderReferences'),
         (_leaf_name(anchors.history(42)), 'LeafDetached', 'LeafDropped'),
         (_leaf_name(anchors.history(41)), 'LeafPendingBlocked', None),
         (_leaf_name(anchors.history(40)), 'LeafDetached', 'LeafDropped'),
@@ -425,7 +436,12 @@ def test_a_blocked_interrupted_detach_is_also_a_finalize_refusal(
     unblocked ones, so a blocked pending detach was a sweep refusal alone."""
     reference, candidate = _pair(
         empty_database,
-        Seeds(expired_history=True, blocked_interrupted=True, unpublished_leaf=False),
+        Seeds(
+            expired_history=True,
+            out_of_band_detach=False,
+            blocked_interrupted=True,
+            unpublished_leaf=False,
+        ),
     )
     blocked = _leaf_name(_anchors().history(42))
 
@@ -448,7 +464,12 @@ def test_a_detach_publishes_only_when_the_manifest_names_the_leaf(
     stale; the heartbeat detach republished them before, and does not now."""
     reference, candidate = _pair(
         empty_database,
-        Seeds(expired_history=False, blocked_interrupted=False, unpublished_leaf=True),
+        Seeds(
+            expired_history=False,
+            out_of_band_detach=False,
+            blocked_interrupted=False,
+            unpublished_leaf=True,
+        ),
     )
 
     diff = compare_snapshots(reference.run.snapshot, candidate.run.snapshot)
@@ -460,3 +481,38 @@ def test_a_detach_publishes_only_when_the_manifest_names_the_leaf(
     assert {entry.table for entry in diff.entries} == {'horsies_task_lookup_manifest'}, (
         render_diff(diff)
     )
+
+
+def test_a_leaf_detached_out_of_band_is_recorded_and_dropped(
+    empty_database: MakeDatabase,
+) -> None:
+    """Rule difference: before the switch the pass never recorded a detach
+    made out of band, so the published manifest kept naming the leaf and its
+    drop was refused on every pass. Now ``horsies_begin_leaf_detach`` records
+    the detach and publishes the readers without the leaf, and the same pass
+    drops it."""
+    reference, candidate = _pair(
+        empty_database,
+        Seeds(
+            expired_history=False,
+            out_of_band_detach=True,
+            blocked_interrupted=False,
+            unpublished_leaf=False,
+        ),
+    )
+    anchors = _anchors()
+    heartbeat = (
+        f'horsies_heartbeats_{anchors.heartbeat_hour:%Y_%m_%d_%H}',
+        'LeafDetached',
+        'LeafDropped',
+    )
+    detached = _leaf_name(anchors.history(43))
+
+    assert reference.unrecorded_after_pass == (detached,)
+    assert candidate.unrecorded_after_pass == ()
+    assert _entries(reference.report) == [
+        heartbeat,
+        (detached, 'LeafDetached', 'DropRefusedLoaderReferences'),
+    ]
+    assert _entries(candidate.report) == [heartbeat, (detached, 'LeafDetached', 'LeafDropped')]
+    assert candidate.report.errors == ()

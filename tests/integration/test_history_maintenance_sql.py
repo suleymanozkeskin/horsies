@@ -20,7 +20,6 @@ import pytest_asyncio
 
 from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
 from horsies.core.lifecycle.operations import TerminalizationKind, equivalence_class_of
-from horsies.core.types.result import Err, Ok
 from horsies.core.utils.url import to_psycopg_url
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
@@ -30,7 +29,7 @@ pytestmark = [pytest.mark.integration]
 _CASES_SQL: Final = Path(__file__).with_name('history_maintenance_cases.sql')
 _CONCURRENCY_SQL: Final = Path(__file__).with_name('history_maintenance_concurrency.sql')
 
-PASSED_CASES: Final = 113
+PASSED_CASES: Final = 119
 """The checks of ``history_maintenance_cases.sql``. A check added to the file changes it."""
 
 PASSED_CONCURRENCY_CASES: Final = 36
@@ -40,11 +39,7 @@ _PASSED_PREFIX: Final = 'ok: '
 
 
 def _migration() -> BaselineMigration:
-    match load_baseline_migration():
-        case Ok(loaded):
-            return loaded
-        case Err(unreadable):
-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
+    return load_baseline_migration()
 
 
 @pytest_asyncio.fixture
