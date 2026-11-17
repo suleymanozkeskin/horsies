@@ -2555,51 +2555,15 @@ class TestWorkflowHandleInfraErrors:
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope='function')
 class TestListenerFallbackContract:
-    """Verify the listener-failure → polling-fallback contract at integration level.
+    """A programming error of the wait (a ``TypeError``) propagates through
+    ``WorkflowHandle.get_async``; it is never folded into an answer.
 
-    Tests prove that:
-    - Operational listener failures (Err) silently degrade to DB polling.
-    - Programming errors (TypeError) from ``listener.listen`` propagate
-      through ``WorkflowHandle.get_async``; they are never silently
-      swallowed into polling.
+    The wait and its listener run in the core
+    (``CoreHandle.wait_workflow_result_async``). The fallback to polling when
+    the listener cannot subscribe is tested there:
+    ``crates/horsies-core/src/workflow_engine/port_tests/handle_reads.rs``,
+    ``get_polls_when_the_listener_cannot_connect``.
     """
-
-    async def test_handle_get_async_polls_on_listener_err(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        """Operational listener Err triggers polling fallback; get_async still returns Ok."""
-        from horsies.core.brokers.result_types import (
-            BrokerErrorCode,
-            BrokerOperationFailed,
-        )
-        from horsies.core.types.result import Err as Err_
-
-        task_a = make_simple_task(app, 'listen_fallback_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 50})
-        spec = make_workflow_spec(
-            broker=broker, name='listen_fallback', tasks=[node_a], output=node_a,
-        )
-        handle = await start_ok(spec, broker)
-
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
-
-        listen_err = Err_(BrokerOperationFailed(
-            code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
-            message='forced test failure',
-            retryable=True,
-            exception=ConnectionError('listener down'),
-        ))
-        with patch.object(
-            listener_of(broker), 'listen', new=AsyncMock(return_value=listen_err),
-        ):
-            result = await handle.get_async(timeout_ms=5000)
-
-        assert result.is_ok(), f'Expected Ok, got {result}'
-        assert result.unwrap() == 100
 
     async def test_handle_get_async_propagates_programming_error(
         self,
