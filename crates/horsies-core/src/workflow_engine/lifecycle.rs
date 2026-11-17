@@ -150,7 +150,6 @@ fn to_handle_error(e: WorkflowError, workflow_id: Uuid) -> HandleOperationError 
 /// - `Validation`: only the host build of a child that a resume owes gives it (a stored node input that the
 ///   `args_from` merge refuses, a built child spec that the tree arguments refuse); Python's resume lets
 ///   every exception other than a database error propagate.
-/// - `WorkflowTimeout`, `WorkflowError`: no workflow operation constructs them.
 pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> HandleOperationError {
     let (code, retryable) = match e {
         WorkflowError::WorkflowNotFound { .. } => (HandleErrorCode::WorkflowNotFound, false),
@@ -162,10 +161,7 @@ pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> Ha
         WorkflowError::InvalidStatus(_) | WorkflowError::Serialization(_) => {
             (HandleErrorCode::StoredDataInvalid, false)
         }
-        WorkflowError::WorkflowTimeout { .. }
-        | WorkflowError::WorkflowError(_)
-        | WorkflowError::Validation(_)
-        | WorkflowError::StepContract(_) => panic!(
+        WorkflowError::Validation(_) | WorkflowError::StepContract(_) => panic!(
             "workflow handle operation on workflow {workflow_id} failed with an error that has no \
              handle catalog entry (a defect): {e}"
         ),

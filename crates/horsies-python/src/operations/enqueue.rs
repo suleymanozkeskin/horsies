@@ -5,17 +5,19 @@
 //! `REPEAT`, so a task that finished answers from history and does not run
 //! again. The first send of a handle installs the schema once first, as
 //! Python's broker does. The outcome is `Enqueued`, `SendValidationFailed`
-//! (the core refused the input or the options before any statement), or one
-//! class per other variant of the core's send error catalog
-//! (`TaskSendError`), each with only the facts of its state.
+//! (the core refused the input or the options before any statement),
+//! `SendEnqueueFailed` for a retention class key that no class derives (as
+//! Python's broker answers it), or one class per other variant of the core's
+//! send error catalog (`TaskSendError`), each with only the facts of its
+//! state.
 
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use horsies_core::core::task::send_types::send_error_from_enqueue;
 use horsies_core::{
-    BrokerError, BrokerErrorCode, EnqueueRefusal, EnqueueRefusalCause, EnqueueRetention, SendKind,
-    SendPart, TaskSendError, TaskSendPayload,
+    BrokerError, BrokerErrorCode, EnqueueRefusal, EnqueueRefusalCause, EnqueueRetention,
+    RetentionClassKeyRefused, SendKind, SendPart, TaskSendError, TaskSendPayload,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -176,8 +178,8 @@ pub struct SendSuppressed {
 
 /// The core refused the send before any statement. Nothing was written.
 /// `code` is `INVALID_INPUT` (the input, or a fact of the call: the start,
-/// the sent instant, the idempotency key, the retention class key, the
-/// fingerprint) or `INVALID_TASK_OPTIONS`. `cause_text` is the JSON reader's
+/// the sent instant, the idempotency key, the fingerprint) or
+/// `INVALID_TASK_OPTIONS`. `cause_text` is the JSON reader's
 /// error when the refused text does not read, and `None` when a rule refused
 /// a value that reads.
 #[pyclass(module = "horsies._core", frozen, get_all)]
@@ -210,7 +212,10 @@ fn refused_code(part: SendPart) -> BrokerErrorCode {
     }
 }
 
-/// The database failed during the enqueue; the row may or may not exist.
+/// The enqueue failed; the row may or may not exist. A retention class key
+/// that no class derives is this record too, built before any statement:
+/// nothing was written, and `retryable` is false
+/// (`retention_key_refused`).
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct SendEnqueueFailed {
@@ -252,6 +257,8 @@ pub enum SendOutcome {
     Enqueued(Uuid),
     /// The core refused the input or the options before any statement.
     Invalid(SendValidationFailed),
+    /// No retention class derives the class key; nothing was written.
+    RetentionKeyRefused(SendEnqueueFailed),
     Refused(TaskSendError),
 }
 
@@ -264,6 +271,7 @@ impl<'py> IntoPyObject<'py> for SendOutcome {
         match self {
             Self::Enqueued(task_id) => Enqueued { task_id }.into_bound_py_any(py),
             Self::Invalid(invalid) => invalid.into_bound_py_any(py),
+            Self::RetentionKeyRefused(failed) => failed.into_bound_py_any(py),
             Self::Refused(error) => refusal_record(py, error),
         }
     }
@@ -332,10 +340,11 @@ pub async fn enqueue_operation(
     let retention = match EnqueueRetention::from_class_key(&command.retention_class_key) {
         Ok(retention) => retention,
         Err(refused_key) => {
-            // The same message form as every other refusal of the core.
-            let refusal = EnqueueRefusal::by_rule(SendPart::Input, refused_key.to_string());
-            let message = BrokerError::EnqueueContract(refusal.clone()).to_string();
-            return SendOutcome::Invalid(SendValidationFailed::of(&refusal, message));
+            return SendOutcome::RetentionKeyRefused(retention_key_refused(
+                command.task_id,
+                &command.task_name,
+                &refused_key,
+            ));
         }
     };
     let broker = match connection.initialized_broker().await {
@@ -368,6 +377,24 @@ pub async fn enqueue_operation(
     match enqueued {
         Ok(task_id) => SendOutcome::Enqueued(task_id),
         Err(error) => refused(&command, retention, &error),
+    }
+}
+
+/// The record of a retention class key that no class derives, as Python's
+/// broker answers it: Python sends the key, the CHECK
+/// `horsies_tasks_retention_class_key_form` refuses the insert, and the
+/// enqueue is `BrokerEnqueueFailed` with that cause, not retryable. The core
+/// refuses the key before any statement; nothing is written in both. The
+/// message has Python's form, with the refusal as the cause. Pure.
+fn retention_key_refused(
+    task_id: Uuid,
+    task_name: &str,
+    refused: &RetentionClassKeyRefused,
+) -> SendEnqueueFailed {
+    SendEnqueueFailed {
+        task_id,
+        message: format!("Failed to enqueue task {task_name}: {refused}"),
+        retryable: false,
     }
 }
 
@@ -413,6 +440,23 @@ mod tests {
         let record = SendValidationFailed::of(&refusal, refusal.message.clone());
         assert_eq!(record.code, "INVALID_INPUT");
         assert_eq!(record.cause_text.as_deref(), Some("trailing characters"));
+    }
+
+    #[test]
+    fn a_retention_key_that_no_class_derives_is_a_failed_enqueue_that_is_not_retried() {
+        let task_id = Uuid::from_u128(7);
+        let refused = EnqueueRetention::from_class_key("standard_0d")
+            .expect_err("a period of 0 days is below the bounds");
+        let record = retention_key_refused(task_id, "send.task", &refused);
+        assert_eq!(record.task_id, task_id);
+        assert!(!record.retryable);
+        assert!(
+            record.message.starts_with(
+                "Failed to enqueue task send.task: retention class key \"standard_0d\""
+            ),
+            "{}",
+            record.message
+        );
     }
 
     #[test]

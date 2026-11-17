@@ -326,7 +326,10 @@ class SendValidationFailed:
 
 @final
 class SendEnqueueFailed:
-    """The database failed during the enqueue; the row may or may not exist."""
+    """The enqueue failed; the row may or may not exist. A retention class key that no class
+    derives is this record too, built before any statement: nothing was written, and
+    retryable is False.
+    """
     @property
     def task_id(self) -> uuid.UUID: ...
     @property
