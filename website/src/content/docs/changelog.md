@@ -617,8 +617,8 @@ unless it starts with "Added".
 - **`spawn_scheduler` is removed; `run_scheduler` refuses schedule input
   that does not read back.** `Horsies::scheduler()` checks each enabled
   schedule (its task, its queue, its input decoded and read back with the
-  task's input type, a member that the type does not read, the input size)
-  before any connection, and returns a `PreparedScheduler` with `run()` and
+  task's input type, a member that the type does not read at any depth,
+  the input size) before any connection, and returns a `PreparedScheduler` with `run()` and
   `stop_handle()`. `run_scheduler()` runs it until `SIGTERM` or `SIGINT`.
   Both return `SchedulerStopped` or a closed `SchedulerRunError`. A schedule
   section that is missing or switched off is refused.
@@ -686,7 +686,11 @@ unless it starts with "Added".
   type of its task or child workflow**, with each `args_from` member as a
   result and the workflow context when the task takes it: a member that
   binds to no field is `HRS-019`, a missing field `HRS-020`, a value of
-  another type `HRS-031`. It also refuses an `any` or quorum join with an
+  another type `HRS-031`. A member of the node's own input binds to no
+  field when the decoded value does not write it back, at any depth, so
+  an input type without `deny_unknown_fields` refuses it too; the error
+  names its key path (`options.retries`, `parcels[0].weight`). A member
+  whose value is `null` is not compared. It also refuses an `any` or quorum join with an
   `args_from` member whose field has no default (`HRS-013`), a priority
   outside 1 to 100 (`HRS-034`), and `workflow_ctx_from` on a task without
   `workflow_ctx` (`HRS-010`).

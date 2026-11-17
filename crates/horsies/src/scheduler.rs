@@ -312,6 +312,24 @@ mod tests {
         Ok(input.count)
     }
 
+    #[derive(Debug, Serialize, Deserialize)]
+    struct StepInput {
+        count: u32,
+        options: StepOptions,
+    }
+
+    /// A nested input type that reads an unknown key without an error.
+    #[derive(Debug, Serialize, Deserialize)]
+    struct StepOptions {
+        #[serde(default)]
+        step: u32,
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn step_task(input: StepInput) -> Result<u32, TaskError<std::convert::Infallible>> {
+        Ok(input.count + input.options.step)
+    }
+
     fn schedule(name: &str, task_name: &str, input: serde_json::Value) -> TaskSchedule {
         TaskSchedule {
             name: name.to_owned(),
@@ -392,6 +410,32 @@ mod tests {
         let refusals = app.schedule_refusals(&schedule);
         assert_eq!(refusals.len(), 1);
         assert!(refusals[0].notes[0].contains("'cuont'"), "{}", refusals[0]);
+    }
+
+    /// #571, Python `_validate_input` with `extra='forbid'`: a key inside a
+    /// nested object of the input that binds to no field is refused before
+    /// any connection, with its key path.
+    #[test]
+    fn a_nested_input_member_that_the_type_does_not_read_is_refused() {
+        let mut app = app_with(
+            vec![schedule(
+                "every",
+                "step",
+                json!({"count": 5, "options": {"stpe": 2}}),
+            )],
+            true,
+        );
+        app.register("step", crate::blocking_task_fn!(step_task, StepInput))
+            .unwrap();
+        let schedule = app.config().schedule.clone().unwrap();
+        let refusals = app.schedule_refusals(&schedule);
+        assert_eq!(refusals.len(), 1);
+        assert_eq!(refusals[0].code, Some(ErrorCode::ConfigInvalidSchedule));
+        assert!(
+            refusals[0].notes[0].contains("'options.stpe'"),
+            "{}",
+            refusals[0]
+        );
     }
 
     #[test]
