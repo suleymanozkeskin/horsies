@@ -3,9 +3,8 @@
 Reference: ``tests/dualrun/monitoring_detail_reference.py`` (a REPEATABLE
 READ session: live read, staged history read, absence rule, attempt rows,
 workflow link). Candidate: one call of ``horsies_monitoring_task_detail``
-(Python's body before the monitoring switch,
-``tests/dualrun/reference/monitoring_queries.py``) and of
-``horsies_monitoring_workflow_node`` (``horsies.monitoring``).
+and of ``horsies_monitoring_workflow_node``, Python's bodies before the
+monitoring switch (``tests/dualrun/reference/monitoring_queries.py``).
 The seed has live tasks with and without attempts, history tasks with an
 attempt snapshot, workflow-bound tasks, absent ids of both kinds, and the
 nodes of one run: a task node per location, a sub-workflow node, a node
@@ -13,9 +12,10 @@ whose task is in neither place, a node with a stored error and one with a
 stored value. Each read must give equal answers.
 
 The caller switch pair of the monitoring switch: on the same seed, Python's
-``get_task_detail`` against the production read, which the core runs. The
-reports must be equal; the open span of a live task may be up to
-``COUNTING_SPAN_TOLERANCE_S`` longer on the core, which reads second.
+``get_task_detail`` and ``get_workflow_node`` against the production reads,
+which the core runs. The reports must be equal; the open span of a live
+task may be up to ``COUNTING_SPAN_TOLERANCE_S`` longer on the core, which
+reads second.
 """
 
 from __future__ import annotations
@@ -243,7 +243,7 @@ def _detail_pair(task_id: str) -> ReadPair[object]:
 
 def _node_pair(task_index: int) -> ReadPair[object]:
     async def candidate(broker: PostgresBroker) -> object:
-        return await get_workflow_node(broker, _RUN_ID, task_index)
+        return await python_reads.get_workflow_node(broker, _RUN_ID, task_index)
 
     async def reference_read(broker: PostgresBroker) -> object:
         return await reference.get_workflow_node(broker, _RUN_ID, task_index)
@@ -325,9 +325,20 @@ def _core_detail_pair(task_id: str) -> ReadPair[object]:
     return ReadPair(name=f'detail {task_id}', reference=python_read, candidate=core_read)
 
 
+def _core_node_pair(task_index: int) -> ReadPair[object]:
+    async def python_read(broker: PostgresBroker) -> object:
+        return await python_reads.get_workflow_node(broker, _RUN_ID, task_index)
+
+    async def core_read(broker: PostgresBroker) -> object:
+        return await get_workflow_node(broker, _RUN_ID, task_index)
+
+    return ReadPair(name=f'node {task_index}', reference=python_read, candidate=core_read)
+
+
 def test_the_core_answers_what_python_answered(empty_database: MakeDatabase) -> None:
-    """The caller switch: Python's detail read against the production read on the core."""
+    """The caller switch: Python's detail and node reads against the production reads on the core."""
     pairs = [_core_detail_pair(task_id) for task_id in _TASK_IDS]
+    pairs += [_core_node_pair(task_index) for task_index in _NODE_INDEXES]
 
     answers = read_dual_run(empty_database, _seed(), pairs)
 
@@ -341,6 +352,14 @@ def test_the_core_answers_what_python_answered(empty_database: MakeDatabase) -> 
         'task',
         'absent WITHIN_RETAINED_HISTORY',
         'absent NOT_CLASSIFIED',
+        'node with task',
+        'node with task',
+        'node without task',
+        'node without task',
+        'node without task',
+        'node without task',
+        'node without task',
+        'no node',
     ]
 
 

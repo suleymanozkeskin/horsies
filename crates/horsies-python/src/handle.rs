@@ -39,8 +39,10 @@ use crate::operations::failed_attempt::{
     finish_ended_attempt_operation, finish_failed_attempt_operation, FinishFailedAttemptRequest,
 };
 use crate::operations::monitoring_reads::{
-    list_tasks_operation, task_detail_operation, task_facets_operation, TaskFacetsQuery,
-    TaskListQuery,
+    list_tasks_operation, schedules_operation, task_breakdown_operation, task_detail_operation,
+    task_facets_operation, task_stats_operation, workflow_names_operation, workflow_node_operation,
+    workflow_run_operation, workflow_runs_operation, TaskBreakdownQuery, TaskFacetsQuery,
+    TaskListQuery, TaskStatsQuery, WorkflowRunsQuery,
 };
 use crate::operations::paused_expiry::expire_paused_workflows_operation;
 use crate::operations::queue_starts::{count_queue_starts_operation, QueueStartsRequest};
@@ -898,6 +900,135 @@ impl CoreHandle {
             "CoreHandle.monitoring_task_facets_async",
             CallKind::Read,
             task_facets_operation(self.connection(), query.get().query()),
+        )
+    }
+
+    /// The count of each task status (`horsies_monitoring_task_stats`):
+    /// `MonitoringJson` of the core's `Vec<StatusCount>`, or
+    /// `MonitoringFailed`. Reads only, in one statement. Awaitable only: its
+    /// caller, `horsies.monitoring.task_stats`, is a coroutine. A cancelled
+    /// await drops the read.
+    fn monitoring_task_stats_async<'py>(
+        &self,
+        py: Python<'py>,
+        query: &Bound<'_, TaskStatsQuery>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_task_stats_async",
+            CallKind::Read,
+            task_stats_operation(self.connection(), query.get().query()),
+        )
+    }
+
+    /// The task counts per group (`horsies_monitoring_task_breakdown`):
+    /// `MonitoringJson` of the core's `Breakdown`, or `MonitoringFailed`.
+    /// Reads only, in one statement. Awaitable only. A cancelled await drops
+    /// the read.
+    fn monitoring_task_breakdown_async<'py>(
+        &self,
+        py: Python<'py>,
+        query: &Bound<'_, TaskBreakdownQuery>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_task_breakdown_async",
+            CallKind::Read,
+            task_breakdown_operation(self.connection(), query.get().query()),
+        )
+    }
+
+    /// The names of the root runs (`horsies_monitoring_workflow_names`):
+    /// `MonitoringJson` of the core's `Vec<String>`, or `MonitoringFailed`.
+    /// Reads only, in one statement. Awaitable only. A cancelled await drops
+    /// the read.
+    fn monitoring_workflow_names_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_workflow_names_async",
+            CallKind::Read,
+            workflow_names_operation(self.connection()),
+        )
+    }
+
+    /// The newest root runs (`horsies_monitoring_workflow_runs`):
+    /// `MonitoringJson` of the core's `Vec<WorkflowRunSummary>`, or
+    /// `MonitoringFailed`. Reads only, in one statement. Awaitable only. A
+    /// cancelled await drops the read.
+    fn monitoring_workflow_runs_async<'py>(
+        &self,
+        py: Python<'py>,
+        query: &Bound<'_, WorkflowRunsQuery>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_workflow_runs_async",
+            CallKind::Read,
+            workflow_runs_operation(self.connection(), query.get().query()),
+        )
+    }
+
+    /// One run with its nodes and edges (`horsies_monitoring_workflow_run`):
+    /// `MonitoringJson` of the core's `Option<WorkflowRunDetail>` (`null`
+    /// when no run has the id), or `MonitoringFailed`. Reads only, in one
+    /// statement. Awaitable only. A cancelled await drops the read.
+    fn monitoring_workflow_run_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_workflow_run_async",
+            CallKind::Read,
+            workflow_run_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// One node with its task (`horsies_monitoring_workflow_node`):
+    /// `MonitoringJson` of the core's `Option<WorkflowTaskDetail>` (`null`
+    /// when the run has no node at the index), or `MonitoringFailed`. Reads
+    /// only, in one statement. Awaitable only. A cancelled await drops the
+    /// read. An index outside 32 bits raises `OverflowError`.
+    #[pyo3(signature = (workflow_id, *, task_index))]
+    fn monitoring_workflow_node_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+        task_index: i32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_workflow_node_async",
+            CallKind::Read,
+            workflow_node_operation(self.connection(), workflow_id, task_index),
+        )
+    }
+
+    /// Every schedule state (`horsies_monitoring_schedules`):
+    /// `MonitoringJson` of the core's `Vec<ScheduleStateInfo>`, or
+    /// `MonitoringFailed`. Reads only, in one statement. Awaitable only. A
+    /// cancelled await drops the read.
+    fn monitoring_schedules_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_schedules_async",
+            CallKind::Read,
+            schedules_operation(self.connection()),
         )
     }
 

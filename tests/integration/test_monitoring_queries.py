@@ -17,18 +17,40 @@ applies migrations). Coverage:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from collections.abc import Awaitable, Callable, Generator
 from typing import Any, AsyncGenerator
 
 import pytest
 import pytest_asyncio
 
 from horsies.monitoring import MonitoringWindow
-from tests.broker_resources_support import current_resources
+from tests.integration.autocommit_support import proxied_url, steady_state_turns, upstream_of
+from tests.integration.round_trip_proxy import RoundTripProxy, Turn
+
+
+_FORWARD_WAIT_S = 0.5
+"""How long a test that expects no record waits for a late one: the core
+hands its records to Python ``logging`` on its forwarder thread."""
+
+
+async def _until_logged(caplog: pytest.LogCaptureFixture, text_part: str) -> None:
+    """Wait until a record whose message holds ``text_part`` reaches ``caplog``.
+
+    The core hands its records to Python ``logging`` on its forwarder thread,
+    so a record can arrive after the call that logged it returned. Python's
+    read logs before it returns, so the wait ends at once there.
+    """
+    for _ in range(100):
+        if any(text_part in record.getMessage() for record in caplog.records):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f'no log record holds {text_part!r}')
 
 
 def _test_window() -> MonitoringWindow:
@@ -36,7 +58,7 @@ def _test_window() -> MonitoringWindow:
     now = datetime.now(timezone.utc)
     return MonitoringWindow(lower=now - timedelta(days=29), upper=now + timedelta(hours=1))
 from pydantic import SecretStr
-from sqlalchemy import event, text
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -477,29 +499,27 @@ class TestTaskFacets:
         assert {f.value: f.count for f in facets.queues} == {'default': 1, 'fast': 2}
 
     async def test_a_poll_runs_one_statement_for_both_sides(
-        self, broker: PostgresBroker, session: AsyncSession
+        self,
+        broker: PostgresBroker,  # noqa: ARG002 - the schema and history leaves
+        session: AsyncSession,
+        proxy: RoundTripProxy,
+        db_url: str,
     ) -> None:
         await insert_rows(session, make_task(task_name='alpha_task'))
-        statements: list[str] = []
 
-        def _record(_conn: Any, _cursor: Any, statement: str, *_rest: Any) -> None:
-            statements.append(statement)
-
-        engine = current_resources(broker).engine.sync_engine
-        event.listen(engine, 'before_cursor_execute', _record)
-        try:
-            result = await task_facets(
-                broker,
+        turns = await _steady_read_turns(
+            proxy,
+            db_url,
+            lambda proxied: task_facets(
+                proxied,
                 window=_test_window(),
                 statuses=[],
                 error_categories=[],
                 retried_only=False,
-            )
-        finally:
-            event.remove(engine, 'before_cursor_execute', _record)
+            ),
+        )
 
-        assert is_ok(result)
-        assert len(statements) == 1
+        assert len(turns) == 1, turns
 
     async def test_ties_follow_the_database_collation(
         self, broker: PostgresBroker, session: AsyncSession
@@ -1656,7 +1676,11 @@ class TestListTasks:
         assert result.ok_value.total == 5
 
     async def test_one_statement_reads_the_page_and_no_payload_column(
-        self, broker: PostgresBroker, session: AsyncSession
+        self,
+        broker: PostgresBroker,  # noqa: ARG002 - the schema and history leaves
+        session: AsyncSession,
+        proxy: RoundTripProxy,
+        db_url: str,
     ) -> None:
         """One statement reads the page and the total; the function returns no payload column.
 
@@ -1665,12 +1689,9 @@ class TestListTasks:
         """
         await insert_rows(session, make_task(), make_task(status=TaskStatus.COMPLETED))
 
-        with _StatementCapture(broker) as capture:
-            result = await _unfiltered_list(broker)
+        turns = await _steady_read_turns(proxy, db_url, _unfiltered_list)
 
-        assert is_ok(result)
-        assert len(capture.statements) == 1
-        assert 'horsies_monitoring_task_list(' in capture.statements[0]
+        assert len(turns) == 1, turns
         returned = (
             await session.execute(
                 text(
@@ -2876,6 +2897,7 @@ class TestListBounds:
 
         with caplog.at_level(logging.WARNING, logger='horsies.monitoring'):
             result = await list_schedules(broker)
+            await _until_logged(caplog, 'the list is cut at')
 
         assert is_ok(result)
         names = [row.schedule_name for row in result.ok_value]
@@ -2896,6 +2918,7 @@ class TestListBounds:
 
         with caplog.at_level(logging.WARNING, logger='horsies.monitoring'):
             result = await list_schedules(broker)
+            await asyncio.sleep(_FORWARD_WAIT_S)
 
         assert is_ok(result)
         assert len(result.ok_value) == LIST_ROW_BOUND
@@ -2925,6 +2948,7 @@ class TestListBounds:
 
         with caplog.at_level(logging.WARNING, logger='horsies.monitoring'):
             result = await list_workflow_names(broker)
+            await _until_logged(caplog, 'the list is cut at')
 
         assert is_ok(result)
         assert len(result.ok_value) == LIST_ROW_BOUND
@@ -3010,30 +3034,40 @@ class TestDatabaseFailure:
 # --------------------------------------------------------------------------- #
 # list_tasks — the unfiltered-total contract on the history side
 # --------------------------------------------------------------------------- #
-class _StatementCapture:
-    """Every SQL string the engine executes inside the ``with`` block."""
+@pytest.fixture
+def proxy(db_url: str) -> Generator[RoundTripProxy]:
+    """A round-trip counting proxy in front of the test database."""
+    host, port = upstream_of(db_url)
+    started = RoundTripProxy(host, port)
+    started.start()
+    yield started
+    started.stop()
 
-    def __init__(self, broker: PostgresBroker) -> None:
-        self._engine = current_resources(broker).engine.sync_engine
-        self.statements: list[str] = []
 
-    def _collect(
-        self,
-        conn: Any,
-        cursor: Any,
-        statement: str,
-        parameters: Any,
-        context: Any,
-        executemany: bool,
-    ) -> None:
-        self.statements.append(statement)
+async def _steady_read_turns(
+    proxy: RoundTripProxy,
+    db_url: str,
+    read: Callable[[PostgresBroker], Awaitable[object]],
+) -> tuple[Turn, ...]:
+    """The client turns of ``read`` in the steady state of prepared statements,
+    on a broker that connects through ``proxy``. Python's read and the read on
+    the core both connect through it, so the count holds for either."""
+    proxied = PostgresBroker(
+        PostgresConfig(database_url=SecretStr(proxied_url(db_url, proxy))),
+    )
 
-    def __enter__(self) -> '_StatementCapture':
-        event.listen(self._engine, 'before_cursor_execute', self._collect)
-        return self
+    async def arrange() -> None:
+        return None
 
-    def __exit__(self, *exc_info: Any) -> None:
-        event.remove(self._engine, 'before_cursor_execute', self._collect)
+    async def act(_case: None) -> None:
+        result = await read(proxied)
+        assert isinstance(result, Ok), result
+
+    try:
+        _, turns = await steady_state_turns(proxy, arrange, act)
+    finally:
+        _ = await proxied.close_async()
+    return turns
 
 
 async def _unfiltered_list(

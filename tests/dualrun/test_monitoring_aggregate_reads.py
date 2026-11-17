@@ -3,16 +3,16 @@
 Reference: ``tests/dualrun/monitoring_reference.py`` (``task_stats``,
 ``task_facets`` and ``task_breakdown`` as two statements and a client
 merge). Candidate: one call of ``horsies_monitoring_task_stats``,
-``horsies_monitoring_task_facets`` and ``horsies_monitoring_task_breakdown``
-(``horsies.monitoring``; for the facets, Python's body before the monitoring
-switch, ``tests/dualrun/reference/monitoring_queries.py``). The seed has live
+``horsies_monitoring_task_facets`` and ``horsies_monitoring_task_breakdown``,
+Python's bodies before the monitoring switch
+(``tests/dualrun/reference/monitoring_queries.py``). The seed has live
 and history rows of every status, claimed and unclaimed rows, a worker named
 ``unknown``, error codes of every built-in category, user codes and an empty
 code. Each scope must give equal answers.
 
 The caller switch pair of the monitoring switch: on the same seed, Python's
-``task_facets`` against the production read, which the core runs. The
-reports must be equal.
+three reads against the production reads, which the core runs. The reports
+must be equal.
 """
 
 from __future__ import annotations
@@ -177,7 +177,13 @@ _STATUS_SETS: Final[tuple[tuple[str, list[TaskStatus]], ...]] = (
 type _StatsRead = Callable[..., Awaitable[MonitoringResult[object]]]
 
 
-def _stats_pair(name: str, filters: _Filters) -> ReadPair[object]:
+def _stats_pair(
+    name: str,
+    filters: _Filters,
+    *,
+    reference_stats: _StatsRead = reference.task_stats,
+    candidate_stats: _StatsRead = python_reads.task_stats,
+) -> ReadPair[object]:
     task_names, queues, workers, error_codes, categories, retried_only = filters
 
     def read(stats: _StatsRead) -> Callable[[PostgresBroker], Awaitable[object]]:
@@ -197,8 +203,8 @@ def _stats_pair(name: str, filters: _Filters) -> ReadPair[object]:
 
     return ReadPair(
         name=f'stats, {name}',
-        reference=read(reference.task_stats),
-        candidate=read(task_stats),
+        reference=read(reference_stats),
+        candidate=read(candidate_stats),
     )
 
 
@@ -209,6 +215,9 @@ def _breakdown_pair(
     filter_name: str,
     filters: _Filters,
     limit: int,
+    *,
+    reference_breakdown: _StatsRead = reference.task_breakdown,
+    candidate_breakdown: _StatsRead = python_reads.task_breakdown,
 ) -> ReadPair[object]:
     task_names, queues, workers, error_codes, categories, retried_only = filters
 
@@ -232,8 +241,8 @@ def _breakdown_pair(
 
     return ReadPair(
         name=f'breakdown by {group_by}, {status_name}, {filter_name}, limit {limit}',
-        reference=read(reference.task_breakdown),
-        candidate=read(task_breakdown),
+        reference=read(reference_breakdown),
+        candidate=read(candidate_breakdown),
     )
 
 
@@ -353,8 +362,30 @@ def test_the_comparison_sees_a_candidate_that_drops_a_filter(
 
 
 def test_the_core_answers_what_python_answered(empty_database: MakeDatabase) -> None:
-    """The caller switch: Python's facets read against the production read on the core."""
+    """The caller switch: Python's three reads against the production reads on the core."""
     pairs = [
+        _stats_pair(
+            name, filters, reference_stats=python_reads.task_stats, candidate_stats=task_stats,
+        )
+        for name, filters in _FILTERS
+    ]
+    pairs += [
+        _breakdown_pair(
+            group_by,
+            status_name,
+            statuses,
+            filter_name,
+            filters,
+            limit,
+            reference_breakdown=python_reads.task_breakdown,
+            candidate_breakdown=task_breakdown,
+        )
+        for group_by in ('worker', 'task_name', 'queue')
+        for status_name, statuses in _STATUS_SETS
+        for filter_name, filters in _FILTERS
+        for limit in (1, 2, 500)
+    ]
+    pairs += [
         _facets_pair(
             status_name,
             statuses,
@@ -368,7 +399,7 @@ def test_the_core_answers_what_python_answered(empty_database: MakeDatabase) -> 
 
     answers = read_dual_run(empty_database, _seed(), pairs)
 
-    assert len(answers) == 18
+    assert len(answers) == 10 + 270 + 18
     assert [each.name for each in answers if not isinstance(each.candidate, Ok)] == []
     assert differing_reports(answers) == {}
 

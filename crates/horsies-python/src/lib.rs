@@ -238,6 +238,9 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::task_info::TaskInfoNotFound>()?;
     module.add_class::<operations::monitoring_reads::TaskListQuery>()?;
     module.add_class::<operations::monitoring_reads::TaskFacetsQuery>()?;
+    module.add_class::<operations::monitoring_reads::TaskStatsQuery>()?;
+    module.add_class::<operations::monitoring_reads::TaskBreakdownQuery>()?;
+    module.add_class::<operations::monitoring_reads::WorkflowRunsQuery>()?;
     module.add_class::<operations::monitoring_reads::MonitoringJson>()?;
     module.add_class::<operations::monitoring_reads::MonitoringFailed>()?;
     module.add_class::<operations::monitoring_reads::TaskDetailAbsent>()?;

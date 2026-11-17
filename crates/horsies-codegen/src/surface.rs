@@ -297,6 +297,45 @@ const TASK_FACETS_QUERY_PARAMETERS: &[StubParameter] = &[
     keyword("error_categories", "list[str]"),
     keyword("retried_only", "bool"),
 ];
+const TASK_STATS_QUERY_PARAMETERS: &[StubParameter] = &[
+    keyword("window_lower", "datetime.datetime"),
+    keyword("window_upper", "datetime.datetime"),
+    keyword("task_names", "list[str]"),
+    keyword("queues", "list[str]"),
+    keyword("workers", "list[str]"),
+    keyword("error_codes", "list[str]"),
+    keyword("error_categories", "list[str]"),
+    keyword("retried_only", "bool"),
+];
+const TASK_BREAKDOWN_QUERY_PARAMETERS: &[StubParameter] = &[
+    keyword("window_lower", "datetime.datetime"),
+    keyword("window_upper", "datetime.datetime"),
+    keyword("group_by", "str"),
+    keyword("statuses", "list[str]"),
+    keyword("task_names", "list[str]"),
+    keyword("queues", "list[str]"),
+    keyword("workers", "list[str]"),
+    keyword("error_codes", "list[str]"),
+    keyword("error_categories", "list[str]"),
+    keyword("retried_only", "bool"),
+    keyword("limit", "int"),
+];
+const WORKFLOW_RUNS_QUERY_PARAMETERS: &[StubParameter] = &[
+    keyword("name", "str | None"),
+    keyword("status", "str | None"),
+    keyword("limit", "int"),
+];
+const MONITORING_TASK_STATS_PARAMETERS: &[StubParameter] = &[positional("query", "TaskStatsQuery")];
+const MONITORING_TASK_BREAKDOWN_PARAMETERS: &[StubParameter] =
+    &[positional("query", "TaskBreakdownQuery")];
+const MONITORING_WORKFLOW_RUNS_PARAMETERS: &[StubParameter] =
+    &[positional("query", "WorkflowRunsQuery")];
+const MONITORING_WORKFLOW_RUN_PARAMETERS: &[StubParameter] =
+    &[positional("workflow_id", "uuid.UUID")];
+const MONITORING_WORKFLOW_NODE_PARAMETERS: &[StubParameter] = &[
+    positional("workflow_id", "uuid.UUID"),
+    keyword("task_index", "int"),
+];
 const MONITORING_LIST_TASKS_PARAMETERS: &[StubParameter] = &[positional("query", "TaskListQuery")];
 const MONITORING_TASK_DETAIL_PARAMETERS: &[StubParameter] = &[positional("task_id", "uuid.UUID")];
 const STALE_TASKS_PARAMETERS: &[StubParameter] = &[positional("threshold_minutes", "object")];
@@ -630,7 +669,7 @@ const TASK_LIST_OUTCOME: &str = "TaskListComplete | TaskListTruncated | BrokerFa
 const MONITORING_DETAIL_OUTCOME: &str = "MonitoringJson | TaskDetailAbsent | MonitoringFailed";
 
 /// The monitoring methods of `CoreHandle`.
-const MONITORING_HANDLE_METHODS: [StubFunction; 5] = [
+const MONITORING_HANDLE_METHODS: [StubFunction; 12] = [
     StubFunction {
         name: "monitoring_list_tasks_async",
         parameters: MONITORING_LIST_TASKS_PARAMETERS,
@@ -648,6 +687,48 @@ const MONITORING_HANDLE_METHODS: [StubFunction; 5] = [
         parameters: MONITORING_TASK_FACETS_PARAMETERS,
         returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
         doc: "The facets of one scope: the JSON text of the core's Facets. Reads only, in one\nstatement. A cancelled await drops the read.",
+    },
+    StubFunction {
+        name: "monitoring_task_stats_async",
+        parameters: MONITORING_TASK_STATS_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "The count of each task status: the JSON text of the core's list of StatusCount. Reads\nonly, in one statement.",
+    },
+    StubFunction {
+        name: "monitoring_task_breakdown_async",
+        parameters: MONITORING_TASK_BREAKDOWN_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "The task counts per group: the JSON text of the core's Breakdown. Reads only, in one\nstatement.",
+    },
+    StubFunction {
+        name: "monitoring_workflow_names_async",
+        parameters: &[],
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "The names of the root runs: the JSON text of a list of str. Reads only, in one statement.",
+    },
+    StubFunction {
+        name: "monitoring_workflow_runs_async",
+        parameters: MONITORING_WORKFLOW_RUNS_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "The newest root runs: the JSON text of the core's list of WorkflowRunSummary. Reads only,\nin one statement.",
+    },
+    StubFunction {
+        name: "monitoring_workflow_run_async",
+        parameters: MONITORING_WORKFLOW_RUN_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "One run with its nodes and edges: the JSON text of the core's WorkflowRunDetail, or null\nwhen no run has the id. Reads only, in one statement.",
+    },
+    StubFunction {
+        name: "monitoring_workflow_node_async",
+        parameters: MONITORING_WORKFLOW_NODE_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "One node with its task: the JSON text of the core's WorkflowTaskDetail, or null when the\nrun has no node at the index. Reads only, in one statement. An index outside 32 bits\nraises OverflowError.",
+    },
+    StubFunction {
+        name: "monitoring_schedules_async",
+        parameters: &[],
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "Every schedule state: the JSON text of the core's list of ScheduleStateInfo. Reads only,\nin one statement.",
     },
     StubFunction {
         name: "stale_tasks_async",
@@ -1626,7 +1707,7 @@ const HANDLE_CLASSES: [StubClass; 3] = [
 ];
 
 /// The classes of the monitoring reads and the web handler.
-const MONITORING_CLASSES: [StubClass; 9] = [
+const MONITORING_CLASSES: [StubClass; 12] = [
     StubClass {
         name: "MonitoringWindowRecord",
         doc: "The window of one monitoring request: UTC bounds, increasing, at most the core's maximum\napart.",
@@ -1655,6 +1736,27 @@ const MONITORING_CLASSES: [StubClass; 9] = [
         name: "TaskFacetsQuery",
         doc: "One frozen task facets read: the window, the statuses, the error categories that narrow\nthe code list, and the retried filter. A value outside its rule raises ValueError; a naive\nbound raises TypeError.",
         constructor: Constructor::Parameters(TASK_FACETS_QUERY_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskStatsQuery",
+        doc: "One frozen task stats read: the window and every filter but the status. A value outside\nits rule raises ValueError; a naive bound raises TypeError.",
+        constructor: Constructor::Parameters(TASK_STATS_QUERY_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskBreakdownQuery",
+        doc: "One frozen task breakdown read: the window, the group column, the filters and the group\nlimit. A value outside its rule raises ValueError; a naive bound raises TypeError.",
+        constructor: Constructor::Parameters(TASK_BREAKDOWN_QUERY_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowRunsQuery",
+        doc: "One frozen workflow runs read: the exact name and status filters (None for none) and the\nlimit. A limit outside 1 to 200 raises ValueError.",
+        constructor: Constructor::Parameters(WORKFLOW_RUNS_QUERY_PARAMETERS),
         properties: &[],
         methods: &[],
     },
