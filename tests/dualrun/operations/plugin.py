@@ -7,7 +7,8 @@ module lists as core-only runs once, on the core; one that it lists as
 reference-only runs once, on the reference. Each run counts
 the calls of the table's operations; the terminal summary lists the tests
 that called at least one operation (the informative ones) and the count of
-the others. Without the option the fixture changes nothing.
+the others, then the calls of each operation of the table on the reference
+and on the core. Without the option the fixture changes nothing.
 
 This plugin imports no ``horsies`` module at import: the tables name their
 functions by path, and the fixture loads them.
@@ -32,6 +33,7 @@ from tests.dualrun.operations.monitoring_and_web import (
     MONITORING_AND_WEB_CORE_ONLY_TESTS,
     MONITORING_AND_WEB_OPERATIONS,
 )
+from tests.dualrun.operations.scheduler import SCHEDULER_OPERATIONS
 from tests.dualrun.operations.workflow_engine import (
     WORKFLOW_ENGINE_CORE_ONLY_TESTS,
     WORKFLOW_ENGINE_OPERATIONS,
@@ -60,6 +62,7 @@ OPERATION_TABLES: Final[Mapping[SwitchModule, tuple[DualRunOperation, ...]]] = {
     SwitchModule.BROKER: BROKER_OPERATIONS,
     SwitchModule.MONITORING_AND_WEB: MONITORING_AND_WEB_OPERATIONS,
     SwitchModule.WORKFLOW_ENGINE: WORKFLOW_ENGINE_OPERATIONS,
+    SwitchModule.SCHEDULER: SCHEDULER_OPERATIONS,
 }
 
 CORE_ONLY_TESTS: Final[Mapping[SwitchModule, tuple[CoreOnlyTest, ...]]] = {
@@ -68,6 +71,7 @@ CORE_ONLY_TESTS: Final[Mapping[SwitchModule, tuple[CoreOnlyTest, ...]]] = {
     SwitchModule.BROKER: (),
     SwitchModule.MONITORING_AND_WEB: MONITORING_AND_WEB_CORE_ONLY_TESTS,
     SwitchModule.WORKFLOW_ENGINE: WORKFLOW_ENGINE_CORE_ONLY_TESTS,
+    SwitchModule.SCHEDULER: (),
 }
 """The tests that run once, on the core, in the dual-run of each module."""
 
@@ -77,11 +81,15 @@ REFERENCE_ONLY_TESTS: Final[Mapping[SwitchModule, tuple[ReferenceOnlyTest, ...]]
     SwitchModule.BROKER: BROKER_REFERENCE_ONLY_TESTS,
     SwitchModule.MONITORING_AND_WEB: (),
     SwitchModule.WORKFLOW_ENGINE: (),
+    SwitchModule.SCHEDULER: (),
 }
 """The tests that run once, on the Python reference, in the dual-run of each module."""
 
 _COUNTS_KEY: Final = pytest.StashKey[dict[str, int]]()
 """Calls of the table's operations per test id (both runs together)."""
+
+_OPERATION_COUNTS_KEY: Final = pytest.StashKey[dict[tuple[str, Implementation], int]]()
+"""Calls per operation name and run (every test together)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,10 +184,19 @@ def _test_item(request: pytest.FixtureRequest) -> pytest.Item:
     return node
 
 
-def _record_counts(config: pytest.Config, node_id: str, counts: CallCounts) -> None:
+def _record_counts(
+    config: pytest.Config,
+    node_id: str,
+    implementation: Implementation,
+    counts: CallCounts,
+) -> None:
     by_test = config.stash.setdefault(_COUNTS_KEY, {})
     base_id = node_id.rsplit('[', 1)[0]
     by_test[base_id] = by_test.get(base_id, 0) + counts.total()
+    by_operation = config.stash.setdefault(_OPERATION_COUNTS_KEY, {})
+    for operation, calls in counts.by_operation.items():
+        key = (operation, implementation)
+        by_operation[key] = by_operation.get(key, 0) + calls
 
 
 def _isolate_process_registries(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -231,7 +248,7 @@ def implementation(
         case _ as unreachable:
             assert_never(unreachable)
     yield DualRunCase(module=switched, implementation=implementation_run, counts=counts)
-    _record_counts(request.config, _test_item(request).nodeid, counts)
+    _record_counts(request.config, _test_item(request).nodeid, implementation_run, counts)
 
 
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
@@ -248,3 +265,11 @@ def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
     )
     for test_id in informative:
         terminalreporter.write_line(f'  {test_id}: {by_test[test_id]} call(s)')
+    by_operation = config.stash.get(_OPERATION_COUNTS_KEY, dict[tuple[str, Implementation], int]())
+    terminalreporter.write_line('calls per operation, on the reference and on the core:')
+    for operation in OPERATION_TABLES[module]:
+        reference_calls = by_operation.get((operation.name, Implementation.PYTHON_REFERENCE), 0)
+        core_calls = by_operation.get((operation.name, Implementation.CORE), 0)
+        terminalreporter.write_line(
+            f'  {operation.name}: {reference_calls} on the reference, {core_calls} on the core'
+        )

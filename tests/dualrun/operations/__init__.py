@@ -6,6 +6,7 @@ integration tests once on the Python reference and once on the core.
 - ``broker``: the table of the broker switch.
 - ``monitoring_and_web``: the table of the monitoring and web switch.
 - ``workflow_engine``: the table of the workflow engine switch.
+- ``scheduler``: the table of the scheduler switch.
 - ``rebinding``: the identity rebinding, the tripwires and the call counters.
 - ``plugin``: the pytest option ``--dual-run=<module>``, the ``implementation``
   fixture and the summary of the counters.

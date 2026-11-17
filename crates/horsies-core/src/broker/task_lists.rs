@@ -5,6 +5,7 @@
 //! value is `INVALID_INPUT` before any read, with Python's text.
 
 use crate::broker::result_types::{BrokerErrorCode, BrokerOperationError};
+use crate::failure_cause::FailureCause;
 
 /// The most rows a stale or expired task list returns.
 pub const TASK_LIST_BOUND: usize = 10_000;
@@ -69,6 +70,7 @@ impl StaleThresholdRefusal {
                  {MAX_STALE_THRESHOLD_MINUTES}"
             ),
             retryable: false,
+            cause: FailureCause::PreconditionFailed,
         }
     }
 }

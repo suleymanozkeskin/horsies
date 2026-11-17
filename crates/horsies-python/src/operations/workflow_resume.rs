@@ -171,6 +171,7 @@ mod tests {
             message: "planned".to_owned(),
             retryable,
             workflow_id: Uuid::nil(),
+            cause: horsies_core::FailureCause::Connection,
         }
     }
 

@@ -37,6 +37,7 @@ use crate::broker::result_types::{BrokerErrorCode, BrokerOperationError, BrokerR
 use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
 use crate::core::task::Execution;
 use crate::db::{ParameterType, TypedStatement};
+use crate::failure_cause::FailureCause;
 
 /// The most snapshot rows inside the live window that a read takes. A worker
 /// writes `WORKER_STATE_LIVE_WINDOW_S` / snapshot interval rows into the
@@ -356,6 +357,7 @@ fn class_read_failed(operation: &str, error: &sqlx::Error) -> BrokerOperationErr
         code: BrokerErrorCode::MonitoringQueryFailed,
         message: format!("{operation} failed: {error}"),
         retryable: is_retryable_sqlx_error(error),
+        cause: FailureCause::of_sqlx_error(error),
     }
 }
 
@@ -368,6 +370,7 @@ fn class_statement_failed(operation: &str, error: &BrokerError) -> BrokerOperati
         code: BrokerErrorCode::MonitoringQueryFailed,
         message: format!("{operation} failed: {error}"),
         retryable: error.is_retryable(),
+        cause: error.failure_cause(),
     }
 }
 
@@ -379,6 +382,7 @@ fn class_read_refused(operation: &str, cause: &ClassReadRefused) -> BrokerOperat
         code: BrokerErrorCode::MonitoringQueryFailed,
         message: format!("{operation} refused: {cause}"),
         retryable: false,
+        cause: FailureCause::ContractViolation,
     }
 }
 

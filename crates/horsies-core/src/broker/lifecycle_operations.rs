@@ -280,6 +280,7 @@ impl PostgresBroker {
                 false => Transience::Permanent,
             },
             detail: error.to_string(),
+            cause: error.failure_cause(),
         };
         self.ensure_client_family_for_write()
             .await

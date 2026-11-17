@@ -22,11 +22,10 @@ use chrono::{DateTime, Utc};
 use horsies_core::core::codec::from_json_str;
 use horsies_core::handle::CoreHandle;
 use horsies_core::{
-    process_role, resume_workflow, wait_inside_task_message, BuiltInTaskCode, HandleErrorCode,
-    HandleOperationError, HandleResult, NodeResultsRead, NodesRead, OperationalErrorCode,
-    OutcomeCode, PostgresBroker, ProcessRole, RetrievalCode, StoredNode, SubWorkflowSummary,
-    TaskResult, TerminalErrorStatus, UserCode, WaitLimit, WorkflowEnd, WorkflowStatus,
-    WorkflowTaskStatus, WorkflowWait,
+    process_role, wait_inside_task_message, BuiltInTaskCode, HandleErrorCode, HandleOperationError,
+    HandleResult, NodeResultsRead, NodesRead, OperationalErrorCode, OutcomeCode, PostgresBroker,
+    ProcessRole, RetrievalCode, StoredNode, SubWorkflowSummary, TaskResult, TerminalErrorStatus,
+    UserCode, WaitLimit, WorkflowEnd, WorkflowStatus, WorkflowTaskStatus, WorkflowWait,
 };
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
@@ -207,6 +206,7 @@ impl<T> WorkflowHandle<T> {
                 message: error.to_string(),
                 retryable: error.is_retryable(),
                 workflow_id: self.workflow_id,
+                cause: error.failure_cause(),
             })
     }
 
@@ -284,16 +284,10 @@ impl<T> WorkflowHandle<T> {
     /// `STORED_DATA_INVALID`; `RESUME_RECOVERY_FAILED` (the resume
     /// committed, the work after it failed).
     pub async fn resume(&self) -> HandleResult<bool> {
-        let broker = self.broker().await?;
-        let config = self.workflows.config();
-        resume_workflow(
-            &broker,
-            self.workflow_id,
-            &self.workflows.core_registry(),
-            &config.payload,
-            &config.retention,
-        )
-        .await
+        self.broker()
+            .await?
+            .resume_client_workflow(self.workflow_id, &*self.workflows)
+            .await
     }
 
     /// The outcome of the node `key`, read with its output type `V` and the
@@ -332,6 +326,7 @@ impl<T> WorkflowHandle<T> {
             message: format!("workflow {} not found", self.workflow_id),
             retryable: false,
             workflow_id: self.workflow_id,
+            cause: horsies_core::FailureCause::PreconditionFailed,
         }
     }
 
@@ -341,6 +336,7 @@ impl<T> WorkflowHandle<T> {
             message,
             retryable: false,
             workflow_id: self.workflow_id,
+            cause: horsies_core::FailureCause::ContractViolation,
         }
     }
 
