@@ -12,7 +12,9 @@ mod definition;
 mod dependency;
 mod input;
 mod node;
+mod registry;
 mod spec;
+mod spec_data;
 mod sub_workflow;
 
 pub use context::{WorkflowContext, WorkflowContextError};
@@ -21,6 +23,8 @@ pub use dependency::OutputlessResults;
 pub use node::{InputField, JoinType, NodeKey, NodeRef, TaskNode, TypedNodeRef};
 pub use spec::{SuccessCase, SuccessPolicy, WorkflowSpec, WorkflowSpecBuilder};
 pub use sub_workflow::{SubWorkflowNode, SubWorkflowParams};
+
+pub(crate) use registry::WorkflowRegistry;
 
 /// The workflow types of the core: the error policy, the statuses, the
 /// summary of a child workflow and the workflow meta of a task.
