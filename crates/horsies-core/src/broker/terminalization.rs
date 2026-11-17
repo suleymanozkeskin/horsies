@@ -38,6 +38,7 @@ use crate::db::{
     BoundStatement, CheckoutClass, CorePool, IsolationLevel, NotSentCause, ParameterType, Row,
     StatementBound, StatementFailure, TypedStatement,
 };
+use crate::log_targets::TERMINALIZATION_OUTCOME;
 
 use super::error::BrokerError;
 
@@ -619,6 +620,7 @@ pub fn log_terminalization_outcome(operation: &str, outcome: &TerminalizationOut
             observed,
         } => {
             tracing::debug!(
+                target: TERMINALIZATION_OUTCOME,
                 operation,
                 %task_id,
                 ?ordinality,
@@ -636,6 +638,7 @@ pub fn log_terminalization_outcome(operation: &str, outcome: &TerminalizationOut
             observed,
         } => {
             tracing::warn!(
+                target: TERMINALIZATION_OUTCOME,
                 operation,
                 %task_id,
                 ?ordinality,
@@ -650,7 +653,14 @@ pub fn log_terminalization_outcome(operation: &str, outcome: &TerminalizationOut
             ordinality,
             observed,
         } => {
-            tracing::warn!(operation, %task_id, ?ordinality, ?observed, "terminalization lost claim");
+            tracing::warn!(
+                target: TERMINALIZATION_OUTCOME,
+                operation,
+                %task_id,
+                ?ordinality,
+                ?observed,
+                "terminalization lost claim"
+            );
         }
         TerminalizationOutcome::SourceStateConflict {
             task_id,
@@ -659,6 +669,7 @@ pub fn log_terminalization_outcome(operation: &str, outcome: &TerminalizationOut
             evidence,
         } => {
             tracing::warn!(
+                target: TERMINALIZATION_OUTCOME,
                 operation,
                 %task_id,
                 ?ordinality,
@@ -671,7 +682,13 @@ pub fn log_terminalization_outcome(operation: &str, outcome: &TerminalizationOut
             task_id,
             ordinality,
         } => {
-            tracing::warn!(operation, %task_id, ?ordinality, "terminalization task absent");
+            tracing::warn!(
+                target: TERMINALIZATION_OUTCOME,
+                operation,
+                %task_id,
+                ?ordinality,
+                "terminalization task absent"
+            );
         }
     }
 }
