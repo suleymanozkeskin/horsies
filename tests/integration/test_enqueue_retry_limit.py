@@ -37,7 +37,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 async def _enqueue(broker: PostgresBroker, task_options: str) -> BrokerResult[str]:
     return await broker.enqueue_async(
         'retry.limit.task',
-        task_id=str(uuid.uuid4()),
+        task_id=uuid.uuid4(),
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
         input_json='{}',
