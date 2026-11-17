@@ -22,6 +22,7 @@ command that writes. Exit codes: 0 done, 1 an edit anchor or a check failed,
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 import subprocess
 import sys
@@ -186,12 +187,13 @@ def _matches_package_glob(relative: str, pattern: str) -> bool:
 
 
 def _puts_files_into_the_wheel(entry: dict[str, object]) -> bool:
-    \"\"\"Whether a ``[tool.maturin] include`` entry targets the wheel.\"\"\"
+    \"\"\"Whether a ``[tool.maturin] include`` entry targets the wheel.
+
+    maturin takes ``format`` as ``'sdist'``, ``'wheel'`` or a list of them.
+    \"\"\"
     match entry['format']:
-        case 'wheel':
+        case 'wheel' | ['wheel'] | ['sdist', 'wheel'] | ['wheel', 'sdist']:
             return True
-        case list() as formats:
-            return 'wheel' in formats
         case _:
             return False
 
@@ -701,6 +703,75 @@ def check_kept_lines_match(repo: Path) -> list[Failure]:
     return failures
 
 
+CORE_MIGRATIONS: Final = 'crates/horsies-core/src/broker/migrations.rs'
+"""The core file whose ``baseline_sql_files!`` list compiles the baseline SQL files in."""
+
+_RUST_LITERAL_INCLUDE: Final = re.compile(r'include_(?:str|bytes)!\(\s*"([^"]+)"\s*,?\s*\)')
+_RUST_BASELINE_INCLUDE: Final = re.compile(r'include_str!\(concat!\(\s*"([^"]+)"\s*,\s*\$file\s*\)\)')
+_RUST_BASELINE_LIST: Final = re.compile(r'^baseline_sql_files!\(\n(.*?)^\);$', re.MULTILINE | re.DOTALL)
+
+
+def resolve_include(source: str, relative: str) -> str:
+    """The repository path that an include path written in ``source`` names."""
+    return posixpath.normpath(posixpath.join(posixpath.dirname(source), relative))
+
+
+def check_rust_includes(repo: Path) -> tuple[int, list[Failure]]:
+    """Each literal ``include_str!``/``include_bytes!`` path of a tracked Rust file names a tracked file.
+
+    No build runs here, so this is the check that a moved file is still where
+    the Rust sources include it from. Returns the count of literal paths.
+    """
+    index = tracked_files(repo)
+    tracked = set(index)
+    count = 0
+    failures: list[Failure] = []
+    for path in index:
+        if not path.endswith('.rs'):
+            continue
+        text = read_text(repo / path)
+        if text is None:
+            failures.append(Failure(path, 'a Rust file that is not UTF-8 text'))
+            continue
+        for match in _RUST_LITERAL_INCLUDE.finditer(text):
+            count += 1
+            target = resolve_include(path, match.group(1))
+            if target not in tracked:
+                line = text.count('\n', 0, match.start()) + 1
+                failures.append(
+                    Failure(f'{path}:{line}', f'include path {match.group(1)!r} names no tracked file: {target}')
+                )
+    return count, failures
+
+
+def check_baseline_list(repo: Path) -> tuple[int, list[Failure]]:
+    """The core's ``baseline_sql_files!`` list is the SQL files of the crate folder, included from there.
+
+    Returns the count of listed files.
+    """
+    text = read_text(repo / CORE_MIGRATIONS) if (repo / CORE_MIGRATIONS).is_file() else None
+    if text is None:
+        return 0, [Failure(CORE_MIGRATIONS, 'missing, or not UTF-8 text')]
+    failures: list[Failure] = []
+    folders = sorted({resolve_include(CORE_MIGRATIONS, m.group(1)) for m in _RUST_BASELINE_INCLUDE.finditer(text)})
+    if folders != [NEW_SQL_FOLDER]:
+        failures.append(Failure(CORE_MIGRATIONS, f'the baseline files are included from {folders}, expected {NEW_SQL_FOLDER}'))
+    in_folder = sorted(
+        name.removeprefix(f'{NEW_SQL_FOLDER}/')
+        for name in tracked_files(repo)
+        if name.startswith(f'{NEW_SQL_FOLDER}/') and name.endswith('.sql')
+    )
+    match _RUST_BASELINE_LIST.search(text):
+        case None:
+            failures.append(Failure(CORE_MIGRATIONS, 'no baseline_sql_files! list'))
+            return 0, failures
+        case listing:
+            listed = re.findall(r'"([^"]+)"', listing.group(1))
+    if listed != in_folder:
+        failures.append(Failure(CORE_MIGRATIONS, f'baseline_sql_files! lists {listed}; the folder holds {in_folder}'))
+    return len(listed), failures
+
+
 def check_parse(repo: Path) -> list[Failure]:
     """Every tracked TOML file and the pyright configs parse."""
     failures: list[Failure] = []
@@ -773,10 +844,15 @@ def command_check(repo: Path, old_commit: str) -> int:
     scan = scan_citations(repo)
     failures += scan.failures
     failures += check_kept_lines_match(repo)
+    include_count, include_failures = check_rust_includes(repo)
+    failures += include_failures
+    listed_count, list_failures = check_baseline_list(repo)
+    failures += list_failures
     failures += check_parse(repo)
     failures += check_pyproject(repo)
     moved = len(old_package_files(repo, old_commit))
     print(f'files moved: {moved} ({moved - sql_count} to {NEW_PACKAGE}/, {sql_count} to {NEW_SQL_FOLDER}/)')
+    print(f'Rust include paths checked: {include_count}; baseline_sql_files! entries: {listed_count}')
     for pattern, count in sorted(scan.kept_by_file.items()):
         print(f'kept old-path lines, file rule {pattern}: {count}')
     for reason, count in sorted(scan.kept_by_line.items()):

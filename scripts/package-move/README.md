@@ -55,6 +55,10 @@ alone does not build.
 - Every file of the old `horsies/` is at its new path, and no tracked file or folder is left at the old path.
 - Each SQL file in `crates/horsies-core/baseline/` has the same git blob as before the move.
 - No tracked text file cites an old path, except the kept text below.
+- Every literal `include_str!` and `include_bytes!` path of a tracked Rust file names a tracked file. No build
+  runs, so this is the check that the Rust sources still find the moved files.
+- The names of `baseline_sql_files!` (`crates/horsies-core/src/broker/migrations.rs`) are the SQL files of
+  `crates/horsies-core/baseline/`, and the macro includes them from that folder.
 - Every tracked TOML file, every tracked YAML file and both pyright configs parse.
 - `pyproject.toml` builds with maturin, its `manifest-path` is a crate whose `[lib] name` is `_core` and that has
   the feature `extension-module`, and its `include` entries match files.
@@ -72,8 +76,11 @@ alone does not build.
 ## When the patch does not apply
 
 `program/0.8.0` moves on. When an edit anchor or `sql-through-core.patch` no longer matches, the script stops before
-the checks. Run steps 2 to 5 by hand on a fresh checkout, make the SQL change again, and write the patch with
+the checks. When the patch is the step that stops, the checkout holds steps 2 to 5, staged. Make the SQL change
+again in its working tree (`git apply --reject` applies the hunks that still match and leaves the others in
+`.rej` files), delete the `.rej` files, and write the patch with
 `git diff > scripts/package-move/sql-through-core.patch` (the working tree against the staged steps 2 to 5).
+Then run the script again on a fresh checkout.
 
 ## After the move
 
