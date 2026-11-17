@@ -304,6 +304,66 @@ fn a_member_that_binds_to_no_field_is_refused() {
     assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidKwargKey));
 }
 
+/// The input of a task whose types do not refuse an unknown key on read
+/// (no `deny_unknown_fields`), as a user's types may be.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ShipInput {
+    label: String,
+    options: ShipOptions,
+    parcels: Vec<Parcel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ShipOptions {
+    #[serde(default)]
+    retries: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Parcel {
+    weight: u32,
+}
+
+/// The refusal of a spec with one node of [`ShipInput`] whose input text is
+/// `input`.
+fn ship_refusal(input: &str) -> HorsiesError {
+    let mut builder = WorkflowSpecBuilder::new("ship");
+    builder.task(
+        task_node::<u32, ShipInput>("ship")
+            .input_json(input)
+            .unwrap(),
+    );
+    refusal(builder)
+}
+
+/// #571: a member that binds to no field of an input type that reads an
+/// unknown key without an error (Python `extra='forbid'`).
+#[test]
+fn a_member_that_a_lenient_input_type_does_not_read_is_refused() {
+    let refused = ship_refusal(r#"{"label": "a", "options": {}, "parcels": [], "lable": "b"}"#);
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+    assert!(refused.message.contains("lable"), "{refused}");
+}
+
+/// #571: a key inside a nested object that binds to no field, named by its
+/// key path.
+#[test]
+fn a_nested_member_that_binds_to_no_field_is_refused_with_its_key_path() {
+    let refused = ship_refusal(r#"{"label": "a", "options": {"retriess": 3}, "parcels": []}"#);
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+    assert!(refused.message.contains("options.retriess"), "{refused}");
+}
+
+/// #571: a key inside an element of a list that binds to no field, named by
+/// its key path.
+#[test]
+fn a_list_element_member_that_binds_to_no_field_is_refused_with_its_key_path() {
+    let refused =
+        ship_refusal(r#"{"label": "a", "options": {}, "parcels": [{"weight": 1, "wieght": 2}]}"#);
+    assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+    assert!(refused.message.contains("parcels[0].wieght"), "{refused}");
+}
+
 /// #572: a node whose static input misses a field of its input type.
 #[test]
 fn a_missing_field_is_refused() {

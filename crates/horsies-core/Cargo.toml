@@ -2,13 +2,12 @@
 name = "horsies-core"
 version = "0.1.0-alpha.36"
 edition = "2021"
-description = "Unified public API for the horsies task queue and workflow engine"
+description = "Shared core of the horsies task queue and workflow engine, used by the horsies clients"
 license = "MIT"
 repository = "https://github.com/suleymanozkeskin/horsies"
 readme = "README.md"
 keywords = ["task-queue", "workflow", "distributed", "postgresql", "async"]
 categories = ["asynchronous", "database"]
-publish = false
 
 [lib]
 name = "horsies_core"
@@ -37,7 +36,7 @@ web = [
 [dependencies]
 # The `CodeCatalog` derive of the code enums; the tests of the workflow DSL
 # also derive `WorkflowInput` from it.
-horsies-macros = { path = "../horsies-macros" }
+horsies-macros = { version = "0.1.0-alpha.36", path = "../horsies-macros" }
 async-stream = { version = "0.3", optional = true }
 async-trait = { version = "0.1", optional = true }
 axum = { version = "0.8", optional = true }

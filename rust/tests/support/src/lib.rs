@@ -1,21 +1,21 @@
-#![allow(clippy::unwrap_used)]
+//! Shared infrastructure of the horsies Rust end-to-end and parity tests.
+//!
+//! - [`database`]: one fresh database per test on the test server, dropped
+//!   at the end of the test. The server comes from the environment only;
+//!   no test falls back to a local default.
+//! - [`process`]: a worker or scheduler process of a test binary, with its
+//!   output kept for the failure report, stopped at the end of the test.
+//! - [`poll`]: bounded waits on a condition.
+//! - [`rows`]: reads of the task and workflow tables for the waits and the
+//!   checks that the client API does not offer.
+//!
+//! Each failure of these helpers is a test failure: they panic with the
+//! subject and the cause.
 
-//! Shared test infrastructure for horsies integration and e2e tests.
-//!
-//! Mirrors Python's `tests/conftest.py` and `tests/integration/conftest.py`.
-//!
-//! # Usage
-//!
-//! Add to `[dev-dependencies]`:
-//! ```toml
-//! horsies-test-support = { path = "../horsies-test-support" }
-//! ```
-//!
-//! Requires `DATABASE_URL` env var or defaults to local test DB.
+pub mod database;
+pub mod poll;
+pub mod process;
+pub mod rows;
 
-pub mod db;
-pub mod e2e;
-pub mod fixtures;
-pub mod pgbouncer;
-pub mod tasks;
-pub mod workflow_helpers;
+/// The driver of the direct connections, for the tests that read tables.
+pub use tokio_postgres;

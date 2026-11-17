@@ -1271,11 +1271,6 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let broker = PostgresBroker::from_pool(pool.clone());
     let (completed, _) = seed_source(&pool, TerminalSource::Completed, false, None).await;
-    let result = broker
-        .get_result::<serde_json::Value>(completed, Some(std::time::Duration::from_secs(1)))
-        .await
-        .unwrap();
-    assert_eq!(result.unwrap(), serde_json::json!({"value": 7}));
     let raw = broker
         .get_raw_result_record(completed, None)
         .await
@@ -1319,15 +1314,6 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         envelope_value(&failed_raw),
         Some(expected_error_envelope.clone())
     );
-    let failed_error = broker
-        .get_result::<serde_json::Value>(failed, None)
-        .await
-        .unwrap()
-        .unwrap_err();
-    assert_eq!(failed_error.error_code, expected_error.error_code);
-    assert_eq!(failed_error.message, expected_error.message);
-    assert_eq!(failed_error.exception, None);
-    assert_eq!(failed_error.data, None);
 
     let (expired, _) = seed_source(&pool, TerminalSource::Expired, false, None).await;
     let expired_raw = broker
@@ -1337,22 +1323,8 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .expect_found();
     assert_eq!(expired_raw.status, TaskStatus::Expired);
     assert_eq!(envelope_value(&expired_raw), Some(expected_error_envelope));
-    let expired_error = broker
-        .get_result::<serde_json::Value>(expired, None)
-        .await
-        .unwrap()
-        .unwrap_err();
-    assert_eq!(expired_error.error_code, expected_error.error_code);
-    assert_eq!(expired_error.message, expected_error.message);
-    assert_eq!(expired_error.exception, None);
-    assert_eq!(expired_error.data, None);
 
     let (cancelled, _) = seed_source(&pool, TerminalSource::Cancelled, false, None).await;
-    assert!(broker
-        .get_result::<serde_json::Value>(cancelled, Some(std::time::Duration::from_secs(1)))
-        .await
-        .unwrap()
-        .is_err());
     let cancelled_raw = broker
         .get_raw_result_record(cancelled, None)
         .await
@@ -1374,10 +1346,6 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     .execute(&pool)
     .await
     .unwrap();
-    assert!(broker
-        .get_result::<serde_json::Value>(completed, Some(std::time::Duration::from_secs(1)))
-        .await
-        .is_err());
     let history_info_error = broker
         .get_task_info_with_attempts(completed, true, false, true)
         .await
