@@ -26,6 +26,7 @@ use crate::bridge::CallKind;
 use crate::errors::ManifestRefused;
 use crate::handle::{checked_core, BrokerConnection};
 use crate::operations::arguments::utc_instant;
+use crate::operations::finalizing::{mark_finalizing_operation, marker_fence};
 use crate::operations::start::{start_attempt_operation, start_command, start_window};
 
 /// The pool profile of a child: `kept_open` connections kept open (0 keeps
@@ -141,6 +142,51 @@ impl CoreChildHandle {
             "CoreChildHandle.start_attempt_async",
             CallKind::Write,
             start_attempt_operation(self.connection.clone(), command, window),
+        )
+    }
+
+    /// Write the finalizing marker of a run whose body ended
+    /// (`horsies_mark_finalizing`): `FinalizingMarked`, `FinalizingNotHeld`,
+    /// or `MarkFinalizingFailed`. Writes, in one statement, checked out as
+    /// reserved work; the wait for the connection and the statement have the
+    /// pool's bounds. Blocking, for the isolated child and the seats of a
+    /// shared thread child. A naive `claimed_at` raises `TypeError`.
+    #[pyo3(signature = (task_id, *, worker_id, claimed_at))]
+    fn mark_finalizing(
+        &self,
+        py: Python<'_>,
+        task_id: Uuid,
+        worker_id: String,
+        claimed_at: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let fence = marker_fence(worker_id, utc_instant(claimed_at)?);
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreChildHandle.mark_finalizing",
+            CallKind::Write,
+            mark_finalizing_operation(self.connection.clone(), task_id, fence),
+        )
+    }
+
+    /// The awaitable form of `mark_finalizing`, for a shared async child.
+    #[pyo3(signature = (task_id, *, worker_id, claimed_at))]
+    fn mark_finalizing_async<'py>(
+        &self,
+        py: Python<'py>,
+        task_id: Uuid,
+        worker_id: String,
+        claimed_at: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let fence = marker_fence(worker_id, utc_instant(claimed_at)?);
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreChildHandle.mark_finalizing_async",
+            CallKind::Write,
+            mark_finalizing_operation(self.connection.clone(), task_id, fence),
         )
     }
 }

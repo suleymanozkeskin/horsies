@@ -100,6 +100,7 @@ pub use crate::broker::{
     CancelAnswer, CancelTaskError, EnqueueRefusal, EnqueueRefusalCause, SendKind,
 };
 pub use crate::core::history::enqueue::SendPart;
+pub use crate::worker::execution::FinalizingMark;
 pub use crate::worker::finalize_batch::{
     BatchOutcomes, BatchWriteError, PlainSuccess, SuccessBatch, SuccessBatchError,
     FUSED_BATCH_MAX_ROWS,

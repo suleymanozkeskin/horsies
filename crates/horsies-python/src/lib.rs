@@ -198,6 +198,9 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::start::AttemptMissed>()?;
     module.add_class::<operations::start::DeadlineBeforeStart>()?;
     module.add_class::<operations::start::StartFailed>()?;
+    module.add_class::<operations::finalizing::FinalizingMarked>()?;
+    module.add_class::<operations::finalizing::FinalizingNotHeld>()?;
+    module.add_class::<operations::finalizing::MarkFinalizingFailed>()?;
     module.add_class::<operations::schema::SchemaInstalled>()?;
     module.add_class::<operations::schema::SchemaInstallNotRun>()?;
     module.add_class::<operations::schema::SchemaStatusRecord>()?;

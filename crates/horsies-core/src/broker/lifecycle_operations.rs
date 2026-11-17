@@ -21,6 +21,8 @@
 //!   start check (a plain read, not a 0004 function).
 //! - [`PostgresBroker::start_attempt`]: `horsies_start_attempt`, the start
 //!   of a run in a worker's child, with the window of its deadline.
+//! - [`PostgresBroker::mark_finalizing`]: `horsies_mark_finalizing`, the
+//!   finalizing marker of a run whose body ended in a worker's child.
 //! - [`PostgresBroker::cancel_task`]: `horsies_cancel_task`, the
 //!   administrative cancel of one plain task (Python
 //!   `horsies.monitoring.task_actions.cancel_task`, and the core's monitoring
@@ -52,11 +54,12 @@ use crate::broker::stale_recovery::{
 };
 use crate::core::lifecycle::{
     decode_outcome_row, FailedAttemptOutcome, GuardEvidence, ObservedTaskState,
-    ObservedWorkflowTask, OutcomeDecodeError, TerminalizationOutcome, UnreportedAttemptOutcome,
-    WorkflowSuccessOutcome,
+    ObservedWorkflowTask, OutcomeDecodeError, OwnedClaim, TerminalizationOutcome,
+    UnreportedAttemptOutcome, WorkflowSuccessOutcome,
 };
 use crate::core::types::status::TaskStatus;
 use crate::db::{CheckoutClass, ParameterType, StatementBound, Transience, TypedStatement};
+use crate::worker::execution::{mark_task_finalizing, FinalizingMark};
 use crate::worker::finalize_batch::statement::complete_plain_successes;
 use crate::worker::finalize_batch::{BatchOutcomes, BatchWriteError, SuccessBatch};
 use crate::worker::recovery::stale_running_pass;
@@ -366,6 +369,31 @@ impl PostgresBroker {
         self.ensure_client_family_for_write().await?;
         let (open, _write) = self.core_pools_for_write()?;
         start_attempt_within(open.main(), self.statement_log(), command, window).await
+    }
+
+    /// Write the finalizing marker of a run whose body ended in a worker's
+    /// child (Python `child_runner._mark_task_finalizing` and
+    /// `shared_lifecycle.mark_task_finalizing`): `horsies_mark_finalizing`,
+    /// one statement in autocommit on the main core pool, checked out as
+    /// reserved work. When the row is RUNNING under `fence` (this worker,
+    /// this claim generation) it stamps `finalizing_at` and
+    /// `finalizing_by_worker_id` ([`FinalizingMark::Marked`]); otherwise it
+    /// writes nothing ([`FinalizingMark::NotHeld`]). The wait for the
+    /// connection and the statement have the pool's bounds.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); [`BrokerError::Statement`] (nothing written, or
+    /// `OutcomeUnknown`: the marker may be written, and the same call sent
+    /// again writes it again); [`BrokerError::RowDecode`] and
+    /// [`BrokerError::ClaimContract`] for a row outside the function's
+    /// contract.
+    pub async fn mark_finalizing(
+        &self,
+        task_id: Uuid,
+        fence: &OwnedClaim,
+    ) -> Result<FinalizingMark, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        mark_task_finalizing(self, task_id, &fence.worker_id, fence.claimed_at).await
     }
 
     /// Cancel one plain task (Python `horsies.monitoring.task_actions.cancel_task`):
