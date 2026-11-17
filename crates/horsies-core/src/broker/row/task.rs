@@ -216,9 +216,9 @@ pub struct ExpiredTaskRow {
     pub sent_at: DateTime<Utc>,
     pub enqueued_at: DateTime<Utc>,
     pub good_until: DateTime<Utc>,
-    /// How long ago `good_until` passed, in milliseconds, on the database
-    /// clock (Python's `expired_for`).
-    pub expired_for_ms: i64,
+    /// How long ago `good_until` passed, in microseconds, on the database
+    /// clock: the exact length of Python's `expired_for` interval.
+    pub expired_for_us: i64,
 }
 
 #[cfg(test)]

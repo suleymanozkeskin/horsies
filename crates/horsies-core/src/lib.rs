@@ -159,6 +159,12 @@ pub use crate::broker::{
     StreamWait, WorkerClassLoad, LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT,
 };
 
+// the stale and expired task lists of a client handle
+pub use crate::broker::task_lists::{
+    BoundedTaskList, StaleMinutes, StaleThresholdRefusal, MAX_STALE_THRESHOLD_MINUTES,
+    TASK_LIST_BOUND,
+};
+
 pub use crate::broker::client_family::{ClientFamily, FamilyCheckFailure};
 pub use crate::broker::migrations::SchemaRefusal;
 pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
