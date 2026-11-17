@@ -132,7 +132,6 @@ async fn run_isolated(context: &HostContext, run: RunFrame) {
         task_id,
         task_name,
         worker_id,
-        task_kind,
         claimed_at,
         work,
         input,
@@ -141,7 +140,6 @@ async fn run_isolated(context: &HostContext, run: RunFrame) {
         task_id,
         task_name,
         worker_id,
-        task_kind,
         claimed_at,
     };
     if let Started::Stopped(reason) = start_attempt(context, &facts).await {
@@ -247,7 +245,6 @@ fn facts_of(run: &SharedRunFrame) -> RunFacts {
         task_id: run.task_id,
         task_name: run.task_name.clone(),
         worker_id: run.worker_id.clone(),
-        task_kind: run.task_kind,
         claimed_at: run.claimed_at,
     }
 }

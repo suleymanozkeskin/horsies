@@ -978,7 +978,6 @@ mod tests {
     /// and `::test_a_removed_child_pool_field_is_refused`: a pool field that
     /// moved to the worker profile is refused by name, not as an unknown key.
     #[test]
-    #[ignore = "waits on #746: the removed pool fields are refused as unknown keys"]
     fn a_removed_pool_field_is_refused_by_name() {
         for field in [
             "worker_pool_size",

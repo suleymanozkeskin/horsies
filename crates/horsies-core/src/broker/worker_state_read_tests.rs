@@ -4,6 +4,7 @@
 //! `tests/integration/test_worker_health_api.py`.
 
 use std::num::NonZeroU64;
+use std::sync::Arc;
 
 use chrono::TimeZone;
 use chrono::Utc;
@@ -13,7 +14,11 @@ use sqlx::PgPool;
 use crate::broker::monitoring_test_database::MonitoringTestDatabase;
 use crate::broker::result_types::BrokerErrorCode;
 use crate::broker::slot_health::{ClearableBootCause, DownSlot, ShortageErrno, SlotHealth};
+use crate::core::config::worker_profile::WorkerProfile;
 use crate::core::task::Execution;
+use crate::worker::children::{child_layout, ChildrenView, SeatsPerChild};
+use crate::worker::executor::slots::board::PoolBoard;
+use crate::worker::worker_state::class_capacity_of;
 
 /// One snapshot of a worker with 2 processes on queue `default`, written now.
 async fn insert_snapshot(pool: &PgPool, worker_id: &str, slots_down: Value, class_capacity: Value) {
@@ -353,5 +358,104 @@ async fn a_worker_with_no_budget_reads_as_no_budgets() {
         "{:?}",
         read.class_capacity
     );
+    database.drop().await;
+}
+
+/// The `class_capacity` that a new worker of `profile` writes in its first
+/// snapshot: the slots of a new board (each booting) with the seats of each
+/// shared child, as `WorkerChildren::start` builds them.
+fn first_class_capacity_of(profile: &WorkerProfile) -> Value {
+    let board = Arc::new(PoolBoard::new(child_layout(profile)));
+    let children = ChildrenView::new(board, SeatsPerChild::of_profile(profile));
+    class_capacity_of(&children.service())
+}
+
+/// Python `test_claim_plan.py::TestClassCapacityOfAProfile::test_the_snapshot_value_reads_back`:
+/// the class capacity that a worker of each profile writes in its snapshot
+/// reads back through the worker state read as the budgets of the profile.
+#[tokio::test]
+async fn the_class_capacity_a_worker_of_each_profile_writes_reads_back() {
+    let database = MonitoringTestDatabase::create().await;
+    let broker = database.broker();
+    let cases: [(&str, Value, Vec<(Execution, u64, Vec<Execution>)>); 4] = [
+        (
+            "isolated-and-shared",
+            json!({
+                "isolated": {"kind": "isolated_children", "count": 2},
+                "shared_async": {"kind": "shared_async_children", "count": 3, "seats": 5},
+            }),
+            vec![
+                (
+                    Execution::Isolated,
+                    2,
+                    vec![Execution::Isolated, Execution::SharedThread],
+                ),
+                (Execution::SharedAsync, 15, vec![Execution::SharedAsync]),
+            ],
+        ),
+        (
+            "shared-only",
+            json!({
+                "shared_async": {"kind": "shared_async_children", "count": 1, "seats": 4},
+            }),
+            vec![(Execution::SharedAsync, 4, vec![Execution::SharedAsync])],
+        ),
+        (
+            "isolated-only",
+            json!({
+                "isolated": {"kind": "isolated_children", "count": 2},
+            }),
+            vec![(
+                Execution::Isolated,
+                2,
+                vec![
+                    Execution::Isolated,
+                    Execution::SharedAsync,
+                    Execution::SharedThread,
+                ],
+            )],
+        ),
+        (
+            "thread",
+            json!({
+                "isolated": {"kind": "isolated_children", "count": 1},
+                "shared_thread": {"kind": "shared_thread_children", "count": 2, "seats": 3},
+            }),
+            vec![
+                (
+                    Execution::Isolated,
+                    1,
+                    vec![Execution::Isolated, Execution::SharedAsync],
+                ),
+                (Execution::SharedThread, 6, vec![Execution::SharedThread]),
+            ],
+        ),
+    ];
+
+    for (case, profile, expected) in cases {
+        let profile: WorkerProfile = serde_json::from_value(profile).expect("the profile is valid");
+        let worker_id = format!("w-{case}");
+        insert_snapshot(
+            &database.pool,
+            &worker_id,
+            json!([]),
+            first_class_capacity_of(&profile),
+        )
+        .await;
+
+        let read = broker
+            .get_worker_state(&worker_id)
+            .await
+            .expect("the read answers")
+            .expect("the worker reported");
+
+        let budgets: Vec<(Execution, u64, Vec<Execution>)> = read
+            .class_capacity
+            .as_slice()
+            .iter()
+            .map(|budget| (budget.budget, budget.capacity, budget.serves.clone()))
+            .collect();
+        assert_eq!(budgets, expected, "{case}");
+    }
     database.drop().await;
 }

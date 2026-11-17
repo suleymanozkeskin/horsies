@@ -27,8 +27,8 @@
 //!   `stopped_before_running` with a named reason, or `worker_failure` with
 //!   a detail. Version 1 sent `ok` and one free text field for both a
 //!   reason and a detail.
-//! - `is_workflow_task` becomes the closed `task_kind`, until the start
-//!   statement reads it from the locked row.
+//! - The run frames do not carry `is_workflow_task`: the start statement
+//!   reads it from the locked row.
 //! - The init frame names the child program (`python` with the import
 //!   facts, or `rust`), a closed log level, and no driver option map: the
 //!   connection settings of the parent's config are the typed `connection`
