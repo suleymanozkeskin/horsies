@@ -3132,7 +3132,7 @@ SMALL_PARENT_POOL_APP: Final = (
     '    worker_profiles={\n'
     "        'small': WorkerProfile(\n"
     '            isolated=IsolatedChildren(count=1),\n'
-    '            pool=ParentPool(max_size=PoolSize(connections=4)),\n'
+    '            pool=ParentPool(max_size=PoolSize(connections=2)),\n'
     '        ),\n'
     '    },\n'
     '))\n'
@@ -3181,7 +3181,7 @@ class TestCommandsRefuseASmallParentPool:
         assert exc_info.value.code == 1
         logged = '\n'.join(r.getMessage() for r in caplog.records)
         assert (
-            "error[HRS-218]: worker_profiles['small'].pool.max_size: 4 "
+            "error[HRS-218]: worker_profiles['small'].pool.max_size: 2 "
             'connections is below the minimum of the pool of the worker '
-            'process (5)'
+            'process (3)'
         ) in logged
