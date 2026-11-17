@@ -97,7 +97,7 @@ impl LoggerName {
 /// Target prefixes and their loggers. A prefix matches a target that equals
 /// it or continues with `::`. The first match wins, so a longer prefix comes
 /// before a shorter one of the same module.
-const TARGET_ROUTES: [(&str, LoggerName); 22] = [
+const TARGET_ROUTES: [(&str, LoggerName); 21] = [
     (
         "horsies_core::broker::process_listener",
         LoggerName::Listener,
@@ -107,7 +107,6 @@ const TARGET_ROUTES: [(&str, LoggerName); 22] = [
     ("horsies_core::core::lifecycle", LoggerName::Lifecycle),
     ("horsies_core::core::codec", LoggerName::Codec),
     ("horsies_core::core::config", LoggerName::App),
-    ("horsies_core::core::app", LoggerName::App),
     ("horsies_core::monitoring", LoggerName::Monitoring),
     ("horsies_core::web", LoggerName::Web),
     (

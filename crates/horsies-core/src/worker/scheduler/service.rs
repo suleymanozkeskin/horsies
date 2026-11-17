@@ -3,8 +3,8 @@
 //! through `horsies_fire_schedule` on the main core pool of the broker.
 //!
 //! A service is built from one of two sources: the schedule section of an
-//! app config with the send facts that `Horsies::prepare_schedules`
-//! resolved ([`SchedulerService::new`]), or a client's scheduler manifest,
+//! app config with the send facts of each enabled schedule
+//! ([`PreparedSchedules`], [`SchedulerService::new`]), or a client's scheduler manifest,
 //! whose send facts the client resolved
 //! ([`SchedulerService::from_manifest`]). Both give the same started
 //! scheduler: each enabled schedule with its send command.
@@ -25,7 +25,6 @@ use tokio_util::sync::CancellationToken;
 use crate::broker::core_rows::StatementLog;
 use crate::broker::postgres::SendCommand;
 use crate::broker::{BrokerError, PostgresBroker};
-use crate::core::app::PreparedSchedules;
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind};
 use crate::core::config::{AppConfig, ScheduleConfig, SchedulePattern, TaskSchedule};
 use crate::db::CorePool;
@@ -36,6 +35,23 @@ use super::config_digest::config_digest;
 use super::state::{
     self, DueSchedule, FiredSlot, ScheduleFire, ScheduleFireAnswer, ScheduleFireError, SlotOutcome,
 };
+
+/// What every fired slot of one schedule stores besides its input, resolved
+/// once before the scheduler starts from the task registry of the host
+/// (Python `core/scheduler/validation.py` `prepare_schedules`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleSendFacts {
+    /// The schedule's queue, else the queue the task declares, else
+    /// `default`; validated against the queue mode.
+    pub queue_name: String,
+    /// The task's stored options text, as a send of the task stores it:
+    /// timeout, retry policy and retryable codes. `None` when the task
+    /// declares none.
+    pub task_options: Option<String>,
+}
+
+/// The send facts of each enabled schedule, by schedule name.
+pub type PreparedSchedules = HashMap<String, ScheduleSendFacts>;
 
 /// Wall-clock target between missing-row existence checks while every state
 /// row is present and initialized. The check guards rare conditions (startup
@@ -86,7 +102,7 @@ impl ExistenceCheckCadence {
     }
 }
 
-/// Resolve the effective priority for a queue, mirroring [`Horsies::effective_priority()`].
+/// Resolve the effective priority for a queue, as a send to the queue does.
 ///
 /// Priority resolution:
 /// 1. Queue priority from [`CustomQueueConfig`] (if Custom mode and the queue has a config entry)
@@ -149,10 +165,10 @@ pub enum SchedulerStartError {
         after: DateTime<Utc>,
     },
     /// An enabled schedule has no send facts: the host did not build the
-    /// prepared schedules with `Horsies::prepare_schedules` for this config.
+    /// prepared schedules for this config.
     #[error(
-        "schedule '{schedule}' has no prepared send facts; build them with \
-         Horsies::prepare_schedules from the same config"
+        "schedule '{schedule}' has no prepared send facts; give the send facts of \
+         every enabled schedule of the config"
     )]
     NotPrepared { schedule: String },
     /// An enabled schedule's input is over `payload.reject_bytes`.
@@ -282,10 +298,10 @@ pub struct SchedulerService {
 
 /// Where the schedules of a service and their send facts come from.
 enum ScheduleSource {
-    /// The schedule section of an app config. `prepared` comes from
-    /// `Horsies::prepare_schedules`, which checks the schedules against the
-    /// task registry (task registered, queue, input type, input size) and
-    /// resolves each fired slot's queue and task options. The `app_config`
+    /// The schedule section of an app config. `prepared` holds the send
+    /// facts of each enabled schedule: the host checked the schedules against
+    /// its task registry (task registered, queue, input type, input size)
+    /// and resolved each fired slot's queue and task options. The `app_config`
     /// gives each slot's queue priority, retention and payload policy.
     AppConfig {
         schedule_config: ScheduleConfig,
