@@ -271,14 +271,14 @@ $$;
 -- horsies:manifest:<renderer version>:<sha256 of the manifest rows>. The rows enter in probe order as
 -- leaf_name|probe_position|lower_bound_kind|lower anchor (epoch seconds, '-' for OPEN)|upper anchor (epoch seconds),
 -- joined by commas; epoch seconds do not depend on the session time zone. An empty manifest has a stamp too.
--- Renderer version 1 is the reader bodies of horsies_render_history_reader. A change of any rendered body changes
--- the version here, so the first coverage pass after the migration that ships it republishes, also when the
--- manifest is the same.
+-- Renderer version 2 is the reader bodies of horsies_render_history_reader (version 1 had no command fingerprint
+-- and no sent_at in the provenance row). A change of any rendered body changes the version here, so the first
+-- coverage pass after the migration that ships it republishes, also when the manifest is the same.
 -- Replaces: MANIFEST_STAMP_SQL (history/reads/publisher.py:85-104), which has no renderer version.
 CREATE FUNCTION horsies_history_reader_stamp() RETURNS text
     LANGUAGE sql STABLE
     AS $$
-    SELECT 'horsies:manifest:1:' || encode(sha256(convert_to(COALESCE(
+    SELECT 'horsies:manifest:2:' || encode(sha256(convert_to(COALESCE(
         string_agg(
             concat_ws(
                 '|',
@@ -346,7 +346,9 @@ $$;
 --   id or horsies_task_history_clock_exceptions records it. No live probe and no fallback probes: a row that a wrong
 --   clock placed in an earlier leaf has its clock exception (the move writes it).
 -- - PROVENANCE: horsies_task_provenance_staged(uuid) RETURNS TABLE(task_id, status, terminal_at,
---   terminalization_kind, is_workflow_task): one row when history holds the id, no row otherwise. No live probe.
+--   terminalization_kind, is_workflow_task, command_fingerprint_version, command_fingerprint, sent_at): one row when
+--   history holds the id, no row otherwise. No live probe. The fingerprint columns and sent_at are the facts of the
+--   exact-id resend check (horsies_enqueue_task), read from the same leaf probe.
 -- - DETAIL: horsies_task_detail_staged(uuid) RETURNS TABLE(location, task_row horsies_task_history): LIVE with a
 --   NULL row when the live table holds the id, HISTORY with the full row, no row when absent.
 -- - RESULT: horsies_task_result_staged(uuid) RETURNS TABLE(location, status, failed_reason, result_envelope_version,
@@ -357,8 +359,9 @@ $$;
 -- Returns: the statement text.
 -- Replaces: history/reads/lookup_generation.py:190-596 (the five renderers and _staged_function). Changes from it:
 -- the lookup reader is not rendered (no production caller); the provenance reader has no live probe and no
--- include_live argument, returns plain columns with is_workflow_task, and no row on absence; the fallback probes
--- include the open-ended leaf, because a UUIDv7 can encode a birth after 9999-01-01.
+-- include_live argument, returns plain columns with is_workflow_task, the command fingerprint and sent_at, and no row
+-- on absence; the fallback probes include the open-ended leaf, because a UUIDv7 can encode a birth after
+-- 9999-01-01.
 CREATE FUNCTION horsies_render_history_reader(p_reader text) RETURNS text
     LANGUAGE plpgsql STABLE
     SET "TimeZone" TO 'UTC'
@@ -388,10 +391,12 @@ BEGIN
             v_with_fallback := FALSE;
         WHEN 'PROVENANCE' THEN
             v_header := 'horsies_task_provenance_staged(p_task_id uuid) RETURNS TABLE(task_id uuid, status text, '
-                || 'terminal_at timestamp with time zone, terminalization_kind text, is_workflow_task boolean)';
+                || 'terminal_at timestamp with time zone, terminalization_kind text, is_workflow_task boolean, '
+                || 'command_fingerprint_version smallint, command_fingerprint bytea, '
+                || 'sent_at timestamp with time zone)';
             v_probe := $probe$
             RETURN QUERY SELECT h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text,
-                h.is_workflow_task
+                h.is_workflow_task, h.command_fingerprint_version, h.command_fingerprint, h.sent_at
             FROM %1$I AS h WHERE h.task_id = p_task_id;
             IF FOUND THEN
                 RETURN;
