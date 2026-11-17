@@ -17,8 +17,9 @@ use super::spec_support::{
 use crate::broker::PostgresBroker;
 use crate::core::task::error::{ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode};
 use crate::monitoring::{
-    list_tasks, task_breakdown, task_facets, task_stats, ErrorCategory, TaskBreakdownQuery,
-    TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListQuery, TaskStatsQuery, TaskSummary,
+    list_tasks, task_breakdown, task_facets, task_stats, Breakdown, BreakdownGroup, ErrorCategory,
+    TaskBreakdownQuery, TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListQuery, TaskStatsQuery,
+    TaskSummary,
 };
 
 /// The status cards in their fixed order (Python `_STATUS_ORDER`).
@@ -100,6 +101,32 @@ async fn rows_by_category(
         .await
         .expect("list the tasks")
         .rows
+}
+
+/// The group that holds `value`.
+fn value_group(value: &str) -> BreakdownGroup {
+    BreakdownGroup::Value {
+        value: value.to_owned(),
+    }
+}
+
+/// The worker breakdown over the test window (Python `_worker_breakdown`).
+async fn worker_breakdown(broker: &PostgresBroker) -> Breakdown {
+    task_breakdown(
+        broker,
+        &TaskBreakdownQuery::new(window(), TaskGroupBy::Worker),
+    )
+    .await
+    .expect("read the breakdown")
+}
+
+/// Each group of a breakdown with its total, in order.
+fn groups_with_totals(breakdown: &Breakdown) -> Vec<(BreakdownGroup, i64)> {
+    breakdown
+        .groups
+        .iter()
+        .map(|row| (row.group.clone(), row.counts.total))
+        .collect()
 }
 
 /// One failed task per family, each with the family's sample code.
@@ -410,7 +437,7 @@ async fn category_totals_count_codes_past_the_facet_cap() {
 
 /// Python `TestTaskBreakdown::test_groups_by_worker_with_rollup_total`:
 /// groups by worker with a count per status and of retried tasks, and a
-/// `TOTAL` row over every group.
+/// total over every group.
 #[tokio::test]
 #[serial]
 async fn the_worker_breakdown_counts_each_status_the_retried_tasks_and_a_total() {
@@ -431,24 +458,22 @@ async fn the_worker_breakdown_counts_each_status_the_retried_tasks_and_a_total()
     .await;
     seed_live(&database.pool, &LiveTask::running("alpha_task", "w2")).await;
 
-    let breakdown = task_breakdown(
-        &database.broker(),
-        &TaskBreakdownQuery::new(window(), TaskGroupBy::Worker),
-    )
-    .await
-    .expect("read the breakdown");
+    let breakdown = worker_breakdown(&database.broker()).await;
 
-    let groups: BTreeMap<&str, &crate::monitoring::GroupRow> = breakdown
+    let groups: BTreeMap<String, &crate::monitoring::BreakdownCounts> = breakdown
         .groups
         .iter()
-        .map(|row| (row.group.as_str(), row))
+        .filter_map(|row| match &row.group {
+            BreakdownGroup::Value { value } => Some((value.clone(), &row.counts)),
+            BreakdownGroup::Unclaimed => None,
+        })
         .collect();
+    assert_eq!(groups.len(), breakdown.groups.len(), "{breakdown:?}");
     assert_eq!(groups["w1"].total, 2);
     assert_eq!(groups["w1"].completed, 1);
     assert_eq!(groups["w1"].failed, 1);
     assert_eq!(groups["w1"].retried, 1);
     assert_eq!(groups["w2"].running, 1);
-    assert_eq!(breakdown.total.group, "TOTAL");
     assert_eq!(breakdown.total.total, 3);
     assert_eq!(breakdown.group_count, 2);
     database.drop().await;
@@ -460,40 +485,102 @@ async fn the_worker_breakdown_counts_each_status_the_retried_tasks_and_a_total()
 async fn an_empty_scope_gives_no_groups_and_a_zero_total() {
     let database = SpecDatabase::create().await;
 
-    let breakdown = task_breakdown(
-        &database.broker(),
-        &TaskBreakdownQuery::new(window(), TaskGroupBy::Worker),
-    )
-    .await
-    .expect("read the breakdown");
+    let breakdown = worker_breakdown(&database.broker()).await;
 
     assert!(breakdown.groups.is_empty(), "{:?}", breakdown.groups);
     assert_eq!(breakdown.group_count, 0);
-    assert_eq!(breakdown.total.group, "TOTAL");
     assert_eq!(breakdown.total.total, 0);
     database.drop().await;
 }
 
-/// Python `TestTaskBreakdown::test_null_group_key_is_labelled_unknown`.
+/// Python `TestTaskBreakdown::test_tasks_no_worker_claimed_are_the_unclaimed_group`:
+/// a live task and a history task that no worker claimed are one group.
 #[tokio::test]
 #[serial]
-async fn a_task_with_no_group_key_is_grouped_as_unknown() {
+async fn the_tasks_no_worker_claimed_are_the_unclaimed_group() {
     let database = SpecDatabase::create().await;
     seed_live(&database.pool, &LiveTask::pending("alpha_task")).await;
-
-    let breakdown = task_breakdown(
-        &database.broker(),
-        &TaskBreakdownQuery::new(window(), TaskGroupBy::Worker),
+    seed_terminal(
+        &database.pool,
+        &LiveTask::pending("alpha_task"),
+        Ending::Cancelled,
     )
-    .await
-    .expect("read the breakdown");
+    .await;
 
-    let groups: Vec<&str> = breakdown
+    let breakdown = worker_breakdown(&database.broker()).await;
+
+    assert_eq!(
+        groups_with_totals(&breakdown),
+        [(BreakdownGroup::Unclaimed, 2)]
+    );
+    database.drop().await;
+}
+
+/// Python `TestTaskBreakdown::test_a_worker_named_unknown_is_a_group_apart_from_the_unclaimed_tasks`.
+#[tokio::test]
+#[serial]
+async fn a_worker_named_unknown_is_a_group_apart_from_the_unclaimed_tasks() {
+    let database = SpecDatabase::create().await;
+    seed_live(&database.pool, &LiveTask::running("alpha_task", "unknown")).await;
+    seed_terminal(
+        &database.pool,
+        &LiveTask::pending("alpha_task").with_worker(Some("unknown")),
+        Ending::Completed,
+    )
+    .await;
+    seed_live(&database.pool, &LiveTask::pending("alpha_task")).await;
+
+    let breakdown = worker_breakdown(&database.broker()).await;
+
+    assert_eq!(
+        groups_with_totals(&breakdown),
+        [(value_group("unknown"), 2), (BreakdownGroup::Unclaimed, 1)]
+    );
+    assert_eq!(breakdown.group_count, 2);
+    assert_eq!(
+        breakdown.total.total,
+        breakdown
+            .groups
+            .iter()
+            .map(|row| row.counts.total)
+            .sum::<i64>()
+    );
+    database.drop().await;
+}
+
+/// Python `TestTaskBreakdown::test_with_one_total_a_worker_named_unknown_comes_before_the_unclaimed_group`:
+/// the unclaimed group sorts as the text `unknown`, after a value group
+/// `unknown` with the same total.
+#[tokio::test]
+#[serial]
+async fn with_one_total_a_worker_named_unknown_comes_before_the_unclaimed_group() {
+    let database = SpecDatabase::create().await;
+    seed_terminal(
+        &database.pool,
+        &LiveTask::pending("alpha_task"),
+        Ending::Completed,
+    )
+    .await;
+    for worker in ["unknown", "a-worker", "zz-worker"] {
+        seed_live(&database.pool, &LiveTask::running("alpha_task", worker)).await;
+    }
+
+    let breakdown = worker_breakdown(&database.broker()).await;
+
+    let groups: Vec<BreakdownGroup> = breakdown
         .groups
         .iter()
-        .map(|row| row.group.as_str())
+        .map(|row| row.group.clone())
         .collect();
-    assert_eq!(groups, ["unknown"]);
+    assert_eq!(
+        groups,
+        [
+            value_group("a-worker"),
+            value_group("unknown"),
+            BreakdownGroup::Unclaimed,
+            value_group("zz-worker"),
+        ]
+    );
     database.drop().await;
 }
 
@@ -524,12 +611,12 @@ async fn the_filters_scope_the_groups_and_the_total() {
     .await
     .expect("read the breakdown");
 
-    let groups: Vec<&str> = breakdown
+    let groups: Vec<BreakdownGroup> = breakdown
         .groups
         .iter()
-        .map(|row| row.group.as_str())
+        .map(|row| row.group.clone())
         .collect();
-    assert_eq!(groups, ["w1"]);
+    assert_eq!(groups, [value_group("w1")]);
     assert_eq!(breakdown.total.total, 1);
     database.drop().await;
 }
@@ -680,7 +767,6 @@ async fn every_built_in_code_is_selected_by_the_category_it_reports() {
 /// Python `TestErrorCategoryFilter::test_stats_and_breakdown_apply_the_same_expansion`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn stats_and_breakdown_expand_a_category_the_same_way() {
     let database = SpecDatabase::create().await;
     seed_one_failure_per_family(&database.pool).await;
