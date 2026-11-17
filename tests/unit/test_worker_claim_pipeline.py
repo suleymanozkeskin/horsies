@@ -32,6 +32,7 @@ from horsies.core.worker.child_runner import (
     StartWithin,
     _confirm_ownership_and_set_running,
 )
+from horsies.core.worker.run_return import StoppedBeforeRunning
 from horsies.core.worker.sql import (
     CLAIM_SQL,
     COUNT_CLAIMED_FOR_WORKER_SQL,
@@ -303,7 +304,7 @@ class TestOwnershipGateBehavioral:
 
         result = _start(handle)
 
-        assert result == (False, '', 'CLAIM_LOST'), 'Ownership lost is CLAIM_LOST'
+        assert result == StoppedBeforeRunning('CLAIM_LOST'), 'Ownership lost is CLAIM_LOST'
         assert len(handle.calls) == 1
 
     def test_exception_returns_ownership_unconfirmed(self) -> None:
@@ -313,7 +314,7 @@ class TestOwnershipGateBehavioral:
 
         result = _start(handle)
 
-        assert result == (False, '', 'OWNERSHIP_UNCONFIRMED')
+        assert result == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
     def test_a_deadline_before_start_runs_no_statement(self) -> None:
         """The start check runs right before the start. A deadline that fired
