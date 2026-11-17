@@ -182,9 +182,11 @@ async fn the_run_frame_carries_the_claim_fields() {
     }
 }
 
-/// Python `TestFinalizeAfterSlotOutcome::test_lost_child_reason_names_the_exit`:
-/// a child that dies by `SIGKILL` with a task gives the crash path, its
-/// reason names the signal, and the write carries that reason.
+/// Python `TestFinalizeAfterSlotOutcome::test_lost_child_reason_names_the_exit`
+/// and `_finalize_child_loss`: a child that dies by `SIGKILL` with a task
+/// gives the crash path, its reason starts with `Worker child lost: ` and
+/// names the signal, and the write carries that reason as the attempt's
+/// message and failed reason.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lost_child_names_its_exit_in_the_crash_reason() {
     let claimed = task(ExecutionClass::Isolated, "{}");
@@ -199,6 +201,12 @@ async fn a_lost_child_names_its_exit_in_the_crash_reason() {
         other => panic!("expected the crash path, got {other:?}"),
     };
     assert!(reason.as_str().contains("signal 9 (SIGKILL)"), "{reason}");
+    assert!(
+        reason
+            .as_str()
+            .starts_with(crate::worker::executor::slots::dispatch::LOST_CHILD_REASON_PREFIX),
+        "{reason}"
+    );
 
     let write = killed_child_write(
         &claimed,
@@ -210,6 +218,10 @@ async fn a_lost_child_names_its_exit_in_the_crash_reason() {
     assert_eq!(write.error_code.as_deref(), Some("WORKER_CRASHED"));
     assert_eq!(
         write.attempt.error_message.as_deref(),
+        Some(reason.as_str())
+    );
+    assert_eq!(
+        write.attempt.failed_reason.as_deref(),
         Some(reason.as_str())
     );
     assert!(write.result_json.contains("signal 9 (SIGKILL)"));
