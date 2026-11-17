@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use include_dir::{include_dir, Dir};
 use percent_encoding::percent_decode_str;
-use serde::Serialize;
+
+use super::events::python_json_text;
 
 static EMBEDDED_UI: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/webui-dist");
 
@@ -87,13 +88,6 @@ impl AssetStore for MemoryAssets {
     }
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RuntimeConfig<'a> {
-    base_path: &'a str,
-    api_base: String,
-}
-
 pub(crate) fn normalize_base_path(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
@@ -118,11 +112,7 @@ pub(crate) fn inject(index_html: &str, base_path: &str, custom_css_url: Option<&
     } else {
         format!("{base_path}/api")
     };
-    let runtime = serde_json::to_string(&RuntimeConfig {
-        base_path: &base_path,
-        api_base,
-    })
-    .expect("runtime config JSON encoding cannot fail");
+    let runtime = runtime_config_json(&base_path, &api_base);
     let mut block = format!(
         "<base href=\"{}\"><script>window.__HORSIES_UI__ = {runtime}</script>",
         base_href(&base_path),
@@ -140,6 +130,18 @@ pub(crate) fn inject(index_html: &str, base_path: &str, custom_css_url: Option<&
     } else {
         format!("{index_html}{block}")
     }
+}
+
+/// The runtime config object of the page as Python's `json.dumps` writes it
+/// with its defaults (`tests/dualrun/reference/web_app.py` `_inject`):
+/// `{"basePath": ..., "apiBase": ...}`, a space after each `:` and `,`, and
+/// each text escaped to ASCII. Pure.
+pub(crate) fn runtime_config_json(base_path: &str, api_base: &str) -> String {
+    format!(
+        "{{\"basePath\": {}, \"apiBase\": {}}}",
+        python_json_text(base_path),
+        python_json_text(api_base),
+    )
 }
 
 fn head_close_position(index_html: &str) -> Option<usize> {

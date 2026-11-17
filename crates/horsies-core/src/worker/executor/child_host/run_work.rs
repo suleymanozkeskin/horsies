@@ -34,6 +34,7 @@ use tokio::sync::Notify;
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 
+pub(super) use crate::worker::executor::protocol::ISOLATED_LEFTOVER_GRACE;
 use crate::worker::executor::protocol::{
     BlockedWhere, LeftoverName, LoopHoldsTasks, StuckWork, MAX_LEFTOVER_TASK_NAMES,
 };
@@ -48,9 +49,6 @@ pub(super) const EXTRA_CANCEL_ROUNDS: u32 = 2;
 /// (Python `CANCEL_ROUND_INTERVAL_S`). Three intervals make the
 /// protocol's `STUCK_REPORT_DELAY`.
 pub(super) const CANCEL_ROUND_INTERVAL: Duration = Duration::from_millis(100);
-/// How long an isolated child waits for the work a body left before it
-/// cancels it (Python `ISOLATED_LEFTOVER_GRACE_S`).
-pub(super) const ISOLATED_LEFTOVER_GRACE: Duration = Duration::from_secs(1);
 
 tokio::task_local! {
     static RUN_SCOPE: RunScope;

@@ -35,7 +35,7 @@ use super::shared_stop::{
     LoopHolder,
 };
 use crate::broker::attempt_writes::RetryPlacement;
-use crate::broker::child_writes::CHILD_REFUSAL_WRITES_BOUND;
+use crate::broker::child_writes::LONGEST_REFUSAL_WRITES_BOUND;
 use crate::worker::executor::protocol::{
     BodyEnd, CancelGraceMs, DispatchNumber, FailureDetail, LeftoverCancelFrame, LeftoverStuckFrame,
     LoopBlockedFrame, LoopCulprit, RssReading, RunEnd, RunRef, RunStuckFrame, SeatEnd,
@@ -43,22 +43,26 @@ use crate::worker::executor::protocol::{
 };
 use crate::worker::executor::supervisor::{ChildExit, ChildLost, LossCause};
 
+/// The time past the block limit that the parent leaves for the report of a
+/// blocked loop to reach it (Python `LOOP_BLOCK_REPORT_WAIT_S`).
+pub const LOOP_BLOCK_REPORT_WAIT: Duration = Duration::from_secs(5);
 /// The parent checks a run this long after the due step of its stop: past
-/// the block limit, so a blocked loop is reported first, with its holder
-/// (Python `SHARED_BACKSTOP_MARGIN_S`).
+/// the block limit and the wait for its report, so a blocked loop is
+/// reported first, with its holder (Python `SHARED_BACKSTOP_MARGIN_S`).
 pub const SHARED_BACKSTOP_MARGIN: Duration =
-    LOOP_BLOCK_LIMIT.saturating_add(Duration::from_secs(5));
+    LOOP_BLOCK_LIMIT.saturating_add(LOOP_BLOCK_REPORT_WAIT);
 /// After the first backstop found the cancel reported, the parent checks an
 /// async run again this long later (Python `SHARED_STUCK_BACKSTOP_S`).
 pub const SHARED_STUCK_BACKSTOP: Duration =
     STUCK_REPORT_DELAY.saturating_add(SHARED_BACKSTOP_MARGIN);
 /// A refusal runs only the RUNNING transition and the finalizing marker; a
-/// refusal in flight longer than the bound of these writes in the child
-/// ([`CHILD_REFUSAL_WRITES_BOUND`], 120 s) and the margin means a frozen
-/// child (Python `SHARED_REFUSAL_BACKSTOP_S`). A refusal whose writes end
-/// within their bound never meets it.
+/// refusal in flight longer than the longest bound of these writes in a
+/// child of any kind ([`LONGEST_REFUSAL_WRITES_BOUND`], 145 s: a version-1
+/// Python shared thread child) and the margin means a frozen child (Python
+/// `SHARED_REFUSAL_BACKSTOP_S`). A refusal whose writes end within their
+/// bound, in a child of any kind, never meets it.
 pub const SHARED_REFUSAL_BACKSTOP: Duration =
-    CHILD_REFUSAL_WRITES_BOUND.saturating_add(SHARED_BACKSTOP_MARGIN);
+    LONGEST_REFUSAL_WRITES_BOUND.saturating_add(SHARED_BACKSTOP_MARGIN);
 
 /// The kind of a shared child.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

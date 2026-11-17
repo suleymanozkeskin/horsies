@@ -23,7 +23,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import horsies._core as core
-from horsies.core.worker import shared_lifecycle, slots, thread_runner
+from horsies.core.worker import child_runner, shared_lifecycle, slots, thread_runner
+from tests.dualrun.reference.worker_parent.worker import (
+    slots as reference_slots,
+    thread_runner as reference_thread_runner,
+)
 from horsies.core.worker.run_return import StopReason, StoppedBeforeRunning
 from horsies.core.worker.child_runner import _PRE_START_CONFIRM_ATTEMPTS
 
@@ -306,6 +310,24 @@ class TestRefusalBound:
             )
             + slots.SHARED_BACKSTOP_MARGIN_S
         )
+
+    def test_the_derived_times_are_the_times_of_the_core(self) -> None:
+        """Each time is a sum of named bounds, and the core derives the same
+        time from its own bounds (``the_bounds_keep_their_times``,
+        ``the_backstops_keep_their_times``,
+        ``the_leftover_backstop_keeps_its_time``). The core sizes its
+        refusal and leftover backstops on the version-1 child of the
+        reference copy, whose bounds are the longer: a version-2 child
+        writes through the core with the core's bounds (the refusal writes
+        of ``CHILD_REFUSAL_WRITES_BOUND``, the marker of
+        ``FINALIZING_MARKER_END``)."""
+        assert shared_lifecycle.CANCELLED_WRITE_END_S == 10.0
+        assert slots.SHARED_BACKSTOP_MARGIN_S == 10.0
+        assert reference_thread_runner.THREAD_REFUSAL_WRITES_BOUND_S == 145.0
+        assert reference_slots.SHARED_REFUSAL_BACKSTOP_S == 155.0
+        assert reference_slots.ISOLATED_LEFTOVER_BACKSTOP_S == pytest.approx(26.3)
+        assert thread_runner.THREAD_REFUSAL_WRITES_BOUND_S == 120.0
+        assert child_runner.LEFT_WORK_MARKER_BOUND_S == 20.0
 
 
 class TestMissedStart:

@@ -143,10 +143,20 @@ FINALIZING_MARKER_TIMEOUT_S: Final = 10.0
 ``FINALIZING_MARKER_BOUND``): the wait for a connection and the statement.
 A marker that the core cancels at the bound is not written later."""
 
-CANCELLED_WRITE_END_S: Final = 10.0
+CORE_CANCEL_REQUEST_BOUND_S: Final = 5.0
+"""The longest time of the cancel request that the core sends for a
+statement past its bound: the connection that carries the request and the
+request itself (the core's ``CANCEL_REQUEST_BOUND``)."""
+
+CORE_CANCEL_GRACE_S: Final = 5.0
+"""The time that the core waits for the reply of a cancelled statement after
+its cancel request; past it the connection is discarded and the outcome is
+unknown (the core's ``CANCEL_GRACE``)."""
+
+CANCELLED_WRITE_END_S: Final = CORE_CANCEL_REQUEST_BOUND_S + CORE_CANCEL_GRACE_S
 """The longest time that a statement which a bound cancelled takes to end:
-the core sends the cancel request within 5 s and waits 5 s for the reply
-(the core's ``CANCELLED_WRITE_END``)."""
+the cancel request and the wait for its reply (the core's
+``CANCELLED_WRITE_END``)."""
 
 LEFT_WORK_MARKER_BOUND_S: Final = FINALIZING_MARKER_TIMEOUT_S + CANCELLED_WRITE_END_S
 """The longest time that the finalizing marker of an isolated run takes,
