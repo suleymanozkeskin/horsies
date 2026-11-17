@@ -49,6 +49,7 @@ pub(crate) mod terminalization_matrix;
 pub mod wait_limit;
 #[cfg(test)]
 mod worker_state_read_tests;
+mod workflow_claim_settle;
 
 pub use bound_handle::TaskHandle;
 pub use class_budgets::{ClassBudget, ClassBudgets};
@@ -67,7 +68,7 @@ pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
     ClaimPassParams, PostgresBroker, PrestartExpiry, SchemaInitializationMode, WorkflowStop,
-    WorkflowStopBeforeStart, UPSERT_TASK_ATTEMPT_SQL,
+    WorkflowStopBeforeStart,
 };
 pub use process_listener::{
     CheckInterruption, ListenError, ListenerPlanError, SessionCheckFailure,
@@ -76,7 +77,7 @@ pub use result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult, RawR
 pub use row::heartbeat::HeartbeatRow;
 pub use row::task::{
     ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow,
-    TaskResultRow, TaskRunningContextRow,
+    TaskResultRow,
 };
 pub use row::workflow::{WorkflowRow, WorkflowTaskRow};
 pub use slot_health::{
