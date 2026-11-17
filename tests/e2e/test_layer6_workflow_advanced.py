@@ -22,6 +22,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import TaskResult
 
 from horsies.core.types.result import is_ok
+from horsies.core.utils.db import uuid_column_value
 from tests.e2e.helpers.assertions import assert_ok, assert_err, start_ok_in_thread, unwrap_send
 from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
@@ -877,11 +878,17 @@ async def test_workflow_recovers_after_worker_crash(
             )
             rows = result.fetchall()
             assert len(rows) == 2, f'Expected 2 rows for C,D, got {len(rows)}'
-            task_id_c = rows[0][1]
-            task_id_d = rows[1][1]
+            raw_task_id_c = rows[0][1]
+            raw_task_id_d = rows[1][1]
 
-        assert task_id_c is not None, 'C should have been enqueued (task_id set)'
-        assert task_id_d is not None, 'D should have been enqueued (task_id set)'
+        assert raw_task_id_c is not None, 'C should have been enqueued (task_id set)'
+        assert raw_task_id_d is not None, 'D should have been enqueued (task_id set)'
+        task_id_c = uuid_column_value(
+            raw_task_id_c, column='horsies_workflow_tasks.task_id',
+        )
+        task_id_d = uuid_column_value(
+            raw_task_id_d, column='horsies_workflow_tasks.task_id',
+        )
 
         # Wait until both underlying tasks are actually RUNNING
         await wait_for_status(
@@ -947,7 +954,7 @@ async def test_workflow_recovers_after_worker_crash(
             sa_text("""
                 SELECT result FROM itest_task_rows WHERE id = CAST(:id AS uuid)
             """),
-            {'id': task_id_c},
+            {'id': str(task_id_c)},
         )
         row = result.fetchone()
         assert row is not None and row[0] is not None, 'C task should have a result'

@@ -278,7 +278,7 @@ async def _isolated_pid() -> str:
 
 async def _row_and_attempts(
     broker: PostgresBroker,
-    task_id: str,
+    task_id: UUID,
 ) -> tuple[Any, tuple[AttemptRecord, ...]]:
     """The row of a task and its attempts, live or moved to history."""
     async with current_resources(broker).session_factory() as session:
@@ -288,10 +288,10 @@ async def _row_and_attempts(
                     'SELECT status, error_code, retry_count FROM itest_task_rows '
                     'WHERE id = :id',
                 ),
-                {'id': task_id},
+                {'id': str(task_id)},
             )
         ).one()
-        attempts = await read_attempts(session, task_id)
+        attempts = await read_attempts(session, str(task_id))
     return row, attempts
 
 

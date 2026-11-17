@@ -617,7 +617,7 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
         custom_broker.enqueue,
         task_name='e2e_low',
         queue_name='low',
-        task_id=str(uuid4()),
+        task_id=uuid4(),
         enqueue_sha='test-sha',
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
@@ -629,7 +629,7 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
         custom_broker.enqueue,
         task_name='e2e_high',
         queue_name='high',
-        task_id=str(uuid4()),
+        task_id=uuid4(),
         enqueue_sha='test-sha',
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
@@ -688,7 +688,7 @@ async def test_task_expires_before_claim(broker: PostgresBroker) -> None:
         task_name='e2e_simple',
         kwargs_json='{"x": 5}',
         queue_name='default',
-        task_id=str(uuid4()),
+        task_id=uuid4(),
         enqueue_sha='test-sha',
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
@@ -728,7 +728,7 @@ async def test_task_completes_before_expiry(
         task_name='e2e_simple',
         kwargs_json='{"x": 5}',
         queue_name='default',
-        task_id=str(uuid4()),
+        task_id=uuid4(),
         enqueue_sha='test-sha',
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
@@ -759,7 +759,7 @@ async def test_good_until_already_past(broker: PostgresBroker) -> None:
         task_name='e2e_simple',
         kwargs_json='{"x": 5}',
         queue_name='default',
-        task_id=str(uuid4()),
+        task_id=uuid4(),
         enqueue_sha='test-sha',
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
@@ -801,7 +801,7 @@ async def test_retry_blocked_by_good_until_expiry(
         broker.enqueue,
         task_name='e2e_retry_exhausted',
         queue_name='default',
-        task_id=str(uuid4()),
+        task_id=uuid4(),
         enqueue_sha='test-sha',
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
@@ -851,7 +851,7 @@ async def test_retry_succeeds_within_good_until(
             broker.enqueue,
             task_name='e2e_retry_success',
             queue_name='default',
-            task_id=str(uuid4()),
+            task_id=uuid4(),
             enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
@@ -891,7 +891,7 @@ def test_worker_resolution_error(broker: PostgresBroker, app: Horsies) -> None:
     task_id = broker.enqueue(
         task_name='nonexistent_task_xyz',
         queue_name='default',
-        task_id=str(uuid4()),
+        task_id=uuid4(),
         send_kind=SendKind.FIRST,
         enqueue_sha='test-sha',
         sent_at=datetime.now(timezone.utc),
@@ -927,7 +927,7 @@ def test_unencodable_return_value_is_a_type_mismatch() -> None:
 @pytest.mark.e2e
 def test_task_not_found(broker: PostgresBroker, app: Horsies) -> None:
     """L1.7.3: Non-existent task_id returns TASK_NOT_FOUND."""
-    fake_id = '00000000-0000-0000-0000-000000000000'
+    fake_id = UUID(int=0)
     result = unwrap_get_result(app.get_result(fake_id, timeout_ms=1000))
     assert_err(result, expected_code=RetrievalCode.TASK_NOT_FOUND)
 
@@ -940,7 +940,7 @@ def test_wait_timeout(broker: PostgresBroker, app: Horsies) -> None:
         task_name='e2e_simple',
         kwargs_json='{"x": 5}',
         queue_name='default',
-        task_id=str(uuid4()),
+        task_id=uuid4(),
         send_kind=SendKind.FIRST,
         enqueue_sha='test-sha',
         sent_at=datetime.now(timezone.utc),
@@ -985,7 +985,7 @@ async def test_argument_deserialization_error(
     broker: PostgresBroker, app: Horsies,
 ) -> None:
     """L1.7.7: A corrupted stored input triggers WORKER_SERIALIZATION_ERROR."""
-    task_id = str(uuid4())
+    task_id = uuid4()
     # Store the input as a JSON string instead of a JSON object
     sent_at, fingerprint = compute_test_command_fingerprint(
         task_name='e2e_simple', input_json='"not_a_list"',
@@ -1007,7 +1007,7 @@ async def test_argument_deserialization_error(
                     )
             """),
             {
-                'tid': task_id,
+                'tid': str(task_id),
                 'input': '"not_a_list"',
                 'sent_at': sent_at,
                 'command_fingerprint': fingerprint,
@@ -1030,7 +1030,7 @@ async def test_malformed_pydantic_args(
     broker: PostgresBroker, app: Horsies,
 ) -> None:
     """L1.7.8: Invalid Pydantic model data in the input triggers WORKER_SERIALIZATION_ERROR."""
-    task_id = str(uuid4())
+    task_id = uuid4()
     # Model data that fails model_validate (age is not coercible to int)
     corrupted_input = json.dumps(
         {'user': {'name': 'Alice', 'age': 'not_a_number'}},
@@ -1055,7 +1055,7 @@ async def test_malformed_pydantic_args(
                     )
             """),
             {
-                'tid': task_id,
+                'tid': str(task_id),
                 'input': corrupted_input,
                 'sent_at': sent_at,
                 'command_fingerprint': fingerprint,
@@ -1081,7 +1081,7 @@ async def test_task_cancelled(broker: PostgresBroker, app: Horsies) -> None:
         task_name='e2e_simple',
         kwargs_json='{"x": 5}',
         queue_name='default',
-        task_id=str(uuid4()),
+        task_id=uuid4(),
         enqueue_sha='test-sha',
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
@@ -1089,14 +1089,14 @@ async def test_task_cancelled(broker: PostgresBroker, app: Horsies) -> None:
 
     # Cancel directly in DB (no cancel API exists)
     async with current_resources(broker).session_factory() as session:
-        await force_terminal(session, task_id, status='CANCELLED')
+        await force_terminal(session, str(task_id), status='CANCELLED')
         await session.commit()
 
     result = unwrap_get_result(await asyncio.to_thread(app.get_result, task_id, timeout_ms=1000))
     assert_err(result, expected_code=OutcomeCode.TASK_CANCELLED)
     assert result.err is not None
     assert result.err.data is not None
-    assert result.err.data['task_id'] == task_id
+    assert result.err.data['task_id'] == str(task_id)
 
 
 # =============================================================================
@@ -1325,7 +1325,7 @@ async def test_legacy_pydantic_result_envelope_rejected(
     malformed stored payload is mapped to
     ``TaskResult(err=TaskError(RESULT_DESERIALIZATION_ERROR))``.
     """
-    task_id = str(uuid4())
+    task_id = uuid4()
     legacy_result = json.dumps({
         '__task_result__': True,
         'ok': {
@@ -1355,11 +1355,11 @@ async def test_legacy_pydantic_result_envelope_rejected(
                         'child-1'
                     )
             """),
-            {'tid': task_id, 'sent_at': sent_at, 'command_fingerprint': fingerprint},
+            {'tid': str(task_id), 'sent_at': sent_at, 'command_fingerprint': fingerprint},
         )
         await force_terminal(
             session,
-            task_id,
+            str(task_id),
             status='COMPLETED',
             result_json=legacy_result,
         )

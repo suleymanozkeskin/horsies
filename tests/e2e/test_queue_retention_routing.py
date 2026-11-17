@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import time
+from uuid import UUID
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -46,7 +47,7 @@ from horsies.core.utils.url import sqlalchemy_url
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 
-def _history_partition(task_id: str) -> str | None:
+def _history_partition(task_id: UUID) -> str | None:
     """The relation the completed record landed in, or None if not moved."""
     engine = create_engine(sqlalchemy_url(DB_URL))
     try:
@@ -58,7 +59,7 @@ def _history_partition(task_id: str) -> str | None:
                         'FROM horsies_task_history '
                         'WHERE task_id = CAST(:task_id AS uuid)'
                     ),
-                    {'task_id': task_id},
+                    {'task_id': str(task_id)},
                 )
             ).scalar_one_or_none()
     finally:
