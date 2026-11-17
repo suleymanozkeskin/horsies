@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.brokers.resources import BrokerResources
     from horsies.core.history.maintenance.coverage import CoverageOutcome
+    from horsies.core.history.maintenance.pruning import PrunePassSummary
     from horsies.core.models.recovery import RecoveryConfig
     from horsies.core.models.retention import RetentionConfig
     from horsies.core.worker.config import WorkerConfig
@@ -428,12 +429,6 @@ class ReaperMixin:
                 CoverageEnsured,
                 history_coverage_payload,
             )
-            from horsies.core.history.maintenance.pruning import (
-                prune_expired_partitions,
-            )
-            from horsies.core.history.reads.publisher import (
-                StagedLoaderPublisher,
-            )
 
             try:
                 coverage = await self._run_partition_coverage(
@@ -516,10 +511,7 @@ class ReaperMixin:
             # finalizations) skip their leaf and surface on the health
             # dict; the skipped leaf is the next pass's candidate.
             try:
-                prune = await prune_expired_partitions(
-                    resources.partition_maintenance,
-                    StagedLoaderPublisher(),
-                )
+                prune = await self._run_partition_pruning(temp_broker, resources)
                 if prune.acted:
                     summary = (
                         'Partition pruning: '
@@ -585,6 +577,27 @@ class ReaperMixin:
             declared_classes=retention_cfg.registrable_classes(),
             serialization=CoverageSerialization.PER_LEAF_LOCKS,
         )
+
+    async def _run_partition_pruning(
+        self,
+        temp_broker: 'PostgresBroker',
+        resources: 'BrokerResources',
+    ) -> 'PrunePassSummary':
+        """One pruning pass in the core, on the core handle of
+        ``temp_broker`` (``prune_expired_partitions_in_core``): the expired
+        heartbeat and period leaves are detached and dropped, at most 64 per
+        pass. ``resources`` is not read: the pass runs on the core pools, not
+        on ``partition_maintenance``.
+
+        Returns the summary; raises ``CoreOperationFailed`` when the pass has
+        no report and ``CoreError`` when the core of this process cannot run
+        it. The caller logs both and records the health.
+        """
+        from horsies.core.history.maintenance.pruning import (
+            prune_expired_partitions_in_core,
+        )
+
+        return await prune_expired_partitions_in_core(temp_broker._core_handle)
 
     async def _check_class_coverage(
         self,
