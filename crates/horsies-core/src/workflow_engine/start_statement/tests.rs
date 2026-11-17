@@ -35,7 +35,6 @@ fn task_node(index: usize, dependencies: Vec<usize>) -> AnyNode {
         dependencies,
         args_from: HashMap::new(),
         workflow_ctx_from: None,
-        workflow_ctx_from_refs: None,
         queue: Some("default".to_owned()),
         priority: Some(100),
         allow_failed_deps: false,

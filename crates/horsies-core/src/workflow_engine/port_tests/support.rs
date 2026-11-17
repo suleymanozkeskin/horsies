@@ -677,7 +677,6 @@ pub(super) fn task_node(index: usize, task_name: &str) -> AnyNode {
         dependencies: Vec::new(),
         args_from: std::collections::HashMap::new(),
         workflow_ctx_from: None,
-        workflow_ctx_from_refs: None,
         queue: Some(PORT_QUEUE.to_owned()),
         priority: Some(100),
         allow_failed_deps: false,

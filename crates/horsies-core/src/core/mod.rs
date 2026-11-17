@@ -24,10 +24,7 @@ pub use config::{
     SchedulePattern, TaskSchedule, Weekday, WeeklySchedule, WorkerResilienceConfig,
 };
 pub use error::{ErrorCategory, ErrorCode, HorsiesError, ValidationReport};
-pub use registry::{
-    BuilderHookName, RegisteredWorkflowSpec, SpecBuildError, SpecBuilderFn, TaskRegistry,
-    WorkflowSpecRegistry,
-};
+pub use registry::TaskRegistry;
 pub use task::{
     AsyncTaskFn, BackoffStrategy, BlockingTaskFn, BuiltInTaskCode, CancelGraceMs,
     CancelGraceOutOfRange, ContractCode, ExceptionRecord, Execution, ExecutionClass,
@@ -38,11 +35,9 @@ pub use task::{
 };
 pub use types::{TaskAttemptOutcome, TaskStatus, TASK_TERMINAL_STATES, TASK_TERMINAL_VALUES};
 pub use workflow::{
-    resolve_node_task_options, AnyNode, HandleErrorCode, HandleOperationError, HandleResult,
-    InputField, JoinType, NodeKey, NodeRef, OnError, SubWorkflowNode, SubWorkflowParams,
-    SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskNode, TypedNodeRef, WorkflowContext,
-    WorkflowDefConfig, WorkflowDefinition, WorkflowMeta, WorkflowSpec, WorkflowSpecBuilder,
-    WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus,
-    WorkflowTaskStatus, WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES,
+    AnyNode, HandleErrorCode, HandleOperationError, HandleResult, JoinType, NodeKey, OnError,
+    SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy, WorkflowContext,
+    WorkflowMeta, WorkflowSpec, WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult,
+    WorkflowStatus, WorkflowTaskStatus, WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES,
     WORKFLOW_TERMINAL_STATES,
 };

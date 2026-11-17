@@ -36,8 +36,8 @@ web = [
 ]
 
 [dependencies]
-# The `CodeCatalog` derive of the code enums; the tests of the workflow DSL
-# also derive `WorkflowInput` from it.
+# The `CodeCatalog` derive of the code enums and the `ManifestSchema` derive
+# of the manifest types.
 horsies-macros = { version = "0.1.0-alpha.36", path = "../horsies-macros" }
 async-stream = { version = "0.3", optional = true }
 async-trait = { version = "0.1", optional = true }
