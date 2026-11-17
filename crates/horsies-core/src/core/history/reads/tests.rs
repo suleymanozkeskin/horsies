@@ -22,7 +22,7 @@ use crate::core::history::ddl::classes::{
 use crate::core::history::ddl::runtime_names::daily_leaf_name;
 use crate::core::history::errors::HistoryError;
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
-use crate::core::history::names::{LEAF_CATALOG, TASK_HISTORY_PARENT};
+use crate::core::history::names::{LEAF_CATALOG, TASK_DETAIL_FUNCTION, TASK_HISTORY_PARENT};
 use crate::core::history::outcomes::{LeafCreation, LeafDrop};
 use crate::core::history::partitions::catalog::database_now;
 use crate::core::history::partitions::manager::{
@@ -38,7 +38,6 @@ use super::aggregates::{
     plan_rows_from_explain, plan_rows_from_explain_text, HistoryBreakdownGroup,
     HistoryStatusAggregate, HISTORY_NONEMPTY_PROBE_SQL,
 };
-use super::detail::staged_detail_published;
 use super::pages::{
     history_facet_statement, history_page_statement, history_sort_expression, HistoryBindValue,
     HistoryFacet, HistoryFacetQuery, HistoryPageQuery, HistoryScope, HistorySortField,
@@ -583,6 +582,15 @@ async fn publisher_installs_the_four_readers_and_resolves_live_history_and_absen
     database.drop().await;
 }
 
+/// Whether the detail reader `horsies_task_detail_staged(uuid)` exists.
+async fn detail_reader_exists(connection: &mut PgConnection) -> bool {
+    sqlx::query_scalar("SELECT to_regprocedure($1) IS NOT NULL")
+        .bind(format!("{TASK_DETAIL_FUNCTION}(uuid)"))
+        .fetch_one(connection)
+        .await
+        .expect("look up the detail reader")
+}
+
 #[tokio::test]
 #[serial]
 async fn coverage_republishes_the_triple_when_only_the_detail_function_is_missing() {
@@ -599,9 +607,7 @@ async fn coverage_republishes_the_triple_when_only_the_detail_function_is_missin
         .await
         .expect("drop only staged detail function");
     let mut transaction = database.pool.begin().await.expect("begin healing coverage");
-    assert!(!staged_detail_published(&mut transaction)
-        .await
-        .expect("detail publication probe"));
+    assert!(!detail_reader_exists(&mut transaction).await);
     assert!(published_manifest_absent_leaves(&mut transaction)
         .await
         .expect("healthy manifest probe")
@@ -616,9 +622,7 @@ async fn coverage_republishes_the_triple_when_only_the_detail_function_is_missin
     assert_eq!(healed.created_heartbeat_leaves, 0);
     assert!(healed.republished);
     assert!(healed.absent_leaves.is_empty());
-    assert!(staged_detail_published(&mut transaction)
-        .await
-        .expect("healed detail publication probe"));
+    assert!(detail_reader_exists(&mut transaction).await);
     transaction.commit().await.expect("commit healing coverage");
     database.drop().await;
 }
