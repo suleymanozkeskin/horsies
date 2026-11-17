@@ -10,17 +10,28 @@ that called at least one operation (the informative ones) and the count of
 the others, then the calls of each operation of the table on the reference
 and on the core. Without the option the fixture changes nothing.
 
+Before each run the session database goes back to its seed state
+(``tests/dualrun/seed_reset.py``), so that no run sees the rows, classes,
+leaves or readers of the run before it. The first run of the session installs
+the baseline, runs the seed sequence of the integration tests
+(``ensure_history_seedable``) and saves that state. ``--dual-run`` needs the
+session database: the PgBouncer lane (``HORSIES_PGBOUNCER_TEST=1``) has none
+and is refused.
+
 This plugin imports no ``horsies`` module at import: the tables name their
 functions by path, and the fixture loads them.
 """
 
 from __future__ import annotations
 
+import asyncio
+import os
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, assert_never, cast
+from typing import TYPE_CHECKING, Final, assert_never, cast
 
+import psycopg
 import pytest
 
 from tests.dualrun.operations.broker import BROKER_OPERATIONS, BROKER_REFERENCE_ONLY_TESTS
@@ -51,6 +62,9 @@ from tests.dualrun.operations.table import (
     ReferenceOnlyTest,
     SwitchModule,
 )
+
+if TYPE_CHECKING:
+    from tests.dualrun.seed_reset import SeedState
 
 DUAL_RUN_OPTION: Final = '--dual-run'
 DUAL_RUN_TESTS: Final = Path('tests') / 'integration'
@@ -91,6 +105,12 @@ _COUNTS_KEY: Final = pytest.StashKey[dict[str, int]]()
 _OPERATION_COUNTS_KEY: Final = pytest.StashKey[dict[tuple[str, Implementation], int]]()
 """Calls per operation name and run (every test together)."""
 
+_SEED_KEY: Final = pytest.StashKey['SeedState']()
+"""The seed state of the session database, saved at the first run."""
+
+PGBOUNCER_LANE_VARIABLE: Final = 'HORSIES_PGBOUNCER_TEST'
+"""Set to ``1`` in the PgBouncer lane, which has no session database (``tests/session_database.py``)."""
+
 
 @dataclass(frozen=True, slots=True)
 class SingleRun:
@@ -121,6 +141,19 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "module's switched operations, then on the core"
         ),
     )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    if selected_module(config) is None:
+        return
+    match os.environ.get(PGBOUNCER_LANE_VARIABLE):
+        case '1':
+            raise pytest.UsageError(
+                f'{DUAL_RUN_OPTION} resets the session database before each run; '
+                f'the PgBouncer lane ({PGBOUNCER_LANE_VARIABLE}=1) has no session database'
+            )
+        case _:
+            pass
 
 
 def selected_module(config: pytest.Config) -> SwitchModule | None:
@@ -223,6 +256,88 @@ def _isolate_process_registries(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(registry, '_nodes_by_spec', copied_nodes)
 
 
+async def _install_and_seed(url: str) -> None:
+    """Install the baseline on ``url`` and run the seed sequence of the
+    integration tests, as the ``broker`` fixture of
+    ``tests/integration/conftest.py`` does. Fails the test on a refusal."""
+    from pydantic import SecretStr
+
+    from horsies.core.brokers.postgres import PostgresBroker
+    from horsies.core.models.broker import PostgresConfig
+    from horsies.core.types.result import Err, Ok
+    from tests.broker_resources_support import current_resources
+    from tests.integration.history_seeding import ensure_history_seedable
+
+    broker = PostgresBroker(PostgresConfig(database_url=SecretStr(url)))
+    try:
+        match await broker.ensure_schema_initialized():
+            case Err(refused):
+                pytest.fail(f'dual-run seed: the install refused the session database: {refused}')
+            case Ok():
+                pass
+        async with current_resources(broker).engine.begin() as connection:
+            await ensure_history_seedable(connection)
+    finally:
+        closed = await broker.close_async()
+    match closed:
+        case Err(failed):
+            pytest.fail(f'dual-run seed: closing the seed broker failed: {failed}')
+        case Ok():
+            pass
+
+
+def _session_connection(url: str) -> psycopg.Connection[tuple[object, ...]]:
+    """A new connection to the session database. Fails the test when it cannot connect."""
+    from horsies.core.utils.url import to_psycopg_url
+
+    try:
+        return psycopg.connect(to_psycopg_url(url))
+    except psycopg.Error as exc:
+        pytest.fail(f'dual-run reset: connecting to the session database failed: {exc}')
+
+
+def _saved_seed(config: pytest.Config, url: str) -> SeedState:
+    """The seed state of the session; the first call installs, seeds and saves it."""
+    from horsies.core.types.result import Err, Ok
+    from tests.dualrun.seed_reset import save_seed
+
+    match config.stash.get(_SEED_KEY, None):
+        case None:
+            pass
+        case seed:
+            return seed
+    asyncio.run(_install_and_seed(url))
+    connection = _session_connection(url)
+    try:
+        match save_seed(connection):
+            case Err(error):
+                pytest.fail(f'dual-run seed: saving the seed state failed: {error}')
+            case Ok(seed):
+                config.stash[_SEED_KEY] = seed
+                return seed
+    finally:
+        connection.close()
+
+
+def _reset_session_database(config: pytest.Config) -> None:
+    """Bring the session database to its seed state before a run. Fails the test when the reset fails."""
+    from horsies.core.types.result import Err, Ok
+    from tests.dualrun.seed_reset import reset_to_seed
+    from tests.session_database import session_database_url
+
+    url = session_database_url()
+    seed = _saved_seed(config, url)
+    connection = _session_connection(url)
+    try:
+        match reset_to_seed(connection, seed):
+            case Err(error):
+                pytest.fail(f'dual-run reset: the session database did not go back to its seed: {error}')
+            case Ok():
+                pass
+    finally:
+        connection.close()
+
+
 @pytest.fixture(autouse=True)
 def implementation(
     request: pytest.FixtureRequest,
@@ -237,6 +352,7 @@ def implementation(
         case _:
             yield SingleRun()
             return
+    _reset_session_database(request.config)
     operations = tuple(resolve_operation(each) for each in OPERATION_TABLES[switched])
     _isolate_process_registries(monkeypatch)
     counts = CallCounts()
