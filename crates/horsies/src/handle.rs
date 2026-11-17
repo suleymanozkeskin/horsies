@@ -23,7 +23,7 @@ use horsies_core::handle::CoreHandle;
 use horsies_core::{
     process_role, wait_inside_task_message, BrokerError, BrokerErrorCode, BrokerOperationError,
     BuiltInTaskCode, OperationalErrorCode, OutcomeCode, ProcessRole, RawResultRead,
-    RawResultRecord, RetrievalCode, TaskInfoRead, TaskResult,
+    RawResultRecord, RetrievalCode, StoredEnvelopeText, TaskInfoRead, TaskResult,
 };
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
@@ -36,8 +36,14 @@ pub use horsies_core::TaskAbsenceReason;
 /// The limit of a result wait: `WaitLimit::parse(Some(duration))` refuses
 /// a limit above `MAX_WAIT_LIMIT_MS` (about 49.7 days) before any read.
 pub use horsies_core::{BoundedWait, WaitLimit, WaitLimitRefused, MAX_WAIT_LIMIT_MS};
-/// The info of a task and its attempts, and the status of a task.
-pub use horsies_core::{TaskAttemptInfo, TaskInfo, TaskStatus};
+/// The info of an attempt of a task, and the status of a task.
+pub use horsies_core::{TaskAttemptInfo, TaskStatus};
+
+/// The info of a task. Its `result` is the stored result read as a
+/// `TaskResult`: the `ok` slot as JSON, the `err` slot as a stored task
+/// error. The core's read returns the envelope as stored, and the client
+/// reads it (Python `Horsies.get_task_info_async`).
+pub type TaskInfo = horsies_core::TaskInfo<TaskResult<serde_json::Value>>;
 
 /// What a task ended with.
 #[derive(Debug, Clone, PartialEq)]
@@ -248,7 +254,8 @@ where
     /// The info of the task with the `parts` asked for. Not kept: a status
     /// changes.
     ///
-    /// Errors: `TaskNotFound` for a task held nowhere; `Database`.
+    /// Errors: `TaskNotFound` for a task held nowhere; `StoredResultUnreadable`
+    /// for a stored result that is not a task result; `Database`.
     pub async fn info(&self, parts: TaskInfoParts) -> Result<TaskInfo, ReadError> {
         read_task_info(&self.reads, self.task_id, parts).await
     }
@@ -305,9 +312,29 @@ pub(crate) async fn read_task_info(
         .await
         .map_err(|error| ReadError::of_operation(task_id, error))?;
     match read {
-        TaskInfoRead::Found(info) => Ok(*info),
+        TaskInfoRead::Found(info) => task_info_of_stored(*info),
         TaskInfoRead::Absent { reason } => Err(ReadError::TaskNotFound { task_id, reason }),
     }
+}
+
+/// The task info with its stored result read as a `TaskResult` (Python
+/// `Horsies.get_task_info_async`, which decodes the envelope that the
+/// broker's read returns). Pure.
+///
+/// Errors: `StoredResultUnreadable` for a stored result that is not a task
+/// result envelope, or whose error does not read; the cause names no value.
+fn task_info_of_stored(
+    info: horsies_core::TaskInfo<StoredEnvelopeText>,
+) -> Result<TaskInfo, ReadError> {
+    let task_id = info.task_id;
+    info.try_map_result(|envelope| {
+        task_result_from_json_str::<serde_json::Value>(envelope.as_str()).map_err(|error| {
+            ReadError::StoredResultUnreadable {
+                task_id,
+                cause: unreadable_cause(&error),
+            }
+        })
+    })
 }
 
 /// The duration of a wait limit, as the core's read takes it.
@@ -673,6 +700,92 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A task info as the core's read returns it: the stored result as its
+    /// stored text.
+    fn stored_info(result: Option<Value>) -> horsies_core::TaskInfo<StoredEnvelopeText> {
+        horsies_core::TaskInfo {
+            task_id: task(),
+            task_name: "charge".to_owned(),
+            status: TaskStatus::Failed,
+            queue_name: "default".to_owned(),
+            priority: 100,
+            retry_count: 1,
+            max_retries: 2,
+            next_retry_at: None,
+            sent_at: None,
+            enqueued_at: chrono::Utc::now(),
+            claimed_at: None,
+            started_at: None,
+            completed_at: None,
+            failed_at: Some(chrono::Utc::now()),
+            worker_hostname: None,
+            worker_pid: None,
+            worker_process_name: None,
+            error_code: None,
+            failed_reason: None,
+            result: result.map(|value| {
+                StoredEnvelopeText::parse(value.to_string())
+                    .unwrap()
+                    .expect("an envelope is an object")
+            }),
+            attempts: None,
+            execution: horsies_core::ExecutionClass::NotKeptInHistory,
+        }
+    }
+
+    /// Python `Horsies.get_task_info_async`: the client reads the stored
+    /// envelope that the core returns; the other fields pass unchanged.
+    #[test]
+    fn a_task_info_result_is_read_by_the_client() {
+        let info = task_info_of_stored(stored_info(Some(json!({
+            "__h_task_result__": true,
+            "ok": 3,
+            "err": null
+        }))))
+        .expect("a stored value reads");
+        let Some(TaskResult::Ok(value)) = info.result else {
+            panic!("a stored value is an ok result");
+        };
+        assert_eq!(value, json!(3));
+        assert_eq!(info.task_name, "charge");
+        assert_eq!(info.retry_count, 1);
+
+        let library = task_info_of_stored(stored_info(Some(json!({
+            "__h_task_result__": true,
+            "ok": null,
+            "err": {
+                "exception": null,
+                "error_code": {"__builtin_task_code__": "TASK_EXPIRED"},
+                "data": null,
+                "message": "expired"
+            }
+        }))))
+        .expect("a stored library error reads");
+        assert!(matches!(library.result, Some(TaskResult::Err(_))));
+
+        let none = task_info_of_stored(stored_info(None)).expect("no result reads");
+        assert!(none.result.is_none());
+    }
+
+    /// The core returns any stored object; the client's typed read refuses
+    /// one that is not a task result, and a built-in name stored as a plain
+    /// code, with a cause that names no value.
+    #[test]
+    fn a_task_info_result_that_is_not_a_task_result_is_unreadable() {
+        for stored in [
+            json!({"__h_task_result__": true, "ok": null, "err": {"error_code": "TASK_EXPIRED"}}),
+            json!({"not": MARKER}),
+        ] {
+            let Err(ReadError::StoredResultUnreadable { task_id, cause }) =
+                task_info_of_stored(stored_info(Some(stored.clone())))
+            else {
+                panic!("{stored}: the client reads only a task result");
+            };
+            assert_eq!(task_id, task());
+            assert!(!cause.contains(MARKER), "{cause}");
+        }
     }
 
     #[test]

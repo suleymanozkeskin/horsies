@@ -9,13 +9,13 @@ use std::sync::Arc;
 use horsies_core::handle::CoreHandle;
 use horsies_core::{
     child_producer, process_role, ChildProducer, ProcessRole, RawResultRead, RawResultRecord,
-    TaskInfo, TaskStatus, WaitLimit,
+    TaskStatus, WaitLimit,
 };
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use crate::handle::{limit_duration, read_task_info};
-use crate::{Horsies, ReadError, TaskHandle, TaskInfoParts, TaskOutcome, UserErrorCode};
+use crate::{Horsies, ReadError, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, UserErrorCode};
 
 /// The stored result of a task, not read with any type (Python
 /// `get_raw_result`): for tools that read results without the task's
@@ -89,9 +89,10 @@ impl Horsies {
 
     /// The info of task `task_id` with the `parts` asked for (Python
     /// `get_task_info`): the live row or the history record, attempts
-    /// newest first.
+    /// newest first, the stored result read as a `TaskResult`.
     ///
-    /// Errors: `TaskNotFound`; `Database`.
+    /// Errors: `TaskNotFound`; `StoredResultUnreadable` for a stored result
+    /// that is not a task result; `Database`.
     pub async fn get_task_info(
         &self,
         task_id: Uuid,

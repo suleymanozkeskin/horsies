@@ -8,7 +8,7 @@ use std::str::FromStr;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use crate::core::history::archive::results::{decode_result_envelope, decode_result_envelope_text};
+use crate::core::history::archive::results::decode_result_envelope_text;
 use crate::core::history::enqueue::{
     parse_optional_object, prepare_enqueue_facts, PreparedEnqueueFacts, SendPart,
 };
@@ -398,15 +398,16 @@ static GET_RAW_RESULT_PROBE: TypedStatement = TypedStatement::new(
     &[ParameterType::Uuid],
 );
 
-/// The live row of a task info read. The terminal times, the error code, the
-/// result and the failed reason are `NULL` whatever the include flags say:
-/// the flags select fields of a history row only.
+/// The live row of a task info read. The terminal times, the error code and
+/// the failed reason are `NULL` whatever the include flags say: the flags
+/// select fields of a history row only. The live table stores no result, so
+/// the row has no result column.
 const GET_TASK_INFO_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
        next_retry_at, sent_at, enqueued_at, claimed_at, started_at,
        NULL::timestamptz AS completed_at, NULL::timestamptz AS failed_at,
        worker_hostname, worker_pid, worker_process_name, NULL::text AS error_code,
-       NULL::text AS failed_reason, NULL::text AS result, execution
+       NULL::text AS failed_reason, execution
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -2859,8 +2860,8 @@ mod rerun_family_error_tests {
 /// stored result that fails its check is `INVALID_JSON_PAYLOAD`; a status or
 /// an attempt snapshot that does not decode, and a database failure, are
 /// `TASK_INFO_QUERY_FAILED`, retryable by the driver classification. A
-/// history result is checked in [`history_task_info`]; on the live path the
-/// only `Serialization` error is the stored result's.
+/// history result is checked in [`history_task_info`]; the live row holds no
+/// result.
 fn task_info_history_error(error: BrokerError) -> BrokerOperationError {
     let code = match &error {
         BrokerError::Serialization(_) => BrokerErrorCode::InvalidJsonPayload,
@@ -3044,27 +3045,25 @@ fn raw_result_operation_error(error: BrokerError) -> BrokerOperationError {
     }
 }
 
-fn decode_history_result_value(
-    detail: &HistoryTaskDetail,
-) -> Result<Option<serde_json::Value>, BrokerError> {
-    let Some(payload) = detail.result_payload.as_deref() else {
-        return Ok(None);
+/// The stored result of a history row for a task info read: `None` when the
+/// row stores no result or the JSON `null`, else the envelope text as
+/// stored. Pure.
+///
+/// Errors: `INVALID_JSON_PAYLOAD`, not retryable, for an absent digest, an
+/// envelope that fails its version, digest or strict JSON check, and a value
+/// other than an object or `null`.
+fn history_result_envelope(detail: &HistoryTaskDetail) -> BrokerResult<Option<StoredEnvelopeText>> {
+    let checked = match history_result_text(detail) {
+        Ok(None) => Ok(None),
+        Ok(Some(text)) => StoredEnvelopeText::parse(text).map_err(|refused| refused.to_string()),
+        Err(error) => Err(error.to_string()),
     };
-    let digest = detail.result_digest.as_deref().ok_or_else(|| {
-        BrokerError::HistoryReadContract(format!(
-            "history result digest is absent for task {}",
+    checked.map_err(|cause| {
+        invalid_raw_result(format!(
+            "History result envelope failed validation for task {}: {cause}",
             detail.task_id
         ))
-    })?;
-    decode_result_envelope(
-        detail.result_envelope_version,
-        &detail.result_codec,
-        &detail.result_content_type,
-        payload,
-        digest,
-    )
-    .map(Some)
-    .map_err(|error| BrokerError::HistoryReadContract(error.to_string()))
+    })
 }
 
 /// The text of the stored result of a history row, as stored: an integer
@@ -3126,8 +3125,11 @@ fn history_task_result_row(
     })
 }
 
-/// The task info of a history row. A stored result that fails its digest or
-/// does not decode is `INVALID_JSON_PAYLOAD`; a status or an attempt snapshot
+/// The task info of a history row (Python `PostgresBroker._history_task_info`).
+/// The stored result is checked as a result envelope (version, digest, strict
+/// JSON, an object or `null`) and returned as its stored text, with no typed
+/// decode: a client reads it with the task's types. A stored result that
+/// fails the check is `INVALID_JSON_PAYLOAD`; a status or an attempt snapshot
 /// that does not decode is `TASK_INFO_QUERY_FAILED`, not retryable (Python
 /// `python/horsies/core/brokers/postgres.py:4889-4904`, `:4973-4977`).
 fn history_task_info(
@@ -3135,23 +3137,11 @@ fn history_task_info(
     include_result: bool,
     include_failed_reason: bool,
     include_attempts: bool,
-) -> BrokerResult<TaskInfo> {
+) -> BrokerResult<TaskInfo<StoredEnvelopeText>> {
     let status = detail.status;
     let result = match include_result {
         false => None,
-        true => decode_history_result_value(&detail)
-            .and_then(|value| {
-                value
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(BrokerError::Serialization)
-            })
-            .map_err(|error| {
-                invalid_raw_result(format!(
-                    "History result envelope failed validation for task {}: {error}",
-                    detail.task_id
-                ))
-            })?,
+        true => history_result_envelope(&detail)?,
     };
     let terminal_at = detail.terminal_at;
     // The snapshot holds the attempts oldest first; a task info lists them
@@ -6222,10 +6212,8 @@ mod task_info_code_tests {
 
     /// Python `test_broker_postgres.py::TestHistoryTaskInfoResultDecode::test_stored_result_is_refused_as_invalid_json_payload`,
     /// the payloads past the strict read rule (`core::codec::check_json_bytes`):
-    /// a float out of range and an integer of 5000 digits (refused in a
-    /// default build by serde_json's range check, read as text under its
-    /// `arbitrary_precision` feature), and a repeated key (read in every
-    /// build).
+    /// a float out of range, an integer of 5000 digits and a repeated key,
+    /// which the strict check of the stored text refuses in every build.
     #[test]
     fn a_stored_result_past_the_strict_rule_is_invalid_json_payload_in_every_build() {
         let long_integer = format!("{{\"x\":{}}}", "1".repeat(5000));
@@ -6236,6 +6224,58 @@ mod task_info_code_tests {
         ] {
             assert_refused_as_invalid_json_payload(payload);
         }
+    }
+
+    /// Python `PostgresBroker._history_task_info`: the stored result is
+    /// returned as stored, with no typed decode. An error with a plain
+    /// built-in name as its code, an error without its null keys, a value
+    /// that is not an envelope and an integer above `u64` all come back
+    /// byte for byte; the client's typed read decides on them.
+    #[test]
+    fn a_history_result_is_returned_as_stored() {
+        for payload in [
+            r#"{"__h_task_result__":true,"ok":null,"err":{"error_code":"TASK_EXPIRED"}}"#,
+            r#"{"__h_task_result__":true,"ok":null,"err":{"error_code":"E2"}}"#,
+            r#"{"not":"an envelope"}"#,
+            r#"{"__h_task_result__":true,"ok":18446744073709551616,"err":null}"#,
+        ] {
+            let info = history_task_info(
+                history_detail_with_result(payload.as_bytes()),
+                true,
+                false,
+                false,
+            )
+            .unwrap_or_else(|refused| panic!("{payload}: {refused}"));
+            assert_eq!(
+                info.result.as_ref().map(StoredEnvelopeText::as_str),
+                Some(payload),
+            );
+        }
+    }
+
+    /// Python: a stored JSON `null` is no result.
+    #[test]
+    fn a_history_result_of_null_is_no_result() {
+        let info = history_task_info(history_detail_with_result(b"null"), true, false, false)
+            .expect("a stored null reads");
+        assert!(info.result.is_none());
+    }
+
+    /// Python: a stored result that is neither an object nor `null` is
+    /// `INVALID_JSON_PAYLOAD`.
+    #[test]
+    fn a_history_result_that_is_not_an_object_is_invalid_json_payload() {
+        for payload in [&b"[]"[..], &b"\"text\""[..], &b"1"[..], &b"true"[..]] {
+            assert_refused_as_invalid_json_payload(payload);
+        }
+    }
+
+    /// The result is read only when the caller asks for it.
+    #[test]
+    fn a_history_result_is_not_read_unless_asked() {
+        let info = history_task_info(history_detail_with_result(b"[]"), false, false, false)
+            .expect("a result that is not read is not checked");
+        assert!(info.result.is_none());
     }
 }
 

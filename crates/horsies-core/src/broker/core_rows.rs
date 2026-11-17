@@ -323,7 +323,6 @@ pub(crate) fn task_info_row(
         worker_process_name: column(row, statement, "worker_process_name")?,
         error_code: column(row, statement, "error_code")?,
         failed_reason: column(row, statement, "failed_reason")?,
-        result: column(row, statement, "result")?,
         execution: column(row, statement, "execution")?,
     })
 }
