@@ -17,9 +17,9 @@ mod uuid_text;
 
 pub use crate::monitoring::ResumeChildren;
 pub use auth::{INTENT_HEADER, INTENT_VALUE};
-/// The HTTP types of the handler's request and response parts.
-pub use axum::body::Bytes;
-pub use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
+/// The body type of the handler's request and response parts, from the
+/// `bytes` crate: no web framework's own type.
+pub use bytes::Bytes;
 pub use events::{
     EventBroadcaster, EventCoalescer, EventFrames, EventStreamItem, TopicEvent, CHANNEL_TOPICS,
     DEBOUNCE, DEGRADED_FRAME, HEARTBEAT, HEARTBEAT_FRAME, MAX_IDS_PER_EVENT, TOPIC_DEGRADED,
@@ -29,6 +29,9 @@ pub use handler::{
     RequestParts, ResponseForm, ResponseParts, RouteAccess, Verdict, MAX_REQUEST_BODY_BYTES,
     MAX_RESPONSE_BYTES,
 };
+/// The HTTP types of the handler's request and response parts, from the
+/// `http` crate: no web framework's own type.
+pub use http::{HeaderName, HeaderValue, Method, StatusCode};
 pub use schema::{
     SchemaIncompatible, SchemaProbe, SchemaState, SchemaStatus, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
 };
