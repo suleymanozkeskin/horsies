@@ -78,6 +78,9 @@ pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 
 // lifecycle operations of a client handle (`PostgresBroker::release_claims`,
 // `PostgresBroker::requeue_stale_claimed`, `PostgresBroker::cancel_task`)
+pub use crate::broker::attempt_writes::{
+    AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryPlacement, RetryRequest,
+};
 pub use crate::broker::claims::{
     ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement,
     MAX_RELEASED_CLAIMS,
