@@ -504,11 +504,11 @@ pub fn spawn_worker_state_loop(
                     tracing::error!(
                         worker_id = %source.worker_id,
                         %error,
-                        "failed to count claimed tasks; no worker snapshot this interval",
+                        "failed to count claimed tasks: {error}; no worker snapshot this interval",
                     );
                 }
                 Err(SnapshotFailure::InsertFailed(error)) => {
-                    tracing::warn!(error = %error, "failed to insert worker state");
+                    tracing::warn!(error = %error, "Failed to update worker state: {error}");
                 }
             }
 
