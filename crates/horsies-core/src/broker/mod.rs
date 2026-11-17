@@ -56,6 +56,7 @@ mod worker_state_read_tests;
 mod workflow_claim_settle;
 mod workflow_operations;
 mod workflow_reads;
+pub mod workflow_start;
 
 pub use bound_handle::TaskHandle;
 pub use class_budgets::{ClassBudget, ClassBudgets};
@@ -85,7 +86,10 @@ pub use postgres::{
 pub use process_listener::{
     CheckInterruption, ListenError, ListenerPlanError, SessionCheckFailure,
 };
-pub use result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord};
+pub use result_types::{
+    BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRead, RawResultRecord,
+    TaskInfoRead,
+};
 pub use row::heartbeat::HeartbeatRow;
 pub use row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow, TaskResultRow};
 pub use row::workflow::{WorkflowRow, WorkflowTaskRow};

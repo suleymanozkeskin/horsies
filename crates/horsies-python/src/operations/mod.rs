@@ -30,4 +30,6 @@ pub mod worker_ping;
 pub mod worker_reads;
 pub mod workflow_lifecycle;
 pub mod workflow_reads;
+pub mod workflow_resume;
 pub mod workflow_retention;
+pub mod workflow_start;

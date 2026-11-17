@@ -32,6 +32,7 @@ class WorkflowOperation(Enum):
     RESULT_FOR = 'workflow_node_result'
     RESULTS = 'workflow_node_results'
     TASKS = 'workflow_nodes'
+    RESUME = 'resume_workflow'
 
 
 def _label(operation: WorkflowOperation) -> str:
@@ -51,6 +52,8 @@ def _label(operation: WorkflowOperation) -> str:
             return 'Results'
         case WorkflowOperation.TASKS:
             return 'Tasks'
+        case WorkflowOperation.RESUME:
+            return 'Resume'
         case _ as unreachable:
             assert_never(unreachable)
 

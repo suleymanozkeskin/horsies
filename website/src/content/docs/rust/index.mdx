@@ -1,82 +1,45 @@
 ---
-title: Horsies
-description: A PostgreSQL-backed background task queue and workflow engine for Rust.
-head:
-  - tag: title
-    content: Horsies | PostgreSQL Task Queue & Workflow Engine for Rust
+title: Overview
+description: The API of the horsies crate, the Rust client of the horsies core.
+summary: The horsies crate is the Rust client of the core that the Python client also runs on. This section states its API.
+related: [../concepts/architecture, ../tasks/errors]
+tags: [rust, overview, crate]
 ---
 
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
-import FeatureCard from '../../../components/FeatureCard.astro';
 
-<div class="hero-video">
-  <video autoplay loop muted playsinline>
-    <source src="/horsies/galloping-horsie.mp4" type="video/mp4" />
-  </video>
-</div>
+The `horsies` crate is the Rust client of the horsies core. The Python package and the crate run on one core, `horsies-core`, so a Rust app has the behaviour and the guarantees that the shared pages state. This section states the API of the crate.
 
-**PostgreSQL-backed background task queue and workflow engine for Rust.**
-
-
-> **AI agents:** see [`llms.txt`](/horsies/rust/llms.txt) for a complete sitemap and keyword index of these docs.
-> If you are working from source, agent guidance skills are in `crates/horsies/.agents/skills/` (`SKILL.md`, `tasks.md`, `workflows.md`, `configs.md`, `practical-summary.md`).
-
-> NOTE: There is a <a href="/horsies/">python version</a> of this library, even though rust and python versions have almost the same api and mental model, they are not interoperable!
-
+A database belongs to one client: the core refuses a database that the Python client installed.
 
 <CardGrid>
-  <LinkCard title="Get Started" href="/horsies/rust/quick-start/getting-started/" description="Install Horsies and run your first task" />
-  <LinkCard title="Workflow API" href="/horsies/rust/concepts/workflows/workflow-api/" description="WorkflowSpec and WorkflowHandle signatures" />
-  <LinkCard title="View on GitHub" href="https://github.com/suleymanozkeskin/horsies/tree/main/crates/horsies" description="Source code and contributions" />
-  <LinkCard title="Questions & Answers" href="/horsies/questions-and-answers/" description="Design trade-offs, scaling, and common questions" />
+  <LinkCard title="App Config" href="/horsies/rust/configuration/app-config/" description="Horsies::new, AppConfig, schema modes, queues, state" />
+  <LinkCard title="Defining Tasks" href="/horsies/rust/tasks/defining-tasks/" description="#[horsies::task], execution classes, retry codes, TaskRuntime" />
+  <LinkCard title="Task Errors" href="/horsies/rust/tasks/errors/" description="TaskError<E>, the UserErrorCode derive, library codes" />
+  <LinkCard title="Sending Tasks" href="/horsies/rust/tasks/sending-tasks/" description="send, schedule, send options, TaskSendError, retries" />
+  <LinkCard title="Retrieving Results" href="/horsies/rust/tasks/retrieving-results/" description="TaskHandle::get, TaskOutcome, ReadError, task info" />
+  <LinkCard title="Health Reads" href="/horsies/rust/monitoring/health-reads/" description="Database and worker pings, worker states, stale and expired tasks" />
 </CardGrid>
 
-## Features
+## The Crate
 
-<CardGrid stagger>
-  <FeatureCard title="Postgres Based" icon="/horsies/icons/postgresql.svg" description="Postgres based." />
-  <FeatureCard title="Type-safe Tasks" icon="/horsies/icons/shield-check.svg" description="Tasks return typed TaskResult<T> — errors as values, not panics." />
-  <FeatureCard title="Real-time Dispatch" icon="/horsies/icons/zap.svg" description="PostgreSQL LISTEN/NOTIFY for instant task delivery — no polling." />
-  <FeatureCard title="Workflow Engine" icon="/horsies/icons/network.svg" description="DAG based workflow definitions for orchestrating complex task pipelines." />
-  <FeatureCard title="Scheduled Tasks" icon="/horsies/icons/clock.svg" description="Type-safe, human-readable schedule patterns — no cron strings." />
-  <FeatureCard title="Multi-queue Support" icon="/horsies/icons/layers.svg" description="Priority-based queues with per-queue concurrency limits." />
-  <FeatureCard title="TUI Monitoring" icon="/horsies/icons/terminal.svg" description="Syce TUI dashboard for monitoring workers, tasks, and workflows." />
-</CardGrid>
+| Item | Value |
+|------|-------|
+| Crate | `horsies` |
+| Minimum Rust version | 1.91 (`rust-version`) |
+| Default features | `cli`: the CLI runner and the `horsies` binary, with clap, tracing-subscriber, toml, owo-colors and tempfile |
+| Other features | `web` (the axum mount), `tokio-postgres`, `sqlx` |
 
-## Quick Example
+The sidebar lists every page of the Rust API. A page marked "not written" has no page yet; the GitHub issue it links to tracks it.
 
-```rust
-use horsies::{
-    Horsies, AppConfig, TaskResult, TaskError, task,
-};
-use serde::{Deserialize, Serialize};
+## Where the Behaviour Is
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AddInput { a: i32, b: i32 }
-
-#[task("add_numbers")]
-async fn add_numbers(input: AddInput) -> Result<i32, TaskError> {
-    Ok(input.a + input.b)
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = Horsies::new(AppConfig::for_database_url(
-        "postgresql://user:pass@localhost:5432/mydb"
-    ))?;
-
-    add_numbers::register(&mut app)?;
-
-    // Start a worker in another process/thread to execute tasks.
-    // Here we just send a task and wait for the result.
-    match add_numbers::send(AddInput { a: 5, b: 3 }).await {
-        Ok(handle) => match handle.get(None).await {
-            TaskResult::Ok(value) => println!("{}", value), // 8
-            TaskResult::Err(err) => println!("Task failed: {:?}", err.error_code),
-        },
-        Err(err) => println!("Send failed: {}", err.message),
-    }
-
-    Ok(())
-}
-```
+| Topic | Shared page |
+|-------|-------------|
+| Components and data flow | [Architecture](/horsies/concepts/architecture/) |
+| Task states and transitions | [Task Lifecycle](/horsies/concepts/task-lifecycle/) |
+| Library error codes and config error codes | [Errors Reference](/horsies/tasks/errors/) |
+| When a retry starts | [Retry Policy](/horsies/tasks/retry-policy/) |
+| The three execution classes | [Choosing an Execution Mode](/horsies/workers/execution-modes/) |
+| The meaning of each config field | [Broker Config](/horsies/configuration/broker-config/), [Recovery Config](/horsies/configuration/recovery-config/), [Retention Config](/horsies/configuration/retention-config/) |
+| Workflows | [Workflow Semantics](/horsies/concepts/workflows/workflow-semantics/) |

@@ -36,7 +36,7 @@ from horsies.core.workflows.engine import (
     enqueue_subworkflow_task,
     evaluate_workflow_success,
 )
-from horsies.core.workflows.lifecycle import start_workflow_async
+from tests.dualrun.reference.workflow_start_caller import start_workflow_async
 from horsies.core.workflows.steps import START_WORKFLOW_FUNCTION_SQL
 from horsies.core.workflows.sql import (
     ENQUEUE_SUBWORKFLOW_TASK_SQL,

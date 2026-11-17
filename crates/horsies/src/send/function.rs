@@ -93,6 +93,7 @@ pub struct TaskFunction<A, T, E> {
     queue_name: String,
     priority: u32,
     task_options: Option<TaskOptions>,
+    accepts_workflow_ctx: bool,
     context: Arc<SendContext>,
     types: PhantomData<fn(A) -> (T, E)>,
 }
@@ -104,6 +105,7 @@ impl<A, T, E> Clone for TaskFunction<A, T, E> {
             queue_name: self.queue_name.clone(),
             priority: self.priority,
             task_options: self.task_options.clone(),
+            accepts_workflow_ctx: self.accepts_workflow_ctx,
             context: Arc::clone(&self.context),
             types: PhantomData,
         }
@@ -157,6 +159,7 @@ where
             queue_name: queue_name.to_owned(),
             priority,
             task_options: task.task_options().cloned(),
+            accepts_workflow_ctx: task.accepts_workflow_ctx(),
             context: Arc::new(SendContext::of(app)),
             types: PhantomData,
         };
@@ -182,6 +185,12 @@ where
     /// The options of the task's definition.
     pub fn task_options(&self) -> Option<&TaskOptions> {
         self.task_options.as_ref()
+    }
+
+    /// Whether the task's input takes the workflow context (the task
+    /// attribute's `workflow_ctx`).
+    pub fn accepts_workflow_ctx(&self) -> bool {
+        self.accepts_workflow_ctx
     }
 
     /// Send the task now.

@@ -408,6 +408,25 @@ const AUDIT_ORPHANED_WORKFLOW_TASKS_OUTCOME: &str =
 const TASK_ROW_END_OUTCOME: &str = "TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | \
      AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed";
 
+const START_WORKFLOW_OUTCOME: &str =
+    "WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed";
+const START_WORKFLOW_PARAMETERS: &[StubParameter] =
+    &[positional("request", "WorkflowStartRequest")];
+const REGISTER_CHILD_SPEC_SOURCE_PARAMETERS: &[StubParameter] = &[positional(
+    "source",
+    "Callable[[ChildSpecRequest], ChildSpecBuilt | ChildSpecRefused]",
+)];
+const WORKFLOW_START_REQUEST_PARAMETERS: &[StubParameter] = &[
+    keyword("spec_json", "str"),
+    keyword("workflow_id", "uuid.UUID"),
+    keyword("sent_at", "datetime.datetime"),
+    keyword("resend_on_transient_err", "bool"),
+];
+const CHILD_SPEC_BUILT_PARAMETERS: &[StubParameter] = &[keyword("spec_json", "str")];
+const CHILD_SPEC_REFUSED_PARAMETERS: &[StubParameter] =
+    &[keyword("message", "str"), keyword("failure_result", "str")];
+const RESUME_WORKFLOW_OUTCOME: &str = "WorkflowResumed | WorkflowNotPaused | \
+     WorkflowResumeRecoveryFailed | WorkflowAbsent | HandleFailed";
 const PAUSE_WORKFLOW_OUTCOME: &str =
     "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed";
 const CANCEL_WORKFLOW_OUTCOME: &str =
@@ -431,7 +450,7 @@ const SCHEDULER_TICK_OUTCOME: &str = "SchedulerTicked | SchedulerTickFailed";
 const SCHEDULER_RUN_OUTCOME: &str =
     "SchedulerStopped | SchedulerStartRefused | SchedulerStartFailed";
 
-const CORE_SCHEDULER_METHODS: [StubFunction; 4] = [
+const CORE_SCHEDULER_METHODS: &[StubFunction] = &[
     StubFunction {
         name: "start_async",
         parameters: &[],
@@ -458,7 +477,7 @@ const CORE_SCHEDULER_METHODS: [StubFunction; 4] = [
     },
 ];
 
-const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
+const CORE_CHILD_HANDLE_METHODS: &[StubFunction] = &[
     StubFunction {
         name: "start_attempt",
         parameters: START_ATTEMPT_PARAMETERS,
@@ -497,7 +516,7 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
     },
 ];
 
-const CORE_HANDLE_METHODS: [StubFunction; 38] = [
+const CORE_HANDLE_METHODS: &[StubFunction] = &[
     StubFunction {
         name: "close",
         parameters: &[],
@@ -649,6 +668,24 @@ const CORE_HANDLE_METHODS: [StubFunction; 38] = [
         doc: "Cancel one claimed workflow task that this claim holds and that no runnable node\nlinks. Writes, in one statement. A naive claimed_at raises TypeError.",
     },
     StubFunction {
+        name: "register_child_spec_source",
+        parameters: REGISTER_CHILD_SPEC_SOURCE_PARAMETERS,
+        returns: TypeText::Plain("None"),
+        doc: "Register the child spec source of the handle's workflow operations. The core calls it\non the callback thread for each sub-workflow child that an operation builds. A second\nregistration raises RuntimeError. Starts nothing.",
+    },
+    StubFunction {
+        name: "start_workflow_async",
+        parameters: START_WORKFLOW_PARAMETERS,
+        returns: TypeText::FutureOf(START_WORKFLOW_OUTCOME),
+        doc: "Start one workflow. Writes; the children of its sub-workflow roots come from the child\nspec source. A build that raised KeyboardInterrupt or SystemExit raises it again. With no\nchild spec source it raises RuntimeError.",
+    },
+    StubFunction {
+        name: "resume_workflow_async",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::FutureOf(RESUME_WORKFLOW_OUTCOME),
+        doc: "Resume one workflow tree. Writes; the child starts it owes build their children through\nthe child spec source. A build that raised KeyboardInterrupt or SystemExit raises it\nagain. With no child spec source it raises RuntimeError.",
+    },
+    StubFunction {
         name: "pause_workflow_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(PAUSE_WORKFLOW_OUTCOME),
@@ -733,7 +770,7 @@ const TASK_LIST_OUTCOME: &str = "TaskListComplete | TaskListTruncated | BrokerFa
 const MONITORING_DETAIL_OUTCOME: &str = "MonitoringJson | TaskDetailAbsent | MonitoringFailed";
 
 /// The monitoring methods of `CoreHandle`.
-const MONITORING_HANDLE_METHODS: [StubFunction; 18] = [
+const MONITORING_HANDLE_METHODS: &[StubFunction] = &[
     StubFunction {
         name: "monitoring_list_tasks_async",
         parameters: MONITORING_LIST_TASKS_PARAMETERS,
@@ -923,7 +960,7 @@ const EXCEPTIONS: &[StubException] = &[
     },
 ];
 
-const ARGUMENT_CLASSES: [StubClass; 11] = [
+const ARGUMENT_CLASSES: &[StubClass] = &[
     StubClass {
         name: "StartNow",
         doc: "Start the task as soon as a worker can claim it.",
@@ -1003,7 +1040,7 @@ const ARGUMENT_CLASSES: [StubClass; 11] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 78] = [
+const RECORD_CLASSES: &[StubClass] = &[
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -1790,7 +1827,7 @@ const RECORD_CLASSES: [StubClass; 78] = [
     },
 ];
 
-const HANDLE_CLASSES: [StubClass; 3] = [
+const HANDLE_CLASSES: &[StubClass] = &[
     StubClass {
     name: "CoreHandle",
     doc: "The core handle of one producer manifest and the pool profile of its process: PRODUCER,\nor WORKER (the main core pool keeps 2 connections free from batch checkouts for the\nper-task writes). Building it starts nothing.",
@@ -1803,19 +1840,19 @@ const HANDLE_CLASSES: [StubClass; 3] = [
         doc: "The core handle of one worker's child process: the producer manifest of its child pool,\nthe connections the pool keeps open, and the ping at checkout. Built in the child after\nits start; building it starts nothing.",
         constructor: Constructor::Parameters(CORE_CHILD_HANDLE_PARAMETERS),
         properties: &[],
-        methods: &CORE_CHILD_HANDLE_METHODS,
+        methods: CORE_CHILD_HANDLE_METHODS,
     },
     StubClass {
         name: "CoreScheduler",
         doc: "The scheduler of one scheduler manifest on the broker of a CoreHandle. Building it\nstarts nothing. A refused manifest raises ManifestRefused. One call runs at a time: a\ncall while another is in flight raises RuntimeError.",
         constructor: Constructor::Parameters(CORE_SCHEDULER_PARAMETERS),
         properties: &[],
-        methods: &CORE_SCHEDULER_METHODS,
+        methods: CORE_SCHEDULER_METHODS,
     },
 ];
 
 /// The classes of the monitoring reads and the web handler.
-const MONITORING_CLASSES: [StubClass; 33] = [
+const MONITORING_CLASSES: &[StubClass] = &[
     StubClass {
         name: "MonitoringWindowRecord",
         doc: "The window of one monitoring request: UTC bounds, increasing, at most the core's maximum\napart.",
@@ -2152,7 +2189,7 @@ const MONITORING_CLASSES: [StubClass; 33] = [
     },
 ];
 
-const WORKFLOW_CLASSES: [StubClass; 20] = [
+const WORKFLOW_CLASSES: &[StubClass] = &[
     StubClass {
         name: "WorkflowPaused",
         doc: "The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed\ntasks of the paused tree are abandoned.",
@@ -2342,11 +2379,125 @@ const WORKFLOW_CLASSES: [StubClass; 20] = [
         ],
         methods: &[],
     },
+    StubClass {
+        name: "ChildSpecSourceRow",
+        doc: "One dependency of the node whose result an args_from member of the child's input takes.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_index", "int"),
+            property("node_id", "str | None"),
+            property("status", "str"),
+            property("task_name", "str"),
+            property("definition_key", "str | None"),
+            property("result", "str | None"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ChildSpecRequest",
+        doc: "The sub-workflow node whose child the Python client builds.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("parent_workflow_id", "uuid.UUID"),
+            property("parent_workflow_name", "str"),
+            property("task_index", "int"),
+            property("child_depth", "int"),
+            property("definition_key", "str | None"),
+            property("params", "Literal['GIVEN', 'NOT_GIVEN']"),
+            property("node_input", "str"),
+            property("args_from", "str | None"),
+            property("sources", "list[ChildSpecSourceRow]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ChildSpecBuilt",
+        doc: "The child built: its spec as workflow spec data.",
+        constructor: Constructor::Parameters(CHILD_SPEC_BUILT_PARAMETERS),
+        properties: &[property("spec_json", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "ChildSpecRefused",
+        doc: "The child cannot start: its node fails. message is the error text for the log;\nfailure_result is the result envelope that the node stores.",
+        constructor: Constructor::Parameters(CHILD_SPEC_REFUSED_PARAMETERS),
+        properties: &[
+            property("message", "str"),
+            property("failure_result", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowStartRequest",
+        doc: "One frozen workflow start. spec_json is the workflow spec data of the spec; spec data\nthat the core refuses raises ValueError with the field path. A naive sent_at raises\nTypeError.",
+        constructor: Constructor::Parameters(WORKFLOW_START_REQUEST_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowStarted",
+        doc: "The tree was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowExists",
+        doc: "A workflow with this id and this name exists, or the row with the id was gone by the\nread of its name. Nothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowIdTaken",
+        doc: "A workflow with this id exists under another name. Nothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("existing_name", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowResumed",
+        doc: "The workflow was PAUSED; its tree is RUNNING again.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowNotPaused",
+        doc: "The workflow exists and is not PAUSED. Nothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowResumeRecoveryFailed",
+        doc: "The resume committed; the parent advance or the recovery pass of the tree after it\nfailed. The workflow is RUNNING, and workflow recovery finishes the work. Not retryable.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("message", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowStartFailed",
+        doc: "The connect, the schema install, the client family check, the statement or an owed\nchild start failed, or a child build did not run. Nothing committed, or the commit\noutcome is unknown: a resend with the same id then finds the workflow.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
 ];
 
 /// The classes of the history switch: the coverage pass, the pruning pass and the rerun
 /// in the caller's transaction.
-const HISTORY_CLASSES: [StubClass; 24] = [
+const HISTORY_CLASSES: &[StubClass] = &[
     StubClass {
         name: "CoverageRequest",
         doc: "One frozen coverage pass: the two horizons, the declared retention periods in whole days,\nand how a damaged pass is serialized. A period outside 1 to 1825 days, a horizon below two\nleaves, or another serialization raises ValueError.",
@@ -2543,7 +2694,7 @@ const HISTORY_CLASSES: [StubClass; 24] = [
 
 /// The classes of the parent-child frame codec, for the Python child program
 /// and the preload process.
-const FRAME_CLASSES: [StubClass; 41] = [
+const FRAME_CLASSES: &[StubClass] = &[
     StubClass {
         name: "PythonProgram",
         doc: "What a Python child imports before it reports ready.",
@@ -2849,7 +3000,7 @@ const WORKER_FAIL_CAUSE: &str = "Literal['SERVICE_LOOP_DIED', 'RUNNER_HEARTBEAT_
      'POOL_FAILED', 'BASELINE_OVER_LIMIT', 'CLAIM_FAILED']";
 const WORKER_RUN_OUTCOME: &str = "WorkerStopped | WorkerBootFailed | WorkerFailed";
 
-const PREPARED_WORKER_METHODS: [StubFunction; 2] = [
+const PREPARED_WORKER_METHODS: &[StubFunction] = &[
     StubFunction {
         name: "run",
         parameters: &[],
@@ -2865,13 +3016,13 @@ const PREPARED_WORKER_METHODS: [StubFunction; 2] = [
 ];
 
 /// The classes of the worker run.
-const WORKER_CLASSES: [StubClass; 6] = [
+const WORKER_CLASSES: &[StubClass] = &[
     StubClass {
         name: "PreparedWorker",
         doc: "The worker of one worker manifest, not run yet. host.on_started() runs once per run on\nthe callback thread, after the start and before the first claim; an exception from it is\nlogged at ERROR and the worker runs on.",
         constructor: Constructor::NoConstructor,
         properties: &[],
-        methods: &PREPARED_WORKER_METHODS,
+        methods: PREPARED_WORKER_METHODS,
     },
     StubClass {
         name: "WorkerProfileRefused",

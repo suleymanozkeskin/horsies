@@ -9,6 +9,11 @@ pause abandoned, a PENDING sub-workflow dependent (its child start is owed
 at the resume), and a sub-workflow root whose PAUSED child holds a READY
 node. A RUNNING bystander and an unknown id complete the targets. Each side
 resumes the tree, the bystander and the unknown id.
+
+The caller pair runs the same seed with the Python caller before the switch
+(``tests/dualrun/reference/workflow_resume_caller.py``) against the caller on
+the core (``CoreHandle.resume_workflow_async``), whose owed child start
+builds its child through the broker's child spec source.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from horsies.core.models.workflow import TaskNode, WorkflowDefinition, WorkflowS
 from horsies.core.models.workflow.handle_types import HandleOperationError, HandleWorkflowNotFound
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.workflows.lifecycle import resume_workflow
+from tests.dualrun.reference import workflow_resume_caller as caller_reference
 from horsies.core.workflows.registry import register_workflow_definition
 from tests.dualrun.capture import Connection
 from tests.dualrun.clients import open_broker
@@ -236,6 +242,42 @@ def test_resume_writes_what_the_session_statements_wrote(
             _seed,
             OperationSide(name='session statements', act=_reference),
             OperationSide(name='horsies_workflow_resume', act=_candidate),
+        )
+    )
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    expected = (reference.Resumed(), reference.NotPaused(), reference.NotFound())
+    assert run.reference.report == expected
+    assert run.candidate.report == expected
+
+
+async def _caller_reference_async(
+    database: DualRunDatabase, seed: _Seed,
+) -> tuple[reference.ResumeReport, ...]:
+    async with open_broker(database) as broker:
+        _attach(broker)
+        return tuple([
+            _report(await caller_reference.resume_workflow(broker, str(target)))
+            for target in _targets(seed)
+        ])
+
+
+def _caller_reference(
+    database: DualRunDatabase, seed: _Seed,
+) -> tuple[reference.ResumeReport, ...]:
+    _pause_and_finish(database, seed)
+    return asyncio.run(_caller_reference_async(database, seed))
+
+
+def test_the_resume_on_the_core_writes_what_the_python_caller_wrote(
+    empty_database: MakeDatabase,
+) -> None:
+    run = run_or_fail(
+        dual_run(
+            empty_database,
+            _seed,
+            OperationSide(name='python caller', act=_caller_reference),
+            OperationSide(name='core caller', act=_candidate),
         )
     )
 
