@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -36,6 +35,7 @@ from horsies.core.types.result import is_ok
 from horsies.core.worker.claiming import ClaimPass
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.current import set_current_app
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.stored_timeout import (
     NoTimeout,
     OptionsUnreadable,
@@ -101,9 +101,8 @@ def _run_in_process(
         is_workflow_task: bool = True,
         timeout: StoredTimeout = NoTimeout(),
         *,
-        claimed_at: datetime,
+        claim: DispatchClaim,
         execution: Execution,
-        task_options: str | None,
     ) -> None:
         seen.append(timeout)
         wire = wire_of(
@@ -115,7 +114,7 @@ def _run_in_process(
                 master_worker_id=worker.worker_instance_id,
                 is_workflow_task=is_workflow_task,
                 timeout=timeout,
-                claimed_at=claimed_at,
+                claimed_at=claim.claimed_at,
                 task_loop=TaskLoop(),
             )
         )
@@ -126,7 +125,7 @@ def _run_in_process(
             is_workflow_task,
             timeout=timeout,
             task_name=task_name,
-            claimed_at=claimed_at,
+            claim=claim,
         )
         assert is_ok(result), result
 
@@ -337,3 +336,63 @@ async def test_unreadable_options_fail_in_one_claim_and_do_not_retry(
 
     assert second.claimed == 0
     assert len(seen) == 1
+
+
+async def test_a_retry_policy_that_does_not_validate_fails_before_it_runs(
+    session: AsyncSession,
+    broker: PostgresBroker,
+    app: Horsies,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The claim reads the retry policy with the rule of enqueue. One that
+    does not validate fails the task before its body runs, and the failure
+    does not retry with default intervals. Before, the body ran."""
+    called: list[int] = []
+
+    @app.task(
+        task_name='stored_policy_unreadable',
+        retry_policy=RetryPolicy.fixed(
+            [1, 1],
+            auto_retry_for=[OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value],
+            jitter=False,
+        ),
+    )
+    def stored_policy_unreadable(*, value: int) -> TaskResult[int, TaskError]:
+        called.append(value)
+        return TaskResult(ok=value)
+
+    task_id = (await stored_policy_unreadable.send_async(value=1)).unwrap().task_id
+    policy = {
+        'max_retries': 2,
+        'intervals': [],
+        'backoff_strategy': 'fixed',
+        'jitter': False,
+        'auto_retry_for': [OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value],
+    }
+    await _store_options_text(session, task_id, json.dumps({'retry_policy': policy}))
+    set_current_app(app)
+    worker = _make_worker(broker, app)
+    seen: list[StoredTimeout] = []
+    _run_in_process(worker, broker, seen)
+
+    first: ClaimPass = await worker._claim_and_dispatch_all()  # pyright: ignore[reportPrivateUsage]
+
+    assert first.claimed == 1
+    assert len(seen) == 1
+    match seen[0]:
+        case OptionsUnreadable(reason=reason):
+            assert reason.startswith('stored retry_policy does not validate: ')
+        case other:
+            raise AssertionError(f'expected OptionsUnreadable, got {other!r}')
+    assert called == []
+    row = await _task_row(session, task_id)
+    assert row.status == 'FAILED'
+    assert 'stored retry_policy does not validate' in json.dumps(row.result)
+    attempts = await _attempts(session, task_id)
+    assert [(a.outcome, a.will_retry, a.error_code) for a in attempts] == [
+        ('FAILED', False, OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value),
+    ]
+
+    second: ClaimPass = await worker._claim_and_dispatch_all()  # pyright: ignore[reportPrivateUsage]
+
+    assert second.claimed == 0

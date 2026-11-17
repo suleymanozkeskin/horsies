@@ -1,12 +1,12 @@
 """Frozen inventory of JSON parsing and serializing in the runtime package.
 
-``horsies/core/codec/json_io.py`` is the JSON boundary. ``loads_json`` carries
+``python/horsies/core/codec/json_io.py`` is the JSON boundary. ``loads_json`` carries
 the strict hooks, so a parse anywhere else lets ``NaN``, ``Infinity`` or
 ``1e9999`` into the system. This inventory is the tripwire: an added parse
 fails here, and an added, removed, or moved ``json.dumps`` fails here and must
 be reviewed before the inventory changes.
 
-Scope: every ``.py`` file under ``horsies/``. The scan resolves import aliases
+Scope: every ``.py`` file under ``python/horsies/``. The scan resolves import aliases
 and also counts a reference that is passed without a call, such as
 ``json_deserializer=json.loads``.
 
@@ -39,8 +39,8 @@ import pytest
 pytestmark = [pytest.mark.unit]
 
 _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
-_RUNTIME_ROOT: Final = _REPO_ROOT / 'horsies'
-_CODEC_MODULE: Final = 'horsies/core/codec/json_io.py'
+_RUNTIME_ROOT: Final = _REPO_ROOT / 'python' / 'horsies'
+_CODEC_MODULE: Final = 'python/horsies/core/codec/json_io.py'
 _MODULE_SCOPE: Final = '<module>'
 
 _JSON_MODULES: Final = frozenset({'json', 'json.decoder', 'json.encoder'})
@@ -56,27 +56,27 @@ _FROZEN_DUMPS: Final = Counter(
         (_CODEC_MODULE, 'dumps_json'): 1,
         (_CODEC_MODULE, 'dumps_canonical_json'): 1,
         # The manifest of the core holds only text, integers and booleans.
-        ('horsies/_catalog/manifest.py', 'dump_producer_manifest'): 1,
-        ('horsies/core/history/maintenance/coverage.py', '_expected_registrations'): 1,
-        ('horsies/core/lifecycle/persistence.py', '_fused_batch_parameters'): 1,
-        ('horsies/core/utils/fingerprint.py', 'enqueue_fingerprint'): 1,
-        ('horsies/core/worker/claiming.py', 'ClaimMixin._claim_params'): 6,
-        ('horsies/core/workflows/recovery.py', 'recover_stuck_workflows'): 1,
-        ('horsies/core/workflows/recovery.py', '_recover_global_orphan_candidate'): 1,
-        ('horsies/web/app.py', '_inject'): 1,
-        ('horsies/web/routes/events.py', 'build_router.stream'): 2,
+        ('python/horsies/_catalog/manifest.py', 'dump_producer_manifest'): 1,
+        ('python/horsies/_catalog/worker_manifest.py', 'dump_worker_manifest'): 1,
+        ('python/horsies/core/lifecycle/persistence.py', '_fused_batch_parameters'): 1,
+        ('python/horsies/core/utils/fingerprint.py', 'enqueue_fingerprint'): 1,
+        ('python/horsies/core/worker/claiming.py', 'ClaimMixin._claim_params'): 6,
+        ('python/horsies/core/workflows/recovery.py', 'recover_stuck_workflows'): 1,
+        ('python/horsies/core/workflows/recovery.py', '_recover_global_orphan_candidate'): 1,
+        ('python/horsies/web/app.py', '_inject'): 1,
+        ('python/horsies/web/routes/events.py', 'build_router.stream'): 2,
     }
 )
 
 _FROZEN_JSONB_COLUMNS: Final = frozenset(
     {
-        ('horsies/core/models/task_pg.py', 'queue_priorities'),
-        ('horsies/core/models/task_pg.py', 'queue_max_concurrency'),
-        ('horsies/core/models/task_pg.py', 'recovery_config'),
-        ('horsies/core/models/task_pg.py', 'slots_down'),
-        ('horsies/core/models/task_pg.py', 'class_capacity'),
-        ('horsies/core/models/workflow_pg.py', 'success_policy'),
-        ('horsies/core/models/workflow_pg.py', 'args_from'),
+        ('python/horsies/core/models/task_pg.py', 'queue_priorities'),
+        ('python/horsies/core/models/task_pg.py', 'queue_max_concurrency'),
+        ('python/horsies/core/models/task_pg.py', 'recovery_config'),
+        ('python/horsies/core/models/task_pg.py', 'slots_down'),
+        ('python/horsies/core/models/task_pg.py', 'class_capacity'),
+        ('python/horsies/core/models/workflow_pg.py', 'success_policy'),
+        ('python/horsies/core/models/workflow_pg.py', 'args_from'),
     }
 )
 
@@ -255,7 +255,7 @@ class TestRuntimeInventory:
         )
         assert parsing == Counter({
             (_CODEC_MODULE, 'loads_json', 'loads'): 1,
-            ('horsies/core/codec/typed.py', '_validate_wire', 'validate_json'): 1,
+            ('python/horsies/core/codec/typed.py', '_validate_wire', 'validate_json'): 1,
         })
 
     def test_json_dumps_sites_are_frozen(self) -> None:

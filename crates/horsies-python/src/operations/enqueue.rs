@@ -1,8 +1,12 @@
 //! The send operation: one enqueue of one task through the core.
 //!
-//! The Python client builds one frozen `EnqueueRequest` per send and keeps
-//! it: a resend of the same task id passes the same request. The outcome is
-//! `Enqueued` or one class per variant of the core's send error catalog
+//! The Python client builds one frozen `EnqueueRequest` per send attempt: a
+//! resend of the same task id passes the same values with the send kind
+//! `REPEAT`, so a task that finished answers from history and does not run
+//! again. The first send of a handle installs the schema once first, as
+//! Python's broker does. The outcome is `Enqueued`, `SendValidationFailed`
+//! (the core refused the input or the options before any statement), or one
+//! class per other variant of the core's send error catalog
 //! (`TaskSendError`), each with only the facts of its state.
 
 use std::sync::Arc;
@@ -10,15 +14,15 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use horsies_core::core::task::send_types::send_error_from_enqueue;
 use horsies_core::{
-    BrokerError, EnqueueRetention, RetentionChoice, TaskSendError, TaskSendPayload,
+    BrokerError, BrokerErrorCode, EnqueueRefusal, EnqueueRefusalCause, EnqueueRetention, SendKind,
+    SendPart, TaskSendError, TaskSendPayload,
 };
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
-use super::arguments::{
-    utc_instant, RerunInputPolicy, RetentionArgument, RetentionRequest, StartArgument, StartRule,
-};
+use super::arguments::{utc_instant, RerunInputPolicy, StartArgument, StartRule};
 use crate::handle::BrokerConnection;
 
 /// One send, as the core takes it. Built once, at the boundary.
@@ -34,8 +38,9 @@ pub struct EnqueueCommand {
     good_until: Option<DateTime<Utc>>,
     task_options_json: Option<String>,
     idempotency_key: Option<String>,
-    retention: RetentionRequest,
+    retention_class_key: String,
     rerun_input: RerunInputPolicy,
+    send_kind: SendKind,
 }
 
 impl EnqueueCommand {
@@ -62,6 +67,10 @@ impl EnqueueCommand {
 
 /// A frozen send request. `None` for `good_until`, `task_options_json` or
 /// `idempotency_key` means no deadline, no options, no key.
+/// `retention_class_key` is the stored class key (`forever`, or
+/// `standard_<days>d`); the core checks it at the send. `send_kind` is
+/// `FIRST` for the first send of the task id and `REPEAT` for a send retry;
+/// another text raises `ValueError`.
 #[pyclass(module = "horsies._core", frozen)]
 pub struct EnqueueRequest {
     command: Arc<EnqueueCommand>,
@@ -88,8 +97,9 @@ impl EnqueueRequest {
         good_until,
         task_options_json,
         idempotency_key,
-        retention,
-        rerun_input
+        retention_class_key,
+        rerun_input,
+        send_kind
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -103,8 +113,9 @@ impl EnqueueRequest {
         good_until: Option<Bound<'_, PyAny>>,
         task_options_json: Option<String>,
         idempotency_key: Option<String>,
-        retention: RetentionArgument<'_>,
+        retention_class_key: String,
         rerun_input: &str,
+        send_kind: &str,
     ) -> PyResult<Self> {
         let good_until = match good_until {
             Some(instant) => Some(utc_instant(&instant)?),
@@ -121,8 +132,9 @@ impl EnqueueRequest {
             good_until,
             task_options_json,
             idempotency_key,
-            retention: retention.request(),
+            retention_class_key,
             rerun_input: RerunInputPolicy::parse(rerun_input)?,
+            send_kind: send_kind_of(send_kind).map_err(PyValueError::new_err)?,
         };
         Ok(Self {
             command: Arc::new(command),
@@ -133,6 +145,17 @@ impl EnqueueRequest {
     #[getter]
     fn task_id(&self) -> Uuid {
         self.command.task_id
+    }
+}
+
+/// The send kind of a request: `FIRST` or `REPEAT`. Pure.
+fn send_kind_of(text: &str) -> Result<SendKind, String> {
+    match text {
+        "FIRST" => Ok(SendKind::First),
+        "REPEAT" => Ok(SendKind::Repeat),
+        other => Err(format!(
+            "send_kind must be 'FIRST' or 'REPEAT', not {other:?}"
+        )),
     }
 }
 
@@ -151,11 +174,40 @@ pub struct SendSuppressed {
     pub message: String,
 }
 
-/// The input or the options were refused. Nothing was written.
+/// The core refused the send before any statement. Nothing was written.
+/// `code` is `INVALID_INPUT` (the input, or a fact of the call: the start,
+/// the sent instant, the idempotency key, the retention class key, the
+/// fingerprint) or `INVALID_TASK_OPTIONS`. `cause_text` is the JSON reader's
+/// error when the refused text does not read, and `None` when a rule refused
+/// a value that reads.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct SendValidationFailed {
+    pub code: String,
     pub message: String,
+    pub cause_text: Option<String>,
+}
+
+impl SendValidationFailed {
+    /// The record of a core refusal. Pure.
+    fn of(refusal: &EnqueueRefusal, message: String) -> Self {
+        Self {
+            code: refused_code(refusal.part).to_string(),
+            message,
+            cause_text: match &refusal.cause {
+                EnqueueRefusalCause::JsonUnreadable(text) => Some(text.clone()),
+                EnqueueRefusalCause::RuleRefused => None,
+            },
+        }
+    }
+}
+
+/// The broker code of a refused part. Pure.
+fn refused_code(part: SendPart) -> BrokerErrorCode {
+    match part {
+        SendPart::Input => BrokerErrorCode::InvalidInput,
+        SendPart::TaskOptions => BrokerErrorCode::InvalidTaskOptions,
+    }
 }
 
 /// The database failed during the enqueue; the row may or may not exist.
@@ -198,6 +250,8 @@ pub struct SendKeyConflict {
 /// The outcome of one send.
 pub enum SendOutcome {
     Enqueued(Uuid),
+    /// The core refused the input or the options before any statement.
+    Invalid(SendValidationFailed),
     Refused(TaskSendError),
 }
 
@@ -209,6 +263,7 @@ impl<'py> IntoPyObject<'py> for SendOutcome {
     fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match self {
             Self::Enqueued(task_id) => Enqueued { task_id }.into_bound_py_any(py),
+            Self::Invalid(invalid) => invalid.into_bound_py_any(py),
             Self::Refused(error) => refusal_record(py, error),
         }
     }
@@ -219,9 +274,15 @@ fn refusal_record(py: Python<'_>, error: TaskSendError) -> PyResult<Bound<'_, Py
         TaskSendError::SendSuppressed { message } => {
             SendSuppressed { message }.into_bound_py_any(py)
         }
-        TaskSendError::ValidationFailed { message } => {
-            SendValidationFailed { message }.into_bound_py_any(py)
+        // The send catalog's refusals besides the core's own (`refused`
+        // takes those): a reservation window or a value that does not
+        // serialize. Both refuse a fact of the call, which the input carries.
+        TaskSendError::ValidationFailed { message } => SendValidationFailed {
+            code: BrokerErrorCode::InvalidInput.to_string(),
+            message,
+            cause_text: None,
         }
+        .into_bound_py_any(py),
         TaskSendError::EnqueueFailed {
             task_id,
             message,
@@ -260,36 +321,24 @@ fn refusal_record(py: Python<'_>, error: TaskSendError) -> PyResult<Bound<'_, Py
     }
 }
 
-/// The retention class of the enqueue, or the refusal of the period.
-fn enqueue_retention(request: RetentionRequest) -> Result<EnqueueRetention, String> {
-    match request {
-        RetentionRequest::Default => Ok(EnqueueRetention::Default),
-        RetentionRequest::Forever => Ok(EnqueueRetention::Forever),
-        RetentionRequest::PeriodDays(days) => {
-            match RetentionChoice::period(chrono::Duration::days(i64::from(days))) {
-                Ok(RetentionChoice::Period(period)) => Ok(EnqueueRetention::Period(period)),
-                Ok(RetentionChoice::Forever) => {
-                    unreachable!("RetentionChoice::period returns a period or a refusal")
-                }
-                Err(refused) => Err(format!("retention period of {days} days: {refused}")),
-            }
-        }
-    }
-}
-
-/// Enqueue one task. Writes; a caller that leaves early sees the outcome as
-/// unknown, and a resend of the same request is safe.
+/// Enqueue one task. Installs the schema once per handle first; a failed
+/// connect or install is `SendEnqueueFailed`, as Python's enqueue reports
+/// it. Writes; a caller that leaves early sees the outcome as unknown, and a
+/// resend of the same request with the send kind `REPEAT` is safe.
 pub async fn enqueue_operation(
     connection: BrokerConnection,
     command: Arc<EnqueueCommand>,
 ) -> SendOutcome {
-    let retention = match enqueue_retention(command.retention) {
+    let retention = match EnqueueRetention::from_class_key(&command.retention_class_key) {
         Ok(retention) => retention,
-        Err(message) => {
-            return SendOutcome::Refused(TaskSendError::ValidationFailed { message });
+        Err(refused_key) => {
+            // The same message form as every other refusal of the core.
+            let refusal = EnqueueRefusal::by_rule(SendPart::Input, refused_key.to_string());
+            let message = BrokerError::EnqueueContract(refusal.clone()).to_string();
+            return SendOutcome::Invalid(SendValidationFailed::of(&refusal, message));
         }
     };
-    let broker = match connection.broker().await {
+    let broker = match connection.initialized_broker().await {
         Ok(broker) => broker,
         Err(error) => return refused(&command, retention, &error),
     };
@@ -313,6 +362,7 @@ pub async fn enqueue_operation(
             command.idempotency_key.as_deref(),
             retention,
             command.rerun_input.keep(),
+            command.send_kind,
         )
         .await;
     match enqueued {
@@ -321,16 +371,24 @@ pub async fn enqueue_operation(
     }
 }
 
+/// The outcome of a failed enqueue: a core refusal keeps its part and its
+/// cause; every other error goes through the core's send catalog rule
+/// (`send_error_from_enqueue`). Pure.
 fn refused(
     command: &EnqueueCommand,
     retention: EnqueueRetention,
     error: &BrokerError,
 ) -> SendOutcome {
-    SendOutcome::Refused(send_error_from_enqueue(
-        command.task_id,
-        command.payload(retention),
-        error,
-    ))
+    match error {
+        BrokerError::EnqueueContract(refusal) => {
+            SendOutcome::Invalid(SendValidationFailed::of(refusal, error.to_string()))
+        }
+        other => SendOutcome::Refused(send_error_from_enqueue(
+            command.task_id,
+            command.payload(retention),
+            other,
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -338,24 +396,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_and_forever_retentions_need_no_check() {
-        assert_eq!(
-            enqueue_retention(RetentionRequest::Default),
-            Ok(EnqueueRetention::Default)
-        );
-        assert_eq!(
-            enqueue_retention(RetentionRequest::Forever),
-            Ok(EnqueueRetention::Forever)
-        );
+    fn the_two_send_kinds_are_read_and_any_other_text_is_refused() {
+        assert_eq!(send_kind_of("FIRST"), Ok(SendKind::First));
+        assert_eq!(send_kind_of("REPEAT"), Ok(SendKind::Repeat));
+        let refused = send_kind_of("repeat").expect_err("send kind texts are upper case");
+        assert!(refused.contains("\"repeat\""), "{refused}");
     }
 
     #[test]
-    fn a_period_outside_its_bound_is_refused_before_any_io() {
-        assert!(enqueue_retention(RetentionRequest::PeriodDays(0)).is_err());
-        assert!(enqueue_retention(RetentionRequest::PeriodDays(1_826)).is_err());
-        assert!(matches!(
-            enqueue_retention(RetentionRequest::PeriodDays(30)),
-            Ok(EnqueueRetention::Period(_))
-        ));
+    fn an_input_refusal_is_invalid_input_with_the_reader_error() {
+        let refusal = EnqueueRefusal {
+            part: SendPart::Input,
+            message: "task input refused: trailing characters".to_owned(),
+            cause: EnqueueRefusalCause::JsonUnreadable("trailing characters".to_owned()),
+        };
+        let record = SendValidationFailed::of(&refusal, refusal.message.clone());
+        assert_eq!(record.code, "INVALID_INPUT");
+        assert_eq!(record.cause_text.as_deref(), Some("trailing characters"));
+    }
+
+    #[test]
+    fn an_options_refusal_by_a_rule_is_invalid_task_options_with_no_cause() {
+        let refusal = EnqueueRefusal::by_rule(
+            SendPart::TaskOptions,
+            "task_options refused for t: retry_policy is not an object".to_owned(),
+        );
+        let record = SendValidationFailed::of(&refusal, refusal.message.clone());
+        assert_eq!(record.code, "INVALID_TASK_OPTIONS");
+        assert_eq!(record.cause_text, None);
     }
 }

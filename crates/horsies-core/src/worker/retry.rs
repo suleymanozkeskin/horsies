@@ -1,8 +1,8 @@
 //! The retry rule and the stored run limits of a claimed task.
 //!
 //! One rule serves the worker and the reaper. Python reference:
-//! `horsies/core/utils/retry.py` (the admission and the delay) and
-//! `horsies/core/worker/stored_timeout.py` (the stored timeout).
+//! `python/horsies/core/utils/retry.py` (the admission and the delay) and
+//! `python/horsies/core/worker/stored_timeout.py` (the stored timeout).
 //!
 //! The stored `task_options` text is read once, when the task is dispatched,
 //! into [`StoredOptions`]. A value that does not fit the rule that wrote it is
@@ -21,6 +21,8 @@ use std::time::Duration;
 use rand::Rng;
 use serde::Deserialize;
 
+use crate::core::task::error::RESERVED_NON_TASK_CODES;
+
 /// The smallest stored `timeout_ms` (Python `MIN_TASK_TIMEOUT_MS`).
 pub const MIN_TASK_TIMEOUT_MS: u64 = 1_000;
 /// The largest stored `timeout_ms`, about 49.7 days (Python `MAX_TASK_TIMEOUT_MS`).
@@ -37,6 +39,15 @@ pub const MAX_RETRY_INTERVAL_SECONDS: u32 = 86_400;
 const MIN_RETRY_DELAY_SECONDS: f64 = 1.0;
 /// The jitter adds up to this fraction of the base delay.
 const JITTER_FRACTION: f64 = 0.25;
+/// The start of every refusal text of a stored retry policy (Python
+/// `read_claimed_options`).
+const RETRY_POLICY_REFUSAL_PREFIX: &str = "stored retry_policy does not validate: ";
+/// `max_retries` of a stored policy that leaves the key out (Python
+/// `RetryPolicy.max_retries`).
+const DEFAULT_POLICY_MAX_RETRIES: u32 = 3;
+/// `intervals` of a stored policy that leaves the key out (Python
+/// `RetryPolicy.intervals`).
+const DEFAULT_POLICY_INTERVALS: [u32; 3] = [60, 300, 900];
 
 // ---------------------------------------------------------------------------
 // Stored options
@@ -124,8 +135,10 @@ pub enum Backoff {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DelayCap {
     Uncapped,
-    /// At most this many seconds, after backoff and jitter.
-    AtMost(u32),
+    /// At most this many seconds, after backoff and jitter. Python's
+    /// `PositiveInt` has no upper bound; a stored value above `u64::MAX` does
+    /// not read.
+    AtMost(u64),
 }
 
 /// A stored retry policy that fits the rule that wrote it.
@@ -134,7 +147,8 @@ pub enum DelayCap {
 /// [`MAX_RETRY_ATTEMPTS`], 1 to [`MAX_RETRY_ATTEMPTS`] intervals of 1 to
 /// [`MAX_RETRY_INTERVAL_SECONDS`] seconds (exactly one for exponential
 /// backoff, one per retry for fixed backoff) and at least one code in
-/// `auto_retry_for`.
+/// `auto_retry_for`, each an `UPPER_SNAKE_CASE` code text that is not a
+/// reserved name.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetryRule {
     max_retries: u32,
@@ -157,17 +171,24 @@ pub enum RunPermit {
     Refuse(String),
 }
 
-/// The wire form of a stored retry policy (Python `RetryPolicy`, which
-/// forbids extra keys).
+/// The wire form of a stored retry policy (Python `RetryPolicy`, read in
+/// strict mode: no extra keys, no type coercion). A key that the policy
+/// leaves out takes the field default of `RetryPolicy`, as at enqueue; a
+/// key that is present with `null` does not read, except
+/// `max_delay_seconds`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireRetryPolicy {
+    #[serde(default = "default_policy_max_retries")]
     max_retries: u32,
+    #[serde(default = "default_policy_intervals")]
     intervals: Vec<u32>,
+    #[serde(default = "default_policy_backoff")]
     backoff_strategy: WireBackoff,
+    #[serde(default = "default_policy_jitter")]
     jitter: bool,
     #[serde(default)]
-    max_delay_seconds: Option<u32>,
+    max_delay_seconds: Option<u64>,
     auto_retry_for: Vec<String>,
 }
 
@@ -176,6 +197,22 @@ struct WireRetryPolicy {
 enum WireBackoff {
     Fixed,
     Exponential,
+}
+
+fn default_policy_max_retries() -> u32 {
+    DEFAULT_POLICY_MAX_RETRIES
+}
+
+fn default_policy_intervals() -> Vec<u32> {
+    DEFAULT_POLICY_INTERVALS.to_vec()
+}
+
+fn default_policy_backoff() -> WireBackoff {
+    WireBackoff::Fixed
+}
+
+fn default_policy_jitter() -> bool {
+    true
 }
 
 /// Read the stored `task_options` of a claimed row.
@@ -304,35 +341,53 @@ pub fn grace_refusal_message(refusal: GraceRefusal) -> String {
 }
 
 /// Check the stored `retry_policy` against the rule that wrote it (Python
-/// `RetryPolicy` and its validators).
+/// `stored_retry_policy`: `RetryPolicy` in strict mode, with its
+/// validators). Every refusal text starts with
+/// [`RETRY_POLICY_REFUSAL_PREFIX`]; the detail after it is the core's.
 fn read_retry_policy(raw: Option<&serde_json::Value>) -> StoredRetry {
     let value = match raw {
         None | Some(serde_json::Value::Null) => return StoredRetry::NoPolicy,
-        Some(value) => value,
+        Some(value @ serde_json::Value::Object(_)) => value,
+        Some(other) => {
+            return invalid_policy(&format!(
+                "retry_policy is not an object: {}",
+                python_type_name(other)
+            ))
+        }
     };
     let wire = match WireRetryPolicy::deserialize(value) {
         Ok(wire) => wire,
-        Err(error) => {
-            return StoredRetry::Invalid {
-                reason: format!("stored retry_policy does not fit the policy rule: {error}"),
-            }
-        }
+        Err(error) => return invalid_policy(&error.to_string()),
     };
     match retry_rule_from_wire(wire) {
         Ok(rule) => StoredRetry::Policy(rule),
-        Err(reason) => StoredRetry::Invalid { reason },
+        Err(detail) => invalid_policy(&detail),
     }
+}
+
+fn invalid_policy(detail: &str) -> StoredRetry {
+    StoredRetry::Invalid {
+        reason: format!("{RETRY_POLICY_REFUSAL_PREFIX}{detail}"),
+    }
+}
+
+/// Whether `code` is an error code text by Python's rule
+/// (`validate_error_code_string`: `^[A-Z][A-Z0-9_]*$`, ASCII). A text that
+/// looks like an exception class name has lower-case letters, so it fails
+/// the same check. Pure.
+fn is_error_code_text(code: &str) -> bool {
+    let mut chars = code.chars();
+    matches!(chars.next(), Some('A'..='Z'))
+        && chars.all(|character| matches!(character, 'A'..='Z' | '0'..='9' | '_'))
 }
 
 fn retry_rule_from_wire(wire: WireRetryPolicy) -> Result<RetryRule, String> {
     if wire.max_retries == 0 || wire.max_retries > MAX_RETRY_ATTEMPTS {
-        return Err(format!(
-            "stored retry_policy.max_retries is outside 1..={MAX_RETRY_ATTEMPTS}"
-        ));
+        return Err(format!("max_retries is outside 1..={MAX_RETRY_ATTEMPTS}"));
     }
     if wire.intervals.is_empty() || wire.intervals.len() > MAX_RETRY_ATTEMPTS as usize {
         return Err(format!(
-            "stored retry_policy.intervals must hold 1 to {MAX_RETRY_ATTEMPTS} entries"
+            "intervals must hold 1 to {MAX_RETRY_ATTEMPTS} entries"
         ));
     }
     if wire
@@ -341,31 +396,51 @@ fn retry_rule_from_wire(wire: WireRetryPolicy) -> Result<RetryRule, String> {
         .any(|interval| *interval == 0 || *interval > MAX_RETRY_INTERVAL_SECONDS)
     {
         return Err(format!(
-            "stored retry_policy.intervals must each be 1..={MAX_RETRY_INTERVAL_SECONDS} seconds"
+            "intervals must each be 1..={MAX_RETRY_INTERVAL_SECONDS} seconds"
         ));
     }
     let backoff = match wire.backoff_strategy {
         WireBackoff::Fixed if wire.intervals.len() != wire.max_retries as usize => {
-            return Err(
-                "stored fixed retry_policy has a different number of intervals and retries"
-                    .to_owned(),
-            )
+            return Err(format!(
+                "fixed backoff needs one interval per retry: {} intervals, {} retries",
+                wire.intervals.len(),
+                wire.max_retries
+            ))
         }
         WireBackoff::Fixed => Backoff::Fixed,
         WireBackoff::Exponential if wire.intervals.len() != 1 => {
-            return Err("stored exponential retry_policy has more than one interval".to_owned())
+            return Err(format!(
+                "exponential backoff needs exactly one base interval, got {}",
+                wire.intervals.len()
+            ))
         }
         WireBackoff::Exponential => Backoff::Exponential,
     };
     let delay_cap = match wire.max_delay_seconds {
         None => DelayCap::Uncapped,
-        Some(0) => return Err("stored retry_policy.max_delay_seconds is not positive".to_owned()),
+        Some(0) => return Err("max_delay_seconds is not positive".to_owned()),
         Some(seconds) => DelayCap::AtMost(seconds),
     };
-    if wire.auto_retry_for.is_empty() || wire.auto_retry_for.iter().any(String::is_empty) {
-        return Err(
-            "stored retry_policy.auto_retry_for must name at least one non-empty code".to_owned(),
-        );
+    if wire.auto_retry_for.is_empty() {
+        return Err("auto_retry_for must name at least one code".to_owned());
+    }
+    if let Some(position) = wire
+        .auto_retry_for
+        .iter()
+        .position(|code| !is_error_code_text(code))
+    {
+        return Err(format!(
+            "auto_retry_for item {position} is not an UPPER_SNAKE_CASE error code"
+        ));
+    }
+    if let Some(position) = wire
+        .auto_retry_for
+        .iter()
+        .position(|code| RESERVED_NON_TASK_CODES.contains(&code.as_str()))
+    {
+        return Err(format!(
+            "auto_retry_for item {position} is a reserved error code name and is not a task code"
+        ));
     }
     Ok(RetryRule {
         max_retries: wire.max_retries,
@@ -390,14 +465,15 @@ pub enum RetryLimitRefused {
 }
 
 /// The `max_retries` column of a row whose `task_options` are this text
-/// (Python `stored_max_retries`, `horsies/core/codec/task_options.py:80-103`).
+/// (Python `stored_max_retries`, `python/horsies/core/codec/task_options.py:80-103`).
 ///
 /// - No options, an empty text, no `retry_policy` key or a `null` policy: 0.
 /// - A policy that fits the rule of [`read_stored_options`]: its
 ///   `max_retries`, 1 to [`MAX_RETRY_ATTEMPTS`].
 /// - Otherwise [`RetryLimitRefused`]: the text does not parse, is not an
-///   object, or holds a policy that does not fit the rule (a missing,
-///   non-integer or out-of-range `max_retries` included).
+///   object, or holds a policy that does not fit the rule (a null,
+///   non-integer or out-of-range `max_retries` included). A key that the
+///   policy leaves out takes its `RetryPolicy` field default.
 ///
 /// One reader serves the task row of a send and the node and task rows of a
 /// workflow, so the worker never meets a stored policy that its dispatch
@@ -553,7 +629,8 @@ impl RetryRule {
         };
         match self.delay_cap {
             DelayCap::Uncapped => jittered,
-            DelayCap::AtMost(seconds) => jittered.min(f64::from(seconds)),
+            // A cap above 2^53 s rounds to a nearby f64, far above any delay.
+            DelayCap::AtMost(seconds) => jittered.min(seconds as f64),
         }
     }
 }

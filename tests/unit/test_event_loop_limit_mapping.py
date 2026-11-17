@@ -94,7 +94,7 @@ def test_send_maps_broker_loop_limit_to_send_loop_limit() -> None:
 def test_web_task_action_maps_loop_limit_to_503() -> None:
     error = TaskActionEventLoopLimit(
         message=LIMIT_MESSAGE,
-        task_id='t-1',
+        task_id=uuid.uuid4(),
         loop_limit=EventLoopLimit(
             limit=MAX_CALLER_EVENT_LOOPS,
             held_thread_names=('MainThread',),
@@ -206,7 +206,7 @@ class _AtLimit:
 def at_limit() -> Generator[_AtLimit, None, None]:
     """No database: building a set does no I/O, and the limit stops each call first."""
     app = Horsies(AppConfig(broker=PostgresConfig(
-        database_url=SecretStr('postgresql+psycopg://u:p@localhost:5432/db'),
+        database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
     )))
     broker = app.get_broker()
     loops = [asyncio.new_event_loop() for _ in range(MAX_CALLER_EVENT_LOOPS)]
@@ -262,7 +262,7 @@ class TestRealBrokerAtTheLimit:
         assert result.err_value.code is MonitoringQueryErrorCode.EVENT_LOOP_LIMIT
 
     def test_task_action(self, at_limit: _AtLimit) -> None:
-        result = at_limit.run(cancel_task(at_limit.broker, str(uuid.uuid4())))
+        result = at_limit.run(cancel_task(at_limit.broker, uuid.uuid4()))
 
         assert is_err(result)
         assert result.err_value.code is TaskActionErrorCode.EVENT_LOOP_LIMIT

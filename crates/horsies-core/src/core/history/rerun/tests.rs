@@ -5,10 +5,13 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use super::operations::{
-    rerun_task_in_tx, NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
+    rerun_task_in_transaction, NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome,
+    RerunTask,
 };
 use super::provenance::RERUN_FIELD_PROVENANCE;
-use crate::broker::terminalization::terminalize;
+use crate::broker::core_rows::StatementLog;
+use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::history::ddl::classes::register_period_class;
 use crate::core::history::identity::fingerprint::EnqueueCommandV1;
@@ -23,8 +26,73 @@ use crate::core::lifecycle::{
     WorkerOwned,
 };
 use crate::core::{OperationalErrorCode, TaskError, TaskResult, TaskStatus};
+use crate::db::{
+    CheckoutClass, IsolationLevel, ParameterType, RollbackOutcome, SqlScript, StatementBound,
+    StatementFailure, TypedStatement,
+};
 
 mod ports;
+
+/// Drops the shape check of the rerun input columns, in a test transaction
+/// that rolls back, so a row can hold a shape the check refuses.
+static DROP_RERUN_INPUT_SHAPE: SqlScript = SqlScript::new(
+    "drop_rerun_input_shape",
+    "ALTER TABLE horsies_task_history
+     DROP CONSTRAINT horsies_task_history_rerun_input_shape",
+);
+
+/// An INLINE input with a payload that does not decode, on each history row
+/// of `$1`.
+static STORE_CORRUPT_INLINE_INPUT: TypedStatement = TypedStatement::new(
+    "store_corrupt_inline_input",
+    "UPDATE horsies_task_history
+     SET rerun_input_disposition = 'INLINE', rerun_input_version = 1,
+         rerun_input_digest = decode(repeat('00', 32), 'hex'),
+         rerun_input_inline = 'corrupt'::bytea
+     WHERE task_id = ANY($1)",
+    &[ParameterType::UuidArray],
+);
+
+/// An INLINE disposition with no envelope version on the history row `$1`,
+/// with the digest `$2` and the payload `$3`.
+static STORE_INCOMPLETE_INLINE_INPUT: TypedStatement = TypedStatement::new(
+    "store_incomplete_inline_input",
+    "UPDATE horsies_task_history
+     SET rerun_input_disposition = 'INLINE', rerun_input_version = NULL,
+         rerun_input_digest = $2, rerun_input_inline = $3
+     WHERE task_id = $1",
+    &[
+        ParameterType::Uuid,
+        ParameterType::Bytea,
+        ParameterType::Bytea,
+    ],
+);
+
+/// The record of a period-class leaf that retention removed: a detached and
+/// dropped catalog row of `standard_30d` that ended a day ago.
+static RECORD_REMOVED_LEAF: SqlScript = SqlScript::new(
+    "record_removed_leaf",
+    "INSERT INTO horsies_task_history_leaf_catalog (
+         leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor,
+         index_schema_version, created_at, detached_at, dropped_at
+     ) VALUES (
+         'p8_removed_standard_30d_leaf', 'standard_30d', 'AT',
+         date_trunc('day', NOW(), 'UTC') - interval '2 days',
+         date_trunc('day', NOW(), 'UTC') - interval '1 day',
+         1, NOW(), NOW(), NOW()
+     )",
+);
+
+/// Drops the staged detail reader that the rerun source read calls.
+static DROP_DETAIL_READER: SqlScript = SqlScript::new(
+    "drop_detail_reader",
+    "DROP FUNCTION horsies_task_detail_staged(uuid)",
+);
+
+/// Whether a test transaction rolled back and kept its connection.
+fn rolled_back(outcome: RollbackOutcome) -> bool {
+    matches!(outcome, RollbackOutcome::RolledBack)
+}
 
 const WORKER: &str = "p8-rerun-worker";
 const SOURCE_CLASS: &str = "forever";
@@ -142,12 +210,12 @@ async fn seed_source(
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies,
                  allow_failed_deps, join_type, status, is_subworkflow,
                  max_retries, execution, retention_class_key,
                  task_id, created_at
-             ) VALUES ($1, $2, 0, 'root', 'p8.rerun', $3, 'default',
+             ) VALUES ('NONE', $1, $2, 0, 'root', 'p8.rerun', $3, 'default',
                        50, '{}', FALSE, 'all', 'RUNNING', FALSE,
                        3, 'ISOLATED', 'forever', $4, NOW())",
         )
@@ -225,6 +293,12 @@ async fn cleanup(pool: &PgPool, task_ids: &[Uuid], workflow_ids: &[Uuid]) {
         .await
         .ok();
     sqlx::query("DELETE FROM horsies_key_reservations WHERE task_id = ANY($1)")
+        .bind(task_ids)
+        .execute(pool)
+        .await
+        .ok();
+    // The attempt rows first: their foreign key refuses the task delete.
+    sqlx::query("DELETE FROM horsies_task_attempts WHERE task_id = ANY($1)")
         .bind(task_ids)
         .execute(pool)
         .await
@@ -492,28 +566,31 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     let broker = PostgresBroker::from_pool(pool.clone());
     let (completed, _) = seed_source(&pool, TerminalSource::Completed, false, None).await;
     let (workflow_task, workflow_id) = seed_source(&pool, TerminalSource::Failed, true, None).await;
-    let mut corrupt_eligibility = pool.begin().await.unwrap();
-    sqlx::query(
-        "ALTER TABLE horsies_task_history
-         DROP CONSTRAINT horsies_task_history_rerun_input_eligibility",
-    )
-    .execute(&mut *corrupt_eligibility)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE horsies_task_history
-         SET rerun_input_disposition = 'INLINE', rerun_input_version = 1,
-             rerun_input_digest = decode(repeat('00', 32), 'hex'),
-             rerun_input_inline = 'corrupt'::bytea
-         WHERE task_id = ANY($1)",
-    )
-    .bind(vec![completed, workflow_task])
-    .execute(&mut *corrupt_eligibility)
-    .await
-    .unwrap();
+    let core = core_pool_for_test_pool(&pool);
+    let mut connection = core.checkout(CheckoutClass::Batch).await.unwrap();
+    let mut corrupt_eligibility = connection
+        .begin(IsolationLevel::ServerDefault)
+        .await
+        .unwrap();
+    // The baseline keeps the eligibility rule (no INLINE input on a completed
+    // or workflow row) in the shape check (0001_tables.sql,
+    // horsies_task_history_rerun_input_shape).
+    corrupt_eligibility
+        .run_script(&DROP_RERUN_INPUT_SHAPE, StatementBound::ConnectionTimeouts)
+        .await
+        .unwrap();
+    let corrupted = vec![completed, workflow_task];
+    corrupt_eligibility
+        .execute(
+            &STORE_CORRUPT_INLINE_INPUT.bind().value(&corrupted).finish(),
+            StatementBound::ConnectionTimeouts,
+        )
+        .await
+        .unwrap();
     assert_eq!(
-        rerun_task_in_tx(
-            corrupt_eligibility.as_mut(),
+        rerun_task_in_transaction(
+            &mut corrupt_eligibility,
+            StatementLog::Off,
             &RerunTask::new(completed, None, None),
             &policy(SOURCE_CLASS, true),
         )
@@ -525,8 +602,9 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         }
     );
     assert_eq!(
-        rerun_task_in_tx(
-            corrupt_eligibility.as_mut(),
+        rerun_task_in_transaction(
+            &mut corrupt_eligibility,
+            StatementLog::Off,
             &RerunTask::new(workflow_task, None, None),
             &policy(SOURCE_CLASS, true),
         )
@@ -537,7 +615,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
             reason: NotEligibleReason::WorkflowTask,
         }
     );
-    corrupt_eligibility.rollback().await.unwrap();
+    assert!(rolled_back(corrupt_eligibility.rollback().await));
     let live = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_tasks (
@@ -571,13 +649,18 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     assert_eq!(live_snapshot.task_name, "p8.live");
     assert_eq!(live_snapshot.status, TaskStatus::Pending);
     assert!(live_snapshot.raw_result.is_none());
+    // The worker identity columns are NOT NULL in the baseline attempt
+    // table.
     sqlx::query(
         "INSERT INTO horsies_task_attempts (
-             task_id, attempt, outcome, will_retry, started_at, finished_at
+             task_id, attempt, outcome, will_retry, started_at, finished_at,
+             worker_id, worker_hostname, worker_pid, worker_process_name
          ) VALUES ($1, 1, 'WORKER_FAILURE', TRUE,
-                   NOW() - interval '1 second', NOW())",
+                   NOW() - interval '1 second', NOW(),
+                   $2, 'rerun-test-host', 4242, 'rerun-test-process')",
     )
     .bind(live)
+    .bind(WORKER)
     .execute(&pool)
     .await
     .unwrap();
@@ -599,18 +682,28 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         crate::TaskAttemptOutcome::WorkerFailure
     );
 
-    sqlx::query("UPDATE horsies_tasks SET result = '[]' WHERE id = $1")
-        .bind(live)
-        .execute(&pool)
+    // A live row stores no result (0001_tables.sql): the stored result of a
+    // terminal task is in history. A stored result that is not a task result
+    // is INVALID_JSON_PAYLOAD.
+    let non_object = b"[]".to_vec();
+    sqlx::query(
+        "UPDATE horsies_task_history
+         SET result_payload = $2, result_digest = sha256($2)
+         WHERE task_id = $1",
+    )
+    .bind(completed)
+    .bind(&non_object)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let history_error = broker
+        .get_task_info(completed, true, false)
         .await
-        .unwrap();
-    let live_error = broker.get_task_info(live, true, false).await.unwrap_err();
-    assert_eq!(live_error.code, crate::BrokerErrorCode::InvalidJsonPayload);
-    sqlx::query("UPDATE horsies_tasks SET result = NULL WHERE id = $1")
-        .bind(live)
-        .execute(&pool)
-        .await
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(
+        history_error.code,
+        crate::BrokerErrorCode::InvalidJsonPayload
+    );
     let absent = Uuid::new_v4();
     assert!(matches!(
         broker
@@ -632,23 +725,17 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     let old_absent = Uuid::from_u128(raw);
     // Retention removed a period-class leaf that ended after the id's birth:
     // the record of that removal is a detached catalog row.
-    let mut transaction = pool.begin().await.unwrap();
-    sqlx::query(
-        "INSERT INTO horsies_task_history_leaf_catalog (
-             leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor,
-             index_schema_version, created_at, detached_at, dropped_at
-         ) VALUES (
-             'p8_removed_standard_30d_leaf', 'standard_30d', 'AT',
-             date_trunc('day', NOW(), 'UTC') - interval '2 days',
-             date_trunc('day', NOW(), 'UTC') - interval '1 day',
-             1, NOW(), NOW(), NOW()
-         )",
-    )
-    .execute(&mut *transaction)
-    .await
-    .unwrap();
-    let outcome = rerun_task_in_tx(
-        transaction.as_mut(),
+    let mut transaction = connection
+        .begin(IsolationLevel::ServerDefault)
+        .await
+        .unwrap();
+    transaction
+        .run_script(&RECORD_REMOVED_LEAF, StatementBound::ConnectionTimeouts)
+        .await
+        .unwrap();
+    let outcome = rerun_task_in_transaction(
+        &mut transaction,
+        StatementLog::Off,
         &RerunTask::new(old_absent, None, None),
         &policy(SOURCE_CLASS, true),
     )
@@ -661,7 +748,9 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
             reason: TaskAbsenceReason::PredatesRetainedHistory,
         }
     );
-    transaction.rollback().await.unwrap();
+    assert!(rolled_back(transaction.rollback().await));
+    drop(connection);
+    core.close();
 
     cleanup(
         &pool,
@@ -710,29 +799,32 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
         format!("{{\"input\":{PAYLOAD_INPUT},\"options\":{PAYLOAD_OPTIONS}}}").into_bytes();
     let valid_digest = Sha256::digest(&valid_payload).to_vec();
 
-    let mut incomplete = pool.begin().await.unwrap();
-    sqlx::query(
-        "ALTER TABLE horsies_task_history
-         DROP CONSTRAINT horsies_task_history_rerun_input_shape",
-    )
-    .execute(&mut *incomplete)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE horsies_task_history
-         SET rerun_input_disposition = 'INLINE', rerun_input_version = NULL,
-             rerun_input_digest = $2, rerun_input_inline = $3
-         WHERE task_id = $1",
-    )
-    .bind(source)
-    .bind(&valid_digest)
-    .bind(&valid_payload)
-    .execute(&mut *incomplete)
-    .await
-    .unwrap();
+    let core = core_pool_for_test_pool(&pool);
+    let mut connection = core.checkout(CheckoutClass::Batch).await.unwrap();
+    let mut incomplete = connection
+        .begin(IsolationLevel::ServerDefault)
+        .await
+        .unwrap();
+    incomplete
+        .run_script(&DROP_RERUN_INPUT_SHAPE, StatementBound::ConnectionTimeouts)
+        .await
+        .unwrap();
+    incomplete
+        .execute(
+            &STORE_INCOMPLETE_INLINE_INPUT
+                .bind()
+                .value(&source)
+                .value(&valid_digest)
+                .value(&valid_payload)
+                .finish(),
+            StatementBound::ConnectionTimeouts,
+        )
+        .await
+        .unwrap();
     assert!(matches!(
-        rerun_task_in_tx(
-            incomplete.as_mut(),
+        rerun_task_in_transaction(
+            &mut incomplete,
+            StatementLog::Off,
             &RerunTask::new(source, None, None),
             &policy(SOURCE_CLASS, true),
         )
@@ -741,7 +833,9 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
         RerunOutcome::InputCorrupt { task_id, ref detail }
             if task_id == source && detail.contains("incomplete")
     ));
-    incomplete.rollback().await.unwrap();
+    assert!(rolled_back(incomplete.rollback().await));
+    drop(connection);
+    core.close();
 
     sqlx::query(
         "UPDATE horsies_task_history
@@ -1042,7 +1136,13 @@ async fn broker_rolls_back_an_applied_reservation_when_the_live_insert_fails() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(error, RerunError::Database(_)));
+    assert!(
+        matches!(
+            error,
+            RerunError::Statement(StatementFailure::StatementRefused { .. })
+        ),
+        "{error:?}"
+    );
 
     sqlx::query("DROP TRIGGER horsies_p8_reject_rerun_insert_trigger ON horsies_tasks")
         .execute(&pool)
@@ -1102,23 +1202,38 @@ async fn unregistered_class_refuses_before_source_or_reservation_writes() {
     .await
     .unwrap();
     assert_eq!(after, before);
-    let mut missing_reader = pool.begin().await.unwrap();
-    sqlx::query("DROP FUNCTION horsies_task_detail_staged(uuid)")
-        .execute(&mut *missing_reader)
+    // The class check and the detail read are one statement, which calls the
+    // published detail reader (Python `read_rerun_source`): a missing reader
+    // is the server's `42883` for the whole read, whatever the class.
+    let core = core_pool_for_test_pool(&pool);
+    let mut connection = core.checkout(CheckoutClass::Batch).await.unwrap();
+    let mut missing_reader = connection
+        .begin(IsolationLevel::ServerDefault)
         .await
         .unwrap();
-    let error = rerun_task_in_tx(
-        missing_reader.as_mut(),
+    missing_reader
+        .run_script(&DROP_DETAIL_READER, StatementBound::ConnectionTimeouts)
+        .await
+        .unwrap();
+    let error = rerun_task_in_transaction(
+        &mut missing_reader,
+        StatementLog::Off,
         &RerunTask::new(source, None, None),
         &policy("p8_not_registered", true),
     )
     .await
     .unwrap_err();
-    assert!(matches!(
-        error,
-        RerunError::UnknownRetentionClass(ref key) if key == "p8_not_registered"
-    ));
-    missing_reader.rollback().await.unwrap();
+    assert!(
+        matches!(
+            error,
+            RerunError::Statement(StatementFailure::StatementRefused { ref cause, .. })
+                if cause.server_error().code().code() == "42883"
+        ),
+        "{error:?}"
+    );
+    assert!(rolled_back(missing_reader.rollback().await));
+    drop(connection);
+    core.close();
     cleanup(&pool, &[source], &[]).await;
 }
 

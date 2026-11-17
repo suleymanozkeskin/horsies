@@ -3,8 +3,7 @@
 use serial_test::serial;
 
 use super::support::*;
-use crate::broker::error::BrokerError;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome};
 
 /// Python `TestAppliedCompletion::test_completed_is_never_eligible_even_with_retained_input`
@@ -31,8 +30,6 @@ async fn completed_is_never_eligible_even_with_retained_input() {
             task_id,
             fence: owned_claim(),
             result_json: r#"{"ok": 1}"#.to_owned(),
-            notify_channel: "task_queue_default".to_owned(),
-            notify_payload: format!("capacity:{task_id}"),
         },
     )
     .await
@@ -109,18 +106,11 @@ async fn duplicate_identity_fails_closed() {
             task_id,
             fence: owned_claim(),
             result_json: r#"{"ok": 1}"#.to_owned(),
-            notify_channel: "task_queue_default".to_owned(),
-            notify_payload: format!("capacity:{task_id}"),
         },
     )
     .await;
 
-    match refused {
-        Err(BrokerError::Database(error)) => {
-            assert_refused_with_message(Err::<(), _>(error), "XX001", "multiple locations");
-        }
-        other => panic!("expected the duplicate identity refusal, got {other:?}"),
-    }
+    assert_server_refusal(&server_refusal(refused), "XX001", "multiple locations");
     assert!(live_row(&pool, task_id).await.is_some());
     cleanup_tasks(&pool, &[task_id]).await;
 }

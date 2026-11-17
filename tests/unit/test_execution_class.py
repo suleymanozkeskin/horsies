@@ -8,9 +8,11 @@ insert path reads the row's `execution` column from them.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import textwrap
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -53,11 +55,12 @@ from horsies.core.task_decorator import (
     execution_rule_error,
 )
 from horsies.core.types.result import Err, Ok
-from horsies.core.types.status import TaskStatus
+from horsies.monitoring.models import TaskDetail
+from tests.baseline_sql import baseline_sql
 
 pytestmark = [pytest.mark.unit]
 
-_PACKAGE_ROOT = Path(__file__).resolve().parents[2] / 'horsies'
+_PACKAGE_ROOT = Path(__file__).resolve().parents[2] / 'python' / 'horsies'
 
 
 def _app() -> Horsies:
@@ -65,7 +68,7 @@ def _app() -> Horsies:
         AppConfig(
             broker=PostgresConfig(
                 database_url=SecretStr(
-                    'postgresql+psycopg://user:pass@127.0.0.1:1/none'
+                    'postgresql://user:pass@127.0.0.1:1/none'
                 ),
             ),
         ),
@@ -213,7 +216,7 @@ class TestDeclarationsThatAreRefused:
 
     def test_a_grace_on_an_isolated_task(self) -> None:
         def declare(app: Horsies) -> None:
-            @app.task('bad', cancel_grace_ms=1_000)  # pyright: ignore[reportCallIssue, reportUntypedFunctionDecorator]
+            @app.task('bad', cancel_grace_ms=1_000)  # pyright: ignore[reportCallIssue, reportUntypedFunctionDecorator, reportArgumentType]
             def bad(*, n: int) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedFunction]
                 return TaskResult(ok=n)
 
@@ -223,7 +226,7 @@ class TestDeclarationsThatAreRefused:
 
     def test_a_grace_on_a_shared_thread_task(self) -> None:
         def declare(app: Horsies) -> None:
-            @app.task(
+            @app.task(  # pyright: ignore[reportArgumentType, reportUntypedFunctionDecorator]
                 'bad',
                 execution=Execution.SHARED_THREAD,  # pyright: ignore[reportArgumentType]
                 timeout_ms=5_000,
@@ -315,7 +318,7 @@ class TestDeclarationsThatAreRefused:
 
                 app = Horsies(AppConfig(broker=PostgresConfig(
                     database_url=SecretStr(
-                        'postgresql+psycopg://user:pass@127.0.0.1:1/none',
+                        'postgresql://user:pass@127.0.0.1:1/none',
                     ),
                 )))
 
@@ -727,7 +730,6 @@ class TestEveryInsertPathWritesTheColumn:
                     'execution' if 'execution' in columns else 'MISSING',
                 )
         assert found == {
-            'core/brokers/postgres.py': ['execution'],
             'core/history/rerun/operations.py': ['execution'],
             'core/workflows/sql.py': ['execution'],
         }
@@ -735,18 +737,11 @@ class TestEveryInsertPathWritesTheColumn:
 
 class TestMigrationText:
     def test_the_check_domain_is_the_enum(self) -> None:
-        from horsies.core.schemas.migrations import ADD_TASK_EXECUTION_CHECK_SQL
+        """The task table and the task facts of a workflow node check the
+        class against the same domain."""
+        domain = ', '.join(f"'{member.value}'" for member in Execution)
 
-        expected = "('ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD')"
-        assert ADD_TASK_EXECUTION_CHECK_SQL.text.count(expected) == 2
-
-    def test_the_column_default_is_isolated(self) -> None:
-        from horsies.core.schemas.migrations import ADD_TASK_EXECUTION_COLUMN_SQL
-
-        assert (
-            "ADD COLUMN IF NOT EXISTS execution TEXT NOT NULL DEFAULT 'ISOLATED'"
-            in ADD_TASK_EXECUTION_COLUMN_SQL.text
-        )
+        assert baseline_sql().count(f'execution IN ({domain})') == 2
 
     def test_the_model_column_matches_the_baseline(self) -> None:
         """The baseline table has no database defaults: every insert names
@@ -756,78 +751,55 @@ class TestMigrationText:
         assert str(column.type) == 'TEXT'
         assert column.server_default is None
 
-    def test_the_claim_indexes_have_the_class_as_their_second_key(self) -> None:
-        from horsies.core.schemas.recovery import CLAIM_INDEXES
+    @pytest.mark.parametrize(
+        ('name', 'status'),
+        [
+            ('horsies_tasks_claim_pending', 'PENDING'),
+            ('horsies_tasks_claim_expired_order', 'CLAIMED'),
+        ],
+    )
+    def test_the_claim_indexes_have_the_class_as_their_second_key(
+        self,
+        name: str,
+        status: str,
+    ) -> None:
+        index = (
+            f'CREATE INDEX {name}\n'
+            '    ON horsies_tasks USING btree '
+            '(queue_name, execution, priority, enqueued_at, id)\n'
+            f"    WHERE status = '{status}';"
+        )
 
-        pending, expired = CLAIM_INDEXES
-        assert pending.name == 'idx_horsies_tasks_claim_pending_class'
-        assert "WHERE status = 'PENDING'" in pending.create_sql
-        assert expired.name == 'idx_horsies_tasks_claim_expired_class'
-        assert "WHERE status = 'CLAIMED'" in expired.create_sql
-        for index in CLAIM_INDEXES:
-            assert (
-                '(queue_name, execution, priority, enqueued_at, id)'
-                in index.create_sql
-            )
-            assert index.create_sql.startswith('CREATE INDEX CONCURRENTLY ')
+        assert index in baseline_sql()
 
 
 class TestMonitoringDetail:
     def test_a_live_task_shows_its_class(self) -> None:
-        from horsies.monitoring.queries import _leaf_task  # pyright: ignore[reportPrivateUsage]
+        from horsies.monitoring.queries import get_task_detail
+        from tests.monitoring_function_support import detail_row, function_broker
 
-        now = datetime.now(timezone.utc)
-        task = TaskModel(
-            id='00000000-0000-7000-8000-000000000001',
-            task_name='t',
-            queue_name='default',
-            priority=100,
-            status=TaskStatus.PENDING,
-            enqueued_at=now,
-            retry_count=0,
-            max_retries=0,
-            execution='SHARED_THREAD',
-        )
-        assert _leaf_task(task).execution is Execution.SHARED_THREAD
+        task_id = uuid.UUID('00000000-0000-7000-8000-000000000001')
+        broker, _ = function_broker([detail_row(str(task_id), execution='SHARED_THREAD')])
+
+        result = asyncio.run(get_task_detail(broker, task_id))
+
+        match result:
+            case Ok(TaskDetail(leaf=leaf)):
+                assert leaf.execution is Execution.SHARED_THREAD
+            case _:
+                raise AssertionError(f'the detail answered {result!r}')
 
     def test_a_history_task_shows_no_class(self) -> None:
-        from horsies.core.history.reads.detail import HistoryTaskDetail
-        from horsies.monitoring.queries import _history_leaf  # pyright: ignore[reportPrivateUsage]
+        from horsies.monitoring.queries import get_task_detail
+        from tests.monitoring_function_support import function_broker, history_row
 
-        now = datetime.now(timezone.utc)
-        detail = HistoryTaskDetail(
-            task_id='00000000-0000-7000-8000-000000000002',
-            task_name='t',
-            queue_name='default',
-            priority=100,
-            status=TaskStatus.COMPLETED,
-            terminalization_kind='COMPLETED',
-            terminal_at=now,
-            retention_class_key='standard_30d',
-            enqueued_at=now,
-            created_at=now,
-            sent_at=now,
-            claimed_at=None,
-            started_at=None,
-            good_until=None,
-            retry_count=0,
-            max_retries=0,
-            last_claimed_worker_id=None,
-            last_worker_hostname=None,
-            last_worker_pid=None,
-            result_envelope_version=1,
-            result_payload=None,
-            result_digest=None,
-            error_code=None,
-            final_failed_reason=None,
-            rerun_of_task_id=None,
-            rerun_root_task_id=None,
-            workflow_id=None,
-            is_workflow_task=False,
-            rerun_input_disposition='DECLINED_BY_POLICY',
-            rerun_input_version=None,
-            rerun_input_digest=None,
-            rerun_input_inline=None,
-            attempts=(),
-        )
-        assert _history_leaf(detail).execution is None
+        task_id = uuid.UUID('00000000-0000-7000-8000-000000000002')
+        broker, _ = function_broker([history_row(str(task_id))])
+
+        result = asyncio.run(get_task_detail(broker, task_id))
+
+        match result:
+            case Ok(TaskDetail(leaf=leaf)):
+                assert leaf.execution is None
+            case _:
+                raise AssertionError(f'the detail answered {result!r}')

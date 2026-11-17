@@ -251,11 +251,14 @@ impl ExitWatch {
             match event.filter {
                 libc::EVFILT_READ => wake.woken = true,
                 libc::EVFILT_PROC => {
-                    let pid = u32::try_from(event.ident).ok().and_then(ProcessId::new);
+                    // `libc::kevent` is `repr(packed(4))` on Apple targets:
+                    // copy the field, because the log macro takes a reference.
+                    let ident = event.ident;
+                    let pid = u32::try_from(ident).ok().and_then(ProcessId::new);
                     match pid {
                         Some(pid) => wake.exited.push(pid),
                         None => tracing::error!(
-                            ident = event.ident,
+                            ident,
                             "the kqueue reported an exit for an ident that is not a pid"
                         ),
                     }

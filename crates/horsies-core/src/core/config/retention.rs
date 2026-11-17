@@ -14,7 +14,9 @@ use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use crate::core::history::ddl::classes::{
     DEFAULT_RETENTION_CLASS_KEY, DEFAULT_RETENTION_DAYS, FOREVER_CLASS_KEY,
 };
-use crate::core::history::periods::{PeriodRefused, RetentionDays};
+use crate::core::history::periods::{
+    PeriodRefused, RetentionDays, MAX_RETENTION_DAYS, MIN_RETENTION_DAYS, PERIOD_CLASS_PREFIX,
+};
 
 /// The send-time retention choice that overrides the queue mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +55,41 @@ impl EnqueueRetention {
             Self::Period(days) => days.class_key(),
         }
     }
+
+    /// The retention of a class key, by the rule that derives each key
+    /// ([`EnqueueRetention::class_key`]): `forever`, or `standard_<days>d` of
+    /// a period of whole days within the period bounds, written as
+    /// [`RetentionDays::class_key`] writes it (no sign, no leading zero). The
+    /// baseline CHECK `horsies_tasks_retention_class_key_form` holds the same
+    /// form. `standard_30d` is the period of the default class. Pure.
+    ///
+    /// Errors: [`RetentionClassKeyRefused`] for any other text.
+    pub fn from_class_key(key: &str) -> Result<Self, RetentionClassKeyRefused> {
+        if key == FOREVER_CLASS_KEY {
+            return Ok(Self::Forever);
+        }
+        let period = key
+            .strip_prefix(PERIOD_CLASS_PREFIX)
+            .and_then(|rest| rest.strip_suffix('d'))
+            .and_then(|days| days.parse::<u16>().ok())
+            .and_then(|days| RetentionDays::parse_period(Duration::days(i64::from(days))).ok())
+            .filter(|days| days.class_key() == key);
+        match period {
+            Some(days) => Ok(Self::Period(days)),
+            None => Err(RetentionClassKeyRefused {
+                key: key.to_owned(),
+            }),
+        }
+    }
+}
+
+/// A text that is not the key of a retention class. Nothing was written.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "retention class key {key:?} is neither {FOREVER_CLASS_KEY:?} nor standard_<days>d for a period of {MIN_RETENTION_DAYS} to {MAX_RETENTION_DAYS} whole days"
+)]
+pub struct RetentionClassKeyRefused {
+    pub key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -433,6 +470,43 @@ fn validate_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_class_key_reads_back_as_the_retention_that_derives_it() {
+        assert_eq!(
+            EnqueueRetention::from_class_key("forever"),
+            Ok(EnqueueRetention::Forever)
+        );
+        for days in [1, 30, 1825] {
+            let key = format!("standard_{days}d");
+            let retention = EnqueueRetention::from_class_key(&key).expect("a period key reads");
+            assert_eq!(retention.class_key(), key);
+        }
+        assert_eq!(
+            EnqueueRetention::from_class_key("standard_30d").map(EnqueueRetention::class_key),
+            Ok(EnqueueRetention::Default.class_key())
+        );
+    }
+
+    #[test]
+    fn a_text_that_no_class_derives_is_refused() {
+        for key in [
+            "",
+            "Forever",
+            "standard_0d",
+            "standard_1826d",
+            "standard_030d",
+            "standard_+30d",
+            "standard_30",
+            "standard_d",
+            "standard_99999999999d",
+            "STANDARD_30d",
+            "standard_30d ",
+        ] {
+            let refused = EnqueueRetention::from_class_key(key).expect_err(key);
+            assert_eq!(refused.key, key);
+        }
+    }
 
     #[test]
     fn defaults_and_all_bounds_match_the_retention_contract() {

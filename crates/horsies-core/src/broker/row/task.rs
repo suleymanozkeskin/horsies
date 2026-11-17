@@ -7,13 +7,6 @@ use crate::core::{Execution, ExecutionClass, TaskInfo, TaskStatus};
 
 use crate::broker::error::BrokerError;
 
-/// Minimal row returned by the claim CTE (just the ID).
-#[derive(Debug, FromRow)]
-pub struct ClaimedId {
-    #[allow(dead_code)] // populated by FromRow; used as existence check
-    pub id: Uuid,
-}
-
 /// Row returned by SET_RUNNING_SQL — the attempt context read atomically
 /// with the CLAIMED → RUNNING transition.
 ///
@@ -170,17 +163,6 @@ pub fn parse_task_status(s: &str) -> Result<TaskStatus, BrokerError> {
 // ---------------------------------------------------------------------------
 // Task attempt row types
 // ---------------------------------------------------------------------------
-
-/// Context row from SELECT_RUNNING_TASK_CONTEXT_SQL (locked with FOR UPDATE).
-#[derive(Debug, FromRow)]
-pub struct TaskRunningContextRow {
-    pub retry_count: i32,
-    pub started_at: Option<DateTime<Utc>>,
-    pub claimed_by_worker_id: Option<String>,
-    pub worker_hostname: Option<String>,
-    pub worker_pid: Option<i32>,
-    pub worker_process_name: Option<String>,
-}
 
 /// Row returned by SELECT_TASK_ATTEMPTS_SQL.
 #[derive(Debug, Clone, Serialize, FromRow)]

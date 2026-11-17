@@ -3,6 +3,17 @@
 //! conversion of its outcome; `handle.rs` binds them to `CoreHandle`.
 
 pub mod arguments;
+pub mod attempt_records;
+pub mod cancel;
+pub mod claim;
 pub mod enqueue;
+pub mod failed_attempt;
+pub mod queue_starts;
+pub mod release;
+pub mod result;
 pub mod schema;
+pub mod stale_claims;
+pub mod stale_running;
+pub mod start;
+pub mod success;
 pub mod task_info;

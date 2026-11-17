@@ -7,7 +7,8 @@
 //!   the runs of a closing slot; nothing for a down slot.
 
 use super::dispatch::ExecutionClass;
-use super::route::ClaimPlan;
+use super::route::{ClaimPlan, ClaimRoute};
+use crate::broker::claims::ClaimClasses;
 
 /// The service state of one slot, as the claim sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +38,29 @@ pub struct SharedSlotService {
 pub struct BudgetCapacity {
     pub budget: ExecutionClass,
     pub in_service: u32,
+}
+
+/// The children or seats of each budget that take a task at once: an
+/// isolated child that waits for a task, a free seat of an open shared
+/// child, less the tasks that already wait for one (Python
+/// `SlotPool.free_slots`, `free_shared_async_seats`,
+/// `free_shared_thread_seats`). A kind with no pool has 0.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FreeCapacity {
+    pub isolated: u32,
+    pub shared_async: u32,
+    pub shared_thread: u32,
+}
+
+impl FreeCapacity {
+    /// The free capacity of `budget`.
+    pub fn of(&self, budget: ExecutionClass) -> u32 {
+        match budget {
+            ExecutionClass::Isolated => self.isolated,
+            ExecutionClass::SharedAsync => self.shared_async,
+            ExecutionClass::SharedThread => self.shared_thread,
+        }
+    }
 }
 
 /// The capacity of the `ISOLATED` budget.
@@ -92,6 +116,34 @@ impl PoolService {
                 },
             })
             .collect()
+    }
+
+    /// The budgets and routes of one claim pass (Python `_claim_params`:
+    /// `budgets_json(self._claim_capacity())`, `routes_json(claim_plan)`):
+    /// the capacity in service of each budget of the plan, and the budget of
+    /// each class that the plan serves. A class the plan does not serve has
+    /// no route, so the claim takes no row of it. The routes come from
+    /// [`ClaimPlan::route`], the one routing rule of the worker.
+    pub fn claim_classes(&self) -> ClaimClasses {
+        let plan = self.plan();
+        let budgets = self
+            .capacities()
+            .into_iter()
+            .map(|capacity| (capacity.budget, capacity.in_service))
+            .collect();
+        let routes = ExecutionClass::ALL
+            .into_iter()
+            .filter_map(|class| match plan.route(class) {
+                ClaimRoute::ServedBy(budget) => Some((class, budget)),
+                ClaimRoute::NotServed => None,
+            })
+            .collect();
+        match ClaimClasses::new(budgets, routes) {
+            Ok(classes) => classes,
+            // The plan gives a budget to each class it routes to, so a route
+            // to a missing budget is a defect of the plan.
+            Err(unheld) => panic!("the claim plan of the worker broke its own rule: {unheld}"),
+        }
     }
 
     /// The seats of the worker: one per isolated slot plus the seats of each

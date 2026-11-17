@@ -17,6 +17,7 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import is_err
@@ -24,6 +25,7 @@ from tests.integration.test_task_history_schema_emission import (
     MakeDatabase,
     make_database,
 )
+from horsies.core.utils.url import sqlalchemy_url
 
 __all__ = ['make_database']
 
@@ -32,7 +34,7 @@ pytestmark = [pytest.mark.integration]
 
 def test_config_default_is_false_and_never_an_engine_kwarg() -> None:
     config = PostgresConfig(
-        database_url=SecretStr('postgresql+psycopg://u:p@localhost/x')
+        database_url=SecretStr('postgresql://u:p@localhost/x')
     )
     assert config.retain_rerun_input_default is False
     assert (
@@ -48,6 +50,7 @@ async def _enqueue(
     outcome = await broker.enqueue_async(
         'policy.task',
         task_id=task_id,
+        send_kind=SendKind.FIRST,
         enqueue_sha='b' * 64,
         sent_at=datetime.now(timezone.utc),
         args_json='[]',
@@ -77,7 +80,7 @@ async def test_none_inherits_and_explicit_overrides(
     finally:
         await broker.close_async()
 
-    engine = create_async_engine(url)
+    engine = create_async_engine(sqlalchemy_url(url))
     try:
         async with engine.connect() as connection:
             rows = {

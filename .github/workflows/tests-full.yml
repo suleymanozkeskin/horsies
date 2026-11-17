@@ -131,11 +131,11 @@ jobs:
         env:
           HORSIES_PGBOUNCER_TEST: "1"
           DB_PASSWORD: testpassword
-          HORSIES_TEST_DATABASE_URL_DIRECT: postgresql+psycopg://postgres:testpassword@localhost:15432/horsies
-          HORSIES_TEST_DATABASE_URL_TRANSACTION: postgresql+psycopg://postgres:testpassword@localhost:16432/horsies
-          HORSIES_TEST_DATABASE_URL_PREPARED: postgresql+psycopg://postgres:testpassword@localhost:16435/horsies
-          HORSIES_TEST_DATABASE_URL_SESSION: postgresql+psycopg://postgres:testpassword@localhost:16433/horsies
-          HORSIES_TEST_DATABASE_URL_STATEMENT: postgresql+psycopg://postgres:testpassword@localhost:16434/horsies
+          HORSIES_TEST_DATABASE_URL_DIRECT: postgresql://postgres:testpassword@localhost:15432/horsies
+          HORSIES_TEST_DATABASE_URL_TRANSACTION: postgresql://postgres:testpassword@localhost:16432/horsies
+          HORSIES_TEST_DATABASE_URL_PREPARED: postgresql://postgres:testpassword@localhost:16435/horsies
+          HORSIES_TEST_DATABASE_URL_SESSION: postgresql://postgres:testpassword@localhost:16433/horsies
+          HORSIES_TEST_DATABASE_URL_STATEMENT: postgresql://postgres:testpassword@localhost:16434/horsies
         run: |
           uv run pytest \
             tests/integration/test_pgbouncer_contract.py \
@@ -146,11 +146,11 @@ jobs:
         env:
           HORSIES_PGBOUNCER_TEST: "1"
           DB_PASSWORD: testpassword
-          HORSIES_TEST_DATABASE_URL_DIRECT: postgresql+psycopg://postgres:testpassword@localhost:15432/horsies
-          HORSIES_TEST_DATABASE_URL_TRANSACTION: postgresql+psycopg://postgres:testpassword@localhost:16432/horsies
-          HORSIES_TEST_DATABASE_URL_PREPARED: postgresql+psycopg://postgres:testpassword@localhost:16435/horsies
-          HORSIES_TEST_DATABASE_URL_SESSION: postgresql+psycopg://postgres:testpassword@localhost:16433/horsies
-          HORSIES_TEST_DATABASE_URL_STATEMENT: postgresql+psycopg://postgres:testpassword@localhost:16434/horsies
+          HORSIES_TEST_DATABASE_URL_DIRECT: postgresql://postgres:testpassword@localhost:15432/horsies
+          HORSIES_TEST_DATABASE_URL_TRANSACTION: postgresql://postgres:testpassword@localhost:16432/horsies
+          HORSIES_TEST_DATABASE_URL_PREPARED: postgresql://postgres:testpassword@localhost:16435/horsies
+          HORSIES_TEST_DATABASE_URL_SESSION: postgresql://postgres:testpassword@localhost:16433/horsies
+          HORSIES_TEST_DATABASE_URL_STATEMENT: postgresql://postgres:testpassword@localhost:16434/horsies
         run: uv run pytest tests/e2e/test_pgbouncer_smoke.py -v --tb=short
 
       - name: Stop PgBouncer fixture stack

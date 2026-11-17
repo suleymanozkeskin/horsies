@@ -10,14 +10,17 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from horsies.core.app import Horsies
+from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err
+from horsies.core.worker import finalize as finalize_module
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from tests.dispatch_claim_support import claim_at
 from tests.fixtures.slots.handles import HANDLE_CLAIMED_AT, task_finished_handle
 from tests.integration.conftest import compute_test_command_fingerprint
 
@@ -36,7 +39,7 @@ def _test_app() -> Horsies:
     if _TEST_APP is None:
         cfg = AppConfig(
             broker=PostgresConfig(
-                database_url='postgresql+psycopg://u:p@localhost/db',
+                database_url='postgresql://u:p@localhost/db',
             )
         )
         _TEST_APP = Horsies(cfg)
@@ -103,13 +106,13 @@ async def _insert_running_task(session: AsyncSession) -> str:
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name,
                  input, queue_name, priority,
                  dependencies, allow_failed_deps, join_type,
                  is_subworkflow, status, task_id, created_at,
                  max_retries, execution, retention_class_key)
             VALUES
-                (:id, :wf_id, 0, 'node-0', 'two_phase_finalize_test',
+                ('NONE', :id, :wf_id, 0, 'node-0', 'two_phase_finalize_test',
                  '{}', 'default', 100,
                  '{}', FALSE, 'all',
                  FALSE, 'RUNNING', CAST(:task_id AS uuid), NOW(),
@@ -128,26 +131,18 @@ async def _insert_running_task(session: AsyncSession) -> str:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Phase-2 workflow error must not roll back phase-1 task terminal persistence."""
     task_id = await _insert_running_task(session)
-
-    cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
-        psycopg_dsn='postgresql://u:p@localhost/db',
-        queues=['default'],
-    )
-    sf = async_sessionmaker(engine, expire_on_commit=False)
-    worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
-    worker._app = _test_app()
-    worker.worker_instance_id = TEST_WORKER_ID
+    worker = _worker(engine, broker)
 
     # Simulate workflow advancement failure after phase-1 task status persistence.
-    worker._handle_workflow_task_if_needed = AsyncMock(
-        side_effect=RuntimeError('phase-2 boom')
-    )  # type: ignore[method-assign]
+    failing_phase2 = AsyncMock(side_effect=RuntimeError('phase-2 boom'))
+    monkeypatch.setattr(finalize_module, 'finish_node', failing_phase2)
 
     envelope = encode_task_result(
         TaskResult(ok='phase-1-result'),
@@ -163,7 +158,7 @@ async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
         handle,
         task_id,
         task_name='two_phase_finalize_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
     assert is_err(finalize_r)
 
@@ -181,12 +176,13 @@ async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
     assert row[1] == serialized.ok_value
 
     # Ensure phase-2 was actually attempted.
-    worker._handle_workflow_task_if_needed.assert_awaited()
+    failing_phase2.assert_awaited()
 
 
-def _worker(engine: AsyncEngine) -> Worker:
+def _worker(engine: AsyncEngine, broker: PostgresBroker) -> Worker:
+    """A worker with the broker, through which phase 2 builds child starts."""
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
@@ -194,6 +190,7 @@ def _worker(engine: AsyncEngine) -> Worker:
         session_factory=async_sessionmaker(engine, expire_on_commit=False),
         listener=MagicMock(),
         cfg=cfg,
+        broker=broker,
     )
     worker._app = _test_app()
     worker.worker_instance_id = TEST_WORKER_ID
@@ -228,6 +225,7 @@ async def _node_status(session: AsyncSession, task_id: str) -> str:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_phase2_deletes_the_outbox_row_of_the_node(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
     ok: bool,
@@ -236,7 +234,7 @@ async def test_phase2_deletes_the_outbox_row_of_the_node(
     node deletes it in the same transaction, so no recovery pass has it
     left to consume."""
     task_id = await _insert_running_task(session)
-    worker = _worker(engine)
+    worker = _worker(engine, broker)
     result: TaskResult[JsonValue, TaskError] = (
         TaskResult(ok='done')
         if ok
@@ -249,7 +247,7 @@ async def test_phase2_deletes_the_outbox_row_of_the_node(
         task_finished_handle(True, wire.ok_value, None),
         task_id,
         task_name='two_phase_finalize_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert not is_err(finalize_r)
@@ -260,16 +258,17 @@ async def test_phase2_deletes_the_outbox_row_of_the_node(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_a_failed_phase2_keeps_the_outbox_row(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The delete commits with the node write, or not at all: a phase 2
     that fails leaves the row for the recovery pass."""
     task_id = await _insert_running_task(session)
-    worker = _worker(engine)
-    worker._handle_workflow_task_if_needed = AsyncMock(  # type: ignore[method-assign]
-        side_effect=RuntimeError('phase-2 boom'),
-    )
+    worker = _worker(engine, broker)
+    failing_phase2 = AsyncMock(side_effect=RuntimeError('phase-2 boom'))
+    monkeypatch.setattr(finalize_module, 'finish_node', failing_phase2)
     wire = dumps_json(encode_task_result(TaskResult(ok='done'), JsonValue))
     assert not is_err(wire)
 
@@ -277,8 +276,9 @@ async def test_a_failed_phase2_keeps_the_outbox_row(
         task_finished_handle(True, wire.ok_value, None),
         task_id,
         task_name='two_phase_finalize_test',
-        claimed_at=HANDLE_CLAIMED_AT,
+        claim=claim_at(HANDLE_CLAIMED_AT),
     )
 
     assert is_err(finalize_r)
+    failing_phase2.assert_awaited()
     assert await _outbox_rows(session, task_id) == 1

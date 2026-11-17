@@ -18,11 +18,14 @@ use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::broker::core_rows::{column, one_row, scalar, RowDecodeError};
+use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::{OperationalErrorCode, TaskError, TaskResult};
+use crate::db::{CheckoutClass, ParameterType, Row, TypedStatement};
 use crate::workflow_engine::error::WorkflowError;
+use crate::workflow_engine::steps::{run_alone, StepContractError};
 
 /// Characters of a failure text that the limit error and the log keep.
 pub(crate) const MAX_FAILURE_TEXT_CHARS: usize = 500;
@@ -33,63 +36,36 @@ const MAX_ERROR_TYPE_CHARS: usize = 255;
 /// The error type stored for a candidate that panicked.
 const PANIC_ERROR_TYPE: &str = "Panic";
 
-/// Adds this pass to the stored count of one workflow. No row comes back when this pass already counted it.
-const COUNT_RECOVERY_FAILURE_SQL: &str = "\
-INSERT INTO horsies_workflow_recovery_failures AS failure (
-    workflow_id, failed_passes, last_pass_id,
-    first_failed_at, last_failed_at,
-    last_case, last_task_index, last_error_type
-)
-VALUES ($1, 1, $2, statement_timestamp(), statement_timestamp(), $3, $4, $5)
-ON CONFLICT (workflow_id) DO UPDATE
-SET failed_passes = failure.failed_passes + 1,
-    last_pass_id = EXCLUDED.last_pass_id,
-    last_failed_at = EXCLUDED.last_failed_at,
-    last_case = EXCLUDED.last_case,
-    last_task_index = EXCLUDED.last_task_index,
-    last_error_type = EXCLUDED.last_error_type
-WHERE failure.last_pass_id <> EXCLUDED.last_pass_id
-RETURNING failed_passes";
-
-const LOCK_WORKFLOW_STATUS_SQL: &str = "\
-SELECT status FROM horsies_workflows WHERE id = $1 FOR UPDATE";
-
-const FAIL_CANDIDATE_NODE_SQL: &str = "\
-UPDATE horsies_workflow_tasks
-SET status = 'FAILED', result = $3, completed_at = NOW()
-WHERE workflow_id = $1 AND task_index = $2
-  AND status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')";
-
-const SKIP_UNSTARTED_NODES_SQL: &str = "\
-UPDATE horsies_workflow_tasks
-SET status = 'SKIPPED', completed_at = NOW()
-WHERE workflow_id = $1 AND status IN ('PENDING', 'READY')";
-
-const KEEP_FIRST_WORKFLOW_ERROR_SQL: &str = "\
-UPDATE horsies_workflows
-SET error = COALESCE(error, $2), updated_at = NOW()
-WHERE id = $1 AND status = 'RUNNING'";
-
-const HAS_LIVE_NODE_SQL: &str = "\
-SELECT EXISTS (
-    SELECT 1 FROM horsies_workflow_tasks
-    WHERE workflow_id = $1 AND status IN ('ENQUEUED', 'RUNNING')
-)";
-
-/// Fails the workflow and keeps its stored error.
-const FAIL_WORKFLOW_KEEP_ERROR_SQL: &str = "\
-UPDATE horsies_workflows
-SET status = 'FAILED', result = NULL, completed_at = NOW(), updated_at = NOW()
-WHERE id = $1 AND status = 'RUNNING' AND completed_at IS NULL";
+/// `horsies_workflow_recovery_record_raise(workflow_id, pass_id, case, task_index, error_type, error_detail,
+/// limit)`: counts one persistent raise once per pass, and at the limit writes the recovery limit, in one
+/// statement in autocommit (Python `record_recovery_raise`, `core/workflows/recovery_limit.py`).
+static RECORD_RAISE: TypedStatement = TypedStatement::new(
+    "horsies_workflow_recovery_record_raise",
+    "SELECT outcome, failed_passes, limit_write_error
+     FROM horsies_workflow_recovery_record_raise($1, $2, $3, $4, $5, $6, $7)",
+    &[
+        ParameterType::Uuid,
+        ParameterType::Uuid,
+        ParameterType::Text,
+        ParameterType::Int4,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Int4,
+    ],
+);
 
 /// RUNNING workflows at or over the limit. A live node keeps a workflow here, and so does a limit write that
-/// keeps failing, so such a workflow is visible, not only absent from the log.
-const COUNT_OVER_FAILURE_LIMIT_SQL: &str = "\
-SELECT count(*)
-FROM horsies_workflow_recovery_failures failure
-JOIN horsies_workflows w ON w.id = failure.workflow_id
-WHERE failure.failed_passes >= $1
-  AND w.status = 'RUNNING'";
+/// keeps failing, so such a workflow is visible, not only absent from the log (Python
+/// `COUNT_OVER_FAILURE_LIMIT_SQL`).
+static COUNT_OVER_FAILURE_LIMIT: TypedStatement = TypedStatement::new(
+    "recovery_count_over_failure_limit",
+    "SELECT count(*)
+     FROM horsies_workflow_recovery_failures failure
+     JOIN horsies_workflows w ON w.id = failure.workflow_id
+     WHERE failure.failed_passes >= $1
+       AND w.status = 'RUNNING'",
+    &[ParameterType::Int8],
+);
 
 /// The recovery path that ran a candidate, with the node it worked on.
 ///
@@ -107,11 +83,16 @@ pub(crate) enum RecoveryCase {
     CompletedChildParentNotUpdated { parent_task_index: i32 },
     /// Cases 2 and 3: a RUNNING workflow whose nodes are all terminal.
     TerminalWorkflowRunning,
+    /// The progression of a phase-2 record (phase-2 recovery). Only the limit error of a raised record names
+    /// it: phase-2 recovery counts a raise on the record (`attempt_count`), never in
+    /// `horsies_workflow_recovery_failures`, whose CHECK names the five other values. Python:
+    /// `RecoveryCase.PHASE2_PROGRESSION`.
+    Phase2Progression { task_index: i32 },
 }
 
 impl RecoveryCase {
-    /// The value stored in `last_case`; the baseline CHECK `horsies_workflow_recovery_failures_case_known` names
-    /// the same five values.
+    /// The value stored in `last_case` (the baseline CHECK `horsies_workflow_recovery_failures_case_known` names
+    /// the five workflow recovery cases), and the case that a limit error names.
     pub(crate) fn stored_name(self) -> &'static str {
         match self {
             Self::PendingTerminalDeps { .. } => "pending_terminal_deps",
@@ -119,6 +100,7 @@ impl RecoveryCase {
             Self::ReadySubworkflowNotStarted { .. } => "ready_subworkflow_not_started",
             Self::CompletedChildParentNotUpdated { .. } => "completed_child_parent_not_updated",
             Self::TerminalWorkflowRunning => "terminal_workflow_running",
+            Self::Phase2Progression { .. } => "phase2_progression",
         }
     }
 
@@ -127,7 +109,8 @@ impl RecoveryCase {
         match self {
             Self::PendingTerminalDeps { task_index }
             | Self::ReadyNotEnqueued { task_index }
-            | Self::ReadySubworkflowNotStarted { task_index } => Some(task_index),
+            | Self::ReadySubworkflowNotStarted { task_index }
+            | Self::Phase2Progression { task_index } => Some(task_index),
             Self::CompletedChildParentNotUpdated { parent_task_index } => Some(parent_task_index),
             Self::TerminalWorkflowRunning => None,
         }
@@ -203,7 +186,8 @@ impl CandidateFailure {
                 | WorkflowError::WorkflowTimeout { .. }
                 | WorkflowError::WorkflowError(_)
                 | WorkflowError::InvalidStatus(_)
-                | WorkflowError::Validation(_),
+                | WorkflowError::Validation(_)
+                | WorkflowError::StepContract(_),
             )
             | Self::Panic(_) => FailureClass::Persistent,
         }
@@ -220,6 +204,7 @@ impl CandidateFailure {
             Self::Error(WorkflowError::WorkflowError(_)) => "WorkflowError",
             Self::Error(WorkflowError::InvalidStatus(_)) => "InvalidStatus",
             Self::Error(WorkflowError::Validation(_)) => "Validation",
+            Self::Error(WorkflowError::StepContract(_)) => "StepContract",
             Self::Panic(_) => PANIC_ERROR_TYPE,
         }
     }
@@ -257,24 +242,26 @@ pub(crate) enum FailureRecord {
     LimitReached,
 }
 
-/// What the limit write did.
+/// What `horsies_workflow_recovery_record_raise` did with one persistent raise.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LimitOutcome {
-    /// No live node remained, so the workflow is FAILED.
-    WorkflowFailed,
-    /// A live node remains, so the workflow stays RUNNING with its error stored, and the last node ends it.
-    LiveNodesFinish,
-    /// The workflow was not RUNNING (a pause or a cancel won, or the row is gone). Nothing changed.
-    Refused { status: Option<String> },
-}
-
-/// The result of the count write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PassCount {
-    /// This failure added one to the count.
-    Counted { failed_passes: i32 },
-    /// An earlier failure of this workflow already counted this pass.
+pub(crate) enum RaiseRecorded {
+    /// The workflow row is gone; nothing written.
+    WorkflowAbsent,
+    /// An earlier raise of this workflow already counted this pass; nothing written.
     AlreadyCounted,
+    /// The count moved and is under the limit.
+    Counted { failed_passes: i32 },
+    /// The count reached the limit and the workflow is not RUNNING (a pause or a cancel won); the count stays
+    /// and the workflow did not change. A later pass after a resume tries again.
+    Refused { failed_passes: i32 },
+    /// The count reached the limit and no live node remained: the workflow is FAILED.
+    LimitReachedFailed { failed_passes: i32 },
+    /// The count reached the limit and a live node remains: the workflow stays RUNNING with its error stored,
+    /// and the last node ends it.
+    LimitReachedLiveNodes { failed_passes: i32 },
+    /// The count reached the limit and the limit write raised; the count stays and the next failure tries
+    /// again. `cause`: the SQLSTATE and message of the write.
+    LimitWriteFailed { failed_passes: i32, cause: String },
 }
 
 /// The limit error in the two forms it is stored in.
@@ -288,15 +275,15 @@ pub(crate) struct LimitPayloads {
 
 /// Runs one recovery candidate, catches its panic, and applies the failure bound to its failure.
 ///
-/// - Inputs: the pool, the failure policy of the pass, the workflow and case of the candidate, and the
+/// - Inputs: the broker, the failure policy of the pass, the workflow and case of the candidate, and the
 ///   candidate future.
 /// - Outcomes: `Finished` with the candidate's value; `Failed` with what the bound did.
 /// - Side effects: on a failure, one log record with the subject and the cause, and under
-///   [`RecoveryFailurePolicy::Count`] the count write and, at the limit, the limit write.
+///   [`RecoveryFailurePolicy::Count`] one statement that counts the failure and, at the limit, writes it.
 /// - A panic is caught only here, at the boundary of one candidate. The candidate's open transaction rolls
 ///   back when it is dropped during the unwind.
 pub(crate) async fn run_recovery_candidate<T, F>(
-    pool: &PgPool,
+    broker: &PostgresBroker,
     policy: RecoveryFailurePolicy,
     workflow_id: Uuid,
     case: RecoveryCase,
@@ -305,14 +292,9 @@ pub(crate) async fn run_recovery_candidate<T, F>(
 where
     F: Future<Output = Result<T, WorkflowError>>,
 {
-    let failure = match (CatchPanic {
-        candidate: Box::pin(candidate),
-    })
-    .await
-    {
-        Ok(Ok(value)) => return CandidateOutcome::Finished(value),
-        Ok(Err(error)) => CandidateFailure::Error(error),
-        Err(payload) => CandidateFailure::Panic(panic_text(&*payload)),
+    let failure = match run_catching_panic(candidate).await {
+        Ok(value) => return CandidateOutcome::Finished(value),
+        Err(failure) => failure,
     };
     tracing::error!(
         case = case.stored_name(),
@@ -323,15 +305,35 @@ where
         "workflow recovery candidate failed",
     );
     CandidateOutcome::Failed(
-        record_candidate_failure(pool, policy, workflow_id, case, &failure).await,
+        record_candidate_failure(broker, policy, workflow_id, case, &failure).await,
     )
+}
+
+/// Runs `candidate` and catches a panic inside its polls: the boundary of one recovery candidate. The
+/// candidate's open transaction rolls back when it is dropped during the unwind.
+///
+/// Returns the candidate's value, or its failure: its error ([`CandidateFailure::Error`]) or its panic
+/// ([`CandidateFailure::Panic`]). Logs nothing.
+pub(crate) async fn run_catching_panic<T, F>(candidate: F) -> Result<T, CandidateFailure>
+where
+    F: Future<Output = Result<T, WorkflowError>>,
+{
+    match (CatchPanic {
+        candidate: Box::pin(candidate),
+    })
+    .await
+    {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(CandidateFailure::Error(error)),
+        Err(payload) => Err(CandidateFailure::Panic(panic_text(&*payload))),
+    }
 }
 
 /// Decides whether a failure counts, and counts it.
 ///
 /// A transient failure and a [`RecoveryFailurePolicy::LogOnly`] pass write nothing.
 pub(crate) async fn record_candidate_failure(
-    pool: &PgPool,
+    broker: &PostgresBroker,
     policy: RecoveryFailurePolicy,
     workflow_id: Uuid,
     case: RecoveryCase,
@@ -344,95 +346,140 @@ pub(crate) async fn record_candidate_failure(
     match failure.class() {
         FailureClass::Transient => FailureRecord::NotCounted,
         FailureClass::Persistent => {
-            record_persistent_failure(pool, counting, workflow_id, case, failure).await
+            match record_raise(broker, counting, workflow_id, case, failure).await {
+                Ok(recorded) => failure_record(workflow_id, case, failure, recorded),
+                Err(error) => {
+                    tracing::error!(
+                        workflow_id = %workflow_id,
+                        %error,
+                        "workflow recovery count write failed",
+                    );
+                    FailureRecord::NotCounted
+                }
+            }
         }
     }
 }
 
-/// Counts one persistent failure, and applies the limit when the count reaches it.
-async fn record_persistent_failure(
-    pool: &PgPool,
+/// Counts one persistent failure with `horsies_workflow_recovery_record_raise`, one statement in autocommit on
+/// the reserve (the reaper's class). The function builds the limit error from the stored count.
+///
+/// Errors: [`WorkflowError::Broker`] when the statement failed (nothing counted, or `OutcomeUnknown`);
+/// [`WorkflowError::StepContract`] for a row outside its contract; [`WorkflowError::Validation`] for a limit
+/// above the integer range (the config bounds it to 3-1000).
+async fn record_raise(
+    broker: &PostgresBroker,
     counting: CountFailures,
     workflow_id: Uuid,
     case: RecoveryCase,
     failure: &CandidateFailure,
-) -> FailureRecord {
+) -> Result<RaiseRecorded, WorkflowError> {
+    let limit = i32::try_from(counting.limit).map_err(|_| {
+        WorkflowError::Validation(format!(
+            "workflow recovery failure limit {} is above the integer range",
+            counting.limit
+        ))
+    })?;
+    let case_name = case.stored_name();
+    let task_index = case.task_index();
     let error_type = stored_error_type(failure.error_type());
+    let error_detail = failure.detail();
+    let rows = run_alone(
+        broker,
+        CheckoutClass::Reserved,
+        &RECORD_RAISE
+            .bind()
+            .value(&workflow_id)
+            .value(&counting.pass_id)
+            .value(&case_name)
+            .value(&task_index)
+            .value(&error_type)
+            .value(&error_detail)
+            .value(&limit)
+            .finish(),
+    )
+    .await?;
+    Ok(raise_recorded(rows)?)
+}
+
+/// Decodes the one row of `horsies_workflow_recovery_record_raise`. Pure.
+pub(crate) fn raise_recorded(rows: Vec<Row>) -> Result<RaiseRecorded, StepContractError> {
+    let row = one_row(rows, &RECORD_RAISE)?;
+    let outcome: String = column(&row, &RECORD_RAISE, "outcome")?;
     let failed_passes =
-        match count_failure(pool, counting.pass_id, workflow_id, case, &error_type).await {
-            Err(error) => {
-                tracing::error!(
-                    workflow_id = %workflow_id,
-                    %error,
-                    "workflow recovery count write failed",
-                );
-                return FailureRecord::NotCounted;
-            }
-            Ok(PassCount::AlreadyCounted) => return FailureRecord::NotCounted,
-            Ok(PassCount::Counted { failed_passes }) => failed_passes,
-        };
-    tracing::error!(
-        failed_passes,
-        limit = counting.limit,
-        case = case.stored_name(),
-        workflow_id = %workflow_id,
-        task_index = ?case.task_index(),
-        error_type = %error_type,
-        "workflow recovery failure counted",
-    );
-    match i64::from(failed_passes) < i64::from(counting.limit) {
-        true => FailureRecord::Counted,
-        false => apply_limit(pool, workflow_id, case, failure, failed_passes).await,
+        |row: &Row| -> Result<i32, RowDecodeError> { column(row, &RECORD_RAISE, "failed_passes") };
+    match outcome.as_str() {
+        "WORKFLOW_ABSENT" => Ok(RaiseRecorded::WorkflowAbsent),
+        "ALREADY_COUNTED" => Ok(RaiseRecorded::AlreadyCounted),
+        "COUNTED" => Ok(RaiseRecorded::Counted {
+            failed_passes: failed_passes(&row)?,
+        }),
+        "REFUSED" => Ok(RaiseRecorded::Refused {
+            failed_passes: failed_passes(&row)?,
+        }),
+        "LIMIT_REACHED_FAILED" => Ok(RaiseRecorded::LimitReachedFailed {
+            failed_passes: failed_passes(&row)?,
+        }),
+        "LIMIT_REACHED_LIVE_NODES" => Ok(RaiseRecorded::LimitReachedLiveNodes {
+            failed_passes: failed_passes(&row)?,
+        }),
+        "LIMIT_WRITE_FAILED" => Ok(RaiseRecorded::LimitWriteFailed {
+            failed_passes: failed_passes(&row)?,
+            cause: column(&row, &RECORD_RAISE, "limit_write_error")?,
+        }),
+        _ => Err(StepContractError::UnknownOutcome {
+            function: RECORD_RAISE.name(),
+            outcome,
+        }),
     }
 }
 
-/// Writes the limit and logs what it did.
-async fn apply_limit(
-    pool: &PgPool,
+/// What the bound did with one recorded failure, with its log record.
+fn failure_record(
     workflow_id: Uuid,
     case: RecoveryCase,
     failure: &CandidateFailure,
-    failed_passes: i32,
+    recorded: RaiseRecorded,
 ) -> FailureRecord {
-    let payloads = match recovery_limit_payloads(&recovery_limit_error(
-        workflow_id,
-        case,
-        failure,
-        failed_passes,
-    )) {
-        Ok(payloads) => payloads,
-        Err(error) => {
+    match recorded {
+        RaiseRecorded::WorkflowAbsent | RaiseRecorded::AlreadyCounted => FailureRecord::NotCounted,
+        RaiseRecorded::Counted { failed_passes } => {
             tracing::error!(
-                workflow_id = %workflow_id,
-                %error,
-                "workflow recovery limit error did not encode",
-            );
-            return FailureRecord::Counted;
-        }
-    };
-    match write_limit(pool, workflow_id, case, &payloads).await {
-        Err(error) => {
-            tracing::error!(
-                workflow_id = %workflow_id,
                 failed_passes,
-                %error,
-                "workflow recovery limit write failed; the count stays and the next failure tries again",
+                case = case.stored_name(),
+                workflow_id = %workflow_id,
+                task_index = ?case.task_index(),
+                error_type = failure.error_type(),
+                "workflow recovery failure counted",
             );
             FailureRecord::Counted
         }
-        Ok(LimitOutcome::Refused { status }) => {
+        RaiseRecorded::Refused { failed_passes } => {
             tracing::warn!(
                 workflow_id = %workflow_id,
-                status = ?status,
+                failed_passes,
                 "workflow recovery limit refused: the workflow is not RUNNING",
             );
             FailureRecord::Counted
         }
-        Ok(outcome @ (LimitOutcome::WorkflowFailed | LimitOutcome::LiveNodesFinish)) => {
+        RaiseRecorded::LimitWriteFailed {
+            failed_passes,
+            cause,
+        } => {
             tracing::error!(
                 workflow_id = %workflow_id,
                 failed_passes,
-                outcome = ?outcome,
+                cause = %cause,
+                "workflow recovery limit write failed; the count stays and the next failure tries again",
+            );
+            FailureRecord::Counted
+        }
+        RaiseRecorded::LimitReachedFailed { failed_passes }
+        | RaiseRecorded::LimitReachedLiveNodes { failed_passes } => {
+            tracing::error!(
+                workflow_id = %workflow_id,
+                failed_passes,
+                outcome = ?recorded,
                 case = case.stored_name(),
                 task_index = ?case.task_index(),
                 error_type = failure.error_type(),
@@ -444,97 +491,24 @@ async fn apply_limit(
     }
 }
 
-/// Adds this pass to the stored count of the workflow, in one statement.
-async fn count_failure(
-    pool: &PgPool,
-    pass_id: Uuid,
-    workflow_id: Uuid,
-    case: RecoveryCase,
-    error_type: &str,
-) -> Result<PassCount, sqlx::Error> {
-    let failed_passes: Option<i32> = sqlx::query_scalar(COUNT_RECOVERY_FAILURE_SQL)
-        .bind(workflow_id)
-        .bind(pass_id)
-        .bind(case.stored_name())
-        .bind(case.task_index())
-        .bind(error_type)
-        .fetch_optional(pool)
-        .await?;
-    Ok(match failed_passes {
-        Some(failed_passes) => PassCount::Counted { failed_passes },
-        None => PassCount::AlreadyCounted,
-    })
-}
-
-/// Stops the workflow with SQL only, under the workflow row lock, in one transaction.
+/// Counts the RUNNING workflows at or over the limit, once per pass, on the reserve.
 ///
-/// It runs no engine code, because engine code is what failed, so it does not evaluate the success policy. A
-/// stored first error stays. A live node finishes the workflow later, because a terminal workflow has no node
-/// that is not terminal. A parent workflow hears through recovery case 1.6.
-///
-/// After `Err` the transaction rolled back and the workflow did not change; the count stays.
-async fn write_limit(
-    pool: &PgPool,
-    workflow_id: Uuid,
-    case: RecoveryCase,
-    payloads: &LimitPayloads,
-) -> Result<LimitOutcome, sqlx::Error> {
-    let mut transaction = pool.begin().await?;
-    let status: Option<String> = sqlx::query_scalar(LOCK_WORKFLOW_STATUS_SQL)
-        .bind(workflow_id)
-        .fetch_optional(&mut *transaction)
-        .await?;
-    match status.as_deref() {
-        Some("RUNNING") => {}
-        _ => {
-            transaction.rollback().await?;
-            return Ok(LimitOutcome::Refused { status });
-        }
-    }
-    if let Some(task_index) = case.task_index() {
-        sqlx::query(FAIL_CANDIDATE_NODE_SQL)
-            .bind(workflow_id)
-            .bind(task_index)
-            .bind(&payloads.node_result_json)
-            .execute(&mut *transaction)
-            .await?;
-    }
-    sqlx::query(SKIP_UNSTARTED_NODES_SQL)
-        .bind(workflow_id)
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query(KEEP_FIRST_WORKFLOW_ERROR_SQL)
-        .bind(workflow_id)
-        .bind(&payloads.workflow_error_json)
-        .execute(&mut *transaction)
-        .await?;
-    let has_live_node: bool = sqlx::query_scalar(HAS_LIVE_NODE_SQL)
-        .bind(workflow_id)
-        .fetch_one(&mut *transaction)
-        .await?;
-    let outcome = match has_live_node {
-        true => LimitOutcome::LiveNodesFinish,
-        false => {
-            sqlx::query(FAIL_WORKFLOW_KEEP_ERROR_SQL)
-                .bind(workflow_id)
-                .execute(&mut *transaction)
-                .await?;
-            LimitOutcome::WorkflowFailed
-        }
-    };
-    transaction.commit().await?;
-    Ok(outcome)
-}
-
-/// Counts the RUNNING workflows at or over the limit, once per pass.
+/// Errors: [`WorkflowError::Broker`] when the statement failed; [`WorkflowError::StepContract`] for a row that
+/// does not decode.
 pub(crate) async fn count_over_failure_limit(
-    pool: &PgPool,
+    broker: &PostgresBroker,
     limit: u32,
-) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar(COUNT_OVER_FAILURE_LIMIT_SQL)
-        .bind(i64::from(limit))
-        .fetch_one(pool)
-        .await
+) -> Result<i64, WorkflowError> {
+    let limit = i64::from(limit);
+    let rows: Vec<Row> = run_alone(
+        broker,
+        CheckoutClass::Reserved,
+        &COUNT_OVER_FAILURE_LIMIT.bind().value(&limit).finish(),
+    )
+    .await
+    .map_err(|error: BrokerError| WorkflowError::Broker(error))?;
+    let row = one_row(rows, &COUNT_OVER_FAILURE_LIMIT).map_err(StepContractError::from)?;
+    Ok(scalar::<i64>(&row, &COUNT_OVER_FAILURE_LIMIT).map_err(StepContractError::from)?)
 }
 
 /// The error that the limit stores. Python: `recovery_limit_error`.
@@ -615,6 +589,12 @@ impl<F: Future> Future for CatchPanic<F> {
 mod tests {
     use super::*;
     use serial_test::serial;
+    use sqlx::PgPool;
+
+    /// A broker on the database of `pool`: the failure writes run on its core pools.
+    fn broker_of(pool: &PgPool) -> PostgresBroker {
+        PostgresBroker::from_pool(pool.clone())
+    }
 
     fn lazy_pool() -> PgPool {
         sqlx::postgres::PgPoolOptions::new()
@@ -650,11 +630,11 @@ mod tests {
         };
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps, join_type,
                  max_retries, execution, retention_class_key, status, task_id,
                  is_subworkflow, created_at
-             ) VALUES ($1, $2, $3, $4, 'recovery_limit_task', '{}', 'default', 100,
+             ) VALUES ('NONE', $1, $2, $3, $4, 'recovery_limit_task', '{}', 'default', 100,
                        '{}', FALSE, 'all', 0, 'ISOLATED', 'forever', $5, $6,
                        FALSE, NOW())",
         )
@@ -749,6 +729,11 @@ mod tests {
                 RecoveryCase::TerminalWorkflowRunning,
                 "terminal_workflow_running",
                 None,
+            ),
+            (
+                RecoveryCase::Phase2Progression { task_index: 5 },
+                "phase2_progression",
+                Some(5),
             ),
         ];
         for (case, name, task_index) in cases {
@@ -857,7 +842,7 @@ mod tests {
     #[tokio::test]
     async fn a_finished_candidate_returns_its_value() {
         let outcome = run_recovery_candidate(
-            &lazy_pool(),
+            &broker_of(&lazy_pool()),
             RecoveryFailurePolicy::LogOnly,
             Uuid::new_v4(),
             RecoveryCase::TerminalWorkflowRunning,
@@ -870,7 +855,7 @@ mod tests {
     #[tokio::test]
     async fn a_panic_is_caught_at_the_candidate_boundary() {
         let literal = run_recovery_candidate(
-            &lazy_pool(),
+            &broker_of(&lazy_pool()),
             RecoveryFailurePolicy::LogOnly,
             Uuid::new_v4(),
             RecoveryCase::PendingTerminalDeps { task_index: 0 },
@@ -885,7 +870,7 @@ mod tests {
             CandidateOutcome::Failed(FailureRecord::NotCounted)
         ));
         let formatted = run_recovery_candidate(
-            &lazy_pool(),
+            &broker_of(&lazy_pool()),
             RecoveryFailurePolicy::LogOnly,
             Uuid::new_v4(),
             RecoveryCase::PendingTerminalDeps { task_index: 0 },
@@ -909,7 +894,7 @@ mod tests {
         let case = RecoveryCase::TerminalWorkflowRunning;
         assert_eq!(
             record_candidate_failure(
-                &pool,
+                &broker_of(&pool),
                 RecoveryFailurePolicy::LogOnly,
                 workflow_id,
                 case,
@@ -921,7 +906,7 @@ mod tests {
         // The pool is closed: a write would fail and log. Neither path writes, so the record is the same.
         assert_eq!(
             record_candidate_failure(
-                &pool,
+                &broker_of(&pool),
                 counting(3),
                 workflow_id,
                 case,
@@ -946,13 +931,19 @@ mod tests {
             RecoveryCase::PendingTerminalDeps { task_index: 0 },
             RecoveryCase::ReadyNotEnqueued { task_index: 1 },
         ] {
-            let _counted =
-                record_candidate_failure(&pool, pass, workflow_id, case, &validation("x")).await;
+            let _counted = record_candidate_failure(
+                &broker_of(&pool),
+                pass,
+                workflow_id,
+                case,
+                &validation("x"),
+            )
+            .await;
         }
         assert_eq!(failed_passes(&pool, workflow_id).await, Some(1));
 
         let record = record_candidate_failure(
-            &pool,
+            &broker_of(&pool),
             counting(5),
             workflow_id,
             RecoveryCase::ReadyNotEnqueued { task_index: 1 },
@@ -992,9 +983,30 @@ mod tests {
         let case = RecoveryCase::ReadyNotEnqueued { task_index: 0 };
 
         let records = [
-            record_candidate_failure(&pool, counting(3), workflow_id, case, &validation("x")).await,
-            record_candidate_failure(&pool, counting(3), workflow_id, case, &validation("x")).await,
-            record_candidate_failure(&pool, counting(3), workflow_id, case, &validation("x")).await,
+            record_candidate_failure(
+                &broker_of(&pool),
+                counting(3),
+                workflow_id,
+                case,
+                &validation("x"),
+            )
+            .await,
+            record_candidate_failure(
+                &broker_of(&pool),
+                counting(3),
+                workflow_id,
+                case,
+                &validation("x"),
+            )
+            .await,
+            record_candidate_failure(
+                &broker_of(&pool),
+                counting(3),
+                workflow_id,
+                case,
+                &validation("x"),
+            )
+            .await,
         ];
         assert_eq!(
             records,
@@ -1037,12 +1049,23 @@ mod tests {
         let case = RecoveryCase::TerminalWorkflowRunning;
 
         for _ in 0..2 {
-            let _counted =
-                record_candidate_failure(&pool, counting(3), workflow_id, case, &validation("x"))
-                    .await;
+            let _counted = record_candidate_failure(
+                &broker_of(&pool),
+                counting(3),
+                workflow_id,
+                case,
+                &validation("x"),
+            )
+            .await;
         }
-        let record =
-            record_candidate_failure(&pool, counting(3), workflow_id, case, &validation("x")).await;
+        let record = record_candidate_failure(
+            &broker_of(&pool),
+            counting(3),
+            workflow_id,
+            case,
+            &validation("x"),
+        )
+        .await;
         assert_eq!(record, FailureRecord::LimitReached);
 
         assert_eq!(
@@ -1051,7 +1074,12 @@ mod tests {
         );
         assert_eq!(node_state(&pool, workflow_id, 0).await.0, "RUNNING");
         assert_eq!(node_state(&pool, workflow_id, 1).await.0, "SKIPPED");
-        assert!(count_over_failure_limit(&pool, 3).await.unwrap() >= 1);
+        assert!(
+            count_over_failure_limit(&broker_of(&pool), 3)
+                .await
+                .unwrap()
+                >= 1
+        );
     }
 
     #[tokio::test]
@@ -1066,8 +1094,14 @@ mod tests {
         let mut records = Vec::new();
         for _ in 0..3 {
             records.push(
-                record_candidate_failure(&pool, counting(3), workflow_id, case, &validation("x"))
-                    .await,
+                record_candidate_failure(
+                    &broker_of(&pool),
+                    counting(3),
+                    workflow_id,
+                    case,
+                    &validation("x"),
+                )
+                .await,
             );
         }
         assert_eq!(records, vec![FailureRecord::Counted; 3]);
@@ -1088,7 +1122,7 @@ mod tests {
         seed_node(&pool, workflow_id, 0, "PENDING").await;
 
         let outcome = run_recovery_candidate(
-            &pool,
+            &broker_of(&pool),
             counting(3),
             workflow_id,
             RecoveryCase::PendingTerminalDeps { task_index: 0 },
@@ -1113,7 +1147,9 @@ mod tests {
     #[serial]
     async fn the_over_limit_count_takes_running_workflows_only() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let before = count_over_failure_limit(&pool, 1_000).await.unwrap();
+        let before = count_over_failure_limit(&broker_of(&pool), 1_000)
+            .await
+            .unwrap();
         let running = Uuid::new_v4();
         let paused = Uuid::new_v4();
         seed_workflow(&pool, running, "RUNNING", None).await;
@@ -1132,7 +1168,9 @@ mod tests {
             .unwrap();
         }
         assert_eq!(
-            count_over_failure_limit(&pool, 1_000).await.unwrap(),
+            count_over_failure_limit(&broker_of(&pool), 1_000)
+                .await
+                .unwrap(),
             before + 1
         );
     }

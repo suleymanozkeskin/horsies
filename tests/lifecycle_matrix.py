@@ -1,28 +1,32 @@
 """Authoritative transition matrix for the sixteen terminal writers.
 
-T01-T16 are every statement in the runtime package that can move a
-`horsies_tasks` row to a terminal status. This module declares what each one
-does; tests execute the declaration rather than reading it.
+T01-T16 are the sixteen terminal writer contracts of the runtime. Each one is
+implemented by a baseline SQL function that moves the `horsies_tasks` row to
+history (`tests/unit/test_lifecycle_matrix.py` names the function of each
+row). This module declares what each one does; tests execute the declaration
+rather than reading it. `module` and `statement` name the original writer of
+the contract; the characterization tests use them as test ids.
 
 Two test layers consume it:
 
-- static checks assert the declared guards and shape against the statement
-  text, so a writer whose SQL changes without its row changing fails here;
+- static checks assert the declared guards and shape against the body of the
+  baseline function, so a writer whose SQL changes without its row changing
+  fails here;
 - characterization tests parametrize over the rows, so every writer is pinned
-  in both directions before the terminalization consolidation refactors it.
+  in both directions.
 
-Scope of a row: what the *statement* does. Behavior contributed by its caller —
-attempt insertion issued separately in the same transaction, queue-capacity
-wakes, workflow phase 2 — is named where it exists but is characterized at the
-operation level, not asserted from the statement text.
+Scope of a row: what the *function* does. Behavior contributed by its caller —
+attempt insertion issued separately in the same transaction, workflow
+phase 2 — is named where it exists but is characterized at the operation
+level, not asserted from the function text.
 
-Notification: `task_done` and `horsies_task_status` are emitted by triggers on
-any terminal status change (`schemas/triggers.py`), so every writer gets both
-without asking. `EmitsNotify.FUSED_CAPACITY_WAKE` marks the one statement that
-additionally emits a NOTIFY itself.
+Notification: a move deletes the live row, so no status trigger fires; the
+move sends `task_done` and `horsies_task_status` for every row it moves, and
+every writer gets both without asking. `EmitsNotify.FUSED_CAPACITY_WAKE`
+marks the one function that also sends the capacity wake its caller passes.
 
-Source of truth for the guards is the statement text; this matrix was derived
-from it and the static checks keep the two aligned.
+Source of truth for the guards is the function text; the static checks keep
+this matrix and the baseline functions aligned.
 """
 
 from __future__ import annotations
@@ -91,13 +95,19 @@ class Shape(Enum):
     SINGLE = 'SINGLE'
     SET_WISE = 'SET_WISE'
     SET_WISE_SKIP_LOCKED = 'SET_WISE_SKIP_LOCKED'
-    FUSED_CTE = 'FUSED_CTE'
+    """Set-wise, and the discovery skips rows another transaction holds."""
+
+    FUSED = 'FUSED'
+    """One function locks the row, upserts its attempt, moves it to history
+    and sends the capacity wake."""
 
 
 class EmitsNotify(Enum):
-    """NOTIFY emitted by the statement itself, beyond the triggers."""
+    """NOTIFY sent by the function beyond the status events of the move."""
 
-    TRIGGERS_ONLY = 'TRIGGERS_ONLY'
+    MOVE_EVENTS_ONLY = 'MOVE_EVENTS_ONLY'
+    """Only `task_done` and `horsies_task_status`, for each moved row."""
+
     FUSED_CAPACITY_WAKE = 'FUSED_CAPACITY_WAKE'
 
 
@@ -136,7 +146,7 @@ class TerminalWriter:
 MATRIX: tuple[TerminalWriter, ...] = (
     TerminalWriter(
         writer_id='T01',
-        module='horsies/monitoring/task_actions.py',
+        module='python/horsies/monitoring/task_actions.py',
         statement='_CANCEL_TASK_SQL',
         source_statuses=(),
         target_status='CANCELLED',
@@ -145,14 +155,14 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=False,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='CancelFromMonitoring',
     ),
     TerminalWriter(
         writer_id='T02',
-        module='horsies/core/worker/sql.py',
+        module='python/horsies/core/worker/sql.py',
         statement='UNCLAIM_PAUSED_TASKS_SQL',
         source_statuses=('CLAIMED',),
         target_status='CANCELLED',
@@ -161,14 +171,14 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=False,
         shape=Shape.SET_WISE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write='horsies_workflow_tasks -> READY',
         operation='AbandonForWorkflowPause',
     ),
     TerminalWriter(
         writer_id='T03',
-        module='horsies/core/worker/sql.py',
+        module='python/horsies/core/worker/sql.py',
         statement='CANCEL_CANCELLED_WORKFLOW_TASKS_SQL',
         source_statuses=('CLAIMED',),
         target_status='CANCELLED',
@@ -177,14 +187,14 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=False,
         shape=Shape.SET_WISE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write='horsies_workflow_tasks -> SKIPPED',
         operation='CancelForWorkflow',
     ),
     TerminalWriter(
         writer_id='T04',
-        module='horsies/core/worker/sql.py',
+        module='python/horsies/core/worker/sql.py',
         statement='MARK_TASK_FAILED_WORKER_SQL',
         source_statuses=('RUNNING',),
         target_status='FAILED',
@@ -193,14 +203,14 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.CALLER_INSERTS,
         writes_result=True,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='FailRunning',
     ),
     TerminalWriter(
         writer_id='T05',
-        module='horsies/core/worker/sql.py',
+        module='python/horsies/core/worker/sql.py',
         statement='MARK_TASK_FAILED_SQL',
         source_statuses=('RUNNING',),
         target_status='FAILED',
@@ -209,14 +219,14 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.CALLER_INSERTS,
         writes_result=True,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='FailRunning',
     ),
     TerminalWriter(
         writer_id='T06',
-        module='horsies/core/worker/sql.py',
+        module='python/horsies/core/worker/sql.py',
         statement='MARK_TASK_COMPLETED_SQL',
         source_statuses=('RUNNING',),
         target_status='COMPLETED',
@@ -225,14 +235,14 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.CALLER_INSERTS,
         writes_result=True,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='CompleteRunning',
     ),
     TerminalWriter(
         writer_id='T07',
-        module='horsies/core/worker/sql.py',
+        module='python/horsies/core/worker/sql.py',
         statement='FINALIZE_TASK_COMPLETED_SQL',
         source_statuses=('RUNNING',),
         target_status='COMPLETED',
@@ -240,7 +250,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         guards=(),
         attempt=Attempt.FUSED_UPSERT,
         writes_result=True,
-        shape=Shape.FUSED_CTE,
+        shape=Shape.FUSED,
         emits_notify=EmitsNotify.FUSED_CAPACITY_WAKE,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
@@ -248,7 +258,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     ),
     TerminalWriter(
         writer_id='T08',
-        module='horsies/core/worker/sql.py',
+        module='python/horsies/core/worker/sql.py',
         statement='TERMINATE_ORPHANED_WORKFLOW_TASK_SQL',
         source_statuses=('CLAIMED',),
         target_status='CANCELLED',
@@ -257,14 +267,14 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=False,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='CancelOrphan',
     ),
     TerminalWriter(
         writer_id='T09',
-        module='horsies/core/workflows/sql.py',
+        module='python/horsies/core/workflows/sql.py',
         statement='CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL',
         source_statuses=('CLAIMED',),
         target_status='CANCELLED',
@@ -272,15 +282,15 @@ MATRIX: tuple[TerminalWriter, ...] = (
         guards=(Guard.WORKFLOW_STATUS, Guard.WORKFLOW_LINK_STATE),
         attempt=Attempt.NONE,
         writes_result=False,
-        shape=Shape.SET_WISE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        shape=Shape.SET_WISE_SKIP_LOCKED,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write='horsies_workflow_tasks -> READY',
         operation='AbandonForWorkflowPause',
     ),
     TerminalWriter(
         writer_id='T10',
-        module='horsies/core/worker/child_runner.py',
+        module='python/horsies/core/worker/child_runner.py',
         statement='_handle_workflow_stop_before_start',
         source_statuses=('CLAIMED',),
         target_status='CANCELLED',
@@ -289,14 +299,14 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=False,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.SYNC_PSYCOPG,
         coupled_write='horsies_workflow_tasks -> READY',
         operation='AbandonForWorkflowPause',
     ),
     TerminalWriter(
         writer_id='T11',
-        module='horsies/core/worker/child_runner.py',
+        module='python/horsies/core/worker/child_runner.py',
         statement='_handle_workflow_stop_before_start',
         source_statuses=('CLAIMED', 'PENDING'),
         target_status='CANCELLED',
@@ -305,14 +315,14 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=False,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.SYNC_PSYCOPG,
         coupled_write='horsies_workflow_tasks -> SKIPPED',
         operation='CancelForWorkflow',
     ),
     TerminalWriter(
         writer_id='T12',
-        module='horsies/core/worker/child_runner.py',
+        module='python/horsies/core/worker/child_runner.py',
         statement='_EXPIRE_CLAIMED_TASK_BEFORE_START_SQL',
         source_statuses=('CLAIMED',),
         target_status='EXPIRED',
@@ -321,14 +331,14 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=True,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.SYNC_PSYCOPG,
         coupled_write=None,
         operation='ExpireClaimed',
     ),
     TerminalWriter(
         writer_id='T13',
-        module='horsies/core/brokers/postgres.py',
+        module='python/horsies/core/brokers/postgres.py',
         statement='MARK_STALE_TASK_FAILED_SQL',
         source_statuses=('RUNNING',),
         target_status='FAILED',
@@ -337,14 +347,14 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.CALLER_INSERTS,
         writes_result=True,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='FailStaleRunning',
     ),
     TerminalWriter(
         writer_id='T14',
-        module='horsies/core/brokers/postgres.py',
+        module='python/horsies/core/brokers/postgres.py',
         statement='EXPIRE_PENDING_TASKS_SQL',
         source_statuses=('PENDING',),
         target_status='EXPIRED',
@@ -353,14 +363,14 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=True,
         shape=Shape.SET_WISE_SKIP_LOCKED,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='ExpirePendingBatch',
     ),
     TerminalWriter(
         writer_id='T15',
-        module='horsies/core/brokers/postgres.py',
+        module='python/horsies/core/brokers/postgres.py',
         statement='TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL',
         source_statuses=('CLAIMED', 'PENDING'),
         target_status='CANCELLED',
@@ -369,14 +379,14 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=False,
         shape=Shape.SET_WISE_SKIP_LOCKED,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='CancelOrphanBatch',
     ),
     TerminalWriter(
         writer_id='T16',
-        module='horsies/core/models/workflow/handle.py',
+        module='python/horsies/core/models/workflow/handle.py',
         statement='MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL',
         source_statuses=('PENDING', 'CLAIMED', 'RUNNING'),
         target_status='CANCELLED',
@@ -384,8 +394,8 @@ MATRIX: tuple[TerminalWriter, ...] = (
         guards=(Guard.WORKFLOW_STATUS, Guard.WORKFLOW_LINK_STATE),
         attempt=Attempt.NONE,
         writes_result=False,
-        shape=Shape.SET_WISE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        shape=Shape.SET_WISE_SKIP_LOCKED,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write='horsies_workflow_tasks -> SKIPPED',
         operation='CancelForWorkflow',

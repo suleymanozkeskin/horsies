@@ -114,7 +114,7 @@ async def _raise_value_error(message: str) -> int:
 
 def _real_broker() -> PostgresBroker:
     return PostgresBroker(
-        PostgresConfig(database_url=SecretStr('postgresql+psycopg://u:p@localhost/db')),
+        PostgresConfig(database_url=SecretStr('postgresql://u:p@localhost/db')),
     )
 
 

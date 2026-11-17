@@ -10,7 +10,6 @@ use crate::core::history::errors::HistoryError;
 use crate::core::history::heartbeats::partitioning::probe_index_name;
 use crate::core::history::names::{
     HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_CLASSES, TASK_HISTORY_FOREVER,
-    TASK_HISTORY_PARENT,
 };
 use crate::core::history::periods::{HeartbeatHorizonHours, RetentionDays};
 
@@ -225,12 +224,6 @@ pub enum LeafPartitionBoundExpectation<'a> {
     CatalogOnly,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManifestLeafSelection {
-    pub attached: Vec<LeafCatalogRow>,
-    pub absent_relations: Vec<String>,
-}
-
 #[derive(FromRow)]
 struct RetentionClassRaw {
     class_key: String,
@@ -386,67 +379,6 @@ async fn read_attached(
         }
     };
     rows.into_iter().map(LeafCatalogRaw::into_row).collect()
-}
-
-#[derive(FromRow)]
-struct ManifestRaw {
-    #[sqlx(flatten)]
-    catalog: LeafCatalogRaw,
-    relation_exists: bool,
-    parent_exists: bool,
-}
-
-/// Every attached catalog row, with whether its relation and its derived
-/// parent exist. `to_regclass` of a derived name: the parent is
-/// `horsies_heartbeats` for the heartbeat class, else
-/// `horsies_task_history_<class_key>`.
-pub async fn read_manifest_leaf_rows(
-    connection: &mut PgConnection,
-) -> Result<ManifestLeafSelection, HistoryError> {
-    let sql = format!(
-        "SELECT {},
-                to_regclass(catalog.leaf_name) IS NOT NULL AS relation_exists,
-                to_regclass(
-                    CASE WHEN catalog.class_key = $1 THEN $2
-                         ELSE '{TASK_HISTORY_PARENT}_' || catalog.class_key
-                    END
-                ) IS NOT NULL AS parent_exists
-         FROM {LEAF_CATALOG} AS catalog
-         WHERE catalog.detached_at IS NULL AND catalog.dropped_at IS NULL
-         ORDER BY catalog.lower_anchor NULLS FIRST, catalog.leaf_name",
-        leaf_columns("catalog")
-    );
-    let rows: Vec<ManifestRaw> = sqlx::query_as(&sql)
-        .bind(HEARTBEAT_CLASS_KEY)
-        .bind(HEARTBEATS_TABLE)
-        .fetch_all(connection)
-        .await?;
-    let mut attached = Vec::with_capacity(rows.len());
-    let mut absent = Vec::new();
-    let mut history_rows = 0_usize;
-    let mut any_history_parent = false;
-    for row in rows {
-        let relation_exists = row.relation_exists;
-        let parent_exists = row.parent_exists;
-        let catalog = row.catalog.into_row()?;
-        if catalog.class_key != HEARTBEAT_CLASS_KEY {
-            history_rows += 1;
-            any_history_parent |= parent_exists;
-            if !relation_exists {
-                absent.push(catalog.leaf_name.clone());
-            }
-        }
-        attached.push(catalog);
-    }
-    if history_rows > 0 && !any_history_parent {
-        return Err(HistoryError::HistoryParentAbsent(
-            "no attached history leaf resolves its parent relation".to_owned(),
-        ));
-    }
-    Ok(ManifestLeafSelection {
-        attached,
-        absent_relations: absent,
-    })
 }
 
 pub(crate) async fn pin_utc_timezone(

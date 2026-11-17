@@ -77,6 +77,13 @@ create_exception!(
     "The panic rule of this process was set to another rule before, or fixed when the core \
      started. args: (current_rule,)."
 );
+create_exception!(
+    horsies._core,
+    NotMainThread,
+    CoreDefect,
+    "A run form was called off the main thread, where Python runs signal handlers. \
+     The run did not start. args: (subject,)."
+);
 
 /// The advice of `ForkedAfterCoreStart`.
 pub const FORK_ADVICE: &str =
@@ -130,6 +137,7 @@ pub fn add_errors(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("CoreDefect", py.get_type::<CoreDefect>())?;
     module.add("ManifestRefused", py.get_type::<ManifestRefused>())?;
     module.add("PanicRuleFixed", py.get_type::<PanicRuleFixed>())?;
+    module.add("NotMainThread", py.get_type::<NotMainThread>())?;
     module.add(
         "PanicException",
         py.get_type::<pyo3::panic::PanicException>(),

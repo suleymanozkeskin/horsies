@@ -1346,7 +1346,7 @@ class TestExpireOwnedClaim:
         task_id = await _seed(session, status='CLAIMED')
         await _deadline(session, task_id, seconds_ago=60)
 
-        conninfo = DB_URL.replace('postgresql+psycopg://', 'postgresql://')
+        conninfo = DB_URL
         with psycopg.connect(conninfo) as connection:
             with connection.cursor() as cursor:
                 outcome = apply_sync(cursor, _expire_claim(task_id))
@@ -1596,7 +1596,7 @@ async def _link_workflow_task(
     )
     await session.execute(
         text("""
-            INSERT INTO horsies_workflow_tasks (
+            INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
                 id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, args_from,
                 workflow_ctx_from, allow_failed_deps, join_type, min_success,
@@ -1606,7 +1606,7 @@ async def _link_workflow_task(
                 sub_workflow_params, sub_workflow_summary, result, error,
                 created_at, started_at, completed_at
             )
-            VALUES (
+            VALUES ('NONE',
                 :id, :workflow_id, 0, 'node_0', 'terminalization.test', '{}',
                 'default', 100, '{}', NULL,
                 NULL, FALSE, 'all', NULL,
@@ -2448,7 +2448,7 @@ class TestCancelOwnedNode:
             claimed_at=None,
             is_workflow_task=True,
         )
-        conninfo = DB_URL.replace('postgresql+psycopg://', 'postgresql://')
+        conninfo = DB_URL
         with psycopg.connect(conninfo) as connection:
             with connection.cursor() as cursor:
                 outcome = apply_sync(cursor, _cancel_owned_node(task_id))

@@ -61,7 +61,7 @@ def decode_app() -> Horsies:
     app = Horsies(
         AppConfig(
             broker=PostgresConfig(
-                database_url=SecretStr('postgresql+psycopg://u:p@localhost/db'),
+                database_url=SecretStr('postgresql://u:p@localhost/db'),
             ),
         ),
     )
@@ -93,8 +93,9 @@ def proxied_url(database_url: str, proxy: RoundTripProxy) -> str:
 
 
 def psycopg_url(database_url: str) -> str:
-    """The libpq form of a ``postgresql+psycopg://`` URL."""
-    return database_url.replace('postgresql+psycopg://', 'postgresql://', 1)
+    """The libpq URL of the test database: its ``postgresql://`` URL is one
+    already."""
+    return database_url
 
 
 def upstream_of(database_url: str) -> tuple[str, int]:

@@ -1,8 +1,12 @@
-//! The broker's listener: one [`crate::db::Listener`] per broker, on the
-//! session URL. Every LISTEN of the broker and of the modules that hold the
-//! broker subscribes here; none of them opens a listener connection of its
-//! own.
+//! The process listener: one [`crate::db::Listener`] per process, session URL
+//! and socket settings, shared by every broker of the process. Every LISTEN of a broker and
+//! of the modules that hold it subscribes here; none of them opens a listener
+//! connection of its own.
 //!
+//! - Brokers on the same session URL with the same socket settings share one
+//!   listener and its one connection. The listener stops when the last broker that uses it drops.
+//!   A listener task runs on one tokio runtime, so a broker on another
+//!   runtime of the process gets its own listener.
 //! - The listener starts at the first subscription. The session URL is
 //!   parsed and its connection plan is loaded then, not when the broker is
 //!   built, so building a broker reads no file.
@@ -13,18 +17,19 @@
 //! - A refused plan is not kept: the next subscription loads it again.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use tokio::sync::OnceCell;
 
-use crate::broker::error::is_retryable_sqlx_error;
+use crate::broker::error::is_retryable_statement_failure;
+use crate::broker::pools::PoolSettingsError;
 
 use crate::db::{
     parse_connection_url, ChannelName, ConnectPlan, ConnectPlanError, ConnectionEnvironment,
     EnvironmentError, Listener, MaskedUrl, PayloadFilter, PayloadSubscription, QueueCapacity,
-    SubscribeError, Transience, UrlError, WakeSubscription, DEFAULT_PAYLOAD_QUEUE_CAPACITY,
-    DEFAULT_SOCKET_SETTINGS,
+    SocketSettings, StatementFailure, SubscribeError, Transience, UrlError, WakeSubscription,
+    DEFAULT_PAYLOAD_QUEUE_CAPACITY,
 };
 
 /// The channel of task completions; the payload is the task id.
@@ -43,7 +48,7 @@ pub const SESSION_CHECK_CHANNEL_PREFIX: &str = "horsies_check_";
 
 /// The longest the worker boot's session check waits for its NOTIFY
 /// (Python's `SESSION_CAPABILITY_TIMEOUT`,
-/// `horsies/core/brokers/session_capability.py:13`).
+/// `python/horsies/core/brokers/session_capability.py:13`).
 pub const SESSION_CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The channel name of a fixed name, or of a generated name whose length the
@@ -153,13 +158,25 @@ pub enum SessionCheckFailure {
         session_url: MaskedUrl,
         waited: Duration,
     },
+    /// The broker's core pools were closed and their settings were refused
+    /// when they opened again. Not retryable: the same settings are refused
+    /// again.
+    #[error("the session check could not open the core pools: {0}")]
+    PoolSettings(PoolSettingsError),
+    /// The `SELECT 1` on the session core pool failed. A session URL that does
+    /// not keep a transaction (PgBouncer statement pooling) is a permanent
+    /// failure, not retryable; a database that cannot be reached is retryable.
+    #[error("the session check's statement on the session pool failed: {0}")]
+    SessionPool(StatementFailure),
     /// The check could not subscribe on the broker's listener. Retryable when
     /// the refusal is transient (a database that cannot be reached).
     #[error("the session check could not subscribe: {0}")]
     Subscribe(ListenError),
-    /// The NOTIFY on the main pool failed. Retryable by the driver error.
+    /// The NOTIFY on the main core pool failed. A main URL that does not keep
+    /// a transaction is a permanent failure, not retryable; a database that
+    /// cannot be reached is retryable.
     #[error("the session check could not send its NOTIFY: {0}")]
-    Notify(sqlx::Error),
+    Notify(StatementFailure),
     /// The listener reconnected or stopped before the NOTIFY arrived, so the
     /// check proves nothing. Retryable.
     #[error("the listener {0} during the session check")]
@@ -170,9 +187,11 @@ impl SessionCheckFailure {
     /// Whether a later check can pass.
     pub fn is_retryable(&self) -> bool {
         match self {
-            SessionCheckFailure::NotCapable { .. } => false,
+            SessionCheckFailure::NotCapable { .. } | SessionCheckFailure::PoolSettings(_) => false,
+            SessionCheckFailure::SessionPool(failure) | SessionCheckFailure::Notify(failure) => {
+                is_retryable_statement_failure(failure)
+            }
             SessionCheckFailure::Subscribe(refused) => refused.is_retryable(),
-            SessionCheckFailure::Notify(error) => is_retryable_sqlx_error(error),
             SessionCheckFailure::Interrupted(_) => true,
         }
     }
@@ -191,7 +210,10 @@ impl fmt::Debug for SessionUrl {
 
 #[derive(Debug)]
 enum ListenerSource {
-    SessionUrl(SessionUrl),
+    SessionUrl {
+        session_url: SessionUrl,
+        socket: SocketSettings,
+    },
     /// A broker built from a pool with no session URL.
     NoSessionUrl,
 }
@@ -235,12 +257,13 @@ impl StartedListener {
     }
 }
 
-/// The listener of one broker. It holds no connection until the first
-/// subscription. Dropping it stops the listener: every subscription then
-/// reads `Stopped`.
+/// The listener of one broker: a reference to the process listener of its
+/// session URL. It holds no connection until the first subscription. When the
+/// last broker that uses a process listener drops, the listener stops: every
+/// subscription then reads `Stopped`.
 pub struct ProcessListener {
     source: ListenerSource,
-    started: OnceCell<StartedListener>,
+    started: OnceCell<Arc<StartedListener>>,
 }
 
 impl fmt::Debug for ProcessListener {
@@ -254,10 +277,14 @@ impl fmt::Debug for ProcessListener {
 }
 
 impl ProcessListener {
-    /// A listener on `session_url`. Nothing is parsed or read here.
-    pub(crate) fn on_session_url(session_url: &str) -> ProcessListener {
+    /// A listener on `session_url` whose connection uses `socket`. Nothing is
+    /// parsed or read here.
+    pub(crate) fn on_session_url(session_url: &str, socket: SocketSettings) -> ProcessListener {
         ProcessListener {
-            source: ListenerSource::SessionUrl(SessionUrl(session_url.to_owned())),
+            source: ListenerSource::SessionUrl {
+                session_url: SessionUrl(session_url.to_owned()),
+                socket,
+            },
             started: OnceCell::new(),
         }
     }
@@ -271,17 +298,26 @@ impl ProcessListener {
         }
     }
 
-    /// The started listener. The first call loads the connection plan of the
-    /// session URL (blocking reads run off the runtime threads) and starts
-    /// the listener task; the connection opens at the first subscription.
+    /// The started listener. The first call takes the running process
+    /// listener of the session URL on this runtime, or loads the connection
+    /// plan (blocking reads run off the runtime threads) and starts one. The
+    /// connection opens at the first subscription.
     pub async fn start(&self) -> Result<&StartedListener, ListenError> {
         match &self.source {
             ListenerSource::NoSessionUrl => Err(ListenError::NoSessionUrl),
-            ListenerSource::SessionUrl(session_url) => {
-                self.started
-                    .get_or_try_init(|| start_listener(session_url.clone()))
-                    .await
-            }
+            ListenerSource::SessionUrl {
+                session_url,
+                socket,
+            } => self
+                .started
+                .get_or_try_init(|| {
+                    process_listener(ListenerKey {
+                        session_url: session_url.clone(),
+                        socket: *socket,
+                    })
+                })
+                .await
+                .map(|started| &**started),
         }
     }
 
@@ -308,20 +344,104 @@ impl ProcessListener {
     }
 }
 
-async fn start_listener(session_url: SessionUrl) -> Result<StartedListener, ListenError> {
-    let plan = load_plan(session_url)
+/// What makes two brokers share one listener: the same session URL text and
+/// the same socket settings (on the same runtime).
+#[derive(Clone)]
+struct ListenerKey {
+    session_url: SessionUrl,
+    socket: SocketSettings,
+}
+
+impl ListenerKey {
+    fn matches(&self, other: &ListenerKey) -> bool {
+        self.session_url.0 == other.session_url.0 && self.socket == other.socket
+    }
+}
+
+/// A process listener of one runtime and key. The entry holds no strong
+/// reference, so it does not keep its listener alive.
+struct RegisteredListener {
+    runtime: tokio::runtime::Id,
+    key: ListenerKey,
+    listener: Weak<StartedListener>,
+}
+
+/// The process listeners. It holds an entry per live listener: each
+/// registration first drops the entries whose listener has stopped.
+static PROCESS_LISTENERS: Mutex<Vec<RegisteredListener>> = Mutex::new(Vec::new());
+
+/// Locks the process listeners. A poisoned lock means a panic while it was
+/// held, which already crashed its thread loudly; every critical section
+/// leaves the list whole, so the list is used as it is.
+fn lock_process_listeners() -> MutexGuard<'static, Vec<RegisteredListener>> {
+    PROCESS_LISTENERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The running listener of `runtime` and `key`, when one is registered.
+fn find_running(
+    registered: &[RegisteredListener],
+    runtime: tokio::runtime::Id,
+    key: &ListenerKey,
+) -> Option<Arc<StartedListener>> {
+    registered
+        .iter()
+        .filter(|entry| entry.runtime == runtime && entry.key.matches(key))
+        .find_map(|entry| {
+            entry
+                .listener
+                .upgrade()
+                .filter(|started| started.listener.is_running())
+        })
+}
+
+/// The process listener of `key` on the current runtime: the running one,
+/// or a new one. A refused plan starts nothing.
+async fn process_listener(key: ListenerKey) -> Result<Arc<StartedListener>, ListenError> {
+    let runtime = tokio::runtime::Handle::current().id();
+    let running = {
+        let registered = lock_process_listeners();
+        find_running(&registered, runtime, &key)
+    };
+    if let Some(running) = running {
+        return Ok(running);
+    }
+    let plan = load_plan(key.clone())
         .await
         .map_err(ListenError::PlanRefused)?;
+    Ok(register(runtime, key, plan))
+}
+
+/// Starts and registers the listener of `plan`. When another broker of the
+/// same runtime registered a running listener on the same URL while this plan
+/// loaded, that listener is returned and `plan` is dropped unused.
+fn register(
+    runtime: tokio::runtime::Id,
+    key: ListenerKey,
+    plan: ConnectPlan,
+) -> Arc<StartedListener> {
+    let mut registered = lock_process_listeners();
+    registered.retain(|entry| entry.listener.strong_count() > 0);
+    if let Some(running) = find_running(&registered, runtime, &key) {
+        return running;
+    }
     let masked_url = plan.masked_url().clone();
-    Ok(StartedListener {
+    let started = Arc::new(StartedListener {
         listener: Listener::start(Arc::new(plan)),
         masked_url,
-    })
+    });
+    registered.push(RegisteredListener {
+        runtime,
+        key,
+        listener: Arc::downgrade(&started),
+    });
+    started
 }
 
 /// Runs [`read_plan`] on the blocking pool. A panic in it is resumed here.
-async fn load_plan(session_url: SessionUrl) -> Result<ConnectPlan, ListenerPlanError> {
-    match tokio::task::spawn_blocking(move || read_plan(&session_url)).await {
+async fn load_plan(key: ListenerKey) -> Result<ConnectPlan, ListenerPlanError> {
+    match tokio::task::spawn_blocking(move || read_plan(&key)).await {
         Ok(loaded) => loaded,
         Err(join_error) => match join_error.try_into_panic() {
             Ok(panic) => std::panic::resume_unwind(panic),
@@ -331,20 +451,31 @@ async fn load_plan(session_url: SessionUrl) -> Result<ConnectPlan, ListenerPlanE
 }
 
 /// Reads the connection environment, parses the session URL and loads its
-/// plan. Blocking: reads the TLS files the URL names, `~/.pgpass` when no
-/// other password is given, and the process user name when the URL names no
-/// user.
-fn read_plan(session_url: &SessionUrl) -> Result<ConnectPlan, ListenerPlanError> {
+/// plan with the key's socket settings. Blocking: reads the TLS files the URL
+/// names, `~/.pgpass` when no other password is given, and the process user
+/// name when the URL names no user.
+fn read_plan(key: &ListenerKey) -> Result<ConnectPlan, ListenerPlanError> {
     let environment = ConnectionEnvironment::capture().map_err(ListenerPlanError::Environment)?;
     let settings =
-        parse_connection_url(&session_url.0, &environment).map_err(ListenerPlanError::Url)?;
-    ConnectPlan::load(&settings, &environment, &DEFAULT_SOCKET_SETTINGS)
-        .map_err(ListenerPlanError::Plan)
+        parse_connection_url(&key.session_url.0, &environment).map_err(ListenerPlanError::Url)?;
+    ConnectPlan::load(&settings, &environment, &key.socket).map_err(ListenerPlanError::Plan)
+}
+
+#[cfg(test)]
+impl ProcessListener {
+    /// The shared listener itself, so a test can hold a weak reference.
+    async fn started_for_test(&self) -> &Arc<StartedListener> {
+        let _started = self.start().await.expect("the plan loads");
+        self.started
+            .get()
+            .expect("start fills the cell when it succeeds")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{Keepalives, DEFAULT_SOCKET_SETTINGS};
 
     fn any_channel() -> ChannelName {
         fixed_channel("horsies_listener_unit")
@@ -376,7 +507,10 @@ mod tests {
     /// retryable, and leaves the listener unstarted.
     #[tokio::test]
     async fn a_refused_session_url_is_a_permanent_refusal() {
-        let listener = ProcessListener::on_session_url("mysql://horsies@127.0.0.1:1/horsies");
+        let listener = ProcessListener::on_session_url(
+            "mysql://horsies@127.0.0.1:1/horsies",
+            DEFAULT_SOCKET_SETTINGS,
+        );
 
         let Err(refused) = listener
             .subscribe_wake(any_channel(), PayloadFilter::AnyPayload)
@@ -390,9 +524,74 @@ mod tests {
         assert!(!listener.started.initialized());
     }
 
+    /// A URL whose plan loads with no file and no environment password.
+    const PLAN_ONLY_URL: &str = "postgresql://horsies:pw@127.0.0.1:1/horsies";
+
+    /// Two brokers on the same session URL in one runtime share one listener;
+    /// another URL gets its own. Starting connects to nothing.
+    #[tokio::test]
+    async fn brokers_on_one_session_url_share_one_listener() {
+        let first = ProcessListener::on_session_url(PLAN_ONLY_URL, DEFAULT_SOCKET_SETTINGS);
+        let second = ProcessListener::on_session_url(PLAN_ONLY_URL, DEFAULT_SOCKET_SETTINGS);
+        let other = ProcessListener::on_session_url(
+            &format!("{PLAN_ONLY_URL}?application_name=other"),
+            DEFAULT_SOCKET_SETTINGS,
+        );
+
+        let first_started = first.start().await.expect("the plan loads");
+        let second_started = second.start().await.expect("the plan loads");
+        let other_started = other.start().await.expect("the plan loads");
+
+        assert!(std::ptr::eq(first_started, second_started));
+        assert!(!std::ptr::eq(first_started, other_started));
+    }
+
+    /// Other socket settings on the same URL get their own listener: one
+    /// connection cannot carry two sets of socket settings.
+    #[tokio::test]
+    async fn other_socket_settings_get_their_own_listener() {
+        let url = format!("{PLAN_ONLY_URL}?application_name=socket_settings");
+        let default = ProcessListener::on_session_url(&url, DEFAULT_SOCKET_SETTINGS);
+        let no_keepalives = ProcessListener::on_session_url(
+            &url,
+            SocketSettings {
+                keepalives: Keepalives::Off,
+                ..DEFAULT_SOCKET_SETTINGS
+            },
+        );
+
+        let default_started = default.start().await.expect("the plan loads");
+        let no_keepalives_started = no_keepalives.start().await.expect("the plan loads");
+
+        assert!(!std::ptr::eq(default_started, no_keepalives_started));
+    }
+
+    /// The listener stops when the last broker that uses it drops; the
+    /// process keeps no reference to it.
+    #[tokio::test]
+    async fn the_last_broker_drop_stops_the_shared_listener() {
+        let url = format!("{PLAN_ONLY_URL}?application_name=last_drop");
+        let first = ProcessListener::on_session_url(&url, DEFAULT_SOCKET_SETTINGS);
+        let second = ProcessListener::on_session_url(&url, DEFAULT_SOCKET_SETTINGS);
+        let shared = Arc::downgrade(first.started_for_test().await);
+        assert!(second.start().await.is_ok(), "the plan loads");
+
+        drop(first);
+        assert!(
+            shared.upgrade().is_some(),
+            "the second broker still uses it"
+        );
+        drop(second);
+
+        assert!(shared.upgrade().is_none());
+    }
+
     #[test]
     fn debug_output_does_not_show_the_session_url() {
-        let listener = ProcessListener::on_session_url("postgresql://horsies:secret@db/horsies");
+        let listener = ProcessListener::on_session_url(
+            "postgresql://horsies:secret@db/horsies",
+            DEFAULT_SOCKET_SETTINGS,
+        );
 
         let shown = format!("{listener:?}");
 
@@ -440,8 +639,32 @@ mod tests {
         for interruption in [CheckInterruption::Reconnected, CheckInterruption::Stopped] {
             assert!(SessionCheckFailure::Interrupted(interruption).is_retryable());
         }
-        assert!(SessionCheckFailure::Notify(sqlx::Error::PoolTimedOut).is_retryable());
-        assert!(!SessionCheckFailure::Notify(sqlx::Error::PoolClosed).is_retryable());
+        let unreachable = |statement: &'static str| StatementFailure::NotSent {
+            statement,
+            cause: crate::db::NotSentCause::ConnectionClosed,
+        };
+        let statement_pooled = |statement: &'static str| StatementFailure::NotSent {
+            statement,
+            cause: crate::db::NotSentCause::Checkout(
+                crate::db::CheckoutFailure::StatementPooledUrl {
+                    masked_url: settings.masked_url().clone(),
+                },
+            ),
+        };
+        assert!(SessionCheckFailure::SessionPool(unreachable("session_check")).is_retryable());
+        assert!(
+            !SessionCheckFailure::SessionPool(statement_pooled("session_check")).is_retryable()
+        );
+        assert!(SessionCheckFailure::Notify(unreachable("session_check_notify")).is_retryable());
+        assert!(
+            !SessionCheckFailure::Notify(statement_pooled("session_check_notify")).is_retryable()
+        );
+        assert!(
+            !SessionCheckFailure::PoolSettings(PoolSettingsError::Environment(
+                EnvironmentError::NotUnicode { name: "PGPASSWORD" },
+            ))
+            .is_retryable()
+        );
         assert!(!SessionCheckFailure::Subscribe(ListenError::NoSessionUrl).is_retryable());
     }
 }

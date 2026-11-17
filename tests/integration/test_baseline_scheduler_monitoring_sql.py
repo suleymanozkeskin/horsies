@@ -1,6 +1,9 @@
 """The scheduler and monitoring functions of the baseline, through their SQL cases.
 
-``baseline_scheduler_monitoring_cases.sql`` holds every case. This module
+Two files hold the cases: ``baseline_scheduler_monitoring_cases.sql`` (the
+scheduler, the stale and expired lists, the task detail, list and facets)
+and ``baseline_monitoring_reads_cases.sql`` (the status counts, the
+breakdown, the workflow and schedule reads). For each file this module
 builds the database that the file expects (a fresh database with the
 baseline, the published history readers of the forever leaf, the dblink
 extension for the two-session cases) and runs the file as one message. The
@@ -18,45 +21,26 @@ import pytest
 import pytest_asyncio
 
 from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
-from horsies.core.history.commands import OPEN_END_ANCHOR, OpenLowerBound
-from horsies.core.history.reads.lookup_generation import (
-    LookupLeaf,
-    LookupManifest,
-    render_staged_detail_function,
-    render_staged_provenance_function,
-)
-from horsies.core.types.result import Err, Ok
 from horsies.core.utils.url import to_psycopg_url
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
 
 pytestmark = [pytest.mark.integration]
 
-_CASES_SQL: Final = Path(__file__).with_name('baseline_scheduler_monitoring_cases.sql')
-
-PASSED_CASES: Final = 76
-"""The number of cases in the file. A case added to the file changes it."""
-
-_FOREVER_LEAF: Final = LookupLeaf(
-    relation_name='horsies_task_history_forever_open',
-    lower_bound=OpenLowerBound(),
-    upper_anchor=OPEN_END_ANCHOR,
-)
-
+CASE_FILES: Final = {
+    'baseline_scheduler_monitoring_cases.sql': 79,
+    'baseline_monitoring_reads_cases.sql': 83,
+}
+"""Each case file with its number of cases. A case added to a file changes it."""
 
 def _migration() -> BaselineMigration:
-    match load_baseline_migration():
-        case Ok(loaded):
-            return loaded
-        case Err(unreadable):
-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
+    return load_baseline_migration()
 
 
 @pytest_asyncio.fixture
 async def prepared() -> AsyncGenerator[psycopg.AsyncConnection[tuple[object, ...]]]:
     """An autocommit connection to a fresh database prepared for the cases."""
     migration = _migration()
-    manifest = LookupManifest(leaves=(_FOREVER_LEAF,))
     async with isolated_test_database(DB_URL) as url:
         connection_url = to_psycopg_url(url)
         connection = await psycopg.AsyncConnection.connect(
@@ -69,10 +53,7 @@ async def prepared() -> AsyncGenerator[psycopg.AsyncConnection[tuple[object, ...
             async with connection.transaction():
                 await connection.execute(migration.sql.encode('utf-8'))
                 await connection.execute(
-                    render_staged_detail_function(manifest).encode('utf-8'),
-                )
-                await connection.execute(
-                    render_staged_provenance_function(manifest).encode('utf-8'),
+                    'SELECT outcome FROM horsies_publish_history_readers()'
                 )
                 await connection.execute('CREATE EXTENSION dblink')
             await connection.execute(
@@ -85,8 +66,11 @@ async def prepared() -> AsyncGenerator[psycopg.AsyncConnection[tuple[object, ...
 
 
 @pytest.mark.asyncio(loop_scope='function')
+@pytest.mark.parametrize(('case_file', 'case_count'), sorted(CASE_FILES.items()))
 async def test_scheduler_and_monitoring_sql_cases_pass(
     prepared: psycopg.AsyncConnection[tuple[object, ...]],
+    case_file: str,
+    case_count: int,
 ) -> None:
     passed: list[str] = []
 
@@ -98,9 +82,10 @@ async def test_scheduler_and_monitoring_sql_cases_pass(
     prepared.add_notice_handler(_collect)
     # A failed case raises 'CASE FAILED <name>: ...', which fails this test
     # with the case name in the error.
-    await prepared.execute(_CASES_SQL.read_text(encoding='utf-8').encode('utf-8'))
+    cases_sql = Path(__file__).with_name(case_file).read_text(encoding='utf-8')
+    await prepared.execute(cases_sql.encode('utf-8'))
     cursor = await prepared.execute('SELECT last_value FROM test_passed_cases')
     row = await cursor.fetchone()
-    assert row == (PASSED_CASES,), passed
-    assert len(passed) == PASSED_CASES
-    assert len(set(passed)) == PASSED_CASES, 'two cases share a name'
+    assert row == (case_count,), passed
+    assert len(passed) == case_count
+    assert len(set(passed)) == case_count, 'two cases share a name'

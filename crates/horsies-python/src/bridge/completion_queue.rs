@@ -11,7 +11,9 @@
 //!   in one pass.
 //! - A cancelled future is removed at once by its done callback. A cancelled
 //!   read is dropped on the runtime; a cancelled write runs on to its end and
-//!   its outcome is discarded with a DEBUG record.
+//!   its outcome is discarded with a DEBUG record. A cancelled service run
+//!   ([`call_service_async`]) is asked to stop and runs on to its boundary;
+//!   its outcome is discarded the same way.
 //!
 //! The queues live in a `weakref.WeakKeyDictionary` keyed by the loop. A
 //! queue, its wake socket pair and its pending futures go when the loop is
@@ -31,6 +33,7 @@ use pyo3::sync::PyOnceLock;
 use pyo3::IntoPyObjectExt;
 use tokio::sync::oneshot;
 
+use super::service_run::StopSignal;
 use super::{guard, guarded_into_result, CallKind};
 use crate::errors::TooManyPendingCalls;
 use crate::logging::RecordLevel;
@@ -120,6 +123,16 @@ enum CancelRoute {
     DropOperation(oneshot::Sender<()>),
     /// A write: the operation runs on; only the future goes.
     Detach,
+    /// A service run: the signal asks the run to stop; the run goes on to
+    /// its boundary, and only the future goes.
+    RequestStop(StopSignal),
+}
+
+/// What a cancel of the awaiting future does, chosen by the call form.
+enum CancelPlan {
+    DropOperation,
+    Detach,
+    RequestStop(StopSignal),
 }
 
 /// A future that waits for an operation of this loop.
@@ -283,13 +296,24 @@ impl CallDone {
         match future.call_method0("cancelled")?.is_truthy()? {
             false => Ok(()),
             true => {
-                // A write (`CancelRoute::Detach`) runs on; only its future goes.
-                if let Some(PendingCall {
-                    cancel: CancelRoute::DropOperation(signal),
-                    ..
-                }) = self.queue.take_pending(self.id)
-                {
-                    let _operation_already_ended = signal.send(());
+                match self.queue.take_pending(self.id) {
+                    Some(PendingCall {
+                        cancel: CancelRoute::DropOperation(signal),
+                        ..
+                    }) => {
+                        let _operation_already_ended = signal.send(());
+                    }
+                    Some(PendingCall {
+                        cancel: CancelRoute::RequestStop(stop),
+                        ..
+                    }) => stop.request(),
+                    // A write runs on; only its future goes. No entry: the
+                    // outcome was already handed over.
+                    Some(PendingCall {
+                        cancel: CancelRoute::Detach,
+                        ..
+                    })
+                    | None => {}
                 }
                 Ok(())
             }
@@ -335,6 +359,26 @@ fn running_loop_queue(py: Python<'_>) -> PyResult<(Bound<'_, PyAny>, Arc<LoopQue
     }
 }
 
+/// An asyncio future of the running loop of this thread that is already
+/// done with `value`: the awaitable form of an operation that has nothing
+/// to run, such as the close of a handle that never connected. Starts
+/// nothing on the core runtime.
+///
+/// Failure exits: `RuntimeError` (no running loop), the error of the value
+/// conversion, and errors of the loop methods.
+pub fn done_future<'py, T>(py: Python<'py>, value: T) -> PyResult<Bound<'py, PyAny>>
+where
+    T: IntoPyObject<'py>,
+{
+    let event_loop = GET_RUNNING_LOOP
+        .import(py, "asyncio", "get_running_loop")?
+        .call0()?;
+    let future = event_loop.call_method0("create_future")?;
+    let value = value.into_bound_py_any(py)?;
+    let _done = future.call_method1("set_result", (value,))?;
+    Ok(future)
+}
+
 /// Start `op` on the core runtime and return an asyncio future of its
 /// outcome, bound to the running loop of this thread.
 ///
@@ -347,6 +391,47 @@ pub fn call_async<'py, T, F>(
     core: &'static Core,
     subject: &'static str,
     kind: CallKind,
+    op: F,
+) -> PyResult<Bound<'py, PyAny>>
+where
+    T: for<'a> IntoPyObject<'a> + Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    let plan = match kind {
+        CallKind::Read => CancelPlan::DropOperation,
+        CallKind::Write => CancelPlan::Detach,
+    };
+    submit(py, core, subject, plan, op)
+}
+
+/// Start the service run `run` on the core runtime and return an asyncio
+/// future of its end, bound to the running loop of this thread. A cancel of
+/// the future calls `stop`; the run goes on to its boundary. There is no
+/// total bound.
+///
+/// Failure exits: those of [`call_async`].
+// The first caller is the scheduler run.
+#[allow(dead_code)]
+pub fn call_service_async<'py, T, F>(
+    py: Python<'py>,
+    core: &'static Core,
+    subject: &'static str,
+    stop: StopSignal,
+    run: F,
+) -> PyResult<Bound<'py, PyAny>>
+where
+    T: for<'a> IntoPyObject<'a> + Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    submit(py, core, subject, CancelPlan::RequestStop(stop), run)
+}
+
+/// The body of [`call_async`] and [`call_service_async`].
+fn submit<'py, T, F>(
+    py: Python<'py>,
+    core: &'static Core,
+    subject: &'static str,
+    plan: CancelPlan,
     op: F,
 ) -> PyResult<Bound<'py, PyAny>>
 where
@@ -366,12 +451,13 @@ where
     if let Err(bound) = queue.channel.reserve() {
         return Err(TooManyPendingCalls::new_err((subject, bound)));
     }
-    let (cancel, cancel_signal) = match kind {
-        CallKind::Read => {
+    let (cancel, cancel_signal) = match plan {
+        CancelPlan::DropOperation => {
             let (signal, signalled) = oneshot::channel();
             (CancelRoute::DropOperation(signal), Some(signalled))
         }
-        CallKind::Write => (CancelRoute::Detach, None),
+        CancelPlan::Detach => (CancelRoute::Detach, None),
+        CancelPlan::RequestStop(stop) => (CancelRoute::RequestStop(stop), None),
     };
     queue.insert_pending(
         id,

@@ -7,11 +7,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    broker, node, node_status, ok, registry_of, required, seed_node, seed_node_task, seed_workflow,
-    spec, task_node, workflow, workflow_status, IsolatedDatabase, LiveStatus, NodeSeed, ParentLink,
-    WorkflowSeed, WORKER,
+    node, node_status, ok, registry_of, required, seed_node, seed_node_task, seed_workflow, spec,
+    start_claimed_task, task_node, workflow, workflow_status, IsolatedDatabase, LiveStatus,
+    NodeSeed, ParentLink, WorkflowSeed,
 };
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::{TaskError, WorkflowSpec, WorkflowSpecRegistry};
 use crate::workflow_engine::recovery::{recover_stuck_workflows, RecoveryReport};
@@ -21,11 +20,9 @@ const LIMIT: u32 = 3;
 
 async fn pass(pool: &PgPool, registry: &WorkflowSpecRegistry) -> RecoveryReport {
     recover_stuck_workflows(
-        pool,
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         registry,
-        0,
         LIMIT,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
@@ -53,7 +50,7 @@ fn recovery_child() -> WorkflowSpec {
 #[serial]
 async fn a_ready_node_with_no_task_is_enqueued_once() {
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
     seed_node(&db.pool, &NodeSeed::task(workflow_id, 0, "READY")).await;
 
@@ -89,7 +86,11 @@ async fn recovery_leaves_a_paused_workflow_alone() {
     )
     .await;
 
-    let _report = pass(&db.pool, &WorkflowSpecRegistry::new()).await;
+    let _report = pass(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "PAUSED");
     assert_eq!(node_status(&db.pool, workflow_id, 1).await, "PENDING");
@@ -108,7 +109,11 @@ async fn recovery_completes_a_workflow_whose_nodes_all_ended_and_sets_completed_
     )
     .await;
 
-    let report = pass(&db.pool, &WorkflowSpecRegistry::new()).await;
+    let report = pass(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     assert_eq!(report.total(), 1, "{report:?}");
     let row = workflow(&db.pool, workflow_id).await;
@@ -146,7 +151,11 @@ async fn recovery_decides_by_the_success_policy() {
         cases.push((workflow_id, expected));
     }
 
-    let _report = pass(&db.pool, &WorkflowSpecRegistry::new()).await;
+    let _report = pass(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     for (workflow_id, expected) in cases {
         assert_eq!(workflow_status(&db.pool, workflow_id).await, expected);
@@ -172,7 +181,11 @@ async fn a_pending_node_after_a_failed_dependency_is_skipped_and_the_workflow_fa
     )
     .await;
 
-    let report = pass(&db.pool, &WorkflowSpecRegistry::new()).await;
+    let report = pass(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     assert_eq!(report.total(), 2, "{report:?}");
     assert_eq!(node_status(&db.pool, workflow_id, 1).await, "SKIPPED");
@@ -199,7 +212,11 @@ async fn a_pending_allow_failed_deps_node_after_a_failure_is_enqueued() {
     )
     .await;
 
-    let report = pass(&db.pool, &WorkflowSpecRegistry::new()).await;
+    let report = pass(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     assert_eq!(report.total(), 1, "{report:?}");
     let row = node(&db.pool, workflow_id, 1).await;
@@ -298,7 +315,11 @@ async fn a_completed_child_advances_its_parent_node() {
         seed_parent_of_an_ended_child(&db.pool, "COMPLETED", Some(ok_text(serde_json::json!(42))))
             .await;
 
-    let report = pass(&db.pool, &WorkflowSpecRegistry::new()).await;
+    let report = pass(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     assert!(report.total() >= 1, "{report:?}");
     assert_eq!(node_status(&db.pool, parent, 0).await, "COMPLETED");
@@ -319,7 +340,11 @@ async fn a_cancelled_or_failed_child_fails_its_parent_node() {
         parents.push((parent, child_status));
     }
 
-    let report = pass(&db.pool, &WorkflowSpecRegistry::new()).await;
+    let report = pass(
+        &db.pool,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     assert!(report.total() >= 2, "{report:?}");
     for (parent, child_status) in parents {
@@ -333,11 +358,13 @@ async fn a_cancelled_or_failed_child_fails_its_parent_node() {
 }
 
 /// `test_orphaned_workflow_task_repro.py::test_workflow_check_failed_disabled_leaves_orphan_claimed`:
-/// with self-heal off, a claimed workflow task with no runnable node is
-/// neither cancelled nor run.
+/// a claimed workflow task with no runnable node is not run: the start of
+/// the child host misses with `NODE_NOT_LINKED` and writes nothing, so the
+/// task stays CLAIMED. With orphan self-heal off the outcome writer then
+/// writes nothing either
+/// (`worker/executor/slots/settle_tests.rs::a_task_whose_node_is_not_linked_stays_claimed_when_the_self_heal_is_off`).
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #921"]
 async fn an_orphan_stays_claimed_when_self_heal_is_off() {
     let db = IsolatedDatabase::create().await;
     let task_id = Uuid::new_v4();
@@ -353,18 +380,14 @@ async fn an_orphan_stays_claimed_when_self_heal_is_off() {
     )
     .await;
 
-    let _outcome = crate::worker::execution::confirm_ownership_and_set_running(
-        &broker(&db.pool),
-        task_id,
-        WORKER,
-        4242,
-        "port-host",
-        true,
-        claimed_at,
-        false,
-    )
-    .await;
+    let outcome = start_claimed_task(&db.pool, task_id, claimed_at).await;
 
+    assert_eq!(
+        outcome,
+        crate::broker::claims::StartOutcome::Missed(
+            crate::broker::claims::StartMiss::NodeNotLinked
+        )
+    );
     let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(&db.pool)

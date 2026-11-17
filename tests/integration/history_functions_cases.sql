@@ -1,4 +1,4 @@
--- Cases for horsies/core/baseline/sql/0006_history_functions.sql, one session.
+-- Cases for crates/horsies-core/baseline/0006_history_functions.sql, one session.
 --
 -- Run on a database that holds the baseline migration, in one transaction that the caller rolls back:
 --   psql -v ON_ERROR_STOP=1 --single-transaction -f history_functions_cases.sql
@@ -11,14 +11,21 @@
 SET TimeZone = 'UTC';
 SET client_min_messages = notice;
 
-CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid, p_include_live boolean DEFAULT TRUE)
-RETURNS horsies_task_provenance LANGUAGE sql STABLE AS $$
-    SELECT COALESCE(
-        (SELECT ROW(TRUE, 'HISTORY', h.task_id, h.status::text, h.terminal_at,
-                    h.terminalization_kind::text)::horsies_task_provenance
-         FROM horsies_task_history AS h WHERE h.task_id = p_task_id LIMIT 1),
-        ROW(FALSE, NULL, NULL, NULL, NULL, NULL)::horsies_task_provenance
-    )
+CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
+RETURNS TABLE (
+    task_id uuid, status text, terminal_at timestamptz, terminalization_kind text, is_workflow_task boolean,
+    command_fingerprint_version smallint, command_fingerprint bytea, sent_at timestamptz
+)
+LANGUAGE sql STABLE AS $$
+    SELECT h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text, h.is_workflow_task,
+        h.command_fingerprint_version, h.command_fingerprint, h.sent_at
+    FROM horsies_task_history AS h WHERE h.task_id = p_task_id LIMIT 1
+$$;
+
+CREATE FUNCTION horsies_task_history_duplicate_staged(p_task_id uuid)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (SELECT 1 FROM horsies_task_provenance_staged(p_task_id))
+        OR EXISTS (SELECT 1 FROM horsies_task_history_clock_exceptions AS e WHERE e.task_id = p_task_id)
 $$;
 
 CREATE FUNCTION horsies_task_detail_staged(p_task_id uuid)
@@ -138,12 +145,13 @@ $$;
 
 CREATE FUNCTION fixture_node(p_id uuid, p_workflow uuid, p_index integer, p_task uuid) RETURNS void LANGUAGE sql AS $$
     INSERT INTO horsies_workflow_tasks (
-        id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
+        downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+        dependencies, args_from,
         workflow_ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
         good_until, retention_class_key, status, task_id, is_subworkflow, sub_workflow_id, sub_workflow_name,
         sub_definition_key, sub_workflow_summary, result, error, created_at, started_at, completed_at
     ) VALUES (
-        p_id, p_workflow, p_index, 'node_' || p_index, 'fixture.task', '{"x":1}', 'default', 50, '{}', NULL,
+        'NONE', p_id, p_workflow, p_index, 'node_' || p_index, 'fixture.task', '{"x":1}', 'default', 50, '{}', NULL,
         NULL, FALSE, 'all', NULL, NULL, 3, 'ISOLATED',
         NULL, 'forever', 'RUNNING', p_task, FALSE, NULL, NULL,
         NULL, NULL, NULL, NULL, now(), now(), NULL
@@ -908,12 +916,19 @@ SELECT fixture_check(
     (SELECT b.outcome = 'NOT_EXPIRED' FROM begin_not_expired AS b)
     AND NOT fixture_holds_leaf_lock('standard_1d', date_trunc('day', now()) + interval '1 day')
 );
+-- A leaf detached out of band that the manifest does not name: begin records the detach and publishes nothing (a
+-- publication stamps each reader with a comment; the stand-ins of this file have none).
+SELECT fixture_leaf('standard_1d', '2021-01-04 00:00:00+00');
+ALTER TABLE horsies_task_history_standard_1d DETACH PARTITION horsies_task_history_standard_1d_2021_01_04;
 CREATE TEMP TABLE begin_detached AS
-    SELECT * FROM horsies_begin_leaf_detach('horsies_task_history_standard_1d_2021_01_02');
+    SELECT * FROM horsies_begin_leaf_detach('horsies_task_history_standard_1d_2021_01_04');
 SELECT fixture_check(
-    'begin detach: a detached leaf is DETACHED and leaves no lock',
+    'begin detach: a detached leaf is DETACHED, leaves no lock, and its detach is recorded',
     (SELECT b.outcome = 'DETACHED' FROM begin_detached AS b)
-    AND NOT fixture_holds_leaf_lock('standard_1d', '2021-01-02 00:00:00+00')
+    AND NOT fixture_holds_leaf_lock('standard_1d', '2021-01-04 00:00:00+00')
+    AND (SELECT detached_at IS NOT NULL FROM horsies_task_history_leaf_catalog
+         WHERE leaf_name = 'horsies_task_history_standard_1d_2021_01_04')
+    AND obj_description(to_regprocedure('horsies_task_detail_staged(uuid)'), 'pg_proc') IS NULL
 );
 SELECT fixture_check(
     'begin detach: an expired heartbeat leaf is DETACHABLE from horsies_heartbeats',
@@ -949,6 +964,26 @@ SELECT fixture_check(
     'begin detach: an attached leaf without its task index is CATALOG_CONFLICT PHYSICAL_NONCONFORMANT',
     (SELECT b.outcome = 'CATALOG_CONFLICT' AND b.conflict_kind = 'PHYSICAL_NONCONFORMANT'
      FROM horsies_begin_leaf_detach('horsies_task_history_standard_1d_2021_01_10') AS b)
+);
+-- Index conformance of the inspection is the rule of horsies_history_leaf_indexes, applied to the id index only.
+SELECT fixture_leaf('standard_1d', '2021-01-20 00:00:00+00');
+DROP INDEX horsies_task_history_standard_1d_2021_01_20_task_idx;
+CREATE INDEX horsies_task_history_standard_1d_2021_01_20_task_idx
+    ON horsies_task_history_standard_1d_2021_01_20 USING btree (task_id DESC);
+SELECT fixture_check(
+    'inspect: a task index of another shape (task_id DESC) is CATALOG_CONFLICT PHYSICAL_NONCONFORMANT',
+    (SELECT i.state = 'CATALOG_CONFLICT' AND i.conflict_kind = 'PHYSICAL_NONCONFORMANT'
+     FROM horsies_inspect_history_leaf('horsies_task_history_standard_1d_2021_01_20') AS i)
+    AND (SELECT NOT x.conformant
+         FROM horsies_history_leaf_indexes('HISTORY', 'horsies_task_history_standard_1d_2021_01_20') AS x
+         WHERE x.index_name = 'horsies_task_history_standard_1d_2021_01_20_task_idx')
+);
+SELECT fixture_leaf('standard_1d', '2021-01-21 00:00:00+00');
+DROP INDEX horsies_task_history_standard_1d_2021_01_21_enqueued_idx;
+SELECT fixture_check(
+    'inspect: a leaf without its enqueued index is still classified by its task index (DETACHABLE)',
+    (SELECT i.state = 'DETACHABLE'
+     FROM horsies_inspect_history_leaf('horsies_task_history_standard_1d_2021_01_21') AS i)
 );
 SELECT fixture_leaf('standard_1d', '2021-01-11 00:00:00+00');
 UPDATE horsies_task_history_leaf_catalog SET upper_anchor = '2021-01-11 12:00:00+00'
@@ -1113,4 +1148,141 @@ SELECT fixture_check(
         SELECT 1 FROM horsies_prune_candidates(100) AS c
         WHERE c.leaf_name IN ('horsies_task_history_standard_1d_2021_01_02', 'horsies_heartbeats_2021_01_01_05')
     )
+);
+
+------------------------------------------------------------------------------------------------------------------------
+-- Phase 2 and the format versions of its source row
+------------------------------------------------------------------------------------------------------------------------
+
+-- horsies_phase2_consume and horsies_phase2_quarantine_one (0003_interim_functions.sql) read the rows that the move
+-- writes. Each knows history schema version 1 and result envelope version 1 only. A later writer is played by an
+-- UPDATE of the stored version; the CHECKs allow every positive version.
+
+-- The record statement of the recovery pass for a disposition that keeps the pending row
+-- (crates/horsies-core/src/workflow_engine/phase2_recovery.rs, RECORD_RETAINING_ATTEMPT_SQL).
+CREATE FUNCTION fixture_record_retaining_attempt(p_task uuid, p_failure_class text) RETURNS integer
+LANGUAGE sql AS $$
+    UPDATE horsies_workflow_phase2_pending
+    SET attempt_count = attempt_count + 1,
+        last_attempt_at = statement_timestamp(),
+        last_failure_class = p_failure_class
+    WHERE task_id = p_task
+    RETURNING attempt_count
+$$;
+
+INSERT INTO ids VALUES
+    ('version_workflow', gen_random_uuid()),
+    ('version_history', fixture_uuid7(now() - interval '1 minute')),
+    ('version_history_node', gen_random_uuid()),
+    ('version_quarantine', fixture_uuid7(now() - interval '1 minute')),
+    ('version_quarantine_node', gen_random_uuid());
+SELECT fixture_workflow((SELECT id FROM ids WHERE name = 'version_workflow'));
+SELECT fixture_task((SELECT id FROM ids WHERE name = 'version_history'), 'RUNNING', 'forever', TRUE, TRUE,
+    '{"v":1}', NULL, NULL);
+SELECT fixture_node((SELECT id FROM ids WHERE name = 'version_history_node'),
+    (SELECT id FROM ids WHERE name = 'version_workflow'), 0, (SELECT id FROM ids WHERE name = 'version_history'));
+SELECT fixture_move((SELECT id FROM ids WHERE name = 'version_history'), 'FAILED', 'FAIL_RUNNING', now(),
+    '{"e":"v"}', 'E', 'r');
+SELECT fixture_task((SELECT id FROM ids WHERE name = 'version_quarantine'), 'RUNNING', 'forever', TRUE, TRUE,
+    '{"v":2}', NULL, NULL);
+SELECT fixture_node((SELECT id FROM ids WHERE name = 'version_quarantine_node'),
+    (SELECT id FROM ids WHERE name = 'version_workflow'), 1, (SELECT id FROM ids WHERE name = 'version_quarantine'));
+SELECT fixture_move((SELECT id FROM ids WHERE name = 'version_quarantine'), 'FAILED', 'FAIL_RUNNING', now(),
+    '{"e":"q"}', 'E', 'r');
+
+-- A history source with result envelope version 2.
+UPDATE horsies_task_history SET result_envelope_version = 2
+WHERE task_id = (SELECT id FROM ids WHERE name = 'version_history');
+CREATE TEMP TABLE consume_envelope AS
+    SELECT * FROM horsies_phase2_consume((SELECT id FROM ids WHERE name = 'version_history'), 'FAILED');
+SELECT fixture_check(
+    'phase 2 consume: a history row with an unknown result envelope version is SOURCE_VERSION_CONFLICT',
+    (SELECT c.disposition = 'SOURCE_VERSION_CONFLICT'
+            AND c.detail = 'source result envelope version 2 is not known to this reader'
+     FROM consume_envelope AS c)
+);
+SELECT fixture_check(
+    'phase 2 consume: the refusal changes nothing: the node keeps its status and the pending row its locator',
+    (SELECT n.status = 'RUNNING' AND n.result IS NULL
+     FROM horsies_workflow_tasks AS n WHERE n.id = (SELECT id FROM ids WHERE name = 'version_history_node'))
+    AND (SELECT p.recovery_source = 'HISTORY' AND p.attempt_count = 0 AND p.last_failure_class IS NULL
+         FROM horsies_workflow_phase2_pending AS p
+         WHERE p.task_id = (SELECT id FROM ids WHERE name = 'version_history'))
+);
+CREATE TEMP TABLE record_envelope AS
+    SELECT fixture_record_retaining_attempt(
+        (SELECT id FROM ids WHERE name = 'version_history'), (SELECT c.disposition FROM consume_envelope AS c)
+    ) AS attempt_count;
+SELECT fixture_check(
+    'phase 2 recovery: the record statement stores SOURCE_VERSION_CONFLICT as the failure class',
+    (SELECT r.attempt_count = 1 FROM record_envelope AS r)
+    AND (SELECT p.last_failure_class = 'SOURCE_VERSION_CONFLICT' AND p.last_attempt_at IS NOT NULL
+         FROM horsies_workflow_phase2_pending AS p
+         WHERE p.task_id = (SELECT id FROM ids WHERE name = 'version_history'))
+);
+CREATE TEMP TABLE quarantine_envelope AS
+    SELECT * FROM horsies_phase2_quarantine_one((SELECT id FROM ids WHERE name = 'version_history'));
+SELECT fixture_check(
+    'phase 2 quarantine: a history row with an unknown result envelope version is COPY_VERIFICATION_FAILED',
+    (SELECT q.verdict = 'COPY_VERIFICATION_FAILED'
+            AND q.detail = 'quarantine source result envelope version 2 is not known to this reader'
+     FROM quarantine_envelope AS q)
+    AND NOT EXISTS (
+        SELECT 1 FROM horsies_workflow_phase2_quarantine
+        WHERE task_id = (SELECT id FROM ids WHERE name = 'version_history')
+    )
+    AND (SELECT p.recovery_source = 'HISTORY' AND p.history_class = 'forever'
+         FROM horsies_workflow_phase2_pending AS p
+         WHERE p.task_id = (SELECT id FROM ids WHERE name = 'version_history'))
+);
+
+-- The same source with history schema version 2: the refusal that the envelope version now shares.
+UPDATE horsies_task_history SET result_envelope_version = 1, history_schema_version = 2
+WHERE task_id = (SELECT id FROM ids WHERE name = 'version_history');
+SELECT fixture_check(
+    'phase 2 consume: a history row with an unknown history schema version is SOURCE_VERSION_CONFLICT too',
+    (SELECT c.disposition = 'SOURCE_VERSION_CONFLICT' AND c.detail = 'source schema version disagrees with locator'
+     FROM horsies_phase2_consume((SELECT id FROM ids WHERE name = 'version_history'), 'FAILED') AS c)
+);
+
+-- Control: with both versions known again, the same pending row applies.
+UPDATE horsies_task_history SET history_schema_version = 1
+WHERE task_id = (SELECT id FROM ids WHERE name = 'version_history');
+CREATE TEMP TABLE consume_known AS
+    SELECT * FROM horsies_phase2_consume((SELECT id FROM ids WHERE name = 'version_history'), 'FAILED');
+SELECT fixture_check(
+    'phase 2 consume: with both versions known, the same row is APPLIED_TO_NODE',
+    (SELECT c.disposition = 'APPLIED_TO_NODE' FROM consume_known AS c)
+    AND NOT EXISTS (
+        SELECT 1 FROM horsies_workflow_phase2_pending
+        WHERE task_id = (SELECT id FROM ids WHERE name = 'version_history')
+    )
+);
+
+-- A quarantine source with result envelope version 2.
+SELECT fixture_check(
+    'phase 2 quarantine: fixture copy of a known row is REPOINTED',
+    (SELECT q.verdict = 'REPOINTED'
+     FROM horsies_phase2_quarantine_one((SELECT id FROM ids WHERE name = 'version_quarantine')) AS q)
+);
+UPDATE horsies_workflow_phase2_quarantine SET result_envelope_version = 2
+WHERE task_id = (SELECT id FROM ids WHERE name = 'version_quarantine');
+SELECT fixture_check(
+    'phase 2 consume: a quarantine row with an unknown result envelope version is SOURCE_VERSION_CONFLICT',
+    (SELECT c.disposition = 'SOURCE_VERSION_CONFLICT'
+            AND c.detail = 'source result envelope version 2 is not known to this reader'
+     FROM horsies_phase2_consume((SELECT id FROM ids WHERE name = 'version_quarantine'), 'FAILED') AS c)
+    AND EXISTS (
+        SELECT 1 FROM horsies_workflow_phase2_quarantine
+        WHERE task_id = (SELECT id FROM ids WHERE name = 'version_quarantine')
+    )
+    AND (SELECT n.status = 'RUNNING'
+         FROM horsies_workflow_tasks AS n WHERE n.id = (SELECT id FROM ids WHERE name = 'version_quarantine_node'))
+);
+UPDATE horsies_workflow_phase2_quarantine SET result_envelope_version = 1
+WHERE task_id = (SELECT id FROM ids WHERE name = 'version_quarantine');
+SELECT fixture_check(
+    'phase 2 consume: with the quarantine row known again, it is APPLIED_TO_NODE',
+    (SELECT c.disposition = 'APPLIED_TO_NODE'
+     FROM horsies_phase2_consume((SELECT id FROM ids WHERE name = 'version_quarantine'), 'FAILED') AS c)
 );

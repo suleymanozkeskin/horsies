@@ -20,7 +20,7 @@ from horsies import QueueMode
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
 app = Horsies(config)
 
@@ -52,7 +52,7 @@ config = AppConfig(
         CustomQueueConfig(name="normal", priority=50, max_concurrency=5),
         CustomQueueConfig(name="low", priority=100, max_concurrency=2),
     ],
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
 app = Horsies(config)
 

@@ -9,6 +9,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from horsies._catalog.manifest import (
+    KEEPALIVE_PROBES_MAX,
+    KEEPALIVE_SECONDS_MAX,
+    TCP_USER_TIMEOUT_MS_MAX,
+)
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -48,7 +53,7 @@ from datetime import time as datetime_time
 
 # Shared broker config for all tests
 BROKER = PostgresConfig(
-    database_url='postgresql+psycopg://user:pass@localhost/db',
+    database_url='postgresql://user:pass@localhost/db',
     pool_size=5,
     max_overflow=5,
 )
@@ -64,7 +69,7 @@ class TestPostgresConfigPgBouncer:
 
     def test_the_producer_pool_defaults(self) -> None:
         config = PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
         )
 
         # Producer defaults follow SQLAlchemy's (spec change, 0.1.7);
@@ -74,7 +79,7 @@ class TestPostgresConfigPgBouncer:
 
     def test_sqlalchemy_engine_kwargs_exclude_the_worker_pre_ping(self) -> None:
         config = PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
         )
 
         assert 'worker_pool_pre_ping' not in config.sqlalchemy_engine_kwargs()
@@ -87,7 +92,7 @@ class TestPostgresConfigPgBouncer:
         """SQLAlchemy's own pre-ping pings at every checkout; it stays off.
         The broker registers the ping of idle connections itself."""
         config = PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
             pool_pre_ping=pool_pre_ping,
         )
 
@@ -98,7 +103,7 @@ class TestPostgresConfigPgBouncer:
         would double their round trips. Producer engines keep theirs, also
         the one that task code in a child sends with (the task-send pool)."""
         config = PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
         )
 
         assert config.worker_pool_pre_ping is False
@@ -110,7 +115,7 @@ class TestPostgresConfigPgBouncer:
 
     def test_the_worker_process_pre_pings_when_set(self) -> None:
         config = PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
             pool_pre_ping=False,
             worker_pool_pre_ping=True,
         )
@@ -127,7 +132,7 @@ class TestPostgresConfigPgBouncer:
         parent_pool: int,
     ) -> None:
         config = PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
         )
         with pytest.raises(AssertionError, match='connections must be >= 1'):
             config.worker_process_config(parent_pool)
@@ -160,7 +165,7 @@ class TestPostgresConfigPgBouncer:
         with pytest.raises(ConfigurationError) as exc_info:
             PostgresConfig.model_validate(
                 {
-                    'database_url': 'postgresql+psycopg://user:pass@localhost/db',
+                    'database_url': 'postgresql://user:pass@localhost/db',
                     field: value,
                 },
             )
@@ -184,7 +189,7 @@ class TestPostgresConfigPgBouncer:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             PostgresConfig.model_validate(
                 {
-                    'database_url': 'postgresql+psycopg://user:pass@localhost/db',
+                    'database_url': 'postgresql://user:pass@localhost/db',
                     'worker_pool_size': 3,
                     'worker_max_overflow': 2,
                     'worker_child_pool_max_size': 2,
@@ -202,7 +207,7 @@ class TestPostgresConfigPgBouncer:
         assert set(MOVED_TO_PARENT_POOL) == {'worker_pool_size', 'worker_max_overflow'}
         assert not set(MOVED_TO_PARENT_POOL) & set(PostgresConfig.model_fields)
         kwargs = PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
         ).sqlalchemy_engine_kwargs()
         assert not set(MOVED_TO_PARENT_POOL) & set(kwargs)
 
@@ -229,7 +234,7 @@ class TestPostgresConfigPgBouncer:
         with pytest.raises(ConfigurationError) as exc_info:
             PostgresConfig.model_validate(
                 {
-                    'database_url': 'postgresql+psycopg://user:pass@localhost/db',
+                    'database_url': 'postgresql://user:pass@localhost/db',
                     field: value,
                 },
             )
@@ -251,7 +256,7 @@ class TestPostgresConfigPgBouncer:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             PostgresConfig.model_validate(
                 {
-                    'database_url': 'postgresql+psycopg://user:pass@localhost/db',
+                    'database_url': 'postgresql://user:pass@localhost/db',
                     'worker_child_pool_min_size': 0,
                     'worker_child_pool_max_size': 2,
                     'worker_child_pool_check': True,
@@ -277,7 +282,7 @@ class TestPostgresConfigPgBouncer:
 
     def test_effective_session_database_url_defaults_to_database_url(self) -> None:
         config = PostgresConfig(
-            database_url='postgresql+psycopg://user:pass@localhost/db',
+            database_url='postgresql://user:pass@localhost/db',
         )
 
         # database_url is SecretStr (0.1.7); the effective property unwraps.
@@ -288,13 +293,13 @@ class TestPostgresConfigPgBouncer:
 
     def test_split_database_urls_are_valid(self) -> None:
         config = PostgresConfig(
-            database_url='postgresql+psycopg://user:pass@pooler:6432/db',
-            session_database_url='postgresql+psycopg://user:pass@direct:5432/db',
+            database_url='postgresql://user:pass@pooler:6432/db',
+            session_database_url='postgresql://user:pass@direct:5432/db',
             pgbouncer_transaction_mode=True,
         )
 
         assert config.effective_session_database_url == (
-            'postgresql+psycopg://user:pass@direct:5432/db'
+            'postgresql://user:pass@direct:5432/db'
         )
         # Keepalives default on; PgBouncer mode also disables prepared statements.
         assert config.pooled_connect_args == {
@@ -315,9 +320,9 @@ class TestPostgresConfigPgBouncer:
         """
         password = 'sup3r-secret-pw'
         config = PostgresConfig(
-            database_url=f'postgresql+psycopg://user:{password}@pooler/db',
+            database_url=f'postgresql://user:{password}@pooler/db',
             session_database_url=(
-                f'postgresql+psycopg://user:{password}@direct/db'
+                f'postgresql://user:{password}@direct/db'
             ),
         )
 
@@ -334,9 +339,9 @@ class TestPostgresConfigPgBouncer:
 
         password = 'sup3r-secret-pw'
         cfg = WorkerConfig(
-            dsn=f'postgresql+psycopg://user:{password}@host/db',
+            dsn=f'postgresql://user:{password}@host/db',
             psycopg_dsn=f'postgresql://user:{password}@host/db',
-            session_dsn=f'postgresql+psycopg://user:{password}@direct/db',
+            session_dsn=f'postgresql://user:{password}@direct/db',
             queues=['default'],
         )
 
@@ -346,12 +351,12 @@ class TestPostgresConfigPgBouncer:
     def test_pgbouncer_mode_requires_session_database_url(self) -> None:
         with pytest.raises(ConfigurationError, match='session_database_url required'):
             PostgresConfig(
-                database_url='postgresql+psycopg://user:pass@pooler:6432/db',
+                database_url='postgresql://user:pass@pooler:6432/db',
                 pgbouncer_transaction_mode=True,
             )
 
     def test_pgbouncer_mode_rejects_runtime_url_as_session_url(self) -> None:
-        url = 'postgresql+psycopg://user:pass@pooler:6432/db'
+        url = 'postgresql://user:pass@pooler:6432/db'
         with pytest.raises(
             ConfigurationError,
             match='session_database_url must not use the transaction-pool URL',
@@ -365,23 +370,64 @@ class TestPostgresConfigPgBouncer:
     @pytest.mark.parametrize(
         'url',
         [
-            'postgresql+psycopg2://user:pass@localhost/db',
-            'postgresql+psycopgx://user:pass@localhost/db',
             'postgresql://user:pass@localhost/db',
+            'postgres://user:pass@localhost/db',
         ],
     )
-    def test_database_url_requires_exact_psycopg3_scheme(self, url: str) -> None:
-        with pytest.raises(ConfigurationError, match='invalid database URL scheme'):
-            PostgresConfig(database_url=url)
+    def test_database_url_accepts_the_postgresql_and_postgres_schemes(
+        self, url: str,
+    ) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr(url), session_database_url=SecretStr(url),
+        )
+        assert config.database_url.get_secret_value() == url
+        assert config.effective_session_database_url == url
 
-    def test_session_database_url_requires_exact_psycopg3_scheme(self) -> None:
-        with pytest.raises(
-            ConfigurationError, match='invalid session database URL scheme'
-        ):
+    @pytest.mark.parametrize(
+        'scheme',
+        ['postgresql+psycopg', 'postgresql+psycopg2', 'postgres+asyncpg'],
+    )
+    def test_database_url_that_names_a_driver_is_refused_with_the_fix(
+        self, scheme: str,
+    ) -> None:
+        with pytest.raises(ConfigurationError) as refused:
             PostgresConfig(
-                database_url='postgresql+psycopg://user:pass@localhost/db',
-                session_database_url='postgresql+psycopg2://user:pass@localhost/db',
+                database_url=SecretStr(f'{scheme}://user:secret@localhost/db'),
             )
+        error = refused.value
+        assert error.code == ErrorCode.BROKER_INVALID_URL
+        assert error.message == f'invalid database_url scheme {scheme!r}'
+        assert error.help_text == (
+            f"replace '{scheme}://' with 'postgresql://' "
+            "(postgresql://user:pass@host/db)"
+        )
+        for text in (error.message, error.help_text or '', *error.notes):
+            assert 'secret' not in text
+
+    def test_database_url_with_another_scheme_is_refused(self) -> None:
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig(database_url=SecretStr('mysql://user:pass@localhost/db'))
+        assert refused.value.code == ErrorCode.BROKER_INVALID_URL
+        assert refused.value.message == "invalid database_url scheme 'mysql'"
+
+    def test_database_url_without_a_scheme_is_refused(self) -> None:
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig(database_url=SecretStr('user:pass@localhost/db'))
+        assert refused.value.code == ErrorCode.BROKER_INVALID_URL
+        assert refused.value.message == 'invalid database_url: the URL has no scheme'
+
+    def test_session_database_url_that_names_a_driver_is_refused(self) -> None:
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig(
+                database_url=SecretStr('postgresql://user:pass@localhost/db'),
+                session_database_url=SecretStr(
+                    'postgresql+psycopg://user:pass@localhost/db',
+                ),
+            )
+        assert refused.value.code == ErrorCode.BROKER_INVALID_URL
+        assert refused.value.message == (
+            "invalid session_database_url scheme 'postgresql+psycopg'"
+        )
 
 
 @pytest.mark.unit
@@ -393,7 +439,7 @@ class TestPostgresConfigTcpUserTimeout:
     limit (about 15 minutes on Linux).
     """
 
-    _LOCAL_URL = 'postgresql+psycopg://user:pass@localhost/db'
+    _LOCAL_URL = 'postgresql://user:pass@localhost/db'
 
     def test_default_is_30_seconds_in_every_connect_args(self) -> None:
         config = PostgresConfig(database_url=SecretStr(self._LOCAL_URL))
@@ -418,6 +464,32 @@ class TestPostgresConfigTcpUserTimeout:
         assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
         assert refused.value.message == 'invalid tcp_user_timeout_ms'
 
+    def test_the_core_bound_is_accepted(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr(self._LOCAL_URL),
+            tcp_user_timeout_ms=TCP_USER_TIMEOUT_MS_MAX,
+        )
+
+        assert config.pooled_connect_args['tcp_user_timeout'] == TCP_USER_TIMEOUT_MS_MAX
+
+    def test_a_value_above_the_core_bound_is_refused_with_the_bound(self) -> None:
+        above = TCP_USER_TIMEOUT_MS_MAX + 1
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig(
+                database_url=SecretStr(self._LOCAL_URL), tcp_user_timeout_ms=above,
+            )
+
+        assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert refused.value.message == 'invalid tcp_user_timeout_ms'
+        assert refused.value.notes == [
+            f'got: tcp_user_timeout_ms={above}',
+            'tcp_user_timeout_ms is 0 (the operating system default) or '
+            f'1 to {TCP_USER_TIMEOUT_MS_MAX} milliseconds',
+        ]
+        assert refused.value.help_text == (
+            f'give 0 or a number of milliseconds from 1 to {TCP_USER_TIMEOUT_MS_MAX}'
+        )
+
     def test_not_passed_to_the_sqlalchemy_engine(self) -> None:
         config = PostgresConfig(database_url=SecretStr(self._LOCAL_URL))
 
@@ -433,7 +505,7 @@ class TestPostgresConfigKeepalives:
     connection death (GH issue #100).
     """
 
-    _LOCAL_URL = 'postgresql+psycopg://user:pass@localhost/db'
+    _LOCAL_URL = 'postgresql://user:pass@localhost/db'
 
     def test_keepalives_default_on(self) -> None:
         config = PostgresConfig(database_url=self._LOCAL_URL)
@@ -516,6 +588,65 @@ class TestPostgresConfigKeepalives:
         # tcp_user_timeout does not depend on keepalives.
         assert config.pooled_connect_args == {'tcp_user_timeout': 30_000}
 
+    @pytest.mark.parametrize(
+        ('field_name', 'bound'),
+        [
+            ('tcp_keepalives_idle', KEEPALIVE_SECONDS_MAX),
+            ('tcp_keepalives_interval', KEEPALIVE_SECONDS_MAX),
+            ('tcp_keepalives_count', KEEPALIVE_PROBES_MAX),
+        ],
+    )
+    def test_keepalive_value_at_the_core_bound_is_accepted(
+        self, field_name: str, bound: int,
+    ) -> None:
+        config = PostgresConfig.model_validate(
+            {'database_url': self._LOCAL_URL, field_name: bound},
+        )
+
+        connect_arg = field_name.removeprefix('tcp_')
+        assert config.keepalive_connect_args()[connect_arg] == bound
+
+    @pytest.mark.parametrize(
+        ('field_name', 'bound'),
+        [
+            ('tcp_keepalives_idle', KEEPALIVE_SECONDS_MAX),
+            ('tcp_keepalives_interval', KEEPALIVE_SECONDS_MAX),
+            ('tcp_keepalives_count', KEEPALIVE_PROBES_MAX),
+        ],
+    )
+    def test_keepalive_value_above_the_core_bound_is_refused_with_the_bound(
+        self, field_name: str, bound: int,
+    ) -> None:
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig.model_validate(
+                {'database_url': self._LOCAL_URL, field_name: bound + 1},
+            )
+
+        assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert refused.value.message == f'invalid {field_name}'
+        assert refused.value.notes == [
+            f'got: {field_name}={bound + 1}',
+            f'{field_name} is from 1 to {bound} when tcp_keepalives is True',
+        ]
+        assert refused.value.help_text == (
+            f'give a number from 1 to {bound}, or set tcp_keepalives=False '
+            'to turn keepalives off'
+        )
+
+    def test_values_above_the_core_bounds_allowed_when_keepalives_disabled(
+        self,
+    ) -> None:
+        # Disabled keepalives ignore the interval/idle/count values entirely.
+        config = PostgresConfig(
+            database_url=SecretStr(self._LOCAL_URL),
+            tcp_keepalives=False,
+            tcp_keepalives_idle=KEEPALIVE_SECONDS_MAX + 1,
+            tcp_keepalives_interval=KEEPALIVE_SECONDS_MAX + 1,
+            tcp_keepalives_count=KEEPALIVE_PROBES_MAX + 1,
+        )
+
+        assert config.keepalive_connect_args() == {}
+
     def test_keepalive_fields_excluded_from_engine_kwargs(self) -> None:
         config = PostgresConfig(database_url=self._LOCAL_URL)
         engine_kwargs = config.sqlalchemy_engine_kwargs()
@@ -542,7 +673,7 @@ class TestWorkerConfigPgBouncerChildKwargs:
         from horsies.core.worker.config import WorkerConfig
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@pooler:6432/db',
+            dsn='postgresql://u:p@pooler:6432/db',
             psycopg_dsn='postgresql://u:p@direct/db',
             queues=['default'],
             pgbouncer_transaction_mode=True,
@@ -554,7 +685,7 @@ class TestWorkerConfigPgBouncerChildKwargs:
         from horsies.core.worker.config import WorkerConfig
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@pooler:6432/db',
+            dsn='postgresql://u:p@pooler:6432/db',
             psycopg_dsn='postgresql://u:p@direct/db',
             queues=['default'],
             pgbouncer_transaction_mode=True,
@@ -571,7 +702,7 @@ class TestWorkerConfigPgBouncerChildKwargs:
         from horsies.core.worker.config import WorkerConfig
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@host/db',
+            dsn='postgresql://u:p@host/db',
             psycopg_dsn='postgresql://u:p@host/db',
             queues=['default'],
             child_connect_kwargs={'keepalives': 1},
@@ -1193,7 +1324,7 @@ class TestLogConfig:
 
     def test_mask_database_url_hides_password(self) -> None:
         """Password in database URL should be masked."""
-        url = 'postgresql+psycopg://user:secret@localhost/db'
+        url = 'postgresql://user:secret@localhost/db'
         masked = mask_database_url(url)
         assert 'secret' not in masked
         assert '***' in masked
@@ -1202,7 +1333,7 @@ class TestLogConfig:
 
     def test_mask_database_url_no_password(self) -> None:
         """URL without password should remain unchanged."""
-        url = 'postgresql+psycopg://localhost/db'
+        url = 'postgresql://localhost/db'
         masked = mask_database_url(url)
         assert masked == url
 
@@ -1442,7 +1573,7 @@ class TestExactPool:
     with no overflow."""
 
     _CONFIG = PostgresConfig(
-        database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+        database_url=SecretStr('postgresql://user:pass@localhost/db'),
         pool_size=30,
         max_overflow=30,
         pool_timeout=12,
@@ -1490,7 +1621,7 @@ class TestGetBrokerErrorHandling:
         from horsies import Horsies
 
         config = PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
             pool_size=30,
             max_overflow=30,
         )
@@ -1518,7 +1649,7 @@ class TestGetBrokerErrorHandling:
         from horsies import Horsies
 
         config = PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
             pool_size=30,
             max_overflow=30,
         )
@@ -1789,7 +1920,7 @@ class TestQueueRetentionNamesARealQueue:
 
     def _broker(self) -> PostgresConfig:
         return PostgresConfig(
-            database_url='postgresql+psycopg://u:p@localhost/db'
+            database_url='postgresql://u:p@localhost/db'
         )
 
     def test_default_mode_accepts_the_default_queue(self) -> None:

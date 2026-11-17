@@ -45,7 +45,6 @@ async fn delete_snapshots(pool: &PgPool, worker_id: &str) {
 /// Python `test_an_unreadable_slot_health_fails_the_read`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #677: the worker state read does not read slots_down"]
 async fn an_unreadable_slot_health_fails_the_read() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let broker = PostgresBroker::from_pool(pool.clone());
@@ -69,7 +68,6 @@ async fn an_unreadable_slot_health_fails_the_read() {
 /// budget name fails the read and is named.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #677: the worker state read does not read class_capacity"]
 async fn an_unreadable_class_capacity_fails_the_read() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let broker = PostgresBroker::from_pool(pool.clone());

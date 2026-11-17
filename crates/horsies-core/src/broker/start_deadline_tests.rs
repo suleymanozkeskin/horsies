@@ -9,8 +9,11 @@ use serial_test::serial;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::broker::claims::{start_attempt, StartAttempt, StartMiss, StartOutcome};
+use crate::broker::core_rows::StatementLog;
+use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::terminalization_matrix::migrated_pool;
-use crate::broker::PostgresBroker;
+use crate::core::lifecycle::OwnedClaim;
 
 const WORKER: &str = "start-deadline-worker";
 
@@ -47,23 +50,38 @@ async fn seed_claim_past_its_deadline(pool: &PgPool, task_id: Uuid) -> DateTime<
 }
 
 /// Replaces `broker::postgres::tests::set_running_guards_good_until_before_start`,
-/// which read the statement text. The claim holder's start write on a row
-/// whose deadline passed applies nothing: the row stays CLAIMED, and no
-/// runner heartbeat is written.
+/// which read the statement text. The claim holder's start write
+/// (`horsies_start_attempt`) on a row whose deadline passed applies nothing
+/// and names the deadline: the row stays CLAIMED, and no runner heartbeat is
+/// written.
 #[tokio::test]
 #[serial]
 async fn a_claim_past_its_deadline_does_not_start() {
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
     let task_id = Uuid::new_v4();
     let generation = seed_claim_past_its_deadline(&pool, task_id).await;
+    let core = core_pool_for_test_pool(&pool);
 
-    let started = broker
-        .set_running(task_id, WORKER, 4242, "start-host", "worker", generation)
-        .await
-        .expect("the start write runs");
+    let started = start_attempt(
+        &core,
+        StatementLog::Off,
+        &StartAttempt {
+            task_id,
+            fence: OwnedClaim {
+                worker_id: WORKER.to_owned(),
+                claimed_at: generation,
+            },
+            worker_pid: 4242,
+            worker_hostname: "start-host".to_owned(),
+            worker_process_name: "worker".to_owned(),
+            beat_sender_id: WORKER.to_owned(),
+        },
+    )
+    .await
+    .expect("the start write runs");
 
-    assert!(started.is_none(), "a claim past its deadline started");
+    assert_eq!(started, StartOutcome::Missed(StartMiss::DeadlinePassed));
+    core.close();
     let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(&pool)

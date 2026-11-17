@@ -1,6 +1,6 @@
 /// Typed error types for task send/schedule operations.
 ///
-/// Mirrors Python's `horsies/core/models/task_send_types.py`: one variant per
+/// Mirrors Python's `python/horsies/core/models/task_send_types.py`: one variant per
 /// code, and the core maps every enqueue error to its variant once
 /// ([`send_error_from_enqueue`]).
 use chrono::{DateTime, Utc};
@@ -11,7 +11,7 @@ use crate::broker::BrokerError;
 /// Categorized task send failure codes.
 ///
 /// The members are Python's, in Python's order
-/// (`horsies/core/models/task_send_types.py`). `ASYNC_CONTEXT`,
+/// (`python/horsies/core/models/task_send_types.py`). `ASYNC_CONTEXT`,
 /// `EVENT_LOOP_LIMIT` and `LOOP_RUNNER_FAILED` are produced by the Python
 /// client only; [`TaskSendError`] has no variant for them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
@@ -91,7 +91,7 @@ pub struct TaskSendPayload {
 
 /// Error from task send/schedule operations: one variant per
 /// [`TaskSendErrorCode`] that the core produces, each with only the facts of
-/// its state (Python `horsies/core/models/task_send_types.py:107-252`).
+/// its state (Python `python/horsies/core/models/task_send_types.py:107-252`).
 #[derive(Debug, Clone)]
 pub enum TaskSendError {
     /// Sends are suppressed in this process. Nothing was serialized or
@@ -194,7 +194,7 @@ impl TaskSendError {
 
     /// The task id and payload when the retry methods accept this error,
     /// else `None`. Python's accepted set (`TaskSendRetryable`,
-    /// `horsies/core/models/task_send_types.py:255-260`) without the
+    /// `python/horsies/core/models/task_send_types.py:255-260`) without the
     /// Python-only codes: an enqueue failure and a key conflict. A refusal
     /// is never replayed, because the same input meets the same refusal.
     pub fn resend_target(&self) -> Option<ResendTarget<'_>> {
@@ -232,7 +232,7 @@ impl std::fmt::Display for TaskSendError {
 impl std::error::Error for TaskSendError {}
 
 /// The send error for a failed enqueue, by Python's rule
-/// (`horsies/core/task_decorator.py:1248-1310`):
+/// (`python/horsies/core/task_decorator.py:1248-1310`):
 /// - a refusal of the input, the options or the call (`EnqueueContract`,
 ///   `Serialization`, `InvalidIdempotencyReservationWindow`) is
 ///   `VALIDATION_FAILED`, not retryable;
@@ -270,10 +270,9 @@ pub fn send_error_from_enqueue(
             owner_task_id: *owner_task_id,
         },
         BrokerError::Database(_)
-        | BrokerError::Migration(_)
+        | BrokerError::SchemaRefused(_)
         | BrokerError::InvalidWorkflowNodeStatus
         | BrokerError::IncompleteTaskHistoryCutover
-        | BrokerError::SchemaVersionMismatch { .. }
         | BrokerError::InvalidStatus(_)
         | BrokerError::InvalidExecutionClass(_)
         | BrokerError::ConnectionFailed(_)
@@ -285,6 +284,7 @@ pub fn send_error_from_enqueue(
         | BrokerError::TerminalizationContract(_)
         | BrokerError::HistoryReadContract(_)
         | BrokerError::InvalidClaimArgument(_)
+        | BrokerError::ClaimContract(_)
         | BrokerError::Statement(_)
         | BrokerError::PoolSettings(_)
         | BrokerError::RowDecode(_) => TaskSendError::EnqueueFailed {
@@ -385,7 +385,10 @@ mod tests {
     #[test]
     fn a_refusal_is_validation_failed_and_refused_for_a_resend() {
         for refusal in [
-            BrokerError::EnqueueContract("bad options".to_owned()),
+            BrokerError::EnqueueContract(crate::broker::EnqueueRefusal::by_rule(
+                crate::core::history::enqueue::SendPart::TaskOptions,
+                "bad options".to_owned(),
+            )),
             BrokerError::InvalidIdempotencyReservationWindow("0s".to_owned()),
         ] {
             let error = send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &refusal);
@@ -433,6 +436,71 @@ mod tests {
             .expect("an enqueue failure is accepted");
         assert_eq!(target.task_id, task_id);
         assert_eq!(target.payload.sent_at, sent_at);
+    }
+
+    /// A statement-pooled `database_url` is refused at the first checkout of
+    /// the core pool; the send reports it as `ENQUEUE_FAILED`, not retryable.
+    #[test]
+    fn a_statement_pooled_url_is_an_enqueue_failure_that_is_not_retryable() {
+        let error = send_error_from_enqueue(
+            Uuid::from_u128(1),
+            sample_payload(),
+            &BrokerError::Statement(crate::db::StatementFailure::NotSent {
+                statement: "enqueue",
+                cause: crate::db::NotSentCause::Checkout(
+                    crate::db::CheckoutFailure::StatementPooledUrl {
+                        masked_url: crate::db::MaskedUrl::for_tests(
+                            "postgresql://horsies:***@pgbouncer:6432/app",
+                        ),
+                    },
+                ),
+            }),
+        );
+
+        assert_eq!(error.code(), TaskSendErrorCode::EnqueueFailed);
+        assert!(!error.retryable());
+    }
+
+    /// Python `test_broker_postgres.py::TestEnqueueCatch::test_schema_init_operator_state_stays_enqueue_failed`:
+    /// a schema state that an operator must repair (a newer schema, a cutover
+    /// that is not complete, a lost install lock) fails the send as
+    /// `ENQUEUE_FAILED`, not retryable, and never as a refusal of the input.
+    #[test]
+    fn a_schema_state_for_the_operator_is_an_enqueue_failure_that_is_not_retryable() {
+        for state in [
+            BrokerError::SchemaRefused(crate::broker::migrations::SchemaRefusal::SchemaNewer {
+                stored: 1099,
+                own: 1000,
+            }),
+            BrokerError::IncompleteTaskHistoryCutover,
+            BrokerError::InstallLock(crate::broker::error::InstallLockFailure::OwnershipLost),
+        ] {
+            let error = send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &state);
+
+            assert_eq!(error.code(), TaskSendErrorCode::EnqueueFailed, "{state}");
+            assert!(!error.retryable(), "{state}");
+            assert_eq!(error.message(), state.to_string());
+        }
+    }
+
+    /// Python `test_broker_postgres.py::TestEnqueueCatch::test_write_error_keeps_its_classification`:
+    /// a failed write is `ENQUEUE_FAILED` with the retry flag of its own
+    /// cause, in both directions.
+    #[test]
+    fn a_failed_write_keeps_the_retry_flag_of_its_cause() {
+        for (cause, retryable) in [
+            (sqlx::Error::PoolTimedOut, true),
+            (sqlx::Error::Protocol("connection reset".to_owned()), true),
+            (sqlx::Error::PoolClosed, false),
+            (sqlx::Error::RowNotFound, false),
+        ] {
+            let failure = BrokerError::Database(cause);
+
+            let error = send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &failure);
+
+            assert_eq!(error.code(), TaskSendErrorCode::EnqueueFailed, "{failure}");
+            assert_eq!(error.retryable(), retryable, "{failure}");
+        }
     }
 
     #[test]

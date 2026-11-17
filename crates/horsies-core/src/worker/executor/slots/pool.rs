@@ -1,42 +1,45 @@
-//! The pool of isolated children: the FIFO of tasks, the state of each
-//! slot, the answer of each task, and the stop (Python
-//! `core/worker/slots.py`, the isolated half of `SlotPool`).
+//! The pool of isolated children: the FIFO of tasks, the answer of each
+//! task, and the stop (Python `core/worker/slots.py`, the isolated half of
+//! `SlotPool`). The state of each slot, the failure and the stop live on
+//! the [`PoolBoard`], which every pool of the worker shares.
 
 use std::collections::VecDeque;
-use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU64, NonZeroUsize};
+use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use tokio::sync::{oneshot, Notify};
 use tokio::task::JoinSet;
-use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
+use super::board::{PoolBoard, PoolHealth, SlotPhase};
 use super::budgets::SlotService;
-use super::dispatch::{AttemptEnd, ClaimedTask, NotRunCause};
+use super::dispatch::{AttemptEnd, ClaimedTask, ExecutionClass, NotRunCause};
 use super::isolated::run_slot;
 use super::route::IsolatedDeadline;
+use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     InitFrame, IsolatedWork, ProcessId, RunFrame, TaskInputText,
 };
 use crate::worker::executor::supervisor::{
-    BootFailure, BootFailureCause, ChildCommand, PoolAtFailure, SpawnerHandle, CHILD_KILL_WAIT,
+    ChildCommand, ChildSource, SpawnerHandle, CHILD_KILL_WAIT,
 };
 use crate::worker::runner_beats::LiveDispatches;
 
 /// After the drain deadline kills the busy children, the slot tasks get
 /// this long more before they are aborted (Python: 30 s).
-const AFTER_DRAIN_KILL_WAIT: Duration = CHILD_KILL_WAIT;
+pub(super) const AFTER_DRAIN_KILL_WAIT: Duration = CHILD_KILL_WAIT;
 
-/// Recycle an isolated child after this many tasks.
+/// Recycle a child after this many tasks (per seat for a shared child).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskLimit {
     Off,
     After(NonZeroU64),
 }
 
-/// Recycle an isolated child when its reported RSS reaches this many MiB.
-/// An unreadable RSS never recycles.
+/// Recycle a child when its reported RSS reaches this many MiB. An
+/// unreadable RSS never recycles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryLimit {
     Off,
@@ -55,11 +58,10 @@ pub enum ExitNotSeen {
     WaitForExit,
 }
 
-/// The fixed facts of an isolated pool.
+/// The fixed facts of an isolated pool. The number of its slots is on the
+/// board.
 #[derive(Debug, Clone)]
 pub struct IsolatedPoolConfig {
-    /// The isolated slots (Python: 1 to 1024).
-    pub children: NonZeroUsize,
     /// The program of each child. The spawner appends the socket descriptor
     /// and the worker pid.
     pub command: ChildCommand,
@@ -72,61 +74,11 @@ pub struct IsolatedPoolConfig {
     pub tasks_per_child: TaskLimit,
     pub memory_per_child: MemoryLimit,
     pub exit_not_seen: ExitNotSeen,
-}
-
-/// Why no replacement child can start. The worker stops with a non-zero
-/// exit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PoolFailure {
-    /// A start hook of a child failed or hung.
-    ChildHookFailed,
-    /// The last counted boot attempt of a slot failed.
-    BootAttemptsExhausted { attempts: u32, last: BootFailure },
-}
-
-/// The health of the pool.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PoolHealth {
-    Serving,
-    Failed(PoolFailure),
-    Stopping,
-}
-
-/// A slot that is down after a boot failure that can clear.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DownState {
-    pub cause: BootFailureCause,
-    pub detail: String,
-    pub down_since: DateTime<Utc>,
-    pub failed_boots: NonZeroU32,
-}
-
-/// The state of one isolated slot (Python executor design, section 8.2).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IsolatedSlotState {
-    Booting,
-    Idle { pid: ProcessId },
-    Busy { pid: ProcessId },
-    Retiring,
-    Down(DownState),
-}
-
-impl IsolatedSlotState {
-    fn service(&self) -> SlotService {
-        match self {
-            Self::Booting => SlotService::Booting,
-            Self::Idle { .. } | Self::Busy { .. } => SlotService::InService,
-            Self::Retiring => SlotService::Retiring,
-            Self::Down(_) => SlotService::Down,
-        }
-    }
-}
-
-/// Whether a slot booted a child at least once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BootedOnce {
-    No,
-    Yes,
+    /// The CPUs of each child, set before its init frame.
+    pub child_cpus: ChildCpus,
+    /// The longest wait for the exit of a child after a `SIGKILL`:
+    /// [`CHILD_KILL_WAIT`] in a worker.
+    pub kill_wait: Duration,
 }
 
 /// The answer to one submitted task. Exactly one end reaches the caller:
@@ -173,112 +125,144 @@ pub(super) struct QueuedRun {
     pub(super) answer: Answer,
 }
 
-struct Board {
-    slots: Vec<IsolatedSlotState>,
-    booted: Vec<BootedOnce>,
-    failure: Option<PoolFailure>,
+/// The tasks that wait for a slot, and the slot tasks that wait for a task,
+/// under one lock: a slot that takes a task leaves the idle count in the
+/// same step, so the free slots read under the lock are exact.
+struct SlotQueue {
+    runs: VecDeque<QueuedRun>,
+    /// The slot tasks that wait in `isolated::next_run`: their child is
+    /// ready and holds no task.
+    idle: usize,
+}
+
+/// The tasks whose children the drain deadline killed, in the order of the
+/// kills (Python `StopReport.killed_task_ids`). The slot tasks of one pool
+/// note them; the stop of the pool takes them. Each slot notes at most the
+/// runs of its child once, at the one drain deadline, so the seats of the
+/// pool bound the list.
+#[derive(Debug, Default)]
+pub(super) struct DrainKills(Mutex<Vec<Uuid>>);
+
+impl DrainKills {
+    /// Note the tasks of a child that the drain deadline kills.
+    pub(super) fn note(&self, task_ids: impl IntoIterator<Item = Uuid>) {
+        lock(&self.0).extend(task_ids);
+    }
+
+    /// Take the noted tasks, in the order of the kills.
+    fn take(&self) -> Vec<Uuid> {
+        std::mem::take(&mut *lock(&self.0))
+    }
 }
 
 /// The state that the pool and its slot tasks share.
 pub(super) struct PoolShared {
     pub(super) config: IsolatedPoolConfig,
+    /// Where the children come from: the spawner in a worker.
+    pub(super) source: Arc<dyn ChildSource>,
     pub(super) spawner: SpawnerHandle,
     pub(super) live: LiveDispatches,
-    queue: Mutex<VecDeque<QueuedRun>>,
+    pub(super) board: Arc<PoolBoard>,
+    queue: Mutex<SlotQueue>,
     pub(super) queued: Notify,
-    board: Mutex<Board>,
-    /// Cancelled at `stop`: no new task, booting children are ended.
-    pub(super) stop: CancellationToken,
-    /// Cancelled when the pool fails: every slot stops taking tasks.
-    pub(super) failed: CancellationToken,
-    /// Cancelled at the drain deadline: busy children are killed.
-    pub(super) drain_deadline: CancellationToken,
+    pub(super) drain_kills: DrainKills,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A poisoned lock means a panic while it was held; the queue and the
-    // board are still valid values.
+    // noted kills are still valid values.
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl PoolShared {
-    pub(super) fn pop(&self) -> Option<QueuedRun> {
-        lock(&self.queue).pop_front()
-    }
-
-    pub(super) fn set(&self, index: usize, state: IsolatedSlotState) {
-        let mut board = lock(&self.board);
-        if let IsolatedSlotState::Idle { .. } = state {
-            board.booted[index] = BootedOnce::Yes;
-        }
-        board.slots[index] = state;
-    }
-
-    pub(super) fn state(&self, index: usize) -> IsolatedSlotState {
-        lock(&self.board).slots[index].clone()
-    }
-
-    /// What the rest of the pool looks like at a failed boot of `index`.
-    pub(super) fn pool_at_failure(&self, index: usize) -> PoolAtFailure {
-        let board = lock(&self.board);
-        let others = || {
-            board
-                .slots
-                .iter()
-                .enumerate()
-                .filter(move |(other, _)| *other != index)
-                .map(|(_, state)| state)
-        };
-        let any_booted = board.booted.contains(&BootedOnce::Yes);
-        let every_slot_booted_or_down =
-            board
-                .slots
-                .iter()
-                .zip(&board.booted)
-                .all(|(state, booted)| {
-                    matches!(state, IsolatedSlotState::Down(_)) || *booted == BootedOnce::Yes
-                });
-        PoolAtFailure {
-            first_generation_in: any_booted && every_slot_booted_or_down,
-            another_child_serves: others().any(|state| {
-                matches!(
-                    state,
-                    IsolatedSlotState::Idle { .. } | IsolatedSlotState::Busy { .. }
-                )
-            }),
-            every_other_slot_down: others()
-                .all(|state| matches!(state, IsolatedSlotState::Down(_))),
+    /// A slot task whose child is ready and holds no task starts to wait
+    /// for one: it counts as an idle slot until it takes a task or the guard
+    /// drops.
+    pub(super) fn idle_slot(&self) -> IdleSlot<'_> {
+        lock(&self.queue).idle += 1;
+        IdleSlot {
+            shared: self,
+            counted: IdleCount::Counted,
         }
     }
 
-    /// Fail the pool: the first failure wins. Waiting tasks get
-    /// `NotDispatched(PoolFailed)`.
-    pub(super) fn fail(&self, failure: PoolFailure) {
-        {
-            let mut board = lock(&self.board);
-            if board.failure.is_none() {
-                tracing::error!(failure = ?failure, "the isolated pool failed: no replacement child can start");
-                board.failure = Some(failure);
+    /// The slots that take a task at once: the idle slots less the tasks
+    /// that wait for a slot. 0 once the pools stop or failed.
+    fn free_slots(&self) -> u32 {
+        let queue = lock(&self.queue);
+        match self.board.not_serving() {
+            true => 0,
+            false => {
+                let free = queue.idle.saturating_sub(queue.runs.len());
+                u32::try_from(free).unwrap_or(u32::MAX)
             }
         }
-        self.failed.cancel();
-        self.answer_waiting(NotRunCause::PoolFailed);
     }
 
     fn answer_waiting(&self, cause: NotRunCause) {
-        let waiting: Vec<QueuedRun> = lock(&self.queue).drain(..).collect();
+        let waiting: Vec<QueuedRun> = lock(&self.queue).runs.drain(..).collect();
         for run in waiting {
             run.answer.send(AttemptEnd::NotDispatched(cause));
         }
     }
+}
 
-    fn health(&self) -> PoolHealth {
-        let failure = lock(&self.board).failure.clone();
-        match (failure, self.stop.is_cancelled()) {
-            (Some(failure), _) => PoolHealth::Failed(failure),
-            (None, true) => PoolHealth::Stopping,
-            (None, false) => PoolHealth::Serving,
+/// Whether an idle slot is still in the idle count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleCount {
+    Counted,
+    Left,
+}
+
+/// One slot task in the idle count of its pool (Python: a slot in `Idle`).
+/// It leaves the count when it takes a task, in the step that takes it, or
+/// when it drops.
+pub(super) struct IdleSlot<'a> {
+    shared: &'a PoolShared,
+    counted: IdleCount,
+}
+
+impl IdleSlot<'_> {
+    /// Take the next waiting task. A slot that takes one leaves the idle
+    /// count under the same lock.
+    pub(super) fn take(&mut self) -> Option<QueuedRun> {
+        let mut queue = lock(&self.shared.queue);
+        let run = queue.runs.pop_front()?;
+        match self.counted {
+            IdleCount::Counted => {
+                queue.idle -= 1;
+                self.counted = IdleCount::Left;
+            }
+            // A slot that took a task returns it from `next_run` at once.
+            IdleCount::Left => panic!("an isolated slot took a second task while it waited"),
         }
+        Some(run)
+    }
+}
+
+impl Drop for IdleSlot<'_> {
+    fn drop(&mut self) {
+        if self.counted == IdleCount::Counted {
+            lock(&self.shared.queue).idle -= 1;
+        }
+    }
+}
+
+/// Answer every waiting task with `PoolFailed` when the pools fail. Ends at
+/// the stop, which answers the waiting tasks itself.
+async fn answer_at_failure(shared: Arc<PoolShared>) {
+    tokio::select! {
+        () = shared.board.failed.cancelled() => shared.answer_waiting(NotRunCause::PoolFailed),
+        () = shared.board.stop.cancelled() => {}
+    }
+}
+
+/// The task never reaches a child when the pools stop or failed.
+pub(super) fn not_run_cause(health: PoolHealth) -> Option<NotRunCause> {
+    match health {
+        PoolHealth::Serving => None,
+        PoolHealth::Failed(_) => Some(NotRunCause::PoolFailed),
+        PoolHealth::Stopping => Some(NotRunCause::PoolStopping),
     }
 }
 
@@ -292,16 +276,44 @@ pub enum Submitted {
     NotDispatched(NotRunCause),
 }
 
-/// How the stop ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How the stop ended. `killed` names the tasks whose children the drain
+/// deadline killed, in the order of the kills.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PoolStopReport {
-    /// Every slot ended within the drain timeout.
+    /// Every slot ended within the drain timeout, and no child was killed.
     Drained,
     /// The drain deadline killed the busy children; every slot ended after.
-    KilledAtDrainDeadline,
+    KilledAtDrainDeadline { killed: Vec<Uuid> },
     /// Slot tasks still ran 30 s after the kills and were aborted. Their
     /// tasks got the end their answer held.
-    AbortedAfterDrain,
+    AbortedAfterDrain { killed: Vec<Uuid> },
+}
+
+/// When the slot tasks of a pool ended at its stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SlotsEnded {
+    /// Within the drain timeout.
+    InDrain,
+    /// After the drain deadline, within the wait after the kills.
+    AfterKills,
+    /// Not within the wait after the kills: the rest were aborted.
+    Aborted,
+}
+
+impl PoolStopReport {
+    /// The report of a stop whose slots ended `ended`, with the tasks the
+    /// drain deadline killed. The deadline is the board's, so another pool
+    /// can pass it while this pool's slots still end within their drain
+    /// timeout; kills then make the report `KilledAtDrainDeadline`. Pure.
+    pub(super) fn of(ended: SlotsEnded, killed: Vec<Uuid>) -> PoolStopReport {
+        match (ended, killed.is_empty()) {
+            (SlotsEnded::InDrain, true) => PoolStopReport::Drained,
+            (SlotsEnded::InDrain, false) | (SlotsEnded::AfterKills, _) => {
+                PoolStopReport::KilledAtDrainDeadline { killed }
+            }
+            (SlotsEnded::Aborted, _) => PoolStopReport::AbortedAfterDrain { killed },
+        }
+    }
 }
 
 /// The isolated children of a worker.
@@ -311,29 +323,57 @@ pub struct IsolatedPool {
 }
 
 impl IsolatedPool {
-    /// Start one slot task per isolated child on the current runtime. Each
-    /// boots its child at once.
-    pub fn start(config: IsolatedPoolConfig, spawner: SpawnerHandle, live: LiveDispatches) -> Self {
-        let children = config.children.get();
+    /// Start one slot task per isolated slot of `board` on the current
+    /// runtime. Each boots its child at once.
+    pub fn start(
+        config: IsolatedPoolConfig,
+        board: Arc<PoolBoard>,
+        spawner: SpawnerHandle,
+        live: LiveDispatches,
+    ) -> Self {
+        let source: Arc<dyn ChildSource> = Arc::new(spawner.clone());
+        Self::start_with(config, board, spawner, source, live)
+    }
+
+    /// Start the pool with its children from `source`, a source over
+    /// `spawner` that a test builds.
+    #[cfg(test)]
+    pub(super) fn start_from_source(
+        config: IsolatedPoolConfig,
+        board: Arc<PoolBoard>,
+        spawner: SpawnerHandle,
+        source: Arc<dyn ChildSource>,
+        live: LiveDispatches,
+    ) -> Self {
+        Self::start_with(config, board, spawner, source, live)
+    }
+
+    fn start_with(
+        config: IsolatedPoolConfig,
+        board: Arc<PoolBoard>,
+        spawner: SpawnerHandle,
+        source: Arc<dyn ChildSource>,
+        live: LiveDispatches,
+    ) -> Self {
+        let indices: Range<usize> = board.slots_of(ExecutionClass::Isolated);
         let shared = Arc::new(PoolShared {
             config,
+            source,
             spawner,
             live,
-            queue: Mutex::new(VecDeque::new()),
-            queued: Notify::new(),
-            board: Mutex::new(Board {
-                slots: vec![IsolatedSlotState::Booting; children],
-                booted: vec![BootedOnce::No; children],
-                failure: None,
+            board,
+            queue: Mutex::new(SlotQueue {
+                runs: VecDeque::new(),
+                idle: 0,
             }),
-            stop: CancellationToken::new(),
-            failed: CancellationToken::new(),
-            drain_deadline: CancellationToken::new(),
+            queued: Notify::new(),
+            drain_kills: DrainKills::default(),
         });
         let mut slots = JoinSet::new();
-        for index in 0..children {
+        for index in indices {
             slots.spawn(run_slot(Arc::clone(&shared), index));
         }
+        slots.spawn(answer_at_failure(Arc::clone(&shared)));
         Self { shared, slots }
     }
 
@@ -346,23 +386,22 @@ impl IsolatedPool {
         work: IsolatedWork,
         deadline: IsolatedDeadline,
     ) -> Submitted {
-        match self.shared.health() {
-            PoolHealth::Serving => {}
-            PoolHealth::Failed(_) => return Submitted::NotDispatched(NotRunCause::PoolFailed),
-            PoolHealth::Stopping => return Submitted::NotDispatched(NotRunCause::PoolStopping),
-        }
         let (sender, receiver) = oneshot::channel();
         {
             let mut queue = lock(&self.shared.queue);
-            if queue.len() >= self.shared.config.pending_limit.get() {
+            // Read under the queue lock: a failure that fires after this
+            // read finds the task in the queue and answers it.
+            if let Some(cause) = not_run_cause(self.shared.board.health()) {
+                return Submitted::NotDispatched(cause);
+            }
+            if queue.runs.len() >= self.shared.config.pending_limit.get() {
                 return Submitted::NotDispatched(NotRunCause::QueueFull);
             }
-            queue.push_back(QueuedRun {
+            queue.runs.push_back(QueuedRun {
                 frame: RunFrame {
                     task_id: task.task_id,
                     task_name: task.task_name.clone(),
                     worker_id: self.shared.config.worker_id.clone(),
-                    task_kind: task.kind,
                     claimed_at: task.claimed_at,
                     work,
                     input,
@@ -375,43 +414,71 @@ impl IsolatedPool {
         Submitted::Queued(receiver)
     }
 
-    /// The service state of each slot, for the claim budget.
-    pub fn service(&self) -> Vec<SlotService> {
-        lock(&self.shared.board)
-            .slots
-            .iter()
-            .map(IsolatedSlotState::service)
-            .collect()
+    /// The isolated slots that take a task at once: the slots whose child
+    /// is ready and waits for a task, less the tasks that wait for a slot.
+    /// 0 once the pools stop or failed (Python `SlotPool.free_slots`).
+    pub fn free_slots(&self) -> u32 {
+        self.shared.free_slots()
     }
 
-    /// The state of each slot, for the worker snapshot.
-    pub fn slot_states(&self) -> Vec<IsolatedSlotState> {
-        lock(&self.shared.board).slots.clone()
+    /// The service state of each isolated slot, for the claim budget.
+    pub fn service(&self) -> Vec<SlotService> {
+        self.slot_states().iter().map(SlotPhase::service).collect()
+    }
+
+    /// The state of each isolated slot, for the worker snapshot.
+    pub fn slot_states(&self) -> Vec<SlotPhase> {
+        self.shared.board.phases_of(ExecutionClass::Isolated)
     }
 
     pub fn health(&self) -> PoolHealth {
-        self.shared.health()
+        self.shared.board.health()
     }
 
     /// Stop: waiting tasks get `NotDispatched(PoolStopping)`, booting
     /// children are ended, idle children get the stop frame, busy children
     /// get until `drain_timeout`. Then the busy children are killed with
     /// their sessions (their tasks take the crash path), and the slots get
-    /// 30 s more before they are aborted.
+    /// 30 s more before they are aborted. The stop and the drain deadline
+    /// are those of the board, so every pool of the worker stops with them.
+    /// The report names the tasks whose children the deadline killed.
     pub async fn stop(mut self, drain_timeout: Duration) -> PoolStopReport {
-        self.shared.stop.cancel();
+        self.shared.board.begin_stop();
         self.shared.answer_waiting(NotRunCause::PoolStopping);
-        if join_all(&mut self.slots, drain_timeout).await {
-            return PoolStopReport::Drained;
-        }
-        self.shared.drain_deadline.cancel();
-        if join_all(&mut self.slots, AFTER_DRAIN_KILL_WAIT).await {
-            return PoolStopReport::KilledAtDrainDeadline;
-        }
-        self.slots.abort_all();
-        let _ = join_all(&mut self.slots, AFTER_DRAIN_KILL_WAIT).await;
-        PoolStopReport::AbortedAfterDrain
+        stop_slots(
+            &mut self.slots,
+            &self.shared.board,
+            &self.shared.drain_kills,
+            drain_timeout,
+        )
+        .await
     }
+}
+
+/// Wait for the slot tasks of a pool to end within the drain timeout; then
+/// pass the drain deadline, wait 30 s more, and abort what is left. The
+/// report takes the tasks that the slots noted in `kills`.
+pub(super) async fn stop_slots(
+    slots: &mut JoinSet<()>,
+    board: &PoolBoard,
+    kills: &DrainKills,
+    drain_timeout: Duration,
+) -> PoolStopReport {
+    let ended = match join_all(slots, drain_timeout).await {
+        true => SlotsEnded::InDrain,
+        false => {
+            board.pass_drain_deadline();
+            match join_all(slots, AFTER_DRAIN_KILL_WAIT).await {
+                true => SlotsEnded::AfterKills,
+                false => {
+                    slots.abort_all();
+                    let _ = join_all(slots, AFTER_DRAIN_KILL_WAIT).await;
+                    SlotsEnded::Aborted
+                }
+            }
+        }
+    };
+    PoolStopReport::of(ended, kills.take())
 }
 
 /// Wait up to `bound` for every slot task. A panic of a slot task is a

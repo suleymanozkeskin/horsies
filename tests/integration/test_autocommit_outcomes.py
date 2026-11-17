@@ -48,7 +48,7 @@ from horsies.core.lifecycle.persistence import (
     apply_fused_batch,
     apply_in_autocommit,
 )
-from horsies.core.models.tasks import Execution, TaskResult
+from horsies.core.models.tasks import Execution
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.utils.db import (
     StatementRunner,
@@ -57,9 +57,12 @@ from horsies.core.utils.db import (
     run_in_autocommit,
 )
 from horsies.core.worker import finalize as finalize_module
+from horsies.core.worker.finalize import _NodeFinishOwed
+from horsies.core.workflows.node_finish import FactsUnknown
 from horsies.core.worker.claiming import ClaimPass
 from horsies.core.worker.runtime import FinalizeStage, _FinalizeError
 from horsies.core.worker.worker import Worker
+from tests.dispatch_claim_support import claim_at
 from tests.integration.autocommit_support import (
     QUEUE,
     TASK_NAME,
@@ -216,7 +219,7 @@ async def _finalize_success(
         queue_name=QUEUE,
         is_workflow_task=False,
         task_name=TASK_NAME,
-        claimed_at=claimed_at,
+        claim=claim_at(claimed_at),
     )
 
 
@@ -403,15 +406,14 @@ async def test_a_dead_connection_fails_phase_two_as_retryable(
     session: AsyncSession,
 ) -> None:
     """Phase 2 of a workflow task opens its transaction on the dead pooled
-    connection: a retryable phase-2 error, whose retry runs phase 2 again."""
+    connection (the transaction form of a replay): a retryable phase-2
+    error, whose retry runs phase 2 again."""
     await _one_pooled_connection(direct)
     await _kill_the_pooled_backend(direct.worker, session)
 
     result = await direct.worker._finalize_workflow_phase(
         str(uuid.uuid4()),
-        TaskResult(ok=None),
-        queue_name=QUEUE,
-        task_name=TASK_NAME,
+        _NodeFinishOwed(queue_name=QUEUE, facts=FactsUnknown()),
     )
 
     match result:

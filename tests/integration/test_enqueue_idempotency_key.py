@@ -22,6 +22,7 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
     BrokerIdempotencyKeyConflict,
@@ -39,17 +40,6 @@ TASK_NAME: Final = 'idempotency.key'
 CONCURRENT_SENDS: Final = 64
 """Sends of one key that run at the same time, each on its own connection."""
 
-
-CLAIM_RACE_REFUSAL: Final = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        'horsies_key_reservation_claim inserts when its read finds no row; '
-        'a send that loses the insert race to another send of the same new '
-        'key fails with a unique violation instead of a replay or a key '
-        'conflict (#979)'
-    ),
-)
-"""Two sends that claim one new key at the same time: see #979."""
 
 @dataclass(frozen=True, slots=True)
 class Send:
@@ -83,6 +73,7 @@ async def enqueue(
     return await broker.enqueue_async(
         TASK_NAME,
         task_id=send.task_id,
+        send_kind=SendKind.FIRST,
         enqueue_sha=enqueue_fingerprint(
             task_name=TASK_NAME,
             queue_name='default',
@@ -294,7 +285,6 @@ async def send_concurrently(
         await broker.close_async()
 
 
-@CLAIM_RACE_REFUSAL
 async def test_concurrent_sends_of_one_key_commit_one_task(
     broker: PostgresBroker,
     db_url: str,
@@ -319,7 +309,6 @@ async def test_concurrent_sends_of_one_key_commit_one_task(
     assert await reservations(engine, *(send.task_id for send in sends)) == 1
 
 
-@CLAIM_RACE_REFUSAL
 async def test_concurrent_sends_with_two_commands_classify_against_the_winner(
     broker: PostgresBroker,
     db_url: str,

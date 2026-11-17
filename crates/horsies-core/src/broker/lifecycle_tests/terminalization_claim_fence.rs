@@ -4,7 +4,7 @@
 //! worker claims it again: the row is CLAIMED by that worker once more, so
 //! only the claim generation tells the two dispatches apart. The post-claim
 //! workflow check (`PostgresBroker::filter_non_runnable_workflow_tasks`) and
-//! the pre-start stop (`PostgresBroker::handle_workflow_stop_before_start`)
+//! the pre-start stop (`PostgresBroker::stop_workflow_task_before_start`)
 //! fence on it.
 
 use chrono::{DateTime, Duration, Utc};
@@ -12,8 +12,11 @@ use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
-use crate::broker::postgres::PostgresBroker;
-use crate::broker::terminalization::terminalize;
+use crate::broker::claims::claim_pass;
+use crate::broker::core_rows::StatementLog;
+use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::postgres::{PostgresBroker, WorkflowStop};
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::TerminalizationCommand;
 
 const CLAIM_QUEUE: &str = "lifecycle_claim_fence";
@@ -102,11 +105,15 @@ async fn real_claim_path_arms_the_fence() {
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "PAUSED").await;
     let broker = PostgresBroker::from_pool(pool.clone());
 
-    let rows = broker
-        .claim_batch(&claim_pass(CLAIM_QUEUE))
-        .await
-        .expect("claim pass");
-    let claimed = rows
+    let pass = claim_pass(
+        &core_pool_for_test_pool(&pool),
+        StatementLog::Off,
+        &claim_request(CLAIM_QUEUE),
+    )
+    .await
+    .expect("claim pass");
+    let claimed = pass
+        .claimed
         .iter()
         .find(|row| row.id == task_id)
         .expect("the claim returned the seeded task");
@@ -135,6 +142,7 @@ async fn real_claim_path_arms_the_fence() {
 /// One case of `test_child_prestart_fences_on_claim_generation`.
 struct PrestartCase {
     workflow_status: &'static str,
+    stop: WorkflowStop,
     kind: &'static str,
     fresh_node_status: &'static str,
     fresh_node_link: NodeLink,
@@ -152,8 +160,8 @@ async fn child_prestart_fences(case: PrestartCase) {
     let broker = PostgresBroker::from_pool(pool.clone());
 
     for task_id in [stale, fresh] {
-        broker
-            .handle_workflow_stop_before_start(task_id, case.workflow_status, WORKER, dispatched)
+        let _stopped = broker
+            .stop_workflow_task_before_start(task_id, case.stop, WORKER, dispatched)
             .await
             .expect("stop before start");
     }
@@ -181,6 +189,7 @@ async fn child_prestart_fences(case: PrestartCase) {
 async fn child_prestart_fences_on_claim_generation_paused() {
     child_prestart_fences(PrestartCase {
         workflow_status: "PAUSED",
+        stop: WorkflowStop::Paused,
         kind: "PAUSE_ABANDON_CLAIM",
         fresh_node_status: "READY",
         fresh_node_link: NodeLink::Detached,
@@ -194,6 +203,7 @@ async fn child_prestart_fences_on_claim_generation_paused() {
 async fn child_prestart_fences_on_claim_generation_cancelled() {
     child_prestart_fences(PrestartCase {
         workflow_status: "CANCELLED",
+        stop: WorkflowStop::Cancelled,
         kind: "WORKFLOW_CANCEL_CLAIM",
         fresh_node_status: "SKIPPED",
         fresh_node_link: NodeLink::Linked,
@@ -218,8 +228,8 @@ async fn child_prestart_still_cancels_requeued_pending_row() {
     .await;
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "CANCELLED").await;
 
-    PostgresBroker::from_pool(pool.clone())
-        .handle_workflow_stop_before_start(task_id, "CANCELLED", WORKER, dispatched)
+    let _stopped = PostgresBroker::from_pool(pool.clone())
+        .stop_workflow_task_before_start(task_id, WorkflowStop::Cancelled, WORKER, dispatched)
         .await
         .expect("stop before start");
 

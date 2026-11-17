@@ -6,17 +6,93 @@ use uuid::Uuid;
 
 use crate::broker::core_rows::RowDecodeError;
 use crate::broker::pools::PoolSettingsError;
+use crate::core::codec::JsonReadError;
+use crate::core::history::enqueue::{EnqueuePreparationError, SendPart};
 use crate::db::{StatementFailure, Transience};
+
+/// Why the core refused a send before any statement (Python's
+/// `BrokerInvalidInput` and `BrokerInvalidTaskOptions`). Nothing was
+/// written.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct EnqueueRefusal {
+    /// The part of the send that the rule refused.
+    pub part: SendPart,
+    /// What was refused and why.
+    pub message: String,
+    pub cause: EnqueueRefusalCause,
+}
+
+/// What a send refusal carries besides its message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnqueueRefusalCause {
+    /// The refused text does not read as JSON: the reader's error text
+    /// (Python passes its `StrictJsonError` as the `exception`).
+    JsonUnreadable(String),
+    /// A rule refused a value that reads (Python passes `NoCause()`).
+    RuleRefused,
+}
+
+impl EnqueueRefusal {
+    /// A refusal of `part` by a rule, with no cause besides `message`.
+    pub fn by_rule(part: SendPart, message: String) -> Self {
+        Self {
+            part,
+            message,
+            cause: EnqueueRefusalCause::RuleRefused,
+        }
+    }
+
+    /// A refusal of `part` whose text does not read as strict JSON.
+    pub fn unreadable_json(part: SendPart, message: String, error: &JsonReadError) -> Self {
+        Self {
+            part,
+            message,
+            cause: EnqueueRefusalCause::JsonUnreadable(error.to_string()),
+        }
+    }
+}
+
+impl From<EnqueuePreparationError> for EnqueueRefusal {
+    /// The part and the cause of a preparation error: a JSON text that does
+    /// not read keeps the reader's error; the options' shape and execution
+    /// class are the task options; the fingerprint and the idempotency key
+    /// are the input.
+    fn from(error: EnqueuePreparationError) -> Self {
+        let message = error.to_string();
+        let (part, cause) = match &error {
+            EnqueuePreparationError::StrictJson { field, source } => (
+                *field,
+                EnqueueRefusalCause::JsonUnreadable(source.to_string()),
+            ),
+            EnqueuePreparationError::Json { field, source } => (
+                *field,
+                EnqueueRefusalCause::JsonUnreadable(source.to_string()),
+            ),
+            EnqueuePreparationError::NumberDomain { field, .. } => {
+                (*field, EnqueueRefusalCause::RuleRefused)
+            }
+            EnqueuePreparationError::InvalidTaskOptions
+            | EnqueuePreparationError::InvalidExecution(_) => {
+                (SendPart::TaskOptions, EnqueueRefusalCause::RuleRefused)
+            }
+            EnqueuePreparationError::Fingerprint(_) | EnqueuePreparationError::Idempotency(_) => {
+                (SendPart::Input, EnqueueRefusalCause::RuleRefused)
+            }
+        };
+        Self {
+            part,
+            message,
+            cause,
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrokerError {
     /// Database connection or query error.
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
-
-    /// Migration error.
-    #[error("migration error: {0}")]
-    Migration(#[from] sqlx::migrate::MigrateError),
 
     /// Existing workflow nodes contain a status outside the typed node enum.
     #[error("migration refused: workflow nodes contain an unsupported status; repair these rows before retrying")]
@@ -30,10 +106,6 @@ pub enum BrokerError {
          this fleet"
     )]
     IncompleteTaskHistoryCutover,
-
-    /// The database migration ledger does not end at this binary's exact schema.
-    #[error("schema version mismatch: binary requires {expected}, database reports {actual:?}")]
-    SchemaVersionMismatch { expected: i64, actual: Option<i64> },
 
     /// JSON serialization/deserialization error.
     #[error("serialization error: {0}")]
@@ -82,9 +154,11 @@ pub enum BrokerError {
     )]
     IdempotencyKeyConflict { task_name: String, task_id: Uuid },
 
-    /// Enqueue-time history facts could not be prepared or decoded.
+    /// The core refused a send before any statement: its input, a fact of
+    /// the call, or its task options break a rule. Nothing was written. Not
+    /// retryable: the same send is refused again.
     #[error("enqueue contract violation: {0}")]
-    EnqueueContract(String),
+    EnqueueContract(EnqueueRefusal),
 
     /// The broker's keyed-enqueue reservation window is outside `(0, 30d]`.
     #[error("invalid idempotency reservation window: {0}")]
@@ -101,6 +175,13 @@ pub enum BrokerError {
         stored: crate::broker::client_family::RecordedFamily,
         own: crate::broker::client_family::ClientFamily,
     },
+
+    /// The schema install refused the database: it holds something this
+    /// build does not install into (a 0.x schema, unknown horsies tables, a
+    /// newer, foreign, failed or changed migration). Nothing was changed. Not
+    /// retryable: the same database is refused again.
+    #[error("schema install refused: {0}")]
+    SchemaRefused(crate::broker::migrations::SchemaRefusal),
 
     /// The schema install lock could not be used.
     #[error("schema install lock: {0}")]
@@ -125,6 +206,14 @@ pub enum BrokerError {
     /// takes. It is refused, never clamped.
     #[error("invalid claim argument: {0}")]
     InvalidClaimArgument(String),
+
+    /// A row of the claim, the start, the release, the settle of claimed
+    /// workflow tasks or the stale claim requeue breaks its function's row
+    /// contract (`broker::claims`, `broker::workflow_claim_settle`,
+    /// `broker::stale_recovery`). Not retryable: the same call meets it
+    /// again.
+    #[error("claim contract violation: {0}")]
+    ClaimContract(String),
 
     /// A statement on a core pool failed with one of the statement layer's
     /// three outcomes. Retryable when its cause may clear
@@ -171,10 +260,9 @@ impl BrokerError {
             Self::Statement(failure) => is_retryable_statement_failure(failure),
             Self::ConnectionFailed(_) | Self::ListenerClosed => true,
             Self::InstallLock(failure) => failure.is_retryable(),
-            Self::Migration(_)
+            Self::SchemaRefused(_)
             | Self::InvalidWorkflowNodeStatus
             | Self::IncompleteTaskHistoryCutover
-            | Self::SchemaVersionMismatch { .. }
             | Self::InvalidConnectionSettings(_)
             | Self::ClientFamilyMismatch { .. }
             | Self::Serialization(_)
@@ -188,6 +276,7 @@ impl BrokerError {
             | Self::TerminalizationContract(_)
             | Self::HistoryReadContract(_)
             | Self::InvalidClaimArgument(_)
+            | Self::ClaimContract(_)
             | Self::PoolSettings(_)
             | Self::RowDecode(_) => false,
         }
@@ -209,7 +298,7 @@ pub fn is_retryable_statement_failure(failure: &StatementFailure) -> bool {
 }
 
 /// Why the schema install lock could not be used (Python
-/// `horsies/core/brokers/postgres.py:1466-1525`).
+/// `python/horsies/core/brokers/postgres.py:1466-1525`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InstallLockFailure {
     /// Another installer held the lock for the whole wait bound. Nothing was

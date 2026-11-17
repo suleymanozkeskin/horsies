@@ -30,15 +30,15 @@ from horsies.core.history.ddl.classes import (
     register_finite_retention_class,
 )
 from horsies.core.history.names import FOREVER_LEAF
-from horsies.core.types.result import Err, Ok
 from tests.attempt_snapshot_support import encode_attempt_snapshot
+from horsies.core.utils.url import sqlalchemy_url
 
 
 def _database_url() -> str:
     return (
         os.environ.get('HORSIES_TEST_DATABASE_URL')
         or os.environ.get('HORSES_E2E_DB_URL')
-        or 'postgresql+psycopg://postgres:'
+        or 'postgresql://postgres:'
         f'{os.environ["DB_PASSWORD"]}@localhost:5432/horsies'
     )
 
@@ -58,11 +58,7 @@ async def install_baseline_schema(connection: AsyncConnection) -> None:
     psycopg sends it with the simple query protocol and reads no
     placeholders in it. It joins the caller's transaction.
     """
-    match load_baseline_migration():
-        case Ok(migration):
-            pass
-        case Err(unreadable):
-            raise AssertionError(f'baseline SQL unreadable: {unreadable}')
+    migration = load_baseline_migration()
     raw = await connection.get_raw_connection()
     driver = raw.driver_connection
     assert driver is not None, 'the engine has a driver connection'
@@ -80,14 +76,16 @@ def task_history_schema_fixture(schema_name: str):  # type: ignore[no-untyped-de
     @pytest_asyncio.fixture()
     async def history_schema() -> AsyncGenerator[HistorySchema, None]:
         url = _database_url()
-        admin_engine = create_async_engine(url, isolation_level='AUTOCOMMIT')
+        admin_engine = create_async_engine(
+            sqlalchemy_url(url), isolation_level='AUTOCOMMIT',
+        )
         async with admin_engine.connect() as connection:
             await connection.execute(
                 text(f'DROP SCHEMA IF EXISTS {schema_name} CASCADE')
             )
             await connection.execute(text(f'CREATE SCHEMA {schema_name}'))
         engine = create_async_engine(
-            url,
+            sqlalchemy_url(url),
             connect_args={'options': f'-csearch_path={schema_name}'},
         )
         async with engine.begin() as connection:
@@ -230,14 +228,16 @@ def terminalization_schema_fixture(  # type: ignore[no-untyped-def]
     @pytest_asyncio.fixture()
     async def terminalization_schema() -> AsyncGenerator[HistorySchema, None]:
         url = _database_url()
-        admin_engine = create_async_engine(url, isolation_level='AUTOCOMMIT')
+        admin_engine = create_async_engine(
+            sqlalchemy_url(url), isolation_level='AUTOCOMMIT',
+        )
         async with admin_engine.connect() as connection:
             await connection.execute(
                 text(f'DROP SCHEMA IF EXISTS {schema_name} CASCADE')
             )
             await connection.execute(text(f'CREATE SCHEMA {schema_name}'))
         engine = create_async_engine(
-            url,
+            sqlalchemy_url(url),
             connect_args={'options': f'-csearch_path={schema_name}'},
         )
         async with engine.begin() as connection:
@@ -400,7 +400,7 @@ async def link_workflow_node(
     await connection.execute(
         text(
             """
-            INSERT INTO horsies_workflow_tasks (
+            INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
                 id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, args_from,
                 workflow_ctx_from, allow_failed_deps, join_type, min_success,
@@ -409,7 +409,7 @@ async def link_workflow_node(
                 sub_workflow_id, sub_workflow_name, sub_definition_key,
                 sub_workflow_params, sub_workflow_summary, result, error,
                 created_at, started_at, completed_at
-            ) VALUES (
+            ) VALUES ('NONE',
                 CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), :task_index,
                 :node_key, 'it.move', '{}',
                 'default', 50, '{}', NULL,

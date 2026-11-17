@@ -29,6 +29,7 @@ from pydantic import SecretStr
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
@@ -36,10 +37,6 @@ from horsies.core.brokers.result_types import (
     RawResultRecord,
 )
 from horsies.core.history.names import TASK_RESULT_FUNCTION
-from horsies.core.history.reads.lookup_generation import (
-    LookupManifest,
-    render_staged_result_function,
-)
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskStatus
 from horsies.core.types.result import Err, Ok, is_err
@@ -50,8 +47,22 @@ from tests.integration.test_task_history_schema_emission import (
     make_database,
 )
 from tests.broker_resources_support import current_resources
+from horsies.core.utils.url import sqlalchemy_url
 
 __all__ = ['make_database']
+
+_STALE_RESULT_READER_SQL = f"""
+CREATE OR REPLACE FUNCTION {TASK_RESULT_FUNCTION}(p_task_id uuid)
+RETURNS TABLE(location text, status text, failed_reason text, result_envelope_version smallint,
+              result_payload bytea, result_digest bytea, task_name text)
+LANGUAGE sql STABLE STRICT AS $$
+    SELECT 'LIVE'::text, t.status::text, NULL::text, NULL::smallint, NULL::bytea, NULL::bytea,
+        t.task_name::text
+    FROM horsies_tasks AS t WHERE t.id = p_task_id
+$$
+"""
+"""A result reader that probes no history leaf: the reader of a publication
+that ran before any history leaf existed."""
 
 pytestmark = [pytest.mark.integration]
 
@@ -98,7 +109,7 @@ async def seed_history_task(
 async def populated_history(url: str) -> tuple[str, str]:
     """History holds one COMPLETED task with a result and one CANCELLED
     task without one; the staged readers are published."""
-    engine = create_async_engine(url)
+    engine = create_async_engine(sqlalchemy_url(url))
     try:
         async with AsyncSession(engine) as session:
             completed = await seed_history_task(
@@ -115,7 +126,7 @@ async def populated_history(url: str) -> tuple[str, str]:
 
 
 async def _execute(url: str, statement: str) -> None:
-    engine = create_async_engine(url)
+    engine = create_async_engine(sqlalchemy_url(url))
     try:
         async with engine.begin() as connection:
             await connection.execute(text(statement))
@@ -191,11 +202,11 @@ class TestHistoryFallback:
             await broker.close_async()
 
     @pytest.mark.asyncio
-    async def test_unpublished_staged_function_keeps_old_semantics(
+    async def test_an_id_held_nowhere_is_absent(
         self, make_database: MakeDatabase
     ) -> None:
-        """A pre-coverage database has no history to consult: absent
-        means absent, exactly as before."""
+        """An id that neither the live table nor history holds: the readers
+        that the install publishes answer absent, and the result is Ok(None)."""
         url = await make_database()
         broker = PostgresBroker(
             PostgresConfig(database_url=SecretStr(url))
@@ -221,7 +232,7 @@ class TestHistoryFallback:
         try:
             await broker.ensure_schema_initialized()
             completed, _ = await populated_history(url)
-            engine = create_async_engine(url)
+            engine = create_async_engine(sqlalchemy_url(url))
             try:
                 async with engine.begin() as connection:
                     await connection.execute(
@@ -291,6 +302,7 @@ class TestStagedResultReader:
             enqueued = await broker.enqueue_async(
                 'result.reader.task',
                 task_id=task_id,
+                send_kind=SendKind.FIRST,
                 enqueue_sha='d' * 64,
                 sent_at=datetime.now(timezone.utc),
                 args_json='[]',
@@ -330,13 +342,8 @@ class TestStagedResultReader:
         try:
             await broker.ensure_schema_initialized()
             completed, _ = await populated_history(url)
-            await _execute(
-                url,
-                render_staged_result_function(
-                    LookupManifest(leaves=())
-                ),
-            )
-            engine = create_async_engine(url)
+            await _execute(url, _STALE_RESULT_READER_SQL)
+            engine = create_async_engine(sqlalchemy_url(url))
             try:
                 async with engine.connect() as connection:
                     stale_rows = (

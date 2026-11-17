@@ -43,11 +43,9 @@ from horsies.core.worker.child_runner import (
     MARK_FINALIZING_SQL,
     RESET_PAUSED_NODE_SQL,
     SKIP_CANCELLED_NODE_SQL,
-    START_WORKFLOW_NODE_SQL,
-    WORKFLOW_STATUS_OF_TASK_SQL,
+    START_ATTEMPT_SQL,
     mark_finalizing_params,
-    set_running_params,
-    set_running_sql,
+    start_attempt_params,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -158,39 +156,37 @@ def _confirm(pool: _Pool | _BrokenPool, *, is_workflow_task: bool = False) -> An
     )
 
 
+_STARTED = ('STARTED', None)
+
+
+def _missed(reason: str) -> tuple[str, str]:
+    return ('MISSED', reason)
+
+
 class TestSetRunning:
-    def test_a_started_row_commits_and_runs_the_task(self) -> None:
-        cursor = _Cursor([_Row('task-1')])
+    def test_a_started_row_runs_the_task_after_one_statement(self) -> None:
+        cursor = _Cursor([_STARTED])
         conn = _Conn(cursor)
 
         assert _confirm(_Pool(conn)) is None
 
         assert cursor.queries == [
-            (
-                set_running_sql(False),
-                set_running_params('task-1', 'worker-1', False, CLAIMED_AT),
-            ),
+            (START_ATTEMPT_SQL, start_attempt_params('task-1', 'worker-1', CLAIMED_AT)),
         ]
-        assert (conn.commits, conn.rollbacks) == (1, 0)
+        assert (conn.commits, conn.rollbacks) == (0, 0)
 
-    def test_a_workflow_task_sets_its_node_running_in_the_same_transaction(
-        self,
-    ) -> None:
-        cursor = _Cursor([_Row('task-1'), _Row(True)])
+    def test_a_workflow_task_starts_with_the_same_statement(self) -> None:
+        """The function reads is_workflow_task from the locked row and
+        writes the node in the same statement."""
+        cursor = _Cursor([_STARTED])
         conn = _Conn(cursor)
 
         assert _confirm(_Pool(conn), is_workflow_task=True) is None
 
-        # The pool is in autocommit: the transaction opens before the update.
-        assert [sql for sql, _ in cursor.queries] == [
-            BEGIN_SQL,
-            set_running_sql(True),
-            START_WORKFLOW_NODE_SQL,
-        ]
-        assert conn.commits == 1
+        assert [sql for sql, _ in cursor.queries] == [START_ATTEMPT_SQL]
 
-    def test_a_workflow_task_with_no_node_rolls_back(self) -> None:
-        cursor = _Cursor([_Row('task-1'), _Row(False)])
+    def test_a_node_that_is_not_linked_fails_the_workflow_check(self) -> None:
+        cursor = _Cursor([_missed('NODE_NOT_LINKED')])
         conn = _Conn(cursor)
 
         assert _confirm(_Pool(conn), is_workflow_task=True) == (
@@ -198,8 +194,12 @@ class TestSetRunning:
             '',
             'WORKFLOW_CHECK_FAILED',
         )
-        assert cursor.queries[0] == (BEGIN_SQL, ())
-        assert (conn.commits, conn.rollbacks) == (0, 1)
+        assert [sql for sql, _ in cursor.queries] == [START_ATTEMPT_SQL]
+
+    def test_a_row_outside_the_contract_is_ownership_unconfirmed(self) -> None:
+        cursor = _Cursor([_missed('SOMETHING_ELSE')])
+
+        assert _confirm(_Pool(_Conn(cursor))) == (False, '', 'OWNERSHIP_UNCONFIRMED')
 
     def test_a_pool_error_is_ownership_unconfirmed(self) -> None:
         assert _confirm(_BrokenPool()) == (False, '', 'OWNERSHIP_UNCONFIRMED')
@@ -316,8 +316,8 @@ class TestRefusalBound:
 
 
 class TestMissedStart:
-    def test_an_expired_claim_ends_as_task_expired(self) -> None:
-        cursor = _Cursor([None])
+    def test_a_passed_deadline_expires_the_claim(self) -> None:
+        cursor = _Cursor([_missed('DEADLINE_PASSED')])
         conn = _Conn(cursor)
         with patch.object(
             shared_lifecycle,
@@ -332,8 +332,8 @@ class TestMissedStart:
         assert command.fence.worker_id == 'worker-1'
         assert conn.commits == 1
 
-    def test_a_lost_claim_rolls_back_and_skips_the_task(self) -> None:
-        cursor = _Cursor([None])
+    def test_a_refused_expiry_is_a_lost_claim(self) -> None:
+        cursor = _Cursor([_missed('DEADLINE_PASSED')])
         conn = _Conn(cursor)
         with patch.object(
             shared_lifecycle,
@@ -343,97 +343,59 @@ class TestMissedStart:
             result = _confirm(_Pool(conn))
 
         assert result == (False, '', 'CLAIM_LOST')
-        assert (conn.commits, conn.rollbacks) == (0, 1)
+        assert (conn.commits, conn.rollbacks) == (0, 0)
+
+    @pytest.mark.parametrize('reason', ['NOT_HELD', 'LEASE_EXPIRED'])
+    def test_a_claim_that_is_not_held_or_expired_is_lost_with_no_write(
+        self, reason: str,
+    ) -> None:
+        cursor = _Cursor([_missed(reason)])
+        conn = _Conn(cursor)
+        apply = AsyncMock()
+        with patch.object(shared_lifecycle, 'apply_psycopg_async', apply):
+            result = _confirm(_Pool(conn))
+
+        assert result == (False, '', 'CLAIM_LOST')
+        assert [sql for sql, _ in cursor.queries] == [START_ATTEMPT_SQL]
+        apply.assert_not_awaited()
 
     def test_a_paused_workflow_abandons_the_claim_and_resets_the_node(self) -> None:
-        cursor = _Cursor([None, _Row(status='PAUSED')])
-        conn = _Conn(cursor)
-        outcomes = [MagicMock(spec=LostClaim), MagicMock(spec=Applied)]
-        with patch.object(
-            shared_lifecycle,
-            'apply_psycopg_async',
-            AsyncMock(side_effect=outcomes),
-        ) as apply:
-            result = _confirm(_Pool(conn), is_workflow_task=True)
-
-        assert result == (False, '', 'WORKFLOW_STOPPED')
-        abandon = apply.call_args_list[1].args[1]
-        assert isinstance(abandon, AbandonOwnedNode)
-        assert abandon.fence.claimed_at == CLAIMED_AT
-        assert [sql for sql, _ in cursor.queries][-2:] == [
-            WORKFLOW_STATUS_OF_TASK_SQL,
-            RESET_PAUSED_NODE_SQL,
-        ]
-        assert conn.commits == 1
-
-    def test_a_cancelled_workflow_cancels_the_task_and_skips_the_node(self) -> None:
-        cursor = _Cursor([None, _Row(status='CANCELLED')])
-        conn = _Conn(cursor)
-        outcomes = [MagicMock(spec=LostClaim), MagicMock(spec=Applied)]
-        with patch.object(
-            shared_lifecycle,
-            'apply_psycopg_async',
-            AsyncMock(side_effect=outcomes),
-        ) as apply:
-            result = _confirm(_Pool(conn), is_workflow_task=True)
-
-        assert result == (False, '', 'WORKFLOW_STOPPED')
-        cancel = apply.call_args_list[1].args[1]
-        assert isinstance(cancel, CancelOwnedNode)
-        assert cancel.accepts_requeued_pending is True
-        assert cursor.queries[-1][0] == SKIP_CANCELLED_NODE_SQL
-
-    def test_a_missed_workflow_start_ends_its_transaction_before_the_miss_path(
-        self,
-    ) -> None:
-        """A start that returns no row can hold the row lock: its fence
-        failed after the row was locked, so its transaction ends first. The
-        expiry then runs alone in autocommit, and its task locks end with
-        it. The workflow read, the abandon and the node reset run in a new
-        transaction, which holds no task lock when the abandon asks for the
-        workflow row."""
-        cursor = _Cursor([None, _Row(status='PAUSED')])
+        """The stop runs in its own transaction after the start, whose row
+        lock ended with its statement."""
+        cursor = _Cursor([_missed('WORKFLOW_PAUSED')])
         conn = _OrderedConn(cursor)
-        outcomes = [MagicMock(spec=LostClaim), MagicMock(spec=Applied)]
         with patch.object(
             shared_lifecycle,
             'apply_psycopg_async',
-            _apply_recording(outcomes),
+            _apply_recording([MagicMock(spec=Applied)]),
         ):
             result = _confirm(_Pool(conn), is_workflow_task=True)
 
         assert result == (False, '', 'WORKFLOW_STOPPED')
         assert [sql for sql, _ in cursor.queries] == [
+            START_ATTEMPT_SQL,
             BEGIN_SQL,
-            set_running_sql(True),
-            'ROLLBACK',
-            ExpireOwnedClaim.__name__,
-            BEGIN_SQL,
-            WORKFLOW_STATUS_OF_TASK_SQL,
             AbandonOwnedNode.__name__,
             RESET_PAUSED_NODE_SQL,
             'COMMIT',
         ]
 
-    def test_a_missed_plain_start_opens_no_transaction(self) -> None:
-        """A plain task starts in autocommit: the lock of its start ended with
-        the statement, and nothing is sent between the start and the
-        expiry."""
-        cursor = _Cursor([None])
-        conn = _OrderedConn(cursor)
+    def test_a_cancelled_workflow_cancels_the_task_and_skips_the_node(self) -> None:
+        cursor = _Cursor([_missed('WORKFLOW_CANCELLED')])
+        conn = _Conn(cursor)
         with patch.object(
             shared_lifecycle,
             'apply_psycopg_async',
-            _apply_recording([MagicMock(spec=LostClaim)]),
-        ):
-            result = _confirm(_Pool(conn))
+            AsyncMock(return_value=MagicMock(spec=Applied)),
+        ) as apply:
+            result = _confirm(_Pool(conn), is_workflow_task=True)
 
-        assert result == (False, '', 'CLAIM_LOST')
-        assert [sql for sql, _ in cursor.queries] == [
-            set_running_sql(False),
-            ExpireOwnedClaim.__name__,
-            'ROLLBACK',
-        ]
+        assert result == (False, '', 'WORKFLOW_STOPPED')
+        cancel = apply.call_args.args[1]
+        assert isinstance(cancel, CancelOwnedNode)
+        assert cancel.accepts_requeued_pending is True
+        assert cancel.fence.claimed_at == CLAIMED_AT
+        assert cursor.queries[-1][0] == SKIP_CANCELLED_NODE_SQL
 
     def test_a_resume_before_the_abandon_starts_the_task_on_the_next_attempt(
         self,
@@ -447,20 +409,20 @@ class TestMissedStart:
                 workflow_status='RUNNING',
             ),
         )
-        first = _Conn(_Cursor([None, _Row(status='PAUSED')]))
-        second_cursor = _Cursor([_Row('task-1'), _Row(True)])
+        first = _Conn(_Cursor([_missed('WORKFLOW_PAUSED')]))
+        second_cursor = _Cursor([_STARTED])
         second = _Conn(second_cursor)
         with patch.object(
             shared_lifecycle,
             'apply_psycopg_async',
-            AsyncMock(side_effect=[MagicMock(spec=LostClaim), resumed]),
+            AsyncMock(side_effect=[resumed]),
         ):
             result = _confirm(_Pool(first, second), is_workflow_task=True)
 
         assert result is None
-        # The start that missed, then the refused abandon.
-        assert (first.commits, first.rollbacks) == (0, 2)
-        assert second.commits == 1
+        # The refused abandon rolls back its transaction.
+        assert (first.commits, first.rollbacks) == (0, 1)
+        assert [sql for sql, _ in second_cursor.queries] == [START_ATTEMPT_SQL]
 
     def test_a_resume_on_every_attempt_leaves_the_claim_to_its_lease(self) -> None:
         resumed = SourceStateConflict(
@@ -472,13 +434,11 @@ class TestMissedStart:
                 workflow_status='RUNNING',
             ),
         )
-        conns = [_Conn(_Cursor([None, _Row(status='PAUSED')])) for _ in range(2)]
+        conns = [_Conn(_Cursor([_missed('WORKFLOW_PAUSED')])) for _ in range(2)]
         with patch.object(
             shared_lifecycle,
             'apply_psycopg_async',
-            AsyncMock(
-                side_effect=[MagicMock(spec=LostClaim), resumed] * len(conns),
-            ),
+            AsyncMock(side_effect=[resumed] * len(conns)),
         ):
             result = _confirm(_Pool(*conns), is_workflow_task=True)
 

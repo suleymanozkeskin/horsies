@@ -11,6 +11,7 @@ from horsies.core.history.maintenance import coverage
 from horsies.core.history.maintenance.coverage import (
     CoverageEnsureFailed,
     CoverageEnsured,
+    CoveredUntil,
     StartupCoverageRefused,
     ensure_startup_coverage,
 )
@@ -73,7 +74,7 @@ async def test_complete_required_coverage_allows_startup(
         created_heartbeat_leaves=0,
         republished=False,
         heartbeat_covered_now=True,
-        history_covered_through=now,
+        history_covered_through=CoveredUntil(at=now),
         heartbeats_covered_through=now,
         absent_leaves=(),
     )
@@ -99,7 +100,7 @@ async def test_success_report_refuses_when_heartbeat_is_not_covered(
         created_heartbeat_leaves=0,
         republished=False,
         heartbeat_covered_now=False,
-        history_covered_through=now,
+        history_covered_through=CoveredUntil(at=now),
         heartbeats_covered_through=now,
         absent_leaves=(),
     )
