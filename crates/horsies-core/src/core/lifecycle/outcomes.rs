@@ -19,6 +19,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{Column, Row};
 use uuid::Uuid;
 
+use crate::core::python_text::python_repr;
 use crate::core::types::status::TaskStatus;
 use crate::db::{FromSql, Row as CoreRow};
 
@@ -416,9 +417,10 @@ pub fn decode_raw(raw: RawOutcomeRow) -> Result<TerminalizationOutcome, OutcomeD
             })
         }
         unknown => Err(OutcomeDecodeError(format!(
-            "unknown outcome {unknown:?}. The database implements an outcome \
+            "unknown outcome {}. The database implements an outcome \
              this driver does not; refusing to guess which of the known ones \
-             it resembles."
+             it resembles.",
+            python_repr(unknown)
         ))),
     }
 }
@@ -441,8 +443,12 @@ fn decode_evidence(
         }));
     };
 
-    let guard_kind = GuardKind::parse(raw_guard_kind)
-        .ok_or_else(|| OutcomeDecodeError(format!("unknown guard_kind {raw_guard_kind:?}")))?;
+    let guard_kind = GuardKind::parse(raw_guard_kind).ok_or_else(|| {
+        OutcomeDecodeError(format!(
+            "unknown guard_kind {}",
+            python_repr(raw_guard_kind)
+        ))
+    })?;
 
     match guard_kind {
         GuardKind::Deadline => {
@@ -554,9 +560,10 @@ fn optional_kind(raw: &RawOutcomeRow) -> Result<Option<TerminalizationKind>, Out
         None => Ok(None),
         Some(value) => TerminalizationKind::parse(value).map(Some).ok_or_else(|| {
             OutcomeDecodeError(format!(
-                "unknown terminalization kind {value:?}. A kind this driver \
+                "unknown terminalization kind {}. A kind this driver \
                  does not know cannot be placed in an equivalence class, so \
-                 its provenance cannot be judged."
+                 its provenance cannot be judged.",
+                python_repr(value)
             ))
         }),
     }
@@ -579,10 +586,12 @@ fn parse_optional_status(
 ) -> Result<Option<TaskStatus>, OutcomeDecodeError> {
     match raw {
         None => Ok(None),
-        Some(value) => value
-            .parse::<TaskStatus>()
-            .map(Some)
-            .map_err(|e| OutcomeDecodeError(format!("{key} {e}"))),
+        Some(value) => value.parse::<TaskStatus>().map(Some).map_err(|_| {
+            OutcomeDecodeError(format!(
+                "{key} is not a task status: {}",
+                python_repr(value)
+            ))
+        }),
     }
 }
 
@@ -699,7 +708,10 @@ fn optional_timestamp(
         Some(serde_json::Value::String(value)) => DateTime::parse_from_rfc3339(value)
             .map(|dt| Some(dt.with_timezone(&Utc)))
             .map_err(|_| {
-                OutcomeDecodeError(format!("{key} is not an ISO-8601 timestamp: {value:?}"))
+                OutcomeDecodeError(format!(
+                    "{key} is not an ISO-8601 timestamp: {}",
+                    python_repr(value)
+                ))
             }),
         other => Err(OutcomeDecodeError(format!(
             "{key} must be a timestamp, got {other:?}"
