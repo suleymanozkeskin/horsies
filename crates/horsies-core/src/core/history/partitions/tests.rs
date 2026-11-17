@@ -1224,7 +1224,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
             matches!(outcome, CoverageOutcome::Ensured(_)),
             "{outcome:?}"
         );
-        assert_eq!(proxy.statement_count(), 2);
+        assert_eq!(proxy.statement_count(), 1);
         assert!(!proxy.sql().iter().any(|statement| {
             statement.starts_with("BEGIN") || statement.contains("pg_try_advisory_xact_lock")
         }));
@@ -1263,7 +1263,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
             matches!(outcome, CoverageOutcome::Ensured(_)),
             "{outcome:?}"
         );
-        assert_eq!(proxy.statement_count(), 2);
+        assert_eq!(proxy.statement_count(), 1);
         pool.close().await;
         proxy.stop().await;
     }
@@ -1279,8 +1279,8 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         matches!(outcome, CoverageOutcome::Ensured(_)),
         "{outcome:?}"
     );
-    assert_eq!(proxy.statement_count(), 2);
-    assert!(elapsed >= std::time::Duration::from_millis((delay_ms * 2) as u64));
+    assert_eq!(proxy.statement_count(), 1);
+    assert!(elapsed >= std::time::Duration::from_millis(delay_ms as u64));
     // The exact statement count bounds RTT cost. CI load cannot give a stable
     // wall-clock upper bound.
     pool.close().await;
@@ -1297,59 +1297,44 @@ async fn failed_post_commit_publication_is_retried_by_the_next_healthy_pass() {
             .await
             .expect("create and publish initial coverage");
     assert!(matches!(setup, CoverageOutcome::Ensured(_)));
+    // A created leaf is published by its own creation, so the readers go
+    // stale through the manifest (Python `test_failed_final_publication_is_retried`).
+    sqlx::query(&format!(
+        "UPDATE {TASK_LOOKUP_MANIFEST} SET probe_position = probe_position + 100"
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("move every manifest position");
 
     let publisher = FailFirstStagedPublisher::default();
-    let error = ensure_partition_coverage_in_pool(&database.pool, 3, 3, &[], &publisher)
+    let error = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &publisher)
         .await
         .expect_err("inject final publication failure");
     assert!(error
         .to_string()
         .contains("injected post-commit publication failure"));
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 1);
-
-    let unpublished: i64 = sqlx::query_scalar(&format!(
-        "SELECT count(*)
-         FROM {LEAF_CATALOG} AS catalog
-         WHERE catalog.detached_at IS NULL
-           AND catalog.dropped_at IS NULL
-           AND catalog.class_key <> $1
-           AND to_regclass(catalog.leaf_name) IS NOT NULL
-           AND NOT EXISTS (
-               SELECT 1 FROM {TASK_LOOKUP_MANIFEST} AS manifest
-               WHERE manifest.leaf_name = catalog.leaf_name
-           )"
-    ))
-    .bind(HEARTBEAT_CLASS_KEY)
-    .fetch_one(&database.pool)
-    .await
-    .expect("count committed unpublished leaves");
-    assert!(unpublished > 0);
-
-    let retry = ensure_partition_coverage_in_pool(&database.pool, 3, 3, &[], &publisher)
+    let mut connection = database.pool.acquire().await.expect("acquire publisher");
+    assert!(StagedLoaderPublisher
+        .needs_republication(&mut connection)
         .await
-        .expect("retry publication on a healthy coverage pass");
+        .expect("freshness check after the failed publication"));
+    drop(connection);
+
+    let retry = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &publisher)
+        .await
+        .expect("retry publication on the next pass");
     let CoverageOutcome::Ensured(retry) = retry else {
-        panic!("the next healthy pass must publish the committed leaves");
+        panic!("the next pass must publish the stale readers");
     };
     assert!(retry.republished);
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
-    let unpublished: i64 = sqlx::query_scalar(&format!(
-        "SELECT count(*)
-         FROM {LEAF_CATALOG} AS catalog
-         WHERE catalog.detached_at IS NULL
-           AND catalog.dropped_at IS NULL
-           AND catalog.class_key <> $1
-           AND to_regclass(catalog.leaf_name) IS NOT NULL
-           AND NOT EXISTS (
-               SELECT 1 FROM {TASK_LOOKUP_MANIFEST} AS manifest
-               WHERE manifest.leaf_name = catalog.leaf_name
-           )"
-    ))
-    .bind(HEARTBEAT_CLASS_KEY)
-    .fetch_one(&database.pool)
-    .await
-    .expect("verify all attached leaves are published");
-    assert_eq!(unpublished, 0);
+    let mut connection = database.pool.acquire().await.expect("acquire publisher");
+    assert!(!StagedLoaderPublisher
+        .needs_republication(&mut connection)
+        .await
+        .expect("freshness check after the retry"));
+    drop(connection);
     database.drop().await;
 }
 
@@ -1418,6 +1403,10 @@ async fn current_heartbeat_with_a_wrong_physical_range_refuses_startup() {
         panic!("a wrong current-heartbeat range must refuse startup");
     };
     assert!(!failure.heartbeat_covered_now);
+    assert!(
+        failure.refusal.contains("PHYSICAL_NONCONFORMANT"),
+        "{failure:?}"
+    );
     database.drop().await;
 }
 
@@ -1756,20 +1745,22 @@ async fn pool_coverage_repairs_only_the_damaged_leaf_in_one_mutation_transaction
         2,
         "one gate transaction and one leaf mutation transaction are required"
     );
+    // The leaf lock and the index repair run inside the one creation call.
     assert_eq!(
         sql.iter()
-            .filter(|statement| {
-                statement.contains("pg_try_advisory_xact_lock(horsies_task_history_leaf_lock_key")
-            })
+            .filter(|statement| statement.contains("horsies_create_history_leaf("))
             .count(),
         1
     );
-    assert_eq!(
-        sql.iter()
-            .filter(|statement| statement.contains(&format!("CREATE INDEX {damaged_index}")))
-            .count(),
-        1
-    );
+    assert!(!sql
+        .iter()
+        .any(|statement| statement.contains("horsies_create_heartbeat_leaf(")));
+    let repaired: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(&damaged_index)
+        .fetch_one(&database.pool)
+        .await
+        .expect("read repaired index");
+    assert!(repaired);
     pool.close().await;
     proxy.stop().await;
     database.drop().await;

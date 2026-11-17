@@ -10,20 +10,20 @@ use crate::core::history::ddl::classes::{
 };
 use crate::core::history::errors::HistoryError;
 use crate::core::history::heartbeats::partitioning::{
-    create_hourly_heartbeat_leaf, ensure_heartbeat_coverage, hourly_leaf_ref,
-    register_heartbeat_class, CreateHourlyHeartbeatLeaf, EnsureHeartbeatCoverage,
+    ensure_heartbeat_coverage, hourly_leaf_ref, register_heartbeat_class, EnsureHeartbeatCoverage,
     HeartbeatClassRegistration,
 };
 use crate::core::history::names::{HEARTBEAT_CLASS_KEY, RETENTION_CLASSES};
 use crate::core::history::outcomes::LeafCreation;
 use crate::core::history::partitions::catalog::database_now;
-use crate::core::history::partitions::manager::{
-    create_planned_leaf, ensure_leaf_coverage, PlannedLeaf,
-};
+use crate::core::history::partitions::manager::ensure_leaf_coverage;
 use crate::core::history::partitions::publication::{LoaderPublication, UnpublishedLoader};
 use crate::core::history::periods::{HeartbeatHorizonHours, RetentionDays};
 
-use super::coverage_probe::{probe_partition_coverage, CoverageLeafRepair, CoverageProbe};
+use super::coverage_functions::{
+    create_heartbeat_leaf, create_history_leaf, probe_coverage, register_retention_classes,
+    CoverageProbe, CoverageRequest, DamagedHeartbeatLeaf, DamagedHistoryLeaf,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverageEnsured {
@@ -288,14 +288,16 @@ async fn retry_busy_leaf(attempt: u32) {
     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
 }
 
-async fn create_history_leaf_in_own_transaction(
+/// One expected history leaf in its own transaction: one call of
+/// `horsies_create_history_leaf`. `Busy` is retried `LEAF_BUSY_ATTEMPTS`
+/// times; the transaction ends before each retry delay.
+async fn maintain_history_leaf(
     pool: &PgPool,
-    planned: &PlannedLeaf,
+    leaf: &DamagedHistoryLeaf,
 ) -> Result<LeafCreation, HistoryError> {
     for attempt in 1..=LEAF_BUSY_ATTEMPTS {
         let mut transaction = pool.begin().await?;
-        let outcome =
-            create_planned_leaf(transaction.as_mut(), planned, &UnpublishedLoader).await?;
+        let outcome = create_history_leaf(transaction.as_mut(), leaf).await?;
         transaction.commit().await?;
         match outcome {
             LeafCreation::Busy { .. } if attempt < LEAF_BUSY_ATTEMPTS => {
@@ -305,7 +307,29 @@ async fn create_history_leaf_in_own_transaction(
         }
     }
     Err(HistoryError::contract(
-        "daily leaf retry loop ended without an outcome",
+        "history leaf retry loop ended without an outcome",
+    ))
+}
+
+/// One expected heartbeat leaf in its own transaction: one call of
+/// `horsies_create_heartbeat_leaf`, retried as [`maintain_history_leaf`].
+async fn maintain_heartbeat_leaf(
+    pool: &PgPool,
+    leaf: &DamagedHeartbeatLeaf,
+) -> Result<LeafCreation, HistoryError> {
+    for attempt in 1..=LEAF_BUSY_ATTEMPTS {
+        let mut transaction = pool.begin().await?;
+        let outcome = create_heartbeat_leaf(transaction.as_mut(), leaf).await?;
+        transaction.commit().await?;
+        match outcome {
+            LeafCreation::Busy { .. } if attempt < LEAF_BUSY_ATTEMPTS => {
+                retry_busy_leaf(attempt).await;
+            }
+            outcome => return Ok(outcome),
+        }
+    }
+    Err(HistoryError::contract(
+        "heartbeat leaf retry loop ended without an outcome",
     ))
 }
 
@@ -347,103 +371,26 @@ async fn release_coverage_maintenance_gate(
     Ok(())
 }
 
-fn first_probe_class_key(probe: &CoverageProbe) -> Option<String> {
-    probe
-        .class_faults
-        .first()
-        .map(|fault| fault.class_key.clone())
-        .or_else(|| {
-            probe.leaf_repairs.first().map(|repair| match repair {
-                CoverageLeafRepair::History(planned) => planned.leaf().class_key().to_owned(),
-                CoverageLeafRepair::Heartbeat(command) => command.leaf().class_key().to_owned(),
-            })
-        })
-}
-
-fn failed_probe(
-    stage: &'static str,
-    probe: &CoverageProbe,
-    mut details: Vec<String>,
-    absent_leaves: Vec<String>,
-) -> CoverageOutcome {
-    details.extend(
-        probe
-            .class_faults
-            .iter()
-            .map(|fault| format!("{}: {}", fault.class_key, fault.detail)),
-    );
-    details.extend(probe.leaf_repairs.iter().map(|repair| match repair {
-        CoverageLeafRepair::History(planned) => format!(
-            "{}: required leaf {:?} remains nonconformant",
-            planned.leaf().class_key(),
-            planned.leaf().leaf_name()
-        ),
-        CoverageLeafRepair::Heartbeat(command) => format!(
-            "{}: required leaf {:?} remains nonconformant",
-            command.leaf().class_key(),
-            command.leaf().leaf_name()
-        ),
-    }));
-    CoverageOutcome::Failed(CoverageEnsureFailed {
-        stage,
-        class_key: first_probe_class_key(probe),
-        refusal: details.join("; "),
-        heartbeat_covered_now: probe.heartbeat_covered_now,
-        absent_leaves,
-    })
-}
-
-async fn publish_coverage_if_needed<P: LoaderPublication>(
+/// One probe statement on a connection of `pool`. Reads only.
+async fn probe_in_pool(
     pool: &PgPool,
-    publisher: &P,
-    force: bool,
-) -> Result<(bool, Vec<String>), HistoryError> {
+    request: &CoverageRequest,
+) -> Result<CoverageProbe, HistoryError> {
     let mut connection = pool.acquire().await?;
-    if !force && !publisher.needs_republication(&mut connection).await? {
-        return Ok((false, Vec::new()));
-    }
-    let mut transaction = connection.begin().await?;
-    let report = publisher.republish(transaction.as_mut()).await?;
-    transaction.commit().await?;
-    Ok((true, report.absent_leaves))
+    probe_coverage(&mut connection, request).await
 }
 
-fn ensured_probe(
-    probe: &CoverageProbe,
-    created_history_leaves: u64,
-    created_heartbeat_leaves: u64,
-    republished: bool,
-    absent_leaves: Vec<String>,
-) -> CoverageOutcome {
+/// A healthy probe as the outcome of a pass that changed nothing.
+fn ensured_from_probe(probe: CoverageProbe) -> CoverageOutcome {
     CoverageOutcome::Ensured(CoverageEnsured {
-        created_history_leaves,
-        created_heartbeat_leaves,
-        republished,
+        created_history_leaves: 0,
+        created_heartbeat_leaves: 0,
+        republished: false,
         heartbeat_covered_now: probe.heartbeat_covered_now,
         history_covered_through: probe.history_covered_through,
         heartbeats_covered_through: probe.heartbeats_covered_through,
-        absent_leaves,
+        absent_leaves: probe.absent_leaves,
     })
-}
-
-async fn create_heartbeat_leaf_in_own_transaction(
-    pool: &PgPool,
-    command: &CreateHourlyHeartbeatLeaf,
-) -> Result<LeafCreation, HistoryError> {
-    for attempt in 1..=LEAF_BUSY_ATTEMPTS {
-        let mut transaction = pool.begin().await?;
-        let outcome = create_hourly_heartbeat_leaf(transaction.as_mut(), command).await?;
-        transaction.commit().await?;
-        match outcome {
-            LeafCreation::Busy { .. } if attempt < LEAF_BUSY_ATTEMPTS => {
-                retry_busy_leaf(attempt).await;
-            }
-            outcome => return Ok(outcome),
-        }
-    }
-    Err(HistoryError::contract(
-        "heartbeat leaf retry loop ended without an outcome",
-    ))
 }
 
 /// How a damaged coverage pass is serialized against other passes.
@@ -501,6 +448,15 @@ pub async fn ensure_periodic_coverage_in_pool<P: LoaderPublication>(
     .await
 }
 
+/// The coverage pass through the functions of
+/// `0008_history_maintenance_functions.sql` (Python
+/// `maintain_partition_coverage`). A healthy set costs one probe statement
+/// (`horsies_coverage_probe`). A damaged set takes the coverage gate
+/// (`Gated`), probes again under it, and repairs: the registration when the
+/// probe finds it unhealthy, then one transaction per damaged leaf. A
+/// created history leaf is published by its own creation; the last step
+/// publishes through `publisher` only when the probe still finds the readers
+/// stale.
 async fn ensure_coverage_in_pool<P: LoaderPublication>(
     pool: &PgPool,
     history_horizon_days: u32,
@@ -509,170 +465,148 @@ async fn ensure_coverage_in_pool<P: LoaderPublication>(
     publisher: &P,
     serialization: CoverageSerialization,
 ) -> Result<CoverageOutcome, HistoryError> {
-    EnsureLeafCoverage::new(FOREVER_CLASS_KEY, history_horizon_days)
-        .map_err(|error| HistoryError::contract(error.to_string()))?;
-    EnsureHeartbeatCoverage::new(heartbeat_horizon_hours)?;
-    let mut connection = pool.acquire().await?;
-    let initial_probe = probe_partition_coverage(
-        &mut connection,
+    let request = CoverageRequest::new(
         history_horizon_days,
         heartbeat_horizon_hours,
         declared_periods,
-    )
-    .await?;
-    if initial_probe.is_conformant() {
-        let needs_publication = publisher.needs_republication(&mut connection).await?;
-        drop(connection);
-        if !needs_publication {
-            return Ok(ensured_probe(&initial_probe, 0, 0, false, Vec::new()));
-        }
-        let (republished, absent_leaves) =
-            publish_coverage_if_needed(pool, publisher, true).await?;
-        return Ok(ensured_probe(
-            &initial_probe,
-            0,
-            0,
-            republished,
-            absent_leaves,
-        ));
+    )?;
+    let probe = probe_in_pool(pool, &request).await?;
+    if probe.is_healthy() {
+        return Ok(ensured_from_probe(probe));
     }
-    drop(connection);
-
     let gate = match serialization {
         CoverageSerialization::Gated => acquire_coverage_maintenance_gate(pool).await?,
         CoverageSerialization::PerLeafLocks => CoverageMaintenanceGate::Ungated,
     };
+    // The gate's kind is read before each await: no borrow of the gate
+    // transaction is held across one.
     if matches!(gate, CoverageMaintenanceGate::Busy) {
-        let mut connection = pool.acquire().await?;
-        let current = probe_partition_coverage(
-            &mut connection,
-            history_horizon_days,
-            heartbeat_horizon_hours,
-            declared_periods,
-        )
-        .await?;
-        if current.is_conformant() {
-            let needs_publication = publisher.needs_republication(&mut connection).await?;
-            if !needs_publication {
-                return Ok(ensured_probe(&current, 0, 0, false, Vec::new()));
-            }
+        let busy_probe = probe_in_pool(pool, &request).await?;
+        if busy_probe.is_healthy() {
+            return Ok(ensured_from_probe(busy_probe));
         }
-        return Ok(failed_probe(
-            "coverage_gate_busy",
-            &current,
-            vec!["partition coverage maintenance is active on another worker".to_owned()],
-            Vec::new(),
-        ));
+        return Ok(CoverageOutcome::Failed(CoverageEnsureFailed {
+            stage: "coverage_gate_busy",
+            class_key: busy_probe.first_damaged_class_key(),
+            refusal: "partition coverage maintenance is active on another worker".to_owned(),
+            heartbeat_covered_now: busy_probe.heartbeat_covered_now,
+            absent_leaves: busy_probe.absent_leaves,
+        }));
     }
-
-    let mut connection = pool.acquire().await?;
-    let mut repair_probe = probe_partition_coverage(
-        &mut connection,
-        history_horizon_days,
-        heartbeat_horizon_hours,
-        declared_periods,
-    )
-    .await?;
-    drop(connection);
-    if repair_probe.is_conformant() {
+    // Under a held gate the probe runs again: another pass may have repaired
+    // the set before the gate was granted.
+    let locked_probe = match matches!(gate, CoverageMaintenanceGate::Held(_)) {
+        true => probe_in_pool(pool, &request).await?,
+        false => probe,
+    };
+    if locked_probe.is_healthy() {
         release_coverage_maintenance_gate(gate).await?;
-        let (republished, absent_leaves) =
-            publish_coverage_if_needed(pool, publisher, false).await?;
-        return Ok(ensured_probe(
-            &repair_probe,
-            0,
-            0,
-            republished,
-            absent_leaves,
-        ));
+        return Ok(ensured_from_probe(locked_probe));
     }
+    let outcome = repair_partition_coverage(pool, &request, locked_probe, publisher).await;
+    release_coverage_maintenance_gate(gate).await?;
+    outcome
+}
 
-    if !repair_probe.class_faults.is_empty() {
-        let mut registration = pool.begin().await?;
-        let registration_failure = register_partition_coverage(
-            registration.as_mut(),
-            heartbeat_horizon_hours,
-            declared_periods,
-        )
-        .await?;
-        registration.commit().await?;
-        if let Some(failed) = registration_failure {
-            release_coverage_maintenance_gate(gate).await?;
-            return Ok(CoverageOutcome::Failed(failed));
+/// Repairs one damaged probe while the caller holds the gate, if any
+/// (Python `_repair_partition_coverage`). A leaf that fails stops its class;
+/// the other classes and the heartbeat leaves are still served.
+async fn repair_partition_coverage<P: LoaderPublication>(
+    pool: &PgPool,
+    request: &CoverageRequest,
+    mut probe: CoverageProbe,
+    publisher: &P,
+) -> Result<CoverageOutcome, HistoryError> {
+    if !probe.registration_healthy {
+        let mut transaction = pool.begin().await?;
+        register_retention_classes(transaction.as_mut(), request).await?;
+        transaction.commit().await?;
+        probe = probe_in_pool(pool, request).await?;
+        if !probe.registration_healthy {
+            return Ok(CoverageOutcome::Failed(CoverageEnsureFailed {
+                stage: "verify_registration",
+                class_key: None,
+                refusal: "registered retention class shape is not conformant".to_owned(),
+                heartbeat_covered_now: probe.heartbeat_covered_now,
+                absent_leaves: probe.absent_leaves,
+            }));
         }
-        let mut connection = pool.acquire().await?;
-        repair_probe = probe_partition_coverage(
-            &mut connection,
-            history_horizon_days,
-            heartbeat_horizon_hours,
-            declared_periods,
-        )
-        .await?;
     }
 
     let mut created_history = 0_u64;
     let mut created_heartbeats = 0_u64;
-    let mut failures = Vec::new();
-    for repair in repair_probe.leaf_repairs {
-        match repair {
-            CoverageLeafRepair::History(planned) => {
-                let class_key = planned.leaf().class_key().to_owned();
-                let outcome = match create_history_leaf_in_own_transaction(pool, &planned).await {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        failures.push(format!("{class_key}: {error}"));
-                        continue;
-                    }
-                };
-                match outcome {
-                    LeafCreation::Created { .. } => created_history += 1,
-                    LeafCreation::AlreadyConformant { .. } | LeafCreation::IndexRepaired { .. } => {
-                    }
-                    refusal => failures.push(format!("{class_key}: {refusal:?}")),
-                }
+    let mut failures: Vec<String> = Vec::new();
+    let mut failed_classes: Vec<String> = Vec::new();
+    for leaf in &probe.damaged_history {
+        if failed_classes.contains(&leaf.class_key) {
+            continue;
+        }
+        match maintain_history_leaf(pool, leaf).await {
+            Ok(LeafCreation::Created { .. }) => created_history += 1,
+            Ok(
+                LeafCreation::AlreadyConformant { .. }
+                | LeafCreation::IndexRepaired { .. }
+                | LeafCreation::CoveredByOpenEndedLeaf { .. },
+            ) => {}
+            Ok(refusal) => {
+                failures.push(format!("{}: {refusal:?}", leaf.class_key));
+                failed_classes.push(leaf.class_key.clone());
             }
-            CoverageLeafRepair::Heartbeat(create) => {
-                match create_heartbeat_leaf_in_own_transaction(pool, &create).await {
-                    Ok(LeafCreation::Created { .. }) => created_heartbeats += 1,
-                    Ok(
-                        LeafCreation::AlreadyConformant { .. } | LeafCreation::IndexRepaired { .. },
-                    ) => {}
-                    Ok(refusal) => {
-                        failures.push(format!("{}: {refusal:?}", create.leaf().class_key()));
-                    }
-                    Err(error) => failures.push(format!("{}: {error}", create.leaf().class_key())),
-                }
+            Err(error) => {
+                failures.push(format!("{}: {error}", leaf.class_key));
+                failed_classes.push(leaf.class_key.clone());
+            }
+        }
+    }
+    for leaf in &probe.damaged_heartbeats {
+        match maintain_heartbeat_leaf(pool, leaf).await {
+            Ok(LeafCreation::Created { .. }) => created_heartbeats += 1,
+            Ok(LeafCreation::AlreadyConformant { .. } | LeafCreation::IndexRepaired { .. }) => {}
+            Ok(refusal) => {
+                failures.push(format!("{HEARTBEAT_CLASS_KEY}: {refusal:?}"));
+                break;
+            }
+            Err(error) => {
+                failures.push(format!("{HEARTBEAT_CLASS_KEY}: {error}"));
+                break;
             }
         }
     }
 
     let mut connection = pool.acquire().await?;
-    let final_probe = probe_partition_coverage(
-        &mut connection,
-        history_horizon_days,
-        heartbeat_horizon_hours,
-        declared_periods,
-    )
-    .await?;
-    drop(connection);
-    let (republished, absent_leaves) =
-        publish_coverage_if_needed(pool, publisher, created_history > 0).await?;
-    release_coverage_maintenance_gate(gate).await?;
-    if final_probe.is_conformant() && failures.is_empty() {
-        return Ok(ensured_probe(
-            &final_probe,
-            created_history,
-            created_heartbeats,
-            republished,
-            absent_leaves,
-        ));
+    let mut final_probe = probe_coverage(&mut connection, request).await?;
+    let mut republished = false;
+    if !final_probe.publication_healthy {
+        let mut transaction = connection.begin().await?;
+        let _report = publisher.republish(transaction.as_mut()).await?;
+        transaction.commit().await?;
+        republished = true;
+        final_probe = probe_coverage(&mut connection, request).await?;
     }
-    Ok(failed_probe(
-        "ensure_partition_coverage",
-        &final_probe,
-        failures,
-        absent_leaves,
-    ))
+    drop(connection);
+
+    if final_probe.is_healthy() {
+        return Ok(CoverageOutcome::Ensured(CoverageEnsured {
+            created_history_leaves: created_history,
+            created_heartbeat_leaves: created_heartbeats,
+            republished,
+            heartbeat_covered_now: final_probe.heartbeat_covered_now,
+            history_covered_through: final_probe.history_covered_through,
+            heartbeats_covered_through: final_probe.heartbeats_covered_through,
+            absent_leaves: final_probe.absent_leaves,
+        }));
+    }
+    let refusal = match failures.is_empty() {
+        true => final_probe.unresolved_detail(),
+        false => failures.join("; "),
+    };
+    Ok(CoverageOutcome::Failed(CoverageEnsureFailed {
+        stage: "ensure_leaf_coverage",
+        class_key: final_probe.first_damaged_class_key(),
+        refusal,
+        heartbeat_covered_now: final_probe.heartbeat_covered_now,
+        absent_leaves: final_probe.absent_leaves,
+    }))
 }
 
 pub async fn ensure_startup_coverage<P: LoaderPublication>(
