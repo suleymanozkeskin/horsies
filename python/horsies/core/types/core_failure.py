@@ -9,11 +9,16 @@ from the record:
 - the raise of a facade whose Python caller raised the driver's exception
   (the worker's claim release).
 
+``CoreLockNotAvailable`` is the failure record of a lock refused at once
+(SQLSTATE 55P03), where a caller reads that code.
+
 The core exception classes of #796 (a database failure with its SQLSTATE, a
-connection failure without one) replace it when the core reports them.
+connection failure without one) replace both when the core reports them.
 """
 
 from __future__ import annotations
+
+from typing import Final
 
 from horsies._core import (
     CoreCallTimedOut,
@@ -67,3 +72,16 @@ class CoreOperationFailed(Exception):
 
     def __str__(self) -> str:
         return f'{self.subject}: {self.message}'
+
+
+class CoreLockNotAvailable(CoreOperationFailed):
+    """A core operation was refused at once: a lock that it takes without
+    waiting was held by another session (SQLSTATE 55P03). Nothing was
+    written.
+
+    ``sqlstate`` is ``'55P03'``, as on the driver exception of the statement
+    that Python sent before the core ran the operation, so a reader of the
+    SQLSTATE of a broker error's cause keeps its answer.
+    """
+
+    sqlstate: Final = '55P03'

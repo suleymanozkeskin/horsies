@@ -75,4 +75,29 @@ LIFECYCLE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=('complete_successes_async',),
     ),
+    DualRunOperation(
+        name='pending expiry',
+        production_path='horsies.core.brokers.postgres:PostgresBroker.expire_pending_tasks',
+        reference_path='tests.dualrun.reference.expiry_and_orphans_caller:expire_pending_tasks',
+        mode=PoolMode(),
+        core_methods=('expire_pending_tasks_async',),
+    ),
+    DualRunOperation(
+        name='orphan audit page',
+        production_path=(
+            'horsies.core.brokers.postgres:PostgresBroker.audit_orphaned_workflow_tasks'
+        ),
+        reference_path=(
+            'tests.dualrun.reference.expiry_and_orphans_caller:audit_orphaned_workflow_tasks'
+        ),
+        mode=PoolMode(),
+        core_methods=('audit_orphaned_workflow_tasks_async',),
+    ),
+    DualRunOperation(
+        name='orphan self-heal',
+        production_path='horsies.core.worker.finalize:FinalizeMixin._cancel_owned_orphan',
+        reference_path='tests.dualrun.reference.expiry_and_orphans_caller:cancel_owned_orphan',
+        mode=PoolMode(),
+        core_methods=('cancel_owned_orphan_async',),
+    ),
 )
