@@ -3,14 +3,16 @@
 //!
 //! The outcome is `WorkerPongsRecord` or `BrokerFailure` with
 //! `INVALID_INPUT` (a refused argument; nothing ran), `LISTENER_DISABLED`
-//! (the broker has no listener: an `ASSUME_INITIALIZED` handle; nothing ran)
-//! or `WORKER_PING_FAILED`. The ping sends one NOTIFY and writes no row.
+//! (the handle has no listener: an `ASSUME_INITIALIZED` handle; refused
+//! before any connect, nothing ran) or `WORKER_PING_FAILED`. The ping sends
+//! one NOTIFY and writes no row.
 
 use std::time::Duration;
 
+use horsies_core::handle::HandleListener;
 use horsies_core::{
-    ping_min_responses_refused, ping_timeout_refused, BrokerErrorCode, BrokerOperationError,
-    WorkerPong,
+    ping_listener_disabled, ping_min_responses_refused, ping_timeout_refused, BrokerErrorCode,
+    BrokerOperationError, WorkerPong,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyInt, PyList, PyString};
@@ -172,13 +174,16 @@ fn ping_target(value: &Bound<'_, PyAny>) -> PyResult<Result<Option<String>, Brok
     }
 }
 
-/// The ping of three Python arguments, checked in Python's order: the
-/// window, the reply count, the target. A refused argument is the failure
-/// to answer at once; nothing runs.
+/// The ping of three Python arguments on a handle with `listener`, checked
+/// in Python's order (`ping_workers_async`): the window, the reply count,
+/// the listener, the target. A refused argument, or a handle with no
+/// listener (`LISTENER_DISABLED`), is the failure to answer at once; nothing
+/// runs and nothing connects.
 pub fn ping_request(
     target_worker_id: &Bound<'_, PyAny>,
     timeout_seconds: &Bound<'_, PyAny>,
     min_responses_value: &Bound<'_, PyAny>,
+    listener: HandleListener,
 ) -> PyResult<Result<PingRequest, BrokerFailure>> {
     let window = match ping_window(timeout_seconds)? {
         Ok(window) => window,
@@ -188,6 +193,12 @@ pub fn ping_request(
         Ok(count) => count,
         Err(refused) => return Ok(Err(refused)),
     };
+    match listener {
+        HandleListener::Disabled => {
+            return Ok(Err(BrokerFailure::from(ping_listener_disabled())));
+        }
+        HandleListener::Process => {}
+    }
     let target_worker_id = match ping_target(target_worker_id)? {
         Ok(target) => target,
         Err(refused) => return Ok(Err(refused)),
@@ -244,7 +255,35 @@ mod tests {
                 py.eval(&std::ffi::CString::new(source).expect("no NUL"), None, None)
                     .expect("the expression evaluates")
             };
-            ping_request(&value(target), &value(timeout), &value(minimum)).expect("the values read")
+            ping_request(
+                &value(target),
+                &value(timeout),
+                &value(minimum),
+                HandleListener::Process,
+            )
+            .expect("the values read")
+        })
+    }
+
+    /// The code and retry rule of a ping on a handle with no listener.
+    fn refusal_without_listener(target: &str, timeout: &str, minimum: &str) -> (String, bool) {
+        Python::initialize();
+        Python::attach(|py| {
+            let value = |source: &str| {
+                py.eval(&std::ffi::CString::new(source).expect("no NUL"), None, None)
+                    .expect("the expression evaluates")
+            };
+            let refused = ping_request(
+                &value(target),
+                &value(timeout),
+                &value(minimum),
+                HandleListener::Disabled,
+            )
+            .expect("the values read");
+            match refused {
+                Ok(request) => panic!("a handle with no listener pinged: {request:?}"),
+                Err(failed) => (failed.code, failed.retryable),
+            }
         })
     }
 
@@ -327,6 +366,28 @@ mod tests {
         assert!(
             message.starts_with("ping_workers request refused: "),
             "{message}"
+        );
+    }
+
+    /// Python's order: the window and the reply count first, then the
+    /// listener, then the target. No connect runs for any of them.
+    #[test]
+    fn a_handle_without_a_listener_refuses_after_the_window_and_the_count() {
+        assert_eq!(
+            refusal_without_listener("'w1'", "1", "None"),
+            ("LISTENER_DISABLED".to_owned(), false)
+        );
+        assert_eq!(
+            refusal_without_listener("7", "1", "None"),
+            ("LISTENER_DISABLED".to_owned(), false)
+        );
+        assert_eq!(
+            refusal_without_listener("None", "0", "None"),
+            ("INVALID_INPUT".to_owned(), false)
+        );
+        assert_eq!(
+            refusal_without_listener("None", "1", "0"),
+            ("INVALID_INPUT".to_owned(), false)
         );
     }
 

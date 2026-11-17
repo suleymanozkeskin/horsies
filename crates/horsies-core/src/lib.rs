@@ -176,9 +176,10 @@ pub use crate::worker::{
 
 // worker state snapshot values
 pub use crate::broker::{
-    checked_history_limit, ping_min_responses_refused, ping_timeout_refused,
-    worker_history_limit_refused, ClassBudget, ClassBudgets, ClearableBootCause, DownSlot,
-    DownSlots, ShortageErrno, SlotHealth, MAX_BOOT_FAILURE_DETAIL_CHARS,
+    checked_history_limit, ping_listener_disabled, ping_min_responses_refused,
+    ping_timeout_refused, worker_history_limit_refused, ClassBudget, ClassBudgets,
+    ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
+    MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
 
 // fleet check and class report
