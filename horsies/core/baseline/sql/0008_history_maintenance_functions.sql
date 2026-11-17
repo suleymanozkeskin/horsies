@@ -47,10 +47,12 @@ $$;
 -- Columns: index_name; index_columns, the column list for CREATE INDEX ... USING btree; holder, who holds the name:
 -- NONE (no relation has it), LEAF (an index of this leaf), OTHER (another relation, or a relation that is not an
 -- index); conformant: the name is a valid, ready and live btree index of this leaf, not unique, primary or exclusion,
--- without predicate or expressions, with exactly the shape's key columns, their sort options and the collation of each
--- column. Another p_leaf_kind returns no row.
+-- without predicate or expressions, with exactly the shape's key columns, their sort options, the collation of each
+-- column and the default btree operator class of each column's type: the class of the type itself, else the class of
+-- a type it is binary-coercible to, the preferred type first (text_ops for varchar, as CREATE INDEX picks it). Another
+-- p_leaf_kind returns no row.
 -- A plain SQL table function: a caller that names it in FROM gets it inlined into its own plan.
--- Reads: pg_class, pg_index, pg_am, pg_attribute. Locks: none.
+-- Reads: pg_class, pg_index, pg_am, pg_attribute, pg_opclass, pg_type, pg_cast. Locks: none.
 -- Replaces: the index shape checks of the coverage probe (history/maintenance/coverage.py:271-443),
 -- history/partitions/catalog.py:658-839 (read_leaf_physical_state) and history/partitions/locks.py:172-209
 -- (read_index_relation_state).
@@ -83,6 +85,26 @@ CREATE FUNCTION horsies_history_leaf_indexes(p_leaf_kind text, p_leaf_name text)
                    OR x.indkey[key.position - 1] IS DISTINCT FROM attribute.attnum
                    OR x.indoption[key.position - 1] IS DISTINCT FROM key.sort_option
                    OR x.indcollation[key.position - 1] IS DISTINCT FROM attribute.attcollation
+                   OR x.indclass[key.position - 1] IS DISTINCT FROM (
+                       SELECT opclass.oid
+                       FROM pg_opclass AS opclass
+                       JOIN pg_am AS opclass_method ON opclass_method.oid = opclass.opcmethod
+                       JOIN pg_type AS input_type ON input_type.oid = opclass.opcintype
+                       WHERE opclass_method.amname = 'btree'
+                         AND opclass.opcdefault
+                         AND (
+                             opclass.opcintype = attribute.atttypid
+                             OR EXISTS (
+                                 SELECT 1
+                                 FROM pg_cast AS binary_cast
+                                 WHERE binary_cast.castsource = attribute.atttypid
+                                   AND binary_cast.casttarget = opclass.opcintype
+                                   AND binary_cast.castmethod = 'b'
+                             )
+                         )
+                       ORDER BY opclass.opcintype = attribute.atttypid DESC, input_type.typispreferred DESC
+                       LIMIT 1
+                   )
             ),
             FALSE
         )

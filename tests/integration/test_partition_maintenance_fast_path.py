@@ -300,13 +300,6 @@ async def test_coverage_repairs_noncanonical_index_metadata(
     assert definitions[ordering_name].endswith('USING btree (enqueued_at)')
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        '#1154: horsies_history_leaf_indexes does not compare the operator '
-        'class, so a role varchar_pattern_ops probe index is conformant'
-    ),
-)
 async def test_coverage_repairs_a_noncanonical_operator_class(
     partition_schema: HistorySchema,
 ) -> None:

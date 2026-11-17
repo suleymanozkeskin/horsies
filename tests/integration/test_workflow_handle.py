@@ -2285,10 +2285,11 @@ class TestResumeCommitSplit:
     ) -> None:
         """The resume transaction rolled back: the workflow stays PAUSED."""
         handle = await self._paused_workflow(broker, app, 'resume_commit_err')
-        db_exc = OperationalError('cascade', {}, Exception('connection lost'))
+        db_exc = OperationalError('child start', {}, Exception('connection lost'))
 
+        # The resume statement ran in the transaction; the next statement fails.
         with patch(
-            'horsies.core.workflows.lifecycle.cascade_resume_to_children',
+            'horsies.core.workflows.steps.run_child_starts',
             new=AsyncMock(side_effect=db_exc),
         ):
             resume_r = await handle.resume_async()
