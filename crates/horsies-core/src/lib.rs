@@ -231,12 +231,11 @@ pub use crate::workflow_engine::engine::{
 pub use crate::workflow_engine::error::WorkflowError;
 // the cause of a failed operation, which a client names to its user
 pub use crate::failure_cause::{FailureCause, ServerErrorFacts};
-pub use crate::workflow_engine::info::WorkflowTaskInfo;
 pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow};
 pub use crate::workflow_engine::phase2_recovery::Phase2RecoverySummary;
 pub use crate::workflow_engine::query::{
-    get_workflow_result, NodeResultsRead, NodesRead, StoredNode, StoredNodeResult,
-    TerminalErrorStatus, WorkflowEnd, WorkflowWait,
+    NodeResultsRead, NodesRead, StoredNode, StoredNodeResult, TerminalErrorStatus, WorkflowEnd,
+    WorkflowWait,
 };
 pub use crate::workflow_engine::recovery::recover_stuck_workflows;
 pub use crate::workflow_engine::recovery::{

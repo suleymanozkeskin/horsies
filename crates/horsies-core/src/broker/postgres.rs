@@ -3104,7 +3104,7 @@ fn enqueue_max_retries(task_name: &str, task_options: Option<&str>) -> Result<i3
 // Result wait
 // ---------------------------------------------------------------------------
 
-/// Re-poll interval of the workflow result wait (`get_workflow_result`),
+/// Re-poll interval of the workflow result wait (`wait_workflow_end`),
 /// bounding each `subscription.recv()` so a NOTIFY lost during a listener
 /// reconnect is recovered by a fresh terminal-status poll instead of hanging
 /// the caller forever.
