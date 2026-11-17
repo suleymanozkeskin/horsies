@@ -1977,22 +1977,19 @@ class PostgresBroker:
         so an absent (or vanished-between-statements) live row is the
         NORMAL terminal signal, not an error. Resolution rides the
         staged detail function — location then detail, one statement.
-        Returns ``Ok(None)`` when the staged function is not yet
-        published — a pre-coverage database has no history to consult
-        and no way to have moved the row, so absent means absent — and
+        Returns ``Ok(None)`` when history does not hold the task, and
         ``_STILL_WAITING`` when the row is reported live (it appeared
-        after the live probe missed it).
+        after the live probe missed it). The install and every coverage
+        pass publish the detail reader, so no publication probe runs; a
+        reader removed out of band raises ``42883`` naming it.
         """
         from horsies.core.history.reads.detail import (
             HistoryTaskDetail,
             TaskDetailAbsent,
             read_task_detail,
-            staged_detail_published,
         )
 
         connection = await session.connection()
-        if not await staged_detail_published(connection):
-            return Ok(None)
         detail = await read_task_detail(connection, task_id=task_id)
         match detail:
             case TaskDetailAbsent():
@@ -3498,12 +3495,9 @@ class PostgresBroker:
         from horsies.core.history.reads.detail import (
             HistoryTaskDetail,
             read_task_detail,
-            staged_detail_published,
         )
 
         connection = await session.connection()
-        if not await staged_detail_published(connection):
-            return Ok(None)
         detail = await read_task_detail(connection, task_id=task_id)
         match detail:
             case HistoryTaskDetail():
