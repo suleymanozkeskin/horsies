@@ -162,7 +162,7 @@ class TestSendPaths:
     ) -> None:
         options = json.dumps({'execution': 'PARALLEL'})
         sent_at = datetime.now(timezone.utc)
-        task_id = str(uuid.uuid4())
+        task_id = uuid.uuid4()
 
         outcome = await broker.enqueue_async(
             'exec_store_raw',

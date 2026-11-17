@@ -61,4 +61,18 @@ BROKER_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=('raw_result_record',),
     ),
+    DualRunOperation(
+        name='send',
+        production_path='horsies.core.brokers.postgres:PostgresBroker.enqueue_async',
+        reference_path='tests.dualrun.reference.enqueue_caller:enqueue_async',
+        mode=PoolMode(),
+        core_methods=('enqueue_async',),
+    ),
+    DualRunOperation(
+        name='send, blocking',
+        production_path='horsies.core.brokers.postgres:PostgresBroker.enqueue',
+        reference_path='tests.dualrun.reference.enqueue_caller:enqueue',
+        mode=PoolMode(),
+        core_methods=('enqueue',),
+    ),
 )
