@@ -40,7 +40,6 @@ from ..types.status import TaskStatus
 from .fences import (
     OwnedClaim,
     OwnedClaimBatch,
-    PriorLockedRead,
     TerminalFence,
     WorkerOwned,
 )
@@ -53,14 +52,17 @@ from .fences import (
 
 @dataclass(frozen=True, slots=True)
 class CompleteLockedTask:
-    """Success for a task whose row the caller already locked and read.
+    """Success for a RUNNING workflow task that this claim holds.
 
-    The attempt row is written separately by the caller in the same
-    transaction, from the context that locked read produced.
+    ``horsies_finish_workflow_success`` executes it: the function locks the
+    row by id, compares the worker and the claim generation of ``fence`` on
+    the locked row, and writes the attempt row and the move in one
+    statement. The fence is the full claim, so a command without the
+    generation cannot be built.
     """
 
     task_id: str
-    fence: PriorLockedRead
+    fence: OwnedClaim
     result_json: str
 
 
@@ -89,7 +91,13 @@ class CompleteTaskFused:
 
 @dataclass(frozen=True, slots=True)
 class FailLockedTask:
-    """Failure for a task whose row the caller already locked and read.
+    """Failure of an attempt that this claim holds.
+
+    ``horsies_finish_failed_attempt`` executes it: the function locks the row
+    by id, compares the worker and the claim generation of ``fence`` on the
+    locked row, and writes the attempt row with the retry or the failure in
+    one statement. The fence is the full claim, so a command without the
+    generation cannot be built.
 
     Covers both application failure and worker-level failure; they differ only
     in whether a failure reason is carried.
@@ -101,7 +109,7 @@ class FailLockedTask:
     """
 
     task_id: str
-    fence: PriorLockedRead
+    fence: OwnedClaim
     result_json: str
     error_code: str | None
     failed_reason: str | None

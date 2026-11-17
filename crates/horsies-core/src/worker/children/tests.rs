@@ -26,6 +26,7 @@ fn launch() -> ChildLaunch {
             program: PathBuf::from("/usr/bin/python3"),
             args: vec!["-m".into(), "horsies.core.worker.child_main".into()],
         },
+        preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
         program: ChildProgram::Python(PythonProgram {
             app_locator: "app.main:app".to_owned(),
             imports: vec!["app.tasks".to_owned()],
@@ -367,4 +368,54 @@ fn the_stop_reports_of_the_pools_join_their_killed_tasks() {
         ]),
         PoolStopReport::Drained
     );
+}
+
+fn preload_command() -> ChildCommand {
+    ChildCommand {
+        program: PathBuf::from("/usr/bin/python3"),
+        args: vec!["-m".into(), "horsies.core.worker.preload_main".into()],
+    }
+}
+
+fn launch_with_preload() -> ChildLaunch {
+    ChildLaunch {
+        preload: PreloadProgram::Command(preload_command()),
+        ..launch()
+    }
+}
+
+/// Python `SlotPool._start_preload`: the mode of the profile, the preload
+/// command of the child program, and the init frame of a child.
+#[test]
+fn the_preload_plan_takes_the_mode_the_command_and_the_init_frame_of_the_first_kind() {
+    let all_kinds = profile(serde_json::from_str(ALL_KINDS).expect("test JSON"));
+    let plan = preload_plan(&all_kinds, &launch_with_preload()).expect("a library preload");
+    assert_eq!(plan.mode, PreloadMode::Library);
+    assert_eq!(plan.command, preload_command());
+    let isolated = isolated_pool_config(&all_kinds, &launch_with_preload(), &facts(8))
+        .expect("isolated children");
+    assert_eq!(plan.init, isolated.init);
+
+    let threads_only = profile(serde_json::json!({
+        "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 8},
+        "preload": "app",
+    }));
+    let plan = preload_plan(&threads_only, &launch_with_preload()).expect("an app preload");
+    assert_eq!(plan.mode, PreloadMode::App);
+    let threads = shared_thread_pool_config(&threads_only, &launch_with_preload(), &facts(8))
+        .expect("shared thread children");
+    assert_eq!(plan.init, threads.init);
+}
+
+#[test]
+fn no_preload_runs_for_a_profile_without_one_or_a_child_program_without_one() {
+    let no_preload = profile(serde_json::json!({
+        "isolated": {"kind": "isolated_children", "count": 1},
+        "preload": "none",
+    }));
+    assert!(preload_plan(&no_preload, &launch_with_preload()).is_none());
+    let library = profile(serde_json::json!({
+        "isolated": {"kind": "isolated_children", "count": 1},
+    }));
+    assert!(preload_plan(&library, &launch()).is_none());
 }

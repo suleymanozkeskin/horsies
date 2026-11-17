@@ -7,7 +7,7 @@
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
-use super::host::ChildApp;
+use super::host::{ChildApp, ChildStartHook};
 use super::link::{read_frame, FrameWriter};
 use super::run::HostContext;
 use super::seats::run_isolated;
@@ -40,6 +40,8 @@ pub(crate) async fn run_isolated_in_process(
         app: Arc::new(ChildApp {
             registry,
             hostname: IN_PROCESS_HOSTNAME.to_owned(),
+            start_hook: ChildStartHook::NoHook,
+            producer_manifest: super::producer::test_producer_manifest(),
         }),
         pid: IN_PROCESS_PID,
         writer,

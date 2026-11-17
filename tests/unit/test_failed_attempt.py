@@ -13,6 +13,7 @@ from horsies.core.history.terminalization.move import (
     FINISH_FAILED_ATTEMPT_FUNCTION,
     LOCK_RUNNING_TASK_FUNCTION,
 )
+from horsies.core.lifecycle.commands import FailLockedTask
 from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.lifecycle.outcomes import (
@@ -44,6 +45,7 @@ from horsies.core.worker.failed_attempt import (
     NoRetry,
     RetryAfter,
     _placement_value,
+    finish_for,
     finish_parameters,
 )
 from horsies.core.worker.finalize import _attempt_failure_of
@@ -336,6 +338,28 @@ def _command(retry: NoRetry | RetryAfter) -> FinishFailedAttempt:
             failed_reason='reason',
         ),
     )
+
+
+class TestFinishOfAFailure:
+    def test_the_finish_carries_the_claim_of_the_failure(self) -> None:
+        """The generation comes from the failure's fence, not from a value
+        passed beside it."""
+        attempt = AttemptFailure(
+            kind=AttemptFailureKind.WORKER_FAILURE,
+            error_message='message',
+            failed_reason='reason',
+        )
+        failure = FailLockedTask(
+            task_id=TASK_ID,
+            fence=OwnedClaim(worker_id='w-1', claimed_at=NOW),
+            result_json='{}',
+            error_code='BOOM',
+            failed_reason='final',
+        )
+
+        assert finish_for(failure, retry=NoRetry(), attempt=attempt) == _command(
+            NoRetry(),
+        )
 
 
 class TestParameters:

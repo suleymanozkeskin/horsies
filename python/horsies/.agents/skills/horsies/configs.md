@@ -726,7 +726,7 @@ Setting any of these on `RecoveryConfig` fails at construction naming
 
 | Field | Type | Default | Range | Description |
 |---|---|---|---|---|
-| `paused_workflow_auto_cancel_after` | `timedelta \| None` | `None` | positive duration | Age past which a PAUSED workflow is expired by policy (`WorkflowStatus.EXPIRED`); `None` disables the sweep |
+| `paused_workflow_auto_cancel_after` | `timedelta \| None` | `None` | positive duration, at most 365,000 days | Age past which a PAUSED workflow is expired by policy (`WorkflowStatus.EXPIRED`); `None` disables the sweep. A longer age is refused with `CONFIG_INVALID_RETENTION`: the expiry subtracts the age from `now()`, and the result must stay inside PostgreSQL's timestamp range |
 | `worker_state_retention_hours` | `int \| None` | `168` (7d) | 1–8760; None disables | Prune old worker_state rows |
 | `terminal_record_retention_hours` | `int \| None` | `720` (30d) | 1–43800; None disables | Prune terminal **workflow** rows (`horsies_workflows`, `horsies_workflow_tasks`) |
 | `history_leaf_horizon_days` | `int` | `3` | 2–14 | Complete future daily history partitions kept ahead of writes; 2 is the coverage-health red line |

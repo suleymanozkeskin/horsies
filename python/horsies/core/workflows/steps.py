@@ -146,6 +146,20 @@ PHASE2_RECOVER_FUNCTION_SQL: Final = _step_statement(
 the node finish with no wake, and one attempt with the quarantine at the
 bound for a record that it keeps."""
 
+NODE_REEVALUATE_FUNCTION_SQL: Final = _step_statement(
+    'horsies_workflow_node_reevaluate(CAST(:wf_id AS uuid), CAST(:task_index AS integer))'
+)
+"""Recovery case 0, in the caller's transaction: the join verdict of one
+PENDING node of a RUNNING workflow, then the completion check."""
+
+NODES_ENQUEUE_READY_FUNCTION_SQL: Final = _step_statement(
+    'horsies_workflow_nodes_enqueue_ready(CAST(:wf_id AS uuid), '
+    'CAST(:task_indexes AS integer[]))'
+)
+"""Recovery cases 1 and 1.5, in the caller's transaction: READY nodes with
+no task (task node) or no child (sub-workflow node) move to ENQUEUED, then
+the completion check."""
+
 MAX_PARENT_ADVANCES: Final = MAX_SUBWORKFLOW_DEPTH + 1
 """The most parent advance levels of one drive: the levels of a tree, depth
 0 to ``MAX_SUBWORKFLOW_DEPTH``."""
@@ -241,6 +255,43 @@ class NodeFinishDisposition(Enum):
 
     SOURCE_DIGEST_MISMATCH = 'SOURCE_DIGEST_MISMATCH'
     """The digest of the stored bytes differs: the record is kept."""
+
+
+class ReevaluateDisposition(Enum):
+    """The disposition of ``horsies_workflow_node_reevaluate``."""
+
+    APPLIED = 'APPLIED'
+    """The node left PENDING (``detail``: its status)."""
+
+    WAITING = 'WAITING'
+    """The join is not met; nothing written."""
+
+    STALE = 'STALE'
+    """The node is absent or not PENDING (``detail``: its status); nothing written."""
+
+    NOT_RUNNING = 'NOT_RUNNING'
+    """The workflow is not RUNNING (``detail``: its status); nothing written."""
+
+    NOT_FOUND = 'NOT_FOUND'
+    """No workflow has this id; nothing written."""
+
+
+class EnqueueReadyDisposition(Enum):
+    """The disposition of ``horsies_workflow_nodes_enqueue_ready``."""
+
+    APPLIED = 'APPLIED'
+    """The nodes left READY (``detail``: their indexes, a JSON array): a task
+    node with its task row or failed by its build, a sub-workflow node with
+    its child start owed or failed."""
+
+    STALE = 'STALE'
+    """None of the nodes is READY with no work; nothing written."""
+
+    NOT_RUNNING = 'NOT_RUNNING'
+    """The workflow is not RUNNING (``detail``: its status); nothing written."""
+
+    NOT_FOUND = 'NOT_FOUND'
+    """No workflow has this id; nothing written."""
 
 
 @dataclass(frozen=True, slots=True)

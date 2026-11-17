@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use super::host::ChildApp;
 use super::link::FrameWriter;
+use super::panic::{catch_body_panic, panic_error};
 use crate::broker::claims::{
     release_claims, start_attempt as start_statement, ReleaseBatch, ReleaseClaims, ReleaseOutcome,
     ReleasePlacement, StartAttempt, StartMiss, StartOutcome,
@@ -19,7 +20,7 @@ use crate::broker::{
 };
 use crate::core::lifecycle::OwnedClaim;
 use crate::core::task::error::{OperationalErrorCode, TaskError};
-use crate::core::task::fn_trait::RegisteredTask;
+use crate::core::task::fn_trait::{RegisteredTask, TaskModule};
 use crate::core::task::result::TaskResult;
 use crate::worker::execution::{
     build_task_input, mark_task_finalizing, phase_retry_delay, FinalizingMark,
@@ -379,18 +380,18 @@ pub(super) fn result_end(result: TaskResult<Vec<u8>>) -> RunEnd {
     }
 }
 
-/// The body of a blocking task on the calling thread. A panic is
-/// `UNHANDLED_EXCEPTION`.
+/// The body of blocking task `task_name` (defined in `module`) on the
+/// calling thread. A panic is `UNHANDLED_EXCEPTION` with its record
+/// ([`panic_error`]).
 pub(super) fn run_blocking_body(
     task: &Arc<dyn crate::core::task::fn_trait::BlockingTaskFn>,
     input: &[u8],
+    task_name: &str,
+    module: TaskModule,
 ) -> TaskResult<Vec<u8>> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task.execute(input))) {
+    match catch_body_panic(|| task.execute(input)) {
         Ok(result) => result,
-        Err(_panic) => TaskResult::Err(TaskError::builtin(
-            OperationalErrorCode::UnhandledException,
-            "blocking task panicked",
-        )),
+        Err(record) => TaskResult::Err(panic_error(task_name, module, record)),
     }
 }
 

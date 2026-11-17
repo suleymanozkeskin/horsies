@@ -38,8 +38,8 @@ use crate::db::{
 };
 use crate::worker::backoff::RetryBackoff;
 use crate::worker::children::{
-    attempt_end, baseline_limits, exit_not_seen, pending_task_limit, plan_placement, ChildLaunch,
-    ChildrenStopped, PoolFacts, WorkerChildren,
+    attempt_end, baseline_limits, exit_not_seen, pending_task_limit, plan_placement, preload_plan,
+    ChildLaunch, ChildrenStopped, PoolFacts, WorkerChildren,
 };
 use crate::worker::claim_pass::{
     claim_for_dispatch, BrokerClaimSteps, ClaimBatchLimit, ClaimPassCounts, RegisteredClasses,
@@ -54,7 +54,9 @@ use crate::worker::executor::slots::{
     ClaimedTask, NotRunCause, OrphanSelfHeal, OutcomeWriter, PoolBoard, PoolFailure,
     PoolStopReport, RetryFacts, TaskKind,
 };
-use crate::worker::executor::supervisor::{Spawner, SpawnerStopReport, CHILD_KILL_WAIT};
+use crate::worker::executor::supervisor::{
+    PreloadMode, PreloadStart, PreloadUnsupported, Spawner, SpawnerStopReport, CHILD_KILL_WAIT,
+};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
 use crate::worker::finalize_batch::stop::drain_then_close;
 use crate::worker::finalize_batch::{FinalizeBatcher, FlusherBound};
@@ -448,6 +450,63 @@ async fn watch_new_kind_baselines(
     }
 }
 
+/// What the start of the preload process means for the worker (Python
+/// `SlotPool._start_preload`). Only the `app` mode refuses: the user chose
+/// it, so its failure is reported. In the `library` mode a failure costs
+/// child start time, so children use `exec` and the worker goes on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreloadOutcome {
+    /// Children fork from the preload process.
+    Forks,
+    /// Children use `exec`; `warning` is logged when there is one.
+    Exec { warning: Option<String> },
+    /// The worker fails before any child starts.
+    Refused { reason: String },
+}
+
+/// The outcome of a preload start in `mode`. Pure.
+fn preload_outcome(mode: PreloadMode, start: PreloadStart) -> PreloadOutcome {
+    match (mode, start) {
+        (_, PreloadStart::Ready { .. }) => PreloadOutcome::Forks,
+        (
+            PreloadMode::App,
+            PreloadStart::Unsupported(PreloadUnsupported::NotLinux { platform }),
+        ) => PreloadOutcome::Exec {
+            warning: Some(format!(
+                "App preload needs Linux, this is {platform}. Using exec."
+            )),
+        },
+        (PreloadMode::Library, PreloadStart::Unsupported(PreloadUnsupported::NotLinux { .. })) => {
+            PreloadOutcome::Exec { warning: None }
+        }
+        (_, PreloadStart::Unsupported(PreloadUnsupported::MissingKernelSupport { reason })) => {
+            PreloadOutcome::Exec {
+                warning: Some(format!(
+                    "Child preload cannot run on this host: {reason}. Using exec."
+                )),
+            }
+        }
+        (PreloadMode::App, PreloadStart::Refused { reason })
+        | (PreloadMode::App, PreloadStart::StartFailed { detail: reason }) => {
+            PreloadOutcome::Refused { reason }
+        }
+        (PreloadMode::Library, PreloadStart::Refused { reason }) => PreloadOutcome::Exec {
+            warning: Some(format!(
+                "No preload parent, using exec: the preload process refused: {reason}"
+            )),
+        },
+        (PreloadMode::Library, PreloadStart::StartFailed { detail }) => PreloadOutcome::Exec {
+            warning: Some(format!("No preload parent, using exec: {detail}")),
+        },
+        (_, PreloadStart::SpawnerStopped) => PreloadOutcome::Exec {
+            warning: Some(
+                "No preload parent, using exec: the spawner stopped during the preload start"
+                    .to_owned(),
+            ),
+        },
+    }
+}
+
 /// The children of a started worker, the spawner thread that starts them,
 /// and the registry of the tasks that children hold.
 struct RunningChildren {
@@ -787,14 +846,15 @@ impl Worker {
 
     /// Start the children before any database work, so a bad app or hook
     /// fails at once (Python `start`, `_start_slots`): the CPU plan, the
-    /// spawner thread, one pool per kind, then the wait for the first
-    /// generation, the placement of the worker's threads and the memory
-    /// baseline guard. A stop during the start ends it with `Ok(None)`.
+    /// spawner thread, the preload process of the profile, one pool per
+    /// kind, then the wait for the first generation, the placement of the
+    /// worker's threads and the memory baseline guard. A stop during the
+    /// start ends it with `Ok(None)`.
     ///
     /// Errors: [`WorkerError::PlacementRefused`], [`WorkerError::SpawnerStart`],
-    /// [`WorkerError::ChildHookFailed`] (never retried),
-    /// [`WorkerError::ChildrenStartFailed`]. The pools and the spawner are
-    /// stopped before an error returns.
+    /// [`WorkerError::PreloadRefused`], [`WorkerError::ChildHookFailed`]
+    /// (never retried), [`WorkerError::ChildrenStartFailed`]. The pools and
+    /// the spawner are stopped before an error returns.
     async fn start_pools(&self) -> Result<Option<RunningChildren>, WorkerError> {
         let profile = &self.profile.profile;
         let placement =
@@ -805,6 +865,21 @@ impl Worker {
             Ok(started) => started.map_err(WorkerError::SpawnerStart)?,
             Err(joined) => std::panic::resume_unwind(joined.into_panic()),
         };
+        // The preload process starts before the first child, so the first
+        // generation forks from it (Python `SlotPool.start`).
+        if let Some(plan) = preload_plan(profile, &self.launch) {
+            let mode = plan.mode;
+            match preload_outcome(mode, spawner.handle().start_preload(plan).await) {
+                PreloadOutcome::Forks | PreloadOutcome::Exec { warning: None } => {}
+                PreloadOutcome::Exec {
+                    warning: Some(warning),
+                } => tracing::warn!("{warning}"),
+                PreloadOutcome::Refused { reason } => {
+                    RunningChildren::stop_spawner(spawner).await;
+                    return Err(WorkerError::PreloadRefused { reason });
+                }
+            }
+        }
         let live = LiveDispatches::default();
         let children = WorkerChildren::start(
             profile,
@@ -1701,7 +1776,7 @@ mod tests {
     };
 
     use crate::async_task_fn;
-    use crate::broker::{ClaimedTaskRow, PostgresBroker};
+    use crate::broker::PostgresBroker;
     use crate::core::config::recovery::RecoveryConfig;
     use crate::core::history::maintenance::coverage::{
         ensure_startup_coverage, StartupCoverageOutcome,
@@ -1765,6 +1840,7 @@ mod tests {
             },
             ChildLaunch {
                 command: crate::worker::executor::slots::scripted::idle_child_of_any_kind(),
+                preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
                 program: ChildProgram::Rust,
                 log_level: ChildLogLevel::Info,
                 database_url,
@@ -1972,8 +2048,8 @@ mod tests {
     }
 
     /// The claim generation of every row that `insert_claimed_task` seeds and
-    /// of every dispatch row that `claimed_task_row` builds, so a test's
-    /// dispatch fences on the generation its row carries.
+    /// of every claimed task that `claimed_task` builds, so a test's dispatch
+    /// fences on the generation its row carries.
     fn test_claim_generation() -> chrono::DateTime<Utc> {
         static GENERATION: std::sync::OnceLock<chrono::DateTime<Utc>> = std::sync::OnceLock::new();
         *GENERATION.get_or_init(Utc::now)
@@ -2058,23 +2134,24 @@ mod tests {
         .unwrap();
     }
 
-    /// Build a dispatch row for a task seeded by `insert_claimed_task` /
-    /// `insert_running_task`. Retry counts live on the DB row only: the
-    /// execution path reads them from `set_running`'s RETURNING, not the
-    /// claimed row (v12 claim shape).
-    fn claimed_task_row(
+    /// The claimed task of a plain task seeded by `insert_claimed_task` /
+    /// `insert_running_task`, as the claim returns it: the claim generation
+    /// of the seed, and the retry facts that the seed stored.
+    fn claimed_task(
         task_id: &Uuid,
         queue_name: &str,
-        task_options: Option<String>,
-    ) -> ClaimedTaskRow {
-        ClaimedTaskRow {
-            id: *task_id,
+        task_options: Option<&str>,
+        retry: RetryFacts,
+    ) -> ClaimedTask {
+        ClaimedTask {
+            task_id: *task_id,
             task_name: "finalize_test".to_owned(),
-            input: "null".to_owned(),
             queue_name: queue_name.to_owned(),
-            is_workflow_task: false,
-            task_options,
             claimed_at: test_claim_generation(),
+            execution: crate::core::task::Execution::SharedAsync,
+            kind: TaskKind::Plain,
+            retry,
+            options: crate::worker::retry::read_stored_options(task_options),
         }
     }
 
@@ -2346,6 +2423,7 @@ mod tests {
             },
             ChildLaunch {
                 command,
+                preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
                 program: ChildProgram::Rust,
                 log_level: ChildLogLevel::Info,
                 database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
@@ -2381,6 +2459,7 @@ mod tests {
             },
             ChildLaunch {
                 command: crate::worker::executor::slots::scripted::idle_child_of_any_kind(),
+                preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
                 program: ChildProgram::Rust,
                 log_level: ChildLogLevel::Info,
                 database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
@@ -2682,6 +2761,81 @@ mod tests {
     /// Python `Worker.stop`: the drain line names each task that the drain
     /// deadline killed, as Python prints its list of ids; a drain that
     /// killed none logs no line.
+    /// Python `SlotPool._start_preload`: only the `app` mode refuses; the
+    /// `library` mode and a host without the preload path use `exec`.
+    #[test]
+    fn only_an_app_preload_that_does_not_start_refuses_the_worker() {
+        use crate::worker::executor::protocol::ProcessId;
+        let ready = PreloadStart::Ready {
+            pid: ProcessId::new(42).unwrap(),
+        };
+        assert_eq!(
+            preload_outcome(PreloadMode::App, ready),
+            PreloadOutcome::Forks
+        );
+        for (mode, start) in [
+            (
+                PreloadMode::App,
+                PreloadStart::Refused {
+                    reason: "import failed".to_owned(),
+                },
+            ),
+            (
+                PreloadMode::App,
+                PreloadStart::StartFailed {
+                    detail: "import failed".to_owned(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                preload_outcome(mode, start),
+                PreloadOutcome::Refused {
+                    reason: "import failed".to_owned()
+                }
+            );
+        }
+        assert_eq!(
+            preload_outcome(
+                PreloadMode::Library,
+                PreloadStart::Refused {
+                    reason: "import failed".to_owned()
+                }
+            ),
+            PreloadOutcome::Exec {
+                warning: Some(
+                    "No preload parent, using exec: the preload process refused: import failed"
+                        .to_owned()
+                )
+            }
+        );
+        let not_linux =
+            || PreloadStart::Unsupported(PreloadUnsupported::NotLinux { platform: "macos" });
+        assert_eq!(
+            preload_outcome(PreloadMode::Library, not_linux()),
+            PreloadOutcome::Exec { warning: None }
+        );
+        assert_eq!(
+            preload_outcome(PreloadMode::App, not_linux()),
+            PreloadOutcome::Exec {
+                warning: Some("App preload needs Linux, this is macos. Using exec.".to_owned())
+            }
+        );
+        assert_eq!(
+            preload_outcome(
+                PreloadMode::App,
+                PreloadStart::Unsupported(PreloadUnsupported::MissingKernelSupport {
+                    reason: "pidfd_open: ENOSYS".to_owned()
+                })
+            ),
+            PreloadOutcome::Exec {
+                warning: Some(
+                    "Child preload cannot run on this host: pidfd_open: ENOSYS. Using exec."
+                        .to_owned()
+                )
+            }
+        );
+    }
+
     #[test]
     fn the_drain_line_names_the_killed_tasks_as_python_does() {
         let killed = [Uuid::from_u128(1), Uuid::from_u128(2)];
@@ -3879,10 +4033,25 @@ mod tests {
         let persisted: TaskResult<serde_json::Value> =
             serde_json::from_str(result.as_deref().unwrap()).unwrap();
         let persisted_error = persisted.unwrap_err();
-        assert!(persisted_error
-            .message
-            .as_deref()
-            .is_some_and(|msg| msg.contains("async task panicked")),);
+        // #1402: the panic record of Python's unhandled exception, with
+        // `panic` as the exception type and the module of the task.
+        let message = persisted_error.message.clone().unwrap_or_default();
+        assert!(
+            message.starts_with("Unhandled exception in task ")
+                && message.ends_with(": panic: task panicked before finalize"),
+            "{message}"
+        );
+        assert_eq!(
+            persisted_error.data,
+            Some(serde_json::json!({ "exception_type": "panic" }))
+        );
+        let record = persisted_error
+            .exception
+            .expect("a panic stores an exception record");
+        assert_eq!(record.type_name, "panic");
+        assert_eq!(record.module, module_path!());
+        assert_eq!(record.message, "task panicked before finalize");
+        assert_eq!(record.repr, "task panicked before finalize");
     }
 
     /// A database error during the failed-attempt write decides neither the
@@ -3914,17 +4083,16 @@ mod tests {
 
         let Err(err) = persist_terminal_state(
             &unreachable,
-            task_id,
+            &claimed_task(
+                &task_id,
+                "default",
+                Some(task_options.as_str()),
+                RetryFacts {
+                    retry_count: 0,
+                    max_retries: 3,
+                },
+            ),
             TaskResult::Err(TaskError::new("RETRY_ME", "try again").unwrap()),
-            &claimed_task_row(&task_id, "default", Some(task_options.clone())),
-            &crate::worker::retry::read_stored_options(Some(&task_options)),
-            &crate::broker::SetRunningRow {
-                id: task_id,
-                started_at: Utc::now(),
-                retry_count: 0,
-                max_retries: 3,
-                good_until: None,
-            },
             "worker-1",
             &crate::core::config::payload::PayloadPolicy::default(),
         )
@@ -3954,17 +4122,16 @@ mod tests {
 
         let Err(err) = persist_terminal_state(
             &unreachable,
-            task_id,
+            &claimed_task(
+                &task_id,
+                "default",
+                None,
+                RetryFacts {
+                    retry_count: 0,
+                    max_retries: 0,
+                },
+            ),
             TaskResult::Ok(br#""phase1-durable""#.to_vec()),
-            &claimed_task_row(&task_id, "default", None),
-            &crate::worker::retry::read_stored_options(None),
-            &crate::broker::SetRunningRow {
-                id: task_id,
-                started_at: Utc::now(),
-                retry_count: 0,
-                max_retries: 0,
-                good_until: None,
-            },
             "worker-1",
             &crate::core::config::payload::PayloadPolicy::default(),
         )

@@ -2,7 +2,7 @@ use horsies::task;
 use horsies::TaskError;
 
 #[task("crate_vis")]
-pub(crate) async fn crate_vis(_: ()) -> Result<String, TaskError> {
+pub(crate) async fn crate_vis(_: ()) -> Result<String, TaskError<std::convert::Infallible>> {
     Ok("ok".into())
 }
 

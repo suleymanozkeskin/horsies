@@ -20,16 +20,23 @@ the snapshots must be equal in everything else.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Final, assert_never
 from uuid import UUID
 
 import psycopg
 import pytest
 
-from horsies.core.brokers.enqueue_task import EnqueueRow, SendKind
+from horsies.core.brokers.enqueue_task import (
+    EnqueueRow,
+    SendKind,
+    StartAfterDelay,
+    StartAt,
+    StartNow,
+)
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
     BrokerEnqueueError,
@@ -49,6 +56,7 @@ from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
 from tests.dualrun.reference import enqueue as reference
+from tests.dualrun.reference import enqueue_caller
 from tests.dualrun.seeds import SeedCoverage, SeedStatus, TaskSeed, WorkflowLink, insert_workflow_task
 from tests.dualrun.selfcheck import SelfCheckStepFailed
 
@@ -370,3 +378,236 @@ def test_enqueue_writes_and_answers_what_the_insert_and_key_path_did(
         'history.repeat': 'ok history.repeat; live rows 0',
         'history.repeat_other': 'payload mismatch; live rows 0',
     }
+
+
+# ---- The caller switch: the Python caller against the core ----
+#
+# Reference: ``tests/dualrun/reference/enqueue_caller.py``, the bodies of
+# ``PostgresBroker.enqueue_async`` and ``enqueue`` before the switch (the
+# Python checks and ``horsies_enqueue_task`` on SQLAlchemy). Candidate: the
+# two methods, which send through the broker's ``CoreHandle``. Both write
+# with ``horsies_enqueue_task``, so the reports and the snapshots must be
+# equal. For each row a send of the seed wrote, the report also checks that
+# the stored command fingerprint is Python's version-1 fingerprint of the
+# send (``_prepare_enqueue``), and gives the start offset (``enqueued_at``
+# minus ``created_at``) of a send that starts now or after a delay.
+
+type _EnqueueCall = Callable[..., Awaitable[Result[UUID, BrokerEnqueueError]]]
+
+_WRITTEN_CASES: Final = frozenset(
+    {'enqueue.fresh', 'enqueue.fresh_delayed', 'enqueue.fresh_at', 'enqueue.fresh_keyed'}
+)
+
+_STORED_ROW_SQL: Final = """
+    SELECT command_fingerprint, extract(epoch FROM enqueued_at - created_at)
+    FROM horsies_tasks WHERE id = %s::uuid
+"""
+
+
+def _stored_facts(connection: Connection, each: _Send) -> str:
+    """The fingerprint check and the start offset of the row a send wrote."""
+    match connection.execute(_STORED_ROW_SQL, (each.row.task_id,)).fetchone():
+        case (bytes() as fingerprint, Decimal() as offset):
+            pass
+        case other:
+            raise AssertionError(f'the row of {each.case} read {other!r}')
+    facts = f'; fingerprint is python {fingerprint == each.row.command_fingerprint}'
+    match each.row.start:
+        case StartNow() | StartAfterDelay():
+            return f'{facts}; start offset {round(offset)} s'
+        case StartAt():
+            return facts
+
+
+async def _caller_sends_async(
+    database: DualRunDatabase, seed: _Seed, call: _EnqueueCall,
+) -> dict[str, str]:
+    report: dict[str, str] = {}
+    async with open_broker(database) as broker:
+        for each in seed.sends:
+            result = await call(
+                broker,
+                each.row.task_name,
+                each.row.queue_name,
+                task_id=each.row.task_id,
+                send_kind=each.kind,
+                input_json=each.row.stored_input,
+                priority=each.row.priority,
+                sent_at=each.row.sent_at,
+                enqueued_at=each.enqueued_at,
+                enqueue_delay_seconds=each.enqueue_delay_seconds,
+                good_until=each.row.good_until,
+                task_options=each.row.task_options,
+                retention_class_key=DEFAULT_RETENTION_CLASS_KEY,
+                retain_rerun_input=each.row.retain_rerun_input,
+                idempotency_key=each.idempotency_key,
+            )
+            with psycopg.connect(database.url, autocommit=True) as connection:
+                live = _live_rows(connection, each.row.task_id)
+                stored = _stored_facts(connection, each) if each.case in _WRITTEN_CASES else ''
+            report[each.case] = f'{_candidate_label(result, seed)}; live rows {live}{stored}'
+    return report
+
+
+async def _core_enqueue(
+    broker: PostgresBroker, *args: object, **kwargs: object,
+) -> Result[UUID, BrokerEnqueueError]:
+    return await broker.enqueue_async(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+
+def _caller_side(name: str, call: _EnqueueCall) -> OperationSide[_Seed, dict[str, str]]:
+    def act(database: DualRunDatabase, seed: _Seed) -> dict[str, str]:
+        return asyncio.run(_caller_sends_async(database, seed, call))
+
+    return OperationSide(name=name, act=act)
+
+
+def test_the_core_send_writes_and_answers_what_the_python_send_did(
+    empty_database: MakeDatabase,
+) -> None:
+    run = _ok(
+        dual_run(
+            empty_database,
+            _seed,
+            _caller_side('Python caller on SQLAlchemy', enqueue_caller.enqueue_async),
+            _caller_side('CoreHandle.enqueue_async', _core_enqueue),
+            SeedCoverage.HISTORY_AND_BEATS,
+        )
+    )
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    assert run.reference.report == {
+        'enqueue.fresh': (
+            'ok enqueue.fresh; live rows 1; fingerprint is python True; start offset 0 s'
+        ),
+        'enqueue.fresh_delayed': (
+            'ok enqueue.fresh_delayed; live rows 1; fingerprint is python True; '
+            'start offset 60 s'
+        ),
+        'enqueue.fresh_at': 'ok enqueue.fresh_at; live rows 1; fingerprint is python True',
+        'enqueue.fresh_keyed': (
+            'ok enqueue.fresh_keyed; live rows 1; fingerprint is python True; start offset 0 s'
+        ),
+        'live.same': 'ok enqueue.live; live rows 1',
+        'live.repeat': 'ok enqueue.live; live rows 1',
+        'live.other_sent_at': 'payload mismatch; live rows 1',
+        'live.keyed_other_sent_at': 'payload mismatch; live rows 1',
+        'keyed.replay': 'ok enqueue.keyed; live rows 0',
+        'keyed.conflict': 'key conflict, owner enqueue.keyed; live rows 0',
+        'keyed.other_key': 'payload mismatch; live rows 1',
+        'bind.key': 'ok enqueue.bind; live rows 1',
+        'workflow.unkeyed': 'payload mismatch; live rows 1',
+        'history.first': 'ok history.first; live rows 1',
+        'history.repeat': 'ok history.repeat; live rows 0',
+        'history.repeat_other': 'payload mismatch; live rows 0',
+    }
+    assert run.candidate.report == run.reference.report
+
+
+# ---- Refusals: the Python caller against the core ----
+
+
+@dataclass(frozen=True, slots=True)
+class _Refused:
+    """One send that both callers refuse, with its keyword arguments."""
+
+    case: str
+    keywords: Mapping[str, object]
+
+
+def _refusals(now: datetime) -> tuple[_Refused, ...]:
+    return (
+        _Refused('input.not_an_object', {'input_json': '[1]'}),
+        _Refused('input.unreadable', {'input_json': '{bad'}),
+        _Refused('input.duplicate_key', {'input_json': '{"a":1,"a":2}'}),
+        _Refused('options.unreadable', {'task_options': '{bad'}),
+        _Refused(
+            'options.retry_limit',
+            {'task_options': '{"retry_policy":{"max_retries":99}}'},
+        ),
+        _Refused(
+            'start.both',
+            {'enqueued_at': now + timedelta(minutes=1), 'enqueue_delay_seconds': 60},
+        ),
+        _Refused('sent_at.naive', {'sent_at': now.replace(tzinfo=None)}),
+        _Refused('sent_at.future', {'sent_at': now + timedelta(hours=1)}),
+        _Refused('key.empty', {'idempotency_key': ''}),
+        _Refused('retention.not_derived', {'retention_class_key': 'standard_9999d'}),
+    )
+
+
+def _refusal_label(result: Result[UUID, BrokerEnqueueError]) -> str:
+    match result:
+        case Ok(task_id):
+            return f'ok {task_id}'
+        case Err(error):
+            return f'{error.code.value} retryable {error.retryable}'
+
+
+async def _refused_sends_async(
+    database: DualRunDatabase, call: _EnqueueCall,
+) -> dict[str, str]:
+    now = datetime.now(timezone.utc)
+    report: dict[str, str] = {}
+    async with open_broker(database) as broker:
+        for each in _refusals(now):
+            keywords: dict[str, object] = {
+                'task_id': mint_task_id(),
+                'send_kind': SendKind.FIRST,
+                'input_json': _COMMAND,
+                'sent_at': now,
+                **each.keywords,
+            }
+            result = await call(broker, 'enqueue.refused', 'default', **keywords)
+            report[each.case] = _refusal_label(result)
+    return report
+
+
+def _refusal_side(name: str, call: _EnqueueCall) -> OperationSide[None, dict[str, str]]:
+    def act(database: DualRunDatabase, _seed: None) -> dict[str, str]:
+        return asyncio.run(_refused_sends_async(database, call))
+
+    return OperationSide(name=name, act=act)
+
+
+def _no_seed(_connection: Connection) -> None:
+    return None
+
+
+def test_the_core_send_refuses_what_the_python_send_refused(
+    empty_database: MakeDatabase,
+) -> None:
+    run = _ok_refusals(
+        dual_run(
+            empty_database,
+            _no_seed,
+            _refusal_side('Python caller on SQLAlchemy', enqueue_caller.enqueue_async),
+            _refusal_side('CoreHandle.enqueue_async', _core_enqueue),
+        )
+    )
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    invalid_input = 'INVALID_INPUT retryable False'
+    assert run.reference.report == {
+        'input.not_an_object': invalid_input,
+        'input.unreadable': invalid_input,
+        'input.duplicate_key': invalid_input,
+        'options.unreadable': 'INVALID_TASK_OPTIONS retryable False',
+        'options.retry_limit': 'INVALID_TASK_OPTIONS retryable False',
+        'start.both': invalid_input,
+        'sent_at.naive': invalid_input,
+        'sent_at.future': invalid_input,
+        'key.empty': invalid_input,
+        'retention.not_derived': 'ENQUEUE_FAILED retryable False',
+    }
+    assert run.candidate.report == run.reference.report
+
+
+def _ok_refusals(
+    result: Result[OperationDualRun[dict[str, str], dict[str, str]], SelfCheckStepFailed],
+) -> OperationDualRun[dict[str, str], dict[str, str]]:
+    match result:
+        case Ok(value):
+            return value
+        case Err(failed):
+            pytest.fail(f'{failed.step}: {failed.cause}')

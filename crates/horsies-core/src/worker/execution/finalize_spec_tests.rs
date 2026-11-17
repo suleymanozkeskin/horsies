@@ -6,10 +6,10 @@
 //! and `tests/e2e/test_layer1_tasks.py` (sent_at across retries).
 //!
 //! Each test enters at [`persist_terminal_state`], the worker's phase 1 for a
-//! result of an attempt, and reads the rows it left. The dispatch facts
-//! (`ClaimedTaskRow`, `SetRunningRow`) are read from the seeded row, as the
-//! claim and the start write return them. The wake rows then enter phase 2
-//! at [`finalize_workflow_phase`].
+//! result of an attempt, and reads the rows it left. The dispatch facts (the
+//! outcome writer's [`ClaimedTask`]) are read from the seeded row, as the
+//! claim returns them. The wake rows then enter phase 2 at
+//! [`finalize_workflow_phase`].
 
 use std::time::Duration;
 
@@ -22,13 +22,15 @@ use super::{
     finalize_workflow_phase, persist_terminal_state, FinalizeError, FinalizeOutcome, FinalizeStage,
     PhaseTwoForm,
 };
-use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
+use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::config::PostgresConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{BuiltInTaskCode, TaskError};
 use crate::core::task::result::TaskResult;
+use crate::core::task::Execution;
+use crate::worker::executor::slots::{ClaimedTask, RetryFacts, TaskKind};
 use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 use crate::worker::retry::read_stored_options;
 
@@ -193,28 +195,52 @@ async fn seed_workflow_for(pool: &PgPool, task_id: Uuid, queue: &str) -> Uuid {
     workflow_id
 }
 
-/// The claimed row as the claim returns it.
-async fn claimed_row(pool: &PgPool, task_id: Uuid) -> ClaimedTaskRow {
-    sqlx::query_as(
-        "SELECT id, task_name, input, queue_name, is_workflow_task, task_options, claimed_at
+/// The claimed task as the claim returns it: the claim generation, the class,
+/// the kind, the retry facts and the stored options of the row.
+async fn claimed_task(pool: &PgPool, task_id: Uuid) -> ClaimedTask {
+    let (
+        task_name,
+        queue_name,
+        claimed_at,
+        execution,
+        is_workflow_task,
+        retry_count,
+        max_retries,
+        task_options,
+    ): (
+        String,
+        String,
+        DateTime<Utc>,
+        String,
+        bool,
+        i32,
+        i32,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT task_name, queue_name, claimed_at, execution, is_workflow_task,
+                retry_count, max_retries, task_options
          FROM horsies_tasks WHERE id = $1",
     )
     .bind(task_id)
     .fetch_one(pool)
     .await
-    .expect("claimed row")
-}
-
-/// The attempt facts as the start write returns them.
-async fn running_row(pool: &PgPool, task_id: Uuid) -> SetRunningRow {
-    sqlx::query_as(
-        "SELECT id, started_at, retry_count, max_retries, good_until
-         FROM horsies_tasks WHERE id = $1",
-    )
-    .bind(task_id)
-    .fetch_one(pool)
-    .await
-    .expect("running row")
+    .expect("claimed row");
+    ClaimedTask {
+        task_id,
+        task_name,
+        queue_name,
+        claimed_at,
+        execution: Execution::from_stored(&execution).expect("a stored execution class"),
+        kind: match is_workflow_task {
+            true => TaskKind::WorkflowTask,
+            false => TaskKind::Plain,
+        },
+        retry: RetryFacts {
+            retry_count,
+            max_retries,
+        },
+        options: read_stored_options(task_options.as_deref()),
+    }
 }
 
 /// Run phase 1 with the dispatch facts read now.
@@ -223,32 +249,18 @@ async fn finalize(
     task_id: Uuid,
     result: TaskResult<Vec<u8>>,
 ) -> Result<FinalizeOutcome, FinalizeError> {
-    let claimed = claimed_row(pool, task_id).await;
-    let running = running_row(pool, task_id).await;
-    finalize_with(pool, task_id, result, &claimed, &running).await
+    let claimed = claimed_task(pool, task_id).await;
+    finalize_with(pool, result, &claimed).await
 }
 
 /// Run phase 1 with dispatch facts that the caller read earlier.
 async fn finalize_with(
     pool: &PgPool,
-    task_id: Uuid,
     result: TaskResult<Vec<u8>>,
-    claimed: &ClaimedTaskRow,
-    running: &SetRunningRow,
+    claimed: &ClaimedTask,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let broker = PostgresBroker::from_pool(pool.clone());
-    let stored_options = read_stored_options(claimed.task_options.as_deref());
-    persist_terminal_state(
-        &broker,
-        task_id,
-        result,
-        claimed,
-        &stored_options,
-        running,
-        WORKER,
-        &PayloadPolicy::default(),
-    )
-    .await
+    persist_terminal_state(&broker, claimed, result, WORKER, &PayloadPolicy::default()).await
 }
 
 fn error_result(code: &str) -> TaskResult<Vec<u8>> {
@@ -413,22 +425,14 @@ async fn good_until_is_judged_under_the_lock() {
         },
     )
     .await;
-    let claimed = claimed_row(&pool, seeded.task_id).await;
-    let running = running_row(&pool, seeded.task_id).await;
+    let claimed = claimed_task(&pool, seeded.task_id).await;
     sqlx::query("UPDATE horsies_tasks SET good_until = NOW() - interval '5 minutes' WHERE id = $1")
         .bind(seeded.task_id)
         .execute(&pool)
         .await
         .expect("move good_until into the past");
 
-    let outcome = finalize_with(
-        &pool,
-        seeded.task_id,
-        error_result("ERR"),
-        &claimed,
-        &running,
-    )
-    .await;
+    let outcome = finalize_with(&pool, error_result("ERR"), &claimed).await;
 
     assert!(
         matches!(outcome, Ok(FinalizeOutcome::Finalized)),
@@ -452,8 +456,7 @@ async fn a_failure_for_a_row_the_reaper_already_failed_changes_nothing() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let queue = test_queue();
     let seeded = seed_task(&pool, &TaskSeed::plain(&queue)).await;
-    let claimed = claimed_row(&pool, seeded.task_id).await;
-    let running = running_row(&pool, seeded.task_id).await;
+    let claimed = claimed_task(&pool, seeded.task_id).await;
     let _processed = mark_stale_running_as_failed(
         &pool,
         STALE_THRESHOLD_SECONDS,
@@ -467,14 +470,7 @@ async fn a_failure_for_a_row_the_reaper_already_failed_changes_nothing() {
         .expect("the reaper moved the row to history");
     assert_eq!(before["status"], "FAILED");
 
-    let outcome = finalize_with(
-        &pool,
-        seeded.task_id,
-        error_result("ERR"),
-        &claimed,
-        &running,
-    )
-    .await;
+    let outcome = finalize_with(&pool, error_result("ERR"), &claimed).await;
 
     assert!(
         matches!(outcome, Ok(FinalizeOutcome::Refused)),
@@ -495,28 +491,13 @@ async fn a_plain_failure_replay_after_a_lost_reply_writes_nothing() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let queue = test_queue();
     let seeded = seed_task(&pool, &TaskSeed::plain(&queue)).await;
-    let claimed = claimed_row(&pool, seeded.task_id).await;
-    let running = running_row(&pool, seeded.task_id).await;
+    let claimed = claimed_task(&pool, seeded.task_id).await;
 
-    let first = finalize_with(
-        &pool,
-        seeded.task_id,
-        error_result("TRANSIENT"),
-        &claimed,
-        &running,
-    )
-    .await;
+    let first = finalize_with(&pool, error_result("TRANSIENT"), &claimed).await;
     let committed = history_row(&pool, seeded.task_id)
         .await
         .expect("history row");
-    let replay = finalize_with(
-        &pool,
-        seeded.task_id,
-        error_result("TRANSIENT"),
-        &claimed,
-        &running,
-    )
-    .await;
+    let replay = finalize_with(&pool, error_result("TRANSIENT"), &claimed).await;
 
     assert!(
         matches!(first, Ok(FinalizeOutcome::Finalized)),
@@ -549,28 +530,13 @@ async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
         },
     )
     .await;
-    let claimed = claimed_row(&pool, seeded.task_id).await;
-    let running = running_row(&pool, seeded.task_id).await;
+    let claimed = claimed_task(&pool, seeded.task_id).await;
 
-    let first = finalize_with(
-        &pool,
-        seeded.task_id,
-        error_result("TRANSIENT"),
-        &claimed,
-        &running,
-    )
-    .await;
+    let first = finalize_with(&pool, error_result("TRANSIENT"), &claimed).await;
     let committed = history_row(&pool, seeded.task_id)
         .await
         .expect("history row");
-    let replay = finalize_with(
-        &pool,
-        seeded.task_id,
-        error_result("TRANSIENT"),
-        &claimed,
-        &running,
-    )
-    .await;
+    let replay = finalize_with(&pool, error_result("TRANSIENT"), &claimed).await;
 
     for outcome in [&first, &replay] {
         assert!(
@@ -600,28 +566,13 @@ async fn a_workflow_success_replay_owes_phase_two() {
         },
     )
     .await;
-    let claimed = claimed_row(&pool, seeded.task_id).await;
-    let running = running_row(&pool, seeded.task_id).await;
+    let claimed = claimed_task(&pool, seeded.task_id).await;
 
-    let first = finalize_with(
-        &pool,
-        seeded.task_id,
-        ok_result("persisted"),
-        &claimed,
-        &running,
-    )
-    .await;
+    let first = finalize_with(&pool, ok_result("persisted"), &claimed).await;
     let committed = history_row(&pool, seeded.task_id)
         .await
         .expect("history row");
-    let replay = finalize_with(
-        &pool,
-        seeded.task_id,
-        ok_result("persisted"),
-        &claimed,
-        &running,
-    )
-    .await;
+    let replay = finalize_with(&pool, ok_result("persisted"), &claimed).await;
 
     for outcome in [&first, &replay] {
         assert!(
@@ -652,19 +603,11 @@ async fn a_stale_generation_success_leaves_the_newer_claim_unchanged() {
         },
     )
     .await;
-    let mut claimed = claimed_row(&pool, seeded.task_id).await;
+    let mut claimed = claimed_task(&pool, seeded.task_id).await;
     claimed.claimed_at -= chrono::Duration::minutes(1);
-    let running = running_row(&pool, seeded.task_id).await;
     let before = live_row(&pool, seeded.task_id).await;
 
-    let outcome = finalize_with(
-        &pool,
-        seeded.task_id,
-        ok_result("stale"),
-        &claimed,
-        &running,
-    )
-    .await;
+    let outcome = finalize_with(&pool, ok_result("stale"), &claimed).await;
 
     assert!(
         matches!(outcome, Ok(FinalizeOutcome::Refused)),

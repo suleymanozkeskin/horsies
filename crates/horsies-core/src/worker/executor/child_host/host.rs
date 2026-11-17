@@ -1,15 +1,21 @@
 //! The entry of child mode: boot, report ready, serve, and name the exit
 //! code (Python `core/worker/child_main.py`).
 
+use std::future::Future;
 use std::io;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
+use std::pin::Pin;
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::args::{ChildArgs, CHILD_MODE_ARGUMENT};
 use super::link::{read_frame, start_control_thread, write_frame, FrameWriter, ReadEnd};
+use super::panic::{install_panic_hook, CatchPanic};
+use super::producer::{publish_child_producer, task_send_manifest, task_send_pool_of};
+use super::role::mark_process_runs_task_bodies;
 use super::rss::read_rss;
 use super::run::HostContext;
 use super::seats::{serve_isolated, serve_shared_async, serve_shared_thread, PollWatch, ServeEnd};
@@ -17,7 +23,11 @@ use crate::broker::PostgresBroker;
 use crate::core::config::PostgresConfig;
 use crate::core::TaskRegistry;
 use crate::db::KeptOpen;
-use crate::manifest::PoolRecycle;
+use crate::manifest::{PoolRecycle, ProducerManifest};
+use crate::process_runtime::{
+    process_runtime, shape_process_runtime, OsErrorCode, ProcessRuntimeRefusal, RuntimeShape,
+    ShapeOutcome, ThreadStart,
+};
 use crate::worker::executor::protocol::{
     decode_parent_frame, BootDetail, BootErrorName, BootFailedFrame, ChildConnection,
     ChildExitCode, ChildFrame, ChildKind, ChildPool, ChildProgram, FrameReader, InitFrame,
@@ -32,12 +42,20 @@ const INIT_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 /// marker writes and one async body at a time.
 const SMALL_RUNTIME_THREADS: usize = 2;
 const RUNTIME_THREAD_NAME: &str = "horsies-child-runtime";
+/// The most threads of the blocking pool of a child runtime (tokio's
+/// default).
+const CHILD_MAX_BLOCKING_THREADS: NonZeroUsize = match NonZeroUsize::new(512) {
+    Some(threads) => threads,
+    None => panic!("512 is not zero"),
+};
 /// The checkout wait of the child's pool, in seconds (Python
 /// `CHILD_POOL_CONNECTION_WAIT_S`).
 const CHILD_POOL_CHECKOUT_WAIT_SECONDS: u32 = 30;
 /// The age at which the child's pool replaces a connection (Python
 /// `CHILD_POOL_MAX_LIFETIME_S`).
 const CHILD_POOL_MAX_AGE: PoolRecycle = PoolRecycle::after_seconds(300);
+/// The longest run of the start hook (Python `CHILD_HOOK_TIMEOUT_SECONDS`).
+pub const CHILD_START_HOOK_BOUND: Duration = Duration::from_secs(10);
 
 /// What a worker binary gives its child mode: its tasks and the settings a
 /// child reads from the app.
@@ -45,6 +63,36 @@ pub struct ChildApp {
     pub registry: Arc<TaskRegistry>,
     /// The host name written with each start.
     pub hostname: String,
+    /// What the child runs before it reports ready.
+    pub start_hook: ChildStartHook,
+    /// The app's producer manifest. Task code in the child sends through a
+    /// handle of it whose pool is the `task_send_pool` of the child's kind
+    /// ([`super::child_producer`]).
+    pub producer_manifest: ProducerManifest,
+}
+
+/// Why a start hook failed, as the hook names it. The child logs it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{cause}")]
+pub struct ChildHookFailure {
+    pub cause: String,
+}
+
+/// The future of a start hook.
+pub type ChildStartFuture = Pin<Box<dyn Future<Output = Result<(), ChildHookFailure>> + Send>>;
+
+/// The start hook of a child (Python `on_child_process_start`,
+/// `on_shared_async_child_start`). It runs once in every child, a
+/// replacement child included, on the child's runtime: after the child
+/// connected its pool, before it reports ready, for at most
+/// [`CHILD_START_HOOK_BOUND`]. A hook that returns an error, panics or runs
+/// longer ends the child with exit code 173, and the worker stops with
+/// `ChildHookFailed`. Work that the hook starts and leaves running is not the
+/// work of any task. The hook is `Sync` because the child shares its
+/// [`ChildApp`] between threads; the child takes it out and calls it once.
+pub enum ChildStartHook {
+    NoHook,
+    Run(Box<dyn FnOnce() -> ChildStartFuture + Send + Sync>),
 }
 
 /// How a child ends. The binary exits with [`Self::code`].
@@ -58,6 +106,8 @@ pub enum ChildHostExit {
     /// After a `boot_failed` frame that names the cause.
     BootFailed,
     ProtocolMismatch,
+    /// The start hook failed, panicked or ran past its bound: exit 173.
+    ChildHookFailed,
 }
 
 impl ChildHostExit {
@@ -69,6 +119,7 @@ impl ChildHostExit {
             Self::BadArguments => ChildExitCode::BadArguments.code(),
             Self::BootFailed => ChildExitCode::BootFailed.code(),
             Self::ProtocolMismatch => ChildExitCode::ProtocolMismatch.code(),
+            Self::ChildHookFailed => ChildExitCode::ChildHookFailed.code(),
         }
     }
 }
@@ -86,6 +137,8 @@ pub fn child_command() -> io::Result<ChildCommand> {
 /// Code that the binary runs before this call runs in each child too, as a
 /// Python child imports the app again.
 pub fn run_child_host(app: ChildApp, args: ChildArgs) -> ChildHostExit {
+    mark_process_runs_task_bodies();
+    install_panic_hook();
     if let Err(exit) = watch_parent(args.worker_pid) {
         return exit;
     }
@@ -187,12 +240,66 @@ fn read_init(socket: &UnixStream, reader: &mut FrameReader) -> Result<InitFrame,
 /// The cause of an `io::Error` of a boot step: a resource shortage for a
 /// clearable errno, else `step_cause`.
 fn shortage_or(error: &io::Error, step_cause: ReportedBootCause) -> ReportedBootCause {
-    match error.raw_os_error() {
-        Some(libc::EMFILE) => ReportedBootCause::ResourceShortage(ShortageErrno::Emfile),
-        Some(libc::ENFILE) => ReportedBootCause::ResourceShortage(ShortageErrno::Enfile),
-        Some(libc::ENOMEM) => ReportedBootCause::ResourceShortage(ShortageErrno::Enomem),
-        Some(libc::EAGAIN) => ReportedBootCause::ResourceShortage(ShortageErrno::Eagain),
-        _ => step_cause,
+    let os_error = match error.raw_os_error() {
+        Some(code) => OsErrorCode::Code(code),
+        None => OsErrorCode::NotAnOsError,
+    };
+    shortage_of(os_error, step_cause)
+}
+
+/// The cause of a boot step that failed with `os_error`: a resource
+/// shortage for a clearable errno, else `step_cause`.
+fn shortage_of(os_error: OsErrorCode, step_cause: ReportedBootCause) -> ReportedBootCause {
+    match os_error {
+        OsErrorCode::Code(libc::EMFILE) => {
+            ReportedBootCause::ResourceShortage(ShortageErrno::Emfile)
+        }
+        OsErrorCode::Code(libc::ENFILE) => {
+            ReportedBootCause::ResourceShortage(ShortageErrno::Enfile)
+        }
+        OsErrorCode::Code(libc::ENOMEM) => {
+            ReportedBootCause::ResourceShortage(ShortageErrno::Enomem)
+        }
+        OsErrorCode::Code(libc::EAGAIN) => {
+            ReportedBootCause::ResourceShortage(ShortageErrno::Eagain)
+        }
+        OsErrorCode::Code(_) | OsErrorCode::NotAnOsError => step_cause,
+    }
+}
+
+/// The runtime of the process, shaped for a child of `kind`: the child's
+/// async bodies, its writes and its connections run on it, so the child
+/// starts one runtime. A runtime that ran before child mode (code that
+/// `main` ran first) is used with the shape it started with.
+///
+/// Errors: the boot cause and the detail of a runtime that cannot start.
+fn start_child_runtime(
+    kind: ChildKind,
+) -> Result<&'static tokio::runtime::Runtime, (ReportedBootCause, String)> {
+    let shape = RuntimeShape {
+        worker_threads: NonZeroUsize::new(runtime_threads(kind)).unwrap_or(NonZeroUsize::MIN),
+        max_blocking_threads: CHILD_MAX_BLOCKING_THREADS,
+        thread_name: RUNTIME_THREAD_NAME,
+        on_thread_start: ThreadStart::Nothing,
+    };
+    match shape_process_runtime(shape) {
+        ShapeOutcome::Shaped => {}
+        ShapeOutcome::AlreadyRunning => tracing::warn!(
+            "the process runtime ran before child mode started; the child runs on it with the \
+             shape it started with",
+        ),
+    }
+    match process_runtime() {
+        Ok(process) => Ok(process.runtime()),
+        Err(ProcessRuntimeRefusal::StartFailed { cause, os_error }) => Err((
+            shortage_of(os_error, ReportedBootCause::ThreadStartRefused),
+            cause,
+        )),
+        // A child starts by exec, so it inherits no runtime; a refusal names
+        // the defect in the boot report.
+        Err(refusal @ ProcessRuntimeRefusal::ForkedAfterStart { .. }) => {
+            Err((ReportedBootCause::ThreadStartRefused, refusal.to_string()))
+        }
     }
 }
 
@@ -341,22 +448,57 @@ fn start_threads(
     Ok((writer, serving, frames))
 }
 
+/// Run the start hook on `runtime`, bounded by `bound` (the child passes
+/// [`CHILD_START_HOOK_BOUND`]). The bound is kept by this thread, not by a
+/// runtime timer, so a hook that holds every runtime thread still passes it.
+/// A failure is logged with its cause and gives
+/// [`ChildHostExit::ChildHookFailed`]. A hook that runs past the bound is
+/// left running: the child exits.
+fn run_start_hook(
+    runtime: &tokio::runtime::Runtime,
+    hook: ChildStartHook,
+    bound: Duration,
+) -> Result<(), ChildHostExit> {
+    let start = match hook {
+        ChildStartHook::NoHook => return Ok(()),
+        ChildStartHook::Run(start) => start,
+    };
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let _hook_task = runtime.spawn(async move {
+        let outcome = CatchPanic::new(async move { start().await }).await;
+        // The receiver is gone only after the bound passed.
+        let _sent = sender.send(outcome);
+    });
+    let cause = match receiver.recv_timeout(bound) {
+        Ok(Ok(Ok(()))) => return Ok(()),
+        Ok(Ok(Err(failure))) => format!("it returned an error: {failure}"),
+        Ok(Err(record)) => format!("it panicked: {}", record.text),
+        Err(RecvTimeoutError::Timeout) => {
+            format!("it ran longer than {} ms", bound.as_millis())
+        }
+        Err(RecvTimeoutError::Disconnected) => "it ended with no outcome".to_owned(),
+    };
+    tracing::error!(
+        pid = std::process::id(),
+        "the start hook of the child failed: {cause}; the child exits and the worker stops",
+    );
+    Err(ChildHostExit::ChildHookFailed)
+}
+
 fn boot_and_serve(
-    app: ChildApp,
+    mut app: ChildApp,
     socket: UnixStream,
     reader: FrameReader,
     init: InitFrame,
 ) -> ChildHostExit {
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(runtime_threads(init.child_kind))
-        .thread_name(RUNTIME_THREAD_NAME)
-        .enable_all()
-        .build()
-    {
+    publish_child_producer(task_send_manifest(
+        &app.producer_manifest,
+        task_send_pool_of(init.child_kind),
+    ));
+    let runtime = match start_child_runtime(init.child_kind) {
         Ok(runtime) => runtime,
-        Err(error) => {
-            let cause = shortage_or(&error, ReportedBootCause::ThreadStartRefused);
-            return boot_failed(&socket, cause, "RuntimeStartFailed", &error.to_string());
+        Err((cause, detail)) => {
+            return boot_failed(&socket, cause, "RuntimeStartFailed", &detail);
         }
     };
     let broker = match runtime.block_on(connect(&init)) {
@@ -370,6 +512,10 @@ fn boot_and_serve(
             )
         }
     };
+    let start_hook = std::mem::replace(&mut app.start_hook, ChildStartHook::NoHook);
+    if let Err(exit) = run_start_hook(runtime, start_hook, CHILD_START_HOOK_BOUND) {
+        return exit;
+    }
     let (writer, serving, mut frames) = match start_threads(&socket, reader, init.child_kind) {
         Ok(threads) => threads,
         Err(error) => {
@@ -401,8 +547,8 @@ fn boot_and_serve(
             }
         }
     });
-    // Work that still runs (a stuck body) must not hold the exit.
-    runtime.shutdown_background();
+    // The process runtime is never shut down: the binary exits with the
+    // code, so work that still runs (a stuck body) does not hold the exit.
     match end {
         ServeEnd::Stopped => ChildHostExit::Stopped,
         ServeEnd::BadParentFrame => ChildHostExit::BadParentFrame,
@@ -429,6 +575,86 @@ mod tests {
             max_size: PoolMaxSize::new(max_size).expect("the test max size is inside its bounds"),
             check,
         }
+    }
+
+    fn small_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("a test runtime starts")
+    }
+
+    fn hook<C, F>(make: C) -> ChildStartHook
+    where
+        C: FnOnce() -> F + Send + Sync + 'static,
+        F: Future<Output = Result<(), ChildHookFailure>> + Send + 'static,
+    {
+        ChildStartHook::Run(Box::new(move || -> ChildStartFuture { Box::pin(make()) }))
+    }
+
+    const SHORT_BOUND: Duration = Duration::from_millis(200);
+
+    /// Python `test_child_process_hooks.py`: a hook that returns, and no
+    /// hook, let the child report ready.
+    #[test]
+    fn a_hook_that_returns_lets_the_child_start() {
+        let runtime = small_runtime();
+        assert_eq!(
+            run_start_hook(&runtime, ChildStartHook::NoHook, SHORT_BOUND),
+            Ok(())
+        );
+        assert_eq!(
+            run_start_hook(&runtime, hook(|| async { Ok(()) }), SHORT_BOUND),
+            Ok(())
+        );
+        runtime.shutdown_background();
+    }
+
+    /// #1402: a hook that returns an error, one that panics, and one that
+    /// runs past its bound each end the child with 173.
+    #[test]
+    fn a_hook_that_fails_panics_or_hangs_ends_the_child_with_173() {
+        let runtime = small_runtime();
+        let failing = hook(|| async {
+            Err(ChildHookFailure {
+                cause: "the cache did not open".to_owned(),
+            })
+        });
+        let panicking = hook(|| async {
+            if std::hint::black_box(true) {
+                panic!("the hook panicked");
+            }
+            Ok(())
+        });
+        let hanging = hook(|| async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(())
+        });
+        for start in [failing, panicking, hanging] {
+            let ended = run_start_hook(&runtime, start, SHORT_BOUND);
+            assert_eq!(ended, Err(ChildHostExit::ChildHookFailed));
+            assert_eq!(ChildHostExit::ChildHookFailed.code(), 173);
+        }
+        runtime.shutdown_background();
+    }
+
+    /// The bound holds when the hook holds the only runtime thread: the
+    /// child's own thread keeps it, not a runtime timer.
+    #[test]
+    fn a_hook_that_holds_the_runtime_thread_still_passes_its_bound() {
+        let runtime = small_runtime();
+        let started = std::time::Instant::now();
+        let holding = hook(|| async {
+            std::thread::sleep(Duration::from_secs(5));
+            Ok(())
+        });
+        assert_eq!(
+            run_start_hook(&runtime, holding, SHORT_BOUND),
+            Err(ChildHostExit::ChildHookFailed)
+        );
+        assert!(started.elapsed() < Duration::from_secs(4));
+        runtime.shutdown_background();
     }
 
     /// Python `min_size=0`: no connection stays open; another `min_size`

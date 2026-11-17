@@ -209,7 +209,8 @@ pub async fn cancel_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> Hand
 ///   `paused_workflow_auto_cancel_after elapsed: <age>` with Python's `str(timedelta)` of the age.
 /// - The age goes to the database in exact microseconds (`<micros> * interval '1 microsecond'`, a time interval
 ///   with no day field), as Python sends it: no rounding, and the same age in any session time zone. The config
-///   reader built the age ([`PausedWorkflowAge::parse`]), so it is a whole number of microseconds above zero.
+///   reader built the age ([`PausedWorkflowAge::parse`]), so it is a whole number of microseconds from 1 to
+///   [`PausedWorkflowAge::MAX_MICROS`], and `NOW()` minus the age stays inside PostgreSQL's timestamp range.
 ///
 /// Returns: the count of workflows that this call expired.
 ///
@@ -837,7 +838,7 @@ mod p7_lifecycle_tests {
     /// The age goes to the database in exact microseconds, as Python's `older_than // timedelta(microseconds=1)`:
     /// a part below one millisecond is kept, and one day is 86 400 000 000 microseconds. The sweep sends
     /// `PausedWorkflowAge::micros`; the config reader's tests pin the refusals (a negative or zero age, a part
-    /// below one microsecond, an age past the range of microseconds).
+    /// below one microsecond, an age longer than `PausedWorkflowAge::MAX_DAYS`).
     #[test]
     fn the_paused_age_is_exact_microseconds() {
         assert_eq!(age(chrono::Duration::microseconds(500)).micros(), 500);

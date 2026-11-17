@@ -34,7 +34,7 @@ use deadpool::managed::{
 use deadpool::Runtime;
 use deadpool_postgres::ClientWrapper;
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
-use tokio::task::AbortHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::{CancelToken, Row};
@@ -52,6 +52,7 @@ use super::statement::{
     StatementBound, StatementProtocol, CANCEL_GRACE,
 };
 use super::transaction::TransactionCommand;
+use crate::process_runtime::spawn_on_process_runtime;
 
 /// PostgreSQL's upper limit of `max_connections`; no pool can be larger.
 pub const POSTGRES_MAX_BACKENDS: u32 = 262_143;
@@ -339,8 +340,7 @@ impl Manager for CoreManager {
     type Error = ConnectError;
 
     async fn create(&self) -> Result<CoreConnection, ConnectError> {
-        let (client, connection) = open_connection(&self.plan).await?;
-        let driver = tokio::spawn(drive_connection(connection));
+        let (client, driver) = open_on_process_runtime(Arc::clone(&self.plan)).await?;
         let abort = driver.abort_handle();
         // Dropping the wrapper on a failed setup aborts the driver task.
         let client = ClientWrapper::new(client, driver);
@@ -481,6 +481,39 @@ async fn open_missing(
 }
 
 /// Drives one pooled connection until it closes.
+/// Open a connection of `plan` and start its driver, both on the runtime of
+/// the process ([`crate::process_runtime`]): the socket belongs to the
+/// runtime that opened it, and the connection lives while its driver runs,
+/// so the connection serves every runtime of the process and outlives the
+/// runtime of the caller.
+///
+/// Errors: the [`ConnectError`] of the attempt;
+/// [`ConnectFailure::RuntimeUnavailable`] when the process runtime cannot be
+/// used (nothing was connected).
+async fn open_on_process_runtime(
+    plan: Arc<ConnectPlan>,
+) -> Result<(tokio_postgres::Client, JoinHandle<()>), ConnectError> {
+    let masked_url = plan.masked_url().clone();
+    let opening = spawn_on_process_runtime(async move {
+        let (client, connection) = open_connection(&plan).await?;
+        let driver = tokio::spawn(drive_connection(connection));
+        Ok::<_, ConnectError>((client, driver))
+    })
+    .map_err(|refusal| ConnectError {
+        masked_url,
+        cause: ConnectFailure::RuntimeUnavailable(refusal),
+    })?;
+    match opening.await {
+        Ok(opened) => opened,
+        // The process runtime lives in a static and never shuts down, so the
+        // open is never cancelled; a panic in it is a defect, resumed here.
+        Err(join) => match join.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(join) => unreachable!("the process runtime cancelled a connect: {join}"),
+        },
+    }
+}
+
 async fn drive_connection(connection: DriverConnection) {
     match connection.await {
         Ok(()) => {}
@@ -560,12 +593,25 @@ impl CorePool {
         match plan.sizing.kept_open() {
             KeptOpen::NoConnections => {}
             KeptOpen::Connections(kept) => {
-                let _keeper = tokio::spawn(keep_open(
+                // On the process runtime, as the connections it keeps. When
+                // that runtime cannot be used, no connection can open either:
+                // each checkout names the refusal.
+                match spawn_on_process_runtime(keep_open(
                     pool.weak(),
                     kept,
                     checkout_timeouts(plan.checkout_wait),
                     plan.role,
-                ));
+                )) {
+                    Ok(_keeper) => {}
+                    Err(refusal) => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            role = ?plan.role,
+                            %refusal,
+                            "the pool keeps no connection open: the process runtime cannot be used",
+                        );
+                    }
+                }
             }
         }
         CorePool {

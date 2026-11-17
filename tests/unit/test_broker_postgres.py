@@ -25,6 +25,14 @@ from horsies.core.brokers.enqueue_task import SendKind
 from horsies._core import (
     BrokerFailure,
     DatabasePingRecord,
+    Enqueued,
+    SendEnqueueFailed,
+    SendKeyConflict,
+    SendPayloadMismatch,
+    SendPayloadTooLarge,
+    SendSuppressed,
+    SendValidationFailed,
+    StartAfterDelay as CoreStartAfterDelay,
     SchemaInstalled,
     SchemaInstallNotRun,
     RawResultAbsent,
@@ -59,6 +67,7 @@ from horsies.core.brokers.result_types import (
     BrokerInvalidTaskOptions,
     BrokerListenerDisabled,
     BrokerOperationFailed,
+    BrokerPayloadMismatch,
     RawResultRecord,
 )
 from horsies.core.codec.json_io import SerializationError
@@ -104,7 +113,7 @@ from horsies.core.baseline.install import (
 )
 from horsies.core.types.status import TaskAttemptOutcome, TaskStatus
 from horsies.core.utils.loop_runner import LoopRunnerError
-from tests.dualrun.reference import result_caller
+from tests.dualrun.reference import enqueue_caller, result_caller
 from tests.broker_resources_support import (
     attach_loop_limit,
     pin_resources,
@@ -165,6 +174,13 @@ def _listener_of(broker: Any) -> Any:
             return listener
         case ListenerDisabled():
             raise AssertionError('broker has no listener')
+
+
+# The Python send before the switch, kept as the dual-run reference. The
+# tests of it pass a mocked broker's loose values (text ids), as they did
+# through the method, so it is called untyped.
+_python_enqueue_async: Any = enqueue_caller.enqueue_async
+_python_enqueue: Any = enqueue_caller.enqueue
 
 
 def _make_broker(database_url: str = 'postgresql://u:p@localhost/db') -> Any:
@@ -732,7 +748,9 @@ def _make_enqueue_engine(
 
 @pytest.mark.unit
 class TestEnqueueAsync:
-    """Tests for enqueue_async: task creation, option parsing, retry extraction."""
+    """The Python send before the switch to the core, kept as the dual-run
+    reference (``tests/dualrun/reference/enqueue_caller.py``): task
+    creation, option parsing, retry extraction."""
 
     @pytest.mark.asyncio
     async def test_basic_enqueue_returns_uuid_string(self) -> None:
@@ -741,7 +759,8 @@ class TestEnqueueAsync:
         engine, conn = _make_enqueue_engine()
         _set_resources(broker, engine=engine)
 
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             'default',
             task_id='test-task-id',
@@ -765,7 +784,8 @@ class TestEnqueueAsync:
         _set_resources(broker, engine=engine)
 
         custom_ts = datetime(2025, 1, 1, tzinfo=timezone.utc)
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             send_kind=SendKind.FIRST,
@@ -792,7 +812,8 @@ class TestEnqueueAsync:
             '{"retry_policy": {"max_retries": 5, "intervals": [5], '
             '"backoff_strategy": "exponential", "auto_retry_for": ["TRANSIENT"]}}'
         )
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             send_kind=SendKind.FIRST,
@@ -816,7 +837,8 @@ class TestEnqueueAsync:
         session = _make_enqueue_session()
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             send_kind=SendKind.FIRST,
@@ -839,7 +861,8 @@ class TestEnqueueAsync:
         session = _make_enqueue_session()
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             send_kind=SendKind.FIRST,
@@ -863,7 +886,8 @@ class TestEnqueueAsync:
         session = _make_enqueue_session()
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             sent_at=datetime.now(timezone.utc),
@@ -890,7 +914,8 @@ class TestEnqueueAsync:
         session = _make_enqueue_session()
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             send_kind=SendKind.FIRST,
@@ -915,7 +940,8 @@ class TestEnqueueAsync:
         session = _make_enqueue_session()
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             send_kind=SendKind.FIRST,
@@ -940,7 +966,8 @@ class TestEnqueueAsync:
         session = _make_enqueue_session()
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             send_kind=SendKind.FIRST,
@@ -965,7 +992,8 @@ class TestEnqueueAsync:
         session = _make_enqueue_session()
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             send_kind=SendKind.FIRST,
@@ -991,7 +1019,8 @@ class TestEnqueueAsync:
         _set_resources(broker, engine=engine)
 
         expiry = datetime(2099, 12, 31, tzinfo=timezone.utc)
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             send_kind=SendKind.FIRST,
@@ -1010,7 +1039,8 @@ class TestEnqueueAsync:
         _set_resources(broker, engine=engine)
 
         task_options = '{"retry_policy": "not_a_dict"}'
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             send_kind=SendKind.FIRST,
@@ -1035,7 +1065,8 @@ class TestEnqueueAsync:
         _set_resources(broker, engine=engine)
 
         task_options = '{"some_other_key": "value"}'
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             send_kind=SendKind.FIRST,
@@ -1061,7 +1092,8 @@ class TestEnqueueAsync:
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         future = datetime.now(timezone.utc) + timedelta(minutes=10)
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             send_kind=SendKind.FIRST,
@@ -1085,7 +1117,8 @@ class TestEnqueueAsync:
         _set_resources(broker, engine=engine)
 
         future = datetime.now(timezone.utc) + timedelta(minutes=10)
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             send_kind=SendKind.FIRST,
@@ -1104,7 +1137,8 @@ class TestEnqueueAsync:
         _set_resources(broker, engine=engine)
 
         future = datetime.now(timezone.utc) + timedelta(minutes=10)
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             send_kind=SendKind.FIRST,
@@ -1125,9 +1159,241 @@ class TestEnqueueAsync:
 # ---------------------------------------------------------------------------
 
 
+SEND_TASK_ID = UUID('0198c0de-0000-7000-8000-000000000017')
+
+
+@pytest.mark.unit
+class TestEnqueueThroughCore:
+    """enqueue_async and enqueue build the core's request with the client
+    rules, and map the record of one core send to their result."""
+
+    @staticmethod
+    def _broker_answering(outcome: object) -> Any:
+        broker = _make_broker()
+        handle = MagicMock()
+        handle.enqueue_async = AsyncMock(return_value=outcome)
+        handle.enqueue = MagicMock(return_value=outcome)
+        broker._core_handle = handle
+        return broker
+
+    @staticmethod
+    async def _send(broker: Any, **keywords: Any) -> Any:
+        arguments: dict[str, Any] = {
+            'task_id': SEND_TASK_ID,
+            'send_kind': SendKind.FIRST,
+            'input_json': '{"x":1}',
+            'sent_at': datetime.now(timezone.utc),
+            **keywords,
+        }
+        return await broker.enqueue_async('my_task', 'default', **arguments)
+
+    @pytest.mark.asyncio
+    async def test_an_enqueued_send_returns_its_id_and_builds_the_request(self) -> None:
+        broker = self._broker_answering(MagicMock(spec=Enqueued, task_id=SEND_TASK_ID))
+        with patch('horsies.core.brokers.postgres.EnqueueRequest') as request_class:
+            result = await self._send(
+                broker,
+                send_kind=SendKind.REPEAT,
+                enqueue_delay_seconds=30,
+                idempotency_key='order-17',
+                retain_rerun_input=False,
+                priority=50,
+            )
+
+        assert result == Ok(SEND_TASK_ID)
+        built = request_class.call_args.kwargs
+        assert built['task_id'] == SEND_TASK_ID
+        assert built['input_json'] == '{"x":1}'
+        assert built['priority'] == 50
+        assert built['send_kind'] == 'REPEAT'
+        assert built['idempotency_key'] == 'order-17'
+        assert built['retention_class_key'] == 'standard_30d'
+        assert built['rerun_input'] == 'DROP'
+        assert isinstance(built['start'], CoreStartAfterDelay)
+        broker._core_handle.enqueue_async.assert_awaited_once_with(request_class.return_value)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('keywords', 'expected'),
+        [
+            pytest.param({'input_json': None}, {'input_json': '{}'}, id='no-input'),
+            pytest.param({'input_json': 'null'}, {'input_json': '{}'}, id='null-input'),
+            pytest.param(
+                {'retention_class_key': None}, {'retention_class_key': 'forever'}, id='forever',
+            ),
+            pytest.param({}, {'rerun_input': 'APP_DEFAULT'}, id='rerun-default'),
+            pytest.param(
+                {'retain_rerun_input': True}, {'rerun_input': 'KEEP'}, id='rerun-keep',
+            ),
+        ],
+    )
+    async def test_the_request_holds_the_resolved_values(
+        self, keywords: dict[str, Any], expected: dict[str, Any],
+    ) -> None:
+        broker = self._broker_answering(MagicMock(spec=Enqueued, task_id=SEND_TASK_ID))
+        with patch('horsies.core.brokers.postgres.EnqueueRequest') as request_class:
+            _ = await self._send(broker, **keywords)
+
+        built = request_class.call_args.kwargs
+        assert {key: built[key] for key in expected} == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('keywords', 'message'),
+        [
+            pytest.param({'input_json': '[1]'}, 'must be an object or null', id='not-an-object'),
+            pytest.param({'input_json': '{bad'}, 'kwargs JSON corrupt', id='unreadable'),
+            pytest.param(
+                {
+                    'enqueued_at': datetime.now(timezone.utc),
+                    'enqueue_delay_seconds': 5,
+                },
+                'Cannot specify both',
+                id='both-starts',
+            ),
+            pytest.param(
+                {'sent_at': datetime(2026, 1, 1)}, 'sent_at must be timezone-aware', id='naive-sent-at',
+            ),
+            pytest.param(
+                {'good_until': datetime(2026, 1, 1)},
+                'good_until must be timezone-aware',
+                id='naive-good-until',
+            ),
+            pytest.param({'priority': 2**31}, 'not a 32-bit integer', id='priority-range'),
+            pytest.param(
+                {'enqueue_delay_seconds': 2**63}, 'not a 64-bit integer', id='delay-range',
+            ),
+        ],
+    )
+    async def test_a_client_rule_refuses_before_the_core(
+        self, keywords: dict[str, Any], message: str,
+    ) -> None:
+        broker = self._broker_answering(None)
+
+        result = await self._send(broker, **keywords)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidInput)
+        assert message in result.err_value.message
+        broker._core_handle.enqueue_async.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('code', 'error_class'),
+        [
+            ('INVALID_INPUT', BrokerInvalidInput),
+            ('INVALID_TASK_OPTIONS', BrokerInvalidTaskOptions),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ('cause_text', 'cause_class'),
+        [('expected value at line 1', SerializationError), (None, NoCause)],
+    )
+    async def test_a_core_refusal_keeps_its_code_and_cause(
+        self, code: str, error_class: type, cause_text: str | None, cause_class: type,
+    ) -> None:
+        broker = self._broker_answering(
+            MagicMock(
+                spec=SendValidationFailed, code=code, message='refused', cause_text=cause_text,
+            ),
+        )
+
+        result = await self._send(broker)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, error_class)
+        assert isinstance(result.err_value.exception, cause_class)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('retryable', [True, False])
+    async def test_a_failed_enqueue_keeps_the_core_classification(self, retryable: bool) -> None:
+        broker = self._broker_answering(
+            MagicMock(
+                spec=SendEnqueueFailed,
+                task_id=SEND_TASK_ID,
+                message='Failed to enqueue task my_task: connection lost',
+                retryable=retryable,
+            ),
+        )
+
+        result = await self._send(broker)
+
+        assert is_err(result)
+        failed = result.err_value
+        assert isinstance(failed, BrokerEnqueueFailed)
+        assert failed.retryable is retryable
+        assert isinstance(failed.exception, CoreOperationFailed)
+        assert failed.exception.subject == 'PostgresBroker.enqueue_async'
+
+    @pytest.mark.asyncio
+    async def test_a_payload_mismatch_and_a_key_conflict_keep_their_facts(self) -> None:
+        owner = UUID('0198c0de-0000-7000-8000-0000000000ff')
+        mismatch = await self._send(
+            self._broker_answering(
+                MagicMock(spec=SendPayloadMismatch, task_id=SEND_TASK_ID, message='mismatch'),
+            ),
+        )
+        conflict = await self._send(
+            self._broker_answering(
+                MagicMock(
+                    spec=SendKeyConflict,
+                    task_id=SEND_TASK_ID,
+                    owner_task_id=owner,
+                    message='conflict',
+                ),
+            ),
+        )
+
+        assert mismatch == Err(BrokerPayloadMismatch(message='mismatch'))
+        assert conflict == Err(BrokerIdempotencyKeyConflict(message='conflict', owner_task_id=owner))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('outcome_class', [SendSuppressed, SendPayloadTooLarge])
+    async def test_a_record_the_core_send_never_answers_is_a_defect(
+        self, outcome_class: type,
+    ) -> None:
+        broker = self._broker_answering(MagicMock(spec=outcome_class))
+
+        with pytest.raises(AssertionError, match=outcome_class.__name__):
+            await self._send(broker)
+
+    @pytest.mark.asyncio
+    async def test_a_core_that_cannot_run_the_send_is_enqueue_failed(self) -> None:
+        broker = _make_broker()
+        error = TooManyPendingCalls('CoreHandle.enqueue_async', 65_536)
+        handle = MagicMock()
+        handle.enqueue_async = AsyncMock(side_effect=error)
+        broker._core_handle = handle
+
+        result = await self._send(broker)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerEnqueueFailed)
+        assert result.err_value.retryable is True
+        assert result.err_value.exception is error
+
+    def test_the_blocking_form_sends_on_the_calling_thread(self) -> None:
+        broker = self._broker_answering(MagicMock(spec=Enqueued, task_id=SEND_TASK_ID))
+        broker._loop_runner = MagicMock()
+
+        result = broker.enqueue(
+            'my_task',
+            'default',
+            task_id=SEND_TASK_ID,
+            send_kind=SendKind.FIRST,
+            input_json='{"x":1}',
+            sent_at=datetime.now(timezone.utc),
+        )
+
+        assert result == Ok(SEND_TASK_ID)
+        broker._core_handle.enqueue.assert_called_once()
+        broker._loop_runner.call.assert_not_called()
+
+
 @pytest.mark.unit
 class TestEnqueueOutcomes:
-    """Each outcome of the statement maps to the result of enqueue_async."""
+    """The Python send (the dual-run reference): each outcome of the
+    statement maps to its result."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize('outcome', ['INSERTED', 'SAME_COMMAND'])
@@ -1136,7 +1402,8 @@ class TestEnqueueOutcomes:
         engine, _conn = _make_enqueue_engine(outcome=outcome, task_id=_SENT_TASK_ID)
         _set_resources(broker, engine=engine)
 
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id=_SENT_TASK_ID,
             send_kind=SendKind.FIRST,
@@ -1151,7 +1418,8 @@ class TestEnqueueOutcomes:
         engine, _conn = _make_enqueue_engine(outcome='KEY_REPLAY', task_id=_HOLDER_TASK_ID)
         _set_resources(broker, engine=engine)
 
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id=_SENT_TASK_ID,
             send_kind=SendKind.FIRST,
@@ -1167,7 +1435,8 @@ class TestEnqueueOutcomes:
         engine, _conn = _make_enqueue_engine(outcome='KEY_CONFLICT', task_id=_HOLDER_TASK_ID)
         _set_resources(broker, engine=engine)
 
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id=_SENT_TASK_ID,
             send_kind=SendKind.FIRST,
@@ -1187,7 +1456,8 @@ class TestEnqueueOutcomes:
         engine, _conn = _make_enqueue_engine(outcome='PAYLOAD_MISMATCH', task_id=_SENT_TASK_ID)
         _set_resources(broker, engine=engine)
 
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id=_SENT_TASK_ID,
             send_kind=SendKind.REPEAT,
@@ -1204,7 +1474,8 @@ class TestEnqueueOutcomes:
         engine, _conn = _make_enqueue_engine(outcome='CONFLICT_UNVERIFIABLE', task_id=_SENT_TASK_ID)
         _set_resources(broker, engine=engine)
 
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id=_SENT_TASK_ID,
             send_kind=SendKind.FIRST,
@@ -1224,7 +1495,8 @@ class TestEnqueueOutcomes:
         engine, conn = _make_enqueue_engine()
         _set_resources(broker, engine=engine)
 
-        _ = await broker.enqueue_async(
+        _ = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='t',
             send_kind=send_kind,
@@ -1244,7 +1516,8 @@ class TestEnqueueOutcomes:
         engine, conn = _make_enqueue_engine()
         _set_resources(broker, engine=engine)
 
-        _ = await broker.enqueue_async(
+        _ = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='t',
             send_kind=SendKind.FIRST,
@@ -2602,7 +2875,8 @@ class TestRequeueStaleClaimed:
 
 @pytest.mark.unit
 class TestSyncFacades:
-    """Tests for sync wrappers: enqueue, get_result, get_task_info."""
+    """The sync forms: the Python send's routes (the dual-run reference) and
+    the blocking core reads."""
 
     def test_enqueue_on_the_caller_thread_route_skips_the_loop_runner(
         self,
@@ -2620,7 +2894,8 @@ class TestSyncFacades:
         on_caller = MagicMock(return_value='task-id-456')
         monkeypatch.setattr(broker, '_enqueue_on_caller_thread', on_caller)
 
-        result = broker.enqueue(
+        result = _python_enqueue(
+            broker,
             'my_task',
             'queue',
             task_id='test-task-id',
@@ -2653,7 +2928,8 @@ class TestSyncFacades:
 
         monkeypatch.setattr(broker, 'send_route', _route)
 
-        result = broker.enqueue(
+        result = _python_enqueue(
+            broker,
             'my_task',
             'queue',
             task_id='test-task-id',
@@ -3100,7 +3376,7 @@ class TestClose:
 
 @pytest.mark.unit
 class TestEnqueueAsyncErrorPaths:
-    """Regression tests for error-path behavior in enqueue_async."""
+    """The Python send (the dual-run reference): error paths."""
 
     @pytest.mark.asyncio
     async def test_enqueue_async_connection_error_returns_retryable_err(self) -> None:
@@ -3115,7 +3391,8 @@ class TestEnqueueAsyncErrorPaths:
         )
         _set_resources(broker, engine=engine)
 
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='test-task-id',
             send_kind=SendKind.FIRST,
@@ -3626,14 +3903,16 @@ REFUSED_KWARGS = ['5', '"a"', '[1]', 'true', '0', 'false', '""', '[]', '']
 
 @pytest.mark.unit
 class TestEnqueueInputRefusal:
-    """A refused input is refused before the database, with its own code."""
+    """The Python send (the dual-run reference): a refused input is refused
+    before the database, with its own code."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize('input_json', REFUSED_KWARGS)
     async def test_kwargs_shape_is_refused(self, input_json: str) -> None:
         wiring = _DatabaseMustNotRun()
 
-        result = await wiring.broker.enqueue_async(
+        result = await _python_enqueue_async(
+            wiring.broker,
             'my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), input_json=input_json,
         )
 
@@ -3646,7 +3925,8 @@ class TestEnqueueInputRefusal:
     async def test_shape_refusal_text_holds_no_input_value(self) -> None:
         wiring = _DatabaseMustNotRun()
 
-        result = await wiring.broker.enqueue_async(
+        result = await _python_enqueue_async(
+            wiring.broker,
             'my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), input_json='"secret-value"',
         )
 
@@ -3677,7 +3957,8 @@ class TestEnqueueInputRefusal:
         }
         values.update(overrides)
 
-        result = await wiring.broker.enqueue_async(
+        result = await _python_enqueue_async(
+            wiring.broker,
             task_id='t', send_kind=SendKind.FIRST, **values,
         )
 
@@ -3701,7 +3982,8 @@ class TestEnqueueInputRefusal:
     async def test_idempotency_key_is_refused(self, key: str) -> None:
         wiring = _DatabaseMustNotRun()
 
-        result = await wiring.broker.enqueue_async(
+        result = await _python_enqueue_async(
+            wiring.broker,
             'my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), idempotency_key=key,
         )
 
@@ -3722,7 +4004,8 @@ class TestEnqueueInputRefusal:
             field: datetime(2020, 1, 1),
         }
 
-        result = await wiring.broker.enqueue_async(
+        result = await _python_enqueue_async(
+            wiring.broker,
             'my_task',
             task_id='t',
             send_kind=SendKind.FIRST,
@@ -3771,7 +4054,8 @@ class TestEnqueueInputRefusal:
             side_effect=SAOperationalError('connect', None, Exception('down'))
         )
 
-        result = await wiring.broker.enqueue_async(
+        result = await _python_enqueue_async(
+            wiring.broker,
             'my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), priority=0,
         )
 
@@ -3784,7 +4068,8 @@ class TestEnqueueInputRefusal:
         wiring = _DatabaseMustNotRun()
         wiring.broker._ensure_initialized = AsyncMock()
 
-        result = await wiring.broker.enqueue_async(
+        result = await _python_enqueue_async(
+            wiring.broker,
             'my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc), task_options='{bad',
         )
 
@@ -3795,6 +4080,8 @@ class TestEnqueueInputRefusal:
 
 @pytest.mark.unit
 class TestEnqueueAcceptedInput:
+    """The Python send (the dual-run reference): the stored input."""
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ('input_json', 'expected_input'),
@@ -3818,7 +4105,8 @@ class TestEnqueueAcceptedInput:
         engine, conn = _make_enqueue_engine()
         _set_resources(broker, engine=engine)
 
-        result = await broker.enqueue_async(
+        result = await _python_enqueue_async(
+            broker,
             'my_task',
             task_id='t',
             send_kind=SendKind.FIRST,
@@ -3848,7 +4136,8 @@ class TestEnqueueAcceptedInput:
 
 @pytest.mark.unit
 class TestEnqueueCatch:
-    """Schema init and the write section each state what they catch."""
+    """The Python send (the dual-run reference): schema init and the write
+    section each state what they catch."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -3868,7 +4157,7 @@ class TestEnqueueCatch:
         state = RuntimeError(message)
         broker._ensure_initialized = AsyncMock(side_effect=state)
 
-        result = await broker.enqueue_async('my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc))
+        result = await _python_enqueue_async(broker, 'my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc))
 
         assert is_err(result)
         match result.err_value:
@@ -3903,7 +4192,7 @@ class TestEnqueueCatch:
         _set_resources(broker, engine=engine)
         conn.execute = AsyncMock(side_effect=error)
 
-        result = await broker.enqueue_async('my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc))
+        result = await _python_enqueue_async(broker, 'my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc))
 
         assert is_err(result)
         match result.err_value:
@@ -3921,7 +4210,7 @@ class TestEnqueueCatch:
         conn.execute = AsyncMock(side_effect=TypeError('defect'))
 
         with pytest.raises(TypeError, match='defect'):
-            await broker.enqueue_async('my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc))
+            await _python_enqueue_async(broker, 'my_task', task_id='t', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc))
 
     @pytest.mark.asyncio
     async def test_defect_in_the_keyed_write_crashes_loud(self) -> None:
@@ -3931,7 +4220,8 @@ class TestEnqueueCatch:
         conn.execute = AsyncMock(side_effect=TypeError('defect'))
 
         with pytest.raises(TypeError, match='defect'):
-            await broker.enqueue_async(
+            await _python_enqueue_async(
+            broker,
                 'my_task', task_id='t', send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc), idempotency_key='key',
             )
@@ -3943,7 +4233,8 @@ class TestEnqueueCatch:
         _set_resources(broker, engine=engine)
 
         with pytest.raises(AssertionError, match='SOMETHING_ELSE'):
-            await broker.enqueue_async(
+            await _python_enqueue_async(
+            broker,
                 'my_task', task_id='dup', send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
             )

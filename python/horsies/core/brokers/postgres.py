@@ -25,6 +25,17 @@ from horsies._core import (
     TaskListTruncated,
     CoreHandle,
     DatabasePingRecord,
+    Enqueued,
+    EnqueueRequest,
+    SendEnqueueFailed,
+    SendKeyConflict,
+    SendPayloadMismatch,
+    SendPayloadTooLarge,
+    SendSuppressed,
+    SendValidationFailed,
+    StartAfterDelay as CoreStartAfterDelay,
+    StartAt as CoreStartAt,
+    StartNow as CoreStartNow,
     SchemaInstalled,
     SchemaInstallNotRun,
     RawResultAbsent,
@@ -75,7 +86,6 @@ from horsies.core.brokers.resources import (
 )
 from horsies.core.brokers.enqueue_task import (
     ENQUEUE_TASK_DRIVER_SQL,
-    ENQUEUE_TASK_SQL,
     EnqueueKey,
     EnqueueOutcome,
     EnqueueRow,
@@ -102,6 +112,7 @@ from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
     BrokerErrorCode,
     BrokerEventLoopLimit,
+    BrokerIdempotencyKeyConflict,
     BrokerInvalidInput,
     BrokerInvalidJsonPayload,
     BrokerInvalidTaskOptions,
@@ -109,6 +120,7 @@ from horsies.core.brokers.result_types import (
     BrokerLoopRunnerFailed,
     BrokerOperationFailed,
     BrokerOperationFailedCode,
+    BrokerPayloadMismatch,
     BrokerResult,
     BrokerSyncCallError,
     BrokerWaitInsideTask,
@@ -134,7 +146,7 @@ from horsies.core.types.status import (
     TaskStatus,
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
-from horsies.core.codec.json_io import Json, loads_json, dumps_json
+from horsies.core.codec.json_io import Json, SerializationError, loads_json, dumps_json
 from horsies.core.codec.task_options import stored_execution, stored_max_retries
 from horsies.core.codec.validation_errors import (
     exception_text,
@@ -1051,6 +1063,215 @@ def _task_info_result(
             assert_never(unreachable)
 
 
+SIGNED_32_BIT_MIN: Final = -(2**31)
+SIGNED_32_BIT_MAX: Final = 2**31 - 1
+"""The range of a 32-bit integer argument of a core operation (a priority)."""
+
+
+type CoreEnqueueStart = CoreStartNow | CoreStartAfterDelay | CoreStartAt
+type CoreSendOutcome = (
+    Enqueued
+    | SendSuppressed
+    | SendValidationFailed
+    | SendEnqueueFailed
+    | SendPayloadMismatch
+    | SendPayloadTooLarge
+    | SendKeyConflict
+)
+type RerunInputPolicy = Literal['APP_DEFAULT', 'KEEP', 'DROP']
+
+
+def _invalid_input(message: str) -> Err[BrokerInvalidInput]:
+    return Err(BrokerInvalidInput(message=message, exception=NoCause()))
+
+
+def _enqueue_start_of(
+    *,
+    sent_at: datetime,
+    enqueued_at: datetime | None,
+    enqueue_delay_seconds: int | None,
+    good_until: datetime | None,
+) -> Result[CoreEnqueueStart, BrokerInvalidInput]:
+    """The start of a send, after the rules that the core's request cannot
+    state: one of ``enqueued_at`` and ``enqueue_delay_seconds``, aware
+    instants, and a delay that fits in 64 bits. Pure but for the
+    construction of the start value; nothing is written on a refusal.
+
+    The core refuses a ``sent_at`` in the future of a send that starts now.
+    """
+    if enqueued_at is not None and enqueue_delay_seconds is not None:
+        return _invalid_input('Cannot specify both enqueued_at and enqueue_delay_seconds')
+    for label, instant in (
+        ('sent_at', sent_at), ('enqueued_at', enqueued_at), ('good_until', good_until),
+    ):
+        if instant is not None and instant.tzinfo is None:
+            return _invalid_input(f'{label} must be timezone-aware')
+    match (enqueued_at, enqueue_delay_seconds):
+        case (None, None):
+            return Ok(CoreStartNow())
+        case (datetime() as at, None):
+            return Ok(CoreStartAt(at))
+        case (None, int() as delay_s) if SIGNED_64_BIT_MIN <= delay_s <= SIGNED_64_BIT_MAX:
+            return Ok(CoreStartAfterDelay(delay_s))
+        case (None, int() as delay_s):
+            return _invalid_input(
+                f'enqueue_delay_seconds {delay_s} is not a 64-bit integer',
+            )
+        case _:
+            raise AssertionError('both start values are refused above')
+
+
+def _rerun_input_policy(retain_rerun_input: bool | None) -> RerunInputPolicy:
+    """The rerun-input policy of a send: the config's default, keep or drop. Pure."""
+    match retain_rerun_input:
+        case None:
+            return 'APP_DEFAULT'
+        case True:
+            return 'KEEP'
+        case False:
+            return 'DROP'
+
+
+def _enqueue_request(
+    *,
+    task_id: UUID,
+    task_name: str,
+    queue_name: str,
+    priority: int,
+    input_json: str | None,
+    sent_at: datetime,
+    enqueued_at: datetime | None,
+    enqueue_delay_seconds: int | None,
+    good_until: datetime | None,
+    task_options: str | None,
+    retention_class_key: str,
+    retain_rerun_input: bool | None,
+    idempotency_key: str | None,
+    send_kind: SendKind,
+) -> Result[EnqueueRequest, BrokerInvalidInput]:
+    """The core's request of one send, after the client rules: the start
+    (``_enqueue_start_of``), the input shape of a Python send
+    (``_parse_enqueue_input``: an object, or ``{}`` for none or JSON null)
+    and a priority that fits in 32 bits. Each refusal is ``INVALID_INPUT``
+    and writes nothing.
+
+    The core checks the rest at the send: the strict JSON rule of the input
+    and the options, the retry limit and the class of the options, the
+    command fingerprint, the scope of the idempotency key, the retention
+    class key, and a ``sent_at`` in the future of a send that starts now.
+    """
+    match _enqueue_start_of(
+        sent_at=sent_at,
+        enqueued_at=enqueued_at,
+        enqueue_delay_seconds=enqueue_delay_seconds,
+        good_until=good_until,
+    ):
+        case Err() as refused:
+            return refused
+        case Ok(ok_value=start):
+            pass
+    match _parse_enqueue_input(task_name, input_json):
+        case Err() as refused:
+            return refused
+        case Ok(ok_value=stored_input):
+            pass
+    if not SIGNED_32_BIT_MIN <= priority <= SIGNED_32_BIT_MAX:
+        return _invalid_input(f'priority {priority} is not a 32-bit integer')
+    return Ok(EnqueueRequest(
+        task_id=task_id,
+        task_name=task_name,
+        queue_name=queue_name,
+        priority=priority,
+        input_json=stored_input,
+        sent_at=sent_at,
+        start=start,
+        good_until=good_until,
+        task_options_json=task_options,
+        idempotency_key=idempotency_key,
+        retention_class_key=retention_class_key,
+        rerun_input=_rerun_input_policy(retain_rerun_input),
+        send_kind=send_kind.value,
+    ))
+
+
+def _enqueue_core_error(task_name: str, exc: CoreError) -> Err[BrokerEnqueueFailed]:
+    """The core of this process cannot run a send: it stopped, did not
+    start, has too many calls in flight, or a blocking call reached its
+    bound. The row may or may not exist after a timed-out call. Pure."""
+    return Err(BrokerEnqueueFailed(
+        message=f'Failed to enqueue task {task_name}: {exc}',
+        retryable=core_error_retryable(exc),
+        exception=exc,
+    ))
+
+
+def _refusal_cause(cause_text: str | None) -> SerializationError | NoCause:
+    """The exception of a refused text: the JSON reader's error, as the
+    Python read gives it, or ``NoCause()`` when a rule refused a value that
+    reads. Pure."""
+    match cause_text:
+        case None:
+            return NoCause()
+        case str():
+            return SerializationError(cause_text)
+
+
+def _enqueue_result(
+    subject: str, outcome: CoreSendOutcome,
+) -> Result[UUID, BrokerEnqueueError]:
+    """The result of one core send. Pure.
+
+    - ``Enqueued``: ``Ok`` with the sent id, or the id that holds the key
+      for a key replay.
+    - ``SendValidationFailed``: ``INVALID_INPUT`` or
+      ``INVALID_TASK_OPTIONS``, with the JSON reader's error as the cause.
+    - ``SendEnqueueFailed``: ``ENQUEUE_FAILED`` with a
+      ``CoreOperationFailed``.
+    - ``SendPayloadMismatch``: ``PAYLOAD_MISMATCH``.
+    - ``SendKeyConflict``: ``IDEMPOTENCY_KEY_CONFLICT`` with the owner.
+
+    The core's send never answers ``SendSuppressed`` or
+    ``SendPayloadTooLarge`` (the client checks both before the send):
+    ``AssertionError``.
+    """
+    match outcome:
+        case Enqueued(task_id=task_id):
+            return Ok(task_id)
+        case SendValidationFailed(
+            code='INVALID_INPUT', message=message, cause_text=cause_text,
+        ):
+            return Err(BrokerInvalidInput(
+                message=message, exception=_refusal_cause(cause_text),
+            ))
+        case SendValidationFailed(
+            code='INVALID_TASK_OPTIONS', message=message, cause_text=cause_text,
+        ):
+            return Err(BrokerInvalidTaskOptions(
+                message=message, exception=_refusal_cause(cause_text),
+            ))
+        case SendValidationFailed(code=code):
+            raise AssertionError(f'the core send refused with the code {code}')
+        case SendEnqueueFailed(message=message, retryable=retryable):
+            return Err(BrokerEnqueueFailed(
+                message=message,
+                retryable=retryable,
+                exception=CoreOperationFailed(subject, message, retryable),
+            ))
+        case SendPayloadMismatch(message=message):
+            return Err(BrokerPayloadMismatch(message=message))
+        case SendKeyConflict(message=message, owner_task_id=owner_task_id):
+            return Err(BrokerIdempotencyKeyConflict(
+                message=message, owner_task_id=owner_task_id,
+            ))
+        case SendSuppressed() | SendPayloadTooLarge():
+            raise AssertionError(
+                f'the core send answered {type(outcome).__name__}, which the '
+                'client checks before the send',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 # Most open event loops, other than the broker's sync runner loop and a worker
 # child's task loop, that get their own resource set. pytest-asyncio keeps one event loop open per
 # fixture scope (session, package, module, class, function), so one test
@@ -1961,33 +2182,36 @@ class PostgresBroker:
         retain_rerun_input: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
     ) -> Result[UUID, BrokerEnqueueError]:
-        """Write one PENDING task row, or answer the send that wrote it.
+        """Write one PENDING task row, or answer the send that wrote it,
+        through ``CoreHandle.enqueue_async``.
 
-        One ``horsies_enqueue_task`` statement in autocommit. The row stores
-        ``input_json`` as its ``input`` (``{}`` for none or JSON null), the
-        version-1 command fingerprint of the send and ``sent_at``, the call
-        time of the send. A send that repeats a task id is the same send only
-        when the stored fingerprint and ``sent_at`` are equal; a resend
-        passes the ``sent_at`` of the first send. ``send_kind`` is
-        ``SendKind.REPEAT`` for a send retry: a task that finished then
-        answers with its id and does not run again.
+        The core installs the schema once per handle, checks the family of
+        the database once per handle, and sends one ``horsies_enqueue_task``
+        statement in autocommit. The row stores ``input_json`` as its
+        ``input`` (``{}`` for none or JSON null), the version-1 command
+        fingerprint of the send and ``sent_at``, the call time of the send.
+        A send that repeats a task id is the same send only when the stored
+        fingerprint and ``sent_at`` are equal; a resend passes the
+        ``sent_at`` of the first send. ``send_kind`` is ``SendKind.REPEAT``
+        for a send retry: a task that finished then answers with its id and
+        does not run again. ``retention_class_key`` absent is the 30-day
+        class, an explicit ``None`` is ``forever``; ``retain_rerun_input``
+        ``None`` takes the config's default.
+
+        Failures (``_enqueue_request``, ``_enqueue_result``):
+        - ``INVALID_INPUT`` / ``INVALID_TASK_OPTIONS``: refused before any
+          statement; nothing was written.
+        - ``ENQUEUE_FAILED``: the row may or may not exist; ``retryable`` is
+          the core's classification. A database of the other client family
+          and a retention class key that no class derives are not
+          retryable.
+        - ``PAYLOAD_MISMATCH``, ``IDEMPOTENCY_KEY_CONFLICT``: nothing was
+          written.
+
+        A cancel of the caller does not stop the write: the core runs it to
+        its end.
         """
-        match await self.select_resources():
-            case Err(loop_limit):
-                return _loop_limit_err('enqueue', loop_limit)
-            case Ok(resources):
-                pass
-        # The ratified retention resolution: absent → the immutable
-        # 30-day default class; forever only by EXPLICIT None.
-        resolved_retention_class_key = resolve_retention_class_key(
-            retention_class_key
-        )
-        # The ratified retention posture: an app-level default with a
-        # per-task override, resolved here and snapshotted at enqueue.
-        # None means inherit the deployment's standing policy.
-        if retain_rerun_input is None:
-            retain_rerun_input = self.config.retain_rerun_input_default
-        prepared_r = self._prepare_enqueue(
+        match _enqueue_request(
             task_id=task_id,
             task_name=task_name,
             queue_name=queue_name,
@@ -1998,46 +2222,20 @@ class PostgresBroker:
             enqueue_delay_seconds=enqueue_delay_seconds,
             good_until=good_until,
             task_options=task_options,
-            retention_class_key=resolved_retention_class_key,
+            retention_class_key=resolve_retention_class_key(retention_class_key),
             retain_rerun_input=retain_rerun_input,
             idempotency_key=idempotency_key,
-            key_window=self.idempotency_reservation_window,
-        )
-        if is_err(prepared_r):
-            return prepared_r
-        prepared = prepared_r.ok_value
-
-        # Schema init keeps a broad catch, as ensure_schema_initialized does:
-        # it raises RuntimeError for operator states such as an incomplete
-        # cutover, and each of those is a failed enqueue, not a crash.
+            send_kind=send_kind,
+        ):
+            case Err() as refused:
+                return refused
+            case Ok(ok_value=request):
+                pass
         try:
-            await self._ensure_initialized()
-        except Exception as exc:
-            return _enqueue_failed(
-                f'Failed to enqueue task {task_name}: {exc}',
-                exc,
-            )
-
-        try:
-            async with resources.engine.connect() as conn:
-                autocommit_conn = await conn.execution_options(
-                    isolation_level='AUTOCOMMIT',
-                )
-                result = await autocommit_conn.execute(
-                    ENQUEUE_TASK_SQL,
-                    enqueue_task_params(prepared.row, send_kind),
-                )
-                rows = result.fetchall()
-        except _DRIVER_ERRORS as exc:
-            return _enqueue_failed(
-                f'Failed to enqueue task {task_name}: {exc}',
-                exc,
-            )
-        return enqueue_result(
-            read_enqueue_outcome(rows),
-            task_id=task_id,
-            task_name=task_name,
-        )
+            outcome = await self._core_handle.enqueue_async(request)
+        except CoreError as exc:
+            return _enqueue_core_error(task_name, exc)
+        return _enqueue_result('PostgresBroker.enqueue_async', outcome)
 
     def _build_raw_result_record(
         self,
@@ -3531,59 +3729,44 @@ class PostgresBroker:
         retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
     ) -> Result[UUID, BrokerEnqueueError | BrokerSyncCallError]:
-        """Synchronous task submission, with the outcomes of ``enqueue_async``.
+        """The blocking form of ``enqueue_async``: ``CoreHandle.enqueue`` on
+        the calling thread, with the GIL released, and the outcomes of
+        ``enqueue_async``.
 
-        ``send_route`` decides where the row is written: on the calling
-        thread, or on the sync runner's loop through ``enqueue_async``. On a
-        thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)`` and
-        writes nothing.
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and writes nothing. A call that does not end within the core's bound
+        of a blocking call is ``ENQUEUE_FAILED`` with the
+        ``CoreCallTimedOut`` (retryable): the row may or may not exist.
         """
         if in_running_event_loop():
             return _async_context_err(
                 'PostgresBroker.enqueue()', 'broker.enqueue_async(...)',
             )
-        match self.send_route():
-            case SyncSendRoute.CALLER_THREAD:
-                return self._enqueue_on_caller_thread(
-                    task_name,
-                    queue_name,
-                    task_id=task_id,
-                    send_kind=send_kind,
-                    input_json=input_json,
-                    priority=priority,
-                    sent_at=sent_at,
-                    enqueued_at=enqueued_at,
-                    enqueue_delay_seconds=enqueue_delay_seconds,
-                    good_until=good_until,
-                    task_options=task_options,
-                    retention_class_key=retention_class_key,
-                    retain_rerun_input=retain_rerun_input,
-                    idempotency_key=idempotency_key,
-                )
-            case SyncSendRoute.LOOP_RUNNER:
+        match _enqueue_request(
+            task_id=task_id,
+            task_name=task_name,
+            queue_name=queue_name,
+            priority=priority,
+            input_json=input_json,
+            sent_at=sent_at,
+            enqueued_at=enqueued_at,
+            enqueue_delay_seconds=enqueue_delay_seconds,
+            good_until=good_until,
+            task_options=task_options,
+            retention_class_key=resolve_retention_class_key(retention_class_key),
+            retain_rerun_input=retain_rerun_input,
+            idempotency_key=idempotency_key,
+            send_kind=send_kind,
+        ):
+            case Err() as refused:
+                return refused
+            case Ok(ok_value=request):
                 pass
         try:
-            return self.run_sync(
-                self.enqueue_async,
-                task_name,
-                queue_name,
-                task_id=task_id,
-                send_kind=send_kind,
-                input_json=input_json,
-                priority=priority,
-                sent_at=sent_at,
-                enqueued_at=enqueued_at,
-                enqueue_delay_seconds=enqueue_delay_seconds,
-                good_until=good_until,
-                task_options=task_options,
-                idempotency_key=idempotency_key,
-                retention_class_key=retention_class_key,
-                retain_rerun_input=retain_rerun_input,
-            )
-        except LoopRunnerError as exc:
-            return _loop_runner_err(f'PostgresBroker.enqueue({task_name!r})', exc)
-
-
+            outcome = self._core_handle.enqueue(request)
+        except CoreError as exc:
+            return _enqueue_core_error(task_name, exc)
+        return _enqueue_result('PostgresBroker.enqueue', outcome)
 
     async def _history_task_info(
         self,

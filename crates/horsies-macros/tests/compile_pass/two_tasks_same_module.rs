@@ -2,12 +2,12 @@ use horsies::task;
 use horsies::TaskError;
 
 #[task("first")]
-async fn first(_: ()) -> Result<String, TaskError> {
+async fn first(_: ()) -> Result<String, TaskError<std::convert::Infallible>> {
     Ok("a".into())
 }
 
 #[task("second")]
-async fn second(_: ()) -> Result<String, TaskError> {
+async fn second(_: ()) -> Result<String, TaskError<std::convert::Infallible>> {
     Ok("b".into())
 }
 

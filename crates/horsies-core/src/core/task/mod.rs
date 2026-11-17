@@ -15,6 +15,9 @@ pub use error::{
 pub use execution::{Execution, ExecutionClass, InvalidExecution};
 pub use fn_trait::{AsyncTaskFn, BlockingTaskFn, RawTaskResult, RegisteredTask};
 pub use info::{TaskAttemptInfo, TaskInfo};
-pub use options::{BackoffStrategy, RetryPolicy, RetryPolicyError, TaskOptions};
+pub use options::{
+    BackoffStrategy, CancelGraceMs, CancelGraceOutOfRange, RetryPolicy, RetryPolicyError,
+    TaskOptions,
+};
 pub use result::TaskResult;
 pub use send_types::{TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult};

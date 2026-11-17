@@ -24,7 +24,6 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Final, assert_never
 
 from sqlalchemy import text
@@ -80,18 +79,12 @@ class FinishWorkflowSuccess:
     result_json: str
 
 
-def success_for(
-    completion: CompleteLockedTask,
-    *,
-    claimed_at: datetime,
-) -> FinishWorkflowSuccess:
-    """The one-statement success of a locked completion. Pure.
-
-    ``claimed_at`` is the claim generation that the dispatch was handed.
-    """
+def success_for(completion: CompleteLockedTask) -> FinishWorkflowSuccess:
+    """The one-statement success of a locked completion, fenced on the claim
+    that the completion carries. Pure."""
     return FinishWorkflowSuccess(
         task_id=completion.task_id,
-        fence=OwnedClaim(worker_id=completion.fence.worker_id, claimed_at=claimed_at),
+        fence=completion.fence,
         result_json=completion.result_json,
     )
 

@@ -2,7 +2,7 @@ use horsies::task;
 use horsies::TaskError;
 
 #[task("ping")]
-async fn ping(_: ()) -> Result<String, TaskError> {
+async fn ping(_: ()) -> Result<String, TaskError<std::convert::Infallible>> {
     Ok("pong".into())
 }
 

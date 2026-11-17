@@ -78,18 +78,14 @@ pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};
 pub use partition_maintenance::{CoveragePassError, PrunePassError};
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
-    ClaimPassParams, PostgresBroker, PrestartExpiry, SchemaInitializationMode, WorkflowStop,
-    WorkflowStopBeforeStart,
+    PostgresBroker, PrestartExpiry, SchemaInitializationMode, WorkflowStop, WorkflowStopBeforeStart,
 };
 pub use process_listener::{
     CheckInterruption, ListenError, ListenerPlanError, SessionCheckFailure,
 };
 pub use result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord};
 pub use row::heartbeat::HeartbeatRow;
-pub use row::task::{
-    ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow,
-    TaskResultRow,
-};
+pub use row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow, TaskResultRow};
 pub use row::workflow::{WorkflowRow, WorkflowTaskRow};
 pub use slot_health::{
     ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,

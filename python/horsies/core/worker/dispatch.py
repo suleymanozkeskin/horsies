@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Optional, assert_never
 
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.lifecycle.commands import FailLockedTask
-from horsies.core.lifecycle.fences import PriorLockedRead
+from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     CapacityWoken,
@@ -384,7 +384,10 @@ class DispatchMixin:
         """
         failure = FailLockedTask(
             task_id=task_id,
-            fence=PriorLockedRead(worker_id=self.worker_instance_id),
+            fence=OwnedClaim(
+                worker_id=self.worker_instance_id,
+                claimed_at=claim.claimed_at,
+            ),
             result_json=serialize_error_payload(TaskResult(err=task_error)),
             error_code=_error_code_text(task_error),
             failed_reason=None,
@@ -394,7 +397,6 @@ class DispatchMixin:
             self.core_handle,
             finish_for(
                 failure,
-                claimed_at=claim.claimed_at,
                 retry=request,
                 attempt=AttemptFailure(
                     kind=AttemptFailureKind.FAILED,

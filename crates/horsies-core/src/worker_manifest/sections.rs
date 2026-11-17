@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::config::bounded::BoundedU32;
 use crate::core::config::recovery::WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS;
-use crate::core::config::{PayloadPolicy, RecoveryConfig, RetentionConfig, WorkerResilienceConfig};
+use crate::core::config::{
+    PausedWorkflowAge, PayloadPolicy, RecoveryConfig, RetentionConfig, WorkerResilienceConfig,
+};
 use crate::core::history::periods::{MAX_RETENTION_DAYS, MIN_RETENTION_DAYS};
 use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
 
@@ -28,9 +30,12 @@ const SNAPSHOT_INTERVAL_MAX_MS: u32 = {
     WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS as u32
 };
 
-/// The longest age of a paused workflow, in microseconds: the largest
-/// count that `chrono::Duration::microseconds` takes.
-pub const MAX_PAUSED_AGE_MICROS: u64 = i64::MAX as u64;
+/// The longest age of a paused workflow, in microseconds: the bound of the
+/// retention config's age, [`PausedWorkflowAge::MAX_MICROS`].
+pub const MAX_PAUSED_AGE_MICROS: u64 = {
+    assert!(PausedWorkflowAge::MAX_MICROS > 0);
+    PausedWorkflowAge::MAX_MICROS as u64
+};
 
 /// The largest payload threshold, in bytes.
 pub const MAX_PAYLOAD_BYTES: u64 = u64::MAX;
@@ -142,6 +147,19 @@ impl PausedAgeMicros {
             Ok(micros) => chrono::Duration::microseconds(micros),
             Err(refused) => unreachable!(
                 "a parsed paused age of {} microseconds fits an i64: {refused}",
+                self.0
+            ),
+        }
+    }
+
+    /// The age as the paused age of the retention config. Total: 1 to
+    /// [`MAX_PAUSED_AGE_MICROS`] whole microseconds is the range that
+    /// [`PausedWorkflowAge::parse`] admits.
+    pub fn as_paused_age(self) -> PausedWorkflowAge {
+        match PausedWorkflowAge::parse(self.as_duration()) {
+            Ok(age) => age,
+            Err(refused) => unreachable!(
+                "a parsed paused age of {} microseconds is a paused workflow age: {refused}",
                 self.0
             ),
         }
@@ -399,7 +417,7 @@ impl RetentionManifest {
                 TerminalRecordRetention::NoPruning => None,
             },
             paused_workflow_auto_cancel_after: match self.paused_workflow_auto_cancel_after {
-                PausedWorkflowExpiry::After { micros } => Some(micros.as_duration()),
+                PausedWorkflowExpiry::After { micros } => Some(micros.as_paused_age()),
                 PausedWorkflowExpiry::NoExpiry => None,
             },
             history_leaf_horizon_days: self.history_leaf_horizon_days.0.get(),

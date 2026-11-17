@@ -23,7 +23,7 @@ from horsies.core.lifecycle.classify import (
     WorkerLevelFailure,
 )
 from horsies.core.lifecycle.commands import FailLockedTask
-from horsies.core.lifecycle.fences import PriorLockedRead
+from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     CapacityWoken,
@@ -128,7 +128,6 @@ async def persist_failed_attempt(
                 await autocommit_connection(s),
                 finish_for(
                     failure,
-                    claimed_at=claim.claimed_at,
                     retry=retry,
                     attempt=_attempt_failure_of(report),
                 ),
@@ -156,7 +155,10 @@ async def write_ended_attempt(
     autocommit with the ``RELEASE`` rule. Database errors raise."""
     failure = FailLockedTask(
         task_id=task_id,
-        fence=PriorLockedRead(worker_id=self.worker_instance_id),
+        fence=OwnedClaim(
+            worker_id=self.worker_instance_id,
+            claimed_at=claim.claimed_at,
+        ),
         result_json=serialize_error_payload(TaskResult(err=task_error)),
         error_code=_error_code_text(task_error),
         failed_reason=None,
@@ -167,7 +169,6 @@ async def write_ended_attempt(
             await autocommit_connection(s),
             finish_for(
                 failure,
-                claimed_at=claim.claimed_at,
                 retry=request,
                 attempt=AttemptFailure(
                     kind=AttemptFailureKind.FAILED,

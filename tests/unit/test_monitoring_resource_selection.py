@@ -1,6 +1,10 @@
-"""Monitoring reads return EVENT_LOOP_LIMIT when the broker's resources are
-in use by another event loop. Nothing runs. The cancel action runs in the
-core and selects no resource set, so it has no such answer.
+"""Python's monitoring reads returned EVENT_LOOP_LIMIT when the broker's
+resources were in use by another event loop; nothing ran.
+
+Since the monitoring switch every read and the cancel action run in the
+core and select no resource set, so they have no such answer. The case runs
+on Python's body before the switch, the dual-run reference
+(``tests/dualrun/reference/monitoring_queries.py``).
 """
 
 from __future__ import annotations
@@ -11,7 +15,7 @@ import pytest
 
 from horsies.core.types.result import is_err
 from horsies.monitoring.errors import MonitoringQueryEventLoopLimit
-from horsies.monitoring.queries import list_schedules
+from tests.dualrun.reference.monitoring_queries import list_schedules
 from tests.broker_resources_support import attach_loop_limit
 
 pytestmark = [pytest.mark.unit]

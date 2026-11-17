@@ -16,6 +16,9 @@
 //!   child of this spawner holds the pid.
 //! - It publishes each child's [`ExitState`] on a `watch` channel that the
 //!   core runtime reads.
+//! - On Linux it can serve spawns by fork from a preload process
+//!   ([`preload`]); the waits of that path are states of this loop, so a
+//!   reap or a kill is never held up by them.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
@@ -27,7 +30,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{oneshot, watch};
 
@@ -35,6 +38,14 @@ use super::exit::{ExitState, ReapedExit};
 use super::exit_watch::{ChildWatch, ExitWatch, POLLED_EXIT_INTERVAL};
 use super::socket::child_socket_pair;
 use crate::worker::executor::protocol::{ProcessId, ShortageErrno};
+
+mod preload;
+
+pub use preload::{
+    PreloadMode, PreloadPlan, PreloadStart, PreloadUnsupported, ORPHAN_SWEEP_LIMIT,
+    PRELOAD_FORK_TIMEOUT, PRELOAD_READY_TIMEOUT, PRELOAD_RESTART_DELAY, PRELOAD_RESTART_LIMIT,
+    PRELOAD_STOP_TIMEOUT,
+};
 
 /// The name of the spawner thread.
 const SPAWNER_THREAD_NAME: &str = "horsies-spawner";
@@ -179,6 +190,10 @@ enum Request {
         child: ChildId,
         reply: oneshot::Sender<KillOutcome>,
     },
+    StartPreload {
+        plan: PreloadPlan,
+        reply: oneshot::Sender<PreloadStart>,
+    },
     Shutdown,
 }
 
@@ -316,6 +331,31 @@ impl SpawnerHandle {
         answer.await.unwrap_or(Err(SpawnError::SpawnerStopped))
     }
 
+    /// Start the preload process of `plan` and wait until it is ready or its
+    /// start ended (Python `SlotPool._start_preload`): at most
+    /// [`PRELOAD_READY_TIMEOUT`]. The spawner thread serves reaps and kills
+    /// meanwhile. After any answer but `Ready`, every spawn uses `exec`.
+    /// Call once per spawner, before the first spawn.
+    pub async fn start_preload(&self, plan: PreloadPlan) -> PreloadStart {
+        let (reply, answer) = oneshot::channel();
+        {
+            let mut queue = self.shared.lock();
+            match (queue.intake, queue.requests.len() >= MAX_QUEUED_REQUESTS) {
+                (Intake::ShuttingDown, _) => return PreloadStart::SpawnerStopped,
+                (Intake::Open, true) => {
+                    return PreloadStart::StartFailed {
+                        detail: SpawnError::QueueFull.to_string(),
+                    }
+                }
+                (Intake::Open, false) => queue
+                    .requests
+                    .push_back(Request::StartPreload { plan, reply }),
+            }
+        }
+        self.shared.waker.wake();
+        answer.await.unwrap_or(PreloadStart::SpawnerStopped)
+    }
+
     /// Send `SIGKILL` to the session of `child`, so the subprocesses of its
     /// task end with it, except one that left the session itself. After the
     /// reap of `child`, the processes left in its session get the signal.
@@ -449,6 +489,7 @@ struct SpawnerLoop {
     next_id: u64,
     worker_pid: u32,
     shutting_down: bool,
+    preload: preload::Preload,
 }
 
 impl SpawnerLoop {
@@ -461,17 +502,16 @@ impl SpawnerLoop {
             next_id: 1,
             worker_pid: std::process::id(),
             shutting_down: false,
+            preload: preload::Preload::default(),
         }
     }
 
     /// Serve requests and reap children until a shutdown finds no child
-    /// left. Each pass waits for a request, an exit or [`IDLE_WAIT`].
+    /// left. Each pass waits for a request, an exit, input from the preload
+    /// process, the next deadline of the preload path, or [`IDLE_WAIT`].
     fn run(mut self) {
         loop {
-            let requests: Vec<Request> = self.shared.lock().requests.drain(..).collect();
-            for request in requests {
-                self.serve(request);
-            }
+            self.serve_queued();
             if self.shutting_down && self.children.is_empty() {
                 return;
             }
@@ -479,14 +519,13 @@ impl SpawnerLoop {
                 .children
                 .values()
                 .any(|child| matches!(child.watch, ChildWatch::Polled));
-            let timeout = match any_polled {
-                true => POLLED_EXIT_INTERVAL,
-                false => IDLE_WAIT,
-            };
+            let timeout = wait_bound(any_polled, self.preload.deadline(), Instant::now());
+            let preload_socket = self.preload.socket_fd();
             let wake = self.watch.wait(
                 self.children
                     .iter()
                     .map(|(id, child)| (id.pid, &child.watch)),
+                preload_socket,
                 timeout,
             );
             match wake {
@@ -497,6 +536,9 @@ impl SpawnerLoop {
                     for pid in wake.exited {
                         self.reap(pid, ExitReport::ByWatch);
                     }
+                    if wake.extra_ready {
+                        self.read_preload();
+                    }
                 }
                 Err(error) => {
                     tracing::error!(error = %error, "the spawner exit watch failed; polling every child");
@@ -505,38 +547,70 @@ impl SpawnerLoop {
                 }
             }
             self.reap_polled();
+            self.preload_tick(Instant::now());
+        }
+    }
+
+    /// Serve every queued request. While a fork request is in flight, spawn
+    /// requests go back to the front of the queue in their order: the
+    /// preload process serves one request at a time.
+    fn serve_queued(&mut self) {
+        let requests: Vec<Request> = self.shared.lock().requests.drain(..).collect();
+        let mut held: Vec<Request> = Vec::new();
+        for request in requests {
+            match (request, self.preload.is_forking()) {
+                (spawn @ Request::Spawn { .. }, true) => held.push(spawn),
+                (request, _) => self.serve(request),
+            }
+        }
+        if !held.is_empty() {
+            let mut queue = self.shared.lock();
+            for request in held.into_iter().rev() {
+                queue.requests.push_front(request);
+            }
         }
     }
 
     fn serve(&mut self, request: Request) {
         match request {
-            Request::Spawn { command, reply } => {
-                let result = self.spawn(&command);
-                if let Err(Ok(orphan)) = reply.send(result) {
-                    // The requester went away: no one holds this child.
-                    tracing::warn!(
-                        pid = orphan.pid.get(),
-                        "a spawned child has no requester; killing it"
-                    );
-                    let _outcome = self.kill(orphan.id);
-                }
-            }
+            Request::Spawn { command, reply } => self.spawn_or_fork(command, reply),
             Request::Kill { child, reply } => {
                 // The requester may have gone away; the kill is sent anyway.
                 let _ = reply.send(self.kill(child));
             }
-            Request::Shutdown => self.shutting_down = true,
+            Request::StartPreload { plan, reply } => self.start_preload(plan, reply),
+            Request::Shutdown => {
+                self.shutting_down = true;
+                self.stop_preload(Instant::now());
+            }
         }
     }
 
+    /// Answer a spawn. A child whose requester went away is killed: no one
+    /// holds it.
+    fn answer_spawn(
+        &self,
+        reply: oneshot::Sender<Result<SpawnedChild, SpawnError>>,
+        result: Result<SpawnedChild, SpawnError>,
+    ) {
+        if let Err(Ok(orphan)) = reply.send(result) {
+            tracing::warn!(
+                pid = orphan.pid.get(),
+                "a spawned child has no requester; killing it"
+            );
+            let _outcome = self.kill(orphan.id);
+        }
+    }
+
+    /// Start a child with `exec`.
     fn spawn(&mut self, command: &ChildCommand) -> Result<SpawnedChild, SpawnError> {
         match (self.shutting_down, self.children.len() >= MAX_LIVE_CHILDREN) {
             (true, _) => return Err(SpawnError::SpawnerStopped),
             (false, true) => return Err(SpawnError::TooManyChildren),
             (false, false) => {}
         }
-        let (pid, socket) = exec_child(command, self.worker_pid)?;
-        let (watch, watch_error) = self.watch.watch(pid);
+        let (pid, socket) = exec_child(command, self.worker_pid, &[])?;
+        let (id, exit, watch_error) = self.register(pid);
         if let Some(error) = &watch_error {
             tracing::warn!(
                 pid = pid.get(),
@@ -544,25 +618,11 @@ impl SpawnerLoop {
                 "no exit notification for this child; its exit is polled"
             );
         }
-        let id = ChildId {
-            serial: self.next_id,
-            pid,
-        };
-        self.next_id += 1;
-        let (exit_tx, exit_rx) = watch::channel(ExitState::Running);
-        self.children.insert(
-            id,
-            LiveChild {
-                watch,
-                exit: exit_tx,
-            },
-        );
-        self.by_pid.insert(pid, id);
         Ok(SpawnedChild {
             id,
             pid,
             socket,
-            exit: exit_rx,
+            exit,
         })
     }
 
@@ -625,6 +685,20 @@ impl SpawnerLoop {
         for pid in pids {
             self.reap(pid, ExitReport::ByPoll);
         }
+    }
+}
+
+/// The bound of one wait of the spawner loop: the poll interval when a
+/// child is polled, else [`IDLE_WAIT`], and never past the next deadline of
+/// the preload path. Pure.
+fn wait_bound(any_polled: bool, preload_deadline: Option<Instant>, now: Instant) -> Duration {
+    let base = match any_polled {
+        true => POLLED_EXIT_INTERVAL,
+        false => IDLE_WAIT,
+    };
+    match preload_deadline {
+        Some(deadline) => base.min(deadline.saturating_duration_since(now)),
+        None => base,
     }
 }
 
@@ -723,10 +797,13 @@ fn spawn_error(error: &io::Error) -> SpawnError {
 }
 
 /// Start the child: socket pair, then `exec` with the child end as the only
-/// passed descriptor. Our copy of the child end closes when this returns.
+/// passed descriptor. The arguments are the command's, the descriptor
+/// number of the child end, the worker pid, then `trailing`. Our copy of the
+/// child end closes when this returns.
 fn exec_child(
     command: &ChildCommand,
     worker_pid: u32,
+    trailing: &[&str],
 ) -> Result<(ProcessId, UnixStream), SpawnError> {
     let pair = child_socket_pair().map_err(|error| spawn_error(&error))?;
     let child_fd = pair.child.as_raw_fd();
@@ -738,6 +815,7 @@ fn exec_child(
         .args(&command.args)
         .arg(child_fd.to_string())
         .arg(worker_pid.to_string())
+        .args(trailing)
         .stdin(Stdio::null());
     // SAFETY: the hook runs in the forked child before `exec` and calls only
     // async-signal-safe functions (setsid, fcntl, prctl, getppid, _exit).

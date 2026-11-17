@@ -7,8 +7,8 @@ the cause. History data that does not decode is
 text of the history estimate) and in both detail reads. The query tests run
 on a double of the one function statement.
 
-Since the monitoring switch ``list_tasks`` and ``get_task_detail`` run in
-the core; their cases here test Python's bodies before the switch, the
+Since the monitoring switch every read runs in the core; the cases here
+test Python's bodies before the switch, the
 dual-run reference (``tests/dualrun/reference/monitoring_queries.py``). The
 production facades are tested on a mocked core handle in
 ``tests/unit/test_monitoring_reads_in_core.py``.
@@ -36,9 +36,12 @@ from horsies.monitoring.errors import (
     MonitoringQueryHistoryContractViolation,
 )
 from horsies.monitoring.pages import TaskPage
-from horsies.monitoring.queries import get_workflow_node
 from tests.dualrun.reference import monitoring_queries as python_reads
-from tests.dualrun.reference.monitoring_queries import get_task_detail, list_tasks
+from tests.dualrun.reference.monitoring_queries import (
+    get_task_detail,
+    get_workflow_node,
+    list_tasks,
+)
 from horsies.web.routes._common import query_failed
 from tests.monitoring_function_support import (
     function_broker,

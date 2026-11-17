@@ -7,13 +7,13 @@ use horsies::TaskError;
 // does not cause a compilation error.
 #[cfg(any())] // always false — function and module should be compiled out
 #[task("gated")]
-async fn gated(_: ()) -> Result<String, TaskError> {
+async fn gated(_: ()) -> Result<String, TaskError<std::convert::Infallible>> {
     Ok("never".into())
 }
 
 // This task is always present.
 #[task("always")]
-async fn always(_: ()) -> Result<String, TaskError> {
+async fn always(_: ()) -> Result<String, TaskError<std::convert::Infallible>> {
     Ok("ok".into())
 }
 

@@ -51,6 +51,7 @@ async fn a_live_worker_answers_a_ping_and_lists_its_state() {
     };
     let launch = ChildLaunch {
         command: idle_child_of_any_kind(),
+        preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
         program: ChildProgram::Rust,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new(app_config.broker.database_url.clone()),

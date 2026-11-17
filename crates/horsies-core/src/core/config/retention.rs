@@ -93,7 +93,7 @@ pub struct RetentionClassKeyRefused {
 }
 
 /// The age past which a PAUSED workflow expires: a whole number of
-/// microseconds from 1 to `i64::MAX` (Python
+/// microseconds from 1 to [`PausedWorkflowAge::MAX_MICROS`] (Python
 /// `RetentionConfig.paused_workflow_auto_cancel_after`, a positive
 /// `timedelta`, which holds whole microseconds only).
 ///
@@ -107,11 +107,23 @@ pub struct PausedWorkflowAge {
 }
 
 impl PausedWorkflowAge {
+    /// The longest age, in days: 365,000 days (1,000 years of 365 days).
+    ///
+    /// The expiry reads `updated_at < now() - <age>`. PostgreSQL's lowest
+    /// `timestamptz` is 4714-11-24 BC, so with this bound `now() - <age>` stays
+    /// inside the timestamp range for any `now()` from year 1 AD on, and the
+    /// interval stays far inside the interval range: the expiry has no
+    /// out-of-range failure.
+    pub const MAX_DAYS: i64 = 365_000;
+
+    /// [`PausedWorkflowAge::MAX_DAYS`] in microseconds.
+    pub const MAX_MICROS: i64 = Self::MAX_DAYS * MICROS_PER_DAY;
+
     /// The age of `age`. Pure.
     ///
     /// Errors: [`PausedAgeRefused`] for an age of zero or less, an age with
-    /// a part below one microsecond, or an age above `i64::MAX`
-    /// microseconds.
+    /// a part below one microsecond, or an age longer than
+    /// [`PausedWorkflowAge::MAX_DAYS`].
     pub fn parse(age: Duration) -> Result<Self, PausedAgeRefused> {
         if age <= Duration::zero() {
             return Err(PausedAgeRefused::NotPositive { age });
@@ -120,8 +132,8 @@ impl PausedWorkflowAge {
             return Err(PausedAgeRefused::NotWholeMicroseconds { age });
         }
         match age.num_microseconds() {
-            Some(micros) => Ok(Self { micros }),
-            None => Err(PausedAgeRefused::TooLong { age }),
+            Some(micros) if micros <= Self::MAX_MICROS => Ok(Self { micros }),
+            Some(_) | None => Err(PausedAgeRefused::TooLong { age }),
         }
     }
 
@@ -149,6 +161,9 @@ impl Serialize for PausedWorkflowAge {
 /// Nanoseconds in one microsecond.
 const NANOS_PER_MICROSECOND: i32 = 1_000;
 
+/// Microseconds in one day.
+const MICROS_PER_DAY: i64 = 86_400_000_000;
+
 /// Why a duration is not a paused-workflow age. Nothing reads the value.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PausedAgeRefused {
@@ -159,7 +174,8 @@ pub enum PausedAgeRefused {
     )]
     NotWholeMicroseconds { age: Duration },
     #[error(
-        "paused_workflow_auto_cancel_after ({age}) is too long: its count of microseconds does not fit in a 64-bit integer"
+        "paused_workflow_auto_cancel_after ({age}) is longer than {max_days} days; the expiry subtracts the age from now(), and the result must stay inside PostgreSQL's timestamp range. Use at most {max_days} days, or None to disable the sweep",
+        max_days = PausedWorkflowAge::MAX_DAYS
     )]
     TooLong { age: Duration },
 }
@@ -613,8 +629,8 @@ mod tests {
     }
 
     /// A paused age is a whole number of microseconds above zero, kept
-    /// exact: a part below one millisecond stays, and one day is
-    /// 86 400 000 000 microseconds.
+    /// exact: a part below one millisecond stays, one day is
+    /// 86 400 000 000 microseconds, and the bound itself is an age.
     #[test]
     fn a_paused_age_is_whole_microseconds_above_zero() {
         for (age, micros) in [
@@ -623,15 +639,36 @@ mod tests {
             (Duration::microseconds(1_500), 1_500),
             (Duration::hours(1), 3_600_000_000),
             (Duration::days(1), 86_400_000_000),
+            (
+                Duration::days(PausedWorkflowAge::MAX_DAYS),
+                31_536_000_000_000_000,
+            ),
         ] {
             let parsed = PausedWorkflowAge::parse(age).expect("an age of whole microseconds");
             assert_eq!(parsed.micros(), micros, "{age}");
             assert_eq!(parsed.duration(), age, "{age}");
         }
+        assert_eq!(PausedWorkflowAge::MAX_MICROS, 31_536_000_000_000_000);
     }
 
-    /// An age that the expiry cannot compare exactly in microseconds is
-    /// refused, each with its own reason.
+    /// The bound keeps `now() - <age>` inside PostgreSQL's timestamp range
+    /// for any `now()` from year 1 AD on. PostgreSQL's lowest `timestamptz`
+    /// is 4714-11-24 BC (Julian day 0); chrono counts years
+    /// astronomically, so 4714 BC is year -4713.
+    #[test]
+    fn the_longest_paused_age_stays_inside_the_timestamp_range() {
+        let lowest_postgres_date =
+            chrono::NaiveDate::from_ymd_opt(-4713, 11, 24).expect("a proleptic Gregorian date");
+        let year_one = chrono::NaiveDate::from_ymd_opt(1, 1, 1).expect("a date");
+        let earliest_cutoff = year_one - Duration::days(PausedWorkflowAge::MAX_DAYS);
+        assert!(
+            earliest_cutoff > lowest_postgres_date,
+            "{earliest_cutoff} is before {lowest_postgres_date}"
+        );
+    }
+
+    /// An age that the expiry cannot compare exactly in microseconds, or
+    /// that is longer than the bound, is refused, each with its own reason.
     #[test]
     fn a_paused_age_outside_its_bound_is_refused() {
         for age in [Duration::zero(), Duration::microseconds(-1)] {
@@ -650,10 +687,16 @@ mod tests {
                 Err(PausedAgeRefused::NotWholeMicroseconds { age }),
             );
         }
-        assert_eq!(
-            PausedWorkflowAge::parse(Duration::MAX),
-            Err(PausedAgeRefused::TooLong { age: Duration::MAX }),
-        );
+        for age in [
+            Duration::days(PausedWorkflowAge::MAX_DAYS) + Duration::microseconds(1),
+            Duration::days(PausedWorkflowAge::MAX_DAYS + 1),
+            Duration::MAX,
+        ] {
+            assert_eq!(
+                PausedWorkflowAge::parse(age),
+                Err(PausedAgeRefused::TooLong { age }),
+            );
+        }
     }
 
     /// The config reader is where the paused age enters: an age with a part
@@ -686,6 +729,35 @@ mod tests {
         }))
         .unwrap_err();
         assert!(zero.to_string().contains("must be positive"), "{zero}");
+
+        // One microsecond above the bound of 365,000 days.
+        let too_long = serde_json::from_value::<RetentionConfig>(serde_json::json!({
+            "paused_workflow_auto_cancel_after": [31_536_000_000_i64, 1_000],
+        }))
+        .unwrap_err();
+        let expected = RetentionConfigError::PausedExpiryRefused {
+            refused: PausedAgeRefused::TooLong {
+                age: Duration::days(PausedWorkflowAge::MAX_DAYS) + Duration::microseconds(1),
+            },
+        };
+        assert!(
+            too_long.to_string().contains(&expected.to_string()),
+            "{too_long}"
+        );
+        assert!(
+            too_long.to_string().contains("longer than 365000 days"),
+            "{too_long}"
+        );
+        let longest: RetentionConfig = serde_json::from_value(serde_json::json!({
+            "paused_workflow_auto_cancel_after": [31_536_000_000_i64, 0],
+        }))
+        .expect("the longest age");
+        assert_eq!(
+            longest
+                .paused_workflow_auto_cancel_after
+                .map(PausedWorkflowAge::micros),
+            Some(PausedWorkflowAge::MAX_MICROS)
+        );
 
         let read: RetentionConfig = serde_json::from_value(serde_json::json!({
             "paused_workflow_auto_cancel_after": [3_600, 250_000],
