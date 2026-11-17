@@ -67,6 +67,11 @@ impl SpecDatabase {
         PostgresBroker::from_pool(self.pool.clone())
     }
 
+    /// The URL of this database, for a direct connection of the test.
+    pub(super) fn url(&self) -> &str {
+        self.database.url()
+    }
+
     pub(super) async fn drop(self) {
         self.pool.close().await;
         self.database.drop().await;

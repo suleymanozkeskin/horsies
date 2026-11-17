@@ -9,6 +9,7 @@
 //! ([`SpecDatabase`]).
 
 use std::collections::BTreeMap;
+use std::sync::PoisonError;
 
 use serial_test::serial;
 use sqlx::PgPool;
@@ -24,14 +25,11 @@ use crate::monitoring::{
     get_workflow_node, get_workflow_run, list_schedules, list_workflow_names, list_workflow_runs,
     MonitoringQueryErrorCode, WorkflowNodeInfo, WorkflowRunsQuery,
 };
+use crate::test_support::connect_collecting_notices;
 
 /// Upper bound of a span that counts up to now (Python
 /// `_LIVE_SPAN_CEILING_S`).
 const LIVE_SPAN_CEILING_S: i64 = 600;
-
-/// Live rows of the plan test: enough that the planner prefers the index
-/// to a sort (the population of the kept index test).
-const PLAN_POPULATION: i64 = 2_500;
 
 fn child_of(parent: Uuid, name: &str) -> RunSeed {
     RunSeed {
@@ -516,72 +514,115 @@ async fn schedules_come_in_next_run_order_with_their_run_count() {
     database.drop().await;
 }
 
-/// The plan of `statement` as text, after the table was sampled.
-async fn plan_of(pool: &PgPool, statement: &str) -> String {
-    let lines: Vec<String> = sqlx::query_scalar(&format!("EXPLAIN {statement}"))
-        .fetch_all(pool)
-        .await
-        .expect("explain the statement");
-    lines.join("\n")
-}
+/// One plan read: no sequential scan, and the plan of every statement
+/// inside a function sent as a notice (Python `_nested_plans`). Seeded
+/// tables fit in a few pages, where the planner prefers a sequential scan
+/// and would hide the index choice of a production-sized table.
+const NESTED_PLAN_SETTINGS: &str = "SET LOCAL enable_seqscan = off;
+     LOAD 'auto_explain';
+     SET LOCAL auto_explain.log_min_duration = 0;
+     SET LOCAL auto_explain.log_nested_statements = on;
+     SET LOCAL auto_explain.log_level = 'notice';";
 
-/// Python `test_monitoring_query_plans.py::test_list_default_sort_plans_on_enqueued_at_index`,
-/// both directions, on the live page statement of Python's baseline list
-/// (the live row's columns, ordered by `enqueued_at`, limited to the page
-/// reach): the order comes from `idx_horsies_tasks_enqueued_at` with no
-/// sort. The kept `broker::monitoring_schema_tests` test checks the
-/// descending direction only.
-#[tokio::test]
-#[serial]
-async fn the_enqueue_order_reads_the_enqueue_index_in_both_directions() {
-    let database = SpecDatabase::create().await;
-    sqlx::query(
-        "INSERT INTO horsies_tasks (
-            id, task_name, queue_name, priority, input, task_options, execution,
-            retention_class_key, sent_at, created_at,
-            command_fingerprint_version, command_fingerprint, idempotency_key_digest,
-            status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
-            started_at, finalizing_at, finalizing_by_worker_id,
-            worker_pid, worker_hostname, worker_process_name,
-            retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
-            updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
-        )
-        SELECT gen_random_uuid(), 'plan_task_' || (g % 5), 'default', 100, '{}', NULL,
-               'ISOLATED', 'forever', NOW(), NOW(),
-               1, decode(repeat('08', 32), 'hex'), NULL,
-               'PENDING', NOW() - make_interval(secs => g), NULL, NULL, NULL,
-               NULL, NULL, NULL,
-               NULL, NULL, NULL,
-               0, 0, NULL, NULL, FALSE,
-               NOW(), FALSE, NULL, NULL
-        FROM generate_series(1, $1) AS g",
-    )
-    .bind(PLAN_POPULATION)
-    .execute(&database.pool)
-    .await
-    .expect("seed the plan population");
+/// The task list in its default sort, one page of 50 (Python
+/// `_DEFAULT_SORT_LIST_SQL`). Parameter: the sort direction.
+const DEFAULT_SORT_LIST: &str = "SELECT * FROM horsies_monitoring_task_list(
+         now() - interval '1 day', now(), '{}', '{}', '{}', '{}', '{}', '{}', FALSE,
+         '{}', '{}', 'enqueued_at', $1::text, 0, 50
+     )";
+
+/// The live rows of the plan test (Python `_seed_tasks`): 500 RUNNING rows
+/// over five task names and a backlog of 2,000 PENDING rows, each with its
+/// own enqueue time, then sampled. With only a few PENDING rows, a sort over
+/// another index costs the same as the ordered index and the planner's pick
+/// between them is arbitrary.
+async fn seed_plan_population(pool: &PgPool) {
+    for (status, task_name, started_at, rows) in [
+        ("RUNNING", "'plan_task_' || (g % 5)", "NOW()", 500_i32),
+        ("PENDING", "'plan_task_pending'", "NULL", 2_000_i32),
+    ] {
+        sqlx::query(&format!(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+            )
+            SELECT gen_random_uuid(), {task_name}, 'default', 100, '{{}}', NULL,
+                   'ISOLATED', 'standard_30d', NOW(), NOW(),
+                   1, sha256(convert_to(gen_random_uuid()::text, 'UTF8')), NULL,
+                   '{status}', NOW() - make_interval(secs => g), NULL, NULL, NULL,
+                   {started_at}, NULL, NULL,
+                   NULL, NULL, NULL,
+                   0, 0, NULL, NULL, FALSE,
+                   NOW(), FALSE, NULL, NULL
+            FROM generate_series(1, $1) AS g"
+        ))
+        .bind(rows)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("seed the {status} rows of the plan test: {error}"));
+    }
     sqlx::query("ANALYZE horsies_tasks")
-        .execute(&database.pool)
+        .execute(pool)
         .await
         .expect("sample the live table");
+}
 
-    for direction in ["ASC", "DESC"] {
-        let plan = plan_of(
-            &database.pool,
-            &format!(
-                "SELECT id, task_name, queue_name, status, priority, retry_count, max_retries,
-                        is_workflow_task, worker_hostname, claimed_by_worker_id,
-                        enqueued_at, started_at
-                 FROM horsies_tasks ORDER BY enqueued_at {direction} LIMIT 50"
-            ),
-        )
-        .await;
+/// Python `test_monitoring_query_plans.py::test_list_default_sort_plans_on_enqueued_at_index`:
+/// in both directions of the default sort, the page statement inside
+/// `horsies_monitoring_task_list` reads the live side on
+/// `idx_horsies_tasks_enqueued_at`, with no sequential scan of the live
+/// table. The task id tie-break is an incremental sort on the index order
+/// (presorted key `enqueued_at`): it sorts only the rows of one
+/// `enqueued_at`. A `NULLS LAST` on the NOT NULL key, or a projection
+/// change, moves the live side off the index and fails this test. A plain
+/// `EXPLAIN` of the call shows a Function Scan only, so the plans come from
+/// `auto_explain` with `log_nested_statements`, as notices, in a
+/// transaction that is rolled back.
+#[tokio::test]
+#[serial]
+async fn the_task_list_page_reads_the_live_enqueue_index_in_both_directions() {
+    let database = SpecDatabase::create().await;
+    seed_plan_population(&database.pool).await;
+    let (client, notices) = connect_collecting_notices(database.url()).await;
 
+    for direction in ["DESC", "ASC"] {
+        client.batch_execute("BEGIN").await.expect("begin");
+        client
+            .batch_execute(NESTED_PLAN_SETTINGS)
+            .await
+            .expect("send the nested plans as notices");
+        let rows = client
+            .query(DEFAULT_SORT_LIST, &[&direction])
+            .await
+            .unwrap_or_else(|error| panic!("{direction}: read the task list: {error}"));
+        client.batch_execute("ROLLBACK").await.expect("rollback");
+        let plans =
+            std::mem::take(&mut *notices.lock().unwrap_or_else(PoisonError::into_inner)).join("\n");
+
+        assert!(!rows.is_empty(), "{direction}: the list has no TOTALS row");
+        let page_plan = plans
+            .split("duration:")
+            .find(|plan| plan.contains("WITH live AS"))
+            .unwrap_or_else(|| panic!("{direction}: no plan of the page statement: {plans}"));
         assert!(
-            plan.contains("idx_horsies_tasks_enqueued_at"),
-            "{direction}: {plan}"
+            page_plan.contains("idx_horsies_tasks_enqueued_at"),
+            "{direction}: {page_plan}"
         );
-        assert!(!plan.contains("Sort"), "{direction}: {plan}");
+        assert!(
+            page_plan.contains("Presorted Key: t.enqueued_at"),
+            "{direction}: {page_plan}"
+        );
+        assert!(
+            !page_plan.contains("Seq Scan on horsies_tasks"),
+            "{direction}: {page_plan}"
+        );
     }
+    drop(client);
     database.drop().await;
 }
