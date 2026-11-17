@@ -14,7 +14,6 @@ use crate::broker::stale_recovery::{
     STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS, STALE_RUNNING_SCAN_BATCH,
 };
 use crate::broker::PostgresBroker;
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::identity::reservations::{
@@ -254,7 +253,6 @@ mod p7_maintenance_tests {
             &pool,
             &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &recovery,
-            &PayloadPolicy::default(),
             &retention,
             &health,
             &mut next_retention_cleanup,
@@ -354,7 +352,6 @@ mod p7_maintenance_tests {
             &pool,
             &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &recovery,
-            &PayloadPolicy::default(),
             &retention,
             &health,
             &mut next_retention_cleanup,
@@ -417,7 +414,6 @@ mod p7_maintenance_tests {
             &pool,
             &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &recovery,
-            &PayloadPolicy::default(),
             &retention,
             &health,
             &mut next_retention_cleanup,
@@ -611,7 +607,6 @@ mod p7_maintenance_tests {
             &pool,
             &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &recovery,
-            &PayloadPolicy::default(),
             &retention,
             &health,
             &mut next_retention_cleanup,
@@ -851,7 +846,6 @@ pub fn spawn_reaper(
     maintenance_pool: PgPool,
     registry: Arc<WorkflowSpecRegistry>,
     config: RecoveryConfig,
-    payload: PayloadPolicy,
     retention: RetentionConfig,
     health: ReaperHealth,
     cancel: CancellationToken,
@@ -893,7 +887,6 @@ pub fn spawn_reaper(
                         &maintenance_pool,
                         &registry,
                         &config,
-                        &payload,
                         &retention,
                         &health,
                         &mut next_retention_cleanup,
@@ -910,7 +903,6 @@ pub fn spawn_reaper(
                         &maintenance_pool,
                         &registry,
                         &config,
-                        &payload,
                         &retention,
                         &health,
                         &mut next_retention_cleanup,
@@ -1016,7 +1008,6 @@ async fn run_reaper_pass(
     maintenance_pool: &PgPool,
     registry: &WorkflowSpecRegistry,
     config: &RecoveryConfig,
-    payload: &PayloadPolicy,
     retention: &RetentionConfig,
     health: &ReaperHealth,
     next_retention_cleanup: &mut tokio::time::Instant,
@@ -1169,11 +1160,9 @@ async fn run_reaper_pass(
     // Exact outbox recovery. Each candidate owns its transaction; retaining
     // dispositions remain visible and count toward bounded quarantine.
     let workflow_recovery = crate::workflow_engine::recovery::recover_stuck_workflows_observed(
-        runtime_pool,
+        broker,
         registry,
-        config.crashed_worker_recovery_grace_ms,
         config.workflow_recovery_failure_limit,
-        payload,
         retention,
     )
     .await;
@@ -2156,7 +2145,6 @@ mod tests {
                 broker.reserve_maintenance_pool(),
                 &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
                 &recovery,
-                &PayloadPolicy::default(),
                 &RetentionConfig::default(),
                 &health,
                 &mut next_retention_cleanup,

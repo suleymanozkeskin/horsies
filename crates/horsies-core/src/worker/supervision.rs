@@ -230,7 +230,6 @@ mod tests {
                 crate::core::registry::BuilderHookName::SPEC_BUILDER,
             )),
             config,
-            crate::core::config::payload::PayloadPolicy::default(),
             crate::core::RetentionConfig::default(),
             new_reaper_health(),
             cancel.clone(),
