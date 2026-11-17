@@ -131,6 +131,10 @@ class CoreHandle:
         """
     def release_claims_async(self, request: ReleaseClaimsRequest) -> asyncio.Future[ClaimsReleased | ReleaseFailed]:
         """Release the claims of one request. Writes, in one statement."""
+    def ensure_partition_coverage_async(self, request: CoverageRequest) -> asyncio.Future[CoverageEnsuredRecord | CoverageEnsureFailedRecord | CoverageFailed]:
+        """One partition coverage pass on the session-work pool. Writes (DDL and catalog rows);
+        each leaf commits alone.
+        """
     def cancel_task_async(self, task_id: uuid.UUID, *, include_running: bool) -> asyncio.Future[TaskCancelledRecord | CancelRefusedWorkflowTask | CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid]:
         """Cancel one plain task; a RUNNING task only with include_running. Writes, in one
         statement. An outcome that contradicts the function raises PanicException.
@@ -1279,6 +1283,78 @@ class WorkflowDeleteFailed:
     """
     @property
     def deleted_before(self) -> int: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class CoverageRequest:
+    """One frozen coverage pass: the two horizons, the declared retention periods in whole days,
+    and how a damaged pass is serialized. A period outside 1 to 1825 days, a horizon below two
+    leaves, or another serialization raises ValueError.
+    """
+    def __init__(self, *, history_horizon_days: int, heartbeat_horizon_hours: int, declared_period_days: list[int], serialization: Literal['GATED', 'PER_LEAF_LOCKS']) -> None: ...
+
+
+@final
+class CoveredForeverRecord:
+    """No history class has an end of coverage: only the forever class has leaves, and its leaf
+    has an open upper bound.
+    """
+
+
+@final
+class CoveredUntilRecord:
+    """The first instant (UTC) at which a history class has no leaf."""
+    @property
+    def at(self) -> datetime.datetime: ...
+
+
+@final
+class CoverageEnsuredRecord:
+    """The pass ended with the expected leaves conformant: what it created, whether it published
+    the readers, and how far coverage reaches. absent_leaves names cataloged leaves whose
+    relation is gone.
+    """
+    @property
+    def created_history_leaves(self) -> int: ...
+    @property
+    def created_heartbeat_leaves(self) -> int: ...
+    @property
+    def republished(self) -> bool: ...
+    @property
+    def heartbeat_covered_now(self) -> bool: ...
+    @property
+    def history_covered_through(self) -> CoveredForeverRecord | CoveredUntilRecord: ...
+    @property
+    def heartbeats_covered_through(self) -> datetime.datetime: ...
+    @property
+    def absent_leaves(self) -> list[str]: ...
+
+
+@final
+class CoverageEnsureFailedRecord:
+    """The pass stopped at a refusal; stage, class_key and refusal name where and why."""
+    @property
+    def stage(self) -> str: ...
+    @property
+    def class_key(self) -> str | None: ...
+    @property
+    def refusal(self) -> str: ...
+    @property
+    def heartbeat_covered_now(self) -> bool: ...
+    @property
+    def absent_leaves(self) -> list[str]: ...
+
+
+@final
+class CoverageFailed:
+    """The pass has no outcome: the connect, the client family check, a probe, the coverage
+    gate, the class registration or the final publication failed, or a row broke its
+    function's contract.
+    """
     @property
     def message(self) -> str: ...
     @property

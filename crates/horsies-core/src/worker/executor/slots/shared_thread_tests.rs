@@ -94,6 +94,7 @@ fn timed_out(milliseconds: u64, retry: RetryPlacement) -> AttemptEnd {
     AttemptEnd::TimedOut {
         timeout: timeout_ms(milliseconds),
         retry,
+        cancel: TimeoutCancel::NoSignal,
     }
 }
 

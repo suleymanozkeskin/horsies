@@ -146,7 +146,7 @@ def _expire(connection: Connection, task_id: str, worker_id: str) -> bool:
         ),
     )
     outcome = apply_sync(
-        connection.cursor(),  # pyright: ignore[reportArgumentType]
+        connection.cursor(),
         ExpireOwnedClaim(
             task_id=task_id,
             fence=WorkerOwned(worker_id=worker_id),

@@ -167,6 +167,12 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::claim::ClaimedRowRecord>()?;
     module.add_class::<operations::claim::ClaimPassRecord>()?;
     module.add_class::<operations::claim::ClaimPassFailed>()?;
+    module.add_class::<operations::coverage::CoverageRequestArgument>()?;
+    module.add_class::<operations::coverage::CoveredForeverRecord>()?;
+    module.add_class::<operations::coverage::CoveredUntilRecord>()?;
+    module.add_class::<operations::coverage::CoverageEnsuredRecord>()?;
+    module.add_class::<operations::coverage::CoverageEnsureFailedRecord>()?;
+    module.add_class::<operations::coverage::CoverageFailed>()?;
     module.add_class::<operations::enqueue::EnqueueRequest>()?;
     module.add_class::<operations::enqueue::Enqueued>()?;
     module.add_class::<operations::enqueue::SendSuppressed>()?;

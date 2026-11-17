@@ -6,6 +6,7 @@ pub mod arguments;
 pub mod attempt_records;
 pub mod cancel;
 pub mod claim;
+pub mod coverage;
 pub mod enqueue;
 pub mod expiry_and_orphans;
 pub mod failed_attempt;
