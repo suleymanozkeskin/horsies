@@ -11,8 +11,8 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, Timelike, Utc};
-use sqlx::{FromRow, PgConnection};
 
+use crate::broker::core_rows::{column, one_row, query_in, query_on, RowDecodeError, StatementLog};
 use crate::core::history::commands::EnsureLeafCoverage;
 use crate::core::history::ddl::classes::FOREVER_CLASS_KEY;
 use crate::core::history::ddl::runtime_names::leaf_id_index_name;
@@ -22,27 +22,53 @@ use crate::core::history::names::{HEARTBEAT_CLASS_KEY, TASK_HISTORY_FOREVER_LEAF
 use crate::core::history::outcomes::{CatalogConflictKind, LeafCreation};
 use crate::core::history::partitions::catalog::LeafLowerBound;
 use crate::core::history::periods::RetentionDays;
+use crate::db::{ParameterType, PooledConnection, Row, Transaction, TypedStatement};
 
 use super::coverage::{registered_periods, HistoryCoverage};
 
-const COVERAGE_PROBE_SQL: &str = "SELECT checked_at, leaf_kind, class_key, leaf_name, \
-     lower_bound_kind, lower_anchor, upper_bound_kind, upper_anchor, conformant, \
-     registration_healthy, publication_healthy, absent_leaves \
-     FROM horsies_coverage_probe($1::smallint[], $2::smallint, $3::smallint)";
+/// `horsies_coverage_probe`: the expected leaves of the pass and their
+/// state. `$1` the declared day counts, `$2` the history horizon in days,
+/// `$3` the heartbeat horizon in hours. Reads only.
+pub(super) static COVERAGE_PROBE: TypedStatement = TypedStatement::new(
+    "coverage_probe",
+    "SELECT checked_at, leaf_kind, class_key, leaf_name, lower_bound_kind, lower_anchor, \
+            upper_bound_kind, upper_anchor, conformant, registration_healthy, \
+            publication_healthy, absent_leaves \
+     FROM horsies_coverage_probe($1, $2, $3)",
+    &[
+        ParameterType::Int2Array,
+        ParameterType::Int2,
+        ParameterType::Int2,
+    ],
+);
 
-const REGISTER_CLASSES_SQL: &str = "SELECT class_key, outcome \
-     FROM horsies_register_retention_classes($1::smallint[], $2::smallint)";
+/// `horsies_register_retention_classes`: `$1` the declared day counts, `$2`
+/// the heartbeat horizon in hours.
+pub(super) static REGISTER_CLASSES: TypedStatement = TypedStatement::new(
+    "register_retention_classes",
+    "SELECT class_key, outcome FROM horsies_register_retention_classes($1, $2)",
+    &[ParameterType::Int2Array, ParameterType::Int2],
+);
 
-const CREATE_HISTORY_LEAF_SQL: &str =
-    "SELECT outcome, leaf_name, conflict_kind FROM horsies_create_history_leaf($1, $2)";
+/// `horsies_create_history_leaf`: `$1` the class key, `$2` the lower anchor
+/// (`NULL` for the static forever leaf).
+pub(super) static CREATE_HISTORY_LEAF: TypedStatement = TypedStatement::new(
+    "create_history_leaf",
+    "SELECT outcome, leaf_name, conflict_kind FROM horsies_create_history_leaf($1, $2)",
+    &[ParameterType::Text, ParameterType::Timestamptz],
+);
 
-const CREATE_HEARTBEAT_LEAF_SQL: &str =
-    "SELECT outcome, leaf_name, conflict_kind FROM horsies_create_heartbeat_leaf($1)";
+/// `horsies_create_heartbeat_leaf`: `$1` the lower anchor of the hour.
+pub(super) static CREATE_HEARTBEAT_LEAF: TypedStatement = TypedStatement::new(
+    "create_heartbeat_leaf",
+    "SELECT outcome, leaf_name, conflict_kind FROM horsies_create_heartbeat_leaf($1)",
+    &[ParameterType::Timestamptz],
+);
 
 /// The arguments of one coverage pass, as the functions take them. Only
 /// [`CoverageRequest::new`] constructs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CoverageRequest {
+pub struct CoverageRequest {
     /// The default period and every declared period, each once, in day order.
     declared_days: Vec<i16>,
     history_horizon_days: i16,
@@ -55,7 +81,9 @@ impl CoverageRequest {
     /// not fit `smallint`, before any statement. The functions refuse a
     /// history horizon above 14 days or a heartbeat horizon above 48 hours
     /// (`22023`).
-    pub(crate) fn new(
+    ///
+    /// Errors: [`HistoryError::Contract`] naming the refused horizon.
+    pub fn new(
         history_horizon_days: u32,
         heartbeat_horizon_hours: u32,
         declared_periods: &[RetentionDays],
@@ -166,7 +194,8 @@ impl CoverageProbe {
     }
 }
 
-#[derive(Debug, FromRow)]
+/// One row of `horsies_coverage_probe`, the columns the pass reads.
+#[derive(Debug)]
 struct CoverageProbeRow {
     checked_at: DateTime<Utc>,
     leaf_kind: String,
@@ -182,22 +211,54 @@ struct CoverageProbeRow {
     absent_leaves: Vec<String>,
 }
 
-/// One coverage probe statement and its rows. Reads only.
+/// One coverage probe statement and its rows, in autocommit on a checked
+/// out connection. Reads only.
 ///
-/// Errors: `HistoryError::Database` for a refused call (`22023` for a
-/// horizon outside the function's bounds) or a row that does not decode;
-/// `HistoryError::Contract` for rows that break the probe's contract.
+/// Errors: `HistoryError::Statement` for a failed or refused call (`22023`
+/// for a horizon outside the function's bounds); `HistoryError::RowDecode`
+/// for a column that does not decode; `HistoryError::Contract` for rows that
+/// break the probe's contract.
 pub(crate) async fn probe_coverage(
-    connection: &mut PgConnection,
+    connection: &mut PooledConnection,
+    log: StatementLog,
     request: &CoverageRequest,
 ) -> Result<CoverageProbe, HistoryError> {
-    let rows: Vec<CoverageProbeRow> = sqlx::query_as(COVERAGE_PROBE_SQL)
-        .bind(request.declared_days.as_slice())
-        .bind(request.history_horizon_days)
-        .bind(request.heartbeat_horizon_hours)
-        .fetch_all(connection)
-        .await?;
+    let statement = &COVERAGE_PROBE;
+    let rows = query_on(
+        connection,
+        log,
+        &statement
+            .bind()
+            .value(&request.declared_days)
+            .value(&request.history_horizon_days)
+            .value(&request.heartbeat_horizon_hours)
+            .finish(),
+    )
+    .await?;
+    let rows = rows
+        .iter()
+        .map(coverage_probe_row)
+        .collect::<Result<Vec<_>, RowDecodeError>>()?;
     coverage_probe_of(rows, request)
+}
+
+/// The columns of one probe row. Pure.
+fn coverage_probe_row(row: &Row) -> Result<CoverageProbeRow, RowDecodeError> {
+    let statement = &COVERAGE_PROBE;
+    Ok(CoverageProbeRow {
+        checked_at: column(row, statement, "checked_at")?,
+        leaf_kind: column(row, statement, "leaf_kind")?,
+        class_key: column(row, statement, "class_key")?,
+        leaf_name: column(row, statement, "leaf_name")?,
+        lower_bound_kind: column(row, statement, "lower_bound_kind")?,
+        lower_anchor: column(row, statement, "lower_anchor")?,
+        upper_bound_kind: column(row, statement, "upper_bound_kind")?,
+        upper_anchor: column(row, statement, "upper_anchor")?,
+        conformant: column(row, statement, "conformant")?,
+        registration_healthy: column(row, statement, "registration_healthy")?,
+        publication_healthy: column(row, statement, "publication_healthy")?,
+        absent_leaves: column(row, statement, "absent_leaves")?,
+    })
 }
 
 /// The bounds of one probe row. The forever leaf has OPEN lower and upper
@@ -332,36 +393,39 @@ fn coverage_probe_of(
     })
 }
 
-#[derive(Debug, FromRow)]
-struct RegistrationRow {
-    class_key: String,
-    outcome: String,
-}
-
 /// Registers the default, declared and heartbeat classes in the caller's
 /// transaction: one call of `horsies_register_retention_classes`. Each class
 /// answers REGISTERED, VERIFIED or (heartbeat) HORIZON_UPDATED; the pass
 /// reads the result back through the probe's `registration_healthy`.
 ///
-/// Errors: `HistoryError::Database` for a refused call; `HistoryError::Contract`
-/// for another outcome. A failure leaves the caller's transaction to roll
-/// back.
+/// Errors: `HistoryError::Statement` for a failed or refused call;
+/// `HistoryError::RowDecode` for a column that does not decode;
+/// `HistoryError::Contract` for another outcome. A failure leaves the
+/// caller's transaction to roll back.
 pub(crate) async fn register_retention_classes(
-    connection: &mut PgConnection,
+    transaction: &mut Transaction<'_>,
+    log: StatementLog,
     request: &CoverageRequest,
 ) -> Result<(), HistoryError> {
-    let rows: Vec<RegistrationRow> = sqlx::query_as(REGISTER_CLASSES_SQL)
-        .bind(request.declared_days.as_slice())
-        .bind(request.heartbeat_horizon_hours)
-        .fetch_all(connection)
-        .await?;
-    for row in rows {
-        match row.outcome.as_str() {
+    let statement = &REGISTER_CLASSES;
+    let rows = query_in(
+        transaction,
+        log,
+        &statement
+            .bind()
+            .value(&request.declared_days)
+            .value(&request.heartbeat_horizon_hours)
+            .finish(),
+    )
+    .await?;
+    for row in &rows {
+        let class_key: String = column(row, statement, "class_key")?;
+        let outcome: String = column(row, statement, "outcome")?;
+        match outcome.as_str() {
             "REGISTERED" | "VERIFIED" | "HORIZON_UPDATED" => {}
             other => {
                 return Err(HistoryError::contract(format!(
-                    "class registration of {:?} returned {other:?}",
-                    row.class_key
+                    "class registration of {class_key:?} returned {other:?}"
                 )));
             }
         }
@@ -369,7 +433,8 @@ pub(crate) async fn register_retention_classes(
     Ok(())
 }
 
-#[derive(Debug, FromRow)]
+/// One row of a leaf-creation function.
+#[derive(Debug)]
 struct LeafCreationRow {
     outcome: String,
     leaf_name: Option<String>,
@@ -390,22 +455,31 @@ enum CreatedLeafKind {
 /// is published inside the call. The static forever leaf (`Open` lower
 /// bound) is verified, never created or repaired.
 ///
-/// Errors: `HistoryError::Database` for a refused call (`22023`, `25000`,
-/// `42P17`); `HistoryError::Contract` for a row outside the function's
-/// outcomes.
+/// Errors: `HistoryError::Statement` for a failed or refused call (`22023`,
+/// `25000`, `42P17`); `HistoryError::RowDecode` for no row or a column that
+/// does not decode; `HistoryError::Contract` for a row outside the
+/// function's outcomes.
 pub(crate) async fn create_history_leaf(
-    connection: &mut PgConnection,
+    transaction: &mut Transaction<'_>,
+    log: StatementLog,
     leaf: &DamagedHistoryLeaf,
 ) -> Result<LeafCreation, HistoryError> {
     let lower_anchor: Option<DateTime<Utc>> = match leaf.lower {
         LeafLowerBound::Open => None,
         LeafLowerBound::At(anchor) => Some(anchor),
     };
-    let row: LeafCreationRow = sqlx::query_as(CREATE_HISTORY_LEAF_SQL)
-        .bind(&leaf.class_key)
-        .bind(lower_anchor)
-        .fetch_one(connection)
-        .await?;
+    let statement = &CREATE_HISTORY_LEAF;
+    let rows = query_in(
+        transaction,
+        log,
+        &statement
+            .bind()
+            .value(&leaf.class_key)
+            .value(&lower_anchor)
+            .finish(),
+    )
+    .await?;
+    let row = leaf_creation_row(&one_row(rows, statement)?, statement)?;
     leaf_creation_of(CreatedLeafKind::History, &leaf.class_key, row)
 }
 
@@ -414,14 +488,31 @@ pub(crate) async fn create_history_leaf(
 ///
 /// Errors: as [`create_history_leaf`].
 pub(crate) async fn create_heartbeat_leaf(
-    connection: &mut PgConnection,
+    transaction: &mut Transaction<'_>,
+    log: StatementLog,
     leaf: &DamagedHeartbeatLeaf,
 ) -> Result<LeafCreation, HistoryError> {
-    let row: LeafCreationRow = sqlx::query_as(CREATE_HEARTBEAT_LEAF_SQL)
-        .bind(leaf.lower_anchor)
-        .fetch_one(connection)
-        .await?;
+    let statement = &CREATE_HEARTBEAT_LEAF;
+    let rows = query_in(
+        transaction,
+        log,
+        &statement.bind().value(&leaf.lower_anchor).finish(),
+    )
+    .await?;
+    let row = leaf_creation_row(&one_row(rows, statement)?, statement)?;
     leaf_creation_of(CreatedLeafKind::Heartbeat, HEARTBEAT_CLASS_KEY, row)
+}
+
+/// The columns of one leaf-creation row of `statement`. Pure.
+fn leaf_creation_row(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<LeafCreationRow, RowDecodeError> {
+    Ok(LeafCreationRow {
+        outcome: column(row, statement, "outcome")?,
+        leaf_name: column(row, statement, "leaf_name")?,
+        conflict_kind: column(row, statement, "conflict_kind")?,
+    })
 }
 
 /// The outcome of one leaf-creation row. Pure. An outcome outside the

@@ -18,7 +18,6 @@ use crate::broker::monitoring_test_database::MonitoringTestDatabase;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
-use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 
 /// The least reaper check interval. The loop reads the fleet check from one
@@ -144,11 +143,11 @@ async fn a_started_reaper_logs_an_unserved_isolated_stream() {
     let database = MonitoringTestDatabase::create().await;
     let retention = RetentionConfig::default();
     ensure_startup_coverage_in_pool(
-        &database.pool,
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
         retention.history_leaf_horizon_days,
         retention.heartbeat_leaf_horizon_hours,
         &[],
-        &StagedLoaderPublisher,
     )
     .await
     .expect("startup coverage");

@@ -27,6 +27,7 @@ pub mod migrations;
 mod monitoring_schema_tests;
 #[cfg(test)]
 pub(crate) mod monitoring_test_database;
+pub mod partition_maintenance;
 #[cfg(test)]
 mod pgbouncer_contract_tests;
 pub mod pools;
@@ -72,6 +73,7 @@ pub use health::{
 };
 pub use lifecycle_operations::{CancelAnswer, CancelTaskError};
 pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};
+pub use partition_maintenance::CoveragePassError;
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
     ClaimPassParams, PostgresBroker, PrestartExpiry, SchemaInitializationMode, WorkflowStop,

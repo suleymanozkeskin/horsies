@@ -1450,11 +1450,11 @@ mod tests {
         // The heartbeat table has no default partition: the current hour
         // needs its leaf, as at worker start.
         crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool(
-            &pool,
+            &crate::broker::pools::core_pool_for_test_pool(&pool),
+            crate::broker::core_rows::StatementLog::Off,
             2,
             2,
             &[],
-            &crate::core::history::reads::publisher::StagedLoaderPublisher,
         )
         .await
         .expect("partition coverage");

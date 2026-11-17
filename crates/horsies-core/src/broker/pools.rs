@@ -561,6 +561,31 @@ pub(crate) fn worker_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) -> 
     core_pool
 }
 
+/// A session pool of `size` connections on the database of a test's sqlx
+/// pool: no reserve, statements prepared per connection, as the separate
+/// session pool of a broker. Connects to nothing until the first checkout.
+#[cfg(test)]
+pub(crate) fn session_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) -> CorePool {
+    let mut config = PostgresConfig::from_url(test_url_of(&pool.connect_options()));
+    config.pool_size = size;
+    config.max_overflow = 0;
+    let plan = pool_plan(
+        &config,
+        PoolRole::Session,
+        Reserve::NoReserve,
+        StatementProtocol::PreparedPerConnection,
+    )
+    .expect("a test session pool has at least one connection");
+    let (core_pool, _masked_url) = open_pool(
+        &config.database_url,
+        plan,
+        &ConnectionEnvironment::isolated(),
+        &config.socket_settings(),
+    )
+    .expect("the URL of a test pool is accepted by the statement layer");
+    core_pool
+}
+
 /// The checkout wait of [`unpinged_single_connection_core_pool`].
 #[cfg(test)]
 const TEST_CHECKOUT_WAIT: Duration = Duration::from_secs(30);
