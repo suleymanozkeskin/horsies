@@ -13,7 +13,7 @@ use crate::core::history::enqueue::{parse_optional_object, prepare_enqueue_facts
 use crate::core::history::identity::keys::{
     reservation_window_micros, IDEMPOTENCY_WINDOW_DEFAULT_HOURS, IDEMPOTENCY_WINDOW_DEFAULT_MICROS,
 };
-use crate::core::history::reads::detail::{HistoryTaskDetail, TaskDetailResult};
+use crate::core::history::reads::detail::{HistoryTaskDetail, TaskAbsenceReason, TaskDetailResult};
 use crate::core::history::reads::result::{
     HistoryResultPayload, HistoryTaskResult, TaskResultRead,
 };
@@ -36,13 +36,15 @@ use crate::broker::enqueue_task::{
 };
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError, EnqueueRefusal};
 use crate::broker::health::{
-    checked_history_limit, read_listed_worker_states, read_worker_snapshot, read_worker_snapshots,
-    DatabasePing, ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload,
-    WorkerStateSnapshot, WORKER_PING_CHANNEL,
+    checked_history_limit, ping_min_responses_refused, ping_timeout_refused,
+    read_listed_worker_states, read_worker_snapshot, read_worker_snapshots, DatabasePing,
+    ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
+    WORKER_PING_CHANNEL,
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::result_types::{
-    BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
+    BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRead, RawResultRecord,
+    TaskInfoRead,
 };
 use crate::broker::row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskResultRow};
 use crate::broker::workflow_claim_settle::{settle_claimed_workflow_tasks, ClaimDisposition};
@@ -52,8 +54,7 @@ use crate::broker::client_family::{
     RecordedFamily,
 };
 use crate::broker::process_listener::{
-    default_payload_capacity, fixed_channel, CheckInterruption, ListenError, ProcessListener,
-    SessionCheckFailure, SESSION_CAPABILITY_TIMEOUT, SESSION_CHECK_CHANNEL_PREFIX,
+    default_payload_capacity, fixed_channel, ListenError, ProcessListener, SessionCheckFailure,
     TASK_DONE_CHANNEL, WORKER_PONG_CHANNEL_PREFIX,
 };
 use crate::broker::task_lists::{
@@ -1303,9 +1304,14 @@ impl PostgresBroker {
                 cause: NotSentCause::Checkout(cause),
             })?;
         let mut transaction = connection.begin(IsolationLevel::ServerDefault).await?;
-        let outcome =
-            rerun_task_in_transaction(&mut transaction, self.statement_log, &command, &policy)
-                .await?;
+        let outcome = rerun_task_in_transaction(
+            &mut transaction,
+            self.statement_log,
+            &command,
+            &policy,
+            self.client_family,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(outcome)
     }
@@ -1733,7 +1739,8 @@ impl PostgresBroker {
     /// A terminal history row is resolved through the staged detail reader.
     /// When `timeout` expires for a live non-terminal task, the latest status is
     /// returned with no result. A task absent from both live and retained
-    /// history returns `Ok(None)`. A limit above
+    /// history returns [`RawResultRead::Absent`] with the reason of the
+    /// history read. A limit above
     /// [`MAX_WAIT_LIMIT_MS`](crate::broker::wait_limit::MAX_WAIT_LIMIT_MS) is
     /// `INVALID_INPUT` before any read. A listener that cannot start makes the
     /// wait poll.
@@ -1741,21 +1748,21 @@ impl PostgresBroker {
         &self,
         task_id: Uuid,
         timeout: Option<Duration>,
-    ) -> BrokerResult<Option<RawResultRecord>> {
+    ) -> BrokerResult<RawResultRead> {
         let start = Instant::now();
         let limit =
             WaitLimit::parse(timeout).map_err(|refused| invalid_input(refused.to_string()))?;
         match Box::pin(self.raw_result_probe(task_id)).await? {
-            RawResultProbe::Record(record) => return Ok(Some(record)),
-            RawResultProbe::Absent => return Ok(None),
+            RawResultProbe::Record(record) => return Ok(RawResultRead::Found(record)),
+            RawResultProbe::Absent(reason) => return Ok(RawResultRead::Absent { reason }),
             RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
         }
 
         let mut wait_mode = self.result_wait_mode(task_id).await;
 
         match Box::pin(self.raw_result_probe(task_id)).await? {
-            RawResultProbe::Record(record) => return Ok(Some(record)),
-            RawResultProbe::Absent => return Ok(None),
+            RawResultProbe::Record(record) => return Ok(RawResultRead::Found(record)),
+            RawResultProbe::Absent(reason) => return Ok(RawResultRead::Absent { reason }),
             RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
         }
 
@@ -1764,9 +1771,9 @@ impl PostgresBroker {
             if deadline.is_some_and(|at| Instant::now() >= at) {
                 return match Box::pin(self.raw_result_probe(task_id)).await? {
                     RawResultProbe::Record(record) | RawResultProbe::Waiting(record) => {
-                        Ok(Some(record))
+                        Ok(RawResultRead::Found(record))
                     }
-                    RawResultProbe::Absent => Ok(None),
+                    RawResultProbe::Absent(reason) => Ok(RawResultRead::Absent { reason }),
                     RawResultProbe::Retry => {
                         tokio::task::yield_now().await;
                         continue;
@@ -1779,8 +1786,8 @@ impl PostgresBroker {
                 .unwrap_or(interval);
             wait_mode.pause(wait).await;
             match Box::pin(self.raw_result_probe(task_id)).await? {
-                RawResultProbe::Record(record) => return Ok(Some(record)),
-                RawResultProbe::Absent => return Ok(None),
+                RawResultProbe::Record(record) => return Ok(RawResultRead::Found(record)),
+                RawResultProbe::Absent(reason) => return Ok(RawResultRead::Absent { reason }),
                 RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
             }
         }
@@ -1826,20 +1833,59 @@ impl PostgresBroker {
         task_id: Uuid,
         include_result: bool,
         include_failed_reason: bool,
-    ) -> BrokerResult<Option<TaskInfo>> {
+    ) -> BrokerResult<TaskInfoRead> {
         self.get_task_info_with_attempts(task_id, include_result, include_failed_reason, false)
             .await
     }
 
     /// Fetch task metadata and optionally compose execution attempts from the
     /// live attempt table or the immutable history snapshot.
+    ///
+    /// A task that neither the live table nor the task history holds is
+    /// [`TaskInfoRead::Absent`] with the reason of the history read. When
+    /// the live read finds no row and the history read then finds the task
+    /// live (a send of that id committed between the two statements), the
+    /// read runs again, at most [`TASK_INFO_READ_PASSES`] times in all; a
+    /// task that moves on every pass is `TASK_INFO_QUERY_FAILED`, retryable.
     pub async fn get_task_info_with_attempts(
         &self,
         task_id: Uuid,
         include_result: bool,
         include_failed_reason: bool,
         include_attempts: bool,
-    ) -> BrokerResult<Option<TaskInfo>> {
+    ) -> BrokerResult<TaskInfoRead> {
+        for _pass in 0..TASK_INFO_READ_PASSES {
+            match Box::pin(self.task_info_pass(
+                task_id,
+                include_result,
+                include_failed_reason,
+                include_attempts,
+            ))
+            .await?
+            {
+                TaskInfoPass::Read(read) => return Ok(read),
+                TaskInfoPass::BecameLive => {}
+            }
+        }
+        Err(BrokerOperationError {
+            code: BrokerErrorCode::TaskInfoQueryFailed,
+            message: format!(
+                "task {task_id} was absent from the live table and live in the history read \
+                 on {TASK_INFO_READ_PASSES} passes in a row"
+            ),
+            retryable: true,
+        })
+    }
+
+    /// One pass of [`Self::get_task_info_with_attempts`]: the live row, else
+    /// the history record or the absence reason.
+    async fn task_info_pass(
+        &self,
+        task_id: Uuid,
+        include_result: bool,
+        include_failed_reason: bool,
+        include_attempts: bool,
+    ) -> BrokerResult<TaskInfoPass> {
         let row = self
             .read_main(
                 &GET_TASK_INFO.bind().value(&task_id).finish(),
@@ -1868,7 +1914,7 @@ impl PostgresBroker {
                             .map_err(task_info_history_error)?,
                     );
                 }
-                Ok(Some(info))
+                Ok(TaskInfoPass::Read(TaskInfoRead::Found(Box::new(info))))
             }
             None => {
                 let detail = Box::pin(self.fetch_history_detail(task_id))
@@ -1881,9 +1927,11 @@ impl PostgresBroker {
                         include_failed_reason,
                         include_attempts,
                     )
-                    .map(Some),
-                    TaskDetailResult::Live { .. } => Ok(None),
-                    TaskDetailResult::Absent { .. } => Ok(None),
+                    .map(|info| TaskInfoPass::Read(TaskInfoRead::Found(Box::new(info)))),
+                    TaskDetailResult::Live { .. } => Ok(TaskInfoPass::BecameLive),
+                    TaskDetailResult::Absent { reason, .. } => {
+                        Ok(TaskInfoPass::Read(TaskInfoRead::Absent { reason }))
+                    }
                 }
             }
         }
@@ -2140,7 +2188,9 @@ impl PostgresBroker {
     /// broker with no listener is `LISTENER_DISABLED`, not retryable. A
     /// refused subscription is `WORKER_PING_FAILED` with the listener's
     /// retryable flag. Replies lost to a listener gap or a full reply queue
-    /// are not waited for: the window goes on.
+    /// are not waited for: the window goes on. The window starts when the
+    /// ping NOTIFY has committed, as Python's. A reply that does not decode
+    /// is logged and left out, as Python's (`_decode_pong`).
     pub async fn ping_workers(
         &self,
         target_worker_id: Option<&str>,
@@ -2148,14 +2198,10 @@ impl PostgresBroker {
         min_responses: Option<usize>,
     ) -> BrokerResult<Vec<WorkerPong>> {
         if timeout.is_zero() {
-            return Err(invalid_input(
-                "ping_workers timeout must be positive, got 0".to_owned(),
-            ));
+            return Err(ping_timeout_refused(&0));
         }
         if min_responses == Some(0) {
-            return Err(invalid_input(
-                "ping_workers min_responses must be >= 1 when set, got 0".to_owned(),
-            ));
+            return Err(ping_min_responses_refused(&0));
         }
 
         let correlation_id = Uuid::new_v4().simple().to_string();
@@ -2178,7 +2224,6 @@ impl PostgresBroker {
             retryable: false,
         })?;
 
-        let start = std::time::Instant::now();
         let _notified = self
             .execute_main(
                 &NOTIFY_WORKER_PING
@@ -2189,6 +2234,10 @@ impl PostgresBroker {
             )
             .await
             .map_err(|error| worker_ping_statement_error("ping notify", error))?;
+        // The window and each round trip start when the NOTIFY has committed
+        // (Python's `sent_at`); a reply that arrived before waits in the
+        // reply queue.
+        let start = std::time::Instant::now();
 
         let mut pongs: Vec<WorkerPong> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2248,7 +2297,10 @@ impl PostgresBroker {
     /// 3. One autocommit `SELECT pg_notify($1, 'ok')` on the main core pool.
     ///    Its first checkout runs the statement-pooling check of the main
     ///    pool.
-    /// 4. Wait at most [`SESSION_CAPABILITY_TIMEOUT`] for the NOTIFY.
+    /// 4. Wait at most `SESSION_CAPABILITY_TIMEOUT` (2 s) for the NOTIFY.
+    ///
+    /// Steps 2 to 4 are the LISTEN probe that the live check also runs
+    /// ([`PostgresBroker::check_connectivity`]).
     ///
     /// The subscription is dropped at the end, and the listener UNLISTENs the
     /// channel. Nothing is written.
@@ -2264,43 +2316,9 @@ impl PostgresBroker {
             .pools()
             .map_err(SessionCheckFailure::PoolSettings)?;
         self.check_session_pool(open.pools().session()).await?;
-        let listener = self
-            .listener
-            .start()
+        self.probe_listen_delivery(&self.listener, &open)
             .await
-            .map_err(SessionCheckFailure::Subscribe)?;
-        let channel = fixed_channel(&format!(
-            "{SESSION_CHECK_CHANNEL_PREFIX}{}",
-            Uuid::new_v4().simple()
-        ));
-        let delivery = listener
-            .subscribe_wake(channel.clone(), PayloadFilter::AnyPayload)
-            .await
-            .map_err(SessionCheckFailure::Subscribe)?;
-        let channel_name: &str = channel.as_str();
-        self.log_statement(&SESSION_CHECK_NOTIFY);
-        let _notified = open
-            .main()
-            .execute(
-                CheckoutClass::Batch,
-                &SESSION_CHECK_NOTIFY.bind().value(&channel_name).finish(),
-                StatementBound::ConnectionTimeouts,
-            )
-            .await
-            .map_err(SessionCheckFailure::Notify)?;
-        match tokio::time::timeout(SESSION_CAPABILITY_TIMEOUT, delivery.recv()).await {
-            Ok(WakeEvent::Notified) => Ok(()),
-            Ok(WakeEvent::Gap) => Err(SessionCheckFailure::Interrupted(
-                CheckInterruption::Reconnected,
-            )),
-            Ok(WakeEvent::Stopped) => {
-                Err(SessionCheckFailure::Interrupted(CheckInterruption::Stopped))
-            }
-            Err(_elapsed) => Err(SessionCheckFailure::NotCapable {
-                session_url: listener.masked_url().clone(),
-                waited: SESSION_CAPABILITY_TIMEOUT,
-            }),
-        }
+            .map_err(SessionCheckFailure::from)
     }
 
     /// Step 1 of [`PostgresBroker::check_worker_session`]: `SELECT 1` on the
@@ -2732,7 +2750,19 @@ enum RawResultProbe {
     Record(RawResultRecord),
     Waiting(RawResultRecord),
     Retry,
-    Absent,
+    Absent(TaskAbsenceReason),
+}
+
+/// The passes of a task info read whose live read and history read race a
+/// send of the same id.
+const TASK_INFO_READ_PASSES: u32 = 3;
+
+/// The end of one task info pass.
+enum TaskInfoPass {
+    Read(TaskInfoRead),
+    /// The live read found no row, and the history read found the task
+    /// live: a send of the id committed between the two statements.
+    BecameLive,
 }
 
 fn raw_result_from_history_detail(
@@ -2740,7 +2770,7 @@ fn raw_result_from_history_detail(
     detail: TaskDetailResult,
 ) -> BrokerResult<RawResultProbe> {
     match detail {
-        TaskDetailResult::Absent { .. } => Ok(RawResultProbe::Absent),
+        TaskDetailResult::Absent { reason, .. } => Ok(RawResultProbe::Absent(reason)),
         TaskDetailResult::Live { .. } => Ok(RawResultProbe::Retry),
         TaskDetailResult::History(detail) => {
             // Parsed at the history read (`HistoryTaskDetail.status`).
@@ -3072,7 +3102,26 @@ fn decode_pong(
     correlation_id: &str,
     elapsed: std::time::Duration,
 ) -> Option<WorkerPong> {
-    let payload: WorkerPongPayload = serde_json::from_str(raw_payload).ok()?;
+    // Python's `_decode_pong`: text that is not JSON and an object that is
+    // not a pong are logged; a value that is not an object and a reply of
+    // another round are left out without a record.
+    let body: serde_json::Value = match serde_json::from_str(raw_payload) {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!("Discarding unparseable pong payload: {error}");
+            return None;
+        }
+    };
+    if !body.is_object() {
+        return None;
+    }
+    let payload: WorkerPongPayload = match serde_json::from_value(body) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!("Discarding invalid pong payload: {error}");
+            return None;
+        }
+    };
     if payload.correlation_id != correlation_id {
         return None;
     }
@@ -3693,17 +3742,17 @@ mod tests {
         }
     }
 
-    /// Verify that get_task_info returns BrokerResult<Option<TaskInfo>>
+    /// Verify that get_task_info returns BrokerResult<TaskInfoRead>
     /// and accepts include_result / include_failed_reason filter params.
     #[test]
     fn get_task_info_return_type_contract() {
         #[allow(unused, unreachable_code)]
         async fn _check(broker: &PostgresBroker) {
-            let _result: BrokerResult<Option<TaskInfo>> =
+            let _result: BrokerResult<TaskInfoRead> =
                 broker.get_task_info(Uuid::nil(), false, false).await;
-            let _result: BrokerResult<Option<TaskInfo>> =
+            let _result: BrokerResult<TaskInfoRead> =
                 broker.get_task_info(Uuid::nil(), true, false).await;
-            let _result: BrokerResult<Option<TaskInfo>> =
+            let _result: BrokerResult<TaskInfoRead> =
                 broker.get_task_info(Uuid::nil(), true, true).await;
         }
     }
@@ -4127,6 +4176,29 @@ mod get_result_wait_tests {
         let probe =
             raw_result_from_history_detail(task_id, TaskDetailResult::Live { task_id }).unwrap();
         assert!(matches!(probe, RawResultProbe::Retry));
+    }
+
+    /// The absence reason of the history read reaches the raw result read:
+    /// a task that retention can have removed differs from an id that no
+    /// retained history held.
+    #[test]
+    fn an_absent_history_detail_keeps_its_reason() {
+        let task_id = Uuid::new_v4();
+        for reason in [
+            TaskAbsenceReason::PredatesRetainedHistory,
+            TaskAbsenceReason::WithinRetainedHistory,
+            TaskAbsenceReason::NotClassified,
+        ] {
+            let probe = raw_result_from_history_detail(
+                task_id,
+                TaskDetailResult::Absent { task_id, reason },
+            )
+            .unwrap();
+            assert!(
+                matches!(probe, RawResultProbe::Absent(kept) if kept == reason),
+                "{reason:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -5926,6 +5998,9 @@ mod task_info_code_tests {
         }
     }
 }
+
+mod connectivity;
+pub use connectivity::{ConnectivityRefusal, ListenProbeFailure};
 
 #[cfg(test)]
 mod result_read_spec_tests;

@@ -1,5 +1,6 @@
 ---
 title: Remote PostgreSQL
+section: shared
 summary: Deploy workers against a remote or managed PostgreSQL — connection budgeting, pooled multi-worker setups, prefetch, and health-check tuning.
 related: [broker-config, ../workers/concurrency, ../troubleshooting/pgbouncer]
 tags: [configuration, deployment, postgres, pgbouncer, connections, latency]
@@ -49,15 +50,15 @@ connections for the same rate: set
 `WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N)))`. See
 [The Pool of the Worker Process](/horsies/workers/worker-profiles/#the-pool-of-the-worker-process).
 
-Producers hold their own engine pools of `pool_size + max_overflow`
-connections each (default 5 + 10): one in the resource set of each event loop
-that makes broker calls, one in the set of the sync runner loop for sync
-calls, and the sync send pool for sync sends. A
-producer that sends only with `send()` can open `15 + 15 = 30` at the
-defaults. Each set adds 2 listener connections when it waits for a result,
-and one more pool of `pool_size + max_overflow` when `session_database_url`
-differs (see
-[Connection Ceiling](/horsies/configuration/broker-config/#connection-ceiling)).
+Producers hold their own pools of `pool_size + max_overflow` connections
+each (default 5 + 10): the core pool of the broker, which serves sends and
+reads from every thread and event loop, and one engine pool in the resource
+set of each event loop that starts or resumes a workflow. A producer that
+only sends and reads results can open 15 at the defaults, and 1 listener
+connection when it waits for a result. Each pool has a twin of
+`pool_size + max_overflow` on `session_database_url` when that URL differs
+(see
+[Connection Ceiling](/horsies/configuration/broker-connections/#connection-ceiling)).
 
 Size against the server's effective capacity, not its nominal
 `max_connections`: subtract superuser-reserved slots and any connections

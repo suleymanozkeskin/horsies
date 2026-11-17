@@ -1,7 +1,7 @@
-error: generic task functions are not supported
+error: task functions take no generic or lifetime parameters: the input and output types are the wire contract
  --> tests/compile_fail/lifetime_params.rs:5:13
   |
-5 | async fn bad<'a>(input: &'a str) -> Result<String, TaskError> {
+5 | async fn bad<'a>(input: &'a str) -> Result<String, TaskError<std::convert::Infallible>> {
   |             ^^^^
 
 warning: unused import: `horsies::TaskError`

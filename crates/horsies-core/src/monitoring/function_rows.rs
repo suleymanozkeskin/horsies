@@ -540,9 +540,10 @@ pub(super) fn task_detail_row(
             span_s(started_at, None, status.as_str() == "RUNNING"),
         ),
         (Location::History, Some(terminal)) => {
-            if let Err(reason) = status.parse::<TaskStatus>() {
+            if status.parse::<TaskStatus>().is_err() {
                 return Err(DetailRowError::StoredData(format!(
-                    "history row of task {task_id} has an unknown status: {reason}"
+                    "history row {task_id} has status {}, which is not a task status",
+                    crate::core::python_text::python_repr(&status)
                 )));
             }
             (

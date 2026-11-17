@@ -1,5 +1,6 @@
 ---
 title: Choosing an Execution Mode
+section: shared
 summary: Which execution mode fits a task - isolated, shared async or shared thread - what each mode requires, what a timeout and a crash do, the rules for task authors, and a worker profile for each, with measured conditions and results.
 related: [worker-profiles, shared-async-tasks, shared-thread-tasks, worker-architecture, concurrency, ../tasks/defining-tasks]
 tags: [workers, execution, isolated, shared-async, shared-thread, profiles, timeouts, free-threading]

@@ -28,7 +28,9 @@ pub trait AsyncTaskFn: Send + Sync + 'static {
     /// The default returns `Ok(())` for implementations that cannot introspect
     /// their input type (e.g. hand-written trait impls). Macro-generated tasks
     /// override this to perform the real typed check, enabling `app.check()` to
-    /// validate schedule and workflow-node payloads at startup.
+    /// validate schedule and workflow-node payloads at startup. The Rust
+    /// client's tasks also refuse an input that does not read back to itself,
+    /// as its send does.
     fn validate_input(&self, input: &[u8]) -> Result<(), TaskError> {
         let _ = input;
         Ok(())

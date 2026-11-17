@@ -1,5 +1,6 @@
 ---
 title: Worker Profiles
+section: python
 summary: Named worker settings in AppConfig - isolated, shared async and shared thread children, recycling, connection pools of the children, of task code that sends and of the worker process and their measured default sizes, claim limits, drain timeout, preload and the core of the worker process, example profiles for one machine - and what horsies check and worker boot validate.
 related: [execution-modes, worker-architecture, shared-async-tasks, shared-thread-tasks, concurrency, ../cli, ../configuration/app-config, ../migrations/migration-to-0-7-0]
 tags: [workers, profiles, configuration, concurrency, recycling, connections, validation]
@@ -96,6 +97,174 @@ io_profile = WorkerProfile(
             above=MemoryLimit(mb=2048),
         ),
     ),
+)
+```
+
+### Run Shared Tasks
+
+A worker runs `SHARED_ASYNC` tasks on shared async children and `SHARED_THREAD` tasks on shared thread children. What runs where, the timeouts and the rules for task authors are on [Shared Async Tasks](/horsies/workers/shared-async-tasks/) and [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/).
+
+```python
+import asyncio
+
+from pydantic import SecretStr
+
+from horsies import (
+    AppConfig,
+    Execution,
+    Horsies,
+    IsolatedChildren,
+    PostgresConfig,
+    SharedAsyncChildren,
+    TaskError,
+    TaskResult,
+    WorkerProfile,
+)
+
+app = Horsies(AppConfig(
+    broker=PostgresConfig(
+        database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
+    ),
+    worker_profiles={
+        'io': WorkerProfile(
+            isolated=IsolatedChildren(count=2),
+            shared_async=SharedAsyncChildren(count=4, seats=25),
+        ),
+    },
+))
+
+
+@app.task(
+    'fetch_quote',
+    execution=Execution.SHARED_ASYNC,
+    timeout_ms=10_000,
+    cancel_grace_ms=2_000,
+)
+async def fetch_quote(*, symbol: str) -> TaskResult[str, TaskError]:
+    await asyncio.sleep(0.1)
+    return TaskResult(ok=symbol)
+```
+
+```bash
+horsies worker myapp.instance:app --profile io
+```
+
+This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_ASYNC` tasks on 4 × 25 = 100 seats.
+
+```python
+import hashlib
+
+from pydantic import SecretStr
+
+from horsies import (
+    AppConfig,
+    Execution,
+    Horsies,
+    IsolatedChildren,
+    PostgresConfig,
+    SharedThreadChildren,
+    TaskError,
+    TaskResult,
+    WorkerProfile,
+)
+
+app = Horsies(AppConfig(
+    broker=PostgresConfig(
+        database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
+    ),
+    worker_profiles={
+        'files': WorkerProfile(
+            isolated=IsolatedChildren(count=2),
+            shared_thread=SharedThreadChildren(count=2, seats=4),
+        ),
+    },
+))
+
+
+@app.task('digest_file', execution=Execution.SHARED_THREAD, timeout_ms=60_000)
+def digest_file(*, path: str) -> TaskResult[str, TaskError]:
+    digest = hashlib.sha256()
+    with open(path, 'rb') as source:
+        for block in iter(lambda: source.read(1 << 20), b''):
+            digest.update(block)
+    return TaskResult(ok=digest.hexdigest())
+```
+
+```bash
+horsies worker myapp.instance:app --profile files
+```
+
+This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_THREAD` tasks on 2 × 4 = 8 seats. The fields are in [`SharedAsyncChildren`](#sharedasyncchildren) and [`SharedThreadChildren`](#sharedthreadchildren).
+
+## Recycling
+
+`IsolatedRecycle` sets when an isolated child is replaced: `after` a number of tasks, `above` a resident memory size, or both. What each limit does, and how to choose them, is on [Process Recycling](/horsies/workers/concurrency/#process-recycling) and [Memory Recycling](/horsies/workers/concurrency/#memory-recycling).
+
+```python
+# The default is 100; raise it for high-throughput or connection-constrained apps
+recycle_after_500 = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=8,
+        recycle=IsolatedRecycle(after=TaskLimit(tasks=500)),
+    ),
+)
+
+# Disable recycling entirely
+no_recycling = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=8,
+        recycle=IsolatedRecycle(after=NoTaskLimit()),
+    ),
+)
+```
+
+```python
+# Recycle any child once its RSS reaches 200 MB
+memory_recycling = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(above=MemoryLimit(mb=200)),
+    ),
+)
+
+# Combine with count recycling: a child recycles when either limit is reached
+count_and_memory = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(
+            after=TaskLimit(tasks=500),
+            above=MemoryLimit(mb=200),
+        ),
+    ),
+)
+```
+
+Memory only: disable count recycling explicitly, or its default `TaskLimit(tasks=100)` still applies.
+
+```python
+memory_only = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(after=NoTaskLimit(), above=MemoryLimit(mb=180)),
+    ),
+)
+```
+
+## Claim Limits
+
+`ClaimLimits` caps the claims of a worker. What each limit does is on [Claiming Controls](/horsies/workers/concurrency/#claiming-controls).
+
+```python
+fair_batches = WorkerProfile(
+    isolated=IsolatedChildren(count=8),
+    claim=ClaimLimits(per_queue_per_pass=TaskLimit(tasks=4)),
+)
+```
+
+```python
+few_claimed = WorkerProfile(
+    isolated=IsolatedChildren(count=8),
+    claim=ClaimLimits(claimed_per_worker=TaskLimit(tasks=4)),
 )
 ```
 

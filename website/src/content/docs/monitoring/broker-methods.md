@@ -1,5 +1,6 @@
 ---
 title: Broker Monitoring Methods
+section: python
 summary: Async methods on PostgresBroker for inspecting task and worker health.
 related: [syce-overview, ../workers/heartbeats-recovery]
 tags: [monitoring, broker, api]
@@ -7,7 +8,7 @@ tags: [monitoring, broker, api]
 
 `PostgresBroker` exposes async methods for querying task and worker health directly from the database. These are useful for building custom monitoring, alerting, or cleanup scripts.
 
-All broker methods return `BrokerResult[T]` — either `Ok(value)` on success or `Err(BrokerOperationError)` on failure. `BrokerOperationError` is a union of frozen variants; match on the variant ([Broker Errors](/horsies/tasks/errors/#broker-errors-brokerresult)). Every variant carries a `retryable` flag: `True` when the driver classifies the cause as transient (connection blip), `False` when it does not clear by itself (a refused argument, schema drift, code bug).
+All broker methods return `BrokerResult[T]` — either `Ok(value)` on success or `Err(BrokerOperationError)` on failure. `BrokerOperationError` is a union of frozen variants; match on the variant ([Broker Errors](/horsies/tasks/error-types/#broker-errors-brokerresult)). Every variant carries a `retryable` flag: `True` when the driver classifies the cause as transient (connection blip), `False` when it does not clear by itself (a refused argument, schema drift, code bug).
 
 ```python
 from uuid import UUID
@@ -101,7 +102,7 @@ if is_ok(result):
 
 ### Worker health and load
 
-For per-worker load, configuration, and liveness, use the typed [Worker & Database Health](/horsies/monitoring/worker-health/) API (`app.list_worker_states_async`, `app.ping_workers_async`, `app.ping_database_async`). It reads the worker-state timeseries — so it includes idle workers — and returns typed `WorkerStateSnapshot` / `WorkerPong` models rather than raw dicts.
+For per-worker load, configuration, and liveness, use the typed [Health Reads](/horsies/monitoring/health-reads/) (`app.list_worker_states_async`, `app.ping_workers_async`, `app.ping_database_async`). It reads the worker-state timeseries — so it includes idle workers — and returns typed `WorkerStateSnapshot` / `WorkerPong` models rather than raw dicts.
 
 ### `get_expired_tasks() -> BrokerResult[list[dict[str, Any]]]`
 

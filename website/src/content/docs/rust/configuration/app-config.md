@@ -1,298 +1,131 @@
 ---
-title: AppConfig
-summary: Root configuration for a horsies application.
-related: [broker-config, recovery-config, retention-config, ../../concepts/queue-modes]
-tags: [configuration, AppConfig]
+title: App Config
+summary: Build the app from an AppConfig, choose its schema mode, and register tasks, queues and state.
+related: [../tasks/defining-tasks, ../../configuration/broker-config, ../../configuration/recovery-config, ../../configuration/retention-config]
+tags: [rust, configuration, AppConfig, Horsies, SchemaMode]
 ---
 
-## Basic Usage
+# App Config
+
+`Horsies` is the app of a Rust process: its configuration, its task registrations, its state, and the core handle that connects at the first operation. Every process of a deployment builds the same app in `main`.
+
+## Build the App
 
 ```rust
-use horsies::{
-    Horsies, AppConfig,
-};
+use horsies::{AppConfig, Horsies, HorsiesError};
 
-let config = AppConfig::for_database_url("postgresql://user:pass@localhost:5432/mydb");
-let mut app = Horsies::new(config)?;
+fn build_app() -> Result<Horsies, HorsiesError> {
+    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+    Horsies::new(config)
+}
 ```
 
-## Fields
+`Horsies::new` does no I/O. It validates the config, builds the core's producer manifest, and returns an app whose handle connects at the first operation (a send, a read). A config that does not validate is refused with every refusal of the validation in one `HorsiesError`.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `queue_mode` | `QueueMode` | `Default` | Queue operating mode |
-| `custom_queues` | `Option<Vec<CustomQueueConfig>>` | `None` | Queue definitions (Custom mode only) |
-| `broker` | `PostgresConfig` | required | Database connection settings |
-| `cluster_wide_cap` | `Option<u32>` | `None` | Max in-flight tasks cluster-wide |
-| `prefetch_buffer` | `u32` | `0` | 0 = hard cap mode, >0 = soft cap with prefetch |
-| `claim_lease_ms` | `Option<u32>` | `None` | Claim lease duration (required if prefetch_buffer > 0; optional override in hard cap mode) |
-| `max_claim_renew_age_ms` | `u32` | `180000` | Max age (ms) of a CLAIMED task that heartbeat will renew. Older claims are left to expire, preventing indefinite renewal of orphaned tasks. Must be >= effective claim lease |
-| `payload` | `PayloadPolicy` | defaults | Payload-size guardrail (warn at 1 MiB, rejection off) |
-| `recovery` | `RecoveryConfig` | defaults | Crash recovery settings |
-| `retention` | `RetentionConfig` | defaults | Data lifetime, partition coverage, and cleanup settings |
-| `resilience` | `WorkerResilienceConfig` | defaults | Worker retry/backoff and notify polling |
-| `schedule` | `Option<ScheduleConfig>` | `None` | Scheduled task configuration |
-| `resend_on_transient_err` | `bool` | `false` | Auto-retry transient enqueue/start failures for task sends, scheduled sends, and workflow starts |
+## Schema Modes
 
-## Queue Mode Configuration
+| Constructor | Schema mode | The handle |
+|-------------|-------------|------------|
+| `Horsies::new(config)` | `SchemaMode::MigrateAndValidate` | Installs the schema at the first operation, or checks it |
+| `Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)` | `ObserveOnly` | Runs no schema DDL. For monitoring tools |
+| `Horsies::with_schema_mode(config, SchemaMode::AssumeInitialized)` | `AssumeInitialized` | Runs no schema DDL and uses no listener |
+| `Horsies::with_handle(config, handle)` | the mode of `handle` | Uses an `Arc<CoreHandle>` that another app or the caller shares. The connection settings are those of `handle` |
 
-### DEFAULT Mode
+See [Broker Config](/horsies/configuration/broker-config/#schema-initialization) for the install.
 
-```rust
-let config = AppConfig {
-    queue_mode: QueueMode::Default,
-    custom_queues: None,
-    ..AppConfig::for_database_url("postgresql://...")
-};
-```
+## AppConfig
 
-### CUSTOM Mode
+`AppConfig` is the core's one config schema, which the Python client reads too. `AppConfig::for_database_url(url)` builds it with every default. The meaning, the default and the range of each field are on the shared pages.
 
-```rust
-use horsies::CustomQueueConfig;
-
-let config = AppConfig {
-    queue_mode: QueueMode::Custom,
-    custom_queues: Some(vec![
-        CustomQueueConfig { name: "high".into(), priority: 1, max_concurrency: 10 },
-        CustomQueueConfig { name: "low".into(), priority: 100, max_concurrency: 3 },
-    ]),
-    ..AppConfig::for_database_url("postgresql://...")
-};
-```
-
-See [Queue Modes](../../concepts/queue-modes) for details.
-
-## Cluster-Wide Concurrency
-
-Limit total in-flight tasks across all workers:
+| Field | Type | Meaning |
+|-------|------|---------|
+| `queue_mode` | `QueueMode` (`Default`, `Custom`) | [Queue Modes](/horsies/concepts/queue-modes/) |
+| `custom_queues` | `Option<Vec<CustomQueueConfig>>` (`name`, `priority`, `max_concurrency`) | [Queue Modes](/horsies/concepts/queue-modes/) |
+| `broker` | `PostgresConfig` | [Broker Config](/horsies/configuration/broker-config/) |
+| `cluster_wide_cap` | `Option<u32>` | [Concurrency](/horsies/workers/concurrency/) |
+| `prefetch_buffer` | `u32` | [Concurrency](/horsies/workers/concurrency/) |
+| `claim_lease_ms` | `Option<u32>` | [Concurrency](/horsies/workers/concurrency/) |
+| `max_claim_renew_age_ms` | `u32` | [Heartbeats & Recovery](/horsies/workers/heartbeats-recovery/) |
+| `payload` | `PayloadPolicy` | [Sending Tasks](/horsies/rust/tasks/sending-tasks/#payload-size) |
+| `recovery` | `RecoveryConfig` | [Recovery Config](/horsies/configuration/recovery-config/) |
+| `retention` | `RetentionConfig` | [Retention Config](/horsies/configuration/retention-config/) |
+| `resilience` | `WorkerResilienceConfig` | [Worker Architecture](/horsies/workers/worker-architecture/) |
+| `worker_profiles` | `BTreeMap<String, WorkerProfile>` | [Concurrency](/horsies/workers/concurrency/) |
+| `schedule` | `Option<ScheduleConfig>` | [Scheduler Overview](/horsies/scheduling/scheduler-overview/) |
+| `resend_on_transient_err` | `bool` | [Sending Tasks](/horsies/rust/tasks/sending-tasks/#resend-on-transient-errors) |
 
 ```rust
-let config = AppConfig {
-    cluster_wide_cap: Some(100), // Max 100 in-flight tasks (RUNNING + CLAIMED)
-    ..AppConfig::for_database_url("postgresql://...")
-};
-```
+use horsies::{AppConfig, CustomQueueConfig, Horsies, HorsiesError, QueueMode};
 
-Set to `None` (default) for unlimited.
-
-**Note:** When `cluster_wide_cap` is set, the system operates in hard cap mode (counts RUNNING + CLAIMED tasks). This ensures strict enforcement and fair distribution across workers.
-
-## Prefetch Configuration
-
-Control whether workers can prefetch tasks beyond their running capacity:
-
-```rust
-// Hard cap mode (default) - strict enforcement, fair distribution
-let config = AppConfig {
-    prefetch_buffer: 0, // No prefetch, workers only claim what they can run
-    ..AppConfig::for_database_url("postgresql://...")
-};
-
-// Soft cap mode - allows prefetch with lease expiry
-let config = AppConfig {
-    prefetch_buffer: 4,             // Prefetch up to 4 extra tasks per worker
-    claim_lease_ms: Some(5000),     // Prefetched claims expire after 5 seconds
-    ..AppConfig::for_database_url("postgresql://...")
-};
-```
-
-**Important:** `cluster_wide_cap` cannot be used with `prefetch_buffer > 0`. If you need a global cap, hard cap mode is required.
-
-See [Concurrency](../../workers/concurrency) for detailed explanation of hard vs soft cap modes.
-
-## Recovery Configuration
-
-Override crash recovery defaults:
-
-```rust
-use horsies::RecoveryConfig;
-
-let config = AppConfig {
-    recovery: RecoveryConfig {
-        auto_requeue_stale_claimed: true,
-        claimed_stale_threshold_ms: 120_000,  // 2 minutes
-        auto_fail_stale_running: true,
-        running_stale_threshold_ms: 300_000,  // 5 minutes
-        ..RecoveryConfig::default()
-    },
-    ..AppConfig::for_database_url("postgresql://...")
-};
-```
-
-See [Recovery Config](../recovery-config) for all options.
-
-## Retention Configuration
-
-Set record lifetime and partition coverage under `retention`:
-
-```rust
-use std::collections::HashMap;
-
-use chrono::Duration;
-use horsies::{RetentionClassConfig, RetentionConfig};
-
-let config = AppConfig {
-    retention: RetentionConfig {
-        queue_retention: HashMap::from([
-            ("emails".to_owned(), Some(Duration::days(7))),
-            ("audit".to_owned(), None),
+fn build_app(database_url: &str) -> Result<Horsies, HorsiesError> {
+    let config = AppConfig {
+        queue_mode: QueueMode::Custom,
+        custom_queues: Some(vec![
+            CustomQueueConfig { name: "critical".to_owned(), priority: 1, max_concurrency: None },
+            CustomQueueConfig { name: "standard".to_owned(), priority: 50, max_concurrency: Some(10) },
         ]),
-        retention_classes: vec![RetentionClassConfig {
-            key: "audit_1y".to_owned(),
-            duration: Duration::days(365),
-        }],
-        ..RetentionConfig::default()
-    },
-    ..AppConfig::for_database_url("postgresql://...")
-};
+        ..AppConfig::for_database_url(database_url)
+    };
+    Horsies::new(config)
+}
 ```
 
-`None` in `queue_retention` means forever. A missing queue mapping uses the
-30-day default class. See [Retention Config](../retention-config).
+### PostgresConfig
 
-## Payload Guardrail
+`PostgresConfig::from_url(url)` builds the broker config with every default. Three fields have Rust types where the Python client has numbers:
 
-`payload` bounds serialized task payloads at the encode boundaries. The check compares the length of the already-serialized JSON — one integer comparison per enqueue/result, no extra serialization pass.
+| Field | Type | Python field |
+|-------|------|--------------|
+| `pool_recycle` | `PoolRecycle::Never` or `PoolRecycle::AfterSeconds { seconds: WholeSeconds }` | `pool_recycle` (`-1` or seconds) |
+| `tcp_keepalives` | `TcpKeepalivesConfig::Off` or `TcpKeepalivesConfig::On { idle_seconds, interval_seconds, probes }` | `tcp_keepalives`, `tcp_keepalives_idle`, `tcp_keepalives_interval`, `tcp_keepalives_count` |
+| `tcp_user_timeout` | `TcpUserTimeoutConfig::SystemDefault` or `TcpUserTimeoutConfig::After { milliseconds }` | `tcp_user_timeout_ms` (`0` or milliseconds) |
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `warn_bytes` | `Option<u64>` | `Some(1_048_576)` (1 MiB) | Log a structured warning when a payload exceeds this size, rate-limited to once per (task_name, kind) per process. `None` disables |
-| `reject_bytes` | `Option<u64>` | `None` (off) | Fail an enqueue closed (`PAYLOAD_TOO_LARGE`, nothing written) when its payload exceeds this size. Results are never rejected — the work is done, and destroying it would convert a size concern into data loss |
+The other fields have the names and the meanings of the [Broker Config](/horsies/configuration/broker-config/) table.
 
-Per-boundary coverage:
+## Rules That Only a Rust App Has
 
-| Boundary | Warn | Reject |
-|----------|------|--------|
-| `send` / `schedule` (args + kwargs) | yes | yes |
-| Scheduler slot enqueue (static schedule args/kwargs) | yes | yes (slot not enqueued, logged via the schedule's enqueue-failure path) |
-| Worker terminal result (success payload and error envelope) | yes | never |
-| Workflow-node enqueue (args_from-merged kwargs, measured on the final kwargs JSON incl. injected workflow context) | yes | no — rejecting a mid-workflow node needs a designed node-failure path; a size limit must not strand a running workflow |
+`Horsies::new` refuses these configs:
 
-```rust
-use horsies::PayloadPolicy;
+| Config | Refusal |
+|--------|---------|
+| `broker.pool_size` outside 1 to 10,000, or `broker.max_overflow` above 10,000 | `HorsiesError` "invalid broker config: broker.<field>: ..." with no code |
+| A worker profile whose `preload` is `ChildPreload::Library` (the default) or `ChildPreload::App` | `HRS-218` (`ConfigInvalidWorkerProfile`) with the path `worker_profiles.<name>.preload`. A Rust worker starts each child with `exec` of its own binary, so there is nothing to preload. Set `preload: ChildPreload::NoPreload` |
 
-let config = AppConfig {
-    payload: PayloadPolicy {
-        warn_bytes: Some(512 * 1024),      // warn at 512 KiB
-        reject_bytes: Some(4 * 1024 * 1024), // reject enqueues over 4 MiB
-    },
-    ..AppConfig::for_database_url("postgresql://...")
-};
-```
+## Queues
 
-## Resilience Configuration
+| Method | Returns |
+|--------|---------|
+| `get_valid_queue_names()` | `Vec<String>`: `default` in `Default` mode, the configured queues in `Custom` mode |
+| `validate_queue(queue_name)` | `Result<(), HorsiesError>`: refuses with `HRS-103` (`TaskInvalidQueue`) and the valid names |
+| `effective_priority(queue_name, task_priority)` | `u32`: `task_priority` when given, else the queue's configured priority, else 100 |
 
-Configure worker retry/backoff and NOTIFY fallback polling:
+A task registration follows the queue rules of the Python client:
 
-```rust
-use horsies::WorkerResilienceConfig;
+- In `Default` mode, a task that names a queue is refused, `default` included (`HRS-200`).
+- In `Custom` mode, a task that names no queue is refused (`HRS-200`), and an unknown queue is refused with `HRS-103`.
 
-let config = AppConfig {
-    resilience: WorkerResilienceConfig {
-        db_retry_initial_ms: 500,
-        db_retry_max_ms: 30_000,
-        db_retry_max_attempts: 0, // 0 = infinite
-        notify_poll_interval_ms: 5_000,
-    },
-    ..AppConfig::for_database_url("postgresql://...")
-};
-```
+## Registration and State
 
-## Schedule Configuration
+| Method | Does |
+|--------|------|
+| `register(name, task)` | Registers a task built with `async_task_fn!` or `blocking_task_fn!`, on the queue that its options name. The `#[horsies::task]` attribute generates a `register` function that calls it. Refuses an empty or repeated name, a definition-time `good_until`, and a queue that the queue mode does not admit; after a refusal nothing is registered |
+| `register_with_queue(name, task, queue)` | Registers on `queue` in place of the queue of the options |
+| `provide(value)` | Provides a value of type `T` to task bodies, which read it with `TaskRuntime::state::<T>()`. Refuses a second value of one type (wrap it in a newtype) and a value provided after a body read the state |
+| `discover(registrars)` | Runs each registrar function on the app in order and stops at the first refusal |
+| `task_runtime()` | The `TaskRuntime` that task bodies take as their first parameter |
 
-Enable scheduled tasks:
+Each process builds its own state: every worker child runs `main` again. See [Defining Tasks](/horsies/rust/tasks/defining-tasks/).
 
-```rust
-use horsies::{ScheduleConfig, TaskSchedule, SchedulePattern, DailySchedule};
-use chrono::NaiveTime;
+## Role and Send Suppression
 
-let config = AppConfig {
-    schedule: Some(ScheduleConfig::new(vec![
-        TaskSchedule::new(
-            "daily-cleanup",
-            "cleanup_old_data",
-            SchedulePattern::Daily(DailySchedule {
-                time: NaiveTime::from_hms_opt(3, 0, 0).unwrap(),
-            }),
-        ),
-    ])),
-    ..AppConfig::for_database_url("postgresql://...")
-};
-```
+| Item | Does |
+|------|------|
+| `role()`, `set_role(AppRole)` | The role of the process: `AppRole::Producer` (a new app), `Worker` or `Scheduler`. A worker skips the schedule checks |
+| `suppress_sends(bool)` | Suppresses the sends of this process (`true`) or stops suppressing them (`false`) |
+| `are_sends_suppressed()` | `true` when `suppress_sends(true)` was called, or when the environment variable `HORSIES_SUPPRESS_SENDS` (`SUPPRESS_SENDS_ENV`) is `1`. The variable is read at each call |
 
-See [Scheduler Overview](../../scheduling/scheduler-overview) for details.
+A suppressed send returns `TaskSendError::SendSuppressed` and writes nothing.
 
-## Validation
+## Refusals
 
-`AppConfig` is validated when you construct `Horsies` or run `app.check()`:
-
-- CUSTOM mode requires non-empty `custom_queues`
-- DEFAULT mode must not have `custom_queues`
-- Queue names must be unique
-- `cluster_wide_cap` must be positive if set
-- `prefetch_buffer` must be non-negative
-- `claim_lease_ms` is required when `prefetch_buffer > 0`
-- `claim_lease_ms` is optional when `prefetch_buffer = 0` (overrides the default 60s lease)
-- `cluster_wide_cap` cannot be combined with `prefetch_buffer > 0`
-- retention class keys and durations must be valid
-- `queue_retention` keys must name configured queues
-
-Multiple validation errors within the same phase are collected and reported together (compiler-style), rather than stopping at the first error.
-
-## Startup Validation (`app.check()`)
-
-Use `app.check()` to run static validation before starting a worker or scheduler. Use `app.check_live()` to additionally connect to PostgreSQL, ensure the schema, and verify broker connectivity.
-
-```rust
-// Static validation — returns Result<(), HorsiesError>
-app.check()?;
-
-// Static + broker connectivity check
-app.check_live().await?;
-```
-
-**Phases:**
-
-| Phase | What it validates | Gating |
-|-------|-------------------|--------|
-| 1. Config | `AppConfig`, `RecoveryConfig`, `ScheduleConfig` consistency | Validated at construction (implicit pass) |
-| 2. Task registry | All registered tasks have valid names and queue assignments | Errors stop progression to later phases |
-| 3. Workflows | `WorkflowSpec` DAG validation (cycles, missing deps, type mismatches) | Collected alongside Phase 2 |
-| 4. Broker (if `check_live`) | Connects to PostgreSQL, ensures the Horsies schema, and runs `SELECT 1` | Only runs if earlier phases pass |
-
-**Returns** `Ok(())` when all validations pass, or `Err(HorsiesError)` with diagnostic messages.
-
-**Command line:** the `horsies` binary does not run this check. `horsies check` writes a refusal to stderr and exits with code 1, because the check needs the task registry of the application binary. See the [CLI Reference](../../cli). To run the check from the command line, call `app.check_with(live)` in the application binary. `check_with(true)` runs `check_live()`; `check_with(false)` runs `check()`.
-
-```rust
-// In the application binary, after every task is registered
-let live = std::env::args().any(|argument| argument == "--live");
-app.check_with(live).await?;
-```
-
-One entry point for the worker, scheduler, and check modes is tracked in [#656](https://github.com/suleymanozkeskin/horsies/issues/656).
-
-## Logging Configuration
-
-Log the configuration (with masked password):
-
-```rust
-use tracing::info;
-
-info!("AppConfig:\n{}", config.format_for_logging());
-```
-
-Output:
-
-```
-AppConfig:
-  queue_mode: DEFAULT
-  broker:
-    database_url: postgresql://user:***@localhost/db
-    pool_size: 30
-    max_overflow: 30
-  recovery:
-    auto_requeue_stale_claimed: true
-    ...
-```
+A refusal of the config, of a registration or of `provide` is a `HorsiesError`: an `ErrorCode` (`HRS-xxx`) and its `ErrorCategory` where the refusal has one, the message, notes and help text. A `ValidationReport` collects the refusals of one phase. Both clients print the same codes; the codes are in the [Errors Reference](/horsies/tasks/errors/#config-error-codes-horsieserror).

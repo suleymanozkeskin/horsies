@@ -1,5 +1,6 @@
 //! Render a manifest of horsies-core as a module of `_catalog`
-//! (`manifest.py`, `worker_manifest.py`, `scheduler_manifest.py`): one
+//! (`manifest.py`, `worker_manifest.py`, `scheduler_manifest.py`,
+//! `workflow_spec.py`): one
 //! frozen dataclass per manifest
 //! type, the integer bounds the core's parser enforces, and the dump
 //! function that gives the manifest's JSON text.
@@ -19,6 +20,9 @@ pub const WORKER_MANIFEST_MODULE_FILE: &str = "worker_manifest.py";
 
 /// The file name of the scheduler manifest module, inside `_catalog`.
 pub const SCHEDULER_MANIFEST_MODULE_FILE: &str = "scheduler_manifest.py";
+
+/// The file name of the workflow spec data module, inside `_catalog`.
+pub const WORKFLOW_SPEC_MODULE_FILE: &str = "workflow_spec.py";
 
 /// The decorator of every generated dataclass. `kw_only` lets a tag field
 /// with a default come before the fields without one.
@@ -249,7 +253,7 @@ fn snake_case(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use horsies_core::manifest_schema::{
-        PythonItem, PRODUCER_MANIFEST, SCHEDULER_MANIFEST, WORKER_MANIFEST,
+        PythonItem, PRODUCER_MANIFEST, SCHEDULER_MANIFEST, WORKER_MANIFEST, WORKFLOW_SPEC_DATA,
     };
 
     use super::*;
@@ -412,5 +416,28 @@ mod tests {
             .contains("\ndef dump_scheduler_manifest(manifest: SchedulerManifest) -> str:\n"));
         assert!(rendered.contains("    schedules: tuple[ScheduleManifest, ...]\n"));
         assert!(rendered.contains("    pattern_json: str\n"));
+    }
+
+    #[test]
+    fn the_workflow_spec_data_module_has_every_type_bound_and_the_dump() {
+        let rendered = render_manifest_module(&WORKFLOW_SPEC_DATA);
+        assert!(rendered.starts_with(GENERATED_HEADER));
+        for manifest_type in WORKFLOW_SPEC_DATA.types {
+            let defined = match manifest_type.shape {
+                ManifestShape::Record { .. } => format!("\nclass {}:\n", manifest_type.python_name),
+                ManifestShape::Tagged { .. } | ManifestShape::Choice { .. } => {
+                    format!("\ntype {} = ", manifest_type.python_name)
+                }
+            };
+            assert!(rendered.contains(&defined), "{}", manifest_type.python_name);
+        }
+        for bound in WORKFLOW_SPEC_DATA.int_bounds() {
+            assert!(rendered.contains(&format!("\n{}_MIN: Final = {}\n", bound.name, bound.min)));
+        }
+        assert!(rendered
+            .contains("\ndef dump_workflow_spec_data(manifest: WorkflowSpecData) -> str:\n"));
+        assert!(rendered.contains("    nodes: tuple[SpecNode, ...]\n"));
+        assert!(rendered.contains("    args_from: dict[str, int]\n"));
+        assert!(rendered.contains("    queue_classes: dict[str, str]\n"));
     }
 }

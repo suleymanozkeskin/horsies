@@ -16,7 +16,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Final, assert_never, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, assert_never, cast
 
 from sqlalchemy import text
 
@@ -157,7 +157,7 @@ from horsies.core.worker.shared_finalize import (
     timeout_retry_write,
 )
 from horsies.core.worker.shared_stop import (
-    EndedByKill,
+    CancelEnd,
     NoCancelSignal,
     RetryPlacement,
     TimeoutCancel,
@@ -175,17 +175,13 @@ from horsies.core.worker.workflow_success import (
     finish_workflow_success_in_core,
     success_for,
 )
+from horsies.core.lifecycle.outcomes import PhaseTwoStep
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.workflows.node_finish import (
-    CapacityWake,
     FactsUnknown,
     NodeFinishFacts,
-    finish_node,
 )
-from horsies.core.workflows.steps import (
-    NodeFinishDisposition,
-    ParentAdvanceFailure,
-    advance_parents,
-)
+from horsies.core.workflows.steps import NodeFinishDisposition
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -199,6 +195,24 @@ if TYPE_CHECKING:
     from horsies.core.worker.finalize_batch import FinalizeBatcher
 
 logger = get_logger('worker')
+
+
+def _node_finish_facts(
+    facts: NodeFinishFacts,
+) -> Literal['NO_DEPENDENTS', 'DEPENDENTS_WITHOUT_SUBWORKFLOW', 'SUBWORKFLOW_REACHABLE', 'UNKNOWN']:
+    """The facts text of a phase 2: the phase-1 node facts, or ``UNKNOWN``
+    for a replay or a retry. Pure."""
+    match facts:
+        case PhaseTwoStep.NO_DEPENDENTS:
+            return 'NO_DEPENDENTS'
+        case PhaseTwoStep.DEPENDENTS_WITHOUT_SUBWORKFLOW:
+            return 'DEPENDENTS_WITHOUT_SUBWORKFLOW'
+        case PhaseTwoStep.SUBWORKFLOW_REACHABLE:
+            return 'SUBWORKFLOW_REACHABLE'
+        case FactsUnknown():
+            return 'UNKNOWN'
+        case _ as unreachable:
+            assert_never(unreachable)
 
 _CANCEL_OWNED_ORPHAN_SUBJECT: Final = 'FinalizeMixin._cancel_owned_orphan'
 """The subject of a failed orphan self-heal write."""
@@ -368,12 +382,12 @@ def _shared_timeout_ms(task_id: str, work: SharedWork) -> int:
 
 def cancel_at_kill(task_id: str, work: SharedWork) -> TimeoutCancel:
     """What a shared run that passed its deadline and ended at a kill of its
-    child records about its cancel: ``EndedByKill`` for an async run,
-    ``NoCancelSignal`` for a thread run. A refusal has no deadline:
-    ``AssertionError``. Pure."""
+    child records about its cancel: ``CancelEnd.KILLED_WITH_CHILD`` for an
+    async run, ``NoCancelSignal`` for a thread run. A refusal has no
+    deadline: ``AssertionError``. Pure."""
     match work:
         case SeatTask():
-            return EndedByKill()
+            return CancelEnd.KILLED_WITH_CHILD
         case ThreadSeatTask():
             return NoCancelSignal()
         case SeatRefusal():
@@ -1693,13 +1707,33 @@ class FinalizeMixin:
                 )
             case broker:
                 pass
+        from horsies._core import (
+            CoreError,
+            NodeFinished,
+            NodeFinishFailed,
+            NodeFinishRequest,
+        )
+
+        request = NodeFinishRequest(
+            task_id=uuid.UUID(task_id), facts=_node_finish_facts(owed.facts), wake='SEND',
+        )
         try:
-            committed = await finish_node(
-                self.sf, broker, task_id, owed.facts, CapacityWake.SEND,
-            )
-        except Exception as exc:
+            record = await broker._core_handle.finish_workflow_node_async(request)  # pyright: ignore[reportPrivateUsage]
+        except CoreError as exc:
             return Err(self._phase2_error(task_id, owed.queue_name, exc=exc))
-        match committed.outcome.disposition:
+        match record:
+            case NodeFinishFailed(message=message, retryable=retryable):
+                return Err(self._phase2_error(
+                    task_id,
+                    owed.queue_name,
+                    exc=CoreOperationFailed('finish_workflow_node', message, retryable),
+                ))
+            case NodeFinished():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        disposition = NodeFinishDisposition(record.disposition)
+        match disposition:
             case NodeFinishDisposition.APPLIED:
                 pass
             case (
@@ -1710,8 +1744,8 @@ class FinalizeMixin:
                 logger.debug(
                     'Phase 2 of workflow task %s: %s (workflow %s)',
                     task_id,
-                    committed.outcome.disposition.value,
-                    committed.outcome.workflow_status,
+                    disposition.value,
+                    record.workflow_status,
                 )
             case (
                 NodeFinishDisposition.SOURCE_ABSENT
@@ -1719,15 +1753,13 @@ class FinalizeMixin:
                 | NodeFinishDisposition.SOURCE_VERSION_CONFLICT
                 | NodeFinishDisposition.SOURCE_DIGEST_MISMATCH
             ):
-                return Err(
-                    self._kept_record_error(
-                        task_id, owed.queue_name, committed.outcome.disposition,
-                    )
-                )
+                return Err(self._kept_record_error(task_id, owed.queue_name, disposition))
             case _ as unreachable:
                 assert_never(unreachable)
-        if committed.parent_advances:
-            await self._drive_parent_propagations(list(committed.parent_advances))
+        if record.parent_advances:
+            await self._drive_parent_propagations(
+                [str(child_workflow_id) for child_workflow_id in record.parent_advances],
+            )
         return Ok(None)
 
     def _phase2_error(
@@ -2240,13 +2272,25 @@ class FinalizeMixin:
                 return
             case broker:
                 pass
-        match await advance_parents(broker, self.sf, child_workflow_ids):
-            case None:
+        from horsies._core import CoreError, ParentAdvanceStopped, ParentsAdvanced
+
+        try:
+            record = await broker._core_handle.advance_workflow_parents_async(  # pyright: ignore[reportPrivateUsage]
+                [uuid.UUID(child_workflow_id) for child_workflow_id in child_workflow_ids],
+            )
+        except CoreError as exc:
+            await self._handle_finalize_error(self._parent_error(child_workflow_ids, exc))
+            return
+        match record:
+            case ParentsAdvanced():
                 for child_id in child_workflow_ids:
                     self._clear_finalize_retry_attempts(child_id, _FINALIZE_STAGE_PARENT)
-            case ParentAdvanceFailure(still_owed=still_owed, cause=cause):
+            case ParentAdvanceStopped(still_owed=still_owed, message=message, retryable=retryable):
                 await self._handle_finalize_error(
-                    self._parent_error(list(still_owed), cause)
+                    self._parent_error(
+                        [str(child_workflow_id) for child_workflow_id in still_owed],
+                        CoreOperationFailed('advance_workflow_parents', message, retryable),
+                    )
                 )
             case _ as unreachable:
                 assert_never(unreachable)

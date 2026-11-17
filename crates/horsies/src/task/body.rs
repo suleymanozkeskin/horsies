@@ -57,6 +57,90 @@ pub fn decode_input<A: DeserializeOwned>(input: &[u8]) -> Result<A, StoredTaskEr
     })
 }
 
+/// The input check of a schedule and of the static check (Python
+/// `encode_kwargs_read_back` and `sig.bind`): `input` decodes as `A` by the
+/// path the body takes ([`decode_input`]), the decoded value reads back to
+/// itself ([`encode_read_back`]), and each member of an object input that
+/// is not `null` is a member that `A` writes back. The client's task
+/// bodies give it as `validate_input`. Pure.
+///
+/// Fails with `WORKER_SERIALIZATION_ERROR`; the text names `A`, the field
+/// path or the member, never a value.
+pub fn check_input<A>(input: &[u8]) -> Result<(), StoredTaskError>
+where
+    A: Serialize + DeserializeOwned,
+{
+    let decoded = decode_input::<A>(input)?;
+    let encoded = encode_read_back(&decoded).map_err(|cause| {
+        serialization_error::<A>(format!(
+            "task input of type {} does not read back: {cause}",
+            std::any::type_name::<A>()
+        ))
+    })?;
+    match unread_member(input, &encoded) {
+        None => Ok(()),
+        Some(member) => Err(serialization_error::<A>(format!(
+            "task input names the member '{member}', which {} does not read",
+            std::any::type_name::<A>()
+        ))),
+    }
+}
+
+/// The first member of an object `input`, with a value that is not `null`,
+/// that the object `encoded` does not hold. `None` when either is not an
+/// object. Pure.
+fn unread_member(input: &[u8], encoded: &[u8]) -> Option<String> {
+    let given = serde_json::from_slice::<serde_json::Value>(input).ok()?;
+    let read = serde_json::from_slice::<serde_json::Value>(encoded).ok()?;
+    let (serde_json::Value::Object(given), serde_json::Value::Object(read)) = (given, read) else {
+        return None;
+    };
+    given
+        .into_iter()
+        .find(|(key, value)| !value.is_null() && !read.contains_key(key))
+        .map(|(key, _)| key)
+}
+
+/// The input of a task with no parameters: `null`, the input that a send
+/// of `()` stores, or `{}`, the input of a workflow node (a node's input is
+/// an object, and the child removes the engine members from it before the
+/// decode).
+///
+/// Pure. Fails with `WORKER_SERIALIZATION_ERROR` naming `()` when `input`
+/// breaks the strict read rule of a stored text, and for any other value.
+pub fn decode_unit_input(input: &[u8]) -> Result<(), StoredTaskError> {
+    check_json_bytes(input).map_err(|refused| {
+        serialization_error::<()>(format!("task input is not strict JSON: {refused}"))
+    })?;
+    decode_unit(input).map_err(|failure| {
+        serialization_error::<()>(format!("task input does not decode as (): {failure}"))
+    })
+}
+
+/// `()` from the text `null` or `{}`. A non-empty object names its first
+/// key in serde's words for a type with no fields; any other value names
+/// only its kind. Pure.
+pub(crate) fn decode_unit(input: &[u8]) -> Result<(), DecodeFailure> {
+    let value = decode_checked::<serde_json::Value>(input)?;
+    let text = match &value {
+        serde_json::Value::Null => return Ok(()),
+        serde_json::Value::Object(members) => match members.keys().next() {
+            None => return Ok(()),
+            Some(key) => format!("unknown field `{key}`, there are no fields"),
+        },
+        serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_)
+        | serde_json::Value::Array(_) => {
+            format!("invalid type: {INPUT_PLACEHOLDER}, expected null or an empty object")
+        }
+    };
+    Err(DecodeFailure {
+        path: ".".to_owned(),
+        text,
+    })
+}
+
 /// The stored value of what a task body returned.
 ///
 /// - `Ok(value)`: the encoded value, after the read-back of
@@ -332,6 +416,27 @@ mod tests {
         );
     }
 
+    /// Python `encode_kwargs_read_back` and `sig.bind`: the schedule check
+    /// takes an input that decodes and reads back, and refuses a member that
+    /// the type does not read, naming the member and not its value.
+    #[test]
+    fn check_input_takes_a_value_that_reads_back_and_names_a_member_it_does_not_read() {
+        assert!(check_input::<Order>(br#"{"id": 1, "items": []}"#).is_ok());
+        let unread =
+            check_input::<Order>(br#"{"id": 1, "items": [], "note": "secret"}"#).unwrap_err();
+        let message = unread.message.unwrap_or_default();
+        assert!(message.contains("'note'"), "{message}");
+        assert!(!message.contains("secret"), "{message}");
+        assert!(check_input::<Order>(br#"{"id": 1, "items": [], "note": null}"#).is_ok());
+    }
+
+    #[test]
+    fn check_input_refuses_a_value_that_does_not_decode() {
+        let wrong_type = check_input::<Order>(br#"{"id": "one", "items": []}"#).unwrap_err();
+        assert_serialization_error(&wrong_type);
+        assert!(!text_of(&wrong_type).contains("one"));
+    }
+
     #[test]
     fn an_input_of_the_type_decodes() {
         let input = bytes(json!({"id": 7, "items": [{"name": "pen", "count": 2}]}));
@@ -346,6 +451,28 @@ mod tests {
         assert_serialization_error(&error);
         let map: BTreeMap<String, u32> = decode_input(b"{}").unwrap();
         assert!(map.is_empty());
+    }
+
+    /// A task with no parameters reads `null` (a send) and `{}` (a workflow
+    /// node); any other input is refused with its kind and no value.
+    #[test]
+    fn a_unit_input_reads_null_and_an_empty_object() {
+        decode_unit_input(b"null").unwrap();
+        decode_unit_input(b" { } ").unwrap();
+        let member = decode_unit_input(&bytes(json!({"secret-key-7": 1}))).unwrap_err();
+        assert_serialization_error(&member);
+        assert!(
+            member
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("unknown field `secret-key-7`"),
+            "{member:?}"
+        );
+        let number = decode_unit_input(&bytes(json!(MARKER))).unwrap_err();
+        assert_serialization_error(&number);
+        assert!(!number.message.as_deref().unwrap().contains(MARKER));
+        assert_serialization_error(&decode_unit_input(b"{").unwrap_err());
     }
 
     #[test]

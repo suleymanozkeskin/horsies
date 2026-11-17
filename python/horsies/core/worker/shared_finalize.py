@@ -48,7 +48,6 @@ from horsies.core.worker.shared_stop import (
     BesideBlockedLoop,
     BlockedTheLoop,
     CancelEnd,
-    EndedByKill,
     NoCancelSignal,
     RetryPlacement,
     ReturnedBeforeKill,
@@ -189,12 +188,12 @@ class SharedKillFinalizeMixin:
     ) -> Result[None, _FinalizeError]:
         """Write ``TASK_TIMEOUT`` for a run that was past its deadline at the
         kill of its child (``killed_by``). An async run records
-        ``EndedByKill``, a thread run ``NoCancelSignal``. A refusal has no
-        deadline: ``AssertionError``."""
+        ``CancelEnd.KILLED_WITH_CHILD``, a thread run ``NoCancelSignal``. A
+        refusal has no deadline: ``AssertionError``."""
         cancel: TimeoutCancel
         match work:
             case SeatTask(timeout_ms=timeout_ms):
-                cancel = EndedByKill()
+                cancel = CancelEnd.KILLED_WITH_CHILD
             case ThreadSeatTask(timeout_ms=timeout_ms):
                 cancel = NoCancelSignal()
             case SeatRefusal():
@@ -321,7 +320,7 @@ def timeout_retry_write(
             'timeout_ms': int() as timeout_ms,
             'retry': str() as placement,
             'claim': DispatchClaim() as claim,
-            'cancel': NoCancelSignal() | CancelEnd() | EndedByKill() as cancel,
+            'cancel': NoCancelSignal() | CancelEnd() as cancel,
         }:
             return timeout_ms, RetryPlacement(placement), claim, cancel
         case _:

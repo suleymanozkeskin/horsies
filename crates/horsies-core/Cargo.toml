@@ -84,6 +84,10 @@ libc = "0.2"
 workspace = true
 
 [dev-dependencies]
+# The JSON schema of the monitoring models, for the contract test with the
+# Pydantic models (`src/monitoring/model_contract_tests.rs`). Tests only: the
+# shipped core does not depend on it.
+schemars = { version = "1", features = ["chrono04", "uuid1"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "net", "io-util"] }
 serial_test = "3"
 futures = "0.3"

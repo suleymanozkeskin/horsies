@@ -3,22 +3,27 @@
 The dual-run reference of ``PostgresBroker.get_stale_tasks``,
 ``get_expired_tasks``, ``list_worker_states_async``,
 ``get_worker_state_async``, ``get_worker_state_history_async``,
-``get_class_coverage_async`` and ``get_class_report_async``, which the core
-runs since the switch. Each function takes the broker as its first argument,
+``get_class_coverage_async``, ``get_class_report_async`` and
+``ping_workers_async``, which the core runs since the switch. Each function takes the broker as its first argument,
 so the rebinding of ``tests/dualrun/operations/monitoring_and_web.py`` can
 put it in the place of the method. The task list statements call
 ``horsies_list_stale_tasks`` and ``horsies_list_expired_tasks``; the rows
 become the dicts of the public API. The worker state reads build the
 snapshot dataclasses from the stored rows; the class reads run
-``tests/dualrun/reference/class_coverage_reads.py``.
+``tests/dualrun/reference/class_coverage_reads.py``. The worker ping sends
+its NOTIFY on the loop's SQLAlchemy session and waits on the loop's
+listener.
 """
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
 
@@ -30,11 +35,20 @@ from horsies.core.brokers.postgres import (
     _loop_limit_err,  # pyright: ignore[reportPrivateUsage]
     _operation_failed,  # pyright: ignore[reportPrivateUsage]
 )
+from horsies.core.brokers.listener import PostgresListener
+from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
     BrokerInvalidInput,
+    BrokerListenerDisabled,
     BrokerOperationFailed,
     BrokerResult,
+)
+from horsies.core.codec.json_io import dumps_json, loads_json
+from horsies.core.codec.validation_errors import (
+    exception_text,
+    validation_summary,
+    without_validation_input,
 )
 from horsies.core.models.class_coverage import (
     ClassCoverage,
@@ -42,12 +56,16 @@ from horsies.core.models.class_coverage import (
     ClassReport,
 )
 from horsies.core.models.health import (
+    WORKER_PING_CHANNEL,
+    WorkerPingRequest,
+    WorkerPong,
+    WorkerPongPayload,
     WorkerStateSnapshot,
     parse_class_capacity,
     parse_slot_health,
 )
 from horsies.core.types.error_detail import NoCause
-from horsies.core.types.result import Err, Ok, Result
+from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.utils.db import autocommit_connection, uuid_column_value
 from tests.dualrun.reference.class_coverage_reads import (
     read_class_coverage,
@@ -568,3 +586,194 @@ async def get_class_report_async(self: PostgresBroker) -> BrokerResult[ClassRepo
             return Ok(report)
         case Err(refused):
             return _class_read_refused('get_class_report', refused)
+
+
+async def ping_workers_async(
+    self: PostgresBroker,
+    *,
+    target_worker_id: str | None = None,
+    timeout_seconds: float = 2.0,
+    min_responses: int | None = None,
+) -> BrokerResult[list[WorkerPong]]:
+    """Active ping-pong: NOTIFY workers and collect replies within a window.
+
+    Subscribes to a unique reply channel, broadcasts a ping on
+    ``WORKER_PING_CHANNEL``, then collects pongs until a stop condition:
+
+    - ``target_worker_id`` set: returns as soon as that worker replies.
+    - ``min_responses`` set: returns as soon as that many distinct workers
+      reply (fast fail-open liveness, e.g. ``min_responses=1`` for a
+      ``/health`` gate — a healthy fleet answers in milliseconds; only a
+      degraded fleet pays the full ``timeout_seconds``).
+    - neither set: waits the full window and enumerates every responder.
+
+    A pong proves the replying worker's event loop is responsive *and*
+    that it can reach Postgres. Workers present in
+    ``list_worker_states_async`` but absent here are non-responsive.
+    """
+    match await self.select_resources():
+        case Err(loop_limit):
+            return _loop_limit_err('ping_workers', loop_limit)
+        case Ok(resources):
+            pass
+    if timeout_seconds <= 0:
+        return Err(
+            BrokerInvalidInput(
+                message=f'timeout_seconds must be positive, got {timeout_seconds}',
+                exception=NoCause(),
+            )
+        )
+    if min_responses is not None and min_responses < 1:
+        return Err(
+            BrokerInvalidInput(
+                message=f'min_responses must be >= 1 when set, got {min_responses}',
+                exception=NoCause(),
+            )
+        )
+
+    correlation_id = uuid.uuid4().hex
+    reply_channel = f'horsies_worker_pong_{correlation_id}'
+
+    # A broker without a listener cannot receive replies: an Err, so the
+    # Result contract holds on every path.
+    match resources.listener:
+        case ListenerEnabled(listener=listener):
+            pass
+        case ListenerDisabled():
+            return Err(
+                BrokerListenerDisabled(
+                    message=(
+                        'ping_workers listener unavailable: this broker was '
+                        'built with assume_initialized=True and has no listener'
+                    ),
+                )
+            )
+    # A refused target_worker_id is refused input. A validated request
+    # holds strings only, so its encode cannot fail; the encode runs
+    # outside every catch, so a failure crashes as the defect it is.
+    try:
+        request = WorkerPingRequest(
+            correlation_id=correlation_id,
+            reply_channel=reply_channel,
+            target_worker_id=target_worker_id,
+        )
+    except ValidationError as exc:
+        return Err(BrokerInvalidInput(
+            message=f'ping_workers request refused: {validation_summary(exc)}',
+            exception=without_validation_input(exc),
+        ))
+    match dumps_json(request.model_dump()):
+        case Ok(encoded):
+            payload = encoded
+        case Err(encode_error):
+            raise AssertionError(
+                f'ping_workers request encode failed: {encode_error}',
+            )
+
+    listen_r = await listener.listen(reply_channel)
+    if is_err(listen_r):
+        err = listen_r.err_value
+        return Err(
+            BrokerOperationFailed(
+                code=BrokerErrorCode.WORKER_PING_FAILED,
+                message=f'ping_workers reply subscribe failed: {err.message}',
+                retryable=err.retryable,
+                exception=err.exception,
+            )
+        )
+    queue = listen_r.ok_value
+
+    try:
+        loop = asyncio.get_running_loop()
+        async with resources.session_factory() as session:
+            await session.execute(
+                text('SELECT pg_notify(:ch, :p)'),
+                {'ch': WORKER_PING_CHANNEL, 'p': payload},
+            )
+            await session.commit()
+        sent_at = loop.time()
+
+        pongs: list[WorkerPong] = []
+        seen: set[str] = set()
+        deadline = sent_at + timeout_seconds
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                notify = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            pong = _decode_pong(
+                self, notify.payload, correlation_id, loop.time() - sent_at
+            )
+            if pong is None or pong.worker_id in seen:
+                continue  # malformed, mismatched, or duplicate worker
+            seen.add(pong.worker_id)
+            pongs.append(pong)
+            if target_worker_id is not None and pong.worker_id == target_worker_id:
+                break
+            if min_responses is not None and len(pongs) >= min_responses:
+                break
+        return Ok(pongs)
+    except Exception as exc:
+        return _operation_failed(
+            BrokerErrorCode.WORKER_PING_FAILED,
+            f'ping_workers failed: {exception_text(exc)}',
+            exc,
+        )
+    finally:
+        await _unsubscribe_ping_safely(listener, reply_channel, queue)
+
+
+async def _unsubscribe_ping_safely(
+    listener: PostgresListener, channel: str, q: asyncio.Queue[Any],
+) -> None:
+    """Ensure reply-channel unsubscribe completes even under repeated cancellation.
+
+    Mirrors ``_unsubscribe_task_done_safely``: shields the unsubscribe so a
+    cancelled ``ping_workers_async`` does not leak the server-side LISTEN,
+    and re-raises cancellation only after cleanup finishes.
+    """
+    unsubscribe_task = asyncio.create_task(listener.unsubscribe(channel, q))
+    cancelled_during_cleanup = False
+    while not unsubscribe_task.done():
+        try:
+            await asyncio.shield(unsubscribe_task)
+        except asyncio.CancelledError:
+            cancelled_during_cleanup = True
+            continue
+    await unsubscribe_task
+    if cancelled_during_cleanup:
+        raise asyncio.CancelledError
+
+
+def _decode_pong(
+    self: PostgresBroker,
+    raw_payload: str,
+    correlation_id: str,
+    elapsed_seconds: float,
+) -> WorkerPong | None:
+    """Decode a pong notification, discarding malformed or mismatched replies."""
+    parsed = loads_json(raw_payload)
+    if is_err(parsed):
+        self.logger.warning(
+            'Discarding unparseable pong payload: %s', parsed.err_value
+        )
+        return None
+    body = parsed.ok_value
+    if not isinstance(body, dict):
+        return None
+    try:
+        payload = WorkerPongPayload.model_validate(body)
+    except Exception as exc:
+        self.logger.warning('Discarding invalid pong payload: %s', exception_text(exc))
+        return None
+    if payload.correlation_id != correlation_id:
+        return None
+    return WorkerPong(
+        worker_id=payload.worker_id,
+        hostname=payload.hostname,
+        pid=payload.pid,
+        round_trip_ms=elapsed_seconds * 1000.0,
+    )

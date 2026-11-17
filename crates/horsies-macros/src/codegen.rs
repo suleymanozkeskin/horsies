@@ -34,10 +34,13 @@ struct Param {
 enum InputShape {
     /// No parameter: the input is `()`, sent as `null`.
     Unit,
-    /// One parameter: its type is the input.
+    /// One parameter whose type the attribute takes as a struct (or `()`):
+    /// its type is the input, and its fields are the keys of the stored
+    /// object.
     Direct(Param),
-    /// Several parameters, or one that a workflow fills from a dependency
-    /// result: a generated `Input` struct with one field per parameter.
+    /// Several parameters, or one that is not a struct: a generated `Input`
+    /// struct with one field per parameter, keyed by the parameter's name,
+    /// as Python stores each keyword argument.
     Wrapped(Vec<Param>),
 }
 
@@ -350,12 +353,18 @@ fn registered_task(
         ::horsies::__private::TaskMeta::for_input::<#input>()
             .in_module(::horsies::__private::parent_module(::std::module_path!()))
     };
+    let validate_call = match &signature.input {
+        InputShape::Unit => quote! { ::horsies::__private::decode_unit_input(input) },
+        InputShape::Direct(_) | InputShape::Wrapped(_) => quote! {
+            ::horsies::__private::check_input::<#input>(input)
+        },
+    };
     let validate = quote! {
         fn validate_input(
             &self,
             input: &[u8],
         ) -> ::std::result::Result<(), ::horsies::__private::StoredTaskError> {
-            ::horsies::__private::decode_input::<#input>(input).map(|_decoded| ())
+            #validate_call
         }
     };
     match kind {
@@ -416,7 +425,8 @@ fn registered_task(
 }
 
 /// The decode of `input` (a byte slice or a vector in scope) into the
-/// bindings that the call takes. A refusal returns the stored error.
+/// bindings that the call takes. A refusal returns the stored error. A task
+/// with no parameters reads `null` (a send) and `{}` (a workflow node).
 fn decode_statement(signature: &Signature, input_type: &Type) -> TokenStream {
     let pattern = match &signature.input {
         InputShape::Unit => quote! { () },
@@ -426,8 +436,14 @@ fn decode_statement(signature: &Signature, input_type: &Type) -> TokenStream {
             quote! { Input { #(#names),* } }
         }
     };
+    let decode = match &signature.input {
+        InputShape::Unit => quote! { ::horsies::__private::decode_unit_input(&input) },
+        InputShape::Direct(_) | InputShape::Wrapped(_) => {
+            quote! { ::horsies::__private::decode_input::<#input_type>(&input) }
+        }
+    };
     quote! {
-        let #pattern = match ::horsies::__private::decode_input::<#input_type>(&input) {
+        let #pattern = match #decode {
             ::std::result::Result::Ok(decoded) => decoded,
             ::std::result::Result::Err(refused) => {
                 return ::horsies::__private::TaskResult::Err(refused);
@@ -617,7 +633,7 @@ fn validate_signature(func: &ItemFn, kind: BodyKind) -> syn::Result<Signature> {
         .collect::<syn::Result<Vec<_>>>()?;
     let input = match params.as_slice() {
         [] => InputShape::Unit,
-        [param] if !is_dependency_result(&param.ty) => InputShape::Direct(param.clone()),
+        [param] if is_own_input(&param.ty) => InputShape::Direct(param.clone()),
         _ => InputShape::Wrapped(params),
     };
     Ok(Signature {
@@ -647,10 +663,115 @@ fn is_task_runtime(ty: &Type) -> bool {
     last_segment_is(ty, "TaskRuntime")
 }
 
-/// A single parameter that a workflow fills from a dependency result is
-/// wrapped, so that the node can bind it by name.
-fn is_dependency_result(ty: &Type) -> bool {
-    last_segment_is(ty, "TaskResult")
+/// The deepest nesting of `Box`, `Arc`, `Rc` and parentheses that
+/// [`is_own_input`] reads through; a deeper type is wrapped.
+const MAX_TRANSPARENT_DEPTH: usize = 8;
+
+/// The last path segments of the types that never encode as a struct's
+/// object: the primitives, strings, sequences, sets, maps, `Option`, JSON
+/// values, UUIDs, dates and times. A map is an object, but its keys are
+/// data, not keyword arguments, so it is wrapped too.
+const NOT_A_STRUCT: &[&str] = &[
+    "bool",
+    "char",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "i128",
+    "isize",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "u128",
+    "usize",
+    "f32",
+    "f64",
+    "str",
+    "String",
+    "Option",
+    "Vec",
+    "VecDeque",
+    "LinkedList",
+    "BinaryHeap",
+    "HashSet",
+    "BTreeSet",
+    "HashMap",
+    "BTreeMap",
+    "IndexMap",
+    "IndexSet",
+    "Map",
+    "Value",
+    "Number",
+    "Uuid",
+    "DateTime",
+    "NaiveDate",
+    "NaiveDateTime",
+    "NaiveTime",
+    "NonZeroU8",
+    "NonZeroU16",
+    "NonZeroU32",
+    "NonZeroU64",
+    "NonZeroU128",
+    "NonZeroUsize",
+    "NonZeroI8",
+    "NonZeroI16",
+    "NonZeroI32",
+    "NonZeroI64",
+    "NonZeroI128",
+    "NonZeroIsize",
+];
+
+/// The type names that the attribute reads through to their one type
+/// argument: they encode as that argument.
+const TRANSPARENT: &[&str] = &["Box", "Arc", "Rc"];
+
+/// Whether a single parameter of type `ty` is the input itself: a type that
+/// the attribute takes as a struct, whose fields are the keys of the stored
+/// object, or `()`, which a send stores as `null`.
+///
+/// Every other single parameter is wrapped in the generated `Input` struct,
+/// keyed by its name, as Python stores each keyword argument
+/// (`fn double(x: i64)` stores `{"x": 2}`): a dependency's result
+/// (`TaskOutcome<S, E>`, the receiving type of `arg_from`) and the workflow
+/// context (`WorkflowContext`), which a node binds by name; a tuple, an
+/// array, a slice or a reference; and a path whose last segment is in
+/// [`NOT_A_STRUCT`]. `Box`, `Arc`, `Rc` and parentheses are read through.
+///
+/// The attribute sees the type's name, not its definition: a path to any
+/// other type is taken as a struct. An enum or a tuple struct of the user
+/// stays the input itself, and a workflow node of the task refuses an input
+/// that is not an object (`HRS-026`).
+fn is_own_input(ty: &Type) -> bool {
+    let mut current = ty;
+    for _level in 0..=MAX_TRANSPARENT_DEPTH {
+        match current {
+            Type::Paren(inner) => current = &inner.elem,
+            Type::Group(inner) => current = &inner.elem,
+            Type::Tuple(tuple) => return tuple.elems.is_empty(),
+            Type::Path(path) => {
+                let Some(segment) = path.path.segments.last() else {
+                    return false;
+                };
+                let name = segment.ident.to_string();
+                if TRANSPARENT.contains(&name.as_str()) {
+                    match generic_types(&segment.arguments).as_slice() {
+                        [inner] => {
+                            current = inner;
+                            continue;
+                        }
+                        _ => return false,
+                    }
+                }
+                return !(NOT_A_STRUCT.contains(&name.as_str())
+                    || name == "TaskOutcome"
+                    || name == "WorkflowContext");
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn last_segment_is(ty: &Type, name: &str) -> bool {
@@ -763,5 +884,54 @@ fn generic_types(arguments: &PathArguments) -> Vec<&Type> {
             })
             .collect(),
         PathArguments::None | PathArguments::Parenthesized(_) => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_own_input;
+
+    #[test]
+    fn a_struct_and_the_unit_type_are_the_input_itself() {
+        let own: [syn::Type; 5] = [
+            syn::parse_quote!(Order),
+            syn::parse_quote!(crate::orders::Order),
+            syn::parse_quote!(Box<Order>),
+            syn::parse_quote!(std::sync::Arc<(Order)>),
+            syn::parse_quote!(()),
+        ];
+        for ty in own {
+            assert!(is_own_input(&ty), "{}", quote::quote!(#ty));
+        }
+    }
+
+    #[test]
+    fn every_other_single_parameter_is_wrapped() {
+        let wrapped: [syn::Type; 13] = [
+            syn::parse_quote!(i64),
+            syn::parse_quote!(String),
+            syn::parse_quote!(Option<Order>),
+            syn::parse_quote!(Vec<u8>),
+            syn::parse_quote!(std::collections::HashMap<String, i64>),
+            syn::parse_quote!(serde_json::Value),
+            syn::parse_quote!(uuid::Uuid),
+            syn::parse_quote!(chrono::DateTime<chrono::Utc>),
+            syn::parse_quote!((i64, String)),
+            syn::parse_quote!([u8; 4]),
+            syn::parse_quote!(Box<i64>),
+            syn::parse_quote!(TaskOutcome<i64, Infallible>),
+            syn::parse_quote!(horsies::WorkflowContext),
+        ];
+        for ty in wrapped {
+            assert!(!is_own_input(&ty), "{}", quote::quote!(#ty));
+        }
+    }
+
+    #[test]
+    fn a_nesting_past_the_depth_bound_is_wrapped() {
+        let deep: syn::Type = syn::parse_quote!(Box<Box<Box<Box<Box<Box<Box<Box<Box<Order>>>>>>>>>);
+        assert!(!is_own_input(&deep));
+        let within: syn::Type = syn::parse_quote!(Box<Box<Box<Order>>>);
+        assert!(is_own_input(&within));
     }
 }

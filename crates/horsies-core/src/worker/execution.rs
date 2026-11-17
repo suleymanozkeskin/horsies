@@ -31,13 +31,11 @@ use crate::broker::terminalization::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::codec::user_value::check_task_input;
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
-use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{
     AfterFailure, AttemptWriteRefusal, FailedAttemptOutcome, OwnedClaim, PhaseTwoStep,
     TerminalizationCommand, TerminalizationOutcome, UnreportedAttemptOutcome,
     WorkflowSuccessOutcome,
 };
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::core::task::result::TaskResult;
 use crate::core::workflow::context::{WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
@@ -703,6 +701,7 @@ fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> boo
     match e {
         crate::workflow_engine::WorkflowError::Database(error) => is_retryable_sqlx_error(error),
         crate::workflow_engine::WorkflowError::Broker(be) => be.is_retryable(),
+        crate::workflow_engine::WorkflowError::ChildSpecSource(error) => error.is_retryable(),
         crate::workflow_engine::WorkflowError::Serialization(_)
         | crate::workflow_engine::WorkflowError::WorkflowNotFound { .. }
         | crate::workflow_engine::WorkflowError::InvalidStatus(_)
@@ -728,29 +727,24 @@ fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> boo
 /// `core/worker/finalize.py:1676-1697`). Returns the parent advances that the
 /// step owes after its commit.
 ///
+/// The node finish builds the child of each sub-workflow node that it
+/// promotes with `build`.
+///
 /// Errors: [`FinalizeError`] at [`FinalizeStage::Phase2Workflow`], retryable
 /// when the failure may clear.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn finalize_workflow_phase(
     broker: &PostgresBroker,
-    workflow_registry: &WorkflowSpecRegistry,
+    build: ChildBuild<'_>,
     task_id: Uuid,
     queue_name: &str,
     is_workflow_task: bool,
     capacity_notified: bool,
     phase_two: PhaseTwoForm,
-    retention: &RetentionConfig,
 ) -> Result<OwedParentAdvances, FinalizeError> {
     // Workflow membership is carried on the task row (is_workflow_task), set at
     // insert time — no per-task JOIN to horsies_workflow_tasks needed here.
     match is_workflow_task {
-        true => {
-            let build = ChildBuild {
-                registry: workflow_registry,
-                retention,
-            };
-            finish_workflow_node(broker, build, task_id, capacity_notified, phase_two).await
-        }
+        true => finish_workflow_node(broker, build, task_id, capacity_notified, phase_two).await,
         false => {
             // Skipped when phase 1's statement already sent the wake in the
             // same commit as the transition: no statement, no checkout.
@@ -1085,20 +1079,12 @@ pub(crate) async fn mark_task_finalizing(
 /// Should be called AFTER the semaphore permit is released. Phase 2 has up to
 /// [`PHASE2_MAX_RETRIES`] retries; the parent advances that a committed phase 2
 /// owes run after it, one transaction per level, with their own retries
-/// ([`retry_parent_advances`]).
-pub(crate) async fn run_phase2(
-    broker: &PostgresBroker,
-    workflow_registry: &WorkflowSpecRegistry,
-    work: Phase2Work,
-    retention: &RetentionConfig,
-) {
-    let finished = retry_phase2(broker, workflow_registry, &work, retention).await;
+/// ([`retry_parent_advances`]). Both build the child of each sub-workflow
+/// node that they promote with `build`.
+pub(crate) async fn run_phase2(broker: &PostgresBroker, build: ChildBuild<'_>, work: Phase2Work) {
+    let finished = retry_phase2(broker, build, &work).await;
     match finished {
         Ok(owed) if !owed.is_empty() => {
-            let build = ChildBuild {
-                registry: workflow_registry,
-                retention,
-            };
             retry_parent_advances(broker, build, work.task_id, owed).await;
         }
         // Each failure was logged where it happened; workflow recovery
@@ -1120,9 +1106,8 @@ pub(crate) async fn run_phase2(
 /// (already logged).
 async fn retry_phase2(
     broker: &PostgresBroker,
-    workflow_registry: &WorkflowSpecRegistry,
+    build: ChildBuild<'_>,
     work: &Phase2Work,
-    retention: &RetentionConfig,
 ) -> Result<OwedParentAdvances, FinalizeError> {
     let mut attempt: u32 = 0;
     loop {
@@ -1139,13 +1124,12 @@ async fn retry_phase2(
         }
         let finished = finalize_workflow_phase(
             broker,
-            workflow_registry,
+            build,
             work.task_id,
             &work.queue_name,
             work.is_workflow_task,
             work.capacity_notified,
             work.phase_two,
-            retention,
         )
         .await;
         match finished {

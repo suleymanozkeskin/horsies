@@ -21,6 +21,12 @@ lifecycle state fresh, the lineage pair atomic. The write is one call of
 that call. Because the fingerprint covers rerun lineage, a key still
 reserved by the source request conflicts by contract rather than aliasing
 its rerun.
+
+``rerun_task`` runs in the core: the core builds the read and the write
+and decides the outcome (``horsies._core.rerun_read``,
+``prepare_rerun_write``, ``decode_rerun_write``), and the caller's
+connection runs both statements. ``read_rerun_source`` is the Python read,
+kept for the dual-run references (``tests/dualrun/reference/``).
 """
 
 from __future__ import annotations
@@ -35,38 +41,35 @@ from typing import Any, Final, assert_never
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from horsies.core.brokers.enqueue_task import (
-    ENQUEUE_TASK_SQL,
-    ConflictUnverifiable,
-    EnqueueKey,
-    EnqueueOutcome,
-    EnqueueRow,
-    Inserted,
-    KeyConflict,
-    Keyed,
-    KeyReplay,
-    PayloadMismatch,
-    RerunOf,
-    SameCommand,
-    SendKind,
-    StartNow,
-    Unkeyed,
-    enqueue_task_params,
-    read_enqueue_outcome,
+from horsies._core import (
+    IdMintRefused,
+    PreparedStatement,
+    RerunCallerKeyRefused,
+    RerunClassNotRegistered,
+    RerunClientFamilyMismatch,
+    RerunCommandRecord,
+    RerunEnqueuedRecord,
+    RerunInputCorruptRecord,
+    RerunInputUnavailableRecord,
+    RerunKeyConflictRecord,
+    RerunKeyReplayRecord,
+    RerunNotEligibleRecord,
+    RerunPolicyRecord,
+    RerunSourceAbsentRecord,
+    RerunSourceCorruptRecord,
+    RerunSourceLiveRecord,
+    RerunWriteRecord,
+    decode_rerun_write,
+    prepare_rerun_write,
 )
-from horsies.core.codec.task_options import stored_execution
+from horsies._core import rerun_read as core_rerun_read
+from horsies.core.types.core_failure import CoreOperationFailed
 
 from ..ddl.tables import FOREVER_CLASS_KEY
 from ..errors import HistoryContractError
 from ..periods import parse_retention_period, period_class_key
 from horsies.core.types.result import Err, Ok
-from ..identity.fingerprint import EnqueueCommandV1
-from ..identity.keys import (
-    IDEMPOTENCY_SCOPE_VERSION,
-    ScopedIdempotencyKey,
-    validate_reservation_window,
-)
-from ..identity.uuid7 import mint_task_id
+from ..identity.keys import validate_reservation_window
 from ...utils.db import uuid_column_value
 from horsies.core.types.status import TaskStatus
 from ..archive.attempts import decode_attempt_snapshot
@@ -75,13 +78,6 @@ from ..reads.detail import (
     TaskAbsenceReason,
     absence_reason_of,
     history_status,
-)
-from .input_envelope import (
-    InputEnvelopeCorrupt,
-    InputEnvelopeVersionUnknown,
-    ReconstructedInput,
-    StoredTaskOptions,
-    decode_input_envelope,
 )
 
 
@@ -357,191 +353,133 @@ type RerunOutcome = (
 )
 
 
-async def rerun_task(
-    connection: AsyncConnection,
-    command: RerunTask,
-    policy: RerunEnqueuePolicy,
-) -> RerunOutcome:
-    """Execute one rerun inside the caller-owned transaction."""
-    read = await read_rerun_source(
-        connection, command.source_task_id, policy.retention_class_key
-    )
-    match read:
-        case RerunClassUnregistered():
-            # The policy's key routes the NEW request's eventual history row
-            # into a LIST partition; an unregistered key has none, so the
-            # failure would otherwise arrive at the rerun's completion as a
-            # partition-routing error. A caller precondition raises before
-            # any write.
-            raise ValueError(
-                f'retention class {policy.retention_class_key!r} is not '
-                'registered: the new request would have no history partition. '
-                'Add the period to the maintenance owner\'s queue_retention or '
-                'retention_periods, and rerun after its next pass'
-            )
-        case RerunSourceLive() | RerunSourceAbsent() | RerunSourceCorrupt():
-            return read
-        case RerunSource():
-            source = read
-
-    if source.is_workflow_task:
-        return RerunNotEligible(
-            task_id=command.source_task_id,
-            reason=NotEligibleReason.WORKFLOW_TASK,
-        )
-    if source.status is TaskStatus.COMPLETED:
-        return RerunNotEligible(
-            task_id=command.source_task_id,
-            reason=NotEligibleReason.COMPLETED_SOURCE,
-        )
-
-    if source.rerun_input_disposition != 'INLINE':
-        return RerunInputUnavailable(
-            task_id=command.source_task_id,
-            disposition=source.rerun_input_disposition,
-        )
-    if (
-        source.rerun_input_version is None
-        or source.rerun_input_inline is None
-        or source.rerun_input_digest is None
-    ):
-        return RerunInputCorrupt(
-            task_id=command.source_task_id,
-            detail='inline disposition with an incomplete envelope',
-        )
-    decoded = decode_input_envelope(
-        version=source.rerun_input_version,
-        payload=source.rerun_input_inline,
-        digest=source.rerun_input_digest,
-    )
-    match decoded:
-        case ReconstructedInput():
-            pass
-        case InputEnvelopeVersionUnknown(version=version):
-            return RerunInputCorrupt(
-                task_id=command.source_task_id,
-                detail=f'unknown input-envelope version {version}',
-            )
-        case InputEnvelopeCorrupt(detail=corruption):
-            return RerunInputCorrupt(
-                task_id=command.source_task_id, detail=corruption
-            )
-    match decoded.options:
-        case None:
-            options_json = None
-            options_value = None
-        case StoredTaskOptions(text=stored_text, value=stored_value):
-            options_json = stored_text
-            options_value = stored_value
-    # The rerun runs with the execution class of the stored request.
-    match stored_execution(options_value):
-        case Err(err_value=invalid_execution):
-            return RerunInputCorrupt(
-                task_id=command.source_task_id,
-                detail=f'stored task options: {invalid_execution.detail}',
-            )
-        case Ok(ok_value=execution):
-            pass
-
-    new_task_id = mint_task_id()
-    root_task_id = source.rerun_root_task_id or source.task_id
-    # The one fingerprint over the stored input: the args element is
-    # always null and the kwargs element is the input text.
-    fingerprint = EnqueueCommandV1(
-        task_name=source.task_name,
-        queue_name=source.queue_name,
-        priority=source.priority,
-        args_json=None,
-        kwargs_json=decoded.input_json,
-        good_until=command.deadline,
-        enqueue_delay_seconds=None,
-        task_options_json=options_json,
-        retention_class_key=policy.retention_class_key,
-        retain_rerun_input=policy.retain_rerun_input,
-        rerun_of_task_id=str(source.task_id),
-        rerun_root_task_id=str(root_task_id),
-    ).fingerprint
-
-    key: EnqueueKey
-    match command.caller_key:
-        case None:
-            key = Unkeyed()
-        case caller_key:
-            key = Keyed(
-                digest=ScopedIdempotencyKey(
-                    task_name=source.task_name, key=caller_key
-                ).digest,
-                scope_version=IDEMPOTENCY_SCOPE_VERSION,
-                window=policy.reservation_window,
-            )
-    # The row stores no envelope: the move builds it from ``input`` and
-    # ``task_options``. Both texts are the source's, unchanged, so when the
-    # new row's policy retains its input, its envelope has the source
-    # envelope's bytes and digest.
-    row = EnqueueRow(
-        task_id=new_task_id,
-        task_name=source.task_name,
-        queue_name=source.queue_name,
-        priority=source.priority,
-        stored_input=decoded.input_json,
-        task_options=options_json,
-        execution=execution,
-        retention_class_key=policy.retention_class_key,
-        retain_rerun_input=policy.retain_rerun_input,
-        max_retries=source.max_retries,
-        good_until=command.deadline,
-        sent_at=datetime.now(timezone.utc),
-        start=StartNow(),
-        command_fingerprint=fingerprint,
-        key=key,
-        lineage=RerunOf(source_task_id=source.task_id, root_task_id=root_task_id),
-    )
-    rows = (
-        await connection.execute(
-            ENQUEUE_TASK_SQL, enqueue_task_params(row, SendKind.FIRST)
-        )
-    ).all()
-    return _rerun_write_outcome(
-        read_enqueue_outcome(rows),
-        new_task_id=new_task_id,
-        source_task_id=source.task_id,
-        rerun_root_task_id=root_task_id,
-    )
+RERUN_SUBJECT: Final = 'rerun_task'
+"""The subject of a ``CoreOperationFailed`` of a rerun: a database of the
+other client family (the interim class of #1363)."""
 
 
-def _rerun_write_outcome(
-    written: EnqueueOutcome,
-    *,
-    new_task_id: UUID,
-    source_task_id: UUID,
-    rerun_root_task_id: UUID,
+async def _run_prepared(
+    connection: AsyncConnection, statement: PreparedStatement
+) -> tuple[object, ...]:
+    """Run one core statement on the caller's connection and give its one row
+    as a tuple in column order. A ``memoryview`` of a ``bytea`` column is
+    passed as ``bytes``. A database error raises from the caller's driver."""
+    row = (await connection.execute(text(statement.sql), statement.parameters)).one()
+    return tuple(_cell(value) for value in row)
+
+
+def _cell(value: object) -> object:
+    """``value`` as the core reads it: a ``memoryview`` as ``bytes``. Pure."""
+    match value:
+        case memoryview():
+            return value.tobytes()
+        case _:
+            return value
+
+
+def _write_outcome(
+    record: RerunEnqueuedRecord | RerunKeyReplayRecord | RerunKeyConflictRecord,
 ) -> RerunEnqueued | RerunKeyReplay | RerunKeyConflict:
-    """The rerun outcome of the write of ``new_task_id``. Pure.
-
-    ``SAME_COMMAND`` is the write of this id that already ran in the caller's
-    transaction: the rerun is enqueued. ``new_task_id`` was minted for this
-    write, so another row cannot hold it: ``PAYLOAD_MISMATCH`` and
-    ``CONFLICT_UNVERIFIABLE`` are defects of the id mint or of the function
-    (``AssertionError`` with the id and the outcome).
-    """
-    match written:
-        case Inserted() | SameCommand():
+    """The public outcome of a core write record. Pure."""
+    match record:
+        case RerunEnqueuedRecord(
+            new_task_id=new_task_id,
+            source_task_id=source_task_id,
+            rerun_root_task_id=rerun_root_task_id,
+        ):
             return RerunEnqueued(
                 new_task_id=new_task_id,
                 source_task_id=source_task_id,
                 rerun_root_task_id=rerun_root_task_id,
             )
-        case KeyReplay(task_id=existing):
-            return RerunKeyReplay(existing_task_id=existing)
-        case KeyConflict(owner_task_id=owner):
-            return RerunKeyConflict(
-                task_id=source_task_id,
-                reserved_by_task_id=owner,
-            )
-        case PayloadMismatch() | ConflictUnverifiable():
-            raise AssertionError(
-                f'the rerun write of the minted task id {new_task_id} answered '
-                f'{written!r}: no other row can hold a minted id'
-            )
+        case RerunKeyReplayRecord(existing_task_id=existing_task_id):
+            return RerunKeyReplay(existing_task_id=existing_task_id)
+        case RerunKeyConflictRecord(task_id=task_id, reserved_by_task_id=reserved_by):
+            return RerunKeyConflict(task_id=task_id, reserved_by_task_id=reserved_by)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _class_not_registered(class_key: str) -> ValueError:
+    # The policy's key routes the NEW request's eventual history row into a
+    # LIST partition; an unregistered key has none, so the failure would
+    # otherwise arrive at the rerun's completion as a partition-routing
+    # error. A caller precondition raises before any write.
+    return ValueError(
+        f'retention class {class_key!r} is not '
+        'registered: the new request would have no history partition. '
+        'Add the period to the maintenance owner\'s queue_retention or '
+        'retention_periods, and rerun after its next pass'
+    )
+
+
+async def rerun_task(
+    connection: AsyncConnection,
+    command: RerunTask,
+    policy: RerunEnqueuePolicy,
+) -> RerunOutcome:
+    """Execute one rerun inside the caller-owned transaction.
+
+    The core builds each statement and decides the outcome
+    (``horsies._core.rerun_read``, ``prepare_rerun_write``,
+    ``decode_rerun_write``); ``connection`` runs the two statements (the
+    source read ``horsies_rerun_source_read``, then for an eligible source
+    one ``horsies_enqueue_task`` with the lineage ``RERUN``), so the rerun
+    commits or rolls back with the caller's own writes. Every outcome but
+    ``RerunEnqueued`` writes nothing.
+
+    Raises:
+        ValueError: the new request's retention class is not registered, the
+            caller key is not a valid idempotency key, or the task id source
+            refused to mint. Nothing is written.
+        CoreOperationFailed: the database was installed by the other client
+            family, or records none. Nothing is written.
+        CoreError: the core of this process cannot run (forked after the
+            core started, or stopped).
+        A database error of a statement raises from the caller's driver.
+    """
+    core_command = RerunCommandRecord(
+        source_task_id=command.source_task_id,
+        deadline=command.deadline,
+        caller_key=command.caller_key,
+    )
+    core_policy = RerunPolicyRecord(
+        retention_class_key=policy.retention_class_key,
+        retain_rerun_input=policy.retain_rerun_input,
+        reservation_window_us=policy.reservation_window // timedelta(microseconds=1),
+    )
+    read = core_rerun_read(core_command, core_policy)
+    read_row = await _run_prepared(connection, read)
+    prepared = prepare_rerun_write(
+        read,
+        read_row,
+        core_command,
+        core_policy,
+        sent_at=datetime.now(timezone.utc),
+    )
+    match prepared:
+        case RerunWriteRecord():
+            written = await _run_prepared(connection, prepared.statement)
+            return _write_outcome(decode_rerun_write(prepared, written))
+        case RerunSourceLiveRecord(task_id=task_id):
+            return RerunSourceLive(task_id=task_id)
+        case RerunSourceAbsentRecord(task_id=task_id, reason=reason):
+            return RerunSourceAbsent(task_id=task_id, reason=TaskAbsenceReason(reason))
+        case RerunSourceCorruptRecord(task_id=task_id, detail=detail):
+            return RerunSourceCorrupt(task_id=task_id, exception=HistoryContractError(detail))
+        case RerunNotEligibleRecord(task_id=task_id, reason=reason):
+            return RerunNotEligible(task_id=task_id, reason=NotEligibleReason(reason))
+        case RerunInputUnavailableRecord(task_id=task_id, disposition=disposition):
+            return RerunInputUnavailable(task_id=task_id, disposition=disposition)
+        case RerunInputCorruptRecord(task_id=task_id, detail=detail):
+            return RerunInputCorrupt(task_id=task_id, detail=detail)
+        case RerunClassNotRegistered(class_key=class_key):
+            raise _class_not_registered(class_key)
+        case RerunClientFamilyMismatch(message=message):
+            raise CoreOperationFailed(RERUN_SUBJECT, message, False)
+        case RerunCallerKeyRefused(cause=cause):
+            raise ValueError(cause)
+        case IdMintRefused(cause=cause):
+            raise ValueError(cause)
         case _ as unreachable:
             assert_never(unreachable)

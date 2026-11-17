@@ -7,7 +7,6 @@ use uuid::Uuid;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::PostgresBroker;
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome, WorkerOwned};
 use crate::core::registry::workflow::WorkflowSpecRegistry;
@@ -466,9 +465,12 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
     let broker = PostgresBroker::from_pool(pool.clone());
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    let payload = PayloadPolicy::default();
-    let retention = RetentionConfig::default();
+    let children = ResumeChildren::Registry {
+        registry: std::sync::Arc::new(WorkflowSpecRegistry::new(
+            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        )),
+        retention: RetentionConfig::default(),
+    };
 
     let running_to_pause = seed_workflow(&pool, WorkflowStatus::Running).await;
     let paused = pause_workflow_action(&broker, running_to_pause).await;
@@ -480,8 +482,7 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     assert_eq!(workflow_status(&pool, running_to_pause).await, "PAUSED");
 
     let paused_to_resume = seed_workflow(&pool, WorkflowStatus::Paused).await;
-    let resumed =
-        resume_workflow_action(&broker, paused_to_resume, &registry, &payload, &retention).await;
+    let resumed = resume_workflow_action(&broker, paused_to_resume, &children).await;
     assert_eq!(resumed.status_code(), 200);
     assert_eq!(
         body_json(&resumed),
@@ -501,9 +502,7 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
         let completed = seed_workflow(&pool, WorkflowStatus::Completed).await;
         let outcome = match action {
             "pause" => pause_workflow_action(&broker, completed).await,
-            "resume" => {
-                resume_workflow_action(&broker, completed, &registry, &payload, &retention).await
-            }
+            "resume" => resume_workflow_action(&broker, completed, &children).await,
             "cancel" => cancel_workflow_action(&broker, completed).await,
             _ => unreachable!(),
         };
@@ -518,9 +517,7 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
         let missing = Uuid::new_v4();
         let outcome = match action {
             "pause" => pause_workflow_action(&broker, missing).await,
-            "resume" => {
-                resume_workflow_action(&broker, missing, &registry, &payload, &retention).await
-            }
+            "resume" => resume_workflow_action(&broker, missing, &children).await,
             "cancel" => cancel_workflow_action(&broker, missing).await,
             _ => unreachable!(),
         };

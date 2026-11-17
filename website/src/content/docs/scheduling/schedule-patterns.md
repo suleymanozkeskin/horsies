@@ -1,5 +1,6 @@
 ---
 title: Schedule Patterns
+section: python
 summary: Type-safe patterns for Interval, Hourly, Daily, Weekly, Monthly, and full cron-style schedules.
 related: [scheduler-overview, schedule-config]
 tags: [scheduling, patterns, interval, cron]

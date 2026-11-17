@@ -1,5 +1,6 @@
 ---
 title: Action Semantics
+section: shared
 summary: Exactly what task cancel, the `rerun_task` function, and workflow pause, resume, and cancel do to the rows and the processes behind them.
 related: [web-ui-overview, web-ui-deployment, ../concepts/task-lifecycle, ../concepts/workflows/workflow-api]
 tags: [monitoring, actions, cancel, rerun, pause, resume, workflow]
@@ -226,7 +227,10 @@ List and aggregate reads are **window-scoped**. They cover live rows plus a
 bounded slice of terminal history: the last 24 hours by default, with
 optional `since` / `until`. Bounds must be timezone-aware and increasing,
 and the span may not exceed 30 days — a request over the maximum is refused
-with the bound named, never silently clamped.
+with the bound named, never silently clamped. The default and the maximum are
+elapsed time: each bound is converted to a UTC instant first. Across a
+daylight saving change, the wall-clock span and the elapsed span differ by the
+change, and the elapsed span counts.
 
 The page total follows a stated contract: **exact when any filter is
 active, a planner estimate on the unfiltered view.** An unfiltered total is
@@ -242,8 +246,8 @@ concurrency control.
 |---|---|---|
 | 200 | The CAS matched and committed | Observe the entity |
 | 400 | The row is a workflow node; task actions do not apply | Use the workflow actions |
-| 400 | A task id in the path is not a UUID (`INVALID_INPUT`, with a `detail`); nothing was read or changed | Send the id as UUID text |
-| 404 | The row no longer exists | Retention may have removed it |
+| 400 | A task id in the path of a task route, or a workflow id in the path of a workflow action (`pause`, `resume`, `cancel`), is not a UUID (`INVALID_INPUT`, with a `detail`); nothing was read or changed | Send the id as UUID text |
+| 404 | The row no longer exists. On the workflow read routes also a workflow id that is not a UUID, and a node index outside the 32-bit node index column; nothing was read | Retention may have removed it |
 | 409 | Another change won the race, or the schema does not match this build | Re-read the entity; the body carries `current_status` |
 | 500 | Stored data that does not parse (`STORED_DATA_INVALID`): a stored value of the workflow run, or, on a task cancel, a history status that is not a task status. Or a server defect | Check the server logs and re-read the entity. For `STORED_DATA_INVALID`, nothing was committed, and a repeat gets the same answer until the stored row changes |
 | 503 | Broker or database failure | The action may or may not have committed; re-read before retrying |

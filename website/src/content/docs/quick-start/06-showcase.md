@@ -1,5 +1,6 @@
 ---
 title: Showcase Application
+section: python
 summary: A runnable demonstration app in the repository that exercises every horsies capability against a real database.
 related: [quick-start/getting-started, quick-start/05-workflow-patterns, monitoring/web-ui-overview, tasks/retry-policy]
 tags: [showcase, example, demo, workflows, monitoring]

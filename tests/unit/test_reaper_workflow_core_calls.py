@@ -126,3 +126,128 @@ async def test_a_failed_retention_delete_raises_with_the_count_before_it() -> No
     assert 'statement timeout' in raised.value.message
     assert '4 workflow(s)' in raised.value.message
     assert raised.value.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_the_phase2_recovery_maps_the_pass_and_folds_pending_absent() -> None:
+    broker = _broker(
+        'recover_workflow_phase2_async',
+        _record(
+            core.Phase2RecoveryRecord,
+            considered=6,
+            applied=2,
+            already_applied=1,
+            superseded=1,
+            pending_absent=1,
+            retained=1,
+            failed=0,
+            quarantined=1,
+            raised_counted=0,
+            over_attempt_bound=4,
+            retained_details=['t1: SOURCE_ABSENT'],
+            quarantine_refusals=[],
+        ),
+    )
+
+    summary = await _Reaper()._recover_phase2(
+        broker, grace_ms=30_000, max_rows=100, quarantine_after_attempts=3,
+    )
+
+    assert summary.considered == 6
+    assert summary.applied == 2
+    # The Python pass counted a record gone with its node not terminal as
+    # already applied.
+    assert summary.already_applied == 2
+    assert summary.over_attempt_bound == 4
+    assert summary.retained_details == ('t1: SOURCE_ABSENT',)
+    assert summary.quarantine_refusals == ()
+    broker._core_handle.recover_workflow_phase2_async.assert_awaited_once_with(
+        grace_ms=30_000, max_rows=100, quarantine_after_attempts=3,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_phase2_recovery_raises_with_its_cause() -> None:
+    broker = _broker(
+        'recover_workflow_phase2_async',
+        _record(core.Phase2RecoveryFailed, message='discovery failed', retryable=True),
+    )
+
+    with pytest.raises(CoreOperationFailed) as raised:
+        await _Reaper()._recover_phase2(
+            broker, grace_ms=0, max_rows=100, quarantine_after_attempts=3,
+        )
+
+    assert raised.value.subject == 'recover_workflow_phase2'
+    assert raised.value.retryable is True
+
+
+def _case(**fields: int) -> MagicMock:
+    defaults = {
+        'rows_selected': 0,
+        'candidates_returned': 0,
+        'duration_ms': 0,
+        'refusals': 0,
+        'errors': 0,
+        'failures_counted': 0,
+        'limit_reached': 0,
+    }
+    return _record(core.RecoveryCaseRecord, **{**defaults, **fields})
+
+
+def _pass_record(record_class: type, **fields: object) -> MagicMock:
+    cases = {
+        name: _case() for name in ('case_0', 'case_1', 'case_1_5', 'case_1_6', 'case_4')
+    }
+    defaults: dict[str, object] = {
+        'recovered': 0,
+        'pass_errors': 0,
+        'over_failure_limit': 0,
+        'case_2_3': _case(),
+        **cases,
+    }
+    return _record(record_class, **{**defaults, **fields})
+
+
+@pytest.mark.asyncio
+async def test_the_recovery_pass_builds_the_published_health() -> None:
+    broker = _broker(
+        'recover_workflows_async',
+        _pass_record(
+            core.RecoveryPassRecord,
+            recovered=3,
+            over_failure_limit=1,
+            case_2_3=_case(rows_selected=10, candidates_returned=2, errors=1),
+            case_4=_case(rows_selected=10, errors=1),
+        ),
+    )
+
+    report = await _Reaper()._recover_workflows(broker, failure_limit=5)
+    health = report.health()
+
+    assert health['recovered'] == 3
+    # The audit failure counts in each case it serves, as the Python pass
+    # counted it.
+    assert health['errors'] == 2
+    assert health['over_failure_limit'] == 1
+    assert health['completion_candidate_yield'] == 0.2
+    broker._core_handle.recover_workflows_async.assert_awaited_once_with(failure_limit=5)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_recovery_pass_raises_with_its_partial_report() -> None:
+    from horsies.core.workflows.recovery import RecoveryPassFailure
+
+    report = _pass_record(core.RecoveryPassRecord, pass_errors=1)
+    broker = _broker(
+        'recover_workflows_async',
+        _record(core.RecoveryPassFailed, report=report, message='count failed', retryable=True),
+    )
+
+    with pytest.raises(RecoveryPassFailure) as raised:
+        await _Reaper()._recover_workflows(broker, failure_limit=5)
+
+    health = raised.value.health()
+    assert health['state'] == 'error'
+    assert health['errors'] == 1
+    assert health['completion_candidate_yield'] is None

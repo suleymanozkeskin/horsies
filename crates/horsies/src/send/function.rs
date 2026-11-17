@@ -80,7 +80,7 @@ impl SendContext {
 
 /// When a send asks the task to start.
 #[derive(Debug, Clone, Copy)]
-enum SendStart {
+pub(crate) enum SendStart {
     Now,
     AfterDelay(WholeSeconds),
 }
@@ -93,6 +93,7 @@ pub struct TaskFunction<A, T, E> {
     queue_name: String,
     priority: u32,
     task_options: Option<TaskOptions>,
+    accepts_workflow_ctx: bool,
     context: Arc<SendContext>,
     types: PhantomData<fn(A) -> (T, E)>,
 }
@@ -104,6 +105,7 @@ impl<A, T, E> Clone for TaskFunction<A, T, E> {
             queue_name: self.queue_name.clone(),
             priority: self.priority,
             task_options: self.task_options.clone(),
+            accepts_workflow_ctx: self.accepts_workflow_ctx,
             context: Arc::clone(&self.context),
             types: PhantomData,
         }
@@ -157,6 +159,7 @@ where
             queue_name: queue_name.to_owned(),
             priority,
             task_options: task.task_options().cloned(),
+            accepts_workflow_ctx: task.accepts_workflow_ctx(),
             context: Arc::new(SendContext::of(app)),
             types: PhantomData,
         };
@@ -182,6 +185,12 @@ where
     /// The options of the task's definition.
     pub fn task_options(&self) -> Option<&TaskOptions> {
         self.task_options.as_ref()
+    }
+
+    /// Whether the task's input takes the workflow context (the task
+    /// attribute's `workflow_ctx`).
+    pub fn accepts_workflow_ctx(&self) -> bool {
+        self.accepts_workflow_ctx
     }
 
     /// Send the task now.
@@ -234,9 +243,9 @@ where
     /// wrote answers with its id, also after it finished.
     ///
     /// Errors: `VALIDATION_FAILED` for an error the retry does not accept
-    /// (only `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT` carry a payload
-    /// to send again), for the error of another task, and for the error of
-    /// a `schedule`; else the errors of a send.
+    /// (only `ASYNC_CONTEXT`, `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`
+    /// carry a payload to send again), for the error of another task, and
+    /// for the error of a `schedule`; else the errors of a send.
     pub async fn retry_send(
         &self,
         error: &TaskSendError,
@@ -271,7 +280,7 @@ where
 
     /// The task id and payload of a first send, or the refusal before any
     /// statement (Python `_send_with_options`, `_prepare_send`). No I/O.
-    fn prepare(
+    pub(crate) fn prepare(
         &self,
         start: SendStart,
         options: &TaskSendOptions,
@@ -379,15 +388,15 @@ where
 
     /// The task id and payload of an error that `retry_send` or
     /// `retry_schedule` accepts (Python `_validate_retry`).
-    fn retry_target(
+    pub(crate) fn retry_target(
         &self,
         error: &TaskSendError,
         retry: RetryOf,
     ) -> Result<(Uuid, TaskSendPayload), TaskSendError> {
         let Some(target) = error.resend_target() else {
             return Err(self.validation_failed(format!(
-                "cannot retry a send that failed with {}: only ENQUEUE_FAILED and \
-                 IDEMPOTENCY_KEY_CONFLICT carry a payload to send again",
+                "cannot retry a send that failed with {}: only ASYNC_CONTEXT, \
+                 ENQUEUE_FAILED and IDEMPOTENCY_KEY_CONFLICT carry a payload to send again",
                 error.code()
             )));
         };
@@ -413,7 +422,7 @@ where
     /// Enqueue `payload` as `task_id`, and resend a retryable
     /// `ENQUEUE_FAILED` when the app asks for it. Every call after the first
     /// is `SendKind::Repeat`.
-    async fn enqueue_with_resends(
+    pub(crate) async fn enqueue_with_resends(
         &self,
         task_id: Uuid,
         payload: TaskSendPayload,
@@ -449,7 +458,7 @@ where
 
 /// Which retry method checks an error.
 #[derive(Debug, Clone, Copy)]
-enum RetryOf {
+pub(crate) enum RetryOf {
     Send,
     Schedule,
 }
@@ -756,6 +765,24 @@ mod tests {
         assert!(function(&app)
             .retry_target(&scheduled, RetryOf::Schedule)
             .is_ok());
+    }
+
+    /// Python `_validate_retry` accepts `TaskSendAsyncContext`: the
+    /// prepared task id and payload of a blocking send on a runtime thread.
+    #[test]
+    fn a_retry_takes_the_task_id_and_payload_of_an_async_context() {
+        let app = app_with(config());
+        let (task_id, payload) = function(&app)
+            .prepare(SendStart::Now, &TaskSendOptions::new(), &invoice())
+            .unwrap();
+        let error = TaskSendError::AsyncContext {
+            task_id,
+            payload: Box::new(payload),
+            message: "blocking send on a runtime thread".to_owned(),
+        };
+        let (retried_id, retried) = function(&app).retry_target(&error, RetryOf::Send).unwrap();
+        assert_eq!(retried_id, task_id);
+        assert_eq!(retried.input_json, r#"{"id":7,"amount":12.5}"#);
     }
 
     #[test]

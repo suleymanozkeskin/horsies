@@ -16,8 +16,8 @@ mod task_actions;
 
 pub use actions::{
     cancel_task_action, cancel_workflow_action, pause_workflow_action, resume_workflow_action,
-    task_action_outcome, ActionBody, ActionConflictCode, ActionOutcome, RESUME_RECOVERY_WARNING,
-    STATE_CONFLICT,
+    task_action_outcome, ActionBody, ActionConflictCode, ActionOutcome, ResumeChildren,
+    RESUME_RECOVERY_WARNING, STATE_CONFLICT,
 };
 
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
@@ -61,6 +61,8 @@ mod aggregate_spec_tests;
 mod cancel_spec_tests;
 #[cfg(test)]
 mod list_detail_spec_tests;
+#[cfg(test)]
+mod model_contract_tests;
 #[cfg(test)]
 mod spec_support;
 #[cfg(test)]

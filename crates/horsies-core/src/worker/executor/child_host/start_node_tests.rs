@@ -17,7 +17,7 @@ use serial_test::serial;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::host::{ChildApp, ChildStartHook};
+use super::host::{ChildApp, ChildLogSetup, ChildStartHook};
 use super::link::FrameWriter;
 use super::run::{start_attempt, HostContext, RunFacts, Started};
 use crate::broker::PostgresBroker;
@@ -44,6 +44,7 @@ fn context(pool: PgPool) -> (HostContext, UnixStream) {
             hostname: "h1".to_owned(),
             start_hook: ChildStartHook::NoHook,
             producer_manifest: super::producer::test_producer_manifest(),
+            log_setup: ChildLogSetup::NoSetup,
         }),
         pid: 1,
         writer,
@@ -160,8 +161,8 @@ async fn settle_stop(pool: &PgPool, task: &ClaimedTask, reason: StopReason) -> S
     let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
     let writer = OutcomeWriter::new(
         Arc::clone(&broker),
-        Arc::new(WorkflowSpecRegistry::new(
-            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         )),
         WORKER_ID.to_owned(),
         crate::core::config::payload::PayloadPolicy::default(),

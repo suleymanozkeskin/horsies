@@ -1,15 +1,19 @@
 //! Transport-free decisions for monitoring actions.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::broker::PostgresBroker;
-use crate::core::config::payload::PayloadPolicy;
+use crate::catalog::CodeEnum;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError};
 use crate::core::workflow::status::WorkflowStatus;
+use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::error::WorkflowError;
+use crate::workflow_engine::steps::ChildBuild;
 
 use super::models::ActionResponse;
 use super::task_actions::{
@@ -24,6 +28,48 @@ pub const RESUME_RECOVERY_WARNING: &str = "post_resume_recovery_failed";
 pub enum ActionConflictCode {
     TaskNotCancellable,
     StateConflict,
+}
+
+impl ActionConflictCode {
+    /// The code as the response body writes it. Pure.
+    pub const fn wire_value(self) -> &'static str {
+        match self {
+            Self::TaskNotCancellable => "TASK_NOT_CANCELLABLE",
+            Self::StateConflict => STATE_CONFLICT,
+        }
+    }
+}
+
+/// Where a resume through the monitoring actions gets the spec of each
+/// sub-workflow child that the resume owes.
+#[derive(Clone)]
+pub enum ResumeChildren {
+    /// The registered definitions of the Rust client. The task queues of a
+    /// child take their retention class from `retention`.
+    Registry {
+        registry: Arc<WorkflowSpecRegistry>,
+        retention: RetentionConfig,
+    },
+    /// A client that builds each child in its own language and sends its
+    /// spec as data, with the retention class of each task queue (the
+    /// `build_with` of the Python client).
+    Client(Arc<dyn ChildSpecSource>),
+}
+
+impl ResumeChildren {
+    /// The child build of one resume. Pure.
+    fn build(&self) -> ChildBuild<'_> {
+        match self {
+            Self::Registry {
+                registry,
+                retention,
+            } => ChildBuild::Registry {
+                registry: registry.as_ref(),
+                retention,
+            },
+            Self::Client(source) => ChildBuild::Client(source.as_ref()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +105,18 @@ impl ActionOutcome {
 
     pub fn into_body(self) -> ActionBody {
         self.body
+    }
+
+    /// The result word of the action log line, as Python's action routes
+    /// write it (`result=` of `monitoring action route=...`): the outcome of
+    /// a success, else the code of a refusal, else `error`. Pure.
+    pub fn result_word(&self) -> &str {
+        match &self.body {
+            ActionBody::Success(response) => response.outcome.as_str(),
+            ActionBody::Conflict { code, .. } => code.wire_value(),
+            ActionBody::Code { code } => code.wire_value(),
+            ActionBody::Detail { .. } => "error",
+        }
     }
 }
 
@@ -147,7 +205,8 @@ fn status_failed(workflow_id: Uuid, error: WorkflowError) -> ActionOutcome {
         | WorkflowError::Serialization(_)
         | WorkflowError::InvalidStatus(_)
         | WorkflowError::Validation(_)
-        | WorkflowError::StepContract(_) => detail(503, error.to_string()),
+        | WorkflowError::StepContract(_)
+        | WorkflowError::ChildSpecSource(_) => detail(503, error.to_string()),
     }
 }
 
@@ -207,21 +266,16 @@ fn resume_failure(error: HandleOperationError) -> ActionOutcome {
     }
 }
 
+/// Resume a workflow tree; each owed sub-workflow child start builds its
+/// child through `children`. A resume that committed and whose recovery
+/// pass failed answers success with a warning ([`resume_failure`]).
 pub async fn resume_workflow_action(
     broker: &PostgresBroker,
     workflow_id: Uuid,
-    registry: &WorkflowSpecRegistry,
-    payload: &PayloadPolicy,
-    retention: &RetentionConfig,
+    children: &ResumeChildren,
 ) -> ActionOutcome {
-    match crate::workflow_engine::lifecycle::resume_workflow(
-        broker,
-        workflow_id,
-        registry,
-        payload,
-        retention,
-    )
-    .await
+    match crate::workflow_engine::lifecycle::resume_with(broker, workflow_id, children.build())
+        .await
     {
         Ok(true) => succeeded("resumed", None, None),
         Ok(false) => match current_status(broker, workflow_id).await {
@@ -246,6 +300,42 @@ pub async fn cancel_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The result word of the log line is Python's: the outcome, else the
+    /// code, else `error`.
+    #[test]
+    fn the_result_word_is_the_outcome_then_the_code() {
+        assert_eq!(succeeded("paused", None, None).result_word(), "paused");
+        assert_eq!(
+            conflict(ActionConflictCode::StateConflict, None).result_word(),
+            "STATE_CONFLICT"
+        );
+        assert_eq!(
+            conflict(ActionConflictCode::TaskNotCancellable, None).result_word(),
+            "TASK_NOT_CANCELLABLE"
+        );
+        let workflow_task = TaskActionError {
+            code: TaskActionErrorCode::TaskIsWorkflowTask,
+            message: "a workflow task".to_owned(),
+            retryable: false,
+            task_id: Uuid::nil(),
+            current_status: None,
+        };
+        assert_eq!(
+            task_action_failed(workflow_task).result_word(),
+            "TASK_IS_WORKFLOW_TASK"
+        );
+        assert_eq!(detail(503, "down").result_word(), "error");
+        for code in [
+            ActionConflictCode::TaskNotCancellable,
+            ActionConflictCode::StateConflict,
+        ] {
+            assert_eq!(
+                serde_json::to_value(code).expect("a code serializes"),
+                serde_json::Value::from(code.wire_value())
+            );
+        }
+    }
 
     #[test]
     fn resume_failure_mapping_is_exhaustive() {

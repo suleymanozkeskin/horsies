@@ -9,6 +9,7 @@ use super::operations::{
     RerunTask,
 };
 use super::provenance::RERUN_FIELD_PROVENANCE;
+use crate::broker::client_family::ClientFamily;
 use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::terminalization::on_test_pool::terminalize;
@@ -607,6 +608,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
             StatementLog::Off,
             &RerunTask::new(completed, None, None),
             &policy(SOURCE_CLASS, true),
+            ClientFamily::Rust,
         )
         .await
         .unwrap(),
@@ -621,6 +623,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
             StatementLog::Off,
             &RerunTask::new(workflow_task, None, None),
             &policy(SOURCE_CLASS, true),
+            ClientFamily::Rust,
         )
         .await
         .unwrap(),
@@ -658,7 +661,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         .get_raw_result_record(live, Some(std::time::Duration::ZERO))
         .await
         .unwrap()
-        .unwrap();
+        .expect_found();
     assert_eq!(live_snapshot.task_id, live);
     assert_eq!(live_snapshot.task_name, "p8.live");
     assert_eq!(live_snapshot.status, TaskStatus::Pending);
@@ -682,7 +685,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         .get_task_info_with_attempts(live, false, false, true)
         .await
         .unwrap()
-        .unwrap();
+        .expect_found();
     assert_eq!(live_info.task_id, live);
     assert_eq!(live_info.status, TaskStatus::Pending);
     assert_eq!(
@@ -752,6 +755,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         StatementLog::Off,
         &RerunTask::new(old_absent, None, None),
         &policy(SOURCE_CLASS, true),
+        ClientFamily::Rust,
     )
     .await
     .unwrap();
@@ -841,6 +845,7 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
             StatementLog::Off,
             &RerunTask::new(source, None, None),
             &policy(SOURCE_CLASS, true),
+            ClientFamily::Rust,
         )
         .await
         .unwrap(),
@@ -1234,6 +1239,7 @@ async fn unregistered_class_refuses_before_source_or_reservation_writes() {
         StatementLog::Off,
         &RerunTask::new(source, None, None),
         &policy("p8_not_registered", true),
+        ClientFamily::Rust,
     )
     .await
     .unwrap_err();
@@ -1266,7 +1272,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(completed, None)
         .await
         .unwrap()
-        .unwrap();
+        .expect_found();
     assert_eq!(raw.task_id, completed);
     assert_eq!(raw.task_name, "p8.rerun");
     assert_eq!(raw.status, TaskStatus::Completed);
@@ -1283,7 +1289,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_task_info_with_attempts(completed, true, true, true)
         .await
         .unwrap()
-        .unwrap();
+        .expect_found();
     assert_eq!(info.status, TaskStatus::Completed);
     assert_eq!(
         info.execution,
@@ -1300,7 +1306,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(failed, None)
         .await
         .unwrap()
-        .unwrap();
+        .expect_found();
     assert_eq!(failed_raw.status, TaskStatus::Failed);
     let expected_error =
         TaskError::builtin(OperationalErrorCode::TaskException, "p8 terminal source");
@@ -1326,7 +1332,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(expired, None)
         .await
         .unwrap()
-        .unwrap();
+        .expect_found();
     assert_eq!(expired_raw.status, TaskStatus::Expired);
     assert_eq!(expired_raw.raw_result, Some(expected_error_envelope));
     let expired_error = broker
@@ -1349,14 +1355,14 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(cancelled, None)
         .await
         .unwrap()
-        .unwrap();
+        .expect_found();
     assert_eq!(cancelled_raw.status, TaskStatus::Cancelled);
     assert!(cancelled_raw.raw_result.is_none());
     assert!(broker
         .get_raw_result_record(Uuid::new_v4(), None)
         .await
         .unwrap()
-        .is_none());
+        .is_absent());
 
     sqlx::query(
         "UPDATE horsies_task_history SET result_digest = decode(repeat('00', 32), 'hex')
@@ -1462,7 +1468,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(Uuid::new_v4(), None)
         .await
         .unwrap()
-        .is_none());
+        .is_absent());
 }
 
 #[tokio::test]
@@ -1557,5 +1563,100 @@ async fn a_handle_of_another_client_family_reruns_nothing() {
     .await
     .unwrap();
     assert_eq!(after, before);
+    cleanup(&pool, &[source], &[]).await;
+}
+
+/// The prepared write of a rerun, from its read on `transaction`.
+async fn prepared_write(
+    transaction: &mut crate::db::Transaction<'_>,
+    command: &RerunTask,
+    policy: &RerunEnqueuePolicy,
+) -> super::steps::RerunWrite {
+    use super::caller::CallerTransaction;
+    use super::steps::{prepare_rerun_write, rerun_read, RerunPreparation};
+
+    let read = rerun_read(command, policy);
+    let row = transaction.query_one(&read).await.unwrap();
+    match prepare_rerun_write(&read, &row, command, policy, ClientFamily::Rust, Utc::now()).unwrap()
+    {
+        RerunPreparation::Write(write) => write,
+        other => panic!("expected a write, got {other:?}"),
+    }
+}
+
+/// The same prepared rerun write run twice in one transaction gives one
+/// task: the second run answers `SAME_COMMAND`, which is the enqueued rerun.
+#[tokio::test]
+#[serial]
+async fn the_same_prepared_rerun_write_run_twice_gives_one_task() {
+    use super::caller::CallerTransaction;
+    use super::steps::{decode_rerun_write, RerunWriteOutcome};
+
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
+    let core = core_pool_for_test_pool(&pool);
+    let mut connection = core.checkout(CheckoutClass::Batch).await.unwrap();
+    let mut transaction = connection
+        .begin(IsolationLevel::ServerDefault)
+        .await
+        .unwrap();
+    let command = RerunTask::new(source, None, None);
+    let policy = policy(SOURCE_CLASS, true);
+    let write = prepared_write(&mut transaction, &command, &policy).await;
+    for _ in 0..2 {
+        let row = transaction.query_one(write.statement()).await.unwrap();
+        assert!(matches!(
+            decode_rerun_write(&write, &row).unwrap(),
+            RerunWriteOutcome::Enqueued { new_task_id, .. } if new_task_id == write.new_task_id()
+        ));
+    }
+    transaction.commit().await.unwrap();
+    drop(connection);
+    let tasks: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
+        .bind(write.new_task_id())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(tasks, 1);
+    core.close();
+    cleanup(&pool, &[source, write.new_task_id()], &[]).await;
+}
+
+/// A keyed rerun that the caller's transaction rolls back leaves no task and
+/// no key reservation.
+#[tokio::test]
+#[serial]
+async fn a_rerun_rolls_back_with_the_callers_transaction() {
+    use super::caller::CallerTransaction;
+    use super::steps::{decode_rerun_write, RerunWriteOutcome};
+
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
+    let core = core_pool_for_test_pool(&pool);
+    let mut connection = core.checkout(CheckoutClass::Batch).await.unwrap();
+    let mut transaction = connection
+        .begin(IsolationLevel::ServerDefault)
+        .await
+        .unwrap();
+    let command = RerunTask::new(source, None, Some("p8-rollback-key".to_owned()));
+    let policy = policy(SOURCE_CLASS, true);
+    let write = prepared_write(&mut transaction, &command, &policy).await;
+    let row = transaction.query_one(write.statement()).await.unwrap();
+    assert!(matches!(
+        decode_rerun_write(&write, &row).unwrap(),
+        RerunWriteOutcome::Enqueued { .. }
+    ));
+    assert!(rolled_back(transaction.rollback().await));
+    drop(connection);
+    let (tasks, reservations): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM horsies_tasks WHERE id = $1),
+                (SELECT count(*) FROM horsies_key_reservations WHERE task_id = $1)",
+    )
+    .bind(write.new_task_id())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((tasks, reservations), (0, 0));
+    core.close();
     cleanup(&pool, &[source], &[]).await;
 }

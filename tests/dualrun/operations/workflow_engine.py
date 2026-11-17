@@ -14,6 +14,55 @@ from tests.dualrun.operations.table import DualRunOperation, PoolMode
 
 WORKFLOW_ENGINE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
     DualRunOperation(
+        name='workflow start',
+        production_path='horsies.core.workflows.lifecycle:start_workflow_async',
+        reference_path='tests.dualrun.reference.workflow_start_caller:start_workflow_async',
+        mode=PoolMode(),
+        core_methods=('start_workflow_async',),
+    ),
+    DualRunOperation(
+        name='workflow resume',
+        production_path='horsies.core.workflows.lifecycle:resume_workflow',
+        reference_path='tests.dualrun.reference.workflow_resume_caller:resume_workflow',
+        mode=PoolMode(),
+        core_methods=('resume_workflow_async',),
+    ),
+    DualRunOperation(
+        name='workflow phase 2',
+        production_path='horsies.core.worker.finalize:FinalizeMixin._finalize_workflow_phase',
+        reference_path='tests.dualrun.reference.workflow_phase2_caller:finalize_workflow_phase',
+        mode=PoolMode(),
+        core_methods=('finish_workflow_node_async',),
+    ),
+    DualRunOperation(
+        name='workflow parent advance',
+        production_path='horsies.core.worker.finalize:FinalizeMixin._drive_parent_propagations',
+        reference_path='tests.dualrun.reference.workflow_phase2_caller:drive_parent_propagations',
+        mode=PoolMode(),
+        core_methods=('advance_workflow_parents_async',),
+    ),
+    DualRunOperation(
+        name='workflow phase-2 recovery',
+        production_path='horsies.core.worker.reaper:ReaperMixin._recover_phase2',
+        reference_path='tests.dualrun.reference.phase2_recovery_caller:recover_phase2',
+        mode=PoolMode(),
+        core_methods=('recover_workflow_phase2_async',),
+    ),
+    DualRunOperation(
+        name='workflow recovery pass',
+        production_path='horsies.core.worker.reaper:ReaperMixin._recover_workflows',
+        reference_path='tests.dualrun.reference.recovery_pass_caller:recover_workflows',
+        mode=PoolMode(),
+        core_methods=('recover_workflows_async',),
+    ),
+    DualRunOperation(
+        name='workflow claim-time settle',
+        production_path='horsies.core.worker.claiming:ClaimMixin._filter_nonrunnable_workflow_tasks',
+        reference_path='tests.dualrun.reference.claim_settle_caller:filter_nonrunnable_workflow_tasks',
+        mode=PoolMode(),
+        core_methods=('settle_claimed_workflow_tasks_async',),
+    ),
+    DualRunOperation(
         name='workflow pause',
         production_path='horsies.core.workflows.lifecycle:pause_workflow',
         reference_path='tests.dualrun.reference.workflow_pause_caller:pause_workflow',

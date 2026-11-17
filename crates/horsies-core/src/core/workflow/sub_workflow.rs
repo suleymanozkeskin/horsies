@@ -53,9 +53,9 @@ impl<P, T> SubWorkflowNode<P, T> {
     /// client's choice whether the node gives params.
     ///
     /// The text is required in both cases. With
-    /// [`SubWorkflowParams::NotGiven`] it is the caller's encoding of an empty
-    /// params input (`null` for a Rust `()`). A node that sets fields later
-    /// with `.set(...)` starts from an object such as `{}`. `.input_json`,
+    /// [`SubWorkflowParams::NotGiven`] it is `{}`, Python's stored form of no
+    /// params. A node that sets fields later with `.set(...)` starts from an
+    /// object such as `{}`. `.input_json`,
     /// `.set_input`, `.set` and `.arg_from` give params: they set
     /// [`SubWorkflowParams::Given`].
     pub fn typed(

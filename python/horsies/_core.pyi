@@ -4,6 +4,7 @@
 import asyncio
 import datetime
 import uuid
+from collections.abc import Callable
 from typing import Literal, final
 
 
@@ -93,11 +94,11 @@ class CoreHandle:
         """The schema state of the database. Reads only."""
     def schema_status_async(self) -> asyncio.Future[SchemaStatusRecord]:
         """The awaitable form of the method above."""
-    def enqueue(self, request: EnqueueRequest) -> Enqueued | SendSuppressed | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict:
+    def enqueue(self, request: EnqueueRequest) -> Enqueued | SendSuppressed | SendAsyncContext | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict:
         """Enqueue one task, in one statement. Installs the schema once per handle first. Writes; a
         resend with send_kind REPEAT is safe.
         """
-    def enqueue_async(self, request: EnqueueRequest) -> asyncio.Future[Enqueued | SendSuppressed | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict]:
+    def enqueue_async(self, request: EnqueueRequest) -> asyncio.Future[Enqueued | SendSuppressed | SendAsyncContext | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict]:
         """The awaitable form of the method above."""
     def requeue_stale_claimed_async(self, stale_after_ms: int) -> asyncio.Future[StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed]:
         """One stale CLAIMED requeue pass. Writes; each batch commits alone. A threshold that
@@ -150,6 +151,51 @@ class CoreHandle:
     def cancel_owned_orphan_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime) -> asyncio.Future[TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed]:
         """Cancel one claimed workflow task that this claim holds and that no runnable node
         links. Writes, in one statement. A naive claimed_at raises TypeError.
+        """
+    def register_child_spec_source(self, source: Callable[[ChildSpecRequest], ChildSpecBuilt | ChildSpecRefused]) -> None:
+        """Register the child spec source of the handle's workflow operations. The core calls it
+        on the callback thread for each sub-workflow child that an operation builds. A second
+        registration raises RuntimeError. Starts nothing.
+        """
+    def start_workflow_async(self, request: WorkflowStartRequest) -> asyncio.Future[WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed]:
+        """Start one workflow. Writes; the children of its sub-workflow roots come from the child
+        spec source. A build that raised KeyboardInterrupt or SystemExit raises it again. With no
+        child spec source it raises RuntimeError.
+        """
+    def resume_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowResumed | WorkflowNotPaused | WorkflowResumeRecoveryFailed | WorkflowAbsent | HandleFailed]:
+        """Resume one workflow tree. Writes; the child starts it owes build their children through
+        the child spec source. A build that raised KeyboardInterrupt or SystemExit raises it
+        again. With no child spec source it raises RuntimeError.
+        """
+    def finish_workflow_node_async(self, request: NodeFinishRequest) -> asyncio.Future[NodeFinished | NodeFinishFailed]:
+        """Phase 2 of one finished workflow task. Writes; the child starts it owes build their
+        children through the child spec source. A build that raised KeyboardInterrupt or
+        SystemExit raises it again. With no child spec source it raises RuntimeError.
+        """
+    def advance_workflow_parents_async(self, child_workflow_ids: list[uuid.UUID]) -> asyncio.Future[ParentsAdvanced | ParentAdvanceStopped]:
+        """Advance the parent nodes above child_workflow_ids, one transaction per level. Writes; the
+        child starts a level owes build their children through the child spec source. A build
+        that raised KeyboardInterrupt or SystemExit raises it again. With no child spec source
+        it raises RuntimeError.
+        """
+    def recover_workflow_phase2_async(self, *, grace_ms: int, max_rows: int, quarantine_after_attempts: int) -> asyncio.Future[Phase2RecoveryRecord | Phase2RecoveryFailed]:
+        """One phase-2 recovery pass of the reaper: the phase-2 records older than grace_ms and
+        under quarantine_after_attempts, oldest first, at most max_rows, each in its own
+        transaction. Writes; owed child starts build their children through the child spec
+        source. A build that raised KeyboardInterrupt or SystemExit raises it again after the
+        pass. A negative value raises OverflowError; with no child spec source it raises
+        RuntimeError.
+        """
+    def recover_workflows_async(self, *, failure_limit: int) -> asyncio.Future[RecoveryPassRecord | RecoveryPassFailed]:
+        """One global workflow recovery pass of the reaper, with failure_limit passes per workflow
+        before it fails closed. Writes; each candidate commits alone, and owed child starts build
+        their children through the child spec source. A build that raised KeyboardInterrupt or
+        SystemExit raises it again after the pass. A negative value raises OverflowError; with
+        no child spec source it raises RuntimeError.
+        """
+    def settle_claimed_workflow_tasks_async(self, request: SettleRequest) -> asyncio.Future[ClaimsSettled | SettleFailed]:
+        """Settle the claimed workflow tasks of one claim pass. Writes, one statement per 1000
+        claims. A request with no claim sends nothing.
         """
     def pause_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed]:
         """Pause one workflow tree. Writes, in one statement. A row outside the function's contract
@@ -239,6 +285,11 @@ class CoreHandle:
     def expired_tasks_async(self) -> asyncio.Future[TaskListComplete | TaskListTruncated | BrokerFailure]:
         """The PENDING tasks whose good_until passed before a worker took them. Reads only, in
         one statement.
+        """
+    def ping_workers_async(self, *, target_worker_id: str | None, timeout_seconds: float, min_responses: int | None) -> asyncio.Future[WorkerPongsRecord | BrokerFailure]:
+        """Ping the workers and collect the distinct replies within the window, on the process
+        listener. A refused argument is INVALID_INPUT before any core call; a handle with no
+        listener is LISTENER_DISABLED. Sends one NOTIFY; writes no row.
         """
     def worker_states_async(self) -> asyncio.Future[WorkerStatesRecord | BrokerFailure]:
         """The latest state snapshot per worker, idle workers included. Reads only, in one
@@ -478,6 +529,17 @@ class Enqueued:
 @final
 class SendSuppressed:
     """Sends are suppressed. Nothing was written."""
+    @property
+    def message(self) -> str: ...
+
+
+@final
+class SendAsyncContext:
+    """A blocking send ran on a thread that runs an event loop or a tokio runtime. Nothing was
+    written. A client produces it before the send, never the core's enqueue.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
     @property
     def message(self) -> str: ...
 
@@ -1390,6 +1452,26 @@ class TaskListTruncated:
 
 
 @final
+class WorkerPongRecord:
+    """One worker's reply to a ping, with the measured round trip."""
+    @property
+    def worker_id(self) -> str: ...
+    @property
+    def hostname(self) -> str: ...
+    @property
+    def pid(self) -> int: ...
+    @property
+    def round_trip_ms(self) -> float: ...
+
+
+@final
+class WorkerPongsRecord:
+    """The distinct workers that replied within the window, in reply order."""
+    @property
+    def pongs(self) -> list[WorkerPongRecord]: ...
+
+
+@final
 class ResourceShortageRecord:
     """The cause of a down slot that ran short of an OS resource."""
     @property
@@ -1814,6 +1896,326 @@ class WorkflowNodesRead:
 
 
 @final
+class ChildSpecSourceRow:
+    """One dependency of the node whose result an args_from member of the child's input takes."""
+    @property
+    def task_index(self) -> int: ...
+    @property
+    def node_id(self) -> str | None: ...
+    @property
+    def status(self) -> str: ...
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def definition_key(self) -> str | None: ...
+    @property
+    def result(self) -> str | None: ...
+
+
+@final
+class ChildSpecRequest:
+    """The sub-workflow node whose child the Python client builds."""
+    @property
+    def parent_workflow_id(self) -> uuid.UUID: ...
+    @property
+    def parent_workflow_name(self) -> str: ...
+    @property
+    def task_index(self) -> int: ...
+    @property
+    def child_depth(self) -> int: ...
+    @property
+    def definition_key(self) -> str | None: ...
+    @property
+    def params(self) -> Literal['GIVEN', 'NOT_GIVEN']: ...
+    @property
+    def node_input(self) -> str: ...
+    @property
+    def args_from(self) -> str | None: ...
+    @property
+    def sources(self) -> list[ChildSpecSourceRow]: ...
+
+
+@final
+class ChildSpecBuilt:
+    """The child built: its spec as workflow spec data."""
+    def __init__(self, *, spec_json: str) -> None: ...
+    @property
+    def spec_json(self) -> str: ...
+
+
+@final
+class ChildSpecRefused:
+    """The child cannot start: its node fails. message is the error text for the log;
+    failure_result is the result envelope that the node stores.
+    """
+    def __init__(self, *, message: str, failure_result: str) -> None: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def failure_result(self) -> str: ...
+
+
+@final
+class WorkflowStartRequest:
+    """One frozen workflow start. spec_json is the workflow spec data of the spec; spec data
+    that the core refuses raises ValueError with the field path. A naive sent_at raises
+    TypeError.
+    """
+    def __init__(self, *, spec_json: str, workflow_id: uuid.UUID, sent_at: datetime.datetime, resend_on_transient_err: bool) -> None: ...
+
+
+@final
+class WorkflowStarted:
+    """The tree was written."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowExists:
+    """A workflow with this id and this name exists, or the row with the id was gone by the
+    read of its name. Nothing was written.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowIdTaken:
+    """A workflow with this id exists under another name. Nothing was written."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def existing_name(self) -> str: ...
+
+
+@final
+class NodeFinishRequest:
+    """One frozen phase 2. Another facts or wake value raises ValueError."""
+    def __init__(self, *, task_id: uuid.UUID, facts: Literal['NO_DEPENDENTS', 'DEPENDENTS_WITHOUT_SUBWORKFLOW', 'SUBWORKFLOW_REACHABLE', 'UNKNOWN'], wake: Literal['SEND', 'NONE']) -> None: ...
+
+
+@final
+class NodeFinished:
+    """The phase 2 committed, or found nothing to write. A SOURCE_* disposition kept the
+    phase-2 record and wrote nothing. parent_advances are the child workflows whose parent
+    nodes advance after the commit.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def disposition(self) -> Literal['APPLIED', 'APPLIED_WORKFLOW_ENDED', 'ALREADY_APPLIED', 'PENDING_ABSENT', 'SOURCE_ABSENT', 'SOURCE_STATE_CONFLICT', 'SOURCE_VERSION_CONFLICT', 'SOURCE_DIGEST_MISMATCH']: ...
+    @property
+    def workflow_status(self) -> str | None: ...
+    @property
+    def parent_advances(self) -> list[uuid.UUID]: ...
+
+
+@final
+class NodeFinishFailed:
+    """The phase 2 failed: the client family check, a statement, a child build that did not
+    run, a child tree that the core refuses, or a row outside the function's contract (not
+    retryable). Nothing committed, or the outcome is unknown.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class ParentsAdvanced:
+    """Every parent advance committed."""
+    @property
+    def child_workflow_ids(self) -> list[uuid.UUID]: ...
+
+
+@final
+class ParentAdvanceStopped:
+    """The parent advance stopped at the level of failed_child_workflow_id; the levels before
+    it committed. still_owed holds every advance a retry runs, the failed level first.
+    """
+    @property
+    def failed_child_workflow_id(self) -> uuid.UUID: ...
+    @property
+    def still_owed(self) -> list[uuid.UUID]: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class Phase2RecoveryRecord:
+    """What one pass did. pending_absent counts the records that were gone while their node is
+    not terminal (nothing written).
+    """
+    @property
+    def considered(self) -> int: ...
+    @property
+    def applied(self) -> int: ...
+    @property
+    def already_applied(self) -> int: ...
+    @property
+    def superseded(self) -> int: ...
+    @property
+    def pending_absent(self) -> int: ...
+    @property
+    def retained(self) -> int: ...
+    @property
+    def failed(self) -> int: ...
+    @property
+    def quarantined(self) -> int: ...
+    @property
+    def raised_counted(self) -> int: ...
+    @property
+    def over_attempt_bound(self) -> int: ...
+    @property
+    def retained_details(self) -> list[str]: ...
+    @property
+    def quarantine_refusals(self) -> list[str]: ...
+
+
+@final
+class Phase2RecoveryFailed:
+    """The pass failed before it recovered a record: the client family check, the discovery or
+    the count. Nothing was recovered.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class RecoveryCaseRecord:
+    """Bounded work and outcome counts of one recovery case."""
+    @property
+    def rows_selected(self) -> int: ...
+    @property
+    def candidates_returned(self) -> int: ...
+    @property
+    def duration_ms(self) -> int: ...
+    @property
+    def refusals(self) -> int: ...
+    @property
+    def errors(self) -> int: ...
+    @property
+    def failures_counted(self) -> int: ...
+    @property
+    def limit_reached(self) -> int: ...
+
+
+@final
+class RecoveryPassRecord:
+    """What one pass did: the candidates recovered over every case, the failures that no case
+    counted, the workflows over the failure limit, and the counts of each case. The audit
+    page of cases 2/3 and 4 scanned case_2_3.rows_selected workflows and returned
+    case_2_3.candidates_returned completion candidates.
+    """
+    @property
+    def recovered(self) -> int: ...
+    @property
+    def pass_errors(self) -> int: ...
+    @property
+    def over_failure_limit(self) -> int: ...
+    @property
+    def case_0(self) -> RecoveryCaseRecord: ...
+    @property
+    def case_1(self) -> RecoveryCaseRecord: ...
+    @property
+    def case_1_5(self) -> RecoveryCaseRecord: ...
+    @property
+    def case_1_6(self) -> RecoveryCaseRecord: ...
+    @property
+    def case_2_3(self) -> RecoveryCaseRecord: ...
+    @property
+    def case_4(self) -> RecoveryCaseRecord: ...
+
+
+@final
+class RecoveryPassFailed:
+    """The pass failed: the client family check, a discovery statement, the audit page or the
+    count of workflows over the limit. report holds the counts of the cases before it.
+    """
+    @property
+    def report(self) -> RecoveryPassRecord: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class SettleRequest:
+    """The claims of one settle: the worker and each claimed workflow task with its claim
+    generation. A naive datetime raises TypeError.
+    """
+    def __init__(self, *, worker_id: str, claims: list[tuple[uuid.UUID, datetime.datetime]]) -> None: ...
+
+
+@final
+class ClaimsSettled:
+    """The settle committed: the tasks of PAUSED and CANCELLED workflows, never to dispatch, in
+    input order. Every other claim dispatches.
+    """
+    @property
+    def blocked_task_ids(self) -> list[uuid.UUID]: ...
+
+
+@final
+class SettleFailed:
+    """The settle failed: the client family check, a statement, or rows outside the function's
+    contract (not retryable). The statements before the failed one stay committed.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class WorkflowResumed:
+    """The workflow was PAUSED; its tree is RUNNING again."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowNotPaused:
+    """The workflow exists and is not PAUSED. Nothing was written."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowResumeRecoveryFailed:
+    """The resume committed; the parent advance or the recovery pass of the tree after it
+    failed. The workflow is RUNNING, and workflow recovery finishes the work. Not retryable.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def message(self) -> str: ...
+
+
+@final
+class WorkflowStartFailed:
+    """The connect, the schema install, the client family check, the statement or an owed
+    child start failed, or a child build did not run. Nothing committed, or the commit
+    outcome is unknown: a resend with the same id then finds the workflow.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
 class CoverageRequest:
     """One frozen coverage pass: the two horizons, the declared retention periods in whole days,
     and how a damaged pass is serialized. A period outside 1 to 1825 days, a horizon below two
@@ -1914,6 +2316,156 @@ class PruneFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+
+
+@final
+class RerunCommandRecord:
+    """One rerun request: the source task id, the deadline of the new task (aware, or None
+    for no deadline) and the caller key. A naive deadline raises TypeError.
+    """
+    def __init__(self, *, source_task_id: uuid.UUID, deadline: datetime.datetime | None, caller_key: str | None) -> None: ...
+
+
+@final
+class RerunPolicyRecord:
+    """The enqueue policy of the new task: its retention class key, whether it keeps its input
+    for a rerun, and the reservation window of a caller key in microseconds. A window not
+    above 0 or above 30 days, or an empty class key, raises ValueError.
+    """
+    def __init__(self, *, retention_class_key: str, retain_rerun_input: bool, reservation_window_us: int) -> None: ...
+
+
+@final
+class PreparedStatement:
+    """One statement for the caller's connection: sql with a named bind and a cast for each
+    parameter, parameters (one value per bind, p1 first), and the result columns as (name,
+    SQL type) in row order.
+    """
+    @property
+    def name(self) -> str: ...
+    @property
+    def sql(self) -> str: ...
+    @property
+    def parameters(self) -> dict[str, object]: ...
+    @property
+    def columns(self) -> list[tuple[str, str]]: ...
+
+
+@final
+class RerunWriteRecord:
+    """The write of a rerun: run statement, then pass its row to decode_rerun_write.
+    new_task_id is the id minted for the new task.
+    """
+    @property
+    def statement(self) -> PreparedStatement: ...
+    @property
+    def new_task_id(self) -> uuid.UUID: ...
+
+
+@final
+class RerunSourceLiveRecord:
+    """The source is live; its own lifecycle owns its retry. Nothing written."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class RerunSourceAbsentRecord:
+    """No live or history record has the source id. Nothing written."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def reason(self) -> Literal['PREDATES_RETAINED_HISTORY', 'WITHIN_RETAINED_HISTORY', 'NOT_CLASSIFIED']: ...
+
+
+@final
+class RerunSourceCorruptRecord:
+    """The source history row does not decode; detail names why. Nothing written."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def detail(self) -> str: ...
+
+
+@final
+class RerunNotEligibleRecord:
+    """The source is not eligible for a rerun. Nothing written."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def reason(self) -> Literal['COMPLETED_SOURCE', 'WORKFLOW_TASK']: ...
+
+
+@final
+class RerunInputUnavailableRecord:
+    """The source stores no input envelope; disposition is its stored reason. Nothing written."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def disposition(self) -> str: ...
+
+
+@final
+class RerunInputCorruptRecord:
+    """The stored envelope, its input or its options fail their checks; detail names why.
+    Nothing written.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def detail(self) -> str: ...
+
+
+@final
+class RerunClassNotRegistered:
+    """The new task's retention class has no class row. Nothing written."""
+    @property
+    def class_key(self) -> str: ...
+
+
+@final
+class RerunClientFamilyMismatch:
+    """The database records the other client family, or none (stored is None). Nothing
+    written. message names both.
+    """
+    @property
+    def stored(self) -> Literal['PYTHON', 'RUST'] | None: ...
+    @property
+    def message(self) -> str: ...
+
+
+@final
+class RerunCallerKeyRefused:
+    """The caller key is not a valid idempotency key; cause names why. Nothing written."""
+    @property
+    def cause(self) -> str: ...
+
+
+@final
+class RerunEnqueuedRecord:
+    """The new task exists: this write, or this write already run in the caller's transaction."""
+    @property
+    def new_task_id(self) -> uuid.UUID: ...
+    @property
+    def source_task_id(self) -> uuid.UUID: ...
+    @property
+    def rerun_root_task_id(self) -> uuid.UUID: ...
+
+
+@final
+class RerunKeyReplayRecord:
+    """The caller key already holds this rerun command, as existing_task_id."""
+    @property
+    def existing_task_id(self) -> uuid.UUID: ...
+
+
+@final
+class RerunKeyConflictRecord:
+    """The caller key holds another command (the source's own included)."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def reserved_by_task_id(self) -> uuid.UUID: ...
 
 
 @final
@@ -2282,13 +2834,14 @@ class PreloadRefusedFrame:
 class PreparedWorker:
     """The worker of one worker manifest, not run yet. host.on_started() runs once per run on
     the callback thread, after the start and before the first claim; an exception from it is
-    logged at ERROR and the worker runs on.
+    logged at ERROR and the worker runs on. host.build_child_spec(request) builds each
+    sub-workflow child that a workflow step of the worker starts, on the callback thread.
     """
     def run(self) -> WorkerStopped | WorkerBootFailed | WorkerFailed:
         """Build the worker and run it until a stop request or a failure. Main thread only: the
         signal handlers run between wait slices, and there is no total bound. Raises
-        NotMainThread off the main thread, RuntimeError for a second run, and the exception of
-        a signal handler after the run ended.
+        NotMainThread off the main thread, RuntimeError for a second run, and, after the run
+        ended, the exception of a signal handler or the interrupt that a child build raised.
         """
     def request_stop(self) -> StopRequested:
         """Ask the run to stop: the claim loop ends and the children drain within the profile's
@@ -2349,6 +2902,13 @@ def decode_parent_frame(meta: bytes, body: bytes) -> InitFrame | RunFrame | Shar
     """Decode one parent frame from its metadata and its body. Pure."""
 
 
+def decode_rerun_write(write: RerunWriteRecord, row: tuple[object, ...]) -> RerunEnqueuedRecord | RerunKeyReplayRecord | RerunKeyConflictRecord:
+    """The outcome of the row of a rerun write (a tuple in column order). Pure. A row that does
+    not fit the columns raises CoreDefect; an answer that contradicts the minted id raises
+    PanicException.
+    """
+
+
 def encode_child_frame(frame: ReadyFrame | BootFailedFrame | ResultFrame | BodyReturnedFrame | LeftWorkEndedFrame | LeftWorkStuckFrame | SharedResultFrame | DeadlineFiredFrame | SecondCancelFrame | RunStuckFrame | LeftoverCancelFrame | LeftoverStuckFrame | LoopBlockedFrame) -> bytes | FrameTooLarge:
     """Encode a child frame: its bytes, or FrameTooLarge when it is over a bound of the
     header. Pure.
@@ -2363,9 +2923,17 @@ def mint_task_id() -> uuid.UUID | IdMintRefused:
     """Mint a new task id (UUIDv7). Starts no runtime."""
 
 
+def prepare_rerun_write(read: PreparedStatement, row: tuple[object, ...], command: RerunCommandRecord, policy: RerunPolicyRecord, *, sent_at: datetime.datetime) -> RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunCallerKeyRefused | IdMintRefused:
+    """Decide the rerun from the row of its read (a tuple in column order): the write, or the
+    answer that ends it with nothing written. Pure apart from the id mint. A row that does not
+    fit the columns raises CoreDefect.
+    """
+
+
 def prepare_worker(manifest_json: str, *, host: object) -> PreparedWorker | WorkerProfileRefused:
-    """Parse a worker manifest and pick its profile. Pure: starts no runtime. host has an
-    on_started() method. A refused manifest raises ManifestRefused.
+    """Parse a worker manifest and pick its profile. Pure: starts no runtime. host has the
+    methods on_started() and build_child_spec(request). A refused manifest raises
+    ManifestRefused.
     """
 
 
@@ -2375,6 +2943,10 @@ def protocol_numbers() -> ProtocolNumbers:
 
 def refresh_log_levels() -> None:
     """Read the effective level of every horsies logger again."""
+
+
+def rerun_read(command: RerunCommandRecord, policy: RerunPolicyRecord) -> PreparedStatement:
+    """The source read of a rerun as a PreparedStatement. Pure: starts no runtime."""
 
 
 def resolve_monitoring_window(*, since: datetime.datetime | None, until: datetime.datetime | None, now: datetime.datetime | None) -> MonitoringWindowRecord | WindowRefusedRecord:

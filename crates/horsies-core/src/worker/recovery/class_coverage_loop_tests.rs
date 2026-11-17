@@ -162,8 +162,8 @@ async fn a_started_reaper_logs_an_unserved_isolated_stream() {
         )),
         database.pool.clone(),
         database.pool.clone(),
-        Arc::new(WorkflowSpecRegistry::new(
-            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         )),
         RecoveryConfig {
             check_interval_ms: CHECK_INTERVAL_MS,

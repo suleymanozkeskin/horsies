@@ -10,13 +10,13 @@
 //! `PYTHON`.
 
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use horsies_core::core::lifecycle::OwnedClaim;
 use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
 use horsies_core::{BrokerError, BrokerErrorCode, ClientFamily, PoolProfile, PostgresBroker};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -24,10 +24,12 @@ use uuid::Uuid;
 use crate::bridge::blocking::{call_blocking, call_blocking_within};
 use crate::bridge::completion_queue::{call_async, done_future};
 use crate::bridge::CallKind;
+use crate::child_spec::{PythonChildSpecSource, RegisteredSource};
 use crate::errors::{refusal_error, ManifestRefused};
 use crate::operations::arguments::utc_instant;
 use crate::operations::cancel::cancel_task_operation;
 use crate::operations::claim::{claim_pass_operation, ClaimPassRequest};
+use crate::operations::claim_settle::{settle_claimed_workflow_tasks_operation, SettleRequest};
 use crate::operations::coverage::{ensure_partition_coverage_operation, CoverageRequestArgument};
 use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
 use crate::operations::expiry_and_orphans::{
@@ -59,16 +61,24 @@ use crate::operations::task_info::{task_info_operation, TaskInfoParts};
 use crate::operations::task_lists::{
     expired_tasks_operation, stale_tasks_operation, stale_threshold,
 };
+use crate::operations::worker_ping::{ping_request, ping_workers_operation};
 use crate::operations::worker_reads::{
     class_coverage_operation, class_report_operation, history_limit,
     worker_state_history_operation, worker_state_operation, worker_states_operation,
 };
 use crate::operations::workflow_lifecycle::{cancel_workflow_operation, pause_workflow_operation};
+use crate::operations::workflow_phase2::{
+    advance_workflow_parents_operation, finish_workflow_node_operation, NodeFinishRequest,
+};
+use crate::operations::workflow_phase2_recovery::recover_workflow_phase2_operation;
 use crate::operations::workflow_reads::{
     wait_workflow_result_operation, workflow_node_result_operation,
     workflow_node_results_operation, workflow_nodes_operation, workflow_status_operation,
 };
+use crate::operations::workflow_recovery::recover_workflows_operation;
+use crate::operations::workflow_resume::resume_workflow_operation;
 use crate::operations::workflow_retention::delete_expired_workflows_operation;
+use crate::operations::workflow_start::{start_workflow_operation, WorkflowStartRequest};
 use crate::process_core::{core_for_call, Core};
 use crate::records::{BrokerFailure, DatabasePingRecord, HandleClosed, Outcome};
 
@@ -136,12 +146,28 @@ fn handle_profile(text: &str) -> Result<PoolProfile, String> {
 #[pyclass(module = "horsies._core", name = "CoreHandle", frozen)]
 pub struct CoreHandle {
     connection: BrokerConnection,
+    /// The child spec source of the handle's workflow operations, set once
+    /// by `register_child_spec_source`.
+    child_spec_source: OnceLock<RegisteredSource>,
 }
 
 impl CoreHandle {
     /// A clone of the connection, for an operation future.
     pub fn connection(&self) -> BrokerConnection {
         self.connection.clone()
+    }
+
+    /// The child spec source of one operation on `core`.
+    ///
+    /// Failure exits: `RuntimeError` when no source is registered (a defect
+    /// of the client: the handle's workflow operations build children).
+    fn child_spec_source(&self, core: &'static Core) -> PyResult<PythonChildSpecSource> {
+        match self.child_spec_source.get() {
+            Some(callable) => Ok(PythonChildSpecSource::new(core, Arc::clone(callable))),
+            None => Err(PyRuntimeError::new_err(
+                "CoreHandle has no child spec source; call register_child_spec_source first",
+            )),
+        }
     }
 }
 
@@ -161,7 +187,21 @@ impl CoreHandle {
             .map_err(|refused| ManifestRefused::new_err((refused.field_path, refused.cause)))?;
         Ok(Self {
             connection: BrokerConnection::new(manifest, profile),
+            child_spec_source: OnceLock::new(),
         })
+    }
+
+    /// Register the child spec source of the handle's workflow operations:
+    /// a callable that takes a `ChildSpecRequest` and returns
+    /// `ChildSpecBuilt` or `ChildSpecRefused`. The core calls it on the
+    /// callback thread for each sub-workflow child that an operation builds.
+    /// A second registration raises `RuntimeError`. Starts nothing.
+    fn register_child_spec_source(&self, source: Py<PyAny>) -> PyResult<()> {
+        self.child_spec_source
+            .set(Arc::new(source))
+            .map_err(|_already| {
+                PyRuntimeError::new_err("CoreHandle has a child spec source already")
+            })
     }
 
     /// The version of the manifest this handle was built from.
@@ -652,6 +692,179 @@ impl CoreHandle {
             "CoreHandle.pause_workflow_async",
             CallKind::Write,
             pause_workflow_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// Start one workflow (`horsies_workflow_start`): `WorkflowStarted`,
+    /// `WorkflowExists`, `WorkflowIdTaken` or `WorkflowStartFailed`. Writes;
+    /// the children of its sub-workflow roots come from the child spec
+    /// source. A build that raised `KeyboardInterrupt` or `SystemExit`
+    /// raises it again. Awaitable only: its caller, `start_workflow_async`,
+    /// is a coroutine. With no child spec source it raises `RuntimeError`.
+    fn start_workflow_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'py, WorkflowStartRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        let source = self.child_spec_source(core)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.start_workflow_async",
+            CallKind::Write,
+            start_workflow_operation(self.connection(), request.get().parts(), source),
+        )
+    }
+
+    /// Resume one workflow tree (`horsies_workflow_resume`): `WorkflowResumed`,
+    /// `WorkflowNotPaused`, `WorkflowResumeRecoveryFailed`, `WorkflowAbsent`
+    /// or `HandleFailed`. Writes; the child starts it owes build their
+    /// children through the child spec source. A build that raised
+    /// `KeyboardInterrupt` or `SystemExit` raises it again. Awaitable only:
+    /// its callers run it on the loop runner. With no child spec source it
+    /// raises `RuntimeError`.
+    fn resume_workflow_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        let source = self.child_spec_source(core)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.resume_workflow_async",
+            CallKind::Write,
+            resume_workflow_operation(self.connection(), workflow_id, source),
+        )
+    }
+
+    /// Phase 2 of one finished workflow task (`horsies_workflow_node_finish`):
+    /// `NodeFinished` or `NodeFinishFailed`. Writes; the child starts it owes
+    /// build their children through the child spec source. A build that
+    /// raised `KeyboardInterrupt` or `SystemExit` raises it again. Awaitable
+    /// only: its caller, the worker's finalize, is a coroutine. With no
+    /// child spec source it raises `RuntimeError`.
+    fn finish_workflow_node_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'py, NodeFinishRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        let source = self.child_spec_source(core)?;
+        let request = request.get();
+        call_async(
+            py,
+            core,
+            "CoreHandle.finish_workflow_node_async",
+            CallKind::Write,
+            finish_workflow_node_operation(
+                self.connection(),
+                request.task_id,
+                request.form,
+                request.wake,
+                source,
+            ),
+        )
+    }
+
+    /// Advance the parent nodes above `child_workflow_ids`
+    /// (`horsies_workflow_child_finish`, one transaction per level):
+    /// `ParentsAdvanced` or `ParentAdvanceStopped`. Writes; the child starts
+    /// a level owes build their children through the child spec source. A
+    /// build that raised `KeyboardInterrupt` or `SystemExit` raises it again.
+    /// With no child spec source it raises `RuntimeError`.
+    fn advance_workflow_parents_async<'py>(
+        &self,
+        py: Python<'py>,
+        child_workflow_ids: Vec<Uuid>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        let source = self.child_spec_source(core)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.advance_workflow_parents_async",
+            CallKind::Write,
+            advance_workflow_parents_operation(self.connection(), child_workflow_ids, source),
+        )
+    }
+
+    /// One phase-2 recovery pass of the reaper: the phase-2 records older than
+    /// `grace_ms` and under `quarantine_after_attempts`, oldest first, at most
+    /// `max_rows`, each in its own transaction: `Phase2RecoveryRecord` or
+    /// `Phase2RecoveryFailed`. Writes; owed child starts build their children
+    /// through the child spec source. A build that raised `KeyboardInterrupt`
+    /// or `SystemExit` raises it again after the pass. A negative value
+    /// raises `OverflowError`; with no child spec source it raises
+    /// `RuntimeError`.
+    #[pyo3(signature = (*, grace_ms, max_rows, quarantine_after_attempts))]
+    fn recover_workflow_phase2_async<'py>(
+        &self,
+        py: Python<'py>,
+        grace_ms: u64,
+        max_rows: u32,
+        quarantine_after_attempts: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        let source = self.child_spec_source(core)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.recover_workflow_phase2_async",
+            CallKind::Write,
+            recover_workflow_phase2_operation(
+                self.connection(),
+                grace_ms,
+                max_rows,
+                quarantine_after_attempts,
+                source,
+            ),
+        )
+    }
+
+    /// One global workflow recovery pass of the reaper, with `failure_limit`
+    /// passes per workflow before it fails closed: `RecoveryPassRecord` or
+    /// `RecoveryPassFailed`. Writes; each candidate commits alone, and owed
+    /// child starts build their children through the child spec source. A
+    /// build that raised `KeyboardInterrupt` or `SystemExit` raises it again
+    /// after the pass. A negative value raises `OverflowError`; with no child
+    /// spec source it raises `RuntimeError`.
+    #[pyo3(signature = (*, failure_limit))]
+    fn recover_workflows_async<'py>(
+        &self,
+        py: Python<'py>,
+        failure_limit: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        let source = self.child_spec_source(core)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.recover_workflows_async",
+            CallKind::Write,
+            recover_workflows_operation(self.connection(), failure_limit, source),
+        )
+    }
+
+    /// Settle the claimed workflow tasks of one claim pass
+    /// (`horsies_workflow_claimed_tasks_settle`): `ClaimsSettled` with the
+    /// tasks of PAUSED and CANCELLED workflows, never to dispatch, or
+    /// `SettleFailed`. Writes, one statement per 1000 claims. A claim with no
+    /// task sends nothing.
+    fn settle_claimed_workflow_tasks_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'py, SettleRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.settle_claimed_workflow_tasks_async",
+            CallKind::Write,
+            settle_claimed_workflow_tasks_operation(self.connection(), request.get().parts()),
         )
     }
 
@@ -1151,6 +1364,38 @@ impl CoreHandle {
             "CoreHandle.expired_tasks_async",
             CallKind::Read,
             expired_tasks_operation(self.connection()),
+        )
+    }
+
+    /// Ping the workers and collect the distinct replies within the window
+    /// (`PostgresBroker::ping_workers`, on the process listener):
+    /// `WorkerPongsRecord`, or `BrokerFailure` with `INVALID_INPUT`,
+    /// `LISTENER_DISABLED` (an `ASSUME_INITIALIZED` handle has no listener)
+    /// or `WORKER_PING_FAILED`. The arguments follow Python's rules
+    /// (`ping_request`); a refused argument answers in a future that is
+    /// already done, before any core call. Sends one NOTIFY; writes no row.
+    /// Awaitable only: the sync facade of `Horsies` runs the async method
+    /// on the broker's loop runner. A cancelled await drops the wait and the
+    /// reply subscription.
+    #[pyo3(signature = (*, target_worker_id, timeout_seconds, min_responses))]
+    fn ping_workers_async<'py>(
+        &self,
+        py: Python<'py>,
+        target_worker_id: &Bound<'_, PyAny>,
+        timeout_seconds: &Bound<'_, PyAny>,
+        min_responses: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let request = match ping_request(target_worker_id, timeout_seconds, min_responses)? {
+            Ok(request) => request,
+            Err(refused) => return done_future(py, refused),
+        };
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.ping_workers_async",
+            CallKind::Read,
+            ping_workers_operation(self.connection(), request),
         )
     }
 

@@ -1,5 +1,6 @@
 ---
 title: Async Frameworks
+section: python
 summary: Own the broker in a FastAPI lifespan, call the async forms from coroutines, and stay inside the event-loop limit.
 related: [../configuration/broker-config, ../quick-start/getting-started, ../tasks/sending-tasks]
 tags: [guides, async, fastapi, asgi, broker, event-loop]
@@ -13,7 +14,7 @@ An ASGI application runs endpoint code on an event loop. Horsies has a sync form
 
 Read this page when a web framework (FastAPI, Starlette, or another ASGI framework) sends tasks or starts workflows.
 
-The sync forms block their thread. On a thread that runs an event loop, the block would stop every coroutine on that loop. For this reason the sync forms refuse to run there. See [Async Code and Jupyter](/horsies/configuration/broker-config/#async-code-and-jupyter) for the full table of sync calls and their `ASYNC_CONTEXT` results.
+The sync forms block their thread. On a thread that runs an event loop, the block would stop every coroutine on that loop. For this reason the sync forms refuse to run there. See [Async Code and Jupyter](/horsies/configuration/broker-connections/#async-code-and-jupyter) for the full table of sync calls and their `ASYNC_CONTEXT` results.
 
 ## How To
 
@@ -71,7 +72,7 @@ A sync call in this endpoint returns `Err` with `ASYNC_CONTEXT`. Nothing is enqu
 
 ### Use the Sync Forms Only in Plain `def` Endpoints
 
-FastAPI runs a plain `def` endpoint in a thread pool. That thread has no event loop, so the sync form is allowed. A sync send, with or without an idempotency key, writes on the endpoint's thread, through the sync send pool of the broker. The first send of the broker and the other sync calls, for example `TaskHandle.get()`, run on the broker's own runner loop.
+FastAPI runs a plain `def` endpoint in a thread pool. That thread has no event loop, so the sync form is allowed. A sync send and a sync result read (`TaskHandle.get()`) call the core of the process on the endpoint's thread. A sync workflow start runs on the broker's own runner loop.
 
 ```python
 @api.post("/welcome-blocking/{address}")
@@ -83,15 +84,15 @@ def welcome_blocking(address: str) -> dict[str, str]:
             raise HTTPException(status_code=503, detail=send_error.code.value)
 ```
 
-Prefer one form per application. The async form opens connections in the set of the server's event loop. The sync form opens them in the set of the runner loop and in the sync send pool. A mix of both forms can open all three. See [Connection Ceiling](/horsies/configuration/broker-config/#connection-ceiling).
+Sends and result reads of both forms use the one core pool of the broker. A workflow start opens connections in the resource set of its loop: the server's event loop for the async form, the runner loop for the sync form. See [Connection Ceiling](/horsies/configuration/broker-connections/#connection-ceiling).
 
 ## The Event-Loop Limit
 
-A broker keeps one resource set (pools and a listener) for each event loop that calls it. It serves at most 5 open caller loops, plus its own sync runner loop and, in a worker child, the task loop (`MAX_CALLER_EVENT_LOOPS = 5`).
+A workflow start and a workflow resume use one broker resource set (pools and a listener) for each event loop that calls them. A broker serves at most 5 open caller loops, plus its own sync runner loop and, in a worker child, the task loop (`MAX_CALLER_EVENT_LOOPS = 5`). Sends and reads run on the core of the process and have no such limit.
 
-A call from one more open loop returns `EVENT_LOOP_LIMIT` in the error type of that call. Nothing runs. The error clears when one of the open loops closes.
+A workflow start or resume from one more open loop returns `EVENT_LOOP_LIMIT` in the error type of that call. Nothing runs. The error clears when one of the open loops closes.
 
-An ASGI server such as uvicorn runs one loop for each process, so a server stays far below the limit. The limit matters for code that creates loops itself, and for test runs. See [Event Loops](/horsies/configuration/broker-config/#event-loops).
+An ASGI server such as uvicorn runs one loop for each process, so a server stays far below the limit. The limit matters for code that creates loops itself, and for test runs. See [Event Loops](/horsies/configuration/broker-connections/#event-loops).
 
 ## Things to Avoid
 
@@ -106,14 +107,14 @@ broker.close()
 await broker.close_async()
 ```
 
-**Don't create an event loop for each call.** Each open loop keeps its resource set. The sixth open loop gets `EVENT_LOOP_LIMIT`.
+**Don't create an event loop for each workflow start.** Each open loop keeps its resource set. The sixth open loop gets `EVENT_LOOP_LIMIT`.
 
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong: each call leaves one more open loop
 loop = asyncio.new_event_loop()
-loop.run_until_complete(horsies_app.get_broker().ping_database_async())
+loop.run_until_complete(spec.start_async())
 
 # Correct: asyncio.run() closes its loop
-asyncio.run(horsies_app.get_broker().ping_database_async())
+asyncio.run(spec.start_async())
 ```

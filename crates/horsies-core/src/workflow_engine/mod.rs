@@ -2,6 +2,7 @@
 
 pub mod args_merge;
 pub mod bound_handle;
+pub mod child_spec;
 pub(crate) mod child_start;
 pub mod engine;
 pub mod error;
@@ -11,6 +12,7 @@ pub mod phase2_recovery;
 pub mod query;
 pub mod recovery;
 pub(crate) mod recovery_limit;
+pub mod spec_data;
 pub mod start;
 pub(crate) mod start_statement;
 pub(crate) mod steps;

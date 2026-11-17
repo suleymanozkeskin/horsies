@@ -1,5 +1,6 @@
 ---
 title: Deploying Code Changes
+section: shared
 summary: What happens to stored task rows and workflows when task signatures, task names, return types or models change, and the order of a safe deploy.
 related: [../workers/worker-architecture, ../tasks/errors, ../internals/serialization, ../concepts/workflows/subworkflows, ../concepts/workflows/workflow-api]
 tags: [operations, deploy, rolling-deploy, rename, model-change, AliasChoices, WORKER_SERIALIZATION_ERROR, WORKER_RESOLUTION_ERROR, SUBWORKFLOW_LOAD_FAILED, RESULT_DESERIALIZATION_ERROR]

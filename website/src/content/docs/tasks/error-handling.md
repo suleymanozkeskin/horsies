@@ -1,5 +1,6 @@
 ---
 title: Error Handling
+section: python
 summary: Patterns for handling TaskResult errors with explicit control flow.
 related: [errors, retrieving-results, retry-policy]
 tags: [tasks, errors, TaskResult, patterns]
@@ -82,7 +83,7 @@ def fetch_api_data(*, url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
     ...
 ```
 
-See [retry-policy](../retry-policy) for configuration details.
+The `RetryPolicy` API is in [Configure Retries](/horsies/tasks/defining-tasks/#configure-retries). The retry rules are on [Retry Policy](/horsies/tasks/retry-policy/).
 
 ### Handling Upstream Failures in Chained Tasks
 

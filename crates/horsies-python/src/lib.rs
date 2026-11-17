@@ -30,6 +30,7 @@
 
 mod bridge;
 mod child_handle;
+mod child_spec;
 mod errors;
 mod frames;
 mod handle;
@@ -68,8 +69,8 @@ fn core_state() -> &'static str {
 /// The refusal of a task id mint: the cause from the core's UUIDv7 source.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
-struct IdMintRefused {
-    cause: String,
+pub(crate) struct IdMintRefused {
+    pub(crate) cause: String,
 }
 
 /// A minted task id, or the refusal.
@@ -148,6 +149,31 @@ fn refresh_log_levels(py: Python<'_>) -> PyResult<()> {
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<handle::CoreHandle>()?;
+    module.add_class::<child_spec::ChildSpecRequestRecord>()?;
+    module.add_class::<child_spec::ChildSpecSourceRow>()?;
+    module.add_class::<child_spec::ChildSpecBuilt>()?;
+    module.add_class::<child_spec::ChildSpecRefused>()?;
+    module.add_class::<operations::workflow_start::WorkflowStartRequest>()?;
+    module.add_class::<operations::workflow_start::WorkflowStarted>()?;
+    module.add_class::<operations::workflow_start::WorkflowExists>()?;
+    module.add_class::<operations::workflow_start::WorkflowIdTaken>()?;
+    module.add_class::<operations::workflow_start::WorkflowStartFailed>()?;
+    module.add_class::<operations::workflow_resume::WorkflowResumed>()?;
+    module.add_class::<operations::workflow_resume::WorkflowNotPaused>()?;
+    module.add_class::<operations::workflow_resume::WorkflowResumeRecoveryFailed>()?;
+    module.add_class::<operations::workflow_phase2::NodeFinishRequest>()?;
+    module.add_class::<operations::workflow_phase2::NodeFinishedRecord>()?;
+    module.add_class::<operations::workflow_phase2::NodeFinishFailed>()?;
+    module.add_class::<operations::workflow_phase2::ParentsAdvanced>()?;
+    module.add_class::<operations::workflow_phase2::ParentAdvanceStoppedRecord>()?;
+    module.add_class::<operations::workflow_phase2_recovery::Phase2RecoveryRecord>()?;
+    module.add_class::<operations::workflow_phase2_recovery::Phase2RecoveryFailed>()?;
+    module.add_class::<operations::workflow_recovery::RecoveryCaseRecord>()?;
+    module.add_class::<operations::workflow_recovery::RecoveryPassRecord>()?;
+    module.add_class::<operations::workflow_recovery::RecoveryPassFailed>()?;
+    module.add_class::<operations::claim_settle::SettleRequest>()?;
+    module.add_class::<operations::claim_settle::ClaimsSettled>()?;
+    module.add_class::<operations::claim_settle::SettleFailed>()?;
     module.add_class::<child_handle::CoreChildHandle>()?;
     module.add_class::<scheduler::CoreScheduler>()?;
     module.add_class::<records::BrokerFailure>()?;
@@ -181,9 +207,26 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::coverage::CoverageFailed>()?;
     module.add_class::<operations::pruning::PrunePassRecord>()?;
     module.add_class::<operations::pruning::PruneFailed>()?;
+    module.add_class::<operations::rerun::RerunCommandArgument>()?;
+    module.add_class::<operations::rerun::RerunPolicyArgument>()?;
+    module.add_class::<operations::rerun::PreparedStatementRecord>()?;
+    module.add_class::<operations::rerun::RerunWriteRecord>()?;
+    module.add_class::<operations::rerun::RerunSourceLiveRecord>()?;
+    module.add_class::<operations::rerun::RerunSourceAbsentRecord>()?;
+    module.add_class::<operations::rerun::RerunSourceCorruptRecord>()?;
+    module.add_class::<operations::rerun::RerunNotEligibleRecord>()?;
+    module.add_class::<operations::rerun::RerunInputUnavailableRecord>()?;
+    module.add_class::<operations::rerun::RerunInputCorruptRecord>()?;
+    module.add_class::<operations::rerun::RerunClassNotRegistered>()?;
+    module.add_class::<operations::rerun::RerunClientFamilyMismatch>()?;
+    module.add_class::<operations::rerun::RerunCallerKeyRefused>()?;
+    module.add_class::<operations::rerun::RerunEnqueuedRecord>()?;
+    module.add_class::<operations::rerun::RerunKeyReplayRecord>()?;
+    module.add_class::<operations::rerun::RerunKeyConflictRecord>()?;
     module.add_class::<operations::enqueue::EnqueueRequest>()?;
     module.add_class::<operations::enqueue::Enqueued>()?;
     module.add_class::<operations::enqueue::SendSuppressed>()?;
+    module.add_class::<operations::enqueue::SendAsyncContext>()?;
     module.add_class::<operations::enqueue::SendValidationFailed>()?;
     module.add_class::<operations::enqueue::SendEnqueueFailed>()?;
     module.add_class::<operations::enqueue::SendPayloadMismatch>()?;
@@ -251,6 +294,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::monitoring_reads::TaskDetailAbsent>()?;
     module.add_class::<operations::task_lists::TaskListComplete>()?;
     module.add_class::<operations::task_lists::TaskListTruncated>()?;
+    module.add_class::<operations::worker_ping::WorkerPongRecord>()?;
+    module.add_class::<operations::worker_ping::WorkerPongsRecord>()?;
     module.add_class::<operations::worker_reads::ResourceShortageRecord>()?;
     module.add_class::<operations::worker_reads::DownSlotRecord>()?;
     module.add_class::<operations::worker_reads::AllSlotsServingRecord>()?;
@@ -307,6 +352,18 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(baseline_sql_files, module)?)?;
     module.add_function(wrap_pyfunction!(core_state, module)?)?;
     module.add_function(wrap_pyfunction!(mint_task_id, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        operations::rerun::rerun_read_function,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        operations::rerun::prepare_rerun_write_function,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        operations::rerun::decode_rerun_write_function,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(worker::prepare_worker, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_log_levels, module)?)?;
     module.add_function(wrap_pyfunction!(

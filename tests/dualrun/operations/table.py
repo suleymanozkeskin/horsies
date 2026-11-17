@@ -22,9 +22,17 @@ class PoolMode:
     same database. The test's own sessions read the committed state."""
 
 
-type OperationMode = PoolMode
-"""The modes that a table uses. The statement and the connection modes come
-with the first module whose operations run inside a caller's transaction."""
+@dataclass(frozen=True, slots=True)
+class StatementMode:
+    """The core builds each statement and decides the outcome; the caller's
+    connection runs the statements (``rerun_task(connection, ...)``). The
+    core run uses the test's connection as given, as the Python run does, so
+    it needs no core connection and no test dialect."""
+
+
+type OperationMode = PoolMode | StatementMode
+"""The modes that a table uses. The connection mode comes with the first
+module whose core operations run on a connection the core does not own."""
 
 
 class SwitchModule(Enum):

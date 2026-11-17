@@ -6,8 +6,18 @@ sequence of reruns, each in its own caller transaction:
 - reference side: ``reference/rerun_write.py``, the key claim
   (``horsies_key_reservation_claim``) and the INSERT that ``rerun_task`` sent
   before the switch;
-- candidate side: ``rerun_task``, one call of ``horsies_enqueue_task`` with
+- candidate side: the Python ``rerun_task`` on the function
+  (``reference/rerun_caller.py``), one call of ``horsies_enqueue_task`` with
   the lineage ``RERUN`` (0004_lifecycle_functions.sql).
+
+Caller pairs (the switch of ``rerun_task`` to the core), on the same seeds
+and sequences: reference = the Python ``rerun_task`` on the function
+(``reference/rerun_caller.py``); candidate = the production ``rerun_task``,
+whose read and write the core builds and decides
+(``horsies._core.rerun_read``, ``prepare_rerun_write``,
+``decode_rerun_write``) and the test's connection runs. Both write through
+``horsies_enqueue_task``, so the snapshots and the answers must be equal with
+no exception.
 
 Sequences: an unkeyed rerun; a keyed rerun sent twice (key replay); a keyed
 rerun sent again with another deadline (key conflict); a rerun that the
@@ -17,11 +27,9 @@ must be equal and the answers must be equal.
 Each caller transaction waits before the rerun, so the start of the
 transaction and the time of the rerun's statement differ. The answer records
 whether ``enqueued_at`` and ``created_at`` are later than the start of the
-transaction: both sides date ``enqueued_at`` by the statement. ``created_at``
-is the one known difference: the old INSERT dated it by the statement, and
-``horsies_insert_task_rows`` dates it by the start of the transaction (#1422).
-Each answer also checks that the stored fingerprint is the version-1
-fingerprint of the row's own columns.
+transaction: both sides date both by the statement. Each answer also checks
+that the stored fingerprint is the version-1 fingerprint of the row's own
+columns.
 """
 
 from __future__ import annotations
@@ -56,6 +64,7 @@ from tests.dualrun.clients import sqlalchemy_url
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
+from tests.dualrun.reference.rerun_caller import rerun_task as python_rerun_task
 from tests.dualrun.reference.rerun_write import rerun_task_before
 from tests.dualrun.seeds import SeedCoverage, SeedStatus, TaskSeed, insert_task
 
@@ -323,26 +332,13 @@ def _pair(
         make_database,
         _seed,
         _side('key claim and INSERT', rerun_task_before, steps),
-        _side('horsies_enqueue_task', rerun_task, steps),
+        _side('horsies_enqueue_task', python_rerun_task, steps),
         SeedCoverage.HISTORY_AND_BEATS,
     ):
         case Ok(pair):
             return pair
         case Err(failed):
             pytest.fail(f'{failed.step}: {failed.cause}')
-
-
-def _same_except_created_at(
-    reference: tuple[StepAnswer, ...], candidate: tuple[StepAnswer, ...]
-) -> None:
-    """The answers are equal but for ``created_at`` of each written row,
-    which the reference dates by the statement and the candidate by the start
-    of the transaction (#1422)."""
-    expected = tuple(
-        replace(answer, created_by_statement=False) if isinstance(answer, Enqueued) else answer
-        for answer in reference
-    )
-    assert candidate == expected
 
 
 _FIRST_ENQUEUED: Final = Enqueued(
@@ -362,7 +358,7 @@ def test_an_unkeyed_rerun_writes_the_row_of_before(empty_database: MakeDatabase)
 
     assert pair.diff.entries == (), render_diff(pair.diff)
     assert pair.reference.report == (_FIRST_ENQUEUED,)
-    _same_except_created_at(pair.reference.report, pair.candidate.report)
+    assert pair.candidate.report == pair.reference.report
 
 
 def test_a_keyed_rerun_sent_twice_replays_the_first(empty_database: MakeDatabase) -> None:
@@ -372,7 +368,7 @@ def test_a_keyed_rerun_sent_twice_replays_the_first(empty_database: MakeDatabase
 
     assert pair.diff.entries == (), render_diff(pair.diff)
     assert pair.reference.report == (_FIRST_ENQUEUED, KeyReplayed(existing_task='rerun 1'))
-    _same_except_created_at(pair.reference.report, pair.candidate.report)
+    assert pair.candidate.report == pair.reference.report
 
 
 def test_a_keyed_rerun_of_another_command_conflicts(empty_database: MakeDatabase) -> None:
@@ -388,7 +384,7 @@ def test_a_keyed_rerun_of_another_command_conflicts(empty_database: MakeDatabase
         _FIRST_ENQUEUED,
         KeyConflicted(source='source failed', reserved_by='rerun 1'),
     )
-    _same_except_created_at(pair.reference.report, pair.candidate.report)
+    assert pair.candidate.report == pair.reference.report
 
 
 def test_a_rolled_back_keyed_rerun_leaves_no_row_and_no_reservation(
@@ -408,7 +404,7 @@ def test_a_rolled_back_keyed_rerun_leaves_no_row_and_no_reservation(
         _FIRST_ENQUEUED,
         replace(_FIRST_ENQUEUED, new_task='rerun 2'),
     )
-    _same_except_created_at(pair.reference.report, pair.candidate.report)
+    assert pair.candidate.report == pair.reference.report
 
 
 def test_refused_sources_write_nothing_as_before(empty_database: MakeDatabase) -> None:
@@ -424,4 +420,54 @@ def test_refused_sources_write_nothing_as_before(empty_database: MakeDatabase) -
         Refused(outcome='RerunSourceLive', source='source live'),
         Refused(outcome='RerunNotEligible', source='source completed'),
     )
+    assert pair.candidate.report == pair.reference.report
+
+
+# ---- The caller switch: the Python rerun against the core's steps ----
+
+
+def _caller_pair(
+    make_database: MakeDatabase, steps: tuple[RerunStep, ...]
+) -> OperationDualRun[tuple[StepAnswer, ...], tuple[StepAnswer, ...]]:
+    match dual_run(
+        make_database,
+        _seed,
+        _side('Python rerun_task', python_rerun_task, steps),
+        _side('rerun_task through the core', rerun_task, steps),
+        SeedCoverage.HISTORY_AND_BEATS,
+    ):
+        case Ok(pair):
+            return pair
+        case Err(failed):
+            pytest.fail(f'{failed.step}: {failed.cause}')
+
+
+_CALLER_SEQUENCES: Final = {
+    'unkeyed': (RerunStep(Source.FAILED, None, DEADLINE, TransactionEnd.COMMIT),),
+    'keyed twice': (
+        RerunStep(Source.FAILED, CALLER_KEY, None, TransactionEnd.COMMIT),
+        RerunStep(Source.FAILED, CALLER_KEY, None, TransactionEnd.COMMIT),
+    ),
+    'key conflict': (
+        RerunStep(Source.FAILED, CALLER_KEY, None, TransactionEnd.COMMIT),
+        RerunStep(Source.FAILED, CALLER_KEY, DEADLINE, TransactionEnd.COMMIT),
+    ),
+    'rolled back': (
+        RerunStep(Source.FAILED, CALLER_KEY, None, TransactionEnd.ROLLBACK),
+        RerunStep(Source.FAILED, CALLER_KEY, DEADLINE, TransactionEnd.COMMIT),
+    ),
+    'refused sources': (
+        RerunStep(Source.LIVE, CALLER_KEY, None, TransactionEnd.COMMIT),
+        RerunStep(Source.COMPLETED, CALLER_KEY, None, TransactionEnd.COMMIT),
+    ),
+}
+
+
+@pytest.mark.parametrize('sequence', sorted(_CALLER_SEQUENCES))
+def test_the_core_rerun_writes_and_answers_as_the_python_rerun(
+    empty_database: MakeDatabase, sequence: str
+) -> None:
+    pair = _caller_pair(empty_database, _CALLER_SEQUENCES[sequence])
+
+    assert pair.diff.entries == (), render_diff(pair.diff)
     assert pair.candidate.report == pair.reference.report

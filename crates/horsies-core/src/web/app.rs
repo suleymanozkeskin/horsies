@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{NestedPath, Request, State};
+use axum::extract::{NestedPath, OriginalUri, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -12,15 +12,13 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::broker::PostgresBroker;
-use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::Horsies;
+use crate::monitoring::ResumeChildren;
 
 use super::auth::{
     MonitoringAuthPolicy, MonitoringRequest, INTENT_HEADER, INTENT_VALUE, NOT_AUTHORIZED,
 };
-use super::common::{ApiError, CodeBody, DetailBody};
+use super::common::{ApiError, CodeBody, DetailBody, InvalidInputRefused, INVALID_INPUT};
 use super::events::EventBroadcaster;
 use super::events::HEARTBEAT;
 use super::routes;
@@ -60,11 +58,19 @@ pub(crate) struct WebState {
     pub actions_enabled: bool,
     pub ui_config: MonitoringUiConfig,
     pub assets: Arc<dyn AssetStore>,
-    pub workflow_registry: Arc<WorkflowSpecRegistry>,
-    pub payload: PayloadPolicy,
-    pub retention: RetentionConfig,
+    /// Where the resume route gets the children that a resume owes.
+    pub children: ResumeChildren,
     pub heartbeat: std::time::Duration,
+    /// The version that `/api/meta` reports: the package version of the
+    /// client that serves the app.
+    pub client_version: String,
 }
+
+/// The mount path of a request that the framework-neutral handler serves:
+/// the base path that its host framework gave. When present, it is the base
+/// path of the page and of `/api/meta` in place of axum's nested path.
+#[derive(Debug, Clone)]
+pub(crate) struct MountPath(pub(crate) String);
 
 /// Build a monitoring router for an already connected broker.
 ///
@@ -93,10 +99,12 @@ where
         actions_enabled,
         ui_config: config,
         assets: Arc::new(EmbeddedAssets),
-        workflow_registry: Arc::new(app.workflow_registry().clone()),
-        payload: app.config().payload.clone(),
-        retention: app.config().retention.clone(),
+        children: ResumeChildren::Registry {
+            registry: Arc::new(app.workflow_registry().clone()),
+            retention: app.config().retention.clone(),
+        },
         heartbeat: HEARTBEAT,
+        client_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
     build_router(state)
 }
@@ -108,7 +116,10 @@ pub(crate) fn build_router(state: WebState) -> Router {
     let action_routes = routes::action_router()
         .route_layer(middleware::from_fn_with_state(state.clone(), action_guard));
 
-    let api = read_routes.merge(action_routes).fallback(api_not_found);
+    let api = read_routes
+        .merge(action_routes)
+        .fallback(api_not_found)
+        .layer(middleware::from_fn(log_invalid_input));
     Router::new()
         .nest("/api", api)
         .route("/", get(serve_spa))
@@ -118,6 +129,36 @@ pub(crate) fn build_router(state: WebState) -> Router {
 
 async fn api_not_found() -> Response {
     ApiError::detail(StatusCode::NOT_FOUND, "Not found.").into_response()
+}
+
+/// The path of a request as the client sent it: the mount path of the
+/// framework-neutral handler, then the path that the router got; or the
+/// path before any nesting. For the log lines.
+fn request_path(request: &Request<Body>) -> String {
+    let path = request
+        .extensions()
+        .get::<OriginalUri>()
+        .map_or_else(|| request.uri().path(), |original| original.0.path())
+        .to_owned();
+    match request.extensions().get::<MountPath>() {
+        Some(MountPath(mount)) => format!("{}{path}", mount.trim_end_matches('/')),
+        None => path,
+    }
+}
+
+/// Log each request that a route refused as `INVALID_INPUT` (Python's
+/// `monitoring request refused path=... http=400 result=INVALID_INPUT`, at
+/// INFO on `horsies.web`).
+async fn log_invalid_input(request: Request, next: Next) -> Response {
+    let path = request_path(&request);
+    let response = next.run(request).await;
+    if response.extensions().get::<InvalidInputRefused>().is_some() {
+        tracing::info!(
+            "monitoring request refused path={path} http={} result={INVALID_INPUT}",
+            response.status().as_u16(),
+        );
+    }
+    response
 }
 
 async fn view_guard(State(state): State<WebState>, request: Request, next: Next) -> Response {
@@ -158,6 +199,11 @@ async fn action_guard(State(state): State<WebState>, request: Request, next: Nex
     let status = state.schema_probe.status().await;
     if !status.compatible() {
         let incompatible = SchemaIncompatible::from_status(status);
+        tracing::warn!(
+            "monitoring action refused path={} http=409 result={}",
+            request_path(&request),
+            incompatible.code,
+        );
         return (
             StatusCode::CONFLICT,
             Json(CodeBody {
@@ -181,6 +227,9 @@ fn forbidden(detail: &str) -> Response {
 }
 
 fn base_path(request: &Request<Body>, api_route: bool) -> String {
+    if let Some(MountPath(mount)) = request.extensions().get::<MountPath>() {
+        return normalize_base_path(mount);
+    }
     let nested = request
         .extensions()
         .get::<NestedPath>()
@@ -209,7 +258,7 @@ async fn read_meta(State(state): State<WebState>, request: Request) -> Response 
         }
     };
     Json(MetaResponse {
-        horsies_version: env!("CARGO_PKG_VERSION").to_owned(),
+        horsies_version: state.client_version.clone(),
         base_path,
         actions_enabled: state.actions_enabled && schema.compatible(),
         can_act,

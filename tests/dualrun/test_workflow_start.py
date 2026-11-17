@@ -20,12 +20,19 @@ on an empty baseline with one seeded workflow:
   its id and another name.
 
 The snapshots compare equal.
+
+The caller pair runs the same starts with the Python caller before the
+switch (``tests/dualrun/reference/workflow_start_caller.py``) against the
+caller on the core (``CoreHandle.start_workflow_async``), with one fixed
+``sent_at``. Each side also reports how many times ``build_with`` ran per
+definition key: the core runs it as often as Python.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -60,6 +67,7 @@ from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationSide, dual_run
 from tests.dualrun.reference import workflow_start as reference
+from tests.dualrun.reference import workflow_start_caller as caller_reference
 from tests.dualrun.workflow_seeds import (
     OnError as SeedOnError,
     TopLevel,
@@ -83,6 +91,10 @@ APP = Horsies(
 )
 
 
+_BUILDS: Counter[str] = Counter()
+"""The runs of ``build_with`` per definition key, since the last reset."""
+
+
 @APP.task(task_name='dualrun.start.value')
 def value_task(*, value: int) -> TaskResult[int, TaskError]:
     return TaskResult(ok=value)
@@ -97,6 +109,7 @@ class BuiltChild(WorkflowDefinition[int]):
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
         _ = (args, params)
+        _BUILDS[cls.definition_key] += 1
         root = TaskNode(fn=value_task, kwargs={'value': 20})
         dependent = TaskNode(fn=value_task, kwargs={'value': 21}, waits_for=[root])
         return app.workflow(
@@ -113,6 +126,7 @@ class BrokenChild(WorkflowDefinition[int]):
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
         _ = (app, args, params)
+        _BUILDS[cls.definition_key] += 1
         raise RuntimeError('the child cannot be built')
 
 
@@ -314,3 +328,64 @@ def test_start_writes_what_the_session_statements_wrote(
         reference.Started(),
         reference.IdConflict(existing_name=_EXISTING_NAME),
     )
+
+
+_CALLER_SENT_AT = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
+"""The one start time of both sides of the caller pair."""
+
+
+@dataclass(frozen=True, slots=True)
+class _CallerReport:
+    starts: tuple[reference.StartReport, ...]
+    builds: tuple[tuple[str, int], ...]
+    """The runs of ``build_with`` per definition key, sorted by key."""
+
+
+StartFunction = Callable[..., Any]
+
+
+async def _caller_async(
+    database: DualRunDatabase, seed: _Seed, start: StartFunction,
+) -> _CallerReport:
+    _BUILDS.clear()
+    async with open_broker(database) as broker:
+        _attach(broker)
+        starts = tuple([
+            _report(await start(spec, broker, str(workflow_id), _CALLER_SENT_AT))
+            for spec, workflow_id in _starts(seed)
+        ])
+    return _CallerReport(starts=starts, builds=tuple(sorted(_BUILDS.items())))
+
+
+def _caller_reference(database: DualRunDatabase, seed: _Seed) -> _CallerReport:
+    return asyncio.run(_caller_async(database, seed, caller_reference.start_workflow_async))
+
+
+def _caller_candidate(database: DualRunDatabase, seed: _Seed) -> _CallerReport:
+    return asyncio.run(_caller_async(database, seed, start_workflow_async))
+
+
+def test_the_start_on_the_core_writes_what_the_python_caller_wrote(
+    empty_database: MakeDatabase,
+) -> None:
+    run = run_or_fail(
+        dual_run(
+            empty_database,
+            _seed,
+            OperationSide(name='python caller', act=_caller_reference),
+            OperationSide(name='core caller', act=_caller_candidate),
+        )
+    )
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    expected = (
+        reference.Started(),
+        reference.Started(),
+        reference.Started(),
+        reference.Started(),
+        reference.Started(),
+        reference.IdConflict(existing_name=_EXISTING_NAME),
+    )
+    assert run.reference.report.starts == expected
+    assert run.candidate.report.starts == expected
+    assert run.candidate.report.builds == run.reference.report.builds

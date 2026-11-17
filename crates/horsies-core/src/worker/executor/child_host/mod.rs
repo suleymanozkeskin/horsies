@@ -36,11 +36,11 @@ mod tests;
 
 pub use args::{child_mode, ChildArgs, ChildArgsError, ChildMode, CHILD_MODE_ARGUMENT};
 pub use host::{
-    child_command, run_child_host, ChildApp, ChildHookFailure, ChildHostExit, ChildStartFuture,
-    ChildStartHook, CHILD_START_HOOK_BOUND,
+    child_command, run_child_host, ChildApp, ChildHookFailure, ChildHostExit, ChildLogSetup,
+    ChildStartFuture, ChildStartHook, NamedChildStartHook, CHILD_START_HOOK_BOUND,
 };
 pub use producer::{child_producer, ChildProducer};
-pub use role::{process_role, wait_inside_task_message, ProcessRole};
+pub use role::{process_role, thread_role, wait_inside_task_message, ProcessRole, ThreadRole};
 pub use run_work::{
     run_cancel_signal, spawn_in_run, RunCancelSignal, RunSignalRefused, RunSpawnRefused,
     MAX_RUN_WORK,

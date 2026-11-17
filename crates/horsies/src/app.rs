@@ -11,13 +11,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use horsies_core::handle::CoreHandle;
-use horsies_core::{ClientFamily, PoolProfile, RegisteredTask, TaskRegistry};
+use horsies_core::manifest::ProducerManifest;
+use horsies_core::{ClientFamily, NamedChildStartHook, PoolProfile, RegisteredTask, TaskRegistry};
 
 pub use horsies_core::manifest::SchemaMode;
 
 use crate::config::{producer_manifest, rust_config_refusals};
 use crate::registry::{check_queue, queue_priority, register_task, valid_queue_names, QueueSource};
 use crate::send::TaskFunctions;
+use crate::workflow::WorkflowRegistry;
 use crate::{AppConfig, HorsiesError, TaskRuntime, ValidationReport};
 
 /// The environment variable that suppresses sends in this process when its
@@ -65,6 +67,20 @@ pub struct Horsies {
     role: AppRole,
     sends: SendSuppression,
     functions: Arc<TaskFunctions>,
+    workflows: Arc<WorkflowRegistry>,
+    child_start_hooks: Vec<ChildStartFn>,
+}
+
+/// One start hook of a worker child, with its name, called once in the
+/// child.
+pub(crate) type ChildStartFn = NamedChildStartHook;
+
+/// What child mode takes from the app: the tasks, the start hooks in
+/// registration order, and the producer manifest of the app's handle.
+pub(crate) struct ChildParts {
+    pub(crate) tasks: TaskRegistry,
+    pub(crate) start_hooks: Vec<ChildStartFn>,
+    pub(crate) producer_manifest: ProducerManifest,
 }
 
 impl Horsies {
@@ -99,6 +115,7 @@ impl Horsies {
 
     fn from_parts(config: AppConfig, handle: Arc<CoreHandle>) -> Self {
         Self {
+            workflows: Arc::new(WorkflowRegistry::new(config.clone())),
             config,
             handle,
             tasks: TaskRegistry::new(),
@@ -106,6 +123,7 @@ impl Horsies {
             role: AppRole::Producer,
             sends: SendSuppression::new(),
             functions: Arc::new(TaskFunctions::new()),
+            child_start_hooks: Vec::new(),
         }
     }
 
@@ -229,7 +247,11 @@ impl Horsies {
     /// parameter: it reads the app's state. The `#[horsies::task]` attribute
     /// calls it when the task registers.
     pub fn task_runtime(&self) -> TaskRuntime {
-        TaskRuntime::new(Arc::clone(self.state()), Arc::clone(&self.functions))
+        TaskRuntime::new(
+            Arc::clone(self.state()),
+            Arc::clone(&self.functions),
+            crate::workflow::WorkflowStarter::of(self),
+        )
     }
 
     /// The core handle of the app.
@@ -252,10 +274,46 @@ impl Horsies {
         &self.functions
     }
 
+    /// The workflow definitions registered on this app.
+    pub(crate) fn workflows(&self) -> &Arc<WorkflowRegistry> {
+        &self.workflows
+    }
+
+    /// The findings of the workflow check (Python's check of the registered
+    /// workflows): each definition without params and each check case of a
+    /// workflow builder, built, checked against the registered definitions
+    /// and the app's queues, and walked into its sub-workflows; a nesting
+    /// is reported only when it reaches the depth limit for certain. Empty
+    /// when every workflow passes.
+    pub(crate) fn workflow_check_findings(&self) -> Vec<HorsiesError> {
+        self.workflows.check_findings()
+    }
+
     /// The suppression of this process's sends, for a send path that lives
     /// apart from the app.
     pub(crate) fn send_suppression(&self) -> SendSuppression {
         self.sends.clone()
+    }
+
+    /// Keep `hook` as the last start hook of each worker child.
+    pub(crate) fn add_child_start_hook(&mut self, hook: ChildStartFn) {
+        self.child_start_hooks.push(hook);
+    }
+
+    /// The number of child start hooks.
+    #[cfg(test)]
+    pub(crate) fn child_start_hook_count(&self) -> usize {
+        self.child_start_hooks.len()
+    }
+
+    /// The parts of the app that child mode serves from. Consumes the app:
+    /// a child process serves until its end.
+    pub(crate) fn into_child_parts(self) -> ChildParts {
+        ChildParts {
+            producer_manifest: self.handle.manifest().clone(),
+            tasks: self.tasks,
+            start_hooks: self.child_start_hooks,
+        }
     }
 }
 
@@ -265,6 +323,8 @@ impl std::fmt::Debug for Horsies {
             .field("role", &self.role)
             .field("queues", &self.get_valid_queue_names())
             .field("tasks", &self.tasks.len())
+            .field("workflows", &self.workflows)
+            .field("child_start_hooks", &self.child_start_hooks.len())
             .finish()
     }
 }

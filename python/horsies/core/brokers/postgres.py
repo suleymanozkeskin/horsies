@@ -1,6 +1,6 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
-import asyncio, hashlib, contextlib, os, random, threading, time, uuid
+import asyncio, hashlib, contextlib, os, random, threading, time
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum
@@ -26,6 +26,7 @@ from horsies._core import (
     TaskListComplete,
     TaskListTruncated,
     WorkerStateAbsent,
+    WorkerPongsRecord,
     WorkerStateRecord,
     WorkerStatesRecord,
     CoreHandle,
@@ -35,6 +36,7 @@ from horsies._core import (
     SendEnqueueFailed,
     SendKeyConflict,
     SendPayloadMismatch,
+    SendAsyncContext,
     SendPayloadTooLarge,
     SendSuppressed,
     SendValidationFailed,
@@ -70,7 +72,6 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
-from pydantic import ValidationError
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.resources import (
     BrokerResources,
@@ -152,21 +153,14 @@ from horsies.core.types.status import (
     TaskStatus,
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
-from horsies.core.codec.json_io import Json, SerializationError, loads_json, dumps_json
+from horsies.core.codec.json_io import Json, SerializationError, loads_json
 from horsies.core.codec.task_options import stored_execution, stored_max_retries
-from horsies.core.codec.validation_errors import (
-    exception_text,
-    validation_summary,
-    without_validation_input,
-)
+from horsies.core.codec.validation_errors import without_validation_input
 from horsies.core.models.tasks import Execution, TaskInfo, TaskAttemptInfo
 from horsies.core.models.class_coverage import ClassCoverage, ClassReport
 from horsies.core.models.health import (
-    WORKER_PING_CHANNEL,
     DatabasePing,
     WorkerPong,
-    WorkerPongPayload,
-    WorkerPingRequest,
     WorkerStateSnapshot,
 )
 from horsies.core.history.identity.fingerprint import (
@@ -640,10 +634,15 @@ def _monitoring_read_failed(
             raise AssertionError(f'the core {operation} answered the code {code}')
 
 
-def _loop_limit_err(
+def _loop_limit_err(  # pyright: ignore[reportUnusedFunction]
     operation: str, loop_limit: EventLoopLimit,
 ) -> Err[BrokerEventLoopLimit]:
-    """Build the broker error for the event loop limit. Nothing ran."""
+    """Build the broker error for the event loop limit. Nothing ran.
+
+    No broker method selects a SQLAlchemy resource set any longer; the
+    dual-run references of the switched methods (``tests/dualrun/``) build
+    their limit error with it.
+    """
     return Err(
         BrokerEventLoopLimit(
             message=f'{operation}: {loop_limit.describe()}',
@@ -1013,6 +1012,7 @@ type CoreEnqueueStart = CoreStartNow | CoreStartAfterDelay | CoreStartAt
 type CoreSendOutcome = (
     Enqueued
     | SendSuppressed
+    | SendAsyncContext
     | SendValidationFailed
     | SendEnqueueFailed
     | SendPayloadMismatch
@@ -1171,8 +1171,8 @@ def _enqueue_result(
     - ``SendPayloadMismatch``: ``PAYLOAD_MISMATCH``.
     - ``SendKeyConflict``: ``IDEMPOTENCY_KEY_CONFLICT`` with the owner.
 
-    The core's send never answers ``SendSuppressed`` or
-    ``SendPayloadTooLarge`` (the client checks both before the send):
+    The core's send never answers ``SendSuppressed``, ``SendAsyncContext``
+    or ``SendPayloadTooLarge`` (the client checks each before the send):
     ``AssertionError``.
     """
     match outcome:
@@ -1204,7 +1204,7 @@ def _enqueue_result(
             return Err(BrokerIdempotencyKeyConflict(
                 message=message, owner_task_id=owner_task_id,
             ))
-        case SendSuppressed() | SendPayloadTooLarge():
+        case SendSuppressed() | SendAsyncContext() | SendPayloadTooLarge():
             raise AssertionError(
                 f'the core send answered {type(outcome).__name__}, which the '
                 'client checks before the send',
@@ -1320,6 +1320,11 @@ class PostgresBroker:
             ),
             pool_profile=self._CORE_POOL_PROFILE,
         )
+        # The workflow operations of the core build each sub-workflow child
+        # through this source, which runs the child's build_with.
+        from horsies.core.workflows.child_spec_source import child_spec_source_of
+
+        self._core_handle.register_child_spec_source(child_spec_source_of(self))
 
         # Each worker child builds its own broker, so this fires on every
         # recycle (max_tasks_per_child); keep it at DEBUG in child processes.
@@ -2828,171 +2833,70 @@ class PostgresBroker:
         A pong proves the replying worker's event loop is responsive *and*
         that it can reach Postgres. Workers present in
         ``list_worker_states_async`` but absent here are non-responsive.
+
+        The core runs the ping on the process listener of the broker's core
+        handle; the window starts when the ping NOTIFY has committed. A
+        reply that does not decode is logged on ``horsies.broker`` and left
+        out. An infinite ``timeout_seconds`` waits with no deadline.
+
+        - ``Err(INVALID_INPUT)``: ``timeout_seconds`` is 0 or less, or NaN;
+          ``min_responses`` is below 1; ``target_worker_id`` is not a
+          ``str``. Nothing ran.
+        - ``Err(LISTENER_DISABLED)``: the broker was built with
+          ``assume_initialized=True`` and has no listener. Nothing ran.
+        - ``Err(WORKER_PING_FAILED)``: the reply subscribe, the NOTIFY or the
+          wait failed, or the core of this process cannot run the ping
+          (``CoreError``). The NOTIFY may have been sent.
         """
-        match await self.select_resources():
-            case Err(loop_limit):
-                return _loop_limit_err('ping_workers', loop_limit)
-            case Ok(resources):
-                pass
-        if timeout_seconds <= 0:
-            return Err(
-                BrokerInvalidInput(
-                    message=f'timeout_seconds must be positive, got {timeout_seconds}',
-                    exception=NoCause(),
-                )
-            )
-        if min_responses is not None and min_responses < 1:
-            return Err(
-                BrokerInvalidInput(
-                    message=f'min_responses must be >= 1 when set, got {min_responses}',
-                    exception=NoCause(),
-                )
-            )
-
-        correlation_id = uuid.uuid4().hex
-        reply_channel = f'horsies_worker_pong_{correlation_id}'
-
-        # A broker without a listener cannot receive replies: an Err, so the
-        # Result contract holds on every path.
-        match resources.listener:
-            case ListenerEnabled(listener=listener):
-                pass
-            case ListenerDisabled():
-                return Err(
-                    BrokerListenerDisabled(
-                        message=(
-                            'ping_workers listener unavailable: this broker was '
-                            'built with assume_initialized=True and has no listener'
-                        ),
-                    )
-                )
-        # A refused target_worker_id is refused input. A validated request
-        # holds strings only, so its encode cannot fail; the encode runs
-        # outside every catch, so a failure crashes as the defect it is.
         try:
-            request = WorkerPingRequest(
-                correlation_id=correlation_id,
-                reply_channel=reply_channel,
+            outcome = await self._core_handle.ping_workers_async(
                 target_worker_id=target_worker_id,
+                timeout_seconds=timeout_seconds,
+                min_responses=min_responses,
             )
-        except ValidationError as exc:
-            return Err(BrokerInvalidInput(
-                message=f'ping_workers request refused: {validation_summary(exc)}',
-                exception=without_validation_input(exc),
-            ))
-        match dumps_json(request.model_dump()):
-            case Ok(encoded):
-                payload = encoded
-            case Err(encode_error):
-                raise AssertionError(
-                    f'ping_workers request encode failed: {encode_error}',
-                )
-
-        listen_r = await listener.listen(reply_channel)
-        if is_err(listen_r):
-            err = listen_r.err_value
+        except CoreError as exc:
             return Err(
                 BrokerOperationFailed(
                     code=BrokerErrorCode.WORKER_PING_FAILED,
-                    message=f'ping_workers reply subscribe failed: {err.message}',
-                    retryable=err.retryable,
-                    exception=err.exception,
-                )
+                    message=f'ping_workers failed: {exc}',
+                    retryable=core_error_retryable(exc),
+                    exception=exc,
+                ),
             )
-        queue = listen_r.ok_value
-
-        try:
-            loop = asyncio.get_running_loop()
-            async with resources.session_factory() as session:
-                await session.execute(
-                    text('SELECT pg_notify(:ch, :p)'),
-                    {'ch': WORKER_PING_CHANNEL, 'p': payload},
+        match outcome:
+            case WorkerPongsRecord(pongs=pongs):
+                return Ok(
+                    [
+                        WorkerPong(
+                            worker_id=pong.worker_id,
+                            hostname=pong.hostname,
+                            pid=pong.pid,
+                            round_trip_ms=pong.round_trip_ms,
+                        )
+                        for pong in pongs
+                    ],
                 )
-                await session.commit()
-            sent_at = loop.time()
-
-            pongs: list[WorkerPong] = []
-            seen: set[str] = set()
-            deadline = sent_at + timeout_seconds
-            while True:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    break
-                try:
-                    notify = await asyncio.wait_for(queue.get(), timeout=remaining)
-                except asyncio.TimeoutError:
-                    break
-                pong = self._decode_pong(
-                    notify.payload, correlation_id, loop.time() - sent_at
+            case BrokerFailure(code='INVALID_INPUT', message=message):
+                return Err(BrokerInvalidInput(message=message, exception=NoCause()))
+            case BrokerFailure(code='LISTENER_DISABLED', message=message):
+                return Err(BrokerListenerDisabled(message=message))
+            case BrokerFailure(
+                code='WORKER_PING_FAILED', message=message, retryable=retryable,
+            ):
+                return Err(
+                    BrokerOperationFailed(
+                        code=BrokerErrorCode.WORKER_PING_FAILED,
+                        message=message,
+                        retryable=retryable,
+                        exception=CoreOperationFailed(
+                            'PostgresBroker.ping_workers_async', message, retryable,
+                        ),
+                    ),
                 )
-                if pong is None or pong.worker_id in seen:
-                    continue  # malformed, mismatched, or duplicate worker
-                seen.add(pong.worker_id)
-                pongs.append(pong)
-                if target_worker_id is not None and pong.worker_id == target_worker_id:
-                    break
-                if min_responses is not None and len(pongs) >= min_responses:
-                    break
-            return Ok(pongs)
-        except Exception as exc:
-            return _operation_failed(
-                BrokerErrorCode.WORKER_PING_FAILED,
-                f'ping_workers failed: {exception_text(exc)}',
-                exc,
-            )
-        finally:
-            await self._unsubscribe_ping_safely(listener, reply_channel, queue)
-
-    async def _unsubscribe_ping_safely(
-        self, listener: PostgresListener, channel: str, q: asyncio.Queue[Any],
-    ) -> None:
-        """Ensure reply-channel unsubscribe completes even under repeated cancellation.
-
-        Mirrors ``_unsubscribe_task_done_safely``: shields the unsubscribe so a
-        cancelled ``ping_workers_async`` does not leak the server-side LISTEN,
-        and re-raises cancellation only after cleanup finishes.
-        """
-        unsubscribe_task = asyncio.create_task(listener.unsubscribe(channel, q))
-        cancelled_during_cleanup = False
-        while not unsubscribe_task.done():
-            try:
-                await asyncio.shield(unsubscribe_task)
-            except asyncio.CancelledError:
-                cancelled_during_cleanup = True
-                continue
-        await unsubscribe_task
-        if cancelled_during_cleanup:
-            raise asyncio.CancelledError
-
-    def _decode_pong(
-        self,
-        raw_payload: str,
-        correlation_id: str,
-        elapsed_seconds: float,
-    ) -> WorkerPong | None:
-        """Decode a pong notification, discarding malformed or mismatched replies."""
-        parsed = loads_json(raw_payload)
-        if is_err(parsed):
-            self.logger.warning(
-                'Discarding unparseable pong payload: %s', parsed.err_value
-            )
-            return None
-        body = parsed.ok_value
-        if not isinstance(body, dict):
-            return None
-        try:
-            payload = WorkerPongPayload.model_validate(body)
-        except Exception as exc:
-            self.logger.warning('Discarding invalid pong payload: %s', exception_text(exc))
-            return None
-        if payload.correlation_id != correlation_id:
-            return None
-        return WorkerPong(
-            worker_id=payload.worker_id,
-            hostname=payload.hostname,
-            pid=payload.pid,
-            round_trip_ms=elapsed_seconds * 1000.0,
-        )
+            case BrokerFailure(code=code):
+                raise AssertionError(f'the core worker ping answered the code {code}')
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def list_worker_states_async(self) -> BrokerResult[list[WorkerStateSnapshot]]:
         """Latest state snapshot per worker, including idle workers.

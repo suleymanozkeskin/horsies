@@ -1,5 +1,6 @@
 ---
 title: Shared Async Tasks
+section: shared
 summary: SHARED_ASYNC tasks run as coroutines, many at once, in shared async children - what runs where, the timeout (cancel, second cancel, close, kill), a return that leaves work alive, a blocked event loop, the rules for task authors, recycling and sizing.
 related: [execution-modes, worker-profiles, worker-architecture, child-process-hooks, ../tasks/defining-tasks]
 tags: [workers, async, shared-async, execution, timeouts, cancellation, concurrency]
@@ -31,80 +32,13 @@ Enqueue stores a `timeout_ms` and a `cancel_grace_ms` on every `SHARED_ASYNC` ro
 
 ## How To
 
-Declare the task. `timeout_ms` is required; `cancel_grace_ms` is optional.
+Declare the task with the `SHARED_ASYNC` class and a `timeout_ms`; `cancel_grace_ms` is optional. Start a worker whose profile has shared async children. A profile with 2 isolated children and 4 shared async children of 25 seats runs `ISOLATED` tasks in the 2 isolated children and `SHARED_ASYNC` tasks on 4 × 25 = 100 seats.
 
-```python
-import asyncio
-
-from pydantic import SecretStr
-
-from horsies import (
-    AppConfig,
-    Execution,
-    Horsies,
-    IsolatedChildren,
-    PostgresConfig,
-    SharedAsyncChildren,
-    TaskError,
-    TaskResult,
-    WorkerProfile,
-)
-
-app = Horsies(AppConfig(
-    broker=PostgresConfig(
-        database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
-    ),
-    worker_profiles={
-        'io': WorkerProfile(
-            isolated=IsolatedChildren(count=2),
-            shared_async=SharedAsyncChildren(count=4, seats=25),
-        ),
-    },
-))
-
-
-@app.task(
-    'fetch_quote',
-    execution=Execution.SHARED_ASYNC,
-    timeout_ms=10_000,
-    cancel_grace_ms=2_000,
-)
-async def fetch_quote(*, symbol: str) -> TaskResult[str, TaskError]:
-    await asyncio.sleep(0.1)
-    return TaskResult(ok=symbol)
-```
-
-Start a worker with a profile that has shared async children:
-
-```bash
-horsies worker myapp.instance:app --profile io
-```
-
-This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_ASYNC` tasks on 4 × 25 = 100 seats. See [Worker Profiles](/horsies/workers/worker-profiles/#sharedasyncchildren) for the fields.
+The API is on the client pages: [Choose the Execution Class](/horsies/tasks/defining-tasks/#choose-the-execution-class) and [Run Shared Tasks](/horsies/workers/worker-profiles/#run-shared-tasks) (Python), and [Attributes](/horsies/rust/tasks/defining-tasks/#attributes) (Rust). The Rust worker setup page is not written yet.
 
 ### Keep a client for the life of the child
 
-Build a long-lived async client in an `on_shared_async_child_start` hook. The hook runs on the event loop of each shared async child before the child takes its first task, so the client belongs to the loop that every task of the child uses.
-
-<!-- check: skip partial -- the client module is the reader's own -->
-```python
-import httpx
-
-clients: dict[str, httpx.AsyncClient] = {}
-
-
-@app.on_shared_async_child_start
-async def open_http_client() -> None:
-    clients['http'] = httpx.AsyncClient(timeout=5.0)
-
-
-@app.task('get_status', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
-async def get_status(*, url: str) -> TaskResult[int, TaskError]:
-    response = await clients['http'].get(url)
-    return TaskResult(ok=response.status_code)
-```
-
-See [Child-Process Hooks](/horsies/workers/child-process-hooks/#shared-async-child-start-hooks).
+Build a long-lived async client in a start hook of the shared async child (Python: `on_shared_async_child_start`). The hook runs on the event loop of each shared async child before the child takes its first task, so the client belongs to the loop that every task of the child uses. See [Shared async child start hooks](/horsies/workers/child-process-hooks/#shared-async-child-start-hooks) (Python).
 
 ## The Timeout
 
@@ -117,14 +51,15 @@ The shared async child holds the deadline of each of its tasks. It starts the de
 
 A task that returns a value after its deadline fired still fails with `TASK_TIMEOUT`. A task that returns before its deadline keeps what it returned, also when work that it started is still alive then: see [A Return That Leaves Work](#a-return-that-leaves-work). The other tasks of the child continue in every case. A timeout is terminal by default; add `"TASK_TIMEOUT"` to `auto_retry_for` for a retry.
 
-The `data` of the `TASK_TIMEOUT` error has `task_id` and `timeout_ms`. When the child reports the end of the attempt, `data` also has `cancel_end`, which tells how the attempt ended:
+The `data` of the `TASK_TIMEOUT` error has `task_id`, `timeout_ms` and `cancel_end`, which tells how the attempt ended:
 
 | `cancel_end` | The attempt |
 | ------------ | ----------- |
 | `RETURNED_AFTER_SIGNAL` | ended within G after the cancel at T: the child sent no second cancel |
 | `DROPPED_AFTER_GRACE` | was still alive at T + G: the child sent the second cancel (step 3) |
+| `KILLED_WITH_CHILD` | ended when the worker killed the child of the task, before the child reported the end of the attempt |
 
-When the worker kills the child of the task, `data` has no `cancel_end`.
+When every write of `TASK_TIMEOUT` fails, crash recovery writes `TASK_TIMEOUT` with its own `data`: `task_id` and `worker_id`.
 
 The finalizing marker of a task is written when its attempt ends, never before: after its coroutine and the work that it started. Only a task that returned before its deadline, and whose work ended within the grace, gets it; the child reports the end after the marker, and waits for it at most until the deadline of the task. The marker stops the runner heartbeats of the row and gives the worker `finalizing_stale_threshold_ms` to write the outcome before stale recovery. A task that timed out, or whose work needed a cancel, gets no marker: the child reports its end at once, and the heartbeats of the worker cover the row until the worker reads that end. So the heartbeats of a row never stop while work of its attempt still runs, and the marker never uses the cancel grace or changes the outcome of a task.
 
@@ -143,7 +78,7 @@ What a cancel does to common libraries, measured on one shared child (CPython 3.
 | `asyncio.to_thread()` with a sync client | the thread runs on | the thread runs on: it ends only by the client's own timeout |
 | DNS lookup with a resolver that does not answer | the lookup thread runs on, 9.7 s with glibc defaults | the thread runs on |
 
-Notes: a pause of the database container stood in for a server that stops answering; the kernel still accepted TCP connections. Networks that drop packets, TLS and remote servers add round trips to each cleanup step, and were not measured. The psycopg row used `psycopg-binary` 3.3.8, with its bundled libpq 18.6. With a libpq older than 17, psycopg sends its cancel request from a thread with no limit, and the attempt ends only when that thread returns. See [psycopg and libpq](/horsies/configuration/broker-config/#psycopg-and-libpq).
+Notes: a pause of the database container stood in for a server that stops answering; the kernel still accepted TCP connections. Networks that drop packets, TLS and remote servers add round trips to each cleanup step, and were not measured. The psycopg row used `psycopg-binary` 3.3.8, with its bundled libpq 18.6. With a libpq older than 17, psycopg sends its cancel request from a thread with no limit, and the attempt ends only when that thread returns. See [psycopg and libpq](/horsies/configuration/broker-connections/#psycopg-and-libpq).
 
 The worker keeps one timer per task, at `timeout_ms + cancel_grace_ms + 10 seconds`. The child reports the second cancel at T + G, so a child that has reported neither the second cancel nor the end by then is frozen: C code holds the GIL, and nothing in the child can run. The worker kills that child. Each task in it that is past its deadline fails with `TASK_TIMEOUT`; every other task takes the crash path (`WORKER_CRASHED`, or a retry when its policy names that code). This kill names no new cause; a task that the child already reported stuck keeps its retry in an isolated child, as it does at every kill by the worker whose exit it saw.
 
@@ -197,22 +132,7 @@ The block limit is 7.4 times the longest common burst of CPU work measured on on
 
 **Do not block the event loop.** A call that blocks it, such as `time.sleep()`, a sync HTTP or database client, or long CPU work, stops every task of the child for that time. A block of 5 seconds kills the child.
 
-```python
-import time
-
-# Wrong: stops every task of the child for 2 seconds
-@app.task('wait_wrong', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
-async def wait_wrong() -> TaskResult[None, TaskError]:
-    time.sleep(2)
-    return TaskResult(ok=None)
-
-
-# Correct
-@app.task('wait_right', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
-async def wait_right() -> TaskResult[None, TaskError]:
-    await asyncio.sleep(2)
-    return TaskResult(ok=None)
-```
+The Python example is in [Things to Avoid](/horsies/tasks/defining-tasks/#things-to-avoid) of Defining Tasks.
 
 **Await what you start.** The attempt ends only when the work that the task started has ended. A task that returns while an asyncio task that it started still runs holds its seat until that task ends. After `cancel_grace_ms` the child cancels that task and is replaced; the outcome stays what the task returned.
 

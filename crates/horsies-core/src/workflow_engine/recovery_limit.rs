@@ -24,6 +24,7 @@ use crate::broker::core_rows::{column, one_row, scalar, RowDecodeError};
 use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::{OperationalErrorCode, TaskError, TaskResult};
 use crate::db::{CheckoutClass, ParameterType, Row, TypedStatement};
+use crate::workflow_engine::child_spec::ChildSpecUnavailable;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::steps::{run_alone, StepContractError};
 
@@ -180,6 +181,11 @@ impl CandidateFailure {
                 true => FailureClass::Transient,
                 false => FailureClass::Persistent,
             },
+            // A build that did not run, or an interrupt of the process, is
+            // not a property of the candidate: it is not counted.
+            Self::Error(WorkflowError::ChildSpecSource(
+                ChildSpecUnavailable::NotRun { .. } | ChildSpecUnavailable::Interrupted { .. },
+            )) => FailureClass::Transient,
             Self::Error(
                 WorkflowError::Serialization(_)
                 | WorkflowError::WorkflowNotFound { .. }
@@ -201,6 +207,7 @@ impl CandidateFailure {
             Self::Error(WorkflowError::InvalidStatus(_)) => "InvalidStatus",
             Self::Error(WorkflowError::Validation(_)) => "Validation",
             Self::Error(WorkflowError::StepContract(_)) => "StepContract",
+            Self::Error(WorkflowError::ChildSpecSource(_)) => "ChildSpecSource",
             Self::Panic(_) => PANIC_ERROR_TYPE,
         }
     }

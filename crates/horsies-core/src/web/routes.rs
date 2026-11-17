@@ -683,7 +683,19 @@ async fn read_events(State(state): State<WebState>) -> Response {
         .into_response()
 }
 
-fn action_response(outcome: crate::monitoring::ActionOutcome) -> Response {
+/// The response of an action, with its log line (Python `_respond`,
+/// `python/horsies/web/routes/actions.py`): `monitoring action route=...
+/// id=... http=... result=...`, at INFO on `horsies.web`.
+fn action_response(
+    route: &'static str,
+    entity_id: Uuid,
+    outcome: crate::monitoring::ActionOutcome,
+) -> Response {
+    tracing::info!(
+        "monitoring action route={route} id={entity_id} http={} result={}",
+        outcome.status_code(),
+        outcome.result_word(),
+    );
     let status =
         StatusCode::from_u16(outcome.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     (status, Json(outcome.into_body())).into_response()
@@ -733,7 +745,11 @@ async fn cancel_task(
         Ok(task_uuid) => task_uuid,
         Err(refused) => return refused.into_response(),
     };
-    action_response(cancel_task_action(&state.broker, task_uuid, body.include_running).await)
+    action_response(
+        "tasks.cancel",
+        task_uuid,
+        cancel_task_action(&state.broker, task_uuid, body.include_running).await,
+    )
 }
 
 /// The workflow path id of an action route. Text that is not a UUID is
@@ -751,7 +767,11 @@ async fn pause_workflow(
         Ok(workflow_id) => workflow_id,
         Err(response) => return response,
     };
-    action_response(pause_workflow_action(&state.broker, workflow_id).await)
+    action_response(
+        "workflows.pause",
+        workflow_id,
+        pause_workflow_action(&state.broker, workflow_id).await,
+    )
 }
 
 async fn resume_workflow(
@@ -763,14 +783,9 @@ async fn resume_workflow(
         Err(response) => return response,
     };
     action_response(
-        resume_workflow_action(
-            &state.broker,
-            workflow_id,
-            &state.workflow_registry,
-            &state.payload,
-            &state.retention,
-        )
-        .await,
+        "workflows.resume",
+        workflow_id,
+        resume_workflow_action(&state.broker, workflow_id, &state.children).await,
     )
 }
 
@@ -782,5 +797,9 @@ async fn cancel_workflow(
         Ok(workflow_id) => workflow_id,
         Err(response) => return response,
     };
-    action_response(cancel_workflow_action(&state.broker, workflow_id).await)
+    action_response(
+        "workflows.cancel",
+        workflow_id,
+        cancel_workflow_action(&state.broker, workflow_id).await,
+    )
 }

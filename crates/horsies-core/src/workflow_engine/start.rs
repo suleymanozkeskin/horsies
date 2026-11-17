@@ -45,20 +45,15 @@ pub(crate) struct NodeTaskFacts {
     pub(crate) facts: WorkflowTaskFacts,
 }
 
-/// Parse the typed facts of a task node from its merged task options and its
-/// queue's retention class.
+/// Parse the typed facts of a task node from its merged task options and the
+/// retention class key of its queue (`None`: forever).
 pub(crate) fn node_task_facts(
     node: &AnyNode,
-    queue: &str,
     merged_task_options: Option<&str>,
-    retention: &RetentionConfig,
+    queue_class_key: Option<&str>,
 ) -> Result<NodeTaskFacts, WorkflowError> {
-    let facts = prepare_workflow_task_facts(
-        &node.input_json,
-        merged_task_options,
-        retention.resolve_queue_class(queue).as_deref(),
-    )
-    .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+    let facts = prepare_workflow_task_facts(&node.input_json, merged_task_options, queue_class_key)
+        .map_err(|error| WorkflowError::Validation(error.to_string()))?;
     Ok(NodeTaskFacts {
         max_retries: node_max_retries(node.index, &node.task_name, merged_task_options)?,
         good_until: node_good_until(node.index, &node.task_name, merged_task_options)?,
@@ -318,13 +313,13 @@ async fn start_workflow_inner(
     registry: &WorkflowSpecRegistry,
     retention: &RetentionConfig,
 ) -> Result<WorkflowRowInsert, WorkflowError> {
-    let arguments = start_arguments(spec, wf_id, registry, retention)?;
+    let arguments = start_arguments(spec, wf_id, registry, retention).await?;
 
     // The handle writes only into a database of its own client family: checked once per handle,
     // before the first write. A mismatch is not retryable and writes nothing.
     broker.ensure_client_family_for_write().await?;
 
-    let build = ChildBuild {
+    let build = ChildBuild::Registry {
         registry,
         retention,
     };
@@ -381,9 +376,10 @@ fn classify_workflow_error(
         WorkflowError::Serialization(_) | WorkflowError::Validation(_) => {
             WorkflowStartErrorCode::ValidationFailed
         }
-        WorkflowError::Database(_) | WorkflowError::Broker(_) | WorkflowError::StepContract(_) => {
-            WorkflowStartErrorCode::EnqueueFailed
-        }
+        WorkflowError::Database(_)
+        | WorkflowError::Broker(_)
+        | WorkflowError::StepContract(_)
+        | WorkflowError::ChildSpecSource(_) => WorkflowStartErrorCode::EnqueueFailed,
         WorkflowError::WorkflowNotFound { .. } | WorkflowError::InvalidStatus(_) => panic!(
             "start of workflow '{workflow_name}' ({workflow_id}) returned an error outside the start catalog: {error}"
         ),
@@ -391,11 +387,7 @@ fn classify_workflow_error(
 }
 
 fn is_retryable_workflow_error(e: &WorkflowError) -> bool {
-    match e {
-        WorkflowError::Database(sqlx_err) => crate::broker::is_retryable_sqlx_error(sqlx_err),
-        WorkflowError::Broker(broker_err) => broker_err.is_retryable(),
-        _ => false,
-    }
+    e.is_retryable()
 }
 
 /// Retry a failed workflow start using the broker.

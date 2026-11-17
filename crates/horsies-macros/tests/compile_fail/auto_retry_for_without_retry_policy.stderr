@@ -1,0 +1,19 @@
+error: `auto_retry_for` needs `retry_policy`: without a policy a task does not retry
+ --> tests/compile_fail/auto_retry_for_without_retry_policy.rs:6:15
+  |
+6 | #[task("bad", auto_retry_for = ["TASK_TIMEOUT"], timeout_ms = 5_000)]
+  |               ^^^^^^^^^^^^^^
+
+warning: unused import: `std::convert::Infallible`
+ --> tests/compile_fail/auto_retry_for_without_retry_policy.rs:2:5
+  |
+2 | use std::convert::Infallible;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `TaskError`
+ --> tests/compile_fail/auto_retry_for_without_retry_policy.rs:4:21
+  |
+4 | use horsies::{task, TaskError};
+  |                     ^^^^^^^^^

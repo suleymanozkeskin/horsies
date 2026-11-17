@@ -10,7 +10,10 @@ conditions that make its numbers meaningful have been stated.
         --scale smoke --control
 
     uv run python -m tests.perf --scenario fused-completion-small-result \\
-        --dsn ... --scale gate --demo-quiesced
+        --dsn ... --scale gate --demo-quiesced --control
+
+On the baseline schema every scenario has one implementation, so a gate run
+is a control run (``--control``).
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from tests.perf.scenarios import (
     scenario_by_name,
 )
 from tests.perf.statistics import Verdict
+from horsies.core.types.result import Err, Ok
 from horsies.core.utils.url import sqlalchemy_url
 
 RESULTS_DIR = Path(__file__).parent / 'results'
@@ -106,9 +110,18 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
 
     if arguments.apply_schema:
-        apply_schema(arguments.dsn)
-        print(f'schema applied at {arguments.dsn.rsplit("@", 1)[-1]}')
-        return 0
+        target = arguments.dsn.rsplit('@', 1)[-1]
+        match apply_schema(arguments.dsn):
+            case Ok():
+                print(f'schema applied at {target}')
+                return 0
+            case Err(err_value=error):
+                print(
+                    f'schema install failed at {target}: {error.code.value}: '
+                    f'{error.message}',
+                    file=sys.stderr,
+                )
+                return 2
 
     if arguments.scenario is None or arguments.scale is None:
         parser.error('--scenario and --scale are required unless --apply-schema')
@@ -122,6 +135,8 @@ def main(argv: list[str] | None = None) -> int:
 
     resamples = GATE_RESAMPLES if arguments.scale == 'gate' else SMOKE_RESAMPLES
     scenarios = _select_scenarios(arguments.scenario)
+    if not scenarios:
+        parser.error(f'--scenario {arguments.scenario} selects no scenario')
     if arguments.observations is not None and arguments.observations <= 0:
         parser.error('--observations must be positive')
     if arguments.scale == 'gate' and arguments.observations is not None:

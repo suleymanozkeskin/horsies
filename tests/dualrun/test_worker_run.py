@@ -15,6 +15,9 @@ profiles where each applies:
 - a stored class that does not fit the registered task (the row goes back
   as isolated);
 - a workflow chain with a sub-workflow that the worker builds;
+- a sub-workflow that the worker builds from the result of the node before
+  it, whose start builds a grandchild;
+- a sub-workflow whose build in the worker raises;
 - a pause of a workflow while its first node runs;
 - recycling by task count;
 - a drain with tasks in flight.
@@ -193,6 +196,26 @@ CASES: dict[str, _Case] = {
         ),
         statuses=(),
         workflow_statuses=('COMPLETED',),
+    ),
+    'workflow-subworkflow-from-a-result': _Case(
+        build=lambda: build_scenario(
+            'workflow-subworkflow-from-a-result',
+            whole.ISOLATED,
+            [],
+            workflows=[whole.chain_from_result],
+        ),
+        statuses=(),
+        workflow_statuses=('COMPLETED',),
+    ),
+    'workflow-subworkflow-build-refused': _Case(
+        build=lambda: build_scenario(
+            'workflow-subworkflow-build-refused',
+            whole.ISOLATED,
+            [],
+            workflows=[whole.chain_with_refused_child],
+        ),
+        statuses=(),
+        workflow_statuses=('FAILED',),
     ),
     'workflow-pause-during-a-run': _Case(
         build=_pause_scenario,

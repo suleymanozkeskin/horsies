@@ -296,7 +296,7 @@ info = broker.get_task_info("task-uuid", include_result=True)  # sync
 
 **Monitoring** (async only): `get_stale_tasks()`, `get_expired_tasks()`, `mark_stale_tasks_as_failed()`, `requeue_stale_claimed()`. See website docs `monitoring/broker-methods` for full signatures.
 
-**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None)` (list[WorkerPong] — active ping-pong; min_responses=1 = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=None)` (WorkerStateSnapshot, includes idle workers). `get_class_coverage_async()` (ClassCoverage — fleet check: each (queue, class) with PENDING rows is StreamServed / StreamWithoutCapacity / StreamUnserved by live workers; the reaper logs unserved at error), `get_class_report_async()` (ClassReport — oldest wait per pending (queue, class), budget capacity/in_flight/free per live worker). Replaces the retired `get_worker_stats()`. `WorkerStateSnapshot.memory_usage_mb` is the parent process only; `children_memory_mb` is the summed RSS of executor children (the memory-quota driver — use it to size `IsolatedRecycle.after` / `IsolatedRecycle.above`, and `SharedRecycle` for shared children). See website docs `monitoring/worker-health`. 
+**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None)` (list[WorkerPong] — active ping-pong; min_responses=1 = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=None)` (WorkerStateSnapshot, includes idle workers). `get_class_coverage_async()` (ClassCoverage — fleet check: each (queue, class) with PENDING rows is StreamServed / StreamWithoutCapacity / StreamUnserved by live workers; the reaper logs unserved at error), `get_class_report_async()` (ClassReport — oldest wait per pending (queue, class), budget capacity/in_flight/free per live worker). Replaces the retired `get_worker_stats()`. `WorkerStateSnapshot.memory_usage_mb` is the parent process only; `children_memory_mb` is the summed RSS of executor children (the memory-quota driver — use it to size `IsolatedRecycle.after` / `IsolatedRecycle.above`, and `SharedRecycle` for shared children). See website docs `monitoring/health-reads` (the methods) and `monitoring/worker-health` (what each read means). 
 
 ## PostgresConfig
 
@@ -310,24 +310,26 @@ config = PostgresConfig(
 )
 ```
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `database_url` | `SecretStr` | required | Must start with `"postgresql://"` (HRS-203 otherwise) |
-| `session_database_url` | `SecretStr \| None` | `None` | Direct/session-capable URL for LISTEN and schema setup; required when `database_url` is transaction-pooled |
-| `pgbouncer_transaction_mode` | `bool` | `False` | Disable prepared statements for transaction-pooled `database_url`; requires `session_database_url` |
-| `pool_size` | `int` | `5` | Connection pool size (raise for high-throughput producers) |
-| `max_overflow` | `int` | `10` | Extra connections beyond pool_size |
-| `retain_rerun_input_default` | `bool` | `False` | App-level default for enqueue-time rerun-input retention; a per-task value overrides it and the resolved value is snapshotted at enqueue. A task enqueued without a retained input cannot be rerun later |
-| `pool_timeout` | `int` | `30` | Seconds to wait for a connection |
-| `pool_recycle` | `int` | `1800` | Seconds before connections are recycled |
-| `pool_pre_ping` | `bool` | `True` | Ping a pooled connection at checkout when it waited in the pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`), in every engine but the worker process's |
-| `worker_pool_pre_ping` | `bool` | `False` | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: a one-statement write is one round trip, and a dead connection fails its first statement as a retryable connection error |
-| `tcp_keepalives` | `bool` | `True` | Enable libpq TCP keepalives on broker and child-process connections |
-| `tcp_keepalives_idle` | `int` | `30` | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
-| `tcp_keepalives_interval` | `int` | `10` | Seconds between keepalive probes (libpq `keepalives_interval`) |
-| `tcp_keepalives_count` | `int` | `3` | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
-| `tcp_user_timeout_ms` | `int` | `30000` | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the OS default |
-| `echo` | `bool` | `False` | Echo SQL (debug only); bound values are not shown |
+| Field | Type | Default | Range | Description |
+|---|---|---|---|---|
+| `database_url` | `SecretStr` | required | – | Must start with `"postgresql://"` (HRS-203 otherwise) |
+| `session_database_url` | `SecretStr \| None` | `None` | – | Direct/session-capable URL for LISTEN and schema setup; required when `database_url` is transaction-pooled |
+| `pgbouncer_transaction_mode` | `bool` | `False` | – | Disable prepared statements for transaction-pooled `database_url`; requires `session_database_url` |
+| `pool_size` | `int` | `5` | 1 to 10,000 | Connection pool size (raise for high-throughput producers) |
+| `max_overflow` | `int` | `10` | 0 to 10,000 | Extra connections beyond pool_size |
+| `retain_rerun_input_default` | `bool` | `False` | – | App-level default for enqueue-time rerun-input retention; a per-task value overrides it and the resolved value is snapshotted at enqueue. A task enqueued without a retained input cannot be rerun later |
+| `pool_timeout` | `int` | `30` | 0 to 4,294,967,295; `0`: a checkout does not wait | Seconds to wait for a connection |
+| `pool_recycle` | `int` | `1800` | `-1` (never) or 0 to 4,294,967,295 | Seconds before connections are recycled |
+| `pool_pre_ping` | `bool` | `True` | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`), in every engine but the worker process's |
+| `worker_pool_pre_ping` | `bool` | `False` | – | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: a one-statement write is one round trip, and a dead connection fails its first statement as a retryable connection error |
+| `tcp_keepalives` | `bool` | `True` | – | Enable libpq TCP keepalives on broker and child-process connections |
+| `tcp_keepalives_idle` | `int` | `30` | 1 to 32,767 | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
+| `tcp_keepalives_interval` | `int` | `10` | 1 to 32,767 | Seconds between keepalive probes (libpq `keepalives_interval`) |
+| `tcp_keepalives_count` | `int` | `3` | 1 to 127 | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
+| `tcp_user_timeout_ms` | `int` | `30000` | `0` or 1 to 2,147,483,647 | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the OS default |
+| `echo` | `bool` | `False` | – | Echo SQL (debug only); bound values are not shown |
+
+A pool value outside its range fails with HRS-213 (`CONFIG_INVALID_BROKER_POOL`); `pool_size=0` and `max_overflow=-1` (no limit in SQLAlchemy) are refused, and the help says to give a number. A TCP value outside its range fails with HRS-215 (`CONFIG_INVALID_KEEPALIVE`); the three keepalive values are checked only when `tcp_keepalives` is `True`.
 
 `database_url` and `session_database_url` take the scheme `postgresql://` or `postgres://` and name no driver; horsies opens the database with psycopg 3. A URL that names a driver (`postgresql+psycopg://`, `postgresql+psycopg2://`) is refused with HRS-203, and the error says to use `postgresql://`.
 

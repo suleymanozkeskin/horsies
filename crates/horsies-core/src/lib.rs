@@ -73,13 +73,16 @@ pub use crate::core::{AppConfig, HorsiesError};
 // broker re-exports
 pub use crate::broker::{
     expected_schema_version, BrokerError, BrokerErrorCode, BrokerOperationError, BrokerResult,
-    CheckInterruption, DatabasePing, ExpiredTaskRow, HeartbeatRow, ListenError, ListenerPlanError,
-    PostgresBroker, RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow,
-    TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow, WorkerPingRequest, WorkerPong,
+    CheckInterruption, ConnectivityRefusal, DatabasePing, ExpiredTaskRow, HeartbeatRow,
+    ListenError, ListenProbeFailure, ListenerPlanError, PostgresBroker, RawResultRead,
+    RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow, TaskAttemptRow,
+    TaskHandle, TaskInfoRead, TaskInfoRow, TaskResultRow, WorkerPingRequest, WorkerPong,
     WorkerPongPayload, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE,
     WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
+// The bounded limit of a result wait; a client checks it before the read.
+pub use crate::broker::wait_limit::{BoundedWait, WaitLimit, WaitLimitRefused, MAX_WAIT_LIMIT_MS};
 
 // partition maintenance of a client handle (`PostgresBroker::ensure_partition_coverage`,
 // `PostgresBroker::prune_expired_partitions`)
@@ -131,10 +134,11 @@ pub use crate::worker::finalize_batch::{
 // cancel signal of their run with `run_cancel_signal`. A result wait reads
 // `process_role` first: a process that runs task bodies refuses it.
 pub use crate::worker::executor::child_host::{
-    child_mode, child_producer, process_role, run_cancel_signal, run_child_host, spawn_in_run,
-    wait_inside_task_message, ChildApp, ChildArgs, ChildArgsError, ChildHookFailure, ChildHostExit,
-    ChildMode, ChildProducer, ChildStartFuture, ChildStartHook, ProcessRole, RunCancelSignal,
-    RunSignalRefused, RunSpawnRefused, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, MAX_RUN_WORK,
+    child_command, child_mode, child_producer, process_role, run_cancel_signal, run_child_host,
+    spawn_in_run, thread_role, wait_inside_task_message, ChildApp, ChildArgs, ChildArgsError,
+    ChildHookFailure, ChildHostExit, ChildLogSetup, ChildMode, ChildProducer, ChildStartFuture,
+    ChildStartHook, NamedChildStartHook, ProcessRole, RunCancelSignal, RunSignalRefused,
+    RunSpawnRefused, ThreadRole, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, MAX_RUN_WORK,
 };
 
 // The parent-child frame codec, for the Python child program and the
@@ -142,6 +146,8 @@ pub use crate::worker::executor::child_host::{
 pub use crate::worker::executor::protocol as frame_protocol;
 
 // worker re-exports
+// The worker connection check of a client's live check (`check --live`).
+pub use crate::worker::connection_fit::check_worker_connections;
 pub use crate::worker::from_manifest::{WorkerPlan, WorkerPlanRefused};
 pub use crate::worker::run_end::{
     run_end_of, RunPhase, WorkerBootCause, WorkerFailCause, WorkerRunEnd,
@@ -159,9 +165,9 @@ pub use crate::worker::{
 
 // worker state snapshot values
 pub use crate::broker::{
-    checked_history_limit, worker_history_limit_refused, ClassBudget, ClassBudgets,
-    ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
-    MAX_BOOT_FAILURE_DETAIL_CHARS,
+    checked_history_limit, ping_min_responses_refused, ping_timeout_refused,
+    worker_history_limit_refused, ClassBudget, ClassBudgets, ClearableBootCause, DownSlot,
+    DownSlots, ShortageErrno, SlotHealth, MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
 
 // fleet check and class report
@@ -176,7 +182,7 @@ pub use crate::broker::task_lists::{
     TASK_LIST_BOUND,
 };
 
-pub use crate::broker::client_family::{ClientFamily, FamilyCheckFailure};
+pub use crate::broker::client_family::{ClientFamily, FamilyCheckFailure, RecordedFamily};
 pub use crate::broker::migrations::SchemaRefusal;
 pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
@@ -187,21 +193,45 @@ pub use crate::core::history::rerun::{
 // client's adapters implement `CallerTransaction`; the core's own
 // `db::Transaction` implements it too.
 pub use crate::core::history::rerun::{
-    positional_sql, CallerColumn, CallerRow, CallerRowRefused, CallerStatement,
-    CallerStatementRefused, CallerTransaction, CallerType, OwnTransactionError, StatementValue,
+    named_bind, named_bind_sql, positional_sql, CallerColumn, CallerRow, CallerRowRefused,
+    CallerStatement, CallerStatementRefused, CallerTransaction, CallerType, OwnTransactionError,
+    StatementValue,
+};
+// The rerun as three pure steps for a transaction that the caller owns
+// (the Python bridge's `rerun_read`, `prepare_rerun_write`,
+// `decode_rerun_write`).
+pub use crate::core::history::identity::keys::IdempotencyKeyError;
+pub use crate::core::history::rerun::{
+    decode_rerun_write, prepare_rerun_write, rerun_read, RerunPreparation, RerunRefusal,
+    RerunRowError, RerunWrite, RerunWriteOutcome,
 };
 pub use crate::workflow_engine::bound_handle::WorkflowHandle;
+// The child spec source of a client that keeps its workflow DSL in its own
+// language, and the spec data it sends.
+pub use crate::broker::workflow_phase2::{NodeFinishForm, NodeFinished, ParentAdvanceStopped};
+pub use crate::broker::workflow_start::{ClientStartError, ClientStartOutcome};
+pub use crate::workflow_engine::child_spec::{
+    ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ChildSpecs,
+    ChildStartSource, ClientChildSpec, ClientSpec,
+};
 pub use crate::workflow_engine::engine::{
     on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
 };
 pub use crate::workflow_engine::error::WorkflowError;
 pub use crate::workflow_engine::info::WorkflowTaskInfo;
 pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_workflow};
+pub use crate::workflow_engine::phase2_recovery::Phase2RecoverySummary;
 pub use crate::workflow_engine::query::{
     get_workflow_result, NodeResultsRead, NodesRead, StoredNode, StoredNodeResult,
     TerminalErrorStatus, WorkflowEnd, WorkflowWait,
 };
 pub use crate::workflow_engine::recovery::recover_stuck_workflows;
+pub use crate::workflow_engine::recovery::{
+    RecoveryCaseMetrics, RecoveryMetrics, RecoveryPassFailure, RecoveryReport,
+};
+pub use crate::workflow_engine::spec_data::{
+    parse_workflow_spec_data, SpecDataRefused, WorkflowSpecData, WORKFLOW_SPEC_DATA_VERSION,
+};
 pub use crate::workflow_engine::start::{retry_start, start_workflow, start_workflow_with_retry};
 
 #[cfg(test)]

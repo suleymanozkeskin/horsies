@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import text
@@ -17,10 +17,10 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err
-from horsies.core.worker import finalize as finalize_module
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 from tests.dispatch_claim_support import claim_at
+from tests.phase2_support import failing_phase2
 from tests.fixtures.slots.handles import HANDLE_CLAIMED_AT, task_finished_handle
 from tests.integration.conftest import compute_test_command_fingerprint
 
@@ -141,8 +141,7 @@ async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
     worker = _worker(engine, broker)
 
     # Simulate workflow advancement failure after phase-1 task status persistence.
-    failing_phase2 = AsyncMock(side_effect=RuntimeError('phase-2 boom'))
-    monkeypatch.setattr(finalize_module, 'finish_node', failing_phase2)
+    phase2_call = failing_phase2(broker, monkeypatch, 'phase-2 boom')
 
     envelope = encode_task_result(
         TaskResult(ok='phase-1-result'),
@@ -176,7 +175,7 @@ async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
     assert row[1] == serialized.ok_value
 
     # Ensure phase-2 was actually attempted.
-    failing_phase2.assert_awaited()
+    phase2_call.assert_awaited()
 
 
 def _worker(engine: AsyncEngine, broker: PostgresBroker) -> Worker:
@@ -267,8 +266,7 @@ async def test_a_failed_phase2_keeps_the_outbox_row(
     that fails leaves the row for the recovery pass."""
     task_id = await _insert_running_task(session)
     worker = _worker(engine, broker)
-    failing_phase2 = AsyncMock(side_effect=RuntimeError('phase-2 boom'))
-    monkeypatch.setattr(finalize_module, 'finish_node', failing_phase2)
+    phase2_call = failing_phase2(broker, monkeypatch, 'phase-2 boom')
     wire = dumps_json(encode_task_result(TaskResult(ok='done'), JsonValue))
     assert not is_err(wire)
 
@@ -280,5 +278,5 @@ async def test_a_failed_phase2_keeps_the_outbox_row(
     )
 
     assert is_err(finalize_r)
-    failing_phase2.assert_awaited()
+    phase2_call.assert_awaited()
     assert await _outbox_rows(session, task_id) == 1

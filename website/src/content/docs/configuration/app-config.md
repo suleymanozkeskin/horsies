@@ -1,5 +1,6 @@
 ---
 title: AppConfig
+section: python
 summary: Root configuration for a horsies application.
 related: [broker-config, recovery-config, ../../concepts/queue-modes]
 tags: [configuration, AppConfig]
@@ -176,19 +177,18 @@ See [Recovery Config](/horsies/configuration/recovery-config/) for all options.
 
 ## Resilience Configuration
 
-Configure worker retry/backoff and NOTIFY fallback polling:
+Configure worker retry/backoff and NOTIFY fallback polling. The fields and their ranges are on [Resilience](/horsies/workers/worker-architecture/#resilience).
 
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 from horsies import WorkerResilienceConfig
 
 config = AppConfig(
-    broker=PostgresConfig(...),
+    broker=broker,
     resilience=WorkerResilienceConfig(
-        db_retry_initial_ms=500,
-        db_retry_max_ms=30_000,
-        db_retry_max_attempts=0,  # 0 = infinite
-        notify_poll_interval_ms=5_000,
+        db_retry_initial_ms=500,      # initial backoff on DB errors
+        db_retry_max_ms=30_000,       # backoff cap
+        db_retry_max_attempts=0,      # 0 = retry forever
+        notify_poll_interval_ms=5_000, # poll fallback when NOTIFY is silent
     ),
 )
 ```
@@ -306,6 +306,63 @@ For deterministic, high-confidence workflow validity in CI:
 3. Ensure all builder modules are imported by the app used in `horsies check` (no hidden or dynamic registration paths).
 4. Run `horsies check` in CI and fail the pipeline on any errors.
 5. Treat HRS-030 as additional lint signal, not the primary guarantee mechanism.
+
+## Example Configurations
+
+The limits that these configs set are on [Concurrency](/horsies/workers/concurrency/).
+
+### Single Worker, Simple
+
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
+```python
+config = AppConfig(
+    queue_mode=QueueMode.DEFAULT,
+    broker=PostgresConfig(...),
+)
+```
+
+```bash
+horsies worker myapp.instance:app --profile default
+```
+
+The `default` profile holds `isolated=IsolatedChildren(count=8)`.
+
+### Multi-Worker with Global Cap
+
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
+```python
+config = AppConfig(
+    queue_mode=QueueMode.DEFAULT,
+    cluster_wide_cap=20,
+    broker=PostgresConfig(...),
+)
+```
+
+```bash
+# Machine 1
+horsies worker myapp.instance:app --profile default
+
+# Machine 2
+horsies worker myapp.instance:app --profile default
+
+# Total: 16 children (8 each), but max 20 RUNNING tasks cluster-wide
+```
+
+### Priority Queues with Rate Limiting
+
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
+```python
+config = AppConfig(
+    queue_mode=QueueMode.CUSTOM,
+    custom_queues=[
+        CustomQueueConfig(name="stripe", priority=1, max_concurrency=3),
+        CustomQueueConfig(name="email", priority=50, max_concurrency=10),
+        CustomQueueConfig(name="reports", priority=100, max_concurrency=2),
+    ],
+    cluster_wide_cap=15,
+    broker=PostgresConfig(...),
+)
+```
 
 ## Logging Configuration
 

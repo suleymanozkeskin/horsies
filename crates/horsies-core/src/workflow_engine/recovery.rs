@@ -66,6 +66,10 @@ pub struct RecoveryReport {
     /// RUNNING workflows whose stored recovery failure count is at or over the limit. Counted once per
     /// global pass; 0 in a pass that does not count failures.
     pub over_failure_limit: i64,
+    /// The failures of the pass that no case counted (the count of workflows over the limit). Every
+    /// other failure is in the errors of its case or cases; `errors` counts each failure once.
+    #[serde(skip)]
+    pub pass_errors: u32,
 }
 
 #[derive(Debug, Default, serde::Serialize)]
@@ -118,10 +122,11 @@ impl RecoveryReport {
     }
 }
 
+/// A global pass that failed, with its partial report.
 #[derive(Debug)]
-pub(crate) struct RecoveryPassFailure {
-    pub(crate) report: RecoveryReport,
-    pub(crate) error: WorkflowError,
+pub struct RecoveryPassFailure {
+    pub report: RecoveryReport,
+    pub error: WorkflowError,
 }
 
 impl RecoveryPassFailure {
@@ -633,21 +638,20 @@ pub async fn recover_stuck_workflows(
     .await
 }
 
-/// The reaper's global pass. It keeps its partial report when it fails.
-pub(crate) async fn recover_stuck_workflows_observed(
+/// The reaper's global pass, with the children of its cases built by `build`. Outcomes as
+/// [`recover_stuck_workflows`]; a failed pass keeps its partial report ([`RecoveryPassFailure`]).
+pub(crate) async fn recover_stuck_workflows_observed_with(
     broker: &PostgresBroker,
-    registry: &WorkflowSpecRegistry,
+    build: ChildBuild<'_>,
     failure_limit: u32,
-    retention: &RetentionConfig,
 ) -> Result<RecoveryReport, RecoveryPassFailure> {
     recover_stuck_workflows_in_scope(
         broker,
-        registry,
+        build,
         RecoveryScope::Global {
             max_rows: GLOBAL_SCAN_ROW_CAP,
         },
         RecoveryFailurePolicy::Count(CountFailures::new_pass(failure_limit)),
-        retention,
     )
     .await
 }
@@ -663,10 +667,12 @@ pub(crate) async fn recover_stuck_workflows_with_cap(
 ) -> Result<RecoveryReport, WorkflowError> {
     recover_stuck_workflows_in_scope(
         broker,
-        registry,
+        ChildBuild::Registry {
+            registry,
+            retention,
+        },
         RecoveryScope::Global { max_rows },
         failure_policy,
-        retention,
     )
     .await
     .map_err(|failure| failure.error)
@@ -683,6 +689,24 @@ pub(crate) async fn recover_stuck_workflow_tree(
     root_workflow_id: Uuid,
     retention: &RetentionConfig,
 ) -> Result<RecoveryReport, WorkflowError> {
+    recover_workflow_tree(
+        broker,
+        ChildBuild::Registry {
+            registry,
+            retention,
+        },
+        root_workflow_id,
+    )
+    .await
+}
+
+/// [`recover_stuck_workflow_tree`] with the children of its cases built by
+/// `build`. Errors as [`recover_stuck_workflow_tree`].
+pub(crate) async fn recover_workflow_tree(
+    broker: &PostgresBroker,
+    build: ChildBuild<'_>,
+    root_workflow_id: Uuid,
+) -> Result<RecoveryReport, WorkflowError> {
     let rows = run_alone(
         broker,
         CheckoutClass::Reserved,
@@ -696,10 +720,9 @@ pub(crate) async fn recover_stuck_workflow_tree(
         .map_err(StepContractError::from)?;
     recover_stuck_workflows_in_scope(
         broker,
-        registry,
+        build,
         RecoveryScope::WorkflowTree(&workflow_ids),
         RecoveryFailurePolicy::LogOnly,
-        retention,
     )
     .await
     .map_err(|failure| failure.error)
@@ -709,18 +732,14 @@ pub(crate) async fn recover_stuck_workflow_tree(
 /// a debug build needs more than a 2 MiB thread stack for one pass.
 async fn recover_stuck_workflows_in_scope(
     broker: &PostgresBroker,
-    registry: &WorkflowSpecRegistry,
+    build: ChildBuild<'_>,
     scope: RecoveryScope<'_>,
     failure_policy: RecoveryFailurePolicy,
-    retention: &RetentionConfig,
 ) -> Result<RecoveryReport, RecoveryPassFailure> {
     let mut report = RecoveryReport::default();
     let pass = PassContext {
         broker,
-        build: ChildBuild {
-            registry,
-            retention,
-        },
+        build,
         scope,
         failure_policy,
     };
@@ -769,6 +788,7 @@ async fn recover_stuck_workflows_in_scope(
                 Ok(count) => report.over_failure_limit = count,
                 Err(error) => {
                     report.errors += 1;
+                    report.pass_errors += 1;
                     return Err(RecoveryPassFailure { report, error });
                 }
             }
@@ -1753,7 +1773,7 @@ async fn audit_end_states(
     let retention = RetentionConfig::default();
     let pass = PassContext {
         broker,
-        build: ChildBuild {
+        build: ChildBuild::Registry {
             registry,
             retention: &retention,
         },
@@ -1807,7 +1827,7 @@ mod cap_tests {
                 .value(&workflow_id)
                 .value(&task_indexes)
                 .finish(),
-            ChildBuild {
+            ChildBuild::Registry {
                 registry: &registry,
                 retention: &retention,
             },
@@ -1833,7 +1853,7 @@ mod cap_tests {
                 .value(&workflow_id)
                 .value(&task_index)
                 .finish(),
-            ChildBuild {
+            ChildBuild::Registry {
                 registry: &registry,
                 retention: &retention,
             },
@@ -2062,11 +2082,15 @@ mod cap_tests {
 
     #[tokio::test]
     async fn discovery_query_failure_keeps_case_metrics_in_the_health_snapshot() {
-        let failure = recover_stuck_workflows_observed(
+        let failure = recover_stuck_workflows_observed_with(
             &unreachable_broker(),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            ChildBuild::Registry {
+                registry: &WorkflowSpecRegistry::new(
+                    crate::core::registry::BuilderHookName::SPEC_BUILDER,
+                ),
+                retention: &RetentionConfig::default(),
+            },
             25,
-            &RetentionConfig::default(),
         )
         .await
         .expect_err("candidate discovery failure must keep its partial report");

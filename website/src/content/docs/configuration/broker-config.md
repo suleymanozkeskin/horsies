@@ -1,43 +1,39 @@
 ---
 title: Broker Config
-summary: PostgreSQL connection settings via PostgresConfig.
-related: [app-config]
+section: shared
+summary: The PostgreSQL connection settings of the app - the broker fields, the URL format, PgBouncer transaction pooling, JIT, pool sizing and schema initialization.
+related: [broker-connections, ../rust/configuration/app-config, remote-postgres, ../troubleshooting/pgbouncer]
 tags: [configuration, PostgresConfig, database]
 ---
 
-## Basic Usage
+The broker config is the `broker` field of the app config: the PostgreSQL URLs, the connection pool and the TCP settings.
 
-```python
-from pydantic import SecretStr
-from horsies import PostgresConfig
-
-broker = PostgresConfig(
-    database_url=SecretStr("postgresql://user:password@localhost:5432/mydb"),
-)
-```
+The API is on the client pages: [Broker Connections](/horsies/configuration/broker-connections/) (Python: `PostgresConfig`, field types and refusals, psycopg and libpq, event loops and the connection ceiling) and [PostgresConfig](/horsies/rust/configuration/app-config/#postgresconfig) (Rust).
 
 ## Fields
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `database_url` | `SecretStr` | required | SQLAlchemy connection URL |
-| `session_database_url` | `SecretStr \| None` | `None` | Direct/session-capable URL for schema setup and LISTEN/NOTIFY |
-| `pgbouncer_transaction_mode` | `bool` | `False` | Disable prepared statements for transaction-pooled PgBouncer |
-| `pool_size` | `int` | 5 | Connection pool size (raise for high-throughput producers) |
-| `max_overflow` | `int` | 10 | Additional connections beyond pool_size |
-| `pool_timeout` | `int` | 30 | Seconds to wait for connection |
-| `pool_pre_ping` | `bool` | `True` | Ping a pooled connection at checkout when it waited in the pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`), in every engine but the one of the worker process; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
-| `worker_pool_pre_ping` | `bool` | `False` | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: the worker sends a one-statement write in one round trip, and a dead pooled connection fails its first statement with a connection error that the worker retries; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
-| `tcp_keepalives` | `bool` | `True` | Enable libpq TCP keepalives on broker and child-process connections; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
-| `tcp_keepalives_idle` | `int` | 30 | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
-| `tcp_keepalives_interval` | `int` | 10 | Seconds between keepalive probes (libpq `keepalives_interval`) |
-| `tcp_keepalives_count` | `int` | 3 | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
-| `tcp_user_timeout_ms` | `int` | 30000 | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the operating system default; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
-| `retain_rerun_input_default` | `bool` | `False` | App-level default for rerun-input retention at enqueue; a per-task value overrides it |
-| `echo` | `bool` | `False` | Echo SQL statements to logs. Bound values are not shown |
-| `pool_recycle` | `int` | 1800 | Recycle connections after N seconds |
+| Field | Default | Range | Description |
+|-------|---------|-------|-------------|
+| `database_url` | required | – | PostgreSQL connection URL; see [Connection URL Format](#connection-url-format) |
+| `session_database_url` | none | – | Direct/session-capable URL for schema setup and LISTEN/NOTIFY |
+| `pgbouncer_transaction_mode` | off | – | Disable prepared statements for transaction-pooled PgBouncer |
+| `pool_size` | 5 | 1 to 10,000 | Connection pool size (raise for high-throughput producers) |
+| `max_overflow` | 10 | 0 to 10,000 | Additional connections beyond pool_size |
+| `pool_timeout` | 30 | 0 to 4,294,967,295; `0`: a checkout does not wait | Seconds to wait for connection |
+| `pool_pre_ping` | on | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`), in every pool but the one of the worker process; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `worker_pool_pre_ping` | off | – | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: the worker sends a one-statement write in one round trip, and a dead pooled connection fails its first statement with a connection error that the worker retries; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
+| `tcp_keepalives` | on | – | Enable libpq TCP keepalives on broker and child-process connections; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `tcp_keepalives_idle` | 30 | 1 to 32,767 | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
+| `tcp_keepalives_interval` | 10 | 1 to 32,767 | Seconds between keepalive probes (libpq `keepalives_interval`) |
+| `tcp_keepalives_count` | 3 | 1 to 127 | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
+| `tcp_user_timeout_ms` | 30000 | `0` or 1 to 2,147,483,647 | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the operating system default; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `retain_rerun_input_default` | off | – | App-level default for rerun-input retention at enqueue; a per-task value overrides it |
+| `echo` | off | – | Echo SQL statements to logs. Bound values are not shown |
+| `pool_recycle` | 1800 | `-1` (never) or 0 to 4,294,967,295 | Recycle connections after N seconds |
 
-The pools of a worker are not `PostgresConfig` fields. Each child kind has its own `pool` and `task_send_pool` in the worker profile, and the worker process has `WorkerProfile.pool`. See [Connection Pools and the Default Executor](/horsies/workers/worker-profiles/#connection-pools-and-the-default-executor). `worker_child_pool_min_size`, `worker_child_pool_max_size`, `worker_child_pool_check`, `worker_pool_size` and `worker_max_overflow` were removed in 0.7.0; a config that sets one fails with `HRS-213`, and the error names the profile field that replaces it.
+A value outside its range is refused when the config is built. The three keepalive values are checked only when `tcp_keepalives` is on.
+
+The pools of a worker are not broker fields. Each child kind has its own `pool` and `task_send_pool` in the worker profile, and the worker process has the `pool` of the profile. See [Connection Pools and the Default Executor](/horsies/workers/worker-profiles/#connection-pools-and-the-default-executor) (Python).
 
 ## Connection URL Format
 
@@ -47,81 +43,17 @@ postgresql://user:password@host:port/database
 
 Components:
 
-- `postgresql` - Scheme; `postgres` is accepted too. The URL names no driver: horsies opens the database with psycopg 3. A URL that names a driver, such as `postgresql+psycopg://`, is refused with `ConfigurationError` `HRS-203`, and the error names the fix
+- `postgresql` - Scheme; `postgres` is accepted too. The URL names no driver. A URL that names a driver, such as `postgresql+psycopg://`, is refused, and the error names the fix
 - `user:password` - Credentials
 - `host:port` - Server location (default port: 5432)
 - `database` - Database name
 
-## psycopg and libpq
-
-horsies needs psycopg 3.3.7 or later. The install sets where the libpq of psycopg comes from:
-
-| Install | psycopg loads |
-|---------|---------------|
-| `horsies` | the libpq of the system |
-| `horsies[pg-binary]` | the libpq that `psycopg-binary` bundles |
-| `horsies[pg-c]` | the libpq of the system, through `psycopg-c` |
-
-When a cancelled asyncio task, `KeyboardInterrupt` or `SystemExit` interrupts a running query, psycopg:
-
-1. Sends a cancel request to the server, for at most 5 seconds.
-2. Waits for the query to end, for at most 5 seconds.
-3. Closes the connection, when the query has not ended.
-
-The 5-second limit of step 1 needs libpq 17 or later. With an older libpq, the cancel request has no limit, and in async code psycopg sends it from a thread of the default executor. The 5-second limit of step 2 applies with every libpq. Read the version that psycopg loaded with `psycopg.pq.version()`: libpq 17.0 reads `170000`.
-
-In a [shared async child](/horsies/workers/shared-async-tasks/#the-timeout), that thread is work of the task: the attempt ends only when the cancel request returns. A second cancel does not stop a thread.
-
-## Examples
-
-### Local Development
-
-```python
-PostgresConfig(
-    database_url=SecretStr("postgresql://postgres:postgres@localhost:5432/horsies_dev"),
-)
-```
-
-### Production with Connection Pool
-
-```python
-PostgresConfig(
-    database_url=SecretStr("postgresql://app:secret@db.example.com:5432/production"),
-    pool_size=10,
-    max_overflow=20,
-    pool_timeout=30,
-    pool_recycle=3600,
-)
-```
-
-### From Environment Variable
-
-```python
-import os
-
-PostgresConfig(
-    database_url=SecretStr(os.environ["DATABASE_URL"]),
-)
-```
-
-### PgBouncer / Transaction Pooling
+## PgBouncer / Transaction Pooling
 
 Use a split configuration when the main SQL URL points to PgBouncer transaction
 pooling. `database_url` is used for ordinary SQL work. `session_database_url` is
 used for schema setup, partition maintenance, and PostgreSQL `LISTEN`/`NOTIFY`.
 These operations need persistent session semantics.
-
-```python
-from horsies import AppConfig, PostgresConfig
-
-config = AppConfig(
-    broker=PostgresConfig(
-        database_url=SecretStr(os.environ["DATABASE_URL_POOLED"]),
-        session_database_url=SecretStr(os.environ["DATABASE_URL_DIRECT"]),
-        pgbouncer_transaction_mode=True,
-    ),
-)
-```
 
 Some managed providers, including PlanetScale Postgres, expose separate pooled
 and direct connection strings. Treat provider-specific ports and hostnames as an
@@ -131,14 +63,14 @@ direct/session-capable URL into `session_database_url`.
 
 Rules:
 
-- Workers require `session_database_url` when `pgbouncer_transaction_mode=True`.
+- Workers require `session_database_url` when `pgbouncer_transaction_mode` is on.
 - The two URLs must be different in transaction-pool mode.
 - Worker startup checks session behavior before partition maintenance starts.
 - Syce requires the session URL for real-time updates.
 - PgBouncer-only worker deployment is unsupported.
 - Horsies does not infer PgBouncer mode from port numbers.
 
-### JIT
+## JIT
 
 Horsies runs `SET jit = off` once on each new broker connection that keeps
 session settings. Some partition-maintenance statements have cost estimates
@@ -146,7 +78,7 @@ above the default `jit_above_cost`, so a JIT-enabled server would compile
 them on every call.
 
 - Direct connections and the `session_database_url` pool always run without JIT.
-- With `pgbouncer_transaction_mode=True`, the `database_url` pool keeps the
+- With `pgbouncer_transaction_mode` on, the `database_url` pool keeps the
   server's JIT setting, because server sessions are shared between clients.
   To disable JIT there too, set it for the role:
   `ALTER ROLE <horsies_role> SET jit = off;`
@@ -154,12 +86,7 @@ them on every call.
 
 ## Connection Pooling
 
-The broker uses SQLAlchemy's async connection pool:
-
-- `pool_size`: Base number of persistent connections
-- `max_overflow`: Additional connections created under load (temporary)
-- `pool_timeout`: How long to wait if all connections are busy
-- `pool_recycle`: Close and recreate connections after this many seconds
+`pool_size` and `max_overflow` bound the connections of each broker pool: `pool_size` persistent connections, and up to `max_overflow` more under load. `pool_timeout` is how long a checkout waits when all connections are busy, and `pool_recycle` closes and recreates a connection after that many seconds.
 
 ### Sizing Guidelines
 
@@ -207,152 +134,10 @@ multiplexed onto fewer server backends. Connections are still not safe to share
 between OS processes; Horsies creates child pools inside each child process, and
 a child inherits no database socket from the worker.
 
-## Event Loops
+## Health Checks
 
-A broker keeps one resource set per open event loop that calls it. A set is a
-runtime engine with its own pool, a session engine when `session_database_url`
-differs from `database_url`, and a LISTEN/NOTIFY listener. Sync calls
-(`send()`, `TaskHandle.get()`, `spec.start()`, the sync `WorkflowHandle`
-methods, `app.ping_workers()`) run on the broker's own sync runner loop, which
-has its own set. One exception: in a process that runs no task bodies, a sync
-send, with or without an idempotency key, writes on the calling thread,
-through the sync send pool of the broker, once the broker checked the
-schema. See [Connection Ceiling](#connection-ceiling).
-
-- A set is built on the first call from its loop. Its pools open connections
-  on demand, so a set that makes no database call opens none.
-- When a loop closes, the next broker call from any loop releases that loop's
-  set: its idle connections and its listener connections close. A connection
-  that a task of the closed loop still held is closed by garbage collection.
-- A broker serves at most 5 open loops other than its sync runner loop and, in
-  a worker child, the task loop that runs `async def` tasks. A call
-  from one more open loop returns `EVENT_LOOP_LIMIT` in the error type of that
-  call, and nothing runs. The error clears when one of those loops closes.
-  The limit covers pytest-asyncio, which keeps one loop open per fixture scope
-  (session, package, module, class, function).
-- `close_async()` and `close()` close every set: the calling loop's set
-  directly, the set of a closed loop by release, and the set of another open
-  loop on that loop. When that loop does not run the close within 5 s, the
-  result is `CLOSE_FAILED` with the loop's thread in the message, and the
-  close stays scheduled on that loop. A later call builds a new set.
-
-### Async Code and Jupyter
-
-A sync call blocks its thread until the sync runner loop completes the call.
-On a thread that runs an event loop, this wait stops every coroutine on that
-loop. Coroutines and Jupyter notebook cells run on such a thread.
-
-On such a thread, a sync call returns `ASYNC_CONTEXT` in the error type of
-that call. Nothing runs, and the sync runner does not start.
-
-| Sync call | Returns |
-|---|---|
-| `send()`, `schedule()`, `retry_send()`, `retry_schedule()` | `TaskSendAsyncContext` (`TaskSendErrorCode.ASYNC_CONTEXT`); the error keeps the payload for `retry_send_async()` / `retry_schedule_async()` |
-| `app.get_result()`, `app.get_raw_result()`, `app.get_task_info()`, `app.ping_database()`, `app.ping_workers()`, `app.list_worker_states()`, `app.get_worker_state()`, `app.get_worker_state_history()`, `TaskHandle.info()`, `broker.enqueue()`, `broker.get_task_info()`, `broker.get_raw_result_record()`, `broker.close()` | `BrokerAsyncContext` (`BrokerErrorCode.ASYNC_CONTEXT`) |
-| `TaskHandle.get()`, `WorkflowHandle.get()`, `WorkflowHandle.result_for()` | A result with `RetrievalCode.ASYNC_CONTEXT`, not cached |
-| `WorkflowHandle.status()`, `.results()`, `.tasks()`, `.cancel()`, `.pause()`, `.resume()`, `pause_workflow_sync()`, `resume_workflow_sync()` | `HandleAsyncContext` (`HandleErrorCode.ASYNC_CONTEXT`) |
-| `spec.start()`, `spec.retry_start()` | `WorkflowStartAsyncContext` (`WorkflowStartErrorCode.ASYNC_CONTEXT`); the error keeps the workflow id for `retry_start_async()` |
-| `app.check(live=True)` | `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`); the live check does not connect |
-
-On such a thread, use the `*_async` form:
-
-```python
-# In a coroutine or a notebook cell
-handle = (await my_task.send_async(value=1)).unwrap()
-result = await handle.get_async(timeout_ms=5000)
-```
-
-- A `TaskHandle` that already holds its result returns it from `get()`,
-  because that call does not wait.
-- `await spec.retry_start_async(err)` completes a start that returned
-  `ASYNC_CONTEXT`, with the error's workflow id.
-- To run a sync call from async code, run it on a thread without an event
-  loop, for example `await asyncio.to_thread(app.check, live=True)`.
-
-### Connection Ceiling
-
-Each set can open:
-
-```text
-pool_size + max_overflow      # runtime engine
-+ pool_size + max_overflow    # session engine, only when session_database_url differs
-+ 2                           # listener, from the first result wait, workflow wait or worker ping
-```
-
-In a process that runs no task bodies, the broker has one more pool, the
-sync send pool: up to `pool_size + max_overflow` connections, with the same
-URL, connect args and idle ping as the runtime engine. A sync send (`send()`,
-`schedule()`, `retry_send()`, `retry_schedule()`), with or without an
-idempotency key, writes on the calling thread through this pool, once the
-broker checked the schema. The first send of a broker (it checks the schema)
-and the other sync calls use the set of the sync runner.
-Task code in a worker child sends through the set of its `task_send_pool`
-only, and has no sync send pool.
-
-```text
-connections of one process = sets × (the ceiling of one set)
-                           + pool_size + max_overflow    # sync send pool, when the table says Yes
-```
-
-| Process | Sets | Sync send pool |
-|---|---|---|
-| Sync calls only, for example a WSGI app or a script | 1 (the sync runner loop) | Yes, when it sends |
-| Async calls from one loop only | 1 | No |
-| ASGI app with async endpoints and sync calls in a thread pool | 2 | Yes, when the sync calls send |
-| pytest run with a session-scoped broker and function-scoped async tests | 2 (session loop, current test loop), plus 1 when tests make sync calls | Yes, when tests send with `send()` |
-| Worker child whose task code sends | 1 for the sync tasks (the runner loop), plus 1 for the async tasks (the task loop) | No |
-
-At the defaults (`pool_size=5`, `max_overflow=10`, no `session_database_url`),
-a process that sends only with `send()` opens up to `15 + 15 = 30`
-connections, and 2 more when it waits for a result. Each pool opens a
-connection only when a call finds none free.
-
-### Things to Avoid
-
-**Don't leave event loops open after their work is done.** Each open loop
-keeps its set and its idle connections, and the sixth open loop gets
-`EVENT_LOOP_LIMIT`.
-
-<!-- check: skip elided -- shows a wrong form next to the right one -->
-```python
-# Wrong: each call leaves one more open loop
-loop = asyncio.new_event_loop()
-loop.run_until_complete(broker.ping_database_async())
-
-# Correct: asyncio.run() closes its loop
-asyncio.run(broker.ping_database_async())
-```
-
-**Don't call sync `close()` inside a coroutine.** It returns `ASYNC_CONTEXT`
-and closes nothing. Use `await broker.close_async()`.
-
-## Multiple Components
-
-The broker creates three connection types:
-
-1. **Runtime async engine** (SQLAlchemy): For task and workflow SQL.
-2. **Maintenance async engine** (SQLAlchemy): For schema and partition DDL.
-3. **LISTEN/NOTIFY** (psycopg): For real-time notifications.
-
-By default all three use `database_url`. With split PgBouncer configuration, ordinary
-SQL uses `database_url`. Schema setup, partition maintenance, and
-`LISTEN`/`NOTIFY` use `session_database_url`.
-
-## Health Monitoring
-
-The broker includes automatic health checks:
-
-- Proactive connection monitoring
-- Auto-reconnect on connection loss
-- Exponential backoff for reconnection attempts
+Connection health comes from `pool_pre_ping`, `worker_pool_pre_ping`, the TCP keepalives and `tcp_user_timeout_ms` in the [field table](#fields). How to tune them for a remote database is on [Remote PostgreSQL](/horsies/configuration/remote-postgres/).
 
 ## Schema Initialization
 
-On first use, the broker creates required tables:
-
-- `horsies_tasks` - Task storage
-- `horsies_heartbeats` - Liveness tracking
-- `horsies_worker_states` - Worker monitoring
-- `horsies_schedule_state` - Scheduler state
-
-Uses PostgreSQL advisory locks to prevent race conditions during schema creation.
+The broker installs the schema at its first initialization. A fresh install takes the schema advisory lock on a direct connection to the session URL. The steps, the tables and the refusals are on [Schema Creation](/horsies/internals/database-schema/#schema-creation).

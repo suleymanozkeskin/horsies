@@ -17,6 +17,7 @@ mod app;
 mod config;
 mod error;
 mod registry;
+mod signals;
 
 // The `pub` items of these modules form the crate root API. Each of them
 // keeps its submodules private, so a submodule name never reaches the root.
@@ -65,7 +66,9 @@ pub use horsies_macros::{blocking_task, task, WorkflowInput};
 /// Paths that the expansions of the `horsies` macros name. Not API.
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::task::body::{body_result, decode_input, StoredTaskError};
+    pub use crate::task::body::{
+        body_result, check_input, decode_input, decode_unit_input, StoredTaskError,
+    };
     pub use horsies_core::core::task::fn_trait::TaskMeta;
     pub use horsies_core::core::task::{AsyncTaskFn, BlockingTaskFn, RawTaskResult};
     pub use horsies_core::{RegisteredTask, TaskResult};

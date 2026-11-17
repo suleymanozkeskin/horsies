@@ -20,10 +20,16 @@ mod workflow_input;
 /// The function returns `Result<T, TaskError<E>>`: `T` is the output type
 /// and `E` the code type of the task's own errors
 /// (`#[derive(horsies::UserErrorCode)]`, or `std::convert::Infallible`).
-/// Its parameters form the input: none is `()`, one is its type, several
-/// are a generated `Input` struct. A first parameter of type
-/// `horsies::TaskRuntime` is not input: the body gets the runtime of the
-/// app.
+/// Its parameters form the input, stored as Python stores keyword
+/// arguments: none is `()`; one struct is the input itself, its fields the
+/// keys; several parameters, or one that is not a struct (`fn double(x:
+/// i64)`), are a generated `Input` struct keyed by the parameter names
+/// (`{"x": 2}`). The attribute reads the type's name: a primitive, a string,
+/// a sequence, a set, a map, an `Option`, a tuple, an array, a JSON value, a
+/// UUID, a date or time, a `TaskOutcome` and a `WorkflowContext` are
+/// wrapped; a path to any other type is taken as a struct. A first
+/// parameter of type `horsies::TaskRuntime` is not input: the body gets the
+/// runtime of the app.
 ///
 /// Attributes after the name:
 /// - `queue = "name"`: a queue of `Custom` queue mode.

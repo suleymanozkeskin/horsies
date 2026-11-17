@@ -1,296 +1,147 @@
 ---
 title: Sending Tasks
-summary: How to enqueue tasks for background execution.
-related: [defining-tasks, retrieving-results]
-tags: [tasks, send, async, scheduling]
+summary: Send a task now or after a delay, with per-send options, and handle the closed catalog of TaskSendError.
+related: [defining-tasks, retrieving-results, ../configuration/app-config, ../../tasks/errors]
+tags: [rust, send, schedule, TaskFunction, TaskSendError, idempotency, retention]
 ---
 
 # Sending Tasks
 
-Enqueue tasks with `::send()` or `::schedule()`. Both return `TaskSendResult<TaskHandle<T>>` — either `Ok(TaskHandle)` on success or `Err(TaskSendError)` on failure.
+`register` returns the `TaskFunction<A, T, E>` of a task: input `A`, output `T`, code type `E`. Its sends return `Result<TaskHandle<T, E>, TaskSendError>`.
 
-## How To
-
-### Send a Task
+## Send a Task
 
 ```rust
-match my_task::send(input).await {
-    Ok(handle) => println!("Task submitted: {}", handle.task_id()),
-    Err(send_err) => println!("Send failed: {} - {}", send_err.code, send_err.message),
+use horsies::{task, Horsies, TaskError, TaskSendError, WholeSeconds};
+
+#[task("send_receipt")]
+async fn send_receipt(order_id: String) -> Result<(), TaskError<std::convert::Infallible>> {
+    let _ = order_id;
+    Ok(())
+}
+
+async fn send_receipts(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
+    let receipt = send_receipt::register(app)?;
+
+    let now = receipt.send("order-1042".to_owned()).await?;
+    let later = receipt.schedule(WholeSeconds::from_secs(300), "order-1043".to_owned()).await?;
+
+    // The generated module sends through the function of the first register.
+    let also_now: Result<_, TaskSendError> = send_receipt::send("order-1044".to_owned()).await;
+
+    println!("{} {} {}", now.task_id(), later.task_id(), also_now.is_ok());
+    Ok(())
 }
 ```
 
-### Delay Execution
+| Method | Sends |
+|--------|-------|
+| `send(input)` | Now |
+| `schedule(delay, input)` | To start after `delay: WholeSeconds` |
+| `send_with_options(options, input)` | Now, with `TaskSendOptions` |
+| `schedule_with_options(options, delay, input)` | After `delay`, with `TaskSendOptions` |
+| `with_options(options)` | A `TaskFunctionSendOptions` with `send(input)` and `schedule(delay, input)` |
 
-```rust
-use std::time::Duration;
+`task_name()`, `queue_name()`, `priority()` and `task_options()` read the task's registration.
 
-match my_task::schedule(Duration::from_secs(60), input).await {
-    Ok(handle) => println!("Scheduled: {}", handle.task_id()),
-    Err(err) => println!("Schedule failed: {}", err.code),
-}
-```
+## What a Send Does
 
-### Set a Deadline
+A send runs these steps in order, and stops at the first refusal:
 
-Use `TaskSendOptions` when the deadline is dynamic for this particular send:
+1. The suppression check: a suppressed send returns `SendSuppressed`.
+2. The retention of the send.
+3. The read-back of the input: encode it, decode the text with `A`, encode that value again. Two different texts refuse the send with `ValidationFailed` before any statement.
+4. The payload size: an input over `payload.reject_bytes` is `PayloadTooLarge`.
+5. A new task id and the sent instant.
+6. One enqueue through the core.
+
+In a worker child, a send goes through the child's own producer handle, whose pool the worker sizes. Anywhere else it goes through the app's handle.
+
+## Send Options
 
 ```rust
 use chrono::{Duration, Utc};
-use horsies::TaskSendOptions;
+use horsies::{SendRetention, TaskSendOptions};
 
-let deadline = Utc::now() + Duration::minutes(5);
-
-let handle = my_task::with_options(
-    TaskSendOptions::new().good_until(deadline),
-)
-.send(input)
-.await?;
-```
-
-For scheduled sends:
-
-```rust
-let handle = my_task::with_options(
-    TaskSendOptions::new().good_until(deadline),
-)
-.schedule(std::time::Duration::from_secs(60), input)
-.await?;
-```
-
-`good_until` is an absolute UTC deadline. It is not relative to the schedule delay.
-If the scheduled task has not started by that instant, it expires instead of running.
-
-For workflow tasks, prefer setting the deadline on the node when building the workflow spec:
-
-```rust
-let node = my_task::node()?
-    .set_input(input)?
-    .good_until(deadline);
-```
-
-### Choose task-history retention
-
-Every send gets a retention class. The precedence is:
-
-1. An explicit send choice.
-2. The queue's `queue_retention` mapping.
-3. `standard_30d`.
-
-Use `retention_class(...)` for a finite class:
-
-```rust
-use horsies::TaskSendOptions;
-
-let handle = audit_task::with_options(
-    TaskSendOptions::new().retention_class("audit_1y"),
-)
-.send(input)
-.await?;
-```
-
-Use `retain_forever()` for the explicit forever choice:
-
-```rust
-let handle = audit_task::with_options(
-    TaskSendOptions::new().retain_forever(),
-)
-.send(input)
-.await?;
-```
-
-The payload stores the explicit forever choice as a missing finite
-`retention_class_key`. The database resolves it to the `forever` class. Do not
-pass the string `"forever"` to `retention_class(...)`.
-
-An unknown class returns `ValidationFailed`. No task row is written. The class
-is fixed at enqueue. Retry methods replay the same class.
-
-See [Retention Config](../../configuration/retention-config).
-
-### Use an idempotency key
-
-An idempotency key deduplicates enqueue commands for one task name.
-
-```rust
-let handle = charge_card::with_options(
-    TaskSendOptions::new().idempotency_key("checkout-4182"),
-)
-.send(input)
-.await?;
-```
-
-The key is scoped by task name. The key must be non-empty. It can use at most
-255 UTF-8 bytes.
-
-The default reservation window is 24 hours. A matching command replays the
-existing task ID. A different command with the same scoped key returns a key
-conflict. The command fingerprint includes task name, queue, payload, options,
-retention class, deadline, and rerun lineage.
-
-Delayed sends carry the same key. `retry_send` and `retry_schedule` also carry
-it. Do not change the stored error payload before a retry.
-
-### Wait for Result
-
-```rust
-use std::time::Duration;
-
-match my_task::send(input).await {
-    Ok(handle) => {
-        // Wait with timeout
-        let result = handle.get(Some(Duration::from_secs(5))).await;
-
-        // Wait indefinitely
-        let result = handle.get(None).await;
-    }
-    Err(err) => println!("Send failed: {}", err.code),
+fn invoice_options(invoice_id: u64) -> TaskSendOptions {
+    TaskSendOptions::new()
+        .good_until(Utc::now() + Duration::hours(1))
+        .idempotency_key(format!("invoice-{invoice_id}"))
+        .retention(SendRetention::Forever)
 }
 ```
 
-### Fire and Forget
+| Option | Does |
+|--------|------|
+| `good_until(deadline)` | The task expires when no worker started it by `deadline` |
+| `idempotency_key(key)` | Stores the task once per key within the app's reservation window (24 hours): a second send of the same command answers with the task that holds the key |
+| `retention(SendRetention)` | The retention of the task's history record |
+| `retain_forever()` | `retention(SendRetention::Forever)` |
+
+`SendRetention`:
+
+| Variant | History record kept |
+|---------|---------------------|
+| `FromQueueOrDefault` (default) | For the period that `RetentionConfig.queue_retention` maps the task's queue to, else 30 days |
+| `Forever` | Forever |
+| `Period(RetentionDays)` | For a period of whole days that this deployment registers: the 30-day default, a period of `queue_retention`, or one of `retention_periods`. Build it with `RetentionDays::parse_period(chrono::Duration::days(n))`. Another period is refused with the allowed periods |
+
+The meaning of the reservation window and of retention is on [Retention Config](/horsies/configuration/retention-config/).
+
+## TaskSendError
+
+`TaskSendError` is the closed catalog of the send codes. Each variant has only the facts of its state.
+
+| Variant | Code | Fields | Retry methods |
+|---------|------|--------|---------------|
+| `SendSuppressed` | `SEND_SUPPRESSED` | `message` | Refused |
+| `AsyncContext` | `ASYNC_CONTEXT` | `task_id`, `payload`, `message` | Accepted |
+| `ValidationFailed` | `VALIDATION_FAILED` | `message` | Refused |
+| `EnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable` | Accepted |
+| `PayloadMismatch` | `PAYLOAD_MISMATCH` | `task_id`, `payload`, `message` | Refused |
+| `PayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` | Refused |
+| `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Accepted |
+
+- `EnqueueFailed`: the row may or may not exist. `retryable` is the classification of the cause.
+- `AsyncContext` is the error of a blocking send on a thread that runs a runtime. The async sends do not return it.
+- `PayloadMismatch`: the task id exists with another command or idempotency key; nothing was written.
+- `IdempotencyKeyConflict`: another task (`owner_task_id`) holds the key with another command; nothing was written.
+
+The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#send-error-codes).
+
+### Retry a Failed Send
 
 ```rust
-// Send without waiting for result — drop the handle
-let _ = my_task::send(input).await;
-```
+use horsies::{TaskFunction, TaskHandle, TaskSendError};
 
-### Pass Complex Arguments
-
-Arguments must implement `Serialize` and `Deserialize`:
-
-```rust
-use serde::{Serialize, Deserialize};
-
-#[derive(Serialize, Deserialize)]
-struct OrderInput {
-    id: i64,
-    items: Vec<String>,
-    metadata: HashMap<String, serde_json::Value>,
-}
-
-match process_order::send(OrderInput {
-    id: 123,
-    items: vec!["a".into(), "b".into()],
-    metadata: HashMap::new(),
-}).await {
-    Ok(handle) => { /* ... */ }
-    Err(err) => println!("Send failed: {}", err.code),
-}
-```
-
-## Retrying Failed Sends
-
-When `send()` fails with `EnqueueFailed` (a transient broker error), use the retry methods to replay the exact same payload. The `enqueue_sha` on the stored `TaskSendPayload` guarantees the retry carries the identical serialized payload.
-
-```rust
-match my_task::send(input).await {
-    Ok(handle) => { /* ... */ }
-    Err(send_err) if send_err.retryable => {
-        let task_fn = my_task::handle(&rt)?;
-        match task_fn.retry_send(&send_err).await {
-            Ok(handle) => println!("Retry succeeded: {}", handle.task_id()),
-            Err(retry_err) => println!("Retry failed: {}", retry_err.code),
-        }
-    }
-    Err(send_err) => {
-        println!("Permanent failure: {}", send_err.code);
+async fn send_with_one_retry(
+    receipt: &TaskFunction<String, (), std::convert::Infallible>,
+    order_id: String,
+) -> Result<TaskHandle<(), std::convert::Infallible>, TaskSendError> {
+    match receipt.send(order_id).await {
+        Err(error @ TaskSendError::EnqueueFailed { retryable: true, .. }) => receipt.retry_send(&error).await,
+        other => other,
     }
 }
 ```
 
-### Automatic Retry via Config
+`retry_send(&error)` and `retry_schedule(&error)` send again the task of a failed `send` or `schedule`: the same task id and the same payload, as a repeat. A task that an earlier call wrote answers with its task id, also after it finished, and does not run again. Both refuse with `ValidationFailed`:
 
-Set `resend_on_transient_err = true` in `AppConfig` to have the library automatically retry transient enqueue failures (up to 3 times with exponential backoff):
+- an error that carries no payload (only `AsyncContext`, `EnqueueFailed` and `IdempotencyKeyConflict` carry one);
+- the error of another task;
+- the error of the other method (a `schedule` error to `retry_send`, a `send` error to `retry_schedule`).
 
-```rust
-let config = AppConfig {
-    resend_on_transient_err: true,
-    ..AppConfig::for_database_url("postgresql://...")
-};
-```
+### Resend on Transient Errors
 
-## API Reference
+With `AppConfig.resend_on_transient_err`, a send that fails with a retryable `EnqueueFailed` is sent again with the same task id and payload, as a repeat. The number of resends, the waits and the answer of a repeat are on [Atomic Enqueue and Topology](/horsies/operations/atomic-enqueue-and-topology/#resend-transient-failures).
 
-### `task_name::send(args) -> TaskSendResult<TaskHandle<T>>`
+## Payload Size
 
-Enqueue task for immediate execution.
+`AppConfig.payload` is a `PayloadPolicy`:
 
-| Parameter | Type | Description |
-| --------- | ---- | ----------- |
-| `args` | `A: Serialize` | Task arguments |
+| Field | Type | Does |
+|-------|------|------|
+| `warn_bytes` | `Option<u64>` | Logs a warning when a serialized payload exceeds this many bytes, once per task name and payload kind per process; `None` turns it off |
+| `reject_bytes` | `Option<u64>` | Refuses a send whose serialized input exceeds this many bytes with `PayloadTooLarge`, before any row is written; `None` (default) turns it off. Results are never refused |
 
-### `task_name::schedule(delay, args) -> TaskSendResult<TaskHandle<T>>`
-
-Enqueue task for delayed execution.
-
-| Parameter | Type | Description |
-| --------- | ---- | ----------- |
-| `delay` | `Duration` | Time to wait before task becomes claimable |
-| `args` | `A: Serialize` | Task arguments |
-
-### `TaskFunction<A, T>`
-
-| Method | Returns | Description |
-| ------ | ------- | ----------- |
-| `.send(args)` | `TaskSendResult<TaskHandle<T>>` | Enqueue immediately |
-| `.schedule(delay, args)` | `TaskSendResult<TaskHandle<T>>` | Enqueue with delay |
-| `.with_options(options)` | `TaskFunctionSendOptions<'_, A, T>` | Bind per-send options |
-| `.retry_send(&err)` | `TaskSendResult<TaskHandle<T>>` | Retry failed send |
-| `.retry_schedule(&err)` | `TaskSendResult<TaskHandle<T>>` | Retry failed schedule |
-| `.task_name()` | `&str` | Task name |
-| `.queue_name()` | `&str` | Assigned queue |
-| `.priority()` | `u32` | Effective priority |
-
-### `TaskSendOptions`
-
-```rust
-TaskSendOptions::new()
-    .good_until(deadline)
-    .idempotency_key("checkout-4182")
-    .retention_class("audit_1y")
-```
-
-`good_until` is the last valid time for the task to begin execution. A task whose deadline passes while still `Pending` or `Claimed` transitions to `Expired` without running user code.
-
-| Method | Meaning |
-|---|---|
-| `.good_until(deadline)` | Set the last valid start time |
-| `.idempotency_key(key)` | Set a task-name-scoped enqueue key |
-| `.retention_class(key)` | Select a configured finite class |
-| `.retain_forever()` | Keep the terminal record forever |
-
-Omitting retention uses the queue mapping. It uses `standard_30d` when the
-queue has no mapping.
-
-### `TaskSendResult<T>`
-
-Type alias: `Result<T, TaskSendError>`.
-
-### `TaskSendError`
-
-| Field | Type | Description |
-| ----- | ---- | ----------- |
-| `code` | `TaskSendErrorCode` | Failure category |
-| `message` | `String` | Human-readable description |
-| `retryable` | `bool` | Whether the caller can retry with the same payload |
-| `task_id` | `Option<Uuid>` | Generated task ID |
-| `payload` | `Option<TaskSendPayload>` | Serialized envelope for replay |
-
-### `TaskSendErrorCode`
-
-| Code | Description | Retryable |
-| ---- | ----------- | --------- |
-| `SendSuppressed` | Send suppressed during check phase | No |
-| `ValidationFailed` | Argument serialization or validation failed | No |
-| `EnqueueFailed` | Broker/database failure during enqueue | Yes |
-| `PayloadMismatch` | Retry payload SHA does not match | No |
-| `PayloadTooLarge` | Serialized input exceeded the configured limit | No |
-
-### `TaskHandle<T>`
-
-| Method | Returns | Description |
-| ------ | ------- | ----------- |
-| `.task_id()` | `Uuid` | Unique task identifier |
-| `.get(timeout)` | `TaskResult<T>` | Wait for result |
-| `.info(include_result, include_failed_reason, include_attempts)` | `BrokerResult<Option<TaskInfo>>` | Fetch task metadata |
+The size is counted in bytes of the UTF-8 text.

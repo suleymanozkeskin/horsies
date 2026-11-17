@@ -13,7 +13,7 @@ pub fn render_core_stub(surface: &ModuleSurface) -> String {
     let mut text = format!("{GENERATED_HEADER}\n");
     text.push_str("\"\"\"Type stubs of the extension module horsies._core.\"\"\"\n\n");
     text.push_str(
-        "import asyncio\nimport datetime\nimport uuid\nfrom typing import Literal, final\n",
+        "import asyncio\nimport datetime\nimport uuid\nfrom collections.abc import Callable\nfrom typing import Literal, final\n",
     );
     for exception in surface.exceptions {
         text.push_str("\n\n");
