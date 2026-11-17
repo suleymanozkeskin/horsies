@@ -336,32 +336,65 @@ fn source_read(
         "HISTORY" => history_source(read, row, source_task_id),
         other => Ok(SourceRead::Refused(RerunRefusal::SourceCorrupt {
             task_id: source_task_id,
-            detail: HistoryError::contract(format!(
-                "staged detail returned unknown location {other:?}"
-            ))
-            .to_string(),
+            detail: format!(
+                "staged detail returned unknown location {}",
+                python_repr(other)
+            ),
         })),
     }
 }
 
 /// The absence of a source, or the corruption of its reason. Pure.
 fn absence_of(source_task_id: Uuid, reason: Option<&str>) -> RerunRefusal {
-    let parsed = match reason {
-        Some(reason) => TaskAbsenceReason::parse(reason),
-        None => Err(HistoryError::contract(format!(
-            "the absence read of {source_task_id} returned no reason"
-        ))),
-    };
-    match parsed {
-        Ok(reason) => RerunRefusal::SourceAbsent {
+    match reason.map(|text| (text, TaskAbsenceReason::parse(text))) {
+        Some((_, Ok(reason))) => RerunRefusal::SourceAbsent {
             task_id: source_task_id,
             reason,
         },
-        Err(error) => RerunRefusal::SourceCorrupt {
+        Some((text, Err(_))) => RerunRefusal::SourceCorrupt {
             task_id: source_task_id,
-            detail: error.to_string(),
+            detail: absence_reason_refused(source_task_id, &python_repr(text)),
+        },
+        None => RerunRefusal::SourceCorrupt {
+            task_id: source_task_id,
+            detail: absence_reason_refused(source_task_id, "None"),
         },
     }
+}
+
+/// Python's text of a stored absence reason that is not a member
+/// (`absence_reason_of`), with the stored value as Python shows it.
+fn absence_reason_refused(source_task_id: Uuid, shown: &str) -> String {
+    format!("absence reason of {source_task_id} is {shown}, which is not a task absence reason")
+}
+
+/// A text as Python's `repr` of a `str` shows it: in single quotes, or in
+/// double quotes when it holds a single quote and no double quote; a
+/// backslash, the quote in use and the control characters `\n`, `\r`, `\t`
+/// escaped. The corrupt-source details keep Python's wording, which names
+/// the stored value this way. Pure.
+fn python_repr(text: &str) -> String {
+    let quote = match (text.contains('\''), text.contains('"')) {
+        (true, false) => '"',
+        (true, true) | (false, true) | (false, false) => '\'',
+    };
+    let mut shown = String::with_capacity(text.len() + 2);
+    shown.push(quote);
+    for character in text.chars() {
+        match character {
+            '\\' => shown.push_str("\\\\"),
+            '\n' => shown.push_str("\\n"),
+            '\r' => shown.push_str("\\r"),
+            '\t' => shown.push_str("\\t"),
+            other if other == quote => {
+                shown.push('\\');
+                shown.push(other);
+            }
+            other => shown.push(other),
+        }
+    }
+    shown.push(quote);
+    shown
 }
 
 /// The history source of one read row, or the corruption it carries: the
@@ -377,10 +410,10 @@ fn history_source(
     let Ok(status) = status.parse::<TaskStatus>() else {
         return Ok(SourceRead::Refused(RerunRefusal::SourceCorrupt {
             task_id: source_task_id,
-            detail: HistoryError::contract(format!(
-                "history row {task_id} has status {status:?}, which is not a task status"
-            ))
-            .to_string(),
+            detail: format!(
+                "history row {task_id} has status {}, which is not a task status",
+                python_repr(&status)
+            ),
         }));
     };
     let attempt_archive_version = required(
