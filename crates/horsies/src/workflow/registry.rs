@@ -262,7 +262,9 @@ impl WorkflowRegistry {
     /// Python's check of the registered workflows: each definition without
     /// params and each check case is built, checked against the registry and
     /// the app's queues, and walked into its sub-workflows down to the depth
-    /// limit. A nesting is reported only when it fails for certain.
+    /// limit. A nesting is reported only when it fails for certain. The spec
+    /// of a check case without a definition key is reported (`HRS-016`) and
+    /// not checked further.
     pub(crate) fn check_findings(&self) -> Vec<HorsiesError> {
         let registered = self.read();
         let mut findings = Vec::new();
@@ -276,7 +278,10 @@ impl WorkflowRegistry {
             .collect::<Vec<WorkflowSpec>>();
         for case in &registered.check_cases {
             match std::panic::catch_unwind(AssertUnwindSafe(|| (case.build)())) {
-                Ok(Ok(spec)) => self.check_root(&registered, &spec, &mut findings),
+                Ok(Ok(spec)) => match keyless_spec(&spec) {
+                    Some(refused) => findings.push(refused),
+                    None => self.check_root(&registered, &spec, &mut findings),
+                },
                 Ok(Err(refused)) => findings.push(
                     HorsiesError::new(format!(
                         "workflow builder '{}' refused a check case",
@@ -712,6 +717,24 @@ fn duplicate(definition: &Definition, cause: String) -> HorsiesError {
     ))
     .with_code(ErrorCode::WorkflowDuplicateDefinitionKey)
     .with_help("give each workflow definition its own name and definition key")
+}
+
+/// The refusal of the spec of a check case that has no definition key, or
+/// a blank one (Python `WorkflowSpec._require_definition_key`, which the
+/// check of a workflow builder runs); `None` for a keyed spec. Pure.
+fn keyless_spec(spec: &WorkflowSpec) -> Option<HorsiesError> {
+    match spec.definition_key().map(str::trim) {
+        Some(key) if !key.is_empty() => None,
+        Some(_) | None => Some(
+            HorsiesError::new("WorkflowSpec is missing definition_key")
+                .with_code(ErrorCode::WorkflowNoDefinitionKey)
+                .with_note(format!(
+                    "workflow '{}' has no stable definition_key",
+                    spec.name()
+                ))
+                .with_help("set a definition key such as 'your.workflow.v1' on the builder"),
+        ),
+    }
 }
 
 fn unregistered_child(spec: &WorkflowSpec, node: &SpecNode, definition_key: &str) -> HorsiesError {

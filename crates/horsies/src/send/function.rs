@@ -649,6 +649,35 @@ mod tests {
         assert_eq!(function.priority(), 100);
     }
 
+    /// A workflow node of a registered function has the queue and the
+    /// stored options text of its registration (Python `TaskNode(fn=task)`);
+    /// a task registered without options gives its node none.
+    #[test]
+    fn a_node_of_a_registered_function_has_the_queue_and_options_of_its_registration() {
+        let options = TaskOptions {
+            task_name: "send_invoice".to_owned(),
+            queue_name: None,
+            good_until: None,
+            auto_retry_for: None,
+            retry_policy: None,
+            timeout_ms: Some(5_000),
+            execution: Execution::Isolated,
+            cancel_grace_ms: None,
+        };
+        let mut app = Horsies::new(config()).unwrap();
+        app.register(
+            "send_invoice",
+            crate::async_task_fn!(send_invoice, Invoice).with_task_options(options.clone()),
+        )
+        .unwrap();
+        let node = function(&app).node();
+        assert_eq!(node.queue, "default");
+        assert_eq!(node.task_options, Some(options.stored_options_text()));
+
+        let plain = app_with(config());
+        assert_eq!(function(&plain).node().task_options, None);
+    }
+
     #[test]
     fn an_unknown_task_name_is_refused() {
         let app = app_with(config());
