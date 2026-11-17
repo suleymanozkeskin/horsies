@@ -40,7 +40,9 @@ serde = { version = "1", features = ["derive"] }
 # `unbounded_depth`: a task input or a returned value that the strict reader
 # bounded at 300 levels decodes past serde_json's own limit of 128.
 # `raw_value`: a workflow node's input keeps the text of each member.
-serde_json = { version = "1", features = ["raw_value", "unbounded_depth"] }
+# `preserve_order`: an object keeps its members in insertion order, as the
+# core's objects do (the core enables it too).
+serde_json = { version = "1", features = ["raw_value", "unbounded_depth", "preserve_order"] }
 # The field path of a decode failure of a task input or a returned value.
 serde_path_to_error = "0.1"
 thiserror = "2"
