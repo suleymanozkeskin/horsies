@@ -9,6 +9,11 @@ next runs of ``calculate_next_run``, the config digest of
 now a facade on ``horsies._core.CoreScheduler``; this class is the reference
 of the dual-runs of the scheduler switch (``tests/dualrun/test_schedule_fire.py``)
 and of the unit tests of the Python loop (``tests/unit/test_scheduler_service.py``).
+
+``facade_start`` and ``facade_check_and_run_schedules`` are the references of
+the facade's ``start`` and ``_check_and_run_schedules`` in the integration
+dual-run (``--dual-run=scheduler``): each runs the reference loop of the facade
+instance, one loop per facade.
 """
 
 from __future__ import annotations
@@ -19,7 +24,8 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Final, Optional
+from weakref import WeakKeyDictionary
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker, SendCommand
 from horsies.core.models.retention import resolve_queue_retention_class
@@ -44,6 +50,7 @@ from horsies.core.scheduler.validation import (
     prepare_schedules,
 )
 from horsies.core.scheduler.calculator import calculate_next_run
+from horsies.core.scheduler.service import Scheduler as SchedulerFacade
 from horsies.core.logging import get_logger
 from horsies.core.brokers.result_types import broker_error_cause
 from horsies.core.types.error_detail import NoCause
@@ -1004,3 +1011,47 @@ class Scheduler:
                 f"Schedule '{schedule.name}' has no send command: start() did not run",
             )
         return command
+
+
+_REFERENCE_LOOPS: Final[WeakKeyDictionary[SchedulerFacade, Scheduler]] = WeakKeyDictionary()
+"""The reference loop of each production ``Scheduler`` that ran a reference
+function below. An entry ends with its facade."""
+
+
+def _reference_loop(self: SchedulerFacade) -> Scheduler:
+    """The reference loop of the facade ``self``, built on its app at the first call."""
+    match _REFERENCE_LOOPS.get(self):
+        case Scheduler() as existing:
+            return existing
+        case None:
+            built = Scheduler(self.app)
+            _REFERENCE_LOOPS[self] = built
+            return built
+
+
+async def facade_start(self: SchedulerFacade) -> None:
+    """The facade's ``start`` on the reference loop of ``self``: the Python
+    start, which returns at once after a start that completed. The facade
+    gets the loop's broker, also after a failed start, so the facade's
+    ``stop`` closes it.
+
+    Raises:
+        The errors of ``Scheduler.start`` of the reference loop.
+    """
+    loop = _reference_loop(self)
+    try:
+        await loop.start()
+    finally:
+        self.broker = loop.broker
+
+
+async def facade_check_and_run_schedules(self: SchedulerFacade) -> None:
+    """The facade's ``_check_and_run_schedules``: one tick of the reference
+    loop of ``self``.
+
+    Raises:
+        The errors of ``Scheduler._check_and_run_schedules`` of the reference
+        loop: ``RuntimeError`` before a start completed, or a database
+        failure of the due read or the heal.
+    """
+    await _reference_loop(self)._check_and_run_schedules()  # pyright: ignore[reportPrivateUsage]
