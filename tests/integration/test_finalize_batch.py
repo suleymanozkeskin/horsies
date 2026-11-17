@@ -2,7 +2,8 @@
 
 Each test enters through the worker (``_finalize_task_result``,
 ``_finalize_after``, ``_retry_finalize_phase1``) or through the batch write
-itself (``apply_fused_batch`` on a runner of the worker), against the real
+itself (``complete_fused_batch_in_core`` on the worker's core handle; the lock
+order test sends the statement with ``apply_fused_batch``), against the real
 schema. The finalizers of one test submit in one loop turn, so the first
 flusher takes their rows as one batch.
 
@@ -28,7 +29,7 @@ import uuid
 from collections.abc import AsyncGenerator, Generator, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, Final, assert_never
+from typing import Any, Final
 
 import psycopg
 import pytest
@@ -48,11 +49,13 @@ from horsies.core.lifecycle.outcomes import (
     TerminalizationOutcome,
 )
 from horsies.core.lifecycle.outcomes import decode_outcome_row
+from horsies._core import CoreHandle
 from horsies.core.lifecycle.persistence import (
     _COMPLETE_TASKS_FUSED_SQL,
     BatchWriteError,
     FusedCompletionBatch,
     apply_fused_batch,
+    complete_fused_batch_in_core,
 )
 from horsies.core.models.child_sizing import parent_pool_flusher_bound
 from horsies.core.types.result import Err, Ok, Result
@@ -60,13 +63,12 @@ from horsies.core.worker import finalize as finalize_module
 from horsies.core.worker.child_protocol import NoTaskLoop, RssUnreadable
 from horsies.core.worker.finalize_batch import (
     FinalizeBatcher,
-    FlusherRole,
     FlushersCancelled,
 )
 from horsies.core.worker.runtime import FinalizeStage, _FinalizeError
 from horsies.core.worker.slots import Assigned, TaskFinished
 from horsies.core.worker.worker import Worker
-from horsies.core.utils.db import PooledStatements, StatementRunner
+from horsies.core.utils.db import PooledStatements
 from tests.dispatch_claim_support import claim_at
 from tests.fixtures.slots.handles import unbound_handle
 from tests.integration.autocommit_support import (
@@ -104,13 +106,6 @@ QUEUE_ROOM: Final = 4 * BATCH_ROWS
 claim budget, which is 2 for the one-slot test worker; these tests finalize
 more rows at once than one slot ever holds."""
 
-FLUSHER_ROLES: Final = pytest.mark.parametrize(
-    'role',
-    list(FlusherRole),
-    ids=[role.value.lower() for role in FlusherRole],
-)
-"""Runs a test once on the runner of each flusher role (``_runner_of``)."""
-
 type Case = list[tuple[str, datetime]]
 
 
@@ -134,26 +129,10 @@ async def _open_worker(database_url: str) -> ProxiedWorker:
     worker = opened.worker
     worker._finalize_batcher = FinalizeBatcher(
         worker._write_fused_batch,
-        steady_runners=worker._batch_connections,
-        surge_runner=PooledStatements(worker.sf),
         max_queued_rows=QUEUE_ROOM,
         max_flushers=parent_pool_flusher_bound(worker.cfg.parent_pool_size),
     )
     return opened
-
-
-def _runner_of(worker: Worker, role: FlusherRole) -> StatementRunner:
-    """The runner of ``worker`` that a flusher of ``role`` writes on: a held
-    connection of a steady flusher, or a checkout per statement for a surge
-    flusher. The held connection is also a runner of the batcher: a test that
-    uses it must not write rows through the batcher."""
-    match role:
-        case FlusherRole.STEADY:
-            return worker._batch_connections[0]
-        case FlusherRole.SURGE:
-            return PooledStatements(worker.sf)
-        case _ as unreachable:
-            assert_never(unreachable)
 
 
 @pytest_asyncio.fixture(loop_scope='function')
@@ -201,11 +180,11 @@ class _RecordedBatches:
 
     async def __call__(
         self,
-        runner: StatementRunner,
+        handle: CoreHandle,
         batch: FusedCompletionBatch,
     ) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
         self.batches.append(tuple(command.task_id for command in batch.commands))
-        written = await apply_fused_batch(runner, batch)
+        written = await complete_fused_batch_in_core(handle, batch)
         self.results.append(written)
         return written
 
@@ -225,7 +204,7 @@ class _RecordedBatches:
 @pytest.fixture
 def recorded(monkeypatch: pytest.MonkeyPatch) -> _RecordedBatches:
     recording = _RecordedBatches()
-    monkeypatch.setattr(finalize_module, 'apply_fused_batch', recording)
+    monkeypatch.setattr(finalize_module, 'complete_fused_batch_in_core', recording)
     return recording
 
 
@@ -496,12 +475,10 @@ async def test_each_row_keeps_its_own_fence_in_one_batch(
     assert set(await _history(session, [mine, foreign, stale, done])) == {mine, done}
 
 
-@FLUSHER_ROLES
 async def test_a_batch_writes_each_result_text_as_given(
     direct: ProxiedWorker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
-    role: FlusherRole,
 ) -> None:
     """Escapes, whitespace and characters outside ASCII reach the row
     unchanged."""
@@ -517,18 +494,16 @@ async def test_a_batch_writes_each_result_text_as_given(
         ),
     )
 
-    written = await apply_fused_batch(_runner_of(direct.worker, role), batch)
+    written = await complete_fused_batch_in_core(direct.worker.core_handle, batch)
 
     assert _written(written) == [Applied, Applied]
     assert await _history_results(session, [first, second]) == texts
 
 
-@FLUSHER_ROLES
 async def test_a_claim_generation_keeps_its_microseconds_and_its_offset(
     direct: ProxiedWorker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
-    role: FlusherRole,
 ) -> None:
     """The fence compares instants: the same instant at another UTC offset
     matches, one microsecond later does not."""
@@ -542,7 +517,7 @@ async def test_a_claim_generation_keeps_its_microseconds_and_its_offset(
         ),
     )
 
-    written = await apply_fused_batch(_runner_of(direct.worker, role), batch)
+    written = await complete_fused_batch_in_core(direct.worker.core_handle, batch)
 
     assert _written(written) == [Applied, LostClaim]
     assert await _live_statuses(session, [same, later]) == {later: 'RUNNING'}
@@ -609,15 +584,16 @@ async def test_a_replay_of_a_whole_batch_is_already_applied_and_writes_nothing(
         assert len(await read_attempts(session, task_id)) == 1
 
 
-async def test_a_lone_row_runs_the_single_fused_completion(
+async def test_a_lone_row_runs_the_batch_function_with_one_row(
     direct: ProxiedWorker,
     session: AsyncSession,
     blocker: psycopg.AsyncConnection[Any],
     recorded: _RecordedBatches,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """A batch of one row sends ``horsies_complete_task_fused`` itself, not
-    the batch function."""
+    """The core sends ``horsies_complete_tasks_fused`` for a batch of one row
+    too; it calls ``horsies_complete_task_fused`` once. The Python statement
+    sent the single fused completion itself; the effects are the same."""
     task_id, claimed_at = await insert_task(session, status='RUNNING')
     await _hold_task_lock(blocker, task_id)
     finalizing = asyncio.create_task(_finalize(direct.worker, task_id, claimed_at))
@@ -625,8 +601,7 @@ async def test_a_lone_row_runs_the_single_fused_completion(
     await _release_task_lock(blocker, task_id)
 
     assert await asyncio.wait_for(finalizing, OUTER_BOUND_S) == Ok(None)
-    assert 'horsies_complete_task_fused(' in query
-    assert 'horsies_complete_tasks_fused(' not in query
+    assert 'horsies_complete_tasks_fused(' in query
     assert recorded.batches == [(task_id,)]
     assert recorded.outcomes() == {task_id: [Applied]}
 
