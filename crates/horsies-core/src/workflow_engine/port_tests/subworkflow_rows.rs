@@ -9,19 +9,16 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    child_of, code, err, execute, finish_node, node, node_status, ok, registry_of, shared_pool,
-    spec, start, stored_result, stored_result_error, sub_workflow_node, task_node, try_finish_task,
-    workflow, workflow_status, IsolatedDatabase,
+    advance_parent_of, child_of, code, err, execute, finish_node, node, node_status, ok,
+    registry_of, shared_pool, spec, start, stored_result, stored_result_error, sub_workflow_node,
+    task_node, try_finish_task, workflow, workflow_status, IsolatedDatabase,
 };
-use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::RegisteredWorkflowDefinition;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::{
     AnyNode, HorsiesError, SpecBuildError, SubWorkflowSummary, TaskError, TaskResult, WorkflowSpec,
     WorkflowSpecRegistry, WorkflowStatus,
 };
-use crate::workflow_engine::engine::on_subworkflow_complete;
 use crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH;
 
 /// A child with one task node that is its output (Python `StartChildWorkflow`).
@@ -196,19 +193,7 @@ async fn a_replayed_child_completion_does_not_rewrite_a_terminal_parent_node() {
         .await
         .expect("end the child");
 
-        on_subworkflow_complete(
-            &pool,
-            parent_id,
-            0,
-            child_id,
-            child_status,
-            child_result.as_deref(),
-            &registry,
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
-        )
-        .await
-        .expect("the replay");
+        advance_parent_of(&pool, child_id, &registry).await;
 
         let replayed = node(&pool, parent_id, 0).await;
         assert_eq!(replayed.status, "COMPLETED", "{child_status}");

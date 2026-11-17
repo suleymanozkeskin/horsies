@@ -217,6 +217,10 @@ const CANCEL_TASK_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("include_running", "bool"),
 ];
+const RAW_RESULT_RECORD_PARAMETERS: &[StubParameter] = &[
+    positional("task_id", "uuid.UUID"),
+    keyword("timeout_ms", "int | None"),
+];
 const TASK_INFO_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("include_result", "bool"),
@@ -224,11 +228,26 @@ const TASK_INFO_PARAMETERS: &[StubParameter] = &[
     keyword("include_attempts", "bool"),
 ];
 
+const CORE_CHILD_HANDLE_PARAMETERS: &[StubParameter] = &[
+    positional("manifest_json", "str"),
+    keyword("kept_open", "int"),
+    keyword("check_at_checkout", "bool"),
+];
+const START_ATTEMPT_PARAMETERS: &[StubParameter] = &[
+    positional("task_id", "uuid.UUID"),
+    keyword("worker_id", "str"),
+    keyword("claimed_at", "datetime.datetime"),
+    keyword("worker_pid", "int"),
+    keyword("worker_hostname", "str"),
+    keyword("deadline_in_ms", "int | None"),
+];
+
 const PING_OUTCOME: &str = "DatabasePingRecord | BrokerFailure";
 const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerFailure";
 const SEND_OUTCOME: &str = "Enqueued | SendSuppressed | SendValidationFailed | \
      SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict";
 const TASK_INFO_OUTCOME: &str = "TaskInfoRecord | TaskInfoNotFound | BrokerFailure";
+const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | BrokerFailure";
 const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
     "StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed";
 const RELEASE_CLAIMS_OUTCOME: &str = "ClaimsReleased | ReleaseFailed";
@@ -249,7 +268,25 @@ const MARK_STALE_RUNNING_OUTCOME: &str =
 const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
      CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
 
-const CORE_HANDLE_METHODS: [StubFunction; 22] = [
+const START_ATTEMPT_OUTCOME: &str =
+    "AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed";
+
+const CORE_CHILD_HANDLE_METHODS: [StubFunction; 2] = [
+    StubFunction {
+        name: "start_attempt",
+        parameters: START_ATTEMPT_PARAMETERS,
+        returns: TypeText::Plain(START_ATTEMPT_OUTCOME),
+        doc: "Start one claimed task. Writes, in one statement. deadline_in_ms is the time left before\nthe deadline of the run, or None: when it has passed by the time the pool gives the\nconnection, no statement runs. A naive claimed_at raises TypeError.",
+    },
+    StubFunction {
+        name: "start_attempt_async",
+        parameters: START_ATTEMPT_PARAMETERS,
+        returns: TypeText::FutureOf(START_ATTEMPT_OUTCOME),
+        doc: "The awaitable form of the method above.",
+    },
+];
+
+const CORE_HANDLE_METHODS: [StubFunction; 24] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -381,6 +418,18 @@ const CORE_HANDLE_METHODS: [StubFunction; 22] = [
         parameters: TASK_INFO_PARAMETERS,
         returns: TypeText::FutureOf(TASK_INFO_OUTCOME),
         doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "raw_result_record",
+        parameters: RAW_RESULT_RECORD_PARAMETERS,
+        returns: TypeText::Plain(RAW_RESULT_OUTCOME),
+        doc: "The result of one task, waiting up to timeout_ms (no limit for None) while it has not\nfinished. Installs the schema once per handle first; then reads only. Bounded by the limit\nplus the bound of a blocking call; not bounded with no limit.",
+    },
+    StubFunction {
+        name: "raw_result_record_async",
+        parameters: RAW_RESULT_RECORD_PARAMETERS,
+        returns: TypeText::FutureOf(RAW_RESULT_OUTCOME),
+        doc: "The awaitable form of the method above. A cancelled await drops the wait.",
     },
 ];
 
@@ -522,7 +571,7 @@ const ARGUMENT_CLASSES: [StubClass; 11] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 55] = [
+const RECORD_CLASSES: [StubClass; 61] = [
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -709,6 +758,28 @@ const RECORD_CLASSES: [StubClass; 55] = [
                 "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'] | None",
             ),
         ],
+        methods: &[],
+    },
+    StubClass {
+        name: "RawResultRecordRecord",
+        doc: "The status of one task and its stored result envelope as JSON text; result_json is None\nfor a task that had not finished when the limit passed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("task_name", "str"),
+            StubProperty {
+                name: "status",
+                annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
+            },
+            property("result_json", "str | None"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "RawResultAbsent",
+        doc: "Neither the live table nor the task history holds the task.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID")],
         methods: &[],
     },
     StubClass {
@@ -1007,6 +1078,48 @@ const RECORD_CLASSES: [StubClass; 55] = [
         methods: &[],
     },
     StubClass {
+        name: "AttemptStarted",
+        doc: "The row is RUNNING with its first runner beat, from started_at on the database clock.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("started_at", "datetime.datetime"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "AttemptMissed",
+        doc: "The start wrote nothing; reason is the first reason that holds. The path after the miss\nis the caller's.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property(
+                "reason",
+                "Literal['DEADLINE_PASSED', 'NOT_HELD', 'LEASE_EXPIRED', 'WORKFLOW_PAUSED', \
+                 'WORKFLOW_CANCELLED', 'NODE_NOT_LINKED']",
+            ),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "DeadlineBeforeStart",
+        doc: "The deadline of the run passed while the start waited for a pooled connection. No\nstatement ran: the row stays CLAIMED.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "StartFailed",
+        doc: "The start failed. It wrote nothing, or it committed and its reply was lost: the row may\nbe RUNNING.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
         name: "ClaimsReleased",
         doc: "The release statement ran: one row outcome per claim, in the request order.",
         constructor: Constructor::NoConstructor,
@@ -1100,24 +1213,39 @@ const RECORD_CLASSES: [StubClass; 55] = [
     },
 ];
 
-const HANDLE_CLASSES: [StubClass; 1] = [StubClass {
+const HANDLE_CLASSES: [StubClass; 2] = [
+    StubClass {
     name: "CoreHandle",
     doc: "The core handle of one producer manifest and the pool profile of its process: PRODUCER,\nor WORKER (the main core pool keeps 2 connections free from batch checkouts for the\nper-task writes). Building it starts nothing.",
     constructor: Constructor::Parameters(CORE_HANDLE_PARAMETERS),
     properties: &[property("manifest_version", "int")],
     methods: &CORE_HANDLE_METHODS,
-}];
+},
+    StubClass {
+        name: "CoreChildHandle",
+        doc: "The core handle of one worker's child process: the producer manifest of its child pool,\nthe connections the pool keeps open, and the ping at checkout. Built in the child after\nits start; building it starts nothing.",
+        constructor: Constructor::Parameters(CORE_CHILD_HANDLE_PARAMETERS),
+        properties: &[],
+        methods: &CORE_CHILD_HANDLE_METHODS,
+    },
+];
 
-const CLASSES: [StubClass; 67] = {
-    let mut classes = [HANDLE_CLASSES[0]; 67];
+const CLASSES: [StubClass; 74] = {
+    let mut classes = [HANDLE_CLASSES[0]; 74];
+    let mut handle_position = 0;
+    while handle_position < HANDLE_CLASSES.len() {
+        classes[handle_position] = HANDLE_CLASSES[handle_position];
+        handle_position += 1;
+    }
     let mut position = 0;
     while position < ARGUMENT_CLASSES.len() {
-        classes[1 + position] = ARGUMENT_CLASSES[position];
+        classes[HANDLE_CLASSES.len() + position] = ARGUMENT_CLASSES[position];
         position += 1;
     }
     let mut record_position = 0;
     while record_position < RECORD_CLASSES.len() {
-        classes[1 + ARGUMENT_CLASSES.len() + record_position] = RECORD_CLASSES[record_position];
+        classes[HANDLE_CLASSES.len() + ARGUMENT_CLASSES.len() + record_position] =
+            RECORD_CLASSES[record_position];
         record_position += 1;
     }
     classes

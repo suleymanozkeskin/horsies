@@ -21,7 +21,7 @@ use pyo3::IntoPyObjectExt;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use crate::bridge::blocking::call_blocking;
+use crate::bridge::blocking::{call_blocking, call_blocking_within};
 use crate::bridge::completion_queue::{call_async, done_future};
 use crate::bridge::CallKind;
 use crate::errors::{refusal_error, ManifestRefused};
@@ -33,6 +33,7 @@ use crate::operations::failed_attempt::{
 };
 use crate::operations::queue_starts::{count_queue_starts_operation, QueueStartsRequest};
 use crate::operations::release::{release_claims_operation, ReleaseClaimsRequest};
+use crate::operations::result::{raw_result_record_operation, result_wait_bound};
 use crate::operations::schema::{install_operation, schema_status_operation};
 use crate::operations::stale_claims::requeue_stale_claimed_operation;
 use crate::operations::stale_running::mark_stale_running_operation;
@@ -54,6 +55,16 @@ pub struct BrokerConnection {
 }
 
 impl BrokerConnection {
+    /// The connection of `manifest` with the pools of `profile`. Starts
+    /// nothing: the first operation connects.
+    pub fn new(manifest: ProducerManifest, profile: PoolProfile) -> Self {
+        Self {
+            manifest: Arc::new(manifest),
+            profile,
+            broker: Arc::new(OnceCell::new()),
+        }
+    }
+
     /// The connected broker. Connects at the first call; a failure is
     /// returned and not kept.
     pub async fn broker(&self) -> Result<Arc<PostgresBroker>, BrokerError> {
@@ -105,9 +116,8 @@ async fn connect(
     let config = manifest
         .database
         .to_postgres_config(manifest.send.retain_rerun_input_default);
-    // `AssumeInitialized` runs no schema step, as `ObserveOnly`. Its other
-    // rule, no listener, is for the listener operations, which the bridge
-    // does not expose yet.
+    // `AssumeInitialized` runs no schema step, as `ObserveOnly`, and has no
+    // listener (Python's `assume_initialized=True`): a result wait polls.
     let mode = match manifest.schema {
         SchemaMode::MigrateAndValidate => SchemaInitializationMode::MigrateAndValidate,
         SchemaMode::ObserveOnly | SchemaMode::AssumeInitialized => {
@@ -115,9 +125,13 @@ async fn connect(
         }
     };
     let window = manifest.send.idempotency_reservation_window.as_duration();
-    PostgresBroker::connect_with_policies(&config, mode, window, profile)
-        .await
-        .map(|broker| Arc::new(broker.with_client_family(ClientFamily::Python)))
+    let broker = PostgresBroker::connect_with_policies(&config, mode, window, profile)
+        .await?
+        .with_client_family(ClientFamily::Python);
+    Ok(Arc::new(match manifest.schema {
+        SchemaMode::AssumeInitialized => broker.without_listener(),
+        SchemaMode::MigrateAndValidate | SchemaMode::ObserveOnly => broker,
+    }))
 }
 
 /// The pool profile of a `CoreHandle`'s process: `PRODUCER` or `WORKER`.
@@ -161,11 +175,7 @@ impl CoreHandle {
         let manifest = parse_producer_manifest(manifest_json)
             .map_err(|refused| ManifestRefused::new_err((refused.field_path, refused.cause)))?;
         Ok(Self {
-            connection: BrokerConnection {
-                manifest: Arc::new(manifest),
-                profile,
-                broker: Arc::new(OnceCell::new()),
-            },
+            connection: BrokerConnection::new(manifest, profile),
         })
     }
 
@@ -586,6 +596,53 @@ impl CoreHandle {
             "CoreHandle.task_info_async",
             CallKind::Read,
             task_info_operation(self.connection(), task_id, parts),
+        )
+    }
+
+    /// The result of one task, waiting up to `timeout_ms` (no limit for
+    /// `None`) while it has not finished: `RawResultRecordRecord` (no result
+    /// when the limit passed first), `RawResultAbsent`, or `BrokerFailure`
+    /// with `TASK_INFO_QUERY_FAILED` or `INVALID_JSON_PAYLOAD`. Installs the
+    /// schema once per handle first; then reads only. The wait takes a wake
+    /// from the process listener, or reads again every 200 ms in an
+    /// `ASSUME_INITIALIZED` handle. The call is bounded by the limit plus
+    /// the bound of a blocking call, and not bounded with no limit;
+    /// signals are checked every 100 ms. A negative `timeout_ms` raises
+    /// `OverflowError`.
+    #[pyo3(signature = (task_id, *, timeout_ms))]
+    fn raw_result_record(
+        &self,
+        py: Python<'_>,
+        task_id: Uuid,
+        timeout_ms: Option<u64>,
+    ) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking_within(
+            py,
+            core,
+            "CoreHandle.raw_result_record",
+            CallKind::Read,
+            result_wait_bound(timeout_ms),
+            raw_result_record_operation(self.connection(), task_id, timeout_ms),
+        )
+    }
+
+    /// The awaitable form of `raw_result_record`. A cancelled await drops
+    /// the wait.
+    #[pyo3(signature = (task_id, *, timeout_ms))]
+    fn raw_result_record_async<'py>(
+        &self,
+        py: Python<'py>,
+        task_id: Uuid,
+        timeout_ms: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.raw_result_record_async",
+            CallKind::Read,
+            raw_result_record_operation(self.connection(), task_id, timeout_ms),
         )
     }
 }

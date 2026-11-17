@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
 use sqlx::PgPool;
 
@@ -18,6 +19,7 @@ use crate::broker::lifecycle_tests::support::{
     database_options, unpinged_single_connection_pool, WireProxy,
 };
 use crate::broker::PostgresBroker;
+use crate::core::history::reads::pages::HistoryWindow;
 use crate::core::task::error::{ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode};
 use crate::monitoring::{
     list_tasks, task_breakdown, task_facets, task_stats, Breakdown, BreakdownGroup, ErrorCategory,
@@ -831,5 +833,128 @@ async fn stats_and_breakdown_expand_a_category_the_same_way() {
 
     assert_eq!(stats.iter().map(|row| row.count).sum::<i64>(), 1);
     assert_eq!(breakdown.total.total, 1);
+    database.drop().await;
+}
+
+/// Each group column of the breakdown (worker, task name, queue) counts the
+/// retried tasks of its groups and of the total.
+#[tokio::test]
+#[serial]
+async fn each_group_column_counts_the_retried_tasks() {
+    let database = SpecDatabase::create().await;
+    seed_terminal(
+        &database.pool,
+        &LiveTask::pending("alpha_task")
+            .with_worker(Some("w1"))
+            .with_retry_count(2),
+        Ending::failed("TASK_EXCEPTION"),
+    )
+    .await;
+    seed_terminal(
+        &database.pool,
+        &LiveTask::pending("beta_task")
+            .on_queue("other")
+            .with_worker(Some("w2")),
+        Ending::Completed,
+    )
+    .await;
+    let broker = database.broker();
+
+    for group_by in TaskGroupBy::ALL {
+        let breakdown = task_breakdown(&broker, &TaskBreakdownQuery::new(window(), group_by))
+            .await
+            .unwrap_or_else(|error| panic!("{group_by:?}: read the breakdown: {error:?}"));
+
+        assert_eq!(breakdown.group_count, 2, "{group_by:?}: {breakdown:?}");
+        assert_eq!(breakdown.total.total, 2, "{group_by:?}: {breakdown:?}");
+        assert_eq!(breakdown.total.retried, 1, "{group_by:?}: {breakdown:?}");
+        let mut retried: Vec<i64> = breakdown
+            .groups
+            .iter()
+            .map(|row| row.counts.retried)
+            .collect();
+        retried.sort_unstable();
+        assert_eq!(retried, [0, 1], "{group_by:?}: {breakdown:?}");
+    }
+    database.drop().await;
+}
+
+/// The history window holds its lower bound and not its upper bound: a row
+/// whose terminal time is the lower bound is read, one a microsecond before
+/// it and one at the upper bound are not, in the list, the stats, the facets
+/// and the breakdown.
+#[tokio::test]
+#[serial]
+async fn the_history_window_holds_its_lower_bound_and_not_its_upper_bound() {
+    let database = SpecDatabase::create().await;
+    let at_lower = LiveTask::pending("at_lower_task");
+    let before_lower = LiveTask::pending("before_lower_task");
+    let at_upper = LiveTask::pending("at_upper_task");
+    for task in [&at_lower, &before_lower, &at_upper] {
+        seed_terminal(&database.pool, task, Ending::Completed).await;
+    }
+    let lower: DateTime<Utc> =
+        sqlx::query_scalar("SELECT terminal_at FROM horsies_task_history WHERE task_id = $1")
+            .bind(at_lower.id)
+            .fetch_one(&database.pool)
+            .await
+            .expect("read the terminal time of the lower row");
+    let upper = lower + Duration::hours(1);
+    for (task_id, terminal_at) in [
+        (before_lower.id, lower - Duration::microseconds(1)),
+        (at_upper.id, upper),
+    ] {
+        sqlx::query("UPDATE horsies_task_history SET terminal_at = $2 WHERE task_id = $1")
+            .bind(task_id)
+            .bind(terminal_at)
+            .execute(&database.pool)
+            .await
+            .expect("date the history row");
+    }
+    let window = HistoryWindow::new(lower, upper).expect("a window of one hour");
+    let names = TaskFilters {
+        task_names: vec![
+            at_lower.task_name.clone(),
+            before_lower.task_name.clone(),
+            at_upper.task_name.clone(),
+        ],
+        ..TaskFilters::default()
+    };
+    let broker = database.broker();
+
+    let list = list_tasks(
+        &broker,
+        &TaskListQuery::new(window).with_filters(names.clone()),
+    )
+    .await
+    .expect("read the list");
+    let stats = task_stats(
+        &broker,
+        &TaskStatsQuery::new(window).with_filters(names.clone()),
+    )
+    .await
+    .expect("read the stats");
+    let facets = facets_of(&broker, &TaskFacetsQuery::new(window)).await;
+    let breakdown = task_breakdown(
+        &broker,
+        &TaskBreakdownQuery::new(window, TaskGroupBy::TaskName).with_filters(names),
+    )
+    .await
+    .expect("read the breakdown");
+
+    assert_eq!(list.total, 1);
+    assert_eq!(
+        list.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [at_lower.id]
+    );
+    assert_eq!(stats.iter().map(|row| row.count).sum::<i64>(), 1);
+    assert_eq!(
+        counts_of(&facets.task_names),
+        BTreeMap::from([(at_lower.task_name.clone(), 1)])
+    );
+    assert_eq!(
+        groups_with_totals(&breakdown),
+        [(value_group(&at_lower.task_name), 1)]
+    );
     database.drop().await;
 }

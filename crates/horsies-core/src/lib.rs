@@ -88,8 +88,8 @@ pub use crate::broker::attempt_writes::{
 };
 pub use crate::broker::claims::{
     ClaimClasses, ClaimPass, ClaimPassRequest, ClaimTake, ClaimedRow, QueueStartCheck, QueueStarts,
-    ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement, UnheldBudget,
-    MAX_RELEASED_CLAIMS,
+    ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement, StartAttempt,
+    StartMiss, StartOutcome, StartWindow, UnheldBudget, WindowedStart, MAX_RELEASED_CLAIMS,
 };
 pub use crate::broker::stale_recovery::{
     StaleClaimsRequeueFailed, StaleClaimsRequeuePass, StaleRunningPass, StaleRunningThresholds,
@@ -116,7 +116,10 @@ pub use crate::worker::executor::child_host::{
 pub use crate::worker::{
     cli::LogLevel,
     config::WorkerConfig,
-    scheduler::service::{spawn_scheduler, SchedulerStartError},
+    scheduler::service::{
+        spawn_scheduler, ActiveScheduler, SchedulerService, SchedulerStartError, SchedulerStarted,
+        SchedulerStop, SchedulerTickError,
+    },
     worker::Worker,
     WorkerError,
 };
@@ -142,8 +145,7 @@ pub use crate::core::history::rerun::{
 };
 pub use crate::workflow_engine::bound_handle::WorkflowHandle;
 pub use crate::workflow_engine::engine::{
-    on_subworkflow_complete, on_workflow_task_complete, WorkflowTaskCompletion,
-    WorkflowTaskCompletionError,
+    on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
 };
 pub use crate::workflow_engine::error::WorkflowError;
 pub use crate::workflow_engine::info::WorkflowTaskInfo;

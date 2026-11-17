@@ -40,7 +40,7 @@ use crate::broker::health::{
     ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
     WORKER_PING_CHANNEL,
 };
-use crate::broker::history_reads::{read_history_detail, read_task_result};
+use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
 };
@@ -765,6 +765,29 @@ pub enum WorkflowStopBeforeStart {
     Resumed,
 }
 
+/// The stored values of one send command, checked: only the database can
+/// refuse it now (Python `SendCommand`). Built by
+/// [`PostgresBroker::prepare_send_command`].
+///
+/// The version-1 fingerprint leaves the task id and `sent_at` out, so one
+/// value serves every row of the command: each slot of a schedule fire.
+/// `stored_input` is the `input` text the row stores; `execution` and
+/// `max_retries` are read from `task_options`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendCommand {
+    pub task_name: String,
+    pub queue_name: String,
+    pub priority: i32,
+    pub stored_input: String,
+    pub task_options: Option<String>,
+    pub execution: crate::core::task::execution::Execution,
+    pub max_retries: i32,
+    pub retention_class_key: String,
+    pub retain_rerun_input: bool,
+    pub fingerprint_version: i16,
+    pub fingerprint: Vec<u8>,
+}
+
 /// PostgreSQL-backed task broker.
 ///
 /// Two sets of pools on the same URLs:
@@ -798,6 +821,9 @@ pub struct PostgresBroker {
     client_family: ClientFamily,
     /// Set once the family check before the first write passed.
     client_family_admitted: tokio::sync::OnceCell<()>,
+    /// Whether this broker saw the staged result function published. The
+    /// result read keeps it ([`read_task_result`]).
+    result_reader: ResultReaderSeen,
 }
 
 impl PostgresBroker {
@@ -873,6 +899,7 @@ impl PostgresBroker {
             schema_initialization_mode,
             client_family: ClientFamily::Rust,
             client_family_admitted: tokio::sync::OnceCell::new(),
+            result_reader: ResultReaderSeen::default(),
         }
     }
 
@@ -1022,6 +1049,7 @@ impl PostgresBroker {
             schema_initialization_mode,
             client_family: ClientFamily::Rust,
             client_family_admitted: tokio::sync::OnceCell::new(),
+            result_reader: ResultReaderSeen::default(),
         })
     }
 
@@ -1092,6 +1120,17 @@ impl PostgresBroker {
     /// every write checks it once.
     pub fn with_client_family(mut self, family: ClientFamily) -> Self {
         self.client_family = family;
+        self
+    }
+
+    /// The same handle with no listener (Python's
+    /// `PostgresBroker(assume_initialized=True)`): a result wait reads again
+    /// every 200 ms (`TASK_RESULT_REPOLL_POLLING`), and an operation that
+    /// needs a listener answers `LISTENER_DISABLED`. Opens and closes
+    /// nothing: the listener of a connected broker opens its connection at
+    /// the first subscription.
+    pub fn without_listener(mut self) -> Self {
+        self.listener = ProcessListener::without_session_url();
         self
     }
 
@@ -1520,6 +1559,56 @@ impl PostgresBroker {
             | EnqueueTaskOutcome::PayloadMismatch => {}
         }
         enqueue_result(outcome, task_id, task_name)
+    }
+
+    /// The stored values of an unkeyed send with no deadline and no delay,
+    /// without a write (Python `PostgresBroker.prepare_send_command`): the
+    /// values [`PostgresBroker::enqueue`] writes for the same arguments, with
+    /// the broker's default rerun-input posture. One command serves every row
+    /// of the send, for example each slot of a schedule fire: the version-1
+    /// fingerprint leaves the task id and `sent_at` out. Touches no database.
+    ///
+    /// Errors: `EnqueueContract`, the refusals of `enqueue` before its write:
+    /// an input that the rules refuse, options that do not parse or whose
+    /// retry policy does not fit, a value the fingerprint refuses.
+    pub fn prepare_send_command(
+        &self,
+        task_name: &str,
+        queue_name: &str,
+        priority: i32,
+        input: &str,
+        task_options: Option<&str>,
+        retention: EnqueueRetention,
+    ) -> Result<SendCommand, BrokerError> {
+        check_sent_input(input)?;
+        let max_retries = enqueue_max_retries(task_name, task_options)?;
+        let retention_class_key = retention.class_key();
+        let facts = prepare_enqueue_facts(
+            task_name,
+            queue_name,
+            priority,
+            input,
+            None,
+            None,
+            task_options,
+            Some(&retention_class_key),
+            self.retain_rerun_input_default,
+            None,
+        )
+        .map_err(|error| BrokerError::EnqueueContract(error.to_string()))?;
+        Ok(SendCommand {
+            task_name: task_name.to_owned(),
+            queue_name: queue_name.to_owned(),
+            priority,
+            stored_input: input.to_owned(),
+            task_options: task_options.map(str::to_owned),
+            execution: facts.execution,
+            max_retries,
+            retention_class_key: facts.retention_class_key,
+            retain_rerun_input: facts.retain_rerun_input,
+            fingerprint_version: facts.command_fingerprint_version,
+            fingerprint: facts.command_fingerprint.to_vec(),
+        })
     }
 
     /// Run one collapsed claim pass via `horsies_claim` (parity with horsies
@@ -2592,14 +2681,23 @@ impl PostgresBroker {
 
     /// One statement through the staged result function. While that function
     /// is not published (an upgraded schema before its next coverage pass),
-    /// falls back to the live read plus the staged detail read.
+    /// falls back to the live read plus the staged detail read. A function
+    /// dropped out of band after this broker saw it fails one call with the
+    /// `42883` refusal that names it; the next call falls back (Python's
+    /// rule, [`read_task_result`]).
     ///
     /// An absence from the result reader is confirmed by the detail reader: a
     /// result reader rendered before a leaf existed does not probe that leaf,
     /// and only the detail reader's absence is final.
     async fn fetch_result_row(&self, task_id: Uuid) -> Result<ResultRowProbe, BrokerError> {
         let open = self.core.pools()?;
-        let read = read_task_result(open.main(), self.statement_log, task_id).await?;
+        let read = read_task_result(
+            open.main(),
+            self.statement_log,
+            &self.result_reader,
+            task_id,
+        )
+        .await?;
         match read {
             TaskResultRead::Live(live) => Ok(ResultRowProbe::Row(TaskResultRow {
                 id: task_id,
@@ -3332,6 +3430,25 @@ impl ResultWaitMode {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_broker_without_a_listener_waits_for_a_result_by_polling() {
+        // No server listens on port 1; the session URL would give a
+        // listener, and `without_listener` takes it away.
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
+            .expect("a lazy pool opens no connection");
+        let broker = PostgresBroker::from_pool_and_session_url(
+            pool,
+            "postgresql://horsies@127.0.0.1:1/horsies",
+        )
+        .without_listener();
+        let mode = broker.result_wait_mode(Uuid::from_u128(7)).await;
+        assert!(matches!(mode, ResultWaitMode::Polling));
+        assert_eq!(mode.repoll_interval(), TASK_RESULT_REPOLL_POLLING);
+    }
 
     #[test]
     fn idempotency_reservation_window_defaults_and_bounds_are_exact() {

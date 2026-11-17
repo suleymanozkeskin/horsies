@@ -762,9 +762,9 @@ async def test_linear_failure_cascades_to_skip(broker: PostgresBroker) -> None:
         assert b['status'] == 'FAILED'
         assert c['status'] == 'SKIPPED'
 
-        # Skipped task was never executed
+        # Skipped task was never executed; the skip write sets completed_at
         assert c['started_at'] is None
-        assert c['completed_at'] is None
+        assert c['completed_at'] is not None
 
 
 @pytest.mark.e2e
@@ -861,9 +861,9 @@ async def test_fanin_one_dep_fails_skips_aggregator(broker: PostgresBroker) -> N
         assert c['status'] == 'COMPLETED'
         assert agg['status'] == 'SKIPPED'
 
-        # Aggregator was never executed
+        # Aggregator was never executed; the skip write sets completed_at
         assert agg['started_at'] is None
-        assert agg['completed_at'] is None
+        assert agg['completed_at'] is not None
 
 
 # =============================================================================
