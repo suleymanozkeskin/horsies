@@ -76,7 +76,9 @@ async fn run_maintenance_pass(pool: &PgPool, retention: &RetentionConfig) -> Rea
         &crate::broker::PostgresBroker::from_pool(pool.clone()),
         pool,
         pool,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &crate::workflow_engine::child_spec::ChildSpecs::Registry(std::sync::Arc::new(
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        )),
         &recovery,
         retention,
         &health,
