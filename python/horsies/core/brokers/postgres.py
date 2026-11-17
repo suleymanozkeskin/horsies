@@ -65,6 +65,7 @@ from horsies.core.brokers.enqueue_task import (
     EnqueueOutcome,
     EnqueueRow,
     EnqueueStart,
+    FirstRun,
     Keyed,
     SendKind,
     StartAfterDelay,
@@ -1839,6 +1840,7 @@ class PostgresBroker:
                 start=_enqueue_start(enqueued_at, enqueue_delay_seconds),
                 command_fingerprint=command.fingerprint,
                 key=key_r.ok_value,
+                lineage=FirstRun(),
             ),
         ))
 
