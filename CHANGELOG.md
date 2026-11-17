@@ -473,9 +473,10 @@ unless it starts with "Added".
   runtime `run` refuses to start, because it blocks its thread.
 - **Added: `Horsies::on_child_start(hook)`.** An async hook that each worker
   child runs once on its runtime, after its pool connected and before its
-  first task; the hooks of a child run in registration order, at most
-  10 s together. A hook that fails, panics or runs longer ends the child
-  with exit code 173 and stops the worker with `CHILD_HOOK_FAILED`.
+  first task; the hooks of a child run in registration order, each for at
+  most 10 s, as each Python hook. A hook that fails, panics or runs longer
+  ends the child with exit code 173 and stops the worker with
+  `CHILD_HOOK_FAILED`; the logged cause names the hook.
 - **`WorkerConfig`, `run_worker_with`, `Worker` and `WorkerError` are
   removed.** `Horsies::run_worker(WorkerStart::profile(name))` runs a named
   profile of `AppConfig.worker_profiles` until `SIGTERM` or `SIGINT`, and

@@ -37,7 +37,7 @@ mod tests;
 pub use args::{child_mode, ChildArgs, ChildArgsError, ChildMode, CHILD_MODE_ARGUMENT};
 pub use host::{
     child_command, run_child_host, ChildApp, ChildHookFailure, ChildHostExit, ChildLogSetup,
-    ChildStartFuture, ChildStartHook, CHILD_START_HOOK_BOUND,
+    ChildStartFuture, ChildStartHook, NamedChildStartHook, CHILD_START_HOOK_BOUND,
 };
 pub use producer::{child_producer, ChildProducer};
 pub use role::{process_role, thread_role, wait_inside_task_message, ProcessRole, ThreadRole};
