@@ -96,7 +96,10 @@ impl std::str::FromStr for TaskStatus {
             "FAILED" => Ok(Self::Failed),
             "CANCELLED" => Ok(Self::Cancelled),
             "EXPIRED" => Ok(Self::Expired),
-            other => Err(format!("not a task status: {other:?}")),
+            other => Err(format!(
+                "not a task status: {}",
+                crate::core::python_text::python_repr(other)
+            )),
         }
     }
 }

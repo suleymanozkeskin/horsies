@@ -563,6 +563,12 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         doc: "The awaitable form of the method above.",
     },
     StubFunction {
+        name: "check_connectivity",
+        parameters: &[],
+        returns: TypeText::Plain("ConnectivityPassed | ConnectivityRefused"),
+        doc: "The connectivity step of the live check: SELECT 1 on the main URL, then on the session URL\nwhen it differs, then the LISTEN probe in PgBouncer transaction mode. Reads only.",
+    },
+    StubFunction {
         name: "install_schema",
         parameters: &[],
         returns: TypeText::Plain(INSTALL_OUTCOME),
@@ -1118,6 +1124,26 @@ const RECORD_CLASSES: &[StubClass] = &[
         doc: "The close of a handle ended: its core pools are closed, or it never connected. The next\noperation on the handle opens new core pools.",
         constructor: Constructor::NoConstructor,
         properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "ConnectivityPassed",
+        doc: "Every step of the connectivity check passed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "ConnectivityRefused",
+        doc: "The first step of the connectivity check that refused, and its cause. No later step ran.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property(
+                "step",
+                "Literal['CONNECT', 'POOL_SETTINGS', 'MAIN_URL', 'SESSION_URL', 'LISTENER']",
+            ),
+            property("message", "str"),
+        ],
         methods: &[],
     },
     StubClass {
@@ -3344,7 +3370,7 @@ const PREPARED_WORKER_METHODS: &[StubFunction] = &[
         name: "run",
         parameters: &[],
         returns: TypeText::Plain(WORKER_RUN_OUTCOME),
-        doc: "Build the worker and run it until a stop request or a failure. Main thread only: the\nsignal handlers run between wait slices, and there is no total bound. Raises\nNotMainThread off the main thread, RuntimeError for a second run, and the exception of\na signal handler after the run ended.",
+        doc: "Build the worker and run it until a stop request or a failure. Main thread only: the\nsignal handlers run between wait slices, and there is no total bound. Raises\nNotMainThread off the main thread, RuntimeError for a second run, and, after the run\nended, the exception of a signal handler or the interrupt that a child build raised.",
     },
     StubFunction {
         name: "request_stop",
@@ -3358,7 +3384,7 @@ const PREPARED_WORKER_METHODS: &[StubFunction] = &[
 const WORKER_CLASSES: &[StubClass] = &[
     StubClass {
         name: "PreparedWorker",
-        doc: "The worker of one worker manifest, not run yet. host.on_started() runs once per run on\nthe callback thread, after the start and before the first claim; an exception from it is\nlogged at ERROR and the worker runs on.",
+        doc: "The worker of one worker manifest, not run yet. host.on_started() runs once per run on\nthe callback thread, after the start and before the first claim; an exception from it is\nlogged at ERROR and the worker runs on. host.build_child_spec(request) builds each\nsub-workflow child that a workflow step of the worker starts, on the callback thread.",
         constructor: Constructor::NoConstructor,
         properties: &[],
         methods: PREPARED_WORKER_METHODS,
@@ -3519,7 +3545,7 @@ const FUNCTIONS: &[StubFunction] = &[
         name: "prepare_worker",
         parameters: &[positional("manifest_json", "str"), keyword("host", "object")],
         returns: TypeText::Plain("PreparedWorker | WorkerProfileRefused"),
-        doc: "Parse a worker manifest and pick its profile. Pure: starts no runtime. host has an\non_started() method. A refused manifest raises ManifestRefused.",
+        doc: "Parse a worker manifest and pick its profile. Pure: starts no runtime. host has the\nmethods on_started() and build_child_spec(request). A refused manifest raises\nManifestRefused.",
     },
     StubFunction {
         name: "protocol_numbers",

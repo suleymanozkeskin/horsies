@@ -16,10 +16,14 @@
 //! - `host.on_started()` runs once per run on the callback thread, after the
 //!   start and before the first claim. An exception from it is logged at
 //!   ERROR on `horsies.bridge`, and the worker runs on.
-//!
-//! The workflow builds of the worker (`build_with` of a sub-workflow node)
-//! use an empty registry until the build callback of the workflow switch
-//! replaces it.
+//! - `host.build_child_spec(request)` is the child spec source of the
+//!   worker's workflow steps (the parent advances of phase 2, workflow
+//!   recovery, phase-2 recovery): the core calls it on the callback thread
+//!   for each sub-workflow child that a step starts, and it answers
+//!   `ChildSpecBuilt` or `ChildSpecRefused` (`child_spec.rs`). A build that
+//!   raised `KeyboardInterrupt` or `SystemExit` rolls its step back and asks
+//!   the worker to stop; after the drain, `run` raises the same object
+//!   again.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -27,8 +31,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use horsies_core::worker_manifest::parse_worker_manifest;
 use horsies_core::{
-    run_end_of, BuilderHookName, OnStarted, RunPhase, Worker, WorkerPlan, WorkerPlanRefused,
-    WorkerRunEnd, WorkerStop, WorkflowSpecRegistry,
+    run_end_of, ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable,
+    ChildSpecs, OnStarted, RunPhase, Worker, WorkerPlan, WorkerPlanRefused, WorkerRunEnd,
+    WorkerStop,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -36,6 +41,7 @@ use pyo3::IntoPyObjectExt;
 
 use crate::bridge::callback_thread::python_call;
 use crate::bridge::service_run::{refuse_off_main_thread, run_blocking, StopSignal};
+use crate::child_spec::{PythonChildSpecSource, RegisteredSource};
 use crate::errors::{refusal_error, ManifestRefused};
 use crate::handle::checked_core;
 use crate::logging::RecordLevel;
@@ -46,10 +52,6 @@ const RUN_SUBJECT: &str = "PreparedWorker.run";
 
 /// The subject of the start hook, in its failure records.
 const ON_STARTED_SUBJECT: &str = "WorkerHost.on_started";
-
-/// The name of the build hook of a Python workflow definition, as the error
-/// texts of a child start write it.
-const PYTHON_BUILD_HOOK: BuilderHookName = BuilderHookName::new("build_with()");
 
 /// The profile of the manifest is refused: the profile set fails its checks,
 /// or the start names no profile or an unknown one. `refusals` are the
@@ -99,6 +101,8 @@ enum PlanSlot {
 pub struct PreparedWorker {
     plan: Mutex<PlanSlot>,
     host: Arc<Py<PyAny>>,
+    /// `host.build_child_spec`, the child spec source of the worker.
+    build_child_spec: RegisteredSource,
     stop: WorkerStop,
 }
 
@@ -126,6 +130,9 @@ enum RunOutcome {
     Stopped(WorkerStopped),
     BootFailed(WorkerBootFailed),
     Failed(WorkerFailed),
+    /// A child build raised this `BaseException`; the worker stopped, and
+    /// `run` raises it again.
+    Interrupted(PyErr),
 }
 
 impl<'py> IntoPyObject<'py> for RunOutcome {
@@ -138,16 +145,19 @@ impl<'py> IntoPyObject<'py> for RunOutcome {
             Self::Stopped(stopped) => stopped.into_bound_py_any(py),
             Self::BootFailed(failed) => failed.into_bound_py_any(py),
             Self::Failed(failed) => failed.into_bound_py_any(py),
+            Self::Interrupted(exception) => Err(exception),
         }
     }
 }
 
 /// Parse a worker manifest and pick its profile: `PreparedWorker` or
-/// `WorkerProfileRefused`. Pure: no I/O, and it starts no runtime.
+/// `WorkerProfileRefused`. Pure: no I/O, and it starts no runtime. `host`
+/// has the methods `on_started()` and `build_child_spec(request)`.
 ///
 /// Failure exits: `ManifestRefused` (a manifest field, or connection
-/// settings that the broker config check refuses), `ForkedAfterCoreStart`,
-/// `CoreStopped`.
+/// settings that the broker config check refuses), `AttributeError` (a host
+/// with no `build_child_spec`, a defect of the client),
+/// `ForkedAfterCoreStart`, `CoreStopped`.
 #[pyfunction]
 #[pyo3(signature = (manifest_json, *, host))]
 pub(crate) fn prepare_worker(manifest_json: &str, host: Bound<'_, PyAny>) -> PyResult<Prepared> {
@@ -156,10 +166,12 @@ pub(crate) fn prepare_worker(manifest_json: &str, host: Bound<'_, PyAny>) -> PyR
     }
     let manifest = parse_worker_manifest(manifest_json)
         .map_err(|refused| ManifestRefused::new_err((refused.field_path, refused.cause)))?;
+    let build_child_spec = host.getattr("build_child_spec")?;
     match WorkerPlan::of_manifest(&manifest) {
         Ok(plan) => Ok(Prepared::Worker(PreparedWorker {
             plan: Mutex::new(PlanSlot::Ready(Box::new(plan))),
             host: Arc::new(host.unbind()),
+            build_child_spec: Arc::new(build_child_spec.unbind()),
             stop: WorkerStop::new(),
         })),
         Err(WorkerPlanRefused::Profile(refused)) => {
@@ -178,8 +190,8 @@ impl PreparedWorker {
     /// Build the worker and run it until a stop request or a failure:
     /// `WorkerStopped`, `WorkerBootFailed` or `WorkerFailed`. Main thread
     /// only. Raises `NotMainThread` off the main thread, `RuntimeError` for
-    /// a second run, and the exception of a signal handler after the run
-    /// ended.
+    /// a second run, and after the run ended the exception of a signal
+    /// handler or the interrupt that a child build raised.
     fn run(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         // Checked before the core starts and before the plan is taken, so a
         // refused call changes nothing.
@@ -202,7 +214,15 @@ impl PreparedWorker {
             core,
             RUN_SUBJECT,
             StopSignal::new(move || signal.request_stop()),
-            run_operation(core, *plan, Arc::clone(&self.host), self.stop.clone()),
+            run_operation(
+                core,
+                *plan,
+                RunHost {
+                    host: Arc::clone(&self.host),
+                    build_child_spec: Arc::clone(&self.build_child_spec),
+                },
+                self.stop.clone(),
+            ),
         )
     }
 
@@ -215,19 +235,32 @@ impl PreparedWorker {
     }
 }
 
-/// `run`: build the worker of `plan` and run it to its end.
+/// The host objects of one run.
+struct RunHost {
+    /// The host, for `on_started`.
+    host: Arc<Py<PyAny>>,
+    /// `host.build_child_spec`.
+    build_child_spec: RegisteredSource,
+}
+
+/// `run`: build the worker of `plan` and run it to its end. An interrupt
+/// that a child build raised comes before the end of the run.
 async fn run_operation(
     core: &'static Core,
     plan: WorkerPlan,
-    host: Arc<Py<PyAny>>,
+    host: RunHost,
     stop: WorkerStop,
 ) -> RunOutcome {
-    let registry = Arc::new(WorkflowSpecRegistry::new(PYTHON_BUILD_HOOK));
-    let end = match Worker::from_plan(plan, registry).await {
+    let source = Arc::new(StopOnInterrupt {
+        source: PythonChildSpecSource::new(core, host.build_child_spec),
+        stop: stop.clone(),
+    });
+    let shared = Arc::clone(&source);
+    let end = match Worker::from_plan(plan, ChildSpecs::Client(shared)).await {
         Ok(worker) => {
             worker
                 .with_stop(&stop)
-                .with_on_started(on_started_hook(core, host))
+                .with_on_started(on_started_hook(core, host.host))
                 .run_to_end()
                 .await
         }
@@ -239,7 +272,32 @@ async fn run_operation(
             run_end_of(Err(error), RunPhase::Starting)
         }
     };
-    outcome_of(end)
+    match source.source.take_interrupt() {
+        Some(exception) => RunOutcome::Interrupted(exception),
+        None => outcome_of(end),
+    }
+}
+
+/// The child spec source of the worker: the host's `build_child_spec` on
+/// the callback thread. A build that raised an interrupt asks the worker to
+/// stop, as an interrupt in Python's worker ends its event loop; the run
+/// raises the interrupt again after the drain.
+struct StopOnInterrupt {
+    source: PythonChildSpecSource,
+    stop: WorkerStop,
+}
+
+impl ChildSpecSource for StopOnInterrupt {
+    fn child_spec(&self, request: ChildSpecRequest) -> ChildSpecFuture<'_> {
+        Box::pin(async move {
+            let answer = self.source.child_spec(request).await;
+            match &answer {
+                Err(ChildSpecUnavailable::Interrupted { .. }) => self.stop.request_stop(),
+                Ok(_) | Err(ChildSpecUnavailable::NotRun { .. }) => {}
+            }
+            answer
+        })
+    }
 }
 
 /// The record of a run end. Pure.

@@ -8,6 +8,7 @@ pub mod defaults;
 pub mod error;
 pub(crate) mod history;
 pub mod lifecycle;
+pub mod python_text;
 pub mod registry;
 pub mod task;
 pub mod types;

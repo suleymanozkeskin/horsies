@@ -93,7 +93,9 @@ fn writer_with_payload(pool: &PgPool, payload: PayloadPolicy) -> OutcomeWriter {
     let successes = super::outcome::test_successes(&broker, WORKER);
     OutcomeWriter::new(
         broker,
-        Arc::new(WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER)),
+        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
+            WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER),
+        )),
         WORKER.to_owned(),
         payload,
         RetentionConfig::default(),

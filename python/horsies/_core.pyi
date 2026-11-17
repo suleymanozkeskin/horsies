@@ -86,6 +86,10 @@ class CoreHandle:
         """Ping the database."""
     def ping_database_async(self) -> asyncio.Future[DatabasePingRecord | BrokerFailure]:
         """The awaitable form of the method above."""
+    def check_connectivity(self) -> ConnectivityPassed | ConnectivityRefused:
+        """The connectivity step of the live check: SELECT 1 on the main URL, then on the session URL
+        when it differs, then the LISTEN probe in PgBouncer transaction mode. Reads only.
+        """
     def install_schema(self) -> SchemaInstalled | SchemaInstallNotRun | BrokerFailure:
         """Apply the embedded migrations and check the schema version, once per handle. Writes."""
     def install_schema_async(self) -> asyncio.Future[SchemaInstalled | SchemaInstallNotRun | BrokerFailure]:
@@ -487,6 +491,20 @@ class HandleClosed:
     """The close of a handle ended: its core pools are closed, or it never connected. The next
     operation on the handle opens new core pools.
     """
+
+
+@final
+class ConnectivityPassed:
+    """Every step of the connectivity check passed."""
+
+
+@final
+class ConnectivityRefused:
+    """The first step of the connectivity check that refused, and its cause. No later step ran."""
+    @property
+    def step(self) -> Literal['CONNECT', 'POOL_SETTINGS', 'MAIN_URL', 'SESSION_URL', 'LISTENER']: ...
+    @property
+    def message(self) -> str: ...
 
 
 @final
@@ -2943,13 +2961,14 @@ class PreloadRefusedFrame:
 class PreparedWorker:
     """The worker of one worker manifest, not run yet. host.on_started() runs once per run on
     the callback thread, after the start and before the first claim; an exception from it is
-    logged at ERROR and the worker runs on.
+    logged at ERROR and the worker runs on. host.build_child_spec(request) builds each
+    sub-workflow child that a workflow step of the worker starts, on the callback thread.
     """
     def run(self) -> WorkerStopped | WorkerBootFailed | WorkerFailed:
         """Build the worker and run it until a stop request or a failure. Main thread only: the
         signal handlers run between wait slices, and there is no total bound. Raises
-        NotMainThread off the main thread, RuntimeError for a second run, and the exception of
-        a signal handler after the run ended.
+        NotMainThread off the main thread, RuntimeError for a second run, and, after the run
+        ended, the exception of a signal handler or the interrupt that a child build raised.
         """
     def request_stop(self) -> StopRequested:
         """Ask the run to stop: the claim loop ends and the children drain within the profile's
@@ -3039,8 +3058,9 @@ def prepare_rerun_write(read: PreparedStatement, row: tuple[object, ...], comman
 
 
 def prepare_worker(manifest_json: str, *, host: object) -> PreparedWorker | WorkerProfileRefused:
-    """Parse a worker manifest and pick its profile. Pure: starts no runtime. host has an
-    on_started() method. A refused manifest raises ManifestRefused.
+    """Parse a worker manifest and pick its profile. Pure: starts no runtime. host has the
+    methods on_started() and build_child_spec(request). A refused manifest raises
+    ManifestRefused.
     """
 
 

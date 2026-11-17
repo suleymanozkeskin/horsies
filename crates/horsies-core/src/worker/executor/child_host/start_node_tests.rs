@@ -161,8 +161,8 @@ async fn settle_stop(pool: &PgPool, task: &ClaimedTask, reason: StopReason) -> S
     let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
     let writer = OutcomeWriter::new(
         Arc::clone(&broker),
-        Arc::new(WorkflowSpecRegistry::new(
-            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         )),
         WORKER_ID.to_owned(),
         crate::core::config::payload::PayloadPolicy::default(),

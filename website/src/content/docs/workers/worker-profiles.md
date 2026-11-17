@@ -196,6 +196,78 @@ horsies worker myapp.instance:app --profile files
 
 This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_THREAD` tasks on 2 × 4 = 8 seats. The fields are in [`SharedAsyncChildren`](#sharedasyncchildren) and [`SharedThreadChildren`](#sharedthreadchildren).
 
+## Recycling
+
+`IsolatedRecycle` sets when an isolated child is replaced: `after` a number of tasks, `above` a resident memory size, or both. What each limit does, and how to choose them, is on [Process Recycling](/horsies/workers/concurrency/#process-recycling) and [Memory Recycling](/horsies/workers/concurrency/#memory-recycling).
+
+```python
+# The default is 100; raise it for high-throughput or connection-constrained apps
+recycle_after_500 = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=8,
+        recycle=IsolatedRecycle(after=TaskLimit(tasks=500)),
+    ),
+)
+
+# Disable recycling entirely
+no_recycling = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=8,
+        recycle=IsolatedRecycle(after=NoTaskLimit()),
+    ),
+)
+```
+
+```python
+# Recycle any child once its RSS reaches 200 MB
+memory_recycling = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(above=MemoryLimit(mb=200)),
+    ),
+)
+
+# Combine with count recycling: a child recycles when either limit is reached
+count_and_memory = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(
+            after=TaskLimit(tasks=500),
+            above=MemoryLimit(mb=200),
+        ),
+    ),
+)
+```
+
+Memory only: disable count recycling explicitly, or its default `TaskLimit(tasks=100)` still applies.
+
+```python
+memory_only = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(after=NoTaskLimit(), above=MemoryLimit(mb=180)),
+    ),
+)
+```
+
+## Claim Limits
+
+`ClaimLimits` caps the claims of a worker. What each limit does is on [Claiming Controls](/horsies/workers/concurrency/#claiming-controls).
+
+```python
+fair_batches = WorkerProfile(
+    isolated=IsolatedChildren(count=8),
+    claim=ClaimLimits(per_queue_per_pass=TaskLimit(tasks=4)),
+)
+```
+
+```python
+few_claimed = WorkerProfile(
+    isolated=IsolatedChildren(count=8),
+    claim=ClaimLimits(claimed_per_worker=TaskLimit(tasks=4)),
+)
+```
+
 ## Connection Pools and the Default Executor
 
 A profile sizes three kinds of connection pools:

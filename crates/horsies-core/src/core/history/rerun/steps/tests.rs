@@ -523,12 +523,3 @@ fn an_outcome_outside_the_function_set_panics() {
     let write = write(None);
     let _outcome = decode_rerun_write(&write, &written("RETRIED", write.new_task_id()));
 }
-
-/// Python's `repr` of a stored text, as the corrupt-source details show it.
-#[test]
-fn a_stored_text_is_shown_as_python_shows_it() {
-    assert_eq!(python_repr("BOGUS"), "'BOGUS'");
-    assert_eq!(python_repr("it's"), "\"it's\"");
-    assert_eq!(python_repr("a'b\"c"), "'a\\'b\"c'");
-    assert_eq!(python_repr("x\ny\\"), "'x\\ny\\\\'");
-}

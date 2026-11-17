@@ -30,6 +30,7 @@ use crate::operations::arguments::utc_instant;
 use crate::operations::cancel::cancel_task_operation;
 use crate::operations::claim::{claim_pass_operation, ClaimPassRequest};
 use crate::operations::claim_settle::{settle_claimed_workflow_tasks_operation, SettleRequest};
+use crate::operations::connectivity::check_connectivity_operation;
 use crate::operations::coverage::{ensure_partition_coverage_operation, CoverageRequestArgument};
 use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
 use crate::operations::expiry_and_orphans::{
@@ -277,6 +278,23 @@ impl CoreHandle {
             "CoreHandle.ping_database_async",
             CallKind::Read,
             ping_database_operation(self.connection()),
+        )
+    }
+
+    /// The connectivity step of the live check
+    /// (`PostgresBroker::check_connectivity`, the rule of both clients):
+    /// `ConnectivityPassed`, or `ConnectivityRefused` with the first step
+    /// that refused. Reads only, plus one NOTIFY of the LISTEN probe in
+    /// PgBouncer transaction mode; no schema step. Blocking only: its
+    /// caller, `Horsies.check(live=True)`, is sync.
+    fn check_connectivity(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.check_connectivity",
+            CallKind::Read,
+            check_connectivity_operation(self.connection()),
         )
     }
 
