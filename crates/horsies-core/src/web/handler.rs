@@ -13,10 +13,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::body::{to_bytes, Body, Bytes};
-use axum::http::{HeaderName, HeaderValue, Method, Request, StatusCode};
+use axum::body::{to_bytes, Body};
+use axum::http::Request;
 use axum::response::IntoResponse;
 use axum::Router;
+use bytes::Bytes;
+use http::{HeaderName, HeaderValue, Method, StatusCode};
 use tower::ServiceExt;
 
 use crate::broker::PostgresBroker;
