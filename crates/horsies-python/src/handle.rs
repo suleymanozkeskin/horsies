@@ -29,6 +29,7 @@ use crate::errors::{refusal_error, ManifestRefused};
 use crate::operations::arguments::utc_instant;
 use crate::operations::cancel::cancel_task_operation;
 use crate::operations::claim::{claim_pass_operation, ClaimPassRequest};
+use crate::operations::coverage::{ensure_partition_coverage_operation, CoverageRequestArgument};
 use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
 use crate::operations::expiry_and_orphans::{
     audit_orphaned_workflow_tasks_operation, cancel_owned_orphan_operation,
@@ -489,6 +490,28 @@ impl CoreHandle {
             "CoreHandle.claim_pass_async",
             CallKind::Write,
             claim_pass_operation(self.connection(), request.get().request()),
+        )
+    }
+
+    /// One partition coverage pass on the session-work pool
+    /// (`PostgresBroker::ensure_partition_coverage`):
+    /// `CoverageEnsuredRecord`, `CoverageEnsureFailedRecord` (a contained
+    /// refusal), or `CoverageFailed`. Writes (DDL and catalog rows); each
+    /// leaf commits alone, and a cancelled await leaves the pass running to
+    /// its end. Awaitable only: its callers, the worker boot and the
+    /// reaper, run on the worker's event loop.
+    fn ensure_partition_coverage_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, CoverageRequestArgument>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.ensure_partition_coverage_async",
+            CallKind::Write,
+            ensure_partition_coverage_operation(self.connection(), request.get().pass()),
         )
     }
 
