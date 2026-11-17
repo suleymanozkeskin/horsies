@@ -9,6 +9,8 @@
 //!   (`horsies_core::manifest_schema::WORKER_MANIFEST`) in the same form.
 //! - `_catalog/scheduler_manifest.py`: the scheduler manifest
 //!   (`horsies_core::manifest_schema::SCHEDULER_MANIFEST`) in the same form.
+//! - `_catalog/workflow_spec.py`: the workflow spec data
+//!   (`horsies_core::manifest_schema::WORKFLOW_SPEC_DATA`) in the same form.
 //! - `_core.pyi`: the type stubs of the extension module `horsies._core`.
 //!
 //! Usage:

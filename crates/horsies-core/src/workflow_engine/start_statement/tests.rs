@@ -18,6 +18,17 @@ use crate::TaskNode;
 
 const CHILD_KEY: &str = "tests.start_statement.child.v1";
 
+/// The start arguments of a spec of the Rust client. The registry form
+/// awaits nothing, so the future ends on its first poll.
+fn arguments_of(
+    spec: &WorkflowSpec,
+    workflow_id: Uuid,
+    registry: &WorkflowSpecRegistry,
+    retention: &RetentionConfig,
+) -> Result<StartArguments, WorkflowError> {
+    futures::executor::block_on(start_arguments(spec, workflow_id, registry, retention))
+}
+
 fn task_node(index: usize, dependencies: Vec<usize>) -> AnyNode {
     AnyNode {
         task_name: format!("task_{index}"),
@@ -94,7 +105,7 @@ fn a_task_chain_gives_one_workflow_row_and_one_row_per_node() {
     dependent.args_from = HashMap::from([("value".to_owned(), 0)]);
     let spec = spec_of("chain", vec![task_node(0, vec![]), dependent]);
 
-    let arguments = start_arguments(
+    let arguments = arguments_of(
         &spec,
         workflow_id,
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
@@ -141,7 +152,7 @@ fn an_empty_context_list_is_stored_as_null() {
     named.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
     let spec = spec_of("ctx_lists", vec![task_node(0, vec![]), empty, named]);
 
-    let arguments = start_arguments(
+    let arguments = arguments_of(
         &spec,
         workflow_id,
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
@@ -160,7 +171,7 @@ fn a_subworkflow_root_gets_a_prebuilt_child_after_its_parent() {
     let workflow_id = Uuid::new_v4();
     let spec = spec_of("parent", vec![subworkflow_root(0)]);
 
-    let arguments = start_arguments(
+    let arguments = arguments_of(
         &spec,
         workflow_id,
         &registry_with_child(),
@@ -200,7 +211,7 @@ fn a_subworkflow_root_whose_child_is_not_registered_gets_a_failed_record() {
     let workflow_id = Uuid::new_v4();
     let spec = spec_of("orphan_parent", vec![subworkflow_root(0)]);
 
-    let arguments = start_arguments(
+    let arguments = arguments_of(
         &spec,
         workflow_id,
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
@@ -260,7 +271,7 @@ fn a_subworkflow_root_whose_builder_fails_gets_a_failed_record() {
         .expect("register the child");
     let spec = spec_of("failing_builder_parent", vec![subworkflow_root(0)]);
 
-    let arguments = start_arguments(&spec, workflow_id, &registry, &RetentionConfig::default())
+    let arguments = arguments_of(&spec, workflow_id, &registry, &RetentionConfig::default())
         .expect("arguments");
 
     assert_eq!(arguments.workflow_ids, vec![workflow_id]);
@@ -290,7 +301,7 @@ fn a_task_node_without_a_resolved_queue_refuses_the_start() {
     unresolved.queue = None;
     let spec = spec_of("unresolved", vec![unresolved]);
 
-    let refused = start_arguments(
+    let refused = arguments_of(
         &spec,
         Uuid::new_v4(),
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
@@ -301,6 +312,186 @@ fn a_task_node_without_a_resolved_queue_refuses_the_start() {
         matches!(refused, Err(WorkflowError::Validation(_))),
         "{refused:?}"
     );
+}
+
+const CLIENT_CHILD_KEY: &str = "tests.start_statement.client_child.v1";
+const CLIENT_MISSING_KEY: &str = "tests.start_statement.client_missing.v1";
+/// The envelope that the scripted client stores for a child it cannot load.
+const CLIENT_FAILURE_RESULT: &str =
+    r#"{"err":{"error_code":"SUBWORKFLOW_LOAD_FAILED","message":"scripted"}}"#;
+
+/// The spec data of a workflow `name` with the nodes `nodes` (JSON values)
+/// and the queue classes `classes`.
+fn client_spec(name: &str, nodes: serde_json::Value, classes: serde_json::Value) -> ClientSpec {
+    let document = serde_json::json!({
+        "data_version": 1,
+        "name": name,
+        "definition_key": {"kind": "KEYED", "key": format!("tests.start_statement.{name}.v1")},
+        "on_error": "FAIL",
+        "output": {"kind": "NO_OUTPUT"},
+        "success_policy": {"kind": "NO_POLICY"},
+        "queue_classes": classes,
+        "nodes": nodes,
+    });
+    crate::workflow_engine::spec_data::parse_workflow_spec_data(&document.to_string())
+        .expect("the spec data parses")
+}
+
+/// A root node of spec data: a task on `queue`, or a sub-workflow node of the
+/// child under `definition_key`.
+fn client_node(index: u32, body: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "index": index,
+        "node_id": format!("node_{index}"),
+        "task_name": format!("node_{index}"),
+        "input_json": "{}",
+        "dependencies": [],
+        "args_from": {},
+        "workflow_ctx_from": [],
+        "allow_failed_deps": false,
+        "join": {"kind": "ALL"},
+        "body": body,
+    })
+}
+
+fn task_body(queue: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "TASK",
+        "queue": queue,
+        "priority": 100,
+        "task_options": {"kind": "NO_OPTIONS"},
+    })
+}
+
+fn sub_body(definition_key: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "SUB_WORKFLOW",
+        "definition_key": definition_key,
+        "params": "NOT_GIVEN",
+    })
+}
+
+/// A client that builds [`CLIENT_CHILD_KEY`] (one task on `bulk`, kept
+/// forever), fails the node of [`CLIENT_MISSING_KEY`] with
+/// [`CLIENT_FAILURE_RESULT`], and does not run any other build. It keeps
+/// every request.
+#[derive(Default)]
+struct ScriptedClient {
+    requests: std::sync::Mutex<Vec<ChildSpecRequest>>,
+}
+
+impl ChildSpecSource for ScriptedClient {
+    fn child_spec(
+        &self,
+        request: ChildSpecRequest,
+    ) -> crate::workflow_engine::child_spec::ChildSpecFuture<'_> {
+        let answer = match request.definition_key.as_deref() {
+            Some(CLIENT_CHILD_KEY) => Ok(ClientChildSpec::Built(client_spec(
+                "client_child",
+                serde_json::json!([client_node(0, task_body("bulk"))]),
+                serde_json::json!({"bulk": "forever"}),
+            ))),
+            Some(CLIENT_MISSING_KEY) => Ok(ClientChildSpec::NodeFails {
+                message: "scripted load failure".to_owned(),
+                failure_result: CLIENT_FAILURE_RESULT.to_owned(),
+            }),
+            _ => Err(
+                crate::workflow_engine::child_spec::ChildSpecUnavailable::NotRun {
+                    subject: "scripted build".to_owned(),
+                    cause: "the callback queue is full".to_owned(),
+                },
+            ),
+        };
+        self.requests
+            .lock()
+            .expect("the request list is not poisoned")
+            .push(request);
+        Box::pin(async move { answer })
+    }
+}
+
+/// A spec of a client: each root asks the client's source once; a built child
+/// is pushed with the classes the client resolved for its queues, and a node
+/// that the client fails stores the client's envelope as written.
+#[test]
+fn a_client_spec_takes_its_children_and_queue_classes_from_the_client() {
+    let workflow_id = Uuid::new_v4();
+    let spec = client_spec(
+        "client_parent",
+        serde_json::json!([
+            client_node(0, sub_body(CLIENT_CHILD_KEY)),
+            client_node(1, sub_body(CLIENT_MISSING_KEY)),
+            client_node(2, task_body("default")),
+        ]),
+        serde_json::json!({"default": "standard_7d"}),
+    );
+    let client = ScriptedClient::default();
+
+    let arguments =
+        futures::executor::block_on(client_start_arguments(&spec, workflow_id, &client))
+            .expect("arguments");
+
+    assert_eq!(arguments.workflow_ids.len(), 2);
+    assert_eq!(arguments.workflow_ids[0], workflow_id);
+    assert_eq!(arguments.parent_workflow_ids[1], Some(workflow_id));
+    assert_eq!(arguments.parent_task_indexes[1], Some(0));
+    assert_eq!(arguments.depths, vec![0, 1]);
+    assert_eq!(arguments.failed_workflow_ids, vec![workflow_id]);
+    assert_eq!(arguments.failed_task_indexes, vec![1]);
+    assert_eq!(
+        arguments.failed_results,
+        vec![CLIENT_FAILURE_RESULT.to_owned()]
+    );
+    assert_eq!(
+        arguments.node_retention_class_keys,
+        vec![
+            None,
+            None,
+            Some("standard_7d".to_owned()),
+            Some("forever".to_owned()),
+        ]
+    );
+    let requests = client
+        .requests
+        .lock()
+        .expect("the request list is not poisoned");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0],
+        ChildSpecRequest {
+            parent_workflow_id: workflow_id,
+            parent_workflow_name: "client_parent".to_owned(),
+            task_index: 0,
+            child_depth: 1,
+            definition_key: Some(CLIENT_CHILD_KEY.to_owned()),
+            params: SubWorkflowParams::NotGiven,
+            node_input: "{}".to_owned(),
+            args_from: None,
+            sources: vec![],
+        }
+    );
+}
+
+/// A client that does not run a build refuses the start before any
+/// statement: a retryable `ChildSpecSource` error.
+#[test]
+fn a_build_that_the_client_did_not_run_refuses_the_start() {
+    let spec = client_spec(
+        "client_refused",
+        serde_json::json!([client_node(0, sub_body("tests.start_statement.unknown.v1"))]),
+        serde_json::json!({}),
+    );
+
+    let refused = futures::executor::block_on(client_start_arguments(
+        &spec,
+        Uuid::new_v4(),
+        &ScriptedClient::default(),
+    ));
+
+    match refused {
+        Err(error @ WorkflowError::ChildSpecSource(_)) => assert!(error.is_retryable()),
+        other => panic!("expected a ChildSpecSource error, got {other:?}"),
+    }
 }
 
 /// The one statement writes the parent, its pre-built child linked from the

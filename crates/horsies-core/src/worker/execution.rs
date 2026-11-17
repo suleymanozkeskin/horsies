@@ -703,6 +703,7 @@ fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> boo
     match e {
         crate::workflow_engine::WorkflowError::Database(error) => is_retryable_sqlx_error(error),
         crate::workflow_engine::WorkflowError::Broker(be) => be.is_retryable(),
+        crate::workflow_engine::WorkflowError::ChildSpecSource(error) => error.is_retryable(),
         crate::workflow_engine::WorkflowError::Serialization(_)
         | crate::workflow_engine::WorkflowError::WorkflowNotFound { .. }
         | crate::workflow_engine::WorkflowError::InvalidStatus(_)
@@ -745,7 +746,7 @@ pub(crate) async fn finalize_workflow_phase(
     // insert time — no per-task JOIN to horsies_workflow_tasks needed here.
     match is_workflow_task {
         true => {
-            let build = ChildBuild {
+            let build = ChildBuild::Registry {
                 registry: workflow_registry,
                 retention,
             };
@@ -1095,7 +1096,7 @@ pub(crate) async fn run_phase2(
     let finished = retry_phase2(broker, workflow_registry, &work, retention).await;
     match finished {
         Ok(owed) if !owed.is_empty() => {
-            let build = ChildBuild {
+            let build = ChildBuild::Registry {
                 registry: workflow_registry,
                 retention,
             };

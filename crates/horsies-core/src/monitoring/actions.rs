@@ -147,7 +147,8 @@ fn status_failed(workflow_id: Uuid, error: WorkflowError) -> ActionOutcome {
         | WorkflowError::Serialization(_)
         | WorkflowError::InvalidStatus(_)
         | WorkflowError::Validation(_)
-        | WorkflowError::StepContract(_) => detail(503, error.to_string()),
+        | WorkflowError::StepContract(_)
+        | WorkflowError::ChildSpecSource(_) => detail(503, error.to_string()),
     }
 }
 

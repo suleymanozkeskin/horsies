@@ -483,6 +483,44 @@ fn a_killed_child_write_names_its_code() {
     assert_eq!(loop_write.retry, RetryRequest::NoRetry);
 }
 
+/// Python `_recover_worker_future_failure`: the write of a child that the
+/// worker killed or lost stores the task and the worker in the error
+/// `data`, for each code it writes: a crash, each loop kill, and crash
+/// recovery after the failed `TASK_TIMEOUT` writes.
+#[test]
+fn a_killed_child_write_stores_the_task_and_the_worker() {
+    let claimed = task(ExecutionClass::SharedAsync, RETRY_ON_TIMEOUT);
+    let expected = serde_json::json!({"task_id": TASK, "worker_id": "worker-1"});
+    for code in [
+        OperationalErrorCode::WorkerCrashed,
+        LoopKillCode::TaskBlockedLoop.code(),
+        LoopKillCode::NeighbourBlockedLoop.code(),
+    ] {
+        let code_text = code.to_string();
+        let write = killed_child_write(
+            &claimed,
+            "worker-1",
+            code.into(),
+            "the child ended".to_owned(),
+            RetryPlacement::SameClass,
+        );
+        assert_eq!(write.error_code.as_deref(), Some(code_text.as_str()));
+        assert_eq!(
+            stored_error_data(&write.result_json),
+            expected,
+            "{code_text}"
+        );
+    }
+    let recovery = timeout_recovery_write(
+        &claimed,
+        "worker-1",
+        TaskTimeoutMs::new(1000).unwrap(),
+        RetryPlacement::Isolated,
+    );
+    assert_eq!(recovery.error_code.as_deref(), Some("TASK_TIMEOUT"));
+    assert_eq!(stored_error_data(&recovery.result_json), expected);
+}
+
 /// Python `_max_retries_of`: the timeout write, crash recovery and phase 1
 /// are each sent again at most 3 times.
 #[test]
@@ -492,10 +530,10 @@ fn each_write_stage_keeps_the_retry_bound_of_python() {
     assert_eq!(WriteStage::CrashRecovery.max_retries(), 3);
 }
 
-/// The stored error of a `TASK_TIMEOUT` write: its `data`.
-fn stored_timeout_data(result_json: &str) -> serde_json::Value {
+/// The `data` of the error that a failed-attempt write stores.
+fn stored_error_data(result_json: &str) -> serde_json::Value {
     let stored: serde_json::Value =
-        serde_json::from_str(result_json).expect("the timeout write stores a JSON envelope");
+        serde_json::from_str(result_json).expect("a failed-attempt write stores a JSON envelope");
     stored["err"]["data"].clone()
 }
 
@@ -533,7 +571,7 @@ fn the_timeout_data_names_how_a_shared_async_run_ended() {
             expected["cancel_end"] = serde_json::Value::from(end);
         }
         assert_eq!(
-            stored_timeout_data(&write.result_json),
+            stored_error_data(&write.result_json),
             expected,
             "{cancel:?}"
         );
