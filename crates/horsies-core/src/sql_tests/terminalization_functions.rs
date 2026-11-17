@@ -6,8 +6,9 @@
 //!   ([`TestDatabase::create`]), and seeds one task row. The function call
 //!   fails with its error, and the task row keeps its status.
 //! - The outcomes of the writers of COMPLETE_LOCKED
-//!   (`horsies_finish_workflow_success`) and FAIL_RUNNING
-//!   (`horsies_finish_failed_attempt`). Each test has a copy of the
+//!   (`horsies_finish_workflow_success`), FAIL_RUNNING
+//!   (`horsies_finish_failed_attempt`) and FAIL_STALE
+//!   (`horsies_finish_stale_attempt`). Each test has a copy of the
 //!   installed schema with one coverage pass ([`covered`]) and seeds its
 //!   rows. It calls the writer with its own SQL and decodes the one outcome
 //!   row with the decoder of the core ([`decode_outcome_row`]).
@@ -33,6 +34,7 @@ use crate::test_support::TestDatabase;
 mod already_applied;
 mod applied_transitions;
 mod fail_locked;
+mod fail_stale;
 mod refusals;
 
 const WORKER: &str = "terminalization-test-worker";
@@ -48,6 +50,28 @@ const FAIL_RUNNING_RESULT: &str = r#"{"err": 1}"#;
 
 /// The error code that the writer of FAIL_RUNNING stores.
 const FAIL_RUNNING_ERROR_CODE: &str = "TASK_EXCEPTION";
+
+/// The result that the writer of FAIL_STALE stores.
+const FAIL_STALE_RESULT: &str = r#"{"err": 2}"#;
+
+/// The error code that the writer of FAIL_STALE stores.
+const FAIL_STALE_ERROR_CODE: &str = "WORKER_CRASHED";
+
+/// The failed reason, attempt message and attempt reason that the writer of
+/// FAIL_STALE stores.
+const FAIL_STALE_REASON: &str = "Worker crashed";
+
+/// The time after which a silent runner is stale, in the stale cases.
+const STALE_AFTER_MS: i32 = 60_000;
+
+/// The time after which a silent finalizer is stale, in the stale cases.
+const FINALIZING_STALE_AFTER_MS: i32 = 30_000;
+
+/// [`STALE_AFTER_MS`] in seconds.
+const STALE_AFTER_SECONDS: i32 = STALE_AFTER_MS / 1000;
+
+/// [`FINALIZING_STALE_AFTER_MS`] in seconds.
+const FINALIZING_STALE_AFTER_SECONDS: i32 = FINALIZING_STALE_AFTER_MS / 1000;
 
 /// The failed reason of attempt one in the cases that requeue a task after
 /// a failed attempt.
@@ -172,6 +196,49 @@ const FAILED_ATTEMPT_SQL: &str = "
         CAST($1 AS uuid), $2, CAST($3 AS TIMESTAMPTZ),
         'NONE', NULL, NULL, NULL, $4, $5, $6,
         'FAILED', NULL, $6, 'REFUSE', TRUE
+    )
+";
+
+/// The writer of FAIL_STALE: the stale RUNNING recovery with no retry
+/// (retry kind NONE). Parameters: `$1` task id, `$2` stale_after_ms, `$3`
+/// finalizing_stale_after_ms, `$4` result, `$5` error code, `$6` failed
+/// reason, which is the attempt message and the attempt reason too.
+const STALE_ATTEMPT_SQL: &str = "
+    SELECT task_id, ordinality, outcome, terminal_at, terminalization_kind,
+           observed_status, observed_worker_id, observed_claimed_at,
+           guard_kind, observed_guard
+    FROM horsies_finish_stale_attempt(
+        CAST($1 AS uuid), CAST($2 AS INTEGER), CAST($3 AS INTEGER),
+        'NONE', NULL, NULL,
+        $4, $5, $6, $6, $6
+    )
+";
+
+/// Sets the row's started_at `$2` seconds and finalizing_at `$3` seconds
+/// before now; NULL clears the column. Parameter `$1` is the task id.
+const AGE_SQL: &str = "
+    UPDATE horsies_tasks
+    SET started_at = CASE
+            WHEN CAST($2 AS INTEGER) IS NULL THEN NULL
+            ELSE NOW() - make_interval(secs => $2)
+        END,
+        finalizing_at = CASE
+            WHEN CAST($3 AS INTEGER) IS NULL THEN NULL
+            ELSE NOW() - make_interval(secs => $3)
+        END
+    WHERE id = $1
+";
+
+/// A heartbeat of the task, sent `$3` seconds before now in the role `$2`.
+/// Parameter `$1` is the task id.
+const HEARTBEAT_SQL: &str = "
+    INSERT INTO horsies_heartbeats (
+        task_id, sender_id, role, sent_at, hostname, pid
+    )
+    VALUES (
+        $1, 'staleness-test', $2,
+        NOW() - make_interval(secs => CAST($3 AS INTEGER)),
+        'terminalization-test-host', 4242
     )
 ";
 
@@ -467,6 +534,66 @@ async fn fail_locked(
         ],
     )
     .await
+}
+
+/// The writer of FAIL_STALE (`horsies_finish_stale_attempt`) with the
+/// thresholds [`STALE_AFTER_MS`] and [`FINALIZING_STALE_AFTER_MS`].
+async fn fail_stale(session: &Session, task_id: Uuid) -> TerminalizationOutcome {
+    fail_stale_after(session, task_id, STALE_AFTER_MS, FINALIZING_STALE_AFTER_MS).await
+}
+
+/// The writer of FAIL_STALE (`horsies_finish_stale_attempt`) with the
+/// thresholds `stale_after_ms` and `finalizing_stale_after_ms`.
+async fn fail_stale_after(
+    session: &Session,
+    task_id: Uuid,
+    stale_after_ms: i32,
+    finalizing_stale_after_ms: i32,
+) -> TerminalizationOutcome {
+    outcome_of(
+        session,
+        "horsies_finish_stale_attempt",
+        STALE_ATTEMPT_SQL,
+        &[
+            &task_id,
+            &stale_after_ms,
+            &finalizing_stale_after_ms,
+            &FAIL_STALE_RESULT,
+            &FAIL_STALE_ERROR_CODE,
+            &FAIL_STALE_REASON,
+        ],
+    )
+    .await
+}
+
+/// Puts the liveness columns of the row where a staleness case needs them:
+/// started_at and finalizing_at the given seconds before now, NULL for
+/// `None`.
+async fn age(
+    session: &Session,
+    task_id: Uuid,
+    started_seconds_ago: Option<i32>,
+    finalizing_seconds_ago: Option<i32>,
+) {
+    let _aged = run(
+        session,
+        "set the liveness columns",
+        AGE_SQL,
+        &[&task_id, &started_seconds_ago, &finalizing_seconds_ago],
+    )
+    .await;
+}
+
+/// A heartbeat of the task in `role`, sent `seconds_ago` seconds before
+/// now.
+async fn heartbeat(session: &Session, task_id: Uuid, seconds_ago: i32, role: &str) {
+    let _sent = run(
+        session,
+        "insert a heartbeat",
+        HEARTBEAT_SQL,
+        &[&task_id, &role, &seconds_ago],
+    )
+    .await;
 }
 
 /// A RUNNING workflow task of [`WORKER`] with its RUNNING node in a RUNNING
