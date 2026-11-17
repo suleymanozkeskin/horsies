@@ -198,6 +198,107 @@ mod checked_send_tests {
 }
 
 #[cfg(test)]
+mod raw_result_probe_tests {
+    //! The probe records of the staged result reader's rows. Pure.
+    use super::*;
+    use crate::core::history::archive::versions::{
+        archive_digest, JSON_CONTENT_TYPE, JSON_UTF8_CODEC,
+    };
+
+    const TASK_ID: Uuid = Uuid::from_u128(9);
+
+    fn history(status: &str, payload: HistoryResultPayload) -> HistoryTaskResult {
+        HistoryTaskResult {
+            task_name: "result.task".to_owned(),
+            status: status.to_owned(),
+            failed_reason: None,
+            envelope_version: 1,
+            codec: JSON_UTF8_CODEC.to_owned(),
+            content_type: JSON_CONTENT_TYPE.to_owned(),
+            payload,
+        }
+    }
+
+    fn stored(text: &str) -> HistoryResultPayload {
+        HistoryResultPayload::Stored {
+            payload: text.as_bytes().to_vec(),
+            digest: archive_digest(text.as_bytes()).to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_history_row_is_a_record_with_its_stored_envelope() {
+        let envelope = r#"{"ok":{"value":7}}"#;
+        let Ok(RawResultProbe::Record(record)) =
+            raw_result_from_history_result(TASK_ID, history("COMPLETED", stored(envelope)))
+        else {
+            panic!("a completed history row is a record");
+        };
+        assert_eq!(record.task_id, TASK_ID);
+        assert_eq!(record.task_name, "result.task");
+        assert_eq!(record.status, crate::core::TaskStatus::Completed);
+        assert_eq!(
+            record.raw_result.as_ref().map(StoredEnvelopeText::as_str),
+            Some(envelope)
+        );
+        let Ok(RawResultProbe::Record(cancelled)) = raw_result_from_history_result(
+            TASK_ID,
+            history("CANCELLED", HistoryResultPayload::Absent),
+        ) else {
+            panic!("a cancelled history row without a result is a record");
+        };
+        assert_eq!(cancelled.raw_result, None);
+    }
+
+    #[test]
+    fn a_history_row_whose_digest_does_not_match_is_invalid_json_payload() {
+        let tampered = HistoryResultPayload::Stored {
+            payload: br#"{"ok":1}"#.to_vec(),
+            digest: vec![0; 32],
+        };
+        let Err(refused) = raw_result_from_history_result(TASK_ID, history("COMPLETED", tampered))
+        else {
+            panic!("a digest mismatch is refused");
+        };
+        assert_eq!(refused.code, BrokerErrorCode::InvalidJsonPayload);
+        assert!(!refused.retryable);
+    }
+
+    #[test]
+    fn a_history_row_with_a_live_status_is_invalid_json_payload() {
+        let Err(refused) = raw_result_from_history_result(
+            TASK_ID,
+            history("RUNNING", HistoryResultPayload::Absent),
+        ) else {
+            panic!("a live status in history is refused");
+        };
+        assert_eq!(refused.code, BrokerErrorCode::InvalidJsonPayload);
+    }
+
+    #[test]
+    fn a_live_row_waits_until_its_status_is_terminal() {
+        assert!(matches!(
+            raw_result_from_live(TASK_ID, "result.task".to_owned(), "RUNNING"),
+            Ok(RawResultProbe::Waiting(_))
+        ));
+        assert!(matches!(
+            raw_result_from_live(TASK_ID, "result.task".to_owned(), "CANCELLED"),
+            Ok(RawResultProbe::Record(RawResultRecord {
+                raw_result: None,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            raw_result_from_live(TASK_ID, "result.task".to_owned(), "NOT_A_STATUS"),
+            Err(BrokerOperationError {
+                code: BrokerErrorCode::InvalidJsonPayload,
+                ..
+            })
+        ));
+    }
+}
+
+#[cfg(test)]
 fn test_uuid(value: &str) -> Uuid {
     Uuid::parse_str(value).expect("test identity must be UUID")
 }
@@ -2573,12 +2674,45 @@ impl PostgresBroker {
         self.confirm_result_absence(task_id).await
     }
 
-    /// One probe of the raw result wait. A live row holds no result, so the
-    /// live read takes the id, name and status only, as Python's
-    /// `_probe_live_result_row` (`python/horsies/core/brokers/postgres.py:2156-2191`):
-    /// a terminal status is a record with no result, a live status waits, and
-    /// a row that is not live is read from history.
+    /// One probe of the raw result wait, as Python's `_probe_result_row`
+    /// (the dual-run reference `tests/dualrun/reference/result_caller.py`
+    /// runs it): one statement through the staged result function
+    /// ([`read_task_result`], with the broker's [`ResultReaderSeen`]). While
+    /// that function is not published, the live probe and the staged detail
+    /// read run instead ([`Self::raw_result_probe_unstaged`]). An absence
+    /// from the function is confirmed by the detail reader: a reader
+    /// published before a leaf existed does not probe that leaf. A function
+    /// dropped out of band after this broker saw it fails one probe with the
+    /// `42883` refusal that names it (`TASK_INFO_QUERY_FAILED`); the next
+    /// probe checks the publication again and falls back.
     async fn raw_result_probe(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
+        let open = self
+            .core
+            .pools()
+            .map_err(|error| raw_result_operation_error(BrokerError::from(error)))?;
+        let read = read_task_result(
+            open.main(),
+            self.statement_log,
+            &self.result_reader,
+            task_id,
+        )
+        .await
+        .map_err(raw_result_operation_error)?;
+        match read {
+            TaskResultRead::Live(live) => {
+                raw_result_from_live(task_id, live.task_name, &live.status)
+            }
+            TaskResultRead::History(history) => raw_result_from_history_result(task_id, history),
+            TaskResultRead::Absent => self.history_raw_result_probe(task_id).await,
+            TaskResultRead::NotPublished => self.raw_result_probe_unstaged(task_id).await,
+        }
+    }
+
+    /// The probe of a schema whose staged result function is not published.
+    /// A live row holds no result, so the live read takes the id, name and
+    /// status only, as Python's `_probe_live_result_row`; a row that is not
+    /// live is read from history.
+    async fn raw_result_probe_unstaged(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
         let live = self
             .read_main(
                 &GET_RAW_RESULT_PROBE.bind().value(&task_id).finish(),
@@ -2589,25 +2723,7 @@ impl PostgresBroker {
         let Some(row) = live.into_iter().next() else {
             return self.history_raw_result_probe(task_id).await;
         };
-        let status: crate::core::TaskStatus = row
-            .status
-            .parse()
-            .map_err(|error| raw_result_operation_error(BrokerError::InvalidStatus(error)))?;
-        let record = RawResultRecord {
-            task_id: row.id,
-            task_name: row.task_name,
-            status,
-            raw_result: None,
-        };
-        Ok(match status {
-            crate::core::TaskStatus::Completed
-            | crate::core::TaskStatus::Failed
-            | crate::core::TaskStatus::Cancelled
-            | crate::core::TaskStatus::Expired => RawResultProbe::Record(record),
-            crate::core::TaskStatus::Pending
-            | crate::core::TaskStatus::Claimed
-            | crate::core::TaskStatus::Running => RawResultProbe::Waiting(record),
-        })
+        raw_result_from_live(row.id, row.task_name, &row.status)
     }
 
     async fn history_raw_result_probe(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
@@ -2798,6 +2914,76 @@ enum TaskInfoPass {
     /// The live read found no row, and the history read found the task
     /// live: a send of the id committed between the two statements.
     BecameLive,
+}
+
+/// The probe of a live row: a terminal status is a record with no result (a
+/// live row holds none), a live status waits. A status that is not a task
+/// status is `INVALID_JSON_PAYLOAD`. Pure.
+fn raw_result_from_live(
+    task_id: Uuid,
+    task_name: String,
+    status: &str,
+) -> BrokerResult<RawResultProbe> {
+    let status: crate::core::TaskStatus = status
+        .parse()
+        .map_err(|error| raw_result_operation_error(BrokerError::InvalidStatus(error)))?;
+    let record = RawResultRecord {
+        task_id,
+        task_name,
+        status,
+        raw_result: None,
+    };
+    Ok(match status {
+        crate::core::TaskStatus::Completed
+        | crate::core::TaskStatus::Failed
+        | crate::core::TaskStatus::Cancelled
+        | crate::core::TaskStatus::Expired => RawResultProbe::Record(record),
+        crate::core::TaskStatus::Pending
+        | crate::core::TaskStatus::Claimed
+        | crate::core::TaskStatus::Running => RawResultProbe::Waiting(record),
+    })
+}
+
+/// The record of a history row read through the staged result function,
+/// with the rules of [`raw_result_from_history_detail`]: a terminal status,
+/// and a stored result that passes its version, digest and UTF-8 checks and
+/// is a JSON object or `null`. A failed check is `INVALID_JSON_PAYLOAD`.
+/// Pure.
+fn raw_result_from_history_result(
+    task_id: Uuid,
+    history: HistoryTaskResult,
+) -> BrokerResult<RawResultProbe> {
+    let status: crate::core::TaskStatus = history
+        .status
+        .parse()
+        .map_err(|error| raw_result_operation_error(BrokerError::InvalidStatus(error)))?;
+    if !status.is_terminal() {
+        return Err(raw_result_operation_error(BrokerError::InvalidStatus(
+            format!("history task {task_id} has non-terminal status {status}"),
+        )));
+    }
+    let text = match &history.payload {
+        HistoryResultPayload::Absent => None,
+        HistoryResultPayload::Stored { payload, digest } => Some(
+            decode_result_envelope_text(
+                history.envelope_version,
+                &history.codec,
+                &history.content_type,
+                payload,
+                digest,
+            )
+            .map_err(|error| {
+                raw_result_operation_error(BrokerError::HistoryReadContract(error.to_string()))
+            })?,
+        ),
+    };
+    let raw_result = text.map(stored_envelope_text).transpose()?.flatten();
+    Ok(RawResultProbe::Record(RawResultRecord {
+        task_id,
+        task_name: history.task_name,
+        status,
+        raw_result,
+    }))
 }
 
 fn raw_result_from_history_detail(
