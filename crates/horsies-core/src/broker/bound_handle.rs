@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::core::task::result::TaskResult;
-use crate::core::{OperationalErrorCode, TaskError, TaskInfo};
+use crate::core::{OperationalErrorCode, TaskError};
 
 use crate::broker::postgres::PostgresBroker;
 
@@ -75,7 +75,7 @@ impl<T: DeserializeOwned + Clone> TaskHandle<T> {
         include_result: bool,
         include_failed_reason: bool,
         include_attempts: bool,
-    ) -> crate::broker::result_types::BrokerResult<Option<TaskInfo>> {
+    ) -> crate::broker::result_types::BrokerResult<crate::broker::result_types::TaskInfoRead> {
         let info = self
             .broker
             .get_task_info_with_attempts(

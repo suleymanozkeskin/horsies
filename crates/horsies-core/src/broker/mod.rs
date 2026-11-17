@@ -85,7 +85,10 @@ pub use postgres::{
 pub use process_listener::{
     CheckInterruption, ListenError, ListenerPlanError, SessionCheckFailure,
 };
-pub use result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord};
+pub use result_types::{
+    BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRead, RawResultRecord,
+    TaskInfoRead,
+};
 pub use row::heartbeat::HeartbeatRow;
 pub use row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow, TaskResultRow};
 pub use row::workflow::{WorkflowRow, WorkflowTaskRow};

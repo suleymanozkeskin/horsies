@@ -245,7 +245,10 @@ unless it starts with "Added".
   sub-second part was dropped.
 - **`TaskHandle::get` takes a `WaitLimit` and returns
   `Result<TaskOutcome<T, E>, ReadError>`.** `TaskResult<T>` is removed. The
-  outer error is the read failing: `WaitTimedOut`, `TaskNotFound`,
+  outer error is the read failing: `WaitTimedOut`, `TaskNotFound { reason }`
+  (`TaskAbsenceReason`: `PredatesRetainedHistory` for a task that retention
+  can have removed, `WithinRetainedHistory` for an id that no retained
+  history held, `NotClassified` for an id that is not a UUIDv7),
   `ResultNotAvailable`, `StoredResultUnreadable`, `UnknownUserCode` (a
   stored user code that `E` does not name), `WaitInsideTask` and
   `Database`, each with Python's code from `ReadError::code`. The inner
