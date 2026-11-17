@@ -47,8 +47,7 @@ use crate::core::history::reads::publisher::StagedLoaderPublisher;
 
 use super::catalog::{
     capture_partition_bound_utc, database_now, read_leaf_catalog_row, read_leaf_physical_state,
-    read_manifest_leaf_rows, LeafCatalogRow, LeafIndexKind, LeafLowerBound,
-    LeafPartitionBoundExpectation,
+    LeafCatalogRow, LeafIndexKind, LeafLowerBound, LeafPartitionBoundExpectation,
 };
 use super::manager::{
     create_daily_leaf, detach_expired_leaf, drop_detached_leaf, ensure_leaf_coverage, inspect_leaf,
@@ -58,6 +57,17 @@ use super::publication::{LoaderPublication, LoaderRepublished, UnpublishedLoader
 
 mod lifecycle_ports;
 
+/// The attached history leaves whose relation is gone, in name order
+/// (`horsies_history_absent_leaves()`, 0008).
+async fn absent_history_leaves(
+    connection: &mut PgConnection,
+) -> Result<Vec<String>, crate::core::history::errors::HistoryError> {
+    Ok(sqlx::query_scalar("SELECT horsies_history_absent_leaves()")
+        .fetch_one(connection)
+        .await?)
+}
+
+/// A publisher that renders nothing and reports the absent history leaves.
 #[derive(Debug, Default)]
 struct CatalogPublisher;
 
@@ -66,9 +76,8 @@ impl LoaderPublication for CatalogPublisher {
         &self,
         connection: &mut PgConnection,
     ) -> Result<LoaderRepublished, crate::core::history::errors::HistoryError> {
-        let selection = read_manifest_leaf_rows(connection).await?;
         Ok(LoaderRepublished {
-            absent_leaves: selection.absent_relations,
+            absent_leaves: absent_history_leaves(connection).await?,
         })
     }
 
@@ -84,10 +93,7 @@ impl LoaderPublication for CatalogPublisher {
         &self,
         connection: &mut PgConnection,
     ) -> Result<bool, crate::core::history::errors::HistoryError> {
-        Ok(!read_manifest_leaf_rows(connection)
-            .await?
-            .absent_relations
-            .is_empty())
+        Ok(!absent_history_leaves(connection).await?.is_empty())
     }
 }
 
@@ -1218,7 +1224,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
             matches!(outcome, CoverageOutcome::Ensured(_)),
             "{outcome:?}"
         );
-        assert_eq!(proxy.statement_count(), 3);
+        assert_eq!(proxy.statement_count(), 2);
         assert!(!proxy.sql().iter().any(|statement| {
             statement.starts_with("BEGIN") || statement.contains("pg_try_advisory_xact_lock")
         }));
@@ -1257,7 +1263,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
             matches!(outcome, CoverageOutcome::Ensured(_)),
             "{outcome:?}"
         );
-        assert_eq!(proxy.statement_count(), 3);
+        assert_eq!(proxy.statement_count(), 2);
         pool.close().await;
         proxy.stop().await;
     }
@@ -1273,8 +1279,8 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         matches!(outcome, CoverageOutcome::Ensured(_)),
         "{outcome:?}"
     );
-    assert_eq!(proxy.statement_count(), 3);
-    assert!(elapsed >= std::time::Duration::from_millis((delay_ms * 3) as u64));
+    assert_eq!(proxy.statement_count(), 2);
+    assert!(elapsed >= std::time::Duration::from_millis((delay_ms * 2) as u64));
     // The exact statement count bounds RTT cost. CI load cannot give a stable
     // wall-clock upper bound.
     pool.close().await;
@@ -2362,21 +2368,33 @@ async fn manifest_excludes_absent_probes_and_keeps_the_complete_attached_set() {
         .execute(&mut *transaction)
         .await
         .expect("drop heartbeat leaf out of band");
-    let selection = read_manifest_leaf_rows(&mut transaction)
-        .await
-        .expect("read manifest leaves");
-    assert!(selection
-        .attached
-        .iter()
-        .any(|row| row.leaf_name == gone.leaf_name()));
+    // The catalog keeps both history leaves attached; the reader manifest
+    // leaves out the one whose relation is gone, and the absent list names
+    // it. The heartbeat leaf is in neither.
+    let attached: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT leaf_name FROM {LEAF_CATALOG}
+         WHERE detached_at IS NULL AND dropped_at IS NULL
+         ORDER BY leaf_name"
+    ))
+    .fetch_all(&mut *transaction)
+    .await
+    .expect("read attached catalog leaves");
+    assert!(attached.iter().any(|name| name == gone.leaf_name()));
+    assert!(attached.iter().any(|name| name == kept.leaf_name()));
+    let manifest: Vec<String> =
+        sqlx::query_scalar("SELECT leaf_name FROM horsies_history_reader_manifest()")
+            .fetch_all(&mut *transaction)
+            .await
+            .expect("read the reader manifest");
+    assert!(manifest.iter().any(|name| name == kept.leaf_name()));
+    assert!(!manifest.iter().any(|name| name == gone.leaf_name()));
+    assert!(!manifest.iter().any(|name| name == heartbeat.leaf_name()));
     assert_eq!(
-        selection.absent_relations,
+        absent_history_leaves(&mut transaction)
+            .await
+            .expect("read absent history leaves"),
         vec![gone.leaf_name().to_owned()]
     );
-    assert!(selection
-        .attached
-        .iter()
-        .any(|row| row.leaf_name == kept.leaf_name()));
     let coverage = ensure_partition_coverage(&mut transaction, 2, 2, &[], &CatalogPublisher)
         .await
         .expect("self-correcting coverage pass");
