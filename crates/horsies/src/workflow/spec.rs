@@ -725,7 +725,9 @@ fn check_join(owner: &str, links: &NodeLinks, report: &mut ValidationReport) {
 /// member also names, and the decode with the input type of the task or
 /// child. The decode reads the input as the child of the worker gives it:
 /// the static members, each `args_from` member as a result envelope, and
-/// the workflow context when the task takes it.
+/// the workflow context when the task takes it. Each static member must
+/// then bind to a field at every depth: a key that the decoded value does
+/// not write back is refused with its key path (Python `extra='forbid'`).
 fn check_input(
     owner: &str,
     input: &NodeInput,
@@ -760,7 +762,8 @@ fn check_input(
     if takes_context {
         members.push((WORKFLOW_CTX_FIELD, context.as_str()));
     }
-    if let Err(failure) = input_check(input.text_with(&members).as_bytes()) {
+    let static_members: Vec<&str> = input.names().collect();
+    if let Err(failure) = input_check(input.text_with(&members).as_bytes(), &static_members) {
         report.add(decode_refusal(owner, &failure));
         return;
     }
@@ -775,7 +778,9 @@ fn check_input(
         .copied()
         .filter(|(member, _)| !links.args_from.contains_key(*member))
         .collect();
-    if let Err(failure) = input_check(input.text_with(&without_results).as_bytes()) {
+    // The static members were compared above; this decode looks for a
+    // missing field only.
+    if let Err(failure) = input_check(input.text_with(&without_results).as_bytes(), &[]) {
         if let Some(member) = missing_field(&failure) {
             if links.args_from.contains_key(member) {
                 report.add(
@@ -793,9 +798,9 @@ fn check_input(
     }
 }
 
-/// The refusal of a node input that does not decode, with Python's code for
-/// each kind: a member that binds to no field, a missing field, a value of
-/// another type.
+/// The refusal of a node input that does not decode, or that holds a member
+/// that binds to no field, with Python's code for each kind: a member that
+/// binds to no field, a missing field, a value of another type.
 fn decode_refusal(owner: &str, failure: &DecodeFailure) -> HorsiesError {
     let code = match (
         failure.text.starts_with("unknown field "),
