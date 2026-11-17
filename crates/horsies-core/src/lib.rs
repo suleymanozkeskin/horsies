@@ -191,6 +191,12 @@ pub use crate::core::history::rerun::{
     CallerStatementRefused, CallerTransaction, CallerType, OwnTransactionError, StatementValue,
 };
 pub use crate::workflow_engine::bound_handle::WorkflowHandle;
+// The child spec source of a client that keeps its workflow DSL in its own
+// language, and the spec data it sends.
+pub use crate::workflow_engine::child_spec::{
+    ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ChildSpecs,
+    ChildStartSource, ClientChildSpec, ClientSpec,
+};
 pub use crate::workflow_engine::engine::{
     on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
 };
@@ -202,6 +208,9 @@ pub use crate::workflow_engine::query::{
     TerminalErrorStatus, WorkflowEnd, WorkflowWait,
 };
 pub use crate::workflow_engine::recovery::recover_stuck_workflows;
+pub use crate::workflow_engine::spec_data::{
+    parse_workflow_spec_data, SpecDataRefused, WorkflowSpecData, WORKFLOW_SPEC_DATA_VERSION,
+};
 pub use crate::workflow_engine::start::{retry_start, start_workflow, start_workflow_with_retry};
 
 #[cfg(test)]
