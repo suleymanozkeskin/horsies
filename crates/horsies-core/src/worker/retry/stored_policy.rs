@@ -24,7 +24,7 @@ use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
 use super::{Backoff, DelayCap, RetryRule, MAX_RETRY_ATTEMPTS, MAX_RETRY_INTERVAL_SECONDS};
-use crate::core::task::error::RESERVED_NON_TASK_CODES;
+use crate::core::task::error::check_error_code_text;
 
 /// `max_retries` of a stored policy that leaves the key out (Python
 /// `RetryPolicy.max_retries`).
@@ -762,7 +762,9 @@ fn rule_from_fields(fields: PolicyFields) -> Result<RetryRule, Entry> {
         Backoff::Fixed | Backoff::Exponential => {}
     }
     if let Some(refused) = fields.auto_retry_for.iter().find_map(|code| {
-        code_text_refusal(code).map(|refusal| refusal.message("auto_retry_for", code))
+        check_error_code_text(code)
+            .err()
+            .map(|refusal| refusal.message("auto_retry_for", code))
     }) {
         return Err(Entry::of_model(refused));
     }
@@ -774,73 +776,6 @@ fn rule_from_fields(fields: PolicyFields) -> Result<RetryRule, Entry> {
         delay_cap: fields.delay_cap,
         auto_retry_for: fields.auto_retry_for,
     })
-}
-
-/// Why a text is not an error code (Python `validate_error_code_string`,
-/// `core/exception_mapper.py:64-84`). The checks run in Python's order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CodeTextRefusal {
-    /// The text is empty.
-    Empty,
-    /// The text matches `^[A-Z][A-Za-z0-9_]*(Error|Exception)$`
-    /// (`EXCEPTION_NAME_RE`).
-    ExceptionClassName,
-    /// The text does not match `^[A-Z][A-Z0-9_]*$` (`ERROR_CODE_RE`).
-    NotUpperSnakeCase,
-    /// The text is in [`RESERVED_NON_TASK_CODES`].
-    ReservedName,
-}
-
-impl CodeTextRefusal {
-    /// Python's text of the refusal of `code` in `field_name`.
-    fn message(self, field_name: &str, code: &str) -> String {
-        match self {
-            Self::Empty => format!("{field_name} must be a non-empty string, got ''"),
-            Self::ExceptionClassName => format!(
-                "{field_name} '{code}' looks like an exception class name; retry matching is \
-                 error-code-only, use UPPER_SNAKE_CASE code names"
-            ),
-            Self::NotUpperSnakeCase => format!(
-                "{field_name} '{code}' is invalid; expected UPPER_SNAKE_CASE (e.g. RATE_LIMITED)"
-            ),
-            Self::ReservedName => format!(
-                "{field_name} '{code}' is a reserved error code name and is not a task code; use \
-                 another UPPER_SNAKE_CASE code"
-            ),
-        }
-    }
-}
-
-/// The refusal of `code` as an error code text, or `None` when it is one.
-/// Pure.
-fn code_text_refusal(code: &str) -> Option<CodeTextRefusal> {
-    match code {
-        "" => Some(CodeTextRefusal::Empty),
-        _ if looks_like_exception_class_name(code) => Some(CodeTextRefusal::ExceptionClassName),
-        _ if !is_upper_snake_case(code) => Some(CodeTextRefusal::NotUpperSnakeCase),
-        _ if RESERVED_NON_TASK_CODES.contains(&code) => Some(CodeTextRefusal::ReservedName),
-        _ => None,
-    }
-}
-
-/// Whether `code` matches `^[A-Z][A-Za-z0-9_]*(Error|Exception)$`: an
-/// upper-case ASCII letter, then ASCII letters, digits and `_` that end in
-/// `Error` or `Exception` after that first letter.
-fn looks_like_exception_class_name(code: &str) -> bool {
-    matches!(code.chars().next(), Some('A'..='Z'))
-        && code
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '_')
-        && ["Error", "Exception"]
-            .into_iter()
-            .any(|suffix| code.len() > suffix.len() && code.ends_with(suffix))
-}
-
-/// Whether `code` matches `^[A-Z][A-Z0-9_]*$` (ASCII).
-fn is_upper_snake_case(code: &str) -> bool {
-    let mut characters = code.chars();
-    matches!(characters.next(), Some('A'..='Z'))
-        && characters.all(|character| matches!(character, 'A'..='Z' | '0'..='9' | '_'))
 }
 
 #[cfg(test)]
