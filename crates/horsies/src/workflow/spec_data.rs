@@ -10,13 +10,11 @@
 //! a node without its own priority takes its queue's priority, and each task
 //! queue takes the retention class of the app's queue mapping.
 
-use std::collections::BTreeMap;
-
 use horsies_core::core::python_text::python_isoformat_utc;
 use horsies_core::{
     parse_workflow_spec_data, ClientSpec, OnError, SpecDataRefused, WORKFLOW_SPEC_DATA_VERSION,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use super::input::NodeInput;
 use super::node::{JoinType, NodeDeadline, NodePriority};
@@ -51,14 +49,16 @@ pub(crate) fn spec_data_text(
     spec: &WorkflowSpec,
     config: &AppConfig,
 ) -> Result<String, HorsiesError> {
-    let mut queue_classes: BTreeMap<String, String> = BTreeMap::new();
+    // The class of each task queue, in the order of the nodes that first
+    // name it (a Python dict): a later node on a queue keeps its place.
+    let mut queue_classes: Map<String, Value> = Map::new();
     let mut nodes = Vec::with_capacity(spec.nodes.len());
     for node in &spec.nodes {
         if let SpecBody::Task { queue, .. } = &node.body {
             check_queue(config, queue).map_err(|refused| unresolved_queue(spec, node, &refused))?;
             let _previous = queue_classes.insert(
                 queue.clone(),
-                config.retention.resolve_queue_retention(queue).class_key(),
+                Value::String(config.retention.resolve_queue_retention(queue).class_key()),
             );
         }
         nodes.push(node_document(spec, node, config)?);
