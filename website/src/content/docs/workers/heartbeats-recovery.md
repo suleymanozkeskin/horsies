@@ -144,7 +144,7 @@ Other children and their tasks continue. The worker also kills the subprocesses 
 
 ### Workflow Task Recovery
 
-When a worker crashes during a **workflow** task, the reaper marks `tasks.status = FAILED`, but the worker dies before calling `on_workflow_task_complete()`. This leaves `workflow_tasks.status` stuck in `RUNNING` while the underlying task is already terminal.
+When a worker crashes during a **workflow** task, the reaper marks `tasks.status = FAILED`, but the worker dies before its phase 2 (`horsies_workflow_node_finish`). This leaves `workflow_tasks.status` stuck in `RUNNING` while the underlying task is already terminal.
 
 The recovery loop detects this mismatch automatically:
 

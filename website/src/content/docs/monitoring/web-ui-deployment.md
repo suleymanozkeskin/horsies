@@ -112,7 +112,7 @@ horsies web myapp.tasks:app
 ```
 
 ```bash
-horsies web --database-url "postgresql+psycopg://user:pass@localhost:5432/mydb"
+horsies web --database-url "postgresql://user:pass@localhost:5432/mydb"
 ```
 
 The first form imports the application module and gets the full feature set. It
@@ -289,7 +289,7 @@ schema.** It reports `ABSENT` and stops. Start a horsies app or worker instead.
 
 ## Static assets
 
-The SPA is served from `horsies/web/static/`, which CI builds into the wheel. If
+The SPA is served from `horsies/web/static/` in the package, which CI builds into the wheel. If
 that directory is missing — a source checkout, or a build that skipped the
 frontend step — `/api/*` continues to work and `GET /` returns 503:
 

@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import text
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerResult
 from horsies.core.history.identity.uuid7 import mint_task_id
@@ -38,6 +39,7 @@ async def send(
     return await broker.enqueue_async(
         TASK_NAME,
         task_id=task_id,
+        send_kind=SendKind.FIRST,
         enqueue_sha=enqueue_fingerprint(
             task_name=TASK_NAME,
             queue_name='default',

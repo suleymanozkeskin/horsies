@@ -21,17 +21,18 @@ from __future__ import annotations
 import os
 
 from sqlalchemy import Engine, create_engine
+from horsies.core.utils.url import sqlalchemy_url
 
 APP_ENGINE_APPLICATION_NAME = 'repro_app_engine'
 
 _DB_URL = os.environ.get(
     'HORSES_E2E_DB_URL',
-    f'postgresql+psycopg://postgres:{os.environ.get("DB_PASSWORD", "")}@localhost:5432/horsies',
+    f'postgresql://postgres:{os.environ.get("DB_PASSWORD", "")}@localhost:5432/horsies',
 )
 
 # Small pool so per-child accumulation is easy to read in pg_stat_activity.
 app_engine: Engine = create_engine(
-    _DB_URL,
+    sqlalchemy_url(_DB_URL),
     pool_size=3,
     max_overflow=2,
     pool_recycle=1800,

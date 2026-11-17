@@ -25,7 +25,6 @@ use crate::broker::attempt_writes::{
 };
 use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::core_pool_for_test_pool;
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{FailedAttemptOutcome, OwnedClaim};
 use crate::core::registry::workflow::RegisteredWorkflowSpec;
@@ -66,21 +65,19 @@ fn slow_parent(name: &str, value: &str) -> WorkflowSpec {
 async fn recovery_pass(pool: &PgPool, registry: &WorkflowSpecRegistry) -> u64 {
     let phase2 = drive_phase2_recovery(
         pool,
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         registry,
         0,
         GLOBAL_SCAN_ROW_CAP,
         QUARANTINE_AFTER_ATTEMPTS,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
     .expect("the phase-2 drain");
     let report = recover_stuck_workflows(
-        pool,
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         registry,
-        0,
         FAILURE_LIMIT,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
@@ -589,14 +586,11 @@ async fn a_child_task_that_spends_its_retries_fails_the_parent() {
             FailedAttempt::Ended { result_json } => ended = Some(result_json),
         }
     }
-    let result_json = ended.expect("the retries end");
+    let _ = ended.expect("the retries end");
     on_workflow_task_complete(
-        &pool,
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         task_id,
-        &result_json,
-        false,
         &registry,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
@@ -639,7 +633,7 @@ async fn an_expired_child_task_fails_the_child_and_the_parent() {
     let child_id = child_of(&db.pool, workflow_id, 0).await;
 
     assert!(
-        expire_pending_tasks(&db.pool)
+        expire_pending_tasks(&core_pool_for_test_pool(&db.pool), StatementLog::Off)
             .await
             .expect("expire_pending_tasks")
             >= 1

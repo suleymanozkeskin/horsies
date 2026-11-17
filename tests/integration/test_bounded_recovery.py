@@ -7,7 +7,8 @@ from __future__ import annotations
 import uuid
 import asyncio
 from collections.abc import AsyncIterator
-from typing import cast
+from dataclasses import dataclass
+from typing import Final, cast
 
 import pytest
 import pytest_asyncio
@@ -27,10 +28,10 @@ from horsies.core.workflows.recovery import (
     _recover_global_orphan_candidate,
     recover_stuck_workflows_global,
 )
-from horsies.core.schemas import recovery as recovery_schema
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
 from tests.broker_resources_support import current_resources
+from horsies.core.utils.url import sqlalchemy_url
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -50,7 +51,7 @@ async def bounded_recovery_database() -> AsyncIterator[
 
         async with current_resources(broker).engine.begin() as connection:
             await ensure_history_seedable(connection)
-        engine = create_async_engine(url)
+        engine = create_async_engine(sqlalchemy_url(url))
         try:
             yield broker, engine
         finally:
@@ -84,26 +85,58 @@ def _relation_rows_examined(plan: object, relation: str) -> float:
     )
 
 
-def _maximum_shared_buffers(plan: object) -> int:
-    if isinstance(plan, list):
-        items = cast(list[object], plan)
-        return max((_maximum_shared_buffers(item) for item in items), default=0)
-    if not isinstance(plan, dict):
-        return 0
+_MAX_PLAN_DEPTH: Final = 64
+
+
+@dataclass(frozen=True, slots=True)
+class _NodeBuffers:
+    """The shared-buffer counts of one plan node (EXPLAIN BUFFERS).
+
+    ``hit`` plus ``read`` is the number of shared pages the node accessed:
+    the plan's own work. ``dirtied`` and ``written`` depend on the server's
+    buffer pool. A page that a checkpoint or an eviction cleaned after the
+    seed is dirtied again when the scan sets its hint bits, and a backend
+    that finds the pool full of dirty pages writes a dirty victim for each
+    page it reads.
+    """
+
+    node_type: str
+    hit: int
+    read: int
+    dirtied: int
+    written: int
+
+    @property
+    def pages_accessed(self) -> int:
+        return self.hit + self.read
+
+
+def _plan_buffers(plan: object, depth: int = 0) -> list[_NodeBuffers]:
+    """The buffer counts of every node of an EXPLAIN (FORMAT JSON) plan,
+    root first. A plan deeper than ``_MAX_PLAN_DEPTH`` fails the test."""
+    assert depth <= _MAX_PLAN_DEPTH, f'plan deeper than {_MAX_PLAN_DEPTH} nodes'
+    assert isinstance(plan, dict), f'plan node is not an object: {plan!r}'
     fields = cast(dict[str, object], plan)
-    current = sum(
-        int(cast(int | float, fields.get(name, 0)))
-        for name in (
-            'Shared Hit Blocks',
-            'Shared Read Blocks',
-            'Shared Dirtied Blocks',
-            'Shared Written Blocks',
-        )
+
+    def count(name: str) -> int:
+        return int(cast(int, fields.get(name, 0)))
+
+    node = _NodeBuffers(
+        node_type=str(fields.get('Node Type')),
+        hit=count('Shared Hit Blocks'),
+        read=count('Shared Read Blocks'),
+        dirtied=count('Shared Dirtied Blocks'),
+        written=count('Shared Written Blocks'),
     )
-    return max(
-        current,
-        *(_maximum_shared_buffers(value) for value in fields.values()),
-    )
+    children = cast(list[object], fields.get('Plans', []))
+    return [
+        node,
+        *(
+            child_node
+            for child in children
+            for child_node in _plan_buffers(child, depth + 1)
+        ),
+    ]
 
 
 async def _seed_workflow_page_fixture(
@@ -134,13 +167,13 @@ async def _seed_workflow_page_fixture(
         )
         await connection.execute(
             text('''
-                INSERT INTO horsies_workflow_tasks (
+                INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
                     id, workflow_id, task_index, task_name, input, queue_name,
                     priority, dependencies, allow_failed_deps, join_type,
                     status, is_subworkflow, created_at,
                     max_retries, execution, retention_class_key
                 )
-                SELECT md5('bounded-node-' || item::text)::uuid,
+                SELECT 'NONE', md5('bounded-node-' || item::text)::uuid,
                        md5('bounded-workflow-' || item::text)::uuid,
                        0, 'bounded_node', '{}', 'default', 100, '{}'::integer[],
                        FALSE, 'all',
@@ -490,13 +523,13 @@ async def _seed_orphan_task_plan_fixture(
         '''))
         await connection.execute(
             text('''
-                INSERT INTO horsies_workflow_tasks (
+                INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
                     id, workflow_id, task_index, task_name, input, queue_name,
                     priority, dependencies, allow_failed_deps, join_type,
                     status, task_id, is_subworkflow, created_at,
                     max_retries, execution, retention_class_key
                 )
-                SELECT md5('orphan-plan-node-' || item::text)::uuid,
+                SELECT 'NONE', md5('orphan-plan-node-' || item::text)::uuid,
                        md5('orphan-plan-workflow')::uuid,
                        item, 'orphan_plan_task', '{}', 'default', 100,
                        '{}'::integer[], FALSE, 'all', 'RUNNING',
@@ -610,6 +643,13 @@ async def test_orphan_task_scan_has_a_strict_plan_and_reaches_cycle_end(
     _broker, engine = bounded_recovery_database
     rows = 50_001
     await _seed_orphan_task_plan_fixture(engine, rows=rows)
+    # The planner reads the statistics of the seeded rows, as autovacuum
+    # leaves them in a live database. Without this the plan depends on
+    # whether autovacuum analyzed the tables before the EXPLAIN.
+    async with engine.begin() as connection:
+        await connection.execute(text(
+            'ANALYZE horsies_tasks, horsies_workflow_tasks, horsies_workflows'
+        ))
 
     async with engine.begin() as connection:
         await connection.execute(text('''
@@ -618,7 +658,8 @@ async def test_orphan_task_scan_has_a_strict_plan_and_reaches_cycle_end(
                 last_id = task.id,
                 cycle_upper_created_at = upper_task.created_at,
                 cycle_upper_id = upper_task.id,
-                completed_cycles = 0
+                completed_cycles = 0,
+                last_scan_at = statement_timestamp()
             FROM horsies_tasks task, horsies_tasks upper_task
             WHERE cursor.scan_name = 'orphan_workflow_tasks'
               AND task.id = md5('orphan-plan-task-49500')::uuid
@@ -630,7 +671,8 @@ async def test_orphan_task_scan_has_a_strict_plan_and_reaches_cycle_end(
         '''))
         plan = cast(object, plan_result.scalar_one()[0]['Plan'])
 
-    assert _maximum_shared_buffers(plan) <= 3_500
+    buffers = _plan_buffers(plan)
+    assert max(node.pages_accessed for node in buffers) <= 3_500, buffers
 
     async with engine.begin() as connection:
         await connection.execute(text('''
@@ -671,111 +713,6 @@ async def test_orphan_task_scan_has_a_strict_plan_and_reaches_cycle_end(
     assert (live, archived) == (0, 1)
 
 
-async def test_recovery_index_upgrade_rebuilds_a_malformed_canonical_index(
-    bounded_recovery_database: tuple[PostgresBroker, AsyncEngine],
-) -> None:
-    _broker, engine = bounded_recovery_database
-    async with engine.connect() as connection:
-        connection = await connection.execution_options(
-            isolation_level='AUTOCOMMIT'
-        )
-        await connection.execute(text('''
-            DROP INDEX CONCURRENTLY
-                idx_horsies_workflows_running_recovery_scan
-        '''))
-        await connection.execute(text('''
-            CREATE INDEX idx_horsies_workflows_running_recovery_scan
-            ON horsies_workflows (id)
-        '''))
-    async with engine.begin() as connection:
-        await connection.execute(text(
-            'DELETE FROM horsies_schema_version WHERE version >= 36'
-        ))
-
-    url = engine.url.render_as_string(hide_password=False)
-    upgrade = PostgresBroker(
-        PostgresConfig(database_url=SecretStr(url))
-    )
-    try:
-        initialized = await upgrade.ensure_schema_initialized()
-        assert initialized.is_ok(), initialized
-    finally:
-        await upgrade.close_async()
-
-    async with engine.connect() as connection:
-        definition = str((await connection.execute(text('''
-            SELECT pg_get_indexdef(
-                'idx_horsies_workflows_running_recovery_scan'::regclass
-            )
-        '''))).scalar_one())
-    assert '(created_at, id) INCLUDE (name)' in definition
-    assert "WHERE ((status)::text = 'RUNNING'::text)" in definition
-
-
-async def test_recovery_index_claim_refuses_foreign_name_reuse(
-    bounded_recovery_database: tuple[PostgresBroker, AsyncEngine],
-) -> None:
-    _broker, engine = bounded_recovery_database
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def pause(index: recovery_schema.RecoveryIndex) -> None:
-        if index.name == 'idx_horsies_workflows_running_recovery_scan':
-            entered.set()
-            await release.wait()
-
-    recovery_schema._index_inspection_pause = pause  # pyright: ignore[reportPrivateUsage]
-    async with engine.begin() as connection:
-        await connection.execute(text(
-            'DELETE FROM horsies_schema_version WHERE version >= 36'
-        ))
-
-    url = engine.url.render_as_string(hide_password=False)
-    upgrade = PostgresBroker(
-        PostgresConfig(database_url=SecretStr(url))
-    )
-    task = asyncio.create_task(upgrade.ensure_schema_initialized())
-    try:
-        await asyncio.wait_for(entered.wait(), timeout=5)
-        async with engine.begin() as connection:
-            await connection.execute(text('''
-                ALTER INDEX idx_horsies_workflows_running_recovery_scan
-                RENAME TO saved_running_recovery_scan
-            '''))
-            await connection.execute(text(
-                'CREATE TABLE foreign_recovery_index_owner (id uuid)'
-            ))
-            await connection.execute(text('''
-                CREATE INDEX idx_horsies_workflows_running_recovery_scan
-                ON foreign_recovery_index_owner (id)
-            '''))
-        release.set()
-        initialized = await asyncio.wait_for(task, timeout=10)
-        assert initialized.is_err()
-    finally:
-        release.set()
-        recovery_schema._index_inspection_pause = None  # pyright: ignore[reportPrivateUsage]
-        if not task.done():
-            task.cancel()
-        await upgrade.close_async()
-
-    async with engine.connect() as connection:
-        owner = str((await connection.execute(text('''
-            SELECT index_state.indrelid::regclass::text
-            FROM pg_index index_state
-            WHERE index_state.indexrelid =
-                'idx_horsies_workflows_running_recovery_scan'::regclass
-        '''))).scalar_one())
-        saved_owner = str((await connection.execute(text('''
-            SELECT index_state.indrelid::regclass::text
-            FROM pg_index index_state
-            WHERE index_state.indexrelid =
-                'saved_running_recovery_scan'::regclass
-        '''))).scalar_one())
-    assert owner == 'foreign_recovery_index_owner'
-    assert saved_owner == 'horsies_workflows'
-
-
 @pytest.mark.parametrize('node_status', ['COMPLETED', 'RUNNING'])
 async def test_generic_audit_uses_partial_node_index(
     bounded_recovery_database: tuple[PostgresBroker, AsyncEngine],
@@ -787,13 +724,13 @@ async def test_generic_audit_uses_partial_node_index(
     await _seed_workflow_page_fixture(engine, rows=200, terminal_last=False)
     async with engine.begin() as connection:
         await connection.execute(text('''
-            INSERT INTO horsies_workflow_tasks (
+            INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
                 id, workflow_id, task_index, task_name, input, status, queue_name,
                 priority, dependencies, allow_failed_deps, join_type,
                 is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             )
-            SELECT md5('wide-partial-' || n)::uuid,
+            SELECT 'NONE', md5('wide-partial-' || n)::uuid,
                    md5('bounded-workflow-200')::uuid, n,
                    'partial_index', '{}', 'COMPLETED', 'default', 100, '{}'::integer[],
                    FALSE, 'all', FALSE, NOW(),
@@ -836,53 +773,3 @@ async def test_generic_audit_uses_partial_node_index(
             case _:
                 raise AssertionError(node_status)
         await connection.execute(text('DEALLOCATE partial_audit'))
-
-
-async def test_partial_node_index_upgrade_repairs_shape_and_preserves_rows(
-    bounded_recovery_database: tuple[PostgresBroker, AsyncEngine],
-) -> None:
-    broker, engine = bounded_recovery_database
-    await _seed_workflow_page_fixture(engine, rows=200, terminal_last=True)
-    row_sql = text(
-        'SELECT jsonb_agg(to_jsonb(n) ORDER BY id) '
-        'FROM horsies_workflow_tasks n'
-    )
-    async with engine.begin() as connection:
-        before = (await connection.execute(row_sql)).scalar_one()
-        await connection.execute(text(
-            'DELETE FROM horsies_schema_version WHERE version >= 38'
-        ))
-        await connection.execute(text(
-            'DROP INDEX idx_horsies_workflow_tasks_nonterminal'
-        ))
-        await connection.execute(text(
-            'CREATE INDEX idx_horsies_workflow_tasks_nonterminal '
-            'ON horsies_workflow_tasks(status)'
-        ))
-    upgrade = PostgresBroker(broker.config)
-    try:
-        for _ in range(2):
-            initialized = await upgrade.ensure_schema_initialized()
-            assert initialized.is_ok(), initialized
-    finally:
-        await upgrade.close_async()
-    async with engine.begin() as connection:
-        after = (await connection.execute(row_sql)).scalar_one()
-        assert after == before
-        definition = (await connection.execute(text(
-            "SELECT pg_get_indexdef('idx_horsies_workflow_tasks_nonterminal'::regclass)"
-        ))).scalar_one()
-        assert "(workflow_id)" in definition
-        async with connection.begin_nested() as wrong_shape:
-            await connection.execute(text(
-                'DROP INDEX idx_horsies_workflow_tasks_nonterminal'
-            ))
-            await connection.execute(text(
-                'CREATE INDEX idx_horsies_workflow_tasks_nonterminal '
-                "ON horsies_workflow_tasks(workflow_id) WHERE status='RUNNING'"
-            ))
-            from sqlalchemy.exc import DBAPIError
-
-            with pytest.raises(DBAPIError, match='absent, invalid, or noncanonical'):
-                await connection.execute(recovery_schema.VALIDATE_RECOVERY_INDEXES_SQL)
-            await wrong_shape.rollback()

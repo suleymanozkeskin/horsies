@@ -33,13 +33,9 @@ from horsies.core.models.workflow import (
     OnError,
 )
 from horsies.core.types.result import Ok
-from horsies.core.workflows.engine import (
-    on_workflow_task_complete,
-    resume_workflow,
-)
+from horsies.core.workflows.engine import resume_workflow
 
-from .conftest import make_simple_task, start_ok
-from tests.integration.conftest import task_name_for
+from .conftest import finish_task, make_simple_task, start_ok
 
 
 # ---------------------------------------------------------------------------
@@ -156,26 +152,13 @@ class TestCascadeResumeMissingCompletionCheck:
         child_wf_id = row[0]
         assert isinstance(child_wf_id, str)
 
-        # Get child task C's task_id (task_index=0 in child workflow)
-        child_task_res = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': child_wf_id},
-        )
-        child_task_row = child_task_res.fetchone()
-        assert child_task_row is not None
-        child_task_c_id = child_task_row[0]
-        assert isinstance(child_task_c_id, str)
-
-        # 1. Fail child task C -> child should PAUSE
-        await on_workflow_task_complete(
+        # 1. Fail child task C (task_index=0 in child workflow) -> child should PAUSE
+        await finish_task(
             session,
-            child_task_c_id,
-            TaskResult(err=TaskError(error_code='CHILD_FAIL', message='C failed')),
             broker,
-            task_name=await task_name_for(session, child_task_c_id),
+            child_wf_id,
+            0,
+            TaskResult(err=TaskError(error_code='CHILD_FAIL', message='C failed')),
         )
         await session.commit()
         session.expire_all()
@@ -188,24 +171,12 @@ class TestCascadeResumeMissingCompletionCheck:
         assert child_status == 'PAUSED', f'Expected child PAUSED, got {child_status}'
 
         # 2. Fail parent task_a -> parent should PAUSE
-        parent_task_res = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        parent_task_row = parent_task_res.fetchone()
-        assert parent_task_row is not None
-        parent_task_a_id = parent_task_row[0]
-        assert isinstance(parent_task_a_id, str)
-
-        await on_workflow_task_complete(
+        await finish_task(
             session,
-            parent_task_a_id,
-            TaskResult(err=TaskError(error_code='PARENT_FAIL', message='A failed')),
             broker,
-            task_name=await task_name_for(session, parent_task_a_id),
+            handle.workflow_id,
+            0,
+            TaskResult(err=TaskError(error_code='PARENT_FAIL', message='A failed')),
         )
         await session.commit()
         session.expire_all()

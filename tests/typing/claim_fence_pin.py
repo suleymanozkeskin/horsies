@@ -13,12 +13,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy.ext.asyncio import AsyncConnection
-
 from horsies.core.lifecycle.fences import OwnedClaim, OwnedClaimBatch
 from horsies.core.worker.child_protocol import RunFrame, SeatTask, SharedRunFrame
 from horsies.core.worker.child_runner import mark_finalizing_params
-from horsies.core.worker.failed_attempt import read_in_flight_attempt
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.stored_timeout import NoTimeout
 from horsies.core.worker.worker import Worker
 
@@ -39,20 +37,15 @@ def frames(claimed_at: datetime) -> None:
     SharedRunFrame(1, 't', 'n', None, None, 'w', False, None, SeatTask(1000, 100))  # pyright: ignore[reportArgumentType]
 
 
-async def writes(
-    connection: AsyncConnection,
-    worker: Worker,
-    claimed_at: datetime,
-) -> None:
-    await read_in_flight_attempt(
-        connection,
-        task_id='t',
-        worker_id='w',
-        claimed_at=claimed_at,
+async def writes(worker: Worker, claimed_at: datetime) -> None:
+    claim = DispatchClaim(
+        claimed_at=claimed_at, retry_count=0, max_retries=0, task_options=None,
     )
-    await read_in_flight_attempt(connection, task_id='t', worker_id='w')  # pyright: ignore[reportCallIssue]
+    DispatchClaim(retry_count=0, max_retries=0, task_options=None)  # pyright: ignore[reportCallIssue]
+    DispatchClaim(None, 0, 0, None)  # pyright: ignore[reportArgumentType]
     mark_finalizing_params('t', 'w', claimed_at)
     mark_finalizing_params('t', 'w', None)  # pyright: ignore[reportArgumentType]
-    await worker._requeue_claimed_task('t', 'reason', claimed_at)
+    await worker._requeue_claimed_task('t', 'reason', claim)
+    await worker._requeue_claimed_task('t', 'reason', claimed_at)  # pyright: ignore[reportArgumentType]
     await worker._requeue_claimed_task('t', 'reason')  # pyright: ignore[reportCallIssue]
     await worker._recover_worker_future_failure('t', 'reason')  # pyright: ignore[reportCallIssue]

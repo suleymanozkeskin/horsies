@@ -113,6 +113,38 @@ impl ClaimPlan {
     }
 }
 
+/// One line that names the route of each class, for the start log (Python
+/// `describe_claim_plan`): `ISOLATED -> ISOLATED budget, SHARED_ASYNC -> not
+/// served, ...`. Pure.
+pub fn describe_claim_plan(plan: ClaimPlan) -> String {
+    ExecutionClass::ALL
+        .into_iter()
+        .map(|class| match plan.route(class) {
+            ClaimRoute::ServedBy(budget) => format!("{class} -> {budget} budget"),
+            ClaimRoute::NotServed => format!("{class} -> not served"),
+        })
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
+/// The start log line of the classes of which the worker claims no row, or
+/// none when it serves every class (Python `_log_claim_plan`). A worker is
+/// not refused for them. Pure.
+pub fn unserved_classes_line(plan: ClaimPlan) -> Option<String> {
+    let unserved: Vec<&'static str> = ExecutionClass::ALL
+        .into_iter()
+        .filter(|class| plan.route(*class) == ClaimRoute::NotServed)
+        .map(ExecutionClass::as_str)
+        .collect();
+    match unserved.is_empty() {
+        true => None,
+        false => Some(format!(
+            "This worker claims no rows of class {}: it runs no children that can run them",
+            unserved.join(", ")
+        )),
+    }
+}
+
 /// The deadline an isolated parent holds for a task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IsolatedDeadline {

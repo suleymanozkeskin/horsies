@@ -17,12 +17,12 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{
-    launch_runner_beats, runner_beat_pool, write_beats, BeatSender, LiveDispatches,
-    StaleRunningRecovery, INSERT_RUNNER_HEARTBEATS_SQL,
+    launch_runner_beats, test_beat_pool, write_beats, BeatSender, DispatchRunner, FailClosedStop,
+    LiveDispatches, StaleRunningRecovery, INSERT_RUNNER_HEARTBEATS_SQL,
 };
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
-use crate::worker::recovery::mark_stale_running_as_failed;
+use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 
 const WORKER_ID: &str = "beat-spec-worker-1";
 const OTHER_WORKER_ID: &str = "beat-spec-worker-2";
@@ -219,9 +219,14 @@ async fn a_running_row_of_this_claim_gets_a_beat() {
     )
     .await;
 
-    let rows = write_beats(&pool, &sender(), &[task_id], &[claimed_at])
-        .await
-        .expect("beat write");
+    let rows = write_beats(
+        &crate::broker::pools::core_pool_for_test_pool(&pool),
+        &sender(),
+        &[task_id],
+        &[claimed_at],
+    )
+    .await
+    .expect("beat write");
 
     assert_eq!(rows, 1);
     assert_eq!(
@@ -293,9 +298,14 @@ async fn a_row_outside_the_fence_gets_no_beat() {
         let task_id = Uuid::new_v4();
         seed_task(&pool, task_id, seed).await;
 
-        let rows = write_beats(&pool, &sender(), &[task_id], &[dispatch_generation])
-            .await
-            .expect("beat write");
+        let rows = write_beats(
+            &crate::broker::pools::core_pool_for_test_pool(&pool),
+            &sender(),
+            &[task_id],
+            &[dispatch_generation],
+        )
+        .await
+        .expect("beat write");
 
         assert_eq!(rows, 0, "{case}");
         assert_eq!(beats(&pool, task_id).await, Vec::new(), "{case}");
@@ -371,9 +381,14 @@ async fn one_statement_beats_every_fenced_row() {
         .await;
     }
 
-    let rows = write_beats(&pool, &sender(), &task_ids, &generations)
-        .await
-        .expect("beat write");
+    let rows = write_beats(
+        &crate::broker::pools::core_pool_for_test_pool(&pool),
+        &sender(),
+        &task_ids,
+        &generations,
+    )
+    .await
+    .expect("beat write");
 
     assert_eq!(rows, 3);
     for task_id in &task_ids {
@@ -406,9 +421,14 @@ async fn the_reaper_leaves_a_beaten_row_and_fails_an_unbeaten_one() {
         )
         .await;
     }
-    let rows = write_beats(&pool, &sender(), &[beaten], &[beaten_claim])
-        .await
-        .expect("beat write");
+    let rows = write_beats(
+        &crate::broker::pools::core_pool_for_test_pool(&pool),
+        &sender(),
+        &[beaten],
+        &[beaten_claim],
+    )
+    .await
+    .expect("beat write");
     assert_eq!(rows, 1);
 
     let _processed = mark_stale_running_as_failed(
@@ -454,15 +474,18 @@ async fn the_beat_loop_keeps_a_held_row_out_of_stale_recovery() {
         .await;
     }
     let live = LiveDispatches::default();
-    let dispatch = live.hold(held, held_claim);
+    let dispatch = live
+        .hold(held, held_claim, DispatchRunner::WorkerProcess)
+        .expect("an open registry holds the dispatch");
     let cancel = CancellationToken::new();
     let (watch, writer) = launch_runner_beats(
-        runner_beat_pool(&pool),
+        test_beat_pool(&crate::broker::pools::test_url_of(&pool.connect_options())),
         sender(),
         LOOP_BEAT_INTERVAL,
         StaleRunningRecovery::Off,
         live.clone(),
         cancel.clone(),
+        FailClosedStop::new(CancellationToken::new()),
     )
     .expect("start the beat loop");
 

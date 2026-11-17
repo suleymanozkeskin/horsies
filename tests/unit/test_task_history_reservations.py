@@ -15,24 +15,31 @@ from uuid import UUID
 
 import pytest
 
-from horsies.core.history.ddl.fragments import frozen_fragments
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.identity.reservations import (
-    KEY_RESERVATION_CLAIM_FUNCTION_DDL,
-    KEY_RESERVATION_CLEANUP_FUNCTION_DDL,
-    KEY_RESERVATION_TERMINALIZE_FUNCTION_DDL,
     ReservationApplied,
     ReservationConflict,
     ReservationReplay,
     decode_reservation_row,
-    reservation_function_fragments,
 )
+from tests.baseline_sql import baseline_function, baseline_sql, baseline_type
 
 pytestmark = [pytest.mark.unit]
 
 
 TASK_ID = UUID('0198c0de-0000-7000-8000-000000000001')
-ALL_FUNCTION_DDL = '\n'.join(reservation_function_fragments())
+KEY_RESERVATION_CLAIM_FUNCTION_DDL = baseline_function('horsies_key_reservation_claim')
+KEY_RESERVATION_TERMINALIZE_FUNCTION_DDL = baseline_function(
+    'horsies_key_reservation_terminalize'
+)
+KEY_RESERVATION_CLEANUP_FUNCTION_DDL = baseline_function('horsies_key_reservation_cleanup')
+ALL_FUNCTION_DDL = '\n'.join((
+    baseline_type('horsies_key_reservation_outcome'),
+    KEY_RESERVATION_CLAIM_FUNCTION_DDL,
+    KEY_RESERVATION_TERMINALIZE_FUNCTION_DDL,
+    baseline_function('horsies_key_reservation_terminalize_batch'),
+    KEY_RESERVATION_CLEANUP_FUNCTION_DDL,
+))
 
 
 class TestRegistrySeam:
@@ -47,18 +54,11 @@ class TestRegistrySeam:
         )
         assert relations == {'horsies_key_reservations'}
 
-    def test_fragments_install_after_the_registry_table(self) -> None:
-        fragments = frozen_fragments()
-
-        def position(marker: str) -> int:
-            for index, fragment in enumerate(fragments):
-                if marker in fragment:
-                    return index
-            raise AssertionError(f'no fragment contains {marker!r}')
-
-        table = position('CREATE TABLE horsies_key_reservations')
-        outcome_type = position('CREATE TYPE horsies_key_reservation_outcome')
-        claim = position('CREATE FUNCTION horsies_key_reservation_claim')
+    def test_the_baseline_creates_them_after_the_registry_table(self) -> None:
+        sql = baseline_sql()
+        table = sql.index('CREATE TABLE horsies_key_reservations')
+        outcome_type = sql.index('CREATE TYPE horsies_key_reservation_outcome')
+        claim = sql.index('CREATE FUNCTION horsies_key_reservation_claim')
         assert table < outcome_type < claim
 
 
@@ -79,7 +79,7 @@ class TestClaimFunctionDdl:
 
     def test_expired_terminal_rows_are_reused_by_deletion(self) -> None:
         assert (
-            "disposition = 'TERMINAL'\n      AND expires_at <= "
+            "disposition = 'TERMINAL'\n          AND expires_at <= "
             'statement_timestamp()'
         ) in KEY_RESERVATION_CLAIM_FUNCTION_DDL
 

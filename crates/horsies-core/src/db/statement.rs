@@ -46,6 +46,7 @@ pub enum ParameterType {
     Int8Array,
     Float8Array,
     TextArray,
+    ByteaArray,
     UuidArray,
     TimestamptzArray,
     JsonbArray,
@@ -73,6 +74,7 @@ impl ParameterType {
             ParameterType::Int8Array => Type::INT8_ARRAY,
             ParameterType::Float8Array => Type::FLOAT8_ARRAY,
             ParameterType::TextArray => Type::TEXT_ARRAY,
+            ParameterType::ByteaArray => Type::BYTEA_ARRAY,
             ParameterType::UuidArray => Type::UUID_ARRAY,
             ParameterType::TimestamptzArray => Type::TIMESTAMPTZ_ARRAY,
             ParameterType::JsonbArray => Type::JSONB_ARRAY,
@@ -100,6 +102,7 @@ impl ParameterType {
             ParameterType::Int8Array => "int8[]",
             ParameterType::Float8Array => "float8[]",
             ParameterType::TextArray => "text[]",
+            ParameterType::ByteaArray => "bytea[]",
             ParameterType::UuidArray => "uuid[]",
             ParameterType::TimestamptzArray => "timestamptz[]",
             ParameterType::JsonbArray => "jsonb[]",
@@ -247,6 +250,47 @@ impl<'a> BoundStatement<'a> {
     }
 }
 
+/// A SQL text of one or more statements with no parameters, such as a
+/// migration. It is sent with the simple query protocol, in one `Query`
+/// message: nothing is prepared, so a script also passes PgBouncer
+/// transaction mode. The server runs the statements in order and stops at the
+/// first error.
+///
+/// A script holds no transaction control (`BEGIN`, `COMMIT`, `ROLLBACK`): a
+/// [`crate::db::Transaction`] knows its state only from its own commands.
+#[derive(Clone, Copy)]
+pub struct SqlScript {
+    name: &'static str,
+    sql: &'static str,
+}
+
+/// The name and the length of the text: a migration text is too long for a
+/// log line.
+impl std::fmt::Debug for SqlScript {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SqlScript")
+            .field("name", &self.name)
+            .field("bytes", &self.sql.len())
+            .finish()
+    }
+}
+
+impl SqlScript {
+    /// `name` names the script in errors and logs.
+    pub const fn new(name: &'static str, sql: &'static str) -> SqlScript {
+        SqlScript { name, sql }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub const fn sql(&self) -> &'static str {
+        self.sql
+    }
+}
+
 /// How statements reach the server on one pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatementProtocol {
@@ -340,8 +384,8 @@ pub(crate) async fn execute_count(
 }
 
 /// Runs one command with the simple query protocol: `BEGIN`, `COMMIT`,
-/// `ROLLBACK`. A command has no parameter, so nothing is prepared, also under
-/// PgBouncer transaction mode.
+/// `ROLLBACK`, or the text of a [`SqlScript`]. A command has no parameter, so
+/// nothing is prepared, also under PgBouncer transaction mode.
 pub(crate) async fn run_command(
     client: &ClientWrapper,
     sql: &'static str,
@@ -358,6 +402,22 @@ mod tests {
         "SELECT $1::text, $2::int8",
         &[ParameterType::Text, ParameterType::Int8],
     );
+
+    #[test]
+    fn a_script_keeps_its_name_and_text() {
+        const SCRIPT: SqlScript = SqlScript::new(
+            "two_statements",
+            "CREATE TABLE a (x int); CREATE TABLE b (y int);",
+        );
+        assert_eq!(SCRIPT.name(), "two_statements");
+        assert_eq!(
+            SCRIPT.sql(),
+            "CREATE TABLE a (x int); CREATE TABLE b (y int);"
+        );
+        let shown = format!("{SCRIPT:?}");
+        assert!(shown.contains("two_statements"), "{shown}");
+        assert!(!shown.contains("CREATE TABLE"), "{shown}");
+    }
 
     #[test]
     fn binding_in_order_keeps_the_declared_types() {
@@ -420,6 +480,7 @@ mod tests {
             ParameterType::Int8Array,
             ParameterType::Float8Array,
             ParameterType::TextArray,
+            ParameterType::ByteaArray,
             ParameterType::UuidArray,
             ParameterType::TimestamptzArray,
             ParameterType::JsonbArray,

@@ -2,11 +2,15 @@
 
 Pins the implementation invariants from the workflow-completion redesign:
 - the driver advances a parent from an ALREADY-TERMINAL child — the state a
-  phase2 finalize retry cannot reach (the task-level terminal CAS blocks it);
+  phase2 finalize retry cannot reach (the phase-2 record is gone);
 - a transient failure folds into the parent_propagation retry stage and the
   bounded retry re-enters the chain and completes it;
 - a multi-level ancestor chain is driven iteratively, one fresh transaction
   per level.
+
+The driver runs ``horsies_workflow_child_finish`` per level
+(``steps.advance_parents``), with the child starts that a level owes, which
+it builds through the worker's broker.
 
 The crash window between levels (child terminal, parent node not updated)
 is the recovery case 1.6 state, already pinned by
@@ -24,6 +28,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.types.result import is_ok
@@ -41,14 +46,14 @@ _OUTPUTLESS_CHILD_RESULT_ENVELOPE = (
 )
 
 
-def _make_worker(engine: AsyncEngine) -> Worker:
+def _make_worker(engine: AsyncEngine, broker: PostgresBroker) -> Worker:
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
-    return Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
+    return Worker(session_factory=sf, listener=MagicMock(), cfg=cfg, broker=broker)
 
 
 async def _insert_workflow(
@@ -94,12 +99,12 @@ async def _insert_subworkflow_node(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name,
                  input, queue_name, priority,
                  dependencies, allow_failed_deps, join_type,
                  is_subworkflow, sub_workflow_id, sub_workflow_params,
                  status, created_at)
-            VALUES (:id, :wf, :idx, :node, 'denest_sub', '{}',
+            VALUES ('NONE', :id, :wf, :idx, :node, 'denest_sub', '{}',
                     'default', 100, '{}', FALSE, 'all',
                     TRUE, :sub_id, 'NOT_GIVEN', 'RUNNING', NOW())
         """),
@@ -156,7 +161,7 @@ async def _cleanup(session: AsyncSession, workflow_ids: list[str]) -> None:
 
 @pytest.mark.asyncio
 async def test_driver_advances_parent_from_already_terminal_child(
-    engine: AsyncEngine, session: AsyncSession,
+    engine: AsyncEngine, broker: PostgresBroker, session: AsyncSession,
 ) -> None:
     """The past-CAS invariant: the child is already COMPLETED (a phase2
     retry would CAS-miss and never reach propagation); the driver alone
@@ -174,7 +179,7 @@ async def test_driver_advances_parent_from_already_terminal_child(
     )
     await session.commit()
 
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     try:
         await worker._drive_parent_propagations([child_id])
 
@@ -188,7 +193,7 @@ async def test_driver_advances_parent_from_already_terminal_child(
 
 @pytest.mark.asyncio
 async def test_driver_propagates_expired_child_as_parent_failure(
-    engine: AsyncEngine, session: AsyncSession,
+    engine: AsyncEngine, broker: PostgresBroker, session: AsyncSession,
 ) -> None:
     parent_id = await _insert_workflow(session, status='RUNNING')
     child_id = await _insert_workflow(
@@ -205,7 +210,7 @@ async def test_driver_propagates_expired_child_as_parent_failure(
     )
     await session.commit()
 
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     try:
         await worker._drive_parent_propagations([child_id])
 
@@ -227,7 +232,7 @@ async def test_driver_propagates_expired_child_as_parent_failure(
 
 @pytest.mark.asyncio
 async def test_outputless_child_propagates_as_none_output(
-    engine: AsyncEngine, session: AsyncSession,
+    engine: AsyncEngine, broker: PostgresBroker, session: AsyncSession,
 ) -> None:
     """A completed outputless child must not expose nested TaskResult
     envelopes as the parent SubWorkflowNode output or summary output.
@@ -250,7 +255,7 @@ async def test_outputless_child_propagates_as_none_output(
     )
     await session.commit()
 
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     try:
         await worker._drive_parent_propagations([child_id])
 
@@ -345,6 +350,7 @@ async def test_recovery_isolates_poison_child_and_continues(
 @pytest.mark.asyncio
 async def test_transient_failure_retries_via_parent_stage_and_completes(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -353,7 +359,7 @@ async def test_transient_failure_retries_via_parent_stage_and_completes(
     retry, which re-enters the chain and completes the parent."""
     from psycopg import OperationalError
 
-    from horsies.core.workflows import engine as engine_mod
+    from horsies.core.workflows import steps as steps_mod
     from horsies.core.worker import finalize as finalize_mod
 
     parent_id = await _insert_workflow(session, status='RUNNING')
@@ -369,22 +375,22 @@ async def test_transient_failure_retries_via_parent_stage_and_completes(
     )
     await session.commit()
 
-    real_on_sub = engine_mod.on_subworkflow_complete
+    real_advance = steps_mod.advance_parent
     calls = {'n': 0}
 
-    async def _flaky(*args: Any, **kwargs: Any) -> None:
+    async def _flaky(*args: Any, **kwargs: Any) -> tuple[str, ...]:
         calls['n'] += 1
         if calls['n'] == 1:
             raise OperationalError('connection dropped')
-        await real_on_sub(*args, **kwargs)
+        return await real_advance(*args, **kwargs)
 
-    monkeypatch.setattr(engine_mod, 'on_subworkflow_complete', _flaky)
+    monkeypatch.setattr(steps_mod, 'advance_parent', _flaky)
     # Shrink the backoff so the retry fires fast. Patch the FINALIZE module's
     # binding — the constant is imported at module load, so patching runtime
     # would be a no-op (import-time binding).
     monkeypatch.setattr(finalize_mod, '_FINALIZE_RETRY_BASE_DELAY_S', 0.05)
 
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     try:
         await worker._drive_parent_propagations([child_id])
 
@@ -409,7 +415,7 @@ async def test_transient_failure_retries_via_parent_stage_and_completes(
 
 @pytest.mark.asyncio
 async def test_chain_drives_every_ancestor_level(
-    engine: AsyncEngine, session: AsyncSession,
+    engine: AsyncEngine, broker: PostgresBroker, session: AsyncSession,
 ) -> None:
     """Grandparent <- parent <- child: the worklist iterates each level in
     its own transaction; both ancestors finalize."""
@@ -436,7 +442,7 @@ async def test_chain_drives_every_ancestor_level(
     )
     await session.commit()
 
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     try:
         await worker._drive_parent_propagations([child_id])
 

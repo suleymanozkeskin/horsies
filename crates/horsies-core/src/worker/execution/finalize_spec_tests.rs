@@ -1,13 +1,15 @@
 //! Ports of the parent finalize rows of Python
 //! `tests/integration/test_worker_retry_scheduling.py`,
 //! `tests/integration/test_worker_persist_terminal_state.py`,
-//! `tests/integration/test_worker_load_persisted_task_result.py` and
-//! `tests/e2e/test_layer1_tasks.py` (sent_at across retries).
+//! `tests/integration/test_worker_load_persisted_task_result.py`,
+//! `tests/integration/test_worker_finalize_workflow_phase.py` (the wake rows)
+//! and `tests/e2e/test_layer1_tasks.py` (sent_at across retries).
 //!
 //! Each test enters at [`persist_terminal_state`], the worker's phase 1 for a
 //! result of an attempt, and reads the rows it left. The dispatch facts
 //! (`ClaimedTaskRow`, `SetRunningRow`) are read from the seeded row, as the
-//! claim and the start write return them.
+//! claim and the start write return them. The wake rows then enter phase 2
+//! at [`finalize_workflow_phase`].
 
 use std::time::Duration;
 
@@ -16,12 +18,18 @@ use serial_test::serial;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{persist_terminal_state, FinalizeError, FinalizeOutcome};
+use super::{
+    finalize_workflow_phase, persist_terminal_state, FinalizeError, FinalizeOutcome, FinalizeStage,
+    PhaseTwoForm,
+};
 use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
 use crate::core::config::payload::PayloadPolicy;
+use crate::core::config::retention::RetentionConfig;
+use crate::core::config::PostgresConfig;
+use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{BuiltInTaskCode, TaskError};
 use crate::core::task::result::TaskResult;
-use crate::worker::recovery::mark_stale_running_as_failed;
+use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 use crate::worker::retry::read_stored_options;
 
 const WORKER: &str = "finalize-spec-worker";
@@ -167,10 +175,10 @@ async fn seed_workflow_for(pool: &PgPool, task_id: Uuid, queue: &str) -> Uuid {
     .expect("seed workflow");
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
              dependencies, allow_failed_deps, join_type, max_retries, execution,
              retention_class_key, status, task_id, is_subworkflow, created_at, started_at
-         ) VALUES ($1, $2, 0, 'only', $3, '{}', $4, 100,
+         ) VALUES ('NONE', $1, $2, 0, 'only', $3, '{}', $4, 100,
                    '{}', FALSE, 'all', 0, 'ISOLATED',
                    'forever', 'RUNNING', $5, FALSE, NOW(), NOW())",
     )
@@ -257,10 +265,10 @@ fn ok_result(text: &str) -> TaskResult<Vec<u8>> {
 fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
     match outcome {
         Ok(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
+            phase_two,
         }) => format!(
-            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified} }}"
+            "Terminal {{ capacity_notified: {capacity_notified}, phase_two: {phase_two:?} }}"
         ),
         Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
         Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),
@@ -566,17 +574,12 @@ async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
 
     for outcome in [&first, &replay] {
         assert!(
-            matches!(
-                outcome,
-                Ok(FinalizeOutcome::Terminal {
-                    is_success: false,
-                    ..
-                })
-            ),
+            matches!(outcome, Ok(FinalizeOutcome::Terminal { .. })),
             "{}",
             describe(outcome)
         );
     }
+    assert_eq!(committed["status"], "FAILED");
     assert_eq!(history_row(&pool, seeded.task_id).await, Some(committed));
     cleanup(&pool, &seeded).await;
 }
@@ -622,13 +625,7 @@ async fn a_workflow_success_replay_owes_phase_two() {
 
     for outcome in [&first, &replay] {
         assert!(
-            matches!(
-                outcome,
-                Ok(FinalizeOutcome::Terminal {
-                    is_success: true,
-                    ..
-                })
-            ),
+            matches!(outcome, Ok(FinalizeOutcome::Terminal { .. })),
             "{}",
             describe(outcome)
         );
@@ -796,6 +793,391 @@ async fn retries_keep_the_sent_at_and_the_second_delay_is_longer() {
         "the second delay ({} ms) is not longer than the first ({} ms)",
         delays[1],
         delays[0]
+    );
+    cleanup(&pool, &seeded).await;
+}
+
+/// Bound of the wakes read before the sentinel wake.
+const WAKE_READ_LIMIT: u32 = 100;
+
+/// A queue name whose channel `task_queue_<name>` is over PostgreSQL's
+/// 63-byte limit, so the server refuses its wake (Python `_TOO_LONG_QUEUE`).
+fn too_long_queue() -> String {
+    "q".repeat(60)
+}
+
+/// A listener on the wake channel of `queue`.
+async fn listen_on_queue(pool: &PgPool, queue: &str) -> sqlx::postgres::PgListener {
+    let mut listener = sqlx::postgres::PgListener::connect_with(pool)
+        .await
+        .expect("listener");
+    listener
+        .listen(&format!("task_queue_{queue}"))
+        .await
+        .expect("listen on the queue channel");
+    listener
+}
+
+/// Every payload on the channel of `queue` committed before a sentinel wake
+/// that this call commits. PostgreSQL delivers notifications in commit
+/// order.
+async fn wakes_before_sentinel(
+    listener: &mut sqlx::postgres::PgListener,
+    pool: &PgPool,
+    queue: &str,
+) -> Vec<String> {
+    let sentinel = format!("sentinel:{}", Uuid::new_v4());
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(format!("task_queue_{queue}"))
+        .bind(&sentinel)
+        .execute(pool)
+        .await
+        .expect("send the sentinel wake");
+    let mut payloads = Vec::new();
+    for _ in 0..WAKE_READ_LIMIT {
+        let notification = tokio::time::timeout(WAKE_BOUND, listener.recv())
+            .await
+            .expect("a wake within the bound")
+            .expect("receive a wake");
+        if notification.payload() == sentinel {
+            return payloads;
+        }
+        payloads.push(notification.payload().to_owned());
+    }
+    panic!("sentinel wake not seen; payloads {payloads:?}");
+}
+
+/// Run phase 2 on a broker of `pool`, as [`phase_two_on`].
+async fn phase_two(
+    pool: &PgPool,
+    task_id: Uuid,
+    queue: &str,
+    is_workflow_task: bool,
+) -> Result<(), FinalizeError> {
+    phase_two_on(
+        &PostgresBroker::from_pool(pool.clone()),
+        task_id,
+        queue,
+        is_workflow_task,
+    )
+    .await
+}
+
+/// Run phase 2 on `broker` with no wake sent by phase 1, in the form a
+/// phase-1 replay gives (`PhaseTwoForm::NotKnown`: the transaction form of
+/// the node finish).
+async fn phase_two_on(
+    broker: &PostgresBroker,
+    task_id: Uuid,
+    queue: &str,
+    is_workflow_task: bool,
+) -> Result<(), FinalizeError> {
+    finalize_workflow_phase(
+        broker,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        task_id,
+        queue,
+        is_workflow_task,
+        false,
+        PhaseTwoForm::NotKnown,
+        &RetentionConfig::default(),
+    )
+    .await
+    .map(|_parent_advances| ())
+}
+
+/// The status of the one node of `workflow_id`, and whether a phase-2
+/// record waits for `task_id`.
+async fn node_and_phase_two_record(
+    pool: &PgPool,
+    workflow_id: Uuid,
+    task_id: Uuid,
+) -> (String, bool) {
+    sqlx::query_as(
+        "SELECT
+             (SELECT status::text FROM horsies_workflow_tasks WHERE workflow_id = $1),
+             EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = $2)",
+    )
+    .bind(workflow_id)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read the node and the phase-2 record")
+}
+
+/// Python `test_worker_finalize_workflow_phase.py::test_phase_two_wakes_the_queue_of_the_task_once[node]`:
+/// phase 2 of a workflow task sends one capacity wake on its queue, in the
+/// transaction that completes the node (#722). The payload is the constant
+/// `capacity` of the baseline function (`0005_workflow_functions.sql:1972`).
+#[tokio::test]
+#[serial]
+async fn phase_two_of_a_workflow_task_wakes_its_queue_once() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let seeded = seed_task(
+        &pool,
+        &TaskSeed {
+            origin: Origin::Workflow,
+            ..TaskSeed::plain(&queue)
+        },
+    )
+    .await;
+    let workflow_id = seeded.workflow_id.expect("a workflow task has a workflow");
+    let phase_one = finalize(&pool, seeded.task_id, ok_result("done")).await;
+    assert!(
+        matches!(
+            phase_one,
+            Ok(FinalizeOutcome::Terminal {
+                capacity_notified: false,
+                ..
+            })
+        ),
+        "{}",
+        describe(&phase_one)
+    );
+    let mut listener = listen_on_queue(&pool, &queue).await;
+
+    let result = phase_two(&pool, seeded.task_id, &queue, true).await;
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        wakes_before_sentinel(&mut listener, &pool, &queue).await,
+        vec!["capacity".to_owned()]
+    );
+    assert_eq!(
+        node_and_phase_two_record(&pool, workflow_id, seeded.task_id).await,
+        ("COMPLETED".to_owned(), false)
+    );
+    cleanup(&pool, &seeded).await;
+}
+
+/// Python `test_worker_finalize_workflow_phase.py::test_phase_two_wakes_the_queue_of_the_task_once[no_node]`,
+/// for a plain task: its phase 2 is the capacity wake alone, one `capacity`
+/// wake on its queue (#722).
+#[tokio::test]
+#[serial]
+async fn phase_two_of_a_plain_task_wakes_its_queue_once() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let mut listener = listen_on_queue(&pool, &queue).await;
+
+    let result = phase_two(&pool, Uuid::new_v4(), &queue, false).await;
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        wakes_before_sentinel(&mut listener, &pool, &queue).await,
+        vec!["capacity".to_owned()]
+    );
+}
+
+/// A workflow task with no phase-2 record is a replay: the node finish
+/// writes nothing and sends no wake (`horsies_workflow_node_apply`,
+/// `0005_workflow_functions.sql:1914-1915`). The wake is the baseline's
+/// single source. Python's phase 2
+/// (`test_phase_two_wakes_the_queue_of_the_task_once[no_node]`) sends the
+/// wake from its own statement before the node lookup, so it wakes here.
+#[tokio::test]
+#[serial]
+async fn phase_two_of_a_workflow_task_with_no_record_sends_no_wake() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let mut listener = listen_on_queue(&pool, &queue).await;
+
+    let result = phase_two(&pool, Uuid::new_v4(), &queue, true).await;
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        wakes_before_sentinel(&mut listener, &pool, &queue).await,
+        Vec::<String>::new()
+    );
+}
+
+/// The longest queue name that the schema admits, in bytes
+/// (`horsies_tasks_queue_name_length`,
+/// `horsies_workflow_tasks_queue_name_length`): its channel
+/// `task_queue_<name>` is 63 bytes, PostgreSQL's limit.
+const LONGEST_QUEUE_BYTES: usize = 52;
+
+/// A queue name of this test run of [`LONGEST_QUEUE_BYTES`] bytes.
+fn longest_queue() -> String {
+    let queue = test_queue();
+    let padding = "q".repeat(LONGEST_QUEUE_BYTES - queue.len());
+    format!("{queue}{padding}")
+}
+
+/// The node finish sends its wake on the channel of the node row's queue,
+/// not on a queue that the caller names (`horsies_workflow_node_apply`,
+/// `0005_workflow_functions.sql:1919`, `:1972`). The schema bounds a node's
+/// queue at [`LONGEST_QUEUE_BYTES`], so `task_queue_<queue>` always fits
+/// PostgreSQL's channel limit and the server cannot refuse the wake for its
+/// channel: the longest admitted queue gets its wake, and a node row with a
+/// longer queue is refused at the insert. Python's
+/// `test_a_notify_that_fails_on_the_server_is_a_phase2_error` takes the
+/// channel from the caller's queue. A refused wake of a plain task stays a
+/// phase-2 error (`a_refused_wake_of_a_plain_task_is_a_phase_two_error_not_retried`).
+#[tokio::test]
+#[serial]
+async fn the_node_finish_wakes_the_queue_of_the_node_row() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = longest_queue();
+    let seeded = seed_task(
+        &pool,
+        &TaskSeed {
+            origin: Origin::Workflow,
+            ..TaskSeed::plain(&queue)
+        },
+    )
+    .await;
+    let workflow_id = seeded.workflow_id.expect("a workflow task has a workflow");
+    let refused = sqlx::query(
+        "INSERT INTO horsies_workflow_tasks (
+             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+             queue_name, priority, dependencies, allow_failed_deps, join_type, status,
+             is_subworkflow, created_at, max_retries, execution, retention_class_key
+         ) VALUES ('NONE', $1, $2, 1, 'node_1', $3, '{}', $4, 100, '{0}',
+                   FALSE, 'all', 'PENDING', FALSE, NOW(), 0, 'ISOLATED', 'forever')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workflow_id)
+    .bind(TASK_NAME)
+    .bind(format!("{queue}q"))
+    .execute(&pool)
+    .await;
+    match refused {
+        Err(sqlx::Error::Database(error)) => assert_eq!(
+            error.constraint(),
+            Some("horsies_workflow_tasks_queue_name_length"),
+            "{error}"
+        ),
+        other => panic!("a node queue over the bound must be refused: {other:?}"),
+    }
+    let phase_one = finalize(&pool, seeded.task_id, ok_result("done")).await;
+    assert!(
+        matches!(phase_one, Ok(FinalizeOutcome::Terminal { .. })),
+        "{}",
+        describe(&phase_one)
+    );
+    let mut listener = listen_on_queue(&pool, &queue).await;
+
+    let result = phase_two(&pool, seeded.task_id, &too_long_queue(), true).await;
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        wakes_before_sentinel(&mut listener, &pool, &queue).await,
+        vec!["capacity".to_owned()]
+    );
+    assert_eq!(
+        node_and_phase_two_record(&pool, workflow_id, seeded.task_id).await,
+        ("COMPLETED".to_owned(), false)
+    );
+    cleanup(&pool, &seeded).await;
+}
+
+/// A plain task's phase 2 is the wake alone: a wake that the server refuses
+/// is a phase-2 error that is not retried, because the refusal repeats
+/// (#722; Python `_phase2_error`, `core/worker/finalize.py:1676-1697`).
+#[tokio::test]
+#[serial]
+async fn a_refused_wake_of_a_plain_task_is_a_phase_two_error_not_retried() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+
+    let result = phase_two(&pool, Uuid::new_v4(), &too_long_queue(), false).await;
+
+    match result {
+        Err(error) => {
+            assert_eq!(error.stage, FinalizeStage::Phase2Workflow);
+            assert!(!error.retryable, "{error}");
+            assert!(error.message.contains("channel name too long"), "{error}");
+        }
+        Ok(()) => panic!("phase 2 returned Ok for a refused wake"),
+    }
+}
+
+/// The lock timeout of the phase-2 connections in
+/// `a_transient_error_at_the_consume_is_a_retryable_phase_two_error`, as the
+/// URL parameter `options=-c lock_timeout=100ms`: the bound of their wait for
+/// the workflow row that the test holds. It goes into the URL that the
+/// broker connects with: phase 2 runs on the core pools, and a broker built
+/// from a sqlx pool opens those from the pool's URL, which does not carry the
+/// pool's `options` (`broker::pools::test_url_of`).
+const CONSUME_LOCK_TIMEOUT_PARAMETER: &str = "options=-c%20lock_timeout%3D100ms";
+
+/// The bound of the test's wait for that phase 2: a lock timeout that does
+/// not apply fails the test instead of blocking the run.
+const CONSUME_WAIT_BOUND: Duration = Duration::from_secs(10);
+
+/// `url` with `parameter` added to its query.
+fn with_query_parameter(url: &str, parameter: &str) -> String {
+    let separator = match url.contains('?') {
+        true => '&',
+        false => '?',
+    };
+    format!("{url}{separator}{parameter}")
+}
+
+/// Python `test_autocommit_outcomes.py::test_a_dead_connection_fails_phase_two_as_retryable`,
+/// at the consume statement: a transient database error after the wake (a
+/// lock timeout, SQLSTATE 55P03) is a retryable phase-2 error, the node and
+/// its phase-2 record stay, and the retry completes the node (#865; Python
+/// `core/worker/finalize.py:1645-1697`, `core/utils/db.py:232-247`).
+#[tokio::test]
+#[serial]
+async fn a_transient_error_at_the_consume_is_a_retryable_phase_two_error() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let seeded = seed_task(
+        &pool,
+        &TaskSeed {
+            origin: Origin::Workflow,
+            ..TaskSeed::plain(&queue)
+        },
+    )
+    .await;
+    let workflow_id = seeded.workflow_id.expect("a workflow task has a workflow");
+    let phase_one = finalize(&pool, seeded.task_id, ok_result("done")).await;
+    assert!(
+        matches!(phase_one, Ok(FinalizeOutcome::Terminal { .. })),
+        "{}",
+        describe(&phase_one)
+    );
+    let database_url = crate::broker::terminalization_matrix::migrated_database_url().await;
+    let timeout_broker = PostgresBroker::connect_with(&PostgresConfig::from_url(
+        with_query_parameter(&database_url, CONSUME_LOCK_TIMEOUT_PARAMETER),
+    ))
+    .await
+    .expect("connect a broker with a lock timeout");
+    let mut holder = pool.begin().await.expect("begin the lock holder");
+    sqlx::query("SELECT id FROM horsies_workflows WHERE id = $1 FOR UPDATE")
+        .bind(workflow_id)
+        .execute(holder.as_mut())
+        .await
+        .expect("lock the workflow row");
+
+    let bounded = tokio::time::timeout(
+        CONSUME_WAIT_BOUND,
+        phase_two_on(&timeout_broker, seeded.task_id, &queue, true),
+    )
+    .await;
+
+    holder.rollback().await.expect("release the workflow row");
+    timeout_broker.close().await;
+    let result = bounded.expect("phase 2 ends within the bound: its lock timeout applies");
+    match result {
+        Err(error) => {
+            assert_eq!(error.stage, FinalizeStage::Phase2Workflow);
+            assert!(error.retryable, "{error}");
+        }
+        Ok(()) => panic!("phase 2 returned Ok while the workflow row was locked"),
+    }
+    assert_eq!(
+        node_and_phase_two_record(&pool, workflow_id, seeded.task_id).await,
+        ("RUNNING".to_owned(), true)
+    );
+    let retry = phase_two(&pool, seeded.task_id, &queue, true).await;
+    assert!(retry.is_ok(), "{retry:?}");
+    assert_eq!(
+        node_and_phase_two_record(&pool, workflow_id, seeded.task_id).await,
+        ("COMPLETED".to_owned(), false)
     );
     cleanup(&pool, &seeded).await;
 }

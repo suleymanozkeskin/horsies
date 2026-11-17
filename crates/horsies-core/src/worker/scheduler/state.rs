@@ -1,437 +1,692 @@
+//! The scheduler's statements on `horsies_schedule_state` (Python
+//! `python/horsies/core/scheduler/state.py`, `ScheduleStateManager`):
+//!
+//! - the due read, the start read and write, the existence heal;
+//! - the fire: the slot tasks and the state move in one statement
+//!   (`horsies_fire_schedule`, `crates/horsies-core/baseline/0007_scheduler_monitoring_functions.sql`).
+//!
+//! Each function sends one statement in autocommit on the core pool it is
+//! given, on a connection that passes the reserve gate
+//! ([`CheckoutClass::Batch`]): the scheduler is producer work.
+
 use chrono::{DateTime, Utc};
-use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-/// A row from `horsies_schedule_state`.
-///
-/// The table's CHECK ties the run record together: `last_run_at` and
-/// `last_task_id` are both set exactly when `run_count` is above 0.
-#[derive(Debug, sqlx::FromRow)]
-pub struct ScheduleStateRow {
-    pub schedule_name: String,
-    pub last_run_at: Option<DateTime<Utc>>,
-    pub next_run_at: DateTime<Utc>,
-    pub last_task_id: Option<Uuid>,
-    pub run_count: i32,
-    /// SHA-256 of the schedule's pattern and timezone (32 bytes).
-    pub config_hash: Vec<u8>,
-}
+use crate::broker::core_rows::{column, StatementLog};
+use crate::broker::postgres::SendCommand;
+use crate::broker::{BrokerError, RowDecodeError};
+use crate::db::{
+    CheckoutClass, CorePool, ParameterType, Row, StatementBound, StatementFailure, Transience,
+    TypedStatement,
+};
 
-/// The column list of every state read (tests check the reads against it).
-#[cfg(test)]
-const STATE_COLUMNS: &str =
-    "schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash";
+/// The due read: the rows of the names in `$1` whose `next_run_at` is at or
+/// before the database time, soonest first, with that database time. The
+/// one-row join returns the time also when no row is due (one row with a
+/// NULL name). Python `ScheduleStateManager.read_due_schedules`.
+const DUE_SCHEDULES_SQL: &str = "\
+SELECT statement_timestamp() AS database_now, s.schedule_name, s.next_run_at
+FROM (VALUES (1)) AS one
+LEFT JOIN horsies_schedule_state AS s
+    ON s.schedule_name = ANY($1)
+   AND s.next_run_at <= statement_timestamp()
+ORDER BY s.next_run_at";
 
-const GET_STATE_SQL: &str = "\
-SELECT schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash
-FROM horsies_schedule_state
-WHERE schedule_name = $1";
+/// [`DUE_SCHEDULES_SQL`] with its parameter type: the schedule names.
+static DUE_SCHEDULES: TypedStatement = TypedStatement::new(
+    "schedule_due_read",
+    DUE_SCHEDULES_SQL,
+    &[ParameterType::TextArray],
+);
 
-/// SQL for filtered due schedules query.
-/// Note: The `$2` parameter is an array of schedule names (uses `= ANY($2)`).
-/// This matches Python's `get_due_states(schedule_names, now)` which filters
-/// to only the provided schedule names at the database level.
-const GET_DUE_SCHEDULES_FILTERED_SQL: &str = "\
-SELECT schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash
-FROM horsies_schedule_state
-WHERE schedule_name = ANY($2)
-  AND next_run_at <= $1
-ORDER BY next_run_at ASC";
+/// The start read: every row's name and digest, with the database time. The
+/// one-row join returns the time also for an empty table. Python
+/// `ScheduleStateManager.read_start_states`.
+const START_STATES_SQL: &str = "\
+SELECT statement_timestamp() AS database_now, s.schedule_name, s.config_hash
+FROM (VALUES (1)) AS one
+LEFT JOIN horsies_schedule_state AS s ON TRUE
+ORDER BY s.schedule_name";
 
-#[allow(dead_code)] // backs delete_state, retained as a state primitive (see e26a0f55).
-const DELETE_STATE_SQL: &str = "\
-DELETE FROM horsies_schedule_state WHERE schedule_name = $1";
+/// [`START_STATES_SQL`]; it takes no parameter.
+static START_STATES: TypedStatement =
+    TypedStatement::new("schedule_start_read", START_STATES_SQL, &[]);
 
-const GET_ALL_STATES_SQL: &str = "\
-SELECT schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash
-FROM horsies_schedule_state
-ORDER BY schedule_name ASC";
-
-/// Existing schedule-state row names (one PK-column SELECT, no locks). Backs the
-/// per-tick self-heal diff.
-const GET_EXISTING_NAMES_SQL: &str = "\
-SELECT schedule_name FROM horsies_schedule_state";
-
-/// Insert the row of a schedule that has none: no run recorded yet. A
-/// concurrent scheduler that lost the race leaves the winner's row, including
-/// its `next_run_at`, untouched.
-const INSERT_STATE_IF_ABSENT_SQL: &str = "\
+/// The start write: a new schedule gets its row with no run recorded; a row
+/// whose digest differs gets the new `next_run_at` and digest and keeps
+/// `run_count`, `last_run_at` and `last_task_id`. The WHERE clause leaves
+/// alone a row that a concurrent scheduler already moved to this digest.
+/// Python `ScheduleStateManager.store_start_states`.
+const STORE_START_STATES_SQL: &str = "\
 INSERT INTO horsies_schedule_state (
     schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash,
     updated_at
-) VALUES ($1, NULL, $2, NULL, 0, $3, statement_timestamp())
-ON CONFLICT (schedule_name) DO NOTHING";
+)
+SELECT u.schedule_name, NULL, u.next_run_at, NULL, 0, u.config_hash, statement_timestamp()
+FROM unnest($1::text[], $2::timestamptz[], $3::bytea[])
+    AS u(schedule_name, next_run_at, config_hash)
+ON CONFLICT (schedule_name) DO UPDATE
+SET next_run_at = EXCLUDED.next_run_at,
+    config_hash = EXCLUDED.config_hash,
+    updated_at = EXCLUDED.updated_at
+WHERE horsies_schedule_state.config_hash <> EXCLUDED.config_hash
+RETURNING schedule_name";
 
-/// Move a schedule whose pattern or timezone changed to its new first slot.
-/// The run record (`run_count`, `last_run_at`, `last_task_id`) is kept
-/// (Python `update_next_run` with a hash). A row that already holds this hash
-/// is not written.
-const UPDATE_SCHEDULE_CONFIG_SQL: &str = "\
-UPDATE horsies_schedule_state
-SET next_run_at = $2, config_hash = $3, updated_at = statement_timestamp()
-WHERE schedule_name = $1 AND config_hash <> $3";
+/// The types of the three arrays of the start write and the heal: names,
+/// next runs, digests.
+const STATE_WRITE_PARAMETERS: &[ParameterType] = &[
+    ParameterType::TextArray,
+    ParameterType::TimestamptzArray,
+    ParameterType::ByteaArray,
+];
 
-/// Record a fired slot and move to the next one (Python `update_after_run`).
-const RECORD_RUN_SQL: &str = "\
-UPDATE horsies_schedule_state
-SET last_run_at = $2, next_run_at = $3, last_task_id = $4,
-    run_count = run_count + 1, updated_at = statement_timestamp()
-WHERE schedule_name = $1";
+/// [`STORE_START_STATES_SQL`] with its parameter types.
+static STORE_START_STATES: TypedStatement = TypedStatement::new(
+    "schedule_start_write",
+    STORE_START_STATES_SQL,
+    STATE_WRITE_PARAMETERS,
+);
 
-/// Move to the next slot without recording a run (Python `update_next_run`
-/// without a hash): the scan cap of a deep backlog, or a slot skipped after a
-/// refusal that repeats.
-const ADVANCE_NEXT_RUN_SQL: &str = "\
-UPDATE horsies_schedule_state
-SET next_run_at = $2, updated_at = statement_timestamp()
-WHERE schedule_name = $1";
+/// The existence heal: a row for each name that has none. A row that exists
+/// is not written. Python `ScheduleStateManager.heal_missing_states`.
+const HEAL_MISSING_STATES_SQL: &str = "\
+INSERT INTO horsies_schedule_state (
+    schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash,
+    updated_at
+)
+SELECT u.schedule_name, NULL, u.next_run_at, NULL, 0, u.config_hash, statement_timestamp()
+FROM unnest($1::text[], $2::timestamptz[], $3::bytea[])
+    AS u(schedule_name, next_run_at, config_hash)
+ON CONFLICT (schedule_name) DO NOTHING
+RETURNING schedule_name";
 
-/// Transaction-scoped per-schedule advisory lock. Auto-released on
-/// commit/rollback, so no explicit unlock round-trip exists — under PgBouncer
-/// transaction pooling the lock stays on one server backend for its whole
-/// lifetime. Matches Python's `SCHEDULE_ADVISORY_LOCK_SQL` scoping (xact),
-/// with try-lock skip semantics instead of blocking.
-const TRY_ACQUIRE_LOCK_SQL: &str = "\
-SELECT pg_try_advisory_xact_lock($1)";
+/// [`HEAL_MISSING_STATES_SQL`] with its parameter types.
+static HEAL_MISSING_STATES: TypedStatement = TypedStatement::new(
+    "schedule_heal",
+    HEAL_MISSING_STATES_SQL,
+    STATE_WRITE_PARAMETERS,
+);
 
-/// Get the state for a single schedule.
-pub async fn get_state(
-    pool: &PgPool,
-    schedule_name: &str,
-) -> Result<Option<ScheduleStateRow>, sqlx::Error> {
-    sqlx::query_as(GET_STATE_SQL)
+/// The fire: lock the state row, compare `next_run_at`, insert the slot
+/// tasks, move the row, in one statement. Python `FIRE_SCHEDULE_SQL`.
+const FIRE_SCHEDULE_SQL: &str = "\
+SELECT row_kind, slot_at, task_id, slot_outcome
+FROM horsies_fire_schedule(
+    $1::text, $2::timestamptz, $3::timestamptz, $4::timestamptz[], $5::text, $6::text,
+    $7::integer, $8::text, $9::text, $10::text, $11::integer, $12::text, $13::boolean,
+    $14::smallint, $15::bytea
+)";
+
+/// [`FIRE_SCHEDULE_SQL`] with its parameter types, in argument order.
+static FIRE_SCHEDULE: TypedStatement = TypedStatement::new(
+    "schedule_fire",
+    FIRE_SCHEDULE_SQL,
+    &[
+        ParameterType::Text,
+        ParameterType::Timestamptz,
+        ParameterType::Timestamptz,
+        ParameterType::TimestamptzArray,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Int4,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Int4,
+        ParameterType::Text,
+        ParameterType::Bool,
+        ParameterType::Int2,
+        ParameterType::Bytea,
+    ],
+);
+
+/// The SQLSTATEs of an argument that breaks a precondition of the fire
+/// function (`invalid_parameter_value`, `null_value_not_allowed`): a defect
+/// of the caller, not a refusal of the fire.
+const CALLER_DEFECT_SQLSTATES: [&str; 2] = ["22023", "22004"];
+
+/// One due row of the due read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueSchedule {
+    pub schedule_name: String,
+    pub next_run_at: DateTime<Utc>,
+}
+
+/// The due rows, soonest first, and the database time of the read. The tick
+/// computes slots and the heal's first runs from `database_now`, never from
+/// the host clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueScheduleRead {
+    pub database_now: DateTime<Utc>,
+    pub due: Vec<DueSchedule>,
+}
+
+/// The name and stored config digest of one state row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredConfigHash {
+    pub schedule_name: String,
+    pub config_hash: Vec<u8>,
+}
+
+/// Every state row's name and digest, and the database time of the read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartStateRead {
+    pub database_now: DateTime<Utc>,
+    pub rows: Vec<StoredConfigHash>,
+}
+
+/// One row for the start write or the existence heal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleStateWrite {
+    pub schedule_name: String,
+    pub next_run_at: DateTime<Utc>,
+    pub config_hash: Vec<u8>,
+}
+
+/// What the fire did with one slot (the outcomes of
+/// `horsies_insert_task_rows`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotOutcome {
+    /// The slot's task row is new.
+    Inserted,
+    /// An earlier fire of this slot committed its task: the same command.
+    SameCommand,
+    /// The slot's task id holds another command; the slot counts as fired.
+    PayloadMismatch,
+    /// The slot's task existed and moved to history between the conflict and
+    /// the read: not enqueued again and not recorded as a run.
+    ConflictUnverifiable,
+}
+
+impl SlotOutcome {
+    /// The outcome of a `slot_outcome` column; `None` for a text the function
+    /// does not define.
+    fn parse(text: &str) -> Option<SlotOutcome> {
+        match text {
+            "INSERTED" => Some(SlotOutcome::Inserted),
+            "SAME_COMMAND" => Some(SlotOutcome::SameCommand),
+            "PAYLOAD_MISMATCH" => Some(SlotOutcome::PayloadMismatch),
+            "CONFLICT_UNVERIFIABLE" => Some(SlotOutcome::ConflictUnverifiable),
+            _ => None,
+        }
+    }
+}
+
+/// One slot of an advanced fire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FiredSlot {
+    pub slot_at: DateTime<Utc>,
+    pub task_id: Uuid,
+    pub outcome: SlotOutcome,
+}
+
+/// The arguments of one fire.
+///
+/// `slot_ats` strictly increase, from `expected_next_run_at` to before
+/// `next_run_at` and not after the database time of the due read they were
+/// computed from. Empty slots only move `next_run_at`.
+#[derive(Debug, Clone, Copy)]
+pub struct ScheduleFire<'a> {
+    pub schedule_name: &'a str,
+    pub expected_next_run_at: DateTime<Utc>,
+    pub next_run_at: DateTime<Utc>,
+    pub slot_ats: &'a [DateTime<Utc>],
+    pub command: &'a SendCommand,
+}
+
+/// What a fire found, when the statement ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleFireAnswer {
+    /// The slots are written and the row moved, in one commit, with each
+    /// slot's outcome in slot order. `last_run_at`, `last_task_id` and
+    /// `run_count` record the fire when a slot is recorded (every outcome
+    /// except [`SlotOutcome::ConflictUnverifiable`]).
+    Advanced { slots: Vec<FiredSlot> },
+    /// The schedule has no state row. Nothing was written.
+    StateMissing,
+    /// The row's `next_run_at` is not the expected one: another scheduler
+    /// fired, or a start moved the row. Nothing was written.
+    StateMoved,
+}
+
+/// Why a fire did not answer.
+#[derive(Debug, thiserror::Error)]
+pub enum ScheduleFireError {
+    /// A failure that may clear: a connection failure, a checkout that timed
+    /// out, a lost reply. The fire may or may not have committed. The next
+    /// due read shows whether the row moved; a repeat of a committed slot
+    /// answers `SAME_COMMAND` or [`ScheduleFireAnswer::StateMoved`], never a
+    /// second task.
+    #[error("the fire of schedule '{schedule_name}' failed and may clear: {cause}")]
+    OutcomeUnknown {
+        schedule_name: String,
+        cause: StatementFailure,
+    },
+    /// The database refused the fire, or the statement cannot be sent (a
+    /// closed pool). Nothing committed. A repeat with the same arguments gives
+    /// the same refusal, for example a CHECK violation of the slot rows.
+    #[error("the fire of schedule '{schedule_name}' was refused: {cause}")]
+    Refused {
+        schedule_name: String,
+        cause: StatementFailure,
+    },
+}
+
+/// The three parallel arrays that `unnest` reads.
+fn write_arrays(writes: &[ScheduleStateWrite]) -> (Vec<String>, Vec<DateTime<Utc>>, Vec<Vec<u8>>) {
+    (
+        writes
+            .iter()
+            .map(|write| write.schedule_name.clone())
+            .collect(),
+        writes.iter().map(|write| write.next_run_at).collect(),
+        writes
+            .iter()
+            .map(|write| write.config_hash.clone())
+            .collect(),
+    )
+}
+
+/// Runs one statement on `pool` and reads every row.
+async fn query(
+    pool: &CorePool,
+    log: StatementLog,
+    statement: &crate::db::BoundStatement<'_>,
+) -> Result<Vec<Row>, StatementFailure> {
+    log.log(statement.statement());
+    pool.query(
+        CheckoutClass::Batch,
+        statement,
+        StatementBound::ConnectionTimeouts,
+    )
+    .await
+}
+
+/// The database time of the first row of a read that always returns one row
+/// (the one-row join).
+///
+/// Panics when the read returned no row: the join makes that impossible.
+fn database_now_of(rows: &[Row], statement: &TypedStatement) -> Result<DateTime<Utc>, BrokerError> {
+    let row = rows.first().unwrap_or_else(|| {
+        panic!(
+            "statement `{}` returned no row; its one-row join always returns one",
+            statement.name()
+        )
+    });
+    Ok(column(row, statement, "database_now")?)
+}
+
+/// Read the due rows of `schedule_names` and the database time, in one
+/// statement (Python `read_due_schedules`). Rows of other names are never
+/// returned. Writes nothing.
+///
+/// Errors: [`BrokerError::Statement`]; [`BrokerError::RowDecode`] for a
+/// column that does not decode.
+///
+/// Panics: when the read returns no row, or a row with a name and no time
+/// (or a time and no name): the statement's contract is broken.
+pub async fn read_due_schedules(
+    pool: &CorePool,
+    log: StatementLog,
+    schedule_names: &[String],
+) -> Result<DueScheduleRead, BrokerError> {
+    let statement = &DUE_SCHEDULES;
+    let bound = statement.bind().value(&schedule_names).finish();
+    let rows = query(pool, log, &bound).await?;
+    let database_now = database_now_of(&rows, statement)?;
+    let mut due = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let schedule_name: Option<String> = column(row, statement, "schedule_name")?;
+        let next_run_at: Option<DateTime<Utc>> = column(row, statement, "next_run_at")?;
+        match (schedule_name, next_run_at) {
+            (Some(schedule_name), Some(next_run_at)) => due.push(DueSchedule {
+                schedule_name,
+                next_run_at,
+            }),
+            (None, None) => {}
+            (schedule_name, next_run_at) => {
+                panic!("the due read returned a partial row: {schedule_name:?}, {next_run_at:?}")
+            }
+        }
+    }
+    Ok(DueScheduleRead { database_now, due })
+}
+
+/// Read every state row's name and digest and the database time, in one
+/// statement (Python `read_start_states`). Writes nothing.
+///
+/// Errors and panics: as [`read_due_schedules`].
+pub async fn read_start_states(
+    pool: &CorePool,
+    log: StatementLog,
+) -> Result<StartStateRead, BrokerError> {
+    let statement = &START_STATES;
+    let bound = statement.bind().finish();
+    let rows = query(pool, log, &bound).await?;
+    let database_now = database_now_of(&rows, statement)?;
+    let mut stored = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let schedule_name: Option<String> = column(row, statement, "schedule_name")?;
+        let config_hash: Option<Vec<u8>> = column(row, statement, "config_hash")?;
+        match (schedule_name, config_hash) {
+            (Some(schedule_name), Some(config_hash)) => stored.push(StoredConfigHash {
+                schedule_name,
+                config_hash,
+            }),
+            (None, None) => {}
+            (schedule_name, config_hash) => {
+                panic!("the start read returned a partial row: {schedule_name:?}, {config_hash:?}")
+            }
+        }
+    }
+    Ok(StartStateRead {
+        database_now,
+        rows: stored,
+    })
+}
+
+/// Runs the start write or the heal with `writes` and reads the names
+/// written.
+async fn write_states(
+    pool: &CorePool,
+    log: StatementLog,
+    statement: &TypedStatement,
+    writes: &[ScheduleStateWrite],
+) -> Result<Vec<String>, BrokerError> {
+    if writes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (names, next_runs, hashes) = write_arrays(writes);
+    let bound = statement
+        .bind()
+        .value(&names)
+        .value(&next_runs)
+        .value(&hashes)
+        .finish();
+    let rows = query(pool, log, &bound).await?;
+    let mut written = Vec::with_capacity(rows.len());
+    for row in &rows {
+        written.push(column(row, statement, "schedule_name")?);
+    }
+    Ok(written)
+}
+
+/// Write the rows of new and changed schedules in one statement (Python
+/// `store_start_states`). A new name gets a row with no run recorded; a row
+/// whose digest differs gets the new `next_run_at` and digest and keeps its
+/// run record; a row that holds the digest is not written. `updated_at` is
+/// the statement's database time. Returns the names of the rows written.
+///
+/// Errors: [`BrokerError::Statement`] (nothing written, or the outcome is
+/// unknown); [`BrokerError::RowDecode`].
+pub async fn store_start_states(
+    pool: &CorePool,
+    log: StatementLog,
+    writes: &[ScheduleStateWrite],
+) -> Result<Vec<String>, BrokerError> {
+    write_states(pool, log, &STORE_START_STATES, writes).await
+}
+
+/// Create the row of each name that has none, in one statement (Python
+/// `heal_missing_states`). A row that exists is not written. `updated_at` is
+/// the statement's database time. Returns the names of the rows created.
+///
+/// Errors: as [`store_start_states`].
+pub async fn heal_missing_states(
+    pool: &CorePool,
+    log: StatementLog,
+    writes: &[ScheduleStateWrite],
+) -> Result<Vec<String>, BrokerError> {
+    write_states(pool, log, &HEAL_MISSING_STATES, writes).await
+}
+
+/// Whether a failed fire is a refusal of an argument that breaks the fire
+/// function's precondition (SQLSTATE 22023 or 22004).
+fn is_caller_defect(failure: &StatementFailure) -> bool {
+    match failure {
+        StatementFailure::StatementRefused { cause, .. } => {
+            CALLER_DEFECT_SQLSTATES.contains(&cause.server_error().code().code())
+        }
+        StatementFailure::NotSent { .. } | StatementFailure::OutcomeUnknown { .. } => false,
+    }
+}
+
+/// Fire the slots of one schedule and move its state row, in one statement
+/// in autocommit (Python `ScheduleStateManager.fire_schedule`).
+///
+/// `horsies_fire_schedule` locks the row, compares `next_run_at` with
+/// `fire.expected_next_run_at`, inserts the slot tasks (task id from the
+/// schedule name and the slot time, `sent_at` the slot time, the command's
+/// values) and moves the row to `fire.next_run_at`. The slot rows and the
+/// row move commit together or not at all.
+///
+/// Errors: [`ScheduleFireError::OutcomeUnknown`] for a failure that may
+/// clear ([`Transience::Transient`]); [`ScheduleFireError::Refused`] for any
+/// other failure.
+///
+/// Panics: SQLSTATE 22023 or 22004, an argument that breaks the function's
+/// precondition (a defect of the caller; nothing committed); and an answer
+/// outside the function's contract (no row, an unknown row kind or slot
+/// outcome, slot rows that are not the fired slots).
+pub async fn fire_schedule(
+    pool: &CorePool,
+    log: StatementLog,
+    fire: &ScheduleFire<'_>,
+) -> Result<ScheduleFireAnswer, ScheduleFireError> {
+    let command = fire.command;
+    let execution = command.execution.as_str();
+    let statement = &FIRE_SCHEDULE;
+    let bound = statement
+        .bind()
+        .value(&fire.schedule_name)
+        .value(&fire.expected_next_run_at)
+        .value(&fire.next_run_at)
+        .value(&fire.slot_ats)
+        .value(&command.task_name)
+        .value(&command.queue_name)
+        .value(&command.priority)
+        .value(&command.stored_input)
+        .value(&command.task_options)
+        .value(&execution)
+        .value(&command.max_retries)
+        .value(&command.retention_class_key)
+        .value(&command.retain_rerun_input)
+        .value(&command.fingerprint_version)
+        .value(&command.fingerprint)
+        .finish();
+    let rows = match query(pool, log, &bound).await {
+        Ok(rows) => rows,
+        Err(failure) if is_caller_defect(&failure) => panic!(
+            "the fire of schedule '{}' broke a precondition of horsies_fire_schedule: {failure}",
+            fire.schedule_name
+        ),
+        Err(failure) => {
+            let schedule_name = fire.schedule_name.to_owned();
+            return Err(match failure.transience() {
+                Transience::Transient => ScheduleFireError::OutcomeUnknown {
+                    schedule_name,
+                    cause: failure,
+                },
+                Transience::Permanent => ScheduleFireError::Refused {
+                    schedule_name,
+                    cause: failure,
+                },
+            });
+        }
+    };
+    Ok(fire_answer(fire, &rows))
+}
+
+/// A fire answer that breaks the function's contract: a defect.
+fn contract_breach(schedule_name: &str, error: RowDecodeError) -> ! {
+    panic!("the fire of schedule '{schedule_name}' answered a row outside its contract: {error}")
+}
+
+/// Asserts that a `STATE_MISSING` or `STATE_MOVED` answer has no slot row.
+fn assert_no_slot_rows(fire: &ScheduleFire<'_>, kind: &str, slot_rows: &[Row]) {
+    assert!(
+        slot_rows.is_empty(),
+        "the fire of schedule '{}' answered {kind} with {} slot rows",
+        fire.schedule_name,
+        slot_rows.len()
+    );
+}
+
+/// The call outcome row, then one SLOT row per slot after ADVANCED.
+///
+/// Panics: an answer outside the function's contract.
+fn fire_answer(fire: &ScheduleFire<'_>, rows: &[Row]) -> ScheduleFireAnswer {
+    let statement = &FIRE_SCHEDULE;
+    let Some((first, slot_rows)) = rows.split_first() else {
+        panic!(
+            "the fire of schedule '{}' answered no row",
+            fire.schedule_name
+        );
+    };
+    let kind: String = column(first, statement, "row_kind")
+        .unwrap_or_else(|error| contract_breach(fire.schedule_name, error));
+    match kind.as_str() {
+        "ADVANCED" => {
+            let slots: Vec<FiredSlot> = slot_rows
+                .iter()
+                .map(|row| {
+                    fired_slot(fire, row)
+                        .unwrap_or_else(|error| contract_breach(fire.schedule_name, error))
+                })
+                .collect();
+            let answered: Vec<DateTime<Utc>> = slots.iter().map(|slot| slot.slot_at).collect();
+            assert_eq!(
+                answered.as_slice(),
+                fire.slot_ats,
+                "the fire of schedule '{}' answered other slots",
+                fire.schedule_name
+            );
+            ScheduleFireAnswer::Advanced { slots }
+        }
+        "STATE_MISSING" => {
+            assert_no_slot_rows(fire, &kind, slot_rows);
+            ScheduleFireAnswer::StateMissing
+        }
+        "STATE_MOVED" => {
+            assert_no_slot_rows(fire, &kind, slot_rows);
+            ScheduleFireAnswer::StateMoved
+        }
+        other => panic!(
+            "the fire of schedule '{}' answered row kind {other:?}",
+            fire.schedule_name
+        ),
+    }
+}
+
+/// One SLOT row.
+///
+/// Errors: a column that does not decode, or is NULL.
+///
+/// Panics: a row kind other than `SLOT`, or an unknown slot outcome.
+fn fired_slot(fire: &ScheduleFire<'_>, row: &Row) -> Result<FiredSlot, RowDecodeError> {
+    let statement = &FIRE_SCHEDULE;
+    let kind: String = column(row, statement, "row_kind")?;
+    assert_eq!(
+        kind, "SLOT",
+        "the fire of schedule '{}' answered row kind {kind:?} after ADVANCED",
+        fire.schedule_name
+    );
+    let slot_at: DateTime<Utc> = column(row, statement, "slot_at")?;
+    let task_id: Uuid = column(row, statement, "task_id")?;
+    let outcome_text: String = column(row, statement, "slot_outcome")?;
+    let outcome = SlotOutcome::parse(&outcome_text).unwrap_or_else(|| {
+        panic!(
+            "the fire of schedule '{}' answered slot outcome {outcome_text:?}",
+            fire.schedule_name
+        )
+    });
+    Ok(FiredSlot {
+        slot_at,
+        task_id,
+        outcome,
+    })
+}
+
+/// Test rows of `horsies_schedule_state`, written and read with sqlx on the
+/// test database (seeds and checks of the tests, not scheduler statements).
+#[cfg(test)]
+pub(crate) mod test_rows {
+    use chrono::{DateTime, Utc};
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    /// A row of `horsies_schedule_state`.
+    #[derive(Debug, sqlx::FromRow)]
+    pub(crate) struct StateRow {
+        pub next_run_at: DateTime<Utc>,
+        pub last_run_at: Option<DateTime<Utc>>,
+        pub last_task_id: Option<Uuid>,
+        pub run_count: i32,
+        pub config_hash: Vec<u8>,
+    }
+
+    /// The row of `schedule_name`, if any.
+    pub(crate) async fn state_row(pool: &PgPool, schedule_name: &str) -> Option<StateRow> {
+        sqlx::query_as(
+            "SELECT next_run_at, last_run_at, last_task_id, run_count, config_hash
+             FROM horsies_schedule_state WHERE schedule_name = $1",
+        )
         .bind(schedule_name)
         .fetch_optional(pool)
         .await
-}
-
-/// Get due schedules filtered by a list of schedule names.
-///
-/// This mirrors Python's `get_due_states(schedule_names, now)` which filters
-/// at the database level rather than in application code.
-pub async fn get_due_schedules_filtered(
-    pool: &PgPool,
-    schedule_names: &[String],
-    now: DateTime<Utc>,
-) -> Result<Vec<ScheduleStateRow>, sqlx::Error> {
-    if schedule_names.is_empty() {
-        return Ok(Vec::new());
+        .expect("read the schedule state row")
     }
-    sqlx::query_as(GET_DUE_SCHEDULES_FILTERED_SQL)
-        .bind(now)
-        .bind(schedule_names)
-        .fetch_all(pool)
-        .await
-}
 
-/// Delete the state entry for a schedule.
-///
-/// Retained as a state primitive but no longer called at startup: foreign
-/// schedule-state rows are now kept, not pruned (parity with horsies PR #101
-/// e26a0f55), so a rolling deploy / shared DB does not lose another scheduler's
-/// rows.
-#[allow(dead_code)]
-pub async fn delete_state(pool: &PgPool, schedule_name: &str) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(DELETE_STATE_SQL)
-        .bind(schedule_name)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
-}
+    /// Delete the row of `schedule_name`.
+    pub(crate) async fn delete_state(pool: &PgPool, schedule_name: &str) {
+        let _deleted = sqlx::query("DELETE FROM horsies_schedule_state WHERE schedule_name = $1")
+            .bind(schedule_name)
+            .execute(pool)
+            .await
+            .expect("delete the schedule state row");
+    }
 
-/// Retrieve all schedule state rows, ordered by schedule name.
-pub async fn get_all_states(pool: &PgPool) -> Result<Vec<ScheduleStateRow>, sqlx::Error> {
-    sqlx::query_as(GET_ALL_STATES_SQL).fetch_all(pool).await
-}
-
-/// Names of all existing schedule-state rows (for the per-tick self-heal diff).
-pub async fn get_existing_names(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar(GET_EXISTING_NAMES_SQL)
-        .fetch_all(pool)
-        .await
-}
-
-/// Insert the state row of a schedule that has none, with no run recorded.
-///
-/// Returns `true` if a row was inserted, `false` if one already existed (the
-/// `ON CONFLICT DO NOTHING` no-op — the existing row, including its
-/// `next_run_at`, is preserved).
-pub async fn insert_state_if_absent(
-    pool: &PgPool,
-    schedule_name: &str,
-    next_run_at: DateTime<Utc>,
-    config_hash: &[u8],
-) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(INSERT_STATE_IF_ABSENT_SQL)
+    /// Replace the row of `schedule_name` with a fresh one due at
+    /// `next_run_at`: no run recorded, a zero digest.
+    pub(crate) async fn seed_state(pool: &PgPool, schedule_name: &str, next_run_at: DateTime<Utc>) {
+        delete_state(pool, schedule_name).await;
+        let _inserted = sqlx::query(
+            "INSERT INTO horsies_schedule_state (
+                 schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash,
+                 updated_at
+             ) VALUES ($1, NULL, $2, NULL, 0, $3, statement_timestamp())",
+        )
         .bind(schedule_name)
         .bind(next_run_at)
-        .bind(config_hash)
+        .bind(vec![0_u8; 32])
         .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
-}
+        .await
+        .expect("seed the schedule state row");
+    }
 
-/// Store a changed pattern or timezone: the new hash and the new first slot.
-/// The run record is kept.
-///
-/// Returns `true` if the row was written, `false` if the row is missing or
-/// already holds this hash.
-pub async fn update_schedule_config(
-    pool: &PgPool,
-    schedule_name: &str,
-    next_run_at: DateTime<Utc>,
-    config_hash: &[u8],
-) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(UPDATE_SCHEDULE_CONFIG_SQL)
+    /// Record one run on the row of `schedule_name`.
+    pub(crate) async fn record_run(
+        pool: &PgPool,
+        schedule_name: &str,
+        run_at: DateTime<Utc>,
+        next_run_at: DateTime<Utc>,
+        task_id: Uuid,
+    ) {
+        let _updated = sqlx::query(
+            "UPDATE horsies_schedule_state
+             SET last_run_at = $2, next_run_at = $3, last_task_id = $4,
+                 run_count = run_count + 1, updated_at = statement_timestamp()
+             WHERE schedule_name = $1",
+        )
         .bind(schedule_name)
-        .bind(next_run_at)
-        .bind(config_hash)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
-}
-
-/// Record a fired slot: `last_run_at`, `last_task_id`, `run_count + 1`, and
-/// the next slot. It does not read the row first.
-pub async fn record_run(
-    pool: &PgPool,
-    schedule_name: &str,
-    executed_at: DateTime<Utc>,
-    next_run_at: DateTime<Utc>,
-    task_id: Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(RECORD_RUN_SQL)
-        .bind(schedule_name)
-        .bind(executed_at)
+        .bind(run_at)
         .bind(next_run_at)
         .bind(task_id)
         .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// Move to the next slot without recording a run.
-pub async fn advance_next_run(
-    pool: &PgPool,
-    schedule_name: &str,
-    next_run_at: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(ADVANCE_NEXT_RUN_SQL)
-        .bind(schedule_name)
-        .bind(next_run_at)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// Try to acquire a per-schedule advisory lock.
-///
-/// Returns `Some(tx)` if acquired: an otherwise-idle transaction whose only
-/// job is to hold the xact-scoped lock while the caller processes the
-/// schedule on other connections. Dropping or committing the transaction
-/// releases the lock.
-pub async fn try_acquire_schedule_lock(
-    pool: &PgPool,
-    schedule_name: &str,
-) -> Result<Option<Transaction<'static, Postgres>>, sqlx::Error> {
-    let key = schedule_lock_key(schedule_name);
-    let mut tx = pool.begin().await?;
-    let result: (bool,) = sqlx::query_as(TRY_ACQUIRE_LOCK_SQL)
-        .bind(key)
-        .fetch_one(tx.as_mut())
-        .await?;
-    if result.0 {
-        Ok(Some(tx))
-    } else {
-        Ok(None)
+        .await
+        .expect("record a run");
     }
-}
-
-/// Release a per-schedule advisory lock by committing its holder transaction.
-pub async fn release_schedule_lock(tx: Transaction<'static, Postgres>) -> Result<(), sqlx::Error> {
-    tx.commit().await
-}
-
-fn schedule_lock_key(schedule_name: &str) -> i64 {
-    let basis = format!("horsies-schedule:{}", schedule_name);
-    let digest = Sha256::digest(basis.as_bytes());
-    let bytes: [u8; 8] = digest[..8].try_into().unwrap_or([0u8; 8]);
-    i64::from_be_bytes(bytes)
-}
-
-/// Replace a schedule's state row with a fresh one due at `next_run_at`
-/// (tests only: seeds a known state).
-#[cfg(test)]
-pub(crate) async fn seed_state(
-    pool: &PgPool,
-    schedule_name: &str,
-    next_run_at: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
-    delete_state(pool, schedule_name).await?;
-    insert_state_if_absent(pool, schedule_name, next_run_at, &[0u8; 32]).await?;
-    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sql_constants_have_placeholders() {
-        assert!(GET_STATE_SQL.contains("$1"));
-        assert!(GET_DUE_SCHEDULES_FILTERED_SQL.contains("$1"));
-        assert!(GET_DUE_SCHEDULES_FILTERED_SQL.contains("$2"));
-        assert!(DELETE_STATE_SQL.contains("$1"));
-        for sql in [
-            GET_STATE_SQL,
-            GET_DUE_SCHEDULES_FILTERED_SQL,
-            GET_ALL_STATES_SQL,
-        ] {
-            assert!(sql.contains(STATE_COLUMNS), "{sql}");
-        }
-    }
-
-    #[test]
-    fn get_due_schedules_filtered_sql_uses_any() {
-        assert!(GET_DUE_SCHEDULES_FILTERED_SQL.contains("= ANY($2)"));
-        assert!(GET_DUE_SCHEDULES_FILTERED_SQL.contains("next_run_at <= $1"));
-        assert!(GET_DUE_SCHEDULES_FILTERED_SQL.contains("ORDER BY next_run_at ASC"));
-    }
-
-    #[test]
-    fn schedule_lock_sql_is_xact_scoped() {
-        assert!(TRY_ACQUIRE_LOCK_SQL.contains("pg_try_advisory_xact_lock($1)"));
-    }
-
-    #[test]
-    fn get_all_states_sql_is_valid() {
-        assert!(GET_ALL_STATES_SQL.contains("schedule_name"));
-        assert!(GET_ALL_STATES_SQL.contains("last_run_at"));
-        assert!(GET_ALL_STATES_SQL.contains("next_run_at"));
-        assert!(GET_ALL_STATES_SQL.contains("run_count"));
-        assert!(GET_ALL_STATES_SQL.contains("config_hash"));
-        assert!(GET_ALL_STATES_SQL.contains("ORDER BY schedule_name"));
-    }
-
-    #[test]
-    fn delete_state_sql_targets_single_row() {
-        assert!(DELETE_STATE_SQL.starts_with("DELETE FROM horsies_schedule_state"));
-        assert!(DELETE_STATE_SQL.contains("WHERE schedule_name = $1"));
-    }
-
-    #[test]
-    fn insert_state_if_absent_sql_does_nothing_on_conflict() {
-        assert!(INSERT_STATE_IF_ABSENT_SQL.starts_with("INSERT INTO horsies_schedule_state"));
-        assert!(INSERT_STATE_IF_ABSENT_SQL.contains("ON CONFLICT (schedule_name) DO NOTHING"));
-        assert!(!INSERT_STATE_IF_ABSENT_SQL.contains("DO UPDATE"));
-    }
-
-    /// Python `update_next_run` with a hash and `update_after_run`: a config
-    /// change keeps the run record; a run increments `run_count` in SQL.
-    #[test]
-    fn config_change_keeps_the_run_record_and_a_run_increments_in_sql() {
-        for kept in ["run_count", "last_run_at", "last_task_id"] {
-            assert!(!UPDATE_SCHEDULE_CONFIG_SQL.contains(kept), "{kept}");
-            assert!(!ADVANCE_NEXT_RUN_SQL.contains(kept), "{kept}");
-        }
-        assert!(UPDATE_SCHEDULE_CONFIG_SQL.contains("config_hash <> $3"));
-        assert!(RECORD_RUN_SQL.contains("run_count = run_count + 1"));
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn get_existing_names_returns_inserted_rows() {
-        let broker = crate::broker::PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::migrated_pool().await,
-        );
-        broker.ensure_schema_initialized().await.expect("schema");
-        let pool = broker.pool().clone();
-        let name = format!("qw_exist_{}", uuid::Uuid::new_v4());
-
-        seed_state(&pool, &name, Utc::now())
-            .await
-            .expect("seed row");
-
-        let names = get_existing_names(&pool).await.expect("get_existing_names");
-        assert!(names.contains(&name));
-
-        delete_state(&pool, &name).await.expect("cleanup");
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn insert_state_if_absent_inserts_then_preserves() {
-        let broker = crate::broker::PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::migrated_pool().await,
-        );
-        broker.ensure_schema_initialized().await.expect("schema");
-        let pool = broker.pool().clone();
-        let name = format!("qw_absent_{}", uuid::Uuid::new_v4());
-        let first = Utc::now() + chrono::Duration::seconds(60);
-
-        // Absent → inserts.
-        let inserted = insert_state_if_absent(&pool, &name, first, &[1u8; 32])
-            .await
-            .expect("insert");
-        assert!(inserted, "first insert must create the row");
-
-        // Present → no-op, existing next_run_at preserved (not overwritten).
-        let second = Utc::now() + chrono::Duration::seconds(999);
-        let inserted_again = insert_state_if_absent(&pool, &name, second, &[2u8; 32])
-            .await
-            .expect("insert again");
-        assert!(!inserted_again, "second insert must be a no-op");
-
-        let row = get_state(&pool, &name).await.expect("get").expect("exists");
-        assert_eq!(
-            row.next_run_at.timestamp(),
-            first.timestamp(),
-            "existing next_run_at must be preserved, not overwritten",
-        );
-        assert_eq!(row.config_hash, vec![1u8; 32]);
-        assert_eq!(row.run_count, 0);
-
-        delete_state(&pool, &name).await.expect("cleanup");
-    }
-
-    /// Python `test_scheduler_service.py::test_config_hash_changed_recalculates_next_run`:
-    /// a changed hash moves `next_run_at` and keeps `run_count`,
-    /// `last_run_at` and `last_task_id`.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn config_change_moves_next_run_and_keeps_the_run_record() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let name = format!("qw_config_change_{}", uuid::Uuid::new_v4());
-        let first_slot = Utc::now() - chrono::Duration::seconds(10);
-        seed_state(&pool, &name, first_slot).await.expect("seed");
-        let task_id = uuid::Uuid::new_v4();
-        let executed_at = Utc::now();
-        let after_run = executed_at + chrono::Duration::seconds(60);
-        record_run(&pool, &name, executed_at, after_run, task_id)
-            .await
-            .expect("record run");
-
-        let moved_to = executed_at + chrono::Duration::seconds(3_600);
-        let written = update_schedule_config(&pool, &name, moved_to, &[7u8; 32])
-            .await
-            .expect("config change");
-        assert!(written);
-        let again = update_schedule_config(&pool, &name, after_run, &[7u8; 32])
-            .await
-            .expect("same hash");
-        assert!(!again, "a row that holds the hash is not written");
-
-        let row = get_state(&pool, &name).await.expect("get").expect("exists");
-        assert_eq!(row.next_run_at.timestamp(), moved_to.timestamp());
-        assert_eq!(row.config_hash, vec![7u8; 32]);
-        assert_eq!(row.run_count, 1);
-        assert_eq!(row.last_task_id, Some(task_id));
-        assert_eq!(
-            row.last_run_at.map(|at| at.timestamp()),
-            Some(executed_at.timestamp())
-        );
-
-        delete_state(&pool, &name).await.expect("cleanup");
-    }
-}
+mod tests;

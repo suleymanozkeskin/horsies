@@ -1,12 +1,14 @@
 //! Typed monitoring reads over a horsies deployment.
 //!
-//! This module has no dependency on the optional web transport. Missing rows
-//! are returned as `Ok(None)`. Database and retained-history contract failures
-//! are returned as typed errors.
+//! This module has no dependency on the optional web transport. A task that
+//! the detail read does not find is `Ok(TaskDetailRead::NotFound)` with its
+//! absence reason; other missing rows are returned as `Ok(None)`. Database
+//! and retained-history contract failures are returned as typed errors.
 
 mod actions;
 mod errors;
 mod execution_classes;
+mod function_rows;
 mod history_window;
 mod models;
 mod queries;
@@ -18,6 +20,7 @@ pub use actions::{
     STATE_CONFLICT,
 };
 
+pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use errors::{
     MonitoringQueryError, MonitoringQueryErrorCode, MonitoringQueryErrorSource, MonitoringResult,
 };
@@ -26,10 +29,11 @@ pub use history_window::{
     resolve_monitoring_window, WindowRefused, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
 };
 pub use models::{
-    ActionResponse, Breakdown, CancelTaskBody, ErrorCategory, ErrorFacet, FacetValue, Facets,
-    GroupRow, LeafTaskInfo, LivenessReport, ScheduleStateInfo, StatusCount, TaskAttemptInfo,
-    TaskDetail, TaskListPage, TaskSummary, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo,
-    WorkflowEdge, WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
+    ActionResponse, Breakdown, BreakdownCounts, BreakdownGroup, CancelTaskBody, ErrorCategory,
+    ErrorFacet, FacetValue, Facets, GroupRow, LeafTaskInfo, LivenessReport, ScheduleStateInfo,
+    StatusCount, TaskAttemptInfo, TaskDetail, TaskDetailNotFound, TaskDetailRead, TaskListPage,
+    TaskSummary, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowEdge,
+    WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
 };
 pub use models::{
     BudgetLoadInfo, ClassReportInfo, DownSlotInfo, PendingStreamInfo, SlotHealthKind,
@@ -49,4 +53,14 @@ pub use task_actions::{
 #[cfg(test)]
 mod action_tests;
 #[cfg(test)]
+mod aggregate_spec_tests;
+#[cfg(test)]
+mod cancel_spec_tests;
+#[cfg(test)]
+mod list_detail_spec_tests;
+#[cfg(test)]
+mod spec_support;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod workflow_schedule_spec_tests;

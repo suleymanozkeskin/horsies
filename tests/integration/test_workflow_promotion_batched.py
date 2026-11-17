@@ -17,7 +17,7 @@ import psycopg
 import psycopg.sql
 import pytest
 from sqlalchemy import event, text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
@@ -28,7 +28,13 @@ from horsies.core.types.result import is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
 from horsies.core.workflows.sql import PROMOTE_DEPENDENTS_BATCH_SQL
 
-from tests.integration.conftest import DB_URL, complete_task
+from tests.broker_resources_support import current_resources
+from tests.integration.conftest import (
+    DB_URL,
+    finish_phase_one,
+    finish_phase_two,
+    finish_task,
+)
 
 pytestmark = [pytest.mark.integration]
 
@@ -91,16 +97,15 @@ class TestBatchedPromotionShape:
         clean_workflow_tables: None,
         app: Horsies,
         broker: PostgresBroker,
-        engine: AsyncEngine,
         session: AsyncSession,
     ) -> None:
         """Regression for the O(7F) promotion: one completion promoting F
         dependents ran 7 statements per dependent under the workflow lock
-        (F=119 ≈ 36.8s at 33-45ms RTT). The batched pipeline must issue
-        the same flat count for any F.
+        (F=119 ≈ 36.8s at 33-45ms RTT). Phase 2 must issue the same flat
+        count for any F.
 
-        ``complete_task`` runs phase 2 on ``session``, so the statements are
-        counted on its engine."""
+        ``finish_phase_two`` runs phase 2 on the broker's engine, so the
+        statements are counted there."""
         root_fn = _make_task(app, 'fanout_root')
         dep_fn = _make_task(app, 'fanout_dep')
 
@@ -121,11 +126,13 @@ class TestBatchedPromotionShape:
             def _count(conn: Any, cursor: Any, stmt: Any, params: Any, ctx: Any, many: Any) -> None:
                 counter['n'] += 1
 
-            event.listen(engine.sync_engine, 'before_cursor_execute', _count)
+            done = await finish_phase_one(session, broker, wf_id, 0, TaskResult(ok=0))
+            sync_engine = current_resources(broker).engine.sync_engine
+            event.listen(sync_engine, 'before_cursor_execute', _count)
             try:
-                await complete_task(session, broker, wf_id, 0, TaskResult(ok=0))
+                await finish_phase_two(broker, done)
             finally:
-                event.remove(engine.sync_engine, 'before_cursor_execute', _count)
+                event.remove(sync_engine, 'before_cursor_execute', _count)
             await session.commit()
             counts_by_f[fan_out] = counter['n']
 
@@ -134,11 +141,10 @@ class TestBatchedPromotionShape:
                 statuses[i] == 'ENQUEUED' for i in range(1, fan_out + 1)
             ), statuses
 
-        # Flatness is the claim, not just smallness. complete_task's lookup
-        # of the task, then phase 2: the node write, the dependents read,
-        # the promotion write, the dependency results, the insert
-        # executemany, the completion check.
-        assert counts_by_f == {5: 7, 20: 7}, counts_by_f
+        # Flatness is the claim, not just smallness. Phase 2 of a node with
+        # task dependents and no sub-workflow node below it is one
+        # statement in autocommit: horsies_workflow_node_finish.
+        assert counts_by_f == {5: 1, 20: 1}, counts_by_f
 
     async def test_promoted_dependents_are_claimable_and_linked(
         self,
@@ -159,7 +165,7 @@ class TestBatchedPromotionShape:
             ],
         ]
         wf_id = await _start(app, broker, nodes, 'batched_shape')
-        await complete_task(session, broker, wf_id, 0, TaskResult(ok=0))
+        await finish_task(session, broker, wf_id, 0, TaskResult(ok=0))
         await session.commit()
 
         rows = (
@@ -205,7 +211,7 @@ class TestBatchedPromotionSemantics:
         failed: TaskResult[int, TaskError] = TaskResult(
             err=TaskError(error_code='CASCADE_FAIL', message='forced'),
         )
-        await complete_task(session, broker, wf_id, 0, failed)
+        await finish_task(session, broker, wf_id, 0, failed)
         await session.commit()
 
         statuses = await _statuses(session, wf_id)
@@ -231,7 +237,7 @@ class TestBatchedPromotionSemantics:
         node_c = TaskNode(fn=fn, kwargs={'value': 2}, waits_for=[node_a, node_b], join='any')
         wf_id = await _start(app, broker, [node_a, node_b, node_c], 'batched_any')
 
-        await complete_task(session, broker, wf_id, 0, TaskResult(ok=0))
+        await finish_task(session, broker, wf_id, 0, TaskResult(ok=0))
         await session.commit()
         statuses = await _statuses(session, wf_id)
         assert statuses[2] == 'ENQUEUED'  # one success suffices
@@ -255,7 +261,7 @@ class TestBatchedPromotionSemantics:
         failed: TaskResult[int, TaskError] = TaskResult(
             err=TaskError(error_code='Q_FAIL', message='forced'),
         )
-        await complete_task(session, broker, wf_id, 0, failed)
+        await finish_task(session, broker, wf_id, 0, failed)
         await session.commit()
         statuses = await _statuses(session, wf_id)
         # 1 of 2 deps failed; threshold 2 unreachable -> SKIPPED.
@@ -278,7 +284,7 @@ class TestBatchedPromotionSemantics:
         failed: TaskResult[int, TaskError] = TaskResult(
             err=TaskError(error_code='AF_FAIL', message='forced'),
         )
-        await complete_task(session, broker, wf_id, 0, failed)
+        await finish_task(session, broker, wf_id, 0, failed)
         await session.commit()
         statuses = await _statuses(session, wf_id)
         assert statuses[1] == 'ENQUEUED'
@@ -308,7 +314,7 @@ class TestBatchedPromotionSemantics:
         )
         wf_id = await _start(app, broker, [root, fast, slow], 'batched_mixed')
 
-        await complete_task(session, broker, wf_id, 0, TaskResult(ok=0))
+        await finish_task(session, broker, wf_id, 0, TaskResult(ok=0))
         await session.commit()
         statuses = await _statuses(session, wf_id)
         assert statuses[1] == 'ENQUEUED'
@@ -336,7 +342,7 @@ class TestBatchedPromotionSemantics:
         wf_id = await _start(app, broker, [root, good, bad], 'batched_isolation')
         await _corrupt_stored_options(session, wf_id, 2)
 
-        await complete_task(session, broker, wf_id, 0, TaskResult(ok=0))
+        await finish_task(session, broker, wf_id, 0, TaskResult(ok=0))
         await session.commit()
 
         statuses = await _statuses(session, wf_id)
@@ -388,7 +394,7 @@ class TestBatchedPromotionSemantics:
         wf_id = start_r.ok_value.workflow_id
         await _corrupt_stored_options(session, wf_id, 2)
 
-        await complete_task(session, broker, wf_id, 0, TaskResult(ok=0))
+        await finish_task(session, broker, wf_id, 0, TaskResult(ok=0))
         await session.commit()
 
         statuses = await _statuses(session, wf_id)
@@ -438,7 +444,7 @@ class TestBatchedPromotionSemantics:
 
 async def _listen_all(channels: tuple[str, ...]) -> psycopg.AsyncConnection[Any]:
     connection = await psycopg.AsyncConnection.connect(
-        DB_URL.replace('postgresql+psycopg://', 'postgresql://'),
+        DB_URL,
         autocommit=True,
     )
     for channel in channels:
@@ -498,9 +504,10 @@ class TestPromotionWrite:
             ],
         ]
         wf_id = await _start(app, broker, nodes, 'promotion_notify')
+        done = await finish_phase_one(session, broker, wf_id, 0, TaskResult(ok=0))
         listener = await _listen_all((*_TASK_CHANNELS, *_WORKFLOW_CHANNELS))
         try:
-            await complete_task(session, broker, wf_id, 0, TaskResult(ok=0))
+            await finish_phase_two(broker, done)
             received = [
                 (notify.channel, notify.payload)
                 async for notify in listener.notifies(timeout=_NOTIFY_WAIT_S)
@@ -526,9 +533,11 @@ class TestPromotionWrite:
                 (channel, str(row.task_id))
                 for channel in ('task_new', 'horsies_task_status')
             )
-        # The queue wake carries the constant payload 'new'; PostgreSQL
-        # delivers identical notifications of one transaction once.
+        # The queue wake of the inserts carries the constant payload 'new';
+        # PostgreSQL delivers identical notifications of one transaction
+        # once. Phase 2 also sends the capacity wake of the root's queue.
         expected.append(('task_queue_default', 'new'))
+        expected.append(('task_queue_default', 'capacity'))
         assert sorted(received) == sorted(expected)
 
     async def test_the_promotion_write_moves_only_pending_nodes(
@@ -664,12 +673,26 @@ class TestMultiLevelDag:
             (8, set()),
         ]
         enqueued: set[int] = {0}
+        kwargs_of_e: str | None = None
         for completed, promoted in steps:
             before = await _node_rows(session, wf_id)
-            await complete_task(
+            await finish_task(
                 session, broker, wf_id, completed, TaskResult(ok=completed * 10)
             )
             after = await _node_rows(session, wf_id)
+            if 4 in promoted:
+                # E's input, read while its task is live: phase 1 of E moves
+                # the task to history.
+                kwargs_of_e = (
+                    await session.execute(
+                        text("""
+                            SELECT t.input FROM horsies_tasks t
+                            JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+                            WHERE wt.workflow_id = :wf AND wt.task_index = 4
+                        """),
+                        {'wf': wf_id},
+                    )
+                ).scalar_one()
             changed = {
                 index
                 for index, row in after.items()
@@ -686,27 +709,19 @@ class TestMultiLevelDag:
         rows = await _node_rows(session, wf_id)
         assert {row.status for row in rows.values()} == {'COMPLETED'}
         assert len({row.task_id for row in rows.values()}) == 9
+        # Phase 1 of each task moved it to history: one history row per node.
         task_rows = (
             await session.execute(
                 text("""
-                    SELECT count(*) FROM horsies_tasks t
-                    JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+                    SELECT count(*) FROM horsies_task_history h
+                    JOIN horsies_workflow_tasks wt ON wt.task_id = h.task_id
                     WHERE wt.workflow_id = :wf
                 """),
                 {'wf': wf_id},
             )
         ).scalar_one()
         assert task_rows == 9
-        kwargs_of_e = (
-            await session.execute(
-                text("""
-                    SELECT t.input FROM horsies_tasks t
-                    JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
-                    WHERE wt.workflow_id = :wf AND wt.task_index = 4
-                """),
-                {'wf': wf_id},
-            )
-        ).scalar_one()
+        assert kwargs_of_e is not None
         match loads_json(kwargs_of_e).unwrap():
             case {'upstream': {'inner': {'ok': upstream_ok}}}:
                 assert upstream_ok == 10  # B's result

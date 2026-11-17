@@ -3,8 +3,8 @@
 PostgreSQL does not validate PL/pgSQL bodies at CREATE, so a staged
 reader generated over a catalog row whose relation was dropped out of
 band builds happily and dies at execution — with `undefined_table`,
-inside the provenance probe that terminalization runs (`move.py` calls
-`horsies_task_provenance_staged(p_task_id, FALSE)`). One such leaf
+inside the provenance probe that terminalization runs (the miss
+classifier calls `horsies_task_provenance_staged(p_task_id)`). One such leaf
 therefore fails every finalize, in every queue and every retention
 class, until something regenerates the readers.
 
@@ -32,10 +32,6 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies.core.history.commands import CreateDailyHistoryLeaf, LeafBounds, LeafRef
-from horsies.core.history.errors import HistoryParentAbsent
-from horsies.core.history.heartbeats.partitioning import (
-    HEARTBEATS_PARTITIONED_DDL,
-)
 from horsies.core.history.identity.uuid7 import MonotonicUuid7Generator
 from horsies.core.history.maintenance.coverage import (
     CoverageEnsureFailed,
@@ -49,13 +45,12 @@ from horsies.core.history.names import (
     LEAF_CATALOG,
     RETENTION_CLASSES,
     TASK_HISTORY_FOREVER,
-    TASK_PROVENANCE_FUNCTION,
 )
 from horsies.core.history.outcomes import LeafCreated
 from horsies.core.history.partitions.catalog import (
     daily_leaf_name,
     database_now,
-    read_manifest_leaf_rows,
+    read_all_attached_leaf_rows,
 )
 from horsies.core.history.partitions.manager import create_daily_leaf
 from horsies.core.history.reads.detail import (
@@ -80,8 +75,10 @@ from tests.integration.task_history_harness import (
 pytestmark = [pytest.mark.integration]
 
 UTC = timezone.utc
-CLASS_KEY = 'it_missing_leaf'
-OTHER_CLASS_KEY = 'it_lost_parent'
+# Period class keys of the baseline form standard_<days>d.
+CLASS_KEY = 'standard_30d'
+OTHER_CLASS_KEY = 'standard_7d'
+OTHER_CLASS_DAYS = 7
 
 history_schema = task_history_schema_fixture('task_history_it_missing_leaf')
 
@@ -117,35 +114,31 @@ async def _create_leaf(
     return leaf_name
 
 
-async def _set_min_birth(
-    connection: AsyncConnection,
-    leaf_name: str,
-    birth: datetime,
-) -> None:
-    """Record a leaf's minimum birth, the catalog fact the floor reads."""
-    await connection.execute(
-        text(
-            f'UPDATE {LEAF_CATALOG} SET min_birth_at = :birth '
-            'WHERE leaf_name = :leaf_name'
-        ),
-        {'birth': birth, 'leaf_name': leaf_name},
-    )
-
-
 async def _probe_provenance(
     connection: AsyncConnection,
     task_id: str,
 ) -> object:
-    """Call the provenance function exactly as terminalization calls it."""
+    """Call the provenance reader as the miss classifier calls it: one row when history holds the id."""
     return (
         await connection.execute(
             text(
-                f'SELECT found FROM {TASK_PROVENANCE_FUNCTION}('
-                'CAST(:task_id AS uuid), FALSE)'
+                'SELECT EXISTS (SELECT 1 FROM horsies_task_provenance_staged('
+                'CAST(:task_id AS uuid)))'
             ),
             {'task_id': task_id},
         )
     ).scalar_one()
+
+
+async def _attached_and_absent(
+    connection: AsyncConnection,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """The attached catalog leaves, and the attached history leaves whose relation is gone."""
+    rows = await read_all_attached_leaf_rows(connection)
+    absent: list[str] = (
+        await connection.execute(text('SELECT horsies_history_absent_leaves()'))
+    ).scalar_one()
+    return frozenset(row.leaf_name for row in rows), frozenset(absent)
 
 
 class TestMissingLeafBreaksAndHeals:
@@ -221,12 +214,12 @@ class TestMissingLeafBreaksAndHeals:
         async with history_schema.engine.connect() as connection:
             # The catalog is untouched: the row is still attached, which
             # is the operator's evidence that a drop happened.
-            selection = await read_manifest_leaf_rows(connection)
-            assert gone in {row.leaf_name for row in selection.attached}
-            assert selection.absent_relations == frozenset({gone})
+            attached, absent = await _attached_and_absent(connection)
+            assert gone in attached
+            assert absent == frozenset({gone})
             # The surviving leaf is still probed -- exclusion is scoped
             # to the missing relation, not to the class.
-            assert kept not in selection.absent_relations
+            assert kept not in absent
             # And the probe that died now answers.
             assert await _probe_provenance(connection, task_id) is False
             assert await published_manifest_absent_leaves(connection) == ()
@@ -247,13 +240,11 @@ class TestMissingLeafBreaksAndHeals:
             parent = await register_class(connection, CLASS_KEY)
             now = await database_now(connection)
             gone = await _create_leaf(connection, parent=parent, day=now)
-            kept = await _create_leaf(
+            # The dropped leaf holds the OLDEST period, so excluding it
+            # from the floor would raise the floor over the task below.
+            await _create_leaf(
                 connection, parent=parent, day=now + timedelta(days=1)
             )
-            # The dropped leaf holds the OLDEST birth, so excluding it
-            # from the floor would raise the floor over the task below.
-            await _set_min_birth(connection, gone, now - timedelta(hours=6))
-            await _set_min_birth(connection, kept, now + timedelta(hours=6))
 
         task_id = v7_with_birth(now - timedelta(hours=3))
 
@@ -287,7 +278,6 @@ class TestMissingLeafBreaksAndHeals:
         create-ahead untouched.
         """
         async with history_schema.engine.begin() as connection:
-            await connection.execute(text(HEARTBEATS_PARTITIONED_DDL))
             parent = await register_class(connection, CLASS_KEY)
             now = await database_now(connection)
             gone = await _create_leaf(
@@ -333,7 +323,6 @@ class TestMissingLeafBreaksAndHeals:
         exists to remove. Pins the documented operator consequence.
         """
         async with history_schema.engine.begin() as connection:
-            await connection.execute(text(HEARTBEATS_PARTITIONED_DDL))
             await register_class(connection, CLASS_KEY)
             settled = await ensure_partition_coverage(
                 connection, history_horizon_days=2, heartbeat_horizon_hours=2
@@ -375,7 +364,6 @@ class TestMissingLeafBreaksAndHeals:
         class leaf, and proves current heartbeat writes remain covered.
         """
         async with history_schema.engine.begin() as connection:
-            await connection.execute(text(HEARTBEATS_PARTITIONED_DDL))
             parent = await register_class(connection, CLASS_KEY)
             settled = await ensure_partition_coverage(
                 connection,
@@ -426,23 +414,22 @@ class TestMissingLeafBreaksAndHeals:
                 text(f'DROP TABLE {parent}, {TASK_HISTORY_FOREVER} CASCADE')
             )
 
-        async with history_schema.engine.connect() as connection:
-            with pytest.raises(HistoryParentAbsent, match='cannot see'):
-                await read_manifest_leaf_rows(connection)
+        async with history_schema.engine.begin() as connection:
+            with pytest.raises(DBAPIError, match='cannot see') as raised:
+                await StagedLoaderPublisher().republish(connection)
+        assert getattr(raised.value.orig, 'sqlstate', None) == '42P01'
 
     @pytest.mark.asyncio
     async def test_heartbeat_rows_are_never_consulted_by_the_guard(
         self, history_schema: HistorySchema
     ) -> None:
-        """A pre-cutover heartbeat row must not refuse publication.
+        """A heartbeat catalog row with no relation must not refuse publication.
 
         Heartbeat leaves share the leaf catalog and leave the manifest at
-        assembly, and a deployment that has not run the heartbeat cutover
-        carries a heartbeat catalog row whose parent does not exist —
-        which heartbeat registration models as a typed refusal, not an
-        error. The guard is scoped to the rows the probe list contains,
-        so such a row is neither resolved nor reported, and a deployment
-        holding ONLY such rows cannot satisfy the systemic threshold.
+        assembly. The guard is scoped to the rows the probe list contains,
+        so a heartbeat row whose relation does not exist is neither
+        resolved nor reported, and a deployment holding ONLY such rows
+        cannot satisfy the systemic threshold.
         """
         async with history_schema.engine.begin() as connection:
             parent = await register_class(connection, CLASS_KEY)
@@ -452,43 +439,36 @@ class TestMissingLeafBreaksAndHeals:
             await connection.execute(
                 text(
                     f'INSERT INTO {RETENTION_CLASSES} ('
-                    'class_key, duration, partition_interval, '
-                    'finite_parent_name, created_at) VALUES ('
-                    ':class_key, NULL, NULL, NULL, statement_timestamp())'
+                    'class_key, class_kind, retention_days, '
+                    'heartbeat_horizon_hours, created_at) VALUES ('
+                    ":class_key, 'HEARTBEAT', NULL, 2, statement_timestamp())"
                 ),
                 {'class_key': HEARTBEAT_CLASS_KEY},
             )
             await connection.execute(
                 text(
                     f'INSERT INTO {LEAF_CATALOG} ('
-                    'leaf_name, parent_name, class_key, lower_anchor, '
-                    'upper_anchor, index_schema_version, id_index_name, '
-                    'partition_bound, min_birth_at, min_birth_verified, '
-                    'created_at) VALUES ('
-                    ':leaf_name, :parent_name, :class_key, :lower, :upper, '
-                    "1, :index_name, 'FOR VALUES ...', NULL, TRUE, "
+                    'leaf_name, class_key, lower_bound_kind, lower_anchor, '
+                    'upper_anchor, index_schema_version, created_at) VALUES ('
+                    ":leaf_name, :class_key, 'AT', :lower, :upper, 1, "
                     'statement_timestamp())'
                 ),
                 {
                     'leaf_name': 'horsies_heartbeats_2026_08_07_00',
-                    'parent_name': 'horsies_heartbeats',
                     'class_key': HEARTBEAT_CLASS_KEY,
                     'lower': lower,
                     'upper': upper,
-                    'index_name': 'horsies_heartbeats_2026_08_07_00_task_idx',
                 },
             )
 
         async with history_schema.engine.connect() as connection:
-            selection = await read_manifest_leaf_rows(connection)
+            attached, absent = await _attached_and_absent(connection)
         # Present in the attached set, absent from the probe accounting:
-        # the reader keeps the catalog's whole memory and consults only
-        # what the manifest will use.
-        assert 'horsies_heartbeats_2026_08_07_00' in {
-            row.leaf_name for row in selection.attached
-        }
-        assert selection.absent_relations == frozenset()
-        assert kept in {row.leaf_name for row in selection.attached}
+        # the catalog keeps its whole memory and the publication consults
+        # only what the manifest will use.
+        assert 'horsies_heartbeats_2026_08_07_00' in attached
+        assert absent == frozenset()
+        assert kept in attached
 
         async with history_schema.engine.begin() as connection:
             republication = await StagedLoaderPublisher().republish(connection)
@@ -506,7 +486,9 @@ class TestMissingLeafBreaksAndHeals:
         """
         async with history_schema.engine.begin() as connection:
             kept_parent = await register_class(connection, CLASS_KEY)
-            lost_parent = await register_class(connection, OTHER_CLASS_KEY)
+            lost_parent = await register_class(
+                connection, OTHER_CLASS_KEY, duration_days=OTHER_CLASS_DAYS
+            )
             now = await database_now(connection)
             kept = await _create_leaf(
                 connection, parent=kept_parent, day=now
@@ -532,9 +514,9 @@ class TestMissingLeafBreaksAndHeals:
             )
 
         async with history_schema.engine.connect() as connection:
-            selection = await read_manifest_leaf_rows(connection)
-        assert selection.absent_relations == frozenset({lost})
-        assert kept in {row.leaf_name for row in selection.attached}
+            attached, absent = await _attached_and_absent(connection)
+        assert absent == frozenset({lost})
+        assert kept in attached
 
         async with history_schema.engine.begin() as connection:
             republication = await StagedLoaderPublisher().republish(connection)

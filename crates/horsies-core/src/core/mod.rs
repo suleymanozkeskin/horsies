@@ -23,11 +23,15 @@ pub use config::{
     CronSchedule, CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector,
     EnqueueRetention, HourlySchedule, IntervalSchedule, Month, MonthlySchedule, PayloadPolicy,
     PostgresConfig, PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
-    ResilienceConfigError, RetentionChoice, RetentionConfig, RetentionConfigError, ScheduleConfig,
-    SchedulePattern, TaskSchedule, Weekday, WeeklySchedule, WorkerResilienceConfig,
+    ResilienceConfigError, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
+    RetentionConfigError, ScheduleConfig, SchedulePattern, TaskSchedule, Weekday, WeeklySchedule,
+    WorkerResilienceConfig,
 };
 pub use error::{ErrorCategory, ErrorCode, HorsiesError, ValidationReport};
-pub use registry::{RegisteredWorkflowSpec, SpecBuilderFn, TaskRegistry, WorkflowSpecRegistry};
+pub use registry::{
+    BuilderHookName, RegisteredWorkflowSpec, SpecBuildError, SpecBuilderFn, TaskRegistry,
+    WorkflowSpecRegistry,
+};
 pub use task::{
     AsyncTaskFn, BackoffStrategy, BlockingTaskFn, BuiltInTaskCode, ContractCode, ExceptionRecord,
     Execution, ExecutionClass, OperationalErrorCode, OutcomeCode, RegisteredTask, RetrievalCode,

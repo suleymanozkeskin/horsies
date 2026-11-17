@@ -38,7 +38,12 @@ fn joined(
 }
 
 async fn run(pool: &PgPool, workflow_spec: &WorkflowSpec) -> Uuid {
-    start(pool, workflow_spec, &WorkflowSpecRegistry::new()).await
+    start(
+        pool,
+        workflow_spec,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await
 }
 
 /// Finishes node `index` with success.
@@ -48,7 +53,7 @@ async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32) {
         workflow_id,
         index,
         &ok(serde_json::json!(index)),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 }
@@ -60,7 +65,7 @@ async fn fail(pool: &PgPool, workflow_id: Uuid, index: i32, error_code: &str) {
         workflow_id,
         index,
         &err(error_code, "failed"),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 }
@@ -578,7 +583,6 @@ async fn a_recovery_branch_runs_after_a_failure_and_the_workflow_still_fails() {
 /// `TestComposedPatterns.test_join_any_with_args_from_partial_terminal`
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #892"]
 async fn join_any_leaves_out_an_args_from_dependency_that_did_not_finish() {
     let pool = shared_pool().await;
     let mut sink = joined(3, &[1, 2], JoinType::Any, None);

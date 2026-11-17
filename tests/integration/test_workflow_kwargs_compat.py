@@ -27,10 +27,8 @@ from horsies.core.models.workflow import (
     WorkflowValidationError,
 )
 from horsies.core.errors import ErrorCode
-from horsies.core.workflows.engine import on_workflow_task_complete
 
-from .conftest import make_simple_task, start_ok
-from tests.integration.conftest import task_name_for
+from .conftest import finish_task, make_simple_task, start_ok
 
 
 # =============================================================================
@@ -283,20 +281,7 @@ class TestSubworkflowKwargsOnly:
         handle = await start_ok(spec, broker)
 
         # Complete upstream task to trigger subworkflow start
-        wt_result = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        task_row = wt_result.fetchone()
-        assert task_row is not None and task_row[0] is not None
-
-        await on_workflow_task_complete(
-            session, task_row[0], TaskResult(ok=7), broker,
-            task_name=await task_name_for(session, task_row[0]),
-        )
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=7))
         await session.commit()
 
         # Subworkflow should be RUNNING

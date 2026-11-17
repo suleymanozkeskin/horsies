@@ -209,6 +209,7 @@ def make_task(
     is_workflow_task: bool = False,
     good_until: datetime | None = None,
     error_code: str | None = None,
+    worker_id: str | None = None,
 ) -> TaskRow:
     """Build a task row. A terminal row ends now."""
     return task_row(
@@ -228,7 +229,7 @@ def make_task(
         good_until=good_until,
         error_code=error_code,
         failed_reason=None,
-        worker_id=None,
+        worker_id=worker_id,
         worker_hostname=None,
         worker_pid=None,
         worker_process_name=None,
@@ -264,7 +265,7 @@ def make_node(*, workflow_id: str, status: str, task_id: str | None) -> NodeRow:
         dependencies=(),
         allow_failed_deps=False,
         kind=TaskNode(task_id=task_id),
-        error=None,
+        result=None,
         created_at=datetime.now(UTC) - timedelta(seconds=120),
         started_at=None,
         completed_at=None,
@@ -378,6 +379,23 @@ class TestTaskReads:
         assert breakdown['group_by'] == 'task_name'
         assert breakdown['total']['total'] == 1
 
+    async def test_breakdown_groups_carry_their_kind(
+        self, api: AsyncClient, session: AsyncSession
+    ) -> None:
+        await persist(
+            session,
+            make_task(worker_id='unknown', status=TaskStatus.RUNNING),
+            make_task(worker_id=None),
+        )
+
+        breakdown = (await api.get('/api/tasks/breakdown?group_by=worker')).json()
+
+        assert [row['group'] for row in breakdown['groups']] == [
+            {'kind': 'value', 'value': 'unknown'},
+            {'kind': 'unclaimed'},
+        ]
+        assert 'group' not in breakdown['total']
+
     async def test_detail_carries_the_leaf_and_attempts(
         self, api: AsyncClient, session: AsyncSession
     ) -> None:
@@ -397,15 +415,17 @@ class TestTaskReads:
         assert response.status_code == 404
         assert response.json()['detail'] == 'Task not found.'
 
-    async def test_an_id_that_is_not_a_uuid_is_unprocessable(
+    async def test_an_id_that_is_not_a_uuid_is_invalid_input(
         self, api: AsyncClient,
     ) -> None:
         response = await api.get('/api/tasks/not-a-uuid')
 
-        assert response.status_code == 422
-        [error] = response.json()['detail']
-        assert error['type'] == 'uuid_parsing'
-        assert error['loc'] == ['path', 'task_id']
+        assert response.status_code == 400
+        body = response.json()
+        assert body['code'] == 'INVALID_INPUT'
+        assert body['detail'].startswith(
+            'Path parameter task_id: Input should be a valid UUID, ',
+        )
 
     async def test_error_category_filters_every_task_surface(
         self, api: AsyncClient, session: AsyncSession
@@ -708,15 +728,17 @@ class TestTaskActionMapping:
         assert response.status_code == 404
         assert 'detail' in response.json()
 
-    async def test_an_id_that_is_not_a_uuid_is_unprocessable(
+    async def test_an_id_that_is_not_a_uuid_is_invalid_input(
         self, api: AsyncClient,
     ) -> None:
         response = await api.post('/api/tasks/not-a-uuid/cancel', headers=ACT)
 
-        assert response.status_code == 422
-        [error] = response.json()['detail']
-        assert error['type'] == 'uuid_parsing'
-        assert error['loc'] == ['path', 'task_id']
+        assert response.status_code == 400
+        body = response.json()
+        assert body['code'] == 'INVALID_INPUT'
+        assert body['detail'].startswith(
+            'Path parameter task_id: Input should be a valid UUID, ',
+        )
 
     async def test_uncancellable_task_is_a_conflict(
         self, api: AsyncClient, session: AsyncSession

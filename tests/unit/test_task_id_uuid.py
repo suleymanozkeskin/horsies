@@ -77,10 +77,10 @@ def test_a_failed_send_carries_the_minted_uuid() -> None:
     assert isinstance(error.task_id, UUID)
 
 
-def test_a_schedule_slot_task_id_is_a_version_5_uuid() -> None:
+def test_a_schedule_slot_task_id_is_a_version_7_uuid() -> None:
     slot = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
 
     slot_task_id = schedule_slot_task_id('daily_report', slot)
 
     assert isinstance(slot_task_id, UUID)
-    assert slot_task_id.version == 5
+    assert slot_task_id.version == 7

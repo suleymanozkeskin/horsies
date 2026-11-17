@@ -1,6 +1,6 @@
 """Regression tests: resume must decode stored dependency results.
 
-``resume_workflow`` and ``cascade_resume_to_children`` previously called
+The resume (``resume_workflow`` and its cascade to paused children) called
 ``get_dependency_results`` without ``app``, so every COMPLETED dependency
 decoded to a ``RESULT_DESERIALIZATION_ERROR`` (stage='no_app') sentinel and
 resumed ``args_from`` consumers received error envelopes for genuinely
@@ -20,13 +20,9 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import TaskNode
 from horsies.core.types.result import is_ok
-from horsies.core.workflows.engine import (
-    on_workflow_task_complete,
-    resume_workflow,
-)
+from horsies.core.workflows.engine import resume_workflow
 
-from .conftest import start_ok
-from tests.integration.conftest import task_name_for
+from .conftest import finish_task, start_ok
 
 pytestmark = [pytest.mark.integration]
 
@@ -96,20 +92,7 @@ async def test_resume_injects_real_dependency_results(
     handle = await start_ok(spec, broker)
 
     # 1. Producer completes -> consumer enqueued with real dep results.
-    producer_task_row = (
-        await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-    ).fetchone()
-    assert producer_task_row is not None
-    await on_workflow_task_complete(
-        session, producer_task_row[0], TaskResult(ok=42), broker,
-        task_name=await task_name_for(session, producer_task_row[0]),
-    )
+    await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=42))
     await session.commit()
 
     # Simulate a worker claiming (but not starting) the consumer's task so

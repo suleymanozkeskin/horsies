@@ -20,8 +20,6 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.workflows import engine
 from horsies.core.workflows.engine import (
     DependencyResults,
-    NoQueueWake,
-    QueueWake,
     _build_workflow_context_data,
     _decode_err_only,
     _deser_json,
@@ -38,11 +36,10 @@ from horsies.core.workflows.engine import (
     get_workflow_failure_error,
     get_workflow_final_result,
     on_subworkflow_complete,
-    on_workflow_task_complete,
     try_make_ready_and_enqueue,
 )
+from horsies.core.workflows.stored_success_policy import StoredSuccessPolicyError
 from horsies.core.workflows.sql import (
-    COMPLETE_WORKFLOW_TASK_SQL,
     ENQUEUE_SUBWORKFLOW_TASK_SQL,
     ENQUEUE_WORKFLOW_TASK_SQL,
     GET_CHILD_WORKFLOW_INFO_SQL,
@@ -55,7 +52,6 @@ from horsies.core.workflows.sql import (
     GET_TASK_RESULTS_BY_INDEXES_SQL,
     GET_WORKFLOW_DAG_EDGES_SQL,
     GET_WORKFLOW_COMPLETION_STATUS_SQL,
-    GET_WORKFLOW_NAME_SQL,
     GET_WORKFLOW_ON_ERROR_SQL,
     GET_WORKFLOW_STATUS_SQL,
     LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
@@ -467,8 +463,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -498,8 +492,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -530,8 +522,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -564,8 +554,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -595,8 +583,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -629,8 +615,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -695,8 +679,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -782,8 +764,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -848,8 +828,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -927,8 +905,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -1072,8 +1048,6 @@ class TestEnqueueSubworkflowTask:
             captured.append(params)
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -1122,8 +1096,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -1156,181 +1128,6 @@ class TestEnqueueSubworkflowTask:
         fail_mock.assert_awaited()
         call = fail_mock.await_args
         assert call.kwargs.get('error_code') == OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED
-
-
-# ── 5. on_workflow_task_complete ─────────────────────────────────────
-
-
-@pytest.mark.unit
-class TestOnWorkflowTaskComplete:
-    @pytest.mark.asyncio
-    async def test_task_or_workflow_not_found_returns_early(self) -> None:
-        """A row with no workflow from the merged statement covers both 'not
-        a workflow task' and 'workflow row missing' (the join eliminates
-        either; the wake CTE keeps one row)."""
-        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
-            if stmt is COMPLETE_WORKFLOW_TASK_SQL:
-                return _one_result(SimpleNamespace(workflow_id=None))
-            return _one_result(SimpleNamespace())
-
-        session = AsyncMock()
-        session.execute = AsyncMock(side_effect=_dispatch)
-        result = TaskResult(ok='done')
-        await on_workflow_task_complete(
-            session, 'task-1', result, None, task_name='task-a',
-        )
-        # Exactly the merged statement ran — no follow-up progression.
-        assert session.execute.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_already_terminal_skips(self) -> None:
-        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
-            if stmt is COMPLETE_WORKFLOW_TASK_SQL:
-                return _one_result(SimpleNamespace(
-                    workflow_id='wf-1', task_index=0, wf_status='RUNNING',
-                    depth=0, root_workflow_id='wf-1', on_error='fail',
-                    cas_won=False,  # CAS failed: already terminal
-                ))
-            return _one_result(SimpleNamespace())
-
-        session = AsyncMock()
-        session.execute = AsyncMock(side_effect=_dispatch)
-        result = TaskResult(ok='done')
-        await on_workflow_task_complete(
-            session, 'task-1', result, None, task_name='task-a',
-        )
-        assert session.execute.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_paused_workflow_stores_result_without_propagation(self) -> None:
-        """The CAS write lands but the PAUSED status (frozen by the held
-        lock) suppresses dependent processing and the completion check."""
-        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
-            if stmt is COMPLETE_WORKFLOW_TASK_SQL:
-                return _one_result(SimpleNamespace(
-                    workflow_id='wf-1', task_index=0, wf_status='PAUSED',
-                    depth=0, root_workflow_id='wf-1', on_error='fail',
-                    cas_won=True, has_dependents=True,
-                ))
-            return _one_result(SimpleNamespace())
-
-        session = AsyncMock()
-        session.execute = AsyncMock(side_effect=_dispatch)
-        result = TaskResult(ok='done')
-        with patch(
-            'horsies.core.workflows.engine._process_dependents',
-            new=AsyncMock(),
-        ) as mock_proc, patch(
-            'horsies.core.workflows.engine.check_workflow_completion',
-            new=AsyncMock(),
-        ) as mock_check:
-            await on_workflow_task_complete(
-                session, 'task-1', result, None, task_name='task-a',
-            )
-        mock_proc.assert_not_awaited()
-        mock_check.assert_not_awaited()
-
-    @pytest.mark.parametrize(
-        ('has_dependents', 'reads_dependents'),
-        [(True, True), (False, False)],
-        ids=['has_dependents', 'no_dependents'],
-    )
-    @pytest.mark.asyncio
-    async def test_the_dependents_are_read_only_for_a_node_that_has_some(
-        self,
-        has_dependents: bool,
-        reads_dependents: bool,
-    ) -> None:
-        """``has_dependents`` of the node write decides whether the
-        dependents are processed; the completion check runs either way."""
-
-        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
-            if stmt is COMPLETE_WORKFLOW_TASK_SQL:
-                return _one_result(
-                    SimpleNamespace(
-                        workflow_id='wf-1',
-                        task_index=0,
-                        wf_status='RUNNING',
-                        depth=0,
-                        root_workflow_id='wf-1',
-                        on_error='fail',
-                        cas_won=True,
-                        has_dependents=has_dependents,
-                    )
-                )
-            return _one_result(SimpleNamespace())
-
-        session = AsyncMock()
-        session.execute = AsyncMock(side_effect=_dispatch)
-        with (
-            patch(
-                'horsies.core.workflows.engine._process_dependents',
-                new=AsyncMock(),
-            ) as mock_proc,
-            patch(
-                'horsies.core.workflows.engine.check_workflow_completion',
-                new=AsyncMock(),
-            ) as mock_check,
-        ):
-            await on_workflow_task_complete(
-                session,
-                'task-1',
-                TaskResult(ok='done'),
-                None,
-                task_name='task-a',
-            )
-        assert mock_proc.await_count == (1 if reads_dependents else 0)
-        mock_check.assert_awaited_once()
-
-
-    @pytest.mark.parametrize(
-        ('wake', 'channel', 'payload'),
-        [
-            (QueueWake(channel='task_queue_q1', payload='capacity:task-1'),
-             'task_queue_q1', 'capacity:task-1'),
-            (NoQueueWake(), None, None),
-        ],
-        ids=['queue_wake', 'no_wake'],
-    )
-    @pytest.mark.asyncio
-    async def test_the_node_statement_carries_the_wake(
-        self,
-        wake: QueueWake | NoQueueWake,
-        channel: str | None,
-        payload: str | None,
-    ) -> None:
-        """The wake rides on the node statement: no statement of its own. A
-        NULL channel sends none."""
-        session = AsyncMock()
-        session.execute = AsyncMock(
-            return_value=_one_result(SimpleNamespace(workflow_id=None)),
-        )
-
-        await on_workflow_task_complete(
-            session, 'task-1', TaskResult(ok='done'), None,
-            task_name='task-a', wake=wake,
-        )
-
-        assert session.execute.await_count == 1
-        statement, parameters = session.execute.await_args.args
-        assert statement is COMPLETE_WORKFLOW_TASK_SQL
-        assert (parameters['wake_channel'], parameters['wake_payload']) == (
-            channel, payload,
-        )
-
-    @pytest.mark.asyncio
-    async def test_no_wake_is_the_default(self) -> None:
-        session = AsyncMock()
-        session.execute = AsyncMock(
-            return_value=_one_result(SimpleNamespace(workflow_id=None)),
-        )
-
-        await on_workflow_task_complete(
-            session, 'task-1', TaskResult(ok='done'), None, task_name='task-a',
-        )
-
-        parameters = session.execute.await_args.args[1]
-        assert parameters['wake_channel'] is None
 
 
 # ── 6. try_make_ready_and_enqueue ────────────────────────────────────
@@ -1467,6 +1264,7 @@ class TestGetDependencyResults:
         row = SimpleNamespace(
             task_index=0,
             task_name='task_a',
+            node_id='node-0',
             status='COMPLETED',
             result='not{json',
             sub_definition_key=None,
@@ -1502,6 +1300,7 @@ class TestGetDependencyResults:
         row = SimpleNamespace(
             task_index=0,
             task_name='task_a',
+            node_id='node-0',
             status='COMPLETED',
             # Valid JSON, but envelope marker is missing → decode rejects.
             result='{"unexpected": "shape"}',
@@ -1521,6 +1320,40 @@ class TestGetDependencyResults:
         assert results[0].is_err()
         assert results[0].err.error_code == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
         assert names[0] == 'task_a'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('status', ['COMPLETED', 'FAILED'])
+    async def test_no_stored_result_gives_the_deserialization_error(
+        self, status: str,
+    ) -> None:
+        """A terminal dependency with no stored result is an entry naming the
+        node; it used to be left out of the results."""
+        row = SimpleNamespace(
+            task_index=3,
+            task_name='task_a',
+            node_id='node-3',
+            status=status,
+            result=None,
+            sub_definition_key=None,
+        )
+
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            return _rows_result([row])
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+        results, names, _def_keys = await get_dependency_results(session, 'wf-1', [3])
+
+        entry = results[3]
+        assert entry.is_err()
+        assert entry.err is not None
+        assert entry.err.error_code == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert entry.err.message == (
+            f'Dependency node node-3 (index 3, task task_a) is {status} '
+            'with no stored result'
+        )
+        assert entry.err.data == {'dependency_index': 3}
+        assert names[3] == 'task_a'
 
 
 # ── 8. get_dependency_results_with_names ─────────────────────────────
@@ -1591,10 +1424,16 @@ class TestGetDependencyResultsWithNames:
         )
 
     @pytest.mark.asyncio
-    async def test_no_stored_result_skipped(self) -> None:
+    @pytest.mark.parametrize('status', ['COMPLETED', 'FAILED'])
+    @pytest.mark.parametrize('stored', [None, ''], ids=['null', 'empty'])
+    async def test_no_stored_result_gives_the_deserialization_error(
+        self, status: str, stored: str | None,
+    ) -> None:
+        """A terminal dependency with no stored result is an entry naming the
+        node; it used to be left out, and the context had no key for it."""
         row = SimpleNamespace(
             task_index=0, task_name='task_a', node_id='node-0',
-            status='COMPLETED', result=None,
+            status=status, result=stored,
             sub_definition_key=None,
         )
 
@@ -1604,8 +1443,18 @@ class TestGetDependencyResultsWithNames:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
         results = await get_dependency_results_with_names(session, 'wf-1', ['node-0'])
-        # result=None with status COMPLETED → continue (skip), not stored
-        assert 0 not in results.by_index
+
+        entry = results.by_index[0]
+        assert results.by_id['node-0'] is entry
+        assert results.by_name['task_a#0'] is entry
+        assert entry.is_err()
+        assert entry.err is not None
+        assert entry.err.error_code == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert entry.err.message == (
+            f'Dependency node node-0 (index 0, task task_a) is {status} '
+            'with no stored result'
+        )
+        assert entry.err.data == {'dependency_index': 0}
 
 
 # ── 9. evaluate_workflow_success ─────────────────────────────────────
@@ -1633,16 +1482,14 @@ class TestEvaluateWorkflowSuccess:
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_corrupt_policy_falls_back(self) -> None:
-        """Policy parses to non-dict → default behavior."""
+    async def test_corrupt_policy_fails_the_step(self) -> None:
+        """A policy that parses to a non-object fails the completion step; it
+        no longer falls back to the default rule (which gave True here)."""
         session = AsyncMock()
         session.execute = AsyncMock(return_value=_empty_result())
-        # String that parses to a list, not dict
-        result = await evaluate_workflow_success(
-            session, 'wf-1', '[1,2,3]', False, 0,
-        )
-        # Default: not has_error and failed == 0 → True
-        assert result is True
+        with pytest.raises(StoredSuccessPolicyError, match='not an object'):
+            await evaluate_workflow_success(session, 'wf-1', '[1,2,3]', False, 0)
+        session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_empty_required_indices_skipped(self) -> None:
@@ -1721,12 +1568,14 @@ class TestGetWorkflowFailureError:
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_corrupt_policy_returns_none(self) -> None:
+    async def test_corrupt_policy_fails_the_step(self) -> None:
+        """A policy that parses to a non-object fails the step; it no longer
+        returns None (which kept the stored error)."""
         session = AsyncMock()
         session.execute = AsyncMock(return_value=_empty_result())
-        # Parses to list, not dict
-        result = await get_workflow_failure_error(session, 'wf-1', '[1,2]')
-        assert result is None
+        with pytest.raises(StoredSuccessPolicyError, match='not an object'):
+            await get_workflow_failure_error(session, 'wf-1', '[1,2]')
+        session.execute.assert_not_awaited()
 
 
 # ── 11. get_workflow_final_result ────────────────────────────────────

@@ -31,10 +31,9 @@ ACME_URL_VARIABLE: Final[str] = 'ACME_DATABASE_URL'
 SHARED_URL_VARIABLE: Final[str] = 'DATABASE_URL'
 ACME_DATABASE_NAME: Final[str] = 'acme_demo'
 MAINTENANCE_DATABASE_NAME: Final[str] = 'postgres'
-SQLALCHEMY_SCHEME: Final[str] = 'postgresql+psycopg'
 PSYCOPG_SCHEME: Final[str] = 'postgresql'
 DEFAULT_DATABASE_URL: Final[str] = (
-    f'{SQLALCHEMY_SCHEME}://postgres:postgres@localhost:5432/{ACME_DATABASE_NAME}'
+    f'{PSYCOPG_SCHEME}://postgres:postgres@localhost:5432/{ACME_DATABASE_NAME}'
 )
 
 
@@ -47,7 +46,7 @@ class DatabaseSettings:
     """Every connection string Acme Clothing needs, derived from one URL."""
 
     url: str
-    """SQLAlchemy URL handed to :class:`horsies.PostgresConfig`."""
+    """``postgresql://`` URL handed to :class:`horsies.PostgresConfig`."""
 
     psycopg_dsn: str
     """Same target, plain libpq form, used by ``store`` for domain tables."""
@@ -156,10 +155,10 @@ def _select_url(env_file: dict[str, str]) -> tuple[str, str]:
 
 def _validate_url(url: str, source: str) -> str:
     """Return the database name, rejecting URLs horsies cannot use."""
-    if not url.startswith(f'{SQLALCHEMY_SCHEME}://'):
+    if not url.startswith(f'{PSYCOPG_SCHEME}://'):
         raise SettingsError(
-            f'{source} must start with "{SQLALCHEMY_SCHEME}://" — got "{url}". '
-            'horsies requires the psycopg3 async driver (HRS-203).',
+            f'{source} must start with "{PSYCOPG_SCHEME}://" — got "{url}". '
+            'horsies takes a postgresql:// URL that names no driver (HRS-203).',
         )
     database_name = urlsplit(url).path.lstrip('/')
     if not database_name:
