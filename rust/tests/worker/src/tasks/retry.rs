@@ -86,3 +86,15 @@ pub async fn retry_other_code() -> Result<String, TaskError<RetryCode>> {
         "not in auto_retry_for",
     ))
 }
+
+/// Python `e2e_retry_exhausted` with the 60 s intervals of
+/// `test_retry_blocked_by_good_until_expiry`: a retry would start after the
+/// deadline of a send with a near `good_until`.
+#[task(
+    "e2e_retry_long_interval",
+    retry_policy = fixed(vec![60, 60, 60]),
+    auto_retry_for = ["TRANSIENT"]
+)]
+pub async fn retry_long_interval() -> Result<String, TaskError<RetryCode>> {
+    Err(TaskError::user(RetryCode::Transient, "always fails"))
+}

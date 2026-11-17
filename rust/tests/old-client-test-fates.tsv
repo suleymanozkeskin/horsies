@@ -39,3 +39,44 @@ support/tests/smoke.rs	workflow_helpers_insert_and_query_task	DELETED	tested a s
 support/tests/smoke.rs	workflow_helpers_good_until_persisted_via_task_options	DELETED	tested a sqlx helper of the old support crate, deleted with it; the new support crate keeps a fresh database per test (horsies_test_support::database tests)
 support/tests/smoke.rs	workflow_helpers_count_tasks_in_status	DELETED	tested a sqlx helper of the old support crate, deleted with it; the new support crate keeps a fresh database per test (horsies_test_support::database tests)
 support/tests/smoke.rs	reaper_phase2_rejects_task_with_fresh_heartbeat	COVERED_BY_CORE	horsies-core broker::lifecycle_tests::stale_recovery_functions::finish::a_fresh_beat_is_not_stale
+worker/tests/layer1_tasks.rs	test_simple_task_lifecycle	PORTED	worker/tests/layer1_tasks.rs::test_simple_task_lifecycle
+worker/tests/layer1_tasks.rs	test_status_transitions	PORTED	worker/tests/layer1_tasks.rs::test_status_transitions
+worker/tests/layer1_tasks.rs	test_kwargs_with_defaults	PORTED	worker/tests/layer1_tasks.rs::test_kwargs_with_defaults
+worker/tests/layer1_tasks.rs	test_explicit_error_result	PORTED	worker/tests/layer1_tasks.rs::test_explicit_error_result
+worker/tests/layer1_tasks.rs	test_no_retry_for_non_matching	PORTED	worker/tests/layer1_tasks.rs::test_no_retry_for_non_matching
+worker/tests/layer1_tasks.rs	test_task_timeout_fails_with_task_timeout	PORTED	worker/tests/layer1_tasks.rs::test_task_timeout_fails_with_task_timeout
+worker/tests/layer1_tasks.rs	test_task_timeout_retry_opt_in	PORTED	worker/tests/layer1_tasks.rs::test_task_timeout_retry_opt_in
+worker/tests/layer1_tasks.rs	test_slow_task_completes	PORTED	worker/tests/layer1_tasks.rs::test_slow_task_completes
+worker/tests/layer1_tasks.rs	test_multiple_tasks_concurrent	PORTED	worker/tests/layer1_tasks.rs::test_multiple_tasks_concurrent
+worker/tests/layer1_tasks.rs	test_healthcheck	PORTED	worker/tests/layer1_tasks.rs::test_healthcheck
+worker/tests/layer1_tasks.rs	test_retry_exhausted	PORTED	worker/tests/layer1_tasks.rs::test_retry_exhausted
+worker/tests/layer1_tasks.rs	test_retry_eventual_success	PORTED	worker/tests/layer1_tasks.rs::test_retry_eventual_success
+worker/tests/layer1_tasks.rs	test_good_until_already_past	PORTED	worker/tests/layer1_tasks.rs::test_good_until_already_past
+worker/tests/layer1_tasks.rs	test_good_until_future_completes	PORTED	worker/tests/layer1_tasks.rs::test_good_until_future_completes
+worker/tests/layer1_tasks.rs	test_retry_blocked_by_good_until_expiry	PORTED	worker/tests/layer1_tasks.rs::test_retry_blocked_by_good_until_expiry
+worker/tests/layer1_tasks.rs	test_worker_resolution_error	PORTED	worker/tests/layer1_tasks.rs::test_worker_resolution_error
+worker/tests/layer1_tasks.rs	test_argument_deserialization_error	PORTED	worker/tests/layer1_tasks.rs::test_argument_deserialization_error
+worker/tests/layer1_tasks.rs	test_task_cancelled	PORTED	worker/tests/layer1_tasks.rs::test_task_cancelled
+worker/tests/layer1_tasks.rs	test_task_info_after_completion	PORTED	worker/tests/layer1_tasks.rs::test_task_info_after_completion
+worker/tests/layer1_tasks.rs	test_exponential_backoff_state	PORTED	worker/tests/layer1_tasks.rs::test_exponential_backoff_state
+worker/tests/layer1_tasks.rs	test_exponential_backoff_intervals	PORTED	worker/tests/layer1_tasks.rs::test_exponential_backoff_intervals
+worker/tests/layer1_tasks.rs	test_auto_retry_by_error_code	PORTED	worker/tests/layer1_tasks.rs::test_auto_retry_by_error_code
+worker/tests/layer1_tasks.rs	test_task_expires_before_claim	PORTED	worker/tests/layer1_tasks.rs::test_task_expires_before_claim
+worker/tests/layer1_tasks.rs	test_retry_succeeds_within_good_until	PORTED	worker/tests/layer1_tasks.rs::test_retry_succeeds_within_good_until
+worker/tests/layer1_tasks.rs	test_good_until_expires_while_claimed_before_start	PORTED	worker/tests/layer1_tasks.rs::test_good_until_expires_while_claimed_before_start
+worker/tests/layer1_tasks.rs	test_priority_ordering	PORTED	worker/tests/layer1_tasks.rs::test_priority_ordering
+worker/tests/layer1_tasks.rs	test_skip_locked_prevents_double_claim	PORTED	worker/tests/layer1_tasks.rs::test_skip_locked_prevents_double_claim
+worker/tests/layer1_tasks.rs	test_max_claim_batch	PORTED	worker/tests/layer1_tasks.rs::test_max_claim_batch
+worker/tests/layer1_tasks.rs	test_multiple_tasks_concurrent_db_proof	PORTED	worker/tests/layer1_tasks.rs::test_multiple_tasks_concurrent_db_proof
+worker/tests/layer1_tasks.rs	test_task_not_found	PORTED	worker/tests/layer1_tasks.rs::test_task_not_found
+worker/tests/layer1_tasks.rs	test_wait_timeout	PORTED	worker/tests/layer1_tasks.rs::test_wait_timeout
+worker/tests/layer1_tasks.rs	test_library_error_code_in_user_task	PORTED	worker/tests/layer1_tasks.rs::test_library_error_code_in_user_task
+worker/tests/layer1_tasks.rs	test_task_cancelled_get_result	PORTED	worker/tests/layer1_tasks.rs::test_task_cancelled_get_result
+worker/tests/layer1_tasks.rs	test_complex_result_serialization	PORTED	worker/tests/layer1_tasks.rs::test_complex_result_serialization
+worker/tests/layer1_tasks.rs	test_custom_mode_queue_routing	PORTED	worker/tests/layer1_tasks.rs::test_custom_mode_queue_routing
+worker/tests/layer1_tasks.rs	test_custom_mode_queue_names_stored	PORTED	worker/tests/layer1_tasks.rs::test_custom_mode_queue_names_stored
+worker/tests/layer1_tasks.rs	test_attempt_recorded_on_success	PORTED	worker/tests/layer1_tasks.rs::test_attempt_recorded_on_success
+worker/tests/layer1_tasks.rs	test_attempt_recorded_on_failure	PORTED	worker/tests/layer1_tasks.rs::test_attempt_recorded_on_failure
+worker/tests/layer1_tasks.rs	test_attempt_recorded_on_retry_exhausted	PORTED	worker/tests/layer1_tasks.rs::test_attempt_recorded_on_retry_exhausted
+worker/tests/layer1_tasks.rs	test_enqueue_sha_idempotent_same_sha	PORTED	worker/tests/layer1_tasks.rs::test_idempotency_key_same_input_returns_the_first_task
+worker/tests/layer1_tasks.rs	test_enqueue_sha_payload_mismatch	PORTED	worker/tests/layer1_tasks.rs::test_idempotency_key_other_input_is_a_conflict
