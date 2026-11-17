@@ -48,10 +48,55 @@ if TYPE_CHECKING:
     from horsies.core.history.maintenance.pruning import PrunePassSummary
     from horsies.core.models.recovery import RecoveryConfig
     from horsies.core.models.retention import RetentionConfig
+    from horsies._core import RecoveryCaseRecord, RecoveryPassRecord
     from horsies.core.workflows.phase2_recovery import Phase2RecoverySummary
+    from horsies.core.workflows.recovery import RecoveryCaseMetrics, RecoveryReport
     from horsies.core.worker.config import WorkerConfig
 
 logger = get_logger('worker')
+
+
+def _recovery_case_metrics(record: 'RecoveryCaseRecord') -> 'RecoveryCaseMetrics':
+    """The case metrics of a core record. Pure."""
+    from horsies.core.workflows.recovery import RecoveryCaseMetrics
+
+    return RecoveryCaseMetrics(
+        rows_selected=record.rows_selected,
+        candidates_returned=record.candidates_returned,
+        duration_ms=record.duration_ms,
+        refusals=record.refusals,
+        errors=record.errors,
+        failures_counted=record.failures_counted,
+        limit_reached=record.limit_reached,
+    )
+
+
+def _recovery_report_of(record: 'RecoveryPassRecord') -> 'RecoveryReport':
+    """The report of a core pass record. Pure.
+
+    ``errors`` holds the failures that no case counted, as the Python pass
+    kept them; the audit page is the one the case 2/3 metrics count (a page
+    of 0 workflows has no completion yield, as no page).
+    """
+    from horsies.core.workflows.recovery import AuditPage, RecoveryReport
+
+    return RecoveryReport(
+        recovered=record.recovered,
+        errors=record.pass_errors,
+        metrics={
+            'case_0': _recovery_case_metrics(record.case_0),
+            'case_1': _recovery_case_metrics(record.case_1),
+            'case_1_5': _recovery_case_metrics(record.case_1_5),
+            'case_1_6': _recovery_case_metrics(record.case_1_6),
+            'case_2_3': _recovery_case_metrics(record.case_2_3),
+            'case_4': _recovery_case_metrics(record.case_4),
+        },
+        audit=AuditPage(
+            scanned=record.case_2_3.rows_selected,
+            completion_candidates=record.case_2_3.candidates_returned,
+        ),
+        over_failure_limit=record.over_failure_limit,
+    )
 
 
 def _operation_sqlstate(error: BrokerOperationError) -> str | None:
@@ -268,12 +313,7 @@ class ReaperMixin:
 
         # Recover stuck workflows
         try:
-            from horsies.core.workflows.recovery import (
-                recover_stuck_workflows_global,
-            )
-
-            recovery_report = await recover_stuck_workflows_global(
-                resources.session_factory,
+            recovery_report = await self._recover_workflows(
                 temp_broker,
                 failure_limit=recovery_cfg.workflow_recovery_failure_limit,
             )
@@ -631,6 +671,43 @@ class ReaperMixin:
                     raise AssertionError('take_uncovered returned a served stream')
                 case _ as unreachable:
                     assert_never(unreachable)
+
+    async def _recover_workflows(
+        self,
+        temp_broker: 'PostgresBroker',
+        *,
+        failure_limit: int,
+    ) -> 'RecoveryReport':
+        """The global workflow recovery pass, in the core
+        (``CoreHandle.recover_workflows_async``): cases 0 to 4, each candidate
+        in its own transaction with the child starts it owes built through
+        the broker's child spec source, then the count of workflows over
+        ``failure_limit``.
+
+        Returns the report of the pass, in the form whose ``health()`` the
+        reaper publishes.
+
+        Raises:
+            RecoveryPassFailure: the pass failed, with its partial report and
+                a ``CoreOperationFailed`` cause.
+            CoreError: the core of this process cannot run the call.
+        """
+        from horsies._core import RecoveryPassFailed, RecoveryPassRecord
+        from horsies.core.types.core_failure import CoreOperationFailed
+
+        record = await temp_broker._core_handle.recover_workflows_async(
+            failure_limit=failure_limit,
+        )
+        match record:
+            case RecoveryPassRecord():
+                return _recovery_report_of(record)
+            case RecoveryPassFailed(report=report, message=message, retryable=retryable):
+                raise RecoveryPassFailure(
+                    _recovery_report_of(report),
+                    CoreOperationFailed('recover_workflows', message, retryable),
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _recover_phase2(
         self,

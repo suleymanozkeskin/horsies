@@ -4,7 +4,8 @@
 //! [`ChildSpecSource`]: the entry points of the Python worker's
 //! `FinalizeMixin._finalize_workflow_phase` and `_drive_parent_propagations`
 //! (`python/horsies/core/worker/finalize.py`) and of its reaper's phase-2
-//! recovery (`python/horsies/core/worker/reaper.py`), which call them through
+//! recovery and workflow recovery pass (`python/horsies/core/worker/reaper.py`),
+//! which call them through
 //! `horsies._core` in place of their own statements.
 //!
 //! Each runs on the main core pool with the reserve
@@ -18,6 +19,9 @@ use crate::db::CheckoutClass;
 use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::phase2_recovery::{drive_phase2_recovery_with, Phase2RecoverySummary};
+use crate::workflow_engine::recovery::{
+    recover_stuck_workflows_observed_with, RecoveryPassFailure, RecoveryReport,
+};
 use crate::workflow_engine::steps::{
     advance_parents, node_finish_alone, node_finish_in_transaction, ChildBuild, Dependents,
     NodeFinishDisposition, OwedParentAdvances, ParentAdvance, ParentAdvanceFailure, SourceFailure,
@@ -222,6 +226,40 @@ impl PostgresBroker {
             quarantine_after_attempts,
         )
         .await
+    }
+}
+
+impl PostgresBroker {
+    /// The reaper's global workflow recovery pass (Python
+    /// `recover_stuck_workflows_global`, `python/horsies/core/workflows/recovery.py`):
+    /// cases 0, 1, 1.5 and 1.6 from their discovery statements and cases 2/3
+    /// and 4 from the audit page, each candidate in its own transaction with
+    /// the child starts it owes (children from `source`), then the count of
+    /// workflows over `failure_limit`. One pass id: a workflow counts at most
+    /// once per pass.
+    ///
+    /// The client family is checked once per handle before the first write;
+    /// a refusal is a failure of the pass with an empty report.
+    ///
+    /// Errors: [`RecoveryPassFailure`] when a discovery statement, the audit
+    /// page or the count failed, with the partial report; the cases before it
+    /// ran. A candidate's own failure is in the report, not an error.
+    pub async fn recover_workflows(
+        &self,
+        failure_limit: u32,
+        source: &dyn ChildSpecSource,
+    ) -> Result<RecoveryReport, RecoveryPassFailure> {
+        if let Err(error) = self.ensure_client_family_for_write().await {
+            return Err(RecoveryPassFailure {
+                report: RecoveryReport {
+                    errors: 1,
+                    pass_errors: 1,
+                    ..RecoveryReport::default()
+                },
+                error: WorkflowError::Broker(error),
+            });
+        }
+        recover_stuck_workflows_observed_with(self, ChildBuild::Client(source), failure_limit).await
     }
 }
 

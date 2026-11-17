@@ -49,6 +49,13 @@ WORKFLOW_ENGINE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         core_methods=('recover_workflow_phase2_async',),
     ),
     DualRunOperation(
+        name='workflow recovery pass',
+        production_path='horsies.core.worker.reaper:ReaperMixin._recover_workflows',
+        reference_path='tests.dualrun.reference.recovery_pass_caller:recover_workflows',
+        mode=PoolMode(),
+        core_methods=('recover_workflows_async',),
+    ),
+    DualRunOperation(
         name='workflow pause',
         production_path='horsies.core.workflows.lifecycle:pause_workflow',
         reference_path='tests.dualrun.reference.workflow_pause_caller:pause_workflow',
