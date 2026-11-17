@@ -315,56 +315,12 @@ WHERE status = 'RUNNING' \
    OR (status = 'CLAIMED' \
        AND (claim_expires_at IS NULL OR claim_expires_at > now()))";
 
-/// Get the workflow status for a task (if it belongs to a workflow).
-const GET_WORKFLOW_STATUS_FOR_TASK_SQL: &str = "\
-SELECT w.status FROM horsies_workflows w \
-JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id \
-WHERE wt.task_id = $1";
-
 /// Skip workflow_tasks for tasks belonging to CANCELLED workflows.
 const SKIP_CANCELLED_WORKFLOW_TASKS_SQL: &str = "\
 UPDATE horsies_workflow_tasks \
 SET status = 'SKIPPED', \
     completed_at = NOW() \
 WHERE task_id = ANY($1) AND status IN ('PENDING', 'READY', 'ENQUEUED')";
-
-/// Release a single claimed task back to PENDING.
-///
-/// The row is read by id alone in a MATERIALIZED CTE that locks it, so only
-/// the primary key serves the read whatever the statistics say; the fence
-/// (CLAIMED, this worker, this claim generation) is checked on the locked
-/// row. The generation comparison has no NULL arm, so a stale dispatch
-/// cannot release a row the same worker re-claimed after lease expiry. The
-/// release clears every claim and run field and the finalizing marker, as
-/// Python's `UNCLAIM_CLAIMED_TASK_SQL` (`core/worker/sql.py`) does.
-const UNCLAIM_TASK_SQL: &str = "\
-WITH target AS MATERIALIZED ( \
-    SELECT id, \
-           ( \
-               status = 'CLAIMED' \
-               AND claimed_by_worker_id = $2 \
-               AND claimed_at = $3 \
-           ) IS TRUE AS releasable \
-    FROM horsies_tasks \
-    WHERE id = $1 \
-    FOR NO KEY UPDATE \
-) \
-UPDATE horsies_tasks t \
-SET status = 'PENDING', \
-    claimed_at = NULL, \
-    claimed_by_worker_id = NULL, \
-    claim_expires_at = NULL, \
-    started_at = NULL, \
-    worker_pid = NULL, \
-    worker_hostname = NULL, \
-    worker_process_name = NULL, \
-    finalizing_at = NULL, \
-    finalizing_by_worker_id = NULL, \
-    updated_at = NOW() \
-FROM target \
-WHERE t.id = target.id \
-  AND target.releasable \
-RETURNING t.id";
 
 /// Reset the nodes of abandoned tasks of PAUSED workflows to READY, so a
 /// resume enqueues a fresh task. Only an ENQUEUED or RUNNING node is reset;
@@ -2031,47 +1987,6 @@ impl PostgresBroker {
         Ok(count.0)
     }
 
-    /// Get the workflow status for a task if it belongs to a workflow.
-    ///
-    /// Returns `None` if the task does not belong to any workflow.
-    pub async fn get_workflow_status_for_task(
-        &self,
-        task_id: Uuid,
-    ) -> Result<Option<String>, BrokerError> {
-        let row: Option<(String,)> = sqlx::query_as(GET_WORKFLOW_STATUS_FOR_TASK_SQL)
-            .bind(task_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(row.map(|r| r.0))
-    }
-
-    /// Handle a workflow stop discovered after the task was claimed but before it started.
-    ///
-    /// Mirrors Python's child-runner preflight behavior:
-    /// - `PAUSED`: unclaim task → `PENDING`, reset `workflow_task` → `READY`
-    /// - `CANCELLED`: cancel task → `CANCELLED`, mark `workflow_task` → `SKIPPED`
-    ///
-    /// Any other status writes nothing. A pause that a resume undid writes
-    /// nothing either (see [`Self::stop_workflow_task_before_start`]).
-    pub async fn handle_workflow_stop_before_start(
-        &self,
-        task_id: Uuid,
-        workflow_status: &str,
-        worker_id: &str,
-        claimed_at: DateTime<Utc>,
-    ) -> Result<(), BrokerError> {
-        let stop = match workflow_status {
-            "PAUSED" => WorkflowStop::Paused,
-            "CANCELLED" => WorkflowStop::Cancelled,
-            _ => return Ok(()),
-        };
-        let _outcome = self
-            .stop_workflow_task_before_start(task_id, stop, worker_id, claimed_at)
-            .await?;
-        Ok(())
-    }
-
     /// Stop a claimed workflow task before it started because its workflow
     /// stopped (Python `_handle_workflow_stop_before_start`,
     /// `horsies/core/worker/child_runner.py`), in one transaction:
@@ -2229,36 +2144,6 @@ impl PostgresBroker {
                 ClaimDisposition::Dispatch => None,
             })
             .collect())
-    }
-
-    /// Unclaim a single task, resetting it from CLAIMED back to PENDING.
-    ///
-    /// Guarded by `worker_id` so we only unclaim tasks we own — prevents
-    /// races where the reaper already requeued the task and another worker
-    /// re-claimed it. `claimed_at` additionally fences the release to the
-    /// caller's claim generation, rejecting a stale release of a row the
-    /// SAME worker re-claimed (C10).
-    ///
-    /// Returns `true` if the task was unclaimed, `false` if it was already
-    /// handled (e.g. reaper moved it or another worker claimed it).
-    pub async fn unclaim_task(
-        &self,
-        task_id: Uuid,
-        worker_id: &str,
-        claimed_at: DateTime<Utc>,
-    ) -> Result<bool, BrokerError> {
-        let row: Option<(Uuid,)> = sqlx::query_as(UNCLAIM_TASK_SQL)
-            .bind(task_id)
-            .bind(worker_id)
-            .bind(claimed_at)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-
-        if row.is_some() {
-            tracing::debug!(task_id = %task_id, worker_id, "task unclaimed back to PENDING");
-        }
-        Ok(row.is_some())
     }
 
     /// Close the broker's pools.
@@ -4858,8 +4743,8 @@ mod set_running_heartbeat_tests {
     }
 
     /// C10 for CLAIMED rows: a stale dispatch (born from an earlier claim
-    /// generation) must not start, expire, or release a row the same worker
-    /// re-claimed — worker_id and status match, only `claimed_at` differs.
+    /// generation) must not start or expire a row the same worker re-claimed
+    /// — worker_id and status match, only `claimed_at` differs.
     #[tokio::test]
     #[serial]
     async fn claimed_row_statements_fenced_by_claimed_at() {
@@ -4887,12 +4772,8 @@ mod set_running_heartbeat_tests {
         assert!(started.is_none(), "stale generation must not start the row");
         assert_eq!(runner_beats(&pool, &id).await, 0);
 
-        // Stale unclaim: the live claim must survive.
-        let released = broker
-            .unclaim_task(Uuid::parse_str(&id).unwrap(), "w1", stale_generation)
-            .await
-            .expect("unclaim");
-        assert!(!released, "stale generation must not release the row");
+        // The release of a stale generation is
+        // `lifecycle_tests::claim_start_release::release::a_held_claim_is_released_and_another_generation_is_not`.
 
         // Expire-before-start deliberately carries no claim generation: once
         // the deadline has passed, expiry is the correct outcome for
@@ -4935,7 +4816,9 @@ mod set_running_heartbeat_tests {
         cleanup(&pool, &id).await;
     }
 
-    /// The live generation passes the set_running and unclaim fences.
+    /// The live generation passes the set_running fence. The release of the
+    /// live generation is
+    /// `lifecycle_tests::claim_start_release::release::a_held_claim_is_released_and_another_generation_is_not`.
     #[tokio::test]
     #[serial]
     async fn claimed_at_fence_admits_live_generation() {
@@ -4943,17 +4826,6 @@ mod set_running_heartbeat_tests {
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-
-        let id = Uuid::new_v4().to_string();
-        seed_claimed(&pool, &id, "w1").await;
-        let live_generation = generation(&pool, &id).await;
-
-        let released = broker
-            .unclaim_task(Uuid::parse_str(&id).unwrap(), "w1", live_generation)
-            .await
-            .expect("unclaim");
-        assert!(released, "live generation must release the row");
-        cleanup(&pool, &id).await;
 
         let id = Uuid::new_v4().to_string();
         seed_claimed(&pool, &id, "w1").await;
@@ -4971,65 +4843,6 @@ mod set_running_heartbeat_tests {
             .expect("set_running");
         assert!(running.is_some(), "live generation must start the row");
         assert_eq!(runner_beats(&pool, &id).await, 1);
-        cleanup(&pool, &id).await;
-    }
-
-    /// The release clears every claim and run field and the finalizing
-    /// marker, as Python's `UNCLAIM_CLAIMED_TASK_SQL` (`core/worker/sql.py`)
-    /// does: a released PENDING row names no worker, no claim and no run.
-    #[tokio::test]
-    #[serial]
-    async fn release_clears_every_claim_and_run_field() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
-        broker.ensure_schema_initialized().await.expect("schema");
-        let pool = broker.pool().clone();
-        let id = Uuid::new_v4().to_string();
-        seed_claimed(&pool, &id, "w1").await;
-        sqlx::query(
-            "UPDATE horsies_tasks
-             SET started_at = NOW(), worker_pid = 321, worker_hostname = 'host1',
-                 worker_process_name = 'worker', finalizing_at = NOW(),
-                 finalizing_by_worker_id = 'w1'
-             WHERE id = $1",
-        )
-        .bind(test_uuid(&id))
-        .execute(&pool)
-        .await
-        .expect("stamp run fields");
-        let live_generation = generation(&pool, &id).await;
-
-        let released = broker
-            .unclaim_task(test_uuid(&id), "w1", live_generation)
-            .await
-            .expect("unclaim");
-        assert!(released, "live generation must release the row");
-
-        let (status, cleared): (String, serde_json::Value) = sqlx::query_as(
-            "SELECT status::text,
-                    jsonb_build_object(
-                        'claimed_at', claimed_at,
-                        'claimed_by_worker_id', claimed_by_worker_id,
-                        'claim_expires_at', claim_expires_at,
-                        'started_at', started_at,
-                        'worker_pid', worker_pid,
-                        'worker_hostname', worker_hostname,
-                        'worker_process_name', worker_process_name,
-                        'finalizing_at', finalizing_at,
-                        'finalizing_by_worker_id', finalizing_by_worker_id
-                    )
-             FROM horsies_tasks WHERE id = $1",
-        )
-        .bind(test_uuid(&id))
-        .fetch_one(&pool)
-        .await
-        .expect("released row");
-        assert_eq!(status, "PENDING");
-        let fields = cleared.as_object().expect("field object");
-        for (field, value) in fields {
-            assert!(value.is_null(), "release must clear {field}, found {value}");
-        }
-        assert_eq!(fields.len(), 9);
         cleanup(&pool, &id).await;
     }
 }
