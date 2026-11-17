@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import get_args
+from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
@@ -47,7 +48,7 @@ pytestmark = [pytest.mark.unit]
 
 MESSAGE_MARKER = 'message-marker-91af'
 CAUSE_MARKER = 'cause-marker-91af'
-TASK_ID = '0b1c2d3e-4f50-4a61-8b72-c3d4e5f60718'
+TASK_ID = UUID('0b1c2d3e-4f50-4a61-8b72-c3d4e5f60718')
 WORKFLOW_ID = '1c2d3e4f-5061-4b72-8c83-d4e5f6071829'
 LOOP_LIMIT = EventLoopLimit(
     limit=5,
@@ -138,7 +139,7 @@ class TestDatabaseFailure:
 class TestHistoryContractViolation:
     @pytest.mark.asyncio
     async def test_task_detail_returns_the_variant_with_the_cause(self) -> None:
-        broker, _ = function_broker([history_row(TASK_ID, status=CAUSE_MARKER)])
+        broker, _ = function_broker([history_row(str(TASK_ID), status=CAUSE_MARKER)])
 
         result = await get_task_detail(broker, TASK_ID)
 
@@ -154,7 +155,7 @@ class TestHistoryContractViolation:
     @pytest.mark.asyncio
     async def test_workflow_node_returns_the_variant_with_the_cause(self) -> None:
         broker, _ = function_broker(
-            [node_row(0, history_row(TASK_ID, status=CAUSE_MARKER))],
+            [node_row(0, history_row(str(TASK_ID), status=CAUSE_MARKER))],
         )
 
         result = await get_workflow_node(broker, WORKFLOW_ID, 0)

@@ -916,12 +916,19 @@ SELECT fixture_check(
     (SELECT b.outcome = 'NOT_EXPIRED' FROM begin_not_expired AS b)
     AND NOT fixture_holds_leaf_lock('standard_1d', date_trunc('day', now()) + interval '1 day')
 );
+-- A leaf detached out of band that the manifest does not name: begin records the detach and publishes nothing (a
+-- publication stamps each reader with a comment; the stand-ins of this file have none).
+SELECT fixture_leaf('standard_1d', '2021-01-04 00:00:00+00');
+ALTER TABLE horsies_task_history_standard_1d DETACH PARTITION horsies_task_history_standard_1d_2021_01_04;
 CREATE TEMP TABLE begin_detached AS
-    SELECT * FROM horsies_begin_leaf_detach('horsies_task_history_standard_1d_2021_01_02');
+    SELECT * FROM horsies_begin_leaf_detach('horsies_task_history_standard_1d_2021_01_04');
 SELECT fixture_check(
-    'begin detach: a detached leaf is DETACHED and leaves no lock',
+    'begin detach: a detached leaf is DETACHED, leaves no lock, and its detach is recorded',
     (SELECT b.outcome = 'DETACHED' FROM begin_detached AS b)
-    AND NOT fixture_holds_leaf_lock('standard_1d', '2021-01-02 00:00:00+00')
+    AND NOT fixture_holds_leaf_lock('standard_1d', '2021-01-04 00:00:00+00')
+    AND (SELECT detached_at IS NOT NULL FROM horsies_task_history_leaf_catalog
+         WHERE leaf_name = 'horsies_task_history_standard_1d_2021_01_04')
+    AND obj_description(to_regprocedure('horsies_task_detail_staged(uuid)'), 'pg_proc') IS NULL
 );
 SELECT fixture_check(
     'begin detach: an expired heartbeat leaf is DETACHABLE from horsies_heartbeats',
