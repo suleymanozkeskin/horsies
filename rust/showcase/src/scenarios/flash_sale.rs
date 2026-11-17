@@ -1,40 +1,51 @@
 //! Flash-sale campaign scenario.
 
 use chrono::{Duration, Utc};
-use serde_json::json;
+use horsies::TaskSendOptions;
+
+use crate::tasks::promotions::update_price;
+use crate::tuning;
 
 use super::{
-    bullet, heading, load_catalog, prepare_database, register_runtime, say, send_json_task,
-    ScenarioResult,
+    bullet, heading, load_catalog, prepare_database, register_runtime, say, ScenarioResult,
 };
+
+/// The campaign of the expiring price updates.
+const PRICE_CAMPAIGN: &str = "flash-sale";
 
 pub async fn run() -> ScenarioResult<()> {
     heading("Acme Clothing — flash sale");
     let (settings, store) = prepare_database().await?;
     let catalog = load_catalog(&store).await?;
-    let (app, handles, workflows) = register_runtime(settings.sqlx_url())?;
-    let flash = workflows
-        .static_specs
-        .get("flash_sale")
-        .ok_or_else(|| "flash_sale workflow is not registered".to_owned())?;
+    let showcase = register_runtime(settings.sqlx_url())?;
     for campaign in ["flash-a", "flash-b"] {
-        let handle = flash.start().await.map_err(|error| error.to_string())?;
+        let handle = showcase
+            .workflows
+            .flash_sale
+            .start()
+            .await
+            .map_err(|error| error.to_string())?;
         bullet(format!("{campaign}: {}", handle.workflow_id()));
     }
-    let good_until = Utc::now() + Duration::seconds(crate::tuning::PRICE_GOOD_UNTIL_SECONDS);
-    for index in 0..crate::tuning::EXPIRING_PRICE_SENDS {
+    let good_until = Utc::now() + Duration::seconds(tuning::PRICE_GOOD_UNTIL_SECONDS);
+    let expiring = showcase
+        .tasks
+        .update_price
+        .with_options(TaskSendOptions::new().good_until(good_until));
+    for index in 0..tuning::EXPIRING_PRICE_SENDS {
         let entry = &catalog[index % catalog.len()];
-        send_json_task(&handles, "update_price", json!({
-            "sku": entry.product.sku,
-            "price_cents": entry.product.price_cents - crate::tuning::FLASH_SALE_DISCOUNT_PERCENT,
-            "good_until": good_until,
-        })).await?;
+        let _update = expiring
+            .send(update_price::Input {
+                sku: entry.product.sku.clone(),
+                campaign_id: PRICE_CAMPAIGN.to_owned(),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
     }
     say(format!(
         "submitted {} expiring price updates",
-        crate::tuning::EXPIRING_PRICE_SENDS
+        tuning::EXPIRING_PRICE_SENDS
     ));
-    drop(app);
     store.close().await;
     Ok(())
 }
