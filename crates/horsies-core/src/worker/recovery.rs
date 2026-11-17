@@ -2887,3 +2887,6 @@ mod class_coverage_loop_tests;
 
 #[cfg(test)]
 mod retention_ports;
+
+#[cfg(test)]
+mod reaper_pass_ports;
