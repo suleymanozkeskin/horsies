@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::core::task::result::TaskResult;
+use crate::core::workflow::summary::SubWorkflowSummary;
 use crate::core::WorkflowTaskStatus;
 
 /// Metadata for a single task within a workflow.
@@ -34,6 +35,7 @@ pub struct WorkflowTaskInfo {
     /// ID of the child workflow (if this task is a sub-workflow node).
     pub sub_workflow_id: Option<Uuid>,
 
-    /// Summary of the child workflow result (if this task is a sub-workflow node).
-    pub sub_workflow_summary: Option<String>,
+    /// Summary of the finished child workflow (a sub-workflow node whose child is terminal), read with
+    /// Python's rules ([`SubWorkflowSummary::from_stored_value`]); `None` when the node stores none.
+    pub sub_workflow_summary: Option<SubWorkflowSummary>,
 }

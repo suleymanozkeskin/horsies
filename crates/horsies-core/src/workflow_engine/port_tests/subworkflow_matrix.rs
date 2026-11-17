@@ -344,7 +344,7 @@ pub(super) fn assert_subworkflow_error(
     if let Some(child) = child_id {
         assert_eq!(details.sub_workflow_id, child);
     }
-    assert_eq!(details.sub_workflow_summary.status, "FAILED");
+    assert_eq!(details.sub_workflow_summary.status, WorkflowStatus::Failed);
     assert!(details.sub_workflow_summary.failed_tasks >= 1);
     details.sub_workflow_summary.clone()
 }
@@ -430,7 +430,7 @@ async fn a_child_success_reads_the_same_on_every_surface() {
     let child_id = sub.sub_workflow_id.expect("the node holds its child");
     assert_ok_value(&node_result(sub.result), serde_json::json!(11));
     let summary = summary_of(sub.sub_workflow_summary.as_deref());
-    assert_eq!(summary.status, "COMPLETED");
+    assert_eq!(summary.status, WorkflowStatus::Completed);
     assert_eq!(summary.output, Some(serde_json::json!(11)));
     assert_eq!((summary.total_tasks, summary.completed_tasks), (1, 1));
     let child = tree(&pool, workflow_id)
@@ -596,7 +596,7 @@ async fn a_failed_child_reaches_its_dependent_through_args_from_and_the_context(
         .unwrap_or_else(|| panic!("the context holds the child summary as text: {input}"));
     let summary: SubWorkflowSummary =
         serde_json::from_str(summary_text).expect("the child summary decodes");
-    assert_eq!(summary.status, "FAILED");
+    assert_eq!(summary.status, WorkflowStatus::Failed);
     assert_eq!(summary.failed_tasks, 1);
 }
 
