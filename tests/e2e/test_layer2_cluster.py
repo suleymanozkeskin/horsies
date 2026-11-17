@@ -1382,6 +1382,13 @@ run: the start of a claimed task (``horsies_start_attempt``, sent by the
 child) and the release of that claim (``horsies_release_claims``, sent by
 the worker)."""
 
+REFUSED_ONCE_A_HOLDS_THE_TASK: Final = (*REFUSED_FOR_WORKER_A, 'horsies_claim(')
+"""Worker A's refusals once it holds the task: also its claims. Its claim
+loop would take the task again each time the lease ends, before worker B
+does; a refused claim is retried with backoff, so worker A stays alive and
+keeps renewing the claims it holds, as the old test's worker A did with the
+task counted against its capacity."""
+
 REFUSAL_EVIDENCE_TIMEOUT_S: Final = 60.0
 """The longest wait for the proxy to refuse both statements of worker A."""
 
@@ -1466,7 +1473,8 @@ async def test_requeue_db_error_age_guard_recovery(
          in its child and the release of the claim in the worker
          (``REFUSED_FOR_WORKER_A``): A claims the task, its child cannot
          start it, and the release fails, so the task stays CLAIMED while
-         A lives and renews its claims.
+         A lives and renews its claims. Once A holds the task, the proxy
+         also refuses A's claims (``REFUSED_ONCE_A_HOLDS_THE_TASK``).
       3. Age guard (max_claim_renew_age_ms=5s) stops lease renewal.
       4. Start Worker B (directly on the database): reclaims the now-expired
          task and completes it.
@@ -1511,6 +1519,9 @@ async def test_requeue_db_error_age_guard_recovery(
                     assert task is not None
                     worker_a_id = task.claimed_by_worker_id
                     assert worker_a_id is not None, 'Task should be claimed by Worker A'
+
+                # Worker A claims nothing more from here on.
+                proxy.refuse_statements(REFUSED_ONCE_A_HOLDS_THE_TASK)
 
                 # 3. Wait for age guard to stop lease renewal.
                 #    max_claim_renew_age_ms=5s, claim_lease_ms=2s → after ~5s the
