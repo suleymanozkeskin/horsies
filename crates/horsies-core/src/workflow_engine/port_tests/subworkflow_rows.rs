@@ -22,7 +22,6 @@ use crate::core::{
     WorkflowSpecRegistry, WorkflowStatus,
 };
 use crate::workflow_engine::engine::on_subworkflow_complete;
-use crate::workflow_engine::recovery::recover_stuck_workflows;
 use crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH;
 
 /// A child with one task node that is its output (Python `StartChildWorkflow`).
@@ -337,7 +336,6 @@ async fn failed_node_code(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> 
 /// root workflow.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #887"]
 async fn a_root_nesting_stops_at_the_depth_limit() {
     let db = IsolatedDatabase::create().await;
     let key = "tests.port.root_nesting.v1";
@@ -356,21 +354,10 @@ async fn a_root_nesting_stops_at_the_depth_limit() {
         )],
     );
     parent.output_index = Some(0);
+    // The start builds the whole nesting in one statement: the depth-32
+    // workflow fails its root node, and the start advances each parent node
+    // up to the root workflow before it commits (`horsies_workflow_start_advance`).
     let root_id = start(&db.pool, &parent, &registry).await;
-
-    // Each pass advances the parents of the children that ended (case 1.6).
-    for _level in 0..=MAX_SUBWORKFLOW_DEPTH {
-        let _report = recover_stuck_workflows(
-            &db.pool,
-            &registry,
-            0,
-            3,
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
-        )
-        .await
-        .expect("a recovery pass");
-    }
 
     let deepest = workflows_at_depth(&db.pool, MAX_SUBWORKFLOW_DEPTH).await;
     assert_eq!(deepest.len(), 1);

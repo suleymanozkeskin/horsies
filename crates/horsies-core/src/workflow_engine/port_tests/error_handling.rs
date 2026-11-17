@@ -216,7 +216,6 @@ async fn a_ready_node_of_a_paused_workflow_is_not_enqueued() {
 /// `args_from` key that names a member of the node's input fails the node.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #680"]
 async fn an_args_from_key_that_names_an_input_member_fails_the_node() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
