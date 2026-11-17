@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
@@ -42,7 +43,7 @@ from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.reaper import ReaperMixin
 from horsies.core.worker.worker import Worker
 
-from .conftest import make_simple_task, make_failing_task, make_workflow_spec, start_ok
+from .conftest import DB_URL, make_simple_task, make_failing_task, make_workflow_spec, start_ok
 from tests.integration.conftest import finish_task
 from tests.broker_resources_support import current_resources, listener_of
 
@@ -66,6 +67,29 @@ async def unreachable_broker() -> AsyncGenerator[PostgresBroker, None]:
     )
     yield broken
     _ = await broken.close_async()
+
+
+@pytest_asyncio.fixture
+async def listener_refused_broker() -> AsyncGenerator[PostgresBroker, None]:
+    """A broker that reads the suite database and whose listener cannot
+    connect. Its session URL is on the port of ``UNREACHABLE_DATABASE_URL``,
+    so the listener's connect is refused, and a ``get()`` wait on it polls
+    the workflow row. The session URL names a database of its own, so the
+    listener of the process for it is new.
+
+    The broker runs no schema install (``run_schema_migrations=False``):
+    the install runs on the session URL."""
+    reader = PostgresBroker(
+        PostgresConfig(
+            database_url=SecretStr(DB_URL),
+            session_database_url=SecretStr(
+                f'postgresql://postgres:none@127.0.0.1:1/listener_refused_{uuid.uuid4().hex}',
+            ),
+        ),
+        run_schema_migrations=False,
+    )
+    yield reader
+    _ = await reader.close_async()
 
 
 async def _execute(session: AsyncSession, statement: str) -> None:
@@ -2552,18 +2576,115 @@ class TestWorkflowHandleInfraErrors:
 # =============================================================================
 
 
+POLLED_WAIT_LIMIT_MS = 10_000
+"""The wait limit of a ``get()`` that the end of the workflow answers. The
+end comes long before it."""
+
+END_DURING_THE_WAIT_AFTER_S = 1.5
+"""When a test ends the workflow after its ``get()`` started: after the first
+poll (1 s, ``WORKFLOW_RESULT_REPOLL_POLLING``), so the wait has read the
+RUNNING row again by then."""
+
+SHORT_WAIT_LIMIT_MS = 1_500
+"""A wait limit that passes while the wait polls a RUNNING workflow."""
+
+WAIT_ANSWER_BOUND_S = 15.0
+"""The longest a test waits for the answer of a ``get()``: more than each
+wait limit of these tests, so a wait that does not end fails the test."""
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope='function')
 class TestListenerFallbackContract:
-    """A programming error of the wait (a ``TypeError``) propagates through
-    ``WorkflowHandle.get_async``; it is never folded into an answer.
+    """The wait of ``WorkflowHandle.get_async`` when its listener cannot
+    subscribe, and a programming error of the wait.
 
     The wait and its listener run in the core
-    (``CoreHandle.wait_workflow_result_async``). The fallback to polling when
-    the listener cannot subscribe is tested there:
-    ``crates/horsies-core/src/workflow_engine/port_tests/handle_reads.rs``,
-    ``get_polls_when_the_listener_cannot_connect``.
+    (``CoreHandle.wait_workflow_result_async``). On a broker whose listener
+    connect is refused (``listener_refused_broker``) the wait cannot
+    subscribe on ``workflow_done``: it reads the workflow row again every
+    second. A programming error of the wait (a ``TypeError``) propagates
+    through ``get_async``; it is never folded into an answer.
     """
+
+    async def _running_on_a_listener_refused_broker(
+        self,
+        broker: PostgresBroker,
+        listener_refused_broker: PostgresBroker,
+        app: Horsies,
+        name: str,
+    ) -> WorkflowHandle[Any]:
+        """A workflow of one node started on ``broker``, and a handle of it
+        on ``listener_refused_broker``. Checks that the workflow is RUNNING:
+        that read opens the connection of the handle's core pool."""
+        task_a = make_simple_task(app, f'{name}_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 50})
+        spec = make_workflow_spec(broker=broker, name=name, tasks=[node_a], output=node_a)
+        started = await start_ok(spec, broker)
+        handle: WorkflowHandle[Any] = WorkflowHandle(
+            workflow_id=started.workflow_id,
+            broker=listener_refused_broker,
+            out_type=started.out_type,
+        )
+        status_r = await handle.status_async()
+        assert is_ok(status_r), f'Expected Ok, got {status_r}'
+        assert status_r.ok_value == WorkflowStatus.RUNNING
+        return handle
+
+    async def test_get_async_polls_to_the_end_when_the_listener_connect_is_refused(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        listener_refused_broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """A wait on a RUNNING workflow whose listener connect is refused
+        polls the workflow row. The workflow ends during the wait, and a poll
+        answers its result."""
+        handle = await self._running_on_a_listener_refused_broker(
+            broker, listener_refused_broker, app, 'listen_refused_poll',
+        )
+
+        wait = asyncio.create_task(handle.get_async(timeout_ms=POLLED_WAIT_LIMIT_MS))
+        await asyncio.sleep(END_DURING_THE_WAIT_AFTER_S)
+        assert not wait.done(), (
+            f'the wait answered before the workflow ended: {wait.result()!r}'
+        )
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
+        result = await asyncio.wait_for(wait, timeout=WAIT_ANSWER_BOUND_S)
+
+        assert result.is_ok(), f'Expected Ok, got {result}'
+        assert result.unwrap() == 100
+
+    async def test_get_async_answers_wait_timeout_when_the_limit_passes_while_polling(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        listener_refused_broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """A wait on a RUNNING workflow whose listener connect is refused
+        polls the workflow row, and the workflow does not end. At the wait
+        limit ``get_async`` answers ``WAIT_TIMEOUT``: it waited for the whole
+        limit, and it did not hang."""
+        handle = await self._running_on_a_listener_refused_broker(
+            broker, listener_refused_broker, app, 'listen_refused_timeout',
+        )
+
+        started_at = time.monotonic()
+        result = await asyncio.wait_for(
+            handle.get_async(timeout_ms=SHORT_WAIT_LIMIT_MS),
+            timeout=WAIT_ANSWER_BOUND_S,
+        )
+        waited_s = time.monotonic() - started_at
+
+        assert result.is_err(), f'Expected Err, got {result}'
+        assert result.unwrap_err().error_code == RetrievalCode.WAIT_TIMEOUT
+        assert waited_s >= SHORT_WAIT_LIMIT_MS / 1000, (
+            f'the wait answered after {waited_s:.3f} s, '
+            f'before its limit of {SHORT_WAIT_LIMIT_MS} ms'
+        )
 
     async def test_handle_get_async_propagates_programming_error(
         self,
