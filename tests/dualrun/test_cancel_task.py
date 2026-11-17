@@ -46,6 +46,9 @@ from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
 from tests.dualrun.reference import cancel as reference
 from tests.dualrun.reference import cancel_caller
+from tests.dualrun.reference.interim_terminal_writes import (
+    install_interim_terminal_writes,
+)
 from tests.dualrun.seeds import (
     SeedCoverage,
     SeedStatus,
@@ -156,6 +159,7 @@ def _reference_cancel(
     database: DualRunDatabase, cases: tuple[_Case, ...]
 ) -> dict[str, reference.LiveMiss | reference.CancelCalled]:
     with psycopg.connect(database.url, autocommit=True) as connection:
+        install_interim_terminal_writes(connection)
         return {
             case.name: reference.cancel(connection, case.task_id, case.include_running)
             for case in cases

@@ -179,13 +179,9 @@ pub fn is_already_applied(requested: TerminalizationKind, committed: Terminaliza
 /// The kind the database function for this command hardcodes.
 pub fn kind_of(command: &TerminalizationCommand) -> TerminalizationKind {
     match command {
-        TerminalizationCommand::CompleteLockedTask { .. } => TerminalizationKind::CompleteLocked,
         TerminalizationCommand::CompleteTaskFused { .. } => TerminalizationKind::CompleteFused,
-        TerminalizationCommand::FailLockedTask { .. } => TerminalizationKind::FailRunning,
-        TerminalizationCommand::FailStaleTask { .. } => TerminalizationKind::FailStale,
         TerminalizationCommand::ExpireOwnedClaim { .. } => TerminalizationKind::ExpireClaimed,
         TerminalizationCommand::ExpirePendingTasks { .. } => TerminalizationKind::ExpirePending,
-        TerminalizationCommand::CancelLockedTask { .. } => TerminalizationKind::CancelAdmin,
         TerminalizationCommand::CancelOwnedOrphan { .. } => TerminalizationKind::CancelOrphan,
         TerminalizationCommand::CancelOrphanedTasks { .. } => {
             TerminalizationKind::CancelOrphanSweep
@@ -215,13 +211,9 @@ pub fn kind_of(command: &TerminalizationCommand) -> TerminalizationKind {
 /// two cannot drift.
 pub fn function_name_of(command: &TerminalizationCommand) -> &'static str {
     match command {
-        TerminalizationCommand::CompleteLockedTask { .. } => "horsies_complete_locked_task",
         TerminalizationCommand::CompleteTaskFused { .. } => "horsies_complete_task_fused",
-        TerminalizationCommand::FailLockedTask { .. } => "horsies_fail_locked_task",
-        TerminalizationCommand::FailStaleTask { .. } => "horsies_fail_stale_task",
         TerminalizationCommand::ExpireOwnedClaim { .. } => "horsies_expire_owned_claim",
         TerminalizationCommand::ExpirePendingTasks { .. } => "horsies_expire_pending_tasks",
-        TerminalizationCommand::CancelLockedTask { .. } => "horsies_cancel_locked_task",
         TerminalizationCommand::CancelOwnedOrphan { .. } => "horsies_cancel_owned_orphan",
         TerminalizationCommand::CancelOrphanedTasks { .. } => "horsies_cancel_orphaned_tasks",
         TerminalizationCommand::AbandonOwnedNode { .. } => "horsies_abandon_owned_node",

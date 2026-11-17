@@ -33,7 +33,6 @@ use crate::broker::core_rows::{roll_back, StatementLog};
 use crate::core::lifecycle::operations::function_name_of;
 use crate::core::lifecycle::outcomes::{decode_outcome_pg_row, decode_outcome_row};
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome};
-use crate::core::types::status::TaskStatus;
 use crate::db::{
     BoundStatement, CheckoutClass, CorePool, IsolationLevel, NotSentCause, ParameterType, Row,
     StatementBound, StatementFailure, TypedStatement,
@@ -42,18 +41,13 @@ use crate::log_targets::TERMINALIZATION_OUTCOME;
 
 use super::error::BrokerError;
 
-const COMPLETE_LOCKED_TASK_SQL: &str = "SELECT * FROM horsies_complete_locked_task($1, $2, $3)";
 /// The last argument (wake) is TRUE: the function sends the capacity wake of
 /// the locked row's queue (as Python).
 const COMPLETE_TASK_FUSED_SQL: &str =
     "SELECT * FROM horsies_complete_task_fused($1, $2, $3::timestamptz, $4, TRUE)";
-const FAIL_LOCKED_TASK_SQL: &str = "SELECT * FROM horsies_fail_locked_task($1, $2, $3, $4, $5)";
-const FAIL_STALE_TASK_SQL: &str =
-    "SELECT * FROM horsies_fail_stale_task($1, $2::integer, $3::integer, $4, $5, $6)";
 const EXPIRE_OWNED_CLAIM_SQL: &str = "SELECT * FROM horsies_expire_owned_claim($1, $2, $3, $4)";
 const EXPIRE_PENDING_TASKS_SQL: &str =
     "SELECT * FROM horsies_expire_pending_tasks($1::integer, $2, $3)";
-const CANCEL_LOCKED_TASK_SQL: &str = "SELECT * FROM horsies_cancel_locked_task($1, $2::text[])";
 const CANCEL_OWNED_ORPHAN_SQL: &str =
     "SELECT * FROM horsies_cancel_owned_orphan($1, $2, $3::timestamptz)";
 const CANCEL_ORPHANED_TASKS_SQL: &str = "SELECT * FROM horsies_cancel_orphaned_tasks($1::integer)";
@@ -84,15 +78,6 @@ const OWNED_CLAIM_BATCH_PARAMETERS: &[ParameterType] = &[
     ParameterType::Text,
 ];
 
-static COMPLETE_LOCKED_TASK: TypedStatement = TypedStatement::new(
-    "complete_locked_task",
-    COMPLETE_LOCKED_TASK_SQL,
-    &[
-        ParameterType::Uuid,
-        ParameterType::Text,
-        ParameterType::Text,
-    ],
-);
 static COMPLETE_TASK_FUSED: TypedStatement = TypedStatement::new(
     "complete_task_fused",
     COMPLETE_TASK_FUSED_SQL,
@@ -100,29 +85,6 @@ static COMPLETE_TASK_FUSED: TypedStatement = TypedStatement::new(
         ParameterType::Uuid,
         ParameterType::Text,
         ParameterType::Timestamptz,
-        ParameterType::Text,
-    ],
-);
-static FAIL_LOCKED_TASK: TypedStatement = TypedStatement::new(
-    "fail_locked_task",
-    FAIL_LOCKED_TASK_SQL,
-    &[
-        ParameterType::Uuid,
-        ParameterType::Text,
-        ParameterType::Text,
-        ParameterType::Text,
-        ParameterType::Text,
-    ],
-);
-static FAIL_STALE_TASK: TypedStatement = TypedStatement::new(
-    "fail_stale_task",
-    FAIL_STALE_TASK_SQL,
-    &[
-        ParameterType::Uuid,
-        ParameterType::Int4,
-        ParameterType::Int4,
-        ParameterType::Text,
-        ParameterType::Text,
         ParameterType::Text,
     ],
 );
@@ -144,11 +106,6 @@ static EXPIRE_PENDING_TASKS: TypedStatement = TypedStatement::new(
         ParameterType::Text,
         ParameterType::Text,
     ],
-);
-static CANCEL_LOCKED_TASK: TypedStatement = TypedStatement::new(
-    "cancel_locked_task",
-    CANCEL_LOCKED_TASK_SQL,
-    &[ParameterType::Uuid, ParameterType::TextArray],
 );
 static CANCEL_OWNED_ORPHAN: TypedStatement = TypedStatement::new(
     "cancel_owned_orphan",
@@ -199,13 +156,9 @@ static CANCEL_NODES_OF_CANCELLED_WORKFLOW: TypedStatement = TypedStatement::new(
 /// The one statement of a command. Both forms run its SQL.
 fn statement_of(command: &TerminalizationCommand) -> &'static TypedStatement {
     match command {
-        TerminalizationCommand::CompleteLockedTask { .. } => &COMPLETE_LOCKED_TASK,
         TerminalizationCommand::CompleteTaskFused { .. } => &COMPLETE_TASK_FUSED,
-        TerminalizationCommand::FailLockedTask { .. } => &FAIL_LOCKED_TASK,
-        TerminalizationCommand::FailStaleTask { .. } => &FAIL_STALE_TASK,
         TerminalizationCommand::ExpireOwnedClaim { .. } => &EXPIRE_OWNED_CLAIM,
         TerminalizationCommand::ExpirePendingTasks { .. } => &EXPIRE_PENDING_TASKS,
-        TerminalizationCommand::CancelLockedTask { .. } => &CANCEL_LOCKED_TASK,
         TerminalizationCommand::CancelOwnedOrphan { .. } => &CANCEL_OWNED_ORPHAN,
         TerminalizationCommand::CancelOrphanedTasks { .. } => &CANCEL_ORPHANED_TASKS,
         TerminalizationCommand::AbandonOwnedNode { .. } => &ABANDON_OWNED_NODE,
@@ -231,12 +184,8 @@ enum Cardinality {
 
 fn cardinality_of(command: &TerminalizationCommand) -> Cardinality {
     match command {
-        TerminalizationCommand::CompleteLockedTask { .. }
-        | TerminalizationCommand::CompleteTaskFused { .. }
-        | TerminalizationCommand::FailLockedTask { .. }
-        | TerminalizationCommand::FailStaleTask { .. }
+        TerminalizationCommand::CompleteTaskFused { .. }
         | TerminalizationCommand::ExpireOwnedClaim { .. }
-        | TerminalizationCommand::CancelLockedTask { .. }
         | TerminalizationCommand::CancelOwnedOrphan { .. }
         | TerminalizationCommand::AbandonOwnedNode { .. }
         | TerminalizationCommand::CancelOwnedNode { .. } => Cardinality::ExactlyOne,
@@ -251,11 +200,6 @@ fn cardinality_of(command: &TerminalizationCommand) -> Cardinality {
             Cardinality::PerTransition
         }
     }
-}
-
-/// The text of each status that a cancellation permits as its source.
-fn status_texts(statuses: &[TaskStatus]) -> Vec<String> {
-    statuses.iter().map(|status| status.to_string()).collect()
 }
 
 /// Where the statement of a command runs.
@@ -279,14 +223,6 @@ async fn run_command(
 ) -> Result<Vec<Row>, BrokerError> {
     let statement = statement_of(command);
     match command {
-        TerminalizationCommand::CompleteLockedTask {
-            task_id,
-            fence,
-            result_json,
-        } => {
-            let bound = statement.bind().value(task_id).value(&fence.worker_id);
-            run_bound(target, log, bound.value(result_json).finish()).await
-        }
         TerminalizationCommand::CompleteTaskFused {
             task_id,
             fence,
@@ -295,37 +231,6 @@ async fn run_command(
             let bound = statement.bind().value(task_id).value(&fence.worker_id);
             let bound = bound.value(&fence.claimed_at).value(result_json);
             run_bound(target, log, bound.finish()).await
-        }
-        TerminalizationCommand::FailLockedTask {
-            task_id,
-            fence,
-            result_json,
-            error_code,
-            failed_reason,
-        } => {
-            let bound = statement.bind().value(task_id).value(&fence.worker_id);
-            let bound = bound
-                .value(result_json)
-                .value(error_code)
-                .value(failed_reason);
-            run_bound(target, log, bound.finish()).await
-        }
-        TerminalizationCommand::FailStaleTask {
-            task_id,
-            stale_after_ms,
-            finalizing_stale_after_ms,
-            result_json,
-            error_code,
-            failed_reason,
-        } => {
-            let bound = statement.bind().value(task_id).value(stale_after_ms);
-            let bound = bound.value(finalizing_stale_after_ms).value(result_json);
-            run_bound(
-                target,
-                log,
-                bound.value(error_code).value(failed_reason).finish(),
-            )
-            .await
         }
         TerminalizationCommand::ExpireOwnedClaim {
             task_id,
@@ -349,19 +254,6 @@ async fn run_command(
             let batch_size = batch_size.get();
             let bound = statement.bind().value(&batch_size).value(result_json);
             run_bound(target, log, bound.value(error_code).finish()).await
-        }
-        TerminalizationCommand::CancelLockedTask {
-            task_id,
-            fence: _,
-            permitted_source_statuses,
-        } => {
-            let statuses = status_texts(permitted_source_statuses);
-            run_bound(
-                target,
-                log,
-                statement.bind().value(task_id).value(&statuses).finish(),
-            )
-            .await
         }
         TerminalizationCommand::CancelOwnedOrphan { task_id, fence }
         | TerminalizationCommand::AbandonOwnedNode { task_id, fence } => {
@@ -427,11 +319,6 @@ async fn run_bound(
 fn fetch_query(command: &TerminalizationCommand) -> sqlx::query::Query<'_, Postgres, PgArguments> {
     let query = sqlx::query(statement_of(command).sql());
     match command {
-        TerminalizationCommand::CompleteLockedTask {
-            task_id,
-            fence,
-            result_json,
-        } => query.bind(task_id).bind(&fence.worker_id).bind(result_json),
         TerminalizationCommand::CompleteTaskFused {
             task_id,
             fence,
@@ -441,32 +328,6 @@ fn fetch_query(command: &TerminalizationCommand) -> sqlx::query::Query<'_, Postg
             .bind(&fence.worker_id)
             .bind(fence.claimed_at)
             .bind(result_json),
-        TerminalizationCommand::FailLockedTask {
-            task_id,
-            fence,
-            result_json,
-            error_code,
-            failed_reason,
-        } => query
-            .bind(task_id)
-            .bind(&fence.worker_id)
-            .bind(result_json)
-            .bind(error_code.as_deref())
-            .bind(failed_reason.as_deref()),
-        TerminalizationCommand::FailStaleTask {
-            task_id,
-            stale_after_ms,
-            finalizing_stale_after_ms,
-            result_json,
-            error_code,
-            failed_reason,
-        } => query
-            .bind(task_id)
-            .bind(stale_after_ms)
-            .bind(finalizing_stale_after_ms)
-            .bind(result_json)
-            .bind(error_code)
-            .bind(failed_reason),
         TerminalizationCommand::ExpireOwnedClaim {
             task_id,
             fence,
@@ -485,13 +346,6 @@ fn fetch_query(command: &TerminalizationCommand) -> sqlx::query::Query<'_, Postg
             .bind(batch_size.get())
             .bind(result_json)
             .bind(error_code),
-        TerminalizationCommand::CancelLockedTask {
-            task_id,
-            fence: _,
-            permitted_source_statuses,
-        } => query
-            .bind(task_id)
-            .bind(status_texts(permitted_source_statuses)),
         TerminalizationCommand::CancelOwnedOrphan { task_id, fence }
         | TerminalizationCommand::AbandonOwnedNode { task_id, fence } => query
             .bind(task_id)
@@ -854,11 +708,10 @@ mod catalog_tests {
         &[],
     );
 
-    /// (function, rendered argument list, rendered result type, language).
-    ///
-    /// The P0 renderer freezes nineteen terminalization fragments: the
-    /// outcome composite plus these eighteen functions.
-    pub(super) const EXPECTED_SIGNATURES: [(&str, &str, &str, &str); 18] = [
+    /// (function, rendered argument list, rendered result type, language):
+    /// the eleven command functions, the miss classifier, the attempt
+    /// encoder and the shared move.
+    pub(super) const EXPECTED_SIGNATURES: [(&str, &str, &str, &str); 14] = [
         (
             "horsies_encode_task_attempts",
             "p_task_id uuid",
@@ -878,27 +731,9 @@ mod catalog_tests {
             "plpgsql",
         ),
         (
-            "horsies_complete_locked_task",
-            "p_task_id uuid, p_worker_id text, p_result text",
-            "SETOF horsies_terminalization_outcome",
-            "plpgsql",
-        ),
-        (
             "horsies_complete_task_fused",
             "p_task_id uuid, p_worker_id text, p_claimed_at timestamp with time zone, p_result text, p_wake boolean",
             "TABLE(task_id uuid, ordinality bigint, outcome text, terminal_at timestamp with time zone, terminalization_kind text, observed_status text, observed_worker_id text, observed_claimed_at timestamp with time zone, guard_kind text, observed_guard jsonb)",
-            "plpgsql",
-        ),
-        (
-            "horsies_fail_locked_task",
-            "p_task_id uuid, p_worker_id text, p_result text, p_error_code text, p_failed_reason text",
-            "SETOF horsies_terminalization_outcome",
-            "plpgsql",
-        ),
-        (
-            "horsies_fail_stale_task",
-            "p_task_id uuid, p_stale_after_ms integer, p_finalizing_stale_after_ms integer, p_result text, p_error_code text, p_failed_reason text",
-            "SETOF horsies_terminalization_outcome",
             "plpgsql",
         ),
         (
@@ -911,12 +746,6 @@ mod catalog_tests {
             "horsies_expire_pending_tasks",
             "p_batch_size integer, p_result text, p_error_code text",
             "TABLE(task_id uuid, ordinality bigint, outcome text, terminal_at timestamp with time zone, terminalization_kind text, observed_status text, observed_worker_id text, observed_claimed_at timestamp with time zone, guard_kind text, observed_guard jsonb)",
-            "plpgsql",
-        ),
-        (
-            "horsies_cancel_locked_task",
-            "p_task_id uuid, p_permitted_source_statuses text[]",
-            "SETOF horsies_terminalization_outcome",
             "plpgsql",
         ),
         (
@@ -1185,24 +1014,21 @@ mod statement_tests {
 
 #[cfg(test)]
 mod anchor_tests {
-    //! The count pin: fifteen lifecycle commands, fifteen kinds (one per
-    //! command), and eighteen installed functions across nineteen DDL
-    //! fragments.
+    //! The count pin: eleven terminalization commands and four writers of
+    //! their own write the fifteen kinds, one kind each, and the catalog
+    //! holds fourteen terminalization functions.
     //! `catalog_tests` ties EXPECTED_SIGNATURES to the installed database
     //! program; the vocabulary unit tests tie `function_name_of` to the
     //! variant names; this anchor ties the two ends together so a command,
     //! function, or kind cannot be added or removed alone.
     use super::catalog_tests::EXPECTED_SIGNATURES;
-    use crate::core::lifecycle::TerminalizationKind;
+    use crate::core::lifecycle::tests::sample_commands;
+    use crate::core::lifecycle::{kind_of, TerminalizationKind};
 
-    const COMMAND_FUNCTIONS: [&str; 15] = [
-        "horsies_complete_locked_task",
+    const COMMAND_FUNCTIONS: [&str; 11] = [
         "horsies_complete_task_fused",
-        "horsies_fail_locked_task",
-        "horsies_fail_stale_task",
         "horsies_expire_owned_claim",
         "horsies_expire_pending_tasks",
-        "horsies_cancel_locked_task",
         "horsies_cancel_owned_orphan",
         "horsies_cancel_orphaned_tasks",
         "horsies_abandon_owned_node",
@@ -1213,12 +1039,43 @@ mod anchor_tests {
         "horsies_cancel_nodes_of_cancelled_workflow",
     ];
 
+    /// The writers of the kinds that no command writes, each with an entry
+    /// point of its own (`broker::attempt_writes`, `broker::stale_recovery`,
+    /// `broker::lifecycle_operations`), and the kind that each hardcodes.
+    const OWN_WRITERS: [(&str, TerminalizationKind); 4] = [
+        (
+            "horsies_finish_workflow_success",
+            TerminalizationKind::CompleteLocked,
+        ),
+        (
+            "horsies_finish_failed_attempt",
+            TerminalizationKind::FailRunning,
+        ),
+        (
+            "horsies_finish_stale_attempt",
+            TerminalizationKind::FailStale,
+        ),
+        ("horsies_cancel_task", TerminalizationKind::CancelAdmin),
+    ];
+
     #[test]
     fn commands_functions_and_kinds_agree() {
         assert_eq!(
-            COMMAND_FUNCTIONS.len(),
+            COMMAND_FUNCTIONS.len() + OWN_WRITERS.len(),
             TerminalizationKind::ALL.len(),
-            "every kind is written by exactly one wire command"
+            "every kind is written by exactly one function"
+        );
+        let mut kinds: Vec<&str> = sample_commands()
+            .iter()
+            .map(|(_, command)| kind_of(command).as_str())
+            .chain(OWN_WRITERS.iter().map(|(_, kind)| kind.as_str()))
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert_eq!(
+            kinds.len(),
+            TerminalizationKind::ALL.len(),
+            "the commands and the writers of their own write every kind once"
         );
 
         let mut expected: Vec<&str> = EXPECTED_SIGNATURES

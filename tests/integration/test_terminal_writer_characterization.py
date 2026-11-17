@@ -49,33 +49,34 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.lifecycle.commands import (
     AbandonNodesOfPausedWorkflows,
     AbandonOwnedNodes,
-    CancelLockedTask,
     CancelNodesOfCancelledWorkflow,
     CancelOrphanedTasks,
     CancelOwnedNodes,
     CancelOwnedOrphan,
-    CompleteLockedTask,
     CompleteTaskFused,
     ExpirePendingTasks,
-    FailLockedTask,
-    FailStaleTask,
 )
 from horsies.core.lifecycle.fences import (
-    CallerHoldsRowLock,
     OwnedClaim,
     OwnedClaimBatch,
-    PriorLockedRead,
 )
 from horsies.core.lifecycle.persistence import (
     apply_async,
     apply_batch_async,
 )
-from horsies.core.types.status import TaskStatus
 from horsies.core.worker.child_runner import (
     _expire_claimed_task_before_start,
     _handle_workflow_stop_before_start,
 )
 from tests.integration.conftest import compute_test_command_fingerprint
+from tests.integration.terminal_writes import (
+    StaleFailure,
+    cancel_live_task,
+    complete_workflow_task,
+    fail_running_task,
+    fail_stale_task,
+    task_failure,
+)
 from tests.lifecycle_matrix import MATRIX, TerminalWriter
 
 pytestmark = [pytest.mark.integration]
@@ -234,25 +235,11 @@ decides for itself.
 
 
 async def _t01_monitoring_cancel(ctx: Context, eligible: bool) -> str:
-    task = await _seed_task(ctx.session, status='CLAIMED', claimed_at=_now())
-    # The caller supplies the permitted source statuses; ineligible here means
-    # the row's status is outside the set the caller allows.
-    await ctx.session.execute(
-        text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
-        {'id': task.task_id},
-    )
-    permitted = (
-        (TaskStatus.PENDING, TaskStatus.CLAIMED)
-        if eligible
-        else (TaskStatus.PENDING,)
-    )
-    await apply_async(
-        await ctx.session.connection(),
-        CancelLockedTask(
-            task_id=task.task_id,
-            fence=CallerHoldsRowLock(),
-            permitted_source_statuses=permitted,
-        ),
+    task = await _seed_task(ctx.session, status='RUNNING', claimed_at=_now())
+    # The caller chooses whether a RUNNING row may be cancelled; ineligible
+    # here means the row's status is outside the set the caller allows.
+    _ = await cancel_live_task(
+        await ctx.session.connection(), task.task_id, include_running=eligible,
     )
     await ctx.session.commit()
     return task.task_id
@@ -302,17 +289,11 @@ async def _cancelled_batch(ctx: Context, eligible: bool) -> str:
 
 async def _fail_worker(ctx: Context, eligible: bool) -> str:
     task = await _seed_task(ctx.session, status='RUNNING', claimed_at=_now())
-    await ctx.session.execute(
-        text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
-        {'id': task.task_id},
-    )
-    await apply_async(
+    _ = await fail_running_task(
         await ctx.session.connection(),
-        FailLockedTask(
-            task_id=task.task_id,
-            fence=PriorLockedRead(
-                worker_id=WORKER_ID if eligible else OTHER_WORKER_ID
-            ),
+        task.task_id,
+        worker_id=WORKER_ID if eligible else OTHER_WORKER_ID,
+        failure=task_failure(
             result_json='{"err": null}',
             error_code='BROKER_ERROR',
             failed_reason='characterization',
@@ -324,17 +305,11 @@ async def _fail_worker(ctx: Context, eligible: bool) -> str:
 
 async def _fail_running(ctx: Context, eligible: bool) -> str:
     task = await _seed_task(ctx.session, status='RUNNING', claimed_at=_now())
-    await ctx.session.execute(
-        text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
-        {'id': task.task_id},
-    )
-    await apply_async(
+    _ = await fail_running_task(
         await ctx.session.connection(),
-        FailLockedTask(
-            task_id=task.task_id,
-            fence=PriorLockedRead(
-                worker_id=WORKER_ID if eligible else OTHER_WORKER_ID
-            ),
+        task.task_id,
+        worker_id=WORKER_ID if eligible else OTHER_WORKER_ID,
+        failure=task_failure(
             result_json='{"err": null}',
             error_code='WORKER_SERIALIZATION_ERROR',
             failed_reason=None,
@@ -345,20 +320,19 @@ async def _fail_running(ctx: Context, eligible: bool) -> str:
 
 
 async def _complete_running(ctx: Context, eligible: bool) -> str:
-    task = await _seed_task(ctx.session, status='RUNNING', claimed_at=_now())
-    await ctx.session.execute(
-        text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
-        {'id': task.task_id},
+    # The success of a workflow task: the move writes the phase-2 record of
+    # its node, so the node exists first.
+    task = await _seed_task(
+        ctx.session, status='RUNNING', claimed_at=_now(), is_workflow_task=True,
     )
-    await apply_async(
+    await _seed_workflow(
+        ctx.session, task.task_id, wf_status='RUNNING', wt_status='RUNNING',
+    )
+    _ = await complete_workflow_task(
         await ctx.session.connection(),
-        CompleteLockedTask(
-            task_id=task.task_id,
-            fence=PriorLockedRead(
-                worker_id=WORKER_ID if eligible else OTHER_WORKER_ID
-            ),
-            result_json='{"ok": 1}',
-        ),
+        task.task_id,
+        worker_id=WORKER_ID if eligible else OTHER_WORKER_ID,
+        result_json='{"ok": 1}',
     )
     await ctx.session.commit()
     return task.task_id
@@ -499,10 +473,10 @@ async def _stale_running(ctx: Context, eligible: bool) -> str:
     # Ineligible raises the staleness bar past the row's own age rather than
     # changing the row, so the guard is what differs and nothing else.
     threshold_ms = 60_000 if eligible else 86_400_000
-    await apply_async(
+    _ = await fail_stale_task(
         await ctx.session.connection(),
-        FailStaleTask(
-            task_id=task.task_id,
+        task.task_id,
+        failure=StaleFailure(
             stale_after_ms=threshold_ms,
             finalizing_stale_after_ms=threshold_ms,
             result_json='{"err": null}',
