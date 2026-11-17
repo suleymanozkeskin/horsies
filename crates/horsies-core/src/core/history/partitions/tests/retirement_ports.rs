@@ -82,8 +82,9 @@ async fn a_drop_of_a_ref_that_differs_from_the_catalog_rolls_back() {
 }
 
 /// `test_finalize_records_a_detach_made_out_of_band`: a leaf detached
-/// outside maintenance has no detach stamp; the finalize records it without
-/// a detach statement and reports the leaf detached.
+/// outside maintenance has no detach stamp; the finalize's
+/// `horsies_begin_leaf_detach` records it, no detach statement runs, and the
+/// leaf is reported detached.
 #[tokio::test]
 #[serial]
 async fn finalize_records_a_detach_made_out_of_band() {
