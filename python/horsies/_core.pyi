@@ -1439,6 +1439,368 @@ class CoverageFailed:
     def retryable(self) -> bool: ...
 
 
+@final
+class PythonProgram:
+    """What a Python child imports before it reports ready."""
+    @property
+    def app_locator(self) -> str: ...
+    @property
+    def imports(self) -> list[str]: ...
+    @property
+    def sys_path_roots(self) -> list[str]: ...
+    @property
+    def parent_sys_path(self) -> list[str]: ...
+    @property
+    def parent_argv(self) -> list[str]: ...
+
+
+@final
+class IsolatedChildKind:
+    """An isolated child: one task at a time."""
+    @property
+    def task_send_pool(self) -> int: ...
+
+
+@final
+class SharedAsyncChildKind:
+    """A shared async child: up to seats async tasks on one event loop."""
+    @property
+    def seats(self) -> int: ...
+    @property
+    def executor_threads(self) -> int: ...
+    @property
+    def task_send_pool(self) -> int: ...
+
+
+@final
+class SharedThreadChildKind:
+    """A shared thread child: up to seats blocking tasks, each on a thread."""
+    @property
+    def seats(self) -> int: ...
+    @property
+    def task_send_pool(self) -> int: ...
+
+
+@final
+class InitFrame:
+    """The first frame to a child or to the preload process. The database URL and the
+    connection settings stay in the core.
+    """
+    @property
+    def program(self) -> PythonProgram | Literal['RUST']: ...
+    @property
+    def log_level(self) -> Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']: ...
+    @property
+    def process_name(self) -> str: ...
+    @property
+    def child_kind(self) -> IsolatedChildKind | SharedAsyncChildKind | SharedThreadChildKind: ...
+
+
+@final
+class StoredOptionsRefused:
+    """Stored options of the row that the worker cannot use: the child sets the row
+    RUNNING and fails the task before it resolves the task.
+    """
+    @property
+    def kind(self) -> Literal['OPTIONS_UNREADABLE', 'TIMEOUT_VALUE_INVALID', 'CANCEL_GRACE_INVALID']: ...
+    @property
+    def reason(self) -> str: ...
+
+
+@final
+class RunFrame:
+    """Run one task in an isolated child. The parent holds the deadline."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def worker_id(self) -> str: ...
+    @property
+    def claimed_at(self) -> datetime.datetime: ...
+    @property
+    def work(self) -> Literal['RUN'] | StoredOptionsRefused: ...
+    @property
+    def input(self) -> str: ...
+
+
+@final
+class AsyncTaskWork:
+    """Cancel the task timeout_ms after its start, then give it cancel_grace_ms to stop."""
+    @property
+    def timeout_ms(self) -> int: ...
+    @property
+    def cancel_grace_ms(self) -> int: ...
+
+
+@final
+class ThreadTaskWork:
+    """Report the deadline timeout_ms after the child takes the run."""
+    @property
+    def timeout_ms(self) -> int: ...
+
+
+@final
+class SharedRunFrame:
+    """Run one task on a free seat of a shared child."""
+    @property
+    def dispatch(self) -> int: ...
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def worker_id(self) -> str: ...
+    @property
+    def claimed_at(self) -> datetime.datetime: ...
+    @property
+    def work(self) -> AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused: ...
+    @property
+    def input(self) -> str: ...
+
+
+@final
+class StopFrame:
+    """Exit normally. Sent only to a child with no task."""
+
+
+@final
+class FrameRefused:
+    """A parent frame that the child refuses: the child exits with the bad-frame code."""
+    @property
+    def reason(self) -> str: ...
+
+
+@final
+class ParentProtocolMismatch:
+    """An init frame of another protocol version: the child logs both numbers and exits
+    with the protocol-mismatch code.
+    """
+    @property
+    def received(self) -> int | Literal['NOT_NAMED']: ...
+    @property
+    def expected(self) -> int: ...
+
+
+@final
+class FrameOverBound:
+    """A header over the bounds: nothing was allocated for its frame, and the channel
+    cannot be read on.
+    """
+    @property
+    def meta_bytes(self) -> int: ...
+    @property
+    def body_bytes(self) -> int: ...
+
+
+@final
+class FrameTooLarge:
+    """A frame that cannot be sent: its metadata or its body is over a bound of the
+    header. Nothing was encoded.
+    """
+    @property
+    def part(self) -> Literal['METADATA', 'BODY']: ...
+    @property
+    def bytes(self) -> int: ...
+    @property
+    def bound(self) -> int: ...
+
+
+@final
+class ProtocolNumbers:
+    """The protocol version, the exit codes of a child and the spawn request byte."""
+    @property
+    def protocol_version(self) -> int: ...
+    @property
+    def parent_gone_exit_code(self) -> int: ...
+    @property
+    def bad_parent_frame_exit_code(self) -> int: ...
+    @property
+    def bad_arguments_exit_code(self) -> int: ...
+    @property
+    def stopped_with_executor_threads_exit_code(self) -> int: ...
+    @property
+    def boot_failed_exit_code(self) -> int: ...
+    @property
+    def reparent_failed_exit_code(self) -> int: ...
+    @property
+    def protocol_mismatch_exit_code(self) -> int: ...
+    @property
+    def child_hook_failed_exit_code(self) -> int: ...
+    @property
+    def spawn_request_byte(self) -> int: ...
+
+
+@final
+class FrameReader:
+    """The read buffer of the channel from the worker parent, with the bounds of the core
+    reader.
+    """
+    def __init__(self) -> None: ...
+    def feed(self, data: bytes) -> list[InitFrame | RunFrame | SharedRunFrame | StopFrame] | FrameOverBound | FrameRefused | ParentProtocolMismatch:
+        """Take the bytes that arrived and give the whole parent frames they complete, in
+        order. A refusal means the channel cannot be read on.
+        """
+
+
+@final
+class TaskResult:
+    """The task produced a result envelope: a value or a task error."""
+    def __init__(self, *, envelope: str) -> None: ...
+
+
+@final
+class StoppedBeforeRunning:
+    """The child stopped before it set the row RUNNING; no task code ran."""
+    def __init__(self, *, reason: Literal['CLAIM_LOST', 'OWNERSHIP_UNCONFIRMED', 'WORKFLOW_STOPPED', 'TASK_EXPIRED', 'NODE_NOT_LINKED']) -> None: ...
+
+
+@final
+class WorkerFailure:
+    """The worker code of the child failed, not the task. The detail is cut to its bound."""
+    def __init__(self, *, detail: str) -> None: ...
+
+
+@final
+class LoopHoldsTasks:
+    """count asyncio tasks that are not done are on a task loop; names holds
+    min(count, 10) names, each cut to its bound.
+    """
+    def __init__(self, *, count: int, names: list[str]) -> None: ...
+
+
+@final
+class StuckWork:
+    """The work of a run that did not stop after its cancel rounds: at least one task or
+    executor item; names holds min(tasks, 10) names.
+    """
+    def __init__(self, *, tasks: int, executor_items: int, names: list[str]) -> None: ...
+
+
+@final
+class BlockingRun:
+    """The run whose task held a blocked loop."""
+    def __init__(self, *, dispatch: int, task_id: uuid.UUID) -> None: ...
+
+
+@final
+class ResourceShortage:
+    """A boot step failed with an errno of a resource limit."""
+    def __init__(self, *, errno: Literal['EMFILE', 'ENFILE', 'ENOMEM', 'EAGAIN']) -> None: ...
+
+
+@final
+class ReadyFrame:
+    """Boot finished; the child can take a task."""
+    def __init__(self, *, pid: int, rss_mb: float | Literal['UNREADABLE']) -> None: ...
+
+
+@final
+class BootFailedFrame:
+    """In place of the ready frame: the boot failed, and the child exits. Texts are cut
+    to their bounds.
+    """
+    def __init__(self, *, cause: ResourceShortage | Literal['APP_LOAD_FAILED', 'CHILD_POOL_SETUP_FAILED', 'TASK_LOOP_CREATE_FAILED', 'THREAD_START_REFUSED'], error_name: str, detail: str) -> None: ...
+
+
+@final
+class ResultFrame:
+    """An isolated task ended and left no work on a task loop."""
+    def __init__(self, *, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure, rss_mb: float | Literal['UNREADABLE'], task_loop: Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK']) -> None: ...
+
+
+@final
+class BodyReturnedFrame:
+    """The body of an isolated task returned, and work it started is still on the task
+    loop.
+    """
+    def __init__(self, *, task_id: uuid.UUID, returned: TaskResult | WorkerFailure, left: LoopHoldsTasks) -> None: ...
+
+
+@final
+class LeftWorkEndedFrame:
+    """The work that an isolated task left has ended."""
+    def __init__(self, *, task_id: uuid.UUID, end: Literal['IN_GRACE', 'CANCELLED'], rss_mb: float | Literal['UNREADABLE']) -> None: ...
+
+
+@final
+class LeftWorkStuckFrame:
+    """The work that an isolated task left did not stop after the cancel rounds."""
+    def __init__(self, *, task_id: uuid.UUID, still: LoopHoldsTasks) -> None: ...
+
+
+@final
+class SharedResultFrame:
+    """A run of a shared child ended; its seat is free."""
+    def __init__(self, *, dispatch: int, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT'], rss_mb: float | Literal['UNREADABLE']) -> None: ...
+
+
+@final
+class DeadlineFiredFrame:
+    """The deadline of a run fired."""
+    def __init__(self, *, dispatch: int, task_id: uuid.UUID) -> None: ...
+
+
+@final
+class SecondCancelFrame:
+    """The cancel grace of a run ran out while it was alive."""
+    def __init__(self, *, dispatch: int, task_id: uuid.UUID) -> None: ...
+
+
+@final
+class RunStuckFrame:
+    """A run did not stop after its second cancel and its cancel rounds."""
+    def __init__(self, *, dispatch: int, task_id: uuid.UUID, work: StuckWork) -> None: ...
+
+
+@final
+class LeftoverCancelFrame:
+    """The body of a run returned before its deadline, and its marked work was alive one
+    cancel grace later.
+    """
+    def __init__(self, *, dispatch: int, task_id: uuid.UUID, returned: TaskResult | WorkerFailure) -> None: ...
+
+
+@final
+class LeftoverStuckFrame:
+    """The work a run left after its return did not stop after its cancel rounds."""
+    def __init__(self, *, dispatch: int, task_id: uuid.UUID, work: StuckWork, returned: TaskResult | WorkerFailure) -> None: ...
+
+
+@final
+class LoopBlockedFrame:
+    """The event loop of a shared async child has not turned for blocked_ms. The location
+    is cut to its bound.
+    """
+    def __init__(self, *, culprit: BlockingRun | Literal['UNKNOWN'], blocked_ms: int, location: str) -> None: ...
+
+
+@final
+class PreloadReadyFrame:
+    """Imports are done, so forks can start."""
+    def __init__(self, *, pid: int) -> None: ...
+
+
+@final
+class ChildForkedFrame:
+    """The child exists, and it has left the preload process."""
+    def __init__(self, *, pid: int) -> None: ...
+
+
+@final
+class ForkFailedFrame:
+    """This fork failed. The preload process stays up. The reason is cut to its bound."""
+    def __init__(self, *, reason: str) -> None: ...
+
+
+@final
+class PreloadRefusedFrame:
+    """The preload process cannot fork safely, and it exits. The reason is cut to its
+    bound.
+    """
+    def __init__(self, *, reason: str) -> None: ...
+
+
 def baseline_sql_files() -> list[tuple[str, str]]:
     """The baseline SQL files as (file name, text) pairs, in run order. Starts nothing."""
 
@@ -1447,8 +1809,26 @@ def core_state() -> Literal['not_started', 'running', 'stopped', 'inherited']:
     """The state of the core in this process. Starts nothing."""
 
 
+def decode_parent_frame(meta: bytes, body: bytes) -> InitFrame | RunFrame | SharedRunFrame | StopFrame | FrameRefused | ParentProtocolMismatch:
+    """Decode one parent frame from its metadata and its body. Pure."""
+
+
+def encode_child_frame(frame: ReadyFrame | BootFailedFrame | ResultFrame | BodyReturnedFrame | LeftWorkEndedFrame | LeftWorkStuckFrame | SharedResultFrame | DeadlineFiredFrame | SecondCancelFrame | RunStuckFrame | LeftoverCancelFrame | LeftoverStuckFrame | LoopBlockedFrame) -> bytes | FrameTooLarge:
+    """Encode a child frame: its bytes, or FrameTooLarge when it is over a bound of the
+    header. Pure.
+    """
+
+
+def encode_preload_frame(frame: PreloadReadyFrame | ChildForkedFrame | ForkFailedFrame | PreloadRefusedFrame) -> bytes:
+    """Encode a preload frame: its bytes. Pure."""
+
+
 def mint_task_id() -> uuid.UUID | IdMintRefused:
     """Mint a new task id (UUIDv7). Starts no runtime."""
+
+
+def protocol_numbers() -> ProtocolNumbers:
+    """The protocol version, the exit codes of a child and the spawn request byte. Pure."""
 
 
 def refresh_log_levels() -> None:
