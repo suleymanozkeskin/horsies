@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncGenerator, LiteralString
+from typing import Any, AsyncGenerator, Final, LiteralString
 
 import psycopg
 from psycopg import sql
@@ -40,6 +41,10 @@ from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.types.status import TaskStatus
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.workflow import TaskNode as WorkflowTaskNode
+from horsies.core.models.workflow import WorkflowDefinition, WorkflowSpec
+from horsies.core.workflows.registry import register_workflow_definition
 from horsies.web import INTENT_HEADER, INTENT_VALUE, AllowAll, create_monitoring_app
 from horsies.web import app as web_app_module
 from horsies.core.utils.url import to_psycopg_url
@@ -56,6 +61,7 @@ from tests.integration.history_seeding import stored_history_status
 from tests.integration.monitoring_seeding import (
     NodeRow,
     SeedRow,
+    SubworkflowNode,
     TaskNode,
     TaskRow,
     WorkflowRow,
@@ -948,6 +954,155 @@ class TestResumeCommittedThenFailed:
 
         assert response.status_code == 409
         assert response.json()['current_status'] == 'RUNNING'
+
+
+_CORE_LOG_WAIT_POLLS: Final = 100
+"""Reads of ``caplog`` while a test waits for a record of the core."""
+
+_CORE_LOG_WAIT_POLL_S: Final = 0.05
+"""The pause between two of those reads: the wait ends within 5 s."""
+
+
+async def _core_messages_holding(
+    caplog: pytest.LogCaptureFixture, logger_name: str, text_part: str,
+) -> list[str]:
+    """The messages of the records of ``logger_name`` that hold
+    ``text_part``, once one reached ``caplog``.
+
+    The core hands its records to Python ``logging`` on its forwarder
+    thread, so a record can arrive after the call that logged it returned.
+
+    Raises:
+        AssertionError: no such record within the wait.
+    """
+    for _ in range(_CORE_LOG_WAIT_POLLS):
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == logger_name and text_part in record.getMessage()
+        ]
+        if messages:
+            return messages
+        await asyncio.sleep(_CORE_LOG_WAIT_POLL_S)
+    raise AssertionError(f'no record of {logger_name} holds {text_part!r}')
+
+
+def _register_child_with_a_corrupt_root(app: Horsies) -> str:
+    """Register a child definition whose root task has task options that do
+    not parse, so its build raises ``SerializationError``. Returns its
+    definition key."""
+    suffix = uuid.uuid4().hex[:8]
+
+    @app.task(task_name=f'web_corrupt_root_{suffix}')
+    def corrupt_root(*, value: int) -> TaskResult[int, TaskError]:
+        return TaskResult(ok=value)
+
+    corrupt_root.task_options_json = '{not-json'  # type: ignore[attr-defined]
+
+    class CorruptRootChild(WorkflowDefinition[int]):
+        name = f'web_corrupt_child_{suffix}'
+        definition_key = f'web.corrupt_child.{suffix}.v1'
+
+        @classmethod
+        def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
+            _ = (args, params)
+            node = WorkflowTaskNode(fn=corrupt_root, kwargs={'value': 1})
+            return app.workflow(cls.name, [node], output=node, definition_key=cls.definition_key)
+
+    register_workflow_definition(CorruptRootChild)
+    return CorruptRootChild.definition_key
+
+
+async def _seed_paused_parent_of_a_ready_child(
+    session: AsyncSession, definition_key: str,
+) -> WorkflowRow:
+    """A PAUSED run whose node 0 is a READY sub-workflow node of
+    ``definition_key`` with no child: a resume owes its child start."""
+    run = make_workflow(status='PAUSED')
+    node = NodeRow(
+        id=str(uuid.uuid4()),
+        workflow_id=run.id,
+        task_index=0,
+        node_id=None,
+        task_name='corrupt_child',
+        status='READY',
+        dependencies=(),
+        allow_failed_deps=False,
+        kind=SubworkflowNode(sub_workflow_id=None),
+        result=None,
+        created_at=datetime.now(UTC) - timedelta(seconds=120),
+        started_at=None,
+        completed_at=None,
+    )
+    await persist(session, run, node)
+    await session.execute(
+        text(
+            'UPDATE horsies_workflow_tasks '
+            'SET sub_definition_key = :key, sub_workflow_name = :name '
+            'WHERE workflow_id = CAST(:workflow_id AS uuid) AND task_index = 0'
+        ),
+        {'key': definition_key, 'name': 'corrupt_child', 'workflow_id': run.id},
+    )
+    await session.commit()
+    return run
+
+
+@pytest.mark.usefixtures('clean_tables')
+class TestResumeOfAChildBuildThatRaises:
+    """A resume whose owed child start builds a child that raises: the task
+    options of the child's root do not parse (``SerializationError``).
+
+    Python's resume route let the exception propagate, and Starlette answered
+    500 with the text ``Internal Server Error`` and nothing of the exception,
+    whose text can hold user data. The core answers the same, commits
+    nothing, and logs the exception's type and text with the resume and the
+    build on ``horsies.monitoring``. The core's mapping is also tested in
+    ``crates/horsies-core/src/web/tests.rs``
+    (``a_resume_whose_child_build_raised_is_python_s_internal_server_error``).
+    """
+
+    async def test_the_answer_is_python_s_internal_server_error(
+        self,
+        app: Horsies,
+        monitoring: FastAPI,
+        session: AsyncSession,
+        implementation: ImplementationRun,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        definition_key = _register_child_with_a_corrupt_root(app)
+        run = await _seed_paused_parent_of_a_ready_child(session, definition_key)
+
+        # Python's route raised: Starlette sends its 500, then raises the
+        # exception again to the server, which the transport keeps.
+        async with AsyncClient(
+            transport=ASGITransport(app=monitoring, raise_app_exceptions=False),
+            base_url='http://test',
+        ) as client:
+            with caplog.at_level(logging.ERROR, logger='horsies.monitoring'):
+                response = await client.post(f'/api/workflows/{run.id}/resume', headers=ACT)
+                match implementation:
+                    case DualRunCase(implementation=Implementation.PYTHON_REFERENCE):
+                        messages = None
+                    case DualRunCase() | SingleRun():
+                        messages = await _core_messages_holding(
+                            caplog, 'horsies.monitoring', run.id,
+                        )
+
+        assert response.status_code == 500
+        assert response.headers['content-type'] == 'text/plain; charset=utf-8'
+        assert response.text == 'Internal Server Error'
+        assert await read_status(session, run.id) == 'PAUSED'
+        match messages:
+            case None:
+                pass
+            case [message]:
+                assert message.startswith(
+                    f'monitoring resume of workflow {run.id} failed and nothing committed: '
+                    f'build of the child of {run.name}:0 (definition {definition_key}) '
+                    'raised SerializationError: '
+                ), message
+            case _:
+                raise AssertionError(f'one ERROR record of the resume, got {messages}')
 
 
 # --------------------------------------------------------------------------- #

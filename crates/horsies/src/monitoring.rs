@@ -40,8 +40,8 @@ pub use horsies_core::monitoring::{
     TaskListQuery, TaskSortField, TaskStatsQuery, TaskSummary, WindowRefused, WorkerClassLoadInfo,
     WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowEdge, WorkflowNodeInfo,
     WorkflowRunDetail, WorkflowRunSummary, WorkflowRunsQuery, WorkflowTaskDetail,
-    MAX_TASK_PAGE_REACH, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX, RESUME_RECOVERY_WARNING,
-    STATE_CONFLICT,
+    INTERNAL_SERVER_ERROR_TEXT, MAX_TASK_PAGE_REACH, MONITORING_WINDOW_DEFAULT,
+    MONITORING_WINDOW_MAX, RESUME_RECOVERY_WARNING, STATE_CONFLICT,
 };
 
 /// The count of each task status over the live table and the history

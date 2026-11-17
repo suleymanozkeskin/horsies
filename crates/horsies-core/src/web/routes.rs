@@ -25,6 +25,7 @@ use crate::monitoring::{
     TaskStatsQuery, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowRunsQuery,
 };
 use crate::monitoring::{class_report_info, slot_health_info, ClassReportInfo};
+use crate::monitoring::{ActionBody, ActionOutcome, INTERNAL_SERVER_ERROR_TEXT};
 
 use super::app::WebState;
 use super::common::{
@@ -689,12 +690,10 @@ async fn read_events(State(state): State<WebState>) -> Response {
 
 /// The response of an action, with its log line (Python `_respond`,
 /// `tests/dualrun/reference/web_routes/actions.py`): `monitoring action route=...
-/// id=... http=... result=...`, at INFO on `horsies.web`.
-fn action_response(
-    route: &'static str,
-    entity_id: Uuid,
-    outcome: crate::monitoring::ActionOutcome,
-) -> Response {
+/// id=... http=... result=...`, at INFO on `horsies.web`. Every body is JSON
+/// but [`ActionBody::InternalServerError`], which is
+/// [`INTERNAL_SERVER_ERROR_TEXT`] as `text/plain; charset=utf-8`.
+fn action_response(route: &'static str, entity_id: Uuid, outcome: ActionOutcome) -> Response {
     tracing::info!(
         "monitoring action route={route} id={entity_id} http={} result={}",
         outcome.status_code(),
@@ -702,7 +701,13 @@ fn action_response(
     );
     let status =
         StatusCode::from_u16(outcome.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    (status, Json(outcome.into_body())).into_response()
+    match outcome.into_body() {
+        ActionBody::InternalServerError => (status, INTERNAL_SERVER_ERROR_TEXT).into_response(),
+        body @ (ActionBody::Success(_)
+        | ActionBody::Conflict { .. }
+        | ActionBody::Code { .. }
+        | ActionBody::Detail { .. }) => (status, Json(body)).into_response(),
+    }
 }
 
 async fn cancel_task(
