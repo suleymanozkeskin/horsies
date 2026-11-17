@@ -35,8 +35,8 @@ from horsies.core.models.worker_profile import (
     TaskLimit,
 )
 from horsies.core.types.result import Err, Ok
-from horsies.core.worker.dispatch_claim import DispatchClaim
-from horsies.core.worker.child_protocol import (
+from tests.dualrun.reference.worker_parent.worker.dispatch_claim import DispatchClaim
+from tests.dualrun.reference.worker_parent.worker.child_protocol import (
     BlockingRun,
     ChildFrame,
     DeadlineFiredFrame,
@@ -55,9 +55,9 @@ from horsies.core.worker.child_protocol import (
     SeatTimedOut,
     SharedResultFrame,
 )
-from horsies.core.worker.live_dispatches import RegistryClosed
+from tests.dualrun.reference.worker_parent.worker.live_dispatches import RegistryClosed
 from horsies.core.worker.config import ChildPreload
-from horsies.core.worker.slots import (
+from tests.dualrun.reference.worker_parent.worker.slots import (
     CHILD_KILL_WAIT_S,
     Assigned,
     BootAttemptsExhausted,
@@ -103,8 +103,8 @@ from horsies.core.worker.slots import (
     place_on_shared_child,
     shared_recycle_reason,
 )
-from horsies.core.worker.thread_slots import ClosedAtDeadline, RunCulprit
-from horsies.core.worker.shared_stop import (
+from tests.dualrun.reference.worker_parent.worker.thread_slots import ClosedAtDeadline, RunCulprit
+from tests.dualrun.reference.worker_parent.worker.shared_stop import (
     BesideBlockedLoop,
     BlockedLoopKill,
     BlockedTheLoop,
@@ -116,7 +116,7 @@ from horsies.core.worker.shared_stop import (
     ReturnedBeforeKill,
     TimedOutAtKill,
 )
-from horsies.core.worker.stored_timeout import TimeoutValueInvalid
+from tests.dualrun.reference.worker_parent.worker.stored_timeout import TimeoutValueInvalid
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 CLAIM = DispatchClaim(
@@ -1125,9 +1125,9 @@ class TestStartAndStop:
         self,
         pool_factory: PoolFactory,
     ) -> None:
-        from horsies.core.worker.child_protocol import RunFrame
-        from horsies.core.worker.slots import TaskFinished
-        from horsies.core.worker.stored_timeout import NoTimeout
+        from tests.dualrun.reference.worker_parent.worker.child_protocol import RunFrame
+        from tests.dualrun.reference.worker_parent.worker.slots import TaskFinished
+        from tests.dualrun.reference.worker_parent.worker.stored_timeout import NoTimeout
 
         pool = await pool_factory(_config(1, 2, isolated=1))
         isolated = pool.submit(
@@ -1822,7 +1822,7 @@ async def test_a_production_shared_child_waits_for_frames_without_spinning() -> 
     no database is needed."""
     import psutil
 
-    from horsies.core.worker.slots import CHILD_ENTRY
+    from tests.dualrun.reference.worker_parent.worker.slots import CHILD_ENTRY
 
     init = replace(
         _init('tests.e2e.tasks.instance:app'),

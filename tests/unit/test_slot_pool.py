@@ -41,15 +41,15 @@ from horsies.core.models.boot_failure import (
     TaskLoopCreateFailed,
     ThreadStartRefused,
 )
-from horsies.core.worker.child_main import (
+from tests.dualrun.reference.worker_parent.worker.child_main import (
     BAD_PARENT_FRAME_EXIT_CODE,
     BOOT_FAILED_EXIT_CODE,
     STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 )
 from horsies.core.worker.config import ChildPreload
-from horsies.core.worker.preload_main import REPARENT_FAILED_EXIT_CODE
+from tests.dualrun.reference.worker_parent.worker.preload_main import REPARENT_FAILED_EXIT_CODE
 from horsies.core.models.worker_profile import ResolvedPool
-from horsies.core.worker.child_protocol import (
+from tests.dualrun.reference.worker_parent.worker.child_protocol import (
     FRAME_HEADER,
     BodyReturnedFrame,
     BootFailedFrame,
@@ -72,12 +72,12 @@ from horsies.core.worker.child_protocol import (
     encode_child_frame,
     encode_parent_frame,
 )
-from horsies.core.worker.stored_timeout import NoTimeout, TaskTimeout
-from horsies.core.worker.task_loop import ISOLATED_LEFTOVER_GRACE_S
-from horsies.core.worker.worker import Worker, WorkerConfig
-from horsies.core.worker import slots
-from horsies.core.worker.frame_parser import DIRECT_BODY_BYTES, FRAME_READ_BUFFER_BYTES
-from horsies.core.worker.slots import (
+from tests.dualrun.reference.worker_parent.worker.stored_timeout import NoTimeout, TaskTimeout
+from tests.dualrun.reference.worker_parent.worker.task_loop import ISOLATED_LEFTOVER_GRACE_S
+from tests.dualrun.reference.worker_parent.worker.worker import Worker, WorkerConfig
+from tests.dualrun.reference.worker_parent.worker import slots
+from tests.dualrun.reference.worker_parent.worker.frame_parser import DIRECT_BODY_BYTES, FRAME_READ_BUFFER_BYTES
+from tests.dualrun.reference.worker_parent.worker.slots import (
     CHILD_BOOT_ATTEMPTS,
     JOINED_WRITE_BODY_BYTES,
     CHILD_BOOT_KILL_DELAY_MAX_S,
@@ -297,7 +297,7 @@ class TestExitDescription:
 
 class TestInterpreterFlags:
     def _child_flags(self, *python_args: str) -> list[str]:
-        code = 'from horsies.core.worker.slots import interpreter_flags; print(interpreter_flags())'
+        code = 'from tests.dualrun.reference.worker_parent.worker.slots import interpreter_flags; print(interpreter_flags())'
         result = subprocess.run(
             [sys.executable, *python_args, '-c', code],
             capture_output=True,
@@ -2936,9 +2936,9 @@ PARENT_PROGRAM = """
 import asyncio, os, sys, time
 sys.path[:0] = {paths!r}
 from horsies.core.models.worker_profile import ResolvedPool
-from horsies.core.worker.child_protocol import InitFrame, IsolatedChild, RunFrame
+from tests.dualrun.reference.worker_parent.worker.child_protocol import InitFrame, IsolatedChild, RunFrame
 from horsies.core.worker.config import ChildPreload
-from horsies.core.worker.slots import SlotPool, SlotPoolConfig
+from tests.dualrun.reference.worker_parent.worker.slots import SlotPool, SlotPoolConfig
 
 async def main():
     init = InitFrame(

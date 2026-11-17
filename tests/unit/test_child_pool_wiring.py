@@ -26,7 +26,7 @@ from horsies.core.models.worker_profile import (
     SharedThreadChildren,
 )
 from horsies.core.types.result import Err, Ok
-from horsies.core.worker.child_protocol import (
+from tests.dualrun.reference.worker_parent.worker.child_protocol import (
     FRAME_HEADER,
     ChildKind,
     InitFrame,
@@ -37,8 +37,8 @@ from horsies.core.worker.child_protocol import (
     encode_parent_frame,
 )
 from horsies.core.worker.config import WorkerConfig
-from horsies.core.worker.slots import SlotPool
-from horsies.core.worker.worker import Worker
+from tests.dualrun.reference.worker_parent.worker.slots import SlotPool
+from tests.dualrun.reference.worker_parent.worker.worker import Worker
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio(loop_scope='function')]
 

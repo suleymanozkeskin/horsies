@@ -41,14 +41,14 @@ from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import OutcomeCode
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
-from horsies.core.worker.child_protocol import NoTaskLoop, RssUnreadable
-from horsies.core.worker.dispatch_claim import DispatchClaim
-from horsies.core.worker.failed_attempt import (
+from tests.dualrun.reference.worker_parent.worker.child_protocol import NoTaskLoop, RssUnreadable
+from tests.dualrun.reference.worker_parent.worker.dispatch_claim import DispatchClaim
+from tests.dualrun.reference.worker_parent.worker.failed_attempt import (
     FinishFailedAttempt,
     NoRetry,
     RetryAfter,
 )
-from horsies.core.worker.runtime import (
+from tests.dualrun.reference.worker_parent.worker.runtime import (
     _FINALIZE_STAGE_TIMEOUT,
     _AttemptEndUnknown,
     _FinalizeError,
@@ -56,7 +56,7 @@ from horsies.core.worker.runtime import (
     _TimeoutSettled,
     _TimeoutWriteFailed,
 )
-from horsies.core.worker.slots import (
+from tests.dualrun.reference.worker_parent.worker.slots import (
     CHILD_KILL_WAIT_S,
     Child,
     ChildExit,
@@ -69,8 +69,8 @@ from horsies.core.worker.slots import (
     SlotOutcome,
     TaskFinished,
 )
-from horsies.core.worker.stored_timeout import TaskTimeout
-from horsies.core.worker.worker import Worker, WorkerConfig
+from tests.dualrun.reference.worker_parent.worker.stored_timeout import TaskTimeout
+from tests.dualrun.reference.worker_parent.worker.worker import Worker, WorkerConfig
 from tests.fixtures.slots.handles import (
     finished_handle,
     task_finished_handle,
@@ -357,7 +357,7 @@ class _Rig:
                     return answer
 
         return patch(
-            'horsies.core.worker.dispatch.finish_ended_attempt_in_core',
+            'tests.dualrun.reference.worker_parent.worker.dispatch.finish_ended_attempt_in_core',
             AsyncMock(side_effect=_finish),
         )
 

@@ -15,15 +15,15 @@ import pytest
 
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.types.result import Ok
-from horsies.core.worker.child_protocol import (
+from tests.dualrun.reference.worker_parent.worker.child_protocol import (
     LoopHoldsTasks,
     RssUnreadable,
     SeatFinished,
 )
-from horsies.core.worker import child_runner
-from horsies.core.worker.child_runner import StatementsBound
-from horsies.core.worker.run_return import MarkerAfterLeftWork, MarkerAtReturn
-from horsies.core.worker.slots import (
+from tests.dualrun.reference.worker_parent.worker import child_runner
+from tests.dualrun.reference.worker_parent.worker.child_runner import StatementsBound
+from tests.dualrun.reference.worker_parent.worker.run_return import MarkerAfterLeftWork, MarkerAtReturn
+from tests.dualrun.reference.worker_parent.worker.slots import (
     ISOLATED_LEFTOVER_BACKSTOP_S,
     Assigned,
     Child,
@@ -38,14 +38,14 @@ from horsies.core.worker.slots import (
     SlotHandle,
     TaskFinished,
 )
-from horsies.core.worker.dispatch_claim import DispatchClaim
-from horsies.core.worker.stored_timeout import TaskTimeout
-from horsies.core.worker.task_loop import (
+from tests.dualrun.reference.worker_parent.worker.dispatch_claim import DispatchClaim
+from tests.dualrun.reference.worker_parent.worker.stored_timeout import TaskTimeout
+from tests.dualrun.reference.worker_parent.worker.task_loop import (
     CANCEL_ROUND_INTERVAL_S,
     EXTRA_CANCEL_ROUNDS,
     ISOLATED_LEFTOVER_GRACE_S,
 )
-from horsies.core.worker.worker import Worker, WorkerConfig
+from tests.dualrun.reference.worker_parent.worker.worker import Worker, WorkerConfig
 from tests.fixtures.slots.handles import (
     HANDLE_CLAIMED_AT,
     finished_handle,
