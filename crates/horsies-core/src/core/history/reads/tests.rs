@@ -1148,13 +1148,13 @@ async fn guard_marker(connection: &mut PgConnection) -> Option<String> {
     .expect("read duplicate guard marker")
 }
 
-/// The published guard probes only the birth-pruned leaves; the first
-/// version of 0003 (through the provenance reader) is replaced by the next
-/// publication. Migration 1000 publishes the readers before the install
-/// returns, so a fresh database already holds a stamped guard.
+/// The published guard probes only the birth-pruned leaves. The baseline
+/// defines no guard of its own: migration 1000 publishes the readers before
+/// the install returns, so a fresh database already holds a stamped guard,
+/// and a guard dropped out of band comes back with the next publication.
 #[tokio::test]
 #[serial]
-async fn duplicate_guard_probes_the_pruned_set_and_replaces_the_first_version() {
+async fn duplicate_guard_probes_the_pruned_set_and_a_dropped_guard_is_published_again() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
     let mut transaction = database.pool.begin().await.expect("begin guard setup");
@@ -1217,29 +1217,17 @@ async fn duplicate_guard_probes_the_pruned_set_and_replaces_the_first_version() 
         .execute(&mut *connection)
         .await
         .expect("drop rendered guard");
-    let interim_functions = crate::broker::migrations::BASELINE_INTERIM_FUNCTIONS_SQL;
-    let guard_start = interim_functions
-        .find("CREATE FUNCTION horsies_task_history_duplicate_staged(")
-        .expect("first guard version in the baseline");
-    let guard_end = guard_start
-        + interim_functions[guard_start..]
-            .find("$$;\n")
-            .expect("end of the first guard version")
-        + "$$;\n".len();
-    sqlx::raw_sql(&interim_functions[guard_start..guard_end])
-        .execute(&mut *connection)
-        .await
-        .expect("create the first guard version");
+    assert!(!crate::broker::migrations::BASELINE_INTERIM_FUNCTIONS_SQL
+        .contains("FUNCTION horsies_task_history_duplicate_staged("));
     assert_eq!(guard_marker(&mut connection).await, None);
-    assert!(duplicate_guard(&mut connection, clock_violation_id).await);
     assert!(StagedLoaderPublisher
         .needs_republication(&mut connection)
         .await
-        .expect("republication probe with the first version"));
+        .expect("republication probe with the guard dropped"));
     StagedLoaderPublisher
         .republish(&mut connection)
         .await
-        .expect("replace the first version");
+        .expect("publish the guard again");
     assert!(guard_marker(&mut connection)
         .await
         .is_some_and(|stamp| stamp.starts_with("horsies:manifest:")));
