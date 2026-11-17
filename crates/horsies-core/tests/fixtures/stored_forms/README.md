@@ -97,10 +97,13 @@ Encoders:
   then `dumps_json` (`python/horsies/core/codec/json_io.py:43`); the send path
   is `python/horsies/core/task_decorator.py:2426-2432`.
 - Rust client: the `Input` struct of the task attribute
-  (`crates/horsies-macros/src/codegen.rs:482`, `input_struct`), encoded by
-  `encode_read_back` (`crates/horsies/src/task/body.rs:186`) through the core's
-  `to_json_bytes_strict` (`crates/horsies-core/src/core/codec/strict.rs:26`);
-  the send path is `crates/horsies/src/send/function.rs:343`.
+  (`crates/horsies-macros/src/codegen.rs`, `input_struct`), encoded by
+  `encode_send_input` (`crates/horsies/src/task/body.rs`): `{}` for a task
+  with no parameters (the input `()`), else `encode_read_back` through the
+  core's `to_json_bytes_strict` (`crates/horsies-core/src/core/codec/strict.rs`);
+  the send path is `crates/horsies/src/send/function.rs` (`encoded_input`). A
+  schedule without input stores `{}` (`schedule_input_text`,
+  `crates/horsies/src/config/scheduler_manifest.rs`).
 - Core: none. The send checks the text with the strict read rule
   (`crates/horsies-core/src/core/history/enqueue.rs:198`, `check_json_text` at
   `crates/horsies-core/src/core/codec/strict_read.rs:131`) and stores it as
@@ -284,6 +287,6 @@ Differences that the vectors found. A fixed one names its PR; an open one is a
 | `send-deadline-in-options` | task options | a send with a deadline: Python writes it in the options' `good_until`; the Rust client writes `null` there (the deadline is in the row's column) | open |
 | `spec-data-queue-class-order` | workflow spec data | `queue_classes`: Python writes the queues in the order of the nodes; the Rust client writes them sorted (`BTreeMap`). The core reads both | open |
 | `spec-data-non-ascii-escapes` | workflow spec data | Python's `dump_workflow_spec_data` keeps `json.dumps`' default `ensure_ascii=True` and writes `\u00dc` for `Ü`; every other Python stored-form encoder (`dumps_json`) and the Rust client write the character. The core reads both. Not pinned by a vector | open |
-| `no-parameter-input` | task input | a task with no parameters: Python stores `{}`, the Rust client stores `null` (its input is `()`) | open |
+| `no-parameter-input` | task input | a task with no parameters: Python stores `{}`, the Rust client stored `null` (its input is `()`) | fixed, the client's send stores `{}` |
 | `datetime-milliseconds` | task input, result, task options | chrono writes a fraction of whole milliseconds with 3 digits (`.500Z`); Python writes 6 (`.500000Z`). Microseconds and whole seconds agree. The Rust client's node deadline (`to_rfc3339`) too | open |
 | not expressible in Rust | task input, result | `big_int`, `decimal`, `bytes`, `int_enum`, a typed map in insertion order: the client depends on no type that writes Python's text | listed per row |

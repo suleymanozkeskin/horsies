@@ -1,7 +1,7 @@
 {
   "form": "task input",
   "vectors": [
-    {"name": "no_parameters", "parameters": [], "text": "{}", "rust_drift": {"text": "null", "finding": "no-parameter-input"}},
+    {"name": "no_parameters", "parameters": [], "text": "{}"},
     {"name": "bool_true", "parameters": [{"name": "value", "type": "bool", "value": true}], "text": "{\"value\":true}"},
     {"name": "i64_small", "parameters": [{"name": "value", "type": "i64", "value": "7"}], "text": "{\"value\":7}"},
     {"name": "i64_negative", "parameters": [{"name": "value", "type": "i64", "value": "-42"}], "text": "{\"value\":-42}"},
