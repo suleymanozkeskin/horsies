@@ -12,6 +12,7 @@ with its own types: ``{"type": <type name>, "value": <notation>}``. This
 module turns the notation into a Python value and its annotation. Integers are
 decimal text, so that a reader of the file never rounds one. The type names:
 
+- ``none``: ``null``; Python ``None``, Rust ``()``.
 - ``bool``: a JSON boolean.
 - ``i64``, ``u64``, ``i128``, ``u128``, ``big_int``: decimal text; the name is
   the Rust type that holds the value (``big_int``: none does).
@@ -32,6 +33,12 @@ decimal text, so that a reader of the file never rounds one. The type names:
 - ``record_order``: an ``Order`` as ``{"id": <decimal text>, "amount": <float
   text>}``.
 
+A task error is written as ``{"error_code": {"built_in": <name>} | {"user":
+<text>}, "message": <text or null>, "data": <JSON or null>, "exception":
+<the five texts of a flattened exception, or null>}``, with ``"sub_workflow":
+{"id": <UUID text>, "summary": <the summary's fields>}`` for a sub-workflow
+error.
+
 This module is pure. It does no I/O but in ``load_form``.
 """
 
@@ -47,6 +54,14 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from horsies.core.models.tasks import (
+    BUILTIN_CODE_REGISTRY,
+    BuiltInTaskCode,
+    FlattenedException,
+    SubWorkflowError,
+    TaskError,
+)
+from horsies.core.models.workflow import SubWorkflowSummary, WorkflowStatus
 from horsies.core.types.json_value import JsonValue
 
 VECTORS_DIR: Final = (
@@ -126,6 +141,8 @@ def _datetime(notation: Notation) -> dt.datetime:
 def annotation_of(type_name: str) -> object:
     """The Python annotation of the vector type ``type_name``."""
     match type_name:
+        case 'none':
+            return type(None)
         case 'bool':
             return bool
         case 'i64' | 'u64' | 'i128' | 'u128' | 'big_int':
@@ -165,6 +182,9 @@ def annotation_of(type_name: str) -> object:
 def value_of(type_name: str, notation: Notation) -> object:
     """The Python value of ``notation`` under the vector type ``type_name``."""
     match type_name:
+        case 'none':
+            assert notation is None
+            return None
         case 'bool':
             assert isinstance(notation, bool)
             return notation
@@ -215,3 +235,82 @@ def typed(row: dict[str, object]) -> tuple[object, object]:
     """The value and the annotation of a typed row ``{"type": ..., "value": ...}``."""
     type_name = text_of(row, 'type')
     return value_of(type_name, row['value']), annotation_of(type_name)
+
+
+def _members(notation: object, what: str) -> dict[str, object]:
+    assert isinstance(notation, dict), f'{what} is not an object'
+    return cast('dict[str, object]', notation)
+
+
+def _error_code(notation: object) -> BuiltInTaskCode | str:
+    match _members(notation, 'error_code'):
+        case {'built_in': str() as name}:
+            return BUILTIN_CODE_REGISTRY[name]
+        case {'user': str() as text}:
+            return text
+        case other:
+            raise AssertionError(f'unknown error code notation {other!r}')
+
+
+def _exception(notation: object) -> FlattenedException | None:
+    if notation is None:
+        return None
+    fields = _members(notation, 'exception')
+    return FlattenedException(
+        type=text_of(fields, 'type'),
+        module=text_of(fields, 'module'),
+        message=text_of(fields, 'message'),
+        repr=text_of(fields, 'repr'),
+        traceback=text_of(fields, 'traceback'),
+    )
+
+
+def _optional_text(fields: dict[str, object], key: str) -> str | None:
+    value = fields[key]
+    assert value is None or isinstance(value, str), f'{key} is not text or null'
+    return value
+
+
+def _count(fields: dict[str, object], key: str) -> int:
+    value = fields[key]
+    assert isinstance(value, int), f'{key} is not an integer'
+    return value
+
+
+def _summary(notation: object) -> SubWorkflowSummary[object]:
+    fields = _members(notation, 'summary')
+    return SubWorkflowSummary(
+        status=WorkflowStatus(text_of(fields, 'status')),
+        output=fields['output'],
+        total_tasks=_count(fields, 'total_tasks'),
+        completed_tasks=_count(fields, 'completed_tasks'),
+        failed_tasks=_count(fields, 'failed_tasks'),
+        skipped_tasks=_count(fields, 'skipped_tasks'),
+        error_summary=_optional_text(fields, 'error_summary'),
+    )
+
+
+def task_error_of(notation: object) -> TaskError:
+    """The ``TaskError`` (or ``SubWorkflowError``) of a task error notation."""
+    fields = _members(notation, 'error')
+    code = _error_code(fields['error_code'])
+    message = _optional_text(fields, 'message')
+    exception = _exception(fields['exception'])
+    match fields.get('sub_workflow'):
+        case None:
+            return TaskError(
+                error_code=code,
+                message=message,
+                data=cast('JsonValue', fields['data']),
+                exception=exception,
+            )
+        case sub_workflow:
+            sub = _members(sub_workflow, 'sub_workflow')
+            return SubWorkflowError(
+                error_code=code,
+                message=message,
+                data=cast('JsonValue', fields['data']),
+                exception=exception,
+                sub_workflow_id=text_of(sub, 'id'),
+                sub_workflow_summary=_summary(sub['summary']),
+            )
