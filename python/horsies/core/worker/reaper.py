@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal, assert_never
 
 from horsies.core.brokers.result_types import BrokerOperationError, broker_error_cause
@@ -395,20 +396,14 @@ class ReaperMixin:
         # Paused-age expiry: the declared policy's sweep. Gated on the
         # opt-in knob (None = the pass reads nothing) and running under
         # the same cluster-wide reaper gate; the writer is the cancel
-        # path's locked sequence with EXPIRED as the terminal status,
-        # so an expiring workflow leaves no claimable backing rows and
-        # no ENQUEUED nodes behind.
+        # body of horsies_workflow_expire_paused with EXPIRED as the
+        # terminal status, so an expiring workflow leaves no claimable
+        # backing rows and no ENQUEUED nodes behind.
         if retention_cfg.paused_workflow_auto_cancel_after is not None:
-            from horsies.core.workflows.lifecycle import (
-                expire_paused_workflows,
-            )
-
             try:
-                expired = await expire_paused_workflows(
-                    resources.session_factory,
-                    older_than=(
-                        retention_cfg.paused_workflow_auto_cancel_after
-                    ),
+                expired = await self._expire_paused_workflows(
+                    temp_broker,
+                    older_than=retention_cfg.paused_workflow_auto_cancel_after,
                 )
                 if expired > 0:
                     logger.info(
@@ -626,6 +621,40 @@ class ReaperMixin:
                     raise AssertionError('take_uncovered returned a served stream')
                 case _ as unreachable:
                     assert_never(unreachable)
+
+    async def _expire_paused_workflows(
+        self,
+        temp_broker: 'PostgresBroker',
+        *,
+        older_than: timedelta,
+    ) -> int:
+        """The paused expiry of the retention policy, in the core
+        (``CoreHandle.expire_paused_workflows_async``): the PAUSED workflows
+        older than ``older_than``, at most ``PAUSED_EXPIRY_BATCH_SIZE``,
+        oldest first, one ``horsies_workflow_expire_paused`` each. The age
+        goes in exact microseconds.
+
+        Returns the number of workflows expired.
+
+        Raises:
+            CoreOperationFailed: the call failed; the candidates before the
+                failed one are expired, the rest wait for the next pass.
+            CoreError: the core of this process cannot run the call.
+        """
+        from horsies._core import PausedExpired, PausedExpiryFailed
+        from horsies.core.types.core_failure import CoreOperationFailed
+        from horsies.core.workflows.lifecycle import PAUSED_EXPIRY_BATCH_SIZE
+
+        record = await temp_broker._core_handle.expire_paused_workflows_async(
+            older_than // timedelta(microseconds=1), PAUSED_EXPIRY_BATCH_SIZE,
+        )
+        match record:
+            case PausedExpired(expired=expired):
+                return expired
+            case PausedExpiryFailed(message=message, retryable=retryable):
+                raise CoreOperationFailed('expire_paused_workflows', message, retryable)
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _delete_expired_workflows(
         self,
