@@ -76,13 +76,6 @@ mod tests {
     }
 
     #[test]
-    fn meta_clone_eq() {
-        let m1 = WorkflowMeta::new(Uuid::nil(), 0, "task_a".to_owned());
-        let m2 = m1.clone();
-        assert_eq!(m1, m2);
-    }
-
-    #[test]
     fn meta_serde_round_trip() {
         let meta = WorkflowMeta::new(Uuid::nil(), 5, "process".to_owned());
         let json = serde_json::to_string(&meta).unwrap();

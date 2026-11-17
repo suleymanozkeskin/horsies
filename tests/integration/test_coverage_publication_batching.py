@@ -8,7 +8,6 @@ publication shares one timestamp and the probe positions are contiguous.
 
 from __future__ import annotations
 
-import uuid
 from datetime import timedelta
 
 import pytest
@@ -27,10 +26,7 @@ from horsies.core.history.maintenance.coverage import (
 )
 from horsies.core.history.names import LEAF_CATALOG, TASK_LOOKUP_MANIFEST
 from horsies.core.history.partitions.publication import LoaderRepublished
-from horsies.core.history.reads.publisher import (
-    StagedLoaderPublisher,
-    published_manifest_matches_catalog,
-)
+from horsies.core.history.reads.publisher import StagedLoaderPublisher
 from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -48,10 +44,11 @@ class CountingPublisher(StagedLoaderPublisher):
         return await super().republish(connection)
 
 
-async def _register(connection: AsyncConnection) -> str:
-    class_key = f'it_pub_{uuid.uuid4().hex[:8]}'
+async def _register(connection: AsyncConnection, days: int) -> str:
+    """Register a period class of its own: the key form is standard_<days>d."""
+    class_key = f'standard_{days}d'
     registration = await register_finite_retention_class(
-        connection, class_key=class_key, duration=timedelta(days=7),
+        connection, class_key=class_key, duration=timedelta(days=days),
     )
     assert isinstance(registration, ClassRegistered), registration
     return class_key
@@ -62,7 +59,7 @@ async def test_coverage_creating_leaves_in_two_classes_publishes_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with current_resources(broker).engine.begin() as connection:
-        classes = [await _register(connection), await _register(connection)]
+        classes = [await _register(connection, 1601), await _register(connection, 1602)]
     monkeypatch.setattr(coverage_module, 'StagedLoaderPublisher', CountingPublisher)
     CountingPublisher.republished = 0
 
@@ -90,4 +87,4 @@ async def test_coverage_creating_leaves_in_two_classes_publishes_once(
         ))).all()
         assert [row.probe_position for row in manifest] == list(range(len(manifest)))
         assert len({row.published_at for row in manifest}) == 1
-        assert await published_manifest_matches_catalog(connection)
+        assert await StagedLoaderPublisher().is_current(connection)

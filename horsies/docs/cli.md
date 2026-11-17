@@ -141,7 +141,7 @@ Pass either `app_path` or `--database-url`, not both. With `--database-url` the 
 horsies web myapp.tasks:app
 
 # Monitor a database directly
-horsies web --database-url postgresql+psycopg://user:pw@host/db
+horsies web --database-url postgresql://user:pw@host/db
 
 # Behind a proxy that authenticates callers and sets the header
 horsies web myapp.tasks:app --host 0.0.0.0 \
@@ -274,7 +274,7 @@ Workers wait up to the `drain_timeout` of their profile (default 300 seconds) fo
 ## Environment Variables
 
 ```bash
-DATABASE_URL=postgresql+psycopg://... horsies worker myapp.instance:app --profile default
+DATABASE_URL=postgresql://... horsies worker myapp.instance:app --profile default
 ```
 
 Use in config:

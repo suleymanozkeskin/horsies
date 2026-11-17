@@ -34,7 +34,7 @@ DECLARED_KEY = period_class_key(DECLARED_DURATION.days)
 
 def _reaper_worker(broker: PostgresBroker) -> Worker:
     config = WorkerConfig(
-        dsn='postgresql+psycopg://unused:unused@localhost/unused',
+        dsn='postgresql://unused:unused@localhost/unused',
         psycopg_dsn='postgresql://unused:unused@localhost/unused',
         queues=['default'],
     )
@@ -65,7 +65,8 @@ async def _registered_duration(
         return (
             await connection.execute(
                 text(
-                    'SELECT duration FROM horsies_retention_classes '
+                    "SELECT make_interval(days => retention_days) "
+                    'FROM horsies_retention_classes '
                     'WHERE class_key = :key'
                 ),
                 {'key': key},

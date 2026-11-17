@@ -52,11 +52,11 @@ use super::catalog::{
 };
 use super::manager::{
     create_daily_leaf, detach_expired_leaf, drop_detached_leaf, ensure_leaf_coverage, inspect_leaf,
-    verify_static_forever_leaf, DetachExpiredLeafOutcome, LeafBlockerQuarantine, NoQuarantine,
-    QuarantineRefusalVerdict, QuarantineRefused, QuarantineResult, TaskQuarantineRefusal,
-    STATIC_FOREVER_LEAF_BOUND,
+    verify_static_forever_leaf, DetachExpiredLeafOutcome, NoQuarantine, STATIC_FOREVER_LEAF_BOUND,
 };
 use super::publication::{LoaderPublication, LoaderRepublished, UnpublishedLoader};
+
+mod lifecycle_ports;
 
 #[derive(Debug, Default)]
 struct CatalogPublisher;
@@ -220,30 +220,6 @@ impl LoaderPublication for FailFirstStagedPublisher {
     }
 }
 
-#[derive(Debug, Clone)]
-struct RefusingQuarantine {
-    task_id: Uuid,
-}
-
-impl LeafBlockerQuarantine for RefusingQuarantine {
-    async fn quarantine(
-        &self,
-        _connection: &mut PgConnection,
-        leaf: &LeafRef,
-        _horizon: Duration,
-    ) -> Result<QuarantineResult, crate::core::history::errors::HistoryError> {
-        Ok(QuarantineResult::Refused(QuarantineRefused {
-            leaf_name: leaf.leaf_name().to_owned(),
-            repointed: 0,
-            refusals: vec![TaskQuarantineRefusal {
-                task_id: self.task_id,
-                verdict: QuarantineRefusalVerdict::SourceAbsent,
-                detail: Some("history row absent at locator".to_owned()),
-            }],
-        }))
-    }
-}
-
 /// A copy of the installed test template (`crate::test_support`) with a
 /// sqlx pool for the history functions that still take a sqlx connection.
 struct TestDatabase {
@@ -277,6 +253,8 @@ impl TestDatabase {
 }
 
 mod pruning_ports;
+
+mod read_round_trips;
 
 #[derive(Clone)]
 struct StatementPause {
@@ -1965,10 +1943,10 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
     .expect("insert blocker workflow");
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, task_name, input, queue_name, priority,
+             downstream_subworkflow, id, workflow_id, task_index, task_name, input, queue_name, priority,
              dependencies, allow_failed_deps, join_type, max_retries, execution,
              retention_class_key, status, is_subworkflow, created_at
-         ) VALUES ($1, $2, 0, 'p3 blocker node', '{}', 'default', 100,
+         ) VALUES ('NONE', $1, $2, 0, 'p3 blocker node', '{}', 'default', 100,
                    '{}', FALSE, 'all', 0, 'ISOLATED',
                    $3, 'RUNNING', FALSE, NOW())",
     )
@@ -1999,33 +1977,6 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
     .await
     .expect("insert pending blocker");
     transaction.commit().await.expect("commit blocker");
-    let quarantine_detach =
-        DetachExpiredHistoryLeaf::new(leaf.clone(), Some(Duration::hours(1)), Some(5_000))
-            .expect("quarantine detach command");
-    let quarantine_refusal = detach_expired_leaf(
-        &database.pool,
-        &quarantine_detach,
-        &UnpublishedLoader,
-        &RefusingQuarantine {
-            task_id: pending_task_id,
-        },
-    )
-    .await
-    .expect("typed quarantine refusal");
-    match quarantine_refusal {
-        DetachExpiredLeafOutcome::QuarantineRefused(refusal) => {
-            assert_eq!(refusal.leaf_name, leaf.leaf_name());
-            assert_eq!(refusal.repointed, 0);
-            assert_eq!(refusal.refusals.len(), 1);
-            assert_eq!(refusal.refusals[0].task_id, pending_task_id);
-            assert_eq!(
-                refusal.refusals[0].verdict,
-                QuarantineRefusalVerdict::SourceAbsent
-            );
-            assert!(refusal.refusals[0].detail.is_some());
-        }
-        other => panic!("expected task-level quarantine refusal, got {other:?}"),
-    }
     let detach =
         DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach command");
     let blocked = detach_expired_leaf(&database.pool, &detach, &UnpublishedLoader, &NoQuarantine)
@@ -2719,83 +2670,6 @@ impl LoaderPublication for CountingStagedPublisher {
 
 #[tokio::test]
 #[serial]
-async fn connection_coverage_publishes_once_per_changed_class_and_at_completion() {
-    let database = TestDatabase::create().await;
-    let mut tx = database.pool.begin().await.unwrap();
-    let publisher = CountingStagedPublisher::default();
-    let result = ensure_partition_coverage(&mut tx, 3, 2, &[], &publisher)
-        .await
-        .unwrap();
-    let CoverageOutcome::Ensured(report) = result else {
-        panic!("{result:?}");
-    };
-    // Four standard daily leaves. The first migration creates the static
-    // forever leaf; coverage only verifies it.
-    assert_eq!(report.created_history_leaves, 4);
-    assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
-    assert!(!StagedLoaderPublisher
-        .needs_republication(tx.as_mut())
-        .await
-        .unwrap());
-    let again = ensure_partition_coverage(&mut tx, 3, 2, &[], &publisher)
-        .await
-        .unwrap();
-    let CoverageOutcome::Ensured(report) = again else {
-        panic!("{again:?}");
-    };
-    assert_eq!(report.created_history_leaves, 0);
-    assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
-    tx.commit().await.unwrap();
-    database.drop().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn connection_coverage_rolls_back_a_failed_class_and_preserves_other_classes() {
-    let database = TestDatabase::create().await;
-    // Classes are served in key order: forever (verified, nothing created),
-    // standard_30d (its publication is the first one and fails), standard_7d.
-    register_class(&database.pool, "standard_7d", 7).await;
-    let mut tx = database.pool.begin().await.unwrap();
-    let publisher = FailFirstStagedPublisher::default();
-    let result = ensure_partition_coverage(&mut tx, 3, 2, &[], &publisher)
-        .await
-        .unwrap();
-    let CoverageOutcome::Failed(failed) = result else {
-        panic!("{result:?}");
-    };
-    assert_eq!(failed.stage, "ensure_leaf_coverage");
-    assert_eq!(failed.class_key.as_deref(), Some("standard_30d"));
-    assert!(failed.heartbeat_covered_now);
-    assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);
-    let classes: Vec<(String, i64)> = sqlx::query_as("SELECT class_key, count(*) FROM horsies_task_history_leaf_catalog WHERE dropped_at IS NULL AND class_key <> 'heartbeats' GROUP BY class_key ORDER BY class_key")
-        .fetch_all(tx.as_mut()).await.unwrap();
-    assert!(
-        !classes.iter().any(|(class, _)| class == "standard_30d"),
-        "the failed class must retain only its pre-existing leaves: {classes:?}",
-    );
-    assert!(classes
-        .iter()
-        .any(|(class, count)| class == "standard_7d" && *count == 4));
-    assert!(classes
-        .iter()
-        .any(|(class, count)| class == "forever" && *count == 1));
-    assert!(!StagedLoaderPublisher
-        .needs_republication(tx.as_mut())
-        .await
-        .unwrap());
-    tx.commit().await.unwrap();
-    let mut repair = database.pool.begin().await.unwrap();
-    let result = ensure_partition_coverage(&mut repair, 3, 2, &[], &StagedLoaderPublisher)
-        .await
-        .unwrap();
-    assert!(matches!(result, CoverageOutcome::Ensured(_)), "{result:?}");
-    repair.commit().await.unwrap();
-    database.drop().await;
-}
-
-#[tokio::test]
-#[serial]
 async fn detach_publishes_changed_history_only_and_finalization_repairs_stale_readers() {
     use super::manager::finalize_interrupted_detach;
     use crate::core::history::commands::FinalizeInterruptedLeafDetach;
@@ -3216,3 +3090,5 @@ async fn guard_probe_set_is_standard_horizon_plus_the_static_forever_leaf() {
     tx.rollback().await.unwrap();
     database.drop().await;
 }
+
+mod coverage_ports;

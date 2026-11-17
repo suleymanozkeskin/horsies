@@ -13,7 +13,6 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,11 +23,14 @@ from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     CapacityWoken,
+    ClaimReleased,
     FailedAttemptOutcome,
     FailureApplied,
     LostClaim,
     ObservedTaskState,
+    OutcomeDecodeError,
     PhaseTwoOwed,
+    PhaseTwoStep,
     RetryNotRequested,
     RetryPastDeadline,
     RetryScheduled,
@@ -38,6 +40,7 @@ from horsies.core.models.tasks import OutcomeCode
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.worker.child_protocol import NoTaskLoop, RssUnreadable
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.failed_attempt import (
     FinishFailedAttempt,
     NoRetry,
@@ -63,10 +66,6 @@ from horsies.core.worker.slots import (
     SlotHandle,
     SlotOutcome,
     TaskFinished,
-)
-from horsies.core.worker.sql import (
-    READ_IN_FLIGHT_ATTEMPT_SQL,
-    UNCLAIM_CLAIMED_TASK_SQL,
 )
 from horsies.core.worker.stored_timeout import TaskTimeout
 from horsies.core.worker.worker import Worker, WorkerConfig
@@ -95,13 +94,10 @@ _LOST_EXIT_UNKNOWN = ChildLost(
     partial_frame=False,
     pid=CHILD_PID,
 )
-_STATEMENT_NAMES: dict[int, str] = {
-    id(READ_IN_FLIGHT_ATTEMPT_SQL): 'read row',
-    id(UNCLAIM_CLAIMED_TASK_SQL): 'requeue',
-}
 _TIMEOUT_RETRY_OPTIONS = json.dumps(
     {
         'retry_policy': {
+            'max_retries': 1,
             'auto_retry_for': [OutcomeCode.TASK_TIMEOUT.value],
             'intervals': [30],
             'backoff_strategy': 'fixed',
@@ -151,27 +147,25 @@ class _ScriptedChild:
 
 
 class _RecordingConnection:
-    """An autocommit connection double that adds each statement to the timeline."""
+    """An autocommit connection double that adds each statement to the timeline.
 
-    def __init__(self, timeline: list[str], row: SimpleNamespace | None) -> None:
+    The failed-attempt finish is patched, so a statement here is one that the
+    timeout path must not send."""
+
+    def __init__(self, timeline: list[str]) -> None:
         self._timeline = timeline
-        self._row = row
 
     async def execute(self, statement: Any, params: dict[str, Any]) -> Any:
-        self._timeline.append(_STATEMENT_NAMES.get(id(statement), 'other statement'))
-        result = MagicMock()
-        read = statement is READ_IN_FLIGHT_ATTEMPT_SQL
-        result.fetchone.return_value = self._row if read else None
-        result.rowcount = 1
-        return result
+        self._timeline.append('other statement')
+        return MagicMock()
 
 
 class _RecordingSession:
     """An async session double whose connection records each statement."""
 
-    def __init__(self, timeline: list[str], row: SimpleNamespace | None) -> None:
+    def __init__(self, timeline: list[str]) -> None:
         self._timeline = timeline
-        self.connection_double = _RecordingConnection(timeline, row)
+        self.connection_double = _RecordingConnection(timeline)
         self.execution_options: list[dict[str, Any]] = []
 
     async def __aenter__(self) -> _RecordingSession:
@@ -188,12 +182,15 @@ class _RecordingSession:
         return self.connection_double
 
 
-def _row(status: str, *, task_options: str | None = None) -> SimpleNamespace:
-    return SimpleNamespace(
-        status=status,
-        retry_count=0,
-        max_retries=3 if task_options is not None else 0,
-        task_options=task_options,
+def _released() -> ClaimReleased:
+    return ClaimReleased(
+        task_id=TASK_ID,
+        queue_name='default',
+        observed=ObservedTaskState(
+            status=TaskStatus.CLAIMED,
+            worker_id='worker-1',
+            claimed_at=None,
+        ),
     )
 
 
@@ -212,7 +209,11 @@ def _applied(*, workflow: bool = True) -> FailureApplied:
         observed=_observed(),
         retry=RetryNotRequested(),
         after=(
-            PhaseTwoOwed(task_name='timeout_task', queue_name='default')
+            PhaseTwoOwed(
+                task_name='timeout_task',
+                queue_name='default',
+                step=PhaseTwoStep.NO_DEPENDENTS,
+            )
             if workflow
             else CapacityWoken()
         ),
@@ -225,7 +226,9 @@ def _past_deadline() -> FailureApplied:
         terminal_at=_NOW,
         observed=_observed(),
         retry=RetryPastDeadline(next_retry_at=_NOW, good_until=_NOW),
-        after=PhaseTwoOwed(task_name='timeout_task', queue_name='default'),
+        after=PhaseTwoOwed(
+            task_name='timeout_task', queue_name='default', step=PhaseTwoStep.NO_DEPENDENTS,
+        ),
     )
 
 
@@ -267,21 +270,27 @@ class _Rig:
     def __init__(
         self,
         *,
-        row: SimpleNamespace | None,
+        task_options: str | None = None,
         child_exit: ChildExit = _KILLED,
         recovery: RecoveryConfig | None = RecoveryConfig(),
     ) -> None:
         self.timeline: list[str] = []
-        self.session = _RecordingSession(self.timeline, row)
+        self.session = _RecordingSession(self.timeline)
         self.child = _ScriptedChild(self.timeline, child_exit)
         self.handle = unbound_handle(TASK_ID)
         self.handle.bind_child(cast(Child, self.child))
+        self.claim = DispatchClaim(
+            claimed_at=self.handle.frame.claimed_at,
+            retry_count=0,
+            max_retries=3 if task_options is not None else 0,
+            task_options=task_options,
+        )
         self.finish_commands: list[FinishFailedAttempt] = []
         self.worker = Worker(
             session_factory=MagicMock(),
             listener=MagicMock(),
             cfg=WorkerConfig(
-                dsn='postgresql+psycopg://u:p@localhost/db',
+                dsn='postgresql://u:p@localhost/db',
                 psycopg_dsn='postgresql://u:p@localhost/db',
                 queues=['default'],
                 recovery_config=recovery,
@@ -330,13 +339,13 @@ class _Rig:
 
         return _record
 
-    def finish(self, answer: FailedAttemptOutcome | Exception) -> Any:
-        """Patch the failed-attempt finish, recording it and its command."""
+    def finish(self, answer: FailedAttemptOutcome | ClaimReleased | Exception) -> Any:
+        """Patch the ended-attempt finish, recording it and its command."""
 
         async def _finish(
             _connection: object,
             command: FinishFailedAttempt,
-        ) -> FailedAttemptOutcome:
+        ) -> FailedAttemptOutcome | ClaimReleased:
             self.timeline.append('finish attempt')
             self.finish_commands.append(command)
             match answer:
@@ -346,7 +355,7 @@ class _Rig:
                     return answer
 
         return patch(
-            'horsies.core.worker.dispatch.finish_failed_attempt',
+            'horsies.core.worker.dispatch.finish_ended_attempt',
             AsyncMock(side_effect=_finish),
         )
 
@@ -356,7 +365,7 @@ class _Rig:
                 self.handle,
                 TASK_ID,
                 TIMEOUT_MS,
-                self.handle.frame.claimed_at,
+                self.claim,
             ),
             TEST_WAIT_S,
         )
@@ -372,7 +381,7 @@ class _Rig:
                 TASK_ID,
                 timeout=TaskTimeout(ms=1),
                 task_name='timeout_task',
-                claimed_at=self.handle.frame.claimed_at,
+                claim=self.claim,
             ),
             TEST_WAIT_S,
         )
@@ -389,7 +398,7 @@ async def _until_killed(rig: _Rig) -> None:
 @pytest.mark.asyncio
 class TestTheKillComesFirst:
     async def test_nothing_is_written_while_the_child_runs(self) -> None:
-        rig = _Rig(row=_row('RUNNING'))
+        rig = _Rig()
 
         with rig.finish(_applied()):
             timeout = asyncio.ensure_future(rig.handle_timeout())
@@ -402,7 +411,7 @@ class TestTheKillComesFirst:
             assert await timeout == _TimeoutSettled()
 
     async def test_the_wait_for_the_exit_has_the_kill_bound(self) -> None:
-        rig = _Rig(row=_row('RUNNING'))
+        rig = _Rig()
         rig.child.gate.set()
 
         with rig.finish(_applied()):
@@ -411,7 +420,7 @@ class TestTheKillComesFirst:
         assert rig.child.waits_s == [CHILD_KILL_WAIT_S]
 
     async def test_a_workflow_task_fails_then_phase_2_runs_after_the_exit(self) -> None:
-        rig = _Rig(row=_row('RUNNING'))
+        rig = _Rig()
         rig.child.gate.set()
 
         with rig.finish(_applied()):
@@ -421,8 +430,7 @@ class TestTheKillComesFirst:
         assert rig.timeline == [
             'kill',
             'exit seen',
-            'read row',
-            'finish attempt',
+                        'finish attempt',
             'phase 2',
         ]
         assert [command.error_code for command in rig.finish_commands] == [
@@ -433,17 +441,17 @@ class TestTheKillComesFirst:
 
     async def test_a_plain_task_failure_runs_no_phase_2(self) -> None:
         """The function sent the capacity wake of a plain task."""
-        rig = _Rig(row=_row('RUNNING'))
+        rig = _Rig()
         rig.child.gate.set()
 
         with rig.finish(_applied(workflow=False)):
             outcome = await rig.handle_timeout()
 
         assert outcome == _TimeoutSettled()
-        assert rig.timeline == ['kill', 'exit seen', 'read row', 'finish attempt']
+        assert rig.timeline == ['kill', 'exit seen', 'finish attempt']
 
     async def test_a_retry_is_written_only_after_the_exit(self) -> None:
-        rig = _Rig(row=_row('RUNNING', task_options=_TIMEOUT_RETRY_OPTIONS))
+        rig = _Rig(task_options=_TIMEOUT_RETRY_OPTIONS)
         rig.child.gate.set()
 
         with rig.finish(_retry_scheduled()):
@@ -453,8 +461,7 @@ class TestTheKillComesFirst:
         assert rig.timeline == [
             'kill',
             'exit seen',
-            'read row',
-            'finish attempt',
+                        'finish attempt',
             'wake when due',
         ]
         match rig.finish_commands[0].retry:
@@ -465,20 +472,20 @@ class TestTheKillComesFirst:
         assert rig.finish_commands[0].error_code == OutcomeCode.TASK_TIMEOUT.value
 
     async def test_a_claimed_row_is_requeued_only_after_the_exit(self) -> None:
-        rig = _Rig(row=_row('CLAIMED'))
+        rig = _Rig()
         rig.child.gate.set()
 
-        with rig.finish(_applied()):
+        with rig.finish(_released()):
             outcome = await rig.handle_timeout()
 
         assert outcome == _TimeoutSettled()
-        assert rig.timeline == ['kill', 'exit seen', 'read row', 'requeue']
+        assert rig.timeline == ['kill', 'exit seen', 'finish attempt']
 
     async def test_a_database_error_comes_after_the_kill(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        rig = _Rig(row=_row('RUNNING'))
+        rig = _Rig()
         rig.child.gate.set()
         rig.refuse_sessions()
 
@@ -498,7 +505,7 @@ class TestNoExitSeen:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         rig = _Rig(
-            row=_row('RUNNING', task_options=_TIMEOUT_RETRY_OPTIONS),
+            task_options=_TIMEOUT_RETRY_OPTIONS,
             child_exit=ExitUnknown(),
         )
         rig.child.gate.set()
@@ -518,7 +525,7 @@ class TestNoExitSeen:
         self,
     ) -> None:
         """The slot never answers here: the child did not exit."""
-        rig = _Rig(row=_row('RUNNING'), child_exit=ExitUnknown())
+        rig = _Rig(child_exit=ExitUnknown())
         rig.child.gate.set()
 
         result = await rig.finalize_after_deadline()
@@ -531,7 +538,7 @@ class TestNoExitSeen:
     ) -> None:
         """Nothing else would ever move the row: the worker writes
         TASK_TIMEOUT once it sees the exit, and not before."""
-        rig = _Rig(row=_row('RUNNING'), child_exit=ExitUnknown(), recovery=None)
+        rig = _Rig(child_exit=ExitUnknown(), recovery=None)
         rig.child.gate.set()
 
         with rig.finish(_applied()):
@@ -543,13 +550,13 @@ class TestNoExitSeen:
             outcome = await asyncio.wait_for(waiting, TEST_WAIT_S)
 
         assert outcome == _TimeoutSettled()
-        assert rig.timeline[:4] == ['kill', 'wait ended', 'late exit seen', 'read row']
+        assert rig.timeline[:4] == ['kill', 'wait ended', 'late exit seen', 'finish attempt']
         assert [command.error_code for command in rig.finish_commands] == [
             OutcomeCode.TASK_TIMEOUT.value,
         ]
 
     async def test_with_stale_recovery_off_a_stop_ends_the_wait(self) -> None:
-        rig = _Rig(row=_row('RUNNING'), child_exit=ExitUnknown(), recovery=None)
+        rig = _Rig(child_exit=ExitUnknown(), recovery=None)
         rig.child.gate.set()
         waiting = asyncio.ensure_future(rig.handle_timeout())
         await asyncio.sleep(0.05)
@@ -565,7 +572,7 @@ class TestNoExitSeen:
 @pytest.mark.asyncio
 class TestOneWriter:
     async def test_the_timeout_is_written_once_and_never_as_a_crash(self) -> None:
-        rig = _Rig(row=_row('RUNNING'))
+        rig = _Rig()
         rig.child.on_exit.append(rig.handle)
         rig.child.gate.set()
 
@@ -586,7 +593,7 @@ class TestOneWriter:
         """No crash recovery at once: the finalizer returns a retryable
         timeout-stage error, whose retries run the TASK_TIMEOUT write again
         and hand the row to crash recovery only after the last one."""
-        rig = _Rig(row=_row('RUNNING'))
+        rig = _Rig()
         rig.child.on_exit.append(rig.handle)
         rig.child.gate.set()
         rig.refuse_sessions()
@@ -613,7 +620,7 @@ class TestSlotAnsweredAfterTheDeadline:
     """The deadline decides: a later answer of the slot is dropped."""
 
     async def test_a_result_after_the_deadline_is_still_a_timeout(self) -> None:
-        rig = _Rig(row=_row('RUNNING'))
+        rig = _Rig()
         rig.handle = task_finished_handle(True, '{}', None)
 
         with rig.finish(_applied()):
@@ -621,8 +628,7 @@ class TestSlotAnsweredAfterTheDeadline:
 
         assert outcome == _TimeoutSettled()
         assert rig.timeline == [
-            'read row',
-            'finish attempt',
+                        'finish attempt',
             'phase 2',
         ]
         assert [command.error_code for command in rig.finish_commands] == [
@@ -632,7 +638,7 @@ class TestSlotAnsweredAfterTheDeadline:
     async def test_the_finalizer_drops_a_result_that_came_after_the_timer(
         self,
     ) -> None:
-        rig = _Rig(row=_row('RUNNING'))
+        rig = _Rig()
         rig.slot_answers_before_the_kill(
             TaskFinished(True, '{}', None, RssUnreadable(), NoTaskLoop()),
         )
@@ -651,7 +657,7 @@ class TestSlotAnsweredAfterTheDeadline:
         self,
     ) -> None:
         """The late answer of the slot is not read: the deadline decides."""
-        rig = _Rig(row=_row('RUNNING'))
+        rig = _Rig()
         rig.slot_answers_before_the_kill(_KILLED_BY_PARENT)
         rig.refuse_sessions()
 
@@ -664,7 +670,7 @@ class TestSlotAnsweredAfterTheDeadline:
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        rig = _Rig(row=_row('RUNNING'))
+        rig = _Rig()
         rig.handle = finished_handle(_LOST_EXIT_UNKNOWN)
 
         with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
@@ -685,16 +691,16 @@ class TestTimeoutWriteOutcomes:
     """Each other way the timeout write ends, after the exit was seen."""
 
     async def test_a_failed_finish_is_a_failed_write(self) -> None:
-        rig = _Rig(row=_row('RUNNING'))
+        rig = _Rig()
         rig.child.gate.set()
 
         with rig.finish(OperationalError('db down')):
             assert await rig.handle_timeout() == _TimeoutWriteFailed()
 
-        assert rig.timeline == ['kill', 'exit seen', 'read row', 'finish attempt']
+        assert rig.timeline == ['kill', 'exit seen', 'finish attempt']
 
     async def test_a_retry_past_its_deadline_fails_the_row(self) -> None:
-        rig = _Rig(row=_row('RUNNING', task_options=_TIMEOUT_RETRY_OPTIONS))
+        rig = _Rig(task_options=_TIMEOUT_RETRY_OPTIONS)
         rig.child.gate.set()
 
         with rig.finish(_past_deadline()):
@@ -703,7 +709,7 @@ class TestTimeoutWriteOutcomes:
         assert rig.timeline[-2:] == ['finish attempt', 'phase 2']
 
     async def test_a_row_failed_by_this_claim_replays_phase_2(self) -> None:
-        rig = _Rig(row=None)
+        rig = _Rig()
         rig.child.gate.set()
         rig.worker._replay_committed_terminalization = AsyncMock(  # type: ignore[method-assign]
             side_effect=rig._step('replay phase 2', None),
@@ -715,24 +721,25 @@ class TestTimeoutWriteOutcomes:
         assert rig.timeline == [
             'kill',
             'exit seen',
-            'read row',
-            'finish attempt',
+                        'finish attempt',
             'replay phase 2',
         ]
         assert [command.retry for command in rig.finish_commands] == [NoRetry()]
 
     async def test_a_row_another_actor_holds_is_left_alone(self) -> None:
-        rig = _Rig(row=None)
+        rig = _Rig()
         rig.child.gate.set()
 
         with rig.finish(_lost_claim()):
             assert await rig.handle_timeout() == _TimeoutSettled()
 
-        assert rig.timeline == ['kill', 'exit seen', 'read row', 'finish attempt']
+        assert rig.timeline == ['kill', 'exit seen', 'finish attempt']
 
-    async def test_a_status_outside_the_locked_read_is_a_failed_write(self) -> None:
-        rig = _Rig(row=_row('PENDING'))
+    async def test_a_row_outside_the_finish_contract_is_a_failed_write(self) -> None:
+        rig = _Rig()
         rig.child.gate.set()
 
-        assert await rig.handle_timeout() == _TimeoutWriteFailed()
-        assert rig.timeline == ['kill', 'exit seen', 'read row']
+        with rig.finish(OutcomeDecodeError('unknown outcome')):
+            assert await rig.handle_timeout() == _TimeoutWriteFailed()
+
+        assert rig.timeline == ['kill', 'exit seen', 'finish attempt']

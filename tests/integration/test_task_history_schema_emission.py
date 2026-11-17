@@ -29,6 +29,7 @@ from horsies.core.history.partitions.catalog import execute_with_utc_rendering
 from horsies.core.models.broker import PostgresConfig
 from tests.integration.conftest import DB_URL
 from tests.session_database import database_name_prefix
+from horsies.core.utils.url import sqlalchemy_url
 
 pytestmark = [pytest.mark.integration]
 
@@ -120,7 +121,7 @@ async def make_database() -> AsyncIterator[MakeDatabase]:
 
     async def _create() -> str:
         name = f'{database_name_prefix()}emission_{uuid.uuid4().hex[:12]}'
-        admin = create_async_engine(DB_URL, isolation_level='AUTOCOMMIT')
+        admin = create_async_engine(sqlalchemy_url(DB_URL), isolation_level='AUTOCOMMIT')
         async with admin.connect() as connection:
             await connection.execute(text(f'CREATE DATABASE {name}'))
         await admin.dispose()
@@ -129,7 +130,7 @@ async def make_database() -> AsyncIterator[MakeDatabase]:
 
     yield _create
 
-    admin = create_async_engine(DB_URL, isolation_level='AUTOCOMMIT')
+    admin = create_async_engine(sqlalchemy_url(DB_URL), isolation_level='AUTOCOMMIT')
     async with admin.connect() as connection:
         for name in created:
             await connection.execute(
@@ -164,7 +165,7 @@ async def _relation_schema_signature(
 async def _signatures(
     url: str, relations: tuple[str, ...] = COMPARED_RELATIONS
 ) -> dict[str, str]:
-    engine = create_async_engine(url)
+    engine = create_async_engine(sqlalchemy_url(url))
     try:
         async with engine.connect() as connection:
             captured: dict[str, str] = {}
@@ -204,7 +205,7 @@ class TestUpgradedInstallEndpoint:
         await _migrate(url)
         after = await _signatures(url)
         assert after == before
-        engine = create_async_engine(url)
+        engine = create_async_engine(sqlalchemy_url(url))
         try:
             async with engine.connect() as connection:
                 assert await _stored_version(connection) == BASELINE_VERSION

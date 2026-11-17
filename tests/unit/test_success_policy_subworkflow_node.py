@@ -37,11 +37,11 @@ from horsies.core.workflows.engine import (
     evaluate_workflow_success,
 )
 from horsies.core.workflows.lifecycle import start_workflow_async
+from horsies.core.workflows.steps import START_WORKFLOW_FUNCTION_SQL
 from horsies.core.workflows.sql import (
     ENQUEUE_SUBWORKFLOW_TASK_SQL,
     GET_TASK_STATUSES_SQL,
     INSERT_CHILD_WORKFLOW_SQL,
-    INSERT_WORKFLOW_SQL,
 )
 from tests.broker_resources_support import attach_resources, fake_resources
 
@@ -52,7 +52,7 @@ def _plain_build_with(cls: Any, app: Any, *args: Any, **params: Any) -> Any:
 
 pytestmark = [pytest.mark.unit]
 
-DATABASE_URL = 'postgresql+psycopg://u:p@localhost:5432/db'
+DATABASE_URL = 'postgresql://u:p@localhost:5432/db'
 WORKFLOW_ID = '9f1b7a2c-0d4e-4f61-8a23-5c6d7e8f9a0b'
 _key_counter = 0
 
@@ -201,12 +201,16 @@ class TestStartSerialization:
             params_by_statement[statement] = params
             raise _StopAfterInsert
 
+        connection = MagicMock()
+        connection.execute = AsyncMock(side_effect=execute)
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=execute)
+        session.connection = AsyncMock(return_value=connection)
         session_context = MagicMock()
         session_context.__aenter__ = AsyncMock(return_value=session)
         session_context.__aexit__ = AsyncMock(return_value=False)
         broker = MagicMock()
+        broker.app = app
         broker.ensure_schema_initialized = AsyncMock(return_value=Ok(True))
         attach_resources(
             broker,
@@ -216,7 +220,9 @@ class TestStartSerialization:
         with pytest.raises(_StopAfterInsert):
             await start_workflow_async(spec, broker, WORKFLOW_ID)
 
-        stored = json.loads(params_by_statement[INSERT_WORKFLOW_SQL]['success_policy'])
+        stored = json.loads(
+            params_by_statement[START_WORKFLOW_FUNCTION_SQL]['success_policies'][0],
+        )
         assert stored == {
             'cases': [{'required_indices': [0, 1]}],
             'optional_indices': [2],

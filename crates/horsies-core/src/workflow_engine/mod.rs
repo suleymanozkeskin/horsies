@@ -2,6 +2,7 @@
 
 pub mod args_merge;
 pub mod bound_handle;
+pub(crate) mod child_start;
 pub mod engine;
 pub mod error;
 pub mod info;
@@ -11,6 +12,8 @@ pub mod query;
 pub mod recovery;
 pub(crate) mod recovery_limit;
 pub mod start;
+pub(crate) mod start_statement;
+pub(crate) mod steps;
 
 #[cfg(test)]
 mod port_tests;

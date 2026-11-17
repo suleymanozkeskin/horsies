@@ -1,4 +1,7 @@
-use crate::broker::{is_retryable_sqlx_error, BrokerError};
+use crate::broker::{is_retryable_sqlx_error, BrokerError, ListenError, SessionCheckFailure};
+use crate::worker::executor::placement::PlacementRefused;
+use crate::worker::executor::slots::{BaselineOverLimit, ChildrenStartFailed, PoolFailure};
+use crate::worker::executor::supervisor::SpawnerStartError;
 
 /// Errors produced by worker operations.
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +36,57 @@ pub enum WorkerError {
     /// within `bound`. Retryable: the start runs again after a backoff.
     #[error("worker start attempt did not finish within {bound:?}")]
     StartTimedOut { bound: std::time::Duration },
+
+    /// The runner heartbeats failed closed: no beat landed within half of
+    /// `running_stale_threshold_ms`. The watchdog killed every child that
+    /// held a task and stopped the worker (Python `RunnerHeartbeatLostError`).
+    #[error("runner heartbeats failed closed: {cause}; worker stopped")]
+    RunnerHeartbeatLost { cause: String },
+
+    /// The profile's `parent_cpu = OWN_CORE` cannot be planned on this
+    /// machine. The worker started no child.
+    #[error("worker child start failed: {0}")]
+    PlacementRefused(PlacementRefused),
+
+    /// The spawner thread of the children could not start.
+    #[error("worker child start failed: {0}")]
+    SpawnerStart(SpawnerStartError),
+
+    /// An `on_child_process_start` hook failed in a child at the start
+    /// (Python `ChildHookFailedError`). Never retried: every new child runs
+    /// the hook again.
+    #[error("{}", crate::worker::worker::CHILD_HOOK_FAILURE_MESSAGE)]
+    ChildHookFailed,
+
+    /// The start of the children failed: no child could start, the threads
+    /// of the worker could not be placed, or a first baseline is at or above
+    /// its memory limit (Python `ChildStartFailedError`,
+    /// `MemoryBaselineExceedsThresholdError`).
+    #[error(transparent)]
+    ChildrenStartFailed(ChildrenStartFailed),
+
+    /// After the start, no replacement child can start (Python
+    /// `ChildStartFailedError` from the slot failure loop). Running tasks
+    /// drained first.
+    #[error("worker child start failed: {0}")]
+    PoolFailed(PoolFailure),
+
+    /// The first child of a kind that was down at the first start has a
+    /// baseline at or above the memory limit of its kind. Its tasks drained
+    /// first.
+    #[error("{0}")]
+    BaselineOverLimit(BaselineOverLimit),
+
+    /// The session check of the worker boot did not pass. A session URL that
+    /// does not keep session state is not retryable; a database that cannot
+    /// be reached is.
+    #[error("session URL check failed: {0}")]
+    SessionCheck(SessionCheckFailure),
+
+    /// The broker's listener refused a claim wake or ping subscription of the
+    /// worker. Retryable when the refusal is transient.
+    #[error("listener subscription failed: {0}")]
+    Listener(ListenError),
 }
 
 impl WorkerError {
@@ -48,6 +102,15 @@ impl WorkerError {
             Self::Config(_) => false,
             Self::ServiceLoopDied { .. } => false,
             Self::StartTimedOut { .. } => true,
+            Self::RunnerHeartbeatLost { .. } => false,
+            Self::PlacementRefused(_)
+            | Self::SpawnerStart(_)
+            | Self::ChildHookFailed
+            | Self::ChildrenStartFailed(_)
+            | Self::PoolFailed(_)
+            | Self::BaselineOverLimit(_) => false,
+            Self::SessionCheck(failure) => failure.is_retryable(),
+            Self::Listener(refused) => refused.is_retryable(),
         }
     }
 }

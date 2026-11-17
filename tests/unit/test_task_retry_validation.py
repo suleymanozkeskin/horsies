@@ -19,7 +19,7 @@ def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
             broker=PostgresConfig(
-                database_url='postgresql+psycopg://user:pass@localhost/db',
+                database_url='postgresql://user:pass@localhost/db',
             ),
         )
     )
@@ -33,6 +33,11 @@ class TestRetryPolicyValidation:
         """RetryPolicy rejects exception class names in auto_retry_for."""
         with pytest.raises(ValueError, match='auto_retry_for'):
             RetryPolicy.fixed([5], auto_retry_for=['TimeoutError'])
+
+    def test_reserved_code_rejected_in_auto_retry_for(self) -> None:
+        """No task error carries WORKFLOW_STOPPED, so no retry can name it."""
+        with pytest.raises(ValueError, match='reserved error code name'):
+            RetryPolicy.fixed([5], auto_retry_for=['WORKFLOW_STOPPED'])
 
     def test_empty_auto_retry_for_rejected(self) -> None:
         """RetryPolicy rejects empty auto_retry_for list."""

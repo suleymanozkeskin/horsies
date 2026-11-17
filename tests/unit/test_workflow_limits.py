@@ -43,7 +43,7 @@ def _app() -> Horsies:
     return Horsies(
         config=AppConfig(
             broker=PostgresConfig(
-                database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+                database_url=SecretStr('postgresql://user:pass@localhost/db'),
             ),
             queue_mode=QueueMode.CUSTOM,
             custom_queues=[CustomQueueConfig(name=QUEUE, priority=10)],

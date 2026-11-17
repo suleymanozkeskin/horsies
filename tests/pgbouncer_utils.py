@@ -37,7 +37,7 @@ def skip_if_pgbouncer_disabled() -> None:
 
 def _default_url(port: int, database: str = "horsies") -> str:
     password = os.environ.get("DB_PASSWORD", "testpassword")
-    return f"postgresql+psycopg://postgres:{password}@localhost:{port}/{database}"
+    return f"postgresql://postgres:{password}@localhost:{port}/{database}"
 
 
 def _replace_database(url: str, database: str) -> str:

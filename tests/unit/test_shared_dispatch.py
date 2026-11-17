@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Coroutine
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, cast
 from unittest.mock import ANY, AsyncMock, MagicMock
@@ -33,6 +34,7 @@ from horsies.core.models.worker_profile import (
     SharedAsyncChildren,
     SharedRecycle,
 )
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.claim_plan import ClaimPlan, isolated_children_plan
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import dispatch as dispatch_module
@@ -82,7 +84,7 @@ from horsies.core.worker.slots import (
 from horsies.core.worker.shared_finalize import (
     future_retry_data,
     future_retry_write,
-    kept_claim_time,
+    kept_claim,
     timeout_retry_data,
     timeout_retry_write,
 )
@@ -109,6 +111,10 @@ _ASYNC_KIND = SharedAsyncChild(seats=4, pool=_POOL, executor_threads=4, task_sen
 pytestmark = [pytest.mark.unit]
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+CLAIM = DispatchClaim(
+    claimed_at=CLAIMED_AT, retry_count=0, max_retries=0, task_options=None,
+)
+"""The claim of the dispatch: its generation, and no retry facts."""
 SHARED = SharedAsyncChildren(count=2, seats=5)
 
 
@@ -128,7 +134,7 @@ def _worker(
     processes: int = 1,
 ) -> Worker:
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
         processes=processes,
@@ -145,7 +151,7 @@ def _request(timeout_ms: int = MIN_TASK_TIMEOUT_MS) -> SharedRunRequest:
         kwargs_json=None,
         worker_id='worker-1',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=CLAIM,
         work=SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=DEFAULT_CANCEL_GRACE_MS),
     )
 
@@ -303,9 +309,8 @@ class TestDispatch:
             'io',
             False,
             timeout=TaskTimeout(ms=2000),
-            claimed_at=CLAIMED_AT,
+            claim=replace(CLAIM, task_options=SHARED_OPTIONS),
             execution=Execution.SHARED_ASYNC,
-            task_options=SHARED_OPTIONS,
         )
 
         worker._slots.submit.assert_not_called()
@@ -317,7 +322,7 @@ class TestDispatch:
             kwargs_json='{}',
             worker_id=worker.worker_instance_id,
             is_workflow_task=False,
-            claimed_at=CLAIMED_AT,
+            claim=replace(CLAIM, task_options=SHARED_OPTIONS),
             work=SeatTask(timeout_ms=2000, cancel_grace_ms=700),
         )
         worker._finalize_shared_after.assert_called_once_with(
@@ -327,7 +332,7 @@ class TestDispatch:
             False,
             SeatTask(timeout_ms=2000, cancel_grace_ms=700),
             task_name='fetch',
-            claimed_at=CLAIMED_AT,
+            claim=replace(CLAIM, task_options=SHARED_OPTIONS),
         )
         assert worker._spawn_background.call_args.kwargs['finalizer'] is True
 
@@ -344,9 +349,8 @@ class TestDispatch:
             None,
             '{}',
             timeout=TaskTimeout(ms=2000),
-            claimed_at=CLAIMED_AT,
+            claim=replace(CLAIM, task_options=SHARED_OPTIONS),
             execution=Execution.SHARED_ASYNC,
-            task_options=SHARED_OPTIONS,
         )
 
         worker._slots.submit_shared.assert_not_called()
@@ -376,9 +380,8 @@ class TestDispatch:
             None,
             '{}',
             timeout=TaskTimeout(ms=2000),
-            claimed_at=CLAIMED_AT,
+            claim=replace(CLAIM, task_options=_options(timeout_ms=2000, execution='SHARED_ASYNC')),
             execution=Execution.SHARED_ASYNC,
-            task_options=_options(timeout_ms=2000, execution='SHARED_ASYNC'),
         )
 
         worker._slots.submit.assert_not_called()
@@ -399,9 +402,8 @@ class TestDispatch:
             None,
             '{}',
             timeout=NoTimeout(),
-            claimed_at=CLAIMED_AT,
+            claim=replace(CLAIM, task_options=SHARED_OPTIONS),
             execution=Execution.SHARED_ASYNC,
-            task_options=SHARED_OPTIONS,
         )
 
         worker._slots.submit_shared.assert_not_called()
@@ -440,7 +442,7 @@ class TestFinalizeShared:
             False,
             work,
             task_name='fetch',
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
 
     async def test_a_result_takes_the_path_of_an_isolated_result(self) -> None:
@@ -456,7 +458,7 @@ class TestFinalizeShared:
             queue_name='default',
             is_workflow_task=False,
             task_name='fetch',
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
 
     @pytest.mark.parametrize('retry', list(RetryPlacement))
@@ -473,7 +475,7 @@ class TestFinalizeShared:
         worker._record_task_timeout.assert_awaited_once_with(  # type: ignore[attr-defined]
             'task-1',
             1500,
-            CLAIMED_AT,
+            CLAIM,
             retry=retry,
         )
         worker._recover_worker_future_failure.assert_not_awaited()  # type: ignore[attr-defined]
@@ -498,7 +500,7 @@ class TestFinalizeShared:
                 assert timeout_retry_write(error.data) == (
                     1500,
                     RetryPlacement.ISOLATED,
-                    CLAIMED_AT,
+                    CLAIM,
                 )
             case Ok():
                 raise AssertionError(result)
@@ -524,7 +526,7 @@ class TestFinalizeShared:
             queue_name='default',
             is_workflow_task=False,
             task_name='fetch',
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
 
     async def test_a_refusal_that_ends_at_a_deadline_is_a_defect(self) -> None:
@@ -551,7 +553,7 @@ class TestFinalizeShared:
             ANY,
             'task-1',
             lost,
-            CLAIMED_AT,
+            CLAIM,
         )
 
     async def test_a_task_that_reached_no_child_is_requeued(self) -> None:
@@ -592,7 +594,7 @@ class _KillWrites:
             False,
             work,
             task_name='fetch',
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
 
 
@@ -613,7 +615,7 @@ class TestFinalizeKilledRun:
         writes.timeout.assert_awaited_once_with(
             'task-1',
             1500,
-            CLAIMED_AT,
+            CLAIM,
             retry=retry,
         )
         writes.recovery.assert_not_awaited()
@@ -629,7 +631,7 @@ class TestFinalizeKilledRun:
         writes.recovery.assert_awaited_once()
         assert writes.recovery.await_args is not None
         assert writes.recovery.await_args.kwargs == {
-            'claimed_at': CLAIMED_AT,
+            'claim': CLAIM,
             'failure_code': OperationalErrorCode.TASK_BLOCKED_LOOP,
             'retry': RetryPlacement.ISOLATED,
         }
@@ -645,7 +647,7 @@ class TestFinalizeKilledRun:
 
         assert writes.recovery.await_args is not None
         assert writes.recovery.await_args.kwargs == {
-            'claimed_at': CLAIMED_AT,
+            'claim': CLAIM,
             'failure_code': OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
             'retry': RetryPlacement.SAME_CLASS,
         }
@@ -668,7 +670,7 @@ class TestFinalizeKilledRun:
             queue_name='default',
             is_workflow_task=False,
             task_name='fetch',
-            claimed_at=CLAIMED_AT,
+            claim=CLAIM,
         )
         writes.timeout.assert_not_awaited()
         writes.recovery.assert_not_awaited()
@@ -705,7 +707,7 @@ class TestFinalizeKilledRun:
             data=future_retry_data(
                 OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
                 RetryPlacement.SAME_CLASS,
-                CLAIMED_AT,
+                CLAIM,
             ),
         )
 
@@ -713,7 +715,7 @@ class TestFinalizeKilledRun:
 
         assert writes.recovery.await_args is not None
         assert writes.recovery.await_args.kwargs == {
-            'claimed_at': CLAIMED_AT,
+            'claim': CLAIM,
             'failure_code': OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
             'retry': RetryPlacement.SAME_CLASS,
         }
@@ -724,7 +726,7 @@ class TestFinalizeKilledRun:
         data = future_retry_data(
             OutcomeCode.TASK_TIMEOUT,
             RetryPlacement.ISOLATED,
-            CLAIMED_AT,
+            CLAIM,
         )
 
         assert future_retry_write(data) == (
@@ -732,18 +734,18 @@ class TestFinalizeKilledRun:
             RetryPlacement.ISOLATED,
         )
 
-    async def test_the_retry_of_an_error_without_a_claim_time_fails_loud(
+    async def test_the_retry_of_an_error_without_a_claim_fails_loud(
         self,
     ) -> None:
-        """Every writer of a future-stage error keeps the claim time, so a
-        retry without one is a defect: it never runs unfenced."""
+        """Every writer of a future-stage error keeps the claim, so a retry
+        without one is a defect: it never runs unfenced."""
         writes = _KillWrites()
         data = future_retry_data(
             OperationalErrorCode.TASK_BLOCKED_LOOP,
             RetryPlacement.ISOLATED,
-            CLAIMED_AT,
+            CLAIM,
         )
-        del data['claimed_at']
+        del data['claim']
         error = writes.worker._make_finalize_error(
             task_id='task-1',
             stage=_FINALIZE_STAGE_FUTURE,
@@ -752,13 +754,13 @@ class TestFinalizeKilledRun:
             data=data,
         )
 
-        with pytest.raises(AssertionError, match='has no claim time'):
+        with pytest.raises(AssertionError, match='has no claim;'):
             await writes.worker._retry_finalize_future(error, 0.0)
 
         writes.recovery.assert_not_awaited()
 
     async def test_a_crash_error_retries_as_a_crash(self) -> None:
-        assert future_retry_write({'claimed_at': CLAIMED_AT}) == (
+        assert future_retry_write({'claim': CLAIM}) == (
             OperationalErrorCode.WORKER_CRASHED,
             RetryPlacement.SAME_CLASS,
         )
@@ -1054,7 +1056,7 @@ class _TimeoutWriteRetries:
         return self.worker._timeout_write_error(
             'task-1',
             1500,
-            CLAIMED_AT,
+            CLAIM,
             RetryPlacement.ISOLATED,
         )
 
@@ -1072,7 +1074,7 @@ class TestTimeoutWriteRetry:
         retries.timeout.assert_awaited_once_with(
             'task-1',
             1500,
-            CLAIMED_AT,
+            CLAIM,
             retry=RetryPlacement.ISOLATED,
         )
         retries.recovery.assert_not_awaited()
@@ -1118,7 +1120,7 @@ class TestTimeoutWriteRetry:
 
         assert retries.recovery.await_args is not None
         assert retries.recovery.await_args.kwargs == {
-            'claimed_at': CLAIMED_AT,
+            'claim': CLAIM,
             'failure_code': OutcomeCode.TASK_TIMEOUT,
             'retry': RetryPlacement.ISOLATED,
         }
@@ -1143,49 +1145,49 @@ class TestTimeoutWriteRetry:
 
 def test_the_data_of_a_timeout_write_is_a_closed_shape() -> None:
     with pytest.raises(AssertionError, match='no TASK_TIMEOUT write'):
-        timeout_retry_write({'claimed_at': CLAIMED_AT})
+        timeout_retry_write({'claim': CLAIM})
 
 
-def test_the_data_of_a_timeout_write_needs_a_claim_time() -> None:
-    data = timeout_retry_data(1500, RetryPlacement.SAME_CLASS, CLAIMED_AT)
-    data['claimed_at'] = None
+def test_the_data_of_a_timeout_write_needs_a_claim() -> None:
+    data = timeout_retry_data(1500, RetryPlacement.SAME_CLASS, CLAIM)
+    data['claim'] = None
 
     with pytest.raises(AssertionError, match='no TASK_TIMEOUT write'):
         timeout_retry_write(data)
 
 
-class TestKeptClaimTime:
-    """The claim time that the data of a finalize error kept for its retry."""
+class TestKeptClaim:
+    """The claim that the data of a finalize error kept for its retry."""
 
-    def test_the_kept_claim_time_is_returned(self) -> None:
+    def test_the_kept_claim_is_returned(self) -> None:
         data = future_retry_data(
             OperationalErrorCode.WORKER_CRASHED,
             RetryPlacement.SAME_CLASS,
-            CLAIMED_AT,
+            CLAIM,
         )
 
-        assert kept_claim_time(data) == CLAIMED_AT
+        assert kept_claim(data) == CLAIM
 
     @pytest.mark.parametrize(
         ('data', 'keys'),
         [
             (None, '[]'),
             ({'requeue_outcome': 'DB_ERROR'}, "['requeue_outcome']"),
-            ({'claimed_at': None}, "['claimed_at']"),
-            ({'claimed_at': '2026-11-10T09:00:00+00:00'}, "['claimed_at']"),
+            ({'claim': None}, "['claim']"),
+            ({'claimed_at': CLAIMED_AT}, "['claimed_at']"),
         ],
-        ids=['no_data', 'no_claim_time', 'null_claim_time', 'claim_time_as_text'],
+        ids=['no_data', 'no_claim', 'null_claim', 'claim_time_only'],
     )
-    def test_data_without_a_claim_time_is_a_defect(
+    def test_data_without_a_claim_is_a_defect(
         self,
         data: dict[str, Any] | None,
         keys: str,
     ) -> None:
         with pytest.raises(AssertionError) as raised:
-            kept_claim_time(data)
+            kept_claim(data)
 
         assert str(raised.value) == (
-            f'the data of a finalize error has no claim time; its keys are {keys}'
+            f'the data of a finalize error has no claim; its keys are {keys}'
         )
 
 

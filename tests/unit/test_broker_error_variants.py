@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any, get_args
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 import pytest
 
@@ -67,6 +68,8 @@ pytestmark = [pytest.mark.unit]
 
 MESSAGE_MARKER = 'message-marker-7d3e'
 CAUSE_MARKER = 'cause-marker-7d3e'
+OWNER_TASK_ID = UUID('0198c0de-0000-7000-8000-00000000000a')
+HANDLE_TASK_ID = UUID('0198c0de-0000-7000-8000-00000000000b')
 
 
 def _loop_limit() -> EventLoopLimit:
@@ -89,7 +92,7 @@ def _every_variant(cause: BaseException) -> list[BrokerOperationError]:
         ),
         BrokerEnqueueFailed(message=message, retryable=True, exception=cause),
         BrokerPayloadMismatch(message=message),
-        BrokerIdempotencyKeyConflict(message=message, owner_task_id='owner-1'),
+        BrokerIdempotencyKeyConflict(message=message, owner_task_id=OWNER_TASK_ID),
         BrokerNotAttached(message=message),
         BrokerNoTypeAvailable(message=message),
         BrokerInvalidJsonPayload(message=message, exception=cause),
@@ -317,17 +320,17 @@ class TestSendMapping:
 
     def test_the_key_conflict_keeps_the_owner(self) -> None:
         send_error = _send_with_broker_error(
-            BrokerIdempotencyKeyConflict(message='reserved', owner_task_id='owner-9'),
+            BrokerIdempotencyKeyConflict(message='reserved', owner_task_id=OWNER_TASK_ID),
         )
 
         assert isinstance(send_error, TaskSendIdempotencyKeyConflict)
-        assert send_error.owner_task_id == 'owner-9'
+        assert send_error.owner_task_id == OWNER_TASK_ID
 
 
 def _handle(broker: MagicMock) -> TaskHandle[int]:
     app = MagicMock()
     app.get_broker = MagicMock(return_value=broker)
-    return TaskHandle(task_id='task-1', app=app, broker_mode=True, ok_type=int)
+    return TaskHandle(task_id=HANDLE_TASK_ID, app=app, broker_mode=True, ok_type=int)
 
 
 RESULT_CODE_OF: dict[type[Any], tuple[BuiltInTaskCode, bool]] = {
@@ -364,7 +367,9 @@ class TestResultMapping:
 
         task_error = first.unwrap_err()
         assert task_error.error_code == expected_code
-        assert task_error.data == {'task_id': 'task-1', 'broker_code': error.code.value}
+        assert task_error.data == {
+            'task_id': str(HANDLE_TASK_ID), 'broker_code': error.code.value,
+        }
         match broker_error_cause(error):
             case NoCause():
                 assert task_error.exception is None

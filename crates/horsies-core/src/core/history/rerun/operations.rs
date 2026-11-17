@@ -180,11 +180,14 @@ pub enum RerunError {
         stored: crate::broker::client_family::RecordedFamily,
         own: crate::broker::client_family::ClientFamily,
     },
-    /// The client family read before the rerun failed (on the statement
-    /// layer). Nothing was read or written; whether a later rerun can
-    /// succeed is the broker error's `is_retryable`.
-    #[error("rerun refused: the client family check failed: {0}")]
-    FamilyCheckFailed(Box<crate::broker::BrokerError>),
+    /// The client-family check before the rerun could not read the family
+    /// row. Nothing was read or written. Retryable when
+    /// [`FamilyCheckFailure::transience`] is `Transient`: the check keeps no
+    /// answer after a failure, so a retry reads the row again.
+    ///
+    /// [`FamilyCheckFailure::transience`]: crate::broker::client_family::FamilyCheckFailure::transience
+    #[error("rerun refused: {0}")]
+    FamilyCheckFailed(crate::broker::client_family::FamilyCheckFailure),
 }
 
 pub async fn rerun_task_in_tx(

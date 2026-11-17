@@ -26,9 +26,10 @@ from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.types.result import Ok, is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from tests.dispatch_claim_support import claim_at, row_claim
 from tests.integration.autocommit_support import use_pooled_runners
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import (
@@ -68,7 +69,7 @@ def _test_app() -> Horsies:
     if _TEST_APP is None:
         cfg = AppConfig(
             broker=PostgresConfig(
-                database_url='postgresql+psycopg://u:p@localhost/db',
+                database_url='postgresql://u:p@localhost/db',
             )
         )
         _TEST_APP = Horsies(cfg)
@@ -93,7 +94,7 @@ def _make_worker(engine: AsyncEngine) -> Worker:
     """Construct a Worker wired to the test DB (no listener needed)."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
@@ -162,13 +163,13 @@ async def _insert_running_task(
         await session.execute(
             text("""
                 INSERT INTO horsies_workflow_tasks
-                    (id, workflow_id, task_index, node_id, task_name,
+                    (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name,
                      input, queue_name, priority,
                      dependencies, allow_failed_deps, join_type,
                      is_subworkflow, status, task_id, created_at,
                      max_retries, execution, retention_class_key)
                 VALUES
-                    (:id, :wf_id, 0, 'node-0', 'persist_terminal_test',
+                    ('NONE', :id, :wf_id, 0, 'node-0', 'persist_terminal_test',
                      '{}', 'default', 100,
                      '{}', FALSE, 'all',
                      FALSE, 'RUNNING', CAST(:task_id AS uuid), NOW(),
@@ -347,7 +348,7 @@ async def test_claim_lost_skips(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -356,13 +357,110 @@ async def test_claim_lost_skips(
     assert status == 'RUNNING'
 
 
+async def _make_claimed(
+    session: AsyncSession, task_id: str, *, claimed_at: datetime,
+) -> None:
+    """Turn a seeded RUNNING row into a CLAIMED row of ``claimed_at``."""
+    await session.execute(
+        text("""
+            UPDATE horsies_tasks
+            SET status = 'CLAIMED', started_at = NULL, claimed_at = :claimed_at,
+                claim_expires_at = NOW() + INTERVAL '5 minutes',
+                worker_pid = NULL, worker_hostname = NULL,
+                worker_process_name = NULL
+            WHERE id = CAST(:id AS uuid)
+        """),
+        {'id': task_id, 'claimed_at': claimed_at},
+    )
+    await session.commit()
+
+
+async def _claim_columns(
+    session: AsyncSession, task_id: str,
+) -> tuple[str, str | None, datetime | None]:
+    row = (
+        await session.execute(
+            text(
+                'SELECT status, claimed_by_worker_id, claimed_at '
+                'FROM horsies_tasks WHERE id = CAST(:id AS uuid)'
+            ),
+            {'id': task_id},
+        )
+    ).one()
+    return (str(row[0]), row[1], row[2])
+
+
 @pytest.mark.asyncio(loop_scope='function')
-async def test_ownership_unconfirmed_skips(
+async def test_ownership_unconfirmed_releases_the_claim_at_once(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """failed_reason=OWNERSHIP_UNCONFIRMED → Ok(None), task stays RUNNING."""
+    """The start did not confirm and no task code ran: the row of this
+    claim generation goes back to the queue now, not at the end of its
+    lease."""
+    task_id = await _insert_running_task(session)
+    await _make_claimed(session, task_id, claimed_at=CLAIMED_AT)
+    worker = _make_worker(engine)
+
+    result = await worker._persist_task_terminal_state(  # pyright: ignore[reportPrivateUsage]
+        task_id=task_id,
+        now=NOW,
+        ok=False,
+        result_json_str='',
+        failed_reason='OWNERSHIP_UNCONFIRMED',
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
+        claim=claim_at(CLAIMED_AT),
+    )
+
+    assert result == Ok(None)
+    session.expire_all()
+    assert await _claim_columns(session, task_id) == ('PENDING', None, None)
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_ownership_unconfirmed_leaves_another_generation_claimed(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The release is fenced on the generation of the dispatch: a later
+    claim of the row is not released."""
+    later_claim = CLAIMED_AT + timedelta(minutes=1)
+    task_id = await _insert_running_task(session)
+    await _make_claimed(session, task_id, claimed_at=later_claim)
+    worker = _make_worker(engine)
+
+    result = await worker._persist_task_terminal_state(  # pyright: ignore[reportPrivateUsage]
+        task_id=task_id,
+        now=NOW,
+        ok=False,
+        result_json_str='',
+        failed_reason='OWNERSHIP_UNCONFIRMED',
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=False,
+        claim=claim_at(CLAIMED_AT),
+    )
+
+    assert result == Ok(None)
+    session.expire_all()
+    assert await _claim_columns(session, task_id) == (
+        'CLAIMED', TEST_WORKER_ID, later_claim,
+    )
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_ownership_unconfirmed_leaves_a_running_row(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """failed_reason=OWNERSHIP_UNCONFIRMED on a RUNNING row (a start that
+    committed before its reply was lost) → Ok(None): the fenced release does
+    not touch it, and stale recovery owns it."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
 
@@ -375,7 +473,7 @@ async def test_ownership_unconfirmed_skips(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -403,7 +501,7 @@ async def test_workflow_check_failed_skips(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -431,7 +529,7 @@ async def test_workflow_stopped_reason_skips(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -465,7 +563,7 @@ async def test_worker_failure_marks_failed(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -496,7 +594,7 @@ async def test_worker_failure_reaper_already_reclaimed(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -530,7 +628,7 @@ async def test_corrupt_json_marks_serialization_error(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -561,7 +659,7 @@ async def test_invalid_task_result_structure_marks_error(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -574,21 +672,26 @@ async def test_invalid_task_result_structure_marks_error(
 
 
 # ---------------------------------------------------------------------------
-# Group D: Error result with WORKFLOW_STOPPED code
-# Lines 1185-1191
+# Group D: Error result with the reserved WORKFLOW_STOPPED code
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_err_workflow_stopped_code_skips(
+async def test_err_workflow_stopped_code_fails_the_task(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """TaskResult with err.error_code=WORKFLOW_STOPPED → Ok(None), stays RUNNING."""
+    """WORKFLOW_STOPPED is no task code: the err slot does not decode, so the
+    task is FAILED with WORKER_SERIALIZATION_ERROR and not left RUNNING."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
-    result_json = _serialize_err('WORKFLOW_STOPPED', 'workflow was stopped')
+    # TaskError refuses the code, so the stored text is written by hand.
+    result_json = (
+        '{"__h_task_result__":true,"ok":null,'
+        '"err":{"exception":null,"error_code":"WORKFLOW_STOPPED",'
+        '"data":null,"message":"workflow was stopped"}}'
+    )
 
     result = await worker._persist_task_terminal_state(
         task_id=task_id,
@@ -599,13 +702,16 @@ async def test_err_workflow_stopped_code_skips(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
     assert result.ok_value is None
-    status, *_ = await _get_task_row(session, task_id)
-    assert status == 'RUNNING'
+    status, stored_result, _, _ = await _get_task_row(session, task_id)
+    assert status == 'FAILED'
+    assert stored_result is not None
+    assert 'WORKER_SERIALIZATION_ERROR' in stored_result
+    assert 'reserved error code name' in stored_result
 
 
 # ---------------------------------------------------------------------------
@@ -634,7 +740,7 @@ async def test_err_no_retry_marks_failed(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -673,7 +779,7 @@ async def test_err_retry_scheduled_to_pending(
         task_name='persist_retry_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=await row_claim(session, task_id),
     )
 
     assert is_ok(result)
@@ -712,7 +818,7 @@ async def test_err_retry_expired_falls_through_to_failed(
         task_name='persist_retry_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -754,7 +860,7 @@ async def test_success_marks_completed(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -785,7 +891,7 @@ async def test_success_reaper_reclaimed_no_mutation(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=claim_at(CLAIMED_AT),
     )
 
     assert is_ok(result)
@@ -819,7 +925,7 @@ async def test_workflow_phase1_replay_loads_the_persisted_result(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=True,
-        claimed_at=generation,
+        claim=claim_at(generation),
     )
     replay = await worker._persist_task_terminal_state(
         task_id=task_id,
@@ -830,7 +936,7 @@ async def test_workflow_phase1_replay_loads_the_persisted_result(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=True,
-        claimed_at=generation,
+        claim=claim_at(generation),
     )
 
     assert is_ok(first) and first.ok_value is not None
@@ -881,7 +987,7 @@ async def test_failure_phase1_replay_after_a_lost_reply(
             task_name='persist_terminal_test',
             queue_name='default',
             is_workflow_task=is_workflow_task,
-            claimed_at=generation,
+            claim=claim_at(generation),
         )
 
     first = await phase1()
@@ -932,7 +1038,7 @@ async def test_locked_completion_miss_does_not_touch_a_newer_generation(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=True,
-        claimed_at=stale_generation,
+        claim=claim_at(stale_generation),
     )
 
     assert is_ok(result)
@@ -940,15 +1046,17 @@ async def test_locked_completion_miss_does_not_touch_a_newer_generation(
     summary = (
         await session.execute(
             text("""
-                SELECT status, result, terminalization_kind,
+                SELECT status, claimed_at,
                        (SELECT COUNT(*) FROM horsies_task_attempts a
-                        WHERE a.task_id = t.id) AS attempt_count
+                        WHERE a.task_id = t.id) AS attempt_count,
+                       (SELECT COUNT(*) FROM horsies_task_history h
+                        WHERE h.task_id = t.id) AS history_count
                 FROM horsies_tasks t WHERE t.id = :id
             """),
             {'id': task_id},
         )
     ).one()
     assert summary.status == 'RUNNING'
-    assert summary.result is None
-    assert summary.terminalization_kind is None
+    assert summary.claimed_at == current_generation
     assert summary.attempt_count == 0
+    assert summary.history_count == 0
