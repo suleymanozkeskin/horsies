@@ -1303,9 +1303,14 @@ impl PostgresBroker {
                 cause: NotSentCause::Checkout(cause),
             })?;
         let mut transaction = connection.begin(IsolationLevel::ServerDefault).await?;
-        let outcome =
-            rerun_task_in_transaction(&mut transaction, self.statement_log, &command, &policy)
-                .await?;
+        let outcome = rerun_task_in_transaction(
+            &mut transaction,
+            self.statement_log,
+            &command,
+            &policy,
+            self.client_family,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(outcome)
     }
