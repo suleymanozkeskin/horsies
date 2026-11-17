@@ -27,10 +27,10 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
-from horsies.core.worker.child_protocol import SeatFinished, SeatTask
+from tests.dualrun.reference.worker_parent.worker.child_protocol import SeatFinished, SeatTask
 from horsies.core.worker.config import WorkerConfig
-from horsies.core.worker.dispatch_claim import DispatchClaim
-from horsies.core.worker.shared_stop import (
+from tests.dualrun.reference.worker_parent.worker.dispatch_claim import DispatchClaim
+from tests.dualrun.reference.worker_parent.worker.shared_stop import (
     BesideBlockedLoop,
     BlockedTheLoop,
     CancelEnd,
@@ -39,7 +39,7 @@ from horsies.core.worker.shared_stop import (
     ReturnedBeforeKill,
     TimedOutAtKill,
 )
-from horsies.core.worker.slots import (
+from tests.dualrun.reference.worker_parent.worker.slots import (
     ChildKilledPastDeadlines,
     KilledBySignal,
     SeatDeadlineEnded,
@@ -48,8 +48,8 @@ from horsies.core.worker.slots import (
     SharedOutcome,
     SharedRunRequest,
 )
-from horsies.core.worker.thread_slots import RunCulprit
-from horsies.core.worker.worker import Worker
+from tests.dualrun.reference.worker_parent.worker.thread_slots import RunCulprit
+from tests.dualrun.reference.worker_parent.worker.worker import Worker
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import read_attempts
 

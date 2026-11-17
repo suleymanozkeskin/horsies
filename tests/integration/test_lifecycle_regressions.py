@@ -25,15 +25,15 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.worker.config import WorkerConfig
-from horsies.core.worker.worker import (
+from tests.dualrun.reference.worker_parent.worker.worker import (
     _FINALIZE_STAGE_PHASE2,
     Worker,
     _RequeueOutcome,
 )
-from horsies.core.worker.finalize import _NodeFinishOwed
+from tests.dualrun.reference.worker_parent.worker.finalize import _NodeFinishOwed
 from horsies.core.workflows.lifecycle import pause_workflow
 from horsies.core.workflows.node_finish import FactsUnknown
-from tests.dispatch_claim_support import claim_at, row_claim
+from tests.fixtures.reference_worker_support import claim_at, row_claim
 from tests.fixtures.slots.handles import task_finished_handle
 from tests.integration.conftest import DB_URL, compute_test_command_fingerprint
 from tests.integration.history_seeding import read_attempts

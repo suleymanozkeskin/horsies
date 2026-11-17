@@ -30,16 +30,16 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_ok
-from horsies.core.worker.dispatch_claim import DispatchClaim
-from horsies.core.worker import failed_attempt as failed_attempt_module
+from tests.dualrun.reference.worker_parent.worker.dispatch_claim import DispatchClaim
+from tests.dualrun.reference.worker_parent.worker import failed_attempt as failed_attempt_module
 from horsies.core.worker.config import WorkerConfig
-from horsies.core.worker.failed_attempt import FinishFailedAttempt, RetryAfter
-from horsies.core.worker.worker import Worker
-from tests.dispatch_claim_support import claim_at, row_claim
+from tests.dualrun.reference.worker_parent.worker.failed_attempt import FinishFailedAttempt, RetryAfter
+from tests.dualrun.reference.worker_parent.worker.worker import Worker
+from tests.fixtures.reference_worker_support import claim_at, row_claim
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import force_terminal, read_attempts
 from tests.integration.autocommit_support import (
-    open_proxied_worker,
+    open_proxied_reference_worker,
     proxied_url,
     steady_state_turns,
     upstream_of,
@@ -304,7 +304,7 @@ async def test_the_retry_is_one_statement_with_no_read(
     Counted at the wire, in the steady state of the core's prepared
     statements: the finalize sends one turn, the Bind/Execute of the write."""
     opts = _make_task_options(auto_retry_for=['ERR'])
-    opened = await open_proxied_worker(proxied_url(db_url, proxy))
+    opened = await open_proxied_reference_worker(proxied_url(db_url, proxy))
     opened.worker.worker_instance_id = TEST_WORKER_ID
     opened.worker._app = _app()
     opened.worker._spawn_background = MagicMock()  # type: ignore[method-assign]
@@ -376,7 +376,7 @@ async def test_good_until_is_judged_under_the_lock(
         return await finish(handle, command)
 
     with patch(
-        'horsies.core.worker.finalize.finish_failed_attempt_in_core',
+        'tests.dualrun.reference.worker_parent.worker.finalize.finish_failed_attempt_in_core',
         _shrink_then_finish,
     ):
         result = await _finalize_error(worker, task_id, await row_claim(session, task_id), 'ERR')

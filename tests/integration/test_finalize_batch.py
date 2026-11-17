@@ -59,26 +59,26 @@ from horsies.core.lifecycle.persistence import (
 )
 from horsies.core.models.child_sizing import parent_pool_flusher_bound
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.worker import finalize as finalize_module
-from horsies.core.worker.child_protocol import NoTaskLoop, RssUnreadable
-from horsies.core.worker.finalize_batch import (
+from tests.dualrun.reference.worker_parent.worker import finalize as finalize_module
+from tests.dualrun.reference.worker_parent.worker.child_protocol import NoTaskLoop, RssUnreadable
+from tests.dualrun.reference.worker_parent.worker.finalize_batch import (
     FinalizeBatcher,
     FlushersCancelled,
 )
-from horsies.core.worker.runtime import FinalizeStage, _FinalizeError
-from horsies.core.worker.slots import Assigned, TaskFinished
-from horsies.core.worker.worker import Worker
+from tests.dualrun.reference.worker_parent.worker.runtime import FinalizeStage, _FinalizeError
+from tests.dualrun.reference.worker_parent.worker.slots import Assigned, TaskFinished
+from tests.dualrun.reference.worker_parent.worker.worker import Worker
 from horsies.core.utils.db import PooledStatements
-from tests.dispatch_claim_support import claim_at
+from tests.fixtures.reference_worker_support import claim_at
 from tests.fixtures.slots.handles import unbound_handle
 from tests.integration.autocommit_support import (
     QUEUE,
     TASK_NAME,
     WORKER_ID,
-    ProxiedWorker,
+    ProxiedReferenceWorker,
     insert_task,
     ok_result_json,
-    open_proxied_worker,
+    open_proxied_reference_worker,
     proxied_url,
     psycopg_url,
     steady_state_turns,
@@ -124,9 +124,9 @@ def proxy(db_url: str) -> Generator[RoundTripProxy]:
     started.stop()
 
 
-async def _open_worker(database_url: str) -> ProxiedWorker:
+async def _open_worker(database_url: str) -> ProxiedReferenceWorker:
     """A worker as the CLI builds it, with ``QUEUE_ROOM`` in its batch queue."""
-    opened = await open_proxied_worker(database_url)
+    opened = await open_proxied_reference_worker(database_url)
     worker = opened.worker
     worker._finalize_batcher = FinalizeBatcher(
         worker._write_fused_batch,
@@ -140,7 +140,7 @@ async def _open_worker(database_url: str) -> ProxiedWorker:
 async def direct(
     db_url: str,
     broker: PostgresBroker,  # noqa: ARG001 - the schema and history leaves
-) -> AsyncGenerator[ProxiedWorker]:
+) -> AsyncGenerator[ProxiedReferenceWorker]:
     opened = await _open_worker(db_url)
     yield opened
     await opened.close()
@@ -398,7 +398,7 @@ def _phase1_error(result: Result[None, _FinalizeError]) -> _FinalizeError:
 
 
 async def test_a_batch_applies_every_row_and_answers_each_finalizer(
-    direct: ProxiedWorker,
+    direct: ProxiedReferenceWorker,
     session: AsyncSession,
     listener: psycopg.AsyncConnection[Any],
     recorded: _RecordedBatches,
@@ -423,7 +423,7 @@ async def test_a_batch_applies_every_row_and_answers_each_finalizer(
 
 
 async def test_each_row_keeps_its_own_fence_in_one_batch(
-    direct: ProxiedWorker,
+    direct: ProxiedReferenceWorker,
     session: AsyncSession,
     recorded: _RecordedBatches,
     clean_workflow_tables: None,  # noqa: ARG001
@@ -477,7 +477,7 @@ async def test_each_row_keeps_its_own_fence_in_one_batch(
 
 
 async def test_a_batch_writes_each_result_text_as_given(
-    direct: ProxiedWorker,
+    direct: ProxiedReferenceWorker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
@@ -502,7 +502,7 @@ async def test_a_batch_writes_each_result_text_as_given(
 
 
 async def test_a_claim_generation_keeps_its_microseconds_and_its_offset(
-    direct: ProxiedWorker,
+    direct: ProxiedReferenceWorker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
@@ -531,7 +531,7 @@ def _batch_row(task_id: str, claimed_at: str | None) -> list[str | None]:
 
 
 async def test_the_stored_batch_function_refuses_a_null_generation(
-    direct: ProxiedWorker,
+    direct: ProxiedReferenceWorker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
@@ -561,7 +561,7 @@ async def test_the_stored_batch_function_refuses_a_null_generation(
 
 
 async def test_a_replay_of_a_whole_batch_is_already_applied_and_writes_nothing(
-    direct: ProxiedWorker,
+    direct: ProxiedReferenceWorker,
     session: AsyncSession,
     listener: psycopg.AsyncConnection[Any],
     recorded: _RecordedBatches,
@@ -586,7 +586,7 @@ async def test_a_replay_of_a_whole_batch_is_already_applied_and_writes_nothing(
 
 
 async def test_a_lone_row_runs_the_batch_function_with_one_row(
-    direct: ProxiedWorker,
+    direct: ProxiedReferenceWorker,
     session: AsyncSession,
     blocker: psycopg.AsyncConnection[Any],
     recorded: _RecordedBatches,
@@ -648,7 +648,7 @@ async def test_a_batch_of_rows_is_one_round_trip(
 
 
 async def test_a_bad_row_rolls_back_its_batch_and_each_row_is_written_alone_once(
-    direct: ProxiedWorker,
+    direct: ProxiedReferenceWorker,
     session: AsyncSession,
     recorded: _RecordedBatches,
     clean_workflow_tables: None,  # noqa: ARG001
@@ -735,7 +735,7 @@ async def test_a_lost_reply_of_a_batch_is_classified_by_the_replay_of_each_row(
 
 
 async def test_the_finalizer_end_and_the_capacity_wake_follow_the_commit(
-    direct: ProxiedWorker,
+    direct: ProxiedReferenceWorker,
     session: AsyncSession,
     listener: psycopg.AsyncConnection[Any],
     blocker: psycopg.AsyncConnection[Any],
@@ -775,7 +775,7 @@ async def test_the_finalizer_end_and_the_capacity_wake_follow_the_commit(
 
 
 async def test_the_row_is_written_only_after_its_attempt_ended(
-    direct: ProxiedWorker,
+    direct: ProxiedReferenceWorker,
     session: AsyncSession,
     recorded: _RecordedBatches,
     clean_workflow_tables: None,  # noqa: ARG001
@@ -816,7 +816,7 @@ async def test_the_row_is_written_only_after_its_attempt_ended(
 
 
 async def test_a_batch_killed_mid_statement_leaves_its_rows_for_stale_recovery(
-    direct: ProxiedWorker,
+    direct: ProxiedReferenceWorker,
     broker: PostgresBroker,
     session: AsyncSession,
     blocker: psycopg.AsyncConnection[Any],
@@ -868,7 +868,7 @@ async def test_a_batch_killed_mid_statement_leaves_its_rows_for_stale_recovery(
 
 
 async def test_rows_that_a_stop_left_unsent_stay_running(
-    direct: ProxiedWorker,
+    direct: ProxiedReferenceWorker,
     session: AsyncSession,
     blocker: psycopg.AsyncConnection[Any],
     clean_workflow_tables: None,  # noqa: ARG001
@@ -968,7 +968,7 @@ async def _batch_statements_ended(session: AsyncSession) -> None:
 
 
 async def test_the_batch_locks_its_rows_in_sorted_task_id_order(
-    direct: ProxiedWorker,
+    direct: ProxiedReferenceWorker,
     session: AsyncSession,
     blocker: psycopg.AsyncConnection[Any],
     clean_workflow_tables: None,  # noqa: ARG001
@@ -1027,7 +1027,7 @@ async def test_the_batch_locks_its_rows_in_sorted_task_id_order(
 
 
 async def test_two_flushers_and_workflow_node_finalizes_do_not_deadlock(
-    direct: ProxiedWorker,
+    direct: ProxiedReferenceWorker,
     session: AsyncSession,
     recorded: _RecordedBatches,
     clean_workflow_tables: None,  # noqa: ARG001

@@ -18,8 +18,8 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err
 from horsies.core.worker.config import WorkerConfig
-from horsies.core.worker.worker import Worker
-from tests.dispatch_claim_support import claim_at
+from tests.dualrun.reference.worker_parent.worker.worker import Worker
+from tests.fixtures.reference_worker_support import claim_at
 from tests.phase2_support import failing_phase2
 from tests.fixtures.slots.handles import HANDLE_CLAIMED_AT, task_finished_handle
 from tests.integration.conftest import compute_test_command_fingerprint

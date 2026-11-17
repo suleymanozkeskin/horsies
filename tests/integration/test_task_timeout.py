@@ -24,12 +24,12 @@ from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import OutcomeCode, TaskOptions
 from horsies.core.types.result import Ok, is_ok
 from horsies.core.worker.config import WorkerConfig
-from horsies.core.worker.finalize import _NodeFinishOwed
-from horsies.core.worker.slots import ChildExit, ExitUnknown, KilledBySignal, SlotHandle
-from horsies.core.worker.stored_timeout import NoTimeout, TaskTimeout, read_stored_timeout
-from horsies.core.worker.worker import Worker
+from tests.dualrun.reference.worker_parent.worker.finalize import _NodeFinishOwed
+from tests.dualrun.reference.worker_parent.worker.slots import ChildExit, ExitUnknown, KilledBySignal, SlotHandle
+from tests.dualrun.reference.worker_parent.worker.stored_timeout import NoTimeout, TaskTimeout, read_stored_timeout
+from tests.dualrun.reference.worker_parent.worker.worker import Worker
 from horsies.core.workflows.node_finish import FactsUnknown
-from tests.dispatch_claim_support import claim_at, row_claim
+from tests.fixtures.reference_worker_support import claim_at, row_claim
 from tests.fixtures.slots.handles import (
     HANDLE_CLAIMED_AT,
     task_finished_handle,
