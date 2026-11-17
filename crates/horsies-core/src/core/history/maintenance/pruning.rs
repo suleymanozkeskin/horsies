@@ -395,18 +395,14 @@ mod tests {
     //! Python specification: `tests/integration/test_history_catalog_active_index.py`.
 
     use std::collections::BTreeSet;
-    use std::sync::{Arc, Mutex, PoisonError};
+    use std::sync::PoisonError;
 
     use serde_json::Value;
     use serial_test::serial;
-    use tokio_postgres::AsyncMessage;
 
     use super::MAX_PRUNE_CANDIDATES_PER_PASS;
     use crate::core::history::names::{LEAF_CATALOG, RETENTION_CLASSES};
-    use crate::db::{
-        open_connection, parse_connection_url, ConnectPlan, ConnectionEnvironment,
-        DEFAULT_SOCKET_SETTINGS,
-    };
+    use crate::test_support::connect_collecting_notices;
 
     const ACTIVE_INDEX: &str = "horsies_task_history_leaf_catalog_active";
     const CLASS_KEY: &str = "standard_30d";
@@ -477,37 +473,6 @@ mod tests {
                 document["Plan"].clone()
             })
             .collect()
-    }
-
-    /// One direct connection to `url` whose notices are collected in order.
-    async fn connect_collecting_notices(
-        url: &str,
-    ) -> (tokio_postgres::Client, Arc<Mutex<Vec<String>>>) {
-        let environment =
-            ConnectionEnvironment::capture().expect("read the connection environment of the test");
-        let settings = parse_connection_url(url, &environment)
-            .unwrap_or_else(|error| panic!("the test database URL is refused: {error}"));
-        let plan = ConnectPlan::load(&settings, &environment, &DEFAULT_SOCKET_SETTINGS)
-            .unwrap_or_else(|error| panic!("the test connection plan does not load: {error}"));
-        let (client, mut connection) = open_connection(&plan)
-            .await
-            .unwrap_or_else(|error| panic!("connecting to the test server failed: {error}"));
-        let notices = Arc::new(Mutex::new(Vec::new()));
-        let collected = Arc::clone(&notices);
-        drop(tokio::spawn(async move {
-            while let Some(Ok(message)) =
-                std::future::poll_fn(|context| connection.poll_message(context)).await
-            {
-                match message {
-                    AsyncMessage::Notice(notice) => collected
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .push(notice.message().to_owned()),
-                    _ => {}
-                }
-            }
-        }));
-        (client, notices)
     }
 
     /// `test_expired_leaf_scan_examines_only_active_records`: with 6,000

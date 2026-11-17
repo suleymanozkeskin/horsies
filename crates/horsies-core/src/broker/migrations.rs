@@ -111,8 +111,7 @@ baseline_sql_files!(
 
 /// The tables file of the baseline.
 #[cfg(test)]
-pub(crate) const BASELINE_TABLES_SQL: &str =
-    include_str!("../../baseline/0001_tables.sql");
+pub(crate) const BASELINE_TABLES_SQL: &str = include_str!("../../baseline/0001_tables.sql");
 /// The interim functions file of the baseline.
 #[cfg(test)]
 pub(crate) const BASELINE_INTERIM_FUNCTIONS_SQL: &str =
