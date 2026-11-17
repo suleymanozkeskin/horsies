@@ -53,6 +53,8 @@ mod placement_tests;
 #[cfg(test)]
 mod plain_success_tests;
 #[cfg(test)]
+mod report_tests;
+#[cfg(test)]
 pub(crate) mod scripted;
 #[cfg(test)]
 mod settle_tests;
