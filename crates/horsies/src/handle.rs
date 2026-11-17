@@ -95,6 +95,11 @@ pub enum ReadError {
     /// Nothing was read.
     #[error("{message}")]
     WaitInsideTask { message: String },
+    /// `ASYNC_CONTEXT`: a blocking read on a thread that runs a tokio
+    /// runtime; its wait would stall the runtime. Nothing was read; the
+    /// async form reads.
+    #[error("{message}")]
+    AsyncContext { message: String },
     /// `BROKER_ERROR`: the database or the connection failed; `retryable`
     /// is the classification of the cause.
     #[error("the read failed ({code}): {message}")]
@@ -118,6 +123,7 @@ impl ReadError {
                 OperationalErrorCode::ResultDeserializationError.into()
             }
             Self::WaitInsideTask { .. } => RetrievalCode::WaitInsideTask.into(),
+            Self::AsyncContext { .. } => RetrievalCode::AsyncContext.into(),
             Self::Database { .. } => OperationalErrorCode::BrokerError.into(),
         }
     }
@@ -132,6 +138,7 @@ impl ReadError {
             Self::WaitTimedOut { .. }
             | Self::TaskNotFound { .. }
             | Self::WaitInsideTask { .. }
+            | Self::AsyncContext { .. }
             | Self::Database { .. } => false,
         }
     }
@@ -263,6 +270,12 @@ where
             }),
             RawResultRead::Found(record) => outcome_of_record(record),
         }
+    }
+
+    /// The read that the handle kept, when one was kept: a later `get`
+    /// returns it with no read.
+    pub(crate) fn kept(&self) -> Option<Result<TaskOutcome<T, E>, ReadError>> {
+        self.kept.get().cloned()
     }
 
     /// Keep `read` when no other read was kept first, and return the kept
@@ -568,6 +581,9 @@ mod tests {
                 reason: TaskAbsenceReason::WithinRetainedHistory,
             },
             ReadError::wait_inside_task("TaskHandle.get()"),
+            ReadError::AsyncContext {
+                message: "blocking get on a runtime thread".to_owned(),
+            },
             ReadError::Database {
                 code: BrokerErrorCode::TaskInfoQueryFailed,
                 message: "down".to_owned(),
@@ -608,6 +624,9 @@ mod tests {
                 status: TaskStatus::Failed,
             },
             ReadError::wait_inside_task("TaskHandle.get()"),
+            ReadError::AsyncContext {
+                message: "blocking get on a runtime thread".to_owned(),
+            },
         ]
         .iter()
         .map(|error| error.code().value())
@@ -618,7 +637,8 @@ mod tests {
                 "WAIT_TIMEOUT",
                 "TASK_NOT_FOUND",
                 "RESULT_NOT_AVAILABLE",
-                "WAIT_INSIDE_TASK"
+                "WAIT_INSIDE_TASK",
+                "ASYNC_CONTEXT"
             ]
         );
     }

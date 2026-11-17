@@ -11,6 +11,7 @@ use uuid::Uuid;
 use super::host::ChildApp;
 use super::link::FrameWriter;
 use super::panic::{catch_body_panic, panic_error};
+use super::role::as_blocking_body;
 use crate::broker::claims::{
     release_claims, start_attempt as start_statement, ReleaseBatch, ReleaseClaims, ReleaseOutcome,
     ReleasePlacement, StartAttempt, StartMiss, StartOutcome,
@@ -389,7 +390,7 @@ pub(super) fn run_blocking_body(
     task_name: &str,
     module: TaskModule,
 ) -> TaskResult<Vec<u8>> {
-    match catch_body_panic(|| task.execute(input)) {
+    match catch_body_panic(|| as_blocking_body(|| task.execute(input))) {
         Ok(result) => result,
         Err(record) => TaskResult::Err(panic_error(task_name, module, record)),
     }
