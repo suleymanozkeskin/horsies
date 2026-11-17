@@ -3035,8 +3035,9 @@ mod tests {
         assert_eq!(attempt_error_code, None);
     }
 
-    /// Insert a RUNNING task owned by a specific worker, simulating a task that
-    /// was reaper-requeued and re-claimed (then set RUNNING) by another worker.
+    /// Insert a RUNNING task owned by a specific worker at a claim generation
+    /// of now, simulating a task that was reaper-requeued and re-claimed (then
+    /// set RUNNING) by another worker.
     async fn insert_running_task_owned_by(pool: &PgPool, task_id: &Uuid, owner: &str) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
@@ -3052,7 +3053,7 @@ mod tests {
                     $1, 'finalize_test', 'default', 100, 'null', NULL, 'ISOLATED',
                     'standard_30d', NOW(), NOW(),
                     1, decode(repeat('00', 32), 'hex'), NULL,
-                    'RUNNING', NOW(), NULL, $2, NULL,
+                    'RUNNING', NOW(), NOW(), $2, NULL,
                     NOW(), NULL, NULL,
                     4242, 'finalize-host', 'finalize-process',
                     0, 3, NULL, NULL, FALSE,
@@ -3078,29 +3079,22 @@ mod tests {
         let broker = test_broker().await;
         clean(&pool).await;
 
-        use crate::broker::terminalization::on_test_pool::terminalize;
-        use crate::core::lifecycle::{
-            PriorLockedRead, TerminalizationCommand, TerminalizationOutcome,
-        };
+        use crate::broker::attempt_writes::{AttemptFailure, AttemptFailureKind};
+        use crate::core::lifecycle::TerminalizationOutcome;
+        use crate::test_support::terminal_writes::{self, TerminalFailure};
 
-        let complete_as =
-            |task_id: Uuid, worker: &str| TerminalizationCommand::CompleteLockedTask {
-                task_id,
-                fence: PriorLockedRead {
-                    worker_id: worker.to_owned(),
-                },
-                result_json: "{}".to_owned(),
-            };
-        let fail_as = |task_id: Uuid, worker: &str, reason: Option<&str>| {
-            TerminalizationCommand::FailLockedTask {
-                task_id,
-                fence: PriorLockedRead {
-                    worker_id: worker.to_owned(),
-                },
-                result_json: "{}".to_owned(),
-                error_code: reason.is_none().then(|| "X".to_owned()),
-                failed_reason: reason.map(str::to_owned),
-            }
+        // A task failure carries an error code; a worker failure carries a
+        // failed reason and records a WORKER_FAILURE attempt.
+        let task_failure = TerminalFailure::of_task("{}", Some("X"), None);
+        let worker_failure = TerminalFailure {
+            result_json: "{}".to_owned(),
+            error_code: None,
+            failed_reason: Some("crash".to_owned()),
+            attempt: AttemptFailure {
+                kind: AttemptFailureKind::WorkerFailure,
+                error_message: None,
+                failed_reason: Some("crash".to_owned()),
+            },
         };
         let applied = |outcomes: &[TerminalizationOutcome]| {
             matches!(outcomes, [TerminalizationOutcome::Applied { .. }])
@@ -3111,7 +3105,7 @@ mod tests {
         insert_running_task_owned_by(&pool, &t_complete, "worker-2").await;
         assert!(
             !applied(
-                &terminalize(&pool, &complete_as(t_complete, "worker-1"))
+                &terminal_writes::complete_plain_task(&pool, t_complete, "worker-1", "{}")
                     .await
                     .unwrap()
             ),
@@ -3120,7 +3114,7 @@ mod tests {
         assert_eq!(fetch_task_state(&pool, &t_complete).await.0, "RUNNING");
         assert!(
             applied(
-                &terminalize(&pool, &complete_as(t_complete, "worker-2"))
+                &terminal_writes::complete_plain_task(&pool, t_complete, "worker-2", "{}")
                     .await
                     .unwrap()
             ),
@@ -3133,7 +3127,7 @@ mod tests {
         insert_running_task_owned_by(&pool, &t_fail, "worker-2").await;
         assert!(
             !applied(
-                &terminalize(&pool, &fail_as(t_fail, "worker-1", None))
+                &terminal_writes::fail_running_task(&pool, t_fail, "worker-1", &task_failure)
                     .await
                     .unwrap()
             ),
@@ -3141,7 +3135,7 @@ mod tests {
         );
         assert_eq!(fetch_task_state(&pool, &t_fail).await.0, "RUNNING");
         assert!(applied(
-            &terminalize(&pool, &fail_as(t_fail, "worker-2", None))
+            &terminal_writes::fail_running_task(&pool, t_fail, "worker-2", &task_failure)
                 .await
                 .unwrap()
         ));
@@ -3165,13 +3159,13 @@ mod tests {
         assert_eq!(fetch_task_state(&pool, &t_requeue).await.0, "PENDING");
 
         // worker-crash failure (failed_reason carried): stale owner rejected,
-        // current owner applies. Same operation as task failure — they differ
-        // only in whether a failure reason travels.
+        // current owner applies. Same function as the task failure, with a
+        // WORKER_FAILURE attempt.
         let t_worker = Uuid::new_v4();
         insert_running_task_owned_by(&pool, &t_worker, "worker-2").await;
         assert!(
             !applied(
-                &terminalize(&pool, &fail_as(t_worker, "worker-1", Some("crash")))
+                &terminal_writes::fail_running_task(&pool, t_worker, "worker-1", &worker_failure)
                     .await
                     .unwrap()
             ),
@@ -3179,7 +3173,7 @@ mod tests {
         );
         assert_eq!(fetch_task_state(&pool, &t_worker).await.0, "RUNNING");
         assert!(applied(
-            &terminalize(&pool, &fail_as(t_worker, "worker-2", Some("crash")))
+            &terminal_writes::fail_running_task(&pool, t_worker, "worker-2", &worker_failure)
                 .await
                 .unwrap()
         ));
