@@ -30,7 +30,13 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import Execution, RetryPolicy, TaskError, TaskResult
-from horsies.core.models.workflow import OnError, TaskNode
+from horsies.core.models.workflow import (
+    OnError,
+    SubWorkflowNode,
+    TaskNode,
+    WorkflowDefinition,
+    WorkflowDefinitionConfig,
+)
 from horsies.core.models.worker_profile import (
     IsolatedChildren,
     NoIsolatedChildren,
@@ -63,6 +69,10 @@ RETRY_POLICY: Final = RetryPolicy.fixed([1, 1], auto_retry_for=['TRANSIENT'])
 
 CHAIN_NAME: Final = 'parity_chain'
 CHAIN_DEFINITION_KEY: Final = 'tests.parity.chain.v1'
+CHILD_NAME: Final = 'parity_child'
+CHILD_DEFINITION_KEY: Final = 'tests.parity.child.v1'
+PARENT_NAME: Final = 'parity_parent'
+PARENT_DEFINITION_KEY: Final = 'tests.parity.parent.v1'
 
 
 def _database_url() -> str:
@@ -247,3 +257,32 @@ parity_chain = app.workflow(
     definition_key=CHAIN_DEFINITION_KEY,
 )
 """Two nodes: the second takes the result of the first."""
+
+
+class ParityChild(WorkflowDefinition[int]):
+    """The child of `parity_parent`: one node, its output."""
+
+    name = CHILD_NAME
+    definition_key = CHILD_DEFINITION_KEY
+
+    child_add = TaskNode(fn=add, kwargs={'a': 2, 'b': 3}, node_id='add')
+
+    config = WorkflowDefinitionConfig(output=child_add, on_error=OnError.FAIL)
+
+
+_parent_child = SubWorkflowNode(workflow_def=ParityChild, node_id='child')
+_parent_double = TaskNode(
+    fn=double,
+    waits_for=[_parent_child],
+    args_from={'upstream': _parent_child},
+    node_id='double',
+)
+parity_parent = app.workflow(
+    name=PARENT_NAME,
+    tasks=[_parent_child, _parent_double],
+    output=_parent_double,
+    on_error=OnError.FAIL,
+    definition_key=PARENT_DEFINITION_KEY,
+)
+"""A sub-workflow node of `ParityChild`, then a node that takes the child's
+output."""
