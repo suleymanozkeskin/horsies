@@ -291,9 +291,6 @@ mod tests {
         let app = app();
         let source = match resume_children(&app) {
             core_monitoring::ResumeChildren::Client(source) => source,
-            core_monitoring::ResumeChildren::Registry { .. } => {
-                panic!("the Rust client builds through its child spec source")
-            }
         };
         let request = horsies_core::ChildSpecRequest {
             parent_workflow_id: Uuid::nil(),

@@ -1500,6 +1500,65 @@ mod wait_tests {
     use serial_test::serial;
     use std::sync::Arc;
 
+    /// Many concurrent result waits on one broker share its one listener
+    /// connection, not a connection each: twice as many waits as the session
+    /// pool holds all end with `WAIT_TIMEOUT`, and none fails on an exhausted
+    /// session pool.
+    #[tokio::test]
+    #[serial]
+    async fn many_concurrent_result_waits_share_one_listener() {
+        let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+            &crate::broker::terminalization_matrix::migrated_database_url().await,
+        ));
+        let pool = broker.pool().clone();
+        let workflow_id = Uuid::new_v4();
+
+        // A RUNNING workflow that never completes.
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index, definition_key, depth,
+                root_workflow_id, sent_at, created_at, started_at, updated_at
+            ) VALUES ($1, 'p2_wf', 'RUNNING', 'fail', NULL, 'test.p2.v1', 0, $1,
+                      NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(workflow_id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow");
+
+        // 8 concurrent waits: twice the connection limit of the session pool.
+        let waits = (0..8).map(|_| {
+            let broker = Arc::clone(&broker);
+            async move {
+                get_workflow_result::<serde_json::Value>(
+                    &broker,
+                    workflow_id,
+                    Some(Duration::from_millis(400)),
+                )
+                .await
+            }
+        });
+        let results = futures::future::join_all(waits).await;
+
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .expect("delete the workflow");
+        for result in results {
+            match result.expect("each wait reads through the shared listener") {
+                TaskResult::Err(error) => assert_eq!(
+                    error.error_code,
+                    TaskErrorCode::from(RetrievalCode::WaitTimeout),
+                    "each wait ends at its limit: {:?}",
+                    error.error_code,
+                ),
+                TaskResult::Ok(_) => panic!("the workflow must not complete"),
+            }
+        }
+    }
+
     #[tokio::test]
     #[serial]
     async fn get_workflow_result_no_timeout_returns_not_found_for_missing_workflow() {
