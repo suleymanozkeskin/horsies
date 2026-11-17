@@ -147,7 +147,10 @@ async def test_stop_logs_the_rows_that_the_batcher_close_left(
 ) -> None:
     worker = _make_worker()
     worker._finalize_batcher.close = AsyncMock(  # type: ignore[method-assign]
-        return_value=FlushersCancelled(rows_in_flight=3, rows_unsent=2),
+        return_value=FlushersCancelled(
+            in_flight_task_ids=frozenset({'a', 'b', 'c'}),
+            unsent_task_ids=frozenset({'d', 'e'}),
+        ),
     )
 
     with caplog.at_level(logging.WARNING, logger='horsies.worker'):

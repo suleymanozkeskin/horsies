@@ -601,7 +601,11 @@ async def test_close_cancels_the_flushers_at_its_timeout() -> None:
 
     report = await asyncio.wait_for(batcher.close(0.05), OUTER_BOUND_S)
 
-    assert report == FlushersCancelled(rows_in_flight=2, rows_unsent=2)
+    # Each steady flusher took one row alone; the other two stayed queued.
+    assert report == FlushersCancelled(
+        in_flight_task_ids=frozenset({'a', 'b'}),
+        unsent_task_ids=frozenset({'c', 'd'}),
+    )
     _ = await asyncio.gather(*calls, return_exceptions=True)
     assert all(call.cancelled() for call in calls)
 
