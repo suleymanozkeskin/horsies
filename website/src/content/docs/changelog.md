@@ -555,7 +555,9 @@ unless it starts with "Added".
   failures of the stored data, as Python; a timeout, an absent task and a
   database failure are read again. The value decodes from its stored text,
   here and in `WorkflowHandle::get` and `result_for`, so an integer outside
-  the `i64` and `u64` range reads as `u128` or `i128`, as in Python.
+  the `i64` and `u64` range reads as `u128` or `i128`, as in Python. A
+  dependency result (a `TaskOutcome<S, E>` input field) and
+  `WorkflowContext::result_for` decode the value from its stored text too.
 - **A result wait in a worker child is refused** with `WaitInsideTask` and
   sends no statement, as in Python.
 - **Reads by task id are on the app:** `get_result::<T, E>`,

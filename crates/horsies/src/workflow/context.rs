@@ -11,9 +11,11 @@ use std::collections::BTreeMap;
 use horsies_core::{SubWorkflowSummary, TaskResult};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use uuid::Uuid;
 
 use super::node::NodeKey;
+use crate::handle::read_stored_result;
 use crate::task::body::value_free_decode_text;
 use crate::{TaskError, TaskOutcome, UnknownUserCode, UserErrorCode};
 
@@ -27,10 +29,25 @@ pub struct WorkflowContext {
     task_name: String,
     /// The stored result envelope of each context node, by node id.
     #[serde(default)]
-    results_by_id: BTreeMap<String, serde_json::Value>,
+    results_by_id: BTreeMap<String, StoredResultText>,
     /// The summary of each context sub-workflow node, by node id.
     #[serde(default)]
     summaries_by_id: BTreeMap<String, SubWorkflowSummary>,
+}
+
+/// The stored result envelope of one context node, as the text it was
+/// written with. [`WorkflowContext::result_for`] decodes the value from its
+/// own text, so an integer outside the `i64` and `u64` range reads as the
+/// asked type (`u128`, `i128`), as Python reads any integer. Two texts are
+/// equal when they are the same text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+struct StoredResultText(Box<RawValue>);
+
+impl PartialEq for StoredResultText {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.get() == other.0.get()
+    }
 }
 
 /// Why a context read gave no value.
@@ -83,15 +100,16 @@ impl WorkflowContext {
         E: UserErrorCode,
     {
         let node_id = key.node_id();
-        let stored = self.results_by_id.get(node_id).cloned().ok_or_else(|| {
-            WorkflowContextError::NotInContext {
-                node_id: node_id.to_owned(),
-            }
-        })?;
-        let read = serde_json::from_value::<TaskResult<T>>(stored).map_err(|error| {
+        let stored =
+            self.results_by_id
+                .get(node_id)
+                .ok_or_else(|| WorkflowContextError::NotInContext {
+                    node_id: node_id.to_owned(),
+                })?;
+        let read = read_stored_result::<T>(stored.0.get()).map_err(|refused| {
             WorkflowContextError::Unreadable {
                 node_id: node_id.to_owned(),
-                cause: value_free_decode_text(&error),
+                cause: refused.cause,
             }
         })?;
         match read {
@@ -160,6 +178,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::task::body::decode_input;
 
     fn context() -> WorkflowContext {
         serde_json::from_value(json!({
@@ -188,6 +207,35 @@ mod tests {
             .result_for::<u32, horsies_core::UserCode>(&NodeKey::new("check"))
             .unwrap();
         assert!(matches!(checked, TaskOutcome::Failed(_)));
+    }
+
+    /// The value decodes from its own text, in a context that is a field of
+    /// a task input read by the input decode (with its field path tracker):
+    /// an integer outside the `i64` and `u64` range reads as `u128` or
+    /// `i128`, as Python reads it. A read through `serde_json::Value` holds
+    /// it as an `f64`, which both refuse.
+    #[test]
+    fn a_stored_integer_outside_i64_and_u64_reads_as_its_type() {
+        #[derive(Deserialize)]
+        struct Input {
+            workflow_ctx: WorkflowContext,
+        }
+        let text = concat!(
+            r#"{"workflow_ctx":{"workflow_id":"00000000-0000-0000-0000-000000000007","#,
+            r#""task_index":2,"task_name":"report","results_by_id":{"#,
+            r#""max":{"__h_task_result__":true,"ok":340282366920938463463374607431768211455,"err":null},"#,
+            r#""below":{"__h_task_result__":true,"ok":-9223372036854775809,"err":null}},"#,
+            r#""summaries_by_id":{}}}"#,
+        );
+        let context = decode_input::<Input>(text.as_bytes()).unwrap().workflow_ctx;
+        assert_eq!(
+            context.result_for::<u128, Infallible>(&NodeKey::new("max")),
+            Ok(TaskOutcome::Succeeded(u128::MAX))
+        );
+        assert_eq!(
+            context.result_for::<i128, Infallible>(&NodeKey::new("below")),
+            Ok(TaskOutcome::Succeeded(i128::from(i64::MIN) - 1))
+        );
     }
 
     #[test]
