@@ -5,8 +5,9 @@
 //!   case has a database of its own, a copy of the installed schema
 //!   ([`TestDatabase::create`]), and seeds one task row. The function call
 //!   fails with its error, and the task row keeps its status.
-//! - The outcomes of the writer of COMPLETE_LOCKED
-//!   (`horsies_finish_workflow_success`). Each test has a copy of the
+//! - The outcomes of the writers of COMPLETE_LOCKED
+//!   (`horsies_finish_workflow_success`) and FAIL_RUNNING
+//!   (`horsies_finish_failed_attempt`). Each test has a copy of the
 //!   installed schema with one coverage pass ([`covered`]) and seeds its
 //!   rows. It calls the writer with its own SQL and decodes the one outcome
 //!   row with the decoder of the core ([`decode_outcome_row`]).
@@ -31,6 +32,7 @@ use crate::test_support::TestDatabase;
 
 mod already_applied;
 mod applied_transitions;
+mod fail_locked;
 mod refusals;
 
 const WORKER: &str = "terminalization-test-worker";
@@ -40,6 +42,12 @@ const OTHER_WORKER: &str = "someone-else";
 
 /// The result that the writer of COMPLETE_LOCKED stores.
 const LOCKED_RESULT: &str = r#"{"ok": 1}"#;
+
+/// The result that the writer of FAIL_RUNNING stores.
+const FAIL_RUNNING_RESULT: &str = r#"{"err": 1}"#;
+
+/// The error code that the writer of FAIL_RUNNING stores.
+const FAIL_RUNNING_ERROR_CODE: &str = "TASK_EXCEPTION";
 
 /// The failed reason of attempt one in the cases that requeue a task after
 /// a failed attempt.
@@ -149,6 +157,21 @@ const WORKFLOW_SUCCESS_SQL: &str = "
            guard_kind, observed_guard
     FROM horsies_finish_workflow_success(
         CAST($1 AS uuid), $2, CAST($3 AS TIMESTAMPTZ), $4
+    )
+";
+
+/// The writer of FAIL_RUNNING: a failed attempt with no retry (retry kind
+/// NONE, a CLAIMED row refused). The attempt row records the failed reason
+/// too. Parameters: `$1` task id, `$2` worker id, `$3` claimed_at, `$4`
+/// result, `$5` error code, `$6` failed reason.
+const FAILED_ATTEMPT_SQL: &str = "
+    SELECT task_id, ordinality, outcome, terminal_at, terminalization_kind,
+           observed_status, observed_worker_id, observed_claimed_at,
+           guard_kind, observed_guard
+    FROM horsies_finish_failed_attempt(
+        CAST($1 AS uuid), $2, CAST($3 AS TIMESTAMPTZ),
+        'NONE', NULL, NULL, NULL, $4, $5, $6,
+        'FAILED', NULL, $6, 'REFUSE', TRUE
     )
 ";
 
@@ -419,6 +442,29 @@ async fn locked(session: &Session, task_id: Uuid) -> TerminalizationOutcome {
         "horsies_finish_workflow_success",
         WORKFLOW_SUCCESS_SQL,
         &[&task_id, &WORKER, &generation(), &LOCKED_RESULT],
+    )
+    .await
+}
+
+/// The writer of FAIL_RUNNING (`horsies_finish_failed_attempt`) under
+/// [`WORKER`] at [`generation`], with `failed_reason` (NULL for `None`).
+async fn fail_locked(
+    session: &Session,
+    task_id: Uuid,
+    failed_reason: Option<&str>,
+) -> TerminalizationOutcome {
+    outcome_of(
+        session,
+        "horsies_finish_failed_attempt",
+        FAILED_ATTEMPT_SQL,
+        &[
+            &task_id,
+            &WORKER,
+            &generation(),
+            &FAIL_RUNNING_RESULT,
+            &FAIL_RUNNING_ERROR_CODE,
+            &failed_reason,
+        ],
     )
     .await
 }
