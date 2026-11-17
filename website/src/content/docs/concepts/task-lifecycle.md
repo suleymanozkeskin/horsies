@@ -36,19 +36,7 @@ tags: [concepts, tasks, states]
 | `CANCELLED` | `"CANCELLED"` | Yes |
 | `EXPIRED` | `"EXPIRED"` | Yes |
 
-Use `is_terminal` or `TASK_TERMINAL_STATES` to check terminal status programmatically:
-
-```python
-from horsies import TaskStatus, TASK_TERMINAL_STATES
-
-status = TaskStatus.FAILED
-status.is_terminal  # True
-
-TaskStatus.RUNNING.is_terminal  # False
-
-# Frozenset for use in queries or filters
-TASK_TERMINAL_STATES  # frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.EXPIRED})
-```
+The Python client checks a status with `is_terminal` and holds the terminal statuses in `TASK_TERMINAL_STATES`: see [Terminal Statuses](/horsies/tasks/retrieving-results/#terminal-statuses) (Python).
 
 ## State Transitions
 
@@ -174,23 +162,11 @@ and the worker writes its runner heartbeats.
 
 ## Task Expiry
 
-Tasks can have a `good_until` deadline set at send time via `.with_options()`:
+Tasks can have a `good_until` deadline, set at send time:
 
 - **PENDING expiry:** If the task isn't claimed before `good_until`, the claim SQL skips it. The reaper periodically transitions unclaimed expired tasks to `EXPIRED`.
 - **CLAIMED expiry:** If the task was claimed but `good_until` passes before execution starts, the worker marks it `EXPIRED` directly instead of proceeding to `RUNNING`.
 - Both paths produce a `TASK_EXPIRED` outcome code. No attempt row is written since user code never ran.
 - `good_until` also caps retries — a retry scheduled at or past the deadline is rejected.
 
-```python
-from datetime import datetime, timedelta, timezone
-
-@app.task("urgent_task")
-def urgent_task() -> TaskResult[str, TaskError]:
-    ...
-
-# Compute deadline at send time, not module load time
-deadline = datetime.now(timezone.utc) + timedelta(minutes=5)
-urgent_task.with_options(good_until=deadline).send()
-```
-
-`good_until` must be timezone-aware. For workflow nodes, use `.node(good_until=...)` instead — see [Typed Node Builder](../../concepts/workflows/typed-node-builder).
+The API is on the client pages: [Set a Task Deadline](/horsies/tasks/sending-tasks/#set-a-task-deadline) (Python) and [Send Options](/horsies/rust/tasks/sending-tasks/#send-options) (Rust).
