@@ -141,10 +141,16 @@ fn to_handle_error(e: WorkflowError, workflow_id: Uuid) -> HandleOperationError 
 ///   not retryable: the same call gets the same answer (`core/models/workflow/handle_types.py:33-57`).
 /// - A failure of a step on the statement layer (`WorkflowError::Broker` with `BrokerError::Statement`) is
 ///   `DB_OPERATION_FAILED`, retryable by the statement layer's transience.
-/// - A step row outside its function's contract (`StepContract`) is `INTERNAL_FAILED`, not retryable: the
-///   core and the installed baseline disagree.
-/// - The remaining variants keep `INTERNAL_FAILED` until resume runs through its SQL function; Python
-///   raises them.
+///
+/// The other variants have no entry in the handle catalog (Python's `HandleErrorCode`,
+/// `python/horsies/core/models/workflow/handle_types.py`). Each is a defect at this boundary, and the call
+/// panics with the workflow id and the cause, where Python raises:
+/// - `StepContract`: a step row outside its function's contract; the core and the installed baseline
+///   disagree (Python raises `OutcomeDecodeError`, `python/horsies/core/workflows/lifecycle.py`).
+/// - `Validation`: only the host build of a child that a resume owes gives it (a stored node input that the
+///   `args_from` merge refuses, a built child spec that the tree arguments refuse); Python's resume lets
+///   every exception other than a database error propagate.
+/// - `WorkflowTimeout`, `WorkflowError`: no workflow operation constructs them.
 pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> HandleOperationError {
     let (code, retryable) = match e {
         WorkflowError::WorkflowNotFound { .. } => (HandleErrorCode::WorkflowNotFound, false),
@@ -159,7 +165,10 @@ pub(crate) fn handle_operation_error(e: &WorkflowError, workflow_id: Uuid) -> Ha
         WorkflowError::WorkflowTimeout { .. }
         | WorkflowError::WorkflowError(_)
         | WorkflowError::Validation(_)
-        | WorkflowError::StepContract(_) => (HandleErrorCode::InternalFailed, false),
+        | WorkflowError::StepContract(_) => panic!(
+            "workflow handle operation on workflow {workflow_id} failed with an error that has no \
+             handle catalog entry (a defect): {e}"
+        ),
     };
     HandleOperationError {
         code,
@@ -201,7 +210,8 @@ async fn admit_workflow_write(broker: &PostgresBroker, workflow_id: Uuid) -> Han
 /// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
 /// - `DB_OPERATION_FAILED`: the client family check refused the handle, or the statement failed
 ///   (retryable by the statement layer's transience; an `OutcomeUnknown` may have committed).
-/// - `INTERNAL_FAILED`: a row outside the function's contract.
+///
+/// Panics: a row outside the function's contract ([`handle_operation_error`]).
 ///
 /// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub async fn cancel_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> HandleResult<bool> {
@@ -359,7 +369,9 @@ fn format_python_timedelta(duration: chrono::Duration) -> Result<String, Workflo
 /// - `Ok(true)`: the workflow was RUNNING and is PAUSED with its RUNNING descendants.
 /// - `Ok(false)`: the workflow exists and is not RUNNING; nothing was written.
 /// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
-/// - `DB_OPERATION_FAILED` and `INTERNAL_FAILED`: as [`cancel_workflow`].
+/// - `DB_OPERATION_FAILED`: as [`cancel_workflow`].
+///
+/// Panics: as [`cancel_workflow`].
 ///
 /// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub async fn pause_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> HandleResult<bool> {
@@ -455,11 +467,15 @@ pub(crate) async fn pause_tree_and_relocate(
 ///   commit ([`advance_parents`]). Then the tree recovery pass runs as before.
 /// - `Ok(false)`: the workflow exists and is not PAUSED, RUNNING included; nothing was written (Python's rule).
 /// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
-/// - `DB_OPERATION_FAILED`, `INTERNAL_FAILED`: as [`cancel_workflow`]; nothing of the step committed, or its
-///   `COMMIT` reply was lost. A refused host build of an owed child (`INTERNAL_FAILED` or `STORED_DATA_INVALID`)
-///   commits nothing.
+/// - `DB_OPERATION_FAILED`: as [`cancel_workflow`]; nothing of the step committed, or its `COMMIT` reply was
+///   lost.
+/// - `STORED_DATA_INVALID`: the host build of an owed child met a value that does not encode; nothing
+///   committed.
 /// - `RESUME_RECOVERY_FAILED`, not retryable: the resume committed, and the parent advance or the tree recovery
 ///   pass after it failed.
+///
+/// Panics ([`handle_operation_error`]), and nothing committed: a row outside a function's contract, or a host
+/// build of an owed child that the core refuses (`Validation`).
 ///
 /// The handle's client family is checked before the first write (`admit_workflow_write`). The payload
 /// policy is not read: the step functions and the tree recovery take no payload policy.

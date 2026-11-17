@@ -20,41 +20,16 @@ Two error strategies by return type:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import TYPE_CHECKING, ClassVar
 
+from horsies._catalog.workflow_handle import (
+    HandleErrorCode as HandleErrorCode,
+)
 from horsies.core.types.result import Result
 
 
 if TYPE_CHECKING:
     from horsies.core.brokers.resources import EventLoopLimit
-
-
-class HandleErrorCode(str, Enum):
-    """Categorized handle operation failure codes.
-
-    Each member names one variant of ``HandleOperationError``.
-    """
-
-    WORKFLOW_NOT_FOUND = 'WORKFLOW_NOT_FOUND'
-    DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
-    # A stored value of the workflow does not parse: an unknown workflow
-    # status or a subworkflow summary that is not valid. Nothing changed, and
-    # the same call returns the same error.
-    STORED_DATA_INVALID = 'STORED_DATA_INVALID'
-    # ``resume`` committed the resume, and the recovery pass for the
-    # workflow tree, which runs after that commit, failed with a database
-    # error. The workflow is RUNNING.
-    RESUME_RECOVERY_FAILED = 'RESUME_RECOVERY_FAILED'
-    LOOP_RUNNER_FAILED = 'LOOP_RUNNER_FAILED'
-    # The broker already holds resource sets for its limit of open event
-    # loops, and this call ran on a new one. Nothing ran. It clears when one
-    # of those loops closes.
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    # A sync handle method was called on a thread that runs an event loop.
-    # Its wait would stall that loop, so nothing ran. Call the ``*_async``
-    # form.
-    ASYNC_CONTEXT = 'ASYNC_CONTEXT'
 
 
 @dataclass(slots=True, frozen=True)

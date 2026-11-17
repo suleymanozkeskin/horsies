@@ -125,8 +125,7 @@ fn handle_failed(error: HandleOperationError) -> ActionOutcome {
         HandleErrorCode::DbOperationFailed
         | HandleErrorCode::LoopRunnerFailed
         | HandleErrorCode::EventLoopLimit
-        | HandleErrorCode::ResumeRecoveryFailed
-        | HandleErrorCode::InternalFailed => detail(503, error.message),
+        | HandleErrorCode::ResumeRecoveryFailed => detail(503, error.message),
         // Stored data that does not parse: the request was valid, and a repeat gets the same answer
         // (Python `_handle_failed`, `web/routes/actions.py`).
         HandleErrorCode::StoredDataInvalid => detail(500, error.message),
@@ -203,8 +202,7 @@ fn resume_failure(error: HandleOperationError) -> ActionOutcome {
         | HandleErrorCode::StoredDataInvalid
         | HandleErrorCode::LoopRunnerFailed
         | HandleErrorCode::EventLoopLimit
-        | HandleErrorCode::AsyncContext
-        | HandleErrorCode::InternalFailed => handle_failed(error),
+        | HandleErrorCode::AsyncContext => handle_failed(error),
     }
 }
 
@@ -265,7 +263,6 @@ mod tests {
             HandleErrorCode::LoopRunnerFailed,
             HandleErrorCode::EventLoopLimit,
             HandleErrorCode::ResumeRecoveryFailed,
-            HandleErrorCode::InternalFailed,
         ] {
             assert_eq!(handle_failed(error(code)).status_code(), 503);
         }
@@ -293,7 +290,6 @@ mod tests {
             HandleErrorCode::DbOperationFailed,
             HandleErrorCode::LoopRunnerFailed,
             HandleErrorCode::EventLoopLimit,
-            HandleErrorCode::InternalFailed,
         ] {
             let outcome = resume_failure(error(code));
             assert_eq!(outcome.status_code(), 503);
