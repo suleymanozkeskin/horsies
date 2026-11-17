@@ -15,7 +15,7 @@ use crate::core::history::names::{HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_C
 use crate::core::history::outcomes::{LeafDrop, LeafInspection};
 use crate::core::history::partitions::manager::{
     detach_expired_leaf, drop_detached_leaf, finalize_interrupted_detach, inspect_leaf,
-    DetachExpiredLeafOutcome, FinalizeInterruptedLeafOutcome, NoQuarantine,
+    DetachExpiredLeafOutcome, FinalizeInterruptedLeafOutcome,
 };
 use crate::core::history::partitions::publication::LoaderPublication;
 
@@ -45,9 +45,9 @@ pub struct LeafSweep<E> {
 }
 
 /// Whether one swept leaf counts toward `MAX_PRUNE_LEAVES_PER_PASS`: this
-/// pass detached it or dropped it. A busy, blocked, not-expired or
-/// quarantine-refused leaf does not count, and neither does a leaf an earlier
-/// pass detached whose drop is refused now.
+/// pass detached it or dropped it. A busy, blocked or not-expired leaf does
+/// not count, and neither does a leaf an earlier pass detached whose drop is
+/// refused now.
 pub(crate) fn sweep_counts_toward_bound(
     detach: &DetachExpiredLeafOutcome,
     drop: Option<&LeafDrop>,
@@ -56,8 +56,7 @@ pub(crate) fn sweep_counts_toward_bound(
         (DetachExpiredLeafOutcome::Detached { .. }, _) => true,
         (_, Some(LeafDrop::Dropped { .. })) => true,
         (DetachExpiredLeafOutcome::Inspection(_), _)
-        | (DetachExpiredLeafOutcome::Busy { .. }, _)
-        | (DetachExpiredLeafOutcome::QuarantineRefused(_), _) => false,
+        | (DetachExpiredLeafOutcome::Busy { .. }, _) => false,
     }
 }
 
@@ -266,15 +265,13 @@ async fn sweep_history_leaf<P: LoaderPublication>(
     publisher: &P,
 ) -> Result<HistoryLeafSwept, HistoryError> {
     let detach_command =
-        DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(DETACH_STATEMENT_TIMEOUT_MS))
+        DetachExpiredHistoryLeaf::new(leaf.clone(), Some(DETACH_STATEMENT_TIMEOUT_MS))
             .map_err(|error| HistoryError::contract(error.to_string()))?;
-    let detach = detach_expired_leaf(pool, &detach_command, publisher, &NoQuarantine).await?;
+    let detach = detach_expired_leaf(pool, &detach_command, publisher).await?;
     let detached = match &detach {
         DetachExpiredLeafOutcome::Detached { .. }
         | DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. }) => true,
-        DetachExpiredLeafOutcome::Busy { .. }
-        | DetachExpiredLeafOutcome::Inspection(_)
-        | DetachExpiredLeafOutcome::QuarantineRefused(_) => {
+        DetachExpiredLeafOutcome::Busy { .. } | DetachExpiredLeafOutcome::Inspection(_) => {
             let mut connection = pool.acquire().await?;
             matches!(
                 inspect_leaf(&mut connection, &InspectHistoryLeaf::new(leaf.clone())).await?,

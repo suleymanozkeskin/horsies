@@ -1,6 +1,5 @@
 //! Typed lifecycle for one task-history leaf.
 
-use std::future::Future;
 use std::ops::{Deref, DerefMut};
 
 use chrono::{Duration, Timelike};
@@ -117,66 +116,6 @@ impl Drop for SessionConnection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QuarantineRefusalVerdict {
-    NodeRowAbsent,
-    NodeIdentityAbsent,
-    SourceAbsent,
-    CopyVerificationFailed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskQuarantineRefusal {
-    pub task_id: Uuid,
-    pub verdict: QuarantineRefusalVerdict,
-    pub detail: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QuarantineRefused {
-    pub leaf_name: String,
-    pub repointed: u64,
-    pub refusals: Vec<TaskQuarantineRefusal>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QuarantineResult {
-    NoOverHorizonBlockers {
-        leaf_name: String,
-    },
-    BlockersQuarantined {
-        leaf_name: String,
-        repointed: u64,
-        drained: u64,
-    },
-    Refused(QuarantineRefused),
-}
-
-pub trait LeafBlockerQuarantine: Send + Sync {
-    fn quarantine(
-        &self,
-        connection: &mut PgConnection,
-        leaf: &LeafRef,
-        horizon: Duration,
-    ) -> impl Future<Output = Result<QuarantineResult, HistoryError>> + Send;
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoQuarantine;
-
-impl LeafBlockerQuarantine for NoQuarantine {
-    async fn quarantine(
-        &self,
-        _connection: &mut PgConnection,
-        _leaf: &LeafRef,
-        _horizon: Duration,
-    ) -> Result<QuarantineResult, HistoryError> {
-        Err(HistoryError::contract(
-            "phase-2 quarantine provider is not installed",
-        ))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetachExpiredLeafOutcome {
     Busy {
         leaf_name: String,
@@ -189,7 +128,6 @@ pub enum DetachExpiredLeafOutcome {
     /// This call did not detach the leaf; the inspection names the state that
     /// kept it. `LeafInspection::Detached` means an earlier call detached it.
     Inspection(LeafInspection),
-    QuarantineRefused(QuarantineRefused),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -948,16 +886,11 @@ pub async fn verify_static_forever_leaf(
 ///
 /// `pool` must preserve PostgreSQL session affinity. PgBouncer transaction
 /// pooling does not preserve the session advisory lock used by this function.
-pub async fn detach_expired_leaf<P, Q>(
+pub async fn detach_expired_leaf<P: LoaderPublication>(
     pool: &PgPool,
     command: &DetachExpiredHistoryLeaf,
     publisher: &P,
-    quarantine: &Q,
-) -> Result<DetachExpiredLeafOutcome, HistoryError>
-where
-    P: LoaderPublication,
-    Q: LeafBlockerQuarantine,
-{
+) -> Result<DetachExpiredLeafOutcome, HistoryError> {
     let leaf = command.leaf();
     let mut connection = SessionConnection::new(pool.acquire().await?);
     let prior_timeouts =
@@ -971,7 +904,7 @@ where
             leaf_name: leaf.leaf_name().to_owned(),
         });
     }
-    let result = detach_locked(&mut connection, command, publisher, quarantine).await;
+    let result = detach_locked(&mut connection, command, publisher).await;
     let cleanup = restore_timeouts_and_unlock(&mut connection, leaf, &prior_timeouts).await;
     if cleanup.is_ok() {
         connection.mark_reusable();
@@ -983,39 +916,15 @@ where
     }
 }
 
-async fn detach_locked<P, Q>(
+async fn detach_locked<P: LoaderPublication>(
     connection: &mut PgConnection,
     command: &DetachExpiredHistoryLeaf,
     publisher: &P,
-    quarantine: &Q,
-) -> Result<DetachExpiredLeafOutcome, HistoryError>
-where
-    P: LoaderPublication,
-    Q: LeafBlockerQuarantine,
-{
+) -> Result<DetachExpiredLeafOutcome, HistoryError> {
     let leaf = command.leaf();
-    let mut inspection = inspect_leaf(connection, &InspectHistoryLeaf::new(leaf.clone())).await?;
+    let inspection = inspect_leaf(connection, &InspectHistoryLeaf::new(leaf.clone())).await?;
     match &inspection {
         LeafInspection::Detachable { .. } => {}
-        LeafInspection::PendingBlocked {
-            attachment: LeafAttachment::Attached,
-            eligible_at,
-            ..
-        } if command.quarantine_horizon().is_some() => {
-            if *eligible_at > database_now(connection).await? {
-                return Ok(DetachExpiredLeafOutcome::Inspection(inspection));
-            }
-            let horizon = command.quarantine_horizon().expect("matched Some horizon");
-            if let QuarantineResult::Refused(refusal) =
-                quarantine.quarantine(connection, leaf, horizon).await?
-            {
-                return Ok(DetachExpiredLeafOutcome::QuarantineRefused(refusal));
-            }
-            inspection = inspect_leaf(connection, &InspectHistoryLeaf::new(leaf.clone())).await?;
-            if !matches!(inspection, LeafInspection::Detachable { .. }) {
-                return Ok(DetachExpiredLeafOutcome::Inspection(inspection));
-            }
-        }
         _ => return Ok(DetachExpiredLeafOutcome::Inspection(inspection)),
     }
     let parent = detach_parent(connection, leaf).await?;
