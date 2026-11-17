@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
+import json
 import os
 import sys
+from collections.abc import Generator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 
+from horsies._core import CoreError
 from horsies.core.app import Horsies
 from horsies.core.cli import discover_app
 from horsies.core.errors import ConfigurationError, ErrorCode
@@ -462,31 +465,81 @@ class TestCheckTaskImportsErrorClassification:
         assert 'module-level code' in (e210[0].help_text or '')
 
 
+@dataclass(frozen=True)
+class _Passed:
+    """Stands for ``horsies._core.ConnectivityPassed``."""
+
+
+@dataclass(frozen=True)
+class _Refused:
+    """Stands for ``horsies._core.ConnectivityRefused``."""
+
+    step: str
+    message: str
+
+
+class _CheckHandle:
+    """A core handle of the live check: keeps its manifest and profile,
+    answers ``answer`` (or raises it), and counts its closes."""
+
+    built: list[_CheckHandle] = []
+    answer: object = _Passed()
+
+    def __init__(self, manifest_json: str, *, pool_profile: str) -> None:
+        self.manifest = json.loads(manifest_json)
+        self.pool_profile = pool_profile
+        self.closes = 0
+        _CheckHandle.built.append(self)
+
+    def check_connectivity(self) -> object:
+        match _CheckHandle.answer:
+            case BaseException() as raised:
+                raise raised
+            case answer:
+                return answer
+
+    def close(self) -> None:
+        self.closes += 1
+
+
+@contextmanager
+def _core_check(answer: object) -> Generator[list[_CheckHandle], None, None]:
+    """Run the live check against `_CheckHandle`, which answers `answer`.
+    Yields the handles that the check built."""
+    _CheckHandle.built = []
+    _CheckHandle.answer = answer
+    with (
+        mock.patch('horsies.core.app.CoreHandle', _CheckHandle),
+        mock.patch('horsies.core.app.ConnectivityPassed', _Passed),
+        mock.patch('horsies.core.app.ConnectivityRefused', _Refused),
+    ):
+        yield _CheckHandle.built
+
+
+def _pgbouncer_app() -> Horsies:
+    return Horsies(
+        config=AppConfig(
+            broker=PostgresConfig(
+                database_url="postgresql://test:test@pooler/test",
+                session_database_url="postgresql://test:test@direct/test",
+                pgbouncer_transaction_mode=True,
+            ),
+        )
+    )
+
+
 @pytest.mark.unit
 class TestLiveBrokerConnectivityCheck:
-    """Tests for app.check(live=True) broker connectivity behavior."""
+    """``app.check(live=True)``: the connectivity step runs the core's check
+    (``CoreHandle.check_connectivity``) on a handle of its own."""
 
-    def test_live_check_uses_isolated_engine_not_app_broker(self) -> None:
-        """Live connectivity check should not initialize or touch app._broker."""
+    def test_live_check_uses_a_handle_of_its_own_not_the_app_broker(self) -> None:
+        """The check builds an observe-only producer handle from the broker
+        config, closes it, and never builds the app's broker."""
         app = _make_app()
 
-        mock_engine = mock.MagicMock()
-        mock_engine.dispose = mock.AsyncMock()
-        mock_session = mock.AsyncMock()
-        mock_session.__aenter__ = mock.AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = mock.AsyncMock(return_value=None)
-        mock_session.execute = mock.AsyncMock(return_value=None)
-        mock_session_factory = mock.MagicMock(return_value=mock_session)
-
         with (
-            mock.patch(
-                'sqlalchemy.ext.asyncio.create_async_engine',
-                return_value=mock_engine,
-            ),
-            mock.patch(
-                'sqlalchemy.ext.asyncio.async_sessionmaker',
-                return_value=mock_session_factory,
-            ),
+            _core_check(_Passed()) as built,
             mock.patch.object(
                 app, 'get_broker', side_effect=AssertionError('must not call get_broker')
             ),
@@ -495,206 +548,70 @@ class TestLiveBrokerConnectivityCheck:
 
         assert errors == []
         assert app._broker is None
-        mock_session.execute.assert_awaited_once()
-        mock_engine.dispose.assert_awaited_once()
+        [handle] = built
+        assert handle.pool_profile == 'PRODUCER'
+        assert handle.manifest['schema'] == 'OBSERVE_ONLY'
+        assert handle.manifest['database']['database_url'] == (
+            'postgresql://test:test@localhost/test'
+        )
+        assert handle.closes == 1
 
-    def test_live_check_engine_opens_the_producer_pool(self) -> None:
-        """The live check reads through the pool that PostgresConfig sets; a
-        worker pool is a profile setting, never an engine kwarg here."""
+    def test_a_refused_step_is_the_connectivity_refusal_with_its_cause(self) -> None:
+        """MAIN_URL, SESSION_URL, POOL_SETTINGS and CONNECT map to
+        BROKER_INVALID_URL with the core's cause as the note."""
+        for step in ('CONNECT', 'POOL_SETTINGS', 'MAIN_URL', 'SESSION_URL'):
+            app = _make_app()
+            with _core_check(_Refused(step=step, message='db down')) as built:
+                errors = app.check(live=True)
+
+            assert len(errors) == 1, step
+            assert errors[0].code == ErrorCode.BROKER_INVALID_URL
+            assert errors[0].message == 'broker connectivity check failed'
+            assert errors[0].notes == ['db down']
+            assert built[0].closes == 1
+
+    def test_a_core_that_cannot_run_the_call_is_the_connectivity_refusal(self) -> None:
         app = _make_app()
 
-        mock_engine = mock.MagicMock()
-        mock_engine.dispose = mock.AsyncMock()
-        mock_session = mock.AsyncMock()
-        mock_session.__aenter__ = mock.AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = mock.AsyncMock(return_value=None)
-        mock_session.execute = mock.AsyncMock(return_value=None)
-        mock_session_factory = mock.MagicMock(return_value=mock_session)
+        with _core_check(CoreError('the core stopped')) as built:
+            errors = app.check(live=True)
 
-        with (
-            mock.patch(
-                'sqlalchemy.ext.asyncio.create_async_engine',
-                return_value=mock_engine,
-            ) as mock_create_engine,
-            mock.patch(
-                'sqlalchemy.ext.asyncio.async_sessionmaker',
-                return_value=mock_session_factory,
-            ),
-        ):
+        assert [error.code for error in errors] == [ErrorCode.BROKER_INVALID_URL]
+        assert errors[0].notes == ['the core stopped']
+        assert built[0].closes == 1
+
+    def test_pgbouncer_live_check_passes_the_session_url_to_the_core(self) -> None:
+        """The manifest carries the session URL and transaction mode, which
+        the core's LISTEN probe reads."""
+        app = _pgbouncer_app()
+
+        with _core_check(_Passed()) as built:
             errors = app.check(live=True)
 
         assert errors == []
-        engine_kwargs = mock_create_engine.call_args.kwargs
-        assert (engine_kwargs['pool_size'], engine_kwargs['max_overflow']) == (
-            app.config.broker.pool_size,
-            app.config.broker.max_overflow,
-        )
-
-    def test_live_check_reports_connectivity_error_without_touching_broker(self) -> None:
-        """Connectivity failures map to BROKER_INVALID_URL and still dispose engine."""
-        app = _make_app()
-
-        mock_engine = mock.MagicMock()
-        mock_engine.dispose = mock.AsyncMock()
-        mock_session = mock.AsyncMock()
-        mock_session.__aenter__ = mock.AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = mock.AsyncMock(return_value=None)
-        mock_session.execute = mock.AsyncMock(side_effect=RuntimeError('db down'))
-        mock_session_factory = mock.MagicMock(return_value=mock_session)
-
-        with (
-            mock.patch(
-                'sqlalchemy.ext.asyncio.create_async_engine',
-                return_value=mock_engine,
-            ),
-            mock.patch(
-                'sqlalchemy.ext.asyncio.async_sessionmaker',
-                return_value=mock_session_factory,
-            ),
-            mock.patch.object(
-                app, 'get_broker', side_effect=AssertionError('must not call get_broker')
-            ),
-        ):
-            errors = app.check(live=True)
-
-        assert len(errors) == 1
-        assert errors[0].code == ErrorCode.BROKER_INVALID_URL
-        assert 'db down' in (errors[0].notes[0] if errors[0].notes else '')
-        assert app._broker is None
-        mock_engine.dispose.assert_awaited_once()
-
-    def test_pgbouncer_live_check_uses_session_url_for_notify_probe(self) -> None:
-        """PgBouncer live check verifies actual notification delivery on the session URL."""
-        app = Horsies(
-            config=AppConfig(
-                broker=PostgresConfig(
-                    database_url="postgresql://test:test@pooler/test",
-                    session_database_url="postgresql://test:test@direct/test",
-                    pgbouncer_transaction_mode=True,
-                ),
-            )
-        )
-
-        mock_engine = mock.MagicMock()
-        mock_engine.dispose = mock.AsyncMock()
-        mock_session = mock.AsyncMock()
-        mock_session.__aenter__ = mock.AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = mock.AsyncMock(return_value=None)
-        mock_session.execute = mock.AsyncMock(return_value=None)
-        mock_session_factory = mock.MagicMock(return_value=mock_session)
-
-        class _FakeListenerConn:
-            execute = mock.AsyncMock()
-            close = mock.AsyncMock()
-
-            async def notifies(self):
-                yield SimpleNamespace(channel="horsies_check_probe", payload="ok")
-
-        class _FakeNotifierConn:
-            execute = mock.AsyncMock()
-            close = mock.AsyncMock()
-
-        listener_conn = _FakeListenerConn()
-        notifier_conn = _FakeNotifierConn()
-
-        with (
-            mock.patch(
-                "sqlalchemy.ext.asyncio.create_async_engine",
-                return_value=mock_engine,
-            ) as mock_create_engine,
-            mock.patch(
-                "sqlalchemy.ext.asyncio.async_sessionmaker",
-                return_value=mock_session_factory,
-            ),
-            mock.patch(
-                "psycopg.AsyncConnection.connect",
-                new=mock.AsyncMock(side_effect=[listener_conn, notifier_conn]),
-            ) as mock_connect,
-            mock.patch("uuid.uuid4", return_value=SimpleNamespace(hex="probe")),
-        ):
-            errors = app.check(live=True)
-
-        assert errors == []
-        # The engines open the configured URLs with the psycopg 3 driver.
-        assert mock_create_engine.call_args_list[0].args[0] == (
-            "postgresql+psycopg://test:test@pooler/test"
-        )
-        assert mock_create_engine.call_args_list[0].kwargs["connect_args"] == {
-            "keepalives": 1,
-            "keepalives_idle": 30,
-            "keepalives_interval": 10,
-            "keepalives_count": 3,
-            "tcp_user_timeout": 30_000,
-            "prepare_threshold": None,
+        database = built[0].manifest['database']
+        assert database['pgbouncer_transaction_mode'] is True
+        assert database['session_database'] == {
+            'kind': 'SEPARATE',
+            'url': 'postgresql://test:test@direct/test',
         }
-        assert mock_create_engine.call_args_list[1].args[0] == (
-            "postgresql+psycopg://test:test@direct/test"
-        )
-        assert mock_connect.await_args_list == [
-            mock.call("postgresql://test:test@direct/test", autocommit=True),
-            mock.call("postgresql://test:test@direct/test", autocommit=True),
-        ]
 
     def test_pgbouncer_live_check_reports_missing_notify_delivery(self) -> None:
-        """A LISTEN/NOTIFY timeout is reported as transaction-pool-like behavior."""
-        app = Horsies(
-            config=AppConfig(
-                broker=PostgresConfig(
-                    database_url="postgresql://test:test@pooler/test",
-                    session_database_url="postgresql://test:test@direct/test",
-                    pgbouncer_transaction_mode=True,
-                ),
-            )
-        )
+        """A LISTEN probe that sees no NOTIFY is reported as
+        transaction-pool-like behaviour, with the core's cause."""
+        app = _pgbouncer_app()
 
-        mock_engine = mock.MagicMock()
-        mock_engine.dispose = mock.AsyncMock()
-        mock_session = mock.AsyncMock()
-        mock_session.__aenter__ = mock.AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = mock.AsyncMock(return_value=None)
-        mock_session.execute = mock.AsyncMock(return_value=None)
-        mock_session_factory = mock.MagicMock(return_value=mock_session)
-
-        class _FakeListenerConn:
-            execute = mock.AsyncMock()
-            close = mock.AsyncMock()
-
-            async def notifies(self):
-                await asyncio.Future()
-                yield SimpleNamespace(channel="unreachable", payload="never")
-
-        class _FakeNotifierConn:
-            execute = mock.AsyncMock()
-            close = mock.AsyncMock()
-
-        with (
-            mock.patch(
-                "sqlalchemy.ext.asyncio.create_async_engine",
-                return_value=mock_engine,
-            ),
-            mock.patch(
-                "sqlalchemy.ext.asyncio.async_sessionmaker",
-                return_value=mock_session_factory,
-            ),
-            mock.patch(
-                "psycopg.AsyncConnection.connect",
-                new=mock.AsyncMock(
-                    side_effect=[_FakeListenerConn(), _FakeNotifierConn()]
-                ),
-            ),
-            mock.patch(
-                "asyncio.wait_for",
-                new=mock.AsyncMock(side_effect=asyncio.TimeoutError),
-            ),
-        ):
+        with _core_check(_Refused(step='LISTENER', message='no NOTIFY within 2000 ms')):
             errors = app.check(live=True)
 
         assert len(errors) == 1
         assert errors[0].code == ErrorCode.BROKER_INVALID_URL
+        assert errors[0].message == 'broker listener capability check failed'
         assert errors[0].notes is not None
         assert (
             "session_database_url appears to be transaction-pooled" in errors[0].notes[0]
         )
+        assert errors[0].notes[1] == 'no NOTIFY within 2000 ms'
 
 
 @pytest.mark.unit

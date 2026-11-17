@@ -563,6 +563,12 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         doc: "The awaitable form of the method above.",
     },
     StubFunction {
+        name: "check_connectivity",
+        parameters: &[],
+        returns: TypeText::Plain("ConnectivityPassed | ConnectivityRefused"),
+        doc: "The connectivity step of the live check: SELECT 1 on the main URL, then on the session URL\nwhen it differs, then the LISTEN probe in PgBouncer transaction mode. Reads only.",
+    },
+    StubFunction {
         name: "install_schema",
         parameters: &[],
         returns: TypeText::Plain(INSTALL_OUTCOME),
@@ -1118,6 +1124,26 @@ const RECORD_CLASSES: &[StubClass] = &[
         doc: "The close of a handle ended: its core pools are closed, or it never connected. The next\noperation on the handle opens new core pools.",
         constructor: Constructor::NoConstructor,
         properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "ConnectivityPassed",
+        doc: "Every step of the connectivity check passed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "ConnectivityRefused",
+        doc: "The first step of the connectivity check that refused, and its cause. No later step ran.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property(
+                "step",
+                "Literal['CONNECT', 'POOL_SETTINGS', 'MAIN_URL', 'SESSION_URL', 'LISTENER']",
+            ),
+            property("message", "str"),
+        ],
         methods: &[],
     },
     StubClass {
