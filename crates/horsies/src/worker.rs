@@ -235,13 +235,21 @@ mod tests {
     use horsies_core::core::config::worker_profile::ProfileSelectionRefused;
 
     use super::*;
-    use crate::{AppConfig, ChildPreload, ErrorCode, WorkerProfile};
+    use crate::{
+        AppConfig, ChildPreload, ErrorCode, IsolatedChildCount, IsolatedChildren, IsolatedSetting,
+        WorkerProfile,
+    };
 
+    /// An app with the profile `web`: two isolated children. The config
+    /// check refuses a profile that starts no children.
     fn app() -> Horsies {
         let mut config = AppConfig::for_database_url("postgresql://localhost/horsies");
         let _previous = config.worker_profiles.insert(
             "web".to_owned(),
             WorkerProfile {
+                isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
+                    IsolatedChildCount::try_from(2).unwrap(),
+                )),
                 preload: ChildPreload::NoPreload,
                 ..WorkerProfile::default()
             },

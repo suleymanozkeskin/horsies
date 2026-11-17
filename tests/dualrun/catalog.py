@@ -27,6 +27,7 @@ from the run start.
 from __future__ import annotations
 
 from datetime import timedelta
+from enum import Enum
 from typing import Final
 
 from tests.dualrun.rules import (
@@ -709,3 +710,74 @@ BASELINE_CATALOG: Final = SnapshotCatalog(
     ),
 )
 """The rules of the 20 baseline tables, in labelling order."""
+
+
+# ---- Notifications ----
+
+
+class NotificationPayload(Enum):
+    """What the payload of a notification channel holds."""
+
+    TASK_ID = 'a task id'
+    WORKFLOW_ID = 'a workflow id'
+    TEXT = 'a fixed text'
+
+
+TASK_CHANNELS: Final = ('task_new', 'task_done', 'horsies_task_status')
+"""Channels whose payload is a task id (``0001_tables.sql`` triggers, ``0006_history_functions.sql`` moves)."""
+
+WORKFLOW_CHANNELS: Final = ('workflow_done', 'horsies_workflow_status')
+"""Channels whose payload is a workflow id."""
+
+QUEUE_CHANNEL_PREFIX: Final = 'task_queue_'
+"""The wake channel of a queue, ``task_queue_<queue>``; its payload is
+``new``, ``capacity`` or ``class``."""
+
+
+def notification_payload(channel: str) -> NotificationPayload:
+    """The payload kind of ``channel``. A channel outside the three lists is a
+    defect of the caller, which listens only on known channels (asserted)."""
+    match channel:
+        case _ if channel in TASK_CHANNELS:
+            return NotificationPayload.TASK_ID
+        case _ if channel in WORKFLOW_CHANNELS:
+            return NotificationPayload.WORKFLOW_ID
+        case _ if channel.startswith(QUEUE_CHANNEL_PREFIX):
+            return NotificationPayload.TEXT
+        case _:
+            raise AssertionError(
+                f'no payload rule for the notification channel {channel!r}'
+            )
+
+
+NOTIFICATIONS: Final = TableRules(
+    name='notifications',
+    columns=_columns(
+        ('channel', EXACT),
+        ('task_id', TASK_ID),
+        ('workflow_id', WORKFLOW_ID),
+        ('payload', EXACT),
+    ),
+    order_by=('channel', 'payload', 'task_id', 'workflow_id'),
+    identity=('channel', 'task_id', 'workflow_id', 'payload'),
+)
+"""The notifications of a run, one row each: the channel, and the payload in
+the column of its kind (``notification_row``). Rows with one identity
+compare as a multiset, so the section compares as a multiset per channel."""
+
+NOTIFIED_CATALOG: Final = SnapshotCatalog(
+    tables=(*BASELINE_CATALOG.tables, NOTIFICATIONS),
+)
+"""The baseline tables, then the notifications: a payload id takes the label
+that its row in a table gave it."""
+
+
+def notification_row(channel: str, payload: str) -> tuple[str | None, ...]:
+    """One raw row of ``NOTIFICATIONS``."""
+    match notification_payload(channel):
+        case NotificationPayload.TASK_ID:
+            return (channel, payload, None, None)
+        case NotificationPayload.WORKFLOW_ID:
+            return (channel, None, payload, None)
+        case NotificationPayload.TEXT:
+            return (channel, None, None, payload)

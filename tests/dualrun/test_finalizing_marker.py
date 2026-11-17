@@ -8,6 +8,10 @@ one row per marker case; both sides must mark the same rows, leave the
 others as they were, and report the same outcome. The candidate's outcome is
 what its log records say: the debug record of a changed claim is
 ``NOT_HELD``, no record is ``MARKED``, and a warning fails the test.
+
+The candidate runs on a core handle of its own database in place of the
+handle of the process (``child_core_handle_for``): integration tests leave a
+handle of the suite database in place.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ import psycopg
 import pytest
 
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.worker import child_runner
+from horsies.core.worker import child_pool, child_runner
 from tests.dualrun.capture import Connection
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
@@ -183,3 +187,31 @@ def test_the_marker_writes_and_answers_what_the_fenced_update_did(
         'marker.absent': 'NOT_HELD',
     }
     assert run.candidate.report == run.reference.report
+
+
+def test_the_candidate_marks_on_its_own_database_while_another_handle_is_in_place(
+    empty_database: MakeDatabase,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The process state that integration tests leave (a child core handle
+    of another database) does not move the candidate's statements to that
+    database: ``child_core_handle_for`` puts its own handle in place."""
+    caplog.set_level(logging.DEBUG, logger='horsies.worker')
+    other = empty_database()
+
+    with child_core_handle_for(other.url) as in_place:
+        run = _ok(
+            dual_run(
+                empty_database,
+                _seed,
+                OperationSide(name='fenced finalizing update', act=_reference_mark),
+                OperationSide(
+                    name='horsies_mark_finalizing', act=_candidate_mark(caplog)
+                ),
+            )
+        )
+        after = child_pool._get_child_core_handle()
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    assert run.candidate.report == run.reference.report
+    assert after is in_place, 'the handle in place before the pair is back'

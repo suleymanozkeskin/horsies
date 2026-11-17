@@ -22,7 +22,7 @@ import psycopg
 import pytest
 
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.worker import child_runner
+from horsies.core.worker import child_pool, child_runner
 from horsies.core.worker.child_runner import DeadlineBeforeStart
 from horsies.core.worker.run_return import StoppedBeforeRunning
 from tests.dualrun.capture import Connection
@@ -183,3 +183,28 @@ def test_start_writes_and_answers_what_the_running_update_did(
         'start.workflow_node_done': 'WORKFLOW_CHECK_FAILED',
     }
     assert run.candidate.report == run.reference.report
+
+
+def test_the_candidate_starts_on_its_own_database_while_another_handle_is_in_place(
+    empty_database: MakeDatabase,
+) -> None:
+    """The process state that integration tests leave (a child core handle
+    of another database) does not move the candidate's statements to that
+    database: ``child_core_handle_for`` puts its own handle in place."""
+    other = empty_database()
+
+    with child_core_handle_for(other.url) as in_place:
+        run = _ok(
+            dual_run(
+                empty_database,
+                _seed,
+                OperationSide(name='RUNNING update and miss path', act=_reference_start),
+                OperationSide(name='horsies_start_attempt', act=_candidate_start),
+                SeedCoverage.HISTORY_AND_BEATS,
+            )
+        )
+        after = child_pool._get_child_core_handle()
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    assert run.candidate.report == run.reference.report
+    assert after is in_place, 'the handle in place before the pair is back'

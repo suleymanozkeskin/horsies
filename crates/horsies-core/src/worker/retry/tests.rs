@@ -569,11 +569,26 @@ fn a_policy_that_does_not_fit_the_rule_is_refused_not_guessed() {
     }
 }
 
+/// The refusal is Python's `InvalidRetryPolicy.detail`, with no prefix: the
+/// send writes `task_options refused for <task>: <detail>`, as Python's
+/// enqueue does (`python/horsies/core/brokers/postgres.py:463-469`). The
+/// dispatch refusal adds the prefix (`stored retry_policy does not
+/// validate: `).
 #[test]
-fn the_refusal_names_the_cause() {
-    let refusal = stored_max_retries(Some(&options_with_policy(r#"{"max_retries": 5}"#)))
-        .expect_err("a partial policy is refused");
-    assert!(refusal.to_string().contains("retry_policy"), "{refusal}");
+fn the_refusal_is_python_s_detail() {
+    let options = options_with_policy(r#"{"max_retries": 5}"#);
+    let refusal = stored_max_retries(Some(&options)).expect_err("a partial policy is refused");
+    assert_eq!(
+        refusal.to_string(),
+        "auto_retry_for: Field required [missing]"
+    );
+    assert_eq!(
+        read_stored_options(Some(&options)).run_permit(),
+        RunPermit::Refuse(
+            "stored retry_policy does not validate: auto_retry_for: Field required [missing]"
+                .to_owned()
+        )
+    );
 }
 
 // --- stored cancel grace ---------------------------------------------------

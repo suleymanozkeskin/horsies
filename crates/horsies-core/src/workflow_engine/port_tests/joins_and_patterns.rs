@@ -16,7 +16,8 @@ use super::support::{
     RunningNodeTask, PORT_QUEUE,
 };
 use crate::core::workflow::node::JoinType;
-use crate::core::{AnyNode, OnError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
+use crate::core::{AnyNode, OnError, TaskResult, WorkflowSpec};
+use crate::test_support::child_specs::TestChildSpecs;
 
 /// A task node at `index` that waits for `dependencies`.
 fn after(index: usize, dependencies: &[usize]) -> AnyNode {
@@ -39,12 +40,7 @@ fn joined(
 }
 
 async fn run(pool: &PgPool, workflow_spec: &WorkflowSpec) -> Uuid {
-    start(
-        pool,
-        workflow_spec,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await
+    start(pool, workflow_spec, &TestChildSpecs::empty()).await
 }
 
 /// Finishes node `index` with success.
@@ -54,7 +50,7 @@ async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32) {
         workflow_id,
         index,
         &ok(serde_json::json!(index)),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 }
@@ -66,7 +62,7 @@ async fn fail(pool: &PgPool, workflow_id: Uuid, index: i32, error_code: &str) {
         workflow_id,
         index,
         &err(error_code, "failed"),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 }
@@ -930,31 +926,31 @@ async fn a_wide_fan_in_mints_one_join_task() {
     const ROOT_TASK: &str = "wide_fan_in_root";
     const JOIN_TASK: &str = "wide_fan_in_join";
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+    let child_specs = TestChildSpecs::empty();
     let mut tasks: Vec<AnyNode> = (0..WIDE_FAN_IN_ROOTS)
         .map(|index| task_node(index, ROOT_TASK))
         .collect();
     let mut join = task_node(WIDE_FAN_IN_ROOTS, JOIN_TASK);
     join.dependencies = (0..WIDE_FAN_IN_ROOTS).collect();
     tasks.push(join);
-    let workflow_id = start(&db.pool, &spec("wide_fan_in", tasks), &registry).await;
+    let workflow_id = start(&db.pool, &spec("wide_fan_in", tasks), &child_specs).await;
     let join_index = i32::try_from(WIDE_FAN_IN_ROOTS).expect("the join index is an i32");
     let mut roots: Vec<RunningNodeTask> = Vec::with_capacity(WIDE_FAN_IN_ROOTS);
     for root_index in 0..join_index {
         roots.push(run_node_task(&db.pool, workflow_id, root_index).await);
     }
     let broker = broker(&db.pool);
-    let (shared_broker, shared_registry) = (&broker, &registry);
+    let (shared_broker, shared_child_specs) = (&broker, &child_specs);
 
     futures::future::join_all(roots.iter().map(|root| async move {
         let done = worker_phase_one(shared_broker, root, NodeReport::Success).await;
-        worker_phase_two(shared_broker, shared_registry, root, done).await;
+        worker_phase_two(shared_broker, shared_child_specs, root, done).await;
     }))
     .await;
     assert_status(&db.pool, workflow_id, join_index, "ENQUEUED").await;
     let join_task = run_node_task(&db.pool, workflow_id, join_index).await;
     let done = worker_phase_one(&broker, &join_task, NodeReport::Success).await;
-    worker_phase_two(&broker, &registry, &join_task, done).await;
+    worker_phase_two(&broker, &child_specs, &join_task, done).await;
 
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "COMPLETED");
     let rows = task_rows_and_links(&db.pool, workflow_id, &[ROOT_TASK, JOIN_TASK]).await;

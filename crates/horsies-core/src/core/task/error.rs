@@ -330,6 +330,11 @@ impl From<OutcomeCode> for BuiltInTaskCode {
 /// task body ran; a task cannot return it, so no finalize path can take a returned error for a stop.
 pub const RESERVED_NON_TASK_CODES: [&str; 1] = ["WORKFLOW_STOPPED"];
 
+// The text rule of an `auto_retry_for` code. `UserCode::parse` does not apply it.
+mod code_text;
+
+pub use code_text::{check_error_code_text, CodeTextRefusal};
+
 /// An error code that task code chose.
 ///
 /// Only [`UserCode::parse`] builds one, so a user code never has the name of a built-in code or of a reserved

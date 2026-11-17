@@ -237,6 +237,7 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 | `ValidationFailed` | Before any I/O: no definition key, an output type that is not the handle's (`HRS-025`), a sub-workflow node of a definition that is not registered (`HRS-020`), params given to a definition without params (`HRS-022`), a template build that refused, a start before the registration in the process. At the start: a spec or a sub-workflow child spec that the core refuses |
 | `WorkflowIdConflict` | The id belongs to another workflow name. Nothing was written |
 | `EnqueueFailed` | The connect, the schema install, the client family check, the database, or the build of a sub-workflow child failed. `retryable` is the classification of the cause. When the commit reply was lost, a start again with the same id finds the workflow |
+| `AsyncContext` | A blocking start of `horsies::blocking` on a thread that runs a tokio runtime. Nothing was written; `workflow_id` is the id of the start. Not retryable. See [Blocking API](/horsies/rust/tasks/blocking-api/) |
 
 `WorkflowFunction::retry_start(&error)` starts again with the error's `workflow_id`. It refuses with `ValidationFailed` an error that is not `EnqueueFailed`, an error of another workflow name, and an error with no workflow id. For a template, call `start_with_id(params, workflow_id)` with the error's id. The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#workflow-start-error-codes).
 
@@ -290,6 +291,7 @@ A workflow with no output node is read as `OutputlessResults`: the outcome of ea
 | `StoredResultUnreadable { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored value does not read with the handle's types; `cause` names no value |
 | `UnknownUserCode { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored user code is not a code of `E` |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A wait in a worker child. Nothing was read |
+| `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` (`handle.blocking()`) on a thread that runs a tokio runtime. Nothing was read |
 | `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `code` is the `HandleErrorCode` |
 
 `WorkflowReadError::code()` returns the library code of the failure.
@@ -304,6 +306,7 @@ A workflow with no output node is read as `OutputlessResults`: the outcome of ea
 | `DbOperationFailed` | Each operation: the connect, a statement or the commit failed |
 | `StoredDataInvalid` | `status`, `tasks`, `resume`: a stored value does not parse. Nothing changed. Not retryable |
 | `ResumeRecoveryFailed` | `resume`: the resume committed and the recovery pass after it failed. The workflow is RUNNING. Not retryable |
+| `AsyncContext` | Each blocking form (`handle.blocking()`) on a thread that runs a tokio runtime. Nothing ran. Not retryable |
 
 The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#workflow-handle-error-codes).
 

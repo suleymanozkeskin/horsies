@@ -85,7 +85,12 @@
     "tests/session_database.py",
     "tests/unit/test_history_catalog_derived.py",
     "tests/integration/test_history_forever_leaf.py",
-    "tests/dualrun"
+    "tests/dualrun",
+    "tests/public_api",
+    "tests/unit/test_public_api_compare.py",
+    "tests/unit/test_public_api_pyright_view.py",
+    "tests/unit/test_public_api_runner.py",
+    "tests/unit/test_public_api_snapshot.py"
   ],
   "exclude": [
     "tests/dualrun/reference/worker_parent"

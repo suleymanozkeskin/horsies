@@ -224,7 +224,19 @@ class PostgresConfig(BaseModel):
             'operating system default'
         ),
     )
-    echo: bool = Field(default=False, description='Whether to echo the SQL statements')
+    # With echo on, the core logs each statement it runs at INFO on the
+    # horsies.sql logger: the SQL text as the message, the statement name as
+    # the attribute ``statement``, never the bound values. The broker then
+    # sets that logger to INFO and, when it has no handler, adds one stdout
+    # handler per process (horsies.core.logging.enable_statement_echo), as
+    # SQLAlchemy's echo does for its engine logger.
+    echo: bool = Field(
+        default=False,
+        description=(
+            'Log each SQL statement at INFO on the horsies.sql logger, without '
+            'bound values; a stdout handler is added when the logger has none'
+        ),
+    )
 
     @model_validator(mode='before')
     @classmethod

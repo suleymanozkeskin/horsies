@@ -16,16 +16,11 @@ use super::support::{
     shared_pool, stored_error, stored_result, workflow, IsolatedDatabase, NodeSeed, ParentLink,
     WorkflowSeed,
 };
-use crate::core::{
-    SubWorkflowSummary, TaskError, TaskResult, WorkflowSpecRegistry, WorkflowStatus,
-};
-
-fn empty_registry() -> WorkflowSpecRegistry {
-    WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER)
-}
+use crate::core::{SubWorkflowSummary, TaskError, TaskResult, WorkflowStatus};
+use crate::test_support::child_specs::TestChildSpecs;
 
 async fn complete(pool: &PgPool, workflow_id: Uuid) {
-    complete_workflow(pool, workflow_id, &empty_registry()).await;
+    complete_workflow(pool, workflow_id, &TestChildSpecs::empty()).await;
 }
 
 /// The summary stored on node 0 of `parent_id`.
@@ -136,7 +131,7 @@ async fn child_summary_counts_follow_the_child_node_statuses() {
             seed_node(&pool, &NodeSeed::task(child_id, task_index, statuses[kind])).await;
         }
 
-        advance_parent_of(&pool, child_id, &empty_registry()).await;
+        advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
         let summary = parent_summary(&pool, parent_id).await;
         assert_eq!(
@@ -195,7 +190,7 @@ async fn a_child_with_no_node_reports_a_total_of_zero() {
     let (parent_id, child_id) =
         seed_parent_and_child(&pool, WorkflowSeed::running().status("FAILED")).await;
 
-    advance_parent_of(&pool, child_id, &empty_registry()).await;
+    advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
     let summary = parent_summary(&pool, parent_id).await;
     assert_eq!(
@@ -236,7 +231,7 @@ async fn an_outputless_child_completes_its_parent_node_with_an_ok_null() {
     )
     .await;
 
-    advance_parent_of(&pool, child_id, &empty_registry()).await;
+    advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
     let parent_node = node(&pool, parent_id, 0).await;
     assert_eq!(parent_node.status, "COMPLETED");
@@ -276,7 +271,7 @@ async fn the_parent_node_of_an_ended_parent_is_written_once() {
     .await
     .expect("end the parent");
 
-    advance_parent_of(&pool, child_id, &empty_registry()).await;
+    advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
     let written = node(&pool, parent_id, 0).await;
     assert_eq!(written.status, "COMPLETED");
@@ -289,7 +284,7 @@ async fn the_parent_node_of_an_ended_parent_is_written_once() {
         .execute(&pool)
         .await
         .expect("change the child result");
-    advance_parent_of(&pool, child_id, &empty_registry()).await;
+    advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
     let again = node(&pool, parent_id, 0).await;
     assert_eq!(again.status, "COMPLETED");
@@ -322,7 +317,7 @@ async fn the_error_summary_of_a_failed_child_follows_python() {
         child.error = stored.map(str::to_owned);
         let (parent_id, child_id) = seed_parent_and_child(&pool, child).await;
 
-        advance_parent_of(&pool, child_id, &empty_registry()).await;
+        advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
         assert_eq!(
             parent_summary(&pool, parent_id).await.error_summary,
@@ -343,7 +338,7 @@ async fn a_child_error_stored_as_json_null_is_summarized_as_its_text() {
     child.error = Some("null".to_owned());
     let (parent_id, child_id) = seed_parent_and_child(&pool, child).await;
 
-    advance_parent_of(&pool, child_id, &empty_registry()).await;
+    advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
     assert_eq!(
         parent_summary(&pool, parent_id).await.error_summary,
@@ -626,7 +621,7 @@ async fn a_parent_advance_of_a_child_with_no_row_writes_nothing() {
         seed_parent_and_child(&pool, WorkflowSeed::running().status("COMPLETED")).await;
     let before = node(&pool, parent_id, 0).await;
 
-    advance_parent_of(&pool, Uuid::new_v4(), &empty_registry()).await;
+    advance_parent_of(&pool, Uuid::new_v4(), &TestChildSpecs::empty()).await;
 
     let after = node(&pool, parent_id, 0).await;
     assert_eq!(after.status, "RUNNING");
@@ -657,7 +652,7 @@ async fn a_child_end_under_a_paused_parent_writes_the_node_and_promotes_nothing(
         .await
         .expect("pause the parent");
 
-    advance_parent_of(&pool, child_id, &empty_registry()).await;
+    advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
 
     assert_eq!(node(&pool, parent_id, 0).await.status, "COMPLETED");
     let dependent = node(&pool, parent_id, 1).await;

@@ -297,6 +297,15 @@ written in Rust, on a new baseline schema.
   log format writes the message only; a handler with its own formatter can
   read the attributes.
 
+- **`echo=True` logs the statements of the core on `horsies.sql`.** Each
+  statement that the core runs is one INFO record on the logger
+  `horsies.sql`: the SQL text is the message, the statement name is the
+  attribute `statement`, and bound values are not shown. A broker built with
+  `echo=True` sets `horsies.sql` to INFO and, when that logger has no
+  handler, adds one stdout handler per process, as SQLAlchemy's `echo` does
+  for `sqlalchemy.engine.Engine`. The Rust client logs the same events on the
+  `tracing` target `horsies.sql`.
+
 ### Fixed
 
 - **A stored retry policy that does not validate fails the task at claim.**
@@ -541,7 +550,9 @@ unless it starts with "Added".
   `Failed` with `TASK_CANCELLED`. `WaitLimit::parse` refuses a limit above
   about 49.7 days before any read. The handle keeps an outcome and the
   failures of the stored data, as Python; a timeout, an absent task and a
-  database failure are read again.
+  database failure are read again. The value decodes from its stored text,
+  here and in `WorkflowHandle::get` and `result_for`, so an integer outside
+  the `i64` and `u64` range reads as `u128` or `i128`, as in Python.
 - **A result wait in a worker child is refused** with `WaitInsideTask` and
   sends no statement, as in Python.
 - **Reads by task id are on the app:** `get_result::<T, E>`,
@@ -623,17 +634,24 @@ unless it starts with "Added".
   Both return `SchedulerStopped` or a closed `SchedulerRunError`. A schedule
   section that is missing or switched off is refused.
 - **Added: the blocking API, `horsies::blocking`.** `TaskFunction::blocking()`,
-  `TaskHandle::blocking()` and `Horsies::blocking()` give views whose
-  methods have the names, arguments and result types of the async
-  methods: the sends, the schedules and their retries, `get` and `info`,
-  the app's reads by task id, the health reads that Python's app offers in
-  sync form, and `check_live`. Each call runs on the core's process
-  runtime and blocks its thread. On a thread that runs a tokio runtime it
-  runs nothing and answers `ASYNC_CONTEXT`: `TaskSendError::AsyncContext`
-  with the prepared task id and payload (an async retry sends them),
-  `ReadError::AsyncContext` (added; not kept by the handle),
-  `BrokerErrorCode::AsyncContext`, or `HRS-217` in the check report. The
-  body of a `fn` task in a worker child may call them.
+  `TaskHandle::blocking()`, `Horsies::blocking()`,
+  `WorkflowFunction::blocking()`, `WorkflowTemplate::blocking()` and
+  `WorkflowHandle::blocking()` give views whose methods have the names,
+  arguments and result types of the async methods: the sends, the
+  schedules and their retries, `get` and `info`, the app's reads by task
+  id, the health reads that Python's app offers in sync form,
+  `check_live`, the workflow starts and `retry_start`, and the methods of
+  the workflow handle. `blocking::start_workflow` and
+  `blocking::start_workflow_with` are the process-wide starts. Each call
+  runs on the core's process runtime and blocks its thread. On a thread
+  that runs a tokio runtime it runs nothing and answers `ASYNC_CONTEXT`:
+  `TaskSendError::AsyncContext` with the prepared task id and payload (an
+  async retry sends them), `ReadError::AsyncContext` (added; not kept by
+  the handle), `BrokerErrorCode::AsyncContext`, `HRS-217` in the check
+  report, `WorkflowStartErrorCode::AsyncContext` with the workflow id of
+  the start, `HandleErrorCode::AsyncContext`, or
+  `WorkflowReadError::AsyncContext` (added). The body of a `fn` task in a
+  worker child may call them.
 - **`check` and `check_live` return `Result<CheckPassed, CheckReport>`.**
   The report holds the refusals of the first phase that refused: the task
   options of a task registered by hand, then the schedules (not for a
@@ -685,9 +703,10 @@ unless it starts with "Added".
 - **`WorkflowSpecBuilder::build` decodes each node's input with the input
   type of its task or child workflow**, with each `args_from` member as a
   result and the workflow context when the task takes it: a top-level
-  member that binds to no field is `HRS-019`, a missing field `HRS-020`, a
-  value of another type `HRS-031`, and a key inside a member's value that
-  binds to no field `HRS-031`, as in Python. A member of the node's own input binds to no
+  member that binds to no field is `HRS-019`, a top-level missing field
+  `HRS-020`, a value of another type `HRS-031`, and a key that binds to no
+  field or a missing field inside a member's value `HRS-031`, as in Python.
+  A member of the node's own input binds to no
   field when the decoded value does not write it back, at any depth, so
   an input type without `deny_unknown_fields` refuses it too; the error
   names its key path (`options.retries`, `parcels[0].weight`). A member

@@ -628,13 +628,13 @@ pub async fn recover_stuck_workflows(
     failure_limit: u32,
     retention: &RetentionConfig,
 ) -> Result<RecoveryReport, WorkflowError> {
-    recover_stuck_workflows_with_cap(
+    Box::pin(recover_stuck_workflows_with_cap(
         broker,
         registry,
         GLOBAL_SCAN_ROW_CAP,
         RecoveryFailurePolicy::Count(CountFailures::new_pass(failure_limit)),
         retention,
-    )
+    ))
     .await
 }
 
@@ -645,14 +645,14 @@ pub(crate) async fn recover_stuck_workflows_observed_with(
     build: ChildBuild<'_>,
     failure_limit: u32,
 ) -> Result<RecoveryReport, RecoveryPassFailure> {
-    recover_stuck_workflows_in_scope(
+    Box::pin(recover_stuck_workflows_in_scope(
         broker,
         build,
         RecoveryScope::Global {
             max_rows: GLOBAL_SCAN_ROW_CAP,
         },
         RecoveryFailurePolicy::Count(CountFailures::new_pass(failure_limit)),
-    )
+    ))
     .await
 }
 
@@ -665,7 +665,7 @@ pub(crate) async fn recover_stuck_workflows_with_cap(
     failure_policy: RecoveryFailurePolicy,
     retention: &RetentionConfig,
 ) -> Result<RecoveryReport, WorkflowError> {
-    recover_stuck_workflows_in_scope(
+    Box::pin(recover_stuck_workflows_in_scope(
         broker,
         ChildBuild::Registry {
             registry,
@@ -673,7 +673,7 @@ pub(crate) async fn recover_stuck_workflows_with_cap(
         },
         RecoveryScope::Global { max_rows },
         failure_policy,
-    )
+    ))
     .await
     .map_err(|failure| failure.error)
 }
@@ -689,14 +689,14 @@ pub(crate) async fn recover_stuck_workflow_tree(
     root_workflow_id: Uuid,
     retention: &RetentionConfig,
 ) -> Result<RecoveryReport, WorkflowError> {
-    recover_workflow_tree(
+    Box::pin(recover_workflow_tree(
         broker,
         ChildBuild::Registry {
             registry,
             retention,
         },
         root_workflow_id,
-    )
+    ))
     .await
 }
 
@@ -718,18 +718,18 @@ pub(crate) async fn recover_workflow_tree(
         .map(|row| column::<Uuid>(row, &WORKFLOW_TREE_IDS, "id"))
         .collect::<Result<Vec<Uuid>, RowDecodeError>>()
         .map_err(StepContractError::from)?;
-    recover_stuck_workflows_in_scope(
+    Box::pin(recover_stuck_workflows_in_scope(
         broker,
         build,
         RecoveryScope::WorkflowTree(&workflow_ids),
         RecoveryFailurePolicy::LogOnly,
-    )
+    ))
     .await
     .map_err(|failure| failure.error)
 }
 
-/// Each case future is boxed: each holds its candidate steps and the parent advances, and inline,
-/// a debug build needs more than a 2 MiB thread stack for one pass.
+/// Each case future is on the heap, as each candidate step and parent advance inside a case is: inline, a
+/// debug build needs more than a 2 MiB thread stack for one pass (see the module docs of `steps`).
 async fn recover_stuck_workflows_in_scope(
     broker: &PostgresBroker,
     build: ChildBuild<'_>,
@@ -873,9 +873,14 @@ async fn advance_after_candidate(
         return;
     }
     let advanced = run_catching_panic(async {
-        advance_parents(pass.broker, CheckoutClass::Reserved, owed, pass.build)
-            .await
-            .map_err(|failure| failure.error)
+        Box::pin(advance_parents(
+            pass.broker,
+            CheckoutClass::Reserved,
+            owed,
+            pass.build,
+        ))
+        .await
+        .map_err(|failure| failure.error)
     })
     .await;
     if let Err(failure) = advanced {
@@ -934,7 +939,7 @@ async fn recover_case0(
         let case = RecoveryCase::PendingTerminalDeps {
             task_index: row.task_index,
         };
-        let candidate = async {
+        let candidate = Box::pin(async {
             run_in_transaction::<ReevaluateDisposition>(
                 pass.broker,
                 CheckoutClass::Reserved,
@@ -946,7 +951,7 @@ async fn recover_case0(
                 pass.build,
             )
             .await
-        };
+        });
         let outcome = run_recovery_candidate(
             pass.broker,
             pass.failure_policy,
@@ -972,7 +977,12 @@ async fn recover_case0(
                     | ReevaluateDisposition::NotRunning
                     | ReevaluateDisposition::NotFound => metrics.refusals += 1,
                 }
-                advance_after_candidate(pass, row.workflow_id, committed.parent_advances).await;
+                Box::pin(advance_after_candidate(
+                    pass,
+                    row.workflow_id,
+                    committed.parent_advances,
+                ))
+                .await;
             }
             CandidateOutcome::Failed(record) => {
                 report.errors += 1;
@@ -1064,7 +1074,7 @@ async fn recover_ready_nodes(
 
     for row in candidates {
         let task_indexes = vec![row.task_index];
-        let candidate = async {
+        let candidate = Box::pin(async {
             run_in_transaction::<EnqueueReadyDisposition>(
                 pass.broker,
                 CheckoutClass::Reserved,
@@ -1076,7 +1086,7 @@ async fn recover_ready_nodes(
                 pass.build,
             )
             .await
-        };
+        });
         let outcome = run_recovery_candidate(
             pass.broker,
             pass.failure_policy,
@@ -1101,7 +1111,12 @@ async fn recover_ready_nodes(
                     | EnqueueReadyDisposition::NotRunning
                     | EnqueueReadyDisposition::NotFound => metrics.refusals += 1,
                 }
-                advance_after_candidate(pass, row.workflow_id, committed.parent_advances).await;
+                Box::pin(advance_after_candidate(
+                    pass,
+                    row.workflow_id,
+                    committed.parent_advances,
+                ))
+                .await;
             }
             CandidateOutcome::Failed(record) => {
                 report.errors += 1;
@@ -1153,7 +1168,7 @@ async fn recover_case1_6(
         let case = RecoveryCase::CompletedChildParentNotUpdated {
             parent_task_index: row.task_index,
         };
-        let candidate = async {
+        let candidate = Box::pin(async {
             run_in_transaction::<ChildFinishDisposition>(
                 pass.broker,
                 CheckoutClass::Reserved,
@@ -1161,7 +1176,7 @@ async fn recover_case1_6(
                 pass.build,
             )
             .await
-        };
+        });
         let outcome = run_recovery_candidate(
             pass.broker,
             pass.failure_policy,
@@ -1188,7 +1203,12 @@ async fn recover_case1_6(
                     | ChildFinishDisposition::ChildNotTerminal
                     | ChildFinishDisposition::ParentAbsent => metrics.refusals += 1,
                 }
-                advance_after_candidate(pass, row.workflow_id, committed.parent_advances).await;
+                Box::pin(advance_after_candidate(
+                    pass,
+                    row.workflow_id,
+                    committed.parent_advances,
+                ))
+                .await;
             }
             CandidateOutcome::Failed(record) => {
                 report.errors += 1;
@@ -1276,7 +1296,14 @@ async fn recover_global_workflow_end_states(
 
     let mut owns_claim = true;
     for workflow_id in completion_ids {
-        match recover_completion_candidate(pass, workflow_id, claim_token, report).await {
+        match Box::pin(recover_completion_candidate(
+            pass,
+            workflow_id,
+            claim_token,
+            report,
+        ))
+        .await
+        {
             ClaimHold::Held => {}
             ClaimHold::Lost => {
                 owns_claim = false;
@@ -1286,7 +1313,15 @@ async fn recover_global_workflow_end_states(
     }
     if owns_claim {
         for (workflow_id, name) in orphan_ids.into_iter().zip(orphan_names) {
-            match recover_orphan_candidate(pass, workflow_id, &name, claim_token, report).await {
+            match Box::pin(recover_orphan_candidate(
+                pass,
+                workflow_id,
+                &name,
+                claim_token,
+                report,
+            ))
+            .await
+            {
                 ClaimHold::Held => {}
                 ClaimHold::Lost => {
                     owns_claim = false;
@@ -1360,7 +1395,12 @@ async fn recover_completion_candidate(
                 workflow_id = %workflow_id,
                 "recovery case 2+3: finalized a workflow whose nodes are all terminal",
             );
-            advance_after_candidate(pass, workflow_id, OwedParentAdvances::of(advance)).await;
+            Box::pin(advance_after_candidate(
+                pass,
+                workflow_id,
+                OwedParentAdvances::of(advance),
+            ))
+            .await;
             ClaimHold::Held
         }
         CandidateOutcome::Finished(AuditAction::Unchanged) => {
@@ -1413,7 +1453,12 @@ async fn recover_orphan_candidate(
                 workflow_name = %name,
                 "recovery case 4: failed orphaned workflow (no tasks)",
             );
-            advance_after_candidate(pass, workflow_id, OwedParentAdvances::of(advance)).await;
+            Box::pin(advance_after_candidate(
+                pass,
+                workflow_id,
+                OwedParentAdvances::of(advance),
+            ))
+            .await;
             ClaimHold::Held
         }
         Ok(AuditAction::Unchanged) => {
@@ -1555,7 +1600,7 @@ async fn recover_tree_case2_3(
             pass.failure_policy,
             row.workflow_id,
             RecoveryCase::TerminalWorkflowRunning,
-            complete_in_tree(pass.broker, row.workflow_id),
+            Box::pin(complete_in_tree(pass.broker, row.workflow_id)),
         )
         .await;
         match outcome {
@@ -1565,8 +1610,12 @@ async fn recover_tree_case2_3(
                     workflow_id = %row.workflow_id,
                     "recovery case 2+3: finalized a workflow of the tree",
                 );
-                advance_after_candidate(pass, row.workflow_id, OwedParentAdvances::of(advance))
-                    .await;
+                Box::pin(advance_after_candidate(
+                    pass,
+                    row.workflow_id,
+                    OwedParentAdvances::of(advance),
+                ))
+                .await;
             }
             CandidateOutcome::Finished(TreeCompletion::Unchanged) => {
                 report.metrics.case2_3.refusals += 1;
@@ -1695,8 +1744,12 @@ async fn recover_tree_case4(
                     workflow_name = %row.name,
                     "recovery case 4: failed orphaned workflow (no tasks)",
                 );
-                advance_after_candidate(pass, row.workflow_id, OwedParentAdvances::of(advance))
-                    .await;
+                Box::pin(advance_after_candidate(
+                    pass,
+                    row.workflow_id,
+                    OwedParentAdvances::of(advance),
+                ))
+                .await;
             }
             Ok(None) => report.metrics.case4.refusals += 1,
             Err(error) => {
@@ -1767,22 +1820,19 @@ fn orphaned_workflow_error(workflow_id: Uuid, name: &str) -> Result<String, serd
     })
 }
 
-/// Cases 2/3 and 4 of a global pass with `max_rows` per audit page, for the tests of this module.
+/// Cases 2/3 and 4 of a global pass with `max_rows` per audit page, for the tests of this module,
+/// with the children of its cases from `child_specs`.
 #[cfg(test)]
 async fn audit_end_states(
     broker: &PostgresBroker,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &crate::test_support::child_specs::TestChildSpecs,
     max_rows: i64,
     report: &mut RecoveryReport,
     failure_policy: RecoveryFailurePolicy,
 ) -> Result<(), WorkflowError> {
-    let retention = RetentionConfig::default();
     let pass = PassContext {
         broker,
-        build: ChildBuild::Registry {
-            registry,
-            retention: &retention,
-        },
+        build: ChildBuild::Client(child_specs),
         scope: RecoveryScope::Global { max_rows },
         failure_policy,
     };
@@ -1792,6 +1842,7 @@ async fn audit_end_states(
 #[cfg(test)]
 mod cap_tests {
     use super::*;
+    use crate::test_support::child_specs::TestChildSpecs;
     use crate::workflow_engine::steps::CommittedStep;
     use serial_test::serial;
     use sqlx::PgPool;
@@ -1821,9 +1872,7 @@ mod cap_tests {
         workflow_id: Uuid,
         task_index: i32,
     ) -> Result<CommittedStep<EnqueueReadyDisposition>, WorkflowError> {
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-        let retention = RetentionConfig::default();
+        let child_specs = TestChildSpecs::empty();
         let task_indexes = vec![task_index];
         run_in_transaction(
             broker,
@@ -1833,10 +1882,7 @@ mod cap_tests {
                 .value(&workflow_id)
                 .value(&task_indexes)
                 .finish(),
-            ChildBuild::Registry {
-                registry: &registry,
-                retention: &retention,
-            },
+            ChildBuild::Client(&child_specs),
         )
         .await
     }
@@ -1848,9 +1894,7 @@ mod cap_tests {
         workflow_id: Uuid,
         task_index: i32,
     ) -> Result<CommittedStep<ReevaluateDisposition>, WorkflowError> {
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-        let retention = RetentionConfig::default();
+        let child_specs = TestChildSpecs::empty();
         run_in_transaction(
             broker,
             CheckoutClass::Reserved,
@@ -1859,10 +1903,7 @@ mod cap_tests {
                 .value(&workflow_id)
                 .value(&task_index)
                 .finish(),
-            ChildBuild::Registry {
-                registry: &registry,
-                retention: &retention,
-            },
+            ChildBuild::Client(&child_specs),
         )
         .await
     }
@@ -2053,11 +2094,10 @@ mod cap_tests {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         insert_orphaned_workflow(&pool, workflow_id).await;
-        let report = recover_stuck_workflow_tree(
+        let report = recover_workflow_tree(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             workflow_id,
-            &RetentionConfig::default(),
         )
         .await
         .unwrap();
@@ -2075,13 +2115,13 @@ mod cap_tests {
 
     #[tokio::test]
     async fn discovery_query_failure_is_typed() {
-        let error = recover_stuck_workflows(
+        let error = recover_stuck_workflows_observed_with(
             &unreachable_broker(),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             25,
-            &RetentionConfig::default(),
         )
         .await
+        .map_err(|failure| failure.error)
         .expect_err("candidate discovery failure must cross the containment seam");
         assert!(matches!(error, WorkflowError::Broker(_)), "{error:?}");
     }
@@ -2090,12 +2130,7 @@ mod cap_tests {
     async fn discovery_query_failure_keeps_case_metrics_in_the_health_snapshot() {
         let failure = recover_stuck_workflows_observed_with(
             &unreachable_broker(),
-            ChildBuild::Registry {
-                registry: &WorkflowSpecRegistry::new(
-                    crate::core::registry::BuilderHookName::SPEC_BUILDER,
-                ),
-                retention: &RetentionConfig::default(),
-            },
+            ChildBuild::Client(&TestChildSpecs::empty()),
             25,
         )
         .await
@@ -2119,7 +2154,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         let error = audit_end_states(
             &unreachable_broker(),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &TestChildSpecs::empty(),
             200,
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2144,7 +2179,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         let refused = audit_end_states(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &TestChildSpecs::empty(),
             0,
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2220,11 +2255,10 @@ mod cap_tests {
         .await
         .unwrap();
 
-        let report = recover_stuck_workflow_tree(
+        let report = recover_workflow_tree(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             workflow_id,
-            &RetentionConfig::default(),
         )
         .await
         .unwrap();
@@ -2280,31 +2314,32 @@ mod cap_tests {
             insert_orphaned_workflow(&pool, *id).await;
         }
 
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+        let child_specs = TestChildSpecs::empty();
 
         // Capped at 2: exactly 2 of the 3 orphans are failed this pass.
-        let report = recover_stuck_workflows_with_cap(
+        let report = recover_stuck_workflows_in_scope(
             &broker,
-            &registry,
-            2,
+            ChildBuild::Client(&child_specs),
+            RecoveryScope::Global { max_rows: 2 },
             RecoveryFailurePolicy::LogOnly,
-            &RetentionConfig::default(),
         )
         .await
+        .map_err(|failure| failure.error)
         .unwrap();
         assert_eq!(report.case4_orphaned_failed, 2, "{report:?}");
         assert_eq!(failed_count(&pool, &ids).await, 2);
 
         // Uncapped: the remaining orphan is failed.
-        let report = recover_stuck_workflows_with_cap(
+        let report = recover_stuck_workflows_in_scope(
             &broker,
-            &registry,
-            GLOBAL_SCAN_ROW_CAP,
+            ChildBuild::Client(&child_specs),
+            RecoveryScope::Global {
+                max_rows: GLOBAL_SCAN_ROW_CAP,
+            },
             RecoveryFailurePolicy::LogOnly,
-            &RetentionConfig::default(),
         )
         .await
+        .map_err(|failure| failure.error)
         .unwrap();
         assert_eq!(report.case4_orphaned_failed, 1);
         assert_eq!(failed_count(&pool, &ids).await, 3);
@@ -2545,7 +2580,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &TestChildSpecs::empty(),
             200,
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2717,12 +2752,11 @@ mod cap_tests {
         .await
         .unwrap();
 
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+        let child_specs = TestChildSpecs::empty();
         let mut first = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &registry,
+            &child_specs,
             200,
             &mut first,
             RecoveryFailurePolicy::LogOnly,
@@ -2734,7 +2768,7 @@ mod cap_tests {
         let mut second = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &registry,
+            &child_specs,
             200,
             &mut second,
             RecoveryFailurePolicy::LogOnly,
@@ -2798,12 +2832,11 @@ mod cap_tests {
             .await;
         }
 
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+        let child_specs = TestChildSpecs::empty();
         let mut first = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &registry,
+            &child_specs,
             2,
             &mut first,
             RecoveryFailurePolicy::LogOnly,
@@ -2833,7 +2866,7 @@ mod cap_tests {
         let mut second = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &registry,
+            &child_specs,
             2,
             &mut second,
             RecoveryFailurePolicy::LogOnly,
@@ -2854,7 +2887,7 @@ mod cap_tests {
         let mut third = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &registry,
+            &child_specs,
             2,
             &mut third,
             RecoveryFailurePolicy::LogOnly,
@@ -2959,7 +2992,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &TestChildSpecs::empty(),
             200,
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -2980,7 +3013,7 @@ mod cap_tests {
         let mut report = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &TestChildSpecs::empty(),
             200,
             &mut report,
             RecoveryFailurePolicy::LogOnly,
@@ -3135,7 +3168,7 @@ mod cap_tests {
         let mut second = RecoveryReport::default();
         audit_end_states(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &TestChildSpecs::empty(),
             200,
             &mut second,
             RecoveryFailurePolicy::LogOnly,
@@ -3308,7 +3341,7 @@ mod cap_tests {
             std::time::Duration::from_secs(1),
             audit_end_states(
                 &broker_of(&pool),
-                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+                &TestChildSpecs::empty(),
                 200,
                 &mut report,
                 RecoveryFailurePolicy::LogOnly,
@@ -3331,11 +3364,10 @@ mod cap_tests {
         insert_orphaned_workflow(&pool, selected).await;
         insert_orphaned_workflow(&pool, unrelated).await;
 
-        let report = recover_stuck_workflow_tree(
+        let report = recover_workflow_tree(
             &broker_of(&pool),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             selected,
-            &RetentionConfig::default(),
         )
         .await
         .unwrap();
