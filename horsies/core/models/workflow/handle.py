@@ -145,7 +145,7 @@ GET_WORKFLOW_TASKS_SQL = text("""
 # of horsies_workflow_cancel: the workflow row first, before any
 # horsies_tasks/horsies_workflow_tasks rows, so the expiry acquires
 # {horsies_workflows, horsies_workflow_tasks} in the same order as
-# COMPLETE_WORKFLOW_TASK_SQL (workflows before workflow_tasks). Lock-order
+# horsies_workflow_node_finish (workflows before workflow_tasks). Lock-order
 # invariant (N6): any transaction locking both tables must take
 # horsies_workflows first, or it deadlocks against a completing task
 # (SQLSTATE 40P01).

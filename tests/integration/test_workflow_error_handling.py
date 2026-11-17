@@ -1122,7 +1122,7 @@ class TestOnErrorPause:
             {'wf_id': handle.workflow_id},
         )
 
-        # Manually mark A as COMPLETED (bypass on_workflow_task_complete which has its own guard)
+        # Manually mark A as COMPLETED (bypass the node finish, which has its own guard)
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks

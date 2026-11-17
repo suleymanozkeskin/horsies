@@ -1245,8 +1245,8 @@ class TestWorkflowHandleCancel:
     ) -> None:
         """N6 regression: cancel locks the workflow row before workflow_tasks.
 
-        COMPLETE_WORKFLOW_TASK_SQL locks the workflow row, then the
-        workflow_task row. A peer transaction holds locks in that order
+        The node finish (horsies_workflow_node_finish) locks the workflow
+        row, then the workflow_task row. A peer transaction holds locks in that order
         while cancel runs concurrently. With the correct cancel order,
         cancel waits on the workflow row holding no workflow_task locks,
         the peer's second lock succeeds, and both sides finish. With the
