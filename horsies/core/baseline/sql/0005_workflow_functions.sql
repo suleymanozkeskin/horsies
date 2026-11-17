@@ -1874,7 +1874,9 @@ $$;
 -- Internal: the result bytes of a phase-2 record, from the history row at its locator (both partition keys given,
 -- so the parent probe prunes to one leaf) or from its quarantine copy, checked against the record. Returns failure
 -- NULL and the payload, or a failure (SOURCE_ABSENT, SOURCE_STATE_CONFLICT, SOURCE_VERSION_CONFLICT,
--- SOURCE_DIGEST_MISMATCH) and payload NULL. Reads only.
+-- SOURCE_DIGEST_MISMATCH) and payload NULL. SOURCE_VERSION_CONFLICT: the source's history schema version differs
+-- from the record's or is not 1, or its result envelope version is not 1 (the only format this reader knows). Reads
+-- only.
 -- Locks: none (the caller holds the pending row). Python: the source read of horsies_phase2_consume
 -- (0003_interim_functions.sql).
 CREATE FUNCTION horsies_workflow_phase2_source(
@@ -1887,14 +1889,16 @@ DECLARE
     v_source record;
 BEGIN
     IF p_pending.recovery_source = 'HISTORY' THEN
-        SELECT h.task_id, h.result_payload AS payload, h.result_digest AS digest, h.history_schema_version AS version
+        SELECT h.task_id, h.result_payload AS payload, h.result_digest AS digest, h.history_schema_version AS version,
+               h.result_envelope_version AS envelope_version
         INTO v_source
         FROM horsies_task_history h
         WHERE h.retention_class_key = p_pending.history_class
           AND h.terminal_at = p_pending.history_anchor
           AND h.task_id = p_pending.task_id;
     ELSE
-        SELECT q.task_id, q.result_payload AS payload, q.result_digest AS digest, q.history_schema_version AS version
+        SELECT q.task_id, q.result_payload AS payload, q.result_digest AS digest, q.history_schema_version AS version,
+               q.result_envelope_version AS envelope_version
         INTO v_source
         FROM horsies_workflow_phase2_quarantine q
         WHERE q.task_id = p_pending.quarantine_task_id;
@@ -1903,7 +1907,7 @@ BEGIN
         WHEN NOT FOUND THEN 'SOURCE_ABSENT'
         WHEN v_source.task_id <> p_pending.task_id THEN 'SOURCE_STATE_CONFLICT'
         WHEN v_source.version IS DISTINCT FROM p_pending.history_schema_version OR v_source.version <> 1
-            THEN 'SOURCE_VERSION_CONFLICT'
+             OR v_source.envelope_version <> 1 THEN 'SOURCE_VERSION_CONFLICT'
         WHEN v_source.digest IS DISTINCT FROM p_pending.result_digest OR v_source.payload IS NULL
              OR sha256(v_source.payload) <> p_pending.result_digest THEN 'SOURCE_DIGEST_MISMATCH'
     END;
@@ -1918,8 +1922,9 @@ $$;
 -- 2. Lock the workflow row FOR UPDATE, the node row, the pending row.
 -- 3. When p_wake: pg_notify('task_queue_' || <queue of the node row>, 'capacity'), delivered at commit.
 -- 4. Load the result from the history row at the locator (one pruned leaf) or from the quarantine copy; check task
---    identity, history schema version (1) and digest. A mismatch returns SOURCE_ABSENT, SOURCE_STATE_CONFLICT,
---    SOURCE_VERSION_CONFLICT or SOURCE_DIGEST_MISMATCH and writes nothing (the record is kept).
+--    identity, history schema version (1), result envelope version (1) and digest. A mismatch returns SOURCE_ABSENT,
+--    SOURCE_STATE_CONFLICT, SOURCE_VERSION_CONFLICT or SOURCE_DIGEST_MISMATCH and writes nothing (the record is
+--    kept).
 -- 5. Write the node where it is not terminal: COMPLETED for COMPLETE_LOCKED, FAILED for the other kinds, the result,
 --    completed_at. Delete the pending row and the quarantine copy.
 -- Dispositions: APPLIED (node written, workflow live), APPLIED_WORKFLOW_ENDED (node written; the workflow is
