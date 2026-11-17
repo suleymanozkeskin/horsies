@@ -22,13 +22,26 @@ from horsies.core.worker_manifest import python_child_launch, to_worker_manifest
 
 
 class _Host:
-    """A host whose start hook counts its calls."""
+    """A host whose start hook counts its calls. No workflow step runs in
+    these tests, so no child build is asked for."""
 
     def __init__(self) -> None:
         self.started = 0
 
     def on_started(self) -> None:
         self.started += 1
+
+    def build_child_spec(
+        self, request: _core.ChildSpecRequest,
+    ) -> _core.ChildSpecBuilt | _core.ChildSpecRefused:
+        raise AssertionError(f'no workflow step runs here: {request!r}')
+
+
+class _HostWithoutChildSpecSource:
+    """A host with a start hook and no `build_child_spec`."""
+
+    def on_started(self) -> None:
+        return None
 
 
 def _manifest_json(profile: str | None) -> str:
@@ -83,6 +96,13 @@ def test_no_profile_is_refused() -> None:
 def test_a_manifest_the_core_refuses_raises_manifest_refused() -> None:
     with pytest.raises(_core.ManifestRefused):
         _core.prepare_worker('{"manifest_version": 1}', host=_Host())
+
+
+def test_a_host_with_no_child_spec_source_raises_attribute_error() -> None:
+    with pytest.raises(AttributeError, match='build_child_spec'):
+        _core.prepare_worker(
+            _manifest_json('small'), host=_HostWithoutChildSpecSource(),
+        )
 
 
 def test_a_stop_request_returns_at_once_and_repeats() -> None:

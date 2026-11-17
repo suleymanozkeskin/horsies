@@ -389,7 +389,9 @@ fn writer(pool: &PgPool, orphan_self_heal: OrphanSelfHeal) -> OutcomeWriter {
     let successes = test_successes(&broker, WORKER);
     OutcomeWriter::new(
         broker,
-        Arc::new(WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER)),
+        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
+            WorkflowSpecRegistry::new(BuilderHookName::SPEC_BUILDER),
+        )),
         WORKER.to_owned(),
         PayloadPolicy::default(),
         RetentionConfig::default(),
