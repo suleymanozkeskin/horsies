@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, assert_never
+from typing import Final, assert_never, cast
 
 import pytest
 
@@ -194,12 +194,16 @@ def _isolate_process_registries(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ('_workflow_defs_by_key', '_active_specs'):
         current: object = getattr(registry, name)
         assert isinstance(current, dict), f'horsies.core.workflows.registry.{name} is a dict'
-        monkeypatch.setattr(registry, name, dict(current))
+        copied: dict[object, object] = dict(cast(dict[object, object], current))
+        monkeypatch.setattr(registry, name, copied)
     nodes: object = getattr(registry, '_nodes_by_spec')
     assert isinstance(nodes, WeakValueDictionary), (
         'horsies.core.workflows.registry._nodes_by_spec is a WeakValueDictionary'
     )
-    monkeypatch.setattr(registry, '_nodes_by_spec', WeakValueDictionary(nodes))
+    copied_nodes: WeakValueDictionary[object, object] = WeakValueDictionary(
+        cast(WeakValueDictionary[object, object], nodes),
+    )
+    monkeypatch.setattr(registry, '_nodes_by_spec', copied_nodes)
 
 
 @pytest.fixture(autouse=True)
