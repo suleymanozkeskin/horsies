@@ -533,11 +533,11 @@ impl ChildSpecErrorType {
     }
 }
 
-/// Why a registered child gave no spec: the label and the text. For a builder failure they are
+/// Why a child gave no spec: the label and the text. For a builder failure they are
 /// Python's `type(exc).__name__` and `str(exc)` (`core/workflows/engine.py:1196-1211`); for a
 /// refused stored input, `stored node input refused` and the refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChildSpecError {
+pub struct ChildSpecError {
     pub(crate) error_type: ChildSpecErrorType,
     /// The full text; the node error keeps its first 200 characters.
     pub(crate) text: String,
@@ -546,7 +546,7 @@ pub(crate) struct ChildSpecError {
 impl ChildSpecError {
     /// The error of a builder, or of the check of the spec it built: the class of its category and its
     /// text (`Display`). Pure.
-    fn of_builder(error: &HorsiesError) -> Self {
+    pub fn of_builder(error: &HorsiesError) -> Self {
         Self {
             error_type: ChildSpecErrorType::of(error),
             text: error.to_string(),
