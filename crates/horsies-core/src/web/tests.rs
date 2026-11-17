@@ -39,7 +39,9 @@ use super::routes::task_not_found_text;
 use super::schema::{
     SchemaProbe, SchemaReader, SchemaState, SchemaStatus, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
 };
-use super::spa::{inject, safe_asset_path, EmbeddedAssets, MemoryAssets, MonitoringUiConfig};
+use super::spa::{
+    inject, runtime_config_json, safe_asset_path, EmbeddedAssets, MemoryAssets, MonitoringUiConfig,
+};
 use super::task_stats_cache::{ReadCache, TaskStatsCache};
 
 fn lazy_pool() -> PgPool {
@@ -687,7 +689,7 @@ async fn spa_is_public_mountable_injected_and_traversal_safe() {
     )
     .unwrap();
     assert!(page.contains("<base href=\"/\">"));
-    assert!(page.contains(r#"{"basePath":"/","apiBase":"/api"}"#));
+    assert!(page.contains(r#"{"basePath": "/", "apiBase": "/api"}"#));
     assert!(page.find("window.__HORSIES_UI__").unwrap() < page.find("override.css").unwrap());
 
     let asset = router
@@ -727,7 +729,7 @@ async fn spa_is_public_mountable_injected_and_traversal_safe() {
         mounted.contains("<base href=\"/monitoring/\">"),
         "{mounted}"
     );
-    assert!(mounted.contains(r#"{"basePath":"/monitoring","apiBase":"/monitoring/api"}"#));
+    assert!(mounted.contains(r#"{"basePath": "/monitoring", "apiBase": "/monitoring/api"}"#));
     let mounted_meta = host
         .oneshot(
             Request::builder()
@@ -753,6 +755,22 @@ async fn spa_is_public_mountable_injected_and_traversal_safe() {
     }
     let mixed_head = inject("<HTML><HEAD></HeAd   ><BODY>", "/x", None);
     assert!(mixed_head.find("window.__HORSIES_UI__").unwrap() < mixed_head.find("</HeAd").unwrap());
+}
+
+/// The runtime config of the page is the text of Python's
+/// `json.dumps(config)`: a space after each `:` and `,`, and every
+/// character outside printable ASCII escaped (the texts come from
+/// `json.dumps` on Python 3.13).
+#[test]
+fn the_runtime_config_is_the_text_of_python_json_dumps() {
+    assert_eq!(
+        runtime_config_json("/monitoring", "/monitoring/api"),
+        r#"{"basePath": "/monitoring", "apiBase": "/monitoring/api"}"#
+    );
+    assert_eq!(
+        runtime_config_json("/m\u{f6}n \"x\"", "/m\u{f6}n \"x\"/api"),
+        r#"{"basePath": "/m\u00f6n \"x\"", "apiBase": "/m\u00f6n \"x\"/api"}"#
+    );
 }
 
 #[tokio::test]
