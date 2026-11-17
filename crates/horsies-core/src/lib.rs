@@ -7,9 +7,8 @@
 extern crate self as horsies_core;
 
 // Internal modules (merged from formerly separate crates).
-// `core` is `pub` (rather than `pub(crate)`) because `#[macro_export]` macros
-// in `core::task::macros` use `$crate::core::…` paths that must be
-// resolvable when the macro is expanded in downstream crates.
+// `core` is `pub` (rather than `pub(crate)`) because the clients name some of
+// its items by module path (`horsies_core::core::…`).
 pub(crate) mod broker;
 pub mod catalog;
 #[doc(hidden)]

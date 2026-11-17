@@ -782,6 +782,12 @@ mod tests {
         assert_serialization_error(&error);
         let map: BTreeMap<String, u32> = decode_input(b"{}").unwrap();
         assert!(map.is_empty());
+        let none: Option<BTreeMap<String, u32>> = decode_input(b"null").unwrap();
+        assert_eq!(none, None);
+        let empty: Option<BTreeMap<String, u32>> = decode_input(b"{}").unwrap();
+        assert_eq!(empty, Some(BTreeMap::new()));
+        assert_serialization_error(&decode_input::<Option<i32>>(b"{}").unwrap_err());
+        assert_serialization_error(&decode_input::<i32>(b"{}").unwrap_err());
     }
 
     /// A task with no parameters reads `{}` (a send, a workflow node) and
@@ -936,11 +942,19 @@ mod tests {
 
     #[test]
     fn a_non_finite_float_is_refused() {
-        match body_result::<f64, ChargeCode>(Ok(f64::NAN)) {
-            TaskResult::Ok(_) => panic!("NaN was encoded"),
-            TaskResult::Err(error) => {
-                assert_serialization_error(&error);
-                assert!(error.message.unwrap().contains("non-finite"));
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            match body_result::<f64, ChargeCode>(Ok(value)) {
+                TaskResult::Ok(_) => panic!("{value} was encoded"),
+                TaskResult::Err(error) => {
+                    assert_serialization_error(&error);
+                    assert!(error.message.unwrap().contains("non-finite"), "{value}");
+                }
+            }
+        }
+        for value in [3.5, f64::MAX] {
+            match body_result::<f64, ChargeCode>(Ok(value)) {
+                TaskResult::Ok(_) => {}
+                TaskResult::Err(error) => panic!("{value} was refused: {error}"),
             }
         }
     }
@@ -998,6 +1012,10 @@ mod tests {
                     .clone()
                     .unwrap()
                     .contains("does not read back"));
+                assert_eq!(
+                    error.data.as_ref().unwrap()["expected_type"],
+                    std::any::type_name::<TextNumber>()
+                );
                 assert!(!text_of(&error).contains(MARKER));
             }
         }
