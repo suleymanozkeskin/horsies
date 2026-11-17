@@ -51,8 +51,13 @@ pub enum StopReason {
     WorkflowStopped,
     /// The task's deadline passed while it was CLAIMED; it is EXPIRED.
     TaskExpired,
-    /// The workflow node of the task is not linked to it.
+    /// The workflow node of the task is not linked to it, and the orphan
+    /// was not cancelled: the self-heal is off, or a runnable link exists.
     NodeNotLinked,
+    /// The workflow node of the task is not linked to it, and the stop
+    /// function cancelled the task as an owned orphan, under the workflow
+    /// lock (the self-heal is on).
+    OrphanCancelled,
 }
 
 impl StopReason {
@@ -63,6 +68,7 @@ impl StopReason {
             Self::WorkflowStopped => "WORKFLOW_STOPPED",
             Self::TaskExpired => "TASK_EXPIRED",
             Self::NodeNotLinked => "NODE_NOT_LINKED",
+            Self::OrphanCancelled => "ORPHAN_CANCELLED",
         }
     }
 
@@ -73,6 +79,7 @@ impl StopReason {
             "WORKFLOW_STOPPED" => Some(Self::WorkflowStopped),
             "TASK_EXPIRED" => Some(Self::TaskExpired),
             "NODE_NOT_LINKED" => Some(Self::NodeNotLinked),
+            "ORPHAN_CANCELLED" => Some(Self::OrphanCancelled),
             _ => None,
         }
     }

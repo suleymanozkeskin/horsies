@@ -871,6 +871,7 @@ fn every_stop_reason_round_trips() {
         StopReason::WorkflowStopped,
         StopReason::TaskExpired,
         StopReason::NodeNotLinked,
+        StopReason::OrphanCancelled,
     ] {
         let frame = ChildFrame::SharedResult(SharedResultFrame {
             run: run_ref(1, T1),
@@ -908,6 +909,7 @@ fn each_stop_reason_reads_from_its_wire_spelling() {
         ("WORKFLOW_STOPPED", StopReason::WorkflowStopped),
         ("TASK_EXPIRED", StopReason::TaskExpired),
         ("NODE_NOT_LINKED", StopReason::NodeNotLinked),
+        ("ORPHAN_CANCELLED", StopReason::OrphanCancelled),
     ] {
         let end = format!(r#"{{"kind":"stopped_before_running","reason":"{spelling}"}}"#);
         assert_eq!(
