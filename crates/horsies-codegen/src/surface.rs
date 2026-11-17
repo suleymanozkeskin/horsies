@@ -242,6 +242,11 @@ const START_ATTEMPT_PARAMETERS: &[StubParameter] = &[
     keyword("deadline_in_ms", "int | None"),
 ];
 
+const CORE_SCHEDULER_PARAMETERS: &[StubParameter] = &[
+    positional("handle", "CoreHandle"),
+    positional("manifest_json", "str"),
+];
+
 const PING_OUTCOME: &str = "DatabasePingRecord | BrokerFailure";
 const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerFailure";
 const SEND_OUTCOME: &str = "Enqueued | SendSuppressed | SendValidationFailed | \
@@ -271,6 +276,39 @@ const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTa
 
 const START_ATTEMPT_OUTCOME: &str =
     "AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed";
+
+const SCHEDULER_START_OUTCOME: &str =
+    "SchedulerStarted | SchedulerStartRefused | SchedulerStartFailed";
+const SCHEDULER_TICK_OUTCOME: &str = "SchedulerTicked | SchedulerTickFailed";
+const SCHEDULER_RUN_OUTCOME: &str =
+    "SchedulerStopped | SchedulerStartRefused | SchedulerStartFailed";
+
+const CORE_SCHEDULER_METHODS: [StubFunction; 4] = [
+    StubFunction {
+        name: "start_async",
+        parameters: &[],
+        returns: TypeText::FutureOf(SCHEDULER_START_OUTCOME),
+        doc: "Connect, install the schema once per handle, and start the scheduler: the start checks,\nthe client family check and the state start. Writes. A start that completed before\nanswers SchedulerStarted at once.",
+    },
+    StubFunction {
+        name: "tick_async",
+        parameters: &[],
+        returns: TypeText::FutureOf(SCHEDULER_TICK_OUTCOME),
+        doc: "One tick: the due read, the existence heal on its cadence, one fire per due schedule.\nWrites. Raises RuntimeError before a completed start and after the end of a run.",
+    },
+    StubFunction {
+        name: "run_async",
+        parameters: &[],
+        returns: TypeText::FutureOf(SCHEDULER_RUN_OUTCOME),
+        doc: "The start when none completed, then a tick at once and one per check interval until a\nstop request; with nothing to fire, the wait for the stop request. A cancel of the future\nasks for the stop.",
+    },
+    StubFunction {
+        name: "request_stop",
+        parameters: &[],
+        returns: TypeText::Plain("None"),
+        doc: "Ask the run to stop at its next tick boundary; a fire in flight runs to its end.\nIdempotent; returns at once.",
+    },
+];
 
 const CORE_CHILD_HANDLE_METHODS: [StubFunction; 2] = [
     StubFunction {
@@ -572,7 +610,7 @@ const ARGUMENT_CLASSES: [StubClass; 11] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 61] = [
+const RECORD_CLASSES: [StubClass; 67] = [
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -1219,9 +1257,51 @@ const RECORD_CLASSES: [StubClass; 61] = [
         properties: &[property("task_id", "uuid.UUID"), property("message", "str")],
         methods: &[],
     },
+    StubClass {
+        name: "SchedulerStarted",
+        doc: "The start of the scheduler completed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "SchedulerStartRefused",
+        doc: "The start refused a schedule before any state write: a zone that the core does not\nknow, a send that the command rules refuse, or a pattern with no slot after the database\ntime.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("schedule", "str"), property("reason", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "SchedulerStartFailed",
+        doc: "The start failed before the state start: the connect, the schema install or the client\nfamily check. No schedule state was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
+        name: "SchedulerTicked",
+        doc: "The tick ran. The failure of one due schedule is logged and does not fail the tick.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "SchedulerTickFailed",
+        doc: "The tick fired nothing: the core pools could not open, or the due read failed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
+        name: "SchedulerStopped",
+        doc: "The run ended at a stop request.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
 ];
 
-const HANDLE_CLASSES: [StubClass; 2] = [
+const HANDLE_CLASSES: [StubClass; 3] = [
     StubClass {
     name: "CoreHandle",
     doc: "The core handle of one producer manifest and the pool profile of its process: PRODUCER,\nor WORKER (the main core pool keeps 2 connections free from batch checkouts for the\nper-task writes). Building it starts nothing.",
@@ -1236,10 +1316,17 @@ const HANDLE_CLASSES: [StubClass; 2] = [
         properties: &[],
         methods: &CORE_CHILD_HANDLE_METHODS,
     },
+    StubClass {
+        name: "CoreScheduler",
+        doc: "The scheduler of one scheduler manifest on the broker of a CoreHandle. Building it\nstarts nothing. A refused manifest raises ManifestRefused. One call runs at a time: a\ncall while another is in flight raises RuntimeError.",
+        constructor: Constructor::Parameters(CORE_SCHEDULER_PARAMETERS),
+        properties: &[],
+        methods: &CORE_SCHEDULER_METHODS,
+    },
 ];
 
-const CLASSES: [StubClass; 74] = {
-    let mut classes = [HANDLE_CLASSES[0]; 74];
+const CLASSES: [StubClass; 81] = {
+    let mut classes = [HANDLE_CLASSES[0]; 81];
     let mut handle_position = 0;
     while handle_position < HANDLE_CLASSES.len() {
         classes[handle_position] = HANDLE_CLASSES[handle_position];
