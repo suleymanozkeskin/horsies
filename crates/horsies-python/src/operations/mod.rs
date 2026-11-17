@@ -14,5 +14,6 @@ pub mod result;
 pub mod schema;
 pub mod stale_claims;
 pub mod stale_running;
+pub mod start;
 pub mod success;
 pub mod task_info;
