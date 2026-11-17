@@ -5,7 +5,8 @@ The DSL builds and checks a ``WorkflowSpec``; the node rows of the spec
 priority of each task node bound and its deadline merged into its task
 options. ``workflow_spec_data`` turns the spec and its rows into
 ``WorkflowSpecData`` (``horsies._catalog.workflow_spec``), which crosses to
-the core as JSON text. Pure: no I/O.
+the core as JSON text, written by ``dumps_json`` as every stored form is.
+Pure: no I/O.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from horsies._catalog.workflow_spec import (
     WorkflowSpecData,
     dump_workflow_spec_data,
 )
+from horsies.core.codec.json_io import SerdeResult
 from horsies.core.models.workflow.enums import OnError
 from horsies.core.workflows.child_build import NodeRow, SubWorkflowNodeKind, TaskNodeKind
 from horsies.core.workflows.sql import SubWorkflowParams
@@ -196,6 +198,13 @@ def workflow_spec_data(spec: WorkflowSpec[Any], rows: Sequence[NodeRow]) -> Work
     )
 
 
-def workflow_spec_json(spec: WorkflowSpec[Any], rows: Sequence[NodeRow]) -> str:
-    """The JSON text of ``workflow_spec_data(spec, rows)``. Pure."""
+def workflow_spec_json(
+    spec: WorkflowSpec[Any], rows: Sequence[NodeRow],
+) -> SerdeResult[str]:
+    """The JSON text of ``workflow_spec_data(spec, rows)``. Pure.
+
+    Err (``SerializationError``): a text of the spec (its name, a key, a
+    task name, a queue name) holds a lone surrogate, which UTF-8 cannot
+    encode. Nothing else of the spec data can fail the encode.
+    """
     return dump_workflow_spec_data(workflow_spec_data(spec, rows))
