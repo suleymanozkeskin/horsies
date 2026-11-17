@@ -703,12 +703,44 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use crate::broker::workflow_start::{ClientStartError, ClientStartOutcome};
     use crate::core::registry::workflow::{RegisteredWorkflowDefinition, RegisteredWorkflowSpec};
     use crate::core::workflow::spec::WorkflowSpecBuilder;
     use crate::core::workflow::sub_workflow::SubWorkflowNode;
     use crate::core::OnError;
+    use crate::test_support::child_specs::TestChildSpecs;
     use crate::TaskNode;
     use serial_test::serial;
+
+    /// Starts `spec` as the workflow `workflow_id` at `sent_at`, through the
+    /// core's start of a client spec, with no sub-workflow child and the
+    /// task queues classed by `children`.
+    async fn start_client(
+        broker: &PostgresBroker,
+        spec: &WorkflowSpec,
+        workflow_id: Uuid,
+        sent_at: chrono::DateTime<chrono::Utc>,
+        children: &TestChildSpecs,
+    ) -> Result<ClientStartOutcome, ClientStartError> {
+        broker
+            .start_client_workflow(
+                &children.client_spec(spec),
+                workflow_id,
+                sent_at,
+                false,
+                children,
+            )
+            .await
+    }
+
+    /// Whether `error` is a start refused for its spec (the class that a
+    /// client names `VALIDATION_FAILED`).
+    fn refused_for_its_spec(error: &ClientStartError) -> bool {
+        matches!(
+            error,
+            ClientStartError::Start(WorkflowError::Validation(_) | WorkflowError::Serialization(_))
+        )
+    }
 
     fn child_registered_static() -> RegisteredWorkflowSpec {
         let mut builder = WorkflowSpecBuilder::new("child_static");
@@ -834,16 +866,16 @@ mod tests {
         let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
         let workflow_id = Uuid::new_v4();
 
-        let _: WorkflowHandle<serde_json::Value> = start_workflow(
+        let started = start_client(
             &broker,
             &spec,
-            Some(workflow_id),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
+            workflow_id,
+            chrono::Utc::now(),
+            &TestChildSpecs::empty(),
         )
         .await
         .expect("start workflow");
+        assert_eq!(started, ClientStartOutcome::Started);
 
         let nodes: Vec<(i32, String, Option<String>)> = sqlx::query_as(
             "SELECT task_index, downstream_subworkflow, sub_workflow_params
@@ -1111,24 +1143,27 @@ mod tests {
             vec![node_with(false, Some(17))],
         );
 
-        let refused = start_workflow::<serde_json::Value>(
+        let refused = start_client(
             &broker,
             &spec,
-            Some(workflow_id),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
+            workflow_id,
+            chrono::Utc::now(),
+            &TestChildSpecs::empty(),
         )
         .await
         .expect_err("a start of another client family");
 
-        assert_eq!(refused.code, WorkflowStartErrorCode::EnqueueFailed);
-        assert!(!refused.retryable);
         assert!(
-            refused.message.contains("its own family"),
-            "{}",
-            refused.message
+            matches!(
+                refused,
+                ClientStartError::SchemaInstall(
+                    crate::broker::BrokerError::ClientFamilyMismatch { .. }
+                )
+            ),
+            "{refused:?}"
         );
+        assert!(!refused.is_retryable());
+        assert!(refused.to_string().contains("its own family"), "{refused}");
         let written: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM horsies_workflows WHERE id = $1")
                 .bind(workflow_id)
@@ -1208,32 +1243,26 @@ mod tests {
             let spec = keyed_spec(Some("tests.start.refused_retry_policy.v1"), vec![root]);
             let workflow_id = Uuid::new_v4();
 
-            let started = start_workflow::<serde_json::Value>(
+            let started = start_client(
                 &broker,
                 &spec,
-                Some(workflow_id),
-                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-                &PayloadPolicy::default(),
-                &RetentionConfig::default(),
+                workflow_id,
+                chrono::Utc::now(),
+                &TestChildSpecs::empty(),
             )
             .await;
 
             let refused = match started {
-                Ok(_) => panic!("{case}: the start must be refused"),
+                Ok(outcome) => panic!("{case}: the start must be refused, got {outcome:?}"),
                 Err(refused) => refused,
             };
-            assert_eq!(
-                refused.code,
-                WorkflowStartErrorCode::ValidationFailed,
-                "{case}"
-            );
-            assert!(!refused.retryable, "{case}");
+            assert!(refused_for_its_spec(&refused), "{case}: {refused:?}");
+            assert!(!refused.is_retryable(), "{case}");
             assert!(
-                refused.message.contains(&format!(
+                refused.to_string().contains(&format!(
                     "task_options of workflow node 0 ({task_name}) refused"
                 )),
-                "{case}: {}",
-                refused.message
+                "{case}: {refused}"
             );
             let rows: (i64, i64, i64) = sqlx::query_as(
                 "SELECT (SELECT count(*) FROM horsies_workflows WHERE id = $1),
@@ -1282,32 +1311,26 @@ mod tests {
             let spec = keyed_spec(Some("tests.start.refused_deadline.v1"), vec![root]);
             let workflow_id = Uuid::new_v4();
 
-            let started = start_workflow::<serde_json::Value>(
+            let started = start_client(
                 &broker,
                 &spec,
-                Some(workflow_id),
-                &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-                &PayloadPolicy::default(),
-                &RetentionConfig::default(),
+                workflow_id,
+                chrono::Utc::now(),
+                &TestChildSpecs::empty(),
             )
             .await;
 
             let refused = match started {
-                Ok(_) => panic!("{case}: the start must be refused"),
+                Ok(outcome) => panic!("{case}: the start must be refused, got {outcome:?}"),
                 Err(refused) => refused,
             };
-            assert_eq!(
-                refused.code,
-                WorkflowStartErrorCode::ValidationFailed,
-                "{case}"
-            );
-            assert!(!refused.retryable, "{case}");
+            assert!(refused_for_its_spec(&refused), "{case}: {refused:?}");
+            assert!(!refused.is_retryable(), "{case}");
             assert!(
-                refused.message.contains(&format!(
+                refused.to_string().contains(&format!(
                     "task_options of workflow node 0 ({task_name}) refused"
                 )),
-                "{case}: {}",
-                refused.message
+                "{case}: {refused}"
             );
             let rows: (i64, i64, i64) = sqlx::query_as(
                 "SELECT (SELECT count(*) FROM horsies_workflows WHERE id = $1),
@@ -1340,16 +1363,16 @@ mod tests {
         let spec = keyed_spec(Some("tests.start.fitting_retry_policy.v1"), vec![root]);
         let workflow_id = Uuid::new_v4();
 
-        let _: WorkflowHandle<serde_json::Value> = start_workflow(
+        let started = start_client(
             &broker,
             &spec,
-            Some(workflow_id),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
+            workflow_id,
+            chrono::Utc::now(),
+            &TestChildSpecs::empty(),
         )
         .await
         .expect("start a workflow whose node policy fits");
+        assert_eq!(started, ClientStartOutcome::Started);
 
         let limits: (i32, i32) = sqlx::query_as(
             "SELECT wt.max_retries, t.max_retries
@@ -1398,16 +1421,16 @@ mod tests {
         let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
         let workflow_id = Uuid::new_v4();
 
-        let _: WorkflowHandle<serde_json::Value> = start_workflow(
+        let started = start_client(
             &broker,
             &spec,
-            Some(workflow_id),
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
+            workflow_id,
+            chrono::Utc::now(),
+            &TestChildSpecs::empty(),
         )
         .await
         .expect("start workflow with a fast and a slow root");
+        assert_eq!(started, ClientStartOutcome::Started);
 
         let nodes: Vec<(i32, String, bool)> = sqlx::query_as(
             "SELECT wt.task_index, wt.status,
@@ -1469,9 +1492,7 @@ mod tests {
     async fn an_id_of_another_workflow_name_is_a_conflict_and_writes_nothing() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-        let retention = RetentionConfig::default();
+        let children = TestChildSpecs::empty();
         let workflow_id = Uuid::new_v4();
         let sent_at = chrono::Utc::now() - chrono::Duration::minutes(5);
         let mut first = keyed_spec(
@@ -1483,17 +1504,17 @@ mod tests {
         other.name = "other_name".to_owned();
 
         for (spec, expected) in [
-            (&first, WorkflowRowInsert::Inserted),
-            (&first, WorkflowRowInsert::Existing),
+            (&first, ClientStartOutcome::Started),
+            (&first, ClientStartOutcome::Exists),
             (
                 &other,
-                WorkflowRowInsert::IdConflict {
+                ClientStartOutcome::IdTaken {
                     existing_name: "first_name".to_owned(),
                 },
             ),
         ] {
             assert_eq!(
-                start_workflow_inner(&broker, spec, workflow_id, sent_at, &registry, &retention)
+                start_client(&broker, spec, workflow_id, sent_at, &children)
                     .await
                     .expect("start"),
                 expected
@@ -1556,20 +1577,13 @@ mod tests {
             .queue_retention
             .insert("bulk".to_owned(), Some(chrono::Duration::days(7)));
         let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+        let children = TestChildSpecs::empty().with_retention(retention);
         let workflow_id = Uuid::new_v4();
 
-        let _: WorkflowHandle<serde_json::Value> = start_workflow(
-            &broker,
-            &spec,
-            Some(workflow_id),
-            &registry,
-            &PayloadPolicy::default(),
-            &retention,
-        )
-        .await
-        .expect("start workflow with a root task");
+        let started = start_client(&broker, &spec, workflow_id, chrono::Utc::now(), &children)
+            .await
+            .expect("start workflow with a root task");
+        assert_eq!(started, ClientStartOutcome::Started);
 
         let rows: Vec<(String, String, Option<i32>, Option<i16>, bool)> = sqlx::query_as(
             "SELECT id::text, retention_class_key,
@@ -1612,17 +1626,16 @@ mod tests {
             .expect("fixed start call time")
             .with_timezone(&chrono::Utc);
 
-        let _: WorkflowHandle<serde_json::Value> = start_workflow_attempt(
+        let outcome = start_client(
             &broker,
             &spec,
             workflow_id,
             started,
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-            &PayloadPolicy::default(),
-            &RetentionConfig::default(),
+            &TestChildSpecs::empty(),
         )
         .await
         .expect("start workflow with a root task");
+        assert_eq!(outcome, ClientStartOutcome::Started);
 
         let stored: Vec<(Uuid, chrono::DateTime<chrono::Utc>)> =
             sqlx::query_as("SELECT id, sent_at FROM horsies_tasks WHERE task_name = $1")

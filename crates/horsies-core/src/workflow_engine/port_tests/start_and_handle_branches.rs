@@ -12,18 +12,15 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    child_of, end_workflows, execute, handle, registry_of, required, seed_node, seed_workflow,
+    child_of, child_specs_of, end_workflows, execute, handle, required, seed_node, seed_workflow,
     shared_pool, spec, start, sub_workflow_node, task_node, try_start, IsolatedDatabase, NodeSeed,
     ParentLink, WorkflowSeed,
 };
+use crate::broker::workflow_start::ClientStartError;
 use crate::core::workflow::handle_types::HandleErrorCode;
-use crate::core::{
-    AnyNode, WorkflowSpecRegistry, WorkflowStartError, WorkflowStartErrorCode, WorkflowTaskStatus,
-};
-
-fn empty_registry() -> WorkflowSpecRegistry {
-    WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER)
-}
+use crate::core::{AnyNode, WorkflowTaskStatus};
+use crate::test_support::child_specs::TestChildSpecs;
+use crate::workflow_engine::error::WorkflowError;
 
 /// Every node status, in the order of the enum. The match does not compile
 /// when a status is added, so the list follows the enum.
@@ -96,7 +93,7 @@ const CORRUPT_OPTIONS_TASK: &str = "start_branch_corrupt_options";
 /// start left (workflow rows, task rows of [`CORRUPT_OPTIONS_TASK`]).
 async fn starts_with_corrupt_options(
     pool: &PgPool,
-) -> Vec<(&'static str, WorkflowStartError, (i64, i64))> {
+) -> Vec<(&'static str, ClientStartError, (i64, i64))> {
     let mut root = task_node(0, CORRUPT_OPTIONS_TASK);
     root.task_options_json = Some("{not-json".to_owned());
     let mut dependent = after(task_node(1, CORRUPT_OPTIONS_TASK), &[0]);
@@ -111,15 +108,15 @@ async fn starts_with_corrupt_options(
     let mut refusals = Vec::new();
     for (case, tasks) in cases {
         let workflow_id = Uuid::new_v4();
-        let started = try_start(
+        let (_, started) = try_start(
             pool,
             &spec("start_branch_corrupt_options", tasks),
             Some(workflow_id),
-            &empty_registry(),
+            &TestChildSpecs::empty(),
         )
         .await;
         let refused = match started {
-            Ok(_handle) => panic!("{case}: the start must be refused"),
+            Ok(outcome) => panic!("{case}: the start must be refused, got {outcome:?}"),
             Err(refused) => refused,
         };
         let rows = start_rows(pool, workflow_id, CORRUPT_OPTIONS_TASK).await;
@@ -137,12 +134,16 @@ async fn starts_with_corrupt_options(
 async fn a_node_whose_options_do_not_parse_refuses_the_start_and_writes_nothing() {
     let pool = shared_pool().await;
     for (case, refused, rows) in starts_with_corrupt_options(&pool).await {
-        assert_eq!(
-            refused.code,
-            WorkflowStartErrorCode::ValidationFailed,
-            "{case}"
+        assert!(
+            matches!(
+                &refused,
+                ClientStartError::Start(
+                    WorkflowError::Validation(_) | WorkflowError::Serialization(_)
+                )
+            ),
+            "{case}: {refused:?}"
         );
-        assert!(!refused.retryable, "{case}");
+        assert!(!refused.is_retryable(), "{case}");
         assert_eq!(rows, (0, 0), "{case}");
     }
 }
@@ -156,9 +157,8 @@ async fn the_refusal_of_options_that_do_not_parse_names_the_task_of_the_node() {
     let pool = shared_pool().await;
     for (case, refused, _rows) in starts_with_corrupt_options(&pool).await {
         assert!(
-            refused.message.contains(CORRUPT_OPTIONS_TASK),
-            "{case}: {}",
-            refused.message
+            refused.to_string().contains(CORRUPT_OPTIONS_TASK),
+            "{case}: {refused}"
         );
     }
 }
@@ -175,19 +175,19 @@ async fn a_task_node_without_a_resolved_priority_refuses_the_start_and_writes_no
     root.priority = None;
     let workflow_id = Uuid::new_v4();
 
-    let started = try_start(
+    let (_, started) = try_start(
         &pool,
         &spec("start_branch_no_priority", vec![root]),
         Some(workflow_id),
-        &empty_registry(),
+        &TestChildSpecs::empty(),
     )
     .await;
 
     let refused = match started {
-        Ok(_handle) => panic!("the start must be refused"),
+        Ok(outcome) => panic!("the start must be refused, got {outcome:?}"),
         Err(refused) => refused,
     };
-    assert!(refused.message.contains("priority"), "{}", refused.message);
+    assert!(refused.to_string().contains("priority"), "{refused}");
     assert_eq!(start_rows(&pool, workflow_id, task_name).await, (0, 0));
 }
 
@@ -202,7 +202,7 @@ async fn the_start_stores_a_success_policy_that_names_sub_workflow_nodes() {
         "start_branch_policy_child",
         vec![task_node(0, "start_branch_policy_child_task")],
     );
-    let registry = registry_of(std::slice::from_ref(&child));
+    let child_specs = child_specs_of(std::slice::from_ref(&child));
     let mut parent = spec(
         "start_branch_policy_parent",
         vec![
@@ -215,7 +215,7 @@ async fn the_start_stores_a_success_policy_that_names_sub_workflow_nodes() {
     policy.optional_indices = Some(vec![2]);
     parent.success_policy = Some(policy);
 
-    let workflow_id = start(&pool, &parent, &registry).await;
+    let workflow_id = start(&pool, &parent, &child_specs).await;
 
     let stored: Option<serde_json::Value> =
         sqlx::query_scalar("SELECT success_policy FROM horsies_workflows WHERE id = $1")

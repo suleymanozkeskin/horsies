@@ -25,19 +25,19 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    child_of, err, node_status, registry_of, run_node_task, seed_node, seed_workflow, spec, start,
-    sub_workflow_node, task_node, worker_phase_one, workflow_status, IsolatedDatabase, NodeReport,
-    NodeSeed, RunningNodeTask, WorkflowSeed,
+    child_of, child_specs_of, err, node_status, run_node_task, seed_node, seed_workflow, spec,
+    start, sub_workflow_node, task_node, worker_phase_one, workflow_status, IsolatedDatabase,
+    NodeReport, NodeSeed, RunningNodeTask, WorkflowSeed,
 };
 use crate::broker::PostgresBroker;
-use crate::core::config::retention::RetentionConfig;
-use crate::core::{WorkflowSpec, WorkflowSpecRegistry};
+use crate::core::WorkflowSpec;
 use crate::monitoring::{
     cancel_workflow_action, pause_workflow_action, resume_workflow_action, ActionBody,
     ActionOutcome, ActionResponse, ResumeChildren,
 };
+use crate::test_support::child_specs::TestChildSpecs;
 use crate::worker::execution::{run_phase2, Phase2Work};
-use crate::workflow_engine::recovery::recover_stuck_workflows;
+use crate::workflow_engine::recovery::recover_stuck_workflows_observed_with;
 use crate::workflow_engine::steps::ChildBuild;
 
 /// The stack of the thread that runs the paths: 1.5 MiB, 512 KiB under the
@@ -136,17 +136,26 @@ async fn every_path() {
     let db = Box::pin(IsolatedDatabase::create()).await;
     Box::pin(recovery_pass_with_a_case_zero_candidate(&db.pool)).await;
     let child = spec("stack_margin_child", vec![task_node(0, TASK)]);
-    let registry = registry_of(std::slice::from_ref(&child));
+    let child_specs = child_specs_of(std::slice::from_ref(&child));
     let parent_id = Box::pin(start_with_a_child_and_a_late_child(
-        &db.pool, &child, &registry,
+        &db.pool,
+        &child,
+        &child_specs,
     ))
     .await;
-    Box::pin(phase_two_with_a_child_start(&db.pool, parent_id, &registry)).await;
+    Box::pin(phase_two_with_a_child_start(
+        &db.pool,
+        parent_id,
+        &child_specs,
+    ))
+    .await;
     Box::pin(phase_two_with_a_parent_advance(
-        &db.pool, parent_id, &registry,
+        &db.pool,
+        parent_id,
+        &child_specs,
     ))
     .await;
-    Box::pin(monitoring_actions(&db.pool, parent_id, registry)).await;
+    Box::pin(monitoring_actions(&db.pool, parent_id, child_specs)).await;
     Box::pin(db.drop()).await;
 }
 
@@ -174,12 +183,15 @@ async fn recovery_pass_with_a_case_zero_candidate(pool: &PgPool) {
         .await;
     }
     let broker = PostgresBroker::from_pool(pool.clone());
-    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    let retention = RetentionConfig::default();
+    let child_specs = TestChildSpecs::empty();
 
     let report = probe_step(
         "recover_stuck_workflows",
-        recover_stuck_workflows(&broker, &registry, RECOVERY_FAILURE_LIMIT, &retention),
+        recover_stuck_workflows_observed_with(
+            &broker,
+            ChildBuild::Client(&child_specs),
+            RECOVERY_FAILURE_LIMIT,
+        ),
     )
     .await
     .expect("the recovery pass returns its report");
@@ -205,7 +217,7 @@ async fn recovery_pass_with_a_case_zero_candidate(pool: &PgPool) {
 async fn start_with_a_child_and_a_late_child(
     pool: &PgPool,
     child: &WorkflowSpec,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
 ) -> Uuid {
     let mut late_child = sub_workflow_node(2, child);
     late_child.dependencies = vec![0];
@@ -214,7 +226,7 @@ async fn start_with_a_child_and_a_late_child(
         vec![task_node(0, TASK), sub_workflow_node(1, child), late_child],
     );
 
-    let parent_id = probe_step("start_workflow", start(pool, &parent, registry)).await;
+    let parent_id = probe_step("start_client_workflow", start(pool, &parent, child_specs)).await;
 
     let _started_child = child_of(pool, parent_id, 1).await;
     assert_eq!(node_status(pool, parent_id, 2).await, "PENDING");
@@ -225,21 +237,17 @@ async fn start_with_a_child_and_a_late_child(
 async fn finish_through_the_worker(
     pool: &PgPool,
     task: &RunningNodeTask,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
     name: &str,
 ) {
     let broker = PostgresBroker::from_pool(pool.clone());
-    let retention = RetentionConfig::default();
     let done = worker_phase_one(&broker, task, NodeReport::Success).await;
 
     probe_step(
         name,
         run_phase2(
             &broker,
-            ChildBuild::Registry {
-                registry,
-                retention: &retention,
-            },
+            ChildBuild::Client(child_specs),
             Phase2Work {
                 task_id: task.task_id,
                 queue_name: task.queue_name.clone(),
@@ -257,14 +265,14 @@ async fn finish_through_the_worker(
 async fn phase_two_with_a_child_start(
     pool: &PgPool,
     parent_id: Uuid,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
 ) {
     let root = run_node_task(pool, parent_id, 0).await;
 
     Box::pin(finish_through_the_worker(
         pool,
         &root,
-        registry,
+        child_specs,
         "run_phase2 of a node that starts a child",
     ))
     .await;
@@ -278,7 +286,7 @@ async fn phase_two_with_a_child_start(
 async fn phase_two_with_a_parent_advance(
     pool: &PgPool,
     parent_id: Uuid,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
 ) {
     let child_id = child_of(pool, parent_id, 1).await;
     let child_root = run_node_task(pool, child_id, 0).await;
@@ -286,7 +294,7 @@ async fn phase_two_with_a_parent_advance(
     Box::pin(finish_through_the_worker(
         pool,
         &child_root,
-        registry,
+        child_specs,
         "run_phase2 of a node that ends its child workflow",
     ))
     .await;
@@ -297,12 +305,9 @@ async fn phase_two_with_a_parent_advance(
 
 /// The monitoring pause, resume and cancel of the parent: the resume runs its
 /// step, the parent advances and the recovery pass of the tree.
-async fn monitoring_actions(pool: &PgPool, parent_id: Uuid, registry: WorkflowSpecRegistry) {
+async fn monitoring_actions(pool: &PgPool, parent_id: Uuid, child_specs: TestChildSpecs) {
     let broker = PostgresBroker::from_pool(pool.clone());
-    let children = ResumeChildren::Registry {
-        registry: Arc::new(registry),
-        retention: RetentionConfig::default(),
-    };
+    let children = ResumeChildren::Client(Arc::new(child_specs));
 
     let paused = probe_step(
         "pause_workflow_action",

@@ -583,30 +583,27 @@ fn count_raise(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::retention::RetentionConfig;
     use crate::core::history::phase2::consumption::{consume_phase2, Phase2DispositionKind};
     use crate::core::lifecycle::TerminalizationOutcome;
+    use crate::test_support::child_specs::TestChildSpecs;
     use crate::test_support::terminal_writes::{self, TerminalFailure};
     use serial_test::serial;
     use sqlx::PgPool;
 
-    /// One recovery pass with the given grace, cap and attempt bound, and an
-    /// empty registry.
+    /// One recovery pass with the given grace, cap and attempt bound, and no
+    /// child specs.
     async fn recovery_pass(
         pool: &PgPool,
         grace_ms: u64,
         max_rows: i64,
         attempt_bound: u32,
     ) -> Result<Phase2RecoverySummary, WorkflowError> {
-        drive_phase2_recovery(
+        drive_phase2_recovery_with(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::core::WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            ),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             grace_ms,
             max_rows,
             attempt_bound,
-            &RetentionConfig::default(),
         )
         .await
     }
@@ -1204,15 +1201,12 @@ mod tests {
         .expect("age the phase-2 record");
         assert_eq!(kind, "FAIL_RUNNING");
 
-        let summary = drive_phase2_recovery(
+        let summary = drive_phase2_recovery_with(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::core::WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            ),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             0,
             1,
             25,
-            &RetentionConfig::default(),
         )
         .await
         .expect("recovery pass");
@@ -1326,15 +1320,12 @@ mod tests {
         .expect("set the pending schema version");
         store_prior_attempts(&pool, task_id, 2, "SOURCE_VERSION_CONFLICT").await;
 
-        let summary = drive_phase2_recovery(
+        let summary = drive_phase2_recovery_with(
             &PostgresBroker::from_pool(pool.clone()),
-            &crate::core::WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            ),
+            ChildBuild::Client(&TestChildSpecs::empty()),
             0,
             1,
             3,
-            &RetentionConfig::default(),
         )
         .await
         .expect("recovery pass");
@@ -1922,15 +1913,12 @@ mod tests {
             .await
             .expect("age the phase-2 record");
 
-            let summary = drive_phase2_recovery(
+            let summary = drive_phase2_recovery_with(
                 &PostgresBroker::from_pool(pool.clone()),
-                &crate::core::WorkflowSpecRegistry::new(
-                    crate::core::registry::BuilderHookName::SPEC_BUILDER,
-                ),
+                ChildBuild::Client(&TestChildSpecs::empty()),
                 0,
                 1,
                 25,
-                &RetentionConfig::default(),
             )
             .await
             .expect("recovery pass");

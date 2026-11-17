@@ -1,8 +1,10 @@
 //! Test support of the library's tests: the test databases
 //! ([`database`]), the core handle on one of them, the terminal writes of
-//! seeds ([`terminal_writes`]), and the capture of the `tracing` events of a
-//! test ([`log_capture`]).
+//! seeds ([`terminal_writes`]), the capture of the `tracing` events of a
+//! test ([`log_capture`]), and the child spec source of the workflow tests
+//! ([`child_specs`]).
 
+pub(crate) mod child_specs;
 mod database;
 mod log_capture;
 pub(crate) mod terminal_writes;
