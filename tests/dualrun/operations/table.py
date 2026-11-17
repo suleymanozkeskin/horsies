@@ -86,6 +86,18 @@ class CoreOnlyTest:
     reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class ReferenceOnlyTest:
+    """An integration test that observes the Python reference of a switched
+    operation itself (it calls the reference, or counts the reference's
+    statements), so the core run trips on it. In the module's dual-run it
+    runs once, on the reference. ``node_id`` is the pytest id without
+    parameters."""
+
+    node_id: str
+    reason: str
+
+
 class TripwireHit(BaseException):
     """A run called the implementation of the other run: the rebinding missed
     a call path.
