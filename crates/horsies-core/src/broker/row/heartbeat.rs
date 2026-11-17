@@ -35,6 +35,12 @@ mod tests {
     const HEARTBEAT_COLUMNS: [&str; 6] =
         ["task_id", "role", "sent_at", "sender_id", "hostname", "pid"];
 
+    #[test]
+    fn a_heartbeat_row_is_debug_and_clone() {
+        fn assert_debug_clone<T: std::fmt::Debug + Clone>() {}
+        assert_debug_clone::<HeartbeatRow>();
+    }
+
     /// A heartbeat that the baseline table holds decodes into
     /// [`HeartbeatRow`], and the table has no column that the type leaves
     /// out. The database has the heartbeat leaves of the coverage pass, so

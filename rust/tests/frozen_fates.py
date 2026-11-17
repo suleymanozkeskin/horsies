@@ -5,25 +5,40 @@ its engine was deleted (#1404). `frozen-crate-test-fates.tsv` holds one row
 per test function of it: the file below `crates/horsies/`, the test as
 `module::name`, the fate and its detail.
 
-Fates:
-- KEPT: the tip has a test of the same name; the detail names it.
-- CHANGED: the tip has the test under another name, for the 0.8.0 rule; the
-  detail names it.
-- DELETED: the detail names the decision. A detail that holds NO_TWIN names
-  a test with no tip test of its name: the check by name lists these.
+Fates and their details:
+- KEPT: the tip has a test of the same name in `horsies-core` or the client;
+  the detail is `<crate> <module::name>`.
+- CHANGED: the tip has the test under another name, for the 0.8.0 rule
+  (`RENAMED`); the detail is as for KEPT.
+- COVERED: another tip test holds the same guarantee. The detail is one or
+  more test references joined by ` + `, then ` -- ` and a note when the form
+  of the guarantee changed. A test reference is `<repository path>::<name>`:
+  for a Rust file the test function, with the inline modules above it when
+  the name alone is not unique; for a Python file the pytest name
+  (`Class::test` or `test`).
+- PORTED: the test was ported into the tip; the detail is as for COVERED.
+- DELETED: the guarantee no longer exists. The detail is the reason, then
+  ` -- code: ` and one or more code references joined by ` + `: a
+  repository path, or `<repository path>::<text>` where the file holds the
+  text.
+
+A row whose detail holds `UNACCOUNTED` has no fate yet: `build` writes it
+for a frozen test with no tip test of its name and no recorded fate.
 
 Commands, from the repository root:
 - `python rust/tests/frozen_fates.py build`: write the list from the frozen
-  crate (read with `git` at FREEZE_COMMIT) and the tip tree.
+  crate (read with `git` at FREEZE_COMMIT) and the tip tree. A COVERED,
+  PORTED or DELETED row of the current list is kept as it is.
 - `python rust/tests/frozen_fates.py check`: check that each row has a known
-  fate and that each KEPT and CHANGED row names a test of the tip; print the
-  rows with no twin by name.
+  fate, that each test and code reference resolves in the tip, and that no
+  row is unaccounted.
 
 Exit status: 0 when the check passes, 1 with one line per problem.
 """
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import subprocess
@@ -40,14 +55,19 @@ REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 LIST_PATH: Final = REPO_ROOT / 'rust' / 'tests' / 'frozen-crate-test-fates.tsv'
 FROZEN_CRATE: Final = 'crates/horsies'
 TIP_CRATES: Final = (('horsies-core', 'crates/horsies-core'), ('horsies', 'crates/horsies'))
-NO_TWIN: Final = 'no tip test of this name'
+UNACCOUNTED: Final = 'UNACCOUNTED: no tip test of this name and no recorded fate'
+
+REFERENCE_JOIN: Final = ' + '
+NOTE_MARK: Final = ' -- '
+CODE_MARK: Final = ' -- code: '
 
 HEADER: Final = (
     '# One fate for every test function of the frozen crate crates/horsies at '
     f'{FREEZE_COMMIT[:10]} (#1754). Built and checked by rust/tests/frozen_fates.py.\n'
     '# fate: KEPT (detail: the tip test of the same name), CHANGED (detail: the tip test '
-    'under another name, for the 0.8.0 rule), DELETED (detail: the decision; "'
-    f'{NO_TWIN}" marks a test with no twin by name).\n'
+    'under another name, for the 0.8.0 rule), COVERED (detail: the tip tests that hold the '
+    'same guarantee, then a note), PORTED (detail: the ported tests), DELETED (detail: why '
+    'the guarantee no longer exists, then the code that shows it).\n'
     'file\ttest\tfate\tdetail\n'
 )
 
@@ -92,8 +112,9 @@ RENAMED: Final[dict[str, str]] = {
 }
 
 CLEAN_SLATE: Final = (
-    'clean-slate baseline: no cutover, transcode or upgrade of an older database '
-    '(decisions "Schema for 1.0" and "No shims in the clean slate", 2026-11-15)'
+    'clean-slate baseline: the schema is one baseline (migration 1000); a database of an '
+    'older horsies is refused, never cut over, transcoded, migrated or upgraded'
+    f'{CODE_MARK}crates/horsies-core/src/broker/migrations.rs::pub enum SchemaRefusal'
 )
 _CLEAN_SLATE_FILE: Final = re.compile(
     r'(cutover|transcode|migrations\.rs|terminalization_matrix/schema\.rs)'
@@ -106,6 +127,8 @@ _CLEAN_SLATE_NAME: Final = re.compile(
 class Fate(Enum):
     KEPT = 'KEPT'
     CHANGED = 'CHANGED'
+    COVERED = 'COVERED'
+    PORTED = 'PORTED'
     DELETED = 'DELETED'
 
 
@@ -141,6 +164,18 @@ class Row:
     detail: str
 
 
+def is_recorded(row: Row) -> bool:
+    """A fate that a person recorded, which `build` keeps: COVERED, PORTED,
+    or DELETED with its code."""
+    match row.fate:
+        case Fate.COVERED | Fate.PORTED:
+            return True
+        case Fate.DELETED:
+            return CODE_MARK in row.detail
+        case Fate.KEPT | Fate.CHANGED:
+            return False
+
+
 def _module_of(file: str) -> list[str]:
     match file.split('/'):
         case ['src', *rest]:
@@ -156,9 +191,9 @@ def _code(line: str) -> str:
     return _CHAR.sub("''", _STRING.sub('""', line)).split('//')[0]
 
 
-def _tests_of_file(file: str, text: str) -> list[TestFn]:
-    found: list[TestFn] = []
-    base = _module_of(file)
+def _inline_tests(text: str) -> list[tuple[list[str], str]]:
+    """Each test function of a Rust file: its inline modules and its name."""
+    found: list[tuple[list[str], str]] = []
     stack: list[tuple[str, int]] = []
     depth = 0
     after_attribute = False
@@ -168,8 +203,7 @@ def _tests_of_file(file: str, text: str) -> list[TestFn]:
             after_attribute = True
         function = _FN.match(line)
         if function is not None and after_attribute:
-            module = '::'.join(base + [name for name, _depth in stack])
-            found.append(TestFn(file=file, module=module, name=function.group(1)))
+            found.append(([name for name, _depth in stack], function.group(1)))
             after_attribute = False
         code = _code(line)
         if opened is not None:
@@ -178,6 +212,14 @@ def _tests_of_file(file: str, text: str) -> list[TestFn]:
         while stack and depth <= stack[-1][1]:
             stack.pop()
     return found
+
+
+def _tests_of_file(file: str, text: str) -> list[TestFn]:
+    base = _module_of(file)
+    return [
+        TestFn(file=file, module='::'.join(base + modules), name=name)
+        for modules, name in _inline_tests(text)
+    ]
 
 
 def tests_of_crate(crate_dir: Path) -> list[TestFn]:
@@ -230,63 +272,33 @@ def _twin(test: TestFn, index: dict[str, list[tuple[str, TestFn]]]) -> str | Non
     return f'{crate} {twin.path}'
 
 
-def _deleted_detail(test: TestFn) -> str:
-    match test.file.split('/'):
-        case _ if _CLEAN_SLATE_FILE.search(test.file) or _CLEAN_SLATE_NAME.search(test.name):
-            return CLEAN_SLATE
-        case (
-            ['src', 'core', 'app.rs']
-            | ['src', 'core', 'registry', 'workflow.rs']
-            | ['src', 'core', 'task', 'macros.rs']
-            | ['src', 'core', 'workflow', 'spec.rs' | 'node.rs' | 'sub_workflow.rs' | 'definition.rs']
-            | ['src', 'workflow_engine', 'query.rs']
-        ):
-            return (
-                'the typed API of the old Rust client left horsies-core (#1830, #1832, #1833, '
-                f'#1839); the pull request that removed the test names its covering test; {NO_TWIN}'
-            )
-        case ['src', 'task.rs' | 'lib.rs' | 'workflow.rs']:
-            return (
-                'the frozen facade API is replaced by the 0.8.0 client API (build plan 1.2 and '
-                f'its changelog list 2.16); {NO_TWIN}'
-            )
-        case ['src', 'worker', 'cli', *_]:
-            return (
-                'the frozen CLI is replaced by horsies::cli::run and the rewritten horsies '
-                f'binary (build plan 1.2); {NO_TWIN}'
-            )
-        case ['src', 'broker' | 'worker' | 'workflow_engine' | 'monitoring', *_]:
-            return f'deleted with the frozen engine; the core holds the newer engine (build plan 1.2); {NO_TWIN}'
-        case ['src', 'web', *_]:
-            return (
-                'the frozen axum server is replaced by the mount over the core handler '
-                f'(build plan 1.2); {NO_TWIN}'
-            )
-        case ['src', 'core', *_]:
-            return (
-                'deleted with the frozen copy of the shared types; the core copy is the newer '
-                f'code (build plan 1.2); {NO_TWIN}'
-            )
-        case _:
-            return f'deleted with the frozen crate (build plan 1.2); {NO_TWIN}'
+def _is_clean_slate(test: TestFn) -> bool:
+    return bool(_CLEAN_SLATE_FILE.search(test.file) or _CLEAN_SLATE_NAME.search(test.name))
 
 
-def build_rows() -> list[Row] | GitFailed:
+def build_rows(recorded: dict[tuple[str, str], Row]) -> list[Row] | GitFailed:
+    """The list from the frozen crate and the tip. A row of `recorded` (the
+    COVERED, PORTED and DELETED rows of the current list) is kept as it is."""
     frozen = _frozen_tests()
     if isinstance(frozen, GitFailed):
         return frozen
     index = _tip_index()
     rows: list[Row] = []
     for test in frozen:
+        kept = recorded.get((test.file, test.path))
         twin = _twin(test, index)
         renamed = RENAMED.get(test.name)
-        match (twin, renamed):
-            case (str() as found, _):
+        match (kept, twin, renamed):
+            case (Row() as row, _, _):
+                rows.append(row)
+            case (None, str() as found, _):
                 rows.append(Row(test.file, test.path, Fate.KEPT, found))
-            case (None, str() as other):
+            case (None, None, str() as other):
                 rows.append(Row(test.file, test.path, Fate.CHANGED, f'horsies-core {other}'))
-            case (None, None):
-                rows.append(Row(test.file, test.path, Fate.DELETED, _deleted_detail(test)))
+            case (None, None, None) if _is_clean_slate(test):
+                rows.append(Row(test.file, test.path, Fate.DELETED, CLEAN_SLATE))
+            case (None, None, None):
+                rows.append(Row(test.file, test.path, Fate.DELETED, UNACCOUNTED))
     return rows
 
 
@@ -310,22 +322,146 @@ def read_rows() -> tuple[list[Row], list[str]]:
     return rows, problems
 
 
+def _python_test_names(text: str) -> set[str]:
+    """The pytest names of a Python file: `test` and `Class::test`."""
+    names: set[str] = set()
+    for node in ast.parse(text).body:
+        match node:
+            case ast.FunctionDef(name=name) | ast.AsyncFunctionDef(name=name):
+                names.add(name)
+            case ast.ClassDef(name=class_name, body=body):
+                for member in body:
+                    match member:
+                        case ast.FunctionDef(name=name) | ast.AsyncFunctionDef(name=name):
+                            names.add(f'{class_name}::{name}')
+                        case _:
+                            pass
+            case _:
+                pass
+    return names
+
+
+def _rust_test_names(text: str) -> set[str]:
+    """The test names of a Rust file: each test function, alone and with
+    each run of the inline modules above it."""
+    names: set[str] = set()
+    for modules, name in _inline_tests(text):
+        for start in range(len(modules) + 1):
+            names.add('::'.join([*modules[start:], name]))
+    return names
+
+
+class _Sources:
+    """The tip files that the references read, each read once."""
+
+    def __init__(self) -> None:
+        self._texts: dict[str, str | None] = {}
+        self._tests: dict[str, set[str]] = {}
+
+    def text(self, path: str) -> str | None:
+        if path not in self._texts:
+            file = REPO_ROOT / path
+            self._texts[path] = file.read_text(encoding='utf-8') if file.is_file() else None
+        return self._texts[path]
+
+    def tests(self, path: str) -> set[str] | None:
+        text = self.text(path)
+        if text is None:
+            return None
+        if path not in self._tests:
+            match path.rsplit('.', 1)[-1]:
+                case 'py':
+                    self._tests[path] = _python_test_names(text)
+                case 'rs':
+                    self._tests[path] = _rust_test_names(text)
+                case _:
+                    self._tests[path] = set()
+        return self._tests[path]
+
+
+def _test_reference_problem(reference: str, sources: _Sources) -> str | None:
+    """Why `reference` (`<path>::<name>`) names no test of the tip, or None."""
+    path, separator, name = reference.partition('::')
+    if not separator or not name:
+        return f'{reference!r} is not <path>::<test>'
+    tests = sources.tests(path)
+    if tests is None:
+        return f'{path} is not a file of the tip'
+    if name not in tests:
+        return f'{path} holds no test {name}'
+    return None
+
+
+def _code_reference_problem(reference: str, sources: _Sources) -> str | None:
+    """Why `reference` (`<path>` or `<path>::<text>`) shows no code of the
+    tip, or None."""
+    path, separator, needle = reference.partition('::')
+    target = REPO_ROOT / path
+    if not separator:
+        return None if target.exists() else f'{path} is not in the tip'
+    text = sources.text(path)
+    if text is None:
+        return f'{path} is not a file of the tip'
+    if needle not in text:
+        return f'{path} does not hold {needle!r}'
+    return None
+
+
+def _detail_problems(row: Row, known: set[str], sources: _Sources) -> list[str]:
+    """The problems of the detail of `row`."""
+    match row.fate:
+        case _ if UNACCOUNTED in row.detail:
+            return ['no fate: give it COVERED, PORTED or DELETED']
+        case Fate.KEPT | Fate.CHANGED:
+            match row.detail in known:
+                case True:
+                    return []
+                case False:
+                    return [f'names {row.detail!r}, which the tip does not hold']
+        case Fate.COVERED | Fate.PORTED:
+            references, _mark, _note = row.detail.partition(NOTE_MARK)
+            return [
+                problem
+                for reference in references.split(REFERENCE_JOIN)
+                for problem in [_test_reference_problem(reference.strip(), sources)]
+                if problem is not None
+            ]
+        case Fate.DELETED:
+            reason, mark, cites = row.detail.partition(CODE_MARK)
+            if not mark or not reason.strip() or not cites.strip():
+                return ['a DELETED detail is <reason> -- code: <code reference>']
+            return [
+                problem
+                for cite in cites.split(REFERENCE_JOIN)
+                for problem in [_code_reference_problem(cite.strip(), sources)]
+                if problem is not None
+            ]
+
+
 def check_rows(rows: list[Row]) -> list[str]:
-    """The rows whose KEPT or CHANGED detail names no test of the tip."""
+    """One line per row whose fate is not accounted for, or whose detail
+    names a test or code that the tip does not hold."""
     known: set[str] = set()
     for crate, folder in TIP_CRATES:
         known.update(f'{crate} {test.path}' for test in tests_of_crate(REPO_ROOT / folder))
+    sources = _Sources()
     return [
-        f'{row.file} {row.test}: {row.fate.value} names {row.detail!r}, which the tip does not hold'
+        f'{row.file} {row.test}: {row.fate.value}: {problem}'
         for row in rows
-        if row.fate in (Fate.KEPT, Fate.CHANGED) and row.detail not in known
+        for problem in _detail_problems(row, known, sources)
     ]
 
 
 def main(arguments: list[str]) -> int:
     match arguments:
         case ['build']:
-            built = build_rows()
+            current, problems = read_rows()
+            if problems:
+                for problem in problems:
+                    print(problem, file=sys.stderr)
+                return 1
+            recorded = {(row.file, row.test): row for row in current if is_recorded(row)}
+            built = build_rows(recorded)
             if isinstance(built, GitFailed):
                 print(f'{built.step} of {FREEZE_COMMIT} failed: {built.output}', file=sys.stderr)
                 return 1
@@ -337,10 +473,10 @@ def main(arguments: list[str]) -> int:
         case ['check']:
             rows, problems = read_rows()
             problems.extend(check_rows(rows))
-            no_twin = [row for row in rows if NO_TWIN in row.detail]
-            for row in no_twin:
-                print(f'no twin: {row.file} {row.test}')
-            print(f'{len(rows)} rows, {len(no_twin)} with no twin by name')
+            counts = {fate: sum(1 for row in rows if row.fate is fate) for fate in Fate}
+            print(f'{len(rows)} rows: ' + ', '.join(
+                f'{fate.value} {count}' for fate, count in counts.items()
+            ))
             for problem in problems:
                 print(problem, file=sys.stderr)
             return 1 if problems else 0
