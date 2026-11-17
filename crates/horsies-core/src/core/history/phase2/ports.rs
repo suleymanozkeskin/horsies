@@ -13,9 +13,9 @@ use uuid::Uuid;
 
 use super::consumption::{consume_phase2, Phase2DispositionKind};
 use super::quarantine::{quarantine_one, QuarantineVerdict};
-use crate::broker::terminalization::terminalize_in_tx;
 use crate::core::history::errors::HistoryError;
-use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
+use crate::core::lifecycle::TerminalizationOutcome;
+use crate::test_support::terminal_writes::{self, TerminalFailure};
 
 const PORT_WORKER: &str = "port-phase2-worker";
 const CLASS_KEY: &str = "standard_30d";
@@ -138,17 +138,15 @@ async fn seed_pending(
         evidence.task_id,
     )
     .await;
-    let outcomes = terminalize_in_tx(
-        transaction,
-        &TerminalizationCommand::FailLockedTask {
-            task_id: evidence.task_id,
-            fence: PriorLockedRead {
-                worker_id: PORT_WORKER.to_owned(),
-            },
-            result_json: "{\"Err\":{}}".to_owned(),
-            error_code: Some("TASK_ERROR".to_owned()),
-            failed_reason: Some("port phase-2 failure".to_owned()),
-        },
+    let outcomes = terminal_writes::fail_running_task(
+        transaction.as_mut(),
+        evidence.task_id,
+        PORT_WORKER,
+        &TerminalFailure::of_task(
+            "{\"Err\":{}}",
+            Some("TASK_ERROR"),
+            Some("port phase-2 failure"),
+        ),
     )
     .await
     .expect("fail the workflow task");
