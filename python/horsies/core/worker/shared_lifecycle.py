@@ -9,9 +9,8 @@ that an isolated child makes in ``child_runner``:
   the stop of a workflow task, a lost claim), through the awaitable methods
   of the core handle of the child (``CoreChildHandle``), with the bound of
   one start attempt in the core;
-- the finalizing marker after the task body, with the SQL text of
-  ``child_runner`` on a psycopg ``AsyncConnectionPool`` that the child opens
-  on its loop. The pool is in autocommit (``child_pool``).
+- the finalizing marker after the task body, through the awaitable
+  ``CoreChildHandle.mark_finalizing_async``.
 
 Each function mirrors the sync function of the same name in ``child_runner``,
 and the records of the core read the same way (``expired_before_start_of``,
@@ -29,42 +28,34 @@ import socket
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Final, assert_never
-
-from psycopg import AsyncConnection
-from psycopg_pool import AsyncConnectionPool
+from typing import Final, assert_never
 
 import horsies._core as core
 from horsies._core import CoreChildHandle, CoreError
 from horsies.core.lifecycle.core_records import task_row_end_of
 from horsies.core.logging import get_logger
 from horsies.core.types.core_failure import CoreOperationFailed
-from horsies.core.worker.child_pool import (
-    SHARED_POOL_CONNECTION_WAIT_S,
-    _get_child_core_handle,
-)
+from horsies.core.worker.child_pool import _get_child_core_handle
 from horsies.core.worker.child_runner import (
-    MARK_FINALIZING_SQL,
+    CANCELLED_WRITE_END_S as CANCELLED_WRITE_END_S,
+    FINALIZING_MARKER_TIMEOUT_S as FINALIZING_MARKER_TIMEOUT_S,
     _PRE_START_CONFIRM_ATTEMPTS,
-    FinalizingMark,
     StartMissReason,
     _claim_lost,
     _start_unconfirmed,
     _WorkflowResumedBeforeStart,
     attempt_elapsed_ms,
     expired_before_start_of,
-    mark_finalizing_params,
-    read_finalizing_mark,
+    log_finalizing_record,
     stopped_before_start_of,
 )
 from horsies.core.worker.run_return import StoppedBeforeRunning
 
 logger = get_logger('worker')
 
-FINALIZING_MARKER_TIMEOUT_S: Final = 10.0
-"""The longest time a seat waits to write the finalizing marker. The marker
-is best effort: past this time the seat logs and reports its end, and the
-runner heartbeat of the task ends when the parent reads that end."""
+CHILD_WRITE_CHECKOUT_WAIT_S: Final = 30.0
+"""The longest wait of one write of the core handle for a pooled connection
+(the core's ``CHILD_WRITE_CHECKOUT_WAIT``)."""
 
 RUNNING_STATEMENTS_TIMEOUT_S: Final = 10.0
 """The longest run of one statement of an attempt of the RUNNING transition
@@ -72,7 +63,7 @@ before the core sends its cancel request: the start and, when it missed,
 the statement of its miss path (the core's ``CHILD_STATEMENT_BOUND``)."""
 
 RUNNING_ATTEMPT_TIMEOUT_S: Final = (
-    SHARED_POOL_CONNECTION_WAIT_S + RUNNING_STATEMENTS_TIMEOUT_S
+    CHILD_WRITE_CHECKOUT_WAIT_S + RUNNING_STATEMENTS_TIMEOUT_S
 )
 """The bound of one attempt of the RUNNING transition: the wait for a pooled
 connection and the statements (the core's ``START_ATTEMPT_BOUND``). The
@@ -80,13 +71,6 @@ core ends each write of the attempt by it, and a statement past it gets a
 cancel request, so the start does not commit after the bound. A seat also
 ends its wait for the attempt here; past it the attempt ends with
 ``OWNERSHIP_UNCONFIRMED``."""
-
-CANCELLED_WRITE_END_S: Final = 10.0
-"""The longest time that a statement which a bound cancelled takes to end:
-the core sends the cancel request within 5 s and waits 5 s for the reply
-(the core's ``CANCELLED_WRITE_END``). The finalizing marker of this module
-takes the same time: psycopg asks the server to cancel the statement and
-waits for the reply."""
 
 _EXPIRE_BEFORE_START_SUBJECT: Final = 'CoreChildHandle.expire_owned_claim_async'
 """The subject of a failed expiry of the miss path."""
@@ -277,36 +261,34 @@ async def confirm_until_not_resumed(
 
 
 async def mark_task_finalizing(
-    pool: AsyncConnectionPool[AsyncConnection[Any]],
-    task_id: str,
+    task_id: uuid.UUID,
     worker_id: str,
     claimed_at: datetime,
 ) -> None:
     """Mark the row of a task whose body ended as waiting for the parent.
 
-    Same contract as ``_mark_task_finalizing`` in ``child_runner``, bounded
-    by ``FINALIZING_MARKER_TIMEOUT_S``. A failed or late write is logged
-    only. A cancel of the calling task propagates.
+    Same contract as ``mark_run_finalizing`` in ``child_runner``, through
+    ``CoreChildHandle.mark_finalizing_async``. The core bounds the write by
+    ``FINALIZING_MARKER_TIMEOUT_S``; the wait of the seat ends at that bound
+    too, also when the core call does not answer. A failed or late write is
+    logged only. A cancel of the calling task propagates.
     """
     try:
         async with asyncio.timeout(FINALIZING_MARKER_TIMEOUT_S):
-            async with pool.connection() as conn:
-                # One statement on an autocommit connection: committed when
-                # it returns.
-                cursor = conn.cursor()
-                await cursor.execute(
-                    MARK_FINALIZING_SQL,
-                    mark_finalizing_params(task_id, worker_id, claimed_at),
-                )
-                row = await cursor.fetchone()
-    except Exception as exc:
+            record = await _get_child_core_handle().mark_finalizing_async(
+                task_id,
+                worker_id=worker_id,
+                claimed_at=claimed_at,
+            )
+    except TimeoutError:
+        logger.warning(
+            'Failed to mark task %s finalizing: the marker did not finish '
+            'within %ss',
+            task_id,
+            FINALIZING_MARKER_TIMEOUT_S,
+        )
+        return
+    except CoreError as exc:
         logger.warning('Failed to mark task %s finalizing: %s', task_id, exc)
         return
-    match read_finalizing_mark(row, task_id):
-        case FinalizingMark.MARKED:
-            pass
-        case FinalizingMark.NOT_HELD:
-            logger.debug(
-                'Finalizing marker for task %s skipped: the claim changed',
-                task_id,
-            )
+    log_finalizing_record(record)

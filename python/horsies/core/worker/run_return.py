@@ -3,7 +3,8 @@
 Every kind of child uses these: an isolated child (``child_runner``), a seat
 of a shared async child, and a seat of a shared thread child. The end of a
 run writes the finalizing marker only after a ``SetRunning`` run, and only
-when the run has ended. This module is pure.
+when the run has ended, through the core handle of the child
+(``child_runner.mark_run_finalizing``). This module is pure.
 """
 
 from __future__ import annotations
@@ -60,22 +61,3 @@ class StoppedBeforeRunning:
 
 type RunReturn = SetRunning | StoppedBeforeRunning
 """What the run of one task returned."""
-
-
-@dataclass(frozen=True, slots=True)
-class MarkerAtReturn:
-    """The isolated run left no asyncio task on its task loop: its marker
-    follows the return at once. The deadline of the task bounds the run
-    until its result frame."""
-
-
-@dataclass(frozen=True, slots=True)
-class MarkerAfterLeftWork:
-    """The work that the isolated run left on its task loop ended: its
-    marker follows that end. The deadline of the task no longer applies, so
-    the marker has the bounds of the core handle of the child, within the
-    backstop of the parent."""
-
-
-type IsolatedMarkerWindow = MarkerAtReturn | MarkerAfterLeftWork
-"""When the finalizing marker of an isolated run is written."""

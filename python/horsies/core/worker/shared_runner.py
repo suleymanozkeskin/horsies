@@ -1,13 +1,14 @@
 """The seat program of a shared async child: its start, and one task run.
 
 ``PostgresSeatProgram.start`` runs on the task loop of the child, after the
-sync boot (the app import and the ``on_child_process_start`` hooks): it opens
-the async connection pool of the child, then runs the
-``on_shared_async_child_start`` hooks, each bounded. ``PostgresSeats.run``
-runs one task as a coroutine on that loop: the RUNNING transition and the
-task body. ``PostgresSeats.mark_finalizing`` writes the finalizing marker,
-which the seat loop asks for at the end of the run. Every write goes through
-the async pool (``shared_lifecycle``), so no write blocks the loop.
+sync boot (the app import, the ``on_child_process_start`` hooks and the core
+handle of the child): it runs the ``on_shared_async_child_start`` hooks,
+each bounded. ``PostgresSeats.run`` runs one task as a coroutine on that
+loop: the RUNNING transition and the task body.
+``PostgresSeats.mark_finalizing`` writes the finalizing marker, which the
+seat loop asks for at the end of the run. Every write goes through the
+awaitable methods of the core handle (``shared_lifecycle``), so no write
+blocks the loop.
 """
 
 # pyright: reportPrivateUsage=false
@@ -17,10 +18,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Callable, Coroutine
-from typing import Any, Final, assert_never
-
-from psycopg import AsyncConnection
-from psycopg_pool import AsyncConnectionPool
+from typing import Any, assert_never
 
 from horsies import _core as core
 from horsies.core.logging import get_logger
@@ -29,7 +27,6 @@ from horsies.core.models.boot_failure import (
     ThreadStartRefusedError,
 )
 from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_main import (
@@ -37,7 +34,6 @@ from horsies.core.worker.child_main import (
     flush_output,
 )
 from horsies.core.worker.child_frames import BootFailedFrame, stored_refusal_of
-from horsies.core.worker.child_pool import marker_pool_url, open_shared_async_pool
 from horsies.core.worker import child_runner
 from horsies.core.worker.child_runner import (
     CHILD_HOOK_FAILURE_EXIT_CODE,
@@ -50,9 +46,6 @@ from horsies.core.worker.child_runner import (
 )
 from horsies.core.worker.current import get_current_app
 from horsies.core.worker.shared_child import (
-    MarkerBeforeDeadline,
-    MarkerWindow,
-    MarkerWithoutDeadline,
     SeatReturn,
     SetRunning,
     StartedSeats,
@@ -66,17 +59,9 @@ from horsies.core.worker.shared_lifecycle import (
 
 logger = get_logger('worker')
 
-SHARED_POOL_CLOSE_TIMEOUT_S: Final = 1.0
-"""The longest wait for the async pool to close at the stop. With the loop
-close and the writer drain it stays under the 10 s that the parent gives a
-child after its stop frame."""
-
 
 class PostgresSeats:
-    """The seats of a started shared async child, with its async pool."""
-
-    def __init__(self, pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
-        self._pool = pool
+    """The seats of a started shared async child."""
 
     async def run(self, frame: core.SharedRunFrame) -> SeatReturn:
         """Run the task of ``frame``. The same steps and outcomes as
@@ -84,56 +69,27 @@ class PostgresSeats:
         handle of the child."""
         return await run_seat_task(frame)
 
-    async def mark_finalizing(
-        self, frame: core.SharedRunFrame, window: MarkerWindow
-    ) -> None:
+    async def mark_finalizing(self, frame: core.SharedRunFrame) -> None:
         """Write the finalizing marker of the run of ``frame``
         (``mark_seat_finalizing``)."""
-        await mark_seat_finalizing(self._pool, frame, window)
-
-    async def stop(self) -> None:
-        """Close the async pool, bounded by ``SHARED_POOL_CLOSE_TIMEOUT_S``.
-        A failed close is logged: the process exits next."""
-        try:
-            await self._pool.close(timeout=SHARED_POOL_CLOSE_TIMEOUT_S)
-        except Exception as exc:
-            logger.warning('Closing the async pool of the child failed: %s', exc)
+        await mark_seat_finalizing(frame)
 
 
 class PostgresSeatProgram:
     """The seat program of a worker's shared async child."""
 
-    async def start(
-        self,
-        init: core.InitFrame,
-        pool: ResolvedPool,
-    ) -> Result[StartedSeats, BootFailedFrame]:
-        """Open the async pool of the finalizing marker with the bounds of
-        ``pool``, on the database URL and the connection settings of the
-        app's broker config (the source of the parent's own), then run the
-        async start hooks. ``init`` is the init frame of the child.
+    async def start(self) -> Result[StartedSeats, BootFailedFrame]:
+        """Run the async start hooks of the app.
 
-        ``Err``: the pool could not be set up (``ChildPoolSetupFailed``, or a
-        ``ResourceShortage`` for an errno that can clear), or the OS refused
-        the watchdog of a hook (``ThreadStartRefused``). A hook that fails or
-        hangs ends the process with ``CHILD_HOOK_FAILURE_EXIT_CODE``.
+        ``Err``: the OS refused the watchdog of a hook
+        (``ThreadStartRefused``). A hook that fails or hangs ends the
+        process with ``CHILD_HOOK_FAILURE_EXIT_CODE``.
         """
-        broker = get_current_app().config.broker
-        try:
-            async_pool = await open_shared_async_pool(
-                marker_pool_url(broker),
-                connect_kwargs=broker.pooled_connect_args,
-                min_size=pool.min_size,
-                max_size=pool.max_size,
-                check_on_checkout=pool.check,
-            )
-        except Exception as exc:
-            return Err(boot_failure_from_exception(exc, ChildPoolSetupFailed()))
         try:
             await run_shared_async_start_hooks()
         except ThreadStartRefusedError as exc:
             return Err(boot_failure_from_exception(exc, ChildPoolSetupFailed()))
-        return Ok(PostgresSeats(async_pool))
+        return Ok(PostgresSeats())
 
 
 async def run_shared_async_start_hooks() -> None:
@@ -311,42 +267,11 @@ async def _run_after_running(frame: core.SharedRunFrame) -> ResultEnvelope:
         return _task_exception_response(frame.task_name, e)
 
 
-async def mark_seat_finalizing(
-    pool: AsyncConnectionPool[AsyncConnection[Any]],
-    frame: core.SharedRunFrame,
-    window: MarkerWindow,
-) -> None:
-    """Write the finalizing marker of a run that ended, within ``window``.
-
-    ``mark_task_finalizing`` bounds the write by
-    ``FINALIZING_MARKER_TIMEOUT_S``; ``MarkerBeforeDeadline`` bounds it as
-    well by the time left before the deadline of the run. A write cut at
-    that bound is logged and skipped: the marker is best effort, and the
-    end of the run follows at once. Nothing escapes but a cancel of the
-    calling task.
+async def mark_seat_finalizing(frame: core.SharedRunFrame) -> None:
+    """Write the finalizing marker of a run that ended
+    (``shared_lifecycle.mark_task_finalizing``): within the bound of the
+    core, ``FINALIZING_MARKER_TIMEOUT_S``. A failed or late write is logged
+    only: the marker is best effort, and the end of the run follows at
+    once. Nothing escapes but a cancel of the calling task.
     """
-    match window:
-        case MarkerWithoutDeadline():
-            await mark_task_finalizing(
-                pool,
-                str(frame.task_id),
-                frame.worker_id,
-                frame.claimed_at,
-            )
-        case MarkerBeforeDeadline(seconds=seconds):
-            try:
-                async with asyncio.timeout(seconds):
-                    await mark_task_finalizing(
-                        pool,
-                        str(frame.task_id),
-                        frame.worker_id,
-                        frame.claimed_at,
-                    )
-            except TimeoutError:
-                logger.warning(
-                    'Finalizing marker of task %s skipped: it did not end '
-                    'before the deadline of the task',
-                    frame.task_id,
-                )
-        case _ as unreachable:
-            assert_never(unreachable)
+    await mark_task_finalizing(frame.task_id, frame.worker_id, frame.claimed_at)

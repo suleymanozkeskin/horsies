@@ -1,14 +1,13 @@
 """The seat program of a shared thread child: one task run on a seat thread.
 
 A shared thread child boots as an isolated child does (``child_main.boot_app``):
-the app import, the ``on_child_process_start`` hooks, and the sync connection
-pool of the finalizing marker, with the bounds of ``SharedThreadChildren.pool``
-(the pool of the child kind in the init frame).
-Every seat thread writes through that pool, and waits for a connection at
-most ``CHILD_POOL_CONNECTION_WAIT_S``. ``run_thread_seat_task`` runs one task
-on the calling seat thread: the RUNNING transition and the task body, with
-the sync writes of ``child_runner``. ``mark_thread_seat_finalizing`` writes
-the finalizing marker after the return, when the run table asks for it.
+the app import, the ``on_child_process_start`` hooks, and the core handle of
+the child, with the pool of the child kind in the init frame
+(``SharedThreadChildren.pool``). Every seat thread writes through that
+handle. ``run_thread_seat_task`` runs one task on the calling seat thread:
+the RUNNING transition and the task body, with the sync writes of
+``child_runner``. ``mark_thread_seat_finalizing`` writes the finalizing
+marker after the return, when the run table asks for it.
 """
 
 # pyright: reportPrivateUsage=false
@@ -24,41 +23,30 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.worker.child_frames import ThreadSeatWork, stored_refusal_of
 from horsies.core.worker.run_return import ResultEnvelope
 from horsies.core.worker.shared_child import (
-    MarkerBeforeDeadline,
-    MarkerWindow,
-    MarkerWithoutDeadline,
     SetRunning,
     StoppedBeforeRunning,
 )
 from horsies.core.worker.thread_child import ThreadSeatReturn
-from horsies.core.worker.child_pool import CHILD_POOL_CONNECTION_WAIT_S
 from horsies.core.worker.child_runner import (
-    CANCEL_REQUEST_TIMEOUT_S,
-    _PRE_START_CONFIRM_ATTEMPTS,
     DeadlineBeforeStart,
     StartCheck,
-    StatementsBound,
-    StatementsLimit,
-    StatementsUnbounded,
     OnSharedThreadSeat,
     _confirm_until_not_resumed,
     _encode_task_outcome,
-    _mark_task_finalizing,
     _prepare_task_call,
     _PreparedCall,
     _stored_timeout_refusal_response,
     _task_exception_response,
+    mark_run_finalizing,
 )
-from horsies.core.worker.shared_lifecycle import (
-    CANCELLED_WRITE_END_S,
-    RUNNING_ATTEMPT_TIMEOUT_S,
-)
+from horsies.core.worker.shared_lifecycle import REFUSAL_WRITES_BOUND_S
 
 logger = get_logger('worker')
 
 
 class PostgresThreadSeats:
-    """The seats of a worker's shared thread child, on its sync pool."""
+    """The seats of a worker's shared thread child, on the core handle of
+    the child."""
 
     def run(
         self,
@@ -70,10 +58,10 @@ class PostgresThreadSeats:
         ``run_thread_seat_task``."""
         return run_thread_seat_task(frame, work, start_check)
 
-    def mark_finalizing(self, frame: core.SharedRunFrame, window: MarkerWindow) -> None:
+    def mark_finalizing(self, frame: core.SharedRunFrame) -> None:
         """Write the finalizing marker of the run of ``frame``; see
         ``mark_thread_seat_finalizing``."""
-        mark_thread_seat_finalizing(frame, window)
+        mark_thread_seat_finalizing(frame)
 
 
 type _TaskCall = (
@@ -101,40 +89,11 @@ def _thread_call_result(
             )
 
 
-REFUSAL_STATEMENTS_TIMEOUT_S: Final = 10.0
-"""The longest time that the statement of the finalizing marker of a
-refusal on a shared thread child takes once the marker holds its
-connection. The RUNNING transition runs through the core handle of the
-child, with the bound of one start attempt in the core
-(``shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S``)."""
-
-THREAD_REFUSAL_WRITES_BOUND_S: Final = _PRE_START_CONFIRM_ATTEMPTS * (
-    RUNNING_ATTEMPT_TIMEOUT_S + CANCELLED_WRITE_END_S
-) + (
-    CHILD_POOL_CONNECTION_WAIT_S
-    + REFUSAL_STATEMENTS_TIMEOUT_S
-    + CANCEL_REQUEST_TIMEOUT_S
-)
+THREAD_REFUSAL_WRITES_BOUND_S: Final = REFUSAL_WRITES_BOUND_S
 """The longest time that the writes of a refusal take on a shared thread
-child: each attempt of the RUNNING transition, with the end of a statement
-that the core cancelled at its bound, and the finalizing marker, with the
-wait for a pooled connection, its statement, and the cancel request of a
-statement past its bound. The refusal backstop of the parent
-(``slots.SHARED_REFUSAL_BACKSTOP_S``) comes after it."""
-
-
-def _statements_of(work: ThreadSeatWork) -> StatementsLimit:
-    """The bound of the statement of the finalizing marker of a run: a
-    refusal's marker is bounded, so that the refusal backstop of the parent
-    never meets a database that does not answer; a task keeps the wait of its
-    deadline backstop."""
-    match work:
-        case core.StoredOptionsRefused():
-            return StatementsBound(REFUSAL_STATEMENTS_TIMEOUT_S)
-        case core.ThreadTaskWork():
-            return StatementsUnbounded()
-        case _ as unreachable:
-            assert_never(unreachable)
+child: the writes of a shared async child (``REFUSAL_WRITES_BOUND_S``),
+through the same core handle with the same bounds. The refusal backstop of
+the parent (``slots.SHARED_REFUSAL_BACKSTOP_S``) comes after it."""
 
 
 def run_thread_seat_task(
@@ -211,47 +170,10 @@ def _run_after_running(frame: core.SharedRunFrame, work: ThreadSeatWork) -> Resu
         return _task_exception_response(frame.task_name, e)
 
 
-def _refusal_or_task_statements(frame: core.SharedRunFrame) -> StatementsLimit:
-    """The bound of the statements of the writes of the run of ``frame``,
-    as ``_statements_of``. A frame of a shared async run on a thread seat is
-    a defect: ``AssertionError``."""
-    match frame.work:
-        case core.StoredOptionsRefused() | core.ThreadTaskWork() as work:
-            return _statements_of(work)
-        case core.AsyncTaskWork():
-            raise AssertionError(
-                f'run {frame.dispatch} of a shared async child reached a thread seat',
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-def mark_thread_seat_finalizing(frame: core.SharedRunFrame, window: MarkerWindow) -> None:
-    """Write the finalizing marker of a run whose task returned, within
-    ``window``, on the sync pool of the child.
-
-    ``MarkerBeforeDeadline`` bounds the wait for a pooled connection by the
-    time left before the deadline of the run; ``MarkerWithoutDeadline``
-    keeps the wait of the pool (``CHILD_POOL_CONNECTION_WAIT_S``). A write
-    that gets no connection in time is logged and skipped
-    (``_mark_task_finalizing``). The statement of a task is not cut: a
-    database that holds it delays the end report of the run. The statement
-    of a refusal is bounded (``_statements_of``).
+def mark_thread_seat_finalizing(frame: core.SharedRunFrame) -> None:
+    """Write the finalizing marker of a run whose task returned, through the
+    core handle of the child, on the calling seat thread
+    (``child_runner.mark_run_finalizing``): within the bound of the core.
+    A failed or skipped write is logged only.
     """
-    match window:
-        case MarkerWithoutDeadline():
-            _mark_task_finalizing(
-                str(frame.task_id),
-                frame.worker_id,
-                frame.claimed_at,
-                statements=_refusal_or_task_statements(frame),
-            )
-        case MarkerBeforeDeadline(seconds=seconds):
-            _mark_task_finalizing(
-                str(frame.task_id),
-                frame.worker_id,
-                frame.claimed_at,
-                connection_wait_s=seconds,
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
+    mark_run_finalizing(frame.task_id, frame.worker_id, frame.claimed_at)

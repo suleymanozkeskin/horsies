@@ -42,12 +42,13 @@ whatever happens to that work:
 One log line names the work that each such run left, and how it ended: within
 the grace, after a cancel, or stuck.
 
-A run that set its row RUNNING and ended without a cancel writes its
-finalizing marker at its end, after its coroutine and its marked work, and
-the child reports the end after the marker. The marker never holds a run past
-its deadline. Until the worker reads the end, its runner heartbeats cover the
-row. A run that timed out or needed a cancel reports its end at once, with no
-marker (``_marker_window``).
+A run that set its row RUNNING and ended without a cancel, before its
+deadline, writes its finalizing marker at its end, after its coroutine and
+its marked work, and the child reports the end after the marker. The marker
+has the bound of the core handle of the child. Until the worker reads the
+end, its runner heartbeats cover the row. A run that timed out, needed a
+cancel or ended after its deadline reports its end at once, with no marker
+(``_marker_at_end``).
 
 A ``LoopWatchdog`` thread reports a loop that has not turned for the block
 limit (``LoopBlockedFrame``); the parent kills the child at once.
@@ -109,8 +110,6 @@ from horsies.core.worker.child_frames import (
     SharedResultFrame,
     boot_failed_frame,
 )
-from horsies.core.models.worker_profile import ResolvedPool
-from horsies.core.worker.child_pool import pool_of
 from horsies.core.worker.loop_watchdog import LoopWatchdog
 from horsies.core.worker.run_return import (
     ResultEnvelope,
@@ -161,21 +160,9 @@ type SeatReturn = SetRunning | StoppedBeforeRunning
 
 
 @dataclass(frozen=True, slots=True)
-class MarkerBeforeDeadline:
-    """The finalizing marker of a run must end within ``seconds``: the time
-    left before the deadline of the run."""
-
-    seconds: float
-
-
-@dataclass(frozen=True, slots=True)
-class MarkerWithoutDeadline:
-    """The run has no deadline (a refusal): the marker has only the bound of
-    the seat program."""
-
-
-type MarkerWindow = MarkerBeforeDeadline | MarkerWithoutDeadline
-"""The time that the end report of a run may wait for its finalizing marker."""
+class MarkerDue:
+    """The end report of a run waits for its finalizing marker, which has the
+    bound of the core handle of the child."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,29 +183,18 @@ class StartedSeats(Protocol):
         """
         ...
 
-    async def mark_finalizing(
-        self, frame: core.SharedRunFrame, window: MarkerWindow
-    ) -> None:
-        """Write the finalizing marker of the run of ``frame``, which ended,
-        within ``window``. A failed, skipped or late write is logged only:
-        nothing escapes. Runs as a task with no run mark."""
-        ...
-
-    async def stop(self) -> None:
-        """Release what ``start`` opened, bounded. Runs after the last task."""
+    async def mark_finalizing(self, frame: core.SharedRunFrame) -> None:
+        """Write the finalizing marker of the run of ``frame``, which ended.
+        A failed, skipped or late write is logged only: nothing escapes.
+        Runs as a task with no run mark."""
         ...
 
 
 class SeatProgram(Protocol):
     """How a shared async child starts its seats, on its task loop."""
 
-    async def start(
-        self,
-        init: core.InitFrame,
-        pool: ResolvedPool,
-    ) -> Result[StartedSeats, BootFailedFrame]:
+    async def start(self) -> Result[StartedSeats, BootFailedFrame]:
         """Run the start steps on the task loop, before the ready frame.
-        ``pool`` is the connection pool of the child.
 
         ``Err``: the boot fails with this frame. A start hook that fails
         ends the process itself, as at the sync boot.
@@ -887,7 +863,7 @@ class SeatLoop:
         Drop the records of the run, and log how the work that it left after
         its return ended; a stuck report logged it already. Then report the
         end, after the finalizing marker when one is due
-        (``_marker_window``). The run keeps its seat while its marker is in
+        (``_marker_at_end``). The run keeps its seat while its marker is in
         flight."""
         _cancel_timer(seat)
         self._marked.close(seat.mark)
@@ -903,30 +879,27 @@ class SeatLoop:
             case _ as unreachable:
                 assert_never(unreachable)
         end = _end_of(seat)
-        match end, _marker_window(seat, self._loop.time()):
+        match end, _marker_at_end(seat, self._loop.time()):
             case _, NoMarker():
                 self._send_end(dispatch, seat, end)
-            case ResultEnvelope() | StoppedBeforeRunning() as finished, (
-                MarkerBeforeDeadline()
-                | MarkerWithoutDeadline() as window
-            ):
+            case ResultEnvelope() | StoppedBeforeRunning() as finished, MarkerDue():
                 seat.stop = _Finalizing(finished)
-                self._start_marker(dispatch, seat, window)
-            case SeatTimedOut(), _:
+                self._start_marker(dispatch, seat)
+            case SeatTimedOut(), MarkerDue():
                 raise AssertionError(
-                    f'run {dispatch} timed out and has a marker window',
+                    f'run {dispatch} timed out and has a marker due',
                 )
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def _start_marker(self, dispatch: int, seat: _Seat, window: MarkerWindow) -> None:
+    def _start_marker(self, dispatch: int, seat: _Seat) -> None:
         """Write the finalizing marker of run ``dispatch`` in a task with no
         run mark, so the cancel rounds and the end checks of runs never see
         it. ``_marker_done`` reports the end."""
         context = contextvars.copy_context()
         _ = context.run(RUN_MARK.set, UNMARKED)
         marker = self._loop.create_task(
-            seat.program.mark_finalizing(seat.frame, window),
+            seat.program.mark_finalizing(seat.frame),
             name=f'horsies-marker-{dispatch}',
             context=context,
         )
@@ -1080,9 +1053,9 @@ def _returned_result(seat: _Seat) -> ResultEnvelope:
             assert_never(unreachable)
 
 
-def _marker_window(seat: _Seat, now: float) -> MarkerWindow | NoMarker:
+def _marker_at_end(seat: _Seat, now: float) -> MarkerDue | NoMarker:
     """Whether the end report of a run that ended waits for its finalizing
-    marker, and for how long. ``now`` is the time on the clock of the loop.
+    marker. ``now`` is the time on the clock of the loop.
 
     The marker tells the reaper and the runner heartbeat that the attempt
     ended and waits for the worker: the beats of the row stop, and stale
@@ -1091,10 +1064,11 @@ def _marker_window(seat: _Seat, now: float) -> MarkerWindow | NoMarker:
     work, so the beats cover all work of the attempt. A run writes it only
     when it set its row RUNNING and ended without a cancel: its coroutine
     returned before its deadline, or it had none, and the work that it left
-    ended within the cancel grace. The marker never holds a run past its
-    deadline. A run that timed out or needed a cancel reports its end at
-    once: the worker writes its outcome after the read, as at a kill, while
-    its beats cover the row until then.
+    ended within the cancel grace, before the deadline. The marker has the
+    bound of the core handle, ``FINALIZING_MARKER_TIMEOUT_S``. A run that
+    timed out, needed a cancel or ended after its deadline reports its end
+    at once: the worker writes its outcome after the read, as at a kill,
+    while its beats cover the row until then.
     """
     match seat.stop:
         case _Stop.NO_DEADLINE | _Stop.BEFORE_DEADLINE | _LeftoverGrace():
@@ -1117,9 +1091,9 @@ def _marker_window(seat: _Seat, now: float) -> MarkerWindow | NoMarker:
         case StoppedBeforeRunning(), _:
             return NoMarker()
         case SetRunning(), _NoDeadline():
-            return MarkerWithoutDeadline()
+            return MarkerDue()
         case SetRunning(), _DeadlineAt(at=at) if at > now:
-            return MarkerBeforeDeadline(seconds=at - now)
+            return MarkerDue()
         case SetRunning(), _DeadlineAt():
             return NoMarker()
         case _ as unreachable:
@@ -1193,7 +1167,6 @@ def _wake_from_thread(loop: asyncio.AbstractEventLoop, arrived: asyncio.Event) -
 
 async def _live(
     sock: socket.socket,
-    init: core.InitFrame,
     work: ParentFrameInbox,
     kind: core.SharedAsyncChildKind,
     program: SeatProgram,
@@ -1202,11 +1175,10 @@ async def _live(
     """Mark the work of each run, start the seats (the start hooks run
     there), keep the marks of a default executor that a hook set, start the
     loop watchdog, report ready, serve until the stop frame, then stop the
-    watchdog and the seats. Runs on the task loop for the whole life of the
-    child."""
+    watchdog. Runs on the task loop for the whole life of the child."""
     seat_loop = SeatLoop(kind.seats, kind.executor_threads, writer, _read_rss)
     seat_loop.install_marks()
-    match await program.start(init, pool_of(kind)):
+    match await program.start():
         case Ok(started):
             pass
         case Err(failed):
@@ -1222,7 +1194,6 @@ async def _live(
     writer.send(ReadyFrame(pid=os.getpid(), rss=_read_rss()))
     await seat_loop.serve(work, started)
     watchdog.stop()
-    await started.stop()
 
 
 def serve_shared(
@@ -1235,17 +1206,19 @@ def serve_shared(
 ) -> NoReturn:
     """Run a shared async child from its start steps to its exit.
 
-    ``kind`` gives the seats, the connection pool and the default executor
-    size of the child.
+    ``kind`` gives the seats and the default executor size of the child.
 
     ``task_loop`` is open. The writer thread starts first; a refused thread
     fails the boot (``ThreadStartRefused``). The marks of the runs are set
     before ``program.start``, which runs on the loop; an ``Err`` fails the
     boot, before the ready frame, and so does a refused watchdog thread.
-    After the stop frame the watchdog and the seats stop, the loop closes
+    After the stop frame the watchdog stops, the loop closes
     (bounded as for an isolated child), the writer drains, bounded by
     ``WRITER_CLOSE_TIMEOUT_S``, and ``exit_after_stop`` ends the process.
+    The sync boot read ``init`` (``child_main.boot_app``); it is not read
+    again.
     """
+    _ = init
     writer = FrameWriter(
         functools.partial(_send_child_frame, sock),
         capacity=FRAMES_PER_SEAT * kind.seats + FRAMES_PER_CHILD,
@@ -1255,7 +1228,7 @@ def serve_shared(
             pass
         case Err(failed):
             fail_boot(sock, failed)
-    task_loop.run(_live(sock, init, work, kind, program, writer))
+    task_loop.run(_live(sock, work, kind, program, writer))
     executor = task_loop.close()
     writer.close(WRITER_CLOSE_TIMEOUT_S)
     exit_after_stop(executor)

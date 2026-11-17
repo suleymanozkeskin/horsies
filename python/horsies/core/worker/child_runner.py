@@ -18,16 +18,11 @@ import socket
 import threading
 import time
 import uuid
-from collections.abc import Callable, Coroutine, Generator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
 from importlib import import_module
-from typing import Any, Final, Literal, LiteralString, assert_never, cast
-
-from psycopg import Connection
-
+from typing import Any, Final, Literal, assert_never, cast
 
 import horsies._core as core
 from horsies._core import CoreChildHandle, CoreError
@@ -78,9 +73,6 @@ from horsies.core.worker.stored_timeout import (
 )
 from horsies.core.worker.child_frames import PROTOCOL_NUMBERS, stored_refusal_of
 from horsies.core.worker.run_return import (
-    IsolatedMarkerWindow,
-    MarkerAfterLeftWork,
-    MarkerAtReturn,
     ResultEnvelope,
     RunReturn,
     SetRunning,
@@ -146,91 +138,23 @@ type StartCheck = StartAllowed | StartWithin | DeadlineBeforeStart
 start."""
 
 
-@dataclass(frozen=True, slots=True)
-class StatementsBound:
-    """The statements of one write, once it holds its connection, run at most
-    ``seconds``. A timer then cancels the statement that runs; it raises, and
-    the write ends with its error path. In a transaction of the write, the
-    transaction aborts with it."""
+FINALIZING_MARKER_TIMEOUT_S: Final = 10.0
+"""The bound of the finalizing marker in the core (its
+``FINALIZING_MARKER_BOUND``): the wait for a connection and the statement.
+A marker that the core cancels at the bound is not written later."""
 
-    seconds: float
+CANCELLED_WRITE_END_S: Final = 10.0
+"""The longest time that a statement which a bound cancelled takes to end:
+the core sends the cancel request within 5 s and waits 5 s for the reply
+(the core's ``CANCELLED_WRITE_END``)."""
 
-
-@dataclass(frozen=True, slots=True)
-class StatementsUnbounded:
-    """The statements of a write have no bound of their own."""
-
-
-type StatementsLimit = StatementsBound | StatementsUnbounded
-
-CANCEL_REQUEST_TIMEOUT_S: Final = 5.0
-"""The longest wait for the server to take a cancel request of a bounded
-write (``StatementsBound``)."""
-
-LEFT_WORK_MARKER_CONNECTION_WAIT_S: Final = 5.0
-"""The longest wait for a pooled connection of the finalizing marker of an
-isolated run whose task left work on its task loop (``MarkerAfterLeftWork``).
-A marker that gets no connection in time is skipped: the runner heartbeats of
-the worker cover the row until it reads the end of the run."""
-
-LEFT_WORK_MARKER_STATEMENTS_S: Final = 5.0
-"""The longest time that the statement of that marker takes once it holds
-its connection."""
-
-LEFT_WORK_MARKER_BOUND_S: Final = (
-    LEFT_WORK_MARKER_CONNECTION_WAIT_S
-    + LEFT_WORK_MARKER_STATEMENTS_S
-    + CANCEL_REQUEST_TIMEOUT_S
-)
-"""The longest time that the marker after left work takes: the wait for a
-connection, the statement, and the cancel request of a statement past its
-bound. The backstop of the parent after the return of such a run
-(``slots.ISOLATED_LEFTOVER_BACKSTOP_S``) counts it."""
-
-
-def _cancel_running_statement(conn: Connection[Any]) -> None:
-    """Timer target: cancel the statement that runs on ``conn``. A failed
-    cancel is logged: the statement then ends by itself."""
-    try:
-        conn.cancel_safe(timeout=CANCEL_REQUEST_TIMEOUT_S)
-    except Exception as exc:
-        logger.warning('Failed to cancel a statement past its bound: %s', exc)
-
-
-@contextmanager
-def _statements_within(
-    conn: Connection[Any],
-    limit: StatementsLimit,
-) -> Generator[None]:
-    """Run the body with the bound of ``limit`` on the statements of ``conn``.
-
-    ``StatementsBound`` starts a timer thread that cancels the running
-    statement after its seconds. On exit the timer is cancelled and joined,
-    so no cancel reaches the connection after it returns to the pool.
-
-    Raises:
-        ThreadStartRefusedError: the OS refused the timer thread; no
-            statement ran.
-    """
-    match limit:
-        case StatementsUnbounded():
-            yield
-            return
-        case StatementsBound(seconds=seconds):
-            pass
-        case _ as unreachable:
-            assert_never(unreachable)
-    timer = threading.Timer(seconds, _cancel_running_statement, args=(conn,))
-    timer.daemon = True
-    try:
-        timer.start()
-    except RuntimeError as exc:
-        raise ThreadStartRefusedError('the bound of a write', exc) from exc
-    try:
-        yield
-    finally:
-        timer.cancel()
-        timer.join()
+LEFT_WORK_MARKER_BOUND_S: Final = FINALIZING_MARKER_TIMEOUT_S + CANCELLED_WRITE_END_S
+"""The longest time that the finalizing marker of an isolated run takes,
+also after the work that its task left on the task loop: the bound of the
+core and the end of a statement cancelled at it (the core's
+``FINALIZING_MARKER_END``). The backstop of the parent after the return of
+such a run covers it: the core's ``ISOLATED_LEFTOVER_BACKSTOP``, and
+``slots.ISOLATED_LEFTOVER_BACKSTOP_S`` of the Python parent, which adds it."""
 
 
 def start_always_allowed() -> StartCheck:
@@ -335,13 +259,8 @@ from horsies.core.logging import get_logger
 from horsies.core.process_role import mark_process_runs_task_bodies
 from horsies.core.worker.current import get_current_app, set_current_app
 from horsies.core.worker.child_pool import (
-    CHILD_POOL_CONNECTION_WAIT_S,
     _get_child_core_handle,
-    _get_worker_pool,
     _initialize_child_core_handle,
-    _initialize_worker_pool,
-    marker_pool_url,
-    pool_of,
 )
 from horsies.core.utils.imports import import_file_path
 import sys
@@ -671,61 +590,36 @@ def import_app_for_child(
 
 
 def finish_child_start(app: Horsies, init: core.InitFrame) -> None:
-    """Run the per-child steps of an isolated or a shared thread child. Each
-    child runs these itself, after any fork.
+    """Run the per-child start steps of every kind of child. Each child runs
+    these itself, after any fork.
 
-    The sync connection pool of the finalizing marker opens with the bounds
-    of the pool of the child kind in ``init``, on the database URL and the
-    connection settings of the broker config of ``app``, the source of the
-    parent's own (``marker_pool_url``, ``PostgresConfig.pooled_connect_args``).
-    The core handle of the child is built from ``init``
-    (``_initialize_child_core_handle``). Building the handle starts nothing.
+    The process runs task bodies from here on, the
+    ``on_child_process_start`` hooks run, and the core handle of the child
+    is built from ``init`` (``_initialize_child_core_handle``). Every write
+    of the child goes through that handle; building it starts nothing. A
+    shared async child runs its async start hooks afterwards, on its event
+    loop (``shared_runner``).
 
     Raises:
-        Exception: a pool setup failure propagates to the caller. A failing
+        Exception: a failure of a step propagates to the caller. A failing
             hook exits the child with CHILD_HOOK_FAILURE_EXIT_CODE.
     """
     # Every thread and event loop of this process serves task bodies from
     # here on, so result waits fail closed in it, also in the start hooks.
     mark_process_runs_task_bodies()
     # App-owned per-child setup (engine disposal / pool policy) runs after
-    # task imports so app engines exist, and before horsies opens its own
-    # child pool so a failing hook aborts cleanly.
-    _run_child_start_hooks(app)
-
-    # Initialize per-process connection pool (after all imports complete)
-    pool = pool_of(init.child_kind)
-    _initialize_worker_pool(
-        marker_pool_url(app.config.broker),
-        connect_kwargs=app.config.broker.pooled_connect_args,
-        min_size=pool.min_size,
-        max_size=pool.max_size,
-        check_on_checkout=pool.check,
-    )
-    _initialize_child_core_handle(init)
-    logger.debug(f'[child {os.getpid()}] Connection pool initialized')
-
-
-def finish_shared_child_start(app: Horsies, init: core.InitFrame) -> None:
-    """Run the per-child steps of a shared async child that need no loop.
-
-    The same steps as ``finish_child_start`` up to the pool: the process
-    runs task bodies from here on, the ``on_child_process_start`` hooks run,
-    and the core handle of the child is built from ``init``. A shared async
-    child opens no sync pool: it opens an async pool on its event loop
-    afterwards (``shared_runner``). A failing hook exits the child with
-    CHILD_HOOK_FAILURE_EXIT_CODE.
-    """
-    mark_process_runs_task_bodies()
+    # task imports so app engines exist, and before the core handle of the
+    # child is built, so a failing hook aborts cleanly.
     _run_child_start_hooks(app)
     _initialize_child_core_handle(init)
+    logger.debug(f'[child {os.getpid()}] Core handle of the child built')
 
 
 # ---------- Child-process execution ----------
-# The start of a run and its miss path go through the core handle of the
-# child (``CoreChildHandle``, ``child_pool``). The finalizing marker runs its
-# statement on a sync connection here; a shared async child runs the same
-# text on an async connection (``horsies.core.worker.shared_lifecycle``).
+# The start of a run, its miss path and the finalizing marker go through the
+# core handle of the child (``CoreChildHandle``, ``child_pool``); a shared
+# async child calls the awaitable forms of the same methods
+# (``horsies.core.worker.shared_lifecycle``).
 
 type StartMissReason = Literal[
     'DEADLINE_PASSED',
@@ -755,48 +649,28 @@ type StopRecord = (
 _EXPIRE_BEFORE_START_SUBJECT: Final = 'CoreChildHandle.expire_owned_claim'
 """The subject of a failed expiry of the miss path."""
 
-# The finalizing marker: one statement in autocommit. The function locks the
-# row by id alone (FOR NO KEY UPDATE) and writes the marker only when the row
-# is RUNNING under this worker at this claim generation.
-MARK_FINALIZING_SQL: Final[LiteralString] = """
-                SELECT outcome
-                FROM horsies_mark_finalizing(%s::uuid, %s, %s::timestamptz)
-                """
+type FinalizingRecord = (
+    core.FinalizingMarked | core.FinalizingNotHeld | core.MarkFinalizingFailed
+)
+"""The records of ``CoreChildHandle.mark_finalizing``."""
 
 
-class FinalizingMark(Enum):
-    """What ``horsies_mark_finalizing`` found on the task row."""
-
-    MARKED = 'MARKED'
-    """The row is RUNNING under this worker's claim generation; the marker is
-    written."""
-    NOT_HELD = 'NOT_HELD'
-    """Absent, not RUNNING, or another owner or claim generation; nothing is
-    written."""
-
-
-def read_finalizing_mark(row: Sequence[object] | None, task_id: str) -> FinalizingMark:
-    """The outcome of ``MARK_FINALIZING_SQL``. A row outside the function's
-    contract is a defect (``AssertionError``). Pure."""
-    match row:
-        case ('MARKED',):
-            return FinalizingMark.MARKED
-        case ('NOT_HELD',):
-            return FinalizingMark.NOT_HELD
-        case _:
-            raise AssertionError(
-                f'horsies_mark_finalizing returned {row!r} for task {task_id}'
+def log_finalizing_record(record: FinalizingRecord) -> None:
+    """Log the end of a finalizing marker that is not written: DEBUG when
+    the claim changed, WARNING when the write failed. A written marker logs
+    nothing."""
+    match record:
+        case core.FinalizingMarked():
+            pass
+        case core.FinalizingNotHeld(task_id=task_id):
+            logger.debug(
+                'Finalizing marker for task %s skipped: the claim changed',
+                task_id,
             )
-
-
-def mark_finalizing_params(
-    task_id: str,
-    worker_id: str,
-    claimed_at: datetime,
-) -> tuple[object, ...]:
-    """The parameters of ``MARK_FINALIZING_SQL``, in order: the task, the
-    worker and the claim generation. No I/O."""
-    return (task_id, worker_id, claimed_at)
+        case core.MarkFinalizingFailed(task_id=task_id, message=message):
+            logger.warning('Failed to mark task %s finalizing: %s', task_id, message)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _claim_lost(task_id: str) -> StoppedBeforeRunning:
@@ -1077,82 +951,40 @@ def _after_missed_start(
             assert_never(unreachable)
 
 
-def _mark_task_finalizing(
-    task_id: str,
+def mark_run_finalizing(
+    task_id: uuid.UUID,
     worker_id: str,
     claimed_at: datetime,
-    *,
-    connection_wait_s: float = CHILD_POOL_CONNECTION_WAIT_S,
-    statements: StatementsLimit = StatementsUnbounded(),
 ) -> None:
-    """Mark a completed child result as waiting for parent finalization.
+    """Write the finalizing marker of a run that set its row RUNNING and has
+    ended, through the core handle of the child
+    (``CoreChildHandle.mark_finalizing``), on the calling thread.
 
-    The marker is fenced on the claim generation (worker_id, claimed_at): a
-    stale attempt cannot refresh the marker of a later claim of the same
-    task, which would delay that claim's stale-RUNNING recovery. The
-    worker's runner heartbeat skips a row that carries the marker, so
-    the beats of the attempt end here, also while the worker's event loop
-    has not read the result. The marker is best effort: a skipped or failed
-    write is logged only. The wait for a pooled connection is bounded by
-    ``connection_wait_s``; a shared thread seat passes the time left before
-    the deadline of its run. ``statements`` bounds the statement after that
-    wait.
+    One ``horsies_mark_finalizing`` statement, fenced on the claim
+    generation (``worker_id``, ``claimed_at``): a stale attempt cannot
+    refresh the marker of a later claim of the same task, which would delay
+    that claim's stale-RUNNING recovery. The worker's runner heartbeat skips
+    a row that carries the marker, so the beats of the attempt end here. The
+    core bounds the write by ``FINALIZING_MARKER_TIMEOUT_S``, and the call
+    returns within ``LEFT_WORK_MARKER_BOUND_S``. The marker is best effort:
+    a skipped or failed write is logged only (``log_finalizing_record``),
+    and so is a ``CoreError`` of the core boundary.
+
+    Raises:
+        RuntimeError: the process built no core handle; a defect of the
+            caller (``_get_child_core_handle``).
     """
+    handle = _get_child_core_handle()
     try:
-        pool = _get_worker_pool()
-        with (
-            pool.connection(timeout=connection_wait_s) as conn,
-            _statements_within(conn, statements),
-        ):
-            # One statement on an autocommit connection: committed when it
-            # returns.
-            cursor = conn.cursor()
-            cursor.execute(
-                MARK_FINALIZING_SQL,
-                mark_finalizing_params(task_id, worker_id, claimed_at),
-            )
-            row = cursor.fetchone()
-    except Exception as exc:
+        record = handle.mark_finalizing(
+            task_id,
+            worker_id=worker_id,
+            claimed_at=claimed_at,
+        )
+    except CoreError as exc:
         logger.warning('Failed to mark task %s finalizing: %s', task_id, exc)
         return
-    match read_finalizing_mark(row, task_id):
-        case FinalizingMark.MARKED:
-            pass
-        case FinalizingMark.NOT_HELD:
-            logger.debug(
-                'Finalizing marker for task %s skipped: the claim changed',
-                task_id,
-            )
-
-
-def mark_isolated_run_finalizing(
-    task_id: str,
-    worker_id: str,
-    claimed_at: datetime,
-    window: IsolatedMarkerWindow,
-) -> None:
-    """Write the finalizing marker of an isolated run that set its row
-    RUNNING and has ended (``_mark_task_finalizing``).
-
-    ``MarkerAtReturn``: the bounds of the pool, as the marker at the return
-    always had. ``MarkerAfterLeftWork``: the wait for a connection is
-    ``LEFT_WORK_MARKER_CONNECTION_WAIT_S``, and the statement
-    ``LEFT_WORK_MARKER_STATEMENTS_S``. A failed, late or skipped write is
-    logged only: nothing escapes.
-    """
-    match window:
-        case MarkerAtReturn():
-            _mark_task_finalizing(task_id, worker_id, claimed_at)
-        case MarkerAfterLeftWork():
-            _mark_task_finalizing(
-                task_id,
-                worker_id,
-                claimed_at,
-                connection_wait_s=LEFT_WORK_MARKER_CONNECTION_WAIT_S,
-                statements=StatementsBound(LEFT_WORK_MARKER_STATEMENTS_S),
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
+    log_finalizing_record(record)
 
 
 def async_task_presence(app: Horsies) -> AsyncTaskPresence:
@@ -1689,7 +1521,7 @@ def _run_task_entry(
 
     Writes no finalizing marker: the child writes it when the run has
     ended, after the work that the task left on its task loop
-    (``child_main.mark_child_task_finalizing``).
+    (``child_main.mark_child_task_finalizing``, ``mark_run_finalizing``).
 
     The child writes the first runner heartbeat, in the RUNNING transition.
     The worker process writes the later ones while this child holds the

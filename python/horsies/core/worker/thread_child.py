@@ -21,9 +21,10 @@ time left, and the core checks that time again once the pool gave a
 connection. The row stays CLAIMED for the worker to return to the queue.
 
 After the return, a run that set its row RUNNING and returned before its
-deadline writes its finalizing marker, at most until that deadline; the seat
-reports the end after it. A run that timed out writes none: the runner
-heartbeats of the worker cover the row until the worker reads the end.
+deadline writes its finalizing marker, with the bound of the core handle of
+the child; the seat reports the end after it. A run that timed out writes
+none: the runner heartbeats of the worker cover the row until the worker
+reads the end.
 
 Frames leave through the writer thread of ``FrameWriter``. A seat and the
 deadline thread queue the frames of a run while they hold the lock of the
@@ -80,9 +81,7 @@ from horsies.core.worker.shared_child import (
     FRAMES_PER_SEAT,
     WRITER_CLOSE_TIMEOUT_S,
     FrameWriter,
-    MarkerBeforeDeadline,
-    MarkerWindow,
-    MarkerWithoutDeadline,
+    MarkerDue,
     NoMarker,
     SetRunning,
     StoppedBeforeRunning,
@@ -136,10 +135,10 @@ class ThreadSeatProgram(Protocol):
         ``CHILD_DEFECT_EXIT_CODE``."""
         ...
 
-    def mark_finalizing(self, frame: core.SharedRunFrame, window: MarkerWindow) -> None:
+    def mark_finalizing(self, frame: core.SharedRunFrame) -> None:
         """Write the finalizing marker of the run of ``frame``, whose task
-        returned, within ``window``. A failed or skipped write is logged
-        only; an exception that escapes is a defect, as for ``run``."""
+        returned. A failed or skipped write is logged only; an exception
+        that escapes is a defect, as for ``run``."""
         ...
 
 
@@ -229,20 +228,20 @@ def _end_at_return(run: _ThreadRun, returned: ThreadSeatReturn) -> SeatEnd:
             assert_never(unreachable)
 
 
-def _marker_window(
+def _marker_at_return(
     run: _ThreadRun,
     returned: ThreadSeatReturn,
     end: SeatEnd,
     now: float,
-) -> MarkerWindow | NoMarker:
+) -> MarkerDue | NoMarker:
     """Whether the seat writes the finalizing marker of a run whose task
-    returned, and within what time. ``now`` is on the clock of the table.
+    returned. ``now`` is on the clock of the table.
 
     Only a run that set its row RUNNING and returned before its deadline
-    writes it, at most until that deadline: the end report of the run then
-    comes before the backstop of the worker. A run that timed out writes
-    none: the worker writes its outcome after the read, as at a kill, and
-    its beats cover the row until then.
+    writes it, with the bound of the core handle
+    (``FINALIZING_MARKER_TIMEOUT_S``). A run that timed out writes none: the
+    worker writes its outcome after the read, as at a kill, and its beats
+    cover the row until then.
     """
     match end, returned, run.deadline_at:
         case SeatTimedOut(), _, _:
@@ -254,13 +253,13 @@ def _marker_window(
         ):
             return NoMarker()
         case ResultEnvelope() | StoppedBeforeRunning(), SetRunning(), _NoDeadline():
-            return MarkerWithoutDeadline()
+            return MarkerDue()
         case (
             ResultEnvelope() | StoppedBeforeRunning(),
             SetRunning(),
             _DeadlineAt(seconds=at),
         ) if at > now:
-            return MarkerBeforeDeadline(seconds=at - now)
+            return MarkerDue()
         case ResultEnvelope() | StoppedBeforeRunning(), SetRunning(), _DeadlineAt():
             return NoMarker()
         case _ as unreachable:
@@ -351,11 +350,11 @@ class ThreadRunTable:
         self,
         dispatch: int,
         returned: ThreadSeatReturn,
-    ) -> MarkerWindow | NoMarker:
+    ) -> MarkerDue | NoMarker:
         """Fix the end of run ``dispatch``, whose task returned ``returned``
         (``_end_at_return``): the run has no deadline left. Returns whether
-        its seat writes the finalizing marker, and within what time
-        (``_marker_window``). Called once per run, by its seat thread.
+        its seat writes the finalizing marker (``_marker_at_return``).
+        Called once per run, by its seat thread.
 
         Fires every deadline that is due first: a start that the core refused
         at the deadline (``DeadlineBeforeStart``) can return before the
@@ -366,7 +365,7 @@ class ThreadRunTable:
             end = _end_at_return(run, returned)
             run.state = _Returned(end)
             self._changed.notify_all()
-            return _marker_window(run, returned, end, self._clock())
+            return _marker_at_return(run, returned, end, self._clock())
 
     def finish(self, dispatch: int, rss: RssReading) -> None:
         """End run ``dispatch``, whose task returned, and queue its result
@@ -540,8 +539,8 @@ class ThreadSeats:
         match self._table.returned(frame.dispatch, returned):
             case NoMarker():
                 pass
-            case MarkerBeforeDeadline() | MarkerWithoutDeadline() as window:
-                self._mark_or_exit(frame, window)
+            case MarkerDue():
+                self._mark_or_exit(frame)
             case _ as unreachable:
                 assert_never(unreachable)
         self._table.finish(frame.dispatch, self._read_rss())
@@ -564,9 +563,9 @@ class ThreadSeats:
                 CHILD_DEFECT_EXIT_CODE,
             )
 
-    def _mark_or_exit(self, frame: core.SharedRunFrame, window: MarkerWindow) -> None:
+    def _mark_or_exit(self, frame: core.SharedRunFrame) -> None:
         try:
-            self._program.mark_finalizing(frame, window)
+            self._program.mark_finalizing(frame)
         except BaseException as exc:
             _exit_for_defect(
                 f'the finalizing marker of task {frame.task_id} escaped the '
@@ -656,7 +655,7 @@ def serve_thread(
     """Run a shared thread child from its threads to its exit.
 
     The sync boot ran (``child_main.boot_app``): the app is imported, the
-    start hooks ran, and the sync pool of the child is open. ``task_loop``
+    start hooks ran, and the core handle of the child is built. ``task_loop``
     is not created: a thread child runs no ``async def`` task. The writer
     thread, the deadline thread and the ``seats`` seat threads start first;
     a refused thread fails the boot (``ThreadStartRefused``). After the stop

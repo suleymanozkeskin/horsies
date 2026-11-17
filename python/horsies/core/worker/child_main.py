@@ -79,9 +79,6 @@ from horsies.core.worker.child_frames import (
 )
 from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.run_return import (
-    IsolatedMarkerWindow,
-    MarkerAfterLeftWork,
-    MarkerAtReturn,
     ResultEnvelope,
     RunReturn,
     SetRunning,
@@ -134,7 +131,7 @@ BootFn = Callable[[core.InitFrame], Result[AsyncTaskPresence, BootFailedFrame]]
 RunTaskFn = Callable[[core.RunFrame, core.InitFrame, TaskLoop], RunReturn]
 # Writes the finalizing marker of an isolated run that set its row RUNNING
 # and has ended. Logs a failed write; nothing escapes.
-MarkFinalizingFn = Callable[[core.RunFrame, IsolatedMarkerWindow], None]
+MarkFinalizingFn = Callable[[core.RunFrame], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -473,13 +470,16 @@ def _report_run(
     The finalizing marker is the last write of a run that set its row
     RUNNING (``SetRunning``), and it is written only when the run has ended:
 
-    - No asyncio task left on the task loop: the marker (``MarkerAtReturn``),
-      then one ``ResultFrame``, as before.
+    - No asyncio task left on the task loop: the marker, then one
+      ``ResultFrame``.
     - Tasks left: ``BodyReturnedFrame`` with what the body returned at once,
-      then ``TaskLoop.end_left_work``. Work that ended gives the marker
-      (``MarkerAfterLeftWork``), then ``LeftWorkEndedFrame``. Work that did
-      not stop gives ``LeftWorkStuckFrame`` and no marker: the parent kills
-      the child, and its runner heartbeats cover the row until the exit.
+      then ``TaskLoop.end_left_work``. Work that ended gives the marker,
+      then ``LeftWorkEndedFrame``. Work that did not stop gives
+      ``LeftWorkStuckFrame`` and no marker: the parent kills the child, and
+      its runner heartbeats cover the row until the exit.
+
+    The marker has the bound of the core handle of the child in both cases
+    (``child_runner.LEFT_WORK_MARKER_BOUND_S``).
 
     A run that stopped before its RUNNING update (``StoppedBeforeRunning``)
     writes no marker and ran no task code, so it left no work. The result
@@ -495,7 +495,7 @@ def _report_run(
             assert_never(unreachable)
     match task_loop.report(), end:
         case NoTaskLoop() | LoopHoldsNoTask() as nothing_left, _:
-            _mark_when_set_running(frame, returned, MarkerAtReturn(), mark_finalizing)
+            _mark_when_set_running(frame, returned, mark_finalizing)
             _send_child_frame(
                 sock,
                 ResultFrame(
@@ -521,12 +521,7 @@ def _report_run(
     )
     match _end_left_work_or_exit(task_loop, frame):
         case LeftWorkEnd() as left_end:
-            _mark_when_set_running(
-                frame,
-                returned,
-                MarkerAfterLeftWork(),
-                mark_finalizing,
-            )
+            _mark_when_set_running(frame, returned, mark_finalizing)
             _send_child_frame(
                 sock,
                 LeftWorkEndedFrame(task_id=frame.task_id, end=left_end, rss=_read_rss()),
@@ -544,14 +539,13 @@ def _report_run(
 def _mark_when_set_running(
     frame: core.RunFrame,
     returned: RunReturn,
-    window: IsolatedMarkerWindow,
     mark_finalizing: MarkFinalizingFn,
 ) -> None:
     """Write the finalizing marker of a run that set its row RUNNING. A run
     that stopped before its RUNNING update has no marker."""
     match returned:
         case SetRunning():
-            mark_finalizing(frame, window)
+            mark_finalizing(frame)
         case StoppedBeforeRunning():
             return
         case _ as unreachable:
@@ -925,13 +919,12 @@ def restore_parent_state(init: core.InitFrame) -> None:
 
 def boot_app(init: core.InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
     """Restore the parent's import state, import the app, then run the
-    per-child start steps of the kind of the child.
+    per-child start steps.
 
-    An isolated child and a shared thread child open their sync connection
-    pool of the finalizing marker here. A shared async child opens no pool
-    here: it opens an async pool on its event loop, after the ready steps of
-    ``shared_child``. Every kind builds its core handle from ``init`` here
-    (``_initialize_child_core_handle``).
+    Every kind builds its core handle from ``init`` here
+    (``child_runner.finish_child_start``); every write of the child goes
+    through it. A shared async child runs its async start hooks afterwards,
+    on its event loop (``shared_child``).
 
     ``Ok``: whether the booted app has an ``async def`` task, which decides
     whether the child creates its task loop.
@@ -946,7 +939,6 @@ def boot_app(init: core.InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]
     from horsies.core.worker.child_runner import (
         async_task_presence,
         finish_child_start,
-        finish_shared_child_start,
         import_app_for_child,
         log_level_of,
     )
@@ -964,13 +956,7 @@ def boot_app(init: core.InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]
     except Exception as exc:
         return Err(boot_failure_from_exception(exc, AppLoadFailed()))
     try:
-        match init.child_kind:
-            case core.IsolatedChildKind() | core.SharedThreadChildKind():
-                finish_child_start(app, init)
-            case core.SharedAsyncChildKind():
-                finish_shared_child_start(app, init)
-            case _ as unreachable:
-                assert_never(unreachable)
+        finish_child_start(app, init)
     except Exception as exc:
         return Err(boot_failure_from_exception(exc, ChildPoolSetupFailed()))
     return Ok(async_task_presence(app))
@@ -997,21 +983,12 @@ def run_child_task(
     )
 
 
-def mark_child_task_finalizing(
-    frame: core.RunFrame,
-    window: IsolatedMarkerWindow,
-) -> None:
+def mark_child_task_finalizing(frame: core.RunFrame) -> None:
     """Write the finalizing marker of the isolated run of ``frame``, which
-    set its row RUNNING and has ended
-    (``child_runner.mark_isolated_run_finalizing``)."""
-    from horsies.core.worker.child_runner import mark_isolated_run_finalizing
+    set its row RUNNING and has ended (``child_runner.mark_run_finalizing``)."""
+    from horsies.core.worker.child_runner import mark_run_finalizing
 
-    mark_isolated_run_finalizing(
-        str(frame.task_id),
-        frame.worker_id,
-        frame.claimed_at,
-        window,
-    )
+    mark_run_finalizing(frame.task_id, frame.worker_id, frame.claimed_at)
 
 
 def production_runners() -> TaskRunners:
