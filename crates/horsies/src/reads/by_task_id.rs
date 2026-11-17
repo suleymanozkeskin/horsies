@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use horsies_core::handle::CoreHandle;
 use horsies_core::{
-    child_producer, process_role, ChildProducer, ProcessRole, RawResultRecord, TaskInfo,
-    TaskStatus, WaitLimit,
+    child_producer, process_role, ChildProducer, ProcessRole, RawResultRead, RawResultRecord,
+    TaskInfo, TaskStatus, WaitLimit,
 };
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
@@ -82,8 +82,8 @@ impl Horsies {
             .await
             .map_err(|error| ReadError::of_operation(task_id, error))?;
         match record {
-            None => Err(ReadError::TaskNotFound { task_id }),
-            Some(record) => stored_result(record),
+            RawResultRead::Absent { reason } => Err(ReadError::TaskNotFound { task_id, reason }),
+            RawResultRead::Found(record) => stored_result(record),
         }
     }
 
