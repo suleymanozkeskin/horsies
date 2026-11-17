@@ -1600,6 +1600,38 @@ async fn a_workflow_read_path_id_that_is_not_a_uuid_is_not_found() {
     assert_eq!(issues[0]["type"], "int_parsing");
 }
 
+/// The read routes take the workflow id text as Python's `uuid.UUID(text)`
+/// does. It refuses `urn:uuid:` in uppercase, which the `uuid` crate reads:
+/// such a text names no run, 404 with no database call (the router's pool
+/// is lazy and unreachable).
+#[tokio::test]
+async fn a_workflow_read_path_id_that_python_refuses_is_not_found() {
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        true,
+    );
+    let id = "URN:UUID:00345678-abcd-4f12-8456-7890abcdef12";
+    for (path, detail) in [
+        (format!("/api/workflows/{id}"), "Workflow run not found."),
+        (
+            format!("/api/workflows/{id}/tasks/0"),
+            "Workflow task not found.",
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request(Method::GET, &path))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(
+            json(response).await,
+            serde_json::json!({ "detail": detail })
+        );
+    }
+}
+
 /// A workflow path id that is not a UUID on an action route answers 400
 /// `INVALID_INPUT`, as the task cancel route and the Python web app do
 /// (`require_path_uuid`), with no database call (the router's pool is lazy
