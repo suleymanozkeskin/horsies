@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Final, LiteralString
 
@@ -298,6 +298,34 @@ def _caller_side(
     return OperationSide(name=name, act=act)
 
 
+_SEEDED_ID: Final = uuid.UUID(int=0)
+"""Stands in for the task id of a compared answer: each side seeds its own ids."""
+
+
+def _answer_without_id(
+    answer: Result[TaskCancelled, TaskActionError],
+) -> Result[TaskCancelled, TaskActionError]:
+    """``answer`` with its task id replaced by ``_SEEDED_ID``, also inside an
+    error message."""
+    match answer:
+        case Ok(cancelled):
+            return Ok(replace(cancelled, task_id=_SEEDED_ID))
+        case Err(error):
+            return Err(
+                replace(
+                    error,
+                    task_id=_SEEDED_ID,
+                    message=error.message.replace(str(error.task_id), str(_SEEDED_ID)),
+                )
+            )
+
+
+def _answers_by_case(
+    report: dict[str, Result[TaskCancelled, TaskActionError]],
+) -> dict[str, Result[TaskCancelled, TaskActionError]]:
+    return {name: _answer_without_id(answer) for name, answer in report.items()}
+
+
 def test_the_core_cancel_writes_and_answers_what_the_python_caller_did(
     empty_database: MakeDatabase,
 ) -> None:
@@ -314,7 +342,7 @@ def test_the_core_cancel_writes_and_answers_what_the_python_caller_did(
             pytest.fail(f'{failed.step}: {failed.cause}')
 
     assert run.diff.entries == (), render_diff(run.diff)
-    assert run.candidate.report == run.reference.report
+    assert _answers_by_case(run.candidate.report) == _answers_by_case(run.reference.report)
     assert {
         name: answer.is_ok() for name, answer in run.reference.report.items()
     } == {

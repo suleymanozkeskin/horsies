@@ -19,7 +19,9 @@
 --
 -- Functions of 0003_interim_functions.sql that this file replaces by the same name (the interim body is removed
 -- there): horsies_claim, horsies_claim_candidates, horsies_claim_in_flight, horsies_complete_task_fused,
--- horsies_complete_tasks_fused, horsies_finish_workflow_success, horsies_finish_failed_attempt.
+-- horsies_complete_tasks_fused, horsies_finish_workflow_success, horsies_finish_failed_attempt,
+-- horsies_expire_owned_claim, horsies_expire_pending_tasks, horsies_cancel_owned_orphan,
+-- horsies_cancel_orphaned_tasks.
 --
 -- History calls: each terminal write passes the row it locked to horsies_move_task_to_history(horsies_tasks, ...)
 -- (0006_history_functions.sql); each miss passes the writer's kind and fence kind to horsies_terminalization_miss
@@ -2184,5 +2186,440 @@ BEGIN
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'CANCEL_ADMIN'::text,
         v_task.status::text, v_task.claimed_by_worker_id::text, v_task.claimed_at, NULL::text, NULL::jsonb;
+END
+$$;
+
+------------------------------------------------------------------------------------------------------------------------
+-- Expiry and orphan cancel
+------------------------------------------------------------------------------------------------------------------------
+
+-- horsies_expire_owned_claim: the expiry of one CLAIMED task whose deadline passed before its start. Replaces the
+-- interim function of the same name.
+--
+-- Guarantee:
+-- - A row CLAIMED by p_worker_id (any claim generation: the start check of every generation of this worker finds the
+--   same deadline) whose good_until has passed on the database clock moves to history as EXPIRED (EXPIRE_CLAIMED)
+--   with p_result and p_error_code; task_done and horsies_task_status fire (the move).
+-- - A row CLAIMED by p_worker_id whose deadline has not passed: SOURCE_STATE_CONFLICT with guard DEADLINE and the
+--   evidence {good_until, evaluated_at}; nothing is written.
+-- - Every other row is classified by horsies_terminalization_miss (fence OWNER): ALREADY_APPLIED, LOST_CLAIM,
+--   SOURCE_STATE_CONFLICT, TASK_ABSENT; nothing is written.
+-- - p_result may be NULL; the move refuses a workflow task without one (23502), because phase 2 needs it.
+--
+-- Arguments: the task, the worker and the error code are required (22023).
+-- Locks: the task advisory lock, then the whole row by id (FOR UPDATE), the row that the move takes. Every writer of
+-- good_until locks this row, so the deadline read under the lock holds until the move.
+-- Returns one row of the shared outcome columns (ordinality NULL).
+-- Python: horsies_expire_owned_claim (core/schemas/terminalization.py:670-782), its call
+-- (core/lifecycle/persistence.py:167-171), the expiry of the child miss path.
+CREATE FUNCTION horsies_expire_owned_claim(
+    p_task_id uuid,
+    p_worker_id text,
+    p_result text,
+    p_error_code text
+) RETURNS TABLE(
+    task_id uuid,
+    ordinality bigint,
+    outcome text,
+    terminal_at timestamp with time zone,
+    terminalization_kind text,
+    observed_status text,
+    observed_worker_id text,
+    observed_claimed_at timestamp with time zone,
+    guard_kind text,
+    observed_guard jsonb
+)
+    LANGUAGE plpgsql
+    AS $$
+#variable_conflict use_column
+DECLARE
+    v_capture record;
+    v_task horsies_tasks;
+    v_terminal_at timestamptz;
+BEGIN
+    IF num_nulls(p_task_id, p_worker_id, p_error_code) <> 0 THEN
+        RAISE EXCEPTION 'horsies_expire_owned_claim: the task, the worker and the error code are required'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
+    -- One locked capture judges the deadline; the move takes the row as read here.
+    SELECT t AS task, NOW() AS evaluated_at
+    INTO v_capture
+    FROM horsies_tasks t
+    WHERE t.id = p_task_id
+    FOR UPDATE;
+
+    IF FOUND THEN
+        v_task := v_capture.task;
+    END IF;
+    IF FOUND
+       AND v_task.status = 'CLAIMED'
+       AND v_task.claimed_by_worker_id = p_worker_id THEN
+        IF v_task.good_until IS NOT NULL
+           AND v_task.good_until <= v_capture.evaluated_at THEN
+            v_terminal_at := NOW();
+            PERFORM horsies_move_task_to_history(
+                v_task, 'EXPIRED', 'EXPIRE_CLAIMED', v_terminal_at, p_result, p_error_code, NULL
+            );
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'EXPIRE_CLAIMED'::text,
+                'CLAIMED'::text, v_task.claimed_by_worker_id::text, v_task.claimed_at, NULL::text, NULL::jsonb;
+            RETURN;
+        END IF;
+
+        RETURN QUERY SELECT
+            p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text, NULL::timestamptz, NULL::text,
+            v_task.status::text, v_task.claimed_by_worker_id::text, v_task.claimed_at, 'DEADLINE'::text,
+            jsonb_build_object('good_until', v_task.good_until, 'evaluated_at', v_capture.evaluated_at);
+        RETURN;
+    END IF;
+
+    RETURN QUERY
+    SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
+           m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard
+    FROM horsies_terminalization_miss(p_task_id, 'EXPIRE_CLAIMED', 'OWNER', p_worker_id, NULL::timestamptz) AS m;
+END
+$$;
+
+-- horsies_expire_pending_tasks: one batch of the expiry of PENDING tasks whose deadline passed. Replaces the interim
+-- function of the same name.
+--
+-- Guarantee:
+-- - Takes at most p_batch_size PENDING rows with good_until on or before NOW(), earliest deadline first, skipping
+--   rows that another session holds; they are taken by a later batch.
+-- - Each taken row moves to history as EXPIRED (EXPIRE_PENDING) with p_result and p_error_code, at one terminal
+--   time, through the batch move (horsies_move_tasks_to_history); nothing else is written.
+-- - p_result may be NULL; the batch move refuses a workflow task without one (23502) before any row moves.
+--
+-- Arguments: p_batch_size positive, p_error_code required (22023).
+-- Locks: the taken rows (FOR UPDATE SKIP LOCKED), with no advisory lock, so a batch never waits on a row lock and
+-- joins no deadlock cycle.
+-- Returns one row of the shared outcome columns per moved row (APPLIED, ordinality NULL), earliest deadline first;
+-- no row when nothing is due.
+-- Python: horsies_expire_pending_tasks (core/schemas/terminalization.py:797-844), its call
+-- (core/lifecycle/persistence.py:173-177), PostgresBroker.expire_pending_tasks.
+CREATE FUNCTION horsies_expire_pending_tasks(
+    p_batch_size integer,
+    p_result text,
+    p_error_code text
+) RETURNS TABLE(
+    task_id uuid,
+    ordinality bigint,
+    outcome text,
+    terminal_at timestamp with time zone,
+    terminalization_kind text,
+    observed_status text,
+    observed_worker_id text,
+    observed_claimed_at timestamp with time zone,
+    guard_kind text,
+    observed_guard jsonb
+)
+    LANGUAGE plpgsql
+    AS $$
+#variable_conflict use_column
+DECLARE
+    v_ids uuid[];
+    v_terminal_at timestamptz;
+BEGIN
+    IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+        RAISE EXCEPTION 'horsies_expire_pending_tasks: p_batch_size must be a positive integer'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_error_code IS NULL THEN
+        RAISE EXCEPTION 'horsies_expire_pending_tasks: the error code is required'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    SELECT array_agg(s.id) INTO v_ids
+    FROM (
+        SELECT id FROM horsies_tasks
+        WHERE status = 'PENDING'
+          AND good_until IS NOT NULL
+          AND good_until <= NOW()
+        ORDER BY good_until ASC
+        LIMIT p_batch_size
+        FOR UPDATE SKIP LOCKED
+    ) s;
+    IF v_ids IS NULL THEN
+        RETURN;
+    END IF;
+
+    v_terminal_at := NOW();
+    -- The outcome rows come from the locked live rows before the batch move deletes them. RETURN QUERY materializes
+    -- at once; it does not end the function.
+    RETURN QUERY SELECT
+        t.id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'EXPIRE_PENDING'::text,
+        t.status::text, t.claimed_by_worker_id::text, t.claimed_at, NULL::text, NULL::jsonb
+    FROM horsies_tasks t
+    WHERE t.id = ANY(v_ids)
+    ORDER BY t.good_until ASC;
+
+    PERFORM horsies_move_tasks_to_history(
+        v_ids, 'EXPIRED', 'EXPIRE_PENDING', v_terminal_at,
+        p_result, p_error_code, NULL
+    );
+END
+$$;
+
+-- horsies_cancel_owned_orphan: the cancel of one CLAIMED workflow task that its claim holds and whose node no longer
+-- links it. Replaces the interim function of the same name.
+--
+-- Guarantee:
+-- - A workflow task CLAIMED by p_worker_id at the claim generation p_claimed_at with no runnable node link (no node
+--   with this task_id in ENQUEUED, READY, PENDING or RUNNING) moves to history as CANCELLED (CANCEL_ORPHAN, error
+--   code WORKFLOW_CHECK_FAILED); task_done and horsies_task_status fire (the move).
+-- - The same task with a runnable node link: SOURCE_STATE_CONFLICT with guard WORKFLOW_LINK_STATE and the evidence
+--   {node_status}; nothing is written. The fence is classified before the guard.
+-- - Every other row is classified by horsies_terminalization_miss (fence OWNER_AND_GENERATION); nothing is written.
+--
+-- Arguments: every argument is required (22023).
+-- Locks: the task advisory lock, then the whole row by id (FOR UPDATE), the row that the move takes; the node link is
+-- read beside it, unlocked.
+-- Returns one row of the shared outcome columns (ordinality NULL).
+-- Python: horsies_cancel_owned_orphan (core/schemas/terminalization.py:950), its call
+-- (core/lifecycle/persistence.py:186-191), the orphan self-heal of the worker's finalize.
+CREATE FUNCTION horsies_cancel_owned_orphan(
+    p_task_id uuid,
+    p_worker_id text,
+    p_claimed_at timestamp with time zone
+) RETURNS TABLE(
+    task_id uuid,
+    ordinality bigint,
+    outcome text,
+    terminal_at timestamp with time zone,
+    terminalization_kind text,
+    observed_status text,
+    observed_worker_id text,
+    observed_claimed_at timestamp with time zone,
+    guard_kind text,
+    observed_guard jsonb
+)
+    LANGUAGE plpgsql
+    AS $$
+#variable_conflict use_column
+DECLARE
+    v_capture record;
+    v_task horsies_tasks;
+    v_terminal_at timestamptz;
+BEGIN
+    IF num_nulls(p_task_id, p_worker_id, p_claimed_at) <> 0 THEN
+        RAISE EXCEPTION 'horsies_cancel_owned_orphan: the task, the worker and the claim generation are required'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
+    -- One capture: the whole row locked (the move takes it as read here), and the runnable node link read beside
+    -- it. A node in a final status does not count as runnable and leaves the task orphaned.
+    SELECT t AS task,
+           (
+               SELECT wt.status
+               FROM horsies_workflow_tasks wt
+               WHERE wt.task_id = t.id
+                 AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
+               ORDER BY wt.id
+               LIMIT 1
+           ) AS node_status
+    INTO v_capture
+    FROM horsies_tasks t
+    WHERE t.id = p_task_id
+    FOR UPDATE;
+
+    IF FOUND THEN
+        v_task := v_capture.task;
+    END IF;
+    IF FOUND
+       AND v_task.status = 'CLAIMED'
+       AND v_task.claimed_by_worker_id = p_worker_id
+       AND v_task.claimed_at = p_claimed_at
+       AND v_task.is_workflow_task THEN
+        IF v_capture.node_status IS NULL THEN
+            v_terminal_at := NOW();
+            PERFORM horsies_move_task_to_history(
+                v_task, 'CANCELLED', 'CANCEL_ORPHAN', v_terminal_at,
+                NULL, 'WORKFLOW_CHECK_FAILED',
+                'Workflow task orphaned: no live workflow_task linkage'
+            );
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'CANCEL_ORPHAN'::text,
+                v_task.status::text, v_task.claimed_by_worker_id::text, v_task.claimed_at, NULL::text, NULL::jsonb;
+            RETURN;
+        END IF;
+
+        RETURN QUERY SELECT
+            p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text, NULL::timestamptz, NULL::text,
+            v_task.status::text, v_task.claimed_by_worker_id::text, v_task.claimed_at, 'WORKFLOW_LINK_STATE'::text,
+            jsonb_build_object('node_status', v_capture.node_status);
+        RETURN;
+    END IF;
+
+    RETURN QUERY
+    SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
+           m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard
+    FROM horsies_terminalization_miss(
+        p_task_id, 'CANCEL_ORPHAN', 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
+    ) AS m;
+END
+$$;
+
+-- horsies_cancel_orphaned_tasks: one page of the orphan sweep: the cancel of PENDING and CLAIMED workflow tasks that
+-- no node links. Replaces the interim function of the same name.
+--
+-- Guarantee:
+-- - Scans at most p_batch_size PENDING or CLAIMED workflow tasks in (created_at, id) order from the cursor
+--   orphan_workflow_tasks of horsies_recovery_scan_cursors, up to the upper bound that the cycle fixed at its first
+--   page; a page shorter than the batch, or one that reaches the bound, completes the cycle and resets the cursor.
+-- - Each scanned row with no runnable node link (no node with this task_id in ENQUEUED, READY, PENDING or RUNNING)
+--   that no other session holds moves to history as CANCELLED (CANCEL_ORPHAN_SWEEP, error code
+--   WORKFLOW_CHECK_FAILED) at one terminal time, through the batch move. A held row is taken by a later cycle.
+-- - The cursor row records the page: its position, the cycle bound, completed_cycles, last_scan_rows,
+--   last_candidate_rows and last_scan_at, in the same statement.
+--
+-- Arguments: p_batch_size positive (22023). An absent cursor row is refused with data_corrupted (XX001).
+-- Locks: the cursor row (FOR UPDATE NOWAIT: a second sweep fails at once with 55P03), then the candidate rows (FOR
+-- UPDATE SKIP LOCKED), with no advisory lock.
+-- Returns one row of the shared outcome columns per moved row (APPLIED, ordinality NULL); no row when the page has
+-- no orphan.
+-- Python: horsies_cancel_orphaned_tasks (core/schemas/terminalization.py), its call
+-- (core/lifecycle/persistence.py:193-197), PostgresBroker.terminate_orphaned_workflow_tasks.
+CREATE FUNCTION horsies_cancel_orphaned_tasks(p_batch_size integer) RETURNS TABLE(
+    task_id uuid,
+    ordinality bigint,
+    outcome text,
+    terminal_at timestamp with time zone,
+    terminalization_kind text,
+    observed_status text,
+    observed_worker_id text,
+    observed_claimed_at timestamp with time zone,
+    guard_kind text,
+    observed_guard jsonb
+)
+    LANGUAGE plpgsql
+    AS $$
+#variable_conflict use_column
+DECLARE
+    v_cursor_created_at timestamptz;
+    v_cursor_id uuid;
+    v_upper_created_at timestamptz;
+    v_upper_id uuid;
+    v_scan_created_at timestamptz[];
+    v_scan_ids uuid[];
+    v_ids uuid[];
+    v_scan_count integer;
+    v_cycle_complete boolean;
+    v_terminal_at timestamptz;
+BEGIN
+    IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+        RAISE EXCEPTION 'horsies_cancel_orphaned_tasks: p_batch_size must be a positive integer'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    SELECT c.last_created_at, c.last_id, c.cycle_upper_created_at, c.cycle_upper_id
+    INTO v_cursor_created_at, v_cursor_id, v_upper_created_at, v_upper_id
+    FROM horsies_recovery_scan_cursors c
+    WHERE c.scan_name = 'orphan_workflow_tasks'
+    FOR UPDATE NOWAIT;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'orphan workflow-task scan cursor is absent'
+            USING ERRCODE = 'data_corrupted';
+    END IF;
+
+    IF v_upper_id IS NULL THEN
+        SELECT t.created_at, t.id
+        INTO v_upper_created_at, v_upper_id
+        FROM horsies_tasks t
+        WHERE t.is_workflow_task = TRUE
+          AND t.status IN ('CLAIMED', 'PENDING')
+        ORDER BY t.created_at DESC, t.id DESC
+        LIMIT 1;
+    END IF;
+
+    IF v_cursor_id IS NULL THEN
+        SELECT array_agg(s.created_at ORDER BY s.created_at, s.id),
+               array_agg(s.id ORDER BY s.created_at, s.id)
+        INTO v_scan_created_at, v_scan_ids
+        FROM (
+            SELECT t.created_at, t.id
+            FROM horsies_tasks t
+            WHERE t.is_workflow_task = TRUE
+              AND t.status IN ('CLAIMED', 'PENDING')
+              AND v_upper_id IS NOT NULL
+              AND (t.created_at, t.id) <= (v_upper_created_at, v_upper_id)
+            ORDER BY t.created_at, t.id
+            LIMIT p_batch_size
+        ) s;
+    ELSE
+        SELECT array_agg(s.created_at ORDER BY s.created_at, s.id),
+               array_agg(s.id ORDER BY s.created_at, s.id)
+        INTO v_scan_created_at, v_scan_ids
+        FROM (
+            SELECT t.created_at, t.id
+            FROM horsies_tasks t
+            WHERE t.is_workflow_task = TRUE
+              AND t.status IN ('CLAIMED', 'PENDING')
+              AND v_upper_id IS NOT NULL
+              AND (t.created_at, t.id) > (v_cursor_created_at, v_cursor_id)
+              AND (t.created_at, t.id) <= (v_upper_created_at, v_upper_id)
+            ORDER BY t.created_at, t.id
+            LIMIT p_batch_size
+        ) s;
+    END IF;
+    v_scan_count := COALESCE(cardinality(v_scan_ids), 0);
+    v_cycle_complete := v_scan_count < p_batch_size
+        OR (
+            v_scan_count > 0
+            AND (v_scan_created_at[v_scan_count], v_scan_ids[v_scan_count]) = (v_upper_created_at, v_upper_id)
+        );
+
+    SELECT array_agg(s.id ORDER BY s.id) INTO v_ids
+    FROM (
+        SELECT candidate.id
+        FROM unnest(COALESCE(v_scan_ids, '{}'::uuid[])) AS scanned(id)
+        CROSS JOIN LATERAL (
+            SELECT t.id
+            FROM horsies_tasks t
+            LEFT JOIN LATERAL (
+                SELECT TRUE AS found
+                FROM horsies_workflow_tasks wt
+                WHERE wt.task_id = t.id
+                  AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
+                LIMIT 1
+            ) runnable_link ON TRUE
+            WHERE t.id = scanned.id
+              AND t.is_workflow_task = TRUE
+              AND t.status IN ('CLAIMED', 'PENDING')
+              AND runnable_link.found IS NULL
+            LIMIT 1
+            FOR UPDATE OF t SKIP LOCKED
+        ) candidate
+    ) s;
+
+    UPDATE horsies_recovery_scan_cursors c
+    SET last_created_at = CASE WHEN v_cycle_complete THEN NULL ELSE v_scan_created_at[v_scan_count] END,
+        last_id = CASE WHEN v_cycle_complete THEN NULL ELSE v_scan_ids[v_scan_count] END,
+        cycle_upper_created_at = CASE WHEN v_cycle_complete THEN NULL ELSE v_upper_created_at END,
+        cycle_upper_id = CASE WHEN v_cycle_complete THEN NULL ELSE v_upper_id END,
+        completed_cycles = c.completed_cycles + CASE WHEN v_cycle_complete THEN 1 ELSE 0 END,
+        last_scan_rows = v_scan_count,
+        last_candidate_rows = COALESCE(cardinality(v_ids), 0),
+        last_scan_at = statement_timestamp()
+    WHERE c.scan_name = 'orphan_workflow_tasks';
+
+    IF v_ids IS NULL THEN
+        RETURN;
+    END IF;
+
+    v_terminal_at := NOW();
+    -- The outcome rows come from the locked live rows before the batch move deletes them. RETURN QUERY materializes
+    -- at once; it does not end the function.
+    RETURN QUERY SELECT
+        t.id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'CANCEL_ORPHAN_SWEEP'::text,
+        t.status::text, t.claimed_by_worker_id::text, t.claimed_at, NULL::text, NULL::jsonb
+    FROM horsies_tasks t
+    WHERE t.id = ANY(v_ids);
+
+    PERFORM horsies_move_tasks_to_history(
+        v_ids, 'CANCELLED', 'CANCEL_ORPHAN_SWEEP', v_terminal_at,
+        NULL, 'WORKFLOW_CHECK_FAILED',
+        'Workflow task orphaned: no live workflow_task linkage'
+    );
 END
 $$;

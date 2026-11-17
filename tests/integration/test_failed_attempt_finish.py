@@ -55,6 +55,7 @@ from horsies.core.worker.failed_attempt import (
 from horsies.core.worker.shared_stop import RetryPlacement
 from tests.integration.conftest import DB_URL, compute_test_command_fingerprint
 from tests.integration.history_seeding import read_attempts
+from tests.integration.terminal_writes import StaleFailure, fail_stale_task
 
 pytestmark = [pytest.mark.integration]
 
@@ -669,13 +670,18 @@ class TestNoWrite:
     ) -> None:
         seeded = await seed()
         async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    'SELECT * FROM horsies_fail_stale_task(CAST(:id AS uuid), '
-                    "0, 0, :result, 'WORKER_CRASHED', 'went silent')"
+            stale = await fail_stale_task(
+                connection,
+                seeded.task_id,
+                failure=StaleFailure(
+                    stale_after_ms=0,
+                    finalizing_stale_after_ms=0,
+                    result_json=ERROR_RESULT,
+                    error_code='WORKER_CRASHED',
+                    failed_reason='went silent',
                 ),
-                {'id': seeded.task_id, 'result': ERROR_RESULT},
             )
+        assert stale == 'APPLIED'
 
         outcome = await _finish(engine, _command(seeded))
 

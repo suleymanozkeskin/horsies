@@ -11,7 +11,6 @@ leaf past its horizon while the catalog keeps the durable record.
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -53,6 +52,7 @@ from tests.integration.task_history_harness import (
     prepare_move_storage,
     terminalization_schema_fixture,
 )
+from tests.integration.terminal_writes import StaleFailure, fail_stale_task
 
 pytestmark = [pytest.mark.integration]
 
@@ -116,17 +116,20 @@ async def send_heartbeat(
     )
 
 
-async def fail_stale(connection: AsyncConnection, task_id: str) -> Any:
-    return (
-        await connection.execute(
-            text(
-                'SELECT * FROM horsies_fail_stale_task('
-                'CAST(:task_id AS uuid), 600000, 1800000, '
-                '\'{"error":{"code":"STALE"}}\', \'STALE\', \'went silent\')'
-            ),
-            {'task_id': task_id},
-        )
-    ).one()
+async def fail_stale(connection: AsyncConnection, task_id: str) -> str:
+    """The stale RUNNING pass's failure of ``task_id``: stale after 10
+    minutes, a finalizing marker stale after 30 minutes."""
+    return await fail_stale_task(
+        connection,
+        task_id,
+        failure=StaleFailure(
+            stale_after_ms=600_000,
+            finalizing_stale_after_ms=1_800_000,
+            result_json='{"error":{"code":"STALE"}}',
+            error_code='STALE',
+            failed_reason='went silent',
+        ),
+    )
 
 
 class TestRegistration:
@@ -214,7 +217,7 @@ class TestStaleProbeOnPartitionedStorage:
                 started_at_offset=timedelta(minutes=-30),
             )
             outcome = await fail_stale(connection, task_id)
-            assert outcome.outcome == 'APPLIED'
+            assert outcome == 'APPLIED'
 
     @pytest.mark.asyncio
     async def test_a_heartbeat_across_the_hour_boundary_has_a_partition(
@@ -280,7 +283,7 @@ class TestStaleProbeOnPartitionedStorage:
                 connection, task_id, age=timedelta(minutes=1)
             )
             outcome = await fail_stale(connection, task_id)
-            assert outcome.outcome == 'SOURCE_STATE_CONFLICT'
+            assert outcome == 'SOURCE_STATE_CONFLICT'
 
     @pytest.mark.asyncio
     async def test_heartbeat_beyond_the_recency_bound_cannot_flip_verdict(
@@ -316,7 +319,7 @@ class TestStaleProbeOnPartitionedStorage:
                 connection, task_id, age=timedelta(minutes=80)
             )
             outcome = await fail_stale(connection, task_id)
-            assert outcome.outcome == 'APPLIED'
+            assert outcome == 'APPLIED'
 
 
 class TestSweep:

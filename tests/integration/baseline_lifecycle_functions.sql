@@ -1669,3 +1669,138 @@ SELECT lc_expect(
        AND c.conrelid = 'horsies_task_history_forever_open'::regclass),
     '1'
 );
+
+------------------------------------------------------------------------------------------------------------------------
+-- Expiry and orphan cancel: horsies_expire_owned_claim, horsies_expire_pending_tasks, horsies_cancel_owned_orphan,
+-- horsies_cancel_orphaned_tasks
+------------------------------------------------------------------------------------------------------------------------
+
+SELECT lc_expect_sqlstate('expire claim: a NULL task', $q$SELECT * FROM horsies_expire_owned_claim(
+    NULL, 'w1', '{}', 'E')$q$, '22023');
+SELECT lc_expect_sqlstate('expire claim: a NULL worker', $q$SELECT * FROM horsies_expire_owned_claim(
+    gen_random_uuid(), NULL, '{}', 'E')$q$, '22023');
+SELECT lc_expect_sqlstate('expire claim: a NULL error code', $q$SELECT * FROM horsies_expire_owned_claim(
+    gen_random_uuid(), 'w1', '{}', NULL)$q$, '22023');
+SELECT lc_task('00000000-0000-7000-8000-000000009001', 'CLAIMED');
+UPDATE horsies_tasks SET good_until = now() WHERE id = '00000000-0000-7000-8000-000000009001';
+SELECT lc_expect(
+    'expire claim: a passed deadline of this worker expires the row, at any claim generation',
+    (SELECT concat_ws('|', outcome, terminalization_kind, observed_status, observed_worker_id,
+        observed_claimed_at = now() - interval '1 second', terminal_at = now(), ordinality IS NULL,
+        pg_typeof(observed_worker_id)::text)
+     FROM horsies_expire_owned_claim('00000000-0000-7000-8000-000000009001', 'w1', '{"e":1}', 'TASK_EXPIRED')),
+    'APPLIED|EXPIRE_CLAIMED|CLAIMED|w1|t|t|t|text'
+);
+SELECT lc_expect(
+    'expire claim: the row is in history as EXPIRED, not live',
+    (SELECT concat_ws('|', h.status, h.terminalization_kind, h.error_code,
+        (SELECT count(*) FROM horsies_tasks WHERE id = h.task_id))
+     FROM horsies_task_history h WHERE h.task_id = '00000000-0000-7000-8000-000000009001'),
+    'EXPIRED|EXPIRE_CLAIMED|TASK_EXPIRED|0'
+);
+SELECT lc_task('00000000-0000-7000-8000-000000009002', 'CLAIMED');
+UPDATE horsies_tasks SET good_until = now() + interval '1 hour' WHERE id = '00000000-0000-7000-8000-000000009002';
+SELECT lc_expect(
+    'expire claim: a deadline not passed is a DEADLINE conflict with its evidence',
+    (SELECT concat_ws('|', outcome, guard_kind, observed_status,
+        (observed_guard->>'good_until')::timestamptz = now() + interval '1 hour',
+        (observed_guard->>'evaluated_at')::timestamptz = now())
+     FROM horsies_expire_owned_claim('00000000-0000-7000-8000-000000009002', 'w1', '{}', 'E')),
+    'SOURCE_STATE_CONFLICT|DEADLINE|CLAIMED|t|t'
+);
+SELECT lc_expect(
+    'expire claim: an absent task',
+    (SELECT outcome FROM horsies_expire_owned_claim('00000000-0000-7000-8000-0000000090ff', 'w1', '{}', 'E')),
+    'TASK_ABSENT'
+);
+
+SELECT lc_expect_sqlstate('expire pending: a batch of 0', $q$SELECT * FROM horsies_expire_pending_tasks(
+    0, '{}', 'E')$q$, '22023');
+SELECT lc_expect_sqlstate('expire pending: a NULL batch', $q$SELECT * FROM horsies_expire_pending_tasks(
+    NULL, '{}', 'E')$q$, '22023');
+SELECT lc_expect_sqlstate('expire pending: a NULL error code', $q$SELECT * FROM horsies_expire_pending_tasks(
+    10, '{}', NULL)$q$, '22023');
+SELECT lc_task('00000000-0000-7000-8000-000000009011', 'PENDING');
+SELECT lc_task('00000000-0000-7000-8000-000000009012', 'PENDING');
+SELECT lc_task('00000000-0000-7000-8000-000000009013', 'PENDING');
+UPDATE horsies_tasks SET good_until = now() - interval '1 second' WHERE id = '00000000-0000-7000-8000-000000009011';
+UPDATE horsies_tasks SET good_until = now() - interval '2 seconds' WHERE id = '00000000-0000-7000-8000-000000009012';
+UPDATE horsies_tasks SET good_until = now() + interval '1 hour' WHERE id = '00000000-0000-7000-8000-000000009013';
+CREATE TEMP TABLE lc_expired AS
+    SELECT row_number() OVER () AS position, e.*
+    FROM horsies_expire_pending_tasks(100, '{"e":"expired"}', 'TASK_EXPIRED') AS e;
+SELECT lc_expect(
+    'expire pending: the due rows, earliest deadline first, with their kind and status',
+    (SELECT string_agg(concat_ws('|', task_id, outcome, terminalization_kind, observed_status,
+        terminal_at = now(), pg_typeof(observed_worker_id)::text), ',' ORDER BY position)
+     FROM lc_expired
+     WHERE task_id IN ('00000000-0000-7000-8000-000000009011', '00000000-0000-7000-8000-000000009012')),
+    '00000000-0000-7000-8000-000000009012|APPLIED|EXPIRE_PENDING|PENDING|t|text,'
+        || '00000000-0000-7000-8000-000000009011|APPLIED|EXPIRE_PENDING|PENDING|t|text'
+);
+SELECT lc_expect(
+    'expire pending: a row not due stays PENDING',
+    (SELECT status FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000009013'),
+    'PENDING'
+);
+SELECT lc_expect(
+    'expire pending: the due rows are in history as EXPIRED',
+    (SELECT string_agg(h.status || ':' || h.error_code, ',' ORDER BY h.task_id)
+     FROM horsies_task_history h
+     WHERE h.task_id IN ('00000000-0000-7000-8000-000000009011', '00000000-0000-7000-8000-000000009012')),
+    'EXPIRED:TASK_EXPIRED,EXPIRED:TASK_EXPIRED'
+);
+
+SELECT lc_expect_sqlstate('cancel orphan: a NULL worker', $q$SELECT * FROM horsies_cancel_owned_orphan(
+    gen_random_uuid(), NULL, now())$q$, '22023');
+SELECT lc_expect_sqlstate('cancel orphan: a NULL task', $q$SELECT * FROM horsies_cancel_owned_orphan(
+    NULL, 'w1', now())$q$, '22023');
+SELECT lc_task('00000000-0000-7000-8000-000000009021', 'CLAIMED', 'w1', TRUE);
+SELECT lc_expect(
+    'cancel orphan: a held workflow task with no node is cancelled',
+    (SELECT concat_ws('|', outcome, terminalization_kind, observed_status, observed_worker_id,
+        pg_typeof(observed_worker_id)::text)
+     FROM horsies_cancel_owned_orphan(
+        '00000000-0000-7000-8000-000000009021', 'w1', now() - interval '1 second')),
+    'APPLIED|CANCEL_ORPHAN|CLAIMED|w1|text'
+);
+SELECT lc_expect(
+    'cancel orphan: the row is in history as CANCELLED with WORKFLOW_CHECK_FAILED',
+    (SELECT h.status || ':' || h.error_code FROM horsies_task_history h
+     WHERE h.task_id = '00000000-0000-7000-8000-000000009021'),
+    'CANCELLED:WORKFLOW_CHECK_FAILED'
+);
+SELECT lc_workflow('00000000-0000-7000-8000-000000009e01', 'RUNNING');
+SELECT lc_task('00000000-0000-7000-8000-000000009022', 'CLAIMED', 'w1', TRUE);
+SELECT lc_node('00000000-0000-7000-8000-000000009f01', '00000000-0000-7000-8000-000000009e01', 0, 'ENQUEUED',
+               '00000000-0000-7000-8000-000000009022');
+SELECT lc_expect(
+    'cancel orphan: a runnable node link is a WORKFLOW_LINK_STATE conflict with the node status',
+    (SELECT concat_ws('|', outcome, guard_kind, observed_guard->>'node_status')
+     FROM horsies_cancel_owned_orphan(
+        '00000000-0000-7000-8000-000000009022', 'w1', now() - interval '1 second')),
+    'SOURCE_STATE_CONFLICT|WORKFLOW_LINK_STATE|ENQUEUED'
+);
+
+SELECT lc_expect_sqlstate('orphan sweep: a batch of 0', $q$SELECT * FROM horsies_cancel_orphaned_tasks(0)$q$,
+    '22023');
+SELECT lc_task('00000000-0000-7000-8000-000000009031', 'PENDING', 'w1', TRUE);
+CREATE TEMP TABLE lc_swept AS SELECT s.* FROM horsies_cancel_orphaned_tasks(1000) AS s;
+SELECT lc_expect(
+    'orphan sweep: a PENDING workflow task with no node is cancelled',
+    (SELECT concat_ws('|', outcome, terminalization_kind, observed_status, pg_typeof(observed_worker_id)::text)
+     FROM lc_swept WHERE task_id = '00000000-0000-7000-8000-000000009031'),
+    'APPLIED|CANCEL_ORPHAN_SWEEP|PENDING|text'
+);
+SELECT lc_expect(
+    'orphan sweep: a workflow task with a runnable node stays live',
+    (SELECT count(*)::text FROM lc_swept WHERE task_id = '00000000-0000-7000-8000-000000009022'),
+    '0'
+);
+SELECT lc_expect(
+    'orphan sweep: the cursor records the page and completes the cycle',
+    (SELECT concat_ws('|', last_candidate_rows = (SELECT count(*) FROM lc_swept), last_id IS NULL,
+        completed_cycles >= 1, last_scan_at >= now())
+     FROM horsies_recovery_scan_cursors WHERE scan_name = 'orphan_workflow_tasks'),
+    't|t|t|t'
+);

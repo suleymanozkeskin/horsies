@@ -16,10 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.task_options import serialize_task_options
-from horsies.core.lifecycle.commands import CompleteLockedTask
-from horsies.core.lifecycle.fences import PriorLockedRead
-from horsies.core.lifecycle.outcomes import Applied, PhaseTwoStep
-from horsies.core.lifecycle.persistence import LOCK_TASK_SQL, apply_async
+from horsies.core.lifecycle.outcomes import PhaseTwoStep
+from horsies.core.lifecycle.persistence import LOCK_TASK_SQL
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     RetryPolicy,
@@ -39,6 +37,7 @@ from tests.dispatch_claim_support import claim_at, row_claim
 from tests.fixtures.slots.handles import task_finished_handle
 from tests.integration.conftest import DB_URL, compute_test_command_fingerprint
 from tests.integration.history_seeding import read_attempts
+from tests.integration.terminal_writes import complete_workflow_task
 
 pytestmark = [pytest.mark.integration]
 
@@ -578,12 +577,14 @@ async def test_finalizer_row_lock_wins_reaper_race(
 ) -> None:
     """A finalizer holding the task's locks makes the stale recovery wait;
     after the finalizer commits, the recovery finds the row moved and counts
-    nothing."""
+    nothing. The finalizer writes phase 1 of a workflow task's success
+    (``horsies_finish_workflow_success``, kind COMPLETE_LOCKED)."""
     worker_id = f'finalizer-race-{uuid.uuid4().hex}'
     task_id = await _insert_owned_running_task(
         session,
         worker_id=worker_id,
         started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        is_workflow_task=True,
     )
 
     async with AsyncSession(engine, expire_on_commit=False) as finalizer:
@@ -599,15 +600,13 @@ async def test_finalizer_row_lock_wins_reaper_race(
         )
         await _until_a_backend_waits_on_a_lock(engine, 'horsies_finish_stale_attempt')
 
-        outcome = await apply_async(
+        outcome = await complete_workflow_task(
             await finalizer.connection(),
-            CompleteLockedTask(
-                task_id=task_id,
-                fence=PriorLockedRead(worker_id=worker_id),
-                result_json='{"ok": "finalizer won"}',
-            ),
+            task_id,
+            worker_id=worker_id,
+            result_json='{"ok": "finalizer won"}',
         )
-        assert isinstance(outcome, Applied)
+        assert outcome == 'APPLIED'
         await finalizer.commit()
 
     reaper_result = await asyncio.wait_for(reaper, timeout=2)
