@@ -8,6 +8,43 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Rust client (crate `horsies`)
+
+The crate `horsies` is rebuilt on `horsies-core`, the engine that the
+Python client runs on. Each entry is a breaking change of the crate's API,
+unless it starts with "Added".
+
+- **The client runs on `horsies-core`.** The crate has no engine of its
+  own: no sqlx broker, no worker, no workflow engine, no monitoring queries
+  and no migrations. A database that `0.1.0-alpha` installed (migrations 1
+  to 65) is refused with `SchemaRefusal::ForeignMigrations`, and nothing in
+  it is changed. Drain it, then start 0.8.0 on a new database.
+- **The engine types are no longer public.** `PostgresBroker`, `Broker`,
+  `pub mod core`, `compute_enqueue_sha`, `run_horsies_migrations`,
+  `MIGRATIONS_TABLE`, `SchemaInitializationMode`, `expected_schema_version`,
+  `resolve_node_task_options`, the row types (`ClaimedTaskRow`,
+  `HeartbeatRow`, `TaskAttemptRow`, `TaskInfoRow`, `TaskResultRow`,
+  `TaskRunningContextRow`, `WorkerStateRow`, `WorkflowRow`,
+  `WorkflowTaskRow`, `RawResultRecord`) and the listener types
+  (`NotifyListener`, `SharedNotifyListener`) are removed.
+- **The workflow engine functions are removed.** `on_workflow_task_complete`,
+  `on_subworkflow_complete`, `recover_stuck_workflows`, `WorkflowError`, and
+  `cancel_workflow`, `pause_workflow`, `resume_workflow` and
+  `get_workflow_result`, which took a `PgPool`, are removed. The core runs
+  them.
+- **The `arbitrary-precision` feature is removed.** The core stores the input
+  text as the client wrote it, and the command fingerprint hashes that text.
+- **Added: the features `cli`, `tokio-postgres` and `sqlx`.** `cli` is on by
+  default: it builds the CLI runner and the `horsies` binary. clap,
+  tracing-subscriber, toml, owo-colors and tempfile are built only with
+  `cli`. sqlx is built only with `sqlx`.
+- **The crate declares `rust-version = "1.91"`.**
+- **The CLI types and `fetch_docs` are no longer public.** `Cli`, `Command`,
+  `LogLevel`, `execute_web`, `WebArgs`, `WebAuthMode`,
+  `WebCliError`, `execute_cutover`, `CutoverArgs`, `CutoverCliError`,
+  `CutoverCommand`, `execute_transcode`, `TranscodeArgs`,
+  `TranscodeCliError` and `TranscodeCommand` are removed from the library.
+
 ## [0.7.0] - 2026-11-15
 
 0.7.0 runs a task in one of three execution modes: in an isolated child,

@@ -75,10 +75,15 @@ async fn counted_result_read(
 
 async fn published_database() -> TestDatabase {
     let database = TestDatabase::create_with_connections(3).await;
-    let coverage =
-        ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &StagedLoaderPublisher)
-            .await
-            .expect("publish the readers");
+    let coverage = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("publish the readers");
     assert!(
         matches!(coverage, CoverageOutcome::Ensured(_)),
         "{coverage:?}"

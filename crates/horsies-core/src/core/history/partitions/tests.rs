@@ -23,6 +23,7 @@ use crate::core::history::ddl::classes::{
 use crate::core::history::ddl::runtime_names::{
     daily_leaf_name, leaf_enqueued_index_name, leaf_id_index_name, render_daily_leaf_ddl,
 };
+use crate::core::history::errors::HistoryError;
 use crate::core::history::heartbeats::partitioning::{
     create_hourly_heartbeat_leaf, ensure_heartbeat_coverage, heartbeat_horizon, hourly_leaf_name,
     hourly_leaf_ref, probe_index_name, register_heartbeat_class, sweep_expired_heartbeat_leaves,
@@ -44,6 +45,7 @@ use crate::core::history::names::{
 use crate::core::history::outcomes::{CatalogConflictKind, LeafCreation, LeafDrop, LeafInspection};
 use crate::core::history::periods::{HeartbeatHorizonHours, RetentionDays};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
+use crate::db::{CheckoutClass, CorePool, ParameterType, StatementBound, TypedStatement};
 
 use super::catalog::{
     capture_partition_bound_utc, database_now, read_leaf_catalog_row, read_leaf_physical_state,
@@ -554,6 +556,71 @@ async fn pausing_proxied_pool(
         .await
         .expect("connect through pausing SQL statement proxy");
     (proxy, pool, pause)
+}
+
+/// Sets the session time zone of a proxied core connection.
+static SET_SESSION_TIMEZONE: TypedStatement = TypedStatement::new(
+    "set_session_timezone",
+    "SELECT set_config('timezone', $1, false)",
+    &[ParameterType::Text],
+);
+
+/// Reads the session time zone of a proxied core connection.
+static READ_SESSION_TIMEZONE: TypedStatement = TypedStatement::new(
+    "read_session_timezone",
+    "SELECT current_setting('timezone')",
+    &[],
+);
+
+/// A core session pool of `max_connections` through a statement proxy,
+/// warm: its statement-pooling check ran on its first connection, which is
+/// idle again, and the proxy counts from zero. With `session_timezone` the
+/// warm connection's session time zone is set first.
+async fn proxied_core_pool(
+    database: &TestDatabase,
+    delay_ms: usize,
+    max_connections: u32,
+    session_timezone: Option<&str>,
+) -> (SqlStatementProxy, CorePool) {
+    let (proxy, pool) = proxied_pool(database, delay_ms, max_connections).await;
+    let core = crate::broker::pools::session_core_pool_for_test_pool(&pool, max_connections);
+    pool.close().await;
+    {
+        let mut connection = core
+            .checkout(CheckoutClass::Reserved)
+            .await
+            .expect("warm the proxied core pool");
+        if let Some(timezone) = session_timezone {
+            let _rows = connection
+                .query(
+                    &SET_SESSION_TIMEZONE.bind().value(&timezone).finish(),
+                    StatementBound::ConnectionTimeouts,
+                )
+                .await
+                .expect("set the proxied session timezone");
+        }
+    }
+    proxy.reset();
+    (proxy, core)
+}
+
+/// The session time zone of the idle connection of a one-connection core
+/// pool.
+async fn core_session_timezone(pool: &CorePool) -> String {
+    let mut connection = pool
+        .checkout(CheckoutClass::Reserved)
+        .await
+        .expect("check out the proxied core connection");
+    let rows = connection
+        .query(
+            &READ_SESSION_TIMEZONE.bind().finish(),
+            StatementBound::ConnectionTimeouts,
+        )
+        .await
+        .expect("read the proxied session timezone");
+    rows.first()
+        .expect("current_setting returns one row")
+        .get::<_, String>(0)
 }
 
 async fn register_class(pool: &PgPool, class_key: &str, days: i64) -> String {
@@ -1122,9 +1189,15 @@ async fn cancelled_detach_closes_its_connection_and_releases_the_session_lock() 
 #[serial]
 async fn pool_coverage_releases_each_leaf_transaction_before_returning() {
     let database = TestDatabase::create_with_connections(4).await;
-    let outcome = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .expect("pool coverage");
+    let outcome = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("pool coverage");
     assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
     let advisory_locks: i64 = sqlx::query_scalar(
         "SELECT count(*)
@@ -1150,11 +1223,11 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         .collect();
 
     let first = ensure_partition_coverage_in_pool(
-        &database.pool,
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
         8,
         8,
         &declared[..1],
-        &StagedLoaderPublisher,
     )
     .await
     .expect("create initial coverage");
@@ -1162,27 +1235,22 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
 
     for (history_horizon, heartbeat_horizon) in [(2, 2), (8, 8)] {
         let setup = ensure_partition_coverage_in_pool(
-            &database.pool,
+            &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+            crate::broker::core_rows::StatementLog::Off,
             history_horizon,
             heartbeat_horizon,
             &declared[..1],
-            &StagedLoaderPublisher,
         )
         .await
         .expect("set healthy horizon coverage");
         assert!(matches!(setup, CoverageOutcome::Ensured(_)), "{setup:?}");
-        let (proxy, pool) = proxied_pool(&database, 0, 1).await;
-        sqlx::query("SELECT set_config('timezone', 'America/Los_Angeles', false)")
-            .execute(&pool)
-            .await
-            .expect("set proxied session timezone");
-        proxy.reset();
+        let (proxy, pool) = proxied_core_pool(&database, 0, 1, Some("America/Los_Angeles")).await;
         let outcome = ensure_partition_coverage_in_pool(
             &pool,
+            crate::broker::core_rows::StatementLog::Off,
             history_horizon,
             heartbeat_horizon,
             &declared[..1],
-            &StagedLoaderPublisher,
         )
         .await
         .expect("healthy horizon coverage");
@@ -1194,34 +1262,30 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         assert!(!proxy.sql().iter().any(|statement| {
             statement.starts_with("BEGIN") || statement.contains("pg_try_advisory_xact_lock")
         }));
-        let timezone: String = sqlx::query_scalar("SHOW timezone")
-            .fetch_one(&pool)
-            .await
-            .expect("read proxied session timezone");
-        assert_eq!(timezone, "America/Los_Angeles");
-        pool.close().await;
+        assert_eq!(core_session_timezone(&pool).await, "America/Los_Angeles");
+        pool.close();
         proxy.stop().await;
     }
 
     for class_count in [10, 50] {
         let setup = ensure_partition_coverage_in_pool(
-            &database.pool,
+            &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+            crate::broker::core_rows::StatementLog::Off,
             2,
             2,
             &declared[..class_count],
-            &StagedLoaderPublisher,
         )
         .await
         .expect("extend class coverage");
         assert!(matches!(setup, CoverageOutcome::Ensured(_)), "{setup:?}");
 
-        let (proxy, pool) = proxied_pool(&database, 0, 1).await;
+        let (proxy, pool) = proxied_core_pool(&database, 0, 1, None).await;
         let outcome = ensure_partition_coverage_in_pool(
             &pool,
+            crate::broker::core_rows::StatementLog::Off,
             2,
             2,
             &declared[..class_count],
-            &StagedLoaderPublisher,
         )
         .await
         .expect("healthy class coverage");
@@ -1230,16 +1294,22 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
             "{outcome:?}"
         );
         assert_eq!(proxy.statement_count(), 1);
-        pool.close().await;
+        pool.close();
         proxy.stop().await;
     }
 
     let delay_ms = 20_usize;
-    let (proxy, pool) = proxied_pool(&database, delay_ms, 1).await;
+    let (proxy, pool) = proxied_core_pool(&database, delay_ms, 1, None).await;
     let started = tokio::time::Instant::now();
-    let outcome = ensure_partition_coverage_in_pool(&pool, 2, 2, &declared, &StagedLoaderPublisher)
-        .await
-        .expect("healthy high-RTT coverage");
+    let outcome = ensure_partition_coverage_in_pool(
+        &pool,
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &declared,
+    )
+    .await
+    .expect("healthy high-RTT coverage");
     let elapsed = started.elapsed();
     assert!(
         matches!(outcome, CoverageOutcome::Ensured(_)),
@@ -1249,7 +1319,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
     assert!(elapsed >= std::time::Duration::from_millis(delay_ms as u64));
     // The exact statement count bounds RTT cost. CI load cannot give a stable
     // wall-clock upper bound.
-    pool.close().await;
+    pool.close();
     proxy.stop().await;
     database.drop().await;
 }
@@ -1258,10 +1328,16 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
 #[serial]
 async fn failed_post_commit_publication_is_retried_by_the_next_healthy_pass() {
     let database = TestDatabase::create_with_connections(4).await;
-    let setup =
-        ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &StagedLoaderPublisher)
-            .await
-            .expect("create and publish initial coverage");
+    let core_pool = crate::broker::pools::core_pool_for_test_pool(&database.pool);
+    let setup = ensure_partition_coverage_in_pool(
+        &core_pool,
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("create and publish initial coverage");
     assert!(matches!(setup, CoverageOutcome::Ensured(_)));
     // A created leaf is published by its own creation, so the readers go
     // stale through the manifest (Python `test_failed_final_publication_is_retried`).
@@ -1271,15 +1347,29 @@ async fn failed_post_commit_publication_is_retried_by_the_next_healthy_pass() {
     .execute(&database.pool)
     .await
     .expect("move every manifest position");
+    // The manifest refuses the positions that a publication writes, so the
+    // final publication of the next pass fails in the database.
+    sqlx::query(&format!(
+        "ALTER TABLE {TASK_LOOKUP_MANIFEST} ADD CONSTRAINT test_reject_publication \
+         CHECK (probe_position >= 100) NOT VALID"
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("make the next publication fail");
 
-    let publisher = FailFirstStagedPublisher::default();
-    let error = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &publisher)
-        .await
-        .expect_err("inject final publication failure");
-    assert!(error
-        .to_string()
-        .contains("injected post-commit publication failure"));
-    assert_eq!(publisher.calls.load(Ordering::SeqCst), 1);
+    let error = ensure_partition_coverage_in_pool(
+        &core_pool,
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect_err("the final publication fails");
+    assert!(
+        matches!(error, HistoryError::Statement(_)),
+        "a refused publication is a statement failure: {error:?}"
+    );
     let mut connection = database.pool.acquire().await.expect("acquire publisher");
     assert!(StagedLoaderPublisher
         .needs_republication(&mut connection)
@@ -1287,14 +1377,25 @@ async fn failed_post_commit_publication_is_retried_by_the_next_healthy_pass() {
         .expect("freshness check after the failed publication"));
     drop(connection);
 
-    let retry = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &publisher)
-        .await
-        .expect("retry publication on the next pass");
+    sqlx::query(&format!(
+        "ALTER TABLE {TASK_LOOKUP_MANIFEST} DROP CONSTRAINT test_reject_publication"
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("let the next publication pass");
+    let retry = ensure_partition_coverage_in_pool(
+        &core_pool,
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("retry publication on the next pass");
     let CoverageOutcome::Ensured(retry) = retry else {
         panic!("the next pass must publish the stale readers");
     };
     assert!(retry.republished);
-    assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
     let mut connection = database.pool.acquire().await.expect("acquire publisher");
     assert!(!StagedLoaderPublisher
         .needs_republication(&mut connection)
@@ -1308,9 +1409,15 @@ async fn failed_post_commit_publication_is_retried_by_the_next_healthy_pass() {
 #[serial]
 async fn current_heartbeat_with_a_wrong_physical_range_refuses_startup() {
     let database = TestDatabase::create_with_connections(4).await;
-    let setup = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .expect("create heartbeat coverage");
+    let setup = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("create heartbeat coverage");
     assert!(matches!(setup, CoverageOutcome::Ensured(_)));
 
     let (leaf_name, index_name, lower_anchor, upper_anchor): (
@@ -1362,9 +1469,15 @@ async fn current_heartbeat_with_a_wrong_physical_range_refuses_startup() {
     .await
     .expect("create conformant heartbeat index on wrong range");
 
-    let startup = ensure_startup_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .expect("validate startup with a wrong current heartbeat range");
+    let startup = ensure_startup_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("validate startup with a wrong current heartbeat range");
     let StartupCoverageOutcome::Refused(CoverageOutcome::Failed(failure)) = startup else {
         panic!("a wrong current-heartbeat range must refuse startup");
     };
@@ -1380,9 +1493,15 @@ async fn current_heartbeat_with_a_wrong_physical_range_refuses_startup() {
 #[serial]
 async fn coverage_repairs_same_name_wrong_shape_and_invalid_indexes() {
     let database = TestDatabase::create_with_connections(4).await;
-    let setup = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .expect("create index-repair coverage");
+    let setup = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("create index-repair coverage");
     assert!(matches!(setup, CoverageOutcome::Ensured(_)));
 
     let heartbeat = catalog_row_where(
@@ -1423,9 +1542,15 @@ async fn coverage_repairs_same_name_wrong_shape_and_invalid_indexes() {
         .await
         .expect("mark history index invalid");
 
-    let outcome = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .expect("repair malformed indexes");
+    let outcome = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("repair malformed indexes");
     assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
     let heartbeat_bounds = LeafBounds::new(bounded_lower(&heartbeat), heartbeat.upper_anchor)
         .expect("heartbeat bounds");
@@ -1466,9 +1591,15 @@ async fn coverage_repairs_same_name_wrong_shape_and_invalid_indexes() {
 #[serial]
 async fn coverage_repairs_a_nondefault_heartbeat_operator_class() {
     let database = TestDatabase::create_with_connections(4).await;
-    let setup = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .expect("create operator-class repair coverage");
+    let setup = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("create operator-class repair coverage");
     assert!(matches!(setup, CoverageOutcome::Ensured(_)));
     let heartbeat = catalog_row_where(
         &database.pool,
@@ -1499,9 +1630,15 @@ async fn coverage_repairs_a_nondefault_heartbeat_operator_class() {
         .expect("read nondefault heartbeat index definition");
     assert!(index_definition.contains("varchar_pattern_ops"));
 
-    let outcome = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .expect("repair nondefault heartbeat operator class");
+    let outcome = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("repair nondefault heartbeat operator class");
     assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
     let index_definition: String = sqlx::query_scalar("SELECT pg_get_indexdef(to_regclass($1))")
         .bind(&heartbeat_index)
@@ -1677,9 +1814,15 @@ async fn index_repair_lock_wait_is_bounded_and_restores_the_timeout() {
 #[serial]
 async fn pool_coverage_repairs_only_the_damaged_leaf_in_one_mutation_transaction() {
     let database = TestDatabase::create_with_connections(4).await;
-    let setup = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .expect("create repair coverage");
+    let setup = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("create repair coverage");
     assert!(matches!(setup, CoverageOutcome::Ensured(_)));
     let damaged_index: String = sqlx::query_scalar(&format!(
         "SELECT leaf_name || '_task_idx' FROM {LEAF_CATALOG}
@@ -1694,10 +1837,16 @@ async fn pool_coverage_repairs_only_the_damaged_leaf_in_one_mutation_transaction
         .await
         .expect("drop one required index");
 
-    let (proxy, pool) = proxied_pool(&database, 0, 4).await;
-    let outcome = ensure_partition_coverage_in_pool(&pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .expect("repair one damaged leaf");
+    let (proxy, pool) = proxied_core_pool(&database, 0, 4, None).await;
+    let outcome = ensure_partition_coverage_in_pool(
+        &pool,
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("repair one damaged leaf");
     let CoverageOutcome::Ensured(ensured) = outcome else {
         panic!("damaged index must be repairable");
     };
@@ -1727,8 +1876,36 @@ async fn pool_coverage_repairs_only_the_damaged_leaf_in_one_mutation_transaction
         .await
         .expect("read repaired index");
     assert!(repaired);
-    pool.close().await;
+    pool.close();
     proxy.stop().await;
+    database.drop().await;
+}
+
+/// Python `coverage_gate_enabled`: on a pool of one connection a gated pass
+/// takes no gate, so it does not wait for a second checkout until the pool
+/// timeout; it repairs under the per-leaf locks.
+#[tokio::test]
+#[serial]
+async fn a_gated_pass_on_one_connection_repairs_without_the_gate() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let pool = crate::broker::pools::session_core_pool_for_test_pool(&database.pool, 1);
+
+    let outcome = ensure_partition_coverage_in_pool(
+        &pool,
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("a gated pass on one connection");
+
+    let CoverageOutcome::Ensured(ensured) = outcome else {
+        panic!("one connection repairs the set: {outcome:?}");
+    };
+    assert!(ensured.created_history_leaves > 0, "{ensured:?}");
+    assert!(ensured.heartbeat_covered_now);
+    pool.close();
     database.drop().await;
 }
 
@@ -1736,9 +1913,15 @@ async fn pool_coverage_repairs_only_the_damaged_leaf_in_one_mutation_transaction
 #[serial]
 async fn busy_coverage_gate_keeps_startup_ready_when_current_heartbeat_exists() {
     let database = TestDatabase::create_with_connections(4).await;
-    let setup = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .expect("create current heartbeat coverage");
+    let setup = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("create current heartbeat coverage");
     assert!(matches!(setup, CoverageOutcome::Ensured(_)));
 
     let mut holder = database
@@ -1756,9 +1939,15 @@ async fn busy_coverage_gate_keeps_startup_ready_when_current_heartbeat_exists() 
     .expect("hold coverage maintenance gate");
     assert!(held);
 
-    let startup = ensure_startup_coverage_in_pool(&database.pool, 3, 3, &[], &UnpublishedLoader)
-        .await
-        .expect("check startup under a busy coverage gate");
+    let startup = ensure_startup_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        3,
+        3,
+        &[],
+    )
+    .await
+    .expect("check startup under a busy coverage gate");
     let StartupCoverageOutcome::Ready(CoverageOutcome::Failed(failure)) = startup else {
         panic!("current heartbeat coverage must keep non-owner startup ready");
     };
@@ -1775,9 +1964,15 @@ async fn busy_coverage_gate_keeps_startup_ready_when_current_heartbeat_exists() 
 #[serial]
 async fn periodic_coverage_repairs_while_a_startup_pass_holds_the_gate() {
     let database = TestDatabase::create_with_connections(4).await;
-    let setup = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .expect("create coverage");
+    let setup = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("create coverage");
     assert!(matches!(setup, CoverageOutcome::Ensured(_)));
     let damaged_index: String = sqlx::query_scalar(&format!(
         "SELECT leaf_name || '_task_idx' FROM {LEAF_CATALOG}
@@ -1807,16 +2002,28 @@ async fn periodic_coverage_repairs_while_a_startup_pass_holds_the_gate() {
     .expect("hold coverage maintenance gate");
     assert!(held);
 
-    let gated = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .expect("gated pass under a busy gate");
+    let gated = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("gated pass under a busy gate");
     let CoverageOutcome::Failed(failure) = gated else {
         panic!("a gated pass under a busy gate repairs nothing: {gated:?}");
     };
     assert_eq!(failure.stage, "coverage_gate_busy");
-    let periodic = ensure_periodic_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .expect("periodic pass under a busy gate");
+    let periodic = ensure_periodic_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("periodic pass under a busy gate");
     assert!(
         matches!(periodic, CoverageOutcome::Ensured(_)),
         "{periodic:?}"
@@ -1853,9 +2060,15 @@ async fn busy_coverage_gate_refuses_startup_when_current_heartbeat_is_absent() {
     .expect("hold coverage maintenance gate");
     assert!(held);
 
-    let startup = ensure_startup_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .expect("check cold startup under a busy coverage gate");
+    let startup = ensure_startup_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .expect("check cold startup under a busy coverage gate");
     let StartupCoverageOutcome::Refused(CoverageOutcome::Failed(failure)) = startup else {
         panic!("missing current heartbeat coverage must refuse startup");
     };
@@ -2926,9 +3139,15 @@ async fn static_forever_leaf_missing_index_is_a_conflict_and_is_not_repaired() {
         }
     ));
     drop(connection);
-    let outcome = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
-        .await
-        .unwrap();
+    let outcome = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        2,
+        2,
+        &[],
+    )
+    .await
+    .unwrap();
     assert!(matches!(outcome, CoverageOutcome::Failed(_)), "{outcome:?}");
     let restored: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
         .bind(&index_name)
@@ -3018,9 +3237,15 @@ async fn pool_coverage_creates_the_period_leaves_and_no_forever_leaf() {
     let mut reader = database.pool.acquire().await.unwrap();
     let before = forever_leaves(&mut reader).await;
     drop(reader);
-    let first = ensure_partition_coverage_in_pool(&database.pool, 3, 2, &[], &UnpublishedLoader)
-        .await
-        .unwrap();
+    let first = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        3,
+        2,
+        &[],
+    )
+    .await
+    .unwrap();
     let CoverageOutcome::Ensured(report) = first else {
         panic!("{first:?}");
     };
@@ -3029,9 +3254,15 @@ async fn pool_coverage_creates_the_period_leaves_and_no_forever_leaf() {
     let mut reader = database.pool.acquire().await.unwrap();
     assert_eq!(forever_leaves(&mut reader).await, before);
     drop(reader);
-    let second = ensure_partition_coverage_in_pool(&database.pool, 3, 2, &[], &UnpublishedLoader)
-        .await
-        .unwrap();
+    let second = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        crate::broker::core_rows::StatementLog::Off,
+        3,
+        2,
+        &[],
+    )
+    .await
+    .unwrap();
     let CoverageOutcome::Ensured(report) = second else {
         panic!("{second:?}");
     };

@@ -7,12 +7,17 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::broker::core_rows::StatementLog;
+use crate::broker::expiry_and_orphans::{
+    cancel_orphan_page, expire_pending_pass, OrphanAuditPage, PendingExpiryFailed,
+    PendingExpiryPass, PENDING_EXPIRY_MAX_BATCHES_PER_PASS,
+};
 use crate::broker::stale_recovery::{
     finish_stale_attempt, requeue_stale_claimed_pass, scan_stale_running, wake_retried_queue,
     FinishStaleAttempt, RecoveryBatch, StaleCandidate, StaleClaimsRequeuePass, StaleRetry,
     StaleRunningPass, StaleRunningThresholds, ThresholdMs, ThresholdOutOfRange,
     STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS, STALE_RUNNING_SCAN_BATCH,
 };
+use crate::broker::CoveragePassError;
 use crate::broker::PostgresBroker;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
@@ -20,7 +25,7 @@ use crate::core::history::identity::reservations::{
     cleanup_expired_reservations_pass, ReservationCleanupPass, RESERVATION_CLEANUP_BATCHES_PER_PASS,
 };
 use crate::core::history::maintenance::coverage::{
-    ensure_periodic_coverage_in_pool, CoverageOutcome,
+    CoverageOutcome, CoverageRequest, CoverageSerialization,
 };
 use crate::core::history::maintenance::pruning::{prune_expired_partitions, PruneReach};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
@@ -289,11 +294,11 @@ mod p7_maintenance_tests {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let coverage =
             crate::core::history::maintenance::coverage::ensure_partition_coverage_in_pool(
-                &pool,
+                &crate::broker::pools::core_pool_for_test_pool(&pool),
+                crate::broker::core_rows::StatementLog::Off,
                 2,
                 2,
                 &[],
-                &crate::core::history::reads::publisher::StagedLoaderPublisher,
             )
             .await
             .expect("partition coverage");
@@ -1048,7 +1053,13 @@ async fn run_reaper_pass(
             Duration::from_millis(config.orphan_task_audit_interval_ms),
         ) {
             let started = std::time::Instant::now();
-            match terminate_orphaned_workflow_tasks(runtime_pool, started).await {
+            // One page on the main core pool with the reserve, in one
+            // transaction with its cursor counts.
+            let page = match broker.core_pools_for_write() {
+                Ok((open, _write)) => cancel_orphan_page(open.main(), broker.statement_log()).await,
+                Err(error) => Err(error),
+            };
+            match page.map(|page| OrphanTaskAuditReport::ready(page, started)) {
                 Ok(report) => {
                     orphan_state.permanent_failures = 0;
                     if report.cancelled > 0 {
@@ -1136,17 +1147,27 @@ async fn run_reaper_pass(
     // Expire unclaimed PENDING tasks whose good_until has passed, on the
     // main core pool with the reserve.
     let expired = match broker.core_pools_for_write() {
-        Ok((open, _write)) => expire_pending_tasks(open.main(), broker.statement_log()).await,
-        Err(error) => Err(error),
+        Ok((open, _write)) => expire_pending_pass(open.main(), broker.statement_log()).await,
+        Err(error) => Err(PendingExpiryFailed {
+            expired_before: 0,
+            error,
+        }),
     };
     match expired {
-        Ok(count) if count > 0 => {
+        Ok(PendingExpiryPass::Drained { expired: count }) if count > 0 => {
             tracing::info!(count, "reaper expired unclaimed PENDING tasks");
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "reaper: failed to expire pending tasks");
+        Ok(PendingExpiryPass::Drained { .. }) => {}
+        Ok(PendingExpiryPass::BoundReached { expired: count }) => {
+            tracing::warn!(
+                expired = count,
+                batches = PENDING_EXPIRY_MAX_BATCHES_PER_PASS,
+                "pending expiry reached its per-pass bound; the next pass goes on",
+            );
         }
-        _ => {}
+        Err(failed) => {
+            tracing::warn!(error = %failed, "reaper: failed to expire pending tasks");
+        }
     }
 
     // Exact outbox recovery. Each candidate owns its transaction; retaining
@@ -1217,15 +1238,19 @@ async fn run_reaper_pass(
 
     if tokio::time::Instant::now() >= *next_partition_maintenance {
         let declared = retention.registrable_periods();
-        let coverage_health = match ensure_periodic_coverage_in_pool(
-            maintenance_pool,
+        let coverage = match CoverageRequest::new(
             retention.history_leaf_horizon_days,
             retention.heartbeat_leaf_horizon_hours,
             &declared,
-            &StagedLoaderPublisher,
-        )
-        .await
-        {
+        ) {
+            Ok(request) => {
+                broker
+                    .ensure_partition_coverage(&request, CoverageSerialization::PerLeafLocks)
+                    .await
+            }
+            Err(refused) => Err(CoveragePassError::History(refused)),
+        };
+        let coverage_health = match coverage {
             Ok(outcome) => {
                 let encoded = match &outcome {
                     CoverageOutcome::Ensured(ensured) => serde_json::json!({
@@ -1593,14 +1618,6 @@ pub(crate) mod on_test_pool {
     }
 }
 
-/// Batch size per expiry statement.
-const EXPIRE_BATCH_SIZE: i32 = 500;
-/// Max batches per reaper pass, bounding work and trigger-NOTIFY volume.
-const EXPIRE_MAX_BATCHES_PER_PASS: u32 = 200;
-
-/// Maximum rows examined by one orphan-task audit page.
-const ORPHAN_BATCH_SIZE: i32 = 500;
-
 /// Per-reaper state of the orphan audit: when it next runs, and how many
 /// permanent failures in a row it had (for the log only; the audit never
 /// stops on a live worker).
@@ -1685,6 +1702,21 @@ struct OrphanTaskAuditReport {
     errors: u32,
 }
 
+impl OrphanTaskAuditReport {
+    /// The health report of a page that committed, timed from `started`.
+    fn ready(page: OrphanAuditPage, started: std::time::Instant) -> Self {
+        Self {
+            state: "ready",
+            rows_selected: page.rows_selected,
+            candidates_returned: page.candidates_returned,
+            cancelled: page.cancelled,
+            duration_ms: elapsed_millis(started),
+            refusals: 0,
+            errors: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OrphanAuditFailureKind {
     Refusal,
@@ -1720,183 +1752,8 @@ fn orphan_audit_failure_snapshot(
     )
 }
 
-#[derive(sqlx::FromRow)]
-struct OrphanTaskScanStats {
-    rows_selected: i32,
-    candidates_returned: i32,
-}
-
 fn elapsed_millis(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
-/// Cancel orphaned workflow tasks in bounded batches (Python
-/// `audit_orphaned_workflow_tasks`, `core/brokers/postgres.py:3228-3287`).
-///
-/// One call examines one cursor page, in one transaction with the page's
-/// cursor update. The terminalization adapter returns one APPLIED outcome per
-/// orphan candidate.
-///
-/// Errors: [`crate::broker::BrokerError::Database`];
-/// [`crate::broker::BrokerError::TerminalizationContract`] for a row outside
-/// the wire contract, an outcome other than `APPLIED`, or cursor counts that
-/// do not match the outcomes. The transaction is not committed on any error:
-/// it rolls back when it drops, the cursor update included.
-async fn terminate_orphaned_workflow_tasks(
-    pool: &PgPool,
-    started: std::time::Instant,
-) -> Result<OrphanTaskAuditReport, crate::broker::BrokerError> {
-    let command = crate::core::lifecycle::TerminalizationCommand::CancelOrphanedTasks {
-        batch_size: crate::core::lifecycle::BatchSize::new(ORPHAN_BATCH_SIZE)
-            .expect("ORPHAN_BATCH_SIZE is positive"),
-    };
-    let mut transaction = pool
-        .begin()
-        .await
-        .map_err(crate::broker::BrokerError::Database)?;
-    let cancelled =
-        crate::broker::terminalization::terminalize_in_tx(&mut transaction, &command).await?;
-    refuse_unapplied("horsies_cancel_orphaned_tasks", &cancelled)?;
-    let stats: OrphanTaskScanStats = sqlx::query_as(
-        "SELECT last_scan_rows AS rows_selected,
-                last_candidate_rows AS candidates_returned
-         FROM horsies_recovery_scan_cursors
-         WHERE scan_name = 'orphan_workflow_tasks'",
-    )
-    .fetch_one(transaction.as_mut())
-    .await
-    .map_err(crate::broker::BrokerError::Database)?;
-    let rows_selected = u32::try_from(stats.rows_selected).map_err(|_| {
-        crate::broker::BrokerError::TerminalizationContract(
-            "horsies_cancel_orphaned_tasks: cursor row count is negative".to_owned(),
-        )
-    })?;
-    let candidates_returned = u32::try_from(stats.candidates_returned).map_err(|_| {
-        crate::broker::BrokerError::TerminalizationContract(
-            "horsies_cancel_orphaned_tasks: cursor candidate count is negative".to_owned(),
-        )
-    })?;
-    if usize::try_from(candidates_returned).unwrap_or(usize::MAX) != cancelled.len() {
-        return Err(crate::broker::BrokerError::TerminalizationContract(
-            "horsies_cancel_orphaned_tasks: cursor candidate count differs from outcome count"
-                .to_owned(),
-        ));
-    }
-    transaction
-        .commit()
-        .await
-        .map_err(crate::broker::BrokerError::Database)?;
-    Ok(OrphanTaskAuditReport {
-        state: "ready",
-        rows_selected,
-        candidates_returned,
-        cancelled: u32::try_from(cancelled.len()).unwrap_or(u32::MAX),
-        duration_ms: elapsed_millis(started),
-        refusals: 0,
-        errors: 0,
-    })
-}
-
-/// Expire unclaimed PENDING tasks whose `good_until` has passed (Python
-/// `expire_pending_tasks`, `core/brokers/postgres.py:3097-3175`).
-///
-/// Runs `horsies_expire_pending_tasks` in bounded batches (earliest
-/// deadlines first, SKIP LOCKED) so a mass expiry is spread across several
-/// committed transactions instead of one transaction that row-locks every
-/// match and flushes two trigger NOTIFYs per row in a single commit (which
-/// can overflow listener queues). Each batch is one transaction of its own
-/// on `pool` (`BEGIN`, the batch statement, `COMMIT`), checked out as
-/// reserved work, and commits only when every outcome is `APPLIED`. At most
-/// [`EXPIRE_MAX_BATCHES_PER_PASS`] batches run; the rest waits for the next
-/// pass. No attempt rows are written (the task was never executed). Returns
-/// the number of expired tasks.
-///
-/// Errors: [`crate::broker::BrokerError::Statement`];
-/// [`crate::broker::BrokerError::TerminalizationContract`] for a row outside
-/// the wire contract or an outcome other than `APPLIED` (a discovery batch
-/// reports transitioned rows only). The batches before the failed one stay
-/// committed. The failed batch commits nothing, except after a `COMMIT`
-/// whose reply was lost (`OutcomeUnknown`).
-pub async fn expire_pending_tasks(
-    pool: &crate::db::CorePool,
-    log: StatementLog,
-) -> Result<u64, crate::broker::BrokerError> {
-    let task_error = TaskError::builtin(
-        crate::core::OutcomeCode::TaskExpired,
-        "task expired before being claimed (good_until passed)",
-    );
-    let task_result = TaskResult::<()>::Err(task_error);
-    let result_json = serde_json::to_string(&task_result)
-        .unwrap_or_else(|_| r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"TASK_EXPIRED"},"data":null,"message":"expired"}}"#.to_owned());
-    let command = crate::core::lifecycle::TerminalizationCommand::ExpirePendingTasks {
-        batch_size: crate::core::lifecycle::BatchSize::new(EXPIRE_BATCH_SIZE)
-            .expect("EXPIRE_BATCH_SIZE is positive"),
-        result_json,
-        error_code: "TASK_EXPIRED".to_owned(),
-    };
-    let full_batch = u64::from(EXPIRE_BATCH_SIZE.unsigned_abs());
-
-    let mut total: u64 = 0;
-    for _ in 0..EXPIRE_MAX_BATCHES_PER_PASS {
-        let affected = crate::broker::terminalization::terminalize_and_commit_if(
-            pool,
-            log,
-            &command,
-            transitioned_count,
-        )
-        .await?;
-        total += affected;
-        if affected < full_batch {
-            return Ok(total);
-        }
-    }
-    tracing::warn!(
-        expired = total,
-        batches = EXPIRE_MAX_BATCHES_PER_PASS,
-        "pending expiry reached its per-pass bound; the next pass goes on",
-    );
-    Ok(total)
-}
-
-/// The number of rows a pending expiry batch moved. The batch reports only
-/// the rows it moved (Python `expire_pending_tasks`), so any outcome other
-/// than `APPLIED` breaks the wire contract ([`refuse_unapplied`]).
-fn transitioned_count(
-    outcomes: &[crate::core::lifecycle::TerminalizationOutcome],
-) -> Result<u64, crate::broker::BrokerError> {
-    refuse_unapplied("horsies_expire_pending_tasks", outcomes)?;
-    Ok(outcomes.len() as u64)
-}
-
-/// Refuse the outcomes of a discovery batch of `operation` unless each one
-/// is `APPLIED`. A discovery batch reports one row per row it moved (Python
-/// `expire_pending_tasks` and `audit_orphaned_workflow_tasks`,
-/// `core/brokers/postgres.py:3142-3158` and `:3244-3260`). Pure.
-///
-/// Errors: [`crate::broker::BrokerError::TerminalizationContract`] naming
-/// `operation`, the task and the first outcome other than `APPLIED`.
-fn refuse_unapplied(
-    operation: &str,
-    outcomes: &[crate::core::lifecycle::TerminalizationOutcome],
-) -> Result<(), crate::broker::BrokerError> {
-    for outcome in outcomes {
-        match outcome {
-            crate::core::lifecycle::TerminalizationOutcome::Applied { .. } => {}
-            crate::core::lifecycle::TerminalizationOutcome::AlreadyApplied { .. }
-            | crate::core::lifecycle::TerminalizationOutcome::LostClaim { .. }
-            | crate::core::lifecycle::TerminalizationOutcome::SourceStateConflict { .. }
-            | crate::core::lifecycle::TerminalizationOutcome::TaskAbsent { .. } => {
-                return Err(crate::broker::BrokerError::TerminalizationContract(
-                    format!(
-                        "{operation}: task {} reported {outcome:?}; \
-                         a discovery batch reports moved rows only",
-                        outcome.task_id(),
-                    ),
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Requeue stale CLAIMED tasks back to PENDING (Python

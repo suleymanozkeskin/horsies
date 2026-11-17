@@ -33,4 +33,18 @@ BROKER_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=('install_schema_async',),
     ),
+    DualRunOperation(
+        name='task info',
+        production_path='horsies.core.brokers.postgres:PostgresBroker.get_task_info_async',
+        reference_path='tests.dualrun.reference.task_info_caller:get_task_info_async',
+        mode=PoolMode(),
+        core_methods=('task_info_async',),
+    ),
+    DualRunOperation(
+        name='task info, blocking',
+        production_path='horsies.core.brokers.postgres:PostgresBroker.get_task_info',
+        reference_path='tests.dualrun.reference.task_info_caller:get_task_info',
+        mode=PoolMode(),
+        core_methods=('task_info',),
+    ),
 )

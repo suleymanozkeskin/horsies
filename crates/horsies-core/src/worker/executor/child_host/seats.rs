@@ -6,12 +6,14 @@
 //!   rounds, writes the marker and sends `left_work_ended`, or sends
 //!   `left_work_stuck` for work that did not stop.
 //! - Shared async: up to `seats` async bodies at once on the child's
-//!   runtime. At the deadline the body is aborted and `deadline_fired` is
-//!   sent; when anything of the run (the body or its work) is alive after
+//!   runtime. At the deadline the run's cancel signal fires and
+//!   `deadline_fired` is sent; the run ends as a timeout whatever its body
+//!   returns. When anything of the run (the body or its work) is alive after
 //!   the cancel grace, `second_cancel` is sent and everything of the run is
-//!   aborted in rounds, then `run_stuck` names what is alive 0.3 s later,
-//!   and the run keeps its seat until it ends or the parent kills the
-//!   child. A body that returns before its deadline with work alive waits
+//!   dropped (aborted) in rounds, then `run_stuck` names what is alive 0.3 s
+//!   later, and the run keeps its seat until it ends or the parent kills the
+//!   child. The parent reads from `second_cancel` which of the two ended the
+//!   run. A body that returns before its deadline with work alive waits
 //!   the cancel grace for it, then sends `leftover_cancel` and aborts it in
 //!   rounds, then `leftover_stuck`. A run that timed out or needed a cancel
 //!   writes no marker. A body, or work it started with `spawn_in_run`,
@@ -409,7 +411,8 @@ async fn async_body(
             after_return(context, run_ref, &scope, end, grace).await
         }
         () = &mut deadline => {
-            handle.abort();
+            // The body runs on: it sees the signal and has the grace to end.
+            scope.fire_cancel();
             context.writer.send(ChildFrame::DeadlineFired(run_ref)).await;
             stop_after_deadline(context, run_ref, &scope, grace).await;
             (SeatEnd::TimedOut, Marker::Skip)
@@ -465,9 +468,11 @@ async fn after_return(
     (SeatEnd::Finished(end), Marker::Skip)
 }
 
-/// After the deadline's abort of the body: when anything of the run is
-/// alive after the cancel grace, report the second cancel and abort it all
-/// in rounds; then report what is stuck, and wait for the end.
+/// After the run's cancel signal fired at its deadline: when anything of
+/// the run (the body or its work) is alive after the cancel grace, report the
+/// second cancel and drop it all in rounds; then report what is stuck, and
+/// wait for the end. A run that ended within the grace sends no second
+/// cancel, so the parent records that the body returned after the signal.
 async fn stop_after_deadline(
     context: &HostContext,
     run_ref: RunRef,

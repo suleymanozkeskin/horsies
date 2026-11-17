@@ -135,6 +135,22 @@ class CoreHandle:
         """Cancel one plain task; a RUNNING task only with include_running. Writes, in one
         statement. An outcome that contradicts the function raises PanicException.
         """
+    def expire_pending_tasks_async(self) -> asyncio.Future[PendingExpiryDrained | PendingExpiryBoundReached | PendingExpiryFailed]:
+        """One pending expiry pass. Writes; each batch commits alone."""
+    def audit_orphaned_workflow_tasks_async(self) -> asyncio.Future[OrphanPageAudited | OrphanAuditLockBusy | OrphanAuditFailed]:
+        """One page of the orphan sweep and its cursor counts, in one transaction. Writes."""
+    def cancel_owned_orphan_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime) -> asyncio.Future[TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed]:
+        """Cancel one claimed workflow task that this claim holds and that no runnable node
+        links. Writes, in one statement. A naive claimed_at raises TypeError.
+        """
+    def pause_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed]:
+        """Pause one workflow tree. Writes, in one statement. A row outside the function's contract
+        raises PanicException.
+        """
+    def cancel_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleFailed]:
+        """Cancel one workflow tree. Writes, in one statement. A row outside the function's contract
+        raises PanicException.
+        """
     def task_info(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> TaskInfoRecord | TaskInfoNotFound | BrokerFailure:
         """The info of one task. Installs the schema once per handle first; then reads only."""
     def task_info_async(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> asyncio.Future[TaskInfoRecord | TaskInfoNotFound | BrokerFailure]:
@@ -161,6 +177,12 @@ class CoreChildHandle:
         connection, no statement runs. A naive claimed_at raises TypeError.
         """
     def start_attempt_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, worker_pid: int, worker_hostname: str, deadline_in_ms: int | None) -> asyncio.Future[AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed]:
+        """The awaitable form of the method above."""
+    def expire_owned_claim(self, task_id: uuid.UUID, *, worker_id: str) -> TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed:
+        """Expire one claimed row of this worker whose deadline passed before its start. Writes,
+        in one statement.
+        """
+    def expire_owned_claim_async(self, task_id: uuid.UUID, *, worker_id: str) -> asyncio.Future[TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed]:
         """The awaitable form of the method above."""
     def mark_finalizing(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime) -> FinalizingMarked | FinalizingNotHeld | MarkFinalizingFailed:
         """Write the finalizing marker of a run whose body ended. Writes, in one statement, with
@@ -587,6 +609,91 @@ class StaleRunningScanFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+
+
+@final
+class PendingExpiryDrained:
+    """The pending expiry pass ended at a short batch: no due row was left. Every batch
+    committed.
+    """
+    @property
+    def expired(self) -> int: ...
+
+
+@final
+class PendingExpiryBoundReached:
+    """The pending expiry pass ran its bound of full batches and stopped; due rows can remain.
+    Every batch committed.
+    """
+    @property
+    def expired(self) -> int: ...
+
+
+@final
+class PendingExpiryFailed:
+    """The pending expiry pass stopped at a failure. The batches before it committed and
+    expired expired_before rows; the failed batch committed nothing, or its outcome is unknown.
+    """
+    @property
+    def expired_before(self) -> int: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class OrphanPageAudited:
+    """The orphan page committed: rows_selected workflow tasks scanned, and
+    candidates_returned of them, with no runnable node link, moved to history as CANCELLED.
+    """
+    @property
+    def rows_selected(self) -> int: ...
+    @property
+    def candidates_returned(self) -> int: ...
+    @property
+    def cancelled(self) -> int: ...
+
+
+@final
+class OrphanAuditLockBusy:
+    """Another sweep holds the orphan cursor: the page was refused at once (SQLSTATE 55P03)
+    and wrote nothing.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class OrphanAuditFailed:
+    """The orphan page did not commit: a failed connect, family check or statement, or a page
+    outside the function's contract. After a lost COMMIT reply its outcome is unknown.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class TaskRowEnded:
+    """The row moved to history: kind is EXPIRE_CLAIMED or CANCEL_ORPHAN. The observed fields
+    are the row as the statement locked it.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def terminal_at(self) -> datetime.datetime: ...
+    @property
+    def kind(self) -> str: ...
+    @property
+    def observed_status(self) -> str | None: ...
+    @property
+    def observed_worker_id(self) -> str | None: ...
+    @property
+    def observed_claimed_at(self) -> datetime.datetime | None: ...
 
 
 @final
@@ -1096,6 +1203,59 @@ class WindowRefusedRecord:
     """The requested window is not servable; reason names why."""
     @property
     def reason(self) -> str: ...
+
+
+@final
+class WorkflowPaused:
+    """The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed
+    tasks of the paused tree are abandoned.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowNotRunning:
+    """The workflow exists and is not RUNNING. Nothing was written."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowCancelled:
+    """The workflow was PENDING, RUNNING or PAUSED; its tree is CANCELLED."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowNotCancellable:
+    """The workflow is COMPLETED, FAILED, CANCELLED or EXPIRED. Nothing was written."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowAbsent:
+    """No workflow has this id. Nothing was written."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class HandleFailed:
+    """The connect, the client family check or the statement failed (DB_OPERATION_FAILED), or a
+    stored value of the workflow does not parse (STORED_DATA_INVALID, not retryable). After
+    DB_OPERATION_FAILED the statement wrote nothing, or it committed and its reply was lost.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def code(self) -> Literal['DB_OPERATION_FAILED', 'STORED_DATA_INVALID']: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
 
 
 def baseline_sql_files() -> list[tuple[str, str]]:

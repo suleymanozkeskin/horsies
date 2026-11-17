@@ -79,6 +79,15 @@ pub use crate::broker::{
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 
+// partition maintenance of a client handle (`PostgresBroker::ensure_partition_coverage`)
+pub use crate::broker::CoveragePassError;
+pub use crate::core::history::errors::HistoryError;
+pub use crate::core::history::maintenance::coverage::{
+    CoverageEnsureFailed, CoverageEnsured, CoverageOutcome, CoverageRequest, CoverageSerialization,
+    HistoryCoverage,
+};
+pub use crate::core::history::periods::RetentionDays;
+
 // The baseline SQL files, which horsies._core hands to the Python install.
 pub use crate::broker::migrations::BASELINE_SQL_FILE_TEXTS;
 
@@ -92,6 +101,10 @@ pub use crate::broker::claims::{
     ClaimClasses, ClaimPass, ClaimPassRequest, ClaimTake, ClaimedRow, QueueStartCheck, QueueStarts,
     ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement, StartAttempt,
     StartMiss, StartOutcome, StartWindow, UnheldBudget, WindowedStart, MAX_RELEASED_CLAIMS,
+};
+pub use crate::broker::expiry_and_orphans::{
+    OrphanAuditPage, PendingExpiryFailed, PendingExpiryPass, TaskRowEnd, ORPHAN_AUDIT_PAGE_ROWS,
+    PENDING_EXPIRY_BATCH_ROWS, PENDING_EXPIRY_MAX_BATCHES_PER_PASS,
 };
 pub use crate::broker::stale_recovery::{
     StaleClaimsRequeueFailed, StaleClaimsRequeuePass, StaleRunningPass, StaleRunningThresholds,
@@ -109,10 +122,12 @@ pub use crate::worker::finalize_batch::{
 
 // Child mode of a Rust worker binary: the entry checks `child_mode` first
 // and, in child mode, exits with the code of `run_child_host`. Task bodies
-// start work that belongs to their run with `spawn_in_run`.
+// start work that belongs to their run with `spawn_in_run`, and read the
+// cancel signal of their run with `run_cancel_signal`.
 pub use crate::worker::executor::child_host::{
-    child_mode, run_child_host, spawn_in_run, ChildApp, ChildArgs, ChildArgsError, ChildHostExit,
-    ChildMode, RunSpawnRefused, CHILD_MODE_ARGUMENT, MAX_RUN_WORK,
+    child_mode, run_cancel_signal, run_child_host, spawn_in_run, ChildApp, ChildArgs,
+    ChildArgsError, ChildHostExit, ChildMode, RunCancelSignal, RunSignalRefused, RunSpawnRefused,
+    CHILD_MODE_ARGUMENT, MAX_RUN_WORK,
 };
 
 // worker re-exports

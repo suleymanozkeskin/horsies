@@ -14,6 +14,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::*;
+use crate::broker::expiry_and_orphans::transitioned_count;
 use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::BrokerError;
@@ -473,11 +474,11 @@ async fn a_pending_expiry_pass_with_no_due_row_expires_none() {
     )
     .await;
 
-    let expired = expire_pending_tasks(&core, StatementLog::Off)
+    let expired = expire_pending_pass(&core, StatementLog::Off)
         .await
         .expect("the expiry pass");
 
-    assert_eq!(expired, 0);
+    assert_eq!(expired, PendingExpiryPass::Drained { expired: 0 });
     assert_eq!(
         live_status(&pool, not_due).await.as_deref(),
         Some("PENDING")
@@ -495,11 +496,11 @@ async fn a_pending_expiry_pass_expires_each_due_row_with_task_expired() {
     let core = core_pool_for_test_pool(&pool);
     let due = seed_tasks(&pool, &Seed::due_pending(), 3).await;
 
-    let expired = expire_pending_tasks(&core, StatementLog::Off)
+    let expired = expire_pending_pass(&core, StatementLog::Off)
         .await
         .expect("the expiry pass");
 
-    assert_eq!(expired, 3);
+    assert_eq!(expired, PendingExpiryPass::Drained { expired: 3 });
     for task_id in due {
         let (status, _, error_code, result) = history_facts(&pool, task_id)
             .await
@@ -522,11 +523,11 @@ async fn a_pending_expiry_pass_runs_batches_until_a_short_one() {
     let core = core_pool_for_test_pool(&pool);
     let _due = seed_tasks(&pool, &Seed::due_pending(), 502).await;
 
-    let expired = expire_pending_tasks(&core, StatementLog::Off)
+    let expired = expire_pending_pass(&core, StatementLog::Off)
         .await
         .expect("the expiry pass");
 
-    assert_eq!(expired, 502);
+    assert_eq!(expired, PendingExpiryPass::Drained { expired: 502 });
     let left: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM horsies_tasks WHERE task_name = 'reaper_port' AND status = 'PENDING'",
     )
@@ -582,10 +583,16 @@ async fn a_pending_expiry_batch_with_an_outcome_other_than_applied_commits_nothi
     .expect("replace the expiry batch function");
     let core = core_pool_for_test_pool(&pool);
 
-    let refused = expire_pending_tasks(&core, StatementLog::Off).await;
+    let refused = expire_pending_pass(&core, StatementLog::Off).await;
 
     assert!(
-        matches!(refused, Err(BrokerError::TerminalizationContract(_))),
+        matches!(
+            refused,
+            Err(PendingExpiryFailed {
+                expired_before: 0,
+                error: BrokerError::TerminalizationContract(_),
+            })
+        ),
         "{refused:?}"
     );
     let markers: i64 = sqlx::query_scalar("SELECT count(*) FROM expiry_batch_marker")
@@ -605,10 +612,16 @@ async fn a_pending_expiry_pass_whose_batch_cannot_run_is_an_error() {
     let core = core_pool_for_test_pool(&pool);
     core.close();
 
-    let failed = expire_pending_tasks(&core, StatementLog::Off).await;
+    let failed = expire_pending_pass(&core, StatementLog::Off).await;
 
     assert!(
-        matches!(failed, Err(BrokerError::Statement(_))),
+        matches!(
+            failed,
+            Err(PendingExpiryFailed {
+                expired_before: 0,
+                error: BrokerError::Statement(_),
+            })
+        ),
         "{failed:?}"
     );
 }
@@ -621,15 +634,18 @@ async fn a_pending_expiry_pass_whose_batch_cannot_run_is_an_error() {
 #[serial]
 async fn an_orphan_audit_with_no_orphan_cancels_none() {
     let pool = migrated_pool().await;
+    let core = core_pool_for_test_pool(&pool);
     let _sent = seed_task(&pool, &Seed::due_pending()).await;
 
-    let report = terminate_orphaned_workflow_tasks(&pool, std::time::Instant::now())
+    let page = cancel_orphan_page(&core, StatementLog::Off)
         .await
         .expect("the orphan audit");
 
+    assert_eq!(page.cancelled, 0);
+    assert_eq!(page.candidates_returned, 0);
+    let report = OrphanTaskAuditReport::ready(page, std::time::Instant::now());
     assert_eq!(report.state, "ready");
-    assert_eq!(report.cancelled, 0);
-    assert_eq!(report.candidates_returned, 0);
+    core.close();
 }
 
 /// Python `TestTerminateOrphanedWorkflowTasks::test_counts_only_transitioned_rows`:
@@ -650,11 +666,13 @@ async fn an_orphan_audit_cancels_and_counts_only_unlinked_workflow_tasks() {
     )
     .await;
 
-    let report = terminate_orphaned_workflow_tasks(&pool, std::time::Instant::now())
+    let core = core_pool_for_test_pool(&pool);
+
+    let report = cancel_orphan_page(&core, StatementLog::Off)
         .await
         .expect("the orphan audit");
 
-    assert_eq!(report.state, "ready");
+    core.close();
     assert_eq!(report.rows_selected, 2);
     assert_eq!(report.candidates_returned, 2);
     assert_eq!(report.cancelled, 2);
@@ -695,12 +713,14 @@ async fn an_orphan_audit_with_an_outcome_other_than_applied_fails_and_commits_no
     .await
     .expect("replace the orphan page function");
 
-    let refused = terminate_orphaned_workflow_tasks(&pool, std::time::Instant::now()).await;
+    let core = core_pool_for_test_pool(&pool);
 
+    let refused = cancel_orphan_page(&core, StatementLog::Off).await;
+
+    core.close();
     assert!(
         matches!(refused, Err(BrokerError::TerminalizationContract(_))),
-        "{:?}",
-        refused.map(|report| report.cancelled)
+        "{refused:?}"
     );
     let candidates: i32 = sqlx::query_scalar(
         "SELECT last_candidate_rows FROM horsies_recovery_scan_cursors
@@ -722,15 +742,14 @@ async fn an_orphan_audit_with_an_outcome_other_than_applied_fails_and_commits_no
 async fn an_orphan_audit_whose_page_cannot_run_is_an_error() {
     let pool = migrated_pool().await;
     let orphan = seed_task(&pool, &Seed::unlinked_workflow_task("PENDING")).await;
-    let closed = migrated_pool().await;
-    closed.close().await;
+    let closed = core_pool_for_test_pool(&pool);
+    closed.close();
 
-    let failed = terminate_orphaned_workflow_tasks(&closed, std::time::Instant::now()).await;
+    let failed = cancel_orphan_page(&closed, StatementLog::Off).await;
 
     assert!(
-        matches!(failed, Err(BrokerError::Database(_))),
-        "{:?}",
-        failed.map(|report| report.cancelled)
+        matches!(failed, Err(BrokerError::Statement(_))),
+        "{failed:?}"
     );
     assert_eq!(live_status(&pool, orphan).await.as_deref(), Some("PENDING"));
 }

@@ -175,6 +175,13 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::enqueue::SendPayloadMismatch>()?;
     module.add_class::<operations::enqueue::SendPayloadTooLarge>()?;
     module.add_class::<operations::enqueue::SendKeyConflict>()?;
+    module.add_class::<operations::expiry_and_orphans::PendingExpiryDrained>()?;
+    module.add_class::<operations::expiry_and_orphans::PendingExpiryBoundReached>()?;
+    module.add_class::<operations::expiry_and_orphans::PendingExpiryFailed>()?;
+    module.add_class::<operations::expiry_and_orphans::OrphanPageAudited>()?;
+    module.add_class::<operations::expiry_and_orphans::OrphanAuditLockBusy>()?;
+    module.add_class::<operations::expiry_and_orphans::OrphanAuditFailed>()?;
+    module.add_class::<operations::expiry_and_orphans::TaskRowEnded>()?;
     module.add_class::<operations::failed_attempt::NoRetry>()?;
     module.add_class::<operations::failed_attempt::RetryAfter>()?;
     module.add_class::<operations::failed_attempt::FinishFailedAttemptRequest>()?;
@@ -222,6 +229,12 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::task_info::TaskInfoNotFound>()?;
     module.add_class::<operations::monitoring_window::MonitoringWindowRecord>()?;
     module.add_class::<operations::monitoring_window::WindowRefusedRecord>()?;
+    module.add_class::<operations::workflow_lifecycle::WorkflowPaused>()?;
+    module.add_class::<operations::workflow_lifecycle::WorkflowNotRunning>()?;
+    module.add_class::<operations::workflow_lifecycle::WorkflowCancelled>()?;
+    module.add_class::<operations::workflow_lifecycle::WorkflowNotCancellable>()?;
+    module.add_class::<operations::workflow_lifecycle::WorkflowAbsent>()?;
+    module.add_class::<operations::workflow_lifecycle::HandleFailed>()?;
     module.add_class::<scheduler::SchedulerStarted>()?;
     module.add_class::<scheduler::SchedulerStartRefused>()?;
     module.add_class::<scheduler::SchedulerStartFailed>()?;

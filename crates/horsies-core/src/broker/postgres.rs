@@ -1725,16 +1725,17 @@ impl PostgresBroker {
 
     /// Expire a CLAIMED task whose `good_until` passed before user code started.
     ///
-    /// Runs through `horsies_expire_owned_claim`, which fences on worker
-    /// ownership but deliberately not on the claim generation: once the
-    /// deadline has passed, expiry is the correct outcome for whichever
-    /// generation holds the row. One statement on the main core pool,
-    /// checked out as reserved work. `Applied` and `AlreadyApplied` both mean
-    /// the task is expired, as Python's `_expire_claimed_task_before_start`
-    /// (`core/worker/child_runner.py`) reads them; any other outcome is
-    /// logged with its evidence at the adapter boundary. The stored error is
-    /// Python's: `TASK_EXPIRED` with its message and the task and worker ids
-    /// as `data`.
+    /// Runs through `horsies_expire_owned_claim`
+    /// ([`crate::broker::expiry_and_orphans::expire_owned_claim`]), which
+    /// fences on worker ownership but deliberately not on the claim
+    /// generation: once the deadline has passed, expiry is the correct
+    /// outcome for whichever generation holds the row. One statement on the
+    /// main core pool, checked out as reserved work. An end and a replay of
+    /// the expiry both mean the task is expired, as Python's
+    /// `_expire_claimed_task_before_start` (`core/worker/child_runner.py`)
+    /// reads them; any other outcome is logged with its evidence at the
+    /// adapter boundary. The stored error is Python's: `TASK_EXPIRED` with
+    /// its message and the task and worker ids as `data`.
     ///
     /// Errors: [`BrokerError::Statement`], or
     /// [`BrokerError::TerminalizationContract`] for a row outside the wire
@@ -1744,44 +1745,24 @@ impl PostgresBroker {
         task_id: Uuid,
         worker_id: &str,
     ) -> Result<PrestartExpiry, BrokerError> {
-        let mut task_error = crate::core::TaskError::builtin(
-            crate::core::OutcomeCode::TaskExpired,
-            "Task expired: good_until deadline passed before execution started",
-        );
-        task_error.data = Some(serde_json::json!({
-            "task_id": task_id.to_string(),
-            "worker_id": worker_id,
-        }));
-        let task_result = crate::core::TaskResult::<serde_json::Value>::Err(task_error);
-        let result_json =
-            serde_json::to_string(&task_result).map_err(BrokerError::Serialization)?;
-
         let (open, _write) = self.core_pools_for_write()?;
-        let outcomes = crate::broker::terminalization::terminalize(
+        let end = crate::broker::expiry_and_orphans::expire_owned_claim(
             open.main(),
             self.statement_log,
-            &crate::core::lifecycle::TerminalizationCommand::ExpireOwnedClaim {
-                task_id,
-                fence: crate::core::lifecycle::WorkerOwned {
-                    worker_id: worker_id.to_owned(),
-                },
-                result_json,
-                error_code: "TASK_EXPIRED".to_owned(),
-            },
+            task_id,
+            worker_id,
         )
         .await?;
-
-        Ok(match outcomes.first() {
-            Some(
-                crate::core::lifecycle::TerminalizationOutcome::Applied { .. }
-                | crate::core::lifecycle::TerminalizationOutcome::AlreadyApplied { .. },
+        Ok(match end {
+            crate::broker::expiry_and_orphans::TaskRowEnd::Ended { .. }
+            | crate::broker::expiry_and_orphans::TaskRowEnd::Refused(
+                crate::core::lifecycle::AttemptWriteRefusal::AlreadyApplied { .. },
             ) => PrestartExpiry::Expired,
-            Some(
-                crate::core::lifecycle::TerminalizationOutcome::LostClaim { .. }
-                | crate::core::lifecycle::TerminalizationOutcome::SourceStateConflict { .. }
-                | crate::core::lifecycle::TerminalizationOutcome::TaskAbsent { .. },
-            )
-            | None => PrestartExpiry::NotExpired,
+            crate::broker::expiry_and_orphans::TaskRowEnd::Refused(
+                crate::core::lifecycle::AttemptWriteRefusal::LostClaim { .. }
+                | crate::core::lifecycle::AttemptWriteRefusal::SourceStateConflict { .. }
+                | crate::core::lifecycle::AttemptWriteRefusal::TaskAbsent { .. },
+            ) => PrestartExpiry::NotExpired,
         })
     }
 
@@ -3134,17 +3115,21 @@ fn history_task_info(
             })
             .map_err(|error| {
                 invalid_raw_result(format!(
-                    "stored result of task {} does not decode: {error}",
+                    "History result envelope failed validation for task {}: {error}",
                     detail.task_id
                 ))
             })?,
     };
     let terminal_at = detail.terminal_at;
+    // The snapshot holds the attempts oldest first; a task info lists them
+    // newest first, as the live read (`ORDER BY attempt DESC`) and Python's
+    // history read (`reversed(detail.attempts)`).
     let attempts = include_attempts
         .then(|| {
             detail
                 .attempts
                 .iter()
+                .rev()
                 .map(|record| task_attempt_info_from_record(detail.task_id, record))
                 .collect::<Result<Vec<_>, _>>()
         })
@@ -6726,6 +6711,53 @@ mod task_info_code_tests {
             "{shown:.40}"
         );
         assert!(!refused.retryable, "{shown:.40}");
+    }
+
+    fn history_attempt(
+        attempt: i32,
+        outcome: &str,
+        will_retry: bool,
+    ) -> crate::core::history::archive::attempts::AttemptRecord {
+        let at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 8, 7, 0, 0, 0).unwrap();
+        crate::core::history::archive::attempts::AttemptRecord::new(
+            attempt,
+            outcome,
+            will_retry,
+            at,
+            at,
+            None,
+            None,
+            None,
+            Some("w-1".to_owned()),
+            Some("host-1".to_owned()),
+            Some(100),
+            None,
+        )
+        .expect("a valid attempt record")
+    }
+
+    /// Python `test_broker_postgres.py::TestHistoryTaskInfoResultDecode::test_attempts_are_listed_newest_first`:
+    /// the snapshot holds the attempts oldest first, and the task info lists
+    /// them newest first, as the live read does.
+    #[test]
+    fn history_attempts_are_listed_newest_first() {
+        let mut detail = history_detail_with_result(b"{}");
+        detail.attempts = vec![
+            history_attempt(1, "FAILED", true),
+            history_attempt(2, "FAILED", false),
+        ];
+
+        let info = history_task_info(detail, false, false, true)
+            .expect("a history row with two attempts reads");
+
+        let attempts = info.attempts.expect("the read asked for the attempts");
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|attempt| attempt.attempt)
+                .collect::<Vec<i32>>(),
+            vec![2, 1],
+        );
     }
 
     /// Python `test_broker_postgres.py::TestHistoryTaskInfoResultDecode::test_stored_result_is_refused_as_invalid_json_payload`,
