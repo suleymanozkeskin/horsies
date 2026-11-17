@@ -72,7 +72,8 @@ pub(crate) fn input_object(
     match parsed {
         serde_json::Value::Object(object) => Ok(object),
         _ => Err(WorkflowError::Validation(
-            "a node input that takes args_from or workflow context members must be a JSON object"
+            "a node input that takes args_from, workflow context or workflow meta members \
+             must be a JSON object"
                 .to_owned(),
         )),
     }
