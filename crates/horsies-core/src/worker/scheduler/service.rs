@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::broker::PostgresBroker;
+use crate::broker::{PostgresBroker, SendKind};
 use crate::core::app::{PreparedSchedules, ScheduleSendFacts};
 use crate::core::config::{AppConfig, ScheduleConfig, TaskSchedule};
 
@@ -1038,6 +1038,7 @@ async fn enqueue_scheduled_task(
             None,
             retention,
             None,
+            SendKind::First,
         )
         .await
         .map_err(|source| ScheduleFireError::Broker {
