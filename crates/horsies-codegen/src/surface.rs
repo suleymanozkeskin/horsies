@@ -8,7 +8,8 @@
 //! the type comes from the core catalog itself.
 
 use horsies_core::catalog::{CodeCatalog, CodeEnum};
-use horsies_core::{BrokerErrorCode, TaskAttemptOutcome, TaskStatus};
+use horsies_core::monitoring::MonitoringQueryErrorCode;
+use horsies_core::{BrokerErrorCode, TaskAbsenceReason, TaskAttemptOutcome, TaskStatus};
 
 /// The type text of an annotation.
 #[derive(Clone, Copy, Debug)]
@@ -213,6 +214,14 @@ const MARK_STALE_RUNNING_PARAMETERS: &[StubParameter] = &[
     positional("stale_after_ms", "int"),
     positional("finalizing_stale_after_ms", "int"),
 ];
+const COVERAGE_REQUEST_PARAMETERS: &[StubParameter] = &[
+    keyword("history_horizon_days", "int"),
+    keyword("heartbeat_horizon_hours", "int"),
+    keyword("declared_period_days", "list[int]"),
+    keyword("serialization", "Literal['GATED', 'PER_LEAF_LOCKS']"),
+];
+const ENSURE_PARTITION_COVERAGE_PARAMETERS: &[StubParameter] =
+    &[positional("request", "CoverageRequest")];
 const CANCEL_TASK_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("include_running", "bool"),
@@ -257,6 +266,33 @@ const CANCEL_OWNED_ORPHAN_PARAMETERS: &[StubParameter] = &[
     keyword("claimed_at", "datetime.datetime"),
 ];
 
+const TASK_LIST_QUERY_PARAMETERS: &[StubParameter] = &[
+    keyword("window_lower", "datetime.datetime"),
+    keyword("window_upper", "datetime.datetime"),
+    keyword("statuses", "list[str]"),
+    keyword("task_names", "list[str]"),
+    keyword("queues", "list[str]"),
+    keyword("workers", "list[str]"),
+    keyword("error_codes", "list[str]"),
+    keyword("error_categories", "list[str]"),
+    keyword("retried_only", "bool"),
+    keyword("sort_by", "str"),
+    keyword("sort_dir", "str"),
+    keyword("offset", "int"),
+    keyword("limit", "int"),
+];
+const TASK_FACETS_QUERY_PARAMETERS: &[StubParameter] = &[
+    keyword("window_lower", "datetime.datetime"),
+    keyword("window_upper", "datetime.datetime"),
+    keyword("statuses", "list[str]"),
+    keyword("error_categories", "list[str]"),
+    keyword("retried_only", "bool"),
+];
+const MONITORING_LIST_TASKS_PARAMETERS: &[StubParameter] = &[positional("query", "TaskListQuery")];
+const MONITORING_TASK_DETAIL_PARAMETERS: &[StubParameter] = &[positional("task_id", "uuid.UUID")];
+const MONITORING_TASK_FACETS_PARAMETERS: &[StubParameter] =
+    &[positional("query", "TaskFacetsQuery")];
+
 const RESOLVE_MONITORING_WINDOW_PARAMETERS: &[StubParameter] = &[
     keyword("since", "datetime.datetime | None"),
     keyword("until", "datetime.datetime | None"),
@@ -292,6 +328,8 @@ const GUARD_TEXT: &str = "Literal['CLAIM', 'DEADLINE', 'STALENESS', 'RETRY_COUNT
      'FOREIGN_TERMINALIZATION', 'WORKFLOW_TASK']";
 const MARK_STALE_RUNNING_OUTCOME: &str =
     "StaleRunningRecovered | StaleRunningScanFull | StaleRunningScanFailed";
+const ENSURE_PARTITION_COVERAGE_OUTCOME: &str =
+    "CoverageEnsuredRecord | CoverageEnsureFailedRecord | CoverageFailed";
 const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
      CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
 const EXPIRE_PENDING_TASKS_OUTCOME: &str =
@@ -382,7 +420,7 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
     },
 ];
 
-const CORE_HANDLE_METHODS: [StubFunction; 29] = [
+const CORE_HANDLE_METHODS: [StubFunction; 30] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -498,6 +536,12 @@ const CORE_HANDLE_METHODS: [StubFunction; 29] = [
         doc: "Release the claims of one request. Writes, in one statement.",
     },
     StubFunction {
+        name: "ensure_partition_coverage_async",
+        parameters: ENSURE_PARTITION_COVERAGE_PARAMETERS,
+        returns: TypeText::FutureOf(ENSURE_PARTITION_COVERAGE_OUTCOME),
+        doc: "One partition coverage pass on the session-work pool. Writes (DDL and catalog rows);\neach leaf commits alone.",
+    },
+    StubFunction {
         name: "cancel_task_async",
         parameters: CANCEL_TASK_PARAMETERS,
         returns: TypeText::FutureOf(CANCEL_TASK_OUTCOME),
@@ -558,6 +602,51 @@ const CORE_HANDLE_METHODS: [StubFunction; 29] = [
         doc: "The awaitable form of the method above. A cancelled await drops the wait.",
     },
 ];
+
+const MONITORING_READ_OUTCOME: &str = "MonitoringJson | MonitoringFailed";
+const MONITORING_DETAIL_OUTCOME: &str = "MonitoringJson | TaskDetailAbsent | MonitoringFailed";
+
+/// The monitoring methods of `CoreHandle`.
+const MONITORING_HANDLE_METHODS: [StubFunction; 3] = [
+    StubFunction {
+        name: "monitoring_list_tasks_async",
+        parameters: MONITORING_LIST_TASKS_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "One page of the task list: the JSON text of the core's TaskListPage. Reads only, in one\nstatement. A cancelled await drops the read.",
+    },
+    StubFunction {
+        name: "monitoring_task_detail_async",
+        parameters: MONITORING_TASK_DETAIL_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_DETAIL_OUTCOME),
+        doc: "One task with its attempts: the JSON text of the core's TaskDetail, or the reason it is\nabsent. Reads only, in one statement. A cancelled await drops the read.",
+    },
+    StubFunction {
+        name: "monitoring_task_facets_async",
+        parameters: MONITORING_TASK_FACETS_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "The facets of one scope: the JSON text of the core's Facets. Reads only, in one\nstatement. A cancelled await drops the read.",
+    },
+];
+
+const HANDLE_METHOD_COUNT: usize = CORE_HANDLE_METHODS.len() + MONITORING_HANDLE_METHODS.len();
+
+/// Every method of `CoreHandle`: the client operations, then the monitoring
+/// reads.
+const HANDLE_METHODS: [StubFunction; HANDLE_METHOD_COUNT] = {
+    let mut methods = [CORE_HANDLE_METHODS[0]; HANDLE_METHOD_COUNT];
+    let mut position = 0;
+    while position < CORE_HANDLE_METHODS.len() {
+        methods[position] = CORE_HANDLE_METHODS[position];
+        position += 1;
+    }
+    let mut monitoring_position = 0;
+    while monitoring_position < MONITORING_HANDLE_METHODS.len() {
+        methods[CORE_HANDLE_METHODS.len() + monitoring_position] =
+            MONITORING_HANDLE_METHODS[monitoring_position];
+        monitoring_position += 1;
+    }
+    methods
+};
 
 const EXCEPTIONS: &[StubException] = &[
     StubException {
@@ -1483,7 +1572,7 @@ const HANDLE_CLASSES: [StubClass; 3] = [
     doc: "The core handle of one producer manifest and the pool profile of its process: PRODUCER,\nor WORKER (the main core pool keeps 2 connections free from batch checkouts for the\nper-task writes). Building it starts nothing.",
     constructor: Constructor::Parameters(CORE_HANDLE_PARAMETERS),
     properties: &[property("manifest_version", "int")],
-    methods: &CORE_HANDLE_METHODS,
+    methods: &HANDLE_METHODS,
 },
     StubClass {
         name: "CoreChildHandle",
@@ -1502,7 +1591,7 @@ const HANDLE_CLASSES: [StubClass; 3] = [
 ];
 
 /// The classes of the monitoring reads and the web handler.
-const MONITORING_CLASSES: [StubClass; 2] = [
+const MONITORING_CLASSES: [StubClass; 7] = [
     StubClass {
         name: "MonitoringWindowRecord",
         doc: "The window of one monitoring request: UTC bounds, increasing, at most the core's maximum\napart.",
@@ -1518,6 +1607,54 @@ const MONITORING_CLASSES: [StubClass; 2] = [
         doc: "The requested window is not servable; reason names why.",
         constructor: Constructor::NoConstructor,
         properties: &[property("reason", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskListQuery",
+        doc: "One frozen task list read: the window, the filters, the sort and the page. A value\noutside its rule raises ValueError; a naive bound raises TypeError.",
+        constructor: Constructor::Parameters(TASK_LIST_QUERY_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskFacetsQuery",
+        doc: "One frozen task facets read: the window, the statuses, the error categories that narrow\nthe code list, and the retried filter. A value outside its rule raises ValueError; a naive\nbound raises TypeError.",
+        constructor: Constructor::Parameters(TASK_FACETS_QUERY_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "MonitoringJson",
+        doc: "The JSON text of the core model of one monitoring read.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("json", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "MonitoringFailed",
+        doc: "An expected failure of a monitoring read. Nothing changed: a read writes nothing.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            StubProperty {
+                name: "code",
+                annotation: TypeText::WireValuesOf(<MonitoringQueryErrorCode as CodeEnum>::CATALOG),
+            },
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskDetailAbsent",
+        doc: "Neither the live table nor the history holds the task.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            StubProperty {
+                name: "reason",
+                annotation: TypeText::WireValuesOf(<TaskAbsenceReason as CodeEnum>::CATALOG),
+            },
+        ],
         methods: &[],
     },
 ];
@@ -1572,11 +1709,75 @@ const WORKFLOW_CLASSES: [StubClass; 6] = [
     },
 ];
 
+/// The classes of the history switch: the coverage pass.
+const HISTORY_CLASSES: [StubClass; 6] = [
+    StubClass {
+        name: "CoverageRequest",
+        doc: "One frozen coverage pass: the two horizons, the declared retention periods in whole days,\nand how a damaged pass is serialized. A period outside 1 to 1825 days, a horizon below two\nleaves, or another serialization raises ValueError.",
+        constructor: Constructor::Parameters(COVERAGE_REQUEST_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "CoveredForeverRecord",
+        doc: "No history class has an end of coverage: only the forever class has leaves, and its leaf\nhas an open upper bound.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "CoveredUntilRecord",
+        doc: "The first instant (UTC) at which a history class has no leaf.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("at", "datetime.datetime")],
+        methods: &[],
+    },
+    StubClass {
+        name: "CoverageEnsuredRecord",
+        doc: "The pass ended with the expected leaves conformant: what it created, whether it published\nthe readers, and how far coverage reaches. absent_leaves names cataloged leaves whose\nrelation is gone.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("created_history_leaves", "int"),
+            property("created_heartbeat_leaves", "int"),
+            property("republished", "bool"),
+            property("heartbeat_covered_now", "bool"),
+            property(
+                "history_covered_through",
+                "CoveredForeverRecord | CoveredUntilRecord",
+            ),
+            property("heartbeats_covered_through", "datetime.datetime"),
+            property("absent_leaves", "list[str]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "CoverageEnsureFailedRecord",
+        doc: "The pass stopped at a refusal; stage, class_key and refusal name where and why.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("stage", "str"),
+            property("class_key", "str | None"),
+            property("refusal", "str"),
+            property("heartbeat_covered_now", "bool"),
+            property("absent_leaves", "list[str]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "CoverageFailed",
+        doc: "The pass has no outcome: the connect, the client family check, a probe, the coverage\ngate, the class registration or the final publication failed, or a row broke its\nfunction's contract.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+];
+
 const CLASS_COUNT: usize = HANDLE_CLASSES.len()
     + ARGUMENT_CLASSES.len()
     + RECORD_CLASSES.len()
     + MONITORING_CLASSES.len()
-    + WORKFLOW_CLASSES.len();
+    + WORKFLOW_CLASSES.len()
+    + HISTORY_CLASSES.len();
 
 const CLASSES: [StubClass; CLASS_COUNT] = {
     let mut classes = [HANDLE_CLASSES[0]; CLASS_COUNT];
@@ -1607,6 +1808,12 @@ const CLASSES: [StubClass; CLASS_COUNT] = {
     while workflow_position < WORKFLOW_CLASSES.len() {
         classes[workflow_start + workflow_position] = WORKFLOW_CLASSES[workflow_position];
         workflow_position += 1;
+    }
+    let history_start = workflow_start + WORKFLOW_CLASSES.len();
+    let mut history_position = 0;
+    while history_position < HISTORY_CLASSES.len() {
+        classes[history_start + history_position] = HISTORY_CLASSES[history_position];
+        history_position += 1;
     }
     classes
 };

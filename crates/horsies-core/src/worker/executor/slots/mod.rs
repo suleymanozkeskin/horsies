@@ -91,8 +91,8 @@ pub use budgets::{
 };
 pub use defects::{SlotDefect, SLOT_DEFECT_LIMIT};
 pub use dispatch::{
-    AttemptEnd, Claimed, ClaimedTask, ExecutionClass, LoopKillCode, NotRunCause, RetryFacts,
-    Settlement, TaskKind,
+    AttemptEnd, CancelEnd, Claimed, ClaimedTask, ExecutionClass, LoopKillCode, NotRunCause,
+    RetryFacts, Settlement, TaskKind, TimeoutCancel,
 };
 #[cfg(test)]
 pub(crate) use outcome::test_successes;

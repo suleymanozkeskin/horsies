@@ -2,12 +2,17 @@
 
 Reference: ``tests/dualrun/monitoring_reference.py`` (``task_stats``,
 ``task_facets`` and ``task_breakdown`` as two statements and a client
-merge). Candidate: ``horsies.monitoring`` (one call of
-``horsies_monitoring_task_stats``, ``horsies_monitoring_task_facets`` and
-``horsies_monitoring_task_breakdown``). The seed has live and history rows
-of every status, claimed and unclaimed rows, a worker named ``unknown``,
-error codes of every built-in category, user codes and an empty code. Each
-scope must give equal answers.
+merge). Candidate: one call of ``horsies_monitoring_task_stats``,
+``horsies_monitoring_task_facets`` and ``horsies_monitoring_task_breakdown``
+(``horsies.monitoring``; for the facets, Python's body before the monitoring
+switch, ``tests/dualrun/reference/monitoring_queries.py``). The seed has live
+and history rows of every status, claimed and unclaimed rows, a worker named
+``unknown``, error codes of every built-in category, user codes and an empty
+code. Each scope must give equal answers.
+
+The caller switch pair of the monitoring switch: on the same seed, Python's
+``task_facets`` against the production read, which the core runs. The
+reports must be equal.
 """
 
 from __future__ import annotations
@@ -44,8 +49,10 @@ from tests.dualrun.monitoring_reads import (
     MakeDatabase,
     ReadPair,
     differing,
+    differing_reports,
     read_dual_run,
 )
+from tests.dualrun.reference import monitoring_queries as python_reads
 from tests.integration.monitoring_seeding import SeedRow, TaskRow, task_row
 
 pytestmark = [pytest.mark.integration]
@@ -235,6 +242,9 @@ def _facets_pair(
     statuses: list[TaskStatus],
     categories: list[ErrorCategory],
     retried_only: bool,
+    *,
+    reference_facets: _StatsRead,
+    candidate_facets: _StatsRead,
 ) -> ReadPair[object]:
     def read(facets: _StatsRead) -> Callable[[PostgresBroker], Awaitable[object]]:
         async def run(broker: PostgresBroker) -> object:
@@ -250,9 +260,17 @@ def _facets_pair(
 
     return ReadPair(
         name=f'facets, {status_name}, categories {categories}, retried {retried_only}',
-        reference=read(reference.task_facets),
-        candidate=read(task_facets),
+        reference=read(reference_facets),
+        candidate=read(candidate_facets),
     )
+
+
+_FACET_SCOPES: Final = tuple(
+    (status_name, statuses, categories, retried_only)
+    for status_name, statuses in _STATUS_SETS
+    for categories in ([], [ErrorCategory.DOMAIN], [ErrorCategory.OPERATIONAL, ErrorCategory.CONTRACT])
+    for retried_only in (False, True)
+)
 
 
 def _pairs() -> list[ReadPair[object]]:
@@ -265,10 +283,15 @@ def _pairs() -> list[ReadPair[object]]:
         for limit in (1, 2, 500)
     ]
     pairs += [
-        _facets_pair(status_name, statuses, categories, retried_only)
-        for status_name, statuses in _STATUS_SETS
-        for categories in ([], [ErrorCategory.DOMAIN], [ErrorCategory.OPERATIONAL, ErrorCategory.CONTRACT])
-        for retried_only in (False, True)
+        _facets_pair(
+            status_name,
+            statuses,
+            categories,
+            retried_only,
+            reference_facets=reference.task_facets,
+            candidate_facets=python_reads.task_facets,
+        )
+        for status_name, statuses, categories, retried_only in _FACET_SCOPES
     ]
     return pairs
 
@@ -327,3 +350,52 @@ def test_the_comparison_sees_a_candidate_that_drops_a_filter(
     )
 
     assert differing(answers) == [pair.name]
+
+
+def test_the_core_answers_what_python_answered(empty_database: MakeDatabase) -> None:
+    """The caller switch: Python's facets read against the production read on the core."""
+    pairs = [
+        _facets_pair(
+            status_name,
+            statuses,
+            categories,
+            retried_only,
+            reference_facets=python_reads.task_facets,
+            candidate_facets=task_facets,
+        )
+        for status_name, statuses, categories, retried_only in _FACET_SCOPES
+    ]
+
+    answers = read_dual_run(empty_database, _seed(), pairs)
+
+    assert len(answers) == 18
+    assert [each.name for each in answers if not isinstance(each.candidate, Ok)] == []
+    assert differing_reports(answers) == {}
+
+
+def test_the_core_comparison_sees_a_candidate_that_drops_the_category_selection(
+    empty_database: MakeDatabase,
+) -> None:
+    """The core candidate reads without the category selection; the reports must differ."""
+    status_name, statuses, categories, retried_only = _FACET_SCOPES[2]
+    pair = _facets_pair(
+        status_name,
+        statuses,
+        categories,
+        retried_only,
+        reference_facets=python_reads.task_facets,
+        candidate_facets=task_facets,
+    )
+
+    async def dropped(broker: PostgresBroker) -> object:
+        return await task_facets(
+            broker, window=_WINDOW, statuses=statuses, error_categories=[], retried_only=retried_only,
+        )
+
+    answers = read_dual_run(
+        empty_database,
+        _seed(),
+        [ReadPair(name=pair.name, reference=pair.reference, candidate=dropped)],
+    )
+
+    assert list(differing_reports(answers)) == [pair.name]

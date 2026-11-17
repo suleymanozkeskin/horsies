@@ -385,20 +385,23 @@ async fn a_reported_result_of_a_shared_run_completes_the_row() {
 #[serial]
 async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    for (execution, placement, class_after) in [
+    for (execution, placement, cancel, class_after) in [
         (
             ExecutionClass::SharedAsync,
             RetryPlacement::Isolated,
+            TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
             "ISOLATED",
         ),
         (
             ExecutionClass::SharedAsync,
             RetryPlacement::SameClass,
+            TimeoutCancel::Ended(CancelEnd::ReturnedAfterSignal),
             "SHARED_ASYNC",
         ),
         (
             ExecutionClass::SharedThread,
             RetryPlacement::Isolated,
+            TimeoutCancel::NoSignal,
             "ISOLATED",
         ),
     ] {
@@ -427,6 +430,7 @@ async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
                 AttemptEnd::TimedOut {
                     timeout: timeout_ms(1_000),
                     retry: placement,
+                    cancel,
                 },
             )
             .await;
@@ -472,6 +476,7 @@ async fn a_timeout_with_no_retry_fails_the_row_with_task_timeout() {
             AttemptEnd::TimedOut {
                 timeout: timeout_ms(1_000),
                 retry: RetryPlacement::SameClass,
+                cancel: TimeoutCancel::NoSignal,
             },
         )
         .await;
@@ -650,6 +655,7 @@ async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_r
         AttemptEnd::TimedOut {
             timeout: timeout_ms(1_000),
             retry: RetryPlacement::SameClass,
+            cancel: TimeoutCancel::EndedByKill,
         },
     ];
     for end in ends {
@@ -864,6 +870,7 @@ async fn a_failing_timeout_write_runs_crash_recovery_after_its_own_retries() {
             AttemptEnd::TimedOut {
                 timeout: timeout_ms(1_000),
                 retry: RetryPlacement::Isolated,
+                cancel: TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
             },
         )
         .await;

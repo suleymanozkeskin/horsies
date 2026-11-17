@@ -29,6 +29,7 @@ use crate::errors::{refusal_error, ManifestRefused};
 use crate::operations::arguments::utc_instant;
 use crate::operations::cancel::cancel_task_operation;
 use crate::operations::claim::{claim_pass_operation, ClaimPassRequest};
+use crate::operations::coverage::{ensure_partition_coverage_operation, CoverageRequestArgument};
 use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
 use crate::operations::expiry_and_orphans::{
     audit_orphaned_workflow_tasks_operation, cancel_owned_orphan_operation,
@@ -36,6 +37,10 @@ use crate::operations::expiry_and_orphans::{
 };
 use crate::operations::failed_attempt::{
     finish_ended_attempt_operation, finish_failed_attempt_operation, FinishFailedAttemptRequest,
+};
+use crate::operations::monitoring_reads::{
+    list_tasks_operation, task_detail_operation, task_facets_operation, TaskFacetsQuery,
+    TaskListQuery,
 };
 use crate::operations::queue_starts::{count_queue_starts_operation, QueueStartsRequest};
 use crate::operations::release::{release_claims_operation, ReleaseClaimsRequest};
@@ -492,6 +497,28 @@ impl CoreHandle {
         )
     }
 
+    /// One partition coverage pass on the session-work pool
+    /// (`PostgresBroker::ensure_partition_coverage`):
+    /// `CoverageEnsuredRecord`, `CoverageEnsureFailedRecord` (a contained
+    /// refusal), or `CoverageFailed`. Writes (DDL and catalog rows); each
+    /// leaf commits alone, and a cancelled await leaves the pass running to
+    /// its end. Awaitable only: its callers, the worker boot and the
+    /// reaper, run on the worker's event loop.
+    fn ensure_partition_coverage_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, CoverageRequestArgument>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.ensure_partition_coverage_async",
+            CallKind::Write,
+            ensure_partition_coverage_operation(self.connection(), request.get().pass()),
+        )
+    }
+
     /// Count the capped queues of one soft-cap start check: `QueueStartsRecord`
     /// or `QueueStartsFailed`. Reads only, in one statement; a check with no
     /// queue sends nothing. Awaitable only: its caller, the worker's claim
@@ -755,6 +782,66 @@ impl CoreHandle {
             "CoreHandle.raw_result_record_async",
             CallKind::Read,
             raw_result_record_operation(self.connection(), task_id, timeout_ms),
+        )
+    }
+
+    /// One page of the task list (`horsies_monitoring_task_list`):
+    /// `MonitoringJson` of the core's `TaskListPage`, or `MonitoringFailed`.
+    /// Reads only, in one statement. Awaitable only: its caller,
+    /// `horsies.monitoring.list_tasks`, is a coroutine. A cancelled await
+    /// drops the read.
+    fn monitoring_list_tasks_async<'py>(
+        &self,
+        py: Python<'py>,
+        query: &Bound<'_, TaskListQuery>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_list_tasks_async",
+            CallKind::Read,
+            list_tasks_operation(self.connection(), query.get().query()),
+        )
+    }
+
+    /// One task with its attempts (`horsies_monitoring_task_detail`):
+    /// `MonitoringJson` of the core's `TaskDetail`, `TaskDetailAbsent`, or
+    /// `MonitoringFailed`. Reads only, in one statement. Awaitable only: its
+    /// caller, `horsies.monitoring.get_task_detail`, is a coroutine. A
+    /// cancelled await drops the read.
+    fn monitoring_task_detail_async<'py>(
+        &self,
+        py: Python<'py>,
+        task_id: Uuid,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_task_detail_async",
+            CallKind::Read,
+            task_detail_operation(self.connection(), task_id),
+        )
+    }
+
+    /// The facets of one scope (`horsies_monitoring_task_facets`):
+    /// `MonitoringJson` of the core's `Facets`, or `MonitoringFailed`. Reads
+    /// only, in one statement. Awaitable only: its caller,
+    /// `horsies.monitoring.task_facets`, is a coroutine. A cancelled await
+    /// drops the read.
+    fn monitoring_task_facets_async<'py>(
+        &self,
+        py: Python<'py>,
+        query: &Bound<'_, TaskFacetsQuery>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_task_facets_async",
+            CallKind::Read,
+            task_facets_operation(self.connection(), query.get().query()),
         )
     }
 }

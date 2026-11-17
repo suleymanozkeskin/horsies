@@ -2,6 +2,12 @@
 
 The facet statement itself is ``horsies_monitoring_task_facets``; its cases
 are in ``tests/integration/baseline_scheduler_monitoring_cases.sql``.
+
+Since the monitoring switch the production read runs in the core; this file
+tests Python's body before the switch, the dual-run reference
+(``tests/dualrun/reference/monitoring_queries.py``), which specifies the
+answers that the dual-run pairs hold the core to. The production facade is
+tested on a mocked core handle in ``tests/unit/test_monitoring_reads_in_core.py``.
 """
 
 from __future__ import annotations
@@ -15,7 +21,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from horsies.core.types.result import Ok, is_ok
-from horsies.monitoring import ErrorCategory, MonitoringWindow, task_facets
+from horsies.monitoring import ErrorCategory, MonitoringWindow
+from tests.dualrun.reference.monitoring_queries import task_facets
 
 pytestmark = pytest.mark.unit
 

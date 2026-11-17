@@ -34,7 +34,7 @@ use super::defects::{
     count_defect, AfterDefect, CatchPanic, GenerationEnd, Served, SlotDefect, SlotDefects,
     TasksFinished,
 };
-use super::dispatch::{AttemptEnd, NotRunCause};
+use super::dispatch::{AttemptEnd, NotRunCause, TimeoutCancel};
 use super::pool::{Answer, ExitNotSeen, MemoryLimit, PoolShared, QueuedRun, TaskLimit};
 use super::route::IsolatedDeadline;
 use crate::broker::attempt_writes::RetryPlacement;
@@ -444,6 +444,7 @@ fn timeout_end(timeout: Option<TaskTimeoutMs>) -> AttemptEnd {
         Some(timeout) => AttemptEnd::TimedOut {
             timeout,
             retry: RetryPlacement::SameClass,
+            cancel: TimeoutCancel::NoSignal,
         },
         None => unreachable!("a wait with no deadline cannot pass its deadline"),
     }

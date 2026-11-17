@@ -492,6 +492,59 @@ fn each_write_stage_keeps_the_retry_bound_of_python() {
     assert_eq!(WriteStage::CrashRecovery.max_retries(), 3);
 }
 
+/// The stored error of a `TASK_TIMEOUT` write: its `data`.
+fn stored_timeout_data(result_json: &str) -> serde_json::Value {
+    let stored: serde_json::Value =
+        serde_json::from_str(result_json).expect("the timeout write stores a JSON envelope");
+    stored["err"]["data"].clone()
+}
+
+/// Python `_settle_timed_out_row`: the data of a `TASK_TIMEOUT` error names
+/// the task and its `timeout_ms`; a shared async run that its child ended
+/// also names how it ended after its cancel signal (`cancel_end`). An
+/// isolated or a shared thread run, and an async run that ended at a kill of
+/// its child, have no `cancel_end`.
+#[test]
+fn the_timeout_data_names_how_a_shared_async_run_ended() {
+    let claimed = task(ExecutionClass::SharedAsync, RETRY_ON_TIMEOUT);
+    let timeout = TaskTimeoutMs::new(1000).unwrap();
+    let task_id = claimed.task_id.to_string();
+    for (cancel, cancel_end) in [
+        (
+            TimeoutCancel::Ended(CancelEnd::ReturnedAfterSignal),
+            Some("RETURNED_AFTER_SIGNAL"),
+        ),
+        (
+            TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
+            Some("DROPPED_AFTER_GRACE"),
+        ),
+        (TimeoutCancel::NoSignal, None),
+        (TimeoutCancel::EndedByKill, None),
+    ] {
+        let write = timeout_write(
+            &claimed,
+            "worker-1",
+            timeout,
+            RetryPlacement::SameClass,
+            cancel,
+        );
+        let mut expected = serde_json::json!({"task_id": task_id, "timeout_ms": 1000});
+        if let Some(end) = cancel_end {
+            expected["cancel_end"] = serde_json::Value::from(end);
+        }
+        assert_eq!(
+            stored_timeout_data(&write.result_json),
+            expected,
+            "{cancel:?}"
+        );
+        assert_eq!(
+            write.error_code.as_deref(),
+            Some("TASK_TIMEOUT"),
+            "{cancel:?}"
+        );
+    }
+}
+
 /// Python `_recover_timed_out_row`: after the last retry of a TASK_TIMEOUT
 /// write, crash recovery writes TASK_TIMEOUT with the kept placement, and
 /// the policy decides the retry on that code.
@@ -499,7 +552,13 @@ fn each_write_stage_keeps_the_retry_bound_of_python() {
 fn crash_recovery_of_a_timeout_keeps_its_code_and_placement() {
     let claimed = task(ExecutionClass::SharedAsync, RETRY_ON_TIMEOUT);
     let timeout = TaskTimeoutMs::new(1000).unwrap();
-    let first = timeout_write(&claimed, "worker-1", timeout, RetryPlacement::Isolated);
+    let first = timeout_write(
+        &claimed,
+        "worker-1",
+        timeout,
+        RetryPlacement::Isolated,
+        TimeoutCancel::Ended(CancelEnd::ReturnedAfterSignal),
+    );
     let recovery = timeout_recovery_write(&claimed, "worker-1", timeout, RetryPlacement::Isolated);
     for write in [&first, &recovery] {
         assert_eq!(write.error_code.as_deref(), Some("TASK_TIMEOUT"));
@@ -513,7 +572,7 @@ fn crash_recovery_of_a_timeout_keeps_its_code_and_placement() {
     }
     assert_eq!(
         first.attempt.error_message.as_deref(),
-        Some("task exceeded timeout_ms=1000")
+        Some("Task exceeded timeout_ms=1000")
     );
     assert_eq!(
         recovery.attempt.error_message.as_deref(),
@@ -728,6 +787,7 @@ async fn the_deadline_kills_the_child_and_ends_the_task_as_timed_out() {
         AttemptEnd::TimedOut {
             timeout,
             retry: RetryPlacement::SameClass,
+            cancel: TimeoutCancel::NoSignal,
         }
     );
 }
