@@ -204,6 +204,7 @@ worker writes the context into that parameter.
 
 ## Sub-Workflows
 
+<!-- rust-check: skip partial -- fetch_report is a task that the file does not define -->
 ```rust
 use horsies::{
     HorsiesError, OutputlessResults, SubWorkflowParams, WorkflowDefConfig, WorkflowDefinition,
@@ -456,6 +457,7 @@ dependencies).
 A function that builds a spec at run time has no registration that
 `check()` can build. Register check cases for it:
 
+<!-- rust-check: skip partial -- fetch_report is a task that the file does not define -->
 ```rust
 use horsies::{Horsies, HorsiesError, WorkflowSpec, WorkflowSpecBuilder};
 

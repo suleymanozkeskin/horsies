@@ -154,7 +154,12 @@ from horsies.core.types.status import (
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.codec.json_io import Json, SerializationError, loads_json
-from horsies.core.codec.task_options import stored_execution, stored_max_retries
+from horsies.core.codec.task_options import (
+    OPTIONS_INTEGER_OUT_OF_RANGE,
+    options_integer_out_of_range,
+    stored_execution,
+    stored_max_retries,
+)
 from horsies.core.codec.validation_errors import without_validation_input
 from horsies.core.models.tasks import Execution, TaskInfo, TaskAttemptInfo
 from horsies.core.models.class_coverage import ClassCoverage, ClassReport
@@ -450,7 +455,10 @@ def _parse_enqueue_task_options(
 
     ``serialize_task_options()`` always produces this text, so malformed JSON
     is a bug, not a runtime condition, and it must not be silently swallowed.
-    No options store no retries and ``ISOLATED``.
+    No options store no retries and ``ISOLATED``. Options that hold an int
+    outside ``MIN_OPTIONS_INTEGER`` to ``MAX_OPTIONS_INTEGER`` (for example a
+    ``max_delay_seconds`` of ``2**64``) are refused before the retry limit is
+    read, as the core refuses them.
     """
     if not task_options:
         return Ok(_EnqueueOptions(max_retries=0, execution=Execution.ISOLATED))
@@ -459,6 +467,11 @@ def _parse_enqueue_task_options(
         return Err(BrokerInvalidTaskOptions(
             message=f'task_options JSON corrupt: {opts_r.err_value}',
             exception=opts_r.err_value,
+        ))
+    if options_integer_out_of_range(opts_r.ok_value):
+        return Err(BrokerInvalidTaskOptions(
+            message=OPTIONS_INTEGER_OUT_OF_RANGE,
+            exception=NoCause(),
         ))
     retry_limit_r = stored_max_retries(opts_r.ok_value)
     if is_err(retry_limit_r):

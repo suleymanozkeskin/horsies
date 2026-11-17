@@ -477,10 +477,17 @@ def _child_task_options_json(child_task: TaskNode[Any]) -> str | None:
 def _validate_args_from_map(raw: dict[str, Any]) -> dict[str, int] | None:
     """Validate args_from shape: all keys str, all values int.
 
+    A ``bool`` value is refused: ``bool`` is a subclass of ``int``, and
+    ``true`` and ``false`` are not read as the indexes 1 and 0.
+
     Returns the validated dict on success, None if any entry has wrong types.
     """
     for key, val in raw.items():
-        if not isinstance(key, str) or not isinstance(val, int):
+        if (
+            not isinstance(key, str)
+            or isinstance(val, bool)
+            or not isinstance(val, int)
+        ):
             return None
     return cast(dict[str, int], raw)
 

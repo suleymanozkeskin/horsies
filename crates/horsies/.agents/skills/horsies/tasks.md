@@ -640,6 +640,7 @@ again in each child.
 **Wait for no result in a task body.** A result wait in a worker child is
 refused with `WaitInsideTask`. Pass the result with a workflow (`arg_from`).
 
+<!-- rust-check: skip elided -- a Wrong / Correct pair of statements -->
 ```rust
 // WRONG: in a task body
 let total = other_task_handle.get(WaitLimit::NoLimit).await;

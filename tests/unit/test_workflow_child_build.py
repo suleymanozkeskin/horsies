@@ -221,6 +221,21 @@ class TestBuildChild:
         assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
         assert error.message == 'args_from has non-int values for subworkflow task 3'
 
+    @pytest.mark.parametrize('flag', ['true', 'false'])
+    def test_an_args_from_index_that_is_a_bool_fails_the_node(self, flag: str) -> None:
+        # bool is a subclass of int: true and false are not the indexes 1 and 0.
+        error = _failure(
+            build_child(
+                _broker(),
+                _node(args_from=f'{{"value": {flag}}}'),
+                {0: TaskResult(ok=4), 1: TaskResult(ok=5)},
+            ),
+        )
+
+        assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+        assert error.message == 'args_from has non-int values for subworkflow task 3'
+        assert error.data == {'workflow_id': 'parent-wf', 'task_index': 3}
+
     def test_an_args_from_key_that_names_a_static_kwarg_fails_the_node(self) -> None:
         error = _failure(
             build_child(_broker(), _node(node_input='{"value": 1}', args_from='{"value": 0}'), {}),
