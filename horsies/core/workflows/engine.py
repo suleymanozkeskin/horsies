@@ -1774,8 +1774,10 @@ async def on_workflow_task_complete(
     wake: NodeCompletionWake = NoQueueWake(),
 ) -> None:
     """
-    Called from worker._finalize_after when a task completes.
-    Handles workflow task status update and dependency resolution.
+    The node write and progression of a finished workflow task, with the
+    session statements. The worker's phase 2 runs
+    ``horsies_workflow_node_finish`` instead (``node_finish.finish_node``);
+    no library path calls this.
 
     Raises:
         SerializationError: a value that the engine built does not

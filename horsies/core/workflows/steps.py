@@ -11,7 +11,9 @@ and one ``SOURCE`` row per terminal dependency of such a node.
   (``child_build.build_child``) and ``horsies_workflow_child_start``, then
   ``COMMIT``. The parent node, the child rows and the link commit together.
   A child start can owe further child starts; they run in the same
-  transaction, at most ``MAX_WORKFLOW_NODES`` per step.
+  transaction, at most ``MAX_WORKFLOW_NODES`` per step. The phase 2 of a
+  workflow task chooses its form from the node facts of phase 1
+  (``node_finish.finish_node``).
 - ``advance_child_workflow_id`` of an ``OUTCOME`` row names a child workflow
   that the step ended: after the commit, ``horsies_workflow_child_finish``
   advances its parent node, one transaction per level
@@ -127,6 +129,14 @@ RESUME_WORKFLOW_FUNCTION_SQL: Final = _step_statement(
     'horsies_workflow_resume(CAST(:wf_id AS uuid))'
 )
 """The resume of a PAUSED workflow tree, in the caller's transaction."""
+
+NODE_FINISH_FUNCTION_SQL: Final = _step_statement(
+    'horsies_workflow_node_finish(CAST(:task_id AS uuid), CAST(:wake AS boolean), '
+    'CAST(:dependents AS text))'
+)
+"""Phase 2 of a finished workflow task: the node write from its phase-2
+record, the capacity wake, the failure policy, promotion and the completion
+check."""
 
 PHASE2_RECOVER_FUNCTION_SQL: Final = _step_statement(
     'horsies_workflow_phase2_recover(CAST(:task_id AS uuid), '

@@ -121,7 +121,7 @@ from horsies.core.worker.runner_heartbeat import (
 from horsies.core.worker.shared_stop import RetryPlacement, TimedOutAtKill
 from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
 from horsies.core.worker.thread_slots import ThreadRunRequest
-from horsies.core.worker.finalize import _phase2_of_a_replay
+from horsies.core.worker.finalize import _NodeFinishOwed, _phase2_of_a_replay
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -221,12 +221,9 @@ class DispatchMixin:
         async def _finalize_workflow_phase(
             self,
             task_id: str,
-            tr: TaskResult[Any, TaskError],
-            *,
-            queue_name: str = 'default',
-            task_name: str,
+            owed: _NodeFinishOwed,
         ) -> Result[None, _FinalizeError]: ...
-        async def _load_persisted_task_result(
+        async def _load_persisted_terminal(
             self,
             task_id: str,
             *,
@@ -348,10 +345,7 @@ class DispatchMixin:
             case _AttemptUnclaimed():
                 return _RequeueOutcome.REQUEUED
             case _AttemptFinished():
-                return await self._settle_finished_attempt(
-                    written,
-                    TaskResult(err=task_error),
-                )
+                return await self._settle_finished_attempt(written)
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -413,7 +407,6 @@ class DispatchMixin:
     async def _settle_finished_attempt(
         self,
         written: _AttemptFinished,
-        task_result: TaskResult[None, TaskError],
     ) -> _RequeueOutcome:
         """Run what follows a failed-attempt finish, after its session closed.
 
@@ -425,12 +418,10 @@ class DispatchMixin:
         match written.outcome:
             case FailureApplied(task_id=task_id, after=after):
                 match after:
-                    case PhaseTwoOwed(task_name=task_name, queue_name=queue_name):
+                    case PhaseTwoOwed(queue_name=queue_name, step=step):
                         phase2_r = await self._finalize_workflow_phase(
                             task_id,
-                            task_result,
-                            queue_name=queue_name,
-                            task_name=task_name,
+                            _NodeFinishOwed(queue_name=queue_name, facts=step),
                         )
                         if is_err(phase2_r):
                             await self._handle_finalize_error(phase2_r.err_value)
@@ -457,19 +448,14 @@ class DispatchMixin:
         capacity wake in the statement that committed. Total: a failed load
         or phase 2 goes to the finalize retry handler.
         """
-        load_r = _phase2_of_a_replay(await self._load_persisted_task_result(task_id))
+        load_r = _phase2_of_a_replay(await self._load_persisted_terminal(task_id))
         if is_err(load_r):
             await self._handle_finalize_error(load_r.err_value)
             return
         persisted = load_r.ok_value
         if persisted is None:
             return
-        phase2_r = await self._finalize_workflow_phase(
-            task_id,
-            persisted.result,
-            queue_name=persisted.queue_name,
-            task_name=persisted.task_name,
-        )
+        phase2_r = await self._finalize_workflow_phase(task_id, persisted)
         if is_err(phase2_r):
             await self._handle_finalize_error(phase2_r.err_value)
 
@@ -1104,10 +1090,7 @@ class DispatchMixin:
                     timeout_ms,
                 )
             case _AttemptFinished():
-                _ = await self._settle_finished_attempt(
-                    written,
-                    TaskResult(err=task_error),
-                )
+                _ = await self._settle_finished_attempt(written)
             case _ as unreachable:
                 assert_never(unreachable)
         return _TimeoutSettled()

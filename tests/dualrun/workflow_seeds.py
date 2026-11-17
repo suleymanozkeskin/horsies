@@ -14,6 +14,7 @@ transaction then rolls back (``tests/dualrun/operation.py``).
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -59,7 +60,8 @@ class NodeSeed:
 
     ``definition_key`` is the key that loads the child of a sub-workflow node;
     ``None`` on a task node, and on a sub-workflow node whose child no test
-    builds.
+    builds. ``args_from`` maps a kwarg of the task to the index of the
+    dependency whose result it receives.
     """
 
     index: int
@@ -67,6 +69,7 @@ class NodeSeed:
     kind: NodeKind
     dependencies: tuple[int, ...]
     definition_key: str | None = None
+    args_from: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +103,20 @@ class WorkflowSeed:
 def task_node(index: int, name: str, *dependencies: int) -> NodeSeed:
     """A task node of ``name`` that waits for ``dependencies``."""
     return NodeSeed(index=index, name=name, kind=NodeKind.TASK, dependencies=dependencies)
+
+
+def args_from_node(
+    index: int, name: str, args_from: tuple[tuple[str, int], ...], *dependencies: int,
+) -> NodeSeed:
+    """A task node of ``name`` that waits for ``dependencies`` and receives the
+    results that ``args_from`` names."""
+    return NodeSeed(
+        index=index,
+        name=name,
+        kind=NodeKind.TASK,
+        dependencies=dependencies,
+        args_from=args_from,
+    )
 
 
 def subworkflow_node(
@@ -154,6 +171,14 @@ def _dependencies_text(node: NodeSeed) -> str:
     return '[' + ','.join(str(index) for index in node.dependencies) + ']'
 
 
+def _args_from_text(node: NodeSeed) -> str | None:
+    match node.args_from:
+        case ():
+            return None
+        case pairs:
+            return json.dumps(dict(pairs), separators=(',', ':'))
+
+
 def start_parameters(workflows: Sequence[WorkflowSeed]) -> dict[str, object]:
     """The arrays of ``horsies_workflow_start`` for ``workflows`` (top-level row first). Pure."""
     parents = [_parent_columns(workflow.parent) for workflow in workflows]
@@ -176,7 +201,7 @@ def start_parameters(workflows: Sequence[WorkflowSeed]) -> dict[str, object]:
         'node_queue_names': [_QUEUE for _ in nodes],
         'node_priorities': [_PRIORITY for _ in nodes],
         'node_dependencies': [_dependencies_text(node) for _, node in nodes],
-        'node_args_from': [None for _ in nodes],
+        'node_args_from': [_args_from_text(node) for _, node in nodes],
         'node_workflow_ctx_from': [None for _ in nodes],
         'node_allow_failed_deps': [False for _ in nodes],
         'node_join_types': ['all' for _ in nodes],
