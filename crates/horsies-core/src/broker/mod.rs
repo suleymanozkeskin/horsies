@@ -32,6 +32,8 @@ mod pgbouncer_contract_tests;
 pub mod pools;
 pub mod postgres;
 pub mod process_listener;
+#[cfg(test)]
+mod result_envelope_tests;
 pub mod result_types;
 pub mod row;
 #[cfg(test)]
