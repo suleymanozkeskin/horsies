@@ -27,9 +27,7 @@ from horsies.monitoring.errors import MonitoringQueryErrorCode
 from tests.dualrun.reference.monitoring_queries import list_workflow_names
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendEventLoopLimit
-from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
-from horsies.core.models.workflow.handle import WorkflowHandle
-from horsies.core.models.workflow import NodeKey
+from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow.handle_types import HandleErrorCode, HandleEventLoopLimit
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.result import Err, is_err, is_ok
@@ -104,48 +102,6 @@ def test_web_task_action_maps_loop_limit_to_503() -> None:
 
 
 WORKFLOW_ID = '9f1b7a2c-0d4e-4f61-8a23-5c6d7e8f9a0b'
-
-
-def _limited_handle() -> tuple[WorkflowHandle[Any], MagicMock]:
-    broker = MagicMock()
-    attach_loop_limit(broker)
-    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker), broker
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize('method', ['status_async', 'results_async', 'tasks_async'])
-def test_handle_wrap_methods_return_loop_limit(method: str) -> None:
-    handle, broker = _limited_handle()
-    loop_limit = broker.select_resources.return_value.err_value
-
-    result = asyncio.run(getattr(handle, method)())
-
-    assert is_err(result)
-    assert result.err_value.code is HandleErrorCode.EVENT_LOOP_LIMIT
-    assert result.err_value.retryable is False
-    assert result.err_value.workflow_id == WORKFLOW_ID
-    assert isinstance(result.err_value, HandleEventLoopLimit)
-    assert result.err_value.loop_limit is loop_limit
-
-
-@pytest.mark.unit
-def test_handle_get_folds_loop_limit_into_retrieval_code() -> None:
-    handle, broker = _limited_handle()
-
-    result = asyncio.run(handle.get_async(timeout_ms=100))
-
-    assert result.is_err()
-    assert result.unwrap_err().error_code is RetrievalCode.EVENT_LOOP_LIMIT
-
-
-@pytest.mark.unit
-def test_handle_result_for_folds_loop_limit_into_retrieval_code() -> None:
-    handle, _ = _limited_handle()
-
-    result = asyncio.run(handle.result_for_async(NodeKey('node-1')))
-
-    assert result.is_err()
-    assert result.unwrap_err().error_code is RetrievalCode.EVENT_LOOP_LIMIT
 
 
 @pytest.mark.unit
@@ -228,19 +184,6 @@ class TestRealBrokerAtTheLimit:
         assert is_err(result)
         assert result.err_value.code is BrokerErrorCode.EVENT_LOOP_LIMIT
         assert LIMIT_TEXT in result.err_value.message
-
-    def test_workflow_handle_wrap_and_fold(self, at_limit: _AtLimit) -> None:
-        handle: WorkflowHandle[Any] = WorkflowHandle(
-            workflow_id='wf-at-limit', broker=at_limit.broker,
-        )
-
-        status = at_limit.run(handle.status_async())
-        result = at_limit.run(handle.get_async(timeout_ms=0))
-
-        assert is_err(status)
-        assert status.err_value.code is HandleErrorCode.EVENT_LOOP_LIMIT
-        assert result.is_err()
-        assert result.unwrap_err().error_code is RetrievalCode.EVENT_LOOP_LIMIT
 
     def test_monitoring_query(self, at_limit: _AtLimit) -> None:
         # Python's read before the monitoring switch: the reads on the core

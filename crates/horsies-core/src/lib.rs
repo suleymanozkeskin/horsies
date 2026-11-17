@@ -193,7 +193,10 @@ pub use crate::workflow_engine::engine::{
 pub use crate::workflow_engine::error::WorkflowError;
 pub use crate::workflow_engine::info::WorkflowTaskInfo;
 pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_workflow};
-pub use crate::workflow_engine::query::get_workflow_result;
+pub use crate::workflow_engine::query::{
+    get_workflow_result, NodeResultsRead, NodesRead, StoredNode, StoredNodeResult,
+    TerminalErrorStatus, WorkflowEnd, WorkflowWait,
+};
 pub use crate::workflow_engine::recovery::recover_stuck_workflows;
 pub use crate::workflow_engine::start::{retry_start, start_workflow, start_workflow_with_retry};
 

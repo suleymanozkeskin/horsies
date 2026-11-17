@@ -24,7 +24,6 @@ from horsies import (
     NoCause,
     WorkflowHandle,
 )
-from horsies.core.brokers.resources import BrokerResources
 from horsies.core.types.result import is_err
 
 
@@ -90,9 +89,8 @@ def loop_limit_only_on_the_loop_limit(
 
 async def status_read_has_no_loop_limit(
     handle: WorkflowHandle[int],
-    resources: BrokerResources,
 ) -> None:
-    result = await handle._status(resources)
+    result = await handle._status()
     if is_err(result):
         match result.err_value:
             case HandleEventLoopLimit():  # pyright: ignore[reportUnnecessaryComparison]

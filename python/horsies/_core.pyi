@@ -168,6 +168,19 @@ class CoreHandle:
         """Expire the PAUSED workflows older than older_than_us microseconds, at most batch_size,
         oldest first. Writes; each candidate commits alone.
         """
+    def workflow_status_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowStatusRead | WorkflowAbsent | HandleFailed]:
+        """The status of one workflow. Reads only."""
+    def wait_workflow_result_async(self, workflow_id: uuid.UUID, *, timeout_ms: int | None) -> asyncio.Future[WorkflowCompletedRead | WorkflowEndedRead | WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleFailed]:
+        """Wait for the end of one workflow, up to timeout_ms (no limit for None). Reads only; a
+        cancelled await drops the wait and its subscription. A negative timeout raises
+        OverflowError.
+        """
+    def workflow_node_results_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowNodeResultsRead | WorkflowAbsent | HandleFailed]:
+        """The nodes of one workflow that store a result. Reads only."""
+    def workflow_node_result_async(self, workflow_id: uuid.UUID, node_id: str) -> asyncio.Future[StoredNodeResultRecord | NodeResultNotStored | HandleFailed]:
+        """The stored result of one node. Reads only."""
+    def workflow_nodes_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowNodesRead | WorkflowAbsent | HandleFailed]:
+        """The nodes of one workflow in index order. Reads only."""
     def task_info(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> TaskInfoRecord | TaskInfoNotFound | BrokerFailure:
         """The info of one task. Installs the schema once per handle first; then reads only."""
     def task_info_async(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> asyncio.Future[TaskInfoRecord | TaskInfoNotFound | BrokerFailure]:
@@ -1682,6 +1695,122 @@ class PausedExpiryFailed:
     def message(self) -> str: ...
     @property
     def retryable(self) -> bool: ...
+
+
+@final
+class WorkflowStatusRead:
+    """The stored status of a workflow."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def status(self) -> Literal['PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'PAUSED', 'CANCELLED', 'EXPIRED']: ...
+
+
+@final
+class WorkflowCompletedRead:
+    """The workflow is COMPLETED, with its stored result envelope (None only when a write
+    outside the library stored it so).
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def result_json(self) -> str | None: ...
+
+
+@final
+class WorkflowEndedRead:
+    """The workflow is FAILED, CANCELLED or EXPIRED, with its stored error."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def status(self) -> Literal['FAILED', 'CANCELLED', 'EXPIRED']: ...
+    @property
+    def error_json(self) -> str | None: ...
+
+
+@final
+class WorkflowPausedRead:
+    """The workflow is PAUSED."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WaitTimedOut:
+    """The workflow is PENDING or RUNNING after the timeout."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class StoredNodeResultRecord:
+    """One node that stores a result."""
+    @property
+    def node_id(self) -> str | None: ...
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def result_json(self) -> str: ...
+    @property
+    def is_subworkflow(self) -> bool: ...
+    @property
+    def sub_definition_key(self) -> str | None: ...
+
+
+@final
+class WorkflowNodeResultsRead:
+    """The nodes of a workflow that store a result; empty when none does."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def nodes(self) -> list[StoredNodeResultRecord]: ...
+
+
+@final
+class NodeResultNotStored:
+    """No node of this id stores a result, or no workflow has the id; the read does not tell
+    the two apart.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def node_id(self) -> str: ...
+
+
+@final
+class StoredNodeRecord:
+    """One node of a workflow, with its stored values as text."""
+    @property
+    def node_id(self) -> str | None: ...
+    @property
+    def task_index(self) -> int: ...
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def status(self) -> str: ...
+    @property
+    def result_json(self) -> str | None: ...
+    @property
+    def started_at(self) -> datetime.datetime | None: ...
+    @property
+    def completed_at(self) -> datetime.datetime | None: ...
+    @property
+    def sub_workflow_id(self) -> uuid.UUID | None: ...
+    @property
+    def sub_workflow_summary_json(self) -> str | None: ...
+    @property
+    def is_subworkflow(self) -> bool: ...
+    @property
+    def sub_definition_key(self) -> str | None: ...
+
+
+@final
+class WorkflowNodesRead:
+    """The nodes of a workflow in index order; empty when it has none."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def nodes(self) -> list[StoredNodeRecord]: ...
 
 
 @final

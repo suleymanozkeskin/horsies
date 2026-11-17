@@ -275,6 +275,16 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::workflow_lifecycle::WorkflowNotCancellable>()?;
     module.add_class::<operations::workflow_lifecycle::WorkflowAbsent>()?;
     module.add_class::<operations::workflow_lifecycle::HandleFailed>()?;
+    module.add_class::<operations::workflow_reads::WorkflowStatusRead>()?;
+    module.add_class::<operations::workflow_reads::WorkflowCompletedRead>()?;
+    module.add_class::<operations::workflow_reads::WorkflowEndedRead>()?;
+    module.add_class::<operations::workflow_reads::WorkflowPausedRead>()?;
+    module.add_class::<operations::workflow_reads::WaitTimedOut>()?;
+    module.add_class::<operations::workflow_reads::StoredNodeResultRecord>()?;
+    module.add_class::<operations::workflow_reads::WorkflowNodeResultsRead>()?;
+    module.add_class::<operations::workflow_reads::NodeResultNotStored>()?;
+    module.add_class::<operations::workflow_reads::StoredNodeRecord>()?;
+    module.add_class::<operations::workflow_reads::WorkflowNodesRead>()?;
     module.add_class::<operations::workflow_retention::WorkflowsDeleted>()?;
     module.add_class::<operations::workflow_retention::WorkflowDeleteFailed>()?;
     module.add_class::<operations::paused_expiry::PausedExpired>()?;

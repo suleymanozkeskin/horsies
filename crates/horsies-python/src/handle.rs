@@ -64,6 +64,10 @@ use crate::operations::worker_reads::{
     worker_state_history_operation, worker_state_operation, worker_states_operation,
 };
 use crate::operations::workflow_lifecycle::{cancel_workflow_operation, pause_workflow_operation};
+use crate::operations::workflow_reads::{
+    wait_workflow_result_operation, workflow_node_result_operation,
+    workflow_node_results_operation, workflow_nodes_operation, workflow_status_operation,
+};
 use crate::operations::workflow_retention::delete_expired_workflows_operation;
 use crate::process_core::{core_for_call, Core};
 use crate::records::{BrokerFailure, DatabasePingRecord, HandleClosed, Outcome};
@@ -668,6 +672,99 @@ impl CoreHandle {
             "CoreHandle.cancel_workflow_async",
             CallKind::Write,
             cancel_workflow_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// The status of one workflow: `WorkflowStatusRead`, `WorkflowAbsent` or
+    /// `HandleFailed`. Reads only. Awaitable only: the sync handle methods
+    /// run the awaitable ones on the broker's loop runner.
+    fn workflow_status_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.workflow_status_async",
+            CallKind::Read,
+            workflow_status_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// Wait for the end of one workflow, up to `timeout_ms` (no limit for
+    /// None): `WorkflowCompletedRead`, `WorkflowEndedRead`,
+    /// `WorkflowPausedRead`, `WaitTimedOut`, `WorkflowAbsent` or
+    /// `HandleFailed`. Reads only; a cancelled await drops the wait and its
+    /// subscription. A negative timeout raises `OverflowError`.
+    #[pyo3(signature = (workflow_id, *, timeout_ms))]
+    fn wait_workflow_result_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+        timeout_ms: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.wait_workflow_result_async",
+            CallKind::Read,
+            wait_workflow_result_operation(self.connection(), workflow_id, timeout_ms),
+        )
+    }
+
+    /// The nodes of one workflow that store a result:
+    /// `WorkflowNodeResultsRead`, `WorkflowAbsent` or `HandleFailed`. Reads
+    /// only.
+    fn workflow_node_results_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.workflow_node_results_async",
+            CallKind::Read,
+            workflow_node_results_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// The stored result of one node: `StoredNodeResultRecord`,
+    /// `NodeResultNotStored` or `HandleFailed`. Reads only.
+    fn workflow_node_result_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+        node_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.workflow_node_result_async",
+            CallKind::Read,
+            workflow_node_result_operation(self.connection(), workflow_id, node_id),
+        )
+    }
+
+    /// The nodes of one workflow in index order: `WorkflowNodesRead`,
+    /// `WorkflowAbsent` or `HandleFailed`. Reads only.
+    fn workflow_nodes_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.workflow_nodes_async",
+            CallKind::Read,
+            workflow_nodes_operation(self.connection(), workflow_id),
         )
     }
 
