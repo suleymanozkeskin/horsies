@@ -34,6 +34,7 @@ def _frame(task_id: str, claimed_at: datetime = CLAIMED_AT) -> RunFrame:
         is_workflow_task=False,
         timeout=NoTimeout(),
         claimed_at=claimed_at,
+        orphan_self_heal=True,
     )
 
 

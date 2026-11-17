@@ -166,6 +166,7 @@ def _run_frame(task_id: str = 'task-1') -> RunFrame:
         is_workflow_task=False,
         timeout=NoTimeout(),
         claimed_at=CLAIMED_AT,
+        orphan_self_heal=True,
     )
 
 
@@ -1646,6 +1647,39 @@ class TestDispatchOne:
     """_dispatch_one hands the row to the pool and arms one finalizer."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize('self_heal', [True, False])
+    async def test_frame_carries_the_orphan_self_heal_of_the_recovery_config(
+        self,
+        self_heal: bool,
+    ) -> None:
+        """The child's stop before start cancels an orphan only with the
+        app's ``auto_terminate_orphaned_workflow_tasks``: the frame carries
+        it."""
+        worker = _make_worker()
+        worker.cfg.recovery_config = RecoveryConfig(
+            auto_terminate_orphaned_workflow_tasks=self_heal,
+        )
+        worker._slots = MagicMock()
+        worker._spawn_background = MagicMock(  # type: ignore[method-assign]
+            side_effect=lambda coro, **_kwargs: coro.close(),
+        )
+
+        await worker._dispatch_one(
+            'task-31',
+            'app.add',
+            '[1]',
+            '{}',
+            'default',
+            True,
+            timeout=TaskTimeout(ms=1000),
+            claim=CLAIM,
+            execution=Execution.ISOLATED,
+        )
+
+        frame = worker._slots.submit.call_args.args[0]
+        assert frame.orphan_self_heal is self_heal
+
+    @pytest.mark.asyncio
     async def test_frame_carries_the_claim_fields(self) -> None:
         worker = _make_worker()
         worker._slots = MagicMock()
@@ -1676,6 +1710,7 @@ class TestDispatchOne:
             is_workflow_task=True,
             timeout=TaskTimeout(ms=1000),
             claimed_at=claimed_at,
+            orphan_self_heal=False,
         )
         assert worker._spawn_background.call_args.kwargs['finalizer'] is True
 

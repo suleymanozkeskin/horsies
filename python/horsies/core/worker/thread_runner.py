@@ -104,7 +104,9 @@ def _thread_call_result(
 REFUSAL_STATEMENTS_TIMEOUT_S: Final = 10.0
 """The longest time that the statements of one write of a refusal on a
 shared thread child take once the write holds its connection: each attempt
-of the RUNNING transition, and the finalizing marker."""
+of the RUNNING transition, and the finalizing marker. The finalizing marker
+takes it as its statement bound; the RUNNING transition runs through the
+core handle of the child, with the bounds of its pool."""
 
 THREAD_REFUSAL_WRITES_BOUND_S: Final = (_PRE_START_CONFIRM_ATTEMPTS + 1) * (
     CHILD_POOL_CONNECTION_WAIT_S
@@ -119,9 +121,9 @@ request of a statement past its bound. The refusal backstop of the parent
 
 
 def _statements_of(work: ThreadSeatWork) -> StatementsLimit:
-    """The bound of the statements of the writes of a run: a refusal's
-    writes are bounded, so that the refusal backstop of the parent never
-    meets a database that does not answer; a task keeps the wait of its
+    """The bound of the statement of the finalizing marker of a run: a
+    refusal's marker is bounded, so that the refusal backstop of the parent
+    never meets a database that does not answer; a task keeps the wait of its
     deadline backstop."""
     match work:
         case SeatRefusal():
@@ -142,9 +144,10 @@ def run_thread_seat_task(
     The steps and outcomes of ``child_runner._run_task_entry`` but the
     finalizing marker: the RUNNING transition with the first runner
     heartbeat, then the task call and the result encode. ``start_check``
-    runs once the pool gave a connection, before the RUNNING update: a
-    deadline that fired during the wait returns ``DeadlineBeforeStart``, and
-    the task does not start; its row stays CLAIMED. A stop before the
+    runs right before the RUNNING update and gives the time left before the
+    deadline of the run; the core checks it again once the pool gave a
+    connection. A deadline that passed first returns ``DeadlineBeforeStart``,
+    and the task does not start; its row stays CLAIMED. A stop before the
     RUNNING update commits returns ``StoppedBeforeRunning``; every other end
     returns ``SetRunning``. A ``SeatRefusal`` returns
     ``WORKER_SERIALIZATION_ERROR`` after the RUNNING transition, before it
@@ -160,8 +163,8 @@ def run_thread_seat_task(
         frame.worker_id,
         frame.is_workflow_task,
         frame.claimed_at,
+        orphan_self_heal=frame.orphan_self_heal,
         start_check=start_check,
-        statements=_statements_of(work),
     )
     match ownership_result:
         case None:

@@ -7,18 +7,20 @@ from __future__ import annotations
 import os
 import socket
 import threading
+import uuid
 from collections.abc import Callable, Coroutine, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from importlib import import_module
-from typing import Any, Final, LiteralString, Optional, Tuple, assert_never, cast
+from typing import Any, Final, Literal, LiteralString, Optional, Tuple, assert_never, cast
 
-from psycopg import Connection, Cursor
-from psycopg.rows import namedtuple_row
+from psycopg import Connection
 
 
+import horsies._core as core
+from horsies._core import CoreChildHandle, CoreError
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_value import StrictJsonError
@@ -85,51 +87,57 @@ from horsies.core.worker.task_loop import (
     LoopOpen,
     TaskLoop,
 )
-from horsies.core.lifecycle.commands import (
-    AbandonOwnedNode,
-    CancelOwnedNode,
-    ExpireOwnedClaim,
-)
-from horsies.core.lifecycle.fences import OwnedClaim, WorkerOwned
+from horsies.core.lifecycle.core_records import task_row_end_of
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     Applied,
     LostClaim,
-    ObservedWorkflowState,
     SourceStateConflict,
     TaskAbsent,
+    TerminalizationOutcome,
 )
-from horsies.core.lifecycle.persistence import apply_sync
 from horsies.core.task_decorator import TaskBodyKind, await_task_call_in_worker
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Err, Ok, is_err
 
 
 @dataclass(frozen=True, slots=True)
 class _WorkflowResumedBeforeStart:
-    """The pre-start abandon refused: the workflow is no longer PAUSED.
+    """The stop before start found a resume that came first.
 
-    A resume committed after this child read PAUSED. The claim is still this
-    child's and the task is runnable again, so the RUNNING transition is
-    attempted again instead of stopping the task.
+    A resume committed after the start read PAUSED: the claim is still this
+    child's and still startable, and its node is linked live in a RUNNING
+    workflow. Nothing was written, so the RUNNING transition is attempted
+    again instead of stopping the task.
     """
-
-    workflow_status: str
 
 
 @dataclass(frozen=True, slots=True)
 class StartAllowed:
-    """The run may set its row RUNNING."""
+    """The run has no deadline in this child: it may set its row RUNNING
+    whenever the pool gives a connection."""
+
+
+@dataclass(frozen=True, slots=True)
+class StartWithin:
+    """The run may set its row RUNNING only before its deadline:
+    ``milliseconds`` is the time left before it at the check, 1 or more. The
+    core checks it again after the pool gave the connection, before the
+    statement."""
+
+    milliseconds: int
 
 
 @dataclass(frozen=True, slots=True)
 class DeadlineBeforeStart:
-    """The deadline of the run fired before its RUNNING update, while it
+    """The deadline of the run passed before its RUNNING update, while it
     waited for a pooled connection. The run does not start: its row stays
     CLAIMED, and the timeout of the worker returns it to the queue."""
 
 
-type StartCheck = StartAllowed | DeadlineBeforeStart
-"""Whether a run may still start, read after it got its pooled connection."""
+type StartCheck = StartAllowed | StartWithin | DeadlineBeforeStart
+"""Whether a run may still start, and until when, read right before the
+start."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,7 +301,9 @@ from horsies.core.process_role import mark_process_runs_task_bodies
 from horsies.core.worker.current import get_current_app, set_current_app
 from horsies.core.worker.child_pool import (
     CHILD_POOL_CONNECTION_WAIT_S,
+    _get_child_core_handle,
     _get_worker_pool,
+    _initialize_child_core_handle,
     _initialize_worker_pool,
 )
 from horsies.core.utils.imports import import_file_path
@@ -621,7 +631,10 @@ def finish_child_start(
 ) -> None:
     """Run the per-child steps. Each child runs these itself, after any fork.
 
-    The sync connection pool of the child opens with the bounds of ``pool``.
+    The sync connection pool of the child opens with the bounds of ``pool``,
+    and the core handle of the child is built with the same bounds, from the
+    broker config of ``app`` (``_initialize_child_core_handle``). Building
+    the handle starts nothing.
 
     Raises:
         Exception: a pool setup failure propagates to the caller. A failing
@@ -643,107 +656,61 @@ def finish_child_start(
         max_size=pool.max_size,
         check_on_checkout=pool.check,
     )
+    _initialize_child_core_handle(app.config.broker, pool)
     logger.debug(f'[child {os.getpid()}] Connection pool initialized')
 
 
-def finish_shared_child_start(app: Horsies) -> None:
+def finish_shared_child_start(app: Horsies, pool: ResolvedPool) -> None:
     """Run the per-child steps of a shared async child that need no loop.
 
     The same steps as ``finish_child_start`` up to the pool: the process
-    runs task bodies from here on, and the ``on_child_process_start`` hooks
-    run. A shared async child opens no sync pool: it opens an async pool on
-    its event loop afterwards (``shared_runner``). A failing hook exits the
+    runs task bodies from here on, the ``on_child_process_start`` hooks run,
+    and the core handle of the child is built with the bounds of ``pool``. A
+    shared async child opens no sync pool: it opens an async pool on its
+    event loop afterwards (``shared_runner``). A failing hook exits the
     child with CHILD_HOOK_FAILURE_EXIT_CODE.
+
+    Raises:
+        ManifestRefused: the core refused the manifest of the handle.
     """
     mark_process_runs_task_bodies()
     _run_child_start_hooks(app)
+    _initialize_child_core_handle(app.config.broker, pool)
 
 
 # ---------- Child-process execution ----------
-# The statements of the writes around one attempt. An isolated child runs
-# them on a sync connection here; a shared async child runs the same text on
-# an async connection (``horsies.core.worker.shared_lifecycle``).
+# The start of a run and its miss path go through the core handle of the
+# child (``CoreChildHandle``, ``child_pool``). The finalizing marker runs its
+# statement on a sync connection here; a shared async child runs the same
+# text on an async connection (``horsies.core.worker.shared_lifecycle``).
 
-RESET_PAUSED_NODE_SQL: Final[LiteralString] = """
-                        UPDATE horsies_workflow_tasks
-                        SET status = 'READY',
-                            task_id = NULL,
-                            started_at = NULL
-                        WHERE task_id = %s
-                          AND status IN ('ENQUEUED', 'RUNNING')
-                        """
+type StartMissReason = Literal[
+    'DEADLINE_PASSED',
+    'NOT_HELD',
+    'LEASE_EXPIRED',
+    'WORKFLOW_PAUSED',
+    'WORKFLOW_CANCELLED',
+    'NODE_NOT_LINKED',
+]
+"""Why ``horsies_start_attempt`` did not start the row: the first guard that
+failed, in the function's order (``AttemptMissed.reason``).
 
-SKIP_CANCELLED_NODE_SQL: Final[LiteralString] = """
-                        UPDATE horsies_workflow_tasks
-                        SET status = 'SKIPPED',
-                            completed_at = NOW()
-                        WHERE task_id = %s
-                          AND status IN ('ENQUEUED', 'READY')
-                        """
+- ``DEADLINE_PASSED``: CLAIMED by this worker at any claim generation, and
+  ``good_until`` passed: the expiry applies.
+- ``NOT_HELD``: absent, or the status, owner or claim generation differs.
+- ``LEASE_EXPIRED``: the claim lease passed.
+- ``WORKFLOW_PAUSED``, ``WORKFLOW_CANCELLED``: the workflow of the task.
+- ``NODE_NOT_LINKED``: a workflow task whose node is absent or not in a
+  runnable status.
+"""
 
-# The start: one statement in autocommit. The function locks the row by id
-# alone (FOR NO KEY UPDATE), checks the claim generation, the lease, the
-# deadline and, for a workflow task, its workflow and node, and writes the
-# RUNNING row, the first runner beat and the node in the same statement. A
-# miss writes nothing, returns the first guard that failed, and its row lock
-# ends with the statement, so the miss path never runs under it.
-START_ATTEMPT_SQL: Final[LiteralString] = """
-                SELECT outcome, miss_reason
-                FROM horsies_start_attempt(
-                    %s::uuid, %s, %s::timestamptz, %s, %s, %s, %s
-                )
-                """
+type StopRecord = (
+    core.StoppedBeforeStart | core.ResumedBeforeStart | core.StopBeforeStartFailed
+)
+"""The records of ``CoreChildHandle.stop_workflow_task_before_start``."""
 
-
-class StartMiss(Enum):
-    """Why ``horsies_start_attempt`` did not start the row: the first guard
-    that failed, in the function's order."""
-
-    DEADLINE_PASSED = 'DEADLINE_PASSED'
-    """CLAIMED by this worker at any generation, ``good_until`` passed: the
-    expiry applies."""
-    NOT_HELD = 'NOT_HELD'
-    """Absent, or the status, owner or claim generation differs."""
-    LEASE_EXPIRED = 'LEASE_EXPIRED'
-    WORKFLOW_PAUSED = 'WORKFLOW_PAUSED'
-    WORKFLOW_CANCELLED = 'WORKFLOW_CANCELLED'
-    NODE_NOT_LINKED = 'NODE_NOT_LINKED'
-    """A workflow task whose node is absent or not in a runnable status."""
-
-
-@dataclass(frozen=True, slots=True)
-class AttemptStarted:
-    """The row is RUNNING with its first runner beat (and its node, for a
-    workflow task)."""
-
-
-@dataclass(frozen=True, slots=True)
-class AttemptMissed:
-    """Nothing was written; ``reason`` names the guard."""
-
-    reason: StartMiss
-
-
-type StartOutcome = AttemptStarted | AttemptMissed
-
-
-def read_start_outcome(row: Sequence[object] | None, task_id: str) -> StartOutcome:
-    """The outcome of ``START_ATTEMPT_SQL``. A row outside the function's
-    contract is a defect (``AssertionError``). Pure."""
-    match row:
-        case ('STARTED', None):
-            return AttemptStarted()
-        case ('MISSED', str() as reason) if reason in StartMiss.__members__:
-            return AttemptMissed(reason=StartMiss[reason])
-        case _:
-            raise AssertionError(
-                f'horsies_start_attempt returned {row!r} for task {task_id}'
-            )
-
-
-BEGIN_SQL: Final[LiteralString] = 'BEGIN'
-"""Opens a transaction on a connection of a child pool, which is in
-autocommit (``child_pool``)."""
+_EXPIRE_BEFORE_START_SUBJECT: Final = 'CoreChildHandle.expire_owned_claim'
+"""The subject of a failed expiry of the miss path."""
 
 # The finalizing marker: one statement in autocommit. The function locks the
 # row by id alone (FOR NO KEY UPDATE) and writes the marker only when the row
@@ -789,48 +756,7 @@ def mark_finalizing_params(
     return (task_id, worker_id, claimed_at)
 
 
-def _begin_workflow_stop(cursor: Cursor[Any]) -> None:
-    """Open the transaction of the workflow part of a miss path.
-
-    The abandon or the cancel of the task and the write of its node, which
-    commit together. The start before it ran in autocommit, so this
-    transaction holds no task lock when the abandon asks for the workflow
-    row. The abandon locks the workflow row before the task locks, as the
-    cancel of a workflow (``horsies_workflow_cancel``) and the expiry of a
-    paused workflow (``LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL``, then the backing
-    task rows) do.
-
-    Raises:
-        Exception: what the driver raises for the BEGIN.
-    """
-    cursor.execute(BEGIN_SQL)
-
-
-def start_attempt_params(
-    task_id: str,
-    worker_id: str,
-    claimed_at: datetime,
-) -> tuple[object, ...]:
-    """The parameters of ``START_ATTEMPT_SQL``, in order.
-
-    The row and the first beat name this process: its pid, its host, the
-    process name ``worker-<pid>`` and the sender ``<worker_id>:<pid>``.
-    Reads the pid and the host name; no I/O.
-    """
-    pid = os.getpid()
-    hostname = socket.gethostname()
-    return (
-        task_id,
-        worker_id,
-        claimed_at,
-        pid,
-        hostname,
-        f'worker-{pid}',
-        f'{worker_id}:{pid}',
-    )
-
-
-def _claim_lost(task_id: str) -> Tuple[bool, str, Optional[str]]:
+def _claim_lost(task_id: str) -> WireResult:
     """The wire tuple of a start whose claim is gone. Logs a warning."""
     logger.warning(
         f'Task {task_id} ownership lost - claim was reclaimed or status changed. '
@@ -839,138 +765,87 @@ def _claim_lost(task_id: str) -> Tuple[bool, str, Optional[str]]:
     return (False, '', 'CLAIM_LOST')
 
 
-def _handle_workflow_stop_before_start(
-    cursor: Cursor[Any],
-    conn: Connection[Any],
+def _start_unconfirmed(task_id: str, cause: object) -> WireResult:
+    """The wire tuple of a start whose write failed: OWNERSHIP_UNCONFIRMED.
+    The worker then releases the claim (``ReleaseUnconfirmedClaim``). Logs
+    an error with ``cause``."""
+    logger.error(f'Failed to transition task {task_id} to RUNNING: {cause}')
+    return (False, '', 'OWNERSHIP_UNCONFIRMED')
+
+
+def expired_before_start_of(
     task_id: str,
-    workflow_status: str,
-    worker_id: str,
-    claimed_at: datetime,
-) -> Tuple[bool, str, Optional[str]] | _WorkflowResumedBeforeStart:
-    """Skip a task whose workflow is PAUSED/CANCELLED; return the wire tuple.
-
-    Both branches carry the ``OwnedClaim`` pair (worker_id, claimed_at) —
-    the same fence _confirm_ownership_and_set_running applies to the
-    CLAIMED->RUNNING transition. These are claimed pre-start operations, so a
-    row requeued and re-claimed since this child was handed its dispatch is a
-    different claim generation and must not be terminalized here.
-
-    PAUSED: the abandon re-checks the pause under the workflow lock. A refusal
-    because the workflow was resumed returns ``_WorkflowResumedBeforeStart``
-    with nothing written. The node is reset to READY only when the abandon
-    applied (or was already applied): a lost claim, another state conflict,
-    or an absent row leaves the node to the claim generation that owns it.
-
-    CANCELLED: the node is marked SKIPPED only when the cancel applied (or
-    was already applied); any other outcome leaves the node to the writer of
-    the row's actual transition.
-
-    Raises:
-        Exception: DB errors propagate to the wrapped caller,
-            _confirm_ownership_and_set_running, which folds them into
-            OWNERSHIP_UNCONFIRMED.
-    """
-    logger.info(
-        f'Blocking task {task_id} execution before start - workflow is {workflow_status}'
-    )
-    match workflow_status:
-        case 'PAUSED':
-            # Pause is resumable at the workflow node level. The already
-            # claimed task row is abandoned so resume can enqueue a fresh row
-            # without leaving an orphan claim that can run outside the workflow.
-            outcome = apply_sync(
-                cursor,
-                AbandonOwnedNode(
-                    task_id=task_id,
-                    fence=OwnedClaim(
-                        worker_id=worker_id,
-                        claimed_at=claimed_at,
-                    ),
-                ),
-            )
-            match outcome:
-                case SourceStateConflict(
-                    evidence=ObservedWorkflowState(
-                        workflow_id=workflow_id,
-                        workflow_status=resumed_status,
-                    ),
-                ):
-                    conn.rollback()
-                    logger.info(
-                        f'Task {task_id} abandon refused: workflow {workflow_id} '
-                        f'is {resumed_status}, no longer PAUSED'
-                    )
-                    return _WorkflowResumedBeforeStart(
-                        workflow_status=resumed_status,
-                    )
-                case Applied() | AlreadyApplied():
-                    cursor.execute(RESET_PAUSED_NODE_SQL, (task_id,))
-                case LostClaim() | SourceStateConflict() | TaskAbsent():
-                    pass
-                case _ as unreachable:
-                    assert_never(unreachable)
-            conn.commit()
-            return (False, '', 'WORKFLOW_STOPPED')
-        case 'CANCELLED':
-            # Cancellation is terminal: cancel the task row, then mark the
-            # node SKIPPED in the same transaction, only when the cancel
-            # applied (or was already applied).
-            outcome = apply_sync(
-                cursor,
-                CancelOwnedNode(
-                    task_id=task_id,
-                    fence=OwnedClaim(
-                        worker_id=worker_id,
-                        claimed_at=claimed_at,
-                    ),
-                    accepts_requeued_pending=True,
-                ),
-            )
-            match outcome:
-                case Applied() | AlreadyApplied():
-                    cursor.execute(SKIP_CANCELLED_NODE_SQL, (task_id,))
-                case LostClaim() | SourceStateConflict() | TaskAbsent():
-                    pass
-                case _ as unreachable:
-                    assert_never(unreachable)
-            conn.commit()
-            return (False, '', 'WORKFLOW_STOPPED')
-        case _:
-            return (False, '', 'WORKFLOW_CHECK_FAILED')
-
-
-def _expire_claimed_task_before_start(
-    cursor: Cursor[Any],
-    conn: Connection[Any],
-    task_id: str,
-    worker_id: str,
-) -> Optional[Tuple[bool, str, Optional[str]]]:
-    task_result: TaskResult[None, TaskError] = TaskResult(
-        err=TaskError(
-            error_code=OutcomeCode.TASK_EXPIRED,
-            message='Task expired: good_until deadline passed before execution started',
-            data={'task_id': task_id, 'worker_id': worker_id},
-        ),
-    )
-    result_json = serialize_error_payload(task_result)
-    outcome = apply_sync(
-        cursor,
-        ExpireOwnedClaim(
-            task_id=task_id,
-            fence=WorkerOwned(worker_id=worker_id),
-            result_json=result_json,
-            error_code=OutcomeCode.TASK_EXPIRED.value,
-        ),
-    )
+    outcome: TerminalizationOutcome,
+) -> WireResult:
+    """The wire tuple of the expiry of a claim whose deadline passed before
+    its start (``horsies_expire_owned_claim``): ``Applied`` and
+    ``AlreadyApplied`` mean the task is EXPIRED; a refusal means the claim
+    is gone. Logs the end. Pure but the log."""
     match outcome:
         case Applied() | AlreadyApplied():
-            conn.commit()
             logger.info(
                 f'Task {task_id} expired before actual execution start; marked EXPIRED.',
             )
             return (False, '', OutcomeCode.TASK_EXPIRED.value)
         case LostClaim() | SourceStateConflict() | TaskAbsent():
-            return None
+            return _claim_lost(task_id)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def stopped_before_start_of(
+    task_id: str,
+    record: StopRecord,
+) -> WireResult | _WorkflowResumedBeforeStart:
+    """The wire tuple of the stop of a workflow task whose start missed
+    (``horsies_workflow_task_stop_before_start``), by the step that ran:
+
+    - ``EXPIRED``: TASK_EXPIRED; phase 2 of the node is owed.
+    - ``ABANDONED`` (PAUSED workflow), ``CANCELLED`` (CANCELLED workflow):
+      WORKFLOW_STOPPED, whatever the outcome of the move.
+    - ``ORPHAN_CANCELLED``: ORPHAN_CANCELLED; nothing is owed.
+    - ``NODE_NOT_LINKED`` (the orphan self-heal is off): WORKFLOW_CHECK_FAILED;
+      the row stays CLAIMED.
+    - ``NOT_HELD``: CLAIM_LOST.
+    - ``ResumedBeforeStart``: a resume came first; the start runs again.
+    - ``StopBeforeStartFailed``: OWNERSHIP_UNCONFIRMED.
+
+    Logs the end. Pure but the log.
+    """
+    match record:
+        case core.StoppedBeforeStart(outcome=outcome, move_outcome=move_outcome):
+            pass
+        case core.ResumedBeforeStart():
+            logger.info(
+                f'Task {task_id} stop refused: its workflow was resumed and the '
+                f'claim is still startable'
+            )
+            return _WorkflowResumedBeforeStart()
+        case core.StopBeforeStartFailed(message=message):
+            return _start_unconfirmed(task_id, message)
+        case _ as unreachable:
+            assert_never(unreachable)
+    match outcome:
+        case 'EXPIRED':
+            logger.info(
+                f'Task {task_id} expired before actual execution start; marked EXPIRED.',
+            )
+            return (False, '', OutcomeCode.TASK_EXPIRED.value)
+        case 'ABANDONED' | 'CANCELLED':
+            return (False, '', 'WORKFLOW_STOPPED')
+        case 'ORPHAN_CANCELLED':
+            logger.info(
+                f'Task {task_id} orphaned workflow task (no live workflow_task '
+                f'linkage): the cancel ended {move_outcome}'
+            )
+            return (False, '', 'ORPHAN_CANCELLED')
+        case 'NODE_NOT_LINKED':
+            logger.error(
+                f'Failed to update workflow_tasks to RUNNING for task {task_id}'
+            )
+            return (False, '', 'WORKFLOW_CHECK_FAILED')
+        case 'NOT_HELD':
+            return _claim_lost(task_id)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -981,17 +856,16 @@ def _confirm_until_not_resumed(
     is_workflow_task: bool,
     claimed_at: datetime,
     *,
+    orphan_self_heal: bool,
     start_check: Callable[[], StartCheck] = start_always_allowed,
-    statements: StatementsLimit = StatementsUnbounded(),
-) -> Optional[Tuple[bool, str, Optional[str]]] | DeadlineBeforeStart:
-    """Run the RUNNING transition again when a resume refused the abandon.
+) -> WireResult | None | DeadlineBeforeStart:
+    """Run the RUNNING transition again when a resume came before the stop.
 
     Returns None to start the task, or the wire tuple that stops it. A
     workflow resumed on every one of ``_PRE_START_CONFIRM_ATTEMPTS`` tries
     returns OWNERSHIP_UNCONFIRMED; the worker then releases the claim
-    (``ReleaseUnconfirmedClaim``). ``DeadlineBeforeStart``: ``start_check`` found
-    the deadline of the run fired (``_confirm_ownership_and_set_running``).
-    ``statements`` bounds the statements of each attempt.
+    (``ReleaseUnconfirmedClaim``). ``DeadlineBeforeStart``: the deadline of
+    the run passed before the start (``_confirm_ownership_and_set_running``).
     """
     for _ in range(_PRE_START_CONFIRM_ATTEMPTS):
         result = _confirm_ownership_and_set_running(
@@ -999,8 +873,8 @@ def _confirm_until_not_resumed(
             worker_id,
             is_workflow_task,
             claimed_at=claimed_at,
+            orphan_self_heal=orphan_self_heal,
             start_check=start_check,
-            statements=statements,
         )
         match result:
             case _WorkflowResumedBeforeStart():
@@ -1023,104 +897,129 @@ def _confirm_ownership_and_set_running(
     is_workflow_task: bool = True,
     *,
     claimed_at: datetime,
+    orphan_self_heal: bool,
     start_check: Callable[[], StartCheck] = start_always_allowed,
-    statements: StatementsLimit = StatementsUnbounded(),
-) -> (
-    Optional[Tuple[bool, str, Optional[str]]]
-    | _WorkflowResumedBeforeStart
-    | DeadlineBeforeStart
-):
+) -> WireResult | None | _WorkflowResumedBeforeStart | DeadlineBeforeStart:
     """Set the row RUNNING with its first runner heartbeat. None: started.
 
-    One ``horsies_start_attempt`` statement in autocommit; the function
-    reads ``is_workflow_task`` from the locked row, so the argument is not
-    sent. A miss runs its path (``_after_missed_start``) after the
-    statement, with no lock held. ``start_check`` runs once the pool gave a
-    connection, before the statement: a shared thread seat waits for that
-    connection, and its deadline can fire meanwhile. ``DeadlineBeforeStart``
-    then returns with no statement run, so the row stays CLAIMED.
-    ``statements`` bounds the statements after the wait for the connection;
-    a cancelled statement gives OWNERSHIP_UNCONFIRMED, as a database error
-    does.
+    One ``horsies_start_attempt`` statement through the core handle of the
+    child (``CoreChildHandle.start_attempt``), fenced to ``worker_id`` and the
+    claim generation ``claimed_at``: a row requeued and claimed again since
+    the dispatch of this child no longer matches, so the stale child stops
+    with CLAIM_LOST instead of running the task twice. The function reads
+    ``is_workflow_task`` from the locked row, so the argument is not sent. A
+    miss runs its path (``_after_missed_start``) after the statement, with no
+    lock held.
+
+    ``start_check`` runs right before the start. ``DeadlineBeforeStart``
+    returns with nothing sent. ``StartWithin`` sends the time left before the
+    deadline of the run: when it has passed by the time the pool gives the
+    connection, the core runs no statement and ``DeadlineBeforeStart``
+    returns; the row stays CLAIMED.
+
+    A failure record of the core, or a ``CoreError`` of the core boundary,
+    gives OWNERSHIP_UNCONFIRMED. The statements have the bounds of the core
+    pool: the wait for a connection and the connection timeouts.
     """
+    handle = _get_child_core_handle()
+    match start_check():
+        case StartAllowed():
+            deadline_in_ms: int | None = None
+        case StartWithin(milliseconds=milliseconds):
+            deadline_in_ms = milliseconds
+        case DeadlineBeforeStart() as passed:
+            return passed
+        case _ as unreachable:
+            assert_never(unreachable)
     try:
-        pool = _get_worker_pool()
-        with pool.connection() as conn, _statements_within(conn, statements):
-            match start_check():
-                case StartAllowed():
-                    pass
-                case DeadlineBeforeStart() as passed:
-                    return passed
-                case _ as unreachable:
-                    assert_never(unreachable)
-            cursor = conn.cursor(row_factory=namedtuple_row)
-            # The claimed_at pair is the claim-generation fence: the dispatch
-            # that submitted this child carries the claim's own claimed_at; a
-            # row requeued and re-claimed since then (same worker or not) no
-            # longer matches, so the stale child aborts with CLAIM_LOST
-            # instead of double-running the task.
-            cursor.execute(
-                START_ATTEMPT_SQL,
-                start_attempt_params(task_id, worker_id, claimed_at),
-            )
-            match read_start_outcome(cursor.fetchone(), task_id):
-                case AttemptStarted():
-                    return None
-                case AttemptMissed(reason=reason):
-                    return _after_missed_start(
-                        cursor, conn, task_id, worker_id, reason, claimed_at,
-                    )
-                case _ as unreachable:
-                    assert_never(unreachable)
-    except Exception as e:
-        logger.error(f'Failed to transition task {task_id} to RUNNING: {e}')
-        return (False, '', 'OWNERSHIP_UNCONFIRMED')
+        record = handle.start_attempt(
+            uuid.UUID(task_id),
+            worker_id=worker_id,
+            claimed_at=claimed_at,
+            worker_pid=os.getpid(),
+            worker_hostname=socket.gethostname(),
+            deadline_in_ms=deadline_in_ms,
+        )
+        match record:
+            case core.AttemptStarted():
+                return None
+            case core.AttemptMissed(reason=reason):
+                return _after_missed_start(
+                    handle,
+                    task_id,
+                    worker_id,
+                    reason,
+                    claimed_at,
+                    orphan_self_heal=orphan_self_heal,
+                )
+            case core.DeadlineBeforeStart():
+                return DeadlineBeforeStart()
+            case core.StartFailed(message=message):
+                return _start_unconfirmed(task_id, message)
+            case _ as unreachable:
+                assert_never(unreachable)
+    except (CoreError, CoreOperationFailed) as exc:
+        return _start_unconfirmed(task_id, exc)
 
 
 def _after_missed_start(
-    cursor: Cursor[Any],
-    conn: Connection[Any],
+    handle: CoreChildHandle,
     task_id: str,
     worker_id: str,
-    reason: StartMiss,
+    reason: StartMissReason,
     claimed_at: datetime,
-) -> Tuple[bool, str, Optional[str]] | _WorkflowResumedBeforeStart:
-    """The path of a start that missed, by its reason.
+    *,
+    orphan_self_heal: bool,
+) -> WireResult | _WorkflowResumedBeforeStart:
+    """The path of a start that missed, by its reason. One statement at most.
 
-    ``DEADLINE_PASSED`` expires the claim (a refused expiry means the claim
-    is gone); ``NOT_HELD`` and ``LEASE_EXPIRED`` lose the claim; a paused or
-    cancelled workflow stops the task (``_handle_workflow_stop_before_start``,
-    which judges the workflow again under its lock); a node that is not
-    linked fails the workflow check.
+    - ``WORKFLOW_PAUSED``, ``WORKFLOW_CANCELLED``, ``NODE_NOT_LINKED``: the
+      miss of a workflow task. One ``horsies_workflow_task_stop_before_start``
+      (``CoreChildHandle.stop_workflow_task_before_start``), fenced to the
+      claim generation, which judges the task again under its own locks:
+      the expiry, the abandon of a PAUSED workflow, the cancel of a
+      CANCELLED one, a resume that came first, and with ``orphan_self_heal``
+      the cancel of a task that no node links live
+      (``stopped_before_start_of``).
+    - ``DEADLINE_PASSED``: the expiry of the claim
+      (``horsies_expire_owned_claim``); a refused expiry means the claim is
+      gone (``expired_before_start_of``).
+    - ``NOT_HELD``, ``LEASE_EXPIRED``: the claim is lost; nothing is sent.
 
     Raises:
-        Exception: DB errors propagate to the wrapped caller,
-            _confirm_ownership_and_set_running, which folds them into
-            OWNERSHIP_UNCONFIRMED.
+        CoreError: the core of this process cannot run the call.
+        CoreOperationFailed: the expiry failed: it wrote nothing, or it
+            committed and its reply was lost.
+        OutcomeDecodeError: a record outside the Python catalogs.
+
+        ``_confirm_ownership_and_set_running`` folds the first two into
+        OWNERSHIP_UNCONFIRMED.
     """
     match reason:
-        case StartMiss.DEADLINE_PASSED:
-            expired = _expire_claimed_task_before_start(cursor, conn, task_id, worker_id)
-            if expired is not None:
-                return expired
+        case 'WORKFLOW_PAUSED' | 'WORKFLOW_CANCELLED' | 'NODE_NOT_LINKED':
+            logger.info(
+                f'Blocking task {task_id} execution before start - the start '
+                f'missed with {reason}'
+            )
+            return stopped_before_start_of(
+                task_id,
+                handle.stop_workflow_task_before_start(
+                    uuid.UUID(task_id),
+                    worker_id=worker_id,
+                    claimed_at=claimed_at,
+                    orphan_self_heal=orphan_self_heal,
+                ),
+            )
+        case 'DEADLINE_PASSED':
+            return expired_before_start_of(
+                task_id,
+                task_row_end_of(
+                    handle.expire_owned_claim(uuid.UUID(task_id), worker_id=worker_id),
+                    _EXPIRE_BEFORE_START_SUBJECT,
+                ),
+            )
+        case 'NOT_HELD' | 'LEASE_EXPIRED':
             return _claim_lost(task_id)
-        case StartMiss.NOT_HELD | StartMiss.LEASE_EXPIRED:
-            return _claim_lost(task_id)
-        case StartMiss.WORKFLOW_PAUSED:
-            _begin_workflow_stop(cursor)
-            return _handle_workflow_stop_before_start(
-                cursor, conn, task_id, 'PAUSED', worker_id, claimed_at,
-            )
-        case StartMiss.WORKFLOW_CANCELLED:
-            _begin_workflow_stop(cursor)
-            return _handle_workflow_stop_before_start(
-                cursor, conn, task_id, 'CANCELLED', worker_id, claimed_at,
-            )
-        case StartMiss.NODE_NOT_LINKED:
-            logger.error(
-                f'Failed to update workflow_tasks to RUNNING for task {task_id}'
-            )
-            return (False, '', 'WORKFLOW_CHECK_FAILED')
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -1740,6 +1639,7 @@ def _run_task_entry(
     *,
     claimed_at: datetime,
     task_loop: TaskLoop,
+    orphan_self_heal: bool,
 ) -> RunReturn:
     """Run one task in an isolated child, up to its wire tuple.
 
@@ -1751,6 +1651,11 @@ def _run_task_entry(
 
     An ``async def`` task runs on ``task_loop``, the one loop of this child.
     A ``def`` task runs on this thread with no running event loop.
+
+    ``orphan_self_heal`` comes with the run from the worker (the app's
+    ``RecoveryConfig.auto_terminate_orphaned_workflow_tasks``): with it, the
+    stop of a workflow task whose node is not linked cancels the task
+    (ORPHAN_CANCELLED).
 
     ok=True: we produced a valid TaskResult JSON (success *or* failure).
     ok=False: worker couldn't even produce a TaskResult (infra error).
@@ -1784,6 +1689,7 @@ def _run_task_entry(
         master_worker_id,
         is_workflow_task,
         claimed_at,
+        orphan_self_heal=orphan_self_heal,
     )
     match ownership_result:
         case None:

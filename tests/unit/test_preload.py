@@ -132,6 +132,7 @@ def _frame(task_name: str, argument: str | None = None) -> RunFrame:
         is_workflow_task=False,
         timeout=NoTimeout(),
         claimed_at=CLAIMED_AT,
+        orphan_self_heal=True,
     )
 
 

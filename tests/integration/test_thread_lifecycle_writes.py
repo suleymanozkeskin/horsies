@@ -1,11 +1,12 @@
 """The lifecycle writes of a shared thread child against a real database.
 
 A shared thread child runs each task on a seat thread. The thread sets its
-row RUNNING with the first runner heartbeat and marks it finalizing through
-the one sync pool of the child, which has fewer connections than seats:
-threads wait for each other there, bounded. These tests run the real seat
-threads (``ThreadSeats``, ``ThreadRunTable``, ``PostgresThreadSeats``) with
-the real statements; a recording writer stands in for the frame writer.
+row RUNNING with the first runner heartbeat through the core handle of the
+child, and marks it finalizing through the one sync pool of the child; both
+have fewer connections than seats: threads wait for each other there. These
+tests run the real seat threads (``ThreadSeats``, ``ThreadRunTable``,
+``PostgresThreadSeats``) with the real functions; a recording writer stands
+in for the frame writer.
 """
 
 # pyright: reportPrivateUsage=false
@@ -37,9 +38,7 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
-from horsies.core.worker import thread_runner
 from horsies.core.worker.child_pool import _get_worker_pool, _initialize_worker_pool
-from horsies.core.worker.child_runner import CANCEL_REQUEST_TIMEOUT_S
 from horsies.core.worker.child_protocol import (
     ChildFrame,
     RssMb,
@@ -52,11 +51,13 @@ from horsies.core.worker.child_protocol import (
     ThreadSeatWork,
     WireResult,
 )
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.worker.current import set_current_app
 from horsies.core.worker.stored_timeout import TimeoutValueInvalid
 from horsies.core.worker.thread_child import ThreadRunTable, ThreadSeats
 from horsies.core.worker.thread_runner import PostgresThreadSeats
 from tests.broker_resources_support import listener_of
+from tests.fixtures.child_core import TEST_CHILD_POOL, child_core_handle_for
 from tests.integration.conftest import compute_test_command_fingerprint
 
 pytestmark = [pytest.mark.integration]
@@ -66,6 +67,8 @@ SEATS = 6
 TASK_NAME = 'thread_lifecycle_sleep'
 BODY_S = 0.5
 JOIN_S = 60.0
+LOCK_HELD_S = 0.5
+"""How long a test holds a row lock before it reads what the seat did."""
 
 
 async def _seed_claimed_task(session: AsyncSession, *, claimed_at: datetime) -> str:
@@ -134,6 +137,7 @@ def _frame(task_id: str, claimed_at: datetime, work: ThreadSeatWork) -> SharedRu
         is_workflow_task=False,
         claimed_at=claimed_at,
         work=work,
+        orphan_self_heal=True,
     )
 
 
@@ -216,6 +220,7 @@ async def test_seat_threads_share_a_pool_smaller_than_the_seats(
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     assert _get_worker_pool().max_size < SEATS
+    assert TEST_CHILD_POOL.max_size < SEATS
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     task_ids = [
         await _seed_claimed_task(session, claimed_at=claimed_at) for _ in range(SEATS)
@@ -288,17 +293,17 @@ async def test_a_refusal_sets_the_row_running_and_fails_before_resolve(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_a_refusal_whose_update_waits_on_a_row_lock_ends_at_its_bound(
+async def test_a_refusal_whose_update_waits_on_a_row_lock_ends_once_the_lock_is_gone(
     session: AsyncSession,
     thread_app: Horsies,  # noqa: ARG001
     clean_workflow_tables: None,  # noqa: ARG001
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Another session holds the row lock. The writes of a refusal are
-    bounded: the timer cancels the waiting UPDATE, the run stops before
-    RUNNING with OWNERSHIP_UNCONFIRMED, and the row stays CLAIMED. The
-    cancelled connection serves the next refusal once the lock is gone."""
-    monkeypatch.setattr(thread_runner, 'REFUSAL_STATEMENTS_TIMEOUT_S', 0.5)
+    """Another session holds the row lock. The RUNNING update of a refusal
+    goes through the core handle of the child: while the lock is held, the
+    seat reports nothing, and the row stays CLAIMED with no beat. Once the
+    lock is gone, the update applies and the refusal fails the task. The
+    statement bound of the start, which would end the update while the lock
+    is held, is the core's (#1240)."""
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
     refusal = SeatRefusal(
@@ -310,66 +315,83 @@ async def test_a_refusal_whose_update_waits_on_a_row_lock_ends_at_its_bound(
         text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
         {'id': task_id},
     )
-    started = time.monotonic()
-
+    run = asyncio.ensure_future(
+        asyncio.to_thread(_run_on_seats, [_frame(task_id, claimed_at, refusal)]),
+    )
     try:
-        [wire] = _run_on_seats([_frame(task_id, claimed_at, refusal)])
+        await asyncio.sleep(LOCK_HELD_S)
+        assert not run.done()
+        held_row = await _row(session, task_id)
+        held_beats = await _runner_beats(session, task_id)
     finally:
         await session.rollback()
-    elapsed_s = time.monotonic() - started
+    [wire] = await asyncio.wait_for(run, JOIN_S)
 
-    assert wire == (False, '', 'OWNERSHIP_UNCONFIRMED')
-    assert elapsed_s < 0.5 + CANCEL_REQUEST_TIMEOUT_S
-    assert (await _row(session, task_id)).status == 'CLAIMED'
-    assert await _runner_beats(session, task_id) == []
-    [again] = _run_on_seats([_frame(task_id, claimed_at, refusal)])
-    assert again[0] is True
+    assert held_row.status == 'CLAIMED'
+    assert held_beats == []
+    ok, payload, _reason = wire
+    assert ok is True
+    error = _task_result(payload).unwrap_err()
+    assert error.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
     assert (await _row(session, task_id)).status == 'RUNNING'
 
 
 @pytest.mark.asyncio(loop_scope='function')
 async def test_a_seat_that_gets_its_connection_after_the_deadline_leaves_the_row_claimed(
     session: AsyncSession,
+    broker: PostgresBroker,
     thread_app: Horsies,  # noqa: ARG001
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Every connection of the pool is held, so the seat thread waits; the
-    deadline of its run fires during the wait. When the seat gets its
-    connection, it does not set the row RUNNING: the row stays CLAIMED with
+    """The core pool of the child has one connection, and the start of
+    another seat holds it while it waits on a row lock, so the seat thread
+    waits; the deadline of its run fires during the wait. When the seat gets
+    its connection, the core runs no statement: the row stays CLAIMED with
     no runner heartbeat, and the run ends with the timeout."""
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    blocker_id = await _seed_claimed_task(session, claimed_at=claimed_at)
     task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
+    blocker_work = ThreadSeatTask(timeout_ms=30_000)
+    blocker = dataclasses.replace(_frame(blocker_id, claimed_at, blocker_work), dispatch=1)
     work = ThreadSeatTask(timeout_ms=300)
-    frame = _frame(task_id, claimed_at, work)
-    pool = _get_worker_pool()
-    held = [pool.getconn() for _ in range(pool.max_size)]
+    frame = dataclasses.replace(_frame(task_id, claimed_at, work), dispatch=2)
+    await session.execute(
+        text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
+        {'id': blocker_id},
+    )
     writer = _RecordingWriter()
-    table = ThreadRunTable(1, writer)
+    table = ThreadRunTable(2, writer)
     deadlines = threading.Thread(target=table.serve_deadlines, daemon=True)
     deadlines.start()
-    seats = ThreadSeats(1, table, PostgresThreadSeats(), lambda: RssMb(1.0))
-    assert seats.start().is_ok()
-    try:
-        table.add(frame, work)
-        seats.give(frame, work)
-        await asyncio.sleep(0.8)
-        assert writer.results() == []
-    finally:
-        for connection in held:
-            pool.putconn(connection)
-    ends_by = time.monotonic() + JOIN_S
-    while not writer.results():
-        assert time.monotonic() < ends_by, 'the seat did not end its run'
-        await asyncio.sleep(0.01)
-    seats.stop(JOIN_S)
-    table.stop()
-    deadlines.join(JOIN_S)
+    seats = ThreadSeats(2, table, PostgresThreadSeats(), lambda: RssMb(1.0))
+    one_connection = ResolvedPool(min_size=0, max_size=1, check=False)
+    with child_core_handle_for(listener_of(broker).database_url, one_connection):
+        assert seats.start().is_ok()
+        try:
+            table.add(blocker, blocker_work)
+            seats.give(blocker, blocker_work)
+            await asyncio.sleep(LOCK_HELD_S)
+            table.add(frame, work)
+            seats.give(frame, work)
+            await asyncio.sleep(0.8)
+            assert writer.results() == []
+        finally:
+            await session.rollback()
+        ends_by = time.monotonic() + JOIN_S
+        while len(writer.results()) < 2:
+            assert time.monotonic() < ends_by, 'a seat did not end its run'
+            await asyncio.sleep(0.01)
+        seats.stop(JOIN_S)
+        table.stop()
+        deadlines.join(JOIN_S)
 
-    assert [type(item).__name__ for item in writer.frames] == [
+    late = [item for item in writer.frames if getattr(item, 'dispatch', None) == 2]
+    assert [type(item).__name__ for item in late] == [
         'DeadlineFiredFrame',
         'SharedResultFrame',
     ]
-    assert writer.results()[0].end == SeatTimedOut()
+    [result] = [item for item in writer.results() if item.dispatch == 2]
+    assert result.end == SeatTimedOut()
     row = await _row(session, task_id)
     assert row.status == 'CLAIMED'
     assert row.finalizing_at is None

@@ -247,24 +247,6 @@ SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
 FROM horsies_tasks
 WHERE id = $1";
 
-/// Skip workflow_tasks for tasks belonging to CANCELLED workflows.
-const SKIP_CANCELLED_WORKFLOW_TASKS_SQL: &str = "\
-UPDATE horsies_workflow_tasks \
-SET status = 'SKIPPED', \
-    completed_at = NOW() \
-WHERE task_id = ANY($1) AND status IN ('PENDING', 'READY', 'ENQUEUED')";
-
-/// Reset the nodes of abandoned tasks of PAUSED workflows to READY, so a
-/// resume enqueues a fresh task. Only an ENQUEUED or RUNNING node is reset;
-/// a node in another state keeps its state and its task link (Python
-/// `RESET_PAUSED_WORKFLOW_TASKS_SQL`, `python/horsies/core/worker/sql.py:291-296`,
-/// and `RESET_PAUSED_NODE_SQL`, `python/horsies/core/worker/child_runner.py:684-691`).
-const RESET_WORKFLOW_TASKS_SQL: &str = "\
-UPDATE horsies_workflow_tasks \
-SET status = 'READY', task_id = NULL, started_at = NULL \
-WHERE task_id = ANY($1) \
-  AND status IN ('ENQUEUED', 'RUNNING')";
-
 // ---------------------------------------------------------------------------
 // Task attempt SQL
 // ---------------------------------------------------------------------------
@@ -628,26 +610,6 @@ pub enum SchemaInitializationMode {
     /// gates. The broker keeps its listener, as Python's web tool, which runs
     /// with `run_schema_migrations=False`.
     ObserveOnly,
-}
-
-/// Why a claimed workflow task stops before it starts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkflowStop {
-    /// The workflow is PAUSED: the row is abandoned and its node reset.
-    Paused,
-    /// The workflow is CANCELLED: the row is cancelled and its node skipped.
-    Cancelled,
-}
-
-/// What [`PostgresBroker::stop_workflow_task_before_start`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkflowStopBeforeStart {
-    /// The stop committed, or found nothing of this claim to stop.
-    Stopped,
-    /// The workflow was resumed between the start and the abandon: nothing
-    /// was written, and the task may start (Python
-    /// `_WorkflowResumedBeforeStart`).
-    Resumed,
 }
 
 /// The stored values of one send command, checked: only the database can
@@ -1935,116 +1897,6 @@ impl PostgresBroker {
                 }
             }
         }
-    }
-
-    /// Stop a claimed workflow task before it started because its workflow
-    /// stopped (Python `_handle_workflow_stop_before_start`,
-    /// `python/horsies/core/worker/child_runner.py`), in one transaction:
-    /// - [`WorkflowStop::Paused`]: abandon the claimed row, then reset its
-    ///   node to READY, only when the abandon applied (or was applied). A
-    ///   refusal because the workflow is no longer PAUSED rolls back and
-    ///   answers [`WorkflowStopBeforeStart::Resumed`]: nothing is written,
-    ///   and the caller starts the task again.
-    /// - [`WorkflowStop::Cancelled`]: cancel the row (a row already requeued
-    ///   to PENDING is accepted), then mark its node SKIPPED, only when the
-    ///   cancel applied (or was applied).
-    ///
-    /// Both arms carry the claim fence (`worker_id`, `claimed_at`).
-    ///
-    /// Errors: [`BrokerError`] of the transaction; nothing is committed.
-    pub async fn stop_workflow_task_before_start(
-        &self,
-        task_id: Uuid,
-        stop: WorkflowStop,
-        worker_id: &str,
-        claimed_at: DateTime<Utc>,
-    ) -> Result<WorkflowStopBeforeStart, BrokerError> {
-        use crate::core::lifecycle::{
-            GuardEvidence, OwnedClaim, TerminalizationCommand, TerminalizationOutcome,
-        };
-
-        let mut tx = self.pool.begin().await.map_err(BrokerError::Database)?;
-        let task_ids = vec![task_id];
-        let fence = OwnedClaim {
-            worker_id: worker_id.to_owned(),
-            claimed_at,
-        };
-
-        // The coupled node write commits only with a transition that applied
-        // (or was already applied by the same event class, whose coupled
-        // write is then proven committed).
-        let (command, applied) = match stop {
-            WorkflowStop::Paused => {
-                // Abandon the claimed-but-not-started row (terminal) instead
-                // of returning it to PENDING, then reset the node to READY so
-                // resume enqueues a fresh row (parity with horsies PR #96).
-                let command = TerminalizationCommand::AbandonOwnedNode { task_id, fence };
-                let outcomes =
-                    crate::broker::terminalization::terminalize_in_tx(&mut tx, &command).await?;
-                match outcomes.first() {
-                    Some(TerminalizationOutcome::SourceStateConflict {
-                        evidence: GuardEvidence::WorkflowState(observed),
-                        ..
-                    }) => {
-                        tracing::info!(
-                            task_id = %task_id,
-                            observed = ?observed,
-                            "the abandon was refused: the workflow is no longer PAUSED",
-                        );
-                        tx.rollback().await.map_err(BrokerError::Database)?;
-                        return Ok(WorkflowStopBeforeStart::Resumed);
-                    }
-                    Some(
-                        TerminalizationOutcome::Applied { .. }
-                        | TerminalizationOutcome::AlreadyApplied { .. },
-                    ) => {
-                        sqlx::query(RESET_WORKFLOW_TASKS_SQL)
-                            .bind(&task_ids)
-                            .execute(tx.as_mut())
-                            .await
-                            .map_err(BrokerError::Database)?;
-                        ("abandon", true)
-                    }
-                    Some(_) | None => ("abandon", false),
-                }
-            }
-            WorkflowStop::Cancelled => {
-                // A row already requeued to PENDING is accepted: it carries no
-                // claim to fence, and the workflow's cancellation — final,
-                // unlike a pause — is the guard (the Python carve-out).
-                let command = TerminalizationCommand::CancelOwnedNode {
-                    task_id,
-                    fence,
-                    accepts_requeued_pending: true,
-                };
-                let outcomes =
-                    crate::broker::terminalization::terminalize_in_tx(&mut tx, &command).await?;
-                let applied = matches!(
-                    outcomes.first(),
-                    Some(
-                        TerminalizationOutcome::Applied { .. }
-                            | TerminalizationOutcome::AlreadyApplied { .. }
-                    )
-                );
-                if applied {
-                    sqlx::query(SKIP_CANCELLED_WORKFLOW_TASKS_SQL)
-                        .bind(&task_ids)
-                        .execute(tx.as_mut())
-                        .await
-                        .map_err(BrokerError::Database)?;
-                }
-                ("cancel", applied)
-            }
-        };
-
-        tx.commit().await.map_err(BrokerError::Database)?;
-        tracing::info!(
-            task_id = %task_id,
-            arm = command,
-            applied,
-            "handled workflow stop before task start"
-        );
-        Ok(WorkflowStopBeforeStart::Stopped)
     }
 
     /// The claimed tasks of a claim pass that must not be dispatched because

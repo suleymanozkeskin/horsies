@@ -207,6 +207,7 @@ def _frame(task_name: str, kwargs: dict[str, Any] | None = None) -> SharedRunFra
         is_workflow_task=False,
         claimed_at=CLAIMED_AT,
         work=SeatTask(timeout_ms=60_000, cancel_grace_ms=1_000),
+        orphan_self_heal=True,
     )
 
 
@@ -262,7 +263,7 @@ def steps() -> Iterator[_Steps]:
 
 def _run(frame: SharedRunFrame) -> SeatReturn:
     with patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)):
-        return asyncio.run(shared_runner.run_seat_task(MagicMock(), frame))
+        return asyncio.run(shared_runner.run_seat_task(frame))
 
 
 def _set_running(seat_return: SeatReturn) -> WireResult:
@@ -292,7 +293,13 @@ def test_an_async_task_runs_on_the_running_loop(steps: _Steps) -> None:
 
     assert _result(wire, int).unwrap() == 42
     assert wire[2] is None
-    steps.confirm.assert_awaited_once()
+    steps.confirm.assert_awaited_once_with(
+        'task-1',
+        'worker-1',
+        False,
+        CLAIMED_AT,
+        orphan_self_heal=True,
+    )
     steps.mark.assert_not_awaited()
 
 
@@ -369,7 +376,7 @@ def test_a_cancel_of_the_body_ends_the_run(steps: _Steps) -> None:
 
     async def cancel_after_start() -> SeatReturn:
         run = asyncio.ensure_future(
-            shared_runner.run_seat_task(MagicMock(), _frame('seat_waits')),
+            shared_runner.run_seat_task(_frame('seat_waits')),
         )
         await asyncio.wait_for(STARTED.wait(), SCENARIO_TIMEOUT_S)
         run.cancel()
@@ -516,7 +523,7 @@ class _RealSeatRunner:
     ``mark_seat_finalizing``, on a pool that the patched steps never use."""
 
     async def run(self, frame: SharedRunFrame) -> SeatReturn:
-        return await shared_runner.run_seat_task(MagicMock(), frame)
+        return await shared_runner.run_seat_task(frame)
 
     async def mark_finalizing(
         self, frame: SharedRunFrame, window: MarkerWindow
