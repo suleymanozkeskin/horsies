@@ -265,6 +265,29 @@ fn json_object(value: &Value) -> Result<Map<String, Value>, String> {
     }
 }
 
+/// The worker state history limit, by Python's rule
+/// (`get_worker_state_history_async`): `None` reads every retained row; a
+/// limit of 0 or less is refused ([`worker_history_limit_refused`]). Pure.
+/// The bridge checks the limit with this rule before any connect.
+pub fn checked_history_limit(limit: Option<i64>) -> BrokerResult<Option<i64>> {
+    match limit {
+        Some(refused) if refused <= 0 => Err(worker_history_limit_refused(&refused)),
+        other => Ok(other),
+    }
+}
+
+/// The refusal of a worker state history `limit` of 0 or less:
+/// `INVALID_INPUT`, not retryable, with Python's text
+/// (`get_worker_state_history_async`). `limit` is the given value as the
+/// caller wrote it. Nothing ran.
+pub fn worker_history_limit_refused(limit: &dyn std::fmt::Display) -> BrokerOperationError {
+    BrokerOperationError {
+        code: BrokerErrorCode::InvalidInput,
+        message: format!("limit must be positive when set, got {limit}"),
+        retryable: false,
+    }
+}
+
 /// The snapshots of stored rows, for the read `operation`. The first row that
 /// does not read fails the read: `MONITORING_QUERY_FAILED`, not retryable,
 /// since the same rows give the same answer (Python: the `ValueError` of
@@ -539,5 +562,31 @@ mod tests {
 
         assert_eq!(failed.code, BrokerErrorCode::MonitoringQueryFailed);
         assert!(!failed.retryable);
+    }
+
+    #[test]
+    fn a_history_limit_above_zero_or_none_passes_and_zero_or_less_is_refused() {
+        assert_eq!(checked_history_limit(None).ok(), Some(None));
+        assert_eq!(checked_history_limit(Some(1)).ok(), Some(Some(1)));
+        for refused in [0, -1, i64::MIN] {
+            let error = checked_history_limit(Some(refused)).expect_err("0 or less is refused");
+            assert_eq!(error.code, BrokerErrorCode::InvalidInput);
+            assert_eq!(
+                error.message,
+                format!("limit must be positive when set, got {refused}")
+            );
+        }
+    }
+
+    #[test]
+    fn a_history_limit_of_zero_or_less_is_refused_with_python_text() {
+        let refused = worker_history_limit_refused(&-(1_i128 << 70));
+
+        assert_eq!(refused.code, BrokerErrorCode::InvalidInput);
+        assert_eq!(
+            refused.message,
+            format!("limit must be positive when set, got {}", -(1_i128 << 70))
+        );
+        assert!(!refused.retryable);
     }
 }

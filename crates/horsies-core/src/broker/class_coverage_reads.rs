@@ -2,7 +2,7 @@
 //! ([`PostgresBroker::get_class_coverage`]) and the class report
 //! ([`PostgresBroker::get_class_report`]).
 //!
-//! Python reference: `python/horsies/core/brokers/class_coverage_reads.py`. Python
+//! Python reference: `tests/dualrun/reference/class_coverage_reads.py`. Python
 //! runs each read as several statements in one transaction. Here each read is
 //! one autocommit statement, so its parts read one snapshot and one `now()`.
 //! The broker's reads run on the main core pool; the reaper's fleet check
@@ -41,17 +41,17 @@ use crate::db::{ParameterType, TypedStatement};
 /// The most snapshot rows inside the live window that a read takes. A worker
 /// writes `WORKER_STATE_LIVE_WINDOW_S` / snapshot interval rows into the
 /// window: 4 at the default 30 s, 120 at the 1 s floor (Python
-/// `LIVE_SNAPSHOT_ROW_LIMIT`, `class_coverage_reads.py:52-55`).
+/// `LIVE_SNAPSHOT_ROW_LIMIT`, `class_coverage_reads.py:58-61`).
 pub const LIVE_SNAPSHOT_ROW_LIMIT: usize = 20_000;
 
 /// The most (queue, class) streams with `PENDING` rows that a read takes:
 /// 1,000 queues with all three classes (Python `PENDING_STREAM_LIMIT`,
-/// `class_coverage_reads.py:57-59`).
+/// `class_coverage_reads.py:63-65`).
 pub const PENDING_STREAM_LIMIT: usize = 3_000;
 
 /// The most (queue, class, priority) groups of `PENDING` rows that the report
 /// reads. A queue priority is 1 to 100, so one stream has at most 100 (Python
-/// `PENDING_HEAD_LIMIT`, `class_coverage_reads.py:61-63`).
+/// `PENDING_HEAD_LIMIT`, `class_coverage_reads.py:67-69`).
 pub const PENDING_HEAD_LIMIT: usize = 10_000;
 
 /// The live window in seconds, as the statements take it (`$1`).
@@ -477,7 +477,7 @@ fn decoded_part<T: DeserializeOwned>(part: &str, value: Value) -> Result<T, Clas
 /// The [`Execution`] of a `horsies_tasks.execution` value. The column has a
 /// CHECK on the three class names (`horsies_tasks_execution_known`), so
 /// another value is a defect of the schema, and the read panics with the
-/// value (Python `_stored_execution`, `class_coverage_reads.py:273-283`).
+/// value (Python `_stored_execution`, `class_coverage_reads.py:279-289`).
 fn stored_execution(value: &str) -> Execution {
     Execution::from_stored(value).unwrap_or_else(|| {
         panic!(
@@ -489,7 +489,7 @@ fn stored_execution(value: &str) -> Execution {
 #[cfg(test)]
 mod tests {
     //! The named bounds and the part decoding, without a database. Python
-    //! reference: `python/horsies/core/brokers/class_coverage_reads.py:52-63`, `:163-229`
+    //! reference: `tests/dualrun/reference/class_coverage_reads.py:58-69`, `:169-235`
     //! (a part at its bound answers; one row past it refuses the read).
     use super::*;
     use serde_json::json;
