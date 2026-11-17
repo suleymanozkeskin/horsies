@@ -655,7 +655,7 @@ async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_r
         AttemptEnd::TimedOut {
             timeout: timeout_ms(1_000),
             retry: RetryPlacement::SameClass,
-            cancel: TimeoutCancel::EndedByKill,
+            cancel: TimeoutCancel::Ended(CancelEnd::KilledWithChild),
         },
     ];
     for end in ends {

@@ -482,7 +482,7 @@ fn a_run_of_a_lost_child_gets_the_verdict_of_its_kill() {
         AttemptEnd::TimedOut {
             timeout: timeout(),
             retry: RetryPlacement::SameClass,
-            cancel: TimeoutCancel::EndedByKill,
+            cancel: TimeoutCancel::Ended(CancelEnd::KilledWithChild),
         }
     );
     assert!(matches!(
@@ -568,7 +568,7 @@ fn a_kill_past_deadlines_isolates_only_the_culprit() {
         AttemptEnd::TimedOut {
             timeout: timeout(),
             retry: RetryPlacement::Isolated,
-            cancel: TimeoutCancel::EndedByKill,
+            cancel: TimeoutCancel::Ended(CancelEnd::KilledWithChild),
         }
     );
     let mut leftover = seat(4, async_work(), sent_at);

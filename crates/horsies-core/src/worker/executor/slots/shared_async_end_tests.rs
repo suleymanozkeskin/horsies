@@ -279,7 +279,10 @@ fn the_named_culprit_retries_isolated_at_a_kill_by_the_worker_only() {
     ] {
         assert_eq!(
             end_at_loss(&stuck, &kill, CloseCulprit::NotNamed, killed, now),
-            timed_out(RetryPlacement::Isolated, TimeoutCancel::EndedByKill),
+            timed_out(
+                RetryPlacement::Isolated,
+                TimeoutCancel::Ended(CancelEnd::KilledWithChild)
+            ),
             "{kill:?}"
         );
     }
@@ -677,7 +680,10 @@ async fn the_stuck_backstop_kills_a_child_frozen_after_its_last_cancel() {
 
     assert_eq!(
         answer_of(second_answer).await,
-        timed_out(RetryPlacement::SameClass, TimeoutCancel::EndedByKill)
+        timed_out(
+            RetryPlacement::SameClass,
+            TimeoutCancel::Ended(CancelEnd::KilledWithChild)
+        )
     );
     assert!(started.elapsed() >= Duration::from_secs(21));
     assert_eq!(answer_of(returned_answer).await, reported(2));
@@ -729,7 +735,10 @@ async fn a_stuck_run_keeps_its_seat_at_the_stuck_backstop() {
     );
     assert_eq!(
         answer_of(stuck_answer).await,
-        timed_out(RetryPlacement::Isolated, TimeoutCancel::EndedByKill)
+        timed_out(
+            RetryPlacement::Isolated,
+            TimeoutCancel::Ended(CancelEnd::KilledWithChild)
+        )
     );
     let _ = crash_reason(answer_of(neighbour_answer).await);
     let _ = spawner.stop(SPAWNER_STOP_WAIT);
