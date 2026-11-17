@@ -17,3 +17,4 @@ mod baseline_workflow_functions;
 mod harness;
 mod history_functions_sql;
 mod history_maintenance_sql;
+mod terminalization_functions;
