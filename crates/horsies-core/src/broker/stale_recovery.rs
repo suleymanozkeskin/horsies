@@ -55,29 +55,31 @@ impl RecoveryBatch {
 
 /// A staleness threshold in whole milliseconds, in the range of the
 /// `integer` parameters of the recovery functions (0 to 2 147 483 647).
+/// Only [`ThresholdMs::from_millis`] constructs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ThresholdMs(i32);
+pub struct ThresholdMs(i32);
 
 /// A threshold above the `integer` range of the recovery functions. The
 /// recovery config validation keeps the thresholds at 2 hours or less, so
-/// only a config that bypassed validation gets here.
+/// only a config that bypassed validation, or a direct call of a client
+/// method with any integer, gets here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
     "a threshold of {value_ms} ms is above the limit of 2147483647 ms of the recovery functions"
 )]
-pub(crate) struct ThresholdOutOfRange {
-    pub(crate) value_ms: u64,
+pub struct ThresholdOutOfRange {
+    pub value_ms: u64,
 }
 
 impl ThresholdMs {
     /// Errors: [`ThresholdOutOfRange`] above `i32::MAX` ms.
-    pub(crate) fn from_millis(value_ms: u64) -> Result<ThresholdMs, ThresholdOutOfRange> {
+    pub fn from_millis(value_ms: u64) -> Result<ThresholdMs, ThresholdOutOfRange> {
         i32::try_from(value_ms)
             .map(ThresholdMs)
             .map_err(|_| ThresholdOutOfRange { value_ms })
     }
 
-    pub(crate) fn get(self) -> i32 {
+    pub fn get(self) -> i32 {
         self.0
     }
 }
@@ -359,6 +361,95 @@ pub(crate) async fn requeue_stale_claims(
     }
 }
 
+/// Rows per statement of a stale CLAIMED requeue pass (Python
+/// `REQUEUE_STALE_CLAIMS_BATCH_SIZE`).
+pub(crate) const STALE_CLAIMED_REQUEUE_BATCH: RecoveryBatch = match RecoveryBatch::new(500) {
+    Some(batch) => batch,
+    None => panic!("500 rows is a recovery batch"),
+};
+
+/// Statements per stale CLAIMED requeue pass (Python
+/// `REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS`). A pass that reaches it
+/// stops, and the next pass goes on.
+pub const STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS: u32 = 200;
+
+/// How a stale CLAIMED requeue pass ended. Every batch of the pass
+/// committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaleClaimsRequeuePass {
+    /// A batch came back short: no eligible row was left when it ran.
+    Drained { requeued: u64 },
+    /// The pass ran [`STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS`] full
+    /// batches and stopped. Eligible rows can remain for the next pass.
+    BoundReached { requeued: u64 },
+}
+
+/// A stale CLAIMED requeue pass stopped at a failure. The batches before
+/// the failure committed and requeued `requeued_before` rows; the failed
+/// batch wrote nothing, or its outcome is unknown (`error` tells which). No
+/// later batch ran. A failure before the first batch (the pools, the client
+/// family check) has `requeued_before` 0.
+#[derive(Debug, thiserror::Error)]
+#[error("the stale CLAIMED requeue failed after requeueing {requeued_before} task(s): {error}")]
+pub struct StaleClaimsRequeueFailed {
+    pub requeued_before: u64,
+    pub error: BrokerError,
+}
+
+/// One stale CLAIMED requeue pass on `pool`: `horsies_requeue_stale_claims`
+/// in batches of [`STALE_CLAIMED_REQUEUE_BATCH`] rows until a batch is
+/// short, and at most [`STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS`] batches.
+/// Each batch is one statement checked out as reserved work, and commits
+/// alone. Logs nothing; each caller reports the end of the pass.
+///
+/// Errors: [`StaleClaimsRequeueFailed`] with the rows of the batches before
+/// the failed one.
+pub(crate) async fn requeue_stale_claimed_pass(
+    pool: &CorePool,
+    log: StatementLog,
+    stale_after: ThresholdMs,
+) -> Result<StaleClaimsRequeuePass, StaleClaimsRequeueFailed> {
+    let full_batch = STALE_CLAIMED_REQUEUE_BATCH.get().unsigned_abs();
+    requeue_pass_with(
+        full_batch,
+        STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
+        || requeue_stale_claims(pool, log, stale_after, STALE_CLAIMED_REQUEUE_BATCH),
+    )
+    .await
+}
+
+/// The loop of a requeue pass: at most `max_batches` calls of
+/// `requeue_batch`, each of which requeues at most `full_batch` rows and
+/// returns how many it requeued. Stops at the first short batch, at the
+/// first failure, or after `max_batches` full batches.
+async fn requeue_pass_with<F, Fut>(
+    full_batch: u32,
+    max_batches: u32,
+    mut requeue_batch: F,
+) -> Result<StaleClaimsRequeuePass, StaleClaimsRequeueFailed>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<u32, BrokerError>>,
+{
+    let mut requeued: u64 = 0;
+    for _ in 0..max_batches {
+        let rows = match requeue_batch().await {
+            Ok(rows) => rows,
+            Err(error) => {
+                return Err(StaleClaimsRequeueFailed {
+                    requeued_before: requeued,
+                    error,
+                })
+            }
+        };
+        requeued += u64::from(rows);
+        if rows < full_batch {
+            return Ok(StaleClaimsRequeuePass::Drained { requeued });
+        }
+    }
+    Ok(StaleClaimsRequeuePass::BoundReached { requeued })
+}
+
 /// Run one bound statement alone on `pool` as reserved work.
 async fn run_reserved(
     pool: &CorePool,
@@ -403,5 +494,55 @@ mod tests {
             ThresholdMs::from_millis(above),
             Err(ThresholdOutOfRange { value_ms: above })
         );
+    }
+
+    /// The pass of `requeue_pass_with` over planned batch answers, and the
+    /// number of batches it ran.
+    async fn planned_pass(
+        full_batch: u32,
+        max_batches: u32,
+        answers: Vec<Result<u32, BrokerError>>,
+    ) -> (
+        Result<StaleClaimsRequeuePass, StaleClaimsRequeueFailed>,
+        usize,
+    ) {
+        let mut answers = std::collections::VecDeque::from(answers);
+        let mut batches = 0;
+        let pass = requeue_pass_with(full_batch, max_batches, || {
+            batches += 1;
+            std::future::ready(answers.pop_front().expect("a planned batch answer"))
+        })
+        .await;
+        (pass, batches)
+    }
+
+    #[tokio::test]
+    async fn a_short_batch_ends_the_pass_as_drained() {
+        let (pass, batches) = planned_pass(500, 200, vec![Ok(500), Ok(500), Ok(7)]).await;
+        assert_eq!(
+            pass.expect("no batch failed"),
+            StaleClaimsRequeuePass::Drained { requeued: 1007 }
+        );
+        assert_eq!(batches, 3);
+    }
+
+    #[tokio::test]
+    async fn full_batches_up_to_the_bound_end_the_pass_with_the_bound_reached() {
+        let (pass, batches) = planned_pass(2, 3, vec![Ok(2), Ok(2), Ok(2)]).await;
+        assert_eq!(
+            pass.expect("no batch failed"),
+            StaleClaimsRequeuePass::BoundReached { requeued: 6 }
+        );
+        assert_eq!(batches, 3);
+    }
+
+    #[tokio::test]
+    async fn a_failed_batch_reports_the_rows_of_the_batches_before_it() {
+        let failure = BrokerError::ClaimContract("planned failure".to_owned());
+        let (pass, batches) = planned_pass(500, 200, vec![Ok(500), Err(failure)]).await;
+        let failed = pass.expect_err("the second batch failed");
+        assert_eq!(failed.requeued_before, 500);
+        assert!(matches!(failed.error, BrokerError::ClaimContract(_)));
+        assert_eq!(batches, 2);
     }
 }

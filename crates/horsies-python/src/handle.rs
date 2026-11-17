@@ -22,7 +22,9 @@ use crate::bridge::completion_queue::call_async;
 use crate::bridge::CallKind;
 use crate::errors::{refusal_error, ManifestRefused};
 use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
+use crate::operations::release::{release_claims_operation, ReleaseClaimsRequest};
 use crate::operations::schema::{install_operation, schema_status_operation};
+use crate::operations::stale_claims::requeue_stale_claimed_operation;
 use crate::operations::task_info::{task_info_operation, TaskInfoParts};
 use crate::process_core::{core_for_call, Core};
 use crate::records::{BrokerFailure, DatabasePingRecord, Outcome};
@@ -205,6 +207,45 @@ impl CoreHandle {
             "CoreHandle.enqueue_async",
             CallKind::Write,
             enqueue_operation(self.connection(), request.get().command()),
+        )
+    }
+
+    /// One stale CLAIMED requeue pass with the threshold `stale_after_ms`:
+    /// `StaleClaimsDrained`, `StaleClaimsBoundReached`, or
+    /// `StaleClaimsRequeueFailed`. Writes; each batch commits alone.
+    /// Awaitable only: its caller, `PostgresBroker.requeue_stale_claimed`,
+    /// runs on an event loop. A threshold that does not fit in 64 bits
+    /// raises `OverflowError`.
+    fn requeue_stale_claimed_async<'py>(
+        &self,
+        py: Python<'py>,
+        stale_after_ms: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.requeue_stale_claimed_async",
+            CallKind::Write,
+            requeue_stale_claimed_operation(self.connection(), stale_after_ms),
+        )
+    }
+
+    /// Release the claims of one request: `ClaimsReleased` or
+    /// `ReleaseFailed`. Writes, in one statement. Awaitable only: its
+    /// callers run on the worker's event loop.
+    fn release_claims_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, ReleaseClaimsRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.release_claims_async",
+            CallKind::Write,
+            release_claims_operation(self.connection(), request.get().command()),
         )
     }
 

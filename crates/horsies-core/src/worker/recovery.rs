@@ -8,9 +8,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::broker::core_rows::StatementLog;
 use crate::broker::stale_recovery::{
-    finish_stale_attempt, requeue_stale_claims, scan_stale_running, wake_retried_queue,
-    FinishStaleAttempt, RecoveryBatch, StaleCandidate, StaleRetry, StaleRunningThresholds,
-    ThresholdMs, ThresholdOutOfRange,
+    finish_stale_attempt, requeue_stale_claimed_pass, scan_stale_running, wake_retried_queue,
+    FinishStaleAttempt, RecoveryBatch, StaleCandidate, StaleClaimsRequeuePass, StaleRetry,
+    StaleRunningThresholds, ThresholdMs, ThresholdOutOfRange,
+    STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
 };
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
@@ -722,15 +723,6 @@ mod p7_maintenance_tests {
         cleanup.commit().await.unwrap();
     }
 }
-
-/// Rows per stale-CLAIMED requeue statement.
-const STALE_CLAIMED_REQUEUE_BATCH: RecoveryBatch = match RecoveryBatch::new(500) {
-    Some(batch) => batch,
-    None => panic!("500 rows is a recovery batch"),
-};
-/// Statements per reaper pass; a pass that reaches it stops, and the next
-/// pass goes on.
-const STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS: u32 = 200;
 
 // ---------------------------------------------------------------------------
 // Retention cleanup SQL
@@ -1861,12 +1853,9 @@ fn transitioned_count(
 }
 
 /// Requeue stale CLAIMED tasks back to PENDING (Python
-/// `requeue_stale_claimed`, `core/brokers/postgres.py:3505-3530`):
-/// `horsies_requeue_stale_claims` in batches of
-/// [`STALE_CLAIMED_REQUEUE_BATCH`] rows until a batch is short, and at most
-/// [`STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS`] batches. Each batch is one
-/// statement alone on `pool`, checked out as reserved work, and commits
-/// alone. Returns the number of requeued rows.
+/// `requeue_stale_claimed`, `core/brokers/postgres.py:3505-3530`): one
+/// [`requeue_stale_claimed_pass`] on `pool`. Logs a warning when the pass
+/// reached its bound. Returns the number of requeued rows.
 ///
 /// Errors: the failed batch's [`crate::broker::BrokerError`]; the batches
 /// before it stay committed.
@@ -1875,23 +1864,18 @@ pub async fn requeue_stale_claimed(
     log: StatementLog,
     stale_after: ThresholdMs,
 ) -> Result<u64, crate::broker::BrokerError> {
-    let full_batch = STALE_CLAIMED_REQUEUE_BATCH.get().unsigned_abs();
-    let mut total: u64 = 0;
-    for _ in 0..STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS {
-        let requeued =
-            requeue_stale_claims(pool, log, stale_after, STALE_CLAIMED_REQUEUE_BATCH).await?;
-        total += u64::from(requeued);
-        match requeued < full_batch {
-            true => return Ok(total),
-            false => continue,
+    match requeue_stale_claimed_pass(pool, log, stale_after).await {
+        Ok(StaleClaimsRequeuePass::Drained { requeued }) => Ok(requeued),
+        Ok(StaleClaimsRequeuePass::BoundReached { requeued }) => {
+            tracing::warn!(
+                requeued,
+                batches = STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
+                "stale CLAIMED requeue reached its per-pass bound; the next pass goes on",
+            );
+            Ok(requeued)
         }
+        Err(failed) => Err(failed.error),
     }
-    tracing::warn!(
-        requeued = total,
-        batches = STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
-        "stale CLAIMED requeue reached its per-pass bound; the next pass goes on",
-    );
-    Ok(total)
 }
 
 /// The drained signal for one retention DELETE's batching loop.
@@ -2903,3 +2887,6 @@ mod class_coverage_loop_tests;
 
 #[cfg(test)]
 mod retention_ports;
+
+#[cfg(test)]
+mod reaper_pass_ports;
