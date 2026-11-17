@@ -1102,13 +1102,13 @@ impl WireProxy {
     }
 
     /// Start a new count of round trips.
-    pub(super) fn reset_round_trips(&self) {
+    pub(crate) fn reset_round_trips(&self) {
         self.round_trips.store(0, Ordering::SeqCst);
     }
 
     /// Round trips since the last reset: requests of a client that the
     /// server answered or still has to answer.
-    pub(super) fn round_trips(&self) -> u32 {
+    pub(crate) fn round_trips(&self) -> u32 {
         self.round_trips.load(Ordering::SeqCst)
     }
 }
