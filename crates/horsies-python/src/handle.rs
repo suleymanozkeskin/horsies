@@ -69,6 +69,7 @@ use crate::operations::workflow_lifecycle::{cancel_workflow_operation, pause_wor
 use crate::operations::workflow_phase2::{
     advance_workflow_parents_operation, finish_workflow_node_operation, NodeFinishRequest,
 };
+use crate::operations::workflow_phase2_recovery::recover_workflow_phase2_operation;
 use crate::operations::workflow_reads::{
     wait_workflow_result_operation, workflow_node_result_operation,
     workflow_node_results_operation, workflow_nodes_operation, workflow_status_operation,
@@ -785,6 +786,39 @@ impl CoreHandle {
             "CoreHandle.advance_workflow_parents_async",
             CallKind::Write,
             advance_workflow_parents_operation(self.connection(), child_workflow_ids, source),
+        )
+    }
+
+    /// One phase-2 recovery pass of the reaper: the phase-2 records older than
+    /// `grace_ms` and under `quarantine_after_attempts`, oldest first, at most
+    /// `max_rows`, each in its own transaction: `Phase2RecoveryRecord` or
+    /// `Phase2RecoveryFailed`. Writes; owed child starts build their children
+    /// through the child spec source. A build that raised `KeyboardInterrupt`
+    /// or `SystemExit` raises it again after the pass. A negative value
+    /// raises `OverflowError`; with no child spec source it raises
+    /// `RuntimeError`.
+    #[pyo3(signature = (*, grace_ms, max_rows, quarantine_after_attempts))]
+    fn recover_workflow_phase2_async<'py>(
+        &self,
+        py: Python<'py>,
+        grace_ms: u64,
+        max_rows: u32,
+        quarantine_after_attempts: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        let source = self.child_spec_source(core)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.recover_workflow_phase2_async",
+            CallKind::Write,
+            recover_workflow_phase2_operation(
+                self.connection(),
+                grace_ms,
+                max_rows,
+                quarantine_after_attempts,
+                source,
+            ),
         )
     }
 

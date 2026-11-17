@@ -178,6 +178,14 @@ class CoreHandle:
         that raised KeyboardInterrupt or SystemExit raises it again. With no child spec source
         it raises RuntimeError.
         """
+    def recover_workflow_phase2_async(self, *, grace_ms: int, max_rows: int, quarantine_after_attempts: int) -> asyncio.Future[Phase2RecoveryRecord | Phase2RecoveryFailed]:
+        """One phase-2 recovery pass of the reaper: the phase-2 records older than grace_ms and
+        under quarantine_after_attempts, oldest first, at most max_rows, each in its own
+        transaction. Writes; owed child starts build their children through the child spec
+        source. A build that raised KeyboardInterrupt or SystemExit raises it again after the
+        pass. A negative value raises OverflowError; with no child spec source it raises
+        RuntimeError.
+        """
     def pause_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed]:
         """Pause one workflow tree. Writes, in one statement. A row outside the function's contract
         raises PanicException.
@@ -2022,6 +2030,48 @@ class ParentAdvanceStopped:
     def failed_child_workflow_id(self) -> uuid.UUID: ...
     @property
     def still_owed(self) -> list[uuid.UUID]: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class Phase2RecoveryRecord:
+    """What one pass did. pending_absent counts the records that were gone while their node is
+    not terminal (nothing written).
+    """
+    @property
+    def considered(self) -> int: ...
+    @property
+    def applied(self) -> int: ...
+    @property
+    def already_applied(self) -> int: ...
+    @property
+    def superseded(self) -> int: ...
+    @property
+    def pending_absent(self) -> int: ...
+    @property
+    def retained(self) -> int: ...
+    @property
+    def failed(self) -> int: ...
+    @property
+    def quarantined(self) -> int: ...
+    @property
+    def raised_counted(self) -> int: ...
+    @property
+    def over_attempt_bound(self) -> int: ...
+    @property
+    def retained_details(self) -> list[str]: ...
+    @property
+    def quarantine_refusals(self) -> list[str]: ...
+
+
+@final
+class Phase2RecoveryFailed:
+    """The pass failed before it recovered a record: the client family check, the discovery or
+    the count. Nothing was recovered.
+    """
     @property
     def message(self) -> str: ...
     @property
