@@ -16,8 +16,53 @@ concurrency:
 permissions: {}
 
 jobs:
-  unit:
+  # One dev wheel of horsies, with horsies._core for Linux x86_64, per run.
+  # The Python jobs install this wheel and import horsies from it: no job
+  # builds the extension again, and no test imports the source folder.
+  python-wheel:
     needs: scope
+    if: needs.scope.outputs.run_python == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # rustup is preinstalled on the runner. With no argument it installs the
+      # toolchain and components that rust-toolchain.toml names.
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - name: Cache Cargo builds
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      # The build backend of pyproject.toml (maturin) builds in the release
+      # profile unless MATURIN_PEP517_ARGS names another; the dev profile
+      # compiles faster and keeps debug assertions and overflow checks on.
+      - name: Build the dev wheel
+        env:
+          MATURIN_PEP517_ARGS: --profile dev
+        run: uv build --wheel --python 3.13 --out-dir dist
+
+      - name: Upload the dev wheel
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: horsies-dev-wheel
+          path: dist/horsies-*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  unit:
+    needs: [scope, python-wheel]
     if: needs.scope.outputs.run_python == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -30,31 +75,41 @@ jobs:
           version: 0.11.14
           enable-cache: true
 
-      - name: Install dependencies
-        run: uv sync --dev
+      - name: Download the dev wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: horsies-dev-wheel
+          path: dist
+
+      # The project itself comes from the wheel; every later `uv run` has
+      # --no-sync, so uv does not replace it with a build of the source.
+      - name: Install dependencies and the dev wheel
+        run: |
+          uv sync --dev --no-install-project
+          uv pip install --no-deps dist/horsies-*.whl
 
       # Strict pyright over the paths listed in pyrightconfig.clean.json. The
       # list holds files that are clean today, and the type pins.
       - name: Typecheck clean paths
-        run: uv run pyright -p pyrightconfig.clean.json
+        run: uv run --no-sync pyright -p pyrightconfig.clean.json
 
       # Type-check the python blocks of the docs and the skill files. The
       # extractor writes one file per page; blocks marked "check: skip" are
       # left out. See tests/docs_examples/extract.py.
       - name: Typecheck doc examples
         run: |
-          uv run python tests/docs_examples/extract.py build/doc_examples
-          uv run pyright -p pyrightconfig.docs.json
+          uv run --no-sync python tests/docs_examples/extract.py build/doc_examples
+          uv run --no-sync pyright -p pyrightconfig.docs.json
 
       - name: Run unit tests
-        run: uv run pytest tests/unit/ -v --tb=short
+        run: uv run --no-sync pytest tests/unit/ -v --tb=short
 
       # The pure tests of the dual-run snapshot: rules, normalize, compare.
       - name: Run dual-run unit tests
-        run: uv run pytest tests/dualrun/ -m unit -v --tb=short
+        run: uv run --no-sync pytest tests/dualrun/ -m unit -v --tb=short
 
   dualrun:
-    needs: scope
+    needs: [scope, python-wheel]
     if: needs.scope.outputs.run_python == 'true'
     # The snapshot tests that need PostgreSQL. Each test creates and drops
     # its own dualrun_<32 hex> databases on this server.
@@ -83,16 +138,26 @@ jobs:
           version: 0.11.14
           enable-cache: true
 
-      - name: Install dependencies
-        run: uv sync --dev
+      - name: Download the dev wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: horsies-dev-wheel
+          path: dist
+
+      # The project itself comes from the wheel; every later `uv run` has
+      # --no-sync, so uv does not replace it with a build of the source.
+      - name: Install dependencies and the dev wheel
+        run: |
+          uv sync --dev --no-install-project
+          uv pip install --no-deps dist/horsies-*.whl
 
       - name: Run dual-run integration tests
         env:
           DB_PASSWORD: testpassword
-        run: uv run pytest tests/dualrun/ -m integration -v --tb=short
+        run: uv run --no-sync pytest tests/dualrun/ -m integration -v --tb=short
 
   newest-pydantic:
-    needs: scope
+    needs: [scope, python-wheel]
     if: needs.scope.outputs.run_python == 'true'
     # The definition check reads core schema keys that pydantic owns, and the
     # dependency has no upper bound. A user can install a newer pydantic than
@@ -108,14 +173,22 @@ jobs:
           version: 0.11.14
           enable-cache: true
 
-      - name: Install dependencies with the newest pydantic
-        run: uv sync --dev --upgrade-package pydantic --upgrade-package pydantic-core
+      - name: Download the dev wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: horsies-dev-wheel
+          path: dist
+
+      - name: Install dependencies with the newest pydantic, and the dev wheel
+        run: |
+          uv sync --dev --no-install-project --upgrade-package pydantic --upgrade-package pydantic-core
+          uv pip install --no-deps dist/horsies-*.whl
 
       - name: Run the type contract tests
         run: uv run --no-sync pytest tests/unit/test_wire_shape.py tests/unit/test_strict_codec.py tests/unit/test_workflow_node_wire_kwargs.py tests/unit/test_signature_check.py tests/unit/test_type_contract_send_return.py -v --tb=short
 
   showcase:
-    needs: scope
+    needs: [scope, python-wheel]
     if: needs.scope.outputs.run_python == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -147,9 +220,18 @@ jobs:
           version: 0.11.14
           enable-cache: true
 
-      - name: Install dependencies
+      - name: Download the dev wheel
         if: steps.changed.outputs.run == 'true'
-        run: uv sync --dev
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: horsies-dev-wheel
+          path: dist
+
+      - name: Install dependencies and the dev wheel
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          uv sync --dev --no-install-project
+          uv pip install --no-deps dist/horsies-*.whl
 
       # No --live: this validates config, imports, every workflow DAG, and each
       # registered builder without a database. It is what keeps the showcase
@@ -158,11 +240,11 @@ jobs:
       # triggers this job.
       - name: Validate showcase app
         if: steps.changed.outputs.run == 'true'
-        run: uv run horsies check showcase.acme.app:app
+        run: uv run --no-sync horsies check showcase.acme.app:app
 
       - name: Typecheck showcase
         if: steps.changed.outputs.run == 'true'
-        run: uv run pyright showcase/
+        run: uv run --no-sync pyright showcase/
 
   webui:
     needs: scope
