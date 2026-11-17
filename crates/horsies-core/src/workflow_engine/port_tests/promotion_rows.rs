@@ -26,7 +26,7 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::workflow::node::JoinType;
 use crate::core::{AnyNode, OnError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
 use crate::workflow_engine::engine::on_workflow_task_complete;
-use crate::workflow_engine::lifecycle::resume_workflow;
+use crate::workflow_engine::lifecycle::{pause_workflow, resume_workflow};
 use crate::workflow_engine::recovery::recover_stuck_workflows;
 
 /// Stored task options that do not parse (Python's `_corrupt_stored_options`).
@@ -34,6 +34,16 @@ const CORRUPT_TASK_OPTIONS: &str = "{not-json";
 
 /// `workflow_recovery_failure_limit` of a recovery pass.
 const RECOVERY_FAILURE_LIMIT: u32 = 3;
+
+/// The advisory lock that holds the case-0 step at its first node write.
+const STEP_HOLD_LOCK: i64 = 7_311_361;
+
+/// Bound of the wait for a backend to block on another: 500 polls of 10 ms.
+const BLOCK_POLLS: u32 = 500;
+const BLOCK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Bound of the recovery pass and the pause, from the start of the pass.
+const RACE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn after(index: usize, task_name: &str, dependencies: &[usize]) -> AnyNode {
     let mut node = task_node(index, task_name);
@@ -306,18 +316,49 @@ async fn the_promotion_moves_only_pending_nodes() {
     );
 }
 
-/// `TestPromotionWrite.test_the_promotion_write_leaves_a_node_ready_when_the_workflow_is_not_running`:
-/// a promotion whose caller does not hold the workflow row lock (the skip
-/// cascade of recovery) can see a pause land after its dependents read.
-/// The nodes it moved stay READY with no task and no start time.
+/// The one backend that waits on a lock that `holder_pid` holds, polled up
+/// to [`BLOCK_POLLS`] times.
 ///
-/// Node 1 waits for the FAILED node 0, so recovery case 0 skips it; its
-/// dependents (2, 3, 4, `allow_failed_deps`) are promoted by the skip
-/// cascade. A trigger pauses the workflow when the first of them leaves
-/// PENDING, after the dependents read.
+/// Panics when no backend waits within the bound, or when more than one
+/// backend waits.
+async fn sole_waiter_on(pool: &PgPool, holder_pid: i32) -> i32 {
+    for _ in 0..BLOCK_POLLS {
+        let waiters: Vec<i32> = sqlx::query_scalar(
+            "SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) ORDER BY pid",
+        )
+        .bind(holder_pid)
+        .fetch_all(pool)
+        .await
+        .expect("read the backends that wait on the holder");
+        match waiters.as_slice() {
+            [] => tokio::time::sleep(BLOCK_POLL_INTERVAL).await,
+            [waiter] => return *waiter,
+            several => panic!("backends {several:?} wait on backend {holder_pid}; one expected"),
+        }
+    }
+    panic!("no backend waits on backend {holder_pid}");
+}
+
+/// Replaces the port of
+/// `TestPromotionWrite.test_the_promotion_write_leaves_a_node_ready_when_the_workflow_is_not_running`
+/// (`tests/integration/test_workflow_promotion_batched.py:578`). That test
+/// covers a promotion whose caller does not hold the workflow row lock: a
+/// pause can land after its dependents read, and the promoted nodes stay
+/// READY with no task. Recovery case 0 runs
+/// `horsies_workflow_node_reevaluate`, which locks the workflow row
+/// `FOR UPDATE` before it reads or writes a node, so that interleaving
+/// cannot happen on the step path. The guarantee that replaces it: a pause
+/// that arrives during the step waits for the step's commit, the promoted
+/// nodes end ENQUEUED with their task rows, and the pause applies after.
+///
+/// Node 1 waits for the FAILED node 0, so case 0 skips it; its dependents
+/// (2, 3, 4, `allow_failed_deps`) are promoted by the skip cascade. A
+/// trigger holds the step at its first node write, on an advisory lock that
+/// the test holds. The pause starts while the step waits there, and the test
+/// releases the step once the pause waits on the step.
 #[tokio::test]
 #[serial]
-async fn a_pause_after_the_dependents_read_leaves_the_promoted_nodes_ready_with_no_task() {
+async fn a_pause_during_the_case_zero_step_applies_after_its_commit() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
     let failure =
@@ -343,45 +384,95 @@ async fn a_pause_after_the_dependents_read_leaves_the_promoted_nodes_ready_with_
     }
     execute(
         &db.pool,
-        "CREATE FUNCTION port_test_pause_on_ready() RETURNS trigger
-         LANGUAGE plpgsql AS $body$
-         BEGIN
-             UPDATE horsies_workflows SET status = 'PAUSED', updated_at = NOW()
-             WHERE id = NEW.workflow_id AND status = 'RUNNING';
-             RETURN NEW;
-         END
-         $body$",
+        &format!(
+            "CREATE FUNCTION port_test_hold_step() RETURNS trigger
+             LANGUAGE plpgsql AS $body$
+             BEGIN
+                 PERFORM pg_advisory_xact_lock({STEP_HOLD_LOCK});
+                 RETURN NEW;
+             END
+             $body$"
+        ),
     )
     .await;
     execute(
         &db.pool,
-        "CREATE TRIGGER port_test_pause_on_ready BEFORE UPDATE ON horsies_workflow_tasks
-         FOR EACH ROW WHEN (OLD.status = 'PENDING' AND NEW.status = 'READY')
-         EXECUTE FUNCTION port_test_pause_on_ready()",
+        "CREATE TRIGGER port_test_hold_step BEFORE UPDATE ON horsies_workflow_tasks
+         FOR EACH ROW WHEN (OLD.status = 'PENDING' AND NEW.status <> 'PENDING')
+         EXECUTE FUNCTION port_test_hold_step()",
     )
     .await;
+    let mut holder = db.pool.begin().await.expect("begin the step holder");
+    let _held = sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(STEP_HOLD_LOCK)
+        .execute(&mut *holder)
+        .await
+        .expect("take the lock that holds the step");
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .expect("read the backend pid of the holder");
+    let recovery_broker = PostgresBroker::from_pool(db.pool.clone());
+    let pause_broker = PostgresBroker::from_pool(db.pool.clone());
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+    let retention = RetentionConfig::default();
 
-    let _report = recover_stuck_workflows(
-        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    let recovery = recover_stuck_workflows(
+        &recovery_broker,
+        &registry,
         RECOVERY_FAILURE_LIMIT,
-        &RetentionConfig::default(),
-    )
+        &retention,
+    );
+    let pause_during_the_step = async {
+        let step_pid = sole_waiter_on(&db.pool, holder_pid).await;
+        let release_once_the_pause_waits = async {
+            let _pause_pid = sole_waiter_on(&db.pool, step_pid).await;
+            assert_eq!(
+                workflow_status(&db.pool, workflow_id).await,
+                "RUNNING",
+                "the pause applied while the step held the workflow row"
+            );
+            holder.commit().await.expect("release the step");
+        };
+        let (paused, ()) = tokio::join!(
+            pause_workflow(&pause_broker, workflow_id),
+            release_once_the_pause_waits,
+        );
+        paused
+    };
+    let (report, paused) = tokio::time::timeout(RACE_WAIT, async {
+        tokio::join!(recovery, pause_during_the_step)
+    })
     .await
-    .expect("the recovery pass returns its report");
+    .expect("the step and the pause end once the step is released");
 
+    let report = report.expect("the recovery pass returns its report");
+    assert_eq!(
+        (report.case0_pending_reevaluated, report.errors),
+        (1, 0),
+        "the case-0 step applied"
+    );
+    assert!(
+        paused.expect("pause"),
+        "the pause found the workflow RUNNING"
+    );
     let rows = node_rows(&db.pool, workflow_id).await;
     assert_eq!(rows[&1].status, "SKIPPED");
     for index in [2, 3, 4] {
         let row = &rows[&index];
-        assert_eq!(
-            (row.status.as_str(), row.task_id, row.started_at),
-            ("READY", None, None),
-            "node {index}"
-        );
+        assert_eq!(row.status, "ENQUEUED", "node {index}");
+        assert!(row.task_id.is_some(), "node {index} has its task");
+        assert!(row.started_at.is_some(), "node {index} has its start time");
+        assert_eq!(row.task_status.as_deref(), Some("PENDING"), "node {index}");
     }
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "PAUSED");
-    assert_eq!(live_task_count(&db.pool).await, 0, "no runnable task row");
+    assert_eq!(
+        live_task_count(&db.pool).await,
+        3,
+        "one task row per promoted node"
+    );
+    recovery_broker.close().await;
+    pause_broker.close().await;
     db.drop().await;
 }
 

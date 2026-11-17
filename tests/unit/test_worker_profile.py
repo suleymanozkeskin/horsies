@@ -929,8 +929,8 @@ class TestAppConfigPoolChecks:
 
 class TestAppConfigParentPoolChecks:
     """An explicit pool of the worker process below the connections that
-    the claim loop, the steady flushers and the reserve need is refused with
-    the profile name and the field path."""
+    the claim loop and the reserve need is refused with the profile name and
+    the field path."""
 
     @staticmethod
     def _with_pool(max_size: PoolSize | PoolSizeFromSeats) -> WorkerProfile:
@@ -949,19 +949,21 @@ class TestAppConfigParentPoolChecks:
         error = exc_info.value
         assert error.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
         assert error.message == (
-            "worker_profiles['p'].pool.max_size: 4 connections is below the "
-            'minimum of the pool of the worker process (5)'
+            "worker_profiles['p'].pool.max_size: 2 connections is below the "
+            'minimum of the pool of the worker process (3)'
         )
         assert error.notes == [
-            'minimum = claim loop 1 + steady flushers of the batched success '
-            'write 2 + reserve 2',
-            'the claim loop and the steady flushers hold their connections '
-            'while the worker is busy; the reserve is for the reaper, the '
-            'claimer heartbeat and the writes of failures, retries and '
-            'workflow nodes, which otherwise wait for the pool timeout and fail',
+            'minimum = claim loop 1 + reserve 2',
+            'the worker process opens two pools of this size: the claim loop '
+            'holds a connection of its engine pool while the worker is busy, '
+            'and the flushers of the batched success write check out '
+            'connections of its core pool; each pool keeps the reserve for the '
+            'reaper, the claimer heartbeat and the writes of failures, retries '
+            'and workflow nodes, which otherwise wait for the pool timeout and '
+            'fail',
         ]
         assert error.help_text == (
-            'set max_size=PoolSize(connections=5) or more, or '
+            'set max_size=PoolSize(connections=3) or more, or '
             'max_size=PoolSizeFromSeats()'
         )
 
@@ -970,7 +972,7 @@ class TestAppConfigParentPoolChecks:
         assert _app_config({'p': profile}).worker_profiles == {'p': profile}
 
     def test_a_size_from_seats_at_the_floor_is_accepted(self) -> None:
-        """One seat derives the floor; the derived sizes are unchanged."""
+        """One seat derives the floor, which is above the minimum."""
         profile = self._with_pool(PoolSizeFromSeats())
 
         assert _app_config({'p': profile}).worker_profiles == {'p': profile}
