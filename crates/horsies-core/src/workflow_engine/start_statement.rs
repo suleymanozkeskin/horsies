@@ -421,18 +421,18 @@ pub(crate) async fn build_child<'a>(
 /// `args_from` members merged after its static members, each replaced by
 /// its `inner` envelope ([`child_build_input`]). With no `args_from` members
 /// the input is the stored input, or `{}` for a stored input with no static
-/// members ([`child_static_input`]: an empty text, or a value that is not an
-/// object, as Python reads it). A client's child spec source decodes it with
-/// its builder's params type.
+/// members ([`child_static_input`]: a value that is not an object, as Python
+/// reads it). A client's child spec source decodes it with its builder's
+/// params type.
 ///
 /// The node fails ([`NodeInput::NodeFails`]), in Python's order
 /// (`core/workflows/child_build.py`, `_input_kwargs` and `_args_from_map`),
 /// with `WORKER_SERIALIZATION_ERROR` and the workflow id and the node in
 /// `data` unless named otherwise:
-/// - a stored input that the strict read refuses, or `null`:
+/// - a stored input that is empty, that the strict read refuses, or `null`:
 ///   `Corrupt kwargs JSON for subworkflow task <index>`;
-/// - an `args_from` text that the strict read refuses, or `null`:
-///   `Corrupt args_from JSON for subworkflow task <index>`;
+/// - an `args_from` text that is empty, that the strict read refuses, or
+///   `null`: `Corrupt args_from JSON for subworkflow task <index>`;
 /// - an `args_from` value that is not a JSON integer
 ///   ([`read_args_from`]): `args_from has non-int values for subworkflow
 ///   task <index>`;
