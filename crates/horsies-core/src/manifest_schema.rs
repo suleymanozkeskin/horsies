@@ -12,8 +12,9 @@
 //! bound has one definition. A `Vec` is a Python tuple and a `BTreeMap`
 //! with `String` keys a Python `dict` of its values; their items are not
 //! containers. `horsies-codegen` renders [`PRODUCER_MANIFEST`] as
-//! `_catalog/manifest.py` and [`WORKER_MANIFEST`] as
-//! `_catalog/worker_manifest.py`.
+//! `_catalog/manifest.py`, [`WORKER_MANIFEST`] as
+//! `_catalog/worker_manifest.py` and [`SCHEDULER_MANIFEST`] as
+//! `_catalog/scheduler_manifest.py`.
 
 use std::collections::BTreeMap;
 
@@ -23,6 +24,10 @@ use crate::core::task::Execution;
 use crate::manifest::{
     DatabaseManifest, PoolRecycle, ProducerManifest, SchemaMode, SendManifest, SessionDatabase,
     PRODUCER_MANIFEST_VERSION,
+};
+use crate::scheduler_manifest::{
+    ScheduleActivation, ScheduleManifest, ScheduleSendManifest, ScheduleTaskOptions,
+    SchedulerManifest, SCHEDULER_MANIFEST_VERSION,
 };
 use crate::worker_manifest::{
     ChildCommandManifest, ChildLaunchManifest, ChildProgram, ClaimLease, ClaimLimitsManifest,
@@ -247,6 +252,22 @@ pub const WORKER_MANIFEST: ManifestModule = ManifestModule {
         <WorkerLogLevel as ManifestItem>::ITEM,
         <ChildLaunchManifest as ManifestItem>::ITEM,
         <WorkerManifest as ManifestItem>::ITEM,
+    ],
+};
+
+/// The scheduler manifest: the schedules of one scheduler, each enabled one
+/// with its send facts.
+pub const SCHEDULER_MANIFEST: ManifestModule = ManifestModule {
+    root: "SchedulerManifest",
+    version: SCHEDULER_MANIFEST_VERSION,
+    reader: "`horsies._core.CoreScheduler`",
+    reader_short: "`CoreScheduler`",
+    types: &[
+        <ScheduleTaskOptions as ManifestItem>::ITEM,
+        <ScheduleSendManifest as ManifestItem>::ITEM,
+        <ScheduleActivation as ManifestItem>::ITEM,
+        <ScheduleManifest as ManifestItem>::ITEM,
+        <SchedulerManifest as ManifestItem>::ITEM,
     ],
 };
 
@@ -515,8 +536,7 @@ mod tests {
 
     #[test]
     fn every_named_type_is_in_the_module_once() {
-        for parsed in parsed_modules() {
-            let module = parsed.module;
+        for module in [PRODUCER_MANIFEST, WORKER_MANIFEST, SCHEDULER_MANIFEST] {
             for manifest_type in module.types {
                 let count = module
                     .types
@@ -625,6 +645,24 @@ mod tests {
                 "MILLISECONDS",
                 "CLAIM_COUNT",
                 "MANIFEST_VERSION",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_scheduler_manifest_names_each_bound_once() {
+        let names: Vec<&str> = SCHEDULER_MANIFEST
+            .int_bounds()
+            .iter()
+            .map(|bound| bound.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "QUEUE_PRIORITY",
+                "MAX_CATCH_UP_RUNS",
+                "MANIFEST_VERSION",
+                "CHECK_INTERVAL_SECONDS",
             ]
         );
     }
