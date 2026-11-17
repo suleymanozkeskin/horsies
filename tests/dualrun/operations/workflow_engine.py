@@ -4,6 +4,10 @@ One row per Python entry point of the workflow engine that calls the core.
 Every operation of this switch runs in pool mode: the core commits its own
 statements on its own pool. Run:
 ``pytest tests/integration --dual-run=workflow-engine``.
+
+The start of a run in a child and its stop before start call the core
+handle of the child (``CoreChildHandle``), which each child process builds
+once, not a ``CoreHandle``: their rows trip no core method.
 """
 
 from __future__ import annotations
@@ -61,6 +65,22 @@ WORKFLOW_ENGINE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         reference_path='tests.dualrun.reference.claim_settle_caller:filter_nonrunnable_workflow_tasks',
         mode=PoolMode(),
         core_methods=('settle_claimed_workflow_tasks_async',),
+    ),
+    DualRunOperation(
+        name='workflow task stop before start',
+        production_path='horsies.core.worker.child_runner:_confirm_ownership_and_set_running',
+        reference_path=(
+            'tests.dualrun.reference.stop_before_start_caller:_confirm_ownership_and_set_running'
+        ),
+        mode=PoolMode(),
+        core_methods=(),
+    ),
+    DualRunOperation(
+        name='workflow task stop before start, shared async child',
+        production_path='horsies.core.worker.shared_lifecycle:confirm_until_not_resumed',
+        reference_path='tests.dualrun.reference.stop_before_start_caller:confirm_until_not_resumed',
+        mode=PoolMode(),
+        core_methods=(),
     ),
     DualRunOperation(
         name='workflow pause',

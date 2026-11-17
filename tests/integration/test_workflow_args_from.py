@@ -479,6 +479,7 @@ class TestArgsFromInjection:
                 master_worker_id='test-worker',
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
+                orphan_self_heal=True,
             )
         )
         assert ok is True
@@ -567,6 +568,7 @@ class TestArgsFromInjection:
                 master_worker_id='test-worker',
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
+                orphan_self_heal=True,
             )
         )
         assert ok is True
@@ -734,6 +736,7 @@ class TestArgsFromInjection:
                 master_worker_id='test-worker',
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
+                orphan_self_heal=True,
             )
         )
         assert ok is True
@@ -819,6 +822,7 @@ class TestArgsFromInjection:
                 master_worker_id='test-worker',
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
+                orphan_self_heal=True,
             )
         )
         assert ok is True

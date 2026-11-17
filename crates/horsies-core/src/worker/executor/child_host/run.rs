@@ -16,9 +16,8 @@ use crate::broker::claims::{
     release_claims, start_attempt as start_statement, ReleaseBatch, ReleaseClaims, ReleaseOutcome,
     ReleasePlacement, StartAttempt, StartMiss, StartOutcome,
 };
-use crate::broker::{
-    BrokerError, PostgresBroker, PrestartExpiry, WorkflowStop, WorkflowStopBeforeStart,
-};
+use crate::broker::workflow_stop_before_start::stop_before_start;
+use crate::broker::{BrokerError, OrphanSelfHeal, PostgresBroker, PrestartExpiry, StopBeforeStart};
 use crate::core::lifecycle::OwnedClaim;
 use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::core::task::fn_trait::{RegisteredTask, TaskModule};
@@ -134,8 +133,7 @@ pub(super) async fn start_attempt(context: &HostContext, facts: &RunFacts) -> St
 /// |---|---|---|
 /// | `DeadlinePassed` | the expiry of the owned claim | `TaskExpired`, or `ClaimLost` when the expiry is refused |
 /// | `NotHeld`, `LeaseExpired` | none | `ClaimLost` |
-/// | `WorkflowPaused` | abandon and node reset, one transaction | `WorkflowStopped`, or a new start after a resume |
-/// | `WorkflowCancelled` | cancel and node skip, one transaction | `WorkflowStopped` |
+/// | `WorkflowPaused`, `WorkflowCancelled` | `horsies_workflow_task_stop_before_start`, one statement that judges the task again: the abandon and node reset, or the cancel and node skip | `WorkflowStopped`; a new start after a resume; `TaskExpired`, `NodeNotLinked` or `ClaimLost` by what it found |
 /// | `NodeNotLinked` | none in the child; the worker's outcome writer cancels the owned orphan | `NodeNotLinked` |
 ///
 /// Errors: the [`BrokerError`] of a write of the path.
@@ -163,9 +161,8 @@ async fn after_missed_start(
             }
         }
         StartMiss::NotHeld | StartMiss::LeaseExpired => Ok(claim_lost(facts)),
-        StartMiss::WorkflowPaused => stop_for_workflow(context, facts, WorkflowStop::Paused).await,
-        StartMiss::WorkflowCancelled => {
-            stop_for_workflow(context, facts, WorkflowStop::Cancelled).await
+        StartMiss::WorkflowPaused | StartMiss::WorkflowCancelled => {
+            stop_for_workflow(context, facts, miss).await
         }
         StartMiss::NodeNotLinked => Ok(node_not_linked(facts)),
     }
@@ -183,26 +180,54 @@ fn claim_lost(facts: &RunFacts) -> MissedStart {
     MissedStart::Stop(StopReason::ClaimLost)
 }
 
-/// Stop a workflow task whose workflow stopped (Python
-/// `_handle_workflow_stop_before_start`).
+/// Stop a workflow task whose workflow stopped: one
+/// `horsies_workflow_task_stop_before_start` statement on the main core
+/// pool, as the start, which judges the task again under its own locks.
+///
+/// The child host sends the orphan self-heal off: the run frames do not
+/// carry the app's setting, so a task whose node is not linked ends
+/// `NodeNotLinked`, and the worker's outcome writer cancels the owned orphan
+/// when the setting is on.
 async fn stop_for_workflow(
     context: &HostContext,
     facts: &RunFacts,
-    stop: WorkflowStop,
+    miss: StartMiss,
 ) -> Result<MissedStart, BrokerError> {
     tracing::info!(
         task_id = %facts.task_id,
-        stop = ?stop,
+        miss = miss.as_str(),
         "Blocking task {} execution before start - its workflow stopped",
         facts.task_id,
     );
-    match context
-        .broker
-        .stop_workflow_task_before_start(facts.task_id, stop, &facts.worker_id, facts.claimed_at)
-        .await?
-    {
-        WorkflowStopBeforeStart::Stopped => Ok(MissedStart::Stop(StopReason::WorkflowStopped)),
-        WorkflowStopBeforeStart::Resumed => Ok(MissedStart::WorkflowResumed),
+    let fence = OwnedClaim {
+        worker_id: facts.worker_id.clone(),
+        claimed_at: facts.claimed_at,
+    };
+    let (open, _write) = context.broker.core_pools_for_write()?;
+    let stop = stop_before_start(
+        open.main(),
+        context.broker.statement_log(),
+        facts.task_id,
+        &fence,
+        OrphanSelfHeal::Off,
+    )
+    .await?;
+    match stop {
+        StopBeforeStart::Abandoned(_) | StopBeforeStart::Cancelled(_) => {
+            Ok(MissedStart::Stop(StopReason::WorkflowStopped))
+        }
+        StopBeforeStart::Resumed => Ok(MissedStart::WorkflowResumed),
+        StopBeforeStart::Expired(_) => {
+            tracing::info!(
+                task_id = %facts.task_id,
+                "Task {} expired before actual execution start; marked EXPIRED.",
+                facts.task_id,
+            );
+            Ok(MissedStart::Stop(StopReason::TaskExpired))
+        }
+        StopBeforeStart::OrphanCancelled(_) => Ok(MissedStart::Stop(StopReason::OrphanCancelled)),
+        StopBeforeStart::NodeNotLinked => Ok(node_not_linked(facts)),
+        StopBeforeStart::NotHeld(_) => Ok(claim_lost(facts)),
     }
 }
 
@@ -300,8 +325,12 @@ pub(super) async fn mark_finalizing(context: &HostContext, facts: &RunFacts) {
 
 /// The envelope of a task error.
 fn error_envelope(error: TaskError) -> RunEnd {
-    let text = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))
-        .expect("a task error holds only JSON values, so its envelope encodes");
+    // The codec's encoder writes each float of `data` as Python's
+    // `json.dumps` does.
+    let text = crate::core::codec::task_result_to_json_string(
+        &TaskResult::<serde_json::Value>::Err(error),
+    )
+    .expect("a task error holds only JSON values, so its envelope encodes");
     RunEnd::Result(ResultEnvelopeText::new(text))
 }
 

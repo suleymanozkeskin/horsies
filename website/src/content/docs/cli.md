@@ -158,7 +158,15 @@ horsies web --database-url postgresql://user:pw@host/db
 # Behind a proxy that authenticates callers and sets the header
 horsies web myapp.tasks:app --host 0.0.0.0 \
     --auth trusted-header --trusted-header X-Forwarded-User --enable-actions
+
+# Behind a transaction-pooled PgBouncer: the listener takes a direct URL
+horsies web \
+    --database-url "$DATABASE_URL_POOLED" \
+    --session-database-url "$DATABASE_URL_DIRECT" \
+    --pgbouncer-transaction-mode
 ```
+
+The bind rules, the trusted-header contract and the PgBouncer rule are in [Web UI Deployment & Authentication](/horsies/monitoring/web-ui-deployment/#standalone-cli).
 
 ### horsies get-docs
 
@@ -372,4 +380,17 @@ Use this exec form. With the shell form, `sh` receives SIGTERM and the worker do
 ```text
 worker: horsies worker myapp.instance:app --profile default
 scheduler: horsies scheduler myapp.instance:app
+```
+
+## Things to Avoid
+
+**Don't serve `horsies web` on a non-loopback address with `--auth none`.** The command exits with code 2. See [Things to Avoid](/horsies/monitoring/web-ui-deployment/#things-to-avoid) of Web UI Deployment & Authentication.
+
+```bash
+# Wrong — refused with exit 2
+horsies web myapp.tasks:app --host 0.0.0.0 --auth none
+
+# Correct — a proxy owns identity, and it strips the header on ingress
+horsies web myapp.tasks:app --host 0.0.0.0 \
+    --auth trusted-header --trusted-header X-Forwarded-User
 ```

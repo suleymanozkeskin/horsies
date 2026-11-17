@@ -96,6 +96,53 @@ config = AppConfig(
 
 The rules of the split configuration are on [PgBouncer / Transaction Pooling](/horsies/configuration/broker-config/#pgbouncer--transaction-pooling).
 
+#### Check Connections at Checkout
+
+`worker_pool_pre_ping` checks the pool of the worker process. `IsolatedPool(check=True)` and `SharedPool(check=True)` check the pool of each child of that kind. When to turn the checks on, and what each check costs, is on [Health Checks at High RTT](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt).
+
+```python
+from horsies import (
+    AppConfig,
+    IsolatedChildren,
+    IsolatedPool,
+    PostgresConfig,
+    SharedAsyncChildren,
+    SharedPool,
+    WorkerProfile,
+)
+
+config = AppConfig(
+    broker=PostgresConfig(
+        database_url=SecretStr(os.environ['DATABASE_URL']),
+        worker_pool_pre_ping=True,
+    ),
+    worker_profiles={
+        'idle_behind_nat': WorkerProfile(
+            isolated=IsolatedChildren(count=8, pool=IsolatedPool(check=True)),
+            shared_async=SharedAsyncChildren(
+                count=2,
+                seats=50,
+                pool=SharedPool(check=True),
+            ),
+        ),
+    },
+)
+```
+
+#### Shorter Keepalive Idle
+
+For a pooler that reaps idle connections in less than 30 seconds. See [TCP Keepalives for Idle Pooled Connections](/horsies/configuration/remote-postgres/#tcp-keepalives-for-idle-pooled-connections).
+
+```python
+config = AppConfig(
+    broker=PostgresConfig(
+        database_url=SecretStr(os.environ['DATABASE_URL']),
+        tcp_keepalives_idle=15,
+        tcp_keepalives_interval=5,
+    ),
+)
+```
+
 ## psycopg and libpq
 
 horsies needs psycopg 3.3.7 or later. The install sets where the libpq of psycopg comes from:

@@ -52,8 +52,11 @@ tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
 # `raw_value`: stored results are read as raw text first. `unbounded_depth`: a
 # text that the strict reader bounded at 300 levels is decoded past serde_json's
-# own limit of 128 (`core::codec::from_json_str`).
-serde_json = { version = "1", features = ["raw_value", "unbounded_depth"] }
+# own limit of 128 (`core::codec::from_json_str`). `preserve_order`: an object
+# keeps its members in insertion order, as a Python dict does, so a stored
+# object is written in Python's member order
+# (`tests/fixtures/stored_forms/README.md`).
+serde_json = { version = "1", features = ["raw_value", "unbounded_depth", "preserve_order"] }
 serde_path_to_error = "0.1"
 serde_plain = "1"
 chrono = { version = "0.4", features = ["serde"] }

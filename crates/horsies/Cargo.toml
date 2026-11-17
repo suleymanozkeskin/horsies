@@ -20,8 +20,9 @@ cli = [
     "dep:toml",
     "dep:tracing-subscriber",
 ]
-# The axum mount of the core's monitoring handler (`horsies::web`).
-web = ["dep:axum", "dep:futures-util", "horsies-core/web"]
+# The axum mount of the core's monitoring handler (`horsies::web`), and the
+# server of the shipped binary's `horsies web`.
+web = ["dep:axum", "dep:futures-util", "horsies-core/web", "tokio/net"]
 # The rerun adapter for a `tokio_postgres::Transaction`.
 tokio-postgres = ["dep:tokio-postgres"]
 # The rerun adapter for a `sqlx::Transaction<'_, Postgres>`.
@@ -32,6 +33,15 @@ name = "horsies"
 path = "src/bin/horsies.rs"
 required-features = ["cli"]
 
+# The tests of the shipped binary run it.
+[[test]]
+name = "web_cli"
+required-features = ["cli"]
+
+[[test]]
+name = "tools_cli"
+required-features = ["cli"]
+
 [dependencies]
 horsies-core = { version = "0.1.0-alpha.36", path = "../horsies-core" }
 horsies-macros = { version = "0.1.0-alpha.36", path = "../horsies-macros" }
@@ -40,7 +50,9 @@ serde = { version = "1", features = ["derive"] }
 # `unbounded_depth`: a task input or a returned value that the strict reader
 # bounded at 300 levels decodes past serde_json's own limit of 128.
 # `raw_value`: a workflow node's input keeps the text of each member.
-serde_json = { version = "1", features = ["raw_value", "unbounded_depth"] }
+# `preserve_order`: an object keeps its members in insertion order, as the
+# core's objects do (the core enables it too).
+serde_json = { version = "1", features = ["raw_value", "unbounded_depth", "preserve_order"] }
 # The field path of a decode failure of a task input or a returned value.
 serde_path_to_error = "0.1"
 thiserror = "2"
@@ -59,10 +71,15 @@ owo-colors = { version = "4", optional = true }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "postgres",
+    "uuid",
+    "chrono",
 ], optional = true }
 tempfile = { version = "3", optional = true }
 # The same pin as the core's statement layer.
-tokio-postgres = { version = "=0.7.18", optional = true }
+tokio-postgres = { version = "=0.7.18", features = [
+    "with-uuid-1",
+    "with-chrono-0_4",
+], optional = true }
 toml = { version = "0.8", optional = true }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",
@@ -73,6 +90,8 @@ tracing-subscriber = { version = "0.3", features = [
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 # `oneshot` of the web mount's tests.
 tower = { version = "0.5", features = ["util"] }
+# The encode buffer of the tokio-postgres rerun adapter's tests.
+bytes = "1"
 
 [lints]
 workspace = true

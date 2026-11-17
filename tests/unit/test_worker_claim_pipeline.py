@@ -13,13 +13,14 @@ Tests cover:
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Generator
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import horsies._core as core
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
@@ -28,6 +29,7 @@ from horsies.core.worker.child_runner import (
     DeadlineBeforeStart,
     StartAllowed,
     StartCheck,
+    StartWithin,
     _confirm_ownership_and_set_running,
 )
 from horsies.core.worker.sql import (
@@ -234,187 +236,128 @@ class TestLeaseHeartbeatValidation:
 # ---------------------------------------------------------------------------
 
 
-class _FakeCursor:
-    """Minimal cursor mock supporting execute/fetchone for ownership tests."""
-
-    def __init__(self, fetchone_return: Any = None) -> None:
-        self._fetchone_return = fetchone_return
-        self.queries: list[tuple[str, tuple[Any, ...]]] = []
-
-    def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
-        self.queries.append((sql, params))
-
-    def fetchone(self) -> Any:
-        return self._fetchone_return
+TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e02'
 
 
-class _FakeConn:
-    """Minimal connection mock tracking commit/rollback calls."""
-
-    def __init__(self, cursor: _FakeCursor) -> None:
-        self._cursor = cursor
-        self.commits = 0
-        self.rollbacks = 0
-
-    def cursor(self, **kwargs: Any) -> _FakeCursor:
-        return self._cursor
-
-    def commit(self) -> None:
-        self.commits += 1
-
-    def rollback(self) -> None:
-        self.rollbacks += 1
+def _record(record_class: type, **fields: object) -> MagicMock:
+    """A stand-in for a record of ``horsies._core``, which has no Python
+    constructor: a class pattern matches it."""
+    record = MagicMock(spec=record_class)
+    record.task_id = uuid.UUID(TASK_ID)
+    for name, value in fields.items():
+        setattr(record, name, value)
+    return record
 
 
-class _FakePool:
-    """Minimal pool mock that returns a _FakeConn via context manager."""
+class _FakeHandle:
+    """A ``CoreChildHandle`` whose start answers ``start`` and keeps each
+    call."""
 
-    def __init__(self, conn: _FakeConn) -> None:
-        self._conn = conn
+    def __init__(self, start: Any) -> None:
+        self._start = start
+        self.calls: list[dict[str, object]] = []
 
-    @contextmanager
-    def connection(self) -> Generator[_FakeConn, None, None]:
-        yield self._conn
+    def start_attempt(self, task_id: uuid.UUID, **kwargs: object) -> Any:
+        self.calls.append({'task_id': task_id, **kwargs})
+        return self._start
+
+
+def _start(handle: Any, start_check: Any = StartAllowed) -> Any:
+    with patch(
+        'horsies.core.worker.child_runner._get_child_core_handle',
+        return_value=handle,
+    ):
+        return _confirm_ownership_and_set_running(
+            TASK_ID,
+            'worker-A',
+            is_workflow_task=False,
+            claimed_at=CLAIMED_AT,
+            orphan_self_heal=True,
+            start_check=start_check,
+        )
 
 
 @pytest.mark.unit
 class TestOwnershipGateBehavioral:
     """Behavioral tests for _confirm_ownership_and_set_running.
 
-    Exercises three code paths by mocking _get_worker_pool:
+    Exercises the paths by standing in the core handle of the child:
     1. Ownership confirmed (horsies_start_attempt answers STARTED)
     2. Ownership lost (it answers MISSED with NOT_HELD)
-    3. Exception path (pool raises)
+    3. Exception path (the core cannot run the call)
     """
 
-    def test_ownership_confirmed_returns_none_and_commits(self) -> None:
+    def test_ownership_confirmed_returns_none_after_one_call(self) -> None:
         """When the start answers STARTED, ownership is confirmed; the
         statement committed alone in autocommit."""
-        cursor = _FakeCursor(fetchone_return=('STARTED', None))
-        conn = _FakeConn(cursor)
-        pool = _FakePool(conn)
+        handle = _FakeHandle(_record(core.AttemptStarted))
 
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=pool,
-        ):
-            from horsies.core.worker.child_runner import (
-                _confirm_ownership_and_set_running,
-            )
-
-            result = _confirm_ownership_and_set_running(
-                'task-1',
-                'worker-A',
-                is_workflow_task=False,
-                claimed_at=CLAIMED_AT,
-            )
+        result = _start(handle)
 
         assert result is None, 'Ownership confirmed should return None'
-        assert len(cursor.queries) == 1
-        assert (conn.commits, conn.rollbacks) == (0, 0)
+        assert len(handle.calls) == 1
 
-    def test_ownership_lost_returns_claim_lost_and_rollbacks(self) -> None:
+    def test_ownership_lost_returns_claim_lost_with_no_other_call(self) -> None:
         """When the start answers NOT_HELD, returns CLAIM_LOST with no other
         statement."""
-        cursor = _FakeCursor(fetchone_return=('MISSED', 'NOT_HELD'))
-        conn = _FakeConn(cursor)
-        pool = _FakePool(conn)
+        handle = _FakeHandle(_record(core.AttemptMissed, reason='NOT_HELD'))
 
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=pool,
-        ), patch(
-            'horsies.core.worker.child_runner._expire_claimed_task_before_start',
-            return_value=None,
-        ):
-            from horsies.core.worker.child_runner import (
-                _confirm_ownership_and_set_running,
-            )
+        result = _start(handle)
 
-            result = _confirm_ownership_and_set_running(
-                'task-1',
-                'worker-A',
-                claimed_at=CLAIMED_AT,
-            )
-
-        assert isinstance(result, tuple), 'Ownership lost should return a tuple'
-        ok, _result_json, reason = result
-        assert ok is False
-        assert reason == 'CLAIM_LOST'
-        assert len(cursor.queries) == 1
-        assert (conn.commits, conn.rollbacks) == (0, 0)
+        assert result == (False, '', 'CLAIM_LOST'), 'Ownership lost is CLAIM_LOST'
+        assert len(handle.calls) == 1
 
     def test_exception_returns_ownership_unconfirmed(self) -> None:
-        """When pool raises an exception, returns OWNERSHIP_UNCONFIRMED."""
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            side_effect=RuntimeError('pool unavailable'),
-        ):
-            from horsies.core.worker.child_runner import (
-                _confirm_ownership_and_set_running,
-            )
+        """When the core cannot run the call, returns OWNERSHIP_UNCONFIRMED."""
+        handle = MagicMock()
+        handle.start_attempt.side_effect = core.CoreStopped('subject', 'cause')
 
-            result = _confirm_ownership_and_set_running(
-                'task-1',
-                'worker-A',
-                claimed_at=CLAIMED_AT,
-            )
+        result = _start(handle)
 
-        assert isinstance(result, tuple), 'Exception path should return a tuple'
-        ok, _result_json, reason = result
-        assert ok is False
-        assert reason == 'OWNERSHIP_UNCONFIRMED'
+        assert result == (False, '', 'OWNERSHIP_UNCONFIRMED')
 
     def test_a_deadline_before_start_runs_no_statement(self) -> None:
-        """The start check runs once the pool gave a connection. A deadline
-        that fired during the wait stops the run there: no RUNNING update,
-        no commit, and the row stays CLAIMED."""
-        cursor = _FakeCursor(fetchone_return=('task-1',))
-        conn = _FakeConn(cursor)
-        pool = _FakePool(conn)
+        """The start check runs right before the start. A deadline that fired
+        first stops the run there: no RUNNING update, and the row stays
+        CLAIMED."""
+        handle = _FakeHandle(_record(core.AttemptStarted))
         checks: list[str] = []
 
         def deadline_fired() -> StartCheck:
             checks.append('checked')
             return DeadlineBeforeStart()
 
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=pool,
-        ):
-            result = _confirm_ownership_and_set_running(
-                'task-1',
-                'worker-A',
-                is_workflow_task=False,
-                claimed_at=CLAIMED_AT,
-                start_check=deadline_fired,
-            )
+        result = _start(handle, start_check=deadline_fired)
 
         assert result == DeadlineBeforeStart()
         assert checks == ['checked']
-        assert cursor.queries == []
-        assert conn.commits == 0
+        assert handle.calls == []
 
     def test_an_allowed_start_runs_the_update(self) -> None:
-        cursor = _FakeCursor(fetchone_return=('STARTED', None))
-        conn = _FakeConn(cursor)
-        pool = _FakePool(conn)
+        handle = _FakeHandle(_record(core.AttemptStarted))
 
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=pool,
-        ):
-            result = _confirm_ownership_and_set_running(
-                'task-1',
-                'worker-A',
-                is_workflow_task=False,
-                claimed_at=CLAIMED_AT,
-                start_check=StartAllowed,
-            )
+        result = _start(handle, start_check=StartAllowed)
 
         assert result is None
-        assert len(cursor.queries) == 1
-        assert conn.commits == 0
+        assert len(handle.calls) == 1
+        assert handle.calls[0]['deadline_in_ms'] is None
+
+    def test_a_start_within_a_deadline_sends_the_time_left(self) -> None:
+        """The core checks the time left once the pool gave the connection,
+        before the statement."""
+        handle = _FakeHandle(_record(core.AttemptStarted))
+
+        result = _start(handle, start_check=lambda: StartWithin(milliseconds=1500))
+
+        assert result is None
+        assert handle.calls[0]['deadline_in_ms'] == 1500
+
+    def test_a_deadline_that_passes_while_the_pool_waits_runs_no_statement(self) -> None:
+        handle = _FakeHandle(_record(core.DeadlineBeforeStart))
+
+        result = _start(handle, start_check=lambda: StartWithin(milliseconds=1))
+
+        assert result == DeadlineBeforeStart()
 
 
 # ---------------------------------------------------------------------------

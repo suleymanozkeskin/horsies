@@ -116,6 +116,7 @@ def _run_in_process(
                 timeout=timeout,
                 claimed_at=claim.claimed_at,
                 task_loop=TaskLoop(),
+                orphan_self_heal=True,
             )
         )
         result = await worker._finalize_after(

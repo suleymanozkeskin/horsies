@@ -5,7 +5,7 @@ A. _serialization_error_response
 B. _debug_imports_log
 C. _child_initializer
 E. (removed: the start reads the workflow in its own statement)
-F. _handle_workflow_stop_before_start (wildcard branch)
+F. The stop before start of a workflow task
 I. _run_task_entry error paths
 J. Workflow injection deserialization errors in _run_task_entry
 K. Async task calls in _run_task_entry
@@ -16,8 +16,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import socket
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Generator
@@ -27,6 +30,7 @@ import pytest
 from pydantic import BaseModel, SecretStr, field_validator
 from pydantic_core import PydanticCustomError
 
+import horsies._core as core
 from horsies.core.app import Horsies
 from horsies.core.codec.json_io import SerializationError, loads_json
 from horsies.core.codec.typed import decode_task_result
@@ -54,7 +58,6 @@ from horsies.core.task_decorator import TaskBodyKind
 from horsies.core.worker.task_loop import LoopOpen, TaskLoop
 from horsies.core.worker.child_runner import (
     _debug_imports_log,
-    _handle_workflow_stop_before_start,
     _run_task_entry,
     _serialization_error_response,
 )
@@ -62,6 +65,7 @@ from horsies.core.worker.run_return import SetRunning, StoppedBeforeRunning
 from tests.fixtures.run_return import wire_of
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e02'
 
 
 # ---------------------------------------------------------------------------
@@ -120,39 +124,75 @@ class _FakePool:
         yield self._conn
 
 
-class _SequenceCursor(_FakeCursor):
-    """Cursor whose fetchone returns the given rows in order."""
-
-    def __init__(self, rows: list[Any]) -> None:
-        super().__init__()
-        self._rows = rows
-
-    def fetchone(self) -> Any:
-        return self._rows.pop(0)
-
-
-class _OrderedConn(_FakeConn):
-    """Records each commit and rollback among the statements of its cursor,
-    so a test sees where a transaction ends."""
-
-    def commit(self) -> None:
-        super().commit()
-        self._cursor.queries.append(('COMMIT', ()))
-
-    def rollback(self) -> None:
-        super().rollback()
-        self._cursor.queries.append(('ROLLBACK', ()))
+def _record(record_class: type, **fields: object) -> MagicMock:
+    """A stand-in for a record of ``horsies._core``, which has no Python
+    constructor: a class pattern matches it, and ``fields`` are set as its
+    attributes."""
+    record = MagicMock(spec=record_class)
+    for name, value in fields.items():
+        setattr(record, name, value)
+    return record
 
 
-def _apply_recording(outcomes: list[Any]) -> MagicMock:
-    """An ``apply_sync`` that records each command by its class name among
-    the statements of the cursor, and returns ``outcomes`` in order."""
+def _ended_row(kind: str) -> MagicMock:
+    """A ``TaskRowEnded`` of the task of these tests, with the row CLAIMED by
+    ``worker-A``."""
+    return _record(
+        core.TaskRowEnded,
+        task_id=uuid.UUID(TASK_ID),
+        terminal_at=CLAIMED_AT,
+        kind=kind,
+        observed_status='CLAIMED',
+        observed_worker_id='worker-A',
+        observed_claimed_at=CLAIMED_AT,
+    )
 
-    def apply(cursor: _FakeCursor, command: object) -> Any:
-        cursor.queries.append((type(command).__name__, ()))
-        return outcomes.pop(0)
 
-    return MagicMock(side_effect=apply)
+def _refusal(record_class: type) -> MagicMock:
+    """A refusal record of the task of these tests, with the observed row."""
+    return _record(
+        record_class,
+        task_id=uuid.UUID(TASK_ID),
+        terminal_at=CLAIMED_AT,
+        kind='EXPIRE_CLAIMED',
+        guard='DEADLINE',
+        observed_status='CLAIMED',
+        observed_worker_id='worker-B',
+        observed_claimed_at=CLAIMED_AT,
+    )
+
+
+class _FakeChildHandle:
+    """A stand-in for ``CoreChildHandle``: each method answers the next
+    record of its queue, and each call is kept with its arguments, in
+    order."""
+
+    def __init__(
+        self,
+        *,
+        starts: list[Any],
+        stops: list[Any] | None = None,
+        expiries: list[Any] | None = None,
+    ) -> None:
+        self._starts = starts
+        self._stops = stops or []
+        self._expiries = expiries or []
+        self.calls: list[tuple[str, uuid.UUID, dict[str, object]]] = []
+
+    def start_attempt(self, task_id: uuid.UUID, **kwargs: object) -> Any:
+        self.calls.append(('start_attempt', task_id, kwargs))
+        return self._starts.pop(0)
+
+    def stop_workflow_task_before_start(self, task_id: uuid.UUID, **kwargs: object) -> Any:
+        self.calls.append(('stop_workflow_task_before_start', task_id, kwargs))
+        return self._stops.pop(0)
+
+    def expire_owned_claim(self, task_id: uuid.UUID, **kwargs: object) -> Any:
+        self.calls.append(('expire_owned_claim', task_id, kwargs))
+        return self._expiries.pop(0)
+
+    def names(self) -> list[str]:
+        return [name for name, _, _ in self.calls]
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +304,7 @@ class TestChildInitializer:
 
         return {'app': mock_app}
 
+    @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
@@ -278,6 +319,7 @@ class TestChildInitializer:
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_pool: MagicMock,
+        mock_init_core_handle: MagicMock,
     ) -> None:
         from horsies.core.worker.child_runner import _child_initializer
 
@@ -305,7 +347,12 @@ class TestChildInitializer:
             max_size=2,
             check_on_checkout=True,
         )
+        mock_init_core_handle.assert_called_once_with(
+            mocks['app'].config.broker,
+            ResolvedPool(min_size=0, max_size=2, check=True),
+        )
 
+    @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
@@ -318,6 +365,7 @@ class TestChildInitializer:
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_pool: MagicMock,
+        mock_init_core_handle: MagicMock,
     ) -> None:
         from horsies.core.worker.child_runner import _child_initializer
 
@@ -343,6 +391,7 @@ class TestChildInitializer:
             check_on_checkout=False,
         )
 
+    @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
@@ -355,6 +404,7 @@ class TestChildInitializer:
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_pool: MagicMock,
+        mock_init_core_handle: MagicMock,
     ) -> None:
         from horsies.core.worker.child_runner import _child_initializer
 
@@ -423,6 +473,7 @@ class TestChildInitializer:
         finally:
             _ = app.get_broker().close()
 
+    @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
@@ -435,6 +486,7 @@ class TestChildInitializer:
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_pool: MagicMock,
+        mock_init_core_handle: MagicMock,
     ) -> None:
         from horsies.core.worker.child_runner import _child_initializer
 
@@ -453,6 +505,7 @@ class TestChildInitializer:
             )
         mock_init_pool.assert_not_called()
 
+    @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
@@ -465,6 +518,7 @@ class TestChildInitializer:
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_pool: MagicMock,
+        mock_init_core_handle: MagicMock,
     ) -> None:
         from horsies.core.worker.child_runner import _child_initializer
 
@@ -483,6 +537,7 @@ class TestChildInitializer:
             )
         mock_init_pool.assert_not_called()
 
+    @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
@@ -495,6 +550,7 @@ class TestChildInitializer:
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_pool: MagicMock,
+        mock_init_core_handle: MagicMock,
     ) -> None:
         from horsies.core.worker.child_runner import _child_initializer
 
@@ -512,6 +568,7 @@ class TestChildInitializer:
                 task_send_pool=2,
             )
 
+    @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
@@ -528,6 +585,7 @@ class TestChildInitializer:
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_pool: MagicMock,
+        mock_init_core_handle: MagicMock,
     ) -> None:
         from horsies.core.worker.child_runner import _child_initializer
 
@@ -548,6 +606,7 @@ class TestChildInitializer:
         # samefile was checked to avoid re-importing the app module
         mock_samefile.assert_called()
 
+    @patch('horsies.core.worker.child_runner._initialize_child_core_handle')
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
@@ -564,6 +623,7 @@ class TestChildInitializer:
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
         mock_init_pool: MagicMock,
+        mock_init_core_handle: MagicMock,
     ) -> None:
         """When import file matches app file, import_by_path is NOT called."""
         from horsies.core.worker.child_runner import _child_initializer
@@ -694,130 +754,192 @@ class TestInitializeWorkerPoolConnectKwargs:
 
 
 # ===================================================================
-# F. _handle_workflow_stop_before_start — wildcard + existing
+# F. The stop before start of a workflow task: one core call
 # ===================================================================
 
 
-@pytest.mark.unit
-class TestHandleWorkflowStopBeforeStart:
-    """_handle_workflow_stop_before_start for all status branches."""
+def _missed(reason: str) -> MagicMock:
+    return _record(core.AttemptMissed, task_id=uuid.UUID(TASK_ID), reason=reason)
 
-    def test_cancelled_marks_terminal(self) -> None:
-        from horsies.core.lifecycle.commands import CancelOwnedNode
-        from horsies.core.lifecycle.outcomes import Applied
 
-        cursor = _FakeCursor()
-        conn = _FakeConn(cursor)
+def _stopped(outcome: str, move_outcome: str | None) -> MagicMock:
+    return _record(
+        core.StoppedBeforeStart,
+        task_id=uuid.UUID(TASK_ID),
+        outcome=outcome,
+        move_outcome=move_outcome,
+    )
 
-        def _before_node_update(*_args: Any) -> MagicMock:
-            assert cursor.queries == []
-            return MagicMock(spec=Applied)
 
-        with patch(
-            'horsies.core.worker.child_runner.apply_sync',
-            side_effect=_before_node_update,
-        ) as apply:
-            result = _handle_workflow_stop_before_start(
-                cursor, conn, 'task-1', 'CANCELLED', 'worker-1',  # type: ignore[arg-type]
-                CLAIMED_AT,
-            )
-        assert result == (False, '', 'WORKFLOW_STOPPED')
-        assert conn.commits == 1
-        sql_blob = '\n'.join(q[0] for q in cursor.queries)
-        assert "SET status = 'SKIPPED'" in sql_blob
-        command = apply.call_args.args[1]
-        assert isinstance(command, CancelOwnedNode)
-        assert command.task_id == 'task-1'
-        assert command.accepts_requeued_pending is True
+def _start_with(
+    handle: _FakeChildHandle,
+    *,
+    orphan_self_heal: bool = True,
+    start_check: Any = None,
+) -> Any:
+    """Run the sync start of the task of these tests on ``handle``."""
+    from horsies.core.worker.child_runner import (
+        _confirm_ownership_and_set_running,
+        start_always_allowed,
+    )
 
-    def test_paused_cancels_claimed_task_and_resets_node(self) -> None:
-        from horsies.core.lifecycle.commands import AbandonOwnedNode
-        from horsies.core.lifecycle.outcomes import Applied
-
-        cursor = _FakeCursor()
-        conn = _FakeConn(cursor)
-
-        def _before_node_update(*_args: Any) -> MagicMock:
-            assert cursor.queries == []
-            return MagicMock(spec=Applied)
-
-        with patch(
-            'horsies.core.worker.child_runner.apply_sync',
-            side_effect=_before_node_update,
-        ) as apply:
-            result = _handle_workflow_stop_before_start(
-                cursor, conn, 'task-2', 'PAUSED', 'worker-1',  # type: ignore[arg-type]
-                CLAIMED_AT,
-            )
-        assert result == (False, '', 'WORKFLOW_STOPPED')
-        assert conn.commits == 1
-        sql_blob = '\n'.join(q[0] for q in cursor.queries)
-        assert "SET status = 'READY'" in sql_blob
-        assert "status IN ('ENQUEUED', 'RUNNING')" in sql_blob
-        command = apply.call_args.args[1]
-        assert isinstance(command, AbandonOwnedNode)
-        assert command.task_id == 'task-2'
-
-    def test_unknown_status_returns_workflow_check_failed(self) -> None:
-        cursor = _FakeCursor()
-        conn = _FakeConn(cursor)
-        result = _handle_workflow_stop_before_start(
-            cursor, conn, 'task-3', 'UNKNOWN_STATUS', 'worker-1',  # type: ignore[arg-type]
-            CLAIMED_AT,
+    with patch(
+        'horsies.core.worker.child_runner._get_child_core_handle',
+        return_value=handle,
+    ):
+        return _confirm_ownership_and_set_running(
+            TASK_ID,
+            'worker-A',
+            claimed_at=CLAIMED_AT,
+            orphan_self_heal=orphan_self_heal,
+            start_check=start_check or start_always_allowed,
         )
+
+
+@pytest.mark.unit
+class TestStopBeforeStart:
+    """A miss of a workflow task sends one
+    ``horsies_workflow_task_stop_before_start``; its step gives the wire
+    tuple."""
+
+    def test_a_cancelled_workflow_stops_the_task_in_one_call(self) -> None:
+        handle = _FakeChildHandle(
+            starts=[_missed('WORKFLOW_CANCELLED')],
+            stops=[_stopped('CANCELLED', 'APPLIED')],
+        )
+
+        result = _start_with(handle)
+
+        assert result == (False, '', 'WORKFLOW_STOPPED')
+        assert handle.names() == ['start_attempt', 'stop_workflow_task_before_start']
+
+    def test_a_paused_workflow_stops_the_task_in_one_call(self) -> None:
+        handle = _FakeChildHandle(
+            starts=[_missed('WORKFLOW_PAUSED')],
+            stops=[_stopped('ABANDONED', 'APPLIED')],
+        )
+
+        result = _start_with(handle)
+
+        assert result == (False, '', 'WORKFLOW_STOPPED')
+        assert handle.names() == ['start_attempt', 'stop_workflow_task_before_start']
+
+    def test_a_node_that_is_not_linked_with_the_self_heal_off_fails_the_workflow_check(
+        self,
+    ) -> None:
+        handle = _FakeChildHandle(
+            starts=[_missed('NODE_NOT_LINKED')],
+            stops=[_stopped('NODE_NOT_LINKED', None)],
+        )
+
+        result = _start_with(handle, orphan_self_heal=False)
+
         assert result == (False, '', 'WORKFLOW_CHECK_FAILED')
-        # No SQL should have been executed for the unknown branch
-        assert len(cursor.queries) == 0
-        assert conn.commits == 0
+        assert handle.calls[1][2]['orphan_self_heal'] is False
 
-    def test_both_branches_carry_the_claim_generation_fence(self) -> None:
-        """Claimed pre-start cancels fence on (worker_id, claimed_at).
+    def test_a_node_that_is_not_linked_with_the_self_heal_on_is_cancelled(self) -> None:
+        handle = _FakeChildHandle(
+            starts=[_missed('NODE_NOT_LINKED')],
+            stops=[_stopped('ORPHAN_CANCELLED', 'APPLIED')],
+        )
 
-        Without the pair, a row requeued and re-claimed since this child was
-        handed its dispatch is still CLAIMED and would be terminalized out
-        from under the new claim generation.
-        """
+        result = _start_with(handle, orphan_self_heal=True)
+
+        assert result == (False, '', 'ORPHAN_CANCELLED')
+        assert handle.calls[1][2]['orphan_self_heal'] is True
+
+    @pytest.mark.parametrize('reason', ['WORKFLOW_PAUSED', 'WORKFLOW_CANCELLED', 'NODE_NOT_LINKED'])
+    def test_each_stop_carries_the_claim_generation_fence(self, reason: str) -> None:
+        """The stop fences on (worker_id, claimed_at). Without the pair, a row
+        requeued and re-claimed since this child was handed its dispatch is
+        still CLAIMED and would be ended under the new claim generation."""
         generation = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
-        for status in ('PAUSED', 'CANCELLED'):
-            cursor = _FakeCursor()
-            conn = _FakeConn(cursor)
-            from horsies.core.lifecycle.outcomes import Applied
+        handle = _FakeChildHandle(
+            starts=[_missed(reason)],
+            stops=[_stopped('CANCELLED', 'LOST_CLAIM')],
+        )
 
-            with patch(
-                'horsies.core.worker.child_runner.apply_sync',
-                return_value=MagicMock(spec=Applied),
-            ) as apply:
-                _handle_workflow_stop_before_start(
-                    cursor, conn, 'task-4', status, 'worker-7',  # type: ignore[arg-type]
-                    generation,
-                )
-            command = apply.call_args.args[1]
-            assert command.fence.worker_id == 'worker-7', status
-            assert command.fence.claimed_at == generation, status
-
-    def test_cancelled_branch_still_cancels_a_requeued_pending_row(self) -> None:
-        """PENDING has no claim, so the generation fence must not gate it.
-
-        A row the reaper requeued between dispatch and this check carries no
-        claimed_by_worker_id. Gating it on the worker would silently stop
-        cancelling tasks whose workflow is already CANCELLED.
-        """
-        from horsies.core.lifecycle.commands import CancelOwnedNode
-        from horsies.core.lifecycle.outcomes import Applied
-
-        cursor = _FakeCursor()
-        conn = _FakeConn(cursor)
         with patch(
-            'horsies.core.worker.child_runner.apply_sync',
-            return_value=MagicMock(spec=Applied),
-        ) as apply:
-            _handle_workflow_stop_before_start(
-                cursor, conn, 'task-5', 'CANCELLED', 'worker-7',  # type: ignore[arg-type]
-                CLAIMED_AT,
+            'horsies.core.worker.child_runner._get_child_core_handle',
+            return_value=handle,
+        ):
+            from horsies.core.worker.child_runner import _confirm_ownership_and_set_running
+
+            _ = _confirm_ownership_and_set_running(
+                TASK_ID,
+                'worker-7',
+                claimed_at=generation,
+                orphan_self_heal=True,
             )
-        command = apply.call_args.args[1]
-        assert isinstance(command, CancelOwnedNode)
-        assert command.accepts_requeued_pending is True
+
+        name, task_id, arguments = handle.calls[1]
+        assert name == 'stop_workflow_task_before_start'
+        assert task_id == uuid.UUID(TASK_ID)
+        assert arguments == {
+            'worker_id': 'worker-7',
+            'claimed_at': generation,
+            'orphan_self_heal': True,
+        }
+
+    @pytest.mark.parametrize(
+        'move_outcome',
+        ['APPLIED', 'ALREADY_APPLIED', 'LOST_CLAIM', 'SOURCE_STATE_CONFLICT', 'TASK_ABSENT'],
+    )
+    def test_a_stopped_workflow_stops_the_task_whatever_its_move_found(
+        self,
+        move_outcome: str,
+    ) -> None:
+        """A row that the reaper requeued to PENDING is cancelled by the
+        function (the carve-out of a CANCELLED workflow); a row that another
+        claim holds is left to it. Either way the task of this child stops."""
+        for outcome in ('ABANDONED', 'CANCELLED'):
+            handle = _FakeChildHandle(
+                starts=[_missed('WORKFLOW_CANCELLED')],
+                stops=[_stopped(outcome, move_outcome)],
+            )
+
+            assert _start_with(handle) == (False, '', 'WORKFLOW_STOPPED'), outcome
+
+    def test_an_expiry_found_by_the_stop_expires_the_task(self) -> None:
+        handle = _FakeChildHandle(
+            starts=[_missed('WORKFLOW_PAUSED')],
+            stops=[_stopped('EXPIRED', 'APPLIED')],
+        )
+
+        assert _start_with(handle) == (False, '', OutcomeCode.TASK_EXPIRED.value)
+
+    def test_a_claim_that_the_stop_finds_not_held_is_lost(self) -> None:
+        handle = _FakeChildHandle(
+            starts=[_missed('WORKFLOW_CANCELLED')],
+            stops=[_stopped('NOT_HELD', 'LOST_CLAIM')],
+        )
+
+        assert _start_with(handle) == (False, '', 'CLAIM_LOST')
+
+    def test_a_resume_before_the_stop_starts_again(self) -> None:
+        from horsies.core.worker.child_runner import _WorkflowResumedBeforeStart
+
+        handle = _FakeChildHandle(
+            starts=[_missed('WORKFLOW_PAUSED')],
+            stops=[_record(core.ResumedBeforeStart, task_id=uuid.UUID(TASK_ID))],
+        )
+
+        assert _start_with(handle) == _WorkflowResumedBeforeStart()
+
+    def test_a_failed_stop_is_unconfirmed(self) -> None:
+        handle = _FakeChildHandle(
+            starts=[_missed('WORKFLOW_PAUSED')],
+            stops=[
+                _record(
+                    core.StopBeforeStartFailed,
+                    task_id=uuid.UUID(TASK_ID),
+                    message='connection lost',
+                    retryable=True,
+                ),
+            ],
+        )
+
+        assert _start_with(handle) == (False, '', 'OWNERSHIP_UNCONFIRMED')
 
 
 # ===================================================================
@@ -876,6 +998,7 @@ def _run_entry_defaults() -> dict[str, Any]:
         'master_worker_id': 'w-1',
         'claimed_at': CLAIMED_AT,
         'task_loop': TaskLoop(),
+        'orphan_self_heal': True,
     }
 
 
@@ -1891,79 +2014,53 @@ class TestDedupeAndBuildSysPath:
 
 @pytest.mark.unit
 class TestExpireClaimedBeforeStart:
-    """The child maps typed expiry outcomes to its existing return contract."""
+    """The child maps the records of the expiry to its return contract."""
 
-    @pytest.mark.parametrize('outcome_type', ['Applied', 'AlreadyApplied'])
-    def test_applied_or_replayed_expiry_commits_and_returns_expired(
-        self,
-        outcome_type: str,
-    ) -> None:
-        from horsies.core.lifecycle.commands import ExpireOwnedClaim
-        from horsies.core.lifecycle.outcomes import AlreadyApplied, Applied
-        from horsies.core.worker.child_runner import (
-            _expire_claimed_task_before_start,
+    @pytest.mark.parametrize('ended', ['TaskRowEnded', 'AttemptAlreadyApplied'])
+    def test_applied_or_replayed_expiry_returns_expired(self, ended: str) -> None:
+        records = {
+            'TaskRowEnded': _ended_row('EXPIRE_CLAIMED'),
+            'AttemptAlreadyApplied': _refusal(core.AttemptAlreadyApplied),
+        }
+        handle = _FakeChildHandle(
+            starts=[_missed('DEADLINE_PASSED')],
+            expiries=[records[ended]],
         )
 
-        outcomes = {'Applied': Applied, 'AlreadyApplied': AlreadyApplied}
-        cursor = _FakeCursor()
-        conn = _FakeConn(cursor)
-        with patch(
-            'horsies.core.worker.child_runner.apply_sync',
-            return_value=MagicMock(spec=outcomes[outcome_type]),
-        ) as apply:
-            result = _expire_claimed_task_before_start(
-                cursor,
-                conn,
-                'task-1',
-                'worker-A',
-            )
+        result = _start_with(handle)
 
         assert result == (False, '', OutcomeCode.TASK_EXPIRED.value)
-        assert conn.commits == 1
-        command = apply.call_args.args[1]
-        assert isinstance(command, ExpireOwnedClaim)
-        assert command.task_id == 'task-1'
-        assert command.fence.worker_id == 'worker-A'
-        assert command.error_code == OutcomeCode.TASK_EXPIRED.value
-        assert OutcomeCode.TASK_EXPIRED.value in command.result_json
+        name, task_id, arguments = handle.calls[1]
+        assert name == 'expire_owned_claim'
+        assert task_id == uuid.UUID(TASK_ID)
+        assert arguments == {'worker_id': 'worker-A'}
 
     @pytest.mark.parametrize(
-        'outcome_type',
-        ['LostClaim', 'SourceStateConflict', 'TaskAbsent'],
+        'refusal',
+        [core.AttemptLostClaim, core.AttemptSourceStateConflict, core.AttemptTaskAbsent],
     )
-    def test_refusal_or_absence_falls_through_to_existing_classification(
-        self,
-        outcome_type: str,
-    ) -> None:
-        from horsies.core.lifecycle.outcomes import (
-            LostClaim,
-            SourceStateConflict,
-            TaskAbsent,
-        )
-        from horsies.core.worker.child_runner import (
-            _expire_claimed_task_before_start,
+    def test_refusal_or_absence_is_a_lost_claim(self, refusal: type) -> None:
+        handle = _FakeChildHandle(
+            starts=[_missed('DEADLINE_PASSED')],
+            expiries=[_refusal(refusal)],
         )
 
-        outcomes = {
-            'LostClaim': LostClaim,
-            'SourceStateConflict': SourceStateConflict,
-            'TaskAbsent': TaskAbsent,
-        }
-        cursor = _FakeCursor()
-        conn = _FakeConn(cursor)
-        with patch(
-            'horsies.core.worker.child_runner.apply_sync',
-            return_value=MagicMock(spec=outcomes[outcome_type]),
-        ):
-            result = _expire_claimed_task_before_start(
-                cursor,
-                conn,
-                'task-1',
-                'worker-A',
-            )
+        assert _start_with(handle) == (False, '', 'CLAIM_LOST')
 
-        assert result is None
-        assert conn.commits == 0
+    def test_a_failed_expiry_is_unconfirmed(self) -> None:
+        handle = _FakeChildHandle(
+            starts=[_missed('DEADLINE_PASSED')],
+            expiries=[
+                _record(
+                    core.AttemptWriteFailed,
+                    task_id=uuid.UUID(TASK_ID),
+                    message='connection lost',
+                    retryable=True,
+                ),
+            ],
+        )
+
+        assert _start_with(handle) == (False, '', 'OWNERSHIP_UNCONFIRMED')
 
 
 # ===================================================================
@@ -1971,177 +2068,137 @@ class TestExpireClaimedBeforeStart:
 # ===================================================================
 
 
-def _start_with(
-    rows: list[Any],
-    *,
-    applied: list[Any] | None = None,
-    expired: tuple[bool, str, str | None] | None = None,
-) -> tuple[Any, list[Any]]:
-    """Run the sync start on a connection whose start returns ``rows``;
-    ``applied`` are the outcomes of the stop commands, ``expired`` the
-    answer of the expiry. Returns the result and the statements, with each
-    COMMIT and ROLLBACK, in order."""
-    from horsies.core.worker.child_runner import _confirm_ownership_and_set_running
-
-    cursor = _SequenceCursor(rows)
-    conn = _OrderedConn(cursor)
-    with (
-        patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=_FakePool(conn),
-        ),
-        patch(
-            'horsies.core.worker.child_runner.apply_sync',
-            _apply_recording(list(applied or [])),
-        ),
-        patch(
-            'horsies.core.worker.child_runner._expire_claimed_task_before_start',
-            return_value=expired,
-        ) as expire,
-    ):
-        result = _confirm_ownership_and_set_running(
-            'task-1',
-            'worker-A',
-            claimed_at=CLAIMED_AT,
-        )
-    statements: list[Any] = [sql for sql, _ in cursor.queries]
-    if expire.called:
-        statements.insert(1, 'EXPIRE')
-    return result, statements
-
-
 @pytest.mark.unit
 class TestStartAttempt:
-    def test_a_started_row_runs_the_task_after_one_statement(self) -> None:
-        from horsies.core.worker.child_runner import (
-            START_ATTEMPT_SQL,
-            _confirm_ownership_and_set_running,
-            start_attempt_params,
+    def test_a_started_row_runs_the_task_after_one_call(self) -> None:
+        handle = _FakeChildHandle(
+            starts=[_record(core.AttemptStarted, task_id=uuid.UUID(TASK_ID))],
         )
 
-        cursor = _SequenceCursor([('STARTED', None)])
-        conn = _OrderedConn(cursor)
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=_FakePool(conn),
-        ):
-            result = _confirm_ownership_and_set_running(
-                'task-1',
-                'worker-A',
-                claimed_at=CLAIMED_AT,
-            )
+        result = _start_with(handle)
 
         assert result is None
-        assert cursor.queries == [
-            (START_ATTEMPT_SQL, start_attempt_params('task-1', 'worker-A', CLAIMED_AT)),
+        assert handle.calls == [
+            (
+                'start_attempt',
+                uuid.UUID(TASK_ID),
+                {
+                    'worker_id': 'worker-A',
+                    'claimed_at': CLAIMED_AT,
+                    'worker_pid': os.getpid(),
+                    'worker_hostname': socket.gethostname(),
+                    'deadline_in_ms': None,
+                },
+            ),
         ]
 
     def test_a_passed_deadline_expires_the_claim(self) -> None:
-        from horsies.core.worker.child_runner import START_ATTEMPT_SQL
-
-        expired = (False, '', OutcomeCode.TASK_EXPIRED.value)
-
-        result, statements = _start_with(
-            [('MISSED', 'DEADLINE_PASSED')], expired=expired,
+        handle = _FakeChildHandle(
+            starts=[_missed('DEADLINE_PASSED')],
+            expiries=[_ended_row('EXPIRE_CLAIMED')],
         )
 
-        assert result == expired
-        assert statements == [START_ATTEMPT_SQL, 'EXPIRE']
+        result = _start_with(handle)
 
-    def test_a_refused_expiry_is_a_lost_claim(self) -> None:
-        result, _ = _start_with([('MISSED', 'DEADLINE_PASSED')], expired=None)
-
-        assert result == (False, '', 'CLAIM_LOST')
+        assert result == (False, '', OutcomeCode.TASK_EXPIRED.value)
+        assert handle.names() == ['start_attempt', 'expire_owned_claim']
 
     @pytest.mark.parametrize('reason', ['NOT_HELD', 'LEASE_EXPIRED'])
     def test_a_claim_that_is_not_held_or_expired_is_lost_with_no_write(
         self, reason: str,
     ) -> None:
-        from horsies.core.worker.child_runner import START_ATTEMPT_SQL
+        handle = _FakeChildHandle(starts=[_missed(reason)])
 
-        result, statements = _start_with([('MISSED', reason)])
+        result = _start_with(handle)
 
         assert result == (False, '', 'CLAIM_LOST')
-        assert statements == [START_ATTEMPT_SQL]
+        assert handle.names() == ['start_attempt']
 
-    def test_a_paused_workflow_abandons_the_task_and_readies_its_node(self) -> None:
-        """The stop runs in its own transaction after the start, which held
-        no lock past its statement."""
-        from horsies.core.lifecycle.commands import AbandonOwnedNode
-        from horsies.core.lifecycle.outcomes import Applied
-        from horsies.core.worker.child_runner import (
-            BEGIN_SQL,
-            RESET_PAUSED_NODE_SQL,
-            START_ATTEMPT_SQL,
+    def test_the_time_left_before_the_deadline_goes_with_the_start(self) -> None:
+        from horsies.core.worker.child_runner import StartWithin
+
+        handle = _FakeChildHandle(
+            starts=[_record(core.AttemptStarted, task_id=uuid.UUID(TASK_ID))],
         )
 
-        result, statements = _start_with(
-            [('MISSED', 'WORKFLOW_PAUSED')], applied=[MagicMock(spec=Applied)],
+        assert _start_with(handle, start_check=lambda: StartWithin(milliseconds=250)) is None
+        assert handle.calls[0][2]['deadline_in_ms'] == 250
+
+    def test_a_deadline_that_passed_before_the_check_sends_nothing(self) -> None:
+        from horsies.core.worker.child_runner import DeadlineBeforeStart
+
+        handle = _FakeChildHandle(starts=[])
+
+        result = _start_with(handle, start_check=DeadlineBeforeStart)
+
+        assert result == DeadlineBeforeStart()
+        assert handle.calls == []
+
+    def test_a_deadline_that_passed_while_the_pool_waited_does_not_start(self) -> None:
+        from horsies.core.worker.child_runner import DeadlineBeforeStart, StartWithin
+
+        handle = _FakeChildHandle(
+            starts=[_record(core.DeadlineBeforeStart, task_id=uuid.UUID(TASK_ID))],
         )
 
-        assert result == (False, '', 'WORKFLOW_STOPPED')
-        assert statements == [
-            START_ATTEMPT_SQL,
-            BEGIN_SQL,
-            AbandonOwnedNode.__name__,
-            RESET_PAUSED_NODE_SQL,
-            'COMMIT',
-        ]
+        result = _start_with(handle, start_check=lambda: StartWithin(milliseconds=1))
 
-    def test_a_resume_before_the_abandon_starts_again(self) -> None:
-        from horsies.core.lifecycle.outcomes import (
-            ObservedTaskState,
-            ObservedWorkflowState,
-            SourceStateConflict,
-        )
-        from horsies.core.worker.child_runner import _WorkflowResumedBeforeStart
+        assert result == DeadlineBeforeStart()
 
-        refused = SourceStateConflict(
-            task_id='task-1',
-            ordinality=None,
-            observed=ObservedTaskState(status=None, worker_id=None, claimed_at=None),
-            evidence=ObservedWorkflowState(workflow_id='wf-1', workflow_status='RUNNING'),
+    def test_a_failed_start_is_unconfirmed(self) -> None:
+        handle = _FakeChildHandle(
+            starts=[
+                _record(
+                    core.StartFailed,
+                    task_id=uuid.UUID(TASK_ID),
+                    message='horsies_start_attempt returned 0 rows',
+                    retryable=False,
+                ),
+            ],
         )
 
-        result, statements = _start_with([('MISSED', 'WORKFLOW_PAUSED')], applied=[refused])
+        assert _start_with(handle) == (False, '', 'OWNERSHIP_UNCONFIRMED')
 
-        assert result == _WorkflowResumedBeforeStart(workflow_status='RUNNING')
-        assert statements[-1] == 'ROLLBACK'
+    def test_a_core_that_cannot_run_the_call_is_unconfirmed(self) -> None:
+        handle = MagicMock()
+        handle.start_attempt.side_effect = core.TooManyPendingCalls('the queue is full')
 
-    def test_a_cancelled_workflow_cancels_the_task_and_skips_its_node(self) -> None:
-        from horsies.core.lifecycle.commands import CancelOwnedNode
-        from horsies.core.lifecycle.outcomes import Applied
-        from horsies.core.worker.child_runner import (
-            BEGIN_SQL,
-            SKIP_CANCELLED_NODE_SQL,
-            START_ATTEMPT_SQL,
+        assert _start_with(handle) == (False, '', 'OWNERSHIP_UNCONFIRMED')
+
+    def test_a_record_outside_the_catalog_is_a_defect(self) -> None:
+        handle = _FakeChildHandle(starts=[object()])
+
+        with pytest.raises(AssertionError):
+            _start_with(handle)
+
+    def test_a_workflow_resumed_on_each_attempt_is_unconfirmed(self) -> None:
+        from horsies.core.worker.child_runner import _confirm_until_not_resumed
+
+        resumed = _record(core.ResumedBeforeStart, task_id=uuid.UUID(TASK_ID))
+        handle = _FakeChildHandle(
+            starts=[_missed('WORKFLOW_PAUSED'), _missed('WORKFLOW_PAUSED')],
+            stops=[resumed, resumed],
         )
 
-        result, statements = _start_with(
-            [('MISSED', 'WORKFLOW_CANCELLED')], applied=[MagicMock(spec=Applied)],
-        )
-
-        assert result == (False, '', 'WORKFLOW_STOPPED')
-        assert statements == [
-            START_ATTEMPT_SQL,
-            BEGIN_SQL,
-            CancelOwnedNode.__name__,
-            SKIP_CANCELLED_NODE_SQL,
-            'COMMIT',
-        ]
-
-    def test_a_node_that_is_not_linked_fails_the_workflow_check(self) -> None:
-        from horsies.core.worker.child_runner import START_ATTEMPT_SQL
-
-        result, statements = _start_with([('MISSED', 'NODE_NOT_LINKED')])
-
-        assert result == (False, '', 'WORKFLOW_CHECK_FAILED')
-        assert statements == [START_ATTEMPT_SQL]
-
-    def test_a_row_outside_the_contract_is_unconfirmed(self) -> None:
-        result, _ = _start_with([('MISSED', 'SOMETHING_ELSE')])
+        with patch(
+            'horsies.core.worker.child_runner._get_child_core_handle',
+            return_value=handle,
+        ):
+            result = _confirm_until_not_resumed(
+                TASK_ID,
+                'worker-A',
+                True,
+                CLAIMED_AT,
+                orphan_self_heal=True,
+            )
 
         assert result == (False, '', 'OWNERSHIP_UNCONFIRMED')
+        assert handle.names() == [
+            'start_attempt',
+            'stop_workflow_task_before_start',
+            'start_attempt',
+            'stop_workflow_task_before_start',
+        ]
 
 
 # ===================================================================
@@ -2609,6 +2666,7 @@ class TestRunTaskEntryStoredTimeout:
                 _run_task_entry(
                     **_run_entry_defaults,
                     timeout=refusal,
+                    orphan_self_heal=True,
                 )
             )
 
@@ -2634,6 +2692,7 @@ class TestRunTaskEntryStoredTimeout:
                 _run_task_entry(
                     **_run_entry_defaults,
                     timeout=TimeoutValueInvalid(reason='stored timeout_ms is a bool'),
+                    orphan_self_heal=True,
                 )
             )
 
@@ -2658,6 +2717,7 @@ class TestRunTaskEntryStoredTimeout:
                     timeout=CancelGraceInvalid(
                         reason='stored cancel_grace_ms is absent'
                     ),
+                    orphan_self_heal=True,
                 )
             )
 

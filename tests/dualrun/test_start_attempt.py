@@ -2,9 +2,12 @@
 """Dual-run of the start switch: the RUNNING update and its miss path against ``horsies_start_attempt``.
 
 Reference: ``tests/dualrun/reference/start.py``. Candidate: the isolated
-child's ``_confirm_until_not_resumed`` on its sync pool. The seed holds one
-claimed row per start case, plain and workflow; both sides must start, expire,
-stop or leave the same rows, and report the same wire reason.
+child's ``_confirm_until_not_resumed`` on its core handle, with the orphan
+self-heal off: the reference leaves an unlinked task CLAIMED, as the child
+did before the parent's finalize ran (the self-heal is the pair of
+``test_stop_before_start.py``). The seed holds one claimed row per start
+case, plain and workflow; both sides must start, expire, stop or leave the
+same rows, and report the same wire reason.
 """
 
 from __future__ import annotations
@@ -20,7 +23,6 @@ import pytest
 
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import child_runner
-from horsies.core.worker.child_pool import _cleanup_worker_pool, _initialize_worker_pool
 from tests.dualrun.capture import Connection
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
@@ -35,6 +37,7 @@ from tests.dualrun.seeds import (
     insert_workflow_task,
 )
 from tests.dualrun.selfcheck import SelfCheckStepFailed
+from tests.fixtures.child_core import child_core_handle_for
 
 pytestmark = [pytest.mark.integration]
 
@@ -120,18 +123,19 @@ def _wire_reason(result: object) -> str:
 
 
 def _candidate_start(database: DualRunDatabase, seed: _Seed) -> dict[str, str]:
-    _initialize_worker_pool(database.url)
-    try:
+    with child_core_handle_for(database.url):
         return {
             each.name: _wire_reason(
                 child_runner._confirm_until_not_resumed(
-                    each.task_id, seed.worker_id, each.is_workflow_task, each.claimed_at
+                    each.task_id,
+                    seed.worker_id,
+                    each.is_workflow_task,
+                    each.claimed_at,
+                    orphan_self_heal=False,
                 )
             )
             for each in seed.dispatches
         }
-    finally:
-        _cleanup_worker_pool()
 
 
 def _ok(

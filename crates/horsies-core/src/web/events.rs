@@ -35,7 +35,7 @@ pub const HEARTBEAT: Duration = Duration::from_secs(15);
 /// The most items one web client can have queued. On overflow, the client's
 /// queued events are dropped and it gets one event with no ids for every
 /// topic ("refresh the whole topic"), so a slow client cannot grow the web
-/// process. Python keeps an unbounded queue (`python/horsies/web/events.py:211`).
+/// process. Python keeps an unbounded queue (`tests/dualrun/reference/web_events.py:211`).
 pub const SUBSCRIBER_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -474,7 +474,7 @@ impl EventBroadcaster {
 }
 
 /// The JSON object of one event, as Python's `json.dumps` writes it
-/// (`python/horsies/web/routes/events.py`): `{"topic": ..., "ids": [...]}`,
+/// (`tests/dualrun/reference/web_routes/events.py`): `{"topic": ..., "ids": [...]}`,
 /// with a space after each `:` and `,`, and every text escaped to ASCII.
 /// Pure.
 pub(crate) fn data_frame(event: &TopicEvent) -> String {
@@ -554,7 +554,7 @@ enum FramesState {
 
 /// One web client's event stream in the frame texts of the wire, as
 /// Python's `/api/events` route writes them
-/// (`python/horsies/web/routes/events.py`): `data: <event>\n\n` per event,
+/// (`tests/dualrun/reference/web_routes/events.py`): `data: <event>\n\n` per event,
 /// [`HEARTBEAT_FRAME`] after `heartbeat` without an event, and
 /// `data: {"topic": "degraded"}\n\n`, after which the stream ends.
 pub struct EventFrames {

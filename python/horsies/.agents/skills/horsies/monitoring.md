@@ -256,9 +256,12 @@ an outcome.
 
 ## Live Updates
 
-The web process holds ONE `PostgresListener` (~2 connections, lazy start) on
-`horsies_task_status`, `horsies_workflow_status`, and `horsies_worker_state`,
-coalesces notifies (250 ms), and fans out over `GET /api/events` (SSE).
+The web app subscribes on the process listener of its broker (no connection
+of its own; subscriptions start at the first stream) to `horsies_task_status`,
+`horsies_workflow_status`, and `horsies_worker_state`, coalesces notifies
+(250 ms), and fans out over `GET /api/events` (SSE). After a listener
+reconnect each stream gets one event with no ids per topic; a broker with
+`assume_initialized=True` has no listener, and its stream sends `degraded`.
 Events are invalidation signals — `{"topic", "ids"}` — never data. Client
 polling is a fallback that activates only while the stream is down; the
 schedules table always polls (its table has no trigger). A task's start
@@ -267,8 +270,8 @@ schedules table always polls (its table has no trigger). A task's start
 ## Deployment Footprint
 
 - Per web process: the broker pool (defaults `pool_size=5 + max_overflow=10`)
-  plus ~2 listener connections — **flat regardless of viewer count**; excess
-  requests queue on the pool.
+  plus the process listener connection of the session URL — **flat
+  regardless of viewer count**; excess requests queue on the pool.
 - Public view-only deployments: identical viewers issue identical aggregate
   queries; put a ~1 s shared cache in front (`Cache-Control: max-age=1` via a
   proxy) to make audience size irrelevant to database load.

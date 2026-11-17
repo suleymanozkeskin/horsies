@@ -15,7 +15,8 @@ horsies never owns identity. Every deployment supplies an authorization policy,
 and the library enforces the verdict it returns.
 
 The API is on the client pages: [Web UI Mount](/horsies/monitoring/web-ui-mount/)
-(Python). The Rust page is not written yet.
+and [`horsies web`](/horsies/cli/#horsies-web) (Python). The Rust mount page is
+not written yet. The [Rust CLI runner](/horsies/rust/cli/) has no `web` command.
 
 ## Mounted mode
 
@@ -62,28 +63,22 @@ no build-time theming and no theme JSON.
 
 ## Standalone CLI
 
-```bash
-horsies web myapp.tasks:app
-```
+The standalone server takes either an app locator or a database URL. The
+commands and the flags are in the [CLI Reference](/horsies/cli/#horsies-web)
+(Python).
 
-```bash
-horsies web --database-url "postgresql://user:pass@localhost:5432/mydb"
-```
+With an app locator, the server imports the application module and gets the
+full feature set. It runs the same startup validation as the worker and the
+scheduler, so a configuration error refuses to serve rather than surfacing
+later as a failed action.
 
-The first form imports the application module and gets the full feature set. It
-runs the same startup validation as `horsies worker` and `horsies scheduler`,
-so a configuration error refuses to serve rather than surfacing later as a
-failed action.
-
-The second form is registry-less: it constructs a minimal `Horsies` app from the
-URL alone. Task rows carry their own encoded arguments, queue, priority, and
+With a database URL alone, the server is registry-less: it constructs a minimal
+`Horsies` app from the URL. Task rows carry their own encoded arguments, queue, priority, and
 options, so this form supports every read, every task action, and workflow pause
 and cancel. It does not support resuming a run whose next nodes carry
 `args_from`: the resume re-enqueues those nodes, and encoding an upstream result
-into a fresh task row requires the source task's registered return type. Use the
-app-path form where that matters.
-
-The flags are in the [CLI Reference](/horsies/cli/#horsies-web).
+into a fresh task row requires the source task's registered return type. Use an
+app locator where that matters.
 
 ### Bind rules
 
@@ -103,13 +98,6 @@ configuration.
 
 ### Trusted-header mode
 
-```bash
-horsies web myapp.tasks:app \
-  --host 0.0.0.0 --port 8600 \
-  --auth trusted-header --trusted-header X-Forwarded-User \
-  --enable-actions
-```
-
 A request is authorized if and only if the named header is present and
 non-empty. The reverse proxy is the identity boundary; horsies performs no
 verification of its own.
@@ -125,19 +113,19 @@ themselves: oauth2-proxy, Cloudflare Access, Tailscale Serve.
 
 ## Connection footprint
 
-The web app uses the broker's existing pool for queries and adds one dedicated
-listener.
+The web app uses the broker's existing pool for queries and the process
+listener of the broker for the event stream and the worker ping.
 
 | Source | Cost |
 |---|---|
 | API requests | One pooled connection per concurrent request, released on response |
-| SSE event listener | ~2 connections for the process lifetime |
-| Manual worker ping | One LISTEN round trip per invocation |
+| SSE event stream | No connection of its own: subscriptions on the process listener (one connection per session URL and process) |
+| Manual worker ping | One LISTEN round trip per invocation, on the process listener |
 
-The listener is the web app's own, not the broker's internal one, which
-isolates it from result-waiter state. It starts lazily on the first
-SSE subscriber and closes at shutdown. Its subscriptions are held for the app's
-lifetime, so there is no per-request LISTEN churn.
+Each event stream has a bounded queue on the process listener, so a slow
+stream cannot hold the broker's result waiters. The stream's subscriptions
+start on the first SSE subscriber and are held for the app's lifetime, so
+there is no per-request LISTEN churn.
 
 Size the pool for the number of concurrent dashboard viewers, and read
 [PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) before pointing the
@@ -146,18 +134,14 @@ monitoring app at a transaction-pooled URL.
 ### PgBouncer
 
 LISTEN/NOTIFY requires a session-mode connection. When the main URL points at a
-transaction-pooled PgBouncer, give the listener a direct URL:
+transaction-pooled PgBouncer, give the listener a direct URL. In standalone
+mode, pass it with `--session-database-url`, together with
+`--pgbouncer-transaction-mode`: see the example in the
+[CLI Reference](/horsies/cli/#horsies-web) (Python).
 
-```bash
-horsies web \
-  --database-url "$DATABASE_URL_POOLED" \
-  --session-database-url "$DATABASE_URL_DIRECT" \
-  --pgbouncer-transaction-mode
-```
-
-In mounted mode this is already the broker config of the host app: the web app
-uses `session_database_url` when set, and falls back to `database_url`
-otherwise. Without a session-capable URL the event stream cannot connect, and
+In mounted mode this is already the broker config of the host app: the
+process listener uses `session_database_url` when set, and falls back to
+`database_url` otherwise. Without a session-capable URL the event stream cannot connect, and
 the dashboard runs permanently on its polling fallback.
 
 ## Schema handling
@@ -214,16 +198,9 @@ point the fleet and the monitoring app at a new one.
 
 **Don't expose the CLI on a non-loopback address with `--auth none`.** The CLI
 refuses this combination, and the refusal is the point: the dashboard exposes
-every task payload, error message, and worker hostname in the deployment.
-
-```bash
-# Wrong — refused with exit 2
-horsies web myapp.tasks:app --host 0.0.0.0 --auth none
-
-# Correct — a proxy owns identity, and it strips the header on ingress
-horsies web myapp.tasks:app --host 0.0.0.0 \
-  --auth trusted-header --trusted-header X-Forwarded-User
-```
+every task payload, error message, and worker hostname in the deployment. The
+wrong and the correct command are in
+[Things to Avoid](/horsies/cli/#things-to-avoid) of the CLI Reference (Python).
 
 **Don't use the `AllowAll` policy to reach a dashboard you have not otherwise
 guarded.** `AllowAll` asserts that the mount is already authenticated. It is
@@ -234,9 +211,7 @@ schema.** It reports `ABSENT` and stops. Start a horsies app or worker instead.
 
 ## Static assets
 
-When the built SPA assets are missing, for example in a source checkout,
-`/api/*` continues to work and `GET /` returns 503 with a detail that names the
-build command. The Python path and message are in
+The SPA and its assets are compiled into `horsies._core`; see
 [Static Assets](/horsies/monitoring/web-ui-mount/#static-assets).
 
 Static assets are served without the auth dependency; they carry no data. Every

@@ -124,20 +124,24 @@ impl<P> Mount<P> {
     ///
     /// Errors: the [`BrokerError`] of the handle's connect.
     async fn handler(&self) -> Result<&MonitoringHandler, BrokerError> {
-        self.handler
-            .get_or_try_init(|| async {
-                let broker = self.handle.broker().await?;
-                let children = ResumeChildren::Registry {
-                    registry: self.workflows.core_registry(),
-                    retention: self.retention.clone(),
-                };
-                Ok(MonitoringHandler::new(
-                    broker,
-                    children,
-                    self.settings.clone(),
-                ))
-            })
-            .await
+        self.handler.get_or_try_init(|| self.build_handler()).await
+    }
+
+    /// A handler on the broker of the app's handle; a resume builds its
+    /// owed children from the workflow definitions registered now.
+    ///
+    /// Errors: the [`BrokerError`] of the handle's connect.
+    async fn build_handler(&self) -> Result<MonitoringHandler, BrokerError> {
+        let broker = self.handle.broker().await?;
+        let children = ResumeChildren::Registry {
+            registry: self.workflows.core_registry(),
+            retention: self.retention.clone(),
+        };
+        Ok(MonitoringHandler::new(
+            broker,
+            children,
+            self.settings.clone(),
+        ))
     }
 }
 

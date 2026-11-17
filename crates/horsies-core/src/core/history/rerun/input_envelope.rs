@@ -44,7 +44,7 @@ pub fn encode_input_envelope_v1(
 /// `serde_json` and CPython agree on shortest finite-number mantissas but use
 /// different exponent spelling. Python requires a sign and at least two
 /// exponent digits; normalize that spelling recursively while retaining
-/// serde's UTF-8 string escaping and the map's sorted-key order.
+/// serde's UTF-8 string escaping, with the keys of each object sorted.
 pub(crate) fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, serde_json::Error> {
     let mut output = Vec::new();
     write_canonical_json(value, &mut output)?;
@@ -69,8 +69,13 @@ fn write_canonical_json(value: &Value, output: &mut Vec<u8>) -> Result<(), serde
             output.push(b']');
         }
         Value::Object(values) => {
+            // An object keeps its insertion order (serde_json `preserve_order`),
+            // so the keys are sorted here, as `sort_keys=True` sorts them: by
+            // code point, which is the byte order of UTF-8.
+            let mut members: Vec<(&String, &Value)> = values.iter().collect();
+            members.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
             output.push(b'{');
-            for (index, (key, value)) in values.iter().enumerate() {
+            for (index, (key, value)) in members.into_iter().enumerate() {
                 if index != 0 {
                     output.push(b',');
                 }

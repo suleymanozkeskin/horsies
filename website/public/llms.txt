@@ -780,7 +780,7 @@ Each entry: Title -- summary -> URL
 - Queue Modes -- DEFAULT vs CUSTOM, priorities -> /horsies/concepts/queue-modes/
 - AppConfig -- root application config -> /horsies/configuration/app-config/
 - Broker Config -- the broker fields with defaults and ranges, URL format, PgBouncer transaction pooling, JIT, pool sizing, schema initialization -> /horsies/configuration/broker-config/
-- Broker Connections -- PostgresConfig in Python: examples, field types, refusals, psycopg and libpq, event loops, sync calls in async code (ASYNC_CONTEXT), the connection ceiling -> /horsies/configuration/broker-connections/
+- Broker Connections -- PostgresConfig in Python: examples (transaction pooling, connection checks at checkout, keepalives), field types, refusals, psycopg and libpq, event loops, sync calls in async code (ASYNC_CONTEXT), the connection ceiling -> /horsies/configuration/broker-connections/
 - Remote PostgreSQL -- remote or managed PostgreSQL, connection budget, pooled multi-worker setups, health-check tuning -> /horsies/configuration/remote-postgres/
 - Recovery Config -- stale task detection -> /horsies/configuration/recovery-config/
 - Retention Config -- record lifetime, retention classes, per-queue retention, partition upkeep -> /horsies/configuration/retention-config/
@@ -788,7 +788,7 @@ Each entry: Title -- summary -> URL
 ### Workers
 - Worker Architecture -- worker-owned child processes -> /horsies/workers/worker-architecture/
 - Choosing an Execution Mode -- ISOLATED, SHARED_ASYNC or SHARED_THREAD by the work of a task, measured conditions and results, timeouts and crashes per mode, author rules, profile examples -> /horsies/workers/execution-modes/
-- Worker Profiles -- named worker settings in AppConfig, --profile, check and boot validation -> /horsies/workers/worker-profiles/
+- Worker Profiles -- named worker settings in AppConfig, --profile, an app with a profile for each mode, check and boot validation -> /horsies/workers/worker-profiles/
 - Shared Async Tasks -- SHARED_ASYNC tasks as coroutines on seats of a shared async child, the timeout sequence, a return that leaves work alive, the blocked loop, author rules -> /horsies/workers/shared-async-tasks/
 - Shared Thread Tasks -- SHARED_THREAD tasks on seat threads of a shared thread child, when threads help, the timeout and the kill, pool sizing -> /horsies/workers/shared-thread-tasks/
 - Concurrency -- worker/queue/cluster limits -> /horsies/workers/concurrency/
@@ -800,14 +800,16 @@ Each entry: Title -- summary -> URL
 - Worker & Database Health -- what the database ping, the worker ping, worker states, class coverage and the class report answer; snapshot fields; embedded health payloads -> /horsies/monitoring/worker-health/
 - Health Reads -- the Python health methods: ping_database_async, ping_workers_async, list_worker_states_async, get_class_coverage_async, get_class_report_async, result types -> /horsies/monitoring/health-reads/
 - Broker Methods -- async inspection APIs -> /horsies/monitoring/broker-methods/
-- Web UI Overview -- browser dashboard in the horsies[web] extra -> /horsies/monitoring/web-ui-overview/
+- Web UI Overview -- browser dashboard: surfaces, freshness, actions, limits -> /horsies/monitoring/web-ui-overview/
 - Web UI Deployment & Authentication -- mounted and standalone modes, authorization policies, bind rules, identity, connection and schema contracts -> /horsies/monitoring/web-ui-deployment/
-- Web UI Mount -- the Python mount: create_monitoring_app, MonitoringAuthPolicy, AllowAll, ViewOnly, TrustedHeader, MonitoringUIConfig, static assets -> /horsies/monitoring/web-ui-mount/
+- Web UI Mount -- the Python mount: the horsies[web] extra, create_monitoring_app, MonitoringAuthPolicy, AllowAll, ViewOnly, TrustedHeader, MonitoringUIConfig, static assets -> /horsies/monitoring/web-ui-mount/
 - Action Semantics -- what task cancel, task rerun, and workflow pause, resume, and cancel do -> /horsies/monitoring/action-semantics/
 
 ### Operations
 - Atomic Enqueue and Topology -- send after commit, resend_on_transient_err, idempotency_key window and limits, no send API joins a caller transaction -> /horsies/operations/atomic-enqueue-and-topology/
 - Deploying Code Changes -- renamed or removed tasks and parameters, in-flight rows, old and new workers, error codes per change -> /horsies/operations/deploying-code-changes/
+- Code Change Examples -- the Python code of the deploy steps: a parameter with a default, two names for one task, a model field with a default, a renamed field with AliasChoices -> /horsies/operations/code-change-examples/
+- Rerun in Your Transaction -- the Python rerun_task: re-execute a terminal task as a new task in the caller's transaction, RerunTask, RerunEnqueuePolicy, RerunOutcome -> /horsies/operations/rerun-in-your-transaction/
 - Testing -- direct task calls, TaskResult kwargs, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS -> /horsies/operations/testing/
 - Autovacuum Tuning -- per-table autovacuum settings for high-churn tables, verification queries -> /horsies/operations/autovacuum-tuning/
 
@@ -823,7 +825,7 @@ Each entry: Title -- summary -> URL
 - Questions & Answers -- design trade-offs, scaling, failure behavior -> /horsies/questions-and-answers/
 
 ### CLI
-- CLI Reference -- horsies worker, scheduler, check -> /horsies/cli/
+- CLI Reference -- horsies worker, scheduler, check, web -> /horsies/cli/
 - Agent Skills (repository path, usage guidance) -> /horsies/cli/
 
 ### Internals
@@ -849,7 +851,8 @@ install, pip, setup, first task -> /horsies/quick-start/getting-started/
 Horsies, AppConfig, PostgresConfig, database_url, broker -> /horsies/configuration/app-config/
 pool_size, max_overflow, session_database_url, pgbouncer_transaction_mode, keepalives -> /horsies/configuration/broker-config/
 PostgresConfig, psycopg, libpq, event loop, EVENT_LOOP_LIMIT, ASYNC_CONTEXT, connection ceiling -> /horsies/configuration/broker-connections/
-RecoveryConfig, stale, requeue, crash recovery -> /horsies/configuration/recovery-config/
+stale, requeue, crash recovery, recovery fields -> /horsies/configuration/recovery-config/
+RecoveryConfig, HRS-204 example, disable recovery -> /horsies/configuration/app-config/#recovery-configuration
 @app.task, decorator, task definition, define task -> /horsies/tasks/defining-tasks/
 send, send_async, enqueue, dispatch, produce, TaskSendResult, TaskSendError, retry_send -> /horsies/tasks/sending-tasks/
 TaskResult, is_ok, is_err, ok_value, err_value -> /horsies/tasks/error-handling/
@@ -858,8 +861,10 @@ TaskHandle, get, get_async, timeout, result -> /horsies/tasks/retrieving-results
 retry, backoff, exponential, fixed, jitter, max_delay_seconds, auto_retry_for -> /horsies/tasks/retry-policy/
 RetryPolicy, RetryPolicy.fixed, RetryPolicy.exponential, exception_mapper -> /horsies/tasks/defining-tasks/#configure-retries
 PENDING, CLAIMED, RUNNING, COMPLETED, FAILED, task status -> /horsies/concepts/task-lifecycle/
+TaskStatus, is_terminal, TASK_TERMINAL_STATES -> /horsies/tasks/retrieving-results/#terminal-statuses
 TaskResult, Result pattern, error as value -> /horsies/concepts/result-handling/
-QueueMode, DEFAULT, CUSTOM, priority, CustomQueueConfig -> /horsies/concepts/queue-modes/
+DEFAULT, CUSTOM, priority, queue mode, max_concurrency per queue -> /horsies/concepts/queue-modes/
+QueueMode, CustomQueueConfig, queue_name, HRS-103 -> /horsies/configuration/app-config/#queue-mode-configuration
 WorkflowSpec, DAG, TaskNode, waits_for, args_from -> /horsies/concepts/workflows/workflow-semantics/
 WorkflowHandle, WorkflowTaskInfo, WorkflowStatus -> /horsies/concepts/workflows/workflow-api/
 SubWorkflowNode, WorkflowDefinition, build_with, child workflow -> /horsies/concepts/workflows/subworkflows/
@@ -905,14 +910,18 @@ slugify, NodeKey -> /horsies/concepts/workflows/workflow-examples/
 node_id, NODE_ID_PATTERN -> /horsies/concepts/workflows/workflow-semantics/
 showcase, demo app, example application -> /horsies/quick-start/06-showcase/
 remote PostgreSQL, managed PostgreSQL, connection budget, PgBouncer pooling, health checks -> /horsies/configuration/remote-postgres/
-RetentionConfig, retention class, retention_class_key, queue_retention, partitions -> /horsies/configuration/retention-config/
+retention class, retention_class_key, queue_retention, retention_periods, partitions -> /horsies/configuration/retention-config/
+RetentionConfig -> /horsies/configuration/app-config/#retention-configuration
 on_child_process_start, child-process hook, per-child setup -> /horsies/workers/child-process-hooks/
 liveness, worker ping, class coverage, slot health, snapshot fields -> /horsies/monitoring/worker-health/
 ping_database, ping_workers, WorkerPong, WorkerStateSnapshot, ClassCoverage, ClassReport -> /horsies/monitoring/health-reads/
-web UI, horsies[web], dashboard, horsies web -> /horsies/monitoring/web-ui-overview/
+web UI, dashboard -> /horsies/monitoring/web-ui-overview/
+horsies web, standalone dashboard -> /horsies/cli/
 trusted-header, authentication, mounted mode, standalone mode, schema state -> /horsies/monitoring/web-ui-deployment/
-create_monitoring_app, MonitoringAuthPolicy, MonitoringUIConfig, FastAPI mount -> /horsies/monitoring/web-ui-mount/
+horsies[web], create_monitoring_app, MonitoringAuthPolicy, MonitoringUIConfig, FastAPI mount -> /horsies/monitoring/web-ui-mount/
 cancel task, rerun task, pause workflow, resume workflow, cancel workflow, actions -> /horsies/monitoring/action-semantics/
+rerun_task, RerunTask, RerunEnqueuePolicy, RerunOutcome, RerunEnqueued -> /horsies/operations/rerun-in-your-transaction/
+AliasChoices, renamed model field, task alias, deploy -> /horsies/operations/code-change-examples/
 autovacuum, vacuum, high-churn tables -> /horsies/operations/autovacuum-tuning/
 atomic enqueue, send after commit, transaction, topology, separate database, idempotency_key, idempotency window, IDEMPOTENCY_KEY_CONFLICT, resend_on_transient_err -> /horsies/operations/atomic-enqueue-and-topology/
 deploy, rolling deploy, rename task, remove task, rename parameter, in-flight rows, WORKER_SERIALIZATION_ERROR, WORKER_RESOLUTION_ERROR, SUBWORKFLOW_LOAD_FAILED, RESULT_DESERIALIZATION_ERROR, definition_key -> /horsies/operations/deploying-code-changes/

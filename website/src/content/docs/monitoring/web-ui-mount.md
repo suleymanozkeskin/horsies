@@ -12,6 +12,18 @@ tags: [monitoring, web, fastapi, authentication, api]
 
 ## How To
 
+### Install the Extra
+
+```bash
+pip install "horsies[web]"
+```
+
+```bash
+uv add "horsies[web]"
+```
+
+The extra adds `fastapi` and `uvicorn`. The query package `horsies.monitoring` imports neither and is available without the extra.
+
 ### Mount the App
 
 ```python
@@ -107,8 +119,4 @@ What each policy answers is in [Authorization policies](/horsies/monitoring/web-
 
 ### Static Assets
 
-The SPA is served from `horsies/web/static/` in the package; CI builds it into the wheel. When that directory is missing (a source checkout, or a build that skipped the frontend step), `GET /` returns 503:
-
-```json
-{"detail": "horsies web UI assets are not built. Run: cd webui && bun install && bun run build"}
-```
+The SPA is compiled into `horsies._core`: the core embeds the committed build of `webui/` (`crates/horsies-core/webui-dist`), so an installed wheel and a build from a clone serve the same page with no extra step. The page and its assets carry no data and are served without a call of the policy.

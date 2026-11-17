@@ -39,13 +39,13 @@ from horsies.monitoring import (
     task_facets,
     task_stats,
 )
-from horsies.web.read_cache import (
+from tests.dualrun.reference.web_read_cache import (
     TaskBreakdownScope,
     TaskFacetsScope,
     TaskReadCaches,
     TaskStatsScope,
 )
-from horsies.web.routes._common import (
+from tests.dualrun.reference.web_routes._common import (
     parse_error_categories,
     parse_group_by,
     parse_sort_by,
