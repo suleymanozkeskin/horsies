@@ -34,10 +34,7 @@ from horsies.core.history.partitions.manager import (
     detach_expired_leaf,
     drop_detached_leaf,
 )
-from horsies.core.history.reads.publisher import (
-    StagedLoaderPublisher,
-    published_readers_stamped,
-)
+from horsies.core.history.reads.publisher import StagedLoaderPublisher
 from tests.integration.task_history_harness import (
     HistorySchema,
     day_bounds,
@@ -68,8 +65,9 @@ async def complete_fused(connection: AsyncConnection, task_id: str) -> str:
     return str((await connection.execute(
         text(
             'SELECT outcome FROM horsies_complete_task_fused('
-            'CAST(:task_id AS uuid), :worker, NULL, :result, '
-            "'task_done', CAST(:task_id AS text))"
+            'CAST(:task_id AS uuid), :worker, '
+            'COALESCE((SELECT claimed_at FROM horsies_tasks WHERE id = CAST(:task_id AS uuid)), NOW()), '
+            ':result, TRUE)'
         ),
         {'task_id': task_id, 'worker': WORKER, 'result': '{"ok":true}'},
     )).scalar_one())
@@ -85,8 +83,8 @@ async def guard(connection: AsyncConnection, task_id: str) -> bool:
 async def provenance_found(connection: AsyncConnection, task_id: str) -> bool:
     return bool((await connection.execute(
         text(
-            'SELECT found FROM horsies_task_provenance_staged('
-            'CAST(:id AS uuid), FALSE)'
+            'SELECT EXISTS (SELECT 1 FROM horsies_task_provenance_staged('
+            'CAST(:id AS uuid)))'
         ),
         {'id': task_id},
     )).scalar_one())
@@ -103,9 +101,9 @@ async def test_publication_renders_the_stamped_guard_over_a_first_version(
     terminalization_schema: HistorySchema,
 ) -> None:
     async with terminalization_schema.engine.begin() as connection:
-        assert not await published_readers_stamped(connection)
+        assert not await StagedLoaderPublisher().is_current(connection)
         await prepare_move_storage(connection, CLASS_KEY)
-        assert await published_readers_stamped(connection)
+        assert await StagedLoaderPublisher().is_current(connection)
 
 
 async def test_a_clock_ahead_move_is_recorded_and_the_guard_finds_it(

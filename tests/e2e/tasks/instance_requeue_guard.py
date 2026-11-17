@@ -86,9 +86,9 @@ def requeue_guard_task(*, token: str) -> TaskResult[str, TaskError]:
 if os.environ.get('INJECT_REQUEUE_DB_ERROR') == '1':
     from horsies.core.models.tasks import Execution
     from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
+    from horsies.core.worker.dispatch_claim import DispatchClaim
     from horsies.core.worker.worker import Worker, _RequeueOutcome
     from typing import Optional
-    from datetime import datetime
 
     _original_dispatch = Worker._dispatch_one
 
@@ -102,15 +102,14 @@ if os.environ.get('INJECT_REQUEUE_DB_ERROR') == '1':
         is_workflow_task: bool = True,  # noqa: ARG001
         timeout: StoredTimeout = NoTimeout(),  # noqa: ARG001
         *,
-        claimed_at: datetime,
+        claim: DispatchClaim,
         execution: Execution,  # noqa: ARG001
-        task_options: Optional[str],  # noqa: ARG001
     ) -> None:
         # Simulate: no child takes the task → requeue → DB_ERROR
         outcome = await self._requeue_claimed_task(
             task_id,
             'INJECTED dispatch failure',
-            claimed_at,
+            claim,
         )
         if outcome is _RequeueOutcome.DB_ERROR:
             import logging
@@ -126,7 +125,7 @@ if os.environ.get('INJECT_REQUEUE_DB_ERROR') == '1':
         self: Worker,
         task_id: str,
         reason: str,
-        claimed_at: datetime,  # noqa: ARG001
+        claim: DispatchClaim,  # noqa: ARG001
     ) -> _RequeueOutcome:
         import logging
         logging.getLogger('horsies.worker').error(

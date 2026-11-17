@@ -18,8 +18,19 @@ use uuid::Uuid;
 use super::{process_schedule, schedule_slot_task_id, state};
 use crate::broker::PostgresBroker;
 use crate::core::config::{AppConfig, IntervalSchedule, SchedulePattern, TaskSchedule};
+use crate::core::{
+    OperationalErrorCode, PreparedSchedules, RetryPolicy, ScheduleSendFacts, TaskErrorCode,
+    TaskOptions,
+};
 
 const SCHEDULE_INTERVAL_SECONDS: u32 = 60;
+
+/// The timeout that the scheduled task declares (Python `TASK_TIMEOUT_MS`).
+const TASK_TIMEOUT_MS: u32 = 30_000;
+
+/// The fixed retry intervals that the scheduled task declares (Python
+/// `RETRY_INTERVALS_SECONDS`).
+const RETRY_INTERVALS_SECONDS: [u32; 2] = [1, 2];
 
 /// The fingerprint byte of the earlier row: no command of this schedule
 /// hashes to 32 equal bytes.
@@ -58,6 +69,32 @@ async fn seed_earlier_slot_row(pool: &PgPool, task_id: Uuid, task_name: &str, sl
     .expect("seed the earlier slot row");
 }
 
+/// The send facts of the schedule: the default queue and the options text of
+/// a task that declares a timeout and a retry policy (Python
+/// `_app_with_scheduled_task`). The earlier row stores no options.
+fn prepared_schedules(schedule_name: &str, task_name: &str) -> PreparedSchedules {
+    let options = TaskOptions {
+        task_name: task_name.to_owned(),
+        queue_name: None,
+        good_until: None,
+        auto_retry_for: Some(vec![TaskErrorCode::from(
+            OperationalErrorCode::TaskException,
+        )]),
+        retry_policy: Some(
+            RetryPolicy::fixed(RETRY_INTERVALS_SECONDS.to_vec(), true)
+                .expect("two intervals inside the bounds"),
+        ),
+        timeout_ms: Some(TASK_TIMEOUT_MS),
+    };
+    PreparedSchedules::from([(
+        schedule_name.to_owned(),
+        ScheduleSendFacts {
+            queue_name: "default".to_owned(),
+            task_options: options.serialize_retry_options(),
+        },
+    )])
+}
+
 #[tokio::test]
 #[serial]
 async fn a_slot_that_an_earlier_version_enqueued_counts_as_fired() {
@@ -87,7 +124,8 @@ async fn a_slot_that_an_earlier_version_enqueued_counts_as_fired() {
         .expect("a whole second is a valid time");
     let first_due = check_time - chrono::Duration::seconds(1);
     let next_run = first_due + chrono::Duration::seconds(i64::from(SCHEDULE_INTERVAL_SECONDS));
-    let slot_task_id = schedule_slot_task_id(&schedule_name, first_due);
+    let slot_task_id =
+        schedule_slot_task_id(&schedule_name, first_due).expect("the slot time has a slot id");
     seed_earlier_slot_row(&pool, slot_task_id, &task_name, first_due).await;
     state::seed_state(&pool, &schedule_name, first_due)
         .await
@@ -99,6 +137,7 @@ async fn a_slot_that_an_earlier_version_enqueued_counts_as_fired() {
         check_time,
         1,
         &AppConfig::for_database_url("postgresql://unused/test"),
+        &prepared_schedules(&schedule_name, &task_name),
     )
     .await
     .expect("the tick");
@@ -138,14 +177,13 @@ async fn a_slot_that_an_earlier_version_enqueued_counts_as_fired() {
 /// bits are the slot time in milliseconds, so the history reads can prune by
 /// birth time.
 #[test]
-#[ignore = "waits on #721: the slot task id is UUIDv5"]
 fn the_slot_task_id_has_the_uuid7_layout_of_its_slot_time() {
     let slot = Utc::now()
         .with_nanosecond(0)
         .expect("a whole second is a valid time");
-    let id = schedule_slot_task_id("nightly-reindex", slot);
+    let id = schedule_slot_task_id("nightly-reindex", slot).expect("the slot time has a slot id");
 
-    assert_eq!(id, schedule_slot_task_id("nightly-reindex", slot));
+    assert_eq!(Ok(id), schedule_slot_task_id("nightly-reindex", slot));
     assert_eq!(id.get_version_num(), 7);
     assert_eq!(id.get_variant(), uuid::Variant::RFC4122);
     let bytes = id.as_bytes();
@@ -153,5 +191,5 @@ fn the_slot_task_id_has_the_uuid7_layout_of_its_slot_time() {
         .iter()
         .fold(0_i64, |millis, byte| (millis << 8) | i64::from(*byte));
     assert_eq!(birth_ms, slot.timestamp_millis());
-    assert_ne!(id, schedule_slot_task_id("other-schedule", slot));
+    assert_ne!(Ok(id), schedule_slot_task_id("other-schedule", slot));
 }

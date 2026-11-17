@@ -6,7 +6,7 @@ use sqlx::{PgPool, Row};
 use tokio::time::timeout;
 use uuid::Uuid;
 
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{
     CallerHoldsRowLock, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
 };

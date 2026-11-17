@@ -44,7 +44,7 @@ _OUTPUTLESS_CHILD_RESULT_ENVELOPE = (
 def _make_worker(engine: AsyncEngine) -> Worker:
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
@@ -94,12 +94,12 @@ async def _insert_subworkflow_node(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name,
                  input, queue_name, priority,
                  dependencies, allow_failed_deps, join_type,
                  is_subworkflow, sub_workflow_id, sub_workflow_params,
                  status, created_at)
-            VALUES (:id, :wf, :idx, :node, 'denest_sub', '{}',
+            VALUES ('NONE', :id, :wf, :idx, :node, 'denest_sub', '{}',
                     'default', 100, '{}', FALSE, 'all',
                     TRUE, :sub_id, 'NOT_GIVEN', 'RUNNING', NOW())
         """),

@@ -6,8 +6,8 @@ is booted through the CLI, and the leaf must be gone without anything in
 the test asking for it.
 
 The leaf is overdue because its BOUNDS are backdated, not because a
-clock was moved. The sweep selects on `upper_anchor + duration <=
-statement_timestamp()`, so a leaf anchored well before the horizon is
+clock was moved. The sweep selects on `upper_anchor + <heartbeat horizon>
+<= statement_timestamp()`, so a leaf anchored well before the horizon is
 genuinely expired by the same arithmetic production uses.
 """
 
@@ -38,6 +38,7 @@ pytestmark = [pytest.mark.e2e]
 INSTANCE = 'tests.e2e.tasks.instance_queue_retention:app'
 
 from tests.e2e.helpers.env import e2e_database_url
+from horsies.core.utils.url import sqlalchemy_url
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
@@ -55,7 +56,7 @@ def _unremembered_hour() -> datetime:
     memory instead of testing anything. Rows are checked regardless of
     `dropped_at` for exactly that reason.
     """
-    engine = create_engine(DB_URL)
+    engine = create_engine(sqlalchemy_url(DB_URL))
     try:
         with engine.connect() as connection:
             candidate = datetime.now(UTC).replace(
@@ -84,7 +85,7 @@ def _unremembered_hour() -> datetime:
 
 def _leaf_exists(leaf_name: str) -> bool:
     """Whether the relation itself is still present."""
-    engine = create_engine(DB_URL)
+    engine = create_engine(sqlalchemy_url(DB_URL))
     try:
         with engine.connect() as connection:
             return (
@@ -107,7 +108,7 @@ def _plant_overdue_leaf(lower: datetime) -> str:
     """
 
     async def _create() -> str:
-        engine = create_async_engine(DB_URL)
+        engine = create_async_engine(sqlalchemy_url(DB_URL))
         try:
             async with engine.begin() as connection:
                 outcome = await create_hourly_heartbeat_leaf(
@@ -126,7 +127,7 @@ def _plant_overdue_leaf(lower: datetime) -> str:
 
 
 def _forget_leaf(leaf_name: str) -> None:
-    engine = create_engine(DB_URL, isolation_level='AUTOCOMMIT')
+    engine = create_engine(sqlalchemy_url(DB_URL), isolation_level='AUTOCOMMIT')
     try:
         with engine.connect() as connection:
             connection.execute(text(f'DROP TABLE IF EXISTS {leaf_name}'))
@@ -170,14 +171,14 @@ def test_a_booted_worker_drops_an_overdue_leaf() -> None:
 
 def test_the_planted_leaf_is_genuinely_expired() -> None:
     """Guard the premise: an age below the horizon would prove nothing."""
-    engine = create_engine(DB_URL)
+    engine = create_engine(sqlalchemy_url(DB_URL))
     try:
         with engine.connect() as connection:
             horizon = (
                 connection.execute(
                     text(
-                        'SELECT duration FROM horsies_retention_classes '
-                        "WHERE class_key = 'heartbeats'"
+                        'SELECT make_interval(hours => heartbeat_horizon_hours) '
+                        "FROM horsies_retention_classes WHERE class_key = 'heartbeats'"
                     )
                 )
             ).scalar_one_or_none()

@@ -35,6 +35,7 @@ from horsies.core.models.worker_profile import (
     TaskLimit,
 )
 from horsies.core.types.result import Err, Ok
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.child_protocol import (
     BlockingRun,
     ChildFrame,
@@ -117,6 +118,10 @@ from horsies.core.worker.shared_stop import (
 from horsies.core.worker.stored_timeout import TimeoutValueInvalid
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+CLAIM = DispatchClaim(
+    claimed_at=CLAIMED_AT, retry_count=0, max_retries=0, task_options=None,
+)
+"""The claim of the dispatch: its generation, and no retry facts."""
 
 SCRIPTED_CHILD = str(
     Path(__file__).parent.parent / 'fixtures' / 'slots' / 'scripted_child.py'
@@ -194,7 +199,7 @@ def _request(
         kwargs_json=argument,
         worker_id='worker-1',
         is_workflow_task=False,
-        claimed_at=CLAIMED_AT,
+        claim=CLAIM,
         work=SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=grace_ms),
     )
 

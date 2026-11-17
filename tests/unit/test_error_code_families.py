@@ -213,6 +213,16 @@ class TestStrictConstruction:
         with pytest.raises(ValueError, match='reserved built-in error code'):
             TaskError(error_code='RESULT_NOT_READY')
 
+    def test_workflow_stopped_is_reserved_and_not_a_task_code(self) -> None:
+        with pytest.raises(ValueError, match='reserved error code name'):
+            TaskError(error_code='WORKFLOW_STOPPED')
+
+    def test_workflow_stopped_is_not_a_built_in_code(self) -> None:
+        with pytest.raises(ValueError, match='Unknown built-in task code'):
+            TaskError.model_validate(
+                {'error_code': {'__builtin_task_code__': 'WORKFLOW_STOPPED'}},
+            )
+
     def test_dynamically_constructed_reserved_string_rejected(self) -> None:
         code = 'WORKFLOW' + '_' + 'PAUSED'
         with pytest.raises(ValueError, match='reserved built-in error code'):
@@ -455,7 +465,7 @@ class TestCheckReservedCodeCollision:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url='postgresql+psycopg://x/y'),
+                broker=PostgresConfig(database_url='postgresql://x/y'),
                 exception_mapper={ValueError: 'BROKER_ERROR'},
             ),
         )
@@ -476,7 +486,7 @@ class TestCheckReservedCodeCollision:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url='postgresql+psycopg://x/y'),
+                broker=PostgresConfig(database_url='postgresql://x/y'),
                 default_unhandled_error_code='BROKER_ERROR',
             ),
         )
@@ -496,7 +506,7 @@ class TestCheckReservedCodeCollision:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url='postgresql+psycopg://x/y'),
+                broker=PostgresConfig(database_url='postgresql://x/y'),
             ),
         )
         errors = app._check_runtime_policy_safety()
@@ -514,7 +524,7 @@ class TestCheckReservedCodeCollision:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url='postgresql+psycopg://x/y'),
+                broker=PostgresConfig(database_url='postgresql://x/y'),
                 exception_mapper={ValueError: 'MY_CUSTOM_CODE'},
             ),
         )
@@ -535,7 +545,7 @@ class TestCheckReservedCodeCollision:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url=SecretStr('postgresql+psycopg://x/y'),
+                    database_url=SecretStr('postgresql://x/y'),
                 ),
                 exception_mapper={ValueError: 'PYDANTIC_HYDRATION_ERROR'},
             ),
@@ -553,7 +563,7 @@ class TestCheckReservedCodeCollision:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url=SecretStr('postgresql+psycopg://x/y'),
+                    database_url=SecretStr('postgresql://x/y'),
                 ),
                 default_unhandled_error_code='PYDANTIC_HYDRATION_ERROR',
             ),
@@ -571,7 +581,7 @@ class TestCheckReservedCodeCollision:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url='postgresql+psycopg://x/y'),
+                broker=PostgresConfig(database_url='postgresql://x/y'),
             ),
         )
 
@@ -601,7 +611,7 @@ class TestCheckReservedCodeCollision:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url='postgresql+psycopg://x/y'),
+                broker=PostgresConfig(database_url='postgresql://x/y'),
                 exception_mapper=MappingProxyType({ValueError: 'BROKER_ERROR'}),
             ),
         )

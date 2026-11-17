@@ -24,7 +24,7 @@ from horsies.core.models.workflow import TaskNode, WorkflowSpec
 from horsies.core.errors import MultipleValidationErrors
 
 BROKER = PostgresConfig(
-    database_url='postgresql+psycopg://user:pass@localhost/db',
+    database_url='postgresql://user:pass@localhost/db',
     pool_size=5,
     max_overflow=5,
 )

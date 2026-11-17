@@ -240,4 +240,108 @@ mod tests {
             .await
             .expect("delete task");
     }
+
+    /// Seconds from the database clock to the lease of `task_id`.
+    async fn lease_left_s(pool: &PgPool, task_id: Uuid) -> f64 {
+        sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM claim_expires_at - NOW())::float8
+             FROM horsies_tasks WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("lease")
+    }
+
+    /// Python `test_worker_helpers.py::TestLeaseRenewalAgeGuard`: the claimer
+    /// loop renews the lease of a claim of its own worker that is younger
+    /// than `max_claim_renew_age_ms`; a claim older than that, and a claim of
+    /// another worker, keep their lease.
+    #[tokio::test]
+    #[serial]
+    async fn the_claimer_loop_renews_only_young_claims_of_its_own_worker() {
+        let pool = covered_pool().await;
+        let young = Uuid::new_v4();
+        let old = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let claims: [(Uuid, &str, f64); 3] = [
+            (young, BEAT_WORKER, 5.0),
+            (old, BEAT_WORKER, 7_200.0),
+            (other, "other-worker", 5.0),
+        ];
+        for (task_id, owner, age_s) in claims {
+            sqlx::query(
+                "INSERT INTO horsies_tasks (
+                    id, task_name, queue_name, priority, input, task_options, execution,
+                    retention_class_key, sent_at, created_at,
+                    command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                    status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                    started_at, finalizing_at, finalizing_by_worker_id,
+                    worker_pid, worker_hostname, worker_process_name,
+                    retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                    updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+                 ) VALUES (
+                    $1, 'beat_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                    'forever', NOW(), NOW(),
+                    1, decode(repeat('00', 32), 'hex'), NULL,
+                    'CLAIMED', NOW(), NOW() - $3 * interval '1 second', $2,
+                    NOW() + interval '1 second',
+                    NULL, NULL, NULL,
+                    NULL, NULL, NULL,
+                    0, 0, NULL, NULL, FALSE,
+                    NOW(), FALSE, NULL, NULL
+                 )",
+            )
+            .bind(task_id)
+            .bind(owner)
+            .bind(age_s)
+            .execute(&pool)
+            .await
+            .expect("seed CLAIMED task");
+        }
+
+        let cancel = CancellationToken::new();
+        let beats = spawn_claimer_heartbeat(
+            pool.clone(),
+            BEAT_WORKER.to_owned(),
+            "h".to_owned(),
+            1,
+            Duration::from_secs(3_600),
+            600_000,
+            3_600_000,
+            cancel.clone(),
+        );
+        // The first beat runs at start; wait until it renewed the young claim.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while lease_left_s(&pool, young).await < 300.0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the young claim was not renewed in time"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        cancel.cancel();
+        beats.await.expect("the claimer loop ends at its cancel");
+
+        assert!(
+            lease_left_s(&pool, old).await < 60.0,
+            "an old claim kept its lease"
+        );
+        assert!(
+            lease_left_s(&pool, other).await < 60.0,
+            "a claim of another worker kept its lease"
+        );
+
+        let ids = vec![young, old, other];
+        sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id = ANY($1)")
+            .bind(&ids)
+            .execute(&pool)
+            .await
+            .expect("delete beats");
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = ANY($1)")
+            .bind(&ids)
+            .execute(&pool)
+            .await
+            .expect("delete tasks");
+    }
 }
