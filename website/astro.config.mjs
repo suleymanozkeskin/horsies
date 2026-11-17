@@ -25,8 +25,7 @@ export default defineConfig({
 		'/rust/workers/worker-architecture': '/horsies/workers/worker-architecture/',
 		'/rust/scheduling/scheduler-overview': '/horsies/scheduling/scheduler-overview/',
 		'/rust/questions-and-answers': '/horsies/questions-and-answers/',
-		// A Rust API page that the 0.8.0 client replaced redirects to its new page;
-		// one whose API the client does not have yet redirects to the Rust overview.
+		// A Rust API page that the 0.8.0 client replaced redirects to its new page.
 		'/rust/tasks/error-handling': '/horsies/rust/tasks/errors/',
 		'/rust/tasks/retry-policy': '/horsies/rust/tasks/defining-tasks/',
 		'/rust/concepts/result-handling': '/horsies/rust/tasks/retrieving-results/',
@@ -38,13 +37,12 @@ export default defineConfig({
 		'/rust/internals/serialization': '/horsies/internals/serialization/',
 		'/rust/scheduling/schedule-patterns': '/horsies/rust/scheduling/schedule-config/',
 		'/rust/monitoring/web-ui-deployment': '/horsies/rust/monitoring/web-ui-mount/',
-		'/rust/operations/cutover-runbook': '/horsies/rust/',
-		'/rust/quick-start/getting-started': '/horsies/rust/',
-		'/rust/quick-start/01-configuring-horsies': '/horsies/rust/',
-		'/rust/quick-start/02-producing-tasks': '/horsies/rust/',
-		'/rust/quick-start/03-defining-workflows': '/horsies/rust/',
-		'/rust/quick-start/04-scheduling': '/horsies/rust/',
-		'/rust/quick-start/05-workflow-patterns': '/horsies/rust/',
+		'/rust/operations/cutover-runbook': '/horsies/rust/migrations/switching-to-0-8-0/',
+		'/rust/quick-start/01-configuring-horsies': '/horsies/rust/quick-start/getting-started/',
+		'/rust/quick-start/02-producing-tasks': '/horsies/rust/quick-start/getting-started/',
+		'/rust/quick-start/03-defining-workflows': '/horsies/rust/quick-start/getting-started/',
+		'/rust/quick-start/04-scheduling': '/horsies/rust/quick-start/getting-started/',
+		'/rust/quick-start/05-workflow-patterns': '/horsies/rust/quick-start/getting-started/',
 	},
 	integrations: [
 		starlight({
@@ -253,15 +251,14 @@ export default defineConfig({
 					],
 				},
 				{
-					// The API of the Rust client. Every slug is under rust/. An item with the
-					// badge "not written" has no page yet and links to the issue that tracks it.
+					// The API of the Rust client. Every slug is under rust/.
 					label: 'Rust API',
 					items: [
 						{ label: 'Overview', slug: 'rust' },
 						{
 							label: 'Quick Start',
 							items: [
-								{ label: 'Getting Started', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Getting Started', slug: 'rust/quick-start/getting-started' },
 							],
 						},
 						{
@@ -271,7 +268,7 @@ export default defineConfig({
 								{ label: 'Task Errors', slug: 'rust/tasks/errors' },
 								{ label: 'Sending Tasks', slug: 'rust/tasks/sending-tasks' },
 								{ label: 'Retrieving Results', slug: 'rust/tasks/retrieving-results' },
-								{ label: 'Blocking API', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Blocking API', slug: 'rust/tasks/blocking-api' },
 							],
 						},
 						{
@@ -311,16 +308,16 @@ export default defineConfig({
 						{
 							label: 'Operations',
 							items: [
-								{ label: 'Rerun in Your Transaction', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
-								{ label: 'Async Frameworks', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
-								{ label: 'Testing', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Rerun in Your Transaction', slug: 'rust/operations/rerun-in-your-transaction' },
+								{ label: 'Async Frameworks', slug: 'rust/guides/async-frameworks' },
+								{ label: 'Testing', slug: 'rust/operations/testing' },
 								{ label: 'CLI Reference', slug: 'rust/cli' },
 							],
 						},
 						{
 							label: 'Migrations',
 							items: [
-								{ label: 'Switching to 0.8.0', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Switching to 0.8.0', slug: 'rust/migrations/switching-to-0-8-0' },
 							],
 						},
 					],

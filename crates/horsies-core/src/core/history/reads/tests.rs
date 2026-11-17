@@ -1047,6 +1047,19 @@ async fn core_result_read(
     read
 }
 
+/// The `ok` value of the stored result envelope of `record`.
+fn stored_ok(record: &crate::broker::RawResultRecord) -> serde_json::Value {
+    let envelope: serde_json::Value = serde_json::from_str(
+        record
+            .raw_result
+            .as_ref()
+            .expect("the record stores a result")
+            .as_str(),
+    )
+    .expect("the stored envelope is JSON");
+    envelope["ok"].clone()
+}
+
 #[tokio::test]
 #[serial]
 async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
@@ -1107,10 +1120,11 @@ async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
     );
     let broker = PostgresBroker::from_pool(database.pool.clone());
     let confirmed = broker
-        .get_result::<i32>(completed_id, None)
+        .get_raw_result_record(completed_id, None)
         .await
-        .expect("the detail reader confirms the history row");
-    assert!(matches!(confirmed, TaskResult::Ok(7)));
+        .expect("the detail reader confirms the history row")
+        .expect_found();
+    assert_eq!(stored_ok(&confirmed), serde_json::json!(7));
     database.drop().await;
 }
 
@@ -1198,10 +1212,11 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
 
     let broker = PostgresBroker::from_pool(database.pool.clone());
     let staged = broker
-        .get_result::<i32>(completed_id, None)
+        .get_raw_result_record(completed_id, None)
         .await
-        .expect("staged history get_result");
-    assert!(matches!(staged, TaskResult::Ok(7)));
+        .expect("staged history result read")
+        .expect_found();
+    assert_eq!(stored_ok(&staged), serde_json::json!(7));
 
     sqlx::query("DROP FUNCTION horsies_task_result_staged(uuid)")
         .execute(&mut *connection)
@@ -1217,26 +1232,21 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
     // once with the refusal that names the function (Python's rule); the
     // next call falls back to the live and detail reads.
     let refused = broker
-        .get_result::<i32>(completed_id, None)
+        .get_raw_result_record(completed_id, None)
         .await
         .expect_err("the first broker call after the drop fails");
-    assert!(
-        matches!(
-            &refused,
-            BrokerError::Statement(StatementFailure::StatementRefused { cause, .. })
-                if cause.server_error().code().code() == "42883"
-        ),
+    assert_eq!(
+        refused.code,
+        crate::broker::BrokerErrorCode::TaskInfoQueryFailed,
         "{refused:?}"
     );
-    assert!(
-        refused.to_string().contains(TASK_RESULT_FUNCTION),
-        "{refused}"
-    );
+    assert!(refused.message.contains(TASK_RESULT_FUNCTION), "{refused}");
     let fallback = broker
-        .get_result::<i32>(completed_id, None)
+        .get_raw_result_record(completed_id, None)
         .await
-        .expect("fallback history get_result");
-    assert!(matches!(fallback, TaskResult::Ok(7)));
+        .expect("fallback history result read")
+        .expect_found();
+    assert_eq!(stored_ok(&fallback), serde_json::json!(7));
 
     assert!(StagedLoaderPublisher
         .needs_republication(&mut connection)

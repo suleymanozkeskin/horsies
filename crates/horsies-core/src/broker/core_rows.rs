@@ -5,9 +5,7 @@
 
 use crate::broker::error::BrokerError;
 use crate::broker::health::{ListedWorkerStateRow, StoredWorkerState};
-use crate::broker::row::task::{
-    ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow, TaskResultRow,
-};
+use crate::broker::row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow};
 use crate::broker::task_lists::{ListEnd, ListRow};
 use crate::db::{
     BoundStatement, CheckoutClass, CorePool, DiscardReason, FromSql, NotSentCause, PartitionDdl,
@@ -282,19 +280,6 @@ fn expired_task_row(
         enqueued_at: column(row, statement, "enqueued_at")?,
         good_until: column(row, statement, "good_until")?,
         expired_for_us: column(row, statement, "expired_for_us")?,
-    })
-}
-
-/// Reads a [`TaskResultRow`].
-pub(crate) fn task_result_row(
-    row: &Row,
-    statement: &TypedStatement,
-) -> Result<TaskResultRow, RowDecodeError> {
-    Ok(TaskResultRow {
-        id: column(row, statement, "id")?,
-        status: column(row, statement, "status")?,
-        result: column(row, statement, "result")?,
-        failed_reason: column(row, statement, "failed_reason")?,
     })
 }
 

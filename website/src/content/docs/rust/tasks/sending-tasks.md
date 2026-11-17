@@ -110,7 +110,7 @@ The meaning of the reservation window and of retention is on [Retention Config](
 | `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Accepted |
 
 - `EnqueueFailed`: the row may or may not exist. `retryable` is the classification of the cause.
-- `AsyncContext` is the error of a blocking send on a thread that runs a runtime. The async sends do not return it.
+- `AsyncContext` is the error of a blocking send on a thread that runs a runtime. The async sends do not return it. See [Blocking API](/horsies/rust/tasks/blocking-api/#on-a-runtime-thread).
 - `PayloadMismatch`: the task id exists with another command or idempotency key; nothing was written.
 - `IdempotencyKeyConflict`: another task (`owner_task_id`) holds the key with another command; nothing was written.
 

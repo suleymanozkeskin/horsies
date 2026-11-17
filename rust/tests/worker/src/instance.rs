@@ -178,7 +178,8 @@ impl Instance {
 }
 
 /// Python `instance_recovery.py`: 1 s heartbeats and checks, the smallest
-/// stale thresholds that the validation admits.
+/// stale thresholds that the validation admits, and a worker state
+/// snapshot each second.
 pub fn fast_recovery() -> RecoveryConfig {
     RecoveryConfig {
         runner_heartbeat_interval_ms: 1_000,
@@ -187,6 +188,7 @@ pub fn fast_recovery() -> RecoveryConfig {
         claimed_stale_threshold_ms: 2_000,
         crashed_worker_recovery_grace_ms: 2_000,
         check_interval_ms: 1_000,
+        worker_state_snapshot_interval_ms: 1_000,
         ..RecoveryConfig::default()
     }
 }
@@ -298,6 +300,9 @@ pub enum Profile {
     Isolated2,
     /// `isolated-4`: four isolated children.
     Isolated4,
+    /// `isolated-8`: eight isolated children, more than the cap of the
+    /// `high` queue.
+    Isolated8,
     /// `claim-batch-1`: one isolated child; one claim pass takes at most one
     /// task per queue.
     ClaimBatch1,
@@ -318,10 +323,11 @@ pub enum Profile {
 
 impl Profile {
     /// Every profile.
-    pub const ALL: [Profile; 9] = [
+    pub const ALL: [Profile; 10] = [
         Profile::Isolated1,
         Profile::Isolated2,
         Profile::Isolated4,
+        Profile::Isolated8,
         Profile::ClaimBatch1,
         Profile::RecycleAfter2,
         Profile::SharedOnly1x4,
@@ -336,6 +342,7 @@ impl Profile {
             Self::Isolated1 => "isolated-1",
             Self::Isolated2 => "isolated-2",
             Self::Isolated4 => "isolated-4",
+            Self::Isolated8 => "isolated-8",
             Self::ClaimBatch1 => "claim-batch-1",
             Self::RecycleAfter2 => "recycle-after-2-tasks",
             Self::SharedOnly1x4 => "shared-only-1x4",
@@ -353,6 +360,7 @@ impl Profile {
             Self::Isolated1
             | Self::Isolated2
             | Self::Isolated4
+            | Self::Isolated8
             | Self::ClaimBatch1
             | Self::RecycleAfter2
             | Self::SplitShared1x4
@@ -375,6 +383,7 @@ impl Profile {
             Self::Isolated1 => with_isolated(base, 1),
             Self::Isolated2 => with_isolated(base, 2),
             Self::Isolated4 => with_isolated(base, 4),
+            Self::Isolated8 => with_isolated(base, 8),
             Self::ClaimBatch1 => WorkerProfile {
                 claim: ClaimLimits {
                     per_queue_per_pass: TaskLimitSetting::TaskLimit {
