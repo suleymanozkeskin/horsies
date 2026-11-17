@@ -1846,4 +1846,101 @@ mod tests {
             "{counted_without_count:?}"
         );
     }
+
+    /// Python `tests/unit/test_phase2_recovery_policy.py::TestRecoveredFailureResult::test_the_stored_error_survives`
+    /// and `tests/unit/test_task_error_stored_decode.py::TestErrorWithNoMessage::test_phase2_recovery_returns_the_error`:
+    /// phase-2 recovery writes the failed node with the error that the task
+    /// stored, also an error with a code and no message.
+    #[tokio::test]
+    #[serial]
+    async fn recovery_writes_the_stored_error_of_a_failed_task_into_its_node() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let with_message =
+            crate::core::TaskError::new("NODE_FAILURE", "the real one").expect("a user error code");
+        let without_message = crate::core::TaskError {
+            message: None,
+            ..crate::core::TaskError::new("RATE_LIMITED", "dropped").expect("a user error code")
+        };
+        for (code, message, error) in [
+            ("NODE_FAILURE", Some("the real one"), with_message),
+            ("RATE_LIMITED", None, without_message),
+        ] {
+            sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
+                .execute(&pool)
+                .await
+                .expect("clear pending rows before global recovery");
+            let workflow_id = Uuid::new_v4();
+            let task_id = Uuid::new_v4();
+            seed_workflow_task(&pool, workflow_id, task_id, false).await;
+            let stored =
+                serde_json::to_string(&crate::core::TaskResult::<serde_json::Value>::Err(error))
+                    .expect("encode the failure result");
+            let outcomes = terminalize(
+                &pool,
+                &TerminalizationCommand::FailLockedTask {
+                    task_id,
+                    fence: PriorLockedRead {
+                        worker_id: "p7-worker".to_owned(),
+                    },
+                    result_json: stored,
+                    error_code: Some(code.to_owned()),
+                    failed_reason: None,
+                },
+            )
+            .await
+            .expect("fail the workflow task");
+            assert!(
+                matches!(
+                    outcomes.as_slice(),
+                    [TerminalizationOutcome::Applied { .. }]
+                ),
+                "{code}: {outcomes:?}"
+            );
+            sqlx::query(
+                "UPDATE horsies_workflow_phase2_pending
+                 SET created_at = NOW() - INTERVAL '1 hour'
+                 WHERE task_id = $1",
+            )
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .expect("age the phase-2 record");
+
+            let summary = drive_phase2_recovery(
+                &pool,
+                &PostgresBroker::from_pool(pool.clone()),
+                &crate::core::WorkflowSpecRegistry::new(
+                    crate::core::registry::BuilderHookName::SPEC_BUILDER,
+                ),
+                0,
+                1,
+                25,
+                &RetentionConfig::default(),
+            )
+            .await
+            .expect("recovery pass");
+
+            let (node_status, node_result): (String, Option<String>) = sqlx::query_as(
+                "SELECT status, result FROM horsies_workflow_tasks WHERE task_id = $1",
+            )
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the node");
+            cleanup_case(&pool, workflow_id, task_id).await;
+            assert_eq!(summary.applied, 1, "{code}: {summary:?}");
+            assert_eq!(node_status, "FAILED", "{code}");
+            let node_result = node_result.expect("the node stores the task's result");
+            let stored_error = match serde_json::from_str::<
+                crate::core::TaskResult<serde_json::Value>,
+            >(&node_result)
+            .expect("the node result is an envelope")
+            {
+                crate::core::TaskResult::Err(error) => error,
+                crate::core::TaskResult::Ok(value) => panic!("{code}: ok {value}"),
+            };
+            assert_eq!(stored_error.error_code.to_string(), code);
+            assert_eq!(stored_error.message.as_deref(), message, "{code}");
+        }
+    }
 }
