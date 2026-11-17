@@ -41,7 +41,7 @@ REBOUND_PACKAGES: Final = ('horsies', 'tests')
 CORE_HANDLE_MODULE: Final = 'horsies._core'
 """The module of ``CoreHandle``."""
 
-HANDLE_TAKING_CLASSES: Final = ('CoreScheduler',)
+HANDLE_TAKING_CLASSES: Final = ('CoreScheduler', 'MonitoringHandler')
 """The classes of ``horsies._core`` whose constructor takes a ``CoreHandle``.
 A native constructor refuses the Python wrapper of the Python run, so in
 that run it gets the native handle that the wrapper holds. Native code calls
