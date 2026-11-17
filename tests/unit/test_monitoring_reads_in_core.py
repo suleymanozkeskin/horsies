@@ -1,0 +1,253 @@
+"""The monitoring reads that run in the core: the record of the core decides the answer.
+
+``list_tasks``, ``get_task_detail`` and ``task_facets`` call the broker's core
+handle. The tests run on a mocked handle: the record of each call is the
+seam. ``MonitoringJson`` is validated into the response model; a failure
+record maps to its variant; a core boundary error of the call is a database
+failure. The decoding of the function rows is the core's, and its tests
+cover it.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime, timedelta
+from typing import Final
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from horsies._core import (
+    CoreStopped,
+    MonitoringFailed,
+    MonitoringJson,
+    TaskDetailAbsent,
+    TaskFacetsQuery,
+    TaskListQuery,
+    TooManyPendingCalls,
+)
+from horsies.core.history.errors import HistoryContractError
+from horsies.core.models.tasks import Execution
+from horsies.core.types.core_failure import CoreOperationFailed
+from horsies.core.types.result import Err, Ok
+from horsies.core.types.status import TaskStatus
+from horsies.monitoring import (
+    ErrorCategory,
+    Facets,
+    MonitoringQueryDbOperationFailed,
+    MonitoringQueryHistoryContractViolation,
+    MonitoringResult,
+    MonitoringWindow,
+    TaskAbsenceReason,
+    TaskDetail,
+    TaskDetailNotFound,
+    TaskListPage,
+    TaskPage,
+    get_task_detail,
+    list_tasks,
+    task_facets,
+)
+
+pytestmark = [pytest.mark.unit]
+
+TASK_ID: Final = uuid.UUID('0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b')
+UPPER: Final = datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
+WINDOW: Final = MonitoringWindow(lower=UPPER - timedelta(days=1), upper=UPPER)
+MESSAGE: Final = 'task list query failed: message-marker-4c1e'
+
+PAGE_JSON: Final = (
+    '{"rows": [{"id": "0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b", "task_name": "t", '
+    '"queue_name": "default", "status": "FAILED", "priority": 100, "retry_count": 1, '
+    '"max_retries": 3, "is_workflow_task": false, "error_code": "ORDER_REJECTED", '
+    '"error_category": "DOMAIN", "worker_hostname": "host-1", "worker_id": "worker-1", '
+    '"enqueued_at": "2026-11-17T11:00:00Z", "started_at": "2026-11-17T11:00:05.250000Z", '
+    '"completed_at": null, "failed_at": "2026-11-17T11:00:09Z", "queue_s": 5, "exec_s": 3}], '
+    '"total": 7}'
+)
+FACETS_JSON: Final = (
+    '{"workers": [{"value": "worker-1", "count": 2}], "task_names": [], '
+    '"queues": [{"value": "default", "count": 2}], '
+    '"error_codes": [{"value": "ORDER_REJECTED", "count": 1, "category": "DOMAIN"}], '
+    '"error_category_totals": {"DOMAIN": 1}}'
+)
+DETAIL_JSON: Final = (
+    '{"leaf": {"task_id": "0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b", "status": "RUNNING", '
+    '"error_code": null, "failed_reason": null, "retry_count": 0, "max_retries": 3, '
+    '"enqueued_at": "2026-11-17T11:00:00Z", "started_at": "2026-11-17T11:00:01Z", '
+    '"completed_at": null, "failed_at": null, "queue_s": 1, "exec_s": 42, '
+    '"worker_hostname": "host-1", "good_until": null, "execution": "SHARED_THREAD"}, '
+    '"task_name": "t", "queue_name": "default", "priority": 100, "is_workflow_task": true, '
+    '"error_category": null, "attempts": [], '
+    '"workflow_id": "0190a1b2-c3d4-7e5f-8a6b-000000000001", "workflow_task_index": 2}'
+)
+
+
+def _record(record_class: type, **fields: object) -> MagicMock:
+    """A stand-in for a core record: an instance of ``record_class`` for a
+    class pattern, with ``fields``."""
+    record = MagicMock(spec=record_class)
+    for name, value in fields.items():
+        setattr(record, name, value)
+    return record
+
+
+def _broker(method: str, answer: object) -> tuple[MagicMock, AsyncMock]:
+    """A broker whose core handle answers ``method`` with ``answer``: a record,
+    or an exception that the call raises."""
+    match answer:
+        case BaseException():
+            call = AsyncMock(side_effect=answer)
+        case _:
+            call = AsyncMock(return_value=answer)
+    handle = MagicMock()
+    setattr(handle, method, call)
+    broker = MagicMock()
+    broker._core_handle = handle
+    return broker, call
+
+
+def _only_argument(call: AsyncMock) -> object:
+    """The one positional argument of the one await of ``call``."""
+    call.assert_awaited_once()
+    arguments: tuple[object, ...] = tuple(call.await_args_list[0].args)
+    assert len(arguments) == 1, arguments
+    return arguments[0]
+
+
+async def _list(answer: object) -> tuple[MonitoringResult[TaskListPage], AsyncMock]:
+    broker, call = _broker('monitoring_list_tasks_async', answer)
+    result = await list_tasks(
+        broker,
+        window=WINDOW,
+        statuses=[TaskStatus.FAILED],
+        task_names=['t'],
+        queues=[],
+        workers=[],
+        error_codes=[],
+        error_categories=[ErrorCategory.DOMAIN],
+        retried_only=False,
+        sort_by='enqueued_at',
+        sort_dir='desc',
+        page=TaskPage(offset=0, limit=50),
+    )
+    return result, call
+
+
+class TestAnswers:
+    @pytest.mark.asyncio
+    async def test_the_page_is_the_json_of_the_core_model(self) -> None:
+        result, call = await _list(_record(MonitoringJson, json=PAGE_JSON))
+
+        assert result == Ok(TaskListPage.model_validate_json(PAGE_JSON))
+        match result:
+            case Ok(TaskListPage(rows=[row], total=7)):
+                assert row.id == TASK_ID
+                assert row.started_at == datetime(2026, 11, 17, 11, 0, 5, 250000, tzinfo=UTC)
+            case _:
+                raise AssertionError(f'expected one row and the total: {result!r}')
+        assert _only_argument(call).__class__ is TaskListQuery
+
+    @pytest.mark.asyncio
+    async def test_the_facets_are_the_json_of_the_core_model(self) -> None:
+        broker, call = _broker('monitoring_task_facets_async', _record(MonitoringJson, json=FACETS_JSON))
+
+        result = await task_facets(
+            broker,
+            window=WINDOW,
+            statuses=[],
+            error_categories=[ErrorCategory.DOMAIN],
+            retried_only=True,
+        )
+
+        assert result == Ok(Facets.model_validate_json(FACETS_JSON))
+        assert _only_argument(call).__class__ is TaskFacetsQuery
+
+    @pytest.mark.asyncio
+    async def test_the_detail_is_the_json_of_the_core_model_with_the_class(self) -> None:
+        broker, call = _broker('monitoring_task_detail_async', _record(MonitoringJson, json=DETAIL_JSON))
+
+        result = await get_task_detail(broker, TASK_ID)
+
+        match result:
+            case Ok(TaskDetail(leaf=leaf, workflow_id=workflow_id)):
+                assert leaf.execution is Execution.SHARED_THREAD
+                assert workflow_id == '0190a1b2-c3d4-7e5f-8a6b-000000000001'
+            case _:
+                raise AssertionError(f'expected the task: {result!r}')
+        call.assert_awaited_once_with(TASK_ID)
+
+    @pytest.mark.parametrize('reason', list(TaskAbsenceReason))
+    @pytest.mark.asyncio
+    async def test_an_absent_task_keeps_its_reason(self, reason: TaskAbsenceReason) -> None:
+        broker, _ = _broker(
+            'monitoring_task_detail_async',
+            _record(TaskDetailAbsent, task_id=TASK_ID, reason=reason.value),
+        )
+
+        result = await get_task_detail(broker, TASK_ID)
+
+        assert result == Ok(TaskDetailNotFound(task_id=TASK_ID, reason=reason))
+
+
+class TestFailures:
+    @pytest.mark.parametrize('retryable', [True, False])
+    @pytest.mark.asyncio
+    async def test_a_database_failure_keeps_its_message_and_retry_rule(self, retryable: bool) -> None:
+        result, _ = await _list(
+            _record(MonitoringFailed, code='DB_OPERATION_FAILED', message=MESSAGE, retryable=retryable),
+        )
+
+        match result:
+            case Err(MonitoringQueryDbOperationFailed() as error):
+                assert error.message == MESSAGE
+                assert error.retryable is retryable
+                assert isinstance(error.exception, CoreOperationFailed)
+                assert error.exception.subject == 'horsies.monitoring.list_tasks'
+                assert error.exception.message == MESSAGE
+            case _:
+                raise AssertionError(f'expected a database failure: {result!r}')
+
+    @pytest.mark.asyncio
+    async def test_history_data_that_does_not_decode_is_a_contract_violation(self) -> None:
+        message = 'task detail query failed: history row has status BOGUS'
+        broker, _ = _broker(
+            'monitoring_task_detail_async',
+            _record(MonitoringFailed, code='HISTORY_CONTRACT_VIOLATION', message=message, retryable=False),
+        )
+
+        result = await get_task_detail(broker, TASK_ID)
+
+        match result:
+            case Err(MonitoringQueryHistoryContractViolation() as error):
+                assert error.message == message
+                assert error.retryable is False
+                assert isinstance(error.exception, HistoryContractError)
+            case _:
+                raise AssertionError(f'expected a contract violation: {result!r}')
+
+    @pytest.mark.asyncio
+    async def test_the_python_only_loop_limit_from_the_core_is_a_defect(self) -> None:
+        with pytest.raises(AssertionError, match='EVENT_LOOP_LIMIT'):
+            await _list(_record(MonitoringFailed, code='EVENT_LOOP_LIMIT', message=MESSAGE, retryable=False))
+
+    @pytest.mark.parametrize(
+        ('raised', 'retryable'),
+        [
+            (TooManyPendingCalls('CoreHandle.monitoring_list_tasks_async', 65_536), True),
+            (CoreStopped('core task', 'panic'), False),
+        ],
+        ids=['too-many-calls', 'stopped'],
+    )
+    @pytest.mark.asyncio
+    async def test_a_core_boundary_error_is_a_database_failure(
+        self, raised: BaseException, retryable: bool,
+    ) -> None:
+        result, _ = await _list(raised)
+
+        match result:
+            case Err(MonitoringQueryDbOperationFailed() as error):
+                assert error.exception is raised
+                assert error.retryable is retryable
+                assert error.message.startswith('task list query failed: ')
+            case _:
+                raise AssertionError(f'expected a database failure: {result!r}')

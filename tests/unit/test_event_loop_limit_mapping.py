@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import SecretStr
@@ -31,11 +31,10 @@ from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow import NodeKey
 from horsies.core.models.workflow.handle_types import HandleErrorCode, HandleEventLoopLimit
-from horsies.core.task_decorator import TaskHandle, create_task_wrapper
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.task_decorator import create_task_wrapper
+from horsies.core.types.result import Err, is_err, is_ok
 from horsies.monitoring.task_actions import TaskActionEventLoopLimit
 from horsies.core.workflows.lifecycle import (
-    pause_workflow,
     resume_workflow,
     start_workflow_async,
 )
@@ -114,7 +113,7 @@ def _limited_handle() -> tuple[WorkflowHandle[Any], MagicMock]:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize('method', ['status_async', 'results_async', 'tasks_async', 'cancel_async'])
+@pytest.mark.parametrize('method', ['status_async', 'results_async', 'tasks_async'])
 def test_handle_wrap_methods_return_loop_limit(method: str) -> None:
     handle, broker = _limited_handle()
     loop_limit = broker.select_resources.return_value.err_value
@@ -171,12 +170,11 @@ def test_start_workflow_returns_loop_limit_before_any_attempt() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize('operation', [pause_workflow, resume_workflow])
-def test_pause_and_resume_return_loop_limit(operation: Any) -> None:
+def test_resume_returns_loop_limit() -> None:
     broker = MagicMock()
     loop_limit = attach_loop_limit(broker)
 
-    result = asyncio.run(operation(broker, WORKFLOW_ID))
+    result = asyncio.run(resume_workflow(broker, WORKFLOW_ID))
 
     assert is_err(result)
     assert result.err_value.code is HandleErrorCode.EVENT_LOOP_LIMIT
@@ -222,7 +220,9 @@ class TestRealBrokerAtTheLimit:
     """Each entry point returns its own catalog's EVENT_LOOP_LIMIT."""
 
     def test_broker_call(self, at_limit: _AtLimit) -> None:
-        result = at_limit.run(at_limit.broker.ping_database_async())
+        # A broker method that still selects a SQLAlchemy resource set; the
+        # database ping runs on the core pool and has no loop limit.
+        result = at_limit.run(at_limit.broker.get_stale_tasks())
 
         assert is_err(result)
         assert result.err_value.code is BrokerErrorCode.EVENT_LOOP_LIMIT
@@ -256,25 +256,3 @@ class TestRealBrokerAtTheLimit:
 
         assert is_err(result)
         assert result.err_value.code is MonitoringQueryErrorCode.EVENT_LOOP_LIMIT
-
-    def test_task_handle_get_async(self, at_limit: _AtLimit) -> None:
-        """TaskHandle folds the limit into RetrievalCode, as WorkflowHandle does."""
-        handle: TaskHandle[int] = TaskHandle(
-            str(uuid.uuid4()), app=at_limit.app, broker_mode=True, ok_type=int,
-        )
-
-        at_limit_result = at_limit.run(handle.get_async(timeout_ms=0))
-
-        assert at_limit_result.is_err()
-        error = at_limit_result.unwrap_err()
-        assert error.error_code is RetrievalCode.EVENT_LOOP_LIMIT
-        assert LIMIT_TEXT in (error.message or '')
-        # Not cached: the next get_async() reads the broker again.
-        with patch.object(
-            at_limit.broker,
-            'get_raw_result_record_async',
-            AsyncMock(return_value=Ok(None)),
-        ) as read:
-            later = at_limit.run(handle.get_async(timeout_ms=0))
-        read.assert_awaited_once()
-        assert later.unwrap_err().error_code is RetrievalCode.TASK_NOT_FOUND

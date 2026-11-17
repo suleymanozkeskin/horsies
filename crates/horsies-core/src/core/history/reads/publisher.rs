@@ -14,6 +14,7 @@
 
 use sqlx::{FromRow, PgConnection};
 
+use crate::broker::core_rows::{column, one_row, query_in, StatementLog};
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::TASK_LOOKUP_MANIFEST;
 #[cfg(test)]
@@ -22,9 +23,14 @@ use crate::core::history::names::{
     TASK_RESULT_FUNCTION,
 };
 use crate::core::history::partitions::publication::{LoaderPublication, LoaderRepublished};
+use crate::db::{Transaction, TypedStatement};
 
 const PUBLISH_READERS_SQL: &str =
     "SELECT outcome, absent_leaves FROM horsies_publish_history_readers()";
+
+/// `horsies_publish_history_readers()` on the statement layer.
+pub(crate) static PUBLISH_READERS: TypedStatement =
+    TypedStatement::new("publish_history_readers", PUBLISH_READERS_SQL, &[]);
 
 const READERS_CURRENT_SQL: &str = "SELECT horsies_history_readers_current()";
 
@@ -68,18 +74,7 @@ impl LoaderPublication for StagedLoaderPublisher {
         let row: PublicationRow = sqlx::query_as(PUBLISH_READERS_SQL)
             .fetch_one(connection)
             .await?;
-        match row.outcome.as_str() {
-            "PUBLISHED" | "ALREADY_CURRENT" => {}
-            other => {
-                return Err(HistoryError::contract(format!(
-                    "reader publication returned unknown outcome {other:?}"
-                )));
-            }
-        }
-        let absent_leaves = row.absent_leaves.ok_or_else(|| {
-            HistoryError::contract("reader publication returned no absent-leaf list")
-        })?;
-        Ok(LoaderRepublished { absent_leaves })
+        republished_of(&row.outcome, row.absent_leaves)
     }
 
     /// Whether the published manifest still names `leaf_name`.
@@ -117,6 +112,47 @@ impl LoaderPublication for StagedLoaderPublisher {
             )),
         }
     }
+}
+
+/// Publishes the readers for the attached history leaves in the caller's
+/// core transaction: one statement, the core form of
+/// [`StagedLoaderPublisher::republish`], with the same outcomes and errors.
+/// A database error aborts the caller's transaction (`25000` when it is not
+/// READ COMMITTED, `42P01` when no attached leaf resolves its parent).
+///
+/// Errors: `HistoryError::Statement`, `HistoryError::RowDecode`,
+/// `HistoryError::Contract` (an unknown outcome or a NULL absent-leaf list).
+pub(crate) async fn publish_readers_in(
+    transaction: &mut Transaction<'_>,
+    log: StatementLog,
+) -> Result<LoaderRepublished, HistoryError> {
+    let statement = &PUBLISH_READERS;
+    let rows = query_in(transaction, log, &statement.bind().finish()).await?;
+    let row = one_row(rows, statement)?;
+    let outcome: String = column(&row, statement, "outcome")?;
+    let absent_leaves: Option<Vec<String>> = column(&row, statement, "absent_leaves")?;
+    republished_of(&outcome, absent_leaves)
+}
+
+/// The publication of one `horsies_publish_history_readers` row. Pure.
+///
+/// Errors: `HistoryError::Contract` for an outcome other than `PUBLISHED`
+/// and `ALREADY_CURRENT`, or a NULL absent-leaf list.
+fn republished_of(
+    outcome: &str,
+    absent_leaves: Option<Vec<String>>,
+) -> Result<LoaderRepublished, HistoryError> {
+    match outcome {
+        "PUBLISHED" | "ALREADY_CURRENT" => {}
+        other => {
+            return Err(HistoryError::contract(format!(
+                "reader publication returned unknown outcome {other:?}"
+            )));
+        }
+    }
+    let absent_leaves = absent_leaves
+        .ok_or_else(|| HistoryError::contract("reader publication returned no absent-leaf list"))?;
+    Ok(LoaderRepublished { absent_leaves })
 }
 
 /// Published manifest entries whose relation no longer resolves, in name
@@ -184,5 +220,29 @@ mod publication_contract_tests {
         assert_eq!(before, after);
         assert_eq!(readers_before, readers_after);
         tx.rollback().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod republished_of_tests {
+    use super::*;
+
+    /// Both outcomes of `horsies_publish_history_readers` give the absent
+    /// leaves; another outcome and a NULL list break the contract.
+    #[test]
+    fn each_publication_outcome_and_each_refused_row() {
+        for outcome in ["PUBLISHED", "ALREADY_CURRENT"] {
+            let republished =
+                republished_of(outcome, Some(vec!["leaf_a".to_owned()])).expect("a known outcome");
+            assert_eq!(republished.absent_leaves, vec!["leaf_a".to_owned()]);
+        }
+        assert!(matches!(
+            republished_of("SKIPPED", Some(Vec::new())),
+            Err(HistoryError::Contract(_))
+        ));
+        assert!(matches!(
+            republished_of("PUBLISHED", None),
+            Err(HistoryError::Contract(_))
+        ));
     }
 }

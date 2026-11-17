@@ -2,8 +2,9 @@
 
 Reference: ``tests/dualrun/monitoring_list_reference.py`` (``list_tasks``
 as the totals, the live page and the history page in one session, merged
-in client code, in the decided order). Candidate: ``horsies.monitoring``
-(one call of ``horsies_monitoring_task_list``). The seed has live and
+in client code, in the decided order). Candidate: one call of
+``horsies_monitoring_task_list``, Python's body before the monitoring switch
+(``tests/dualrun/reference/monitoring_queries.py``). The seed has live and
 history rows that tie on every sort key: one ``enqueued_at`` on both sides,
 one task name in two cases, one priority, NULL start and end times; the
 history rows hold the lower task ids, so an order by id alone puts them
@@ -12,6 +13,12 @@ answers.
 
 A live row's open span counts up to the read time, so both sides read
 their spans at one fixed instant (``elapsed_s`` is replaced for the run).
+
+The caller switch pair of the monitoring switch: on the same seed, Python's
+``list_tasks`` against the production read, which the core runs. The core
+reads its own clock, so an open span of the core may be up to
+``COUNTING_SPAN_TOLERANCE_S`` longer; every other value of the reports must
+be equal.
 """
 
 from __future__ import annotations
@@ -34,7 +41,6 @@ from horsies.monitoring import (
     TaskPage,
     list_tasks,
 )
-from horsies.monitoring import queries as queries_module
 from horsies.monitoring.errors import MonitoringResult
 from horsies.monitoring.queries import SortDirection, TaskSortField, as_utc
 from tests.dualrun import monitoring_list_reference as reference
@@ -42,8 +48,10 @@ from tests.dualrun.monitoring_reads import (
     MakeDatabase,
     ReadPair,
     differing,
+    differing_reports,
     read_dual_run,
 )
+from tests.dualrun.reference import monitoring_queries as python_reads
 from tests.integration.monitoring_seeding import SeedRow, TaskRow, task_row
 
 pytestmark = [pytest.mark.integration]
@@ -217,6 +225,9 @@ def _list_pair(
     filter_name: str,
     filters: _Filters,
     page: TaskPage,
+    *,
+    reference_list: _ListRead = reference.list_tasks,
+    candidate_list: _ListRead = python_reads.list_tasks,
 ) -> ReadPair[object]:
     statuses, task_names, queues, workers, error_codes, categories, retried_only = filters
 
@@ -241,8 +252,8 @@ def _list_pair(
 
     return ReadPair(
         name=f'{sort_by} {sort_dir}, {filter_name}, offset {page.offset} limit {page.limit}',
-        reference=read(reference.list_tasks),
-        candidate=read(list_tasks),
+        reference=read(reference_list),
+        candidate=read(candidate_list),
     )
 
 
@@ -257,7 +268,7 @@ def _elapsed_at_read_now(start: datetime | None, end: datetime | None) -> int | 
 @pytest.fixture
 def fixed_read_time(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Both sides measure open spans to ``_READ_NOW``."""
-    monkeypatch.setattr(queries_module, 'elapsed_s', _elapsed_at_read_now)
+    monkeypatch.setattr(python_reads, 'elapsed_s', _elapsed_at_read_now)
     yield
 
 
@@ -318,3 +329,61 @@ def test_the_comparison_sees_a_candidate_that_reads_the_other_direction(
     )
 
     assert differing(answers) == [pair.name]
+
+
+def test_the_core_answers_what_python_answered(empty_database: MakeDatabase) -> None:
+    """The caller switch: Python's list read against the production read on the core."""
+    pairs = [
+        _list_pair(
+            sort_by,
+            sort_dir,
+            filter_name,
+            filters,
+            page,
+            reference_list=python_reads.list_tasks,
+            candidate_list=list_tasks,
+        )
+        for sort_by in _SORT_KEYS
+        for sort_dir in _DIRECTIONS
+        for filter_name, filters in _FILTERS
+        for page in _PAGES
+    ]
+
+    answers = read_dual_run(empty_database, _seed(), pairs)
+
+    assert len(answers) == 11 * 2 * 9 * 3
+    assert [each.name for each in answers if not isinstance(each.candidate, Ok)] == []
+    assert differing_reports(answers) == {}
+
+
+def test_the_core_comparison_sees_a_candidate_that_reads_the_other_direction(
+    empty_database: MakeDatabase,
+) -> None:
+    """The core candidate reads the page ascending where Python reads it descending."""
+    _, filters = _FILTERS[0]
+    pair = _list_pair(
+        'enqueued_at',
+        'desc',
+        'none',
+        filters,
+        _PAGES[0],
+        reference_list=python_reads.list_tasks,
+        candidate_list=list_tasks,
+    )
+    flipped = _list_pair(
+        'enqueued_at',
+        'asc',
+        'none',
+        filters,
+        _PAGES[0],
+        reference_list=python_reads.list_tasks,
+        candidate_list=list_tasks,
+    )
+
+    answers = read_dual_run(
+        empty_database,
+        _seed(),
+        [ReadPair(name=pair.name, reference=pair.reference, candidate=flipped.candidate)],
+    )
+
+    assert list(differing_reports(answers)) == [pair.name]

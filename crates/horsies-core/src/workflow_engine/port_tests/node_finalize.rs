@@ -43,14 +43,14 @@ const WORKER_PID: i32 = 4242;
 const WORKER_HOSTNAME: &str = "port-finalize-host";
 const WORKER_PROCESS_NAME: &str = "port-finalize-process";
 
-/// A queue name whose capacity channel (`task_queue_` and 60 bytes) is
-/// longer than the 63 bytes of a PostgreSQL channel name: the server refuses
-/// its NOTIFY (Python's `_TOO_LONG_QUEUE`).
-const TOO_LONG_QUEUE: &str = "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
-
 /// The queue of the phase-2 wake tests, and its capacity channel.
 const WAKE_QUEUE: &str = "port_finalize_wake";
 const WAKE_CHANNEL: &str = "task_queue_port_finalize_wake";
+
+/// The queue of a node that [`NodeSeed::task`] seeds, and its capacity
+/// channel: the node finish wakes the queue of the node row.
+const SEEDED_NODE_QUEUE: &str = "default";
+const SEEDED_NODE_CHANNEL: &str = "task_queue_default";
 
 /// Node A of an A -> B workflow, RUNNING under [`WORKER`], with the facts
 /// that the claim and the start write give the worker.
@@ -697,37 +697,119 @@ async fn phase_two_wakes_the_queue_of_the_task_once() {
     }
 }
 
-/// `test_worker_finalize_workflow_phase.py::test_phase_two_that_fails_sends_no_wake`:
-/// a phase 2 that fails after the node write rolls the write back and sends
-/// no wake.
+/// `test_worker_finalize_workflow_phase.py::test_phase_two_that_fails_after_its_wake_sends_no_wake`
+/// (`tests/integration/test_worker_finalize_workflow_phase.py:198`): a
+/// phase 2 that fails after the node write rolls the write back, keeps the
+/// phase-2 record and sends no wake. The node finish wakes the queue of the
+/// node row (`horsies_workflow_node_apply`), so the listener is on the
+/// channel of the seeded node's queue. Control: after the stored success
+/// policy is repaired, the retry of phase 2 commits, and the same listener
+/// hears its wake.
 #[tokio::test]
 #[serial]
 async fn a_phase_two_that_fails_sends_no_wake() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = seed_owed_phase_two(&db.pool, Some(poison_success_policy())).await;
-    let mut listener = Notifications::listen(&db.pool, &[WAKE_CHANNEL]).await;
+    let mut listener = Notifications::listen(&db.pool, &[SEEDED_NODE_CHANNEL]).await;
 
-    let result = phase_two(&db.pool, task_id, WAKE_QUEUE, true).await;
+    let result = phase_two(&db.pool, task_id, SEEDED_NODE_QUEUE, true).await;
 
     let _error = assert_a_phase_two_error(&result);
     assert_eq!(listener.received().await, Vec::new());
     assert_eq!(node(&db.pool, workflow_id, 0).await.status, "RUNNING");
+    assert_eq!(pending_rows(&db.pool, task_id).await, 1);
+
+    execute(
+        &db.pool,
+        &format!("UPDATE horsies_workflows SET success_policy = NULL WHERE id = '{workflow_id}'"),
+    )
+    .await;
+    phase_two(&db.pool, task_id, SEEDED_NODE_QUEUE, true)
+        .await
+        .expect("the retry of phase 2");
+    assert_eq!(node(&db.pool, workflow_id, 0).await.status, "COMPLETED");
+    assert_eq!(pending_rows(&db.pool, task_id).await, 0);
+    assert_eq!(
+        listener.received().await,
+        vec![(SEEDED_NODE_CHANNEL.to_owned(), "capacity".to_owned())]
+    );
     db.drop().await;
 }
 
-/// `test_worker_finalize_workflow_phase.py::test_a_notify_that_fails_on_the_server_is_a_phase2_error`:
-/// the node write and the wake share one transaction. A wake that the
-/// server refuses is a phase-2 error, and the node write does not commit.
+/// Every column of node `task_index` of `workflow_id`, as JSON.
+async fn node_image(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> serde_json::Value {
+    sqlx::query_scalar(
+        "SELECT to_jsonb(n) FROM horsies_workflow_tasks n
+         WHERE n.workflow_id = $1 AND n.task_index = $2",
+    )
+    .bind(workflow_id)
+    .bind(task_index)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|error| panic!("read node {task_index} of {workflow_id}: {error}"))
+}
+
+/// `test_worker_finalize_workflow_phase.py::test_phase_two_that_fails_after_its_wake_sends_no_wake`
+/// (`tests/integration/test_worker_finalize_workflow_phase.py:198`), with the
+/// failure at the step: the node write and the wake share one transaction. A
+/// phase 2 whose connection is lost after the server ran the step is a
+/// phase-2 error; the node row is unchanged, the phase-2 record stays, and no
+/// wake is delivered.
+///
+/// The server cannot refuse the wake: its channel is built from the queue of
+/// the node row, which `horsies_workflow_tasks_queue_name_length` bounds to
+/// 52 bytes, and the wake writes no row that a trigger could refuse. So the
+/// broker's core pools connect through the proxy (`WireProxy`), and the proxy
+/// drops the reply to the request that carries the task id, the bound
+/// parameter of `horsies_workflow_node_finish`. The step runs in the
+/// transaction form (`PhaseTwoForm::NotKnown`: `BEGIN`, the step, `COMMIT`),
+/// so the proxy closes the connection before the `COMMIT` is sent, and the
+/// server rolls the transaction back. The retry on a direct connection is
+/// the control: it applies the kept record, and the listener hears its wake.
 #[tokio::test]
 #[serial]
-async fn a_wake_that_the_server_refuses_is_a_phase_two_error() {
+async fn a_phase_two_lost_after_its_step_ran_commits_neither_the_wake_nor_the_node_write() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = seed_owed_phase_two(&db.pool, None).await;
+    let before = node_image(&db.pool, workflow_id, 0).await;
+    let upstream = database_options(&db.pool);
+    let proxy = WireProxy::start(&upstream).await;
+    let proxied_broker =
+        PostgresBroker::from_pool(unpinged_single_connection_pool(proxy.options(&upstream)).await);
+    let mut listener = Notifications::listen(&db.pool, &[SEEDED_NODE_CHANNEL]).await;
 
-    let result = phase_two(&db.pool, task_id, TOO_LONG_QUEUE, true).await;
+    proxy.drop_reply_to_request_carrying(task_id.as_bytes());
+    let result = finalize_workflow_phase(
+        &proxied_broker,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        task_id,
+        SEEDED_NODE_QUEUE,
+        true,
+        false,
+        PhaseTwoForm::NotKnown,
+        &RetentionConfig::default(),
+    )
+    .await
+    .map(|_parent_advances| ());
 
+    assert!(
+        proxy.reply_was_dropped(),
+        "the proxy relayed the reply to the step"
+    );
     let _error = assert_a_phase_two_error(&result);
-    assert_eq!(node(&db.pool, workflow_id, 0).await.status, "RUNNING");
+    assert_eq!(node_image(&db.pool, workflow_id, 0).await, before);
     assert_eq!(pending_rows(&db.pool, task_id).await, 1);
+    assert_eq!(listener.received().await, Vec::new());
+    proxied_broker.close().await;
+
+    phase_two(&db.pool, task_id, SEEDED_NODE_QUEUE, true)
+        .await
+        .expect("the retry of phase 2");
+    assert_eq!(node(&db.pool, workflow_id, 0).await.status, "COMPLETED");
+    assert_eq!(pending_rows(&db.pool, task_id).await, 0);
+    assert_eq!(
+        listener.received().await,
+        vec![(SEEDED_NODE_CHANNEL.to_owned(), "capacity".to_owned())]
+    );
     db.drop().await;
 }

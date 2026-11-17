@@ -8,9 +8,12 @@ scheduler's own code and reads the row back with SQL, so the column types and
 the CHECKs see every kind of value the scheduler writes.
 
 The due read, the start, the existence heal and the fire take their time
-from the database clock. The clock tests move the scheduler's host clock one
-day ahead (``_HostClockAhead``): every time they check must still follow the
-database.
+from the database clock. The clock tests move the host clock of the Python
+reference loop one day ahead (``_HostClockAhead``); the core scheduler reads
+no host clock. Every time they check must follow the database.
+
+The digest that the start writes is Python's (``_python_config_hash``, the
+reference loop's ``_compute_config_hash``): the core writes the same bytes.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from horsies.core.scheduler.service import Scheduler
 from horsies.core.scheduler.state import ScheduleStateManager
 from horsies.core.utils.fingerprint import schedule_slot_task_id
 from tests.broker_resources_support import current_resources
+from tests.dualrun.reference.scheduler_loop_caller import Scheduler as ReferenceScheduler
 from tests.integration.conftest import DB_URL, make_simple_task
 
 pytestmark = [pytest.mark.integration]
@@ -80,6 +84,26 @@ def _app_with_schedule(task_name: str, schedule_name: str) -> Horsies:
     )
     make_simple_task(app, task_name)
     return app
+
+
+def _python_config_hash(app: Horsies) -> bytes:
+    """Python's digest of the app's one schedule: the pattern and timezone text
+    that ``Scheduler._compute_config_hash`` of the reference loop hashes."""
+    reference = ReferenceScheduler(app)
+    return reference._compute_config_hash(reference.schedule_config.schedules[0])
+
+
+async def _until_logged(caplog: pytest.LogCaptureFixture, text_part: str) -> None:
+    """Wait until a record whose message holds ``text_part`` reaches ``caplog``.
+
+    The core hands its records to Python ``logging`` on its forwarder thread,
+    so a record can arrive after the call that logged it returned.
+    """
+    for _ in range(100):
+        if any(text_part in record.getMessage() for record in caplog.records):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f'no log record holds {text_part!r}')
 
 
 async def _state_row(session: AsyncSession, schedule_name: str) -> Row[tuple[object, ...]]:
@@ -171,8 +195,9 @@ class _HostClockAhead(datetime):
 
 @contextmanager
 def _scheduler_host_clock_ahead() -> Generator[None]:
-    """The scheduler service's host clock is one day ahead of the database."""
-    with patch('horsies.core.scheduler.service.datetime', _HostClockAhead):
+    """The host clock of the Python reference loop is one day ahead of the
+    database. The core scheduler reads no host clock."""
+    with patch('tests.dualrun.reference.scheduler_loop_caller.datetime', _HostClockAhead):
         yield
 
 
@@ -199,15 +224,12 @@ async def test_scheduler_start_writes_the_config_digest_and_no_last_run(
     broker: PostgresBroker,  # noqa: ARG001 - initializes the schema
 ) -> None:
     task_name, schedule_name = _names()
-    scheduler = Scheduler(_app_with_schedule(task_name, schedule_name))
+    app = _app_with_schedule(task_name, schedule_name)
+    scheduler = Scheduler(app)
     started_at = datetime.now(timezone.utc)
     await scheduler.start()
-    try:
-        expected_hash = scheduler._compute_config_hash(
-            scheduler.schedule_config.schedules[0],
-        )
-    finally:
-        await scheduler.stop()
+    await scheduler.stop()
+    expected_hash = _python_config_hash(app)
 
     row = await _state_row(session, schedule_name)
     assert row.config_hash == expected_hash
@@ -240,27 +262,29 @@ async def test_a_changed_config_digest_at_start_rewrites_the_digest_and_keeps_th
     broker: PostgresBroker,  # noqa: ARG001 - initializes the schema
 ) -> None:
     task_name, schedule_name = _names()
-    scheduler = Scheduler(_app_with_schedule(task_name, schedule_name))
+    app = _app_with_schedule(task_name, schedule_name)
+    scheduler = Scheduler(app)
     await scheduler.start()
-    try:
-        schedule = scheduler.schedule_config.schedules[0]
-        slot = await _database_now(session)
-        task_id = str(schedule_slot_task_id(schedule_name, slot))
-        await _record_run(
-            session,
-            schedule_name,
-            task_id=task_id,
-            run_at=slot,
-            next_run_at=slot + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS),
-        )
-        await _set_config_hash(session, schedule_name, STALE_CONFIG_HASH)
-        before = await _database_now(session)
-        with _scheduler_host_clock_ahead():
-            await scheduler._initialize_schedules()
-        after = await _database_now(session)
-        expected_hash = scheduler._compute_config_hash(schedule)
-    finally:
-        await scheduler.stop()
+    await scheduler.stop()
+    slot = await _database_now(session)
+    task_id = str(schedule_slot_task_id(schedule_name, slot))
+    await _record_run(
+        session,
+        schedule_name,
+        task_id=task_id,
+        run_at=slot,
+        next_run_at=slot + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS),
+    )
+    await _set_config_hash(session, schedule_name, STALE_CONFIG_HASH)
+    # A start of the same config in a new process: its state start finds the
+    # stale digest.
+    restarted = Scheduler(_app_with_schedule(task_name, schedule_name))
+    before = await _database_now(session)
+    with _scheduler_host_clock_ahead():
+        await restarted.start()
+    after = await _database_now(session)
+    await restarted.stop()
+    expected_hash = _python_config_hash(app)
 
     row = await _state_row(session, schedule_name)
     assert row.config_hash == expected_hash
@@ -274,16 +298,14 @@ async def test_a_fired_slot_stores_its_task_id_and_counts_one_run(
     broker: PostgresBroker,  # noqa: ARG001 - initializes the schema
 ) -> None:
     task_name, schedule_name = _names()
-    scheduler = Scheduler(_app_with_schedule(task_name, schedule_name))
+    app = _app_with_schedule(task_name, schedule_name)
+    scheduler = Scheduler(app)
+    expected_hash = _python_config_hash(app)
     await scheduler.start()
     try:
-        assert scheduler.state_manager is not None
-        expected_hash = scheduler._compute_config_hash(scheduler.schedule_config.schedules[0])
         slot = (await _database_now(session)).replace(microsecond=0) - timedelta(seconds=1)
         await _set_next_run(session, schedule_name, slot)
-        read = await scheduler.state_manager.read_due_schedules([schedule_name])
-        [due] = read.due
-        await scheduler._check_schedule(scheduler.schedule_config.schedules[0], due, read.database_now)
+        await scheduler._check_and_run_schedules()
     finally:
         await scheduler.stop()
 
@@ -384,7 +406,9 @@ async def test_the_heal_creates_a_missing_row_from_the_database_time(
     broker: PostgresBroker,  # noqa: ARG001 - initializes the schema
 ) -> None:
     task_name, schedule_name = _names()
-    scheduler = Scheduler(_app_with_schedule(task_name, schedule_name))
+    app = _app_with_schedule(task_name, schedule_name)
+    scheduler = Scheduler(app)
+    expected_hash = _python_config_hash(app)
     await scheduler.start()
     try:
         await session.execute(
@@ -392,12 +416,11 @@ async def test_the_heal_creates_a_missing_row_from_the_database_time(
             {'name': schedule_name},
         )
         await session.commit()
-        scheduler._ticks_until_existence_check = 0
+        # The first tick after a start runs the existence heal.
         before = await _database_now(session)
         with _scheduler_host_clock_ahead():
             await scheduler._check_and_run_schedules()
         after = await _database_now(session)
-        expected_hash = scheduler._compute_config_hash(scheduler.schedule_config.schedules[0])
     finally:
         await scheduler.stop()
 
@@ -483,7 +506,7 @@ async def test_a_catch_up_whose_fire_fails_commits_nothing_and_the_next_tick_fir
             await _terminate_the_waiting_fire(session)
             await session.rollback()
             await tick
-        assert any('fire failed (transient)' in record.getMessage() for record in caplog.records)
+            await _until_logged(caplog, 'fire failed (transient)')
 
         row = await _state_row(session, schedule_name)
         assert (row.next_run_at, row.run_count) == (first, 0)
@@ -505,22 +528,19 @@ async def test_two_schedulers_that_fire_one_slot_write_one_task_and_one_run(
     session: AsyncSession,
     broker: PostgresBroker,  # noqa: ARG001 - initializes the schema
 ) -> None:
-    """Both read the slot as due; the fire locks the state row, so the second
-    finds it moved and writes nothing."""
+    """Both tick at once; the fire locks the state row, so the second finds it
+    moved (or does not read the slot as due) and writes nothing."""
     task_name, schedule_name = _names()
     first = Scheduler(_app_with_schedule(task_name, schedule_name))
     second = Scheduler(_app_with_schedule(task_name, schedule_name))
     await first.start()
     await second.start()
     try:
-        assert first.state_manager is not None
         slot = (await _database_now(session)).replace(microsecond=0) - timedelta(seconds=1)
         await _set_next_run(session, schedule_name, slot)
-        read = await first.state_manager.read_due_schedules([schedule_name])
-        [due] = read.due
         _ = await asyncio.gather(
-            first._check_schedule(first.schedule_config.schedules[0], due, read.database_now),
-            second._check_schedule(second.schedule_config.schedules[0], due, read.database_now),
+            first._check_and_run_schedules(),
+            second._check_and_run_schedules(),
         )
     finally:
         await first.stop()
@@ -543,9 +563,14 @@ async def test_a_fire_repeated_after_its_commit_writes_nothing_once_the_task_lef
     reply), after the slot's task finished and left ``horsies_tasks``. The
     state row moved in the same commit as the slot, so the repeat finds the
     row moved and the slot does not run a second time; the next tick's due
-    read does not show the slot either."""
+    read does not show the slot either.
+
+    A tick reads the due rows again, so it cannot repeat a fire with the next
+    run it computed the slots from. The test drives the fire of the Python
+    reference loop (``ReferenceScheduler._check_schedule``): one call of
+    ``horsies_fire_schedule``, the statement that the core's fire sends."""
     task_name, schedule_name = _names()
-    scheduler = Scheduler(_app_with_schedule(task_name, schedule_name))
+    scheduler = ReferenceScheduler(_app_with_schedule(task_name, schedule_name))
     await scheduler.start()
     try:
         assert scheduler.state_manager is not None

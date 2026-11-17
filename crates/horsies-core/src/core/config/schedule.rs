@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use chrono::NaiveTime;
+use chrono::{NaiveTime, Timelike};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -154,12 +154,37 @@ impl HourlySchedule {
     }
 }
 
+/// Check that a pattern's time of day is a whole second. Slots fire at whole
+/// seconds (Python refuses a `time` with microseconds at config), so the
+/// calculator never sees a fraction of a second. A leap second
+/// (`23:59:60`, a nanosecond count of one second or more) has no Python form
+/// and is refused too. Pure.
+///
+/// Errors: the pattern, the time and the fix, as text.
+fn validate_whole_second(pattern: &str, time: NaiveTime) -> Result<(), String> {
+    match time.nanosecond() {
+        0 => Ok(()),
+        _ => Err(format!(
+            "{pattern} time must be a whole second, got {time}: schedules fire at whole seconds; \
+             give the time without a fraction of a second",
+        )),
+    }
+}
+
 /// Run task every day at a specific time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DailySchedule {
-    /// Time of day to run (HH:MM:SS).
+    /// Time of day to run (HH:MM:SS), in whole seconds, in the schedule's
+    /// timezone.
     pub time: NaiveTime,
+}
+
+impl DailySchedule {
+    /// Validate that the time is a whole second.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_whole_second("DailySchedule", self.time)
+    }
 }
 
 /// Run task on specific days of the week at a specific time.
@@ -168,12 +193,13 @@ pub struct DailySchedule {
 pub struct WeeklySchedule {
     /// Days of week to run (at least one).
     pub days: Vec<Weekday>,
-    /// Time of day to run.
+    /// Time of day to run, in whole seconds, in the schedule's timezone.
     pub time: NaiveTime,
 }
 
 impl WeeklySchedule {
-    /// Validate that the days list is non-empty and contains no duplicates.
+    /// Validate that the days list is non-empty and contains no duplicates,
+    /// and that the time is a whole second.
     pub fn validate(&self) -> Result<(), String> {
         if self.days.is_empty() {
             return Err("WeeklySchedule requires at least one day".to_owned());
@@ -185,7 +211,7 @@ impl WeeklySchedule {
                 self.days,
             ));
         }
-        Ok(())
+        validate_whole_second("WeeklySchedule", self.time)
     }
 }
 
@@ -195,12 +221,12 @@ impl WeeklySchedule {
 pub struct MonthlySchedule {
     /// Day of month (1–31).
     pub day: u32,
-    /// Time of day to run.
+    /// Time of day to run, in whole seconds, in the schedule's timezone.
     pub time: NaiveTime,
 }
 
 impl MonthlySchedule {
-    /// Validate that day is 1–31.
+    /// Validate that day is 1–31 and that the time is a whole second.
     ///
     /// Matches Python's `Field(ge=1, le=31)` constraint.
     pub fn validate(&self) -> Result<(), String> {
@@ -210,7 +236,7 @@ impl MonthlySchedule {
                 self.day,
             ));
         }
-        Ok(())
+        validate_whole_second("MonthlySchedule", self.time)
     }
 }
 
@@ -716,18 +742,18 @@ pub enum SchedulePattern {
 
 impl SchedulePattern {
     /// Check the bounds and the rules of the pattern: interval units,
-    /// hourly and monthly ranges, unique weekly days, cron terms. A daily
-    /// time is a valid time of day by its type. Pure.
+    /// hourly and monthly ranges, unique weekly days, cron terms, and a
+    /// daily, weekly or monthly time of day in whole seconds. Pure.
     ///
     /// Errors: the first broken rule, as text.
     pub fn validate(&self) -> Result<(), String> {
         match self {
             SchedulePattern::Interval(interval) => interval.validate(),
             SchedulePattern::Hourly(hourly) => hourly.validate(),
+            SchedulePattern::Daily(daily) => daily.validate(),
             SchedulePattern::Weekly(weekly) => weekly.validate(),
             SchedulePattern::Monthly(monthly) => monthly.validate(),
             SchedulePattern::Cron(cron) => cron.validate(),
-            SchedulePattern::Daily(_) => Ok(()),
         }
     }
 }
@@ -1078,6 +1104,56 @@ mod tests {
         };
         let err = schedule.validate().unwrap_err();
         assert!(err.contains("duplicate"));
+    }
+
+    /// Python refuses a `time` with microseconds at config; the core refuses
+    /// a time of day with any fraction of a second, and a leap second, in
+    /// each pattern that has a time.
+    #[test]
+    fn a_time_of_day_with_a_fraction_of_a_second_is_refused() {
+        let fractions = [
+            NaiveTime::from_hms_micro_opt(9, 0, 0, 500).unwrap(),
+            NaiveTime::from_hms_nano_opt(9, 0, 0, 1).unwrap(),
+            NaiveTime::from_hms_milli_opt(23, 59, 59, 1_500).unwrap(),
+        ];
+        for time in fractions {
+            let patterns = [
+                (
+                    "DailySchedule",
+                    SchedulePattern::Daily(DailySchedule { time }),
+                ),
+                (
+                    "WeeklySchedule",
+                    SchedulePattern::Weekly(WeeklySchedule {
+                        days: vec![Weekday::Monday],
+                        time,
+                    }),
+                ),
+                (
+                    "MonthlySchedule",
+                    SchedulePattern::Monthly(MonthlySchedule { day: 1, time }),
+                ),
+            ];
+            for (name, pattern) in patterns {
+                let error = pattern.validate().unwrap_err();
+                assert!(
+                    error.starts_with(&format!("{name} time must be a whole second")),
+                    "{error}"
+                );
+                assert!(error.contains("schedules fire at whole seconds"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_time_of_day_in_whole_seconds_is_valid() {
+        let time = NaiveTime::from_hms_opt(23, 59, 59).unwrap();
+        assert!(SchedulePattern::Daily(DailySchedule { time })
+            .validate()
+            .is_ok());
+        assert!(SchedulePattern::Monthly(MonthlySchedule { day: 31, time })
+            .validate()
+            .is_ok());
     }
 
     #[test]

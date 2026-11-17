@@ -15,11 +15,14 @@ pool that task code opens in a child when it sends has a fixed default size.
 Every constant that decides a default size is in this module. The module is
 pure.
 
-The pool of the worker process has a minimum, ``PARENT_POOL_MIN_CONNECTIONS``:
-the connections that its claim loop and the steady flushers of the batched
-success write hold under load, and ``PARENT_POOL_RESERVE`` for its other
-users. AppConfig validation refuses an explicit size below it, and it is the
-floor of a derived size.
+The worker process opens two pools of the parent pool size: the pool of its
+engine and the pool of its core handle. The parent pool has a minimum,
+``PARENT_POOL_MIN_CONNECTIONS``: one connection of the engine pool, which the
+claim loop holds under load, and ``PARENT_POOL_RESERVE`` for the other users
+of each pool. The flushers of the batched success write check out connections
+of the core pool. AppConfig validation refuses an explicit size below the
+minimum. A derived size is at least ``PARENT_POOL_CONNECTIONS_FLOOR``, which
+is above the minimum.
 
 A shared child writes 2 statements per task through its pool (the RUNNING
 update and the finalizing marker), each one round trip in autocommit. On
@@ -81,37 +84,47 @@ they write whenever rows wait. Each one runs one statement at a time through
 the worker's core handle, whose pool has the size of the parent pool."""
 
 PARENT_POOL_CLAIM_CONNECTIONS: Final = 1
-"""The connection of the parent pool that the claim loop holds while it
-claims (``HeldConnection``)."""
+"""The connection of the engine pool of the worker process that the claim
+loop holds while it claims (``HeldConnection``)."""
 
 PARENT_POOL_RESERVE: Final = 2
-"""Connections of the parent pool that the claim loop and the flushers of the
-batched success write leave free for the other users of the pool. Under load
-the held connections stay held, so the other users get only these.
+"""Connections of each pool of the worker process that stay free for its
+other users: the claim loop leaves them free on the engine pool, and the
+flushers of the batched success write leave them free on the core pool
+(``parent_pool_flusher_bound``). Under load the held connections stay held,
+so the other users get only these.
 
-The reaper holds the most at once, 2:
+On the engine pool the reaper holds the most at once, 2:
 
 1. its gate session (``ReaperMixin._reaper_loop``), for the whole pass;
 2. one checkout of the pass body (``_run_reaper_pass``) at a time.
 
-Each other user holds one connection for one statement or one transaction,
-and waits in the pool queue while both are taken: the claimer heartbeat, the
-worker-state snapshot, the ping reply, the workflow and class checks of a
-claim pass (beside the connection of the claim loop), and for each task its
-failure, workflow success, phase 2, parent propagation, requeue and retry
-NOTIFY writes. The runner heartbeats and the listener have connections of
-their own."""
+Each other user of the engine pool holds one connection for one statement or
+one transaction, and waits in the pool queue while both are taken: the
+claimer heartbeat, the worker-state snapshot, the ping reply, the workflow
+and class checks of a claim pass (beside the connection of the claim loop),
+and for each task its phase 2, parent propagation and retry NOTIFY writes.
 
-PARENT_POOL_MIN_CONNECTIONS: Final = (
-    PARENT_POOL_CLAIM_CONNECTIONS + FINALIZE_BATCH_FLUSHERS + PARENT_POOL_RESERVE
-)
-"""The fewest connections of the parent pool: the claim loop, the steady
-flushers of the batched success write and ``PARENT_POOL_RESERVE``. AppConfig
-validation refuses an explicit ``ParentPool`` size below it (HRS-218)."""
+On the core pool each write that runs in the core holds one connection for
+one statement: for each task its failure, retry, workflow success and claim
+release writes, and the stale-task recovery of a reaper pass. The core pool
+of a worker process keeps the same count free from its batch checkouts.
 
-PARENT_POOL_CONNECTIONS_FLOOR: Final = PARENT_POOL_MIN_CONNECTIONS
+The runner heartbeats and the listener have connections of their own."""
+
+PARENT_POOL_MIN_CONNECTIONS: Final = PARENT_POOL_CLAIM_CONNECTIONS + PARENT_POOL_RESERVE
+"""The fewest connections of the parent pool: the claim loop and
+``PARENT_POOL_RESERVE`` on the engine pool. On the core pool, which has the
+same size, it runs one flusher of the batched success write beside
+``PARENT_POOL_RESERVE``. AppConfig validation refuses an explicit
+``ParentPool`` size below it (HRS-218)."""
+
+PARENT_POOL_CONNECTIONS_FLOOR: Final = 5
 """The fewest connections of a parent pool size derived from the seats of
-the worker: the minimum of an explicit size."""
+the worker. It is above ``PARENT_POOL_MIN_CONNECTIONS``: at 5, the core pool
+runs the ``FINALIZE_BATCH_FLUSHERS`` steady flushers and one surge flusher
+beside ``PARENT_POOL_RESERVE`` (``parent_pool_flusher_bound``), and the
+engine pool has 2 connections beside the claim loop and the reserve."""
 
 PARENT_SEATS_PER_POOL_CONNECTION: Final = 10
 """Seats of the worker per connection of a derived parent pool size. A
@@ -208,8 +221,11 @@ def parent_pool_connections(seats: int) -> int:
 
 def parent_pool_flusher_bound(connections: int) -> int:
     """The most flushers of the batched success write, steady and surge
-    together, on a parent pool of ``connections`` connections: the pool less
-    ``PARENT_POOL_CLAIM_CONNECTIONS`` and ``PARENT_POOL_RESERVE``.
+    together, on a parent pool of ``connections`` connections: the core pool
+    of the worker, which has that size, less ``PARENT_POOL_RESERVE``. The
+    claim loop holds a connection of the engine pool, not of the core pool.
+    The core pool keeps the same count free from its batch checkouts, so the
+    flushers fill its batch checkouts and no more.
 
     ``connections`` is at least ``PARENT_POOL_MIN_CONNECTIONS``: AppConfig
     validation refuses a smaller explicit size, and a derived size is at
@@ -219,4 +235,4 @@ def parent_pool_flusher_bound(connections: int) -> int:
         f'a parent pool of {connections} connections is below the minimum '
         f'of {PARENT_POOL_MIN_CONNECTIONS}'
     )
-    return connections - PARENT_POOL_CLAIM_CONNECTIONS - PARENT_POOL_RESERVE
+    return connections - PARENT_POOL_RESERVE

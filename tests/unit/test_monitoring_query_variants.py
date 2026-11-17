@@ -6,6 +6,12 @@ the cause. History data that does not decode is
 ``MonitoringQueryHistoryContractViolation`` in ``list_tasks`` (the EXPLAIN
 text of the history estimate) and in both detail reads. The query tests run
 on a double of the one function statement.
+
+Since the monitoring switch ``list_tasks`` and ``get_task_detail`` run in
+the core; their cases here test Python's bodies before the switch, the
+dual-run reference (``tests/dualrun/reference/monitoring_queries.py``). The
+production facades are tested on a mocked core handle in
+``tests/unit/test_monitoring_reads_in_core.py``.
 """
 
 from __future__ import annotations
@@ -22,7 +28,6 @@ from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.history.errors import HistoryContractError
 from horsies.monitoring.history_window import MonitoringWindow
 from horsies.core.types.result import is_err
-from horsies.monitoring import queries as queries_module
 from horsies.monitoring.errors import (
     MonitoringQueryDbOperationFailed,
     MonitoringQueryError,
@@ -31,11 +36,9 @@ from horsies.monitoring.errors import (
     MonitoringQueryHistoryContractViolation,
 )
 from horsies.monitoring.pages import TaskPage
-from horsies.monitoring.queries import (
-    get_task_detail,
-    get_workflow_node,
-    list_tasks,
-)
+from horsies.monitoring.queries import get_workflow_node
+from tests.dualrun.reference import monitoring_queries as python_reads
+from tests.dualrun.reference.monitoring_queries import get_task_detail, list_tasks
 from horsies.web.routes._common import query_failed
 from tests.monitoring_function_support import (
     function_broker,
@@ -178,7 +181,7 @@ class TestHistoryContractViolation:
         def refuse(payload: object) -> int:
             raise cause
 
-        monkeypatch.setattr(queries_module, 'plan_rows_from_explain', refuse)
+        monkeypatch.setattr(python_reads, 'plan_rows_from_explain', refuse)
         broker, _ = function_broker(
             [
                 list_totals_row(

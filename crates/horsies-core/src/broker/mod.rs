@@ -16,6 +16,7 @@ pub(crate) mod enqueue_history_tests;
 mod enqueue_identity_ports;
 pub(crate) mod enqueue_task;
 pub mod error;
+pub mod expiry_and_orphans;
 pub mod health;
 pub(crate) mod history_reads;
 mod lifecycle_operations;
@@ -27,6 +28,7 @@ pub mod migrations;
 mod monitoring_schema_tests;
 #[cfg(test)]
 pub(crate) mod monitoring_test_database;
+pub mod partition_maintenance;
 #[cfg(test)]
 mod pgbouncer_contract_tests;
 pub mod pools;
@@ -52,6 +54,7 @@ pub mod wait_limit;
 #[cfg(test)]
 mod worker_state_read_tests;
 mod workflow_claim_settle;
+mod workflow_operations;
 
 pub use bound_handle::TaskHandle;
 pub use class_budgets::{ClassBudget, ClassBudgets};
@@ -72,6 +75,7 @@ pub use health::{
 };
 pub use lifecycle_operations::{CancelAnswer, CancelTaskError};
 pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};
+pub use partition_maintenance::CoveragePassError;
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
     ClaimPassParams, PostgresBroker, PrestartExpiry, SchemaInitializationMode, WorkflowStop,
@@ -91,3 +95,4 @@ pub use slot_health::{
     ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
     MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
+pub use workflow_operations::{WorkflowRetentionFailed, WorkflowRetentionPass};

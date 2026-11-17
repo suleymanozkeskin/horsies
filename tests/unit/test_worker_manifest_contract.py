@@ -6,14 +6,18 @@ the bounds of the profile models are the bounds of the manifest, that every
 profile field is mapped with each Pydantic default as a value, that the
 drain timeout becomes whole milliseconds, that every `PostgresConfig` field
 is mapped or named as outside the worker manifest, which claim values the
-manifest cannot hold, and the form of the dumped document.
+manifest cannot hold, that the recovery, retention, resilience and payload
+sections map every field with the Pydantic bounds, how a Python child and
+its preload process start, and the form of the dumped document.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import json
+import sys
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any, Final, cast
 
 import pytest
@@ -28,7 +32,14 @@ from horsies.core.models.child_sizing import (
     DEFAULT_ISOLATED_POOL_CONNECTIONS,
     DEFAULT_TASK_SEND_POOL_CONNECTIONS,
 )
+from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
+from horsies.core.models.recovery import (
+    WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS,
+    RecoveryConfig,
+)
+from horsies.core.models.resilience import WorkerResilienceConfig
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.tasks import Execution
 from horsies.core.models.worker_profile import (
     DEFAULT_DRAIN_TIMEOUT,
@@ -66,12 +77,18 @@ from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.cpu_placement import ParentCpu
 from horsies.core.worker_manifest import (
     CHILD_MAIN_MODULE,
+    PRELOAD_MAIN_MODULE,
     ValueAboveManifestBound,
+    current_interpreter_flags,
     drain_timeout_ms,
     execution_of,
     log_level_of,
+    payload_manifest,
     profile_request,
     python_child_launch,
+    recovery_manifest,
+    resilience_manifest,
+    retention_manifest,
     tcp_keepalives_of,
     tcp_user_timeout_of,
     to_worker_manifest,
@@ -131,9 +148,94 @@ def _app_config(**overrides: Any) -> AppConfig:
     )
 
 
+# RecoveryConfig field -> (its manifest bound, the low end of the field).
+# Each field that is not a flag has a bound, and the bound is Pydantic's.
+RECOVERY_BOUNDS: Final[dict[str, tuple[str, int]]] = {
+    'claimed_stale_threshold_ms': ('CLAIMED_STALE_THRESHOLD_MS', 1_000),
+    'running_stale_threshold_ms': ('STALE_THRESHOLD_MS', 1_000),
+    'finalizing_stale_threshold_ms': ('STALE_THRESHOLD_MS', 1_000),
+    'crashed_worker_recovery_grace_ms': ('RECOVERY_GRACE_MS', 0),
+    'phase2_quarantine_after_attempts': ('RECOVERY_PASS_LIMIT', 3),
+    'workflow_recovery_failure_limit': ('RECOVERY_PASS_LIMIT', 3),
+    'check_interval_ms': ('CHECK_INTERVAL_MS', 1_000),
+    'orphan_task_audit_interval_ms': ('AUDIT_INTERVAL_MS', 1_000),
+    'runner_heartbeat_interval_ms': ('HEARTBEAT_INTERVAL_MS', 1_000),
+    'claimer_heartbeat_interval_ms': ('HEARTBEAT_INTERVAL_MS', 1_000),
+}
+
+RECOVERY_FLAGS: Final[frozenset[str]] = frozenset(
+    {
+        'auto_requeue_stale_claimed',
+        'auto_terminate_orphaned_workflow_tasks',
+        'auto_fail_stale_running',
+    },
+)
+
+# RetentionConfig field -> the RetentionManifest field it fills.
+RETENTION_FIELDS: Final[dict[str, str]] = {
+    'worker_state_retention_hours': 'worker_state_retention',
+    'terminal_record_retention_hours': 'terminal_record_retention',
+    'paused_workflow_auto_cancel_after': 'paused_workflow_auto_cancel_after',
+    'history_leaf_horizon_days': 'history_leaf_horizon_days',
+    'heartbeat_leaf_horizon_hours': 'heartbeat_leaf_horizon_hours',
+    'retention_periods': 'retention_periods',
+    'queue_retention': 'queue_retention',
+    'partition_maintenance_interval_s': 'partition_maintenance_interval_s',
+    'retention_sweep_interval_s': 'retention_sweep_interval_s',
+    'retention_delete_batch_size': 'retention_delete_batch_size',
+}
+
+# RetentionConfig field with a Pydantic bound -> its manifest bound.
+RETENTION_BOUNDS: Final[dict[str, str]] = {
+    'worker_state_retention_hours': 'WORKER_STATE_RETENTION_HOURS',
+    'terminal_record_retention_hours': 'TERMINAL_RECORD_RETENTION_HOURS',
+    'history_leaf_horizon_days': 'HISTORY_LEAF_HORIZON_DAYS',
+    'heartbeat_leaf_horizon_hours': 'HEARTBEAT_LEAF_HORIZON_HOURS',
+    'partition_maintenance_interval_s': 'MAINTENANCE_INTERVAL_SECONDS',
+    'retention_sweep_interval_s': 'SWEEP_INTERVAL_SECONDS',
+    'retention_delete_batch_size': 'DELETE_BATCH_SIZE',
+}
+
+# WorkerResilienceConfig field -> its manifest bound.
+RESILIENCE_BOUNDS: Final[dict[str, str]] = {
+    'db_retry_initial_ms': 'RETRY_INITIAL_MS',
+    'db_retry_max_ms': 'RETRY_MAX_MS',
+    'notify_poll_interval_ms': 'POLL_INTERVAL_MS',
+}
+
+FLAGS: Final = ('-O', '-X', 'dev')
+
+
+def _pydantic_bounds(model: Any, field: str) -> tuple[list[object], list[object]]:
+    """The `ge` and `le` values of a field's metadata."""
+    metadata = model.model_fields[field].metadata
+    lower: list[object] = [item.ge for item in metadata if isinstance(item, Ge)]
+    upper: list[object] = [item.le for item in metadata if isinstance(item, Le)]
+    return lower, upper
+
+
+def _manifest_bounds(name: str) -> tuple[int, int]:
+    return getattr(wire, f'{name}_MIN'), getattr(wire, f'{name}_MAX')
+
+
+def _interpreter_state(*, isolated: int) -> SimpleNamespace:
+    """A `sys.flags` stand-in with every flag that a child takes set."""
+    return SimpleNamespace(
+        optimize=2,
+        dont_write_bytecode=1,
+        isolated=isolated,
+        ignore_environment=1,
+        no_user_site=1,
+        safe_path=True,
+        no_site=1,
+        dev_mode=True,
+    )
+
+
 def _launch() -> wire.ChildLaunchManifest:
     return python_child_launch(
         executable='/usr/bin/python3',
+        interpreter_flags=FLAGS,
         app_locator='app.main:app',
         imports=['app.tasks'],
         sys_path_roots=['/srv/app'],
@@ -631,7 +733,7 @@ class TestValues:
         launch = _launch()
         assert launch.command == wire.ChildCommandManifest(
             program='/usr/bin/python3',
-            args=('-m', CHILD_MAIN_MODULE),
+            args=(*FLAGS, '-m', CHILD_MAIN_MODULE),
         )
         assert launch.program == wire.ChildProgramPython(
             app_locator='app.main:app',
@@ -639,6 +741,267 @@ class TestValues:
             sys_path_roots=('/srv/app',),
             parent_sys_path=('/srv/app', '/usr/lib/python3.13'),
             parent_argv=('horsies', 'worker', 'app.main:app'),
+        )
+
+    def test_the_preload_process_runs_the_preload_module_with_the_flags(
+        self,
+    ) -> None:
+        assert _launch().preload == wire.PreloadLaunchCommand(
+            command=wire.ChildCommandManifest(
+                program='/usr/bin/python3',
+                args=(*FLAGS, '-m', PRELOAD_MAIN_MODULE),
+            ),
+        )
+
+    def test_every_interpreter_flag_is_rebuilt_from_the_process_state(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(sys, 'flags', _interpreter_state(isolated=0))
+        monkeypatch.setattr(sys, 'warnoptions', ['ignore', 'error::DeprecationWarning'])
+        assert current_interpreter_flags() == (
+            '-OO',
+            '-B',
+            '-E',
+            '-s',
+            '-P',
+            '-S',
+            '-X',
+            'dev',
+            '-W',
+            'ignore',
+            '-W',
+            'error::DeprecationWarning',
+        )
+
+    def test_isolated_mode_stands_for_its_three_flags(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(sys, 'flags', _interpreter_state(isolated=1))
+        monkeypatch.setattr(sys, 'warnoptions', [])
+        assert current_interpreter_flags() == ('-OO', '-B', '-I', '-S', '-X', 'dev')
+
+    def test_a_plain_interpreter_has_no_flags(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            sys,
+            'flags',
+            SimpleNamespace(
+                optimize=0,
+                dont_write_bytecode=0,
+                isolated=0,
+                ignore_environment=0,
+                no_user_site=0,
+                safe_path=False,
+                no_site=0,
+                dev_mode=False,
+            ),
+        )
+        monkeypatch.setattr(sys, 'warnoptions', [])
+        assert current_interpreter_flags() == ()
+
+
+class TestRecovery:
+    def test_every_field_is_a_field_of_the_section(self) -> None:
+        fields = {field.name for field in dataclasses.fields(wire.RecoveryManifest)}
+        assert set(RecoveryConfig.model_fields) == fields
+        assert fields == set(RECOVERY_BOUNDS) | RECOVERY_FLAGS | {
+            'worker_state_snapshot_interval_ms',
+        }
+
+    def test_the_bounds_are_the_pydantic_bounds(self) -> None:
+        for field, (bound, low) in RECOVERY_BOUNDS.items():
+            lower, upper = _pydantic_bounds(RecoveryConfig, field)
+            assert lower == [low], field
+            assert _manifest_bounds(bound) == (lower[0], upper[0]), field
+
+    def test_the_snapshot_interval_bound_is_half_the_live_window(self) -> None:
+        lower, _ = _pydantic_bounds(RecoveryConfig, 'worker_state_snapshot_interval_ms')
+        assert _manifest_bounds('SNAPSHOT_INTERVAL_MS') == (
+            lower[0],
+            WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS,
+        )
+
+    def test_each_default_is_a_value_of_the_section(self) -> None:
+        config = RecoveryConfig()
+        section = recovery_manifest(config)
+        for field in RecoveryConfig.model_fields:
+            assert getattr(section, field) == getattr(config, field), field
+
+    def test_a_value_of_its_own_in_each_field_is_kept(self) -> None:
+        config = RecoveryConfig(
+            auto_requeue_stale_claimed=False,
+            auto_fail_stale_running=False,
+            auto_terminate_orphaned_workflow_tasks=False,
+            claimed_stale_threshold_ms=3_600_000,
+            running_stale_threshold_ms=7_200_000,
+            finalizing_stale_threshold_ms=2_000,
+            crashed_worker_recovery_grace_ms=0,
+            phase2_quarantine_after_attempts=1_000,
+            workflow_recovery_failure_limit=3,
+            check_interval_ms=600_000,
+            orphan_task_audit_interval_ms=86_400_000,
+            runner_heartbeat_interval_ms=1_000,
+            claimer_heartbeat_interval_ms=120_000,
+            worker_state_snapshot_interval_ms=1_000,
+        )
+        section = recovery_manifest(config)
+        for field in RecoveryConfig.model_fields:
+            assert getattr(section, field) == getattr(config, field), field
+
+
+class TestRetention:
+    def test_every_field_is_a_field_of_the_section(self) -> None:
+        assert set(RetentionConfig.model_fields) == set(RETENTION_FIELDS)
+        fields = {field.name for field in dataclasses.fields(wire.RetentionManifest)}
+        assert fields == set(RETENTION_FIELDS.values())
+
+    def test_the_bounds_are_the_pydantic_bounds(self) -> None:
+        for field, bound in RETENTION_BOUNDS.items():
+            lower, upper = _pydantic_bounds(RetentionConfig, field)
+            assert _manifest_bounds(bound) == (lower[0], upper[0]), field
+
+    def test_a_period_is_whole_days_in_the_period_bounds(self) -> None:
+        assert _manifest_bounds('RETENTION_DAYS') == (1, 1_825)
+
+    def test_the_defaults_turn_the_paused_expiry_off_and_keep_records_hours(
+        self,
+    ) -> None:
+        assert retention_manifest(RetentionConfig()) == Ok(
+            wire.RetentionManifest(
+                worker_state_retention=wire.WorkerStateRetentionHours(hours=24 * 7),
+                terminal_record_retention=wire.TerminalRecordRetentionHours(
+                    hours=24 * 30,
+                ),
+                paused_workflow_auto_cancel_after=wire.PausedWorkflowExpiryNoExpiry(),
+                history_leaf_horizon_days=3,
+                heartbeat_leaf_horizon_hours=6,
+                retention_periods=(),
+                queue_retention={},
+                partition_maintenance_interval_s=900,
+                retention_sweep_interval_s=300,
+                retention_delete_batch_size=500,
+            ),
+        )
+
+    def test_none_is_no_pruning_and_a_period_is_its_days(self) -> None:
+        config = RetentionConfig(
+            worker_state_retention_hours=None,
+            terminal_record_retention_hours=None,
+            paused_workflow_auto_cancel_after=timedelta(days=2, microseconds=7),
+            retention_periods=(timedelta(days=7), timedelta(days=90)),
+            queue_retention={'high': timedelta(days=14), 'low': None},
+        )
+        match retention_manifest(config):
+            case Ok(section):
+                pass
+            case Err(above):
+                pytest.fail(f'refused: {above}')
+        assert section.worker_state_retention == wire.WorkerStateRetentionNoPruning()
+        assert section.terminal_record_retention == (
+            wire.TerminalRecordRetentionNoPruning()
+        )
+        assert section.paused_workflow_auto_cancel_after == (
+            wire.PausedWorkflowExpiryAfter(micros=2 * 86_400_000_000 + 7)
+        )
+        assert section.retention_periods == (7, 90)
+        assert section.queue_retention == {
+            'high': wire.QueueRetentionDays(days=14),
+            'low': wire.QueueRetentionForever(),
+        }
+
+    def test_a_paused_age_above_its_bound_stops_the_section(self) -> None:
+        config = RetentionConfig(paused_workflow_auto_cancel_after=timedelta.max)
+        micros = timedelta.max // timedelta(microseconds=1)
+        assert micros > wire.PAUSED_AGE_MICROS_MAX
+        assert retention_manifest(config) == Err(
+            ValueAboveManifestBound(
+                path='retention.paused_workflow_auto_cancel_after',
+                value=micros,
+                maximum=wire.PAUSED_AGE_MICROS_MAX,
+            ),
+        )
+
+    def test_a_period_that_validation_refuses_is_a_defect_here(self) -> None:
+        unvalidated = RetentionConfig.model_construct(
+            retention_periods=(timedelta(hours=36),),
+        )
+        with pytest.raises(AssertionError, match='whole days in bounds'):
+            retention_manifest(unvalidated)
+
+
+class TestResilience:
+    def test_every_field_is_a_field_of_the_section(self) -> None:
+        fields = {field.name for field in dataclasses.fields(wire.ResilienceManifest)}
+        assert set(WorkerResilienceConfig.model_fields) == fields
+
+    def test_the_bounds_are_the_pydantic_bounds(self) -> None:
+        for field, bound in RESILIENCE_BOUNDS.items():
+            lower, upper = _pydantic_bounds(WorkerResilienceConfig, field)
+            assert _manifest_bounds(bound) == (lower[0], upper[0]), field
+        lower, upper = _pydantic_bounds(WorkerResilienceConfig, 'db_retry_max_attempts')
+        assert (lower, upper) == ([0], [wire.RETRY_ATTEMPTS_MAX])
+        assert wire.RETRY_ATTEMPTS_MIN == 1
+
+    def test_zero_attempts_is_no_limit(self) -> None:
+        assert resilience_manifest(WorkerResilienceConfig()) == wire.ResilienceManifest(
+            db_retry_initial_ms=500,
+            db_retry_max_ms=30_000,
+            db_retry_max_attempts=wire.RetryAttemptLimitNoLimit(),
+            notify_poll_interval_ms=5_000,
+        )
+        limited = WorkerResilienceConfig(db_retry_max_attempts=10_000)
+        assert resilience_manifest(limited).db_retry_max_attempts == (
+            wire.RetryAttemptLimitAttempts(attempts=10_000)
+        )
+
+
+class TestPayload:
+    def test_every_field_is_a_field_of_the_section(self) -> None:
+        fields = {field.name for field in dataclasses.fields(wire.PayloadManifest)}
+        assert set(PayloadPolicy.model_fields) == fields
+
+    def test_the_low_bound_is_the_pydantic_bound(self) -> None:
+        for field in PayloadPolicy.model_fields:
+            lower, upper = _pydantic_bounds(PayloadPolicy, field)
+            assert (lower, upper) == ([wire.PAYLOAD_BYTES_MIN], []), field
+        assert wire.PAYLOAD_BYTES_MAX == 2**64 - 1
+
+    def test_none_is_no_limit(self) -> None:
+        assert payload_manifest(PayloadPolicy()) == Ok(
+            wire.PayloadManifest(
+                warn_bytes=wire.PayloadLimitBytes(bytes=1_048_576),
+                reject_bytes=wire.PayloadLimitNoLimit(),
+            ),
+        )
+        config = PayloadPolicy(warn_bytes=None, reject_bytes=wire.PAYLOAD_BYTES_MAX)
+        assert payload_manifest(config) == Ok(
+            wire.PayloadManifest(
+                warn_bytes=wire.PayloadLimitNoLimit(),
+                reject_bytes=wire.PayloadLimitBytes(bytes=wire.PAYLOAD_BYTES_MAX),
+            ),
+        )
+
+    def test_a_threshold_above_its_bound_stops_the_section(self) -> None:
+        above = wire.PAYLOAD_BYTES_MAX + 1
+        assert payload_manifest(PayloadPolicy(reject_bytes=above)) == Err(
+            ValueAboveManifestBound(
+                path='payload.reject_bytes',
+                value=above,
+                maximum=wire.PAYLOAD_BYTES_MAX,
+            ),
+        )
+        assert payload_manifest(
+            PayloadPolicy(warn_bytes=above, reject_bytes=above),
+        ) == Err(
+            ValueAboveManifestBound(
+                path='payload.warn_bytes',
+                value=above,
+                maximum=wire.PAYLOAD_BYTES_MAX,
+            ),
         )
 
 
@@ -706,7 +1069,14 @@ class TestDocument:
         launch = self._document()['child_launch']
         assert launch['command'] == {
             'program': '/usr/bin/python3',
-            'args': ['-m', CHILD_MAIN_MODULE],
+            'args': [*FLAGS, '-m', CHILD_MAIN_MODULE],
+        }
+        assert launch['preload'] == {
+            'kind': 'COMMAND',
+            'command': {
+                'program': '/usr/bin/python3',
+                'args': [*FLAGS, '-m', PRELOAD_MAIN_MODULE],
+            },
         }
         assert launch['program']['kind'] == 'PYTHON'
         assert launch['program']['imports'] == ['app.tasks']
@@ -726,5 +1096,40 @@ class TestDocument:
                 path='cluster_wide_cap',
                 value=wire.TASK_LIMIT_MAX + 1,
                 maximum=wire.TASK_LIMIT_MAX,
+            ),
+        )
+
+    def test_the_sections_are_written_in_the_form_the_core_parses(self) -> None:
+        document = self._document()
+        assert document['recovery']['running_stale_threshold_ms'] == 300_000
+        assert document['retention']['paused_workflow_auto_cancel_after'] == {
+            'kind': 'NO_EXPIRY',
+        }
+        assert document['retention']['worker_state_retention'] == {
+            'kind': 'HOURS',
+            'hours': 24 * 7,
+        }
+        assert document['resilience']['db_retry_max_attempts'] == {'kind': 'NO_LIMIT'}
+        assert document['payload'] == {
+            'warn_bytes': {'kind': 'BYTES', 'bytes': 1_048_576},
+            'reject_bytes': {'kind': 'NO_LIMIT'},
+        }
+
+    def test_a_payload_threshold_above_its_bound_stops_the_manifest(self) -> None:
+        config = _app_config(
+            payload=PayloadPolicy(warn_bytes=wire.PAYLOAD_BYTES_MAX + 1),
+        )
+        result = to_worker_manifest(
+            config,
+            profile=None,
+            tasks={},
+            child_launch=_launch(),
+            idempotency_reservation_window=WINDOW,
+        )
+        assert result == Err(
+            ValueAboveManifestBound(
+                path='payload.warn_bytes',
+                value=wire.PAYLOAD_BYTES_MAX + 1,
+                maximum=wire.PAYLOAD_BYTES_MAX,
             ),
         )

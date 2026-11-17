@@ -15,10 +15,12 @@ unavailable.
 The new row is written strictly by the provenance table: replayed
 fields from the source row or its carried envelope, the deadline as the
 caller's explicit choice, policy resolved at enqueue, identity and
-lifecycle state fresh, the lineage pair atomic. A keyed rerun rides the
-reservation registry exactly as frozen; because the fingerprint covers
-rerun lineage, a key still reserved by the source request conflicts by
-contract rather than aliasing its rerun.
+lifecycle state fresh, the lineage pair atomic. The write is one call of
+``horsies_enqueue_task`` (0004_lifecycle_functions.sql) with the lineage
+``RERUN``, in the caller's transaction: a keyed rerun claims its key inside
+that call. Because the fingerprint covers rerun lineage, a key still
+reserved by the source request conflicts by contract rather than aliasing
+its rerun.
 """
 
 from __future__ import annotations
@@ -28,11 +30,30 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from uuid import UUID
 
-from typing import Any, Final
+from typing import Any, Final, assert_never
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from horsies.core.brokers.enqueue_task import (
+    ENQUEUE_TASK_SQL,
+    ConflictUnverifiable,
+    EnqueueKey,
+    EnqueueOutcome,
+    EnqueueRow,
+    Inserted,
+    KeyConflict,
+    Keyed,
+    KeyReplay,
+    PayloadMismatch,
+    RerunOf,
+    SameCommand,
+    SendKind,
+    StartNow,
+    Unkeyed,
+    enqueue_task_params,
+    read_enqueue_outcome,
+)
 from horsies.core.codec.task_options import stored_execution
 
 from ..ddl.tables import FOREVER_CLASS_KEY
@@ -45,14 +66,7 @@ from ..identity.keys import (
     ScopedIdempotencyKey,
     validate_reservation_window,
 )
-from ..identity.reservations import (
-    ReservationApplied,
-    ReservationConflict,
-    ReservationReplay,
-    claim_key_reservation,
-)
 from ..identity.uuid7 import mint_task_id
-from ..names import LIVE_TASKS
 from ...utils.db import uuid_column_value
 from horsies.core.types.status import TaskStatus
 from ..archive.attempts import decode_attempt_snapshot
@@ -448,85 +462,86 @@ async def rerun_task(
         rerun_root_task_id=str(root_task_id),
     ).fingerprint
 
-    if command.caller_key is not None:
-        scoped = ScopedIdempotencyKey(
-            task_name=source.task_name, key=command.caller_key
-        )
-        claim = await claim_key_reservation(
-            connection,
-            key_digest=scoped.digest,
-            key_scope_version=IDEMPOTENCY_SCOPE_VERSION,
-            reservation_window=policy.reservation_window,
-            fingerprint_version=1,
-            fingerprint=fingerprint,
-            task_id=new_task_id,
-        )
-        match claim:
-            case ReservationReplay(task_id=existing):
-                return RerunKeyReplay(existing_task_id=existing)
-            case ReservationConflict(task_id=owner):
-                return RerunKeyConflict(
-                    task_id=command.source_task_id,
-                    reserved_by_task_id=owner,
-                )
-            case ReservationApplied():
-                pass
-
-    await connection.execute(
-        _INSERT_RERUN_SQL,
-        {
-            'id': str(new_task_id),
-            'task_name': source.task_name,
-            'queue_name': source.queue_name,
-            'priority': source.priority,
-            'input': decoded.input_json,
-            'task_options': options_json,
-            'execution': execution.value,
-            'retention_class_key': policy.retention_class_key,
-            'sent_at': datetime.now(timezone.utc),
-            'fingerprint': fingerprint,
-            'key_digest': (
-                ScopedIdempotencyKey(
-                    task_name=source.task_name, key=command.caller_key
-                ).digest
-                if command.caller_key is not None
-                else None
-            ),
-            'max_retries': source.max_retries,
-            'good_until': command.deadline,
-            'retain': policy.retain_rerun_input,
-            'rerun_of': str(source.task_id),
-            'rerun_root': str(root_task_id),
-        },
+    key: EnqueueKey
+    match command.caller_key:
+        case None:
+            key = Unkeyed()
+        case caller_key:
+            key = Keyed(
+                digest=ScopedIdempotencyKey(
+                    task_name=source.task_name, key=caller_key
+                ).digest,
+                scope_version=IDEMPOTENCY_SCOPE_VERSION,
+                window=policy.reservation_window,
+            )
+    # The row stores no envelope: the move builds it from ``input`` and
+    # ``task_options``. Both texts are the source's, unchanged, so when the
+    # new row's policy retains its input, its envelope has the source
+    # envelope's bytes and digest.
+    row = EnqueueRow(
+        task_id=new_task_id,
+        task_name=source.task_name,
+        queue_name=source.queue_name,
+        priority=source.priority,
+        stored_input=decoded.input_json,
+        task_options=options_json,
+        execution=execution,
+        retention_class_key=policy.retention_class_key,
+        retain_rerun_input=policy.retain_rerun_input,
+        max_retries=source.max_retries,
+        good_until=command.deadline,
+        sent_at=datetime.now(timezone.utc),
+        start=StartNow(),
+        command_fingerprint=fingerprint,
+        key=key,
+        lineage=RerunOf(source_task_id=source.task_id, root_task_id=root_task_id),
     )
-    return RerunEnqueued(
+    rows = (
+        await connection.execute(
+            ENQUEUE_TASK_SQL, enqueue_task_params(row, SendKind.FIRST)
+        )
+    ).all()
+    return _rerun_write_outcome(
+        read_enqueue_outcome(rows),
         new_task_id=new_task_id,
         source_task_id=source.task_id,
         rerun_root_task_id=root_task_id,
     )
 
 
-_INSERT_RERUN_SQL = text(
-    f"""
-    INSERT INTO {LIVE_TASKS} (
-        id, task_name, queue_name, priority, input, task_options,
-        execution, retention_class_key, sent_at, created_at,
-        command_fingerprint_version, command_fingerprint,
-        idempotency_key_digest, status, enqueued_at, retry_count,
-        max_retries, good_until, is_workflow_task, updated_at,
-        retain_rerun_input, rerun_of_task_id, rerun_root_task_id
-    ) VALUES (
-        CAST(:id AS uuid), :task_name, :queue_name, :priority, :input,
-        :task_options,
-        :execution, :retention_class_key, :sent_at, statement_timestamp(),
-        1, :fingerprint,
-        :key_digest, 'PENDING', statement_timestamp(), 0,
-        :max_retries, :good_until, FALSE, now(),
-        :retain, CAST(:rerun_of AS uuid), CAST(:rerun_root AS uuid)
-    )
+def _rerun_write_outcome(
+    written: EnqueueOutcome,
+    *,
+    new_task_id: UUID,
+    source_task_id: UUID,
+    rerun_root_task_id: UUID,
+) -> RerunEnqueued | RerunKeyReplay | RerunKeyConflict:
+    """The rerun outcome of the write of ``new_task_id``. Pure.
+
+    ``SAME_COMMAND`` is the write of this id that already ran in the caller's
+    transaction: the rerun is enqueued. ``new_task_id`` was minted for this
+    write, so another row cannot hold it: ``PAYLOAD_MISMATCH`` and
+    ``CONFLICT_UNVERIFIABLE`` are defects of the id mint or of the function
+    (``AssertionError`` with the id and the outcome).
     """
-)
-"""The new PENDING row. The row stores no envelope: the move builds it
-from ``input`` and ``task_options``. Both texts are the source's,
-unchanged, so when the new row's policy retains its input, its envelope
-has the source envelope's bytes and digest."""
+    match written:
+        case Inserted() | SameCommand():
+            return RerunEnqueued(
+                new_task_id=new_task_id,
+                source_task_id=source_task_id,
+                rerun_root_task_id=rerun_root_task_id,
+            )
+        case KeyReplay(task_id=existing):
+            return RerunKeyReplay(existing_task_id=existing)
+        case KeyConflict(owner_task_id=owner):
+            return RerunKeyConflict(
+                task_id=source_task_id,
+                reserved_by_task_id=owner,
+            )
+        case PayloadMismatch() | ConflictUnverifiable():
+            raise AssertionError(
+                f'the rerun write of the minted task id {new_task_id} answered '
+                f'{written!r}: no other row can hold a minted id'
+            )
+        case _ as unreachable:
+            assert_never(unreachable)

@@ -31,7 +31,6 @@ from horsies.core.worker.class_coverage_log import (
 from horsies.core.worker.runtime import _ReaperPassState
 from horsies.core.worker.sql import (
     DELETE_EXPIRED_WORKER_STATES_SQL,
-    DELETE_EXPIRED_WORKFLOWS_SQL,
     REAPER_GATE_TRY_LOCK_SQL,
     _RETENTION_PASS_TIME_BUDGET_S,
 )
@@ -368,20 +367,15 @@ class ReaperMixin:
                 if retention_cfg.terminal_record_retention_hours is not None:
                     # Workflows and their node rows go together in one
                     # workflow-batched statement (node purge is a CTE inside
-                    # it). The all-backing-tasks-terminal guard makes
-                    # partial progress safe. The statement's rowcount
-                    # counts workflows, which the node budget keeps below
-                    # :batch_size while backlog remains — hence
-                    # drained_when='empty_batch'.
-                    deleted_workflows = await self._delete_expired_in_batches(
-                        resources.session_factory,
-                        DELETE_EXPIRED_WORKFLOWS_SQL,
-                        {
-                            'retention_hours': retention_cfg.terminal_record_retention_hours,
-                        },
-                        deadline,
-                        batch_size,
-                        drained_when='empty_batch',
+                    # it), which the core runs in batches until one deletes
+                    # nothing or the pass budget has passed. The
+                    # all-backing-tasks-terminal guard makes partial
+                    # progress safe.
+                    deleted_workflows = await self._delete_expired_workflows(
+                        temp_broker,
+                        retention_hours=retention_cfg.terminal_record_retention_hours,
+                        batch_size=batch_size,
+                        deadline_monotonic=deadline,
                     )
 
                 if deleted_worker_states > 0 or deleted_workflows > 0:
@@ -609,6 +603,51 @@ class ReaperMixin:
                     raise AssertionError('take_uncovered returned a served stream')
                 case _ as unreachable:
                     assert_never(unreachable)
+
+    async def _delete_expired_workflows(
+        self,
+        temp_broker: 'PostgresBroker',
+        *,
+        retention_hours: int,
+        batch_size: int,
+        deadline_monotonic: float,
+    ) -> int:
+        """The workflow part of the retention cleanup, in the core
+        (``CoreHandle.delete_expired_workflows_async``): batches of terminal
+        workflows older than ``retention_hours`` with no live backing task,
+        with their node rows, until a batch deletes no workflow or the pass
+        deadline has passed after a batch. The first batch always runs.
+
+        Returns the number of workflows deleted.
+
+        Raises:
+            CoreOperationFailed: the pass failed; the batches before the
+                failure stay committed (their count is in the message), and
+                the backlog resumes on the next pass.
+            CoreError: the core of this process cannot run the call.
+        """
+        from horsies._core import WorkflowDeleteFailed, WorkflowsDeleted
+        from horsies.core.types.core_failure import CoreOperationFailed
+
+        budget_ms = max(0, int((deadline_monotonic - time.monotonic()) * 1000))
+        record = await temp_broker._core_handle.delete_expired_workflows_async(
+            retention_hours, batch_size, budget_ms,
+        )
+        match record:
+            case WorkflowsDeleted(deleted=deleted):
+                return deleted
+            case WorkflowDeleteFailed(
+                deleted_before=deleted_before,
+                message=message,
+                retryable=retryable,
+            ):
+                raise CoreOperationFailed(
+                    'delete_expired_workflows',
+                    f'{message} ({deleted_before} workflow(s) deleted before the failure)',
+                    retryable,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _delete_expired_in_batches(
         self,

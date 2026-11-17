@@ -241,8 +241,10 @@ $$;
 -- - The insert trigger sends task_new, the queue wake (payload 'new') and horsies_task_status.
 --
 -- Arguments: every value of the row; three variants, each a kind text plus its columns:
--- - p_start_kind NOW | AT (p_start_at) | AFTER_DELAY (p_start_delay_s, whole seconds >= 0): enqueued_at is NOW(),
---   the given time, or NOW() plus the delay. A slot of another kind must be NULL.
+-- - p_start_kind NOW | AT (p_start_at) | AFTER_DELAY (p_start_delay_s, whole seconds >= 0): enqueued_at is
+--   statement_timestamp(), the given time, or statement_timestamp() plus the delay. A slot of another kind must be
+--   NULL. A send in autocommit has statement_timestamp() = NOW(); a rerun in its caller's transaction is dated by
+--   its own statement, not by the start of that transaction (Python's rerun insert).
 -- - p_lineage_kind FIRST_RUN | RERUN (p_rerun_of_task_id and p_rerun_root_task_id).
 -- - p_key_kind UNKEYED | KEYED (p_key_digest, p_key_scope_version, p_key_window: the reservation window, exact to the
 --   microsecond, more than 0 and at most 30 days; the key claim refuses another window with 22023).
@@ -315,7 +317,7 @@ BEGIN
                 RAISE EXCEPTION 'horsies_enqueue_task: start NOW takes no time and no delay'
                     USING ERRCODE = 'invalid_parameter_value';
             END IF;
-            v_enqueued_at := NOW();
+            v_enqueued_at := statement_timestamp();
         WHEN 'AT' THEN
             IF p_start_at IS NULL OR p_start_delay_s IS NOT NULL THEN
                 RAISE EXCEPTION 'horsies_enqueue_task: start AT takes a time and no delay'
@@ -327,7 +329,7 @@ BEGIN
                 RAISE EXCEPTION 'horsies_enqueue_task: start AFTER_DELAY takes a delay of 0 s or more and no time'
                     USING ERRCODE = 'invalid_parameter_value';
             END IF;
-            v_enqueued_at := NOW() + make_interval(secs => p_start_delay_s);
+            v_enqueued_at := statement_timestamp() + make_interval(secs => p_start_delay_s);
         ELSE
             RAISE EXCEPTION 'horsies_enqueue_task: unknown start kind'
                 USING ERRCODE = 'invalid_parameter_value';

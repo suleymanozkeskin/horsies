@@ -850,6 +850,9 @@ impl SendCommand {
 ///   [`PostgresBroker::pool`] and [`PostgresBroker::session_pool`]. The
 ///   schema install runs on the core pools.
 ///
+/// No pool connects when the broker is built: each opens its first
+/// connection at its first checkout.
+///
 /// Every LISTEN of the broker goes through the process listener of its
 /// session URL: one connection, shared with the other brokers of the process
 /// on the same URL.
@@ -1037,8 +1040,10 @@ impl PostgresBroker {
         Self::connect_with_profile(config, schema_initialization_mode, PoolProfile::Producer).await
     }
 
-    /// Checks the config, builds the core pools (no connection), then opens
-    /// the sqlx adapter pools (one connection each, as before).
+    /// Checks the config and builds the core pools and the sqlx adapter
+    /// pools. Opens no connection: each pool connects at its first checkout,
+    /// so a broker whose operations all run on the core pools holds no
+    /// adapter connection.
     async fn connect_with_profile(
         config: &PostgresConfig,
         schema_initialization_mode: SchemaInitializationMode,
@@ -1053,20 +1058,14 @@ impl PostgresBroker {
         };
         let reserve_runtime =
             pg_reserve_pool_options(config).connect_lazy_with(connect_options.clone());
-        let pool = runtime_options
-            .connect_with(connect_options)
-            .await
-            .map_err(BrokerError::Database)?;
+        let pool = runtime_options.connect_lazy_with(connect_options);
 
         let session_pool = if config.effective_session_database_url() == config.database_url {
             pool.clone()
         } else {
             let session_options =
                 pg_connect_options(config.effective_session_database_url(), config.echo)?;
-            pg_session_pool_options(config)
-                .connect_with(session_options)
-                .await
-                .map_err(BrokerError::Database)?
+            pg_session_pool_options(config).connect_lazy_with(session_options)
         };
         let reserve = ReservePools {
             maintenance: match config.effective_session_database_url() == config.database_url {
@@ -1726,16 +1725,17 @@ impl PostgresBroker {
 
     /// Expire a CLAIMED task whose `good_until` passed before user code started.
     ///
-    /// Runs through `horsies_expire_owned_claim`, which fences on worker
-    /// ownership but deliberately not on the claim generation: once the
-    /// deadline has passed, expiry is the correct outcome for whichever
-    /// generation holds the row. One statement on the main core pool,
-    /// checked out as reserved work. `Applied` and `AlreadyApplied` both mean
-    /// the task is expired, as Python's `_expire_claimed_task_before_start`
-    /// (`core/worker/child_runner.py`) reads them; any other outcome is
-    /// logged with its evidence at the adapter boundary. The stored error is
-    /// Python's: `TASK_EXPIRED` with its message and the task and worker ids
-    /// as `data`.
+    /// Runs through `horsies_expire_owned_claim`
+    /// ([`crate::broker::expiry_and_orphans::expire_owned_claim`]), which
+    /// fences on worker ownership but deliberately not on the claim
+    /// generation: once the deadline has passed, expiry is the correct
+    /// outcome for whichever generation holds the row. One statement on the
+    /// main core pool, checked out as reserved work. An end and a replay of
+    /// the expiry both mean the task is expired, as Python's
+    /// `_expire_claimed_task_before_start` (`core/worker/child_runner.py`)
+    /// reads them; any other outcome is logged with its evidence at the
+    /// adapter boundary. The stored error is Python's: `TASK_EXPIRED` with
+    /// its message and the task and worker ids as `data`.
     ///
     /// Errors: [`BrokerError::Statement`], or
     /// [`BrokerError::TerminalizationContract`] for a row outside the wire
@@ -1745,44 +1745,24 @@ impl PostgresBroker {
         task_id: Uuid,
         worker_id: &str,
     ) -> Result<PrestartExpiry, BrokerError> {
-        let mut task_error = crate::core::TaskError::builtin(
-            crate::core::OutcomeCode::TaskExpired,
-            "Task expired: good_until deadline passed before execution started",
-        );
-        task_error.data = Some(serde_json::json!({
-            "task_id": task_id.to_string(),
-            "worker_id": worker_id,
-        }));
-        let task_result = crate::core::TaskResult::<serde_json::Value>::Err(task_error);
-        let result_json =
-            serde_json::to_string(&task_result).map_err(BrokerError::Serialization)?;
-
         let (open, _write) = self.core_pools_for_write()?;
-        let outcomes = crate::broker::terminalization::terminalize(
+        let end = crate::broker::expiry_and_orphans::expire_owned_claim(
             open.main(),
             self.statement_log,
-            &crate::core::lifecycle::TerminalizationCommand::ExpireOwnedClaim {
-                task_id,
-                fence: crate::core::lifecycle::WorkerOwned {
-                    worker_id: worker_id.to_owned(),
-                },
-                result_json,
-                error_code: "TASK_EXPIRED".to_owned(),
-            },
+            task_id,
+            worker_id,
         )
         .await?;
-
-        Ok(match outcomes.first() {
-            Some(
-                crate::core::lifecycle::TerminalizationOutcome::Applied { .. }
-                | crate::core::lifecycle::TerminalizationOutcome::AlreadyApplied { .. },
+        Ok(match end {
+            crate::broker::expiry_and_orphans::TaskRowEnd::Ended { .. }
+            | crate::broker::expiry_and_orphans::TaskRowEnd::Refused(
+                crate::core::lifecycle::AttemptWriteRefusal::AlreadyApplied { .. },
             ) => PrestartExpiry::Expired,
-            Some(
-                crate::core::lifecycle::TerminalizationOutcome::LostClaim { .. }
-                | crate::core::lifecycle::TerminalizationOutcome::SourceStateConflict { .. }
-                | crate::core::lifecycle::TerminalizationOutcome::TaskAbsent { .. },
-            )
-            | None => PrestartExpiry::NotExpired,
+            crate::broker::expiry_and_orphans::TaskRowEnd::Refused(
+                crate::core::lifecycle::AttemptWriteRefusal::LostClaim { .. }
+                | crate::core::lifecycle::AttemptWriteRefusal::SourceStateConflict { .. }
+                | crate::core::lifecycle::AttemptWriteRefusal::TaskAbsent { .. },
+            ) => PrestartExpiry::NotExpired,
         })
     }
 
@@ -3135,17 +3115,21 @@ fn history_task_info(
             })
             .map_err(|error| {
                 invalid_raw_result(format!(
-                    "stored result of task {} does not decode: {error}",
+                    "History result envelope failed validation for task {}: {error}",
                     detail.task_id
                 ))
             })?,
     };
     let terminal_at = detail.terminal_at;
+    // The snapshot holds the attempts oldest first; a task info lists them
+    // newest first, as the live read (`ORDER BY attempt DESC`) and Python's
+    // history read (`reversed(detail.attempts)`).
     let attempts = include_attempts
         .then(|| {
             detail
                 .attempts
                 .iter()
+                .rev()
                 .map(|record| task_attempt_info_from_record(detail.task_id, record))
                 .collect::<Result<Vec<_>, _>>()
         })
@@ -5923,6 +5907,39 @@ mod broker_operation_error_tests {
 }
 
 #[cfg(test)]
+mod connect_tests {
+    //! A connect checks the config and opens no connection.
+    use super::*;
+
+    /// No server listens on port 1.
+    const UNREACHABLE_URL: &str = "postgresql://horsies@127.0.0.1:1/horsies";
+
+    #[tokio::test]
+    async fn a_connect_opens_no_connection() {
+        let broker = PostgresBroker::connect(UNREACHABLE_URL)
+            .await
+            .expect("a connect opens no connection, so it needs no server");
+
+        assert_eq!(broker.pool().size(), 0);
+        assert_eq!(broker.session_pool().size(), 0);
+        assert_eq!(broker.reserve_pool().size(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_worker_connect_with_a_split_session_url_opens_no_connection() {
+        let mut config = PostgresConfig::from_url(UNREACHABLE_URL);
+        config.session_database_url = Some("postgresql://horsies@127.0.0.1:2/horsies".to_owned());
+
+        let broker = PostgresBroker::connect_worker_with(&config)
+            .await
+            .expect("a connect opens no connection, so it needs no server");
+
+        assert_eq!(broker.pool().size(), 0);
+        assert_eq!(broker.session_pool().size(), 0);
+    }
+}
+
+#[cfg(test)]
 mod result_wait_tests {
     //! The result wait: Python's limit bound (`python/horsies/core/utils/wait_timeout.py`)
     //! before any read, Python's repoll intervals, a read at once after a
@@ -6694,6 +6711,53 @@ mod task_info_code_tests {
             "{shown:.40}"
         );
         assert!(!refused.retryable, "{shown:.40}");
+    }
+
+    fn history_attempt(
+        attempt: i32,
+        outcome: &str,
+        will_retry: bool,
+    ) -> crate::core::history::archive::attempts::AttemptRecord {
+        let at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 8, 7, 0, 0, 0).unwrap();
+        crate::core::history::archive::attempts::AttemptRecord::new(
+            attempt,
+            outcome,
+            will_retry,
+            at,
+            at,
+            None,
+            None,
+            None,
+            Some("w-1".to_owned()),
+            Some("host-1".to_owned()),
+            Some(100),
+            None,
+        )
+        .expect("a valid attempt record")
+    }
+
+    /// Python `test_broker_postgres.py::TestHistoryTaskInfoResultDecode::test_attempts_are_listed_newest_first`:
+    /// the snapshot holds the attempts oldest first, and the task info lists
+    /// them newest first, as the live read does.
+    #[test]
+    fn history_attempts_are_listed_newest_first() {
+        let mut detail = history_detail_with_result(b"{}");
+        detail.attempts = vec![
+            history_attempt(1, "FAILED", true),
+            history_attempt(2, "FAILED", false),
+        ];
+
+        let info = history_task_info(detail, false, false, true)
+            .expect("a history row with two attempts reads");
+
+        let attempts = info.attempts.expect("the read asked for the attempts");
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|attempt| attempt.attempt)
+                .collect::<Vec<i32>>(),
+            vec![2, 1],
+        );
     }
 
     /// Python `test_broker_postgres.py::TestHistoryTaskInfoResultDecode::test_stored_result_is_refused_as_invalid_json_payload`,
