@@ -583,3 +583,45 @@ async fn in_transaction_mode_only_the_session_pool_turns_jit_off() {
     assert_eq!(jit_of(broker.session_pool()).await, "off");
     broker.close().await;
 }
+
+/// Python `test_broker_postgres.py::TestEnqueueAcceptedInput::test_the_row_stores_the_kwargs_text_as_its_input`
+/// (earlier `test_envelope_bytes_do_not_change`): the row stores the sent
+/// input text byte for byte, with its spacing and key order, and the rerun
+/// input that the move to history builds reads that text. Each text is a
+/// value the send accepts: an object, `null` and a list.
+#[tokio::test]
+#[serial]
+async fn the_row_stores_the_sent_input_text_byte_for_byte() {
+    let pool = migrated_pool().await;
+    let broker = PostgresBroker::from_pool(pool.clone());
+    let task_name = unique_task_name("accepted_input");
+
+    for input in ["{}", "null", "{ \"z\": 1, \"a\": 2 }", "[ ]"] {
+        let task_id = broker
+            .enqueue(
+                &task_name,
+                input,
+                "default",
+                50,
+                Some(Utc::now()),
+                None,
+                None,
+                None,
+                Some(new_task_id()),
+                None,
+                None,
+                EnqueueRetention::Forever,
+                Some(true),
+            )
+            .await
+            .expect("the send writes its row");
+
+        let stored: String = sqlx::query_scalar("SELECT input FROM horsies_tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the stored input");
+        assert_eq!(stored, input);
+    }
+    remove_task_name(&pool, &task_name).await;
+}
