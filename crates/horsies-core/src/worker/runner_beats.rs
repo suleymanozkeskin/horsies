@@ -15,7 +15,8 @@
 //!   depend on the async runtime: a runtime blocked by task code cannot keep
 //!   it from acting.
 //! - With it off, no reaper fails a RUNNING row: late beats are logged and
-//!   the worker runs on.
+//!   the worker runs on. A writer that dies is logged once, and the worker
+//!   runs on without runner beats.
 
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
@@ -81,6 +82,10 @@ const BEAT_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(60);
 const LATE_BEAT_INTERVALS: u32 = 2;
 
 const WATCH_THREAD_NAME: &str = "horsies-runner-heartbeat-watch";
+
+/// The start of the watchdog's line for a dead writer with stale running
+/// recovery off (Python `describe_fail_closed(BeatThreadDied)`).
+const DEAD_WRITER_LINE: &str = "the runner heartbeat writer died";
 
 /// One statement per interval for every held dispatch. Each row is fenced
 /// like every other write of a dispatch: this worker, and the claim
@@ -543,15 +548,52 @@ struct WatchContext {
     stale_running: StaleRunningRecovery,
     interval: Duration,
     coverage: SharedCoverage,
+    dead_writer: DeadWriter,
     live: LiveDispatches,
     fail_closed_stop: FailClosedStop,
 }
 
+/// Why the beat writer ended with no stop request, recorded once for the
+/// watchdog. Only the writer of stale running recovery off records it: with
+/// recovery on, the worker's supervision stops the worker.
+#[derive(Clone, Default)]
+struct DeadWriter(Arc<OnceLock<String>>);
+
+impl DeadWriter {
+    /// Record why the writer ended; a later record is ignored.
+    fn record(&self, reason: String) {
+        let _first = self.0.set(reason);
+    }
+
+    /// Why the writer ended, once it ended with no stop request.
+    fn reason(&self) -> Option<String> {
+        self.0.get().cloned()
+    }
+}
+
+/// Aborts the writer task when the task that awaits it ends or is dropped.
+struct AbortWriterOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortWriterOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Start the beat writer on the current runtime and its watchdog on its own
-/// thread. Returns the watchdog and the writer task, which the worker
-/// supervises with its other service loops. The writer stops when `cancel`
-/// fires; the watchdog when [`RunnerBeatWatch::stop`] runs. A watchdog that
-/// fails closed asks for the stop through `fail_closed_stop`.
+/// thread. Returns the watchdog and the task that the worker supervises with
+/// its other service loops. The writer stops when `cancel` fires; the
+/// watchdog when [`RunnerBeatWatch::stop`] runs. A watchdog that fails
+/// closed asks for the stop through `fail_closed_stop`.
+///
+/// The supervised task, per `stale_running`:
+/// - on: the writer itself. A writer that ends with no stop request ends the
+///   task, and the worker's supervision stops the worker (fail-fatal).
+/// - off: a task that awaits the writer (Python: the watchdog logs a dead
+///   beat thread and the worker runs on). A writer that ends with no stop
+///   request is logged once by the watchdog, which then ends; the task waits
+///   for `cancel`, so the supervision sees no early end. An abort of the task
+///   aborts the writer.
 ///
 /// The writer closes `pool` when it ends.
 ///
@@ -566,13 +608,53 @@ pub fn launch_runner_beats(
     cancel: CancellationToken,
     fail_closed_stop: FailClosedStop,
 ) -> std::io::Result<(RunnerBeatWatch, JoinHandle<()>)> {
+    let writer_live = live.clone();
+    let writer_cancel = cancel.clone();
+    launch_with_writer(
+        interval,
+        stale_running,
+        live,
+        cancel,
+        fail_closed_stop,
+        move |coverage| {
+            run_beats(
+                pool,
+                sender,
+                interval,
+                stale_running,
+                writer_live,
+                coverage,
+                writer_cancel,
+            )
+        },
+    )
+}
+
+/// [`launch_runner_beats`] with the writer that `writer` builds on the
+/// coverage it shares with the watchdog.
+///
+/// Errors: the OS refused to start the watchdog thread; the writer is not
+/// started then.
+fn launch_with_writer<W>(
+    interval: Duration,
+    stale_running: StaleRunningRecovery,
+    live: LiveDispatches,
+    cancel: CancellationToken,
+    fail_closed_stop: FailClosedStop,
+    writer: impl FnOnce(SharedCoverage) -> W,
+) -> std::io::Result<(RunnerBeatWatch, JoinHandle<()>)>
+where
+    W: std::future::Future<Output = ()> + Send + 'static,
+{
     let coverage = SharedCoverage::new(Instant::now());
+    let dead_writer = DeadWriter::default();
     let (stop_watch, stop_received) = std::sync::mpsc::channel::<()>();
     let context = WatchContext {
         stale_running,
         interval,
         coverage: coverage.clone(),
-        live: live.clone(),
+        dead_writer: dead_writer.clone(),
+        live,
         fail_closed_stop,
     };
     // The watchdog thread and the writer log to the dispatcher of their
@@ -582,19 +664,34 @@ pub fn launch_runner_beats(
         .spawn(with_starter_dispatch(move || {
             run_watch(&context, &stop_received);
         }))?;
-    let writer = tokio::spawn(
-        run_beats(
-            pool,
-            sender,
-            interval,
-            stale_running,
-            live,
-            coverage,
-            cancel,
-        )
-        .with_current_subscriber(),
-    );
-    Ok((RunnerBeatWatch { stop_watch, watch }, writer))
+    let writer = tokio::spawn(writer(coverage).with_current_subscriber());
+    let supervised = match stale_running {
+        StaleRunningRecovery::On { .. } => writer,
+        StaleRunningRecovery::Off => tokio::spawn(
+            run_on_after_writer_end(writer, dead_writer, cancel).with_current_subscriber(),
+        ),
+    };
+    Ok((RunnerBeatWatch { stop_watch, watch }, supervised))
+}
+
+/// With stale running recovery off, the task that the worker supervises in
+/// place of the writer: await the writer; when it ended with no stop request
+/// (`cancel` not fired), record why for the watchdog and wait for `cancel`.
+/// Dropping this task aborts the writer.
+async fn run_on_after_writer_end(
+    writer: JoinHandle<()>,
+    dead_writer: DeadWriter,
+    cancel: CancellationToken,
+) {
+    let _abort_writer = AbortWriterOnDrop(writer.abort_handle());
+    let ended = writer.await;
+    match cancel.is_cancelled() {
+        true => {}
+        false => {
+            dead_writer.record(crate::worker::supervision::unexpected_end_reason(ended));
+            cancel.cancelled().await;
+        }
+    }
 }
 
 impl RunnerBeatWatch {
@@ -792,6 +889,7 @@ fn run_watch(context: &WatchContext, stop: &Receiver<()>) {
         StaleRunningRecovery::Off => watch_and_log(
             context.interval * LATE_BEAT_INTERVALS,
             &context.coverage,
+            &context.dead_writer,
             stop,
         ),
     }
@@ -981,13 +1079,29 @@ fn describe(verdict: &WatchVerdict) -> String {
 }
 
 /// With stale running recovery off: log late beats at most once per log
-/// interval, never stop the worker.
-fn watch_and_log(late_after: Duration, coverage: &SharedCoverage, stop: &Receiver<()>) {
+/// interval, never stop the worker. A writer that died is logged once, and
+/// the watch ends: no beat lands any more, and no task depends on one
+/// (Python `_watch_and_log`).
+fn watch_and_log(
+    late_after: Duration,
+    coverage: &SharedCoverage,
+    dead_writer: &DeadWriter,
+    stop: &Receiver<()>,
+) {
     let mut late_log = LogGate::new(BEAT_FAILURE_LOG_INTERVAL);
     loop {
         match stop.recv_timeout(WATCH_INTERVAL) {
             Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
             Err(RecvTimeoutError::Timeout) => {}
+        }
+        if let Some(reason) = dead_writer.reason() {
+            tracing::error!(
+                cause = %reason,
+                "{DEAD_WRITER_LINE}: {reason}. The worker runs on without runner heartbeats, \
+                 because no reaper fails a RUNNING row (auto_fail_stale_running is off, or no \
+                 recovery config)",
+            );
+            return;
         }
         let now = Instant::now();
         match check_coverage(&coverage.read(), late_after, now) {

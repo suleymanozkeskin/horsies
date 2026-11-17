@@ -8,6 +8,9 @@
 -- horsies_complete_task_fused, horsies_finish_failed_attempt and horsies_finish_workflow_success are not here: the
 -- baseline defines them in 0004_lifecycle_functions.sql, and lifecycle_history_calls.sql holds their definitions
 -- before the switch.
+-- horsies_expire_owned_claim, horsies_expire_pending_tasks, horsies_cancel_owned_orphan and
+-- horsies_cancel_orphaned_tasks are defined in 0004_lifecycle_functions.sql with a table result; a DROP FUNCTION
+-- before each of their definitions here lets the composite result of this text replace them.
 
 CREATE OR REPLACE FUNCTION horsies_move_task_to_history(p_task_id uuid, p_terminal_status text, p_terminalization_kind text, p_terminal_at timestamp with time zone, p_result text, p_error_code text, p_failed_reason text) RETURNS void
     LANGUAGE plpgsql
@@ -1240,6 +1243,9 @@ BEGIN
 END
 $$;
 
+-- The baseline function of this name returns its outcome columns as a table (0004); this definition
+-- returns the composite type, so it replaces the baseline one by drop and create.
+DROP FUNCTION horsies_cancel_orphaned_tasks(integer);
 CREATE OR REPLACE FUNCTION horsies_cancel_orphaned_tasks(p_batch_size integer) RETURNS SETOF horsies_terminalization_outcome
     LANGUAGE plpgsql
     AS $$
@@ -1884,6 +1890,9 @@ BEGIN
 END
 $$;
 
+-- The baseline function of this name returns its outcome columns as a table (0004); this definition
+-- returns the composite type, so it replaces the baseline one by drop and create.
+DROP FUNCTION horsies_cancel_owned_orphan(uuid, text, timestamp with time zone);
 CREATE OR REPLACE FUNCTION horsies_cancel_owned_orphan(p_task_id uuid, p_worker_id text, p_claimed_at timestamp with time zone) RETURNS SETOF horsies_terminalization_outcome
     LANGUAGE plpgsql
     AS $$
@@ -2001,6 +2010,9 @@ BEGIN
 END
 $$;
 
+-- The baseline function of this name returns its outcome columns as a table (0004); this definition
+-- returns the composite type, so it replaces the baseline one by drop and create.
+DROP FUNCTION horsies_expire_owned_claim(uuid, text, text, text);
 CREATE OR REPLACE FUNCTION horsies_expire_owned_claim(p_task_id uuid, p_worker_id text, p_result text, p_error_code text) RETURNS SETOF horsies_terminalization_outcome
     LANGUAGE plpgsql
     AS $$
@@ -2062,6 +2074,9 @@ BEGIN
 END
 $$;
 
+-- The baseline function of this name returns its outcome columns as a table (0004); this definition
+-- returns the composite type, so it replaces the baseline one by drop and create.
+DROP FUNCTION horsies_expire_pending_tasks(integer, text, text);
 CREATE OR REPLACE FUNCTION horsies_expire_pending_tasks(p_batch_size integer, p_result text, p_error_code text) RETURNS SETOF horsies_terminalization_outcome
     LANGUAGE plpgsql
     AS $$

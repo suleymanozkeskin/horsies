@@ -63,6 +63,7 @@ from tests.integration.task_history_harness import (
     prepare_move_storage,
     terminalization_schema_fixture,
 )
+from tests.integration.terminal_writes import fail_running_task, task_failure
 from tests.rerun_envelope_support import frame_rerun_envelope
 
 pytestmark = [pytest.mark.integration]
@@ -89,17 +90,15 @@ def v7_with_birth(birth: datetime) -> str:
 
 
 async def fail_task(connection: AsyncConnection, task_id: str) -> None:
-    outcome = (
-        await connection.execute(
-            text(
-                'SELECT outcome FROM horsies_fail_locked_task('
-                'CAST(:task_id AS uuid), :worker, :result, '
-                "'BOOM', 'exploded')"
-            ),
-            {'task_id': task_id, 'worker': WORKER, 'result': FAILURE_RESULT},
-        )
-    ).one()
-    assert outcome.outcome == 'APPLIED'
+    outcome = await fail_running_task(
+        connection,
+        task_id,
+        worker_id=WORKER,
+        failure=task_failure(
+            result_json=FAILURE_RESULT, error_code='BOOM', failed_reason='exploded'
+        ),
+    )
+    assert outcome == 'APPLIED'
 
 
 async def complete_task(connection: AsyncConnection, task_id: str) -> None:
@@ -136,22 +135,8 @@ class TestDetail:
             task_id = await insert_live_task(
                 connection, class_key=CLASS_KEY, worker=WORKER
             )
-            # A prior attempt row, as the child runner would have written
-            # it; the move must carry it into the snapshot.
-            await connection.execute(
-                text(
-                    'INSERT INTO horsies_task_attempts '
-                    '(task_id, attempt, outcome, will_retry, started_at, '
-                    'finished_at, error_code, error_message, failed_reason, '
-                    'worker_id, worker_hostname, worker_pid, '
-                    'worker_process_name) VALUES '
-                    "(CAST(:task_id AS uuid), 1, 'FAILED', TRUE, "
-                    'statement_timestamp(), statement_timestamp(), '
-                    "'BOOM', 'exploded once', 'TASK_ERROR', :worker, "
-                    "'it-host', 4242, 'it-proc')"
-                ),
-                {'task_id': task_id, 'worker': WORKER},
-            )
+            # The failure writes the attempt row of this run, as the
+            # worker does; the move must carry it into the snapshot.
             await fail_task(connection, task_id)
             detail = await read_task_detail(connection, task_id=UUID(task_id))
             assert isinstance(detail, HistoryTaskDetail)

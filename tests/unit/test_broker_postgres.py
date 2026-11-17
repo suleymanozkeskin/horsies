@@ -230,14 +230,24 @@ def _make_result_session(row: Any) -> AsyncMock:
             'use GET_TASK_STATUS_NAME_SQL'
         ),
     )
-    # The history fallback probes for the staged detail function on
-    # the session's connection; this mock models the unpublished
-    # database, where absent means absent (the integration suite
-    # covers the published side on real schemas).
-    published_probe = MagicMock()
-    published_probe.scalar_one = MagicMock(return_value=False)
+    # The session's connection models a database where the staged result
+    # reader is not published (its probe answers False), so the live probe
+    # runs, and where history does not hold the task: the staged detail
+    # read returns no row and the absence reason is WITHIN_RETAINED_HISTORY.
+    # The integration suite covers history rows on real schemas.
+    async def _connection_execute(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        result = MagicMock()
+        match str(statement):
+            case sql if 'to_regprocedure' in sql:
+                result.scalar_one = MagicMock(return_value=False)
+            case sql if 'horsies_task_absence_reason' in sql:
+                result.scalar_one = MagicMock(return_value='WITHIN_RETAINED_HISTORY')
+            case _:
+                result.one_or_none = MagicMock(return_value=None)
+        return result
+
     connection = AsyncMock()
-    connection.execute = AsyncMock(return_value=published_probe)
+    connection.execute = AsyncMock(side_effect=_connection_execute)
     session.connection = AsyncMock(return_value=connection)
     return session
 

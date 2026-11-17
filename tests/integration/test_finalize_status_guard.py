@@ -22,11 +22,8 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.lifecycle.commands import (
-    CompleteLockedTask,
-    CompleteTaskFused,
-)
-from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead
+from horsies.core.lifecycle.commands import CompleteTaskFused
+from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.lifecycle.outcomes import (
     Applied,
     ClaimReleased,
@@ -160,20 +157,18 @@ async def _set_task_status(
     await session.flush()
 
 
-async def _complete_locked(
+async def _complete(
     session: AsyncSession,
     task_id: str,
     *,
-    worker_id: str = OWNER_WORKER_ID,
     result_json: str = '{"ok": "result"}',
 ) -> TerminalizationOutcome:
-    """``horsies_complete_locked_task``, which classifies its own miss."""
-    command = CompleteLockedTask(
-        task_id=task_id,
-        fence=PriorLockedRead(worker_id=worker_id),
-        result_json=result_json,
+    """The worker's success of a plain task (``horsies_complete_task_fused``)
+    under the claim of ``OWNER_WORKER_ID`` at ``CLAIMED_AT``, which
+    classifies its own miss."""
+    return await _complete_fused(
+        session, task_id, claimed_at=CLAIMED_AT, result_json=result_json
     )
-    return await apply_async(await session.connection(), command)
 
 
 async def _link_workflow_node(session: AsyncSession, task_id: str) -> None:
@@ -304,13 +299,13 @@ async def test_complete_guard_blocks_when_not_running(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Locked completion refuses a task that is no longer RUNNING."""
+    """The success write refuses a task that is no longer RUNNING."""
     task_id = await _insert_running_task(session)
 
     # Simulate reaper marking task as FAILED
     await _set_task_status(session, task_id, 'FAILED')
 
-    outcome = await _complete_locked(
+    outcome = await _complete(
         session,
         task_id,
         result_json='{"ok": "late_result"}',
@@ -327,10 +322,10 @@ async def test_complete_guard_succeeds_when_running(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Locked completion applies when the task is RUNNING."""
+    """The success write applies when the task is RUNNING."""
     task_id = await _insert_running_task(session)
 
-    outcome = await _complete_locked(session, task_id)
+    outcome = await _complete(session, task_id)
 
     assert isinstance(outcome, Applied)
     assert await _get_task_status(session, task_id) == 'COMPLETED'
@@ -440,7 +435,7 @@ async def test_reaper_then_complete_race_sequence(
 
     # T=2: Late worker finalize fires — should be blocked
     late_result = '{"ok": "I completed successfully!"}'
-    outcome = await _complete_locked(
+    outcome = await _complete(
         session,
         task_id,
         result_json=late_result,
@@ -522,12 +517,12 @@ async def test_complete_guard_blocks_on_ownership_mismatch(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Locked completion refuses a row owned by another worker."""
+    """The success write refuses a row owned by another worker."""
     task_id = await _insert_running_task(
         session, claimed_by_worker_id=OTHER_WORKER_ID
     )
 
-    outcome = await _complete_locked(
+    outcome = await _complete(
         session,
         task_id,
         result_json='{"ok": "stale_result"}',
@@ -620,7 +615,7 @@ async def test_stale_finalizer_after_reclaim_race_sequence(
     await session.flush()
 
     # T=3: Worker A's stale finalizer fires — must be blocked
-    outcome = await _complete_locked(
+    outcome = await _complete(
         session,
         task_id,
         result_json='{"ok": "stale A result"}',

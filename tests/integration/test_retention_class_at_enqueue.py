@@ -40,6 +40,7 @@ from horsies.core.models.task_send_types import TaskSendValidationFailed
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err, is_ok
 from tests.broker_resources_support import current_resources
+from tests.integration.terminal_writes import complete_plain_task
 
 pytestmark = [
     pytest.mark.integration,
@@ -120,7 +121,8 @@ async def _row_class(broker: PostgresBroker, task_id: str) -> str | None:
 async def _terminalize(
     broker: PostgresBroker, task_id: str
 ) -> tuple[str, str]:
-    """Drive the enqueued row to COMPLETED through the shipped function.
+    """Drive the enqueued row to COMPLETED through the worker's success
+    (``horsies_complete_task_fused``), after the claim and the start.
 
     Returns (history retention_class_key, history partition name) for the
     moved record — the partition read from ``tableoid``, which is the
@@ -130,25 +132,17 @@ async def _terminalize(
         await connection.execute(
             text(
                 "UPDATE horsies_tasks SET status = 'RUNNING', "
-                'claimed_by_worker_id = :worker, started_at = NOW() '
+                'claimed_by_worker_id = :worker, claimed_at = NOW(), '
+                'started_at = NOW(), worker_pid = 4242, '
+                "worker_hostname = 'it-host', worker_process_name = 'it-proc' "
                 'WHERE id = CAST(:task_id AS uuid)'
             ),
             {'task_id': task_id, 'worker': WORKER},
         )
-        outcome = (
-            await connection.execute(
-                text(
-                    'SELECT * FROM horsies_complete_locked_task('
-                    'CAST(:task_id AS uuid), :worker, :result)'
-                ),
-                {
-                    'task_id': task_id,
-                    'worker': WORKER,
-                    'result': '{"ok":true}',
-                },
-            )
-        ).one()
-        assert outcome.outcome == 'APPLIED', outcome
+        outcome = await complete_plain_task(
+            connection, task_id, worker_id=WORKER, result_json='{"ok":true}'
+        )
+        assert outcome == 'APPLIED', outcome
     async with current_resources(broker).engine.connect() as connection:
         row = (
             await connection.execute(

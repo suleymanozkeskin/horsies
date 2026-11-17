@@ -29,6 +29,7 @@ from tests.integration.task_history_harness import (
     prepare_move_storage,
     terminalization_schema_fixture,
 )
+from tests.integration.terminal_writes import fail_running_task, task_failure
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -53,16 +54,14 @@ async def seed_failed_workflow_task(connection: AsyncConnection) -> str:
     await link_workflow_node(
         connection, task_id, workflow_id=workflow_id, node_status='RUNNING'
     )
-    outcome = (
-        await connection.execute(
-            text(
-                'SELECT outcome FROM horsies_fail_locked_task('
-                "CAST(:task_id AS uuid), :worker, '{\"error\":\"boom\"}', "
-                "'BOOM', 'exploded')"
-            ),
-            {'task_id': task_id, 'worker': WORKER},
-        )
-    ).scalar_one()
+    outcome = await fail_running_task(
+        connection,
+        task_id,
+        worker_id=WORKER,
+        failure=task_failure(
+            result_json='{"error":"boom"}', error_code='BOOM', failed_reason='exploded'
+        ),
+    )
     assert outcome == 'APPLIED'
     return task_id
 

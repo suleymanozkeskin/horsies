@@ -216,15 +216,74 @@ fn a_pattern_text_that_is_not_a_valid_pattern_is_refused() {
     }
 }
 
-/// Python writes a time of day that carries a UTC offset with the offset
-/// (`09:00:00+02:00`). The core's pattern has no form for it, so the parser
-/// refuses the text.
+/// The pattern texts of a daily, a weekly and a monthly schedule at `time`.
+fn timed_patterns(time: &str) -> [String; 3] {
+    [
+        format!("{{\"type\":\"daily\",\"time\":\"{time}\"}}"),
+        format!("{{\"type\":\"weekly\",\"days\":[\"monday\"],\"time\":\"{time}\"}}"),
+        format!("{{\"type\":\"monthly\",\"day\":1,\"time\":\"{time}\"}}"),
+    ]
+}
+
+/// The zone of a schedule comes only from its `timezone`: Python refuses a
+/// time with `tzinfo` at config, and a time of day with a UTC offset
+/// (`09:00:00+02:00`) has no form in the core's pattern, so the parser
+/// refuses the text in each pattern that has a time.
 #[test]
 fn a_time_of_day_with_an_offset_is_refused() {
-    let mut schedule = enabled_schedule("nightly");
-    schedule["activation"]["pattern_json"] =
-        json!("{\"type\":\"daily\",\"time\":\"09:00:00+02:00\"}");
-    assert_refused_in_first_activation(&manifest(json!([schedule])));
+    for text in timed_patterns("09:00:00+02:00") {
+        let mut schedule = enabled_schedule("nightly");
+        schedule["activation"]["pattern_json"] = json!(text);
+        let refused = parse_scheduler_manifest(&manifest(json!([schedule])).to_string())
+            .expect_err("a time with an offset is refused");
+        assert!(
+            refused.field_path.starts_with("schedules[0].activation"),
+            "{text}: {}",
+            refused.field_path
+        );
+        assert!(
+            refused.cause.starts_with("value does not fit the field"),
+            "{text}: {}",
+            refused.cause
+        );
+    }
+}
+
+/// Slots fire at whole seconds: Python refuses a time with microseconds at
+/// config, and the parser refuses a time of day with a fraction of a second
+/// in each pattern that has a time, so the calculator never sees one. The
+/// refusal names the field and the error class, never the value; the rule
+/// is `SchedulePattern::validate` (its test names it), and the same texts at
+/// a whole second parse (`a_time_of_day_in_whole_seconds_parses`).
+#[test]
+fn a_time_of_day_with_a_fraction_of_a_second_is_refused() {
+    for text in timed_patterns("09:00:00.000500") {
+        let mut schedule = enabled_schedule("nightly");
+        schedule["activation"]["pattern_json"] = json!(text);
+        let refused = parse_scheduler_manifest(&manifest(json!([schedule])).to_string())
+            .expect_err("a time with microseconds is refused");
+        assert!(
+            refused.field_path.starts_with("schedules[0].activation"),
+            "{text}: {}",
+            refused.field_path
+        );
+        assert!(
+            refused.cause.starts_with("value does not fit the field"),
+            "{text}: {}",
+            refused.cause
+        );
+    }
+}
+
+/// The same patterns at a whole second parse.
+#[test]
+fn a_time_of_day_in_whole_seconds_parses() {
+    for text in timed_patterns("09:00:00") {
+        let mut schedule = enabled_schedule("nightly");
+        schedule["activation"]["pattern_json"] = json!(text);
+        let manifest = parsed(&manifest(json!([schedule])));
+        assert_eq!(manifest.schedules.len(), 1, "{text}");
+    }
 }
 
 #[test]
