@@ -29,6 +29,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from horsies.core.models.tasks import Execution
@@ -58,14 +59,25 @@ class HeldRow:
     for a free child of its route.
 
     ``budget`` is the budget class of the claim plan that the row's class
-    routes to: the children of that budget run the row. ``row`` is the row
-    as ``horsies_claim`` returned it.
+    routes to: the children of that budget run the row. ``claimed_at`` is
+    the claim generation of the row's claim. ``row`` is the row as
+    ``horsies_claim`` returned it.
     """
 
     task_id: str
     queue_name: str
     budget: Execution
+    claimed_at: datetime
     row: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class StartedClaim:
+    """A row that this worker started and whose finalizer has not ended, with
+    the claim generation of the claim it started under."""
+
+    task_id: str
+    claimed_at: datetime
 
 
 def read_queue_starts(
@@ -104,7 +116,7 @@ class QueueCapHold:
     def __init__(self, caps: Mapping[str, int]) -> None:
         self._caps: Mapping[str, int] = dict(caps)
         self._held: deque[HeldRow] = deque()
-        self._started: set[str] = set()
+        self._started: dict[str, datetime] = {}
 
     def holds(self, queue_name: str) -> bool:
         """Whether a row of ``queue_name`` waits for the start check."""
@@ -125,6 +137,14 @@ class QueueCapHold:
     def started_ids(self) -> tuple[str, ...]:
         """The task ids that this worker started and that have not ended."""
         return tuple(self._started)
+
+    def started_claims(self) -> tuple[StartedClaim, ...]:
+        """The rows that this worker started and that have not ended, with
+        their claim generations."""
+        return tuple(
+            StartedClaim(task_id=task_id, claimed_at=claimed_at)
+            for task_id, claimed_at in self._started.items()
+        )
 
     def held_count(self) -> int:
         """How many rows wait for the start check."""
@@ -157,7 +177,7 @@ class QueueCapHold:
             if count < self._caps[row.queue_name] and room > 0:
                 taken[row.queue_name] = taken.get(row.queue_name, 0) + 1
                 seated[row.budget] = seated.get(row.budget, 0) + 1
-                self._started.add(row.task_id)
+                self._started[row.task_id] = row.claimed_at
                 admitted.append(row)
             else:
                 kept.append(row)
@@ -168,7 +188,7 @@ class QueueCapHold:
         """Forget a started row whose finalizer ended. A task id that was not
         started here is a defect of the caller (``AssertionError``)."""
         assert task_id in self._started, f'task {task_id} was not started by the start check'
-        self._started.remove(task_id)
+        del self._started[task_id]
 
     def drain(self) -> list[HeldRow]:
         """Take every held row, in claim order, at the stop of the worker."""

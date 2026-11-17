@@ -9,6 +9,7 @@ its route (its budget) has a free slot or seat at that moment.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Any, Final
 from unittest.mock import MagicMock
 
@@ -31,6 +32,7 @@ from horsies.core.worker.worker import Worker
 from horsies.core.worker.queue_cap_hold import (
     HeldRow,
     QueueCapHold,
+    StartedClaim,
     read_queue_starts,
     start_check_caps,
 )
@@ -41,6 +43,7 @@ COLUMNS = ('queue_name', 'running', 'started_not_running')
 ISOLATED: Final = Execution.ISOLATED
 SHARED_ASYNC: Final = Execution.SHARED_ASYNC
 SHARED_THREAD: Final = Execution.SHARED_THREAD
+CLAIMED_AT: Final = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
 # Free capacity that never limits the rows of these tests.
 MANY_FREE: Final[Mapping[Execution, int]] = {ISOLATED: 100}
 
@@ -54,6 +57,7 @@ def _row(
         task_id=task_id,
         queue_name=queue_name,
         budget=budget,
+        claimed_at=CLAIMED_AT,
         row={'id': task_id},
     )
 
@@ -96,6 +100,7 @@ class TestAdmit:
         assert hold.admit({'capped': 1}, MANY_FREE) == [_row('t1')]
         assert hold.held_count() == 0
         assert hold.started_ids() == ('t1',)
+        assert hold.started_claims() == (StartedClaim(task_id='t1', claimed_at=CLAIMED_AT),)
 
     def test_a_queue_at_its_cap_keeps_its_row(self) -> None:
         hold = _hold({'capped': 2}, _row('t1'))
