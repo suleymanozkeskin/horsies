@@ -104,11 +104,8 @@ impl std::fmt::Debug for RegisteredWorkflowSpec {
 pub struct BuilderHookName(&'static str);
 
 impl BuilderHookName {
-    /// The hook of the registrations of this crate's [`Horsies`] app:
-    /// [`RegisteredWorkflowSpec::spec_builder`] and
+    /// The hook of [`RegisteredWorkflowSpec::spec_builder`] and
     /// [`RegisteredWorkflowDefinition::spec_builder`].
-    ///
-    /// [`Horsies`]: crate::core::app::Horsies
     pub const SPEC_BUILDER: Self = Self::new("spec_builder");
 
     /// The hook name `name`, as the client's error texts write it.

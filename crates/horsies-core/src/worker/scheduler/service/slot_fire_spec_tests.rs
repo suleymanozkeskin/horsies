@@ -14,16 +14,16 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::state::test_rows::{delete_state, seed_state, state_row};
-use super::{build_commands, fire_due_schedule, DueSchedule, EnabledSchedule};
+use super::{
+    build_commands, fire_due_schedule, DueSchedule, EnabledSchedule, PreparedSchedules,
+    ScheduleSendFacts,
+};
 use crate::broker::core_rows::StatementLog;
 use crate::broker::PostgresBroker;
 use crate::core::config::{
     AppConfig, IntervalSchedule, ScheduleConfig, SchedulePattern, TaskSchedule,
 };
-use crate::core::{
-    OperationalErrorCode, PreparedSchedules, RetryPolicy, ScheduleSendFacts, TaskErrorCode,
-    TaskOptions,
-};
+use crate::core::{OperationalErrorCode, RetryPolicy, TaskErrorCode, TaskOptions};
 
 const SCHEDULE_INTERVAL_SECONDS: u32 = 60;
 

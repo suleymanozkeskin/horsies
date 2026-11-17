@@ -1,5 +1,4 @@
 use super::*;
-use crate::core::app::ScheduleSendFacts;
 use crate::core::config::{
     CustomQueueConfig, IntervalSchedule, PostgresConfig, QueueMode, RecoveryConfig,
     SchedulePattern, WorkerResilienceConfig,
