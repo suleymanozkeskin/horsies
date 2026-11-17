@@ -229,6 +229,12 @@ async fn cleanup(pool: &PgPool, task_ids: &[Uuid], workflow_ids: &[Uuid]) {
         .execute(pool)
         .await
         .ok();
+    // The attempt rows first: their foreign key refuses the task delete.
+    sqlx::query("DELETE FROM horsies_task_attempts WHERE task_id = ANY($1)")
+        .bind(task_ids)
+        .execute(pool)
+        .await
+        .ok();
     sqlx::query("DELETE FROM horsies_tasks WHERE id = ANY($1)")
         .bind(task_ids)
         .execute(pool)
@@ -574,13 +580,18 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     assert_eq!(live_snapshot.task_name, "p8.live");
     assert_eq!(live_snapshot.status, TaskStatus::Pending);
     assert!(live_snapshot.raw_result.is_none());
+    // The worker identity columns are NOT NULL in the baseline attempt
+    // table.
     sqlx::query(
         "INSERT INTO horsies_task_attempts (
-             task_id, attempt, outcome, will_retry, started_at, finished_at
+             task_id, attempt, outcome, will_retry, started_at, finished_at,
+             worker_id, worker_hostname, worker_pid, worker_process_name
          ) VALUES ($1, 1, 'WORKER_FAILURE', TRUE,
-                   NOW() - interval '1 second', NOW())",
+                   NOW() - interval '1 second', NOW(),
+                   $2, 'rerun-test-host', 4242, 'rerun-test-process')",
     )
     .bind(live)
+    .bind(WORKER)
     .execute(&pool)
     .await
     .unwrap();

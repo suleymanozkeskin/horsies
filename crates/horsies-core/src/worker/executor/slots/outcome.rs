@@ -702,6 +702,10 @@ impl OutcomeWriter {
 
     /// The write and at most the retries of its `stage`; then phase 2 when
     /// owed.
+    ///
+    /// The write is boxed: its future holds every writer of phase 1, and
+    /// `settle` builds this future at seven call sites. Inline, a debug
+    /// build needs more than a 2 MiB thread stack for one settlement.
     async fn phase_one(
         &self,
         task: &ClaimedTask,
@@ -712,7 +716,7 @@ impl OutcomeWriter {
         let max_retries = stage.max_retries();
         let mut retries_done: u32 = 0;
         let outcome = loop {
-            let error = match self.write_once(task, &write, claimed_row).await {
+            let error = match Box::pin(self.write_once(task, &write, claimed_row)).await {
                 Ok(outcome) => break outcome,
                 Err(error) => error,
             };
@@ -774,13 +778,16 @@ impl OutcomeWriter {
         }
     }
 
+    /// Phase 2 of one task. Boxed: the future of `run_phase2` holds the node
+    /// finish and the parent advances, and `phase_one` and `after_stop`
+    /// would each carry it inline.
     async fn phase_two(
         &self,
         task: &ClaimedTask,
         capacity_notified: bool,
         phase_two: PhaseTwoForm,
     ) {
-        run_phase2(
+        Box::pin(run_phase2(
             &self.broker,
             &self.workflows,
             Phase2Work {
@@ -791,7 +798,7 @@ impl OutcomeWriter {
                 phase_two,
             },
             &self.retention,
-        )
+        ))
         .await;
     }
 

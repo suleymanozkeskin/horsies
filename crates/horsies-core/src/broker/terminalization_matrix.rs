@@ -2850,8 +2850,10 @@ async fn assert_batch_snapshot_encoding(pool: &PgPool) {
         "expiry",
     ] {
         let workflow = Uuid::new_v4();
+        // `horsies_abandon_owned_nodes` moves only claims whose workflow is
+        // PAUSED; it refuses the others as SOURCE_STATE_CONFLICT.
         let workflow_status = match operation {
-            "paused" => "PAUSED",
+            "abandon_owned" | "paused" => "PAUSED",
             "cancelled" => "CANCELLED",
             _ => "RUNNING",
         };
@@ -2909,49 +2911,50 @@ async fn assert_batch_snapshot_encoding(pool: &PgPool) {
                     .unwrap();
             snapshots.push(expected);
         }
-        let count: i64 = match operation {
+        // One outcome row per task; a refusal row is not a move.
+        let outcomes: Vec<String> = match operation {
             "abandon_owned" | "cancel_owned" => {
                 let query = match operation {
                     "abandon_owned" => {
-                        "SELECT count(*) FROM horsies_abandon_owned_nodes($1, $2, 'w1')"
+                        "SELECT outcome FROM horsies_abandon_owned_nodes($1, $2, 'w1')"
                     }
-                    _ => "SELECT count(*) FROM horsies_cancel_owned_nodes($1, $2, 'w1')",
+                    _ => "SELECT outcome FROM horsies_cancel_owned_nodes($1, $2, 'w1')",
                 };
                 sqlx::query_scalar(query)
                     .bind(&ids)
                     .bind(vec![claimed_at; 2])
-                    .fetch_one(pool)
+                    .fetch_all(pool)
                     .await
                     .unwrap()
             }
             "paused" | "cancelled" => {
                 let query = match operation {
-                    "paused" => {
-                        "SELECT count(*) FROM horsies_abandon_nodes_of_paused_workflows($1)"
-                    }
-                    _ => "SELECT count(*) FROM horsies_cancel_nodes_of_cancelled_workflow($1)",
+                    "paused" => "SELECT outcome FROM horsies_abandon_nodes_of_paused_workflows($1)",
+                    _ => "SELECT outcome FROM horsies_cancel_nodes_of_cancelled_workflow($1)",
                 };
                 sqlx::query_scalar(query)
                     .bind(vec![workflow])
-                    .fetch_one(pool)
+                    .fetch_all(pool)
                     .await
                     .unwrap()
             }
-            "orphan" => {
-                sqlx::query_scalar("SELECT count(*) FROM horsies_cancel_orphaned_tasks(10)")
-                    .fetch_one(pool)
-                    .await
-                    .unwrap()
-            }
+            "orphan" => sqlx::query_scalar("SELECT outcome FROM horsies_cancel_orphaned_tasks(10)")
+                .fetch_all(pool)
+                .await
+                .unwrap(),
             "expiry" => sqlx::query_scalar(
-                "SELECT count(*) FROM horsies_expire_pending_tasks(10, 'expired', 'EXPIRED')",
+                "SELECT outcome FROM horsies_expire_pending_tasks(10, 'expired', 'EXPIRED')",
             )
-            .fetch_one(pool)
+            .fetch_all(pool)
             .await
             .unwrap(),
             _ => unreachable!(),
         };
-        assert_eq!(count, 2, "{operation}");
+        assert_eq!(
+            outcomes,
+            vec!["APPLIED".to_owned(), "APPLIED".to_owned()],
+            "{operation}"
+        );
         for (id, expected) in ids.iter().zip(snapshots) {
             let calls: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM test_attempt_encoding_calls WHERE task_id=$1",
