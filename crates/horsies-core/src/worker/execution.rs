@@ -28,7 +28,7 @@ use crate::broker::core_rows::{column, one_row, scalar, StatementLog};
 use crate::broker::error::is_retryable_sqlx_error;
 use crate::broker::listener::notify_task_queue;
 use crate::broker::terminalization::terminalize;
-use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
+use crate::broker::PostgresBroker;
 use crate::core::codec::user_value::check_task_input;
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::config::retention::RetentionConfig;
@@ -51,6 +51,7 @@ use crate::workflow_engine::steps::{
     NodeFinishDisposition, OwedParentAdvances,
 };
 
+use crate::worker::executor::slots::{ClaimedTask, RetryFacts};
 use crate::worker::retry::{admit_retry, RetryAdmission, StoredOptions};
 
 // Re-export for worker.rs orchestrator.
@@ -261,20 +262,22 @@ fn serialization_error(message: String) -> TaskError {
 /// retryable when the connection failed, and the next try sends the same
 /// statement (Python `core/worker/finalize.py`, `_persist_failed_attempt`).
 /// A refusal is an outcome ([`FinalizeOutcome::Refused`]), not an error.
-#[allow(clippy::too_many_arguments)]
+///
+/// `task` is the claimed task as the claim returned it: its claim generation
+/// fences every write, and its retry facts and stored options decide the
+/// retry of a failure.
 pub(crate) async fn persist_terminal_state(
     broker: &PostgresBroker,
-    task_id: Uuid,
+    task: &ClaimedTask,
     result: TaskResult<Vec<u8>>,
-    row: &ClaimedTaskRow,
-    stored_options: &StoredOptions,
-    running: &SetRunningRow,
     worker_id: &str,
     payload_policy: &PayloadPolicy,
 ) -> Result<FinalizeOutcome, FinalizeError> {
+    let task_id = task.task_id;
+    let is_workflow_task = task.kind.is_workflow_task();
     let fence = OwnedClaim {
         worker_id: worker_id.to_owned(),
-        claimed_at: row.claimed_at,
+        claimed_at: task.claimed_at,
     };
     match result {
         TaskResult::Ok(ref result_bytes) => {
@@ -283,11 +286,11 @@ pub(crate) async fn persist_terminal_state(
             // loss). Parity with horsies PR #208.
             enforce_payload_policy(
                 payload_policy,
-                &row.task_name,
+                &task.task_name,
                 PayloadKind::Result,
                 result_bytes.len(),
             );
-            persist_ok_result(broker, task_id, result_bytes, fence, row.is_workflow_task).await
+            persist_ok_result(broker, task_id, result_bytes, fence, is_workflow_task).await
         }
         TaskResult::Err(ref task_error) => {
             // The stored error keeps its code when its `data` cannot be stored:
@@ -302,14 +305,14 @@ pub(crate) async fn persist_terminal_state(
                 );
             }
             let error_code = Some(task_error.error_code.to_string());
-            let retry = retry_request_for(running, stored_options, error_code.as_deref());
+            let retry = retry_request_for(&task.retry, &task.options, error_code.as_deref());
             let result_json =
                 serde_json::to_string(&TaskResult::<serde_json::Value>::Err(task_error.clone()))
                     .map_err(|error| envelope_error(task_id, error))?;
             // Warn-only: error envelopes can carry oversized data too.
             enforce_payload_policy(
                 payload_policy,
-                &row.task_name,
+                &task.task_name,
                 PayloadKind::Result,
                 result_json.len(),
             );
@@ -326,29 +329,29 @@ pub(crate) async fn persist_terminal_state(
                     failed_reason: None,
                 },
             };
-            persist_failed_attempt(broker, &command, row.is_workflow_task).await
+            persist_failed_attempt(broker, &command, is_workflow_task).await
         }
     }
 }
 
 /// The retry that the task's policy admits for this failure, with its delay
 /// (Python `retry_request_for`). Pure. `retry_count` and `max_retries` come
-/// from the start of this claim generation; the write fences on that count.
+/// from the claim of this claim generation; the write fences on that count.
 /// The deadline is judged by the write, on the database clock.
 fn retry_request_for(
-    running: &SetRunningRow,
+    retry: &RetryFacts,
     stored_options: &StoredOptions,
     error_code: Option<&str>,
 ) -> RetryRequest {
     match admit_retry(
-        running.retry_count,
-        running.max_retries,
+        retry.retry_count,
+        retry.max_retries,
         stored_options.retry(),
         error_code,
     ) {
         RetryAdmission::Admitted(rule) => RetryRequest::RetryAfter {
-            expected_retry_count: running.retry_count,
-            delay_seconds: rule.delay_seconds((running.retry_count + 1).unsigned_abs()),
+            expected_retry_count: retry.retry_count,
+            delay_seconds: rule.delay_seconds((retry.retry_count + 1).unsigned_abs()),
             placement: RetryPlacement::SameClass,
         },
         RetryAdmission::RetriesSpent | RetryAdmission::NoPolicy | RetryAdmission::CodeNotListed => {

@@ -10,8 +10,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    args_from_inner, broker, claim_pass, code, err, error_of, finish_node, node, node_status,
-    node_task_input, ok, required, run_node_task, shared_pool, spec, start, task_node,
+    args_from_inner, broker, claim_once, claim_pass, code, err, error_of, finish_node, node,
+    node_status, node_task_input, ok, required, run_node_task, shared_pool, spec, start, task_node,
     worker_phase_one, worker_phase_two, workflow_status, IsolatedDatabase, NodeReport,
     RunningNodeTask, PORT_QUEUE,
 };
@@ -727,14 +727,10 @@ async fn promoted_siblings_are_claimed_in_priority_order() {
     .await;
     succeed(&db.pool, workflow_id, 0).await;
     let urgent_task = node(&db.pool, workflow_id, 1).await.task_id;
-    let mut one = claim_pass(PORT_QUEUE);
-    one.processes = 1;
+    let mut one = claim_pass(PORT_QUEUE, 1);
     one.max_claim_batch = 1;
 
-    let claimed = broker(&db.pool)
-        .claim_batch(&one)
-        .await
-        .expect("claim pass");
+    let claimed = claim_once(&db.pool, &one).await;
 
     let ids: Vec<Option<Uuid>> = claimed.iter().map(|row| Some(row.id)).collect();
     assert_eq!(ids, vec![urgent_task]);

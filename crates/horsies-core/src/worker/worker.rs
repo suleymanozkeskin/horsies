@@ -1701,7 +1701,7 @@ mod tests {
     };
 
     use crate::async_task_fn;
-    use crate::broker::{ClaimedTaskRow, PostgresBroker};
+    use crate::broker::PostgresBroker;
     use crate::core::config::recovery::RecoveryConfig;
     use crate::core::history::maintenance::coverage::{
         ensure_startup_coverage, StartupCoverageOutcome,
@@ -1972,8 +1972,8 @@ mod tests {
     }
 
     /// The claim generation of every row that `insert_claimed_task` seeds and
-    /// of every dispatch row that `claimed_task_row` builds, so a test's
-    /// dispatch fences on the generation its row carries.
+    /// of every claimed task that `claimed_task` builds, so a test's dispatch
+    /// fences on the generation its row carries.
     fn test_claim_generation() -> chrono::DateTime<Utc> {
         static GENERATION: std::sync::OnceLock<chrono::DateTime<Utc>> = std::sync::OnceLock::new();
         *GENERATION.get_or_init(Utc::now)
@@ -2058,23 +2058,24 @@ mod tests {
         .unwrap();
     }
 
-    /// Build a dispatch row for a task seeded by `insert_claimed_task` /
-    /// `insert_running_task`. Retry counts live on the DB row only: the
-    /// execution path reads them from `set_running`'s RETURNING, not the
-    /// claimed row (v12 claim shape).
-    fn claimed_task_row(
+    /// The claimed task of a plain task seeded by `insert_claimed_task` /
+    /// `insert_running_task`, as the claim returns it: the claim generation
+    /// of the seed, and the retry facts that the seed stored.
+    fn claimed_task(
         task_id: &Uuid,
         queue_name: &str,
-        task_options: Option<String>,
-    ) -> ClaimedTaskRow {
-        ClaimedTaskRow {
-            id: *task_id,
+        task_options: Option<&str>,
+        retry: RetryFacts,
+    ) -> ClaimedTask {
+        ClaimedTask {
+            task_id: *task_id,
             task_name: "finalize_test".to_owned(),
-            input: "null".to_owned(),
             queue_name: queue_name.to_owned(),
-            is_workflow_task: false,
-            task_options,
             claimed_at: test_claim_generation(),
+            execution: crate::core::task::Execution::SharedAsync,
+            kind: TaskKind::Plain,
+            retry,
+            options: crate::worker::retry::read_stored_options(task_options),
         }
     }
 
@@ -3929,17 +3930,16 @@ mod tests {
 
         let Err(err) = persist_terminal_state(
             &unreachable,
-            task_id,
+            &claimed_task(
+                &task_id,
+                "default",
+                Some(task_options.as_str()),
+                RetryFacts {
+                    retry_count: 0,
+                    max_retries: 3,
+                },
+            ),
             TaskResult::Err(TaskError::new("RETRY_ME", "try again").unwrap()),
-            &claimed_task_row(&task_id, "default", Some(task_options.clone())),
-            &crate::worker::retry::read_stored_options(Some(&task_options)),
-            &crate::broker::SetRunningRow {
-                id: task_id,
-                started_at: Utc::now(),
-                retry_count: 0,
-                max_retries: 3,
-                good_until: None,
-            },
             "worker-1",
             &crate::core::config::payload::PayloadPolicy::default(),
         )
@@ -3969,17 +3969,16 @@ mod tests {
 
         let Err(err) = persist_terminal_state(
             &unreachable,
-            task_id,
+            &claimed_task(
+                &task_id,
+                "default",
+                None,
+                RetryFacts {
+                    retry_count: 0,
+                    max_retries: 0,
+                },
+            ),
             TaskResult::Ok(br#""phase1-durable""#.to_vec()),
-            &claimed_task_row(&task_id, "default", None),
-            &crate::worker::retry::read_stored_options(None),
-            &crate::broker::SetRunningRow {
-                id: task_id,
-                started_at: Utc::now(),
-                retry_count: 0,
-                max_retries: 0,
-                good_until: None,
-            },
             "worker-1",
             &crate::core::config::payload::PayloadPolicy::default(),
         )

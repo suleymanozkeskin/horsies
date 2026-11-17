@@ -12,11 +12,11 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    args_from_inner, broker, child_of, claim_pass, code, err, finish_node, finish_task, handle,
-    history_row, node, node_status, node_task_input, ok, registry_of, seed_node, seed_node_task,
-    seed_workflow, shared_pool, spec, start, stored_result_error, sub_workflow_node, task_node,
-    workflow_status, IsolatedDatabase, LiveStatus, NodeSeed, ParentLink, WorkflowDoneListener,
-    WorkflowSeed, PORT_QUEUE, WORKER,
+    args_from_inner, broker, child_of, claim_once, claim_pass, code, err, finish_node, finish_task,
+    handle, history_row, node, node_status, node_task_input, ok, registry_of, seed_node,
+    seed_node_task, seed_workflow, shared_pool, spec, start, stored_result_error,
+    sub_workflow_node, task_node, workflow_status, IsolatedDatabase, LiveStatus, NodeSeed,
+    ParentLink, WorkflowDoneListener, WorkflowSeed, PORT_QUEUE, WORKER,
 };
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::config::payload::PayloadPolicy;
@@ -282,10 +282,7 @@ async fn a_claim_cannot_take_a_task_while_its_cancel_is_uncommitted() {
     let cancel_broker = broker(&db.pool);
     let cancel = tokio::spawn(async move { cancel_workflow(&cancel_broker, workflow_id).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let claimed = broker(&db.pool)
-        .claim_batch(&claim_pass(PORT_QUEUE))
-        .await
-        .expect("claim pass");
+    let claimed = claim_once(&db.pool, &claim_pass(PORT_QUEUE, 10)).await;
 
     let cancelled = tokio::time::timeout(CALL_WAIT, cancel)
         .await
