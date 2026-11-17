@@ -595,18 +595,18 @@ async fn results_keys_two_nodes_of_one_task_by_node_id() {
     assert_eq!(ok_value(&results["node_1"]), &serde_json::json!(200));
 }
 
-/// `TestUnknownStoredWorkflowStatus` (`test_status_returns_stored_data_invalid`,
-/// `test_cancel_returns_stored_data_invalid_and_changes_nothing`,
-/// `test_get_folds_it_into_broker_error`): the baseline CHECK
-/// `horsies_workflows_status_known` refuses a status outside the catalog, so
-/// no handle call can read one. The guarantee moved into the schema.
+/// `TestUnknownStoredWorkflowStatus.test_the_database_refuses_an_unknown_status`:
+/// the baseline CHECK `horsies_workflows_status_known` refuses a status
+/// outside the catalog, so no handle call can read one. The guarantee moved
+/// into the schema. The value fits `status varchar(9)`, as Python's `BOGUS`,
+/// so the CHECK and not the length limit refuses it.
 #[tokio::test]
 #[serial]
 async fn the_database_refuses_an_unknown_workflow_status() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
 
-    let refused = sqlx::query("UPDATE horsies_workflows SET status = 'NOT_A_STATUS' WHERE id = $1")
+    let refused = sqlx::query("UPDATE horsies_workflows SET status = 'BOGUS' WHERE id = $1")
         .bind(workflow_id)
         .execute(&pool)
         .await

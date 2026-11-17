@@ -13,6 +13,7 @@ use super::support::{
     node_task_input, ok, required, seed_node, seed_node_task, seed_workflow, shared_pool, spec,
     start, stored_result, sub_workflow_node, task_node, try_start, unreachable_pool, workflow,
     workflow_error_code, workflow_status, IsolatedDatabase, LiveStatus, NodeSeed, WorkflowSeed,
+    POISON_TASK_OPTIONS,
 };
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
@@ -325,10 +326,13 @@ async fn store_node_options(pool: &PgPool, workflow_id: Uuid, task_index: i32, o
 }
 
 /// Python `_build_enqueued_task_params` and `_fail_enqueued_task`
-/// (`horsies/core/workflows/engine.py:474-533, 746-790`): a task node whose stored retry policy does not read
-/// at promotion fails alone with `WORKER_SERIALIZATION_ERROR` (the node index and the workflow id in `data`),
-/// gets no task row, and its failure is applied: with `on_error = fail` and no other node left, the workflow
-/// fails. The node is not left READY, and the step that promoted it is not rolled back.
+/// (`horsies/core/workflows/engine.py:513-597, 752-820`): a task node whose stored retry policy does not read
+/// at promotion fails alone with `WORKER_SERIALIZATION_ERROR` and Python's text, which names the node index
+/// (`Invalid retry_policy for task <index>: <detail>`, the detail of `stored_max_retries`,
+/// `horsies/core/codec/task_options.py:103`), with the node index and the workflow id in `data`. It gets no
+/// task row, and its failure is applied: with `on_error = fail` and no other node left, the workflow fails.
+/// The node is not left READY, and the step that promoted it is not rolled back. The baseline step writes the
+/// same error (`horsies_workflow_unbuildable_nodes`, `horsies_workflow_task_options_refusal`).
 #[tokio::test]
 #[serial]
 async fn a_task_node_that_cannot_be_prepared_at_promotion_fails_alone() {
@@ -365,11 +369,9 @@ async fn a_task_node_that_cannot_be_prepared_at_promotion_fails_alone() {
         &dependent.result.expect("the node stores its failure"),
     );
     assert_eq!(code(&error).as_deref(), Some("WORKER_SERIALIZATION_ERROR"));
-    assert!(
-        error
-            .message
-            .as_deref()
-            .is_some_and(|message| message.contains("unprepared_dependent")),
+    assert_eq!(
+        error.message.as_deref(),
+        Some("Invalid retry_policy for task 1: retry_policy is not an object: int"),
         "{error:?}"
     );
     assert_eq!(
@@ -384,8 +386,12 @@ async fn a_task_node_that_cannot_be_prepared_at_promotion_fails_alone() {
 }
 
 /// Python `_fail_enqueued_task` returns "stop" when `on_error = pause` paused the workflow, and the promotion
-/// promotes no other node (`horsies/core/workflows/engine.py:474-533`). The node that cannot be prepared
+/// promotes no other node (`horsies/core/workflows/engine.py:513-597`). The node that cannot be prepared
 /// fails; the workflow is PAUSED; its sibling of the same level holds no live task row and is not ENQUEUED.
+/// The node stores task options that are not an object, which Python refuses at promotion
+/// (`horsies/core/workflows/engine.py:798-805`). A stored `good_until` that the database cannot read does not
+/// fail the node: Python passes its text to the task insert, which raises, and the step rolls back
+/// (`horsies/core/workflows/engine.py:832-835`; the baseline `horsies_workflow_node_tasks_insert`).
 #[tokio::test]
 #[serial]
 async fn a_node_that_cannot_be_prepared_pauses_the_workflow_and_promotes_no_sibling() {
@@ -401,7 +407,7 @@ async fn a_node_that_cannot_be_prepared_pauses_the_workflow_and_promotes_no_sibl
     );
     paused_spec.on_error = OnError::Pause;
     let workflow_id = start(&db.pool, &paused_spec, &registry).await;
-    store_node_options(&db.pool, workflow_id, 1, r#"{"good_until": 12345}"#).await;
+    store_node_options(&db.pool, workflow_id, 1, POISON_TASK_OPTIONS).await;
 
     let _source = finish_node(
         &db.pool,
