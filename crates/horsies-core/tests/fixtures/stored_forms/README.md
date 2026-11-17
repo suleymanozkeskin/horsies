@@ -54,6 +54,18 @@ A vector file holds no lone UTF-16 surrogate: the Rust readers refuse the file
 itself, and a Rust `String` cannot hold one. Python refuses one at its encoder
 (`tests/unit/test_typed_codec.py`).
 
+Every form that holds user text has a vector with text outside ASCII, which
+every writer stores as the characters, not as `\u` escapes:
+
+| Form | Vectors |
+|---|---|
+| Task input | `str_unicode` |
+| Result envelope | `ok_str_unicode`, `err_user_code_with_data` |
+| Error data | `result_deserialization_error_non_ascii_task_name` (the message), `workflow_output_skipped_non_ascii_task_name` (the data) |
+
+The task options hold no user text: an error code of `auto_retry_for` is
+UPPER_SNAKE_CASE ASCII in both clients.
+
 ## Value notation
 
 A typed value is `{"type": <name>, "value": <notation>}` (a task input
@@ -195,8 +207,8 @@ test calls the writer itself.
 | `WORKER_CRASHED`, killed child | `task_id`, `worker_id` | `python/horsies/core/worker/dispatch.py:333-339` | `crates/horsies-core/src/worker/executor/slots/outcome.rs:212` (`killed_child_write`) |
 | `WORKER_CRASHED`, stale | `stale_threshold_ms`, `stale_threshold_seconds`, `worker_pid`, `worker_hostname`, `worker_id`, `started_at`, `detected_at` | `python/horsies/core/brokers/stale_running.py:178` (`crash_result_json`) | `crates/horsies-core/src/worker/recovery.rs:1450` (`stale_attempt_command`) |
 | `UPSTREAM_SKIPPED` | `dependency_index` | `python/horsies/core/workflows/engine.py:2496-2499` | `crates/horsies-core/src/workflow_engine/args_merge.rs:330`; SQL `horsies_task_error_envelope` |
-| `RESULT_DESERIALIZATION_ERROR`, dependency without a result | `dependency_index` | `python/horsies/core/workflows/engine.py:186-193` | `crates/horsies-core/src/workflow_engine/args_merge.rs:345` |
-| `WORKFLOW_OUTPUT_SKIPPED` | `workflow_id`, `output_node_id`, `output_task_index`, `output_task_name` | `python/horsies/core/workflows/engine.py:3398-3420` | SQL `horsies_workflow_output_error_data` (`crates/horsies-core/baseline/0005_workflow_functions.sql:1309`) |
+| `RESULT_DESERIALIZATION_ERROR`, dependency without a result (2 vectors: an ASCII and a non-ASCII task name in the message) | `dependency_index` | `python/horsies/core/workflows/engine.py:186-193` | `crates/horsies-core/src/workflow_engine/args_merge.rs:345` |
+| `WORKFLOW_OUTPUT_SKIPPED` (2 vectors: an ASCII and a non-ASCII `output_task_name`) | `workflow_id`, `output_node_id`, `output_task_index`, `output_task_name` | `python/horsies/core/workflows/engine.py:3398-3420` | SQL `horsies_workflow_output_error_data` (`crates/horsies-core/baseline/0005_workflow_functions.sql:1309`) |
 | `WORKFLOW_ENQUEUE_FAILED`, `args_from` conflict | `workflow_id`, `task_index` | `python/horsies/core/workflows/engine.py:545-551` | `crates/horsies-core/src/workflow_engine/args_merge.rs:111` (`node_error`); SQL |
 | `SUBWORKFLOW_DEPTH_LIMIT_REACHED` | `workflow_id`, `task_index` | `python/horsies/core/workflows/engine.py:1068-1078` | `crates/horsies-core/src/workflow_engine/start.rs:193`; SQL |
 | `SUBWORKFLOW_LOAD_FAILED` | `definition_key` | `python/horsies/core/workflows/engine.py:616-619` | `crates/horsies-core/src/workflow_engine/start_statement.rs:707` |
