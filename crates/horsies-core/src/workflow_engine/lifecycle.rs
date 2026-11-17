@@ -417,6 +417,7 @@ pub async fn resume_workflow(
         },
     )
     .await
+    .map_err(|failure| failure.into_handle_error(workflow_id))
 }
 
 /// [`resume_workflow`] of a client that builds its children through
@@ -428,28 +429,60 @@ pub(crate) async fn resume_client_workflow(
     workflow_id: Uuid,
     source: &dyn ChildSpecSource,
 ) -> HandleResult<bool> {
-    resume_with(broker, workflow_id, ChildBuild::Client(source)).await
+    resume_with(broker, workflow_id, ChildBuild::Client(source))
+        .await
+        .map_err(|failure| failure.into_handle_error(workflow_id))
+}
+
+/// Why [`resume_with`] failed.
+#[derive(Debug)]
+pub(crate) enum ResumeFailure {
+    /// The resume step failed, with its own error: nothing of it committed,
+    /// or its `COMMIT` reply was lost. A caller tells a child build that
+    /// raised (`ChildSpecUnavailable::Raised`) from a failed statement by it.
+    Step(WorkflowError),
+    /// Every other failure, as the handle catalog names it: the client family
+    /// check, an unknown workflow, and a failure after the commit
+    /// (`RESUME_RECOVERY_FAILED`).
+    Handle(HandleOperationError),
+}
+
+impl ResumeFailure {
+    /// The failure as the handle catalog names it: the error of a step
+    /// through [`handle_operation_error`]. Pure.
+    ///
+    /// Panics: as [`handle_operation_error`].
+    pub(crate) fn into_handle_error(self, workflow_id: Uuid) -> HandleOperationError {
+        match self {
+            Self::Step(error) => to_handle_error(error, workflow_id),
+            Self::Handle(error) => error,
+        }
+    }
 }
 
 /// The body of [`resume_workflow`] with the children built by `build`.
-/// Outcomes and panics as [`resume_workflow`]; with a client build, as
-/// [`resume_client_workflow`]. The monitoring resume action calls it with
-/// the build of its process.
+/// Outcomes as [`resume_workflow`]; with a client build, as
+/// [`resume_client_workflow`]. The error of the step is
+/// [`ResumeFailure::Step`], unconverted, and every other failure is
+/// [`ResumeFailure::Handle`]. The monitoring resume action calls it with the
+/// build of its process.
 pub(crate) async fn resume_with(
     broker: &PostgresBroker,
     workflow_id: Uuid,
     build: ChildBuild<'_>,
-) -> HandleResult<bool> {
-    admit_workflow_write(broker, workflow_id).await?;
+) -> Result<bool, ResumeFailure> {
+    admit_workflow_write(broker, workflow_id)
+        .await
+        .map_err(ResumeFailure::Handle)?;
     let committed = steps::resume(broker, workflow_id, build)
         .await
-        .map_err(|e| to_handle_error(e, workflow_id))?;
+        .map_err(ResumeFailure::Step)?;
     match committed.disposition {
         ResumeDisposition::NotFound => {
-            return Err(to_handle_error(
+            return Err(ResumeFailure::Handle(to_handle_error(
                 WorkflowError::WorkflowNotFound { workflow_id },
                 workflow_id,
-            ))
+            )))
         }
         ResumeDisposition::NotPaused => return Ok(false),
         ResumeDisposition::Resumed => {}
@@ -461,13 +494,15 @@ pub(crate) async fn resume_with(
         build,
     )
     .await
-    .map_err(|failure| resume_recovery_failed(workflow_id, &failure.error))?;
+    .map_err(|failure| {
+        ResumeFailure::Handle(resume_recovery_failed(workflow_id, &failure.error))
+    })?;
     // Recovery completion pass: a child workflow may have COMPLETED while the parent was paused, leaving the
     // parent's sub-workflow node stale. The sweep is restricted to this workflow's tree (Python
     // `core/workflows/lifecycle.py:1234-1262`).
     crate::workflow_engine::recovery::recover_workflow_tree(broker, build, workflow_id)
         .await
-        .map_err(|error| resume_recovery_failed(workflow_id, &error))?;
+        .map_err(|error| ResumeFailure::Handle(resume_recovery_failed(workflow_id, &error)))?;
     Ok(true)
 }
 

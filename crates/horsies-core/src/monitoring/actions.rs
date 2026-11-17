@@ -11,8 +11,9 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError};
 use crate::core::workflow::status::WorkflowStatus;
-use crate::workflow_engine::child_spec::ChildSpecSource;
+use crate::workflow_engine::child_spec::{ChildSpecSource, ChildSpecUnavailable};
 use crate::workflow_engine::error::WorkflowError;
+use crate::workflow_engine::lifecycle::ResumeFailure;
 use crate::workflow_engine::steps::ChildBuild;
 
 use super::models::ActionResponse;
@@ -22,6 +23,12 @@ use super::task_actions::{
 
 pub const STATE_CONFLICT: &str = "STATE_CONFLICT";
 pub const RESUME_RECOVERY_WARNING: &str = "post_resume_recovery_failed";
+
+/// The body of [`ActionBody::InternalServerError`], sent as
+/// `text/plain; charset=utf-8`: the answer of Starlette's
+/// `ServerErrorMiddleware` to an exception that Python's route did not
+/// handle.
+pub const INTERNAL_SERVER_ERROR_TEXT: &str = "Internal Server Error";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -86,6 +93,15 @@ pub enum ActionBody {
     Detail {
         detail: String,
     },
+    /// An exception of the client's code ended the action, and nothing of
+    /// it committed: the Python client's child build that raised during a
+    /// resume. The answer is Python's answer to an exception that its route
+    /// did not handle: status 500 with [`INTERNAL_SERVER_ERROR_TEXT`] as
+    /// `text/plain`, and nothing of the exception, whose text can hold user
+    /// data. It is not JSON: serializing it is an error, and the web route
+    /// sends the text.
+    #[serde(skip)]
+    InternalServerError,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,7 +131,7 @@ impl ActionOutcome {
             ActionBody::Success(response) => response.outcome.as_str(),
             ActionBody::Conflict { code, .. } => code.wire_value(),
             ActionBody::Code { code } => code.wire_value(),
-            ActionBody::Detail { .. } => "error",
+            ActionBody::Detail { .. } | ActionBody::InternalServerError => "error",
         }
     }
 }
@@ -273,9 +289,29 @@ fn resume_failure(error: HandleOperationError) -> ActionOutcome {
     }
 }
 
+/// The answer of a resume whose owed child build raised an exception of the
+/// client (`ChildSpecUnavailable::Raised`): the step rolled back, and
+/// nothing committed. Python's resume route let the exception propagate, so
+/// the answer is Python's for an exception that its route did not handle
+/// ([`ActionBody::InternalServerError`]). The response holds nothing of the
+/// exception; the log holds its type and text, with the resume and the
+/// build: one ERROR record.
+fn child_build_raised(workflow_id: Uuid, subject: &str, cause: &str) -> ActionOutcome {
+    tracing::error!(
+        workflow_id = %workflow_id,
+        "monitoring resume of workflow {workflow_id} failed and nothing committed: {subject} \
+         raised {cause}",
+    );
+    ActionOutcome {
+        status_code: 500,
+        body: ActionBody::InternalServerError,
+    }
+}
+
 /// Resume a workflow tree; each owed sub-workflow child start builds its
 /// child through `children`. A resume that committed and whose recovery
-/// pass failed answers success with a warning ([`resume_failure`]).
+/// pass failed answers success with a warning ([`resume_failure`]). A child
+/// build of the client that raised answers 500 ([`child_build_raised`]).
 pub async fn resume_workflow_action(
     broker: &PostgresBroker,
     workflow_id: Uuid,
@@ -289,7 +325,10 @@ pub async fn resume_workflow_action(
             Ok(status) => conflict(ActionConflictCode::StateConflict, Some(status.to_string())),
             Err(outcome) => outcome,
         },
-        Err(error) => resume_failure(error),
+        Err(ResumeFailure::Step(WorkflowError::ChildSpecSource(
+            ChildSpecUnavailable::Raised { subject, cause },
+        ))) => child_build_raised(workflow_id, &subject, &cause),
+        Err(failure) => resume_failure(failure.into_handle_error(workflow_id)),
     }
 }
 
@@ -416,6 +455,24 @@ mod tests {
             resume_failure(error(HandleErrorCode::StoredDataInvalid)).status_code(),
             500
         );
+    }
+
+    /// Python's resume route let an exception of a child build propagate,
+    /// and Starlette answered 500 with its text: the answer holds nothing of
+    /// the exception, and its body is not JSON.
+    #[test]
+    fn a_child_build_that_raised_is_python_s_internal_server_error() {
+        let outcome = child_build_raised(
+            Uuid::nil(),
+            "build of the child of nightly:0 (definition report.v1)",
+            "SerializationError: options of user@example.com",
+        );
+
+        assert_eq!(outcome.status_code(), 500);
+        assert_eq!(outcome.body(), &ActionBody::InternalServerError);
+        assert_eq!(outcome.result_word(), "error");
+        assert!(serde_json::to_value(outcome.body()).is_err());
+        assert_eq!(INTERNAL_SERVER_ERROR_TEXT, "Internal Server Error");
     }
 
     #[test]
