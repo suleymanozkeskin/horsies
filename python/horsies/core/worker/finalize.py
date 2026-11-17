@@ -157,7 +157,7 @@ from horsies.core.worker.shared_finalize import (
     timeout_retry_write,
 )
 from horsies.core.worker.shared_stop import (
-    EndedByKill,
+    CancelEnd,
     NoCancelSignal,
     RetryPlacement,
     TimeoutCancel,
@@ -382,12 +382,12 @@ def _shared_timeout_ms(task_id: str, work: SharedWork) -> int:
 
 def cancel_at_kill(task_id: str, work: SharedWork) -> TimeoutCancel:
     """What a shared run that passed its deadline and ended at a kill of its
-    child records about its cancel: ``EndedByKill`` for an async run,
-    ``NoCancelSignal`` for a thread run. A refusal has no deadline:
-    ``AssertionError``. Pure."""
+    child records about its cancel: ``CancelEnd.KILLED_WITH_CHILD`` for an
+    async run, ``NoCancelSignal`` for a thread run. A refusal has no
+    deadline: ``AssertionError``. Pure."""
     match work:
         case SeatTask():
-            return EndedByKill()
+            return CancelEnd.KILLED_WITH_CHILD
         case ThreadSeatTask():
             return NoCancelSignal()
         case SeatRefusal():

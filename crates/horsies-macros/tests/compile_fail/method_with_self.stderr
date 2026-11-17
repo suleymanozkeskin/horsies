@@ -1,7 +1,7 @@
 error: task functions must be free functions, not methods
  --> tests/compile_fail/method_with_self.rs:8:21
   |
-8 |     async fn handle(&self, _: ()) -> Result<String, TaskError> {
+8 |     async fn handle(&self, _: ()) -> Result<String, TaskError<std::convert::Infallible>> {
   |                     ^^^^^
 
 warning: unused import: `horsies::TaskError`

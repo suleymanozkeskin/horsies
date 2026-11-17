@@ -1,12 +1,15 @@
-//! Phase 2 of a finished workflow task and the parent advance after it, on a
+//! Phase 2 of a finished workflow task, the parent advance after it, and the
+//! phase-2 recovery pass of the reaper, on a
 //! client handle whose children come from the client's
 //! [`ChildSpecSource`]: the entry points of the Python worker's
 //! `FinalizeMixin._finalize_workflow_phase` and `_drive_parent_propagations`
-//! (`python/horsies/core/worker/finalize.py`), which call them through
+//! (`python/horsies/core/worker/finalize.py`) and of its reaper's phase-2
+//! recovery (`python/horsies/core/worker/reaper.py`), which call them through
 //! `horsies._core` in place of their own statements.
 //!
-//! Both run on the main core pool with the reserve
-//! ([`CheckoutClass::Reserved`]): they are per-task writes of a worker.
+//! Each runs on the main core pool with the reserve
+//! ([`CheckoutClass::Reserved`]): per-task writes of a worker and the
+//! reaper's pass.
 
 use uuid::Uuid;
 
@@ -14,6 +17,7 @@ use crate::broker::postgres::PostgresBroker;
 use crate::db::CheckoutClass;
 use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::error::WorkflowError;
+use crate::workflow_engine::phase2_recovery::{drive_phase2_recovery_with, Phase2RecoverySummary};
 use crate::workflow_engine::steps::{
     advance_parents, node_finish_alone, node_finish_in_transaction, ChildBuild, Dependents,
     NodeFinishDisposition, OwedParentAdvances, ParentAdvance, ParentAdvanceFailure, SourceFailure,
@@ -183,6 +187,41 @@ impl PostgresBroker {
             still_owed: failure.still_owed().child_workflow_ids().to_vec(),
             error: failure.error,
         })
+    }
+}
+
+impl PostgresBroker {
+    /// One phase-2 recovery pass of the reaper (Python
+    /// `drive_phase2_recovery`, `python/horsies/core/workflows/phase2_recovery.py`):
+    /// the phase-2 records older than `grace_ms` and under
+    /// `quarantine_after_attempts`, oldest first, at most `max_rows`, each in
+    /// its own transaction (`horsies_workflow_phase2_recover` with the child
+    /// starts it owes, children from `source`), then the parent advances of
+    /// each. A persistent failure of a record is counted toward the bound; a
+    /// child build that did not run, or an interrupt, is not.
+    ///
+    /// The client family is checked once per handle before the first write.
+    ///
+    /// Errors: a failed check, discovery or count (nothing recovered), and a
+    /// grace or bound above the integer range (`WorkflowError::Validation`).
+    pub async fn recover_workflow_phase2(
+        &self,
+        grace_ms: u64,
+        max_rows: i64,
+        quarantine_after_attempts: u32,
+        source: &dyn ChildSpecSource,
+    ) -> Result<Phase2RecoverySummary, WorkflowError> {
+        self.ensure_client_family_for_write()
+            .await
+            .map_err(WorkflowError::Broker)?;
+        drive_phase2_recovery_with(
+            self,
+            ChildBuild::Client(source),
+            grace_ms,
+            max_rows,
+            quarantine_after_attempts,
+        )
+        .await
     }
 }
 

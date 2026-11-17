@@ -443,6 +443,11 @@ const NODE_FINISH_REQUEST_PARAMETERS: &[StubParameter] = &[
 const NODE_FINISH_DISPOSITION: &str = "Literal['APPLIED', 'APPLIED_WORKFLOW_ENDED', \
      'ALREADY_APPLIED', 'PENDING_ABSENT', 'SOURCE_ABSENT', 'SOURCE_STATE_CONFLICT', \
      'SOURCE_VERSION_CONFLICT', 'SOURCE_DIGEST_MISMATCH']";
+const RECOVER_WORKFLOW_PHASE2_PARAMETERS: &[StubParameter] = &[
+    keyword("grace_ms", "int"),
+    keyword("max_rows", "int"),
+    keyword("quarantine_after_attempts", "int"),
+];
 const PAUSE_WORKFLOW_OUTCOME: &str =
     "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed";
 const CANCEL_WORKFLOW_OUTCOME: &str =
@@ -712,6 +717,12 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         parameters: ADVANCE_WORKFLOW_PARENTS_PARAMETERS,
         returns: TypeText::FutureOf("ParentsAdvanced | ParentAdvanceStopped"),
         doc: "Advance the parent nodes above child_workflow_ids, one transaction per level. Writes; the\nchild starts a level owes build their children through the child spec source. A build\nthat raised KeyboardInterrupt or SystemExit raises it again. With no child spec source\nit raises RuntimeError.",
+    },
+    StubFunction {
+        name: "recover_workflow_phase2_async",
+        parameters: RECOVER_WORKFLOW_PHASE2_PARAMETERS,
+        returns: TypeText::FutureOf("Phase2RecoveryRecord | Phase2RecoveryFailed"),
+        doc: "One phase-2 recovery pass of the reaper: the phase-2 records older than grace_ms and\nunder quarantine_after_attempts, oldest first, at most max_rows, each in its own\ntransaction. Writes; owed child starts build their children through the child spec\nsource. A build that raised KeyboardInterrupt or SystemExit raises it again after the\npass. A negative value raises OverflowError; with no child spec source it raises\nRuntimeError.",
     },
     StubFunction {
         name: "pause_workflow_async",
@@ -2536,6 +2547,33 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
             property("message", "str"),
             property("retryable", "bool"),
         ],
+        methods: &[],
+    },
+    StubClass {
+        name: "Phase2RecoveryRecord",
+        doc: "What one pass did. pending_absent counts the records that were gone while their node is\nnot terminal (nothing written).",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("considered", "int"),
+            property("applied", "int"),
+            property("already_applied", "int"),
+            property("superseded", "int"),
+            property("pending_absent", "int"),
+            property("retained", "int"),
+            property("failed", "int"),
+            property("quarantined", "int"),
+            property("raised_counted", "int"),
+            property("over_attempt_bound", "int"),
+            property("retained_details", "list[str]"),
+            property("quarantine_refusals", "list[str]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "Phase2RecoveryFailed",
+        doc: "The pass failed before it recovered a record: the client family check, the discovery or\nthe count. Nothing was recovered.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
         methods: &[],
     },
     StubClass {

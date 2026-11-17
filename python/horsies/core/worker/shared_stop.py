@@ -114,9 +114,10 @@ class StopState(Enum):
 
 
 class CancelEnd(Enum):
-    """How a ``SHARED_ASYNC`` run that passed its deadline ended in its child.
-    The child sends the second cancel only when the run is alive after its
-    cancel grace, so the stop report of the run names the value. Stored as
+    """How a ``SHARED_ASYNC`` run that passed its deadline ended: in its
+    child, or at a kill of its child by the worker. The child sends the
+    second cancel only when the run is alive after its cancel grace, so the
+    stop report of a run that its child ended names the value. Stored as
     ``cancel_end`` in the ``data`` of its ``TASK_TIMEOUT`` error, by the
     Python worker and the core worker alike."""
 
@@ -128,6 +129,10 @@ class CancelEnd(Enum):
     """Something of the run was alive after the cancel grace: the child sent
     the second cancel and stopped it."""
 
+    KILLED_WITH_CHILD = 'KILLED_WITH_CHILD'
+    """The run ended when the worker killed its child, before the child
+    reported its end."""
+
 
 @dataclass(frozen=True, slots=True)
 class NoCancelSignal:
@@ -135,14 +140,7 @@ class NoCancelSignal:
     cancel."""
 
 
-@dataclass(frozen=True, slots=True)
-class EndedByKill:
-    """A ``SHARED_ASYNC`` run that passed its deadline and ended when the
-    worker killed its child. Its ``TASK_TIMEOUT`` data has no
-    ``cancel_end``."""
-
-
-type TimeoutCancel = NoCancelSignal | CancelEnd | EndedByKill
+type TimeoutCancel = NoCancelSignal | CancelEnd
 """What the attempt of a run that passed its deadline records about the
 cancel at that deadline."""
 
@@ -153,13 +151,12 @@ def timeout_error_data(
     cancel: TimeoutCancel,
 ) -> dict[str, str | int]:
     """The ``data`` of a ``TASK_TIMEOUT`` error: ``task_id``, ``timeout_ms``,
-    and ``cancel_end`` for a ``SHARED_ASYNC`` run that its child ended.
-    Pure."""
+    and ``cancel_end`` for every ``SHARED_ASYNC`` run. Pure."""
     data: dict[str, str | int] = {'task_id': task_id, 'timeout_ms': timeout_ms}
     match cancel:
         case CancelEnd():
             data['cancel_end'] = cancel.value
-        case NoCancelSignal() | EndedByKill():
+        case NoCancelSignal():
             pass
         case _ as unreachable:
             assert_never(unreachable)

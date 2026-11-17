@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from horsies.core.history.maintenance.pruning import PrunePassSummary
     from horsies.core.models.recovery import RecoveryConfig
     from horsies.core.models.retention import RetentionConfig
+    from horsies.core.workflows.phase2_recovery import Phase2RecoverySummary
     from horsies.core.worker.config import WorkerConfig
 
 logger = get_logger('worker')
@@ -299,13 +300,9 @@ class ReaperMixin:
         # holder is taken; the grace window and the row cap are the ones
         # the retired scan carried.
         try:
-            from horsies.core.workflows.phase2_recovery import (
-                drive_phase2_recovery,
-            )
             from horsies.core.workflows.recovery import GLOBAL_SCAN_ROW_CAP
 
-            phase2 = await drive_phase2_recovery(
-                resources.session_factory,
+            phase2 = await self._recover_phase2(
                 temp_broker,
                 grace_ms=recovery_cfg.crashed_worker_recovery_grace_ms,
                 max_rows=GLOBAL_SCAN_ROW_CAP,
@@ -634,6 +631,57 @@ class ReaperMixin:
                     raise AssertionError('take_uncovered returned a served stream')
                 case _ as unreachable:
                     assert_never(unreachable)
+
+    async def _recover_phase2(
+        self,
+        temp_broker: 'PostgresBroker',
+        *,
+        grace_ms: int,
+        max_rows: int,
+        quarantine_after_attempts: int,
+    ) -> 'Phase2RecoverySummary':
+        """One phase-2 recovery pass, in the core
+        (``CoreHandle.recover_workflow_phase2_async``): the phase-2 records
+        older than ``grace_ms`` and under ``quarantine_after_attempts``,
+        oldest first, at most ``max_rows``, each in its own transaction,
+        with the child starts it owes built through the broker's child spec
+        source.
+
+        A record that the function found gone while its node is not terminal
+        counts as already applied, as the Python pass counted it.
+
+        Raises:
+            CoreOperationFailed: the pass failed before it recovered a record.
+            CoreError: the core of this process cannot run the call.
+        """
+        from horsies._core import Phase2RecoveryFailed, Phase2RecoveryRecord
+        from horsies.core.types.core_failure import CoreOperationFailed
+        from horsies.core.workflows.phase2_recovery import Phase2RecoverySummary
+
+        record = await temp_broker._core_handle.recover_workflow_phase2_async(
+            grace_ms=grace_ms,
+            max_rows=max_rows,
+            quarantine_after_attempts=quarantine_after_attempts,
+        )
+        match record:
+            case Phase2RecoveryRecord():
+                return Phase2RecoverySummary(
+                    considered=record.considered,
+                    applied=record.applied,
+                    already_applied=record.already_applied + record.pending_absent,
+                    superseded=record.superseded,
+                    retained=record.retained,
+                    failed=record.failed,
+                    quarantined=record.quarantined,
+                    raised_counted=record.raised_counted,
+                    over_attempt_bound=record.over_attempt_bound,
+                    retained_details=tuple(record.retained_details),
+                    quarantine_refusals=tuple(record.quarantine_refusals),
+                )
+            case Phase2RecoveryFailed(message=message, retryable=retryable):
+                raise CoreOperationFailed('recover_workflow_phase2', message, retryable)
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _expire_paused_workflows(
         self,

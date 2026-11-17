@@ -1,7 +1,7 @@
-error: #[horsies::task] requires an async function; use #[horsies::blocking_task] for sync functions
+error: #[horsies::task] takes an async fn; use #[horsies::blocking_task] for a fn
  --> tests/compile_fail/sync_with_task_attr.rs:5:1
   |
-5 | fn bad(_: ()) -> Result<String, TaskError> {
+5 | fn bad(_: ()) -> Result<String, TaskError<std::convert::Infallible>> {
   | ^^
 
 warning: unused import: `horsies::TaskError`

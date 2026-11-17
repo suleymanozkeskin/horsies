@@ -266,8 +266,7 @@ pub fn killed_child_write(
 
 /// The `TASK_TIMEOUT` write of an attempt that reached `timeout`, with
 /// Python's error `data`: `task_id`, `timeout_ms`, and, for a shared async
-/// run that its child ended, `cancel_end` (Python `_settle_timed_out_row`).
-/// Pure.
+/// run, `cancel_end` (Python `_settle_timed_out_row`). Pure.
 pub fn timeout_write(
     task: &ClaimedTask,
     worker_id: &str,
@@ -295,8 +294,8 @@ pub fn timeout_write(
     }
 }
 
-/// The `data` of a `TASK_TIMEOUT` error. `cancel_end` is set only for a
-/// shared async run that its child ended. Pure.
+/// The `data` of a `TASK_TIMEOUT` error. `cancel_end` is set for a shared
+/// async run and for no other run. Pure.
 fn timeout_data(task_id: Uuid, timeout: TaskTimeoutMs, cancel: TimeoutCancel) -> serde_json::Value {
     let mut data = serde_json::json!({
         "task_id": task_id.to_string(),
@@ -306,7 +305,7 @@ fn timeout_data(task_id: Uuid, timeout: TaskTimeoutMs, cancel: TimeoutCancel) ->
         TimeoutCancel::Ended(end) => {
             data["cancel_end"] = serde_json::Value::from(end.as_str());
         }
-        TimeoutCancel::NoSignal | TimeoutCancel::EndedByKill => {}
+        TimeoutCancel::NoSignal => {}
     }
     data
 }

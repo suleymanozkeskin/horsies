@@ -297,17 +297,17 @@ async def test_a_timeout_retry_runs_where_its_verdict_says(
                 retry=RetryPlacement.SAME_CLASS,
                 cancel=CancelEnd.RETURNED_AFTER_SIGNAL,
             ),
-            {'cancel_end': 'RETURNED_AFTER_SIGNAL'},
+            'RETURNED_AFTER_SIGNAL',
         ),
         (
             SeatDeadlineEnded(
                 retry=RetryPlacement.ISOLATED,
                 cancel=CancelEnd.DROPPED_AFTER_GRACE,
             ),
-            {'cancel_end': 'DROPPED_AFTER_GRACE'},
+            'DROPPED_AFTER_GRACE',
         ),
-        (_killed(TimedOutAtKill(retry=RetryPlacement.SAME_CLASS)), {}),
-        (_no_time_left(culprit_dispatch=1), {}),
+        (_killed(TimedOutAtKill(retry=RetryPlacement.SAME_CLASS)), 'KILLED_WITH_CHILD'),
+        (_no_time_left(culprit_dispatch=1), 'KILLED_WITH_CHILD'),
     ],
     ids=[
         'returned-after-signal',
@@ -321,12 +321,11 @@ async def test_the_timeout_data_names_how_the_run_ended(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
     outcome: SharedOutcome,
-    cancel_end: dict[str, str],
+    cancel_end: str,
 ) -> None:
-    """The data of the TASK_TIMEOUT error names the task and its
-    ``timeout_ms``. A run that its child ended also names how it ended after
-    the cancel at its deadline; a run that ended at a kill of its child does
-    not."""
+    """The data of the TASK_TIMEOUT error names the task, its ``timeout_ms``
+    and how the run ended after the cancel at its deadline: in its child, or
+    at a kill of its child (``KILLED_WITH_CHILD``)."""
     task_id = await _insert_shared_task(session, [])
 
     await _finalize(_worker(engine), task_id, outcome)
@@ -342,7 +341,7 @@ async def test_the_timeout_data_names_how_the_run_ended(
     assert json.loads(stored)['err']['data'] == {
         'task_id': task_id,
         'timeout_ms': TIMEOUT_MS,
-        **cancel_end,
+        'cancel_end': cancel_end,
     }
 
 

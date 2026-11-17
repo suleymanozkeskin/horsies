@@ -18,6 +18,11 @@ an ended workflow is written (decision on a node of an ended workflow,
 "Write the node on both the normal and the recovery path (one body);
 nothing is promoted"); the session statements dropped the record and left
 the node.
+
+The caller pair runs the same seed with the Python pass that the reaper
+called before the switch (``drive_phase2_recovery``) against the pass in the
+core (``CoreHandle.recover_workflow_phase2_async``, through
+``ReaperMixin._recover_phase2``'s mapping): empty diff, equal reports.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import TaskNode, WorkflowDefinition, WorkflowSpec
 from horsies.core.types.result import Err, Ok
+import horsies._core as core
 from horsies.core.workflows.phase2_recovery import drive_phase2_recovery
 from horsies.core.workflows.registry import register_workflow_definition
 from tests.dualrun.capture import Connection
@@ -257,4 +263,42 @@ def test_phase2_recovery_writes_what_the_session_statements_wrote(
     assert run.reference.report == reference.RecoverReport(
         applied=1, already_applied=0, superseded=1, retained=1, failed=0, quarantined=0,
     )
+    assert run.candidate.report == run.reference.report
+
+
+async def _core_async(database: DualRunDatabase) -> reference.RecoverReport:
+    async with open_broker(database) as broker:
+        _attach(broker)
+        record = await broker._core_handle.recover_workflow_phase2_async(  # pyright: ignore[reportPrivateUsage]
+            grace_ms=0, max_rows=100, quarantine_after_attempts=_BOUND,
+        )
+        assert isinstance(record, core.Phase2RecoveryRecord), record
+        return reference.RecoverReport(
+            applied=record.applied,
+            already_applied=record.already_applied + record.pending_absent,
+            superseded=record.superseded,
+            retained=record.retained,
+            failed=record.failed,
+            quarantined=record.quarantined,
+        )
+
+
+def _core(database: DualRunDatabase, seed: _Seed) -> reference.RecoverReport:
+    _records(database, seed)
+    return asyncio.run(_core_async(database))
+
+
+def test_phase2_recovery_on_the_core_writes_what_the_python_pass_wrote(
+    empty_database: MakeDatabase,
+) -> None:
+    run = run_or_fail(
+        dual_run(
+            empty_database,
+            _seed,
+            OperationSide(name='python pass', act=_candidate),
+            OperationSide(name='core pass', act=_core),
+        )
+    )
+
+    assert run.diff.entries == (), render_diff(run.diff)
     assert run.candidate.report == run.reference.report

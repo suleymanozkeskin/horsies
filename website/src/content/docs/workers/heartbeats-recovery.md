@@ -283,16 +283,7 @@ print(f"Requeued {requeued} stale tasks")
 
 ## Disabling Recovery
 
-Not recommended, but possible:
-
-```python
-RecoveryConfig(
-    auto_requeue_stale_claimed=False,
-    auto_fail_stale_running=False,
-)
-```
-
-Tasks will remain stuck until manually resolved.
+See [Disabling Recovery](/horsies/configuration/recovery-config/#disabling-recovery).
 
 ## Partitioned Storage and Cleanup
 

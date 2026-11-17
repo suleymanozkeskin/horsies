@@ -678,14 +678,14 @@ fn cancel_end_of(report: &RunStopReport) -> CancelEnd {
 }
 
 /// The `TASK_TIMEOUT` end of a run with a deadline whose child the worker
-/// killed. A refusal has none, and the report rules never give it one: a
-/// defect, which crashes loud.
+/// killed: an async run records `KilledWithChild`. A refusal has none, and
+/// the report rules never give it one: a defect, which crashes loud.
 fn timed_out(work: RunWork, run: RunRef, retry: RetryPlacement) -> AttemptEnd {
     match work {
         RunWork::AsyncTask { timeout, .. } => AttemptEnd::TimedOut {
             timeout,
             retry,
-            cancel: TimeoutCancel::EndedByKill,
+            cancel: TimeoutCancel::Ended(CancelEnd::KilledWithChild),
         },
         RunWork::ThreadTask { timeout } => AttemptEnd::TimedOut {
             timeout,
