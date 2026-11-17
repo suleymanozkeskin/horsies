@@ -819,7 +819,7 @@ async fn missing_embedded_index_is_a_factual_503_while_api_still_answers() {
     assert!(json(page).await["detail"]
         .as_str()
         .unwrap()
-        .contains("bun run build"));
+        .contains("bun run build:core"));
     assert_eq!(
         router
             .oneshot(request(Method::GET, "/api/meta"))
