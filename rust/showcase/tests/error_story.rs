@@ -1,11 +1,13 @@
-use std::env;
-use std::sync::Arc;
-use std::time::Duration;
+//! The three error codes of the promotion story, through a worker of the
+//! `acme` binary: a panic, a mapped size code, and a caught panic.
 
-use acme_showcase::app::build_story_app_for_url;
-use acme_showcase::tasks::promotions::{LoyaltyArgs, PromotionArgs};
+mod support;
+
+use acme_showcase::app::build_app_for_url;
+use acme_showcase::tasks::promotions::{apply_promotions, compute_loyalty_points};
 use acme_showcase::{simulate, tuning};
-use horsies::{TaskResult, Worker, WorkerConfig};
+use horsies::{ReadError, SchemaMode, TaskOutcome, UserErrorCode, WaitLimit};
+use serial_test::serial;
 
 fn id_for(rate: f64, label: &str, avoid: Option<(&str, f64)>) -> String {
     (0..100_000)
@@ -19,41 +21,27 @@ fn id_for(rate: f64, label: &str, avoid: Option<(&str, f64)>) -> String {
         .expect("seeded population contains the requested draw")
 }
 
-fn result_code<T>(result: TaskResult<T>) -> String {
-    match result {
-        TaskResult::Err(error) => error
-            .error_code
-            .expect("worker error has a code")
-            .to_string(),
-        TaskResult::Ok(_) => panic!("expected a task error"),
+/// The code of a read that must give a failed task.
+fn failed_code<T, E>(read: Result<TaskOutcome<T, E>, ReadError>) -> String
+where
+    T: std::fmt::Debug,
+    E: UserErrorCode,
+{
+    match read {
+        Ok(TaskOutcome::Failed(error)) => error.code().text(),
+        other => panic!("expected a task error, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn three_error_codes_cross_the_public_worker_api() {
-    let Ok(url) = env::var("ACME_DATABASE_URL") else {
+#[serial]
+async fn three_error_codes_cross_the_worker() {
+    let Some((settings, _store)) = support::database().await else {
         return;
     };
-
-    let (app, handles) = build_story_app_for_url(&url).expect("story app");
-    let (config, registry, workflow_registry, broker) =
-        app.into_parts().await.expect("broker and migrations");
-    let mut worker_config = WorkerConfig {
-        queues: vec!["fulfillment".into(), "analytics".into()],
-        concurrency: 2,
-        ..WorkerConfig::default()
-    };
-    worker_config.apply_queue_config(&config);
-    let worker = Worker::new(
-        Arc::clone(&broker),
-        Arc::new(registry),
-        Arc::new(workflow_registry),
-        config,
-        worker_config,
-    )
-    .expect("worker");
-    let stop = worker.cancel_token();
-    let worker_join = tokio::spawn(async move { worker.run().await });
+    let showcase = build_app_for_url(settings.sqlx_url(), SchemaMode::MigrateAndValidate)
+        .expect("the showcase app");
+    let _worker = support::WorkerProcess::start();
 
     let bundle_id = id_for(tuning::PROMOTION_BUNDLE_BUG_RATE, "bundle-bug", None);
     let size_id = id_for(
@@ -63,42 +51,32 @@ async fn three_error_codes_cross_the_public_worker_api() {
     );
     let loyalty_id = id_for(tuning::LOYALTY_ENGINE_BUG_RATE, "lifetime-bug", None);
 
-    let bundle = handles
-        .apply
-        .send(PromotionArgs {
+    let bundle = showcase
+        .tasks
+        .apply_promotions
+        .send(apply_promotions::Input {
             order_id: bundle_id,
         })
         .await
-        .expect("enqueue bundle task");
-    let size = handles
-        .apply
-        .send(PromotionArgs { order_id: size_id })
+        .expect("send the bundle task");
+    let size = showcase
+        .tasks
+        .apply_promotions
+        .send(apply_promotions::Input { order_id: size_id })
         .await
-        .expect("enqueue size task");
-    let loyalty = handles
-        .loyalty
-        .send(LoyaltyArgs {
+        .expect("send the size task");
+    let loyalty = showcase
+        .tasks
+        .compute_loyalty_points
+        .send(compute_loyalty_points::Input {
             customer_id: loyalty_id,
-            order_id: "story-order".into(),
+            order_id: "story-order".to_owned(),
         })
         .await
-        .expect("enqueue loyalty task");
+        .expect("send the loyalty task");
 
-    assert_eq!(
-        result_code(bundle.get(Some(Duration::from_secs(20))).await),
-        "UNHANDLED_ERROR"
-    );
-    assert_eq!(
-        result_code(size.get(Some(Duration::from_secs(20))).await),
-        "DATA_CORRUPTION"
-    );
-    assert_eq!(
-        result_code(loyalty.get(Some(Duration::from_secs(20))).await),
-        "LOYALTY_ENGINE_BUG"
-    );
-
-    stop.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(10), worker_join)
-        .await
-        .expect("worker stops");
+    let limit = WaitLimit::parse(Some(support::RESULT_WAIT)).expect("the wait limit");
+    assert_eq!(failed_code(bundle.get(limit).await), "UNHANDLED_EXCEPTION");
+    assert_eq!(failed_code(size.get(limit).await), "DATA_CORRUPTION");
+    assert_eq!(failed_code(loyalty.get(limit).await), "LOYALTY_ENGINE_BUG");
 }

@@ -75,6 +75,7 @@ def _run(task_id: str, kwargs_json: str | None = '{"job_id":1}') -> RunFrame:
         is_workflow_task=False,
         timeout=NoTimeout(),
         claimed_at=CLAIMED_AT,
+        orphan_self_heal=True,
     )
 
 

@@ -34,6 +34,7 @@ fn launch(command: ChildCommand) -> ChildLaunch {
 fn facts() -> PoolFacts {
     PoolFacts {
         worker_id: WORKER_ID.to_owned(),
+        orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         pending_limit: std::num::NonZeroUsize::new(16).unwrap(),
         exit_not_seen: ExitNotSeen::LeaveToRecovery,
         placement: CpuPlacement::SharedCpus,

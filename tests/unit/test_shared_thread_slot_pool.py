@@ -168,6 +168,7 @@ def _request(
         is_workflow_task=False,
         claim=CLAIM,
         work=ThreadSeatTask(timeout_ms=timeout_ms),
+        orphan_self_heal=True,
     )
 
 
@@ -355,6 +356,7 @@ class TestSeats:
             is_workflow_task=False,
             claim=CLAIM,
             work=SeatTask(timeout_ms=LONG_TIMEOUT_MS, cancel_grace_ms=1_000),
+            orphan_self_heal=True,
         )
 
         async_pid = await _value(pool.submit_shared(async_request))
@@ -625,6 +627,7 @@ class TestLoss:
                 is_workflow_task=False,
                 claimed_at=CLAIMED_AT,
                 work=SeatTask(timeout_ms=LONG_TIMEOUT_MS, cancel_grace_ms=1_000),
+                orphan_self_heal=True,
             ),
         )
 

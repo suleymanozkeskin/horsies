@@ -221,6 +221,17 @@ written in Rust, on a new baseline schema.
   timestamp (4714-11-24 BC). 0.7.0 accepted any positive `timedelta`, and
   such an age failed every sweep with `timestamp out of range`.
 
+- **The claim values and the payload thresholds are within the bounds of
+  the worker.** `prefetch_buffer`, `cluster_wide_cap` and a custom queue's
+  `max_concurrency` are at most 2,147,483,647; `claim_lease_ms` and
+  `max_claim_renew_age_ms` at most 4,294,967,295; `PayloadPolicy.warn_bytes`
+  and `reject_bytes` at most 2^64 - 1. A larger value is refused when the
+  config is built: `AppConfig` raises `ConfigurationError` with the code of
+  the field (`CONFIG_INVALID_PREFETCH` HRS-202, `CONFIG_INVALID_CLUSTER_CAP`
+  HRS-201, `CONFIG_INVALID_QUEUE_MODE` HRS-200), and `PayloadPolicy` raises
+  `ValidationError`. The bounds are those of the worker manifest of the
+  core. 0.7.0 accepted these values.
+
 - **`check(live=True)` runs the core's connectivity check.** The check
   builds a core handle of its own (observe-only, producer pools) and calls
   `CoreHandle.check_connectivity`, the rule of the Python and Rust clients:
@@ -234,6 +245,16 @@ written in Rust, on a new baseline schema.
   (`HRS-203`, "broker connectivity check failed" with the cause, "broker
   listener capability check failed"); the listener refusal adds the core's
   cause as a second note.
+- **`check(live=True)` compares the worker profiles through the core.**
+  The worker connection phase runs the core's check
+  (`CoreHandle.check_worker_connections`, the rule of the Python and Rust
+  clients) on the handle of the connectivity phase; the live check opens no
+  SQLAlchemy engine. The count is that of the core's worker: its listener
+  opens one connection (before: 2), and a `session_database_url` that
+  differs from `database_url` adds a session pool of the parent pool's size.
+  The errors keep `CHECK_WORKER_CONNECTIONS` (`HRS-219`) and their texts; a
+  limit that is not read, or a core that cannot run the call, is one error
+  with the cause as its note, as before.
 
 ### Fixed
 
@@ -502,6 +523,21 @@ unless it starts with "Added".
   `WebCliError`, `execute_cutover`, `CutoverArgs`, `CutoverCliError`,
   `CutoverCommand`, `execute_transcode`, `TranscodeArgs`,
   `TranscodeCliError` and `TranscodeCommand` are removed from the library.
+- **The shipped `horsies` binary has `web`, `get-docs` and `skills
+  install`.** `cutover` and `transcode` are removed. `worker`, `scheduler`
+  and `check` are refused by name with exit code 2: they run from the
+  app's own binary through `horsies::cli::run(app)`, and `horsies --help`
+  says so. `web` serves one database, from a TOML file of `AppConfig` (a
+  key that no section has is refused by name) or from `--database-url`,
+  and never installs or migrates a schema; it takes Python's flags and
+  `--custom-css-url`, and refuses a blank `--trusted-header` as Python
+  does. `get-docs` fetches the docs of the tag `v<crate version>` (a
+  pre-release version needs `--ref main`) and keeps only the Rust pages
+  and the shared pages, with the Rust `llms.txt`.
+- **Added: `horsies skills install --target <dir> [--force]`.** It writes
+  the skill files that the binary carries to `<dir>/horsies/`, as Python's
+  command does, and replaces a copy that differs only with `--force`. The
+  skill files of the crate are in `.agents/skills/horsies/`.
 - **Task bodies run in child processes of the worker.** The worker starts
   the user's binary again in child mode (`--horsies-child <fd> <pid>`) for
   every execution class, as the Python worker starts Python children.
@@ -586,7 +622,7 @@ unless it starts with "Added".
   `register` returns `TaskFunction<validate_order::Input, T, E>`, and
   `validate_order::params::order()` is the field token of a node. A task
   with no parameters, or with one parameter written `()`, has the input
-  `()`: a send stores `null`, a node `{}`. A parameter whose value is
+  `()`: a send and a node store `{}`. A parameter whose value is
   stored needs a name: `_` is a compile error for it.
   `#[derive(WorkflowInput)]` gives the field tokens of a sub-workflow's
   params type.
@@ -624,7 +660,9 @@ unless it starts with "Added".
   `UnknownUserCode`); `summary_for` returns `&SubWorkflowSummary`, and
   `output_for` the child's output read as `T`.
 - **`UserErrorCode::code` returns `&str`.** Added: `UserCode` implements
-  `UserErrorCode`, with every user code as checked text.
+  `UserErrorCode`, with every user code as checked text. `UserCode` and
+  `UserCodeRefused` are exported at the crate root, so the outcome type of
+  `WorkflowHandle::get` can be named without a `horsies-core` dependency.
 - **A workflow start converts the spec to the core's spec data and runs
   on the core.** `register_workflow_definition::<D>()` (a definition without
   params) returns `WorkflowFunction<T>`; `workflow_template::<D>()` (a
@@ -704,6 +742,31 @@ unless it starts with "Added".
   `rerun::SqlxCaller` (feature `sqlx`). Errors are `CallerRerunError<E>`:
   `Driver(E)`, `ClassNotRegistered { key }`, `ClientFamilyMismatch
   { stored }`, `CallerKeyRefused`, `IdMintRefused`, `Row`.
+- **The client writes each stored form as Python writes it**, as the shared
+  vectors of `crates/horsies-core/tests/fixtures/stored_forms/` pin it:
+  - Task input: a send of a task with no parameters, and a schedule
+    without input, store `{}` (no keyword arguments), not `null`.
+  - Task options of a workflow node: the deadline `good_until` is written
+    as Python's `isoformat()`, with 6 fraction digits when the microsecond
+    is not 0 (`…12.500000+00:00`, not `…12.500+00:00`).
+  - Task options of a send with a deadline (`TaskSendOptions::good_until`):
+    the options text holds the deadline in `good_until`, in Python's
+    `isoformat()`; before, `null`. A task with no options and a send with a
+    deadline stores the options of an `ISOLATED` task with the deadline. The
+    command fingerprint of a send hashes this text, as Python's does.
+    `TaskOptions::stored_send_options_text` (added) writes it.
+  - Workflow spec data, the text that a workflow start sends the core:
+    `queue_classes` lists the task queues in the order of the nodes that
+    first name them, as a Python dict does; before, sorted by name.
+  - Task input and result: a date-time of type `StoredDateTime` (below) is
+    written with Python's fraction (`…12.500000Z`). A plain chrono
+    `DateTime` or `NaiveDateTime` keeps chrono's serde form (`…12.500Z`);
+    both clients read either text to the same value.
+- **Added: `StoredDateTime<T>`**, a chrono date-time
+  (`DateTime<Tz>` or `NaiveDateTime`) that a task input or result stores in
+  Python's text: no fraction for a whole second, 6 digits for a whole
+  microsecond, 9 digits below the microsecond; the offset `Z` when it is 0.
+  It reads any RFC 3339 fraction.
 
 ## [0.7.0] - 2026-11-15
 

@@ -172,6 +172,30 @@ mod tests {
         assert!(back.is_err());
     }
 
+    /// An object keeps its members in insertion order, as a Python dict does:
+    /// a value built in code and a value read from text are written back in
+    /// that order, at every depth.
+    #[test]
+    fn an_object_keeps_its_member_order() {
+        let built = serde_json::json!({"zeta": 1, "alpha": {"delta": [], "beta": null}});
+        let text = r#"{"zeta":1,"alpha":{"delta":[],"beta":null}}"#;
+        assert_eq!(to_json_string(&built).unwrap(), text);
+        let read: serde_json::Value = from_json_str(text).unwrap();
+        assert_eq!(to_json_string(&read).unwrap(), text);
+    }
+
+    /// `shift_remove` keeps the order of the members that stay, as Python's
+    /// `dict.pop` does.
+    #[test]
+    fn a_member_removal_keeps_the_order_of_the_rest() {
+        let mut object = serde_json::Map::new();
+        for (key, value) in [("a", 1), ("b", 2), ("c", 3), ("d", 4)] {
+            let _previous = object.insert(key.to_owned(), serde_json::Value::from(value));
+        }
+        let _removed = object.shift_remove("b");
+        assert_eq!(to_json_string(&object).unwrap(), r#"{"a":1,"c":3,"d":4}"#);
+    }
+
     #[test]
     fn task_result_json_string_round_trip() {
         let result: TaskResult<i32> = TaskResult::Ok(99);

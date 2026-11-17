@@ -49,7 +49,7 @@ use super::failure::{
 use super::pooling_check::{run_pooling_check, PoolingCheckPassed};
 use super::statement::{
     execute_count, query_rows, run_command, AttemptError, BoundStatement, SqlScript, Stage,
-    StatementBound, StatementProtocol, CANCEL_GRACE,
+    StatementBound, StatementProtocol, CANCEL_GRACE, CANCEL_REQUEST_BOUND,
 };
 use super::transaction::TransactionCommand;
 use crate::process_runtime::spawn_on_process_runtime;
@@ -650,9 +650,24 @@ impl CorePool {
         &self,
         class: CheckoutClass,
     ) -> Result<PooledConnection, CheckoutFailure> {
+        self.checkout_within(class, self.plan.checkout_wait).await
+    }
+
+    /// Checks out a connection as [`CorePool::checkout`] does, waiting at
+    /// most `wait` or the pool's `checkout_wait`, whichever is shorter. A
+    /// zero wait takes a free connection or fails at once.
+    ///
+    /// Errors: [`CheckoutFailure`]. After an error nothing was sent and no
+    /// connection is held.
+    pub async fn checkout_within(
+        &self,
+        class: CheckoutClass,
+        wait: Duration,
+    ) -> Result<PooledConnection, CheckoutFailure> {
+        let wait = wait.min(self.plan.checkout_wait);
         let started = Instant::now();
-        let permit = self.pass_gate(class, started).await?;
-        let remaining = self.plan.checkout_wait.saturating_sub(started.elapsed());
+        let permit = self.pass_gate(class, started, wait).await?;
+        let remaining = wait.saturating_sub(started.elapsed());
         let object = self
             .pool
             .timeout_get(&checkout_timeouts(remaining))
@@ -727,6 +742,7 @@ impl CorePool {
         &self,
         class: CheckoutClass,
         started: Instant,
+        wait: Duration,
     ) -> Result<GatePermit, CheckoutFailure> {
         let batch_permits = match (&self.gate, class) {
             (ReserveGate::Ungated, _) | (ReserveGate::KeepFree { .. }, CheckoutClass::Reserved) => {
@@ -736,7 +752,7 @@ impl CorePool {
                 Arc::clone(batch_permits)
             }
         };
-        match tokio::time::timeout(self.plan.checkout_wait, batch_permits.acquire_owned()).await {
+        match tokio::time::timeout(wait, batch_permits.acquire_owned()).await {
             Ok(Ok(permit)) => Ok(GatePermit::Held { _permit: permit }),
             Ok(Err(_closed)) => Err(CheckoutFailure::PoolClosed {
                 role: self.plan.role,
@@ -938,7 +954,7 @@ impl PooledConnection {
                 target: CancelTarget {
                     token: self.object.client.cancel_token(),
                     tls: self.connect.tls().clone(),
-                    bound: self.connect.attempt_bound(),
+                    bound: self.connect.attempt_bound().min(CANCEL_REQUEST_BOUND),
                 },
             },
         }

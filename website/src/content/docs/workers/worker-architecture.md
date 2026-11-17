@@ -72,10 +72,7 @@ Each isolated child holds one task, so a failure stays with that task. A shared 
 
 ### 1. Startup
 
-```bash
-# In CLI
-horsies worker myapp.instance:app --profile default
-```
+A worker starts from the CLI of its client, with the name of a worker profile. The commands are on the client pages: [`horsies worker`](/horsies/cli/#horsies-worker) (Python) and [`worker`](/horsies/rust/cli/#worker) (Rust). The start steps:
 
 1. Load app from module
 2. Import task modules (for registry population)
@@ -483,15 +480,7 @@ Workers need to know where tasks are defined: the app lists its task modules, an
 
 ## Multiple Workers
 
-Run multiple worker processes for horizontal scaling:
-
-```bash
-# On machine 1
-horsies worker myapp.instance:app --profile default
-
-# On machine 2
-horsies worker myapp.instance:app --profile default
-```
+Run several worker processes of one app, on one machine or on several, for horizontal scaling. Each one starts with the same command as a single worker: see [Startup](#1-startup).
 
 - Each worker claims independently
 - `SKIP LOCKED` prevents duplicate claims
@@ -504,17 +493,7 @@ horsies worker myapp.instance:app --profile default
 
 Build such a client in an `on_child_process_start` hook. The Python example is in [Things to Avoid](/horsies/workers/child-process-hooks/#things-to-avoid) of Child-Process Hooks.
 
-**Don't set a library's import-time setting in `.env` that your app loads.** `library` and `app` both import psycopg, SQLAlchemy, and pydantic before your app runs, so `load_dotenv()` in your app is too late for `PSYCOPG_IMPL`. Set such a value in the process environment.
-
-```bash
-# Wrong: in a .env file that the app loads
-PSYCOPG_IMPL=binary
-
-# Correct: in the environment of the worker process
-PSYCOPG_IMPL=binary horsies worker myapp.instance:app --profile default
-```
-
-Monkeypatching has the same limit: a patch that must run before those imports, such as gevent, is too late. Use `preload=ChildPreload.NONE`.
+**Don't set a library's import-time setting in a `.env` file that your app loads.** The `library` and `app` preload modes import the libraries before your app runs, so the app reads the file too late. Set such a value in the environment of the worker process. The Python example is in [Things to Avoid](/horsies/workers/worker-profiles/#things-to-avoid) of Worker Profiles.
 
 **Don't expect a recycle to load new code with `preload=ChildPreload.APP`.** A recycled child is a new fork of the same preload parent. Restart the worker.
 

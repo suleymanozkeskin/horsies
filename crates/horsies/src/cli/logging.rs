@@ -14,7 +14,7 @@ use crate::WorkerLogLevel;
 
 /// Install the subscriber at `level` (Python `setup_logging`). A global
 /// subscriber that exists already is kept.
-pub(super) fn install_logs(level: WorkerLogLevel) {
+pub(crate) fn install_logs(level: WorkerLogLevel) {
     install(filter_text(level));
 }
 

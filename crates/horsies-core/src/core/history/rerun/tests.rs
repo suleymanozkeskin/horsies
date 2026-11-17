@@ -99,6 +99,14 @@ const CURRENT_POLICY_CLASS: &str = "standard_14d";
 const PAYLOAD_INPUT: &str = "{\"k\":\"v\"}";
 const PAYLOAD_OPTIONS: &str = "{\"timeout_ms\":5}";
 
+/// The stored envelope of a raw result record, parsed for a comparison.
+fn envelope_value(record: &crate::broker::RawResultRecord) -> Option<serde_json::Value> {
+    record
+        .raw_result
+        .as_ref()
+        .map(|text| serde_json::from_str(text.as_str()).expect("a stored envelope text is JSON"))
+}
+
 fn digest_hex(payload: &[u8]) -> String {
     Sha256::digest(payload)
         .iter()
@@ -1277,13 +1285,8 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     assert_eq!(raw.task_name, "p8.rerun");
     assert_eq!(raw.status, TaskStatus::Completed);
     assert_eq!(
-        raw.raw_result,
-        Some(
-            serde_json::json!({"__h_task_result__": true, "ok": {"value": 7}, "err": null})
-                .as_object()
-                .unwrap()
-                .clone()
-        )
+        envelope_value(&raw),
+        Some(serde_json::json!({"__h_task_result__": true, "ok": {"value": 7}, "err": null}))
     );
     let info = broker
         .get_task_info_with_attempts(completed, true, true, true)
@@ -1311,12 +1314,11 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     let expected_error =
         TaskError::builtin(OperationalErrorCode::TaskException, "p8 terminal source");
     let expected_error_envelope =
-        serde_json::to_value(TaskResult::<serde_json::Value>::Err(expected_error.clone()))
-            .unwrap()
-            .as_object()
-            .unwrap()
-            .clone();
-    assert_eq!(failed_raw.raw_result, Some(expected_error_envelope.clone()));
+        serde_json::to_value(TaskResult::<serde_json::Value>::Err(expected_error.clone())).unwrap();
+    assert_eq!(
+        envelope_value(&failed_raw),
+        Some(expected_error_envelope.clone())
+    );
     let failed_error = broker
         .get_result::<serde_json::Value>(failed, None)
         .await
@@ -1334,7 +1336,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap()
         .expect_found();
     assert_eq!(expired_raw.status, TaskStatus::Expired);
-    assert_eq!(expired_raw.raw_result, Some(expected_error_envelope));
+    assert_eq!(envelope_value(&expired_raw), Some(expected_error_envelope));
     let expired_error = broker
         .get_result::<serde_json::Value>(expired, None)
         .await

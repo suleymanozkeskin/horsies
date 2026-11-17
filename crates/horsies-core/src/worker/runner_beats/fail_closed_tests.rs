@@ -1057,6 +1057,7 @@ fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
         task_name: claimed.task_name.clone(),
         worker_id: WORKER.to_owned(),
         claimed_at: claimed.claimed_at,
+        orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
         input: input(),
     }))
@@ -1120,6 +1121,7 @@ fn start_pool(spawner: &Spawner, live: &LiveDispatches, command: ChildCommand) -
             command,
             init: init_frame(),
             worker_id: WORKER.to_owned(),
+            orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
             pending_limit: NonZeroUsize::new(4).expect("a positive pending limit"),
             tasks_per_child: TaskLimit::Off,
             memory_per_child: MemoryLimit::Off,

@@ -2,14 +2,16 @@
 
 use std::time::Duration;
 
-use serde_json::json;
-
 use super::{
     bullet, heading, load_catalog, next_order, register_runtime, reserve_order_id, say,
-    send_json_task, send_standalone, start_order, store_order, web_base_url, ScenarioResult,
+    send_standalone, start_order, store_order, web_base_url, ScenarioResult,
 };
-use crate::domain::{Order, ReturnCase};
+use crate::domain::{CatalogEntry, Order, ReturnCase};
 use crate::store::Store;
+use crate::tasks::promotions::{apply_promotions, compute_loyalty_points};
+use crate::tasks::AcmeTasks;
+use crate::workflows::returns_review::ReturnsParams;
+use crate::workflows::RegisteredWorkflows;
 use crate::{simulate, tuning};
 
 pub fn start_fulfillment_hint(order: &Order) {
@@ -23,9 +25,9 @@ pub fn start_fulfillment_hint(order: &Order) {
 
 async fn place_and_start(
     store: &Store,
-    catalog: &[crate::domain::CatalogEntry],
-    handles: &crate::tasks::TaskHandles,
-    workflows: &crate::workflows::RegisteredWorkflows,
+    catalog: &[CatalogEntry],
+    tasks: &AcmeTasks,
+    workflows: &RegisteredWorkflows,
 ) -> ScenarioResult<Order> {
     let order = next_order(store, catalog).await?;
     start_fulfillment_hint(&order);
@@ -35,13 +37,13 @@ async fn place_and_start(
         web_base_url(),
         handle.workflow_id()
     ));
-    send_standalone(handles, &order).await?;
+    send_standalone(tasks, &order).await?;
     Ok(order)
 }
 
 async fn spawn_return(
     store: &Store,
-    workflows: &crate::workflows::RegisteredWorkflows,
+    workflows: &RegisteredWorkflows,
     order: &Order,
 ) -> ScenarioResult<()> {
     let line = order
@@ -67,7 +69,7 @@ async fn spawn_return(
         .map_err(|error| error.to_string())?;
     let handle = workflows
         .returns_review
-        .start(crate::workflows::returns_review::ReturnsParams {
+        .start(ReturnsParams {
             return_id: return_id.clone(),
             order_id: order.order_id.clone(),
             sku: line.sku.clone(),
@@ -83,12 +85,12 @@ async fn spawn_return(
     Ok(())
 }
 
-async fn spawn_restock(workflows: &crate::workflows::RegisteredWorkflows) -> ScenarioResult<()> {
-    let workflow = workflows
-        .static_specs
-        .get("restock")
-        .ok_or_else(|| "restock workflow is not registered".to_owned())?;
-    let handle = workflow.start().await.map_err(|error| error.to_string())?;
+async fn spawn_restock(workflows: &RegisteredWorkflows) -> ScenarioResult<()> {
+    let handle = workflows
+        .restock
+        .start()
+        .await
+        .map_err(|error| error.to_string())?;
     say(format!(
         "  restock  ->  {}/workflows?run={}",
         web_base_url(),
@@ -116,7 +118,7 @@ fn what_to_watch() {
         web_base_url()
     ));
     bullet(format!(
-        "{}/?error_code=UNHANDLED_ERROR      the bundle-pricing crash, as data",
+        "{}/?error_code=UNHANDLED_EXCEPTION  the bundle-pricing crash, as data",
         web_base_url()
     ));
     bullet(format!(
@@ -148,28 +150,38 @@ fn id_for_draw(rate: f64, label: &str, predicate: impl Fn(&str) -> bool) -> Opti
 
 async fn cover_failure_table(
     store: &Store,
-    catalog: &[crate::domain::CatalogEntry],
-    handles: &crate::tasks::TaskHandles,
-    workflows: &crate::workflows::RegisteredWorkflows,
+    catalog: &[CatalogEntry],
+    tasks: &AcmeTasks,
+    workflows: &RegisteredWorkflows,
 ) -> ScenarioResult<()> {
     let bundle = id_for_draw(tuning::PROMOTION_BUNDLE_BUG_RATE, "bundle-bug", |_| true)
         .ok_or_else(|| "could not find a bundle-bug identity".to_owned())?;
-    send_json_task(handles, "apply_promotions", json!({"order_id": bundle})).await?;
+    let _bundle = tasks
+        .apply_promotions
+        .send(apply_promotions::Input { order_id: bundle })
+        .await
+        .map_err(|error| error.to_string())?;
 
     let size = id_for_draw(tuning::PROMOTION_SIZE_CODE_BUG_RATE, "size-code", |id| {
         !simulate::draw(tuning::PROMOTION_BUNDLE_BUG_RATE, &[id, "bundle-bug"])
     })
     .ok_or_else(|| "could not find a size-code identity".to_owned())?;
-    send_json_task(handles, "apply_promotions", json!({"order_id": size})).await?;
+    let _size = tasks
+        .apply_promotions
+        .send(apply_promotions::Input { order_id: size })
+        .await
+        .map_err(|error| error.to_string())?;
 
     let loyalty = id_for_draw(tuning::LOYALTY_ENGINE_BUG_RATE, "lifetime-bug", |_| true)
         .ok_or_else(|| "could not find a loyalty identity".to_owned())?;
-    send_json_task(
-        handles,
-        "compute_loyalty_points",
-        json!({"customer_id": loyalty, "order_id": "S4-LOYALTY"}),
-    )
-    .await?;
+    let _loyalty = tasks
+        .compute_loyalty_points
+        .send(compute_loyalty_points::Input {
+            customer_id: loyalty,
+            order_id: "S4-LOYALTY".to_owned(),
+        })
+        .await
+        .map_err(|error| error.to_string())?;
 
     let card_id = reserve_order_id(store, |id| {
         simulate::draw(tuning::CARD_DECLINE_RATE, &[id, "card"])
@@ -178,9 +190,8 @@ async fn cover_failure_table(
     .await?
     .ok_or_else(|| "could not find a card-decline identity".to_owned())?;
     let card_order = store_order(store, &card_id, catalog).await?;
-    start_order(workflows, card_order)
+    let _card = start_order(workflows, card_order)
         .await
-        .map(|_| ())
         .map_err(|error| format!("card-decline workflow: {error}"))?;
 
     let stock_id = reserve_order_id(store, |id| {
@@ -189,7 +200,7 @@ async fn cover_failure_table(
     .await?
     .ok_or_else(|| "could not find a stock-shortfall identity".to_owned())?;
     let stock_order = store_order(store, &stock_id, catalog).await?;
-    start_order(workflows, stock_order).await?;
+    let _stock = start_order(workflows, stock_order).await?;
 
     let psp_id = reserve_order_id(store, |id| {
         simulate::draw(tuning::PSP_UNAVAILABLE_RATE, &[id, "psp"])
@@ -199,7 +210,7 @@ async fn cover_failure_table(
     .await?
     .ok_or_else(|| "could not find a PSP-unavailable identity".to_owned())?;
     let psp_order = store_order(store, &psp_id, catalog).await?;
-    start_order(workflows, psp_order).await?;
+    let _psp = start_order(workflows, psp_order).await?;
 
     let courier_id = reserve_order_id(store, |id| {
         simulate::draw(tuning::COURIER_FLAKE_RATE, &[id, "courier"])
@@ -209,7 +220,7 @@ async fn cover_failure_table(
     .await?
     .ok_or_else(|| "could not find a courier-flake identity".to_owned())?;
     let courier_order = store_order(store, &courier_id, catalog).await?;
-    start_order(workflows, courier_order).await?;
+    let _courier = start_order(workflows, courier_order).await?;
     Ok(())
 }
 
@@ -217,7 +228,7 @@ pub async fn run(max_orders: Option<usize>, cover_errors: bool, pace: f64) -> Sc
     heading("Acme Clothing — steady");
     let (settings, store) = super::prepare_database().await?;
     let catalog = load_catalog(&store).await?;
-    let (app, handles, workflows) = register_runtime(settings.sqlx_url())?;
+    let showcase = register_runtime(settings.sqlx_url())?;
     say(format!(
         "database: {} (resolved from {})",
         settings.database_name, settings.source
@@ -231,7 +242,7 @@ pub async fn run(max_orders: Option<usize>, cover_errors: bool, pace: f64) -> Sc
     ));
     what_to_watch();
     if cover_errors {
-        cover_failure_table(&store, &catalog, &handles, &workflows).await?;
+        cover_failure_table(&store, &catalog, &showcase.tasks, &showcase.workflows).await?;
     }
 
     let mut placed = 0usize;
@@ -240,13 +251,13 @@ pub async fn run(max_orders: Option<usize>, cover_errors: bool, pace: f64) -> Sc
         if max_orders.is_some_and(|limit| placed >= limit) {
             break;
         }
-        let order = place_and_start(&store, &catalog, &handles, &workflows).await?;
+        let order = place_and_start(&store, &catalog, &showcase.tasks, &showcase.workflows).await?;
         placed += 1;
         if placed % tuning::RETURN_SPAWN_EVERY == 0 {
-            spawn_return(&store, &workflows, &order).await?;
+            spawn_return(&store, &showcase.workflows, &order).await?;
         }
         if placed % tuning::RESTOCK_SPAWN_EVERY == 0 {
-            spawn_restock(&workflows).await?;
+            spawn_restock(&showcase.workflows).await?;
         }
         if max_orders.is_none() {
             let delay = simulate::integer(
@@ -280,7 +291,6 @@ pub async fn run(max_orders: Option<usize>, cover_errors: bool, pace: f64) -> Sc
     } else {
         say(format!("placed {placed} orders"));
     }
-    drop(app);
     store.close().await;
     Ok(())
 }

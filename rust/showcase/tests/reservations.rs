@@ -1,23 +1,19 @@
-use std::env;
+//! Every failure path of an order releases its reservations: at once for a
+//! decline or a short line, through the nightly stocktake for a panic, a
+//! cancel, an abandoned order and a return.
 
-use acme_showcase::domain::{Order, OrderLine, Product, ReturnCase, StockLevel, ORDER_PLACED};
-use acme_showcase::settings::resolve_database_settings;
-use acme_showcase::store::{ensure_database, Store};
-use acme_showcase::tasks::runtime;
+mod support;
+
+use acme_showcase::domain::{
+    AcmeCode, Order, OrderLine, Product, ReturnCase, StockLevel, StocktakeSummary, ORDER_PLACED,
+};
+use acme_showcase::store::Store;
+use acme_showcase::tasks::{promotions, runtime};
 use acme_showcase::{simulate, tuning};
 use chrono::Utc;
-use serde_json::json;
+use horsies::TaskErrorCode;
 use serial_test::serial;
 use uuid::Uuid;
-
-async fn database() -> Option<(String, Store)> {
-    env::var("ACME_DATABASE_URL").ok()?;
-    let settings = resolve_database_settings().expect("showcase settings");
-    ensure_database(&settings).await.expect("showcase database");
-    let store = Store::connect(&settings).await.expect("showcase store");
-    store.ensure_schema().await.expect("showcase schema");
-    Some((settings.sqlx_url().to_owned(), store))
-}
 
 async fn seed_order_with_id(
     store: &Store,
@@ -74,15 +70,10 @@ async fn reserved(store: &Store, sku: &str) -> i32 {
         .expect("reserved count")
 }
 
-async fn run_nightly_cleanup(store: &Store) -> serde_json::Value {
-    runtime::replenish_catalog(
-        store.clone(),
-        json!({
-            "target_units": tuning::CATALOG_STOCK_PER_SKU,
-        }),
-    )
-    .await
-    .expect("nightly reservation cleanup")
+async fn run_nightly_cleanup(store: &Store) -> StocktakeSummary {
+    runtime::replenish(store, tuning::CATALOG_STOCK_PER_SKU)
+        .await
+        .expect("nightly reservation cleanup")
 }
 
 async fn reserve_one(store: &Store, order: &Order, sku: &str) {
@@ -98,7 +89,7 @@ async fn reserve_one(store: &Store, order: &Order, sku: &str) {
 #[tokio::test]
 #[serial]
 async fn every_failure_path_releases_or_cleans_its_reservations() {
-    let Some((url, store)) = database().await else {
+    let Some((_settings, store)) = support::database().await else {
         return;
     };
 
@@ -110,18 +101,12 @@ async fn every_failure_path_releases_or_cleans_its_reservations() {
         .expect("card-decline identity");
     let (card_order, card_sku) = seed_order_with_id(&store, "card", card_id, ORDER_PLACED).await;
     reserve_one(&store, &card_order, &card_sku).await;
-    let card_error = runtime::authorize_payment(
-        store.clone(),
-        json!({
-            "order_id": card_order.order_id,
-            "amount_cents": card_order.total_cents,
-        }),
-    )
-    .await
-    .expect_err("card decline");
+    let card_error = runtime::authorize(&store, &card_order.order_id, card_order.total_cents)
+        .await
+        .expect_err("card decline");
     assert_eq!(
-        card_error.error_code.expect("card code").to_string(),
-        "CARD_DECLINED"
+        card_error.code(),
+        &TaskErrorCode::User(AcmeCode::CardDeclined)
     );
     assert_eq!(reserved(&store, &card_sku).await, 0);
 
@@ -189,20 +174,12 @@ async fn every_failure_path_releases_or_cleans_its_reservations() {
         .await
         .expect("partial order");
     reserve_one(&store, &partial_order, &partial_sku).await;
-    let insufficient = runtime::reserve_stock(
-        store.clone(),
-        json!({
-            "order_id": partial_order.order_id,
-            "line_no": 2,
-            "sku": missing_sku,
-            "quantity": 1,
-        }),
-    )
-    .await
-    .expect_err("insufficient stock");
+    let insufficient = runtime::reserve(&store, &partial_order.order_id, 2, &missing_sku, 1)
+        .await
+        .expect_err("insufficient stock");
     assert_eq!(
-        insufficient.error_code.expect("stock code").to_string(),
-        "INSUFFICIENT_STOCK"
+        insufficient.code(),
+        &TaskErrorCode::User(AcmeCode::InsufficientStock)
     );
     assert_eq!(reserved(&store, &partial_sku).await, 0);
 
@@ -216,19 +193,12 @@ async fn every_failure_path_releases_or_cleans_its_reservations() {
     let (bundle_order, bundle_sku) =
         seed_order_with_id(&store, "bundle", bundle_id, ORDER_PLACED).await;
     reserve_one(&store, &bundle_order, &bundle_sku).await;
-    let panic_join = tokio::spawn(runtime::apply_promotions(
-        acme_showcase::store::TaskStore::new(&url),
-        json!({
-            "order_id": bundle_order.order_id,
-        }),
-    ))
-    .await;
-    assert!(
-        panic_join.is_err(),
-        "bundle pricing must remain a real panic"
-    );
+    let bundle_order_id = bundle_order.order_id.clone();
+    let panicked =
+        std::panic::catch_unwind(move || promotions::promotion_outcome(&bundle_order_id));
+    assert!(panicked.is_err(), "bundle pricing must remain a real panic");
     let cleanup = run_nightly_cleanup(&store).await;
-    assert!(cleanup["reservations_cleared"].as_i64().unwrap_or_default() >= 1);
+    assert!(cleanup.reservations_cleared >= 1);
     assert_eq!(reserved(&store, &bundle_sku).await, 0);
 
     let (cancelled_order, cancelled_sku) = seed_order(&store, "cancelled", ORDER_PLACED).await;

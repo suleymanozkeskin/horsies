@@ -5,9 +5,11 @@ server limit (``horsies check --live``)."""
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+import json
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
 from typing import Any
 from unittest import mock
 
@@ -15,6 +17,7 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy.exc import OperationalError
 
+from horsies._core import CoreError
 from horsies.core.app import Horsies
 from horsies.core.errors import ErrorCode
 from horsies.core.models.app import AppConfig
@@ -778,66 +781,127 @@ def _app(
     )
 
 
-class TestCheckLiveWorkerConnections:
-    """``app.check(live=True)``: each profile against the server limit."""
+@dataclass(frozen=True)
+class _Passed:
+    """Stands for ``horsies._core.ConnectivityPassed``."""
 
-    def test_a_profile_above_the_limit_is_an_error_with_its_path(self) -> None:
+
+@dataclass(frozen=True)
+class _Refused:
+    """Stands for ``horsies._core.ConnectivityRefused``."""
+
+    step: str
+    message: str
+
+
+@dataclass(frozen=True)
+class _CoreRefusal:
+    """Stands for ``horsies._core.WorkerConnectionError``."""
+
+    message: str
+    code: str | None
+    notes: list[str]
+    help_text: str | None
+
+
+class _LiveHandle:
+    """A core handle of the live check: passes or refuses the connectivity
+    step, answers the worker connection step with ``refusals`` (or raises
+    it), keeps the profile text it got, and counts its closes."""
+
+    built: list[_LiveHandle] = []
+    connectivity: object = _Passed()
+    refusals: object = []
+
+    def __init__(self, manifest_json: str, *, pool_profile: str) -> None:
+        self.manifest = json.loads(manifest_json)
+        self.pool_profile = pool_profile
+        self.profiles: list[dict[str, Any]] = []
+        self.closes = 0
+        _LiveHandle.built.append(self)
+
+    def check_connectivity(self) -> object:
+        return _LiveHandle.connectivity
+
+    def check_worker_connections(self, profiles_json: str) -> object:
+        self.profiles.append(json.loads(profiles_json))
+        match _LiveHandle.refusals:
+            case BaseException() as raised:
+                raise raised
+            case refusals:
+                return refusals
+
+    def close(self) -> None:
+        self.closes += 1
+
+
+@contextmanager
+def _live_core(
+    *,
+    refusals: object,
+    connectivity: object | None = None,
+) -> Generator[list[_LiveHandle], None, None]:
+    """Run the live check against `_LiveHandle`. Yields the handles that the
+    check built."""
+    _LiveHandle.built = []
+    _LiveHandle.connectivity = _Passed() if connectivity is None else connectivity
+    _LiveHandle.refusals = refusals
+    with (
+        mock.patch('horsies.core.app.CoreHandle', _LiveHandle),
+        mock.patch('horsies.core.app.ConnectivityPassed', _Passed),
+        mock.patch('horsies.core.app.ConnectivityRefused', _Refused),
+    ):
+        yield _LiveHandle.built
+
+
+class TestCheckLiveWorkerConnections:
+    """``app.check(live=True)``: the core's check of each profile against the
+    server limit (``CoreHandle.check_worker_connections``), on the handle of
+    the connectivity step."""
+
+    def test_each_core_refusal_is_a_python_error_with_its_parts(self) -> None:
+        app = _app({'big': WorkerProfile(isolated=IsolatedChildren(count=20))})
+        refusal = _CoreRefusal(
+            message="worker_profiles['big']: one worker opens up to 27 Postgres connections",
+            code='HRS-219',
+            notes=['parent pool max_size 5 + listener 1 + runner heartbeat 1', 'not counted'],
+            help_text='lower the child counts',
+        )
+
+        with _live_core(refusals=[refusal]):
+            errors = app.check(live=True)
+
+        assert [error.code for error in errors] == [ErrorCode.CHECK_WORKER_CONNECTIONS]
+        assert errors[0].message == refusal.message
+        assert errors[0].notes == refusal.notes
+        assert errors[0].help_text == 'lower the child counts'
+        assert errors[0].location is None
+
+    def test_the_profiles_reach_the_core_in_the_worker_manifest_form(self) -> None:
         app = _app(
             {
                 'big': WorkerProfile(isolated=IsolatedChildren(count=20)),
                 'small': WorkerProfile(isolated=IsolatedChildren(count=1)),
             }
         )
-        reader = mock.AsyncMock(
-            return_value=ServerConnectionLimit(max_connections=30, reserved=3),
-        )
-        with mock.patch('horsies.core.app.read_server_connection_limit', reader):
-            errors = app._check_worker_connections()  # pyright: ignore[reportPrivateUsage]
 
-        assert [error.code for error in errors] == [ErrorCode.CHECK_WORKER_CONNECTIONS]
-        assert errors[0].message == (
-            "worker_profiles['big']: one worker opens up to 28 Postgres "
-            'connections itself, not counting task code; the server has 27 '
-            'usable slots (max_connections 30 - reserved 3)'
-        )
-        assert errors[0].notes == [
-            'parent pool max_size 5 + listener 2 + runner heartbeat 1 + 20 isolated '
-            'children x isolated.pool max_size 1 = 28',
-            'not counted: task code that sends opens a pool of the '
-            'task_send_pool of its child kind in its child, for each event '
-            'loop that it sends from; with one such loop in each child, 20 '
-            'isolated children x isolated.task_send_pool 2 = 40 more, 68 in '
-            'all',
-        ]
-        assert errors[0].location is None
+        with _live_core(refusals=[]) as built:
+            assert app.check(live=True) == []
 
-    def test_profiles_that_fit_have_no_error(self) -> None:
-        app = _app({'small': WorkerProfile(isolated=IsolatedChildren(count=1))})
-        reader = mock.AsyncMock(
-            return_value=ServerConnectionLimit(max_connections=100, reserved=3),
-        )
-        with mock.patch('horsies.core.app.read_server_connection_limit', reader):
-            assert app._check_worker_connections() == []  # pyright: ignore[reportPrivateUsage]
-        reader.assert_awaited_once()
+        [handle] = built
+        [profiles] = handle.profiles
+        assert sorted(profiles) == ['big', 'small']
+        assert profiles['big']['isolated']['kind'] == 'CHILDREN'
+        assert profiles['big']['isolated']['count'] == 20
+        assert handle.manifest['schema'] == 'OBSERVE_ONLY'
+        assert handle.closes == 1
 
-    def test_an_unreadable_limit_is_one_error(self) -> None:
-        app = _app({'small': WorkerProfile(isolated=IsolatedChildren(count=1))})
-        reader = mock.AsyncMock(
-            return_value=ServerConnectionLimitUnreadable(reason='OSError: reset'),
-        )
-        with mock.patch('horsies.core.app.read_server_connection_limit', reader):
-            errors = app._check_worker_connections()  # pyright: ignore[reportPrivateUsage]
-        assert [(error.code, error.notes) for error in errors] == [
-            (ErrorCode.CHECK_WORKER_CONNECTIONS, ['OSError: reset']),
-        ]
+    def test_no_profiles_sends_an_empty_set_for_the_core_to_skip(self) -> None:
+        with _live_core(refusals=[]) as built:
+            assert _app({}).check(live=True) == []
+        assert built[0].profiles == [{}]
 
-    def test_no_profiles_reads_nothing(self) -> None:
-        reader = mock.AsyncMock()
-        with mock.patch('horsies.core.app.read_server_connection_limit', reader):
-            assert _app({})._check_worker_connections() == []  # pyright: ignore[reportPrivateUsage]
-        reader.assert_not_awaited()
-
-    def test_a_transaction_pooler_reads_nothing(self) -> None:
+    def test_a_transaction_pooler_is_in_the_manifest_that_the_core_reads(self) -> None:
         app = _app(
             {'small': WorkerProfile(isolated=IsolatedChildren(count=1))},
             pgbouncer_transaction_mode=True,
@@ -845,45 +909,40 @@ class TestCheckLiveWorkerConnections:
                 'postgresql://user:pass@localhost:5433/db',
             ),
         )
-        reader = mock.AsyncMock()
-        with mock.patch('horsies.core.app.read_server_connection_limit', reader):
-            assert app._check_worker_connections() == []  # pyright: ignore[reportPrivateUsage]
-        reader.assert_not_awaited()
+        with _live_core(refusals=[]) as built:
+            assert app.check(live=True) == []
+        assert built[0].manifest['database']['pgbouncer_transaction_mode'] is True
 
-    def test_check_live_runs_the_phase_after_connectivity(self) -> None:
-        app = _app({'big': WorkerProfile(isolated=IsolatedChildren(count=20))})
-        reader = mock.AsyncMock(
-            return_value=ServerConnectionLimit(max_connections=30, reserved=3),
-        )
-        with (
-            mock.patch.object(app, '_check_broker_connectivity', return_value=[]),
-            mock.patch('horsies.core.app.read_server_connection_limit', reader),
-        ):
+    def test_a_core_that_cannot_run_the_call_is_one_unread_limit_error(self) -> None:
+        app = _app({'small': WorkerProfile(isolated=IsolatedChildren(count=1))})
+
+        with _live_core(refusals=CoreError('the core stopped')) as built:
             errors = app.check(live=True)
-        assert [error.code for error in errors] == [ErrorCode.CHECK_WORKER_CONNECTIONS]
 
-    def test_check_live_skips_the_phase_when_connectivity_fails(self) -> None:
+        assert [(error.code, error.notes) for error in errors] == [
+            (ErrorCode.CHECK_WORKER_CONNECTIONS, ['the core stopped']),
+        ]
+        assert errors[0].message == 'the server connection limit could not be read'
+        assert built[0].closes == 1
+
+    def test_the_phase_is_skipped_when_connectivity_fails(self) -> None:
         app = _app({'big': WorkerProfile(isolated=IsolatedChildren(count=20))})
-        reader = mock.AsyncMock()
-        connectivity_error = mock.MagicMock(code=ErrorCode.BROKER_INVALID_URL)
-        with (
-            mock.patch.object(
-                app,
-                '_check_broker_connectivity',
-                return_value=[connectivity_error],
-            ),
-            mock.patch('horsies.core.app.read_server_connection_limit', reader),
-        ):
+
+        with _live_core(
+            refusals=AssertionError('the worker phase must not run'),
+            connectivity=_Refused(step='MAIN_URL', message='db down'),
+        ) as built:
             errors = app.check(live=True)
-        assert errors == [connectivity_error]
-        reader.assert_not_awaited()
 
-    def test_check_without_live_reads_nothing(self) -> None:
+        assert [error.code for error in errors] == [ErrorCode.BROKER_INVALID_URL]
+        assert built[0].profiles == []
+        assert built[0].closes == 1
+
+    def test_check_without_live_builds_no_handle(self) -> None:
         app = _app({'big': WorkerProfile(isolated=IsolatedChildren(count=20))})
-        reader = mock.AsyncMock()
-        with mock.patch('horsies.core.app.read_server_connection_limit', reader):
+        with _live_core(refusals=AssertionError('no live phase')) as built:
             assert app.check(live=False) == []
-        reader.assert_not_awaited()
+        assert built == []
 
 
 def test_no_isolated_children_has_no_memory_sum_to_exceed() -> None:

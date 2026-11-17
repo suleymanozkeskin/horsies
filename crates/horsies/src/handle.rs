@@ -350,8 +350,7 @@ where
         }
         (_, Some(envelope)) => envelope,
     };
-    let text = serde_json::Value::Object(envelope).to_string();
-    let stored = task_result_from_json_str::<T>(&text).map_err(|error| {
+    let stored = task_result_from_json_str::<T>(envelope.as_str()).map_err(|error| {
         ReadError::StoredResultUnreadable {
             task_id,
             cause: unreadable_cause(&error),
@@ -401,6 +400,7 @@ impl<T, E> std::fmt::Debug for TaskHandle<T, E> {
 mod tests {
     use std::time::Duration;
 
+    use horsies_core::StoredEnvelopeText;
     use serde_json::{json, Value};
 
     use super::*;
@@ -439,9 +439,10 @@ mod tests {
             task_id: task(),
             task_name: "charge".to_owned(),
             status,
-            raw_result: raw_result.map(|value| match value {
-                Value::Object(map) => map,
-                other => panic!("an envelope is an object: {other}"),
+            raw_result: raw_result.map(|value| {
+                StoredEnvelopeText::parse(value.to_string())
+                    .unwrap()
+                    .expect("an envelope is an object")
             }),
         }
     }

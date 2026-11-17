@@ -209,6 +209,7 @@ def _frame(task_name: str, argument: str | None = None) -> RunFrame:
         is_workflow_task=False,
         timeout=NoTimeout(),
         claimed_at=CLAIMED_AT,
+        orphan_self_heal=True,
     )
 
 
@@ -543,6 +544,7 @@ class TestChildSend:
             is_workflow_task=False,
             timeout=NoTimeout(),
             claimed_at=CLAIMED_AT,
+            orphan_self_heal=True,
         )
 
     async def test_a_frame_with_a_small_body_is_one_write(self) -> None:
@@ -2948,7 +2950,7 @@ async def main():
         10,
     )
     await pool.start()
-    pool.submit(RunFrame('t', {task!r}, None, None, 'w', False, None, None))
+    pool.submit(RunFrame('t', {task!r}, None, None, 'w', False, None, None, True))
     await asyncio.sleep(0.3)
     print(pool._slots[0].child.pid, flush=True)
     await asyncio.sleep(60)

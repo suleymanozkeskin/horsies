@@ -155,12 +155,12 @@ type TaskRowEndRecord = (
     | core.AttemptTaskAbsent
     | core.AttemptWriteFailed
 )
-"""The records of a single-row expiry or orphan cancel of the core."""
+"""The records of the single-row expiry of a claim of the core."""
 
 
 def task_row_end_of(record: TaskRowEndRecord, subject: str) -> TerminalizationOutcome:
-    """The outcome of a single-row expiry or orphan cancel of the core
-    (``expire_owned_claim``, ``cancel_owned_orphan_async``). Pure.
+    """The outcome of the single-row expiry of a claim of the core
+    (``CoreChildHandle.expire_owned_claim`` and its awaitable form). Pure.
 
     ``subject`` names the caller in the raised failure.
 

@@ -988,7 +988,8 @@ def boot_app(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
 
     An isolated child and a shared thread child open their sync connection
     pool here. A shared async child opens no pool here: it opens an async
-    pool on its event loop, after the ready steps of ``shared_child``.
+    pool on its event loop, after the ready steps of ``shared_child``. Every
+    kind builds its core handle here (``_initialize_child_core_handle``).
 
     ``Ok``: whether the booted app has an ``async def`` task, which decides
     whether the child creates its task loop.
@@ -1027,8 +1028,8 @@ def boot_app(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
                     dict(init.connect_kwargs),
                     pool,
                 )
-            case SharedAsyncChild():
-                finish_shared_child_start(app)
+            case SharedAsyncChild(pool=pool):
+                finish_shared_child_start(app, pool)
             case _ as unreachable:
                 assert_never(unreachable)
     except Exception as exc:
@@ -1051,6 +1052,7 @@ def run_child_task(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> Run
         frame.timeout,
         claimed_at=frame.claimed_at,
         task_loop=task_loop,
+        orphan_self_heal=frame.orphan_self_heal,
     )
 
 

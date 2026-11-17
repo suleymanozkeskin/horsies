@@ -550,15 +550,15 @@ The connections that each profile opens, and the rate of the worker:
 
 | Profile | Derived pools | Connections that `HRS-219` counts | Task code that sends adds, at most | Tasks/s of one worker |
 |---------|---------------|-----------------------------------|------------------------------------|-----------------------|
-| `async_io` | 4 shared async children × 10, worker process 20 | `20 + 2 + 1 + 4 × 10 = 63` | `4 × 2 = 8` | 2,490-2,630 |
-| `blocking_io` | 2 shared thread children × 7, worker process 13 | `13 + 2 + 1 + 2 × 7 = 30` | `2 × 2 = 4` | 1,010-1,070 |
-| `cpu_isolated` | 14 isolated children × 1, worker process 5 | `5 + 2 + 1 + 14 × 1 = 22` | `14 × 2 = 28` | 108-110 |
-| `native_threads` | 1 shared thread child × 2, worker process 5 | `5 + 2 + 1 + 1 × 2 = 10` | `1 × 2 = 2` | 114-115 |
-| `mixed` | 4 isolated children × 1, 2 shared async children × 20, 1 shared thread child × 4, worker process 20 | `20 + 2 + 1 + 4 × 1 + 2 × 20 + 1 × 4 = 71` | `7 × 2 = 14` | 2,020-2,500: async 1,810-2,270, thread 184-205, isolated 24-27 |
+| `async_io` | 4 shared async children × 10, worker process 20 | `20 + 1 + 1 + 4 × 10 = 62` | `4 × 2 = 8` | 2,490-2,630 |
+| `blocking_io` | 2 shared thread children × 7, worker process 13 | `13 + 1 + 1 + 2 × 7 = 29` | `2 × 2 = 4` | 1,010-1,070 |
+| `cpu_isolated` | 14 isolated children × 1, worker process 5 | `5 + 1 + 1 + 14 × 1 = 21` | `14 × 2 = 28` | 108-110 |
+| `native_threads` | 1 shared thread child × 2, worker process 5 | `5 + 1 + 1 + 1 × 2 = 9` | `1 × 2 = 2` | 114-115 |
+| `mixed` | 4 isolated children × 1, 2 shared async children × 20, 1 shared thread child × 4, worker process 20 | `20 + 1 + 1 + 4 × 1 + 2 × 20 + 1 × 4 = 70` | `7 × 2 = 14` | 2,020-2,500: async 1,810-2,270, thread 184-205, isolated 24-27 |
 
 The rates were measured on an 8-core host (Apple M2) with Postgres 18 on the same host, two runs per profile, with a task that sleeps 0.1 s in place of the work: `asyncio.sleep` for the async tasks, `time.sleep` for the others, which releases the GIL as blocking I/O and native code do. They show what the worker itself carries, on a host with half the CPUs of the profiles. Real work sets its own rate; for CPU work it is about the children, or the seats, divided by the CPU seconds of one task. With Postgres 3.5 ms away, see the per-child rates in [Sizes Derived from the Seats](#sizes-derived-from-the-seats).
 
-A pool opens a connection only when a write finds none free, so a worker can open fewer connections than `HRS-219` counts: in these runs Postgres saw at most 48 connections for `async_io` (63 counted) and 21 for `blocking_io` (30 counted), the measuring script's own connection included. To save server connections when Postgres is near, set a smaller `PoolSize(connections=N)` on the pool of a kind.
+A pool opens a connection only when a write finds none free, so a worker can open fewer connections than `HRS-219` counts: in these runs Postgres saw at most 48 connections for `async_io` (62 counted) and 21 for `blocking_io` (29 counted), the measuring script's own connection included. To save server connections when Postgres is near, set a smaller `PoolSize(connections=N)` on the pool of a kind.
 
 ## API Reference
 
@@ -739,17 +739,18 @@ One worker opens this many Postgres connections itself:
 
 ```text
 pool max_size                                           # pool of the worker process
-+ 2                                                     # listener
++ pool max_size                                         # session pool, when session_database_url differs from database_url
++ 1                                                     # listener
 + 1                                                     # runner heartbeat
 + isolated children × isolated.pool max_size            # isolated child pools
 + shared async children × shared_async.pool max_size    # shared async child pools
 + shared thread children × shared_thread.pool max_size  # shared thread child pools
 ```
 
-The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. Each `max_size` is the resolved value: a `PoolSize`, or the size that `PoolSizeFromSeats()` derives from the seats. An isolated child and a shared thread child open a sync pool; a shared async child opens an async pool. At the defaults, a profile of 8 isolated children needs `5 + 2 + 1 + 8 × 1 = 16`. A profile of 2 isolated children, 2 shared async children with 50 seats and 1 shared thread child with 16 seats has 118 seats and needs `12 + 2 + 1 + 2 × 1 + 2 × 5 + 1 × 2 = 29`. Each `HRS-219` error and the boot log state the formula of the profile, one term per mode:
+The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. One listener connection carries every `LISTEN` of the worker process. When `session_database_url` differs from `database_url`, the worker process opens a session pool there for schema work and partition maintenance, of the size of its own pool. Each `max_size` is the resolved value: a `PoolSize`, or the size that `PoolSizeFromSeats()` derives from the seats. An isolated child and a shared thread child open a sync pool; a shared async child opens an async pool. At the defaults and with no `session_database_url`, a profile of 8 isolated children needs `5 + 1 + 1 + 8 × 1 = 15`. A profile of 2 isolated children, 2 shared async children with 50 seats and 1 shared thread child with 16 seats has 118 seats and needs `12 + 1 + 1 + 2 × 1 + 2 × 5 + 1 × 2 = 28`. Each `HRS-219` error and the boot log state the formula of the profile, one term per mode, with a `session pool max_size N` term after the parent pool when the session pool is separate:
 
 ```text
-parent pool max_size 12 + listener 2 + runner heartbeat 1 + 2 isolated children x isolated.pool max_size 1 + 2 shared async children x shared_async.pool max_size 5 + 1 shared thread children x shared_thread.pool max_size 2 = 29
+parent pool max_size 12 + listener 1 + runner heartbeat 1 + 2 isolated children x isolated.pool max_size 1 + 2 shared async children x shared_async.pool max_size 5 + 1 shared thread children x shared_thread.pool max_size 2 = 28
 ```
 
 Task code that sends through the app opens more: the `task_send_pool` of its child kind for each event loop that it sends from (see [The Task-Send Pool](#the-task-send-pool)). With one sending loop in each child, this is a ceiling for the children whose tasks send:
@@ -760,10 +761,10 @@ isolated children × isolated.task_send_pool
 + shared thread children × shared_thread.task_send_pool
 ```
 
-With one sending loop in each child, 8 isolated children at the defaults add `8 × 2 = 16`, so `32` in all. The comparison below does not count these connections, because only the run time shows whether a task sends. Each `HRS-219` error and the boot log state them next to the compared number, term by term:
+With one sending loop in each child, 8 isolated children at the defaults add `8 × 2 = 16`, so `31` in all. The comparison below does not count these connections, because only the run time shows whether a task sends. Each `HRS-219` error and the boot log state them next to the compared number, term by term:
 
 ```text
-not counted: task code that sends opens a pool of the task_send_pool of its child kind in its child, for each event loop that it sends from; with one such loop in each child, 8 isolated children x isolated.task_send_pool 2 = 16 more, 32 in all
+not counted: task code that sends opens a pool of the task_send_pool of its child kind in its child, for each event loop that it sends from; with one such loop in each child, 8 isolated children x isolated.task_send_pool 2 = 16 more, 31 in all
 ```
 
 The server has `max_connections` minus `superuser_reserved_connections` minus `reserved_connections` (PostgreSQL 16 and later) usable slots. `horsies check --live` reports `HRS-219` for each profile whose worker opens more than that number itself. At boot the worker reads the same settings before it builds its children and logs a warning. With `pgbouncer_transaction_mode=True` the pooled connections do not map to server connections, and nothing is compared; see [PgBouncer pool size](/horsies/troubleshooting/pgbouncer/#pool-size) for the PgBouncer side. See [Remote PostgreSQL](/horsies/configuration/remote-postgres/#connection-budget).
@@ -810,6 +811,18 @@ claim_at_capacity = WorkerProfile(
 ```
 
 **Don't size the memory limits for one machine and ignore the boot warning on another.** The warning names the sum, the usable memory of the worker that started, and its source.
+
+**Don't set `PSYCOPG_IMPL` in a `.env` file that the app loads.** `ChildPreload.LIBRARY` and `ChildPreload.APP` import psycopg, SQLAlchemy and pydantic before the app runs, so `load_dotenv()` in the app is too late. See [Things to Avoid](/horsies/workers/worker-architecture/#things-to-avoid) of Worker Architecture.
+
+```bash
+# Wrong: in a .env file that the app loads
+PSYCOPG_IMPL=binary
+
+# Correct: in the environment of the worker process
+PSYCOPG_IMPL=binary horsies worker myapp.instance:app --profile default
+```
+
+Monkeypatching has the same limit: a patch that must run before those imports, such as gevent, is too late. Use `preload=ChildPreload.NONE`.
 
 ## Migrating from Worker Flags
 

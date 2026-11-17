@@ -22,9 +22,15 @@ import pytest
 
 from tests.dualrun.operations.broker import BROKER_OPERATIONS
 from tests.dualrun.operations.history import HISTORY_OPERATIONS
-from tests.dualrun.operations.lifecycle import LIFECYCLE_OPERATIONS
+from tests.dualrun.operations.lifecycle import (
+    LIFECYCLE_CORE_ONLY_TESTS,
+    LIFECYCLE_OPERATIONS,
+)
 from tests.dualrun.operations.monitoring_and_web import MONITORING_AND_WEB_OPERATIONS
-from tests.dualrun.operations.workflow_engine import WORKFLOW_ENGINE_OPERATIONS
+from tests.dualrun.operations.workflow_engine import (
+    WORKFLOW_ENGINE_CORE_ONLY_TESTS,
+    WORKFLOW_ENGINE_OPERATIONS,
+)
 from tests.dualrun.operations.rebinding import (
     CallCounts,
     install_core_run,
@@ -32,6 +38,7 @@ from tests.dualrun.operations.rebinding import (
     resolve_operation,
 )
 from tests.dualrun.operations.table import (
+    CoreOnlyTest,
     DualRunOperation,
     Implementation,
     SwitchModule,
@@ -48,6 +55,15 @@ OPERATION_TABLES: Final[Mapping[SwitchModule, tuple[DualRunOperation, ...]]] = {
     SwitchModule.MONITORING_AND_WEB: MONITORING_AND_WEB_OPERATIONS,
     SwitchModule.WORKFLOW_ENGINE: WORKFLOW_ENGINE_OPERATIONS,
 }
+
+CORE_ONLY_TESTS: Final[Mapping[SwitchModule, tuple[CoreOnlyTest, ...]]] = {
+    SwitchModule.LIFECYCLE: LIFECYCLE_CORE_ONLY_TESTS,
+    SwitchModule.HISTORY: (),
+    SwitchModule.BROKER: (),
+    SwitchModule.MONITORING_AND_WEB: (),
+    SwitchModule.WORKFLOW_ENGINE: WORKFLOW_ENGINE_CORE_ONLY_TESTS,
+}
+"""The tests that run once, on the core, in the dual-run of each module."""
 
 _COUNTS_KEY: Final = pytest.StashKey[dict[str, int]]()
 """Calls of the table's operations per test id (both runs together)."""
@@ -107,11 +123,19 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         return
     if not _dual_runs(metafunc.config, metafunc.definition.path):
         return
+    module = selected_module(metafunc.config)
+    assert module is not None, 'the dual-run option was checked above'
+    core_only = {test.node_id for test in CORE_ONLY_TESTS[module]}
+    implementations = (
+        [Implementation.CORE]
+        if metafunc.definition.nodeid in core_only
+        else [Implementation.PYTHON_REFERENCE, Implementation.CORE]
+    )
     metafunc.parametrize(
         'implementation',
-        [Implementation.PYTHON_REFERENCE, Implementation.CORE],
+        implementations,
         indirect=True,
-        ids=[Implementation.PYTHON_REFERENCE.value, Implementation.CORE.value],
+        ids=[each.value for each in implementations],
     )
 
 
@@ -126,6 +150,26 @@ def _record_counts(config: pytest.Config, node_id: str, counts: CallCounts) -> N
     by_test = config.stash.setdefault(_COUNTS_KEY, {})
     base_id = node_id.rsplit('[', 1)[0]
     by_test[base_id] = by_test.get(base_id, 0) + counts.total()
+
+
+def _isolate_process_registries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each run of a test its own copy of the workflow registries of
+    this process, so the second run does not see the definitions that the
+    first one registered (``HRS-017 ... already registered``). The teardown
+    of the run restores the registries from before it."""
+    import importlib
+    from weakref import WeakValueDictionary
+
+    registry = importlib.import_module('horsies.core.workflows.registry')
+    for name in ('_workflow_defs_by_key', '_active_specs'):
+        current: object = getattr(registry, name)
+        assert isinstance(current, dict), f'horsies.core.workflows.registry.{name} is a dict'
+        monkeypatch.setattr(registry, name, dict(current))
+    nodes: object = getattr(registry, '_nodes_by_spec')
+    assert isinstance(nodes, WeakValueDictionary), (
+        'horsies.core.workflows.registry._nodes_by_spec is a WeakValueDictionary'
+    )
+    monkeypatch.setattr(registry, '_nodes_by_spec', WeakValueDictionary(nodes))
 
 
 @pytest.fixture(autouse=True)
@@ -143,6 +187,7 @@ def implementation(
             yield SingleRun()
             return
     operations = tuple(resolve_operation(each) for each in OPERATION_TABLES[switched])
+    _isolate_process_registries(monkeypatch)
     counts = CallCounts()
     match implementation_run:
         case Implementation.PYTHON_REFERENCE:

@@ -18,6 +18,7 @@ use super::budgets::SlotService;
 use super::dispatch::{AttemptEnd, ClaimedTask, ExecutionClass, NotRunCause};
 use super::isolated::run_slot;
 use super::route::IsolatedDeadline;
+use crate::broker::OrphanSelfHeal;
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     InitFrame, IsolatedWork, ProcessId, RunFrame, TaskInputText,
@@ -68,6 +69,9 @@ pub struct IsolatedPoolConfig {
     /// The first frame of each child; its kind is isolated.
     pub init: InitFrame,
     pub worker_id: String,
+    /// The orphan self-heal that each run frame carries (the app's
+    /// `auto_terminate_orphaned_workflow_tasks`).
+    pub orphan_self_heal: OrphanSelfHeal,
     /// Tasks that wait for a slot, at most (Python: `2 * max(seats +
     /// prefetch, max_claim_per_worker)`).
     pub pending_limit: NonZeroUsize,
@@ -403,6 +407,7 @@ impl IsolatedPool {
                     task_name: task.task_name.clone(),
                     worker_id: self.shared.config.worker_id.clone(),
                     claimed_at: task.claimed_at,
+                    orphan_self_heal: self.shared.config.orphan_self_heal,
                     work,
                     input,
                 },
