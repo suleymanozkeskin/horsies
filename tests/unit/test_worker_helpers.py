@@ -6014,7 +6014,6 @@ from horsies.core.lifecycle.outcomes import (
     SuccessApplied,
 )
 from horsies.core.lifecycle.persistence import (
-    COMPLETE_SUCCESSES_SUBJECT,
     BatchCommitUnknown,
     BatchRolledBack,
     BatchWriteError,
@@ -6100,8 +6099,9 @@ def _with_core_handle() -> Any:
     )
 
 
-def _core_failure(message: str, retryable: bool) -> CoreOperationFailed:
-    return CoreOperationFailed(COMPLETE_SUCCESSES_SUBJECT, message, retryable)
+def _core_failure(message: str, retryable: bool) -> CoreConnectionError:
+    """The exception of a core batch record that met ``message``."""
+    return CoreConnectionError('complete_successes', message, retryable)
 
 
 @pytest.mark.unit

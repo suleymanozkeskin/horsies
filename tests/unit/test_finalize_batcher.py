@@ -19,6 +19,7 @@ from sqlalchemy.exc import OperationalError as SAOperationalError
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 
+from horsies._core import CoreConnectionError
 from horsies.core.lifecycle.commands import CompleteTaskFused
 from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.lifecycle.operations import TerminalizationKind
@@ -29,7 +30,6 @@ from horsies.core.lifecycle.outcomes import (
     TerminalizationOutcome,
 )
 from horsies.core.lifecycle.persistence import (
-    COMPLETE_SUCCESSES_SUBJECT,
     FUSED_BATCH_MAX_ROWS,
     BatchCommitUnknown,
     BatchRolledBack,
@@ -43,7 +43,6 @@ from horsies.core.models.child_sizing import (
     FINALIZE_BATCH_FLUSHERS,
     PARENT_POOL_MIN_CONNECTIONS,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.db import (
@@ -132,8 +131,9 @@ def _outcome_unknown() -> OutcomeUnknown:
     )
 
 
-def _core_failure(message: str, retryable: bool) -> CoreOperationFailed:
-    return CoreOperationFailed(COMPLETE_SUCCESSES_SUBJECT, message, retryable)
+def _core_failure(message: str, retryable: bool) -> CoreConnectionError:
+    """The exception of a core batch record that met ``message``."""
+    return CoreConnectionError('complete_successes', message, retryable)
 
 
 class _ScriptedWrite:
