@@ -15,6 +15,7 @@ use sqlx::FromRow;
 use crate::broker::class_budgets::{parse_class_capacity, ClassBudgets};
 use crate::broker::result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult};
 use crate::broker::slot_health::{parse_slot_health, SlotHealth};
+use crate::failure_cause::FailureCause;
 
 /// Shared inbound channel every worker subscribes to. A ping NOTIFY carries a
 /// [`WorkerPingRequest`]; each worker replies on the request's `reply_channel`.
@@ -276,6 +277,7 @@ pub fn ping_listener_disabled() -> BrokerOperationError {
                   assume_initialized=True and has no listener"
             .to_owned(),
         retryable: false,
+        cause: FailureCause::PreconditionFailed,
     }
 }
 
@@ -288,6 +290,7 @@ pub fn ping_timeout_refused(timeout_seconds: &dyn std::fmt::Display) -> BrokerOp
         code: BrokerErrorCode::InvalidInput,
         message: format!("timeout_seconds must be positive, got {timeout_seconds}"),
         retryable: false,
+        cause: FailureCause::PreconditionFailed,
     }
 }
 
@@ -299,6 +302,7 @@ pub fn ping_min_responses_refused(min_responses: &dyn std::fmt::Display) -> Brok
         code: BrokerErrorCode::InvalidInput,
         message: format!("min_responses must be >= 1 when set, got {min_responses}"),
         retryable: false,
+        cause: FailureCause::PreconditionFailed,
     }
 }
 
@@ -322,6 +326,7 @@ pub fn worker_history_limit_refused(limit: &dyn std::fmt::Display) -> BrokerOper
         code: BrokerErrorCode::InvalidInput,
         message: format!("limit must be positive when set, got {limit}"),
         retryable: false,
+        cause: FailureCause::PreconditionFailed,
     }
 }
 
@@ -350,6 +355,7 @@ pub(crate) fn read_worker_snapshot(
             code: BrokerErrorCode::MonitoringQueryFailed,
             message: format!("{operation} failed: {unreadable}"),
             retryable: false,
+            cause: FailureCause::ContractViolation,
         })
 }
 

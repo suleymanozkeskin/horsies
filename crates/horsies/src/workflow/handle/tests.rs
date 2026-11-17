@@ -255,6 +255,7 @@ fn a_handle_error_maps_to_its_read_failure() {
         message: "m".to_owned(),
         retryable: false,
         workflow_id: workflow(),
+        cause: horsies_core::FailureCause::PreconditionFailed,
     };
     assert!(matches!(
         WorkflowReadError::of_handle_error(error(HandleErrorCode::WorkflowNotFound)),

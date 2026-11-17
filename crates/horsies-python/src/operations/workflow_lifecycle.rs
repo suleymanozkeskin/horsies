@@ -217,6 +217,7 @@ mod tests {
             message: format!("planned {code}"),
             retryable,
             workflow_id: workflow(),
+            cause: horsies_core::FailureCause::Connection,
         }
     }
 

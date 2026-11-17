@@ -402,6 +402,7 @@ mod tests {
             message: "recovery failed".to_owned(),
             retryable: true,
             workflow_id: Uuid::nil(),
+            cause: crate::failure_cause::FailureCause::Connection,
         };
         assert_eq!(
             handle_failed(error(HandleErrorCode::WorkflowNotFound)).status_code(),
@@ -483,6 +484,7 @@ mod tests {
             message: "sync call inside a loop".to_owned(),
             retryable: false,
             workflow_id: Uuid::nil(),
+            cause: crate::failure_cause::FailureCause::PreconditionFailed,
         });
     }
 }
