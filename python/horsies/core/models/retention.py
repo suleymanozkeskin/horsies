@@ -15,12 +15,13 @@ policy on workflow rows, not a response to a crash.
 
 from __future__ import annotations
 
-from typing import Annotated, Self
+from typing import Annotated, Final, Self
 
 from datetime import timedelta
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from horsies._catalog.worker_manifest import PAUSED_AGE_MICROS_MAX
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -40,6 +41,15 @@ from horsies.core.history.periods import (
     period_class_key,
 )
 from horsies.core.types.result import Err, Ok
+
+PAUSED_WORKFLOW_AGE_MAX: Final = timedelta(microseconds=PAUSED_AGE_MICROS_MAX)
+"""The longest `paused_workflow_auto_cancel_after`: 365,000 days (1,000
+years of 365 days), the core's bound (`PausedWorkflowAge::MAX_DAYS`).
+
+The expiry reads `updated_at < now() - <age>`. PostgreSQL's lowest
+`timestamptz` is 4714-11-24 BC, so with this bound `now() - <age>` stays
+inside the timestamp range for any `now()` from year 1 AD on.
+"""
 
 
 def resolve_queue_retention_class(
@@ -130,7 +140,8 @@ class RetentionConfig(BaseModel):
         default=None,
         description=(
             'Age past which a PAUSED workflow is expired by policy '
-            '(WorkflowStatus.EXPIRED); None disables the sweep — no '
+            '(WorkflowStatus.EXPIRED); a positive duration of at most '
+            '365,000 days; None disables the sweep — no '
             'deployment changes behavior without declaring the rule'
         ),
     )
@@ -213,6 +224,33 @@ class RetentionConfig(BaseModel):
                 'duration; use None to disable the sweep'
             )
         return self
+
+    @model_validator(mode='after')
+    def paused_expiry_age_is_within_the_bound(self) -> Self:
+        """Refuse an age longer than `PAUSED_WORKFLOW_AGE_MAX`.
+
+        The expiry subtracts the age from `now()`; a longer age can leave
+        PostgreSQL's timestamp range, and every sweep would then fail.
+        """
+        match self.paused_workflow_auto_cancel_after:
+            case timedelta() as age if age > PAUSED_WORKFLOW_AGE_MAX:
+                raise ConfigurationError(
+                    message=(
+                        f'paused_workflow_auto_cancel_after ({age}) is longer '
+                        f'than {PAUSED_WORKFLOW_AGE_MAX.days} days'
+                    ),
+                    code=ErrorCode.CONFIG_INVALID_RETENTION,
+                    notes=[
+                        'the expiry subtracts the age from now(), and the '
+                        "result must stay inside PostgreSQL's timestamp range",
+                    ],
+                    help_text=(
+                        f'use at most timedelta(days={PAUSED_WORKFLOW_AGE_MAX.days}), '
+                        'or None to disable the sweep'
+                    ),
+                )
+            case _:
+                return self
 
     @model_validator(mode='before')
     @classmethod

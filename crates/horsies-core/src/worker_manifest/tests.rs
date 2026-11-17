@@ -589,8 +589,10 @@ fn the_retention_section_maps_to_the_config_field_by_field() {
     assert_eq!(config.worker_state_retention_hours, Some(168));
     assert_eq!(config.terminal_record_retention_hours, None);
     assert_eq!(
-        config.paused_workflow_auto_cancel_after,
-        Some(chrono::Duration::microseconds(86_400_000_001))
+        config
+            .paused_workflow_auto_cancel_after
+            .map(crate::core::config::PausedWorkflowAge::micros),
+        Some(86_400_000_001)
     );
     assert_eq!(config.history_leaf_horizon_days, 3);
     assert_eq!(config.heartbeat_leaf_horizon_hours, 6);
@@ -623,7 +625,9 @@ fn a_retention_rule_that_is_off_maps_to_none() {
     assert_eq!(config.paused_workflow_auto_cancel_after, None);
 }
 
-/// A period outside 1 to 1825 days and a paused age of 0 are refused.
+/// A period outside 1 to 1825 days, a paused age of 0 and a paused age
+/// above the bound of the retention config are refused; the bound itself
+/// reaches the config.
 #[test]
 fn a_retention_value_outside_its_bounds_is_refused() {
     for days in [
@@ -645,6 +649,16 @@ fn a_retention_value_outside_its_bounds_is_refused() {
     document["retention"]["paused_workflow_auto_cancel_after"] =
         json!({"kind": "AFTER", "micros": MAX_PAUSED_AGE_MICROS + 1});
     assert!(refused_path(&document).starts_with("retention.paused_workflow_auto_cancel_after"));
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    document["retention"]["paused_workflow_auto_cancel_after"] =
+        json!({"kind": "AFTER", "micros": MAX_PAUSED_AGE_MICROS});
+    let config = parsed(&document).retention.to_config();
+    assert_eq!(
+        config
+            .paused_workflow_auto_cancel_after
+            .map(crate::core::config::PausedWorkflowAge::micros),
+        Some(crate::core::config::PausedWorkflowAge::MAX_MICROS)
+    );
 }
 
 /// The resilience section reaches the config type; no attempt limit is the

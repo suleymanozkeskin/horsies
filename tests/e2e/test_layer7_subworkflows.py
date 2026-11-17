@@ -224,7 +224,7 @@ async def _run_workflow_recovery(broker: PostgresBroker) -> int:
     from horsies.core.workflows.phase2_recovery import drive_phase2_recovery
     from horsies.core.workflows.recovery import (
         GLOBAL_SCAN_ROW_CAP,
-        recover_stuck_workflows,
+        recover_stuck_workflows_global,
     )
 
     phase2 = await drive_phase2_recovery(
@@ -234,10 +234,10 @@ async def _run_workflow_recovery(broker: PostgresBroker) -> int:
         max_rows=GLOBAL_SCAN_ROW_CAP,
         quarantine_after_attempts=25,
     )
-    async with current_resources(broker).session_factory() as session:
-        recovered = await recover_stuck_workflows(session, broker)
-        await session.commit()
-    return recovered + phase2.applied
+    report = await recover_stuck_workflows_global(
+        current_resources(broker).session_factory, broker,
+    )
+    return report.recovered + phase2.applied
 
 
 async def _wait_for_workflow_status(

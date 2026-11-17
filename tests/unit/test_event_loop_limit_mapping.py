@@ -24,7 +24,7 @@ from horsies.core.brokers.result_types import BrokerErrorCode, BrokerEventLoopLi
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.monitoring.errors import MonitoringQueryErrorCode
-from horsies.monitoring.queries import list_workflow_names
+from tests.dualrun.reference.monitoring_queries import list_workflow_names
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendEventLoopLimit
 from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
@@ -243,6 +243,8 @@ class TestRealBrokerAtTheLimit:
         assert result.unwrap_err().error_code is RetrievalCode.EVENT_LOOP_LIMIT
 
     def test_monitoring_query(self, at_limit: _AtLimit) -> None:
+        # Python's read before the monitoring switch: the reads on the core
+        # select no resource set and have no loop limit.
         result = at_limit.run(list_workflow_names(at_limit.broker))
 
         assert is_err(result)

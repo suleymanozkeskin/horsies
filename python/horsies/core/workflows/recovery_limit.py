@@ -13,9 +13,10 @@ at each restart and splits across the workers that hold the reaper gate.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Final, Literal, assert_never
+from typing import TYPE_CHECKING, Any, Final, Literal, assert_never
 
 from sqlalchemy import text
 from sqlalchemy.exc import PendingRollbackError, SQLAlchemyError
@@ -23,6 +24,7 @@ from sqlalchemy.exc import PendingRollbackError, SQLAlchemyError
 from horsies.core.codec.json_io import Json, SerializationError, dumps_json
 from horsies.core.codec.json_value import escape_lone_surrogates
 from horsies.core.codec.typed import encode_task_result
+from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import (
     OperationalErrorCode,
@@ -31,7 +33,7 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.models.workflow.enums import WF_TASK_TERMINAL_VALUES
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.utils.db import autocommit_connection, is_retryable_connection_error
 from horsies.core.workflows.sql import (
     MARK_WORKFLOW_FAILED_SQL,
     MARK_WORKFLOW_TASK_FAILED_SQL,
@@ -263,6 +265,243 @@ WHERE failure.failed_passes >= CAST(:failure_limit AS integer)
 A live node keeps a workflow here, and so does a limit write that keeps
 failing. A workflow that stays here is visible, not only absent from the log.
 """
+
+
+RECORD_RECOVERY_RAISE_FUNCTION_SQL: Final = text("""
+SELECT outcome, failed_passes, limit_write_error
+FROM horsies_workflow_recovery_record_raise(
+    CAST(:workflow_id AS uuid),
+    CAST(:pass_id AS uuid),
+    CAST(:case_name AS text),
+    CAST(:task_index AS integer),
+    CAST(:exception_type AS text),
+    CAST(:detail AS text),
+    CAST(:failure_limit AS integer)
+)
+""")
+"""One persistent raise of a recovery candidate, in one statement in
+autocommit: the count once per pass, and at the limit the limit writes, with
+the limit error built from the stored count."""
+
+
+@dataclass(frozen=True, slots=True)
+class RaiseWorkflowAbsent:
+    """The workflow row is gone. Nothing was written."""
+
+
+@dataclass(frozen=True, slots=True)
+class RaiseAlreadyCounted:
+    """An earlier raise of this workflow already counted this pass. Nothing
+    was written."""
+
+
+@dataclass(frozen=True, slots=True)
+class RaiseCountedUnderLimit:
+    """The count moved and is under the limit."""
+
+    failed_passes: int
+
+
+@dataclass(frozen=True, slots=True)
+class RaiseLimitRefused:
+    """The count reached the limit and the workflow is not RUNNING: a pause or
+    a cancel won. The count stays; the workflow did not change."""
+
+    failed_passes: int
+
+
+@dataclass(frozen=True, slots=True)
+class RaiseLimitWritten:
+    """The count reached the limit and the limit write stopped the workflow."""
+
+    failed_passes: int
+    outcome: RecoveryLimitOutcome
+    """``WORKFLOW_FAILED`` or ``LIVE_NODES_FINISH``."""
+
+
+@dataclass(frozen=True, slots=True)
+class RaiseLimitWriteFailed:
+    """The count reached the limit and the limit write raised. The count
+    stays; the next raise tries the write again."""
+
+    failed_passes: int
+    cause: str
+    """The SQLSTATE and the message of the write."""
+
+
+type RecordedRaise = (
+    RaiseWorkflowAbsent
+    | RaiseAlreadyCounted
+    | RaiseCountedUnderLimit
+    | RaiseLimitRefused
+    | RaiseLimitWritten
+    | RaiseLimitWriteFailed
+)
+
+
+def _failed_passes(value: object) -> int:
+    match value:
+        case bool():
+            raise OutcomeDecodeError(
+                f'horsies_workflow_recovery_record_raise returned failed_passes {value!r}; '
+                'expected an integer',
+            )
+        case int():
+            return value
+        case _:
+            raise OutcomeDecodeError(
+                f'horsies_workflow_recovery_record_raise returned failed_passes {value!r}; '
+                'expected an integer',
+            )
+
+
+def decode_recorded_raise(rows: Sequence[Any]) -> RecordedRaise:
+    """The outcome of a ``horsies_workflow_recovery_record_raise`` call. Pure.
+
+    Raises:
+        OutcomeDecodeError: not one row, an outcome outside the function's
+            contract, or a count or cause that does not have its type.
+    """
+    match rows:
+        case [row]:
+            pass
+        case _:
+            raise OutcomeDecodeError(
+                f'horsies_workflow_recovery_record_raise returned {len(rows)} rows; '
+                'expected one row',
+            )
+    match row.outcome:
+        case 'WORKFLOW_ABSENT':
+            return RaiseWorkflowAbsent()
+        case 'ALREADY_COUNTED':
+            return RaiseAlreadyCounted()
+        case 'COUNTED':
+            return RaiseCountedUnderLimit(failed_passes=_failed_passes(row.failed_passes))
+        case 'REFUSED':
+            return RaiseLimitRefused(failed_passes=_failed_passes(row.failed_passes))
+        case 'LIMIT_REACHED_FAILED':
+            return RaiseLimitWritten(
+                failed_passes=_failed_passes(row.failed_passes),
+                outcome=RecoveryLimitOutcome.WORKFLOW_FAILED,
+            )
+        case 'LIMIT_REACHED_LIVE_NODES':
+            return RaiseLimitWritten(
+                failed_passes=_failed_passes(row.failed_passes),
+                outcome=RecoveryLimitOutcome.LIVE_NODES_FINISH,
+            )
+        case 'LIMIT_WRITE_FAILED':
+            match row.limit_write_error:
+                case str() as cause:
+                    return RaiseLimitWriteFailed(
+                        failed_passes=_failed_passes(row.failed_passes), cause=cause,
+                    )
+                case other:
+                    raise OutcomeDecodeError(
+                        'horsies_workflow_recovery_record_raise returned LIMIT_WRITE_FAILED '
+                        f'with limit_write_error {other!r}; expected text',
+                    )
+        case other:
+            raise OutcomeDecodeError(
+                f'horsies_workflow_recovery_record_raise returned outcome {other!r}',
+            )
+
+
+async def count_recovery_raise(
+    session_factory: 'async_sessionmaker[AsyncSession]',
+    policy: CountFailures,
+    failure: RecoveryRaise,
+) -> RaiseRecord:
+    """Count one persistent raise with ``horsies_workflow_recovery_record_raise``.
+
+    One statement on an autocommit connection, after the candidate's own
+    transaction rolled back. At the limit the function also writes the
+    limit, so the workflow fails closed.
+
+    Returns:
+        NOT_COUNTED: the workflow is gone, this pass already counted it, or
+        the statement failed (logged with its cause; the next pass counts
+        again).
+        COUNTED: the count moved and the workflow did not change: the count
+        is under the limit, or the limit write was refused or failed.
+        LIMIT_REACHED: the limit write stopped the workflow.
+
+    Raises:
+        OutcomeDecodeError: a row outside the function's contract (a defect).
+    """
+    try:
+        async with session_factory() as session:
+            connection = await autocommit_connection(session)
+            rows = (
+                await connection.execute(
+                    RECORD_RECOVERY_RAISE_FUNCTION_SQL,
+                    {
+                        'workflow_id': failure.workflow_id,
+                        'pass_id': policy.pass_id,
+                        'case_name': failure.case.value,
+                        'task_index': failure.task_index,
+                        'exception_type': failure.exception_type,
+                        'detail': failure.detail[:MAX_RAISE_TEXT_LENGTH],
+                        'failure_limit': policy.limit,
+                    },
+                )
+            ).fetchall()
+    except SQLAlchemyError as write_error:
+        logger.error(
+            'Workflow recovery count write failed: workflow_id=%s '
+            'exception_type=%s exception=%s',
+            failure.workflow_id,
+            type(write_error).__name__,
+            str(write_error)[:MAX_RAISE_TEXT_LENGTH],
+        )
+        return RecoveryCandidateOutcome.NOT_COUNTED
+    match decode_recorded_raise(rows):
+        case RaiseWorkflowAbsent() | RaiseAlreadyCounted():
+            return RecoveryCandidateOutcome.NOT_COUNTED
+        case RaiseCountedUnderLimit(failed_passes=failed_passes):
+            logger.error(
+                'Workflow recovery raise counted: failed_passes=%s/%s case=%s '
+                'workflow_id=%s task_index=%s exception_type=%s',
+                failed_passes,
+                policy.limit,
+                failure.case.value,
+                failure.workflow_id,
+                failure.task_index,
+                failure.exception_type,
+            )
+            return RecoveryCandidateOutcome.COUNTED
+        case RaiseLimitRefused(failed_passes=failed_passes):
+            logger.warning(
+                'Workflow recovery limit refused: workflow_id=%s is not RUNNING '
+                '(failed_passes=%s)',
+                failure.workflow_id,
+                failed_passes,
+            )
+            return RecoveryCandidateOutcome.COUNTED
+        case RaiseLimitWriteFailed(failed_passes=failed_passes, cause=cause):
+            logger.critical(
+                'Workflow recovery limit write failed: workflow_id=%s '
+                'failed_passes=%s cause=%s',
+                failure.workflow_id,
+                failed_passes,
+                cause,
+            )
+            return RecoveryCandidateOutcome.COUNTED
+        case RaiseLimitWritten(failed_passes=failed_passes, outcome=outcome):
+            logger.critical(
+                'Workflow recovery limit reached: workflow_id=%s '
+                'failed_passes=%s outcome=%s case=%s task_index=%s '
+                'exception_type=%s exception=%s',
+                failure.workflow_id,
+                failed_passes,
+                outcome.value,
+                failure.case.value,
+                failure.task_index,
+                failure.exception_type,
+                failure.detail,
+            )
+            return RecoveryCandidateOutcome.LIMIT_REACHED
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def classify_recovery_raise(exc: Exception) -> RecoveryRaiseClass:

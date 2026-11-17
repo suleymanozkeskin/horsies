@@ -319,6 +319,7 @@ class TestReclaimUnderCap:
             listener=MagicMock(),
             cfg=cfg,
         )
+        worker.broker = broker
         # Claim semantics: one checkout per claim statement.
         worker._claim_runner = PooledStatements(worker.sf)  # pyright: ignore[reportPrivateUsage]
         # No slot pool: every configured slot counts.

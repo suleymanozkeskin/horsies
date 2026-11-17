@@ -19,12 +19,23 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Final, Optional, assert_never
+from typing import TYPE_CHECKING, Any, Final, Literal, Optional, assert_never
+from uuid import UUID
 
+from horsies._core import (
+    ClaimedRowRecord,
+    ClaimPassFailed,
+    ClaimPassRecord,
+    ClaimPassRequest,
+    QueueStartsFailed,
+    QueueStartsRecord,
+    QueueStartsRequest,
+)
 from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import Execution
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.utils.db import (
     SingleStatement,
     StatementRunner,
@@ -43,7 +54,7 @@ from horsies.core.worker.dispatch_claim import DispatchClaim, dispatch_claim_of
 from horsies.core.worker.queue_cap_hold import (
     HeldRow,
     QueueCapHold,
-    read_queue_starts,
+    StartedClaim,
 )
 from horsies.core.worker.release import (
     HeldClaim,
@@ -67,9 +78,7 @@ from horsies.core.worker.sql import (
     CLAIM_SQL,
     COUNT_CLAIMED_FOR_WORKER_SQL,
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
-    COUNT_QUEUE_STARTS_SQL,
     COUNT_RUNNING_FOR_WORKER_SQL,
-    HORSIES_CLAIM_SQL,
     SETTLE_CLAIMED_WORKFLOW_TASKS_BOUND,
     SETTLE_CLAIMED_WORKFLOW_TASKS_SQL,
 )
@@ -245,6 +254,41 @@ class ClaimPass:
         return short_passes_before + 1 if self.short_of_plan > 0 else 0
 
 
+type ExecutionName = Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']
+
+
+def execution_name(execution: Execution) -> ExecutionName:
+    """The stored name of an execution class. Pure."""
+    match execution:
+        case Execution.ISOLATED:
+            return 'ISOLATED'
+        case Execution.SHARED_ASYNC:
+            return 'SHARED_ASYNC'
+        case Execution.SHARED_THREAD:
+            return 'SHARED_THREAD'
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def claimed_row_of(record: ClaimedRowRecord) -> dict[str, Any]:
+    """The row mapping of one row the core's claim pass took, with the keys
+    of a ``horsies_claim`` row that the dispatch reads (``dispatch_claim_of``,
+    ``_dispatch_claim_row``, the post-claim checks). The task id is text, as
+    the claim loop's ids are. Pure."""
+    return {
+        'id': str(record.id),
+        'task_name': record.task_name,
+        'input': record.input,
+        'queue_name': record.queue_name,
+        'is_workflow_task': record.is_workflow_task,
+        'task_options': record.task_options,
+        'claimed_at': record.claimed_at,
+        'retry_count': record.retry_count,
+        'max_retries': record.max_retries,
+        'execution': record.execution,
+    }
+
+
 def route_budget(plan: ClaimPlan, execution: Execution, task_id: str) -> Execution:
     """The budget class of ``plan`` whose children run claimed task
     ``task_id`` of class ``execution``.
@@ -342,24 +386,7 @@ class ClaimMixin:
                 waits out renewal-cap + lease (the reaper's stale-claimed
                 path needs a dead claimer heartbeat and does not apply).
         """
-        # TIER 1: the per-pass critical section (advisory-lock acquisition + cap
-        # counts + budget math + windowed claim) is one server-side statement
-        # (horsies_claim). It runs in autocommit, as its own transaction, so
-        # the xact-scoped advisory lock ends with the statement — never held
-        # across a client round trip, so a stalled worker cannot freeze the
-        # cluster mid-pass. Budget and cap semantics are computed in-function;
-        # see horsies_claim in the baseline SQL.
-        # The claim loop's held connection: one checkout for the passes that
-        # follow each other, given back after an idle period.
-        claim_result = rows_or_raise(
-            await self._claim_runner.run(
-                SingleStatement(
-                    statement=HORSIES_CLAIM_SQL,
-                    parameters=self._claim_params(),
-                ),
-            ),
-        )
-        claim_rows = read_claim_rows(claim_result.columns, claim_result.rows)
+        claim_rows = await self._claim_rows()
 
         claimed_rows = claim_rows.tasks
         fitting_rows: list[dict[str, Any]] = []
@@ -383,6 +410,7 @@ class ClaimMixin:
                             parse_row_class(task_id, row['execution']),
                             task_id,
                         ),
+                        claimed_at=claim_time_of(row),
                         row=row,
                     ),
                 )
@@ -393,6 +421,112 @@ class ClaimMixin:
             claimed=len(claimed_rows),
             dropped=len(claimed_rows) - len(fitting_rows),
             short_of_plan=claim_rows.short_of_plan,
+        )
+
+    async def _claim_rows(self) -> ClaimRows:
+        """One claim pass through ``CoreHandle.claim_pass_async``: the rows it
+        took, in dispatch order, and the rows its plan chose and its take
+        did not get.
+
+        The core sends one ``horsies_claim`` statement in autocommit on a
+        connection of the worker's main core pool that it checks out for
+        the pass (batch class: the reserve of 2 stays free for the reaper
+        and the per-task writes). The transaction-scoped advisory locks of
+        the caps end with the statement. The request comes from
+        ``_claim_request``. A cancel of the caller does not stop the pass.
+
+        Raises:
+            CoreOperationFailed: the pass failed (``ClaimPassFailed``): it
+                wrote nothing, or it committed and its reply was lost, and
+                the claimed rows return to their queue when their lease
+                expires. ``retryable`` is the core's classification; the
+                worker loop retries a retryable one as a connection error.
+            CoreError: the core of this process cannot run the call.
+        """
+        match await self.core_handle.claim_pass_async(self._claim_request()):
+            case ClaimPassRecord(claimed=claimed, short_of_plan=short_of_plan):
+                return ClaimRows(
+                    tasks=[claimed_row_of(record) for record in claimed],
+                    short_of_plan=short_of_plan,
+                )
+            case ClaimPassFailed(message=message, retryable=retryable):
+                raise CoreOperationFailed('ClaimMixin._claim_rows', message, retryable)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _count_queue_starts(
+        self,
+        queues: Sequence[str],
+        started: Sequence[StartedClaim],
+    ) -> dict[str, int]:
+        """The count of each capped queue of one start check, through
+        ``CoreHandle.count_queue_starts_async``: its RUNNING rows plus this
+        worker's started rows that are still CLAIMED at the claim generation
+        they started under. A queue with no counted row is absent (0).
+        Reads only, one statement; ``queues`` is not empty.
+
+        Raises:
+            CoreOperationFailed: the count failed (``QueueStartsFailed``);
+                the held rows stay held. ``retryable`` is the core's
+                classification.
+            CoreError: the core of this process cannot run the call.
+        """
+        request = QueueStartsRequest(
+            worker_id=self.worker_instance_id,
+            queues=list(queues),
+            started=[(UUID(claim.task_id), claim.claimed_at) for claim in started],
+        )
+        match await self.core_handle.count_queue_starts_async(request):
+            case QueueStartsRecord(starts=starts):
+                return dict(starts)
+            case QueueStartsFailed(message=message, retryable=retryable):
+                raise CoreOperationFailed(
+                    'ClaimMixin._count_queue_starts', message, retryable,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _claim_request(self) -> ClaimPassRequest:
+        """The core's request of one claim pass: the values of
+        ``_claim_params`` as typed fields. Does no I/O.
+
+        The request refuses a route to a budget that the pass does not hold,
+        a lease of 0 and a count outside 32 bits (``ValueError``,
+        ``OverflowError``): the worker config refuses each first, so each is
+        a defect.
+        """
+        ordered_queues = self._ordered_claim_queues()
+        capped_queues = [
+            queue for queue in ordered_queues if queue in self.cfg.queue_max_concurrency
+        ]
+        return ClaimPassRequest(
+            worker_id=self.worker_instance_id,
+            queues=ordered_queues,
+            queue_priority={
+                queue: self.cfg.queue_priorities.get(queue, 100) for queue in ordered_queues
+            },
+            queue_max_concurrency={
+                queue: int(self.cfg.queue_max_concurrency[queue]) for queue in capped_queues
+            },
+            hard_cap_mode=self.cfg.prefetch_buffer == 0,
+            budgets={
+                execution_name(entry.budget): entry.in_service
+                for entry in self._claim_capacity()
+            },
+            routes={
+                execution_name(Execution(served)): execution_name(Execution(budget))
+                for served, budget in routes_json(self.cfg.claim_plan()).items()
+            },
+            prefetch_buffer=int(self.cfg.prefetch_buffer),
+            max_claim_per_worker=int(self.cfg.max_claim_per_worker),
+            max_claim_batch=int(self.cfg.max_claim_batch),
+            cluster_wide_cap=(
+                int(self.cfg.cluster_wide_cap)
+                if self.cfg.cluster_wide_cap is not None
+                else None
+            ),
+            claim_lease_ms=int(self._claim_lease_ms()),
+            lock_keys=self._claim_lock_keys(ordered_queues),
         )
 
     async def _dispatch_claim_row(self, row: Mapping[str, Any]) -> asyncio.Future[Any]:
@@ -416,8 +550,8 @@ class ClaimMixin:
         """Start the held rows of the capped queues that have room, while a
         child of the row's route is free.
 
-        Sends one statement (``COUNT_QUEUE_STARTS_SQL``) when rows are held,
-        none otherwise. The free capacity of each budget is read after the
+        Runs one count (``_count_queue_starts``) when rows are held, none
+        otherwise. The free capacity of each budget is read after the
         count, and nothing awaits between that read and the submits, so each
         started row goes to a child that is free at its submit. Each started
         row leaves the started set when its finalizer ends.
@@ -430,19 +564,7 @@ class ClaimMixin:
         queues = hold.held_queues()
         if not queues:
             return
-        counted = rows_or_raise(
-            await self._claim_runner.run(
-                SingleStatement(
-                    statement=COUNT_QUEUE_STARTS_SQL,
-                    parameters={
-                        'queues': list(queues),
-                        'wid': self.worker_instance_id,
-                        'started_ids': list(hold.started_ids()),
-                    },
-                ),
-            ),
-        )
-        starts = read_queue_starts(counted.columns, counted.rows)
+        starts = await self._count_queue_starts(queues, hold.started_claims())
         for held in hold.admit(starts, self._free_capacity()):
             finalizer = await self._dispatch_claim_row(held.row)
             _end_start_when_done(hold, finalizer, held.task_id)

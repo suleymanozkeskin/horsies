@@ -20,10 +20,12 @@ pub mod catalog;
 #[doc(hidden)]
 pub mod core;
 pub mod db;
+pub mod handle;
 pub mod log_targets;
 pub mod manifest;
 pub mod manifest_schema;
 pub mod monitoring;
+pub mod process_runtime;
 pub mod scheduler_manifest;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -46,25 +48,25 @@ pub use crate::core::RegisteredTask;
 pub use crate::core::SpecBuildError;
 pub use crate::core::{
     mask_database_url, resolve_node_task_options, AnyNode, AppConfigError, BackoffStrategy,
-    BuiltInTaskCode, ContractCode, CronEnumTerm, CronNumericTerm, CronOrdinal, CronSchedule,
-    CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector, EnqueueRetention,
-    ErrorCategory, ErrorCode, Execution, ExecutionClass, HandleErrorCode, HandleOperationError,
-    HandleResult, HourlySchedule, InputField, IntervalSchedule, JoinType, Month, MonthlySchedule,
-    NodeKey, NodeRef, OnError, OperationalErrorCode, OutcomeCode, PausedAgeRefused,
-    PausedWorkflowAge, PayloadPolicy, PostgresConfig, PostgresConfigError, QueueMode,
-    RecoveryConfig, RecoveryConfigError, RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec,
-    ResilienceConfigError, ResolvedEnqueue, RetentionChoice, RetentionClassKeyRefused,
-    RetentionConfig, RetentionConfigError, RetrievalCode, RetryPolicy, RetryPolicyError,
-    ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowFailure, SubWorkflowNode,
-    SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo,
-    TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind, TaskInfo, TaskNode, TaskOptions,
-    TaskRegistry, TaskResult, TaskSchedule, TaskSendError, TaskSendErrorCode, TaskSendPayload,
-    TaskSendResult, TaskStatus, TypedNodeRef, UserCode, UserCodeRefused, ValidationReport, Weekday,
-    WeeklySchedule, WorkerResilienceConfig, WorkflowContext, WorkflowDefConfig, WorkflowDefinition,
-    WorkflowMeta, WorkflowSpec, WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError,
-    WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus,
-    TASK_TERMINAL_STATES, WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES,
-    WORKFLOW_TERMINAL_STATES,
+    BuiltInTaskCode, CancelGraceMs, CancelGraceOutOfRange, ContractCode, CronEnumTerm,
+    CronNumericTerm, CronOrdinal, CronSchedule, CustomQueueConfig, CustomQueueConfigError,
+    DailySchedule, DaySelector, EnqueueRetention, ErrorCategory, ErrorCode, Execution,
+    ExecutionClass, HandleErrorCode, HandleOperationError, HandleResult, HourlySchedule,
+    InputField, IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, NodeRef, OnError,
+    OperationalErrorCode, OutcomeCode, PausedAgeRefused, PausedWorkflowAge, PayloadPolicy,
+    PostgresConfig, PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
+    RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec, ResilienceConfigError, ResolvedEnqueue,
+    RetentionChoice, RetentionClassKeyRefused, RetentionConfig, RetentionConfigError,
+    RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn,
+    SubWorkflowFailure, SubWorkflowNode, SubWorkflowParams, SubWorkflowSummary, SuccessCase,
+    SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind,
+    TaskInfo, TaskNode, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
+    TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, TypedNodeRef, UserCode,
+    UserCodeRefused, ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig,
+    WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta, WorkflowSpec,
+    WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError, WorkflowStartErrorCode,
+    WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES,
+    WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
 
@@ -127,10 +129,10 @@ pub use crate::worker::finalize_batch::{
 // cancel signal of their run with `run_cancel_signal`. A result wait reads
 // `process_role` first: a process that runs task bodies refuses it.
 pub use crate::worker::executor::child_host::{
-    child_mode, process_role, run_cancel_signal, run_child_host, spawn_in_run,
+    child_mode, child_producer, process_role, run_cancel_signal, run_child_host, spawn_in_run,
     wait_inside_task_message, ChildApp, ChildArgs, ChildArgsError, ChildHookFailure, ChildHostExit,
-    ChildMode, ChildStartFuture, ChildStartHook, ProcessRole, RunCancelSignal, RunSignalRefused,
-    RunSpawnRefused, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, MAX_RUN_WORK,
+    ChildMode, ChildProducer, ChildStartFuture, ChildStartHook, ProcessRole, RunCancelSignal,
+    RunSignalRefused, RunSpawnRefused, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, MAX_RUN_WORK,
 };
 
 // The parent-child frame codec, for the Python child program and the
@@ -173,6 +175,13 @@ pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::rerun::{
     NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
+};
+// One core statement in a transaction that the caller owns: the Rust
+// client's adapters implement `CallerTransaction`; the core's own
+// `db::Transaction` implements it too.
+pub use crate::core::history::rerun::{
+    positional_sql, CallerColumn, CallerRow, CallerRowRefused, CallerStatement,
+    CallerStatementRefused, CallerTransaction, CallerType, OwnTransactionError, StatementValue,
 };
 pub use crate::workflow_engine::bound_handle::WorkflowHandle;
 pub use crate::workflow_engine::engine::{

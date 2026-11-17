@@ -83,6 +83,7 @@ from tests.integration.autocommit_support import (
     psycopg_url,
     steady_state_turns,
     upstream_of,
+    warm_core_handle,
 )
 from tests.integration.history_seeding import read_attempts
 from tests.integration.round_trip_proxy import RoundTripProxy
@@ -695,11 +696,9 @@ async def test_a_lost_reply_of_a_batch_is_classified_by_the_replay_of_each_row(
     each row answers AlreadyApplied."""
     opened = await _open_worker(proxied_url(db_url, proxy))
     try:
-        # Connect first: a drop armed before the connect hits the connect,
-        # and the batch is then not sent at all.
-        async with opened.worker.sf() as warm:
-            _ = await warm.execute(text('SELECT 1'))
-            await warm.commit()
+        # Warm the core handle first: a drop armed before its connect and
+        # its family read hits one of them, and the batch is then not sent.
+        await warm_core_handle(opened)
         rows = await _running_tasks(session, 4)
         task_ids = [task_id for task_id, _ in rows]
         proxy.drop_next_execute_reply()

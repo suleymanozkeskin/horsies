@@ -43,6 +43,7 @@ fn context(pool: PgPool) -> (HostContext, UnixStream) {
             registry: Arc::new(TaskRegistry::new()),
             hostname: "h1".to_owned(),
             start_hook: ChildStartHook::NoHook,
+            producer_manifest: super::producer::test_producer_manifest(),
         }),
         pid: 1,
         writer,
