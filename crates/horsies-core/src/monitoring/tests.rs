@@ -637,6 +637,9 @@ struct TestScope {
 }
 
 impl TestScope {
+    /// The queue is `w2_<label>_<32 hex digits>_queue`, which the baseline
+    /// bounds to 52 bytes (`horsies_tasks_queue_name_length`), so `label`
+    /// has 10 bytes at most.
     fn new(label: &str) -> Self {
         let suffix = Uuid::new_v4().simple().to_string();
         let prefix = format!("w2_{label}_{suffix}_");
@@ -1642,7 +1645,7 @@ async fn database_failure_is_typed_and_retryable() {
 #[ignore = "waits on #842"]
 async fn unpublished_staged_detail_preserves_absent_semantics() {
     let pool = migrated_pool().await;
-    let scope = TestScope::new("unpublished");
+    let scope = TestScope::new("unpub");
     clean_w2(&pool, &scope).await;
     let broker = PostgresBroker::from_pool(pool.clone());
     let task = scope.running("unpublished_detail");
