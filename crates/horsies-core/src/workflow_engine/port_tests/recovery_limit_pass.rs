@@ -25,11 +25,11 @@ use super::support::{
     workflow_error_code, workflow_status, IsolatedDatabase, LiveStatus, NodeSeed, ParentLink,
     WorkflowSeed, POISON_TASK_OPTIONS, WORKER,
 };
-use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
+use crate::core::lifecycle::TerminalizationOutcome;
 use crate::core::registry::workflow::RegisteredWorkflowSpec;
 use crate::core::{TaskError, TaskResult, WorkflowSpecRegistry};
+use crate::test_support::terminal_writes;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::phase2_recovery::{drive_phase2_recovery, Phase2RecoverySummary};
 use crate::workflow_engine::recovery::{
@@ -264,7 +264,9 @@ async fn start_a_then_b(pool: &PgPool) -> (Uuid, Uuid) {
     sqlx::query(
         "UPDATE horsies_tasks
          SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
-             claim_expires_at = NULL, started_at = NOW(), updated_at = NOW()
+             claim_expires_at = NULL, started_at = NOW(), worker_pid = 4242,
+             worker_hostname = 'port-host', worker_process_name = 'port-process',
+             updated_at = NOW()
          WHERE id = $1",
     )
     .bind(task_id)
@@ -272,19 +274,10 @@ async fn start_a_then_b(pool: &PgPool) -> (Uuid, Uuid) {
     .execute(pool)
     .await
     .expect("hold A's task");
-    let outcomes = terminalize(
-        pool,
-        &TerminalizationCommand::CompleteLockedTask {
-            task_id,
-            fence: PriorLockedRead {
-                worker_id: WORKER.to_owned(),
-            },
-            result_json: serde_json::to_string(&ok(serde_json::json!(1)))
-                .expect("encode A's result"),
-        },
-    )
-    .await
-    .expect("phase 1 of A");
+    let result = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode A's result");
+    let outcomes = terminal_writes::complete_workflow_task(pool, task_id, WORKER, &result)
+        .await
+        .expect("phase 1 of A");
     assert!(
         matches!(
             outcomes.as_slice(),

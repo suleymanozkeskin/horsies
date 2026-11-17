@@ -241,6 +241,11 @@ const START_ATTEMPT_PARAMETERS: &[StubParameter] = &[
     keyword("worker_hostname", "str"),
     keyword("deadline_in_ms", "int | None"),
 ];
+const MARK_FINALIZING_PARAMETERS: &[StubParameter] = &[
+    positional("task_id", "uuid.UUID"),
+    keyword("worker_id", "str"),
+    keyword("claimed_at", "datetime.datetime"),
+];
 
 const CORE_SCHEDULER_PARAMETERS: &[StubParameter] = &[
     positional("handle", "CoreHandle"),
@@ -276,6 +281,7 @@ const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTa
 
 const START_ATTEMPT_OUTCOME: &str =
     "AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed";
+const MARK_FINALIZING_OUTCOME: &str = "FinalizingMarked | FinalizingNotHeld | MarkFinalizingFailed";
 
 const SCHEDULER_START_OUTCOME: &str =
     "SchedulerStarted | SchedulerStartRefused | SchedulerStartFailed";
@@ -310,7 +316,7 @@ const CORE_SCHEDULER_METHODS: [StubFunction; 4] = [
     },
 ];
 
-const CORE_CHILD_HANDLE_METHODS: [StubFunction; 2] = [
+const CORE_CHILD_HANDLE_METHODS: [StubFunction; 4] = [
     StubFunction {
         name: "start_attempt",
         parameters: START_ATTEMPT_PARAMETERS,
@@ -321,6 +327,18 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 2] = [
         name: "start_attempt_async",
         parameters: START_ATTEMPT_PARAMETERS,
         returns: TypeText::FutureOf(START_ATTEMPT_OUTCOME),
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "mark_finalizing",
+        parameters: MARK_FINALIZING_PARAMETERS,
+        returns: TypeText::Plain(MARK_FINALIZING_OUTCOME),
+        doc: "Write the finalizing marker of a run whose body ended. Writes, in one statement, with\nthe pool's bounds. A naive claimed_at raises TypeError.",
+    },
+    StubFunction {
+        name: "mark_finalizing_async",
+        parameters: MARK_FINALIZING_PARAMETERS,
+        returns: TypeText::FutureOf(MARK_FINALIZING_OUTCOME),
         doc: "The awaitable form of the method above.",
     },
 ];
@@ -610,7 +628,7 @@ const ARGUMENT_CLASSES: [StubClass; 11] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 67] = [
+const RECORD_CLASSES: [StubClass; 71] = [
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -1166,6 +1184,31 @@ const RECORD_CLASSES: [StubClass; 67] = [
         methods: &[],
     },
     StubClass {
+        name: "FinalizingMarked",
+        doc: "The finalizing marker is written: the row is RUNNING under this worker's claim generation.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "FinalizingNotHeld",
+        doc: "The finalizing marker wrote nothing: the row is absent, not RUNNING, or held by another\nworker or another claim generation.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "MarkFinalizingFailed",
+        doc: "The finalizing marker failed. It wrote nothing, or it committed and its reply was lost:\nthe marker may be written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
         name: "ClaimsReleased",
         doc: "The release statement ran: one row outcome per claim, in the request order.",
         constructor: Constructor::NoConstructor,
@@ -1325,8 +1368,8 @@ const HANDLE_CLASSES: [StubClass; 3] = [
     },
 ];
 
-const CLASSES: [StubClass; 81] = {
-    let mut classes = [HANDLE_CLASSES[0]; 81];
+const CLASSES: [StubClass; 85] = {
+    let mut classes = [HANDLE_CLASSES[0]; 85];
     let mut handle_position = 0;
     while handle_position < HANDLE_CLASSES.len() {
         classes[handle_position] = HANDLE_CLASSES[handle_position];

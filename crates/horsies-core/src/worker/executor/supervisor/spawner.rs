@@ -372,13 +372,16 @@ impl Spawner {
         });
         let (stopped_tx, stopped) = mpsc::channel();
         let thread_shared = Arc::clone(&shared);
+        // The thread logs to the dispatcher of its starter.
         let thread = std::thread::Builder::new()
             .name(SPAWNER_THREAD_NAME.to_owned())
-            .spawn(move || {
-                SpawnerLoop::new(thread_shared, watch).run();
-                // The receiver is gone only when `stop` is not waiting.
-                let _ = stopped_tx.send(());
-            })
+            .spawn(crate::worker::thread_dispatch::with_starter_dispatch(
+                move || {
+                    SpawnerLoop::new(thread_shared, watch).run();
+                    // The receiver is gone only when `stop` is not waiting.
+                    let _ = stopped_tx.send(());
+                },
+            ))
             .map_err(SpawnerStartError::Thread)?;
         Ok(Self {
             handle: SpawnerHandle { shared },

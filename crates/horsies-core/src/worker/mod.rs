@@ -20,6 +20,7 @@ pub mod retry;
 pub mod runner_beats;
 pub mod scheduler;
 mod supervision;
+mod thread_dispatch;
 pub mod worker;
 pub mod worker_state;
 

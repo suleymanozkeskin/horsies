@@ -6,11 +6,8 @@ use sqlx::{PgPool, Row};
 use tokio::time::timeout;
 use uuid::Uuid;
 
-use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::core::lifecycle::{
-    CallerHoldsRowLock, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
-};
-use crate::core::types::status::TaskStatus;
+use crate::core::lifecycle::{TerminalizationKind, TerminalizationOutcome};
+use crate::test_support::terminal_writes;
 
 use super::terminalization_matrix::migrated_pool;
 
@@ -421,16 +418,9 @@ async fn a_terminal_move_sends_task_done_and_the_status_event() {
     seed_task(&pool, task_id, "w1_terminal_move_task").await;
     assert_notification(&mut listener, TASK_STATUS_CHANNEL, &task_id.to_string()).await;
 
-    let outcomes = terminalize(
-        &pool,
-        &TerminalizationCommand::CancelLockedTask {
-            task_id,
-            fence: CallerHoldsRowLock,
-            permitted_source_statuses: vec![TaskStatus::Pending],
-        },
-    )
-    .await
-    .expect("move task to history");
+    let outcomes = terminal_writes::cancel_live_task(&pool, task_id, false)
+        .await
+        .expect("move task to history");
     assert!(matches!(
         outcomes.as_slice(),
         [TerminalizationOutcome::Applied {

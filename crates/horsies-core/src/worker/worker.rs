@@ -2419,6 +2419,84 @@ mod tests {
         }
     }
 
+    /// Python `test_worker_helpers.py::TestSlotPoolSetup::test_start_failure_raises_and_keeps_the_pool_for_cleanup`:
+    /// a pool that cannot start its first child ends the start with the
+    /// pool failure. The core start stops the pools and the spawner thread
+    /// itself before it returns the error
+    /// (`RunningChildren::stop_after_failed_start`), so nothing is left for
+    /// the caller to clean; the start returning within its bound shows the
+    /// stop ended.
+    #[tokio::test]
+    async fn a_child_that_cannot_start_ends_the_start_with_the_pool_failure() {
+        use crate::worker::executor::supervisor::{BootFailureCause, ChildCommand};
+
+        let worker = worker_of_one_child(ChildCommand {
+            program: "/nonexistent/horsies-child".into(),
+            args: Vec::new(),
+        });
+        let started = tokio::time::timeout(Duration::from_secs(60), worker.start_pools())
+            .await
+            .expect("the start ends within the bound");
+        match started {
+            Err(WorkerError::ChildrenStartFailed(ChildrenStartFailed::Pool(
+                PoolFailure::BootAttemptsExhausted { last, .. },
+            ))) => assert_eq!(last.cause, BootFailureCause::SpawnFailed),
+            Err(other) => panic!("another error: {other}"),
+            Ok(_) => panic!("a child that cannot start must fail the start"),
+        }
+    }
+
+    /// Python `test_worker_helpers.py::TestStopDuringStart::test_a_start_that_ends_stopped_still_stops_the_children`:
+    /// a stop while the first child boots ends the start with no error, and
+    /// the child is stopped and reaped before the start returns. The child
+    /// writes its pid and never answers ready, so the start is still waiting
+    /// when the stop comes.
+    #[tokio::test]
+    async fn a_start_that_ends_stopped_still_stops_its_children() {
+        use crate::worker::executor::supervisor::ChildCommand;
+
+        let dir =
+            std::env::temp_dir().join(format!("horsies-stopped-start-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).expect("create the test folder");
+        let pid_file = dir.join("child.pid");
+        let worker = worker_of_one_child(ChildCommand {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                format!("echo $$ > '{}'; exec sleep 60", pid_file.display()).into(),
+            ],
+        });
+        let stop_after_spawn = async {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            while !pid_file.exists() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            worker.request_stop();
+        };
+
+        let (started, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::join!(worker.start_pools(), stop_after_spawn)
+        })
+        .await
+        .expect("the start ends within the bound");
+
+        match started {
+            Ok(None) => {}
+            Ok(Some(_)) => panic!("the start ended before the stop"),
+            Err(error) => panic!("a stop during the start is no failure: {error}"),
+        }
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .expect("the child wrote its pid")
+            .trim()
+            .parse()
+            .expect("the pid file holds a pid");
+        // SAFETY: signal 0 sends nothing; it only checks that the process
+        // exists.
+        let exists = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(!exists, "the child {pid} still runs after the start ended");
+        std::fs::remove_dir_all(&dir).expect("remove the test folder");
+    }
+
     /// Python `test_worker_helpers.py::TestSlotPoolSetup::test_a_stop_during_the_start_is_no_failure`
     /// and `::test_a_stop_during_the_start_opens_no_database_work`: a stop
     /// before the children are ready ends the run with no error, before any

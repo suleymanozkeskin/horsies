@@ -16,11 +16,11 @@ use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement,
     RetryRequest,
 };
-use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{
-    AttemptWriteRefusal, FailedAttemptOutcome, GuardEvidence, OwnedClaim, TerminalizationCommand,
-    TerminalizationKind, TerminalizationOutcome, WorkflowSuccessOutcome,
+    AttemptWriteRefusal, FailedAttemptOutcome, GuardEvidence, OwnedClaim, TerminalizationKind,
+    TerminalizationOutcome, WorkflowSuccessOutcome,
 };
+use crate::test_support::terminal_writes::{self, StaleFailure};
 
 const RETRY_FACTS_QUEUE: &str = "lifecycle_retry_facts";
 
@@ -52,14 +52,14 @@ fn retry_after(expected_retry_count: i32) -> RetryRequest {
     }
 }
 
-/// The reaper fails a silent runner: the row moves to history as
-/// FAIL_STALE.
+/// The reaper fails a silent runner (`horsies_finish_stale_attempt`, no
+/// retry): the row moves to history as FAIL_STALE.
 async fn reaper_fails(pool: &sqlx::PgPool, task_id: Uuid) {
     set_started(pool, task_id, Since::SecondsAgo(120.0)).await;
-    let outcomes = terminalize(
+    let outcomes = terminal_writes::fail_stale_task(
         pool,
-        &TerminalizationCommand::FailStaleTask {
-            task_id,
+        task_id,
+        &StaleFailure {
             stale_after_ms: 60_000,
             finalizing_stale_after_ms: 30_000,
             result_json: r#"{"err": 2}"#.to_owned(),
