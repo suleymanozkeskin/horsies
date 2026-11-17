@@ -19,6 +19,9 @@
 //!    the same three outcomes. A [`SqlScript`] (a migration text: several
 //!    statements, no parameters) runs in a transaction with
 //!    [`Transaction::run_script`].
+//! 7. A [`PartitionDdl`] (a leaf detach, built only from checked
+//!    [`SqlIdentifier`]s) runs in autocommit with
+//!    [`PooledConnection::run_partition_ddl`].
 //!
 //! The listener ([`Listener`]) holds one dedicated connection on the session
 //! URL for every LISTEN of the process.
@@ -27,6 +30,7 @@
 //! module.
 
 mod connect;
+mod ddl;
 mod environment;
 mod failure;
 mod listener;
@@ -42,6 +46,7 @@ pub use connect::{
     TcpUserTimeout, DEFAULT_KEEPALIVES_IDLE, DEFAULT_KEEPALIVES_INTERVAL,
     DEFAULT_KEEPALIVES_PROBES, DEFAULT_SOCKET_SETTINGS, DEFAULT_TCP_USER_TIMEOUT,
 };
+pub use ddl::{PartitionDdl, SqlIdentifier, SqlIdentifierError, MAX_IDENTIFIER_BYTES};
 pub use environment::{
     lookup_password, parse_password_file, read_password_file, variable_rule, ConnectionEnvironment,
     EnvironmentError, EnvironmentPassword, HomeDirectory, PasswordFileEntry, PasswordFileError,

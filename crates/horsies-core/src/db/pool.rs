@@ -41,6 +41,7 @@ use tokio_postgres::{CancelToken, Row};
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 use super::connect::{open_connection, ConnectPlan, DriverConnection};
+use super::ddl::PartitionDdl;
 use super::failure::{
     error_scope, CancelRequestOutcome, CheckoutFailure, ConnectError, ConnectFailure, ErrorScope,
     NotSentCause, RefusalCause, StatementFailure, UnknownOutcomeCause,
@@ -904,6 +905,28 @@ impl PooledConnection {
         self.ensure_usable(name)?;
         let bounding = self.bounding(bound);
         let outcome = run_bounded(run_command(&self.object.client, script.sql()), bounding).await;
+        self.settle(name, outcome)
+    }
+
+    /// Runs one partition DDL statement (simple query protocol, no
+    /// parameters) with the same three outcomes as a statement. A refusal
+    /// keeps the server error, so a held lock (`55P03`, `lock_not_available`)
+    /// and a statement timeout (`57014`) stay apart.
+    ///
+    /// The statement runs in autocommit: an open [`crate::db::Transaction`]
+    /// borrows this connection, so no transaction is open while this method
+    /// runs. Session settings (`statement_timeout`, `lock_timeout`) apply as
+    /// the caller set them.
+    pub async fn run_partition_ddl(
+        &mut self,
+        ddl: &PartitionDdl,
+        bound: StatementBound,
+    ) -> Result<(), StatementFailure> {
+        let name = ddl.name();
+        self.ensure_usable(name)?;
+        let bounding = self.bounding(bound);
+        let sql = ddl.sql();
+        let outcome = run_bounded(run_command(&self.object.client, &sql), bounding).await;
         self.settle(name, outcome)
     }
 
