@@ -1595,7 +1595,7 @@ impl PostgresBroker {
             self.retain_rerun_input_default,
             None,
         )
-        .map_err(|error| BrokerError::EnqueueContract(error.to_string()))?;
+        .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
         Ok(SendCommand {
             task_name: task_name.to_owned(),
             queue_name: queue_name.to_owned(),

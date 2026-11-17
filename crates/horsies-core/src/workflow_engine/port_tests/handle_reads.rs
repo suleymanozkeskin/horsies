@@ -687,9 +687,14 @@ async fn get_polls_when_the_listener_cannot_connect() {
         &registry,
     )
     .await;
-    // The pool keeps the connections that it opened for the start and the
-    // finish; the listener of the handle's new broker needs a new one.
+    // The handle's reads run on the core pool of its broker: a status read
+    // opens that pool's connection, which the pool keeps. The listener of
+    // the broker needs a new connection.
     let workflow_handle = handle(&db.pool, workflow_id);
+    let _status = workflow_handle
+        .status()
+        .await
+        .expect("a status read opens the core pool's connection");
     db.allow_connections(false).await;
 
     let got = workflow_handle.get(Some(Duration::from_secs(5))).await;
