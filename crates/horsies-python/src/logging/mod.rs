@@ -1,8 +1,12 @@
 //! The log bridge: core `tracing` events to Python `logging`.
 //!
-//! - The subscriber checks each event against the level snapshot, formats
-//!   it, and pushes one record into a bounded channel. A core thread never
-//!   waits for the GIL to log.
+//! - The subscriber checks each event against the level snapshot, reads its
+//!   fields, and pushes one record into a bounded channel. A core thread
+//!   never waits for the GIL to log.
+//! - The record's message is the event's `message` field alone. Every other
+//!   field goes on the Python `LogRecord` as an attribute, as the keys of
+//!   `extra` do; the forwarder states the rule for a field whose name the
+//!   `LogRecord` already uses.
 //! - One forwarder thread takes the GIL and hands the records to Python
 //!   `logging` with the core's time and thread name. Records arrive after the
 //!   event, from the forwarder thread.
@@ -26,6 +30,7 @@ mod levels;
 mod names;
 mod subscriber;
 
+use std::fmt;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
@@ -59,12 +64,19 @@ const HIGH_RECORD_ATTEMPTS: u128 =
 /// The pause between two reads of the channel count while a drain wait runs.
 const DRAIN_POLL_PAUSE: Duration = Duration::from_millis(5);
 
-/// Largest message of one record, in bytes. A longer message is cut at a
-/// character boundary and marked.
-pub const MAX_RECORD_MESSAGE_BYTES: usize = 16 * 1024;
+/// Largest text of one record, in bytes: its message and its text field
+/// values together. A text that reaches the bound is cut at a character
+/// boundary and marked.
+pub const MAX_RECORD_TEXT_BYTES: usize = 16 * 1024;
+
+/// Most fields of one record besides its message.
+pub const MAX_RECORD_FIELDS: usize = 32;
 
 /// The mark at the end of a cut message.
 pub const CUT_MARK: &str = " [message cut]";
+
+/// The mark at the end of a cut text field value.
+pub const VALUE_CUT_MARK: &str = " [value cut]";
 
 /// Where in the source an event was written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,28 +85,86 @@ pub enum RecordSource {
     Unknown,
 }
 
+/// The value of one field of a core event, as the event records it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FieldValue {
+    Bool(bool),
+    /// A signed integer (`i64` or `i128` in the event).
+    Signed(i128),
+    /// An unsigned integer (`u64` or `u128` in the event).
+    Unsigned(u128),
+    Float(f64),
+    /// Any other value: its `Display` text (a `&str`, an error, a `%value`)
+    /// or its `Debug` text (a `?value`).
+    Text(String),
+}
+
+impl fmt::Display for FieldValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bool(value) => write!(formatter, "{value}"),
+            Self::Signed(value) => write!(formatter, "{value}"),
+            Self::Unsigned(value) => write!(formatter, "{value}"),
+            Self::Float(value) => write!(formatter, "{value}"),
+            Self::Text(value) => formatter.write_str(value),
+        }
+    }
+}
+
+/// One field of a core event other than `message`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordField {
+    /// The name that the event's callsite gives the field.
+    pub name: &'static str,
+    pub value: FieldValue,
+}
+
 /// One core log record on its way to Python.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CoreLogRecord {
     pub logger: LoggerName,
     pub level: RecordLevel,
+    /// The event's `message` field.
     pub message: String,
+    /// The other fields of the event, in the order that the event records
+    /// them.
+    pub fields: Vec<RecordField>,
     pub source: RecordSource,
     pub created: SystemTime,
     pub thread_name: String,
 }
 
 impl CoreLogRecord {
-    /// A record of the bridge itself, created now on this thread.
+    /// A record of the bridge itself, created now on this thread. It has no
+    /// fields.
     pub fn bridge(level: RecordLevel, message: String) -> Self {
         Self {
             logger: LoggerName::Bridge,
             level,
             message,
+            fields: Vec::new(),
             source: RecordSource::Unknown,
             created: SystemTime::now(),
             thread_name: current_thread_name(),
         }
+    }
+
+    /// The fields as ` name=value` text, for a line on stderr: a record that
+    /// goes to stderr has no `LogRecord` to hold them.
+    fn fields_text(&self) -> FieldsText<'_> {
+        FieldsText(&self.fields)
+    }
+}
+
+/// The fields of a record as ` name=value` text, one after the other.
+struct FieldsText<'a>(&'a [RecordField]);
+
+impl fmt::Display for FieldsText<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for field in self.0 {
+            write!(formatter, " {}={}", field.name, field.value)?;
+        }
+        Ok(())
     }
 }
 
@@ -229,11 +299,12 @@ impl LogSink {
     fn spill(&self, record: &CoreLogRecord) {
         let _write_failure_ignored = writeln!(
             std::io::stderr(),
-            "{} {:?} {} (horsies log channel full or closed; dropped DEBUG/INFO records: {}, \
+            "{} {:?} {}{} (horsies log channel full or closed; dropped DEBUG/INFO records: {}, \
              WARNING/ERROR records written to stderr: {})",
             record.logger.python_name(),
             record.level,
             record.message,
+            record.fields_text(),
             self.dropped_low.load(Ordering::Relaxed),
             self.spilled_high.load(Ordering::Relaxed),
         );
@@ -318,22 +389,6 @@ pub fn make_thread_default(dispatch: &tracing::Dispatch) {
     // The guard would restore the earlier default when dropped; the runtime
     // thread keeps this default until it ends, so the guard is not dropped.
     std::mem::forget(tracing::dispatcher::set_default(dispatch));
-}
-
-/// Cut `text` to at most `limit` bytes at a character boundary, and mark
-/// the cut.
-pub fn cut_to_limit(text: &mut String, limit: usize) {
-    if text.len() <= limit {
-        return;
-    }
-    // A UTF-8 character is at most 4 bytes, so a boundary is at most 3 bytes
-    // below `limit`.
-    let boundary = (limit.saturating_sub(3)..=limit)
-        .rev()
-        .find(|position| text.is_char_boundary(*position))
-        .unwrap_or(0);
-    text.truncate(boundary);
-    text.push_str(CUT_MARK);
 }
 
 #[cfg(test)]
@@ -488,12 +543,26 @@ mod tests {
     }
 
     #[test]
-    fn a_long_message_is_cut_at_a_character_boundary() {
-        let mut text = "é".repeat(10);
-        cut_to_limit(&mut text, 5);
-        assert_eq!(text, format!("éé{CUT_MARK}"));
-        let mut short = "short".to_owned();
-        cut_to_limit(&mut short, 5);
-        assert_eq!(short, "short");
+    fn the_stderr_text_of_the_fields_is_each_name_and_value_after_a_space() {
+        let mut logged = record(RecordLevel::Error);
+        assert_eq!(logged.fields_text().to_string(), "");
+        logged.fields = vec![
+            RecordField {
+                name: "read",
+                value: FieldValue::Text("workflow names".to_owned()),
+            },
+            RecordField {
+                name: "bound",
+                value: FieldValue::Unsigned(10_000),
+            },
+            RecordField {
+                name: "retry",
+                value: FieldValue::Bool(false),
+            },
+        ];
+        assert_eq!(
+            logged.fields_text().to_string(),
+            " read=workflow names bound=10000 retry=false"
+        );
     }
 }

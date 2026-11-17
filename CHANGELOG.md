@@ -271,6 +271,17 @@ written in Rust, on a new baseline schema.
   `WorkflowStartValidationFailed`, and a child build fails its node with
   `WORKFLOW_ENQUEUE_FAILED`.
 
+- **A log record of the core holds its fields as attributes.** The core
+  logs to the `horsies.*` loggers through Python `logging`. The message of
+  such a record is the text of the event alone, and each other field of the
+  event is an attribute of the `LogRecord`, as `extra` sets it: a bool, an
+  integer or a float as a Python `bool`, `int` or `float`, any other value
+  as its text. For example, the warning of a monitoring list cut at its
+  bound has `read` and `bound`. A field whose name `LogRecord` already uses
+  (`name`, `created`, `asctime`, ...) is set as `field_<name>`. The horsies
+  log format writes the message only; a handler with its own formatter can
+  read the attributes.
+
 ### Fixed
 
 - **A stored retry policy that does not validate fails the task at claim.**
@@ -725,6 +736,11 @@ unless it starts with "Added".
   workflow definitions registered on the app. The query types take a
   `HistoryWindow` from `resolve_monitoring_window`; the error catalogs are
   Python's (`HISTORY_CONTRACT_VIOLATION`, `STORED_DATA_INVALID`).
+- **The times of the monitoring models serialize in pydantic's JSON
+  form.** A time with a microsecond other than 0 has 6 fraction digits
+  (`2026-11-17T13:59:14.500000Z`), and one with 0 has none; chrono's form
+  wrote `.500Z` for a whole millisecond. The web answers of the Python and
+  Rust apps carry this text. The read accepts any count of fraction digits.
 - **`web::create_monitoring_router` becomes `web::router(&app,
   MonitoringConfig, policy)`** (feature `web`), an axum mount of the core's
   monitoring handler: the core serves every route, the event frames and

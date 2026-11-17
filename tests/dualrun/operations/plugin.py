@@ -28,7 +28,10 @@ from tests.dualrun.operations.lifecycle import (
     LIFECYCLE_CORE_ONLY_TESTS,
     LIFECYCLE_OPERATIONS,
 )
-from tests.dualrun.operations.monitoring_and_web import MONITORING_AND_WEB_OPERATIONS
+from tests.dualrun.operations.monitoring_and_web import (
+    MONITORING_AND_WEB_CORE_ONLY_TESTS,
+    MONITORING_AND_WEB_OPERATIONS,
+)
 from tests.dualrun.operations.workflow_engine import (
     WORKFLOW_ENGINE_CORE_ONLY_TESTS,
     WORKFLOW_ENGINE_OPERATIONS,
@@ -63,7 +66,7 @@ CORE_ONLY_TESTS: Final[Mapping[SwitchModule, tuple[CoreOnlyTest, ...]]] = {
     SwitchModule.LIFECYCLE: LIFECYCLE_CORE_ONLY_TESTS,
     SwitchModule.HISTORY: (),
     SwitchModule.BROKER: (),
-    SwitchModule.MONITORING_AND_WEB: (),
+    SwitchModule.MONITORING_AND_WEB: MONITORING_AND_WEB_CORE_ONLY_TESTS,
     SwitchModule.WORKFLOW_ENGINE: WORKFLOW_ENGINE_CORE_ONLY_TESTS,
 }
 """The tests that run once, on the core, in the dual-run of each module."""

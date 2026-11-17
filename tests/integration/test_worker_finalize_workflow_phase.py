@@ -30,7 +30,6 @@ from horsies.core.types.result import Ok, is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.finalize import _NodeFinishOwed
 from horsies.core.worker.worker import Worker, _FINALIZE_STAGE_PHASE2
-from horsies.core.workflows import steps as steps_module
 from horsies.core.workflows.node_finish import FactsUnknown
 from tests.phase2_support import failing_phase2
 from tests.integration.conftest import DB_URL, PhaseOneDone, finish_phase_one, start_ok
@@ -201,24 +200,49 @@ async def test_phase_two_that_fails_after_its_wake_sends_no_wake(
     broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """In the transaction form the step queues the wake and the COMMIT
     delivers it: a phase 2 that fails after the step rolls back the wake
-    with the node write and keeps the record."""
+    with the node write and keeps the record.
+
+    Phase 2 runs in the core. A deferred constraint trigger on the node rows
+    of the workflow raises at the COMMIT, after the step wrote the nodes and
+    queued the wake (SQLSTATE P0001: not retryable)."""
     workflow_id, done = await _chain_after_phase_one(app, broker, session)
     worker = _make_worker(engine, broker)
-
-    async def _fail_after_the_step(*args: Any, **kwargs: Any) -> tuple[str, ...]:
-        del args, kwargs
-        raise RuntimeError('failed after the node step')
-
-    monkeypatch.setattr(steps_module, 'run_child_starts', _fail_after_the_step)
+    await session.execute(
+        text("""
+            CREATE FUNCTION it_fail_after_the_step() RETURNS trigger
+            LANGUAGE plpgsql AS $body$
+            BEGIN
+                RAISE EXCEPTION 'failed after the node step';
+            END
+            $body$
+        """),
+    )
+    await session.execute(
+        text(f"""
+            CREATE CONSTRAINT TRIGGER it_fail_after_the_step
+            AFTER UPDATE ON horsies_workflow_tasks
+            DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW
+            WHEN (NEW.workflow_id = '{workflow_id}'::uuid)
+            EXECUTE FUNCTION it_fail_after_the_step()
+        """),
+    )
+    await session.commit()
     listener = await _listen(f'task_queue_{_QUEUE}')
 
-    result = await worker._finalize_workflow_phase(
-        done.task_id, _NodeFinishOwed(queue_name=_QUEUE, facts=FactsUnknown()),
-    )
+    try:
+        result = await worker._finalize_workflow_phase(
+            done.task_id, _NodeFinishOwed(queue_name=_QUEUE, facts=FactsUnknown()),
+        )
+    finally:
+        await session.execute(
+            text('DROP TRIGGER it_fail_after_the_step ON horsies_workflow_tasks'),
+        )
+        await session.execute(text('DROP FUNCTION it_fail_after_the_step()'))
+        await session.commit()
     payloads = await _wakes(listener)
 
     assert is_err(result)

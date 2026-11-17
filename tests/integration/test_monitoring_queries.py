@@ -2958,6 +2958,38 @@ class TestListBounds:
             'more exist and are not returned',
         ]
 
+    async def test_the_fields_of_the_cut_warning_are_attributes_of_the_record(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The core logs the cut with the ``tracing`` fields ``read`` and
+        ``bound``. The bridged record's message is the text alone, and each
+        field is an attribute of the record with its type, as ``extra`` sets
+        it."""
+        await self._seed_schedules(session, LIST_ROW_BOUND + 1)
+
+        with caplog.at_level(logging.WARNING, logger='horsies.monitoring'):
+            result = await list_schedules(broker)
+            await _until_logged(caplog, 'the list is cut at')
+
+        assert is_ok(result)
+        match caplog.records:
+            case [record]:
+                pass
+            case records:
+                raise AssertionError(f'one record expected, got {records!r}')
+        assert record.name == 'horsies.monitoring'
+        assert record.getMessage() == (
+            f'schedule state: the list is cut at {LIST_ROW_BOUND} schedules; '
+            'more exist and are not returned'
+        )
+        read: object = getattr(record, 'read')
+        bound: object = getattr(record, 'bound')
+        assert (read, bound) == ('schedule state', LIST_ROW_BOUND)
+        assert type(bound) is int
+
 
 # --------------------------------------------------------------------------- #
 # Database failure

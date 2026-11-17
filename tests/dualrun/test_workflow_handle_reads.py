@@ -24,7 +24,12 @@ from typing import Any, Final, LiteralString
 
 import psycopg
 import pytest
+from pydantic import SecretStr
 
+from horsies.core.app import Horsies
+from horsies.core.models.app import AppConfig
+from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow.handle import WorkflowHandle, WorkflowTaskInfo
 from horsies.core.models.workflow.handle_types import HandleResult
@@ -62,6 +67,22 @@ _STORED_ERROR: Final = '{"error_code":"TASK_EXCEPTION","message":"node failed"}'
 _STORE_ERROR_SQL: Final[LiteralString] = """
     UPDATE horsies_workflows SET error = %(error)s WHERE id = %(wf)s
 """
+
+APP = Horsies(
+    AppConfig(
+        queue_mode=QueueMode.DEFAULT,
+        broker=PostgresConfig(
+            database_url=SecretStr('postgresql://dualrun@127.0.0.1:1/unused'),
+        ),
+    ),
+)
+"""The app of both sides' broker: the reads decode a node result with the ok
+type of its task, which only a registered task gives."""
+
+
+@APP.task(task_name=_TASK)
+def value_task() -> TaskResult[int, TaskError]:
+    return TaskResult(ok=5)
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +249,7 @@ async def _read_all(
         'unknown': (seed.unknown, 'reads.unknown'),
     }
     async with open_broker(database) as broker:
+        broker.app = APP
         answers: dict[str, _Reads] = {}
         for role, (workflow_id, name) in targets.items():
             handle: WorkflowHandle[Any] = WorkflowHandle(

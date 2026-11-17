@@ -7,9 +7,12 @@ every pass:
 - ``BAD_GOOD_UNTIL`` on a node: the INSERT of the task refuses it (DataError).
   Phase-2 recovery copies the node's typed facts instead, so its tests refuse
   the INSERT of the workflow's task rows with a trigger (DataError).
-- ``BAD_POLICY`` on a workflow: the success evaluation raises
-  StoredSuccessPolicyError (the stored success policy does not parse).
-- An output index with no node row: the final result raises AssertionError.
+- ``BAD_POLICY`` on a workflow: the completion check of the step raises
+  data_corrupted (XX001): ``stored success_policy of workflow <id> does not
+  parse: <cause>``.
+- An output index with no node row: the completion check raises
+  data_corrupted: ``workflow <id> has output_task_index <n> and no node at
+  that index``.
 
 Each test has its own database, because a global pass reads every workflow.
 """
@@ -812,8 +815,9 @@ class TestLimitOnEachCase:
         assert reports[-1].metrics['case_2_3'].limit_reached == 1
 
     async def test_case_2_3_assertion_defect(self, harness: Harness) -> None:
-        """The output index has no node row: the final result raises
-        AssertionError on each pass, and the limit bounds it."""
+        """The output index has no node row: the completion check of the
+        step raises on each pass (data_corrupted), and the limit bounds it.
+        The stored error names the defect."""
         workflow_id = await _seed_workflow(harness, output_index=7)
         await _seed_node(harness, workflow_id, 0, status='COMPLETED')
 
@@ -823,7 +827,10 @@ class TestLimitOnEachCase:
         assert await _workflow_status(harness, workflow_id) == 'FAILED'
         error = await _workflow_error(harness, workflow_id)
         assert error is not None
-        assert 'AssertionError' in error
+        assert (
+            f'workflow {workflow_id} has output_task_index 7 and no node at that index'
+            in error
+        )
         assert 'WORKFLOW_RECOVERY_LIMIT_REACHED' in error
 
     async def test_on_error_pause_still_ends_failed(
@@ -1006,8 +1013,7 @@ class TestGlobalCompletion:
         error = await _workflow_error(harness, workflow_id)
         assert error is not None
         assert 'WORKFLOW_RECOVERY_LIMIT_REACHED' in error
-        assert 'StoredSuccessPolicyError' in error
-        assert 'does not parse' in error
+        assert f'stored success_policy of workflow {workflow_id} does not parse' in error
 
 
 class TestCountWrite:
