@@ -308,7 +308,6 @@ mod tests {
             dependencies: vec![],
             args_from: std::collections::HashMap::new(),
             workflow_ctx_from: None,
-            workflow_ctx_from_refs: None,
             queue: Some("default".to_owned()),
             priority,
             allow_failed_deps: false,

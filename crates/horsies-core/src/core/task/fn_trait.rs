@@ -103,9 +103,9 @@ impl TaskMeta {
 
     /// Create metadata with input type information pre-populated.
     ///
-    /// Use this in `async_task_fn!` / `blocking_task_fn!` macros so that
-    /// low-level registered tasks also carry `expects_input` and
-    /// `input_type_name` for `check()` validation.
+    /// A client's task macros use this (the Rust client's `async_task_fn!`
+    /// and `blocking_task_fn!`), so that a registered task also carries
+    /// `expects_input` and `input_type_name` for the client's checks.
     pub fn for_input<A: 'static>() -> Self {
         Self {
             expects_input: std::any::TypeId::of::<A>() != std::any::TypeId::of::<()>(),
