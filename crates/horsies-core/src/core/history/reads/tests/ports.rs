@@ -369,7 +369,7 @@ async fn every_rendered_reader_runs_without_sequential_scans() {
 /// that the first read prepared.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #838"]
+#[ignore = "waits on #1292"]
 async fn a_result_reader_dropped_after_it_was_seen_fails_once() {
     let database = TestDatabase::create().await;
     publish_readers(&database.pool).await;
