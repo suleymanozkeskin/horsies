@@ -237,6 +237,23 @@ unless it starts with "Added".
   removed.
 - **`schedule` takes `WholeSeconds`** in place of a `Duration`, whose
   sub-second part was dropped.
+- **`TaskHandle::get` takes a `WaitLimit` and returns
+  `Result<TaskOutcome<T, E>, ReadError>`.** `TaskResult<T>` is removed. The
+  outer error is the read failing: `WaitTimedOut`, `TaskNotFound`,
+  `ResultNotAvailable`, `StoredResultUnreadable`, `UnknownUserCode` (a
+  stored user code that `E` does not name), `WaitInsideTask` and
+  `Database`, each with Python's code from `ReadError::code`. The inner
+  value is `Succeeded(T)` or `Failed(TaskError<E>)`; a cancelled task is
+  `Failed` with `TASK_CANCELLED`. `WaitLimit::parse` refuses a limit above
+  about 49.7 days before any read. The handle keeps an outcome and the
+  failures of the stored data, as Python; a timeout, an absent task and a
+  database failure are read again.
+- **A result wait in a worker child is refused** with `WaitInsideTask` and
+  sends no statement, as in Python.
+- **Reads by task id are on the app:** `get_result::<T, E>`,
+  `get_raw_result` (the stored envelope as JSON text with the status),
+  `get_task_info` with `TaskInfoParts`, and `task_handle_of` for a handle of
+  a task sent elsewhere. Task info lists attempts newest first.
 - **`TaskRuntime::task_handle` returns `TaskFunctionNotFound`**
   (`NotRegistered`, `OtherTypes`) in place of a `TaskError`.
 - **The CLI types and `fetch_docs` are no longer public.** `Cli`, `Command`,
