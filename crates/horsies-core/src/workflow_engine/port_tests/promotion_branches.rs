@@ -11,13 +11,14 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    broker, code, ctx_result, error_of, node, node_task_input, ok, registry_of, seed_node,
+    broker, child_specs_of, code, ctx_result, error_of, node, node_task_input, ok, seed_node,
     seed_workflow, shared_pool, spec, stored_result_error, task_node, NodeSeed, WorkflowSeed,
 };
-use crate::core::config::retention::RetentionConfig;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
-use crate::core::{WorkflowSpec, WorkflowSpecRegistry};
-use crate::workflow_engine::recovery::recover_stuck_workflow_tree;
+use crate::core::WorkflowSpec;
+use crate::test_support::child_specs::TestChildSpecs;
+use crate::workflow_engine::recovery::recover_workflow_tree;
+use crate::workflow_engine::steps::ChildBuild;
 
 /// The child of the sub-workflow node: one task node.
 fn child() -> WorkflowSpec {
@@ -60,15 +61,11 @@ async fn seed_completed_root_and_dependent(
 }
 
 /// The tree recovery pass of `workflow_id`: case 0 promotes node 1.
-async fn recover(pool: &PgPool, workflow_id: Uuid, registry: &WorkflowSpecRegistry) {
-    let _report = recover_stuck_workflow_tree(
-        &broker(pool),
-        registry,
-        workflow_id,
-        &RetentionConfig::default(),
-    )
-    .await
-    .expect("the tree recovery pass");
+async fn recover(pool: &PgPool, workflow_id: Uuid, child_specs: &TestChildSpecs) {
+    let _report =
+        recover_workflow_tree(&broker(pool), ChildBuild::Client(child_specs), workflow_id)
+            .await
+            .expect("the tree recovery pass");
 }
 
 /// Child workflows of `workflow_id`.
@@ -113,7 +110,7 @@ async fn assert_node_1_failed_alone(pool: &PgPool, workflow_id: Uuid, case: &str
 #[serial]
 async fn a_promoted_node_whose_args_from_is_not_a_map_of_indexes_fails_alone() {
     let pool = shared_pool().await;
-    let registry = registry_of(&[]);
+    let child_specs = child_specs_of(&[]);
     let non_int = "args_from has non-int values for task 1";
     for (args_from, message) in [
         (serde_json::json!({"x": "not_an_int"}), non_int),
@@ -132,7 +129,7 @@ async fn a_promoted_node_whose_args_from_is_not_a_map_of_indexes_fails_alone() {
         })
         .await;
 
-        recover(&pool, workflow_id, &registry).await;
+        recover(&pool, workflow_id, &child_specs).await;
 
         assert_node_1_failed_alone(&pool, workflow_id, &case, message).await;
     }
@@ -149,7 +146,7 @@ async fn a_promoted_node_whose_stored_input_does_not_parse_fails_alone() {
         seed_completed_root_and_dependent(&pool, false, |dependent| dependent.input("broken{json"))
             .await;
 
-    recover(&pool, workflow_id, &registry_of(&[])).await;
+    recover(&pool, workflow_id, &child_specs_of(&[])).await;
 
     assert_node_1_failed_alone(
         &pool,
@@ -171,7 +168,7 @@ async fn a_sub_workflow_node_whose_stored_input_does_not_parse_fails_alone() {
         seed_completed_root_and_dependent(&pool, true, |dependent| dependent.input("broken{json"))
             .await;
 
-    recover(&pool, workflow_id, &registry_of(&[child()])).await;
+    recover(&pool, workflow_id, &child_specs_of(&[child()])).await;
 
     assert_node_1_failed_alone(
         &pool,
@@ -195,7 +192,7 @@ async fn a_sub_workflow_node_whose_args_from_holds_a_value_that_is_not_an_index_
     })
     .await;
 
-    recover(&pool, workflow_id, &registry_of(&[child()])).await;
+    recover(&pool, workflow_id, &child_specs_of(&[child()])).await;
 
     assert_node_1_failed_alone(
         &pool,
@@ -219,7 +216,7 @@ async fn a_sub_workflow_node_whose_args_from_is_a_json_string_fails_alone() {
     })
     .await;
 
-    recover(&pool, workflow_id, &registry_of(&[child()])).await;
+    recover(&pool, workflow_id, &child_specs_of(&[child()])).await;
 
     assert_node_1_failed_alone(
         &pool,
@@ -243,7 +240,7 @@ async fn a_pending_node_without_dependencies_is_promoted() {
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
     seed_node(&pool, &NodeSeed::task(workflow_id, 0, "PENDING")).await;
 
-    recover(&pool, workflow_id, &registry_of(&[])).await;
+    recover(&pool, workflow_id, &child_specs_of(&[])).await;
 
     let row = node(&pool, workflow_id, 0).await;
     assert_eq!(row.status, "ENQUEUED");
@@ -274,7 +271,7 @@ async fn a_context_node_with_no_stored_result_gets_the_missing_result_entry() {
             dependent.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
             seed_node(&pool, &dependent).await;
 
-            recover(&pool, workflow_id, &registry_of(&[])).await;
+            recover(&pool, workflow_id, &child_specs_of(&[])).await;
 
             let input = node_task_input(&pool, workflow_id, 1).await;
             let entry = ctx_result(&input, "node_0");
@@ -323,7 +320,7 @@ async fn a_context_entry_of_a_sub_workflow_node_carries_its_stored_summary() {
     dependent.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
     seed_node(&pool, &dependent).await;
 
-    recover(&pool, workflow_id, &registry_of(&[])).await;
+    recover(&pool, workflow_id, &child_specs_of(&[])).await;
 
     let input = node_task_input(&pool, workflow_id, 1).await;
     assert_eq!(

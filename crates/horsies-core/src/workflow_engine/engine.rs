@@ -85,10 +85,24 @@ pub async fn on_workflow_task_complete(
     registry: &WorkflowSpecRegistry,
     retention: &RetentionConfig,
 ) -> Result<WorkflowTaskCompletion, WorkflowTaskCompletionError> {
-    let build = ChildBuild::Registry {
-        registry,
-        retention,
-    };
+    on_workflow_task_complete_with(
+        broker,
+        task_id,
+        ChildBuild::Registry {
+            registry,
+            retention,
+        },
+    )
+    .await
+}
+
+/// [`on_workflow_task_complete`] with the children of the owed child starts
+/// built by `build`. Outcomes and errors as [`on_workflow_task_complete`].
+pub(crate) async fn on_workflow_task_complete_with(
+    broker: &PostgresBroker,
+    task_id: Uuid,
+    build: ChildBuild<'_>,
+) -> Result<WorkflowTaskCompletion, WorkflowTaskCompletionError> {
     let committed = node_finish_in_transaction(broker, task_id, false, build)
         .await
         .map_err(|error| WorkflowTaskCompletionError::NodeFinish { task_id, error })?;

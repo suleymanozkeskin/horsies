@@ -17,11 +17,11 @@ use super::support::{
     finish_node, handle, node, node_status, node_task_input, ok, shared_pool, spec, start,
     sub_workflow_node, task_node, workflow_status, IsolatedDatabase, PORT_QUEUE,
 };
-use crate::core::registry::workflow::RegisteredWorkflowDefinition;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::workflow::node::SubWorkflowParams;
 use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
-use crate::core::{AnyNode, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
+use crate::core::{AnyNode, TaskResult, WorkflowSpec};
+use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
 
 fn after(index: usize, task_name: &str, dependencies: &[usize]) -> AnyNode {
     let mut node = task_node(index, task_name);
@@ -30,12 +30,7 @@ fn after(index: usize, task_name: &str, dependencies: &[usize]) -> AnyNode {
 }
 
 async fn run(pool: &PgPool, workflow_spec: &WorkflowSpec) -> Uuid {
-    start(
-        pool,
-        workflow_spec,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await
+    start(pool, workflow_spec, &TestChildSpecs::empty()).await
 }
 
 async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json::Value) {
@@ -44,7 +39,7 @@ async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json
         workflow_id,
         index,
         &ok(value),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 }
@@ -55,7 +50,7 @@ async fn fail(pool: &PgPool, workflow_id: Uuid, index: i32, error_code: &str, me
         workflow_id,
         index,
         &err(error_code, message),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &TestChildSpecs::empty(),
     )
     .await;
 }
@@ -329,15 +324,12 @@ async fn a_failed_context_dependency_reads_as_its_original_error() {
     assert_eq!(error.message.as_deref(), Some("A failed"));
 }
 
-/// A definition whose builder copies the node's input into its nodes: one task
-/// node, and one sub-workflow node of `grandchild_key` that gives the same
-/// input as params (Python `_ChildWorkflow`).
-fn container_child(key: &str, grandchild_key: &'static str) -> RegisteredWorkflowDefinition {
-    RegisteredWorkflowDefinition {
-        name: "container_child".to_owned(),
-        definition_key: key.to_owned(),
-        declared_children: vec![grandchild_key.to_owned()],
-        spec_builder: Arc::new(move |input| {
+/// A build that copies the node's input into its nodes: one task node, and
+/// one sub-workflow node of `grandchild_key` that gives the same input as
+/// params (Python `_ChildWorkflow`).
+fn container_child(grandchild_key: &'static str) -> TestChildBuild {
+    Arc::new(
+        move |input: &str| -> Result<WorkflowSpec, TestBuildRefused> {
             let mut copy = task_node(0, "container_child_task");
             copy.input_json = input.to_owned();
             let grandchild = WorkflowSpec {
@@ -353,25 +345,20 @@ fn container_child(key: &str, grandchild_key: &'static str) -> RegisteredWorkflo
             let mut child = spec("container_child", vec![copy, nested]);
             child.output_index = Some(0);
             Ok(child)
-        }),
-    }
+        },
+    )
 }
 
-/// A definition that takes params and builds one task node.
-fn container_grandchild(key: &str) -> RegisteredWorkflowDefinition {
-    RegisteredWorkflowDefinition {
-        name: "container_grandchild".to_owned(),
-        definition_key: key.to_owned(),
-        declared_children: Vec::new(),
-        spec_builder: Arc::new(|_input| {
-            let mut grandchild = spec(
-                "container_grandchild",
-                vec![task_node(0, "container_grandchild_task")],
-            );
-            grandchild.output_index = Some(0);
-            Ok(grandchild)
-        }),
-    }
+/// A build that takes params and builds one task node.
+fn container_grandchild() -> TestChildBuild {
+    Arc::new(|_input: &str| -> Result<WorkflowSpec, TestBuildRefused> {
+        let mut grandchild = spec(
+            "container_grandchild",
+            vec![task_node(0, "container_grandchild_task")],
+        );
+        grandchild.output_index = Some(0);
+        Ok(grandchild)
+    })
 }
 
 fn stored_input(text: &str) -> serde_json::Value {
@@ -387,14 +374,9 @@ async fn a_sub_workflow_node_and_its_children_store_their_container_input() {
     let pool = shared_pool().await;
     let child_key = "tests.port.container_child.v1";
     let grandchild_key = "tests.port.container_grandchild.v1";
-    let mut registry =
-        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    registry
-        .register_definition(container_grandchild(grandchild_key))
-        .expect("register the grandchild");
-    registry
-        .register_definition(container_child(child_key, grandchild_key))
-        .expect("register the child");
+    let child_specs = TestChildSpecs::empty()
+        .with_build(grandchild_key, container_grandchild())
+        .with_build(child_key, container_child(grandchild_key));
     let child_stub = WorkflowSpec {
         definition_key: Some(child_key.to_owned()),
         ..spec(
@@ -409,7 +391,7 @@ async fn a_sub_workflow_node_and_its_children_store_their_container_input() {
     parent.output_index = Some(0);
     let values = serde_json::json!({"values": [1, 2]});
 
-    let parent_id = start(&pool, &parent, &registry).await;
+    let parent_id = start(&pool, &parent, &child_specs).await;
 
     assert_eq!(stored_input(&node(&pool, parent_id, 0).await.input), values);
     let child_id = child_of(&pool, parent_id, 0).await;
@@ -758,7 +740,10 @@ async fn a_cancel_skips_waiting_nodes_and_get_gives_workflow_cancelled() {
             "node {index}: {status}"
         );
     }
-    let got = workflow_handle.get(Some(Duration::from_secs(2))).await;
+    let got = workflow_handle
+        .get(Some(Duration::from_secs(2)))
+        .await
+        .expect("the result read");
     assert_eq!(code(error_of(&got)).as_deref(), Some("WORKFLOW_CANCELLED"));
 }
 
@@ -771,7 +756,8 @@ async fn get_of_a_workflow_that_does_not_finish_gives_wait_timeout() {
 
     let got = handle(&pool, workflow_id)
         .get(Some(Duration::from_millis(200)))
-        .await;
+        .await
+        .expect("the result read");
 
     assert_eq!(code(error_of(&got)).as_deref(), Some("WAIT_TIMEOUT"));
 }
