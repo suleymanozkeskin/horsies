@@ -113,10 +113,10 @@ def owner_only_on_the_conflict(
 
 async def enqueue_async_returns_only_enqueue_errors(broker: PostgresBroker) -> None:
     declared: Result[UUID, BrokerEnqueueError] = await broker.enqueue_async(
-        'report', task_id=TASK_ID, enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc),
+        'report', task_id=TASK_ID, send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc),
     )
     _ = declared
-    match await broker.enqueue_async('report', task_id=TASK_ID, enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc)):
+    match await broker.enqueue_async('report', task_id=TASK_ID, send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc)):
         case Ok():
             pass
         case Err(error):
@@ -129,10 +129,10 @@ async def enqueue_async_returns_only_enqueue_errors(broker: PostgresBroker) -> N
 
 def enqueue_returns_only_enqueue_and_sync_call_errors(broker: PostgresBroker) -> None:
     declared: Result[UUID, BrokerEnqueueError | BrokerSyncCallError] = broker.enqueue(
-        'report', task_id=TASK_ID, enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc),
+        'report', task_id=TASK_ID, send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc),
     )
     _ = declared
-    match broker.enqueue('report', task_id=TASK_ID, enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc)):
+    match broker.enqueue('report', task_id=TASK_ID, send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc)):
         case Ok():
             pass
         case Err(error):

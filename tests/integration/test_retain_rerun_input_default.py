@@ -51,10 +51,8 @@ async def _enqueue(
         'policy.task',
         task_id=task_id,
         send_kind=SendKind.FIRST,
-        enqueue_sha='b' * 64,
         sent_at=datetime.now(timezone.utc),
-        args_json='[]',
-        kwargs_json='{}',
+        input_json='{}',
         retain_rerun_input=retain,
     )
     assert not is_err(outcome), outcome

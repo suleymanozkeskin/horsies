@@ -59,13 +59,11 @@ def _payload() -> TaskSendPayload:
         task_name='test.good_fn',
         queue_name='default',
         priority=100,
-        args_json=None,
-        kwargs_json=f'{{"secret": "{PAYLOAD_MARKER}"}}',
+        input_json=f'{{"secret": "{PAYLOAD_MARKER}"}}',
         sent_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         good_until=None,
         enqueue_delay_seconds=None,
         task_options=None,
-        enqueue_sha='abc123',
     )
 
 
@@ -324,7 +322,7 @@ class TestLoopRunnerFailed:
         assert err.exception is failure.exception
         assert err.message == failure.message
         assert err.task_id == broker.enqueue.call_args.kwargs['task_id']
-        assert err.payload.kwargs_json == broker.enqueue.call_args.kwargs['kwargs_json']
+        assert err.payload.input_json == broker.enqueue.call_args.kwargs['input_json']
 
     def test_a_sync_retry_on_a_stopped_runner_returns_the_same_error(self) -> None:
         app = _make_app()
@@ -363,5 +361,4 @@ class TestLoopRunnerFailed:
         assert result.ok_value.task_id == err.task_id
         sent = broker.enqueue_async.call_args.kwargs
         assert sent['task_id'] == err.task_id
-        assert sent['enqueue_sha'] == err.payload.enqueue_sha
-        assert sent['kwargs_json'] == err.payload.kwargs_json
+        assert sent['input_json'] == err.payload.input_json
