@@ -42,6 +42,7 @@ use crate::operations::monitoring_reads::{
     list_tasks_operation, task_detail_operation, task_facets_operation, TaskFacetsQuery,
     TaskListQuery,
 };
+use crate::operations::paused_expiry::expire_paused_workflows_operation;
 use crate::operations::queue_starts::{count_queue_starts_operation, QueueStartsRequest};
 use crate::operations::release::{release_claims_operation, ReleaseClaimsRequest};
 use crate::operations::result::{raw_result_record_operation, result_wait_bound};
@@ -53,6 +54,9 @@ use crate::operations::success::{
     SuccessBatchRequest,
 };
 use crate::operations::task_info::{task_info_operation, TaskInfoParts};
+use crate::operations::task_lists::{
+    expired_tasks_operation, stale_tasks_operation, stale_threshold,
+};
 use crate::operations::workflow_lifecycle::{cancel_workflow_operation, pause_workflow_operation};
 use crate::operations::workflow_retention::delete_expired_workflows_operation;
 use crate::process_core::{core_for_call, Core};
@@ -715,6 +719,28 @@ impl CoreHandle {
         )
     }
 
+    /// Expire the PAUSED workflows older than `older_than_us` microseconds,
+    /// at most `batch_size`, oldest first (`horsies_workflow_expire_paused`
+    /// per candidate): `PausedExpired` or `PausedExpiryFailed`. Writes; each
+    /// candidate commits alone. Awaitable only: its caller, the reaper, runs
+    /// on the worker's event loop. A batch size that does not fit in 32 bits
+    /// raises `OverflowError`.
+    fn expire_paused_workflows_async<'py>(
+        &self,
+        py: Python<'py>,
+        older_than_us: i64,
+        batch_size: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.expire_paused_workflows_async",
+            CallKind::Write,
+            expire_paused_workflows_operation(self.connection(), older_than_us, batch_size),
+        )
+    }
+
     /// The info of one task: `TaskInfoRecord`, `TaskInfoNotFound`, or
     /// `BrokerFailure` with `TASK_INFO_QUERY_FAILED` or
     /// `INVALID_JSON_PAYLOAD`. Installs the schema once per handle first;
@@ -872,6 +898,52 @@ impl CoreHandle {
             "CoreHandle.monitoring_task_facets_async",
             CallKind::Read,
             task_facets_operation(self.connection(), query.get().query()),
+        )
+    }
+
+    /// The RUNNING tasks whose latest runner beat, or their start when they
+    /// have no beat, is older than `threshold_minutes`
+    /// (`horsies_list_stale_tasks`): `TaskListComplete`,
+    /// `TaskListTruncated`, or `BrokerFailure` with `INVALID_INPUT` or
+    /// `MONITORING_QUERY_FAILED`. The threshold follows Python's rule: a
+    /// `bool`, a value that is not an `int`, or one outside 0 to 525,600
+    /// minutes is `INVALID_INPUT` in a future that is already done, before
+    /// any core call. Reads only, in one statement. Awaitable only: its
+    /// caller, `PostgresBroker.get_stale_tasks`, is a coroutine. A cancelled
+    /// await drops the read.
+    fn stale_tasks_async<'py>(
+        &self,
+        py: Python<'py>,
+        threshold_minutes: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let threshold = match stale_threshold(threshold_minutes)? {
+            Ok(threshold) => threshold,
+            Err(refused) => return done_future(py, BrokerFailure::from(refused.error())),
+        };
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.stale_tasks_async",
+            CallKind::Read,
+            stale_tasks_operation(self.connection(), threshold),
+        )
+    }
+
+    /// The PENDING tasks whose `good_until` passed before a worker took them
+    /// (`horsies_list_expired_tasks`): `TaskListComplete`,
+    /// `TaskListTruncated`, or `BrokerFailure` with
+    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement. Awaitable
+    /// only: its caller, `PostgresBroker.get_expired_tasks`, is a coroutine.
+    /// A cancelled await drops the read.
+    fn expired_tasks_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.expired_tasks_async",
+            CallKind::Read,
+            expired_tasks_operation(self.connection()),
         )
     }
 }

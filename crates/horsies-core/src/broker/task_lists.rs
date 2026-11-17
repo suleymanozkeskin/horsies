@@ -2,7 +2,7 @@
 //!
 //! Each list reads at most [`TASK_LIST_BOUND`] rows and says when it stopped
 //! there. The stale threshold is whole minutes from 0 to one year; another
-//! value is `INVALID_INPUT` before any read.
+//! value is `INVALID_INPUT` before any read, with Python's text.
 
 use crate::broker::result_types::{BrokerErrorCode, BrokerOperationError};
 
@@ -19,24 +19,57 @@ pub struct StaleMinutes(i32);
 
 impl StaleMinutes {
     /// Parse the caller's threshold. A value outside 0 to
-    /// [`MAX_STALE_THRESHOLD_MINUTES`] is `INVALID_INPUT`, not retryable.
-    pub fn parse(minutes: i32) -> Result<Self, BrokerOperationError> {
-        match (0..=MAX_STALE_THRESHOLD_MINUTES).contains(&minutes) {
-            true => Ok(Self(minutes)),
-            false => Err(BrokerOperationError {
-                code: BrokerErrorCode::InvalidInput,
-                message: format!(
-                    "stale_threshold_minutes must be 0 to {MAX_STALE_THRESHOLD_MINUTES}, \
-                     got {minutes}"
-                ),
-                retryable: false,
-            }),
+    /// [`MAX_STALE_THRESHOLD_MINUTES`] is refused (`INVALID_INPUT`, not
+    /// retryable, through [`StaleThresholdRefusal::error`]). Pure.
+    pub fn parse(minutes: i64) -> Result<Self, StaleThresholdRefusal> {
+        match i32::try_from(minutes) {
+            Ok(fits) if (0..=MAX_STALE_THRESHOLD_MINUTES).contains(&fits) => Ok(Self(fits)),
+            _ if minutes < 0 => Err(StaleThresholdRefusal::BelowZero),
+            _ => Err(StaleThresholdRefusal::AboveMaximum),
         }
     }
 
     /// The threshold in minutes.
     pub const fn minutes(self) -> i32 {
         self.0
+    }
+}
+
+/// Why a stale threshold is refused, in Python's terms
+/// (`_stale_threshold_minutes`, `python/horsies/core/brokers/postgres.py`).
+/// A client that takes untyped values (Python) also refuses a `bool` and a
+/// value that is not an integer with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleThresholdRefusal {
+    /// A Python `bool`: an `int` subclass that the threshold refuses.
+    Bool,
+    /// A value that is not an integer; `type_name` is the name of its type.
+    NotAnInteger {
+        type_name: String,
+    },
+    BelowZero,
+    AboveMaximum,
+}
+
+impl StaleThresholdRefusal {
+    /// The `INVALID_INPUT` error of the refusal, not retryable, with
+    /// Python's text: `stale_threshold_minutes <cause>; give whole minutes
+    /// from 0 to 525600`. The text holds no value.
+    pub fn error(&self) -> BrokerOperationError {
+        let cause = match self {
+            Self::Bool => "is a bool, not an int".to_owned(),
+            Self::NotAnInteger { type_name } => format!("is a {type_name}, not an int"),
+            Self::BelowZero => "is below 0".to_owned(),
+            Self::AboveMaximum => format!("is above {MAX_STALE_THRESHOLD_MINUTES} (one year)"),
+        };
+        BrokerOperationError {
+            code: BrokerErrorCode::InvalidInput,
+            message: format!(
+                "stale_threshold_minutes {cause}; give whole minutes from 0 to \
+                 {MAX_STALE_THRESHOLD_MINUTES}"
+            ),
+            retryable: false,
+        }
     }
 }
 
@@ -125,18 +158,54 @@ mod tests {
     fn a_threshold_of_zero_to_one_year_is_accepted() {
         for minutes in [0, 1, 60, MAX_STALE_THRESHOLD_MINUTES] {
             assert_eq!(
-                StaleMinutes::parse(minutes).map(StaleMinutes::minutes).ok(),
+                StaleMinutes::parse(i64::from(minutes))
+                    .map(StaleMinutes::minutes)
+                    .ok(),
                 Some(minutes)
             );
         }
     }
 
+    /// Python `tests/unit/test_broker_task_lists.py`: the refusal texts.
     #[test]
-    fn a_threshold_outside_the_range_is_invalid_input() {
-        for minutes in [-1, i32::MIN, MAX_STALE_THRESHOLD_MINUTES + 1, i32::MAX] {
-            let refused = StaleMinutes::parse(minutes).expect_err("refused");
-            assert_eq!(refused.code, BrokerErrorCode::InvalidInput, "{minutes}");
-            assert!(!refused.retryable, "{minutes}");
+    fn a_threshold_outside_the_range_is_invalid_input_with_python_text() {
+        for (minutes, refusal) in [
+            (-1, StaleThresholdRefusal::BelowZero),
+            (i64::MIN, StaleThresholdRefusal::BelowZero),
+            (
+                i64::from(MAX_STALE_THRESHOLD_MINUTES) + 1,
+                StaleThresholdRefusal::AboveMaximum,
+            ),
+            (i64::from(i32::MAX) + 1, StaleThresholdRefusal::AboveMaximum),
+            (i64::MAX, StaleThresholdRefusal::AboveMaximum),
+        ] {
+            assert_eq!(
+                StaleMinutes::parse(minutes),
+                Err(refusal.clone()),
+                "{minutes}"
+            );
+            let error = refusal.error();
+            assert_eq!(error.code, BrokerErrorCode::InvalidInput, "{minutes}");
+            assert!(!error.retryable, "{minutes}");
+        }
+        for (refusal, cause) in [
+            (StaleThresholdRefusal::BelowZero, "is below 0"),
+            (
+                StaleThresholdRefusal::AboveMaximum,
+                "is above 525600 (one year)",
+            ),
+            (StaleThresholdRefusal::Bool, "is a bool, not an int"),
+            (
+                StaleThresholdRefusal::NotAnInteger {
+                    type_name: "str".to_owned(),
+                },
+                "is a str, not an int",
+            ),
+        ] {
+            assert_eq!(
+                refusal.error().message,
+                format!("stale_threshold_minutes {cause}; give whole minutes from 0 to 525600")
+            );
         }
     }
 

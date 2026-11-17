@@ -18,7 +18,6 @@ from typing import Final
 LIVE_ATTEMPTS: Final = 'horsies_task_attempts'
 ATTEMPT_ENCODER_FUNCTION: Final = 'horsies_encode_task_attempts'
 MOVE_FUNCTION: Final = 'horsies_move_task_to_history'
-CANCEL_LOCKED_FUNCTION: Final = 'horsies_cancel_locked_task'
 CANCEL_ORPHAN_SWEEP_FUNCTION: Final = 'horsies_cancel_orphaned_tasks'
 ABANDON_OWNED_NODE_FUNCTION: Final = 'horsies_abandon_owned_node'
 ABANDON_OWNED_NODES_FUNCTION: Final = 'horsies_abandon_owned_nodes'
@@ -31,22 +30,17 @@ CANCEL_CANCELLED_SWEEP_FUNCTION: Final = (
     'horsies_cancel_nodes_of_cancelled_workflow'
 )
 CANCEL_ORPHAN_FUNCTION: Final = 'horsies_cancel_owned_orphan'
-COMPLETE_LOCKED_FUNCTION: Final = 'horsies_complete_locked_task'
 COMPLETE_FUSED_FUNCTION: Final = 'horsies_complete_task_fused'
 COMPLETE_FUSED_BATCH_FUNCTION: Final = 'horsies_complete_tasks_fused'
-FAIL_LOCKED_FUNCTION: Final = 'horsies_fail_locked_task'
-FAIL_STALE_FUNCTION: Final = 'horsies_fail_stale_task'
 
 EXPIRE_OWNED_FUNCTION: Final = 'horsies_expire_owned_claim'
 EXPIRE_PENDING_FUNCTION: Final = 'horsies_expire_pending_tasks'
 
 FINISH_FAILED_ATTEMPT_FUNCTION: Final = 'horsies_finish_failed_attempt'
-FAILED_ATTEMPT_OUTCOME_TYPE: Final = 'horsies_failed_attempt_outcome'
 LOCK_RUNNING_TASK_FUNCTION: Final = 'horsies_lock_running_task'
 """A retired locking read of a RUNNING task. The baseline does not create
 it; ``horsies_finish_workflow_success`` took its one caller."""
 FINISH_WORKFLOW_SUCCESS_FUNCTION: Final = 'horsies_finish_workflow_success'
-WORKFLOW_SUCCESS_OUTCOME_TYPE: Final = 'horsies_workflow_success_outcome'
 
 TASK_LOCK_SEED: Final = 731
 """The seed of the task advisory lock. The lock key of a task is

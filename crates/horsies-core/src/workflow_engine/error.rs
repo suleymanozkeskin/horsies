@@ -37,3 +37,23 @@ pub enum WorkflowError {
     #[error("workflow step contract: {0}")]
     StepContract(#[from] StepContractError),
 }
+
+impl WorkflowError {
+    /// Whether the condition may clear, so the same call can succeed later. Pure.
+    ///
+    /// - `Database`: the core's SQLSTATE rule ([`crate::broker::is_retryable_sqlx_error`]).
+    /// - `Broker`: the broker error's rule ([`BrokerError::is_retryable`]).
+    /// - Every other variant: no. The same call meets the same stored data,
+    ///   the same refused argument or the same contract break again.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Database(error) => crate::broker::is_retryable_sqlx_error(error),
+            Self::Broker(error) => error.is_retryable(),
+            Self::Serialization(_)
+            | Self::WorkflowNotFound { .. }
+            | Self::InvalidStatus(_)
+            | Self::Validation(_)
+            | Self::StepContract(_) => false,
+        }
+    }
+}

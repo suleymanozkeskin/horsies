@@ -42,4 +42,18 @@ MONITORING_AND_WEB_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=('monitoring_task_facets_async',),
     ),
+    DualRunOperation(
+        name='stale task list',
+        production_path='horsies.core.brokers.postgres:PostgresBroker.get_stale_tasks',
+        reference_path='tests.dualrun.reference.broker_monitoring:get_stale_tasks',
+        mode=PoolMode(),
+        core_methods=('stale_tasks_async',),
+    ),
+    DualRunOperation(
+        name='expired task list',
+        production_path='horsies.core.brokers.postgres:PostgresBroker.get_expired_tasks',
+        reference_path='tests.dualrun.reference.broker_monitoring:get_expired_tasks',
+        mode=PoolMode(),
+        core_methods=('expired_tasks_async',),
+    ),
 )

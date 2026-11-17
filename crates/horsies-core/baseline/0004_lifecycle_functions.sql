@@ -2094,7 +2094,7 @@ $$;
 ------------------------------------------------------------------------------------------------------------------------
 
 -- horsies_cancel_task: the administrative cancel of one plain task. Replaces horsies_cancel_locked_task and the
--- caller's lock statements; the interim function stays until its caller switches.
+-- caller's lock statements.
 --
 -- Guarantee:
 -- - A plain task that is PENDING or CLAIMED (RUNNING only when p_include_running is TRUE) moves to history as

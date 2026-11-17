@@ -7,10 +7,6 @@
 //! Which fence a transition needs follows from where it runs, not from
 //! preference:
 //!
-//! - a caller that already locked and read the row needs no predicate in the
-//!   write;
-//! - a caller whose generation fence lives in that preceding locked read
-//!   carries only the worker in the write itself;
 //! - a caller acting on a deadline needs the worker but not the generation,
 //!   since the outcome is correct for whichever generation holds an expired
 //!   row;
@@ -32,23 +28,6 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::LifecycleValidationError;
-
-/// No predicate in the statement; the caller locked the row first.
-///
-/// The decision was made against a locked read, so re-checking ownership in
-/// the write would guard nothing already established.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CallerHoldsRowLock;
-
-/// Worker ownership in the statement; the generation fence is upstream.
-///
-/// The caller held the row with a locking read that carried the claim
-/// generation, and passes the worker to the write. Splitting the fence this
-/// way is a property of the two-statement shape, not a weaker guard.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PriorLockedRead {
-    pub worker_id: String,
-}
 
 /// Worker ownership, deliberately without a claim generation.
 ///
@@ -132,8 +111,6 @@ impl OwnedClaimBatch {
 /// A command's claim-ownership guard, borrowed for outcome reporting.
 #[derive(Debug, Clone, Copy)]
 pub enum TerminalFence<'a> {
-    CallerHoldsRowLock(&'a CallerHoldsRowLock),
-    PriorLockedRead(&'a PriorLockedRead),
     WorkerOwned(&'a WorkerOwned),
     OwnedClaim(&'a OwnedClaim),
     OwnedClaimBatch(&'a OwnedClaimBatch),

@@ -1528,7 +1528,7 @@ def _stub_startup_coverage(worker: Any, monkeypatch: pytest.MonkeyPatch) -> None
     )
     monkeypatch.setattr(
         coverage_module,
-        'ensure_startup_coverage_in_database',
+        'ensure_startup_coverage_in_core',
         AsyncMock(return_value=ensured),
     )
     broker = MagicMock()

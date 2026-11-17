@@ -8,6 +8,17 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Changed
+
+- **The `TASK_TIMEOUT` error of a `SHARED_ASYNC` task tells how the task
+  ended.** Its `data` gets the key `cancel_end`: `RETURNED_AFTER_SIGNAL`
+  when the task and its work ended within `cancel_grace_ms` after the
+  cancel at the deadline, `DROPPED_AFTER_GRACE` when the child sent the
+  second cancel. The Python worker and the core worker write the same key.
+  An isolated or `SHARED_THREAD` timeout, and a task whose child the
+  worker killed, have no `cancel_end`. The `data` keeps `task_id` and
+  `timeout_ms`.
+
 ### Rust client (crate `horsies`)
 
 The crate `horsies` is rebuilt on `horsies-core`, the engine that the
@@ -69,6 +80,38 @@ unless it starts with "Added".
   `validate_queue` refuses with `HRS-103` and the valid names.
 - **`registry()`, `workflow_registry()`, `resolve_enqueue` and
   `ResolvedEnqueue` are no longer public.**
+- **`TaskError` becomes `TaskError<E>`.** Its code is
+  `TaskErrorCode<E>`: `Library(BuiltInTaskCode)` for a code of the
+  library's catalog, `User(E)` for a code of the task's own enum `E`. A body
+  builds one with `TaskError::user(code, message)`, or with
+  `TaskError::library(code, message)` for a library code. The fields are
+  private: read them with `code()`, `message()`, `data()`, `exception()` and
+  `sub_workflow()`. `TaskError::new`, `TaskError::builtin`, `From<&str>`,
+  `From<String>` and `cause` are removed. A read of a stored error whose
+  user code `E` does not name answers `UnknownUserCode`.
+- **`TaskError::with_data(value)` never fails.** A value that cannot be
+  stored (a non-finite float, a map key that is not a string, a key that
+  only the engine writes, data deeper than the error bound) is replaced with
+  `{"data_refused": "<cause>"}`, the cause that Python stores, and the code
+  and the message are kept. The replacement is logged at ERROR with the
+  code. Before, a non-finite float became `null` with no notice.
+- **Added: `#[derive(horsies::UserErrorCode)]`.** On an enum of unit
+  variants, each variant's code is its name in UPPER_SNAKE_CASE
+  (`RateLimited` is `RATE_LIMITED`). A code with the name of a built-in code
+  or of a reserved code (`WORKFLOW_STOPPED`), a variant with fields, and two
+  variants with one code are compile errors. `std::convert::Infallible` is
+  the code type of a task with no codes of its own.
+- **The built-in codes have Python's names and members.**
+  `UNHANDLED_ERROR` is `UNHANDLED_EXCEPTION`; `TASK_ERROR` is
+  `TASK_EXCEPTION`. `ARGUMENT_TYPE_MISMATCH`, `WORKFLOW_STOPPED` and
+  `SEND_SUPPRESSED` are no longer task codes. Added:
+  `WORKFLOW_RECOVERY_LIMIT_REACHED`, `SUBWORKFLOW_DEPTH_LIMIT_REACHED`,
+  `TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`,
+  `WORKFLOW_START_INCOMPLETE`, `NO_TYPE_AVAILABLE`, `EVENT_LOOP_LIMIT`,
+  `ASYNC_CONTEXT`, `INVALID_INPUT`, `WAIT_INSIDE_TASK` and
+  `WORKFLOW_OUTPUT_SKIPPED`. `ExceptionRecord` and `SubWorkflowFailure`
+  (the failed child workflow as top-level fields) replace
+  `SubWorkflowError`.
 - **The CLI types and `fetch_docs` are no longer public.** `Cli`, `Command`,
   `LogLevel`, `execute_web`, `WebArgs`, `WebAuthMode`,
   `WebCliError`, `execute_cutover`, `CutoverArgs`, `CutoverCliError`,

@@ -18,7 +18,6 @@ from horsies.core.errors import ConfigurationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import is_err, is_ok
-from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.utils.url import to_psycopg_url
 from tests.pgbouncer_utils import (
     PgbouncerUrls,
@@ -56,24 +55,11 @@ async def _notify(database_url: str, channel: str, payload: str) -> None:
 async def _enqueue_probe(broker: PostgresBroker, task_name: str = "pgbouncer_probe"):
     sent_at = datetime.now(timezone.utc)
     task_id = str(uuid4())
-    enqueue_sha = enqueue_fingerprint(
-        task_name=task_name,
-        queue_name="default",
-        priority=100,
-        args_json="[]",
-        kwargs_json="{}",
-        sent_at=sent_at,
-        good_until=None,
-        enqueue_delay_seconds=None,
-        task_options=None,
-    )
     return await broker.enqueue_async(
         task_name,
         task_id=task_id,
         send_kind=SendKind.FIRST,
-        enqueue_sha=enqueue_sha,
-        args_json="[]",
-        kwargs_json="{}",
+        input_json="{}",
         sent_at=sent_at,
     )
 

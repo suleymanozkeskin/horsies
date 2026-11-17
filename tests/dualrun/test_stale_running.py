@@ -39,6 +39,9 @@ from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
 from tests.dualrun.reference import stale_running as reference
 from tests.dualrun.reference import stale_running_caller
+from tests.dualrun.reference.interim_terminal_writes import (
+    install_interim_terminal_writes,
+)
 from tests.dualrun.seeds import (
     BeatRole,
     SeedCoverage,
@@ -143,6 +146,7 @@ def _seed(connection: Connection) -> None:
 
 def _reference_pass(database: DualRunDatabase, _seed: None) -> int:
     with psycopg.connect(database.url, autocommit=True) as connection:
+        install_interim_terminal_writes(connection)
         return reference.mark_stale_tasks_as_failed(
             connection, STALE_AFTER_MS, FINALIZING_STALE_AFTER_MS
         )

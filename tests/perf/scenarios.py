@@ -29,18 +29,13 @@ from sqlalchemy.sql.elements import TextClause
 
 from horsies.core.brokers.postgres import _EXPIRE_BATCH_SIZE
 from horsies.core.codec.error_payload import serialize_error_payload
-from horsies.core.codec.json_io import dumps_json
-from horsies.core.codec.typed import encode_task_result
 from horsies.core.lifecycle.commands import (
-    CompleteLockedTask,
     CompleteTaskFused,
     ExpireOwnedClaim,
     ExpirePendingTasks,
-    FailLockedTask,
-    FailStaleTask,
     TerminalizationCommand,
 )
-from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead, WorkerOwned
+from horsies.core.lifecycle.fences import OwnedClaim, WorkerOwned
 from horsies.core.lifecycle.outcomes import Applied, decode_outcome_row
 from horsies.core.lifecycle.persistence import (
     _log_outcome,
@@ -49,23 +44,14 @@ from horsies.core.lifecycle.persistence import (
     call_for,
 )
 from horsies.core.models.tasks import (
-    OperationalErrorCode,
     OutcomeCode,
     TaskError,
     TaskResult,
 )
-from horsies.core.lifecycle.persistence import LOCK_TASK_SQL
-from horsies.core.worker.sql import NOTIFY_TASK_QUEUE_SQL
-from horsies.core.workflows.steps import NODE_FINISH_FUNCTION_SQL
 from tests.perf.legacy_terminalization_sql import (
-    SELECT_STALE_TASK_FOR_UPDATE_SQL,
-    UPSERT_TASK_ATTEMPT_SQL,
     EXPIRE_CLAIMED_TASK_BEFORE_START_SQL as _EXPIRE_CLAIMED_TASK_BEFORE_START_SQL,
     EXPIRE_PENDING_TASKS_SQL,
     FINALIZE_TASK_COMPLETED_SQL,
-    MARK_STALE_TASK_FAILED_SQL,
-    MARK_TASK_COMPLETED_SQL,
-    MARK_TASK_FAILED_SQL,
 )
 from tests.perf.statistics import Budget
 
@@ -156,38 +142,6 @@ _INSERT_TERMINAL_BALLAST_SQL = text("""
 """)
 
 _DELETE_SEEDED_SQL = text("DELETE FROM horsies_tasks WHERE id LIKE :prefix || '%'")
-
-_INSERT_WORKFLOWS_SQL = text("""
-    INSERT INTO horsies_workflows (
-        id, name, status, on_error, output_task_index, depth,
-        root_workflow_id, sent_at, created_at, started_at, updated_at
-    )
-    SELECT
-        'wf-' || :prefix || g, 'perf.workflow', 'RUNNING', 'fail', 0, 0,
-        'wf-' || :prefix || g, NOW(), NOW(), NOW(), NOW()
-    FROM generate_series(1, :count) AS g
-""")
-
-_INSERT_WORKFLOW_TASKS_SQL = text("""
-    INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
-        id, workflow_id, task_index, node_id, task_name, input,
-        queue_name, priority, dependencies, allow_failed_deps,
-        join_type, is_subworkflow, status, task_id, created_at,
-        max_retries, execution, retention_class_key
-    )
-    SELECT
-        'NONE', 'wt-' || :prefix || g, 'wf-' || :prefix || g, 0, 'node_0',
-        'perf.task', '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
-        'RUNNING', :prefix || g, NOW(), 0, 'ISOLATED', 'standard_30d'
-    FROM generate_series(1, :count) AS g
-""")
-
-_DELETE_WORKFLOW_TASKS_SQL = text(
-    "DELETE FROM horsies_workflow_tasks WHERE task_id LIKE :prefix || '%'"
-)
-_DELETE_WORKFLOWS_SQL = text(
-    "DELETE FROM horsies_workflows WHERE id LIKE 'wf-' || :prefix || '%'"
-)
 
 type Seed = Callable[[Connection, str, int], None]
 type Cleanup = Callable[[Connection, str], None]
@@ -330,34 +284,7 @@ def seed_terminal_ballast(
     connection.commit()
 
 
-def seed_workflow_success_tasks(
-    connection: Connection,
-    prefix: str,
-    count: int,
-) -> None:
-    """One-node RUNNING workflows whose only task is ready to finish."""
-    seed_running_tasks(
-        connection,
-        prefix,
-        count,
-        is_workflow_task=True,
-    )
-    connection.execute(_INSERT_WORKFLOWS_SQL, {'prefix': prefix, 'count': count})
-    connection.execute(
-        _INSERT_WORKFLOW_TASKS_SQL,
-        {'prefix': prefix, 'count': count},
-    )
-    connection.commit()
-
-
 def delete_seeded(connection: Connection, prefix: str) -> None:
-    connection.execute(_DELETE_SEEDED_SQL, {'prefix': prefix})
-    connection.commit()
-
-
-def delete_workflow_seeded(connection: Connection, prefix: str) -> None:
-    connection.execute(_DELETE_WORKFLOW_TASKS_SQL, {'prefix': prefix})
-    connection.execute(_DELETE_WORKFLOWS_SQL, {'prefix': prefix})
     connection.execute(_DELETE_SEEDED_SQL, {'prefix': prefix})
     connection.commit()
 
@@ -453,45 +380,6 @@ def _fused_invocation(
     return build
 
 
-def _locked_completion_invocation(
-    payload: str,
-    *,
-    candidate: bool,
-) -> InvocationFactory:
-    def build(task_id: str) -> Invocation:
-        if candidate:
-            command = CompleteLockedTask(
-                task_id=task_id,
-                fence=PriorLockedRead(worker_id=WORKER_ID),
-                result_json=payload,
-            )
-            statement, parameters = call_for(command)
-            return Invocation(
-                statement=statement,
-                parameters=dict(parameters),
-                candidate=True,
-                operation='locked completion operation',
-                command=command,
-            )
-        return Invocation(
-            statement=MARK_TASK_COMPLETED_SQL,
-            parameters={'id': task_id, 'wid': WORKER_ID, 'result_json': payload},
-            candidate=False,
-            operation='locked completion statement',
-        )
-
-    return build
-
-
-_FAILURE_RESULT = serialize_error_payload(
-    TaskResult(
-        err=TaskError(
-            error_code='PERF_FAILURE',
-            message='terminal application failure measurement',
-        )
-    )
-)
-
 _EXPIRY_RESULT = serialize_error_payload(
     TaskResult(
         err=TaskError(
@@ -500,52 +388,6 @@ _EXPIRY_RESULT = serialize_error_payload(
         )
     )
 )
-
-_STALE_AFTER_MS = 5_000
-_FINALIZING_STALE_AFTER_MS = 5_000
-_STALE_FAILURE_REASON = 'Worker process crashed (no runner heartbeat for 5000ms)'
-_STALE_FAILURE_RESULT = serialize_error_payload(
-    TaskResult(
-        err=TaskError(
-            error_code=OperationalErrorCode.WORKER_CRASHED,
-            message=_STALE_FAILURE_REASON,
-        )
-    )
-)
-
-
-def _failure_invocation(*, candidate: bool) -> InvocationFactory:
-    def build(task_id: str) -> Invocation:
-        if candidate:
-            command = FailLockedTask(
-                task_id=task_id,
-                fence=PriorLockedRead(worker_id=WORKER_ID),
-                result_json=_FAILURE_RESULT,
-                error_code='PERF_FAILURE',
-                failed_reason=None,
-            )
-            statement, parameters = call_for(command)
-            return Invocation(
-                statement=statement,
-                parameters=dict(parameters),
-                candidate=True,
-                operation='terminal application failure operation',
-                command=command,
-            )
-        return Invocation(
-            statement=MARK_TASK_FAILED_SQL,
-            parameters={
-                'id': task_id,
-                'wid': WORKER_ID,
-                'result_json': _FAILURE_RESULT,
-                'error_code': 'PERF_FAILURE',
-            },
-            candidate=False,
-            operation='terminal application failure statement',
-        )
-
-    return build
-
 
 def _owned_expiry_invocation(*, candidate: bool) -> InvocationFactory:
     def build(task_id: str) -> Invocation:
@@ -574,44 +416,6 @@ def _owned_expiry_invocation(*, candidate: bool) -> InvocationFactory:
             },
             candidate=False,
             operation='owned claim expiry statement',
-        )
-
-    return build
-
-
-def _stale_failure_invocation(*, candidate: bool) -> InvocationFactory:
-    def build(task_id: str) -> Invocation:
-        if candidate:
-            command = FailStaleTask(
-                task_id=task_id,
-                stale_after_ms=_STALE_AFTER_MS,
-                finalizing_stale_after_ms=_FINALIZING_STALE_AFTER_MS,
-                result_json=_STALE_FAILURE_RESULT,
-                error_code=OperationalErrorCode.WORKER_CRASHED.value,
-                failed_reason=_STALE_FAILURE_REASON,
-            )
-            statement, parameters = call_for(command)
-            return Invocation(
-                statement=statement,
-                parameters=dict(parameters),
-                candidate=True,
-                operation='stale terminal failure operation',
-                command=command,
-            )
-        return Invocation(
-            statement=MARK_STALE_TASK_FAILED_SQL,
-            parameters={
-                'task_id': task_id,
-                'failed_reason': _STALE_FAILURE_REASON,
-                'result': _STALE_FAILURE_RESULT,
-                'error_code': OperationalErrorCode.WORKER_CRASHED.value,
-                'stale_threshold': _STALE_AFTER_MS / 1000.0,
-                'finalizing_stale_threshold': (
-                    _FINALIZING_STALE_AFTER_MS / 1000.0
-                ),
-            },
-            candidate=False,
-            operation='stale terminal failure statement',
         )
 
     return build
@@ -657,51 +461,6 @@ def _run_owned_expiry(*, candidate: bool) -> Callable[[Connection, str], int]:
     return run
 
 
-def _run_stale_failure(*, candidate: bool) -> Callable[[Connection, str], int]:
-    invocation_for = _stale_failure_invocation(candidate=candidate)
-
-    def run(connection: Connection, task_id: str) -> int:
-        connection.execute(LOCK_TASK_SQL, {'task_id': task_id})
-        context = connection.execute(
-            SELECT_STALE_TASK_FOR_UPDATE_SQL,
-            {
-                'id': task_id,
-                'stale_threshold': _STALE_AFTER_MS / 1000.0,
-                'finalizing_stale_threshold': (
-                    _FINALIZING_STALE_AFTER_MS / 1000.0
-                ),
-            },
-        ).fetchone()
-        if context is None:
-            connection.rollback()
-            raise RuntimeError('stale failure could not lock its seeded task')
-
-        failed_reason = _STALE_FAILURE_REASON
-        connection.execute(
-            UPSERT_TASK_ATTEMPT_SQL,
-            {
-                'task_id': task_id,
-                'attempt': (context.retry_count or 0) + 1,
-                'outcome': 'FAILED',
-                'will_retry': False,
-                'started_at': context.started_at or context.db_now,
-                'finished_at': context.db_now,
-                'error_code': OperationalErrorCode.WORKER_CRASHED.value,
-                'error_message': failed_reason,
-                'failed_reason': failed_reason,
-                'worker_id': context.claimed_by_worker_id,
-                'worker_hostname': context.worker_hostname,
-                'worker_pid': context.worker_pid,
-                'worker_process_name': context.worker_process_name,
-            },
-        )
-        transitioned = _execute_invocation(connection, invocation_for(task_id))
-        connection.commit()
-        return transitioned
-
-    return run
-
-
 def _run_terminal_invocation(
     invocation_for: InvocationFactory,
 ) -> Callable[[Connection, str], int]:
@@ -709,78 +468,6 @@ def _run_terminal_invocation(
         transitioned = _execute_invocation(connection, invocation_for(task_id))
         connection.commit()
         return transitioned
-
-    return run
-
-
-# The locking read of a RUNNING task of one claim generation, after the task
-# advisory lock: the order of every move function.
-_LOCK_RUNNING_CONTEXT_SQL = text("""
-    SELECT retry_count, started_at, claimed_by_worker_id, worker_hostname,
-           worker_pid, worker_process_name, clock_timestamp() AS db_now
-    FROM horsies_tasks
-    WHERE id = CAST(:id AS uuid)
-      AND status = 'RUNNING'
-      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
-      AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)
-    FOR UPDATE
-""")
-
-
-def _upsert_completed_attempt(connection: Connection, task_id: str) -> None:
-    connection.execute(LOCK_TASK_SQL, {'task_id': task_id})
-    context = connection.execute(
-        _LOCK_RUNNING_CONTEXT_SQL,
-        {'id': task_id, 'wid': WORKER_ID, 'claimed_at': CLAIMED_AT},
-    ).fetchone()
-    if context is None:
-        raise RuntimeError('workflow completion could not lock its seeded task')
-    db_now = context.db_now
-    connection.execute(
-        UPSERT_TASK_ATTEMPT_SQL,
-        {
-            'task_id': task_id,
-            'attempt': (context.retry_count or 0) + 1,
-            'outcome': 'COMPLETED',
-            'will_retry': False,
-            'started_at': context.started_at or db_now,
-            'finished_at': db_now,
-            'error_code': None,
-            'error_message': None,
-            'failed_reason': None,
-            'worker_id': context.claimed_by_worker_id,
-            'worker_hostname': context.worker_hostname,
-            'worker_pid': context.worker_pid,
-            'worker_process_name': context.worker_process_name,
-        },
-    )
-
-
-_WORKFLOW_RESULT: TaskResult[int, Any] = TaskResult(ok=1)
-_WORKFLOW_RESULT_JSON = dumps_json(encode_task_result(_WORKFLOW_RESULT, int)).unwrap()
-
-
-def _run_workflow_success(
-    invocation_for: InvocationFactory,
-) -> Callable[[Connection, str], int]:
-    def run(connection: Connection, task_id: str) -> int:
-        _upsert_completed_attempt(connection, task_id)
-        _execute_invocation(connection, invocation_for(task_id))
-        connection.commit()
-
-        # Phase 2 as the worker runs it, with the capacity wake sent apart as
-        # before: the node write from the phase-2 record, promotion and the
-        # completion check.
-        _ = connection.execute(
-            NODE_FINISH_FUNCTION_SQL,
-            {'task_id': task_id, 'wake': False, 'dependents': 'READ'},
-        ).fetchall()
-        connection.execute(
-            NOTIFY_TASK_QUEUE_SQL,
-            {'c2': 'task_queue_default', 'p': f'capacity:{task_id}'},
-        )
-        connection.commit()
-        return 1
 
     return run
 
@@ -880,22 +567,8 @@ _FUSED_LARGE_CANDIDATE = _fused_invocation(
     payload_of(1024 * 1024),
     candidate=True,
 )
-_LOCKED_BASELINE = _locked_completion_invocation(payload_of(200), candidate=False)
-_LOCKED_CANDIDATE = _locked_completion_invocation(payload_of(200), candidate=True)
-_FAILURE_BASELINE = _failure_invocation(candidate=False)
-_FAILURE_CANDIDATE = _failure_invocation(candidate=True)
 _OWNED_EXPIRY_BASELINE = _owned_expiry_invocation(candidate=False)
 _OWNED_EXPIRY_CANDIDATE = _owned_expiry_invocation(candidate=True)
-_STALE_FAILURE_BASELINE = _stale_failure_invocation(candidate=False)
-_STALE_FAILURE_CANDIDATE = _stale_failure_invocation(candidate=True)
-_WORKFLOW_BASELINE = _locked_completion_invocation(
-    _WORKFLOW_RESULT_JSON,
-    candidate=False,
-)
-_WORKFLOW_CANDIDATE = _locked_completion_invocation(
-    _WORKFLOW_RESULT_JSON,
-    candidate=True,
-)
 
 SCENARIOS: tuple[Scenario, ...] = (
     SingleRowScenario(
@@ -927,34 +600,6 @@ SCENARIOS: tuple[Scenario, ...] = (
         exact_client_statements_per_operation=1,
     ),
     SingleRowScenario(
-        name='locked-completion',
-        description='task completion transition under a prior locked read',
-        p50_budget=SINGLE_ROW_P50,
-        p99_budget=SINGLE_ROW_P99,
-        payload_bytes=200,
-        seed=seed_running_tasks,
-        cleanup=delete_seeded,
-        baseline=_run_terminal_invocation(_LOCKED_BASELINE),
-        candidate=_run_terminal_invocation(_LOCKED_CANDIDATE),
-        baseline_invocation=_LOCKED_BASELINE,
-        candidate_invocation=_LOCKED_CANDIDATE,
-        exact_client_statements_per_operation=1,
-    ),
-    SingleRowScenario(
-        name='terminal-application-failure',
-        description='terminal application failure transition, retry already denied',
-        p50_budget=SINGLE_ROW_P50,
-        p99_budget=SINGLE_ROW_P99,
-        payload_bytes=len(_FAILURE_RESULT.encode('utf-8')),
-        seed=seed_running_tasks,
-        cleanup=delete_seeded,
-        baseline=_run_terminal_invocation(_FAILURE_BASELINE),
-        candidate=_run_terminal_invocation(_FAILURE_CANDIDATE),
-        baseline_invocation=_FAILURE_BASELINE,
-        candidate_invocation=_FAILURE_CANDIDATE,
-        exact_client_statements_per_operation=1,
-    ),
-    SingleRowScenario(
         name='owned-claim-expiry',
         description='deadline expiry of a worker-owned claim before user code starts',
         p50_budget=SINGLE_ROW_P50,
@@ -967,39 +612,6 @@ SCENARIOS: tuple[Scenario, ...] = (
         baseline_invocation=_OWNED_EXPIRY_BASELINE,
         candidate_invocation=_OWNED_EXPIRY_CANDIDATE,
         exact_client_statements_per_operation=1,
-    ),
-    SingleRowScenario(
-        name='stale-terminal-failure',
-        description=(
-            'one stale-running terminal branch including row lock and attempt write'
-        ),
-        p50_budget=SINGLE_ROW_P50,
-        p99_budget=SINGLE_ROW_P99,
-        payload_bytes=len(_STALE_FAILURE_RESULT.encode('utf-8')),
-        seed=seed_running_tasks,
-        cleanup=delete_seeded,
-        baseline=_run_stale_failure(candidate=False),
-        candidate=_run_stale_failure(candidate=True),
-        baseline_invocation=_STALE_FAILURE_BASELINE,
-        candidate_invocation=_STALE_FAILURE_CANDIDATE,
-        exact_client_statements_per_operation=3,
-    ),
-    SingleRowScenario(
-        name='workflow-success-phase2',
-        description=(
-            'one-node workflow success through terminal persistence, phase 2, '
-            'workflow completion and queue wake'
-        ),
-        p50_budget=SINGLE_ROW_P50,
-        p99_budget=Budget(fraction=0.15, floor_ms=2.0),
-        payload_bytes=len(_WORKFLOW_RESULT_JSON.encode('utf-8')),
-        seed=seed_workflow_success_tasks,
-        cleanup=delete_workflow_seeded,
-        baseline=_run_workflow_success(_WORKFLOW_BASELINE),
-        candidate=_run_workflow_success(_WORKFLOW_CANDIDATE),
-        baseline_invocation=_WORKFLOW_BASELINE,
-        candidate_invocation=_WORKFLOW_CANDIDATE,
-        exact_write_transactions_per_operation=2,
     ),
     BatchScenario(
         name='pending-expiry-batch',

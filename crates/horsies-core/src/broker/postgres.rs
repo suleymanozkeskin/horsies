@@ -482,7 +482,7 @@ static GET_WORKER_STATE_HISTORY: TypedStatement = TypedStatement::new(
 static LIST_EXPIRED_TASKS: TypedStatement = TypedStatement::new(
     "list_expired_tasks",
     "SELECT row_kind, task_id, task_name, queue_name, priority, sent_at, enqueued_at, good_until,
-            (EXTRACT(EPOCH FROM expired_for) * 1000)::bigint AS expired_for_ms,
+            (EXTRACT(EPOCH FROM expired_for) * 1000000)::bigint AS expired_for_us,
             list_state, row_bound
      FROM horsies_list_expired_tasks()
      ORDER BY row_position NULLS LAST",
@@ -1386,10 +1386,10 @@ impl PostgresBroker {
     }
 
     /// Rerun one retained terminal task in a broker-owned transaction on the
-    /// main core pool ([`CheckoutClass::Batch`]): the source read, the key
-    /// claim of a keyed rerun and the insert of the new row
-    /// (`core::history::rerun::operations`). A close waits for it as for a
-    /// write.
+    /// main core pool ([`CheckoutClass::Batch`]): the source read, then one
+    /// `horsies_enqueue_task` with the lineage `RERUN`, which claims the key
+    /// of a keyed rerun (`core::history::rerun::operations`). A close waits
+    /// for it as for a write.
     ///
     /// The handle checks its client family before the transaction: a
     /// database of another family, or with no family row, is
@@ -2555,7 +2555,8 @@ impl PostgresBroker {
         &self,
         stale_threshold_minutes: i32,
     ) -> BrokerResult<BoundedTaskList<StaleTaskRow>> {
-        let threshold = StaleMinutes::parse(stale_threshold_minutes)?;
+        let threshold = StaleMinutes::parse(i64::from(stale_threshold_minutes))
+            .map_err(|refused| refused.error())?;
         let minutes = threshold.minutes();
         let rows = self
             .read_main(
@@ -6314,9 +6315,9 @@ mod stale_and_expired_list_tests {
         assert_eq!(ours.len(), 1);
         assert_eq!(ours[0].id, expired);
         assert!(
-            ours[0].expired_for_ms >= 120_000,
+            ours[0].expired_for_us >= 120_000_000,
             "{}",
-            ours[0].expired_for_ms
+            ours[0].expired_for_us
         );
         assert!(ours[0].enqueued_at < ours[0].good_until);
         clean(&pool, &task_name).await;

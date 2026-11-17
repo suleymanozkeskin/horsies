@@ -70,7 +70,11 @@ from horsies.core.worker.slots import (
     SlotPoolConfig,
 )
 from horsies.core.worker.stored_timeout import TimeoutValueInvalid
-from horsies.core.worker.shared_stop import RetryPlacement, TimedOutAtKill
+from horsies.core.worker.shared_stop import (
+    NoCancelSignal,
+    RetryPlacement,
+    TimedOutAtKill,
+)
 from horsies.core.worker.thread_slots import (
     ClosedAtDeadline,
     RunCulprit,
@@ -483,6 +487,7 @@ class TestDeadline:
 
         assert await _outcome(late) == SeatDeadlineEnded(
             retry=RetryPlacement.SAME_CLASS,
+            cancel=NoCancelSignal(),
         )
         assert await _value(neighbour) == str(old_child.pid)
         next_pid = await _value(pool.submit_shared(_request('pid')))

@@ -31,7 +31,7 @@ from horsies.core.scheduler.service import Scheduler
 from horsies.core.scheduler.validation import prepare_schedules
 from horsies.core.task_decorator import effective_priority
 from horsies.core.types.result import Ok
-from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
+from horsies.core.utils.fingerprint import schedule_slot_task_id
 from tests.integration.conftest import DB_URL
 
 pytestmark = [pytest.mark.integration]
@@ -181,19 +181,7 @@ async def test_a_slot_that_an_earlier_version_enqueued_counts_as_fired(
             queue_name='default',
             task_id=slot_task_id,
             send_kind=SendKind.FIRST,
-            enqueue_sha=enqueue_fingerprint(
-                task_name=task_name,
-                queue_name='default',
-                priority=priority,
-                args_json=None,
-                kwargs_json=prepared.kwargs_json,
-                sent_at=slot,
-                good_until=None,
-                enqueue_delay_seconds=None,
-                task_options=None,
-            ),
-            args_json=None,
-            kwargs_json=prepared.kwargs_json,
+            input_json=prepared.kwargs_json,
             priority=priority,
             sent_at=slot,
             retention_class_key=resolve_queue_retention_class(
