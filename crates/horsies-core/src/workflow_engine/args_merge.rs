@@ -541,6 +541,12 @@ impl ChildBuildInput {
     pub fn text(&self) -> &str {
         &self.text
     }
+
+    /// The members of [`Self::text`] that hold `args_from` results; the
+    /// other members are the static members of the stored input.
+    pub fn args_from_keys(&self) -> &[String] {
+        &self.args_from_keys
+    }
 }
 
 /// The child build input of `merged`, the text of [`ArgsFromMerge::Merged`] for the same
