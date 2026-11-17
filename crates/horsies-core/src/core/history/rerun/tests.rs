@@ -1424,21 +1424,31 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
 
     cleanup(&pool, &[completed, failed, expired, cancelled], &[]).await;
 
+    // A detail reader removed out of band refuses the history read
+    // (SQLSTATE 42883, TASK_INFO_QUERY_FAILED); the next publication of the
+    // readers makes the read answer again.
     sqlx::query("DROP FUNCTION horsies_task_detail_staged(uuid)")
         .execute(&pool)
         .await
         .unwrap();
-    assert!(broker
+    let refused = broker
         .get_raw_result_record(Uuid::new_v4(), None)
         .await
-        .unwrap()
-        .is_none());
+        .expect_err("a removed detail reader refuses the history read");
+    assert_eq!(refused.code, crate::BrokerErrorCode::TaskInfoQueryFailed);
+    assert!(!refused.retryable);
+    assert!(refused.message.contains("42883"), "{}", refused.message);
     let mut publication = pool.begin().await.unwrap();
     StagedLoaderPublisher
         .republish(publication.as_mut())
         .await
         .unwrap();
     publication.commit().await.unwrap();
+    assert!(broker
+        .get_raw_result_record(Uuid::new_v4(), None)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
