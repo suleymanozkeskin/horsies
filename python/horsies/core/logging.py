@@ -3,7 +3,7 @@ import os
 import sys
 import threading
 from datetime import datetime
-from typing import Final
+from typing import Final, TextIO
 
 from horsies._core import refresh_log_levels
 
@@ -22,6 +22,50 @@ STATEMENT_ECHO_FORMAT: Final = '%(asctime)s %(levelname)s %(name)s %(message)s'
 the format of the handler that SQLAlchemy's ``echo=True`` adds."""
 
 _statement_echo_lock = threading.Lock()
+
+
+class _StatementEchoHandler(logging.StreamHandler[TextIO]):
+    """The stdout handler that ``enable_statement_echo`` adds to
+    ``horsies.sql``, with ``STATEMENT_ECHO_FORMAT``.
+
+    It is a type of its own, so that ``_EchoedStatementFilter`` can tell it
+    from a handler of the application.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(sys.stdout)
+        self.setFormatter(logging.Formatter(STATEMENT_ECHO_FORMAT))
+
+
+class _EchoedStatementFilter(logging.Filter):
+    """The filter of the stderr handler of ``configure_logging``.
+
+    It drops a record of the ``horsies.sql`` logger while that logger holds a
+    ``_StatementEchoHandler``: the handler has written the record to stdout
+    before the record propagates to ``horsies``. It passes every other
+    record, and every ``horsies.sql`` record while that logger holds no such
+    handler (for example, when it holds only a handler of the application).
+
+    It reads the handlers of ``horsies.sql`` at each record, so the order of
+    ``configure_logging`` and ``enable_statement_echo`` has no effect. It
+    does not change the record.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._statement_logger = logging.getLogger(STATEMENT_LOGGER_NAME)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not (
+            record.name == STATEMENT_LOGGER_NAME
+            and self._statement_logger_holds_echo_handler()
+        )
+
+    def _statement_logger_holds_echo_handler(self) -> bool:
+        return any(
+            isinstance(handler, _StatementEchoHandler)
+            for handler in self._statement_logger.handlers
+        )
 
 
 class ColoredFormatter(logging.Formatter):
@@ -123,11 +167,16 @@ def configure_logging(level: int = logging.INFO) -> None:
     Called by the CLI entrypoint and child worker processes. Color is gated by
     ``_should_use_color`` (TTY / ``NO_COLOR`` / ``FORCE_COLOR``). Library users
     should configure the 'horsies' logger via standard logging.
+
+    The stderr handler drops ``horsies.sql`` records while ``horsies.sql``
+    holds the stdout handler of ``enable_statement_echo``
+    (``_EchoedStatementFilter``), so each statement shows once, on stdout.
     """
     root = logging.getLogger('horsies')
     root.handlers.clear()
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(ColoredFormatter(use_color=_should_use_color(sys.stderr)))
+    handler.addFilter(_EchoedStatementFilter())
     root.addHandler(handler)
     root.setLevel(level)
 
@@ -139,27 +188,30 @@ def enable_statement_echo() -> None:
     The broker calls it when ``PostgresConfig.echo`` is on. Effects:
 
     - The ``horsies.sql`` logger gets the level ``INFO``.
-    - When ``horsies.sql`` has no handler, it gets one
-      ``StreamHandler(sys.stdout)`` with ``STATEMENT_ECHO_FORMAT``. A second
+    - When ``horsies.sql`` has no handler, it gets one stdout handler
+      (``_StatementEchoHandler``) with ``STATEMENT_ECHO_FORMAT``. A second
       call adds none, so the process has at most one such handler. A logger
       that has a handler of the application gets none, as in SQLAlchemy.
     - A core that runs reads the levels of the ``horsies`` loggers again
       (``refresh_log_levels``), so its next statement is forwarded. A core
       that has not started reads them when it starts.
 
-    It does not change ``propagate`` (a record also reaches the handlers of
-    ``horsies`` and of the root logger), does not remove a handler, and does
-    not change another logger. Its only failure is a defect: an exception of
-    ``logging`` itself.
+    It does not change ``propagate``: a record also reaches the handlers of
+    ``horsies`` and of the root logger. The stderr handler of
+    ``configure_logging`` drops these records while ``horsies.sql`` holds
+    the stdout handler, so the CLI shows each statement once, on stdout. A
+    handler of the application on ``horsies`` or on the root logger gets
+    them too, as with SQLAlchemy's ``echo``.
+
+    It does not remove a handler and does not change another logger. Its
+    only failure is a defect: an exception of ``logging`` itself.
     """
     logger = logging.getLogger(STATEMENT_LOGGER_NAME)
     with _statement_echo_lock:
         logger.setLevel(logging.INFO)
         match logger.handlers:
             case []:
-                handler = logging.StreamHandler(sys.stdout)
-                handler.setFormatter(logging.Formatter(STATEMENT_ECHO_FORMAT))
-                logger.addHandler(handler)
+                logger.addHandler(_StatementEchoHandler())
             case _:
                 pass
     refresh_log_levels()
