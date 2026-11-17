@@ -44,6 +44,7 @@ from horsies.core.lifecycle.commands import (
 from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.worker.child_runner import _handle_workflow_stop_before_start
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_command_fingerprint
 
@@ -57,14 +58,14 @@ _WORKER_ID = 'fence-worker-1'
 # ---------------------------------------------------------------------------
 
 
-def _make_worker(engine: AsyncEngine) -> Worker:
+def _make_worker(engine: AsyncEngine, broker: PostgresBroker) -> Worker:
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
         dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
-    worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
+    worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg, broker=broker)
     worker.worker_instance_id = _WORKER_ID
     return worker
 
@@ -228,6 +229,7 @@ def _generations() -> tuple[datetime, datetime]:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_t02_stale_generation_does_not_abandon_reclaimed_task(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
@@ -237,7 +239,7 @@ async def test_t02_stale_generation_does_not_abandon_reclaimed_task(
     await _link_to_workflow(session, task_id, wf_status='PAUSED')
     await session.commit()
 
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     result = await worker._filter_nonrunnable_workflow_tasks(
         _dispatch_rows((task_id, dispatched)),
     )
@@ -251,6 +253,7 @@ async def test_t02_stale_generation_does_not_abandon_reclaimed_task(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_t02_matching_generation_abandons_the_task(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
@@ -260,7 +263,7 @@ async def test_t02_matching_generation_abandons_the_task(
     await _link_to_workflow(session, task_id, wf_status='PAUSED')
     await session.commit()
 
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     await worker._filter_nonrunnable_workflow_tasks(
         _dispatch_rows((task_id, dispatched)),
     )
@@ -276,6 +279,7 @@ async def test_t02_matching_generation_abandons_the_task(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_t03_stale_generation_does_not_cancel_reclaimed_task(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
@@ -284,7 +288,7 @@ async def test_t03_stale_generation_does_not_cancel_reclaimed_task(
     await _link_to_workflow(session, task_id, wf_status='CANCELLED')
     await session.commit()
 
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     await worker._filter_nonrunnable_workflow_tasks(
         _dispatch_rows((task_id, dispatched)),
     )
@@ -295,6 +299,7 @@ async def test_t03_stale_generation_does_not_cancel_reclaimed_task(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_t03_matching_generation_cancels_the_task(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
@@ -303,7 +308,7 @@ async def test_t03_matching_generation_cancels_the_task(
     await _link_to_workflow(session, task_id, wf_status='CANCELLED')
     await session.commit()
 
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     await worker._filter_nonrunnable_workflow_tasks(
         _dispatch_rows((task_id, dispatched)),
     )
@@ -314,6 +319,7 @@ async def test_t03_matching_generation_cancels_the_task(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_batch_fences_each_task_on_its_own_generation(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
@@ -328,7 +334,7 @@ async def test_batch_fences_each_task_on_its_own_generation(
     await _link_to_workflow(session, stale_id, wf_status='PAUSED')
     await session.commit()
 
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     await worker._filter_nonrunnable_workflow_tasks(
         _dispatch_rows((fresh_id, dispatched), (stale_id, dispatched)),
     )
@@ -345,6 +351,7 @@ async def test_batch_fences_each_task_on_its_own_generation(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_real_claim_path_arms_the_fence(
     engine: AsyncEngine,
+    broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
@@ -377,7 +384,7 @@ async def test_real_claim_path_arms_the_fence(
     await _link_to_workflow(session, task_id, wf_status='PAUSED')
     await session.commit()
 
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, broker)
     sf = async_sessionmaker(engine, expire_on_commit=False)
     async with sf() as claim_session:
         rows = await worker._claim_batch_locked(claim_session, 'default', 10)

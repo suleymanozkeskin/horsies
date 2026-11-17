@@ -56,6 +56,13 @@ WORKFLOW_ENGINE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         core_methods=('recover_workflows_async',),
     ),
     DualRunOperation(
+        name='workflow claim-time settle',
+        production_path='horsies.core.worker.claiming:ClaimMixin._filter_nonrunnable_workflow_tasks',
+        reference_path='tests.dualrun.reference.claim_settle_caller:filter_nonrunnable_workflow_tasks',
+        mode=PoolMode(),
+        core_methods=('settle_claimed_workflow_tasks_async',),
+    ),
+    DualRunOperation(
         name='workflow pause',
         production_path='horsies.core.workflows.lifecycle:pause_workflow',
         reference_path='tests.dualrun.reference.workflow_pause_caller:pause_workflow',
