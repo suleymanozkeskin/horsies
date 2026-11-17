@@ -716,6 +716,7 @@ fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
         task_name: claimed.task_name.clone(),
         worker_id: "worker-1".to_owned(),
         claimed_at: claimed.claimed_at,
+        orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
         input: TaskInputText::new("{}".to_owned()),
     }))
@@ -752,6 +753,7 @@ fn pool_config(command: ChildCommand) -> IsolatedPoolConfig {
         command,
         init: init_frame(),
         worker_id: "worker-1".to_owned(),
+        orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         pending_limit: NonZeroUsize::new(4).unwrap(),
         tasks_per_child: TaskLimit::Off,
         memory_per_child: MemoryLimit::Off,

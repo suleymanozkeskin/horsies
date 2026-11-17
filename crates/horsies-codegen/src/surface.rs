@@ -3170,7 +3170,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "RunFrame",
         doc: "Run one task in an isolated child. The parent holds the deadline.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID"), property("task_name", "str"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("work", "Literal['RUN'] | StoredOptionsRefused"), property("input", "str")],
+        properties: &[property("task_id", "uuid.UUID"), property("task_name", "str"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "Literal['RUN'] | StoredOptionsRefused"), property("input", "str")],
         methods: &[],
     },
     StubClass {
@@ -3191,7 +3191,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "SharedRunFrame",
         doc: "Run one task on a free seat of a shared child.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("dispatch", "int"), property("task_id", "uuid.UUID"), property("task_name", "str"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("work", "AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused"), property("input", "str")],
+        properties: &[property("dispatch", "int"), property("task_id", "uuid.UUID"), property("task_name", "str"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused"), property("input", "str")],
         methods: &[],
     },
     StubClass {

@@ -8,7 +8,7 @@
 //! | `Reported(result)`, a value | a plain task: its row in the next batch of the finalize batcher; a workflow task: the workflow success |
 //! | `Reported(result)`, a task error | the failed attempt, with the retry the policy admits for its code |
 //! | `Reported(result)` that does not read as the envelope | the failed attempt, `WORKER_SERIALIZATION_ERROR`, no retry |
-//! | `Reported(stopped before running)` | none; an expired workflow task replays phase 2; an unconfirmed start releases the claim (`horsies_release_claims` with placement `SAME_CLASS`); a task whose node is not linked is cancelled as an owned orphan (`horsies_cancel_owned_orphan`) when the app's `auto_terminate_orphaned_workflow_tasks` is on |
+//! | `Reported(stopped before running)` | none; an expired workflow task replays phase 2; an unconfirmed start releases the claim (`horsies_release_claims` with placement `SAME_CLASS`); the child's stop before start already wrote every other stop, the orphan cancel included |
 //! | `Reported(worker failure)` | the failed attempt, `BROKER_ERROR`, no retry |
 //! | `TimedOut`, `KilledForLoop`, `Crashed` | the failed attempt with `TASK_TIMEOUT`, the loop code or `WORKER_CRASHED`, the retry the policy admits, at the placement of the end, under the claimed-row rule `RELEASE`: a row that is still CLAIMED goes back to the queue in the same statement |
 //! | `EndUnknown` | none: stale recovery or the lease decides the row |
@@ -34,11 +34,10 @@ use crate::broker::attempt_writes::{
 use crate::broker::claims::{
     release_claims, ReleaseBatch, ReleaseClaims, ReleaseOutcome, ReleasePlacement,
 };
-use crate::broker::terminalization::terminalize;
 use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::config::retention::RetentionConfig;
-use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
+use crate::core::lifecycle::{OwnedClaim, TerminalizationOutcome};
 use crate::core::task::error::{BuiltInTaskCode, OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
 use crate::db::Transience;
@@ -63,11 +62,6 @@ pub const TIMEOUT_WRITE_MAX_RETRIES: u32 = 3;
 pub const CRASH_RECOVERY_MAX_RETRIES: u32 = 3;
 /// Sends of the release of a claim that no child took, the first included.
 pub const RELEASE_SENDS: u32 = 3;
-
-// Whether the worker cancels a claimed workflow task whose node is not
-// linked to it (the app's `auto_terminate_orphaned_workflow_tasks`). The stop
-// before start of a workflow task takes the same setting.
-pub use crate::broker::OrphanSelfHeal;
 
 /// The stage of an outcome write. Each stage has its own retry bound
 /// (Python `_max_retries_of`).
@@ -105,15 +99,9 @@ enum PhaseOneOutcome {
 
 /// One write of phase 1, sent again on a retryable database error.
 enum PhaseOneWrite {
-    Success {
-        value: Vec<u8>,
-    },
-    Undecodable {
-        diagnosis: String,
-    },
+    Success { value: Vec<u8> },
+    Undecodable { diagnosis: String },
     Failure(FinishFailedAttempt),
-    /// The cancel of a claimed workflow task whose node is not linked.
-    CancelOrphan,
 }
 
 /// What the failed-attempt statement does with a row that is still CLAIMED
@@ -407,7 +395,6 @@ pub struct OutcomeWriter {
     payload_policy: PayloadPolicy,
     retention: RetentionConfig,
     successes: FinalizeBatcher<WorkerPoolSuccessWrite>,
-    orphan_self_heal: OrphanSelfHeal,
 }
 
 impl OutcomeWriter {
@@ -418,7 +405,6 @@ impl OutcomeWriter {
         payload_policy: PayloadPolicy,
         retention: RetentionConfig,
         successes: FinalizeBatcher<WorkerPoolSuccessWrite>,
-        orphan_self_heal: OrphanSelfHeal,
     ) -> Self {
         Self {
             broker,
@@ -427,7 +413,6 @@ impl OutcomeWriter {
             payload_policy,
             retention,
             successes,
-            orphan_self_heal,
         }
     }
 
@@ -613,56 +598,8 @@ impl OutcomeWriter {
                         }
                     });
             }
-            (PhaseOneWrite::CancelOrphan, _) => self.cancel_orphan(task).await,
         };
         written.map(PhaseOneOutcome::Finalize)
-    }
-
-    /// Cancel a claimed workflow task whose node is not linked to it, fenced
-    /// to this claim (Python `python/horsies/core/worker/finalize.py:1216-1260`,
-    /// the `CancelOwnedOrphan` decision of `_persist_task_terminal_state`).
-    /// The function judges the link again under its own lock: a task that
-    /// is no longer a terminable owned orphan is left as it is. Nothing is
-    /// owed to phase 2 in either case.
-    ///
-    /// Errors: a [`FinalizeError`] of phase 1, retryable when the database
-    /// error may clear.
-    async fn cancel_orphan(&self, task: &ClaimedTask) -> Result<FinalizeOutcome, FinalizeError> {
-        let command = TerminalizationCommand::CancelOwnedOrphan {
-            task_id: task.task_id,
-            fence: fence(task, &self.worker_id),
-        };
-        let cancelled = match self.broker.core_pools_for_write() {
-            Ok((open, _write)) => {
-                terminalize(open.main(), self.broker.statement_log(), &command).await
-            }
-            Err(error) => Err(error),
-        };
-        let outcomes = cancelled.map_err(|error| FinalizeError {
-            stage: FinalizeStage::Phase1Persist,
-            task_id: task.task_id,
-            message: format!("Failed to terminate orphaned workflow task: {error}"),
-            retryable: error.is_retryable(),
-        })?;
-        match outcomes.first() {
-            Some(TerminalizationOutcome::Applied { .. }) => tracing::info!(
-                task_id = %task.task_id,
-                "Task {} cancelled: orphaned workflow task (no live workflow_task linkage)",
-                task.task_id,
-            ),
-            Some(
-                TerminalizationOutcome::AlreadyApplied { .. }
-                | TerminalizationOutcome::LostClaim { .. }
-                | TerminalizationOutcome::SourceStateConflict { .. }
-                | TerminalizationOutcome::TaskAbsent { .. },
-            )
-            | None => tracing::debug!(
-                task_id = %task.task_id,
-                "Task {} was no longer a terminable owned orphan",
-                task.task_id,
-            ),
-        }
-        Ok(FinalizeOutcome::Finalized)
     }
 
     /// The success of a plain task: its row joins the next batch of the
@@ -884,31 +821,22 @@ impl OutcomeWriter {
     ///   claim generation. A row outside the fence, such as a start that
     ///   committed before its reply was lost, is left to recovery. A release
     ///   that fails is logged, and the claim lease returns the row.
-    /// - A task whose node is not linked is cancelled as an owned orphan when
-    ///   the app turns the self-heal on; with it off the row stays CLAIMED
-    ///   for inspection.
+    /// - A task whose node is not linked was not cancelled by the child's
+    ///   stop before start, because the app turns the self-heal off: the row
+    ///   stays CLAIMED for inspection.
     /// - Every other stop wrote what its case needs in the child; an
     ///   orphan that the child's stop function cancelled owes nothing more.
     async fn after_stop(&self, task: &ClaimedTask, reason: StopReason) -> Settlement {
-        match (reason, task.kind.is_workflow_task(), self.orphan_self_heal) {
-            (StopReason::TaskExpired, true, _) => {
+        match (reason, task.kind.is_workflow_task()) {
+            (StopReason::TaskExpired, true) => {
                 self.phase_two(task, false, PhaseTwoForm::NotKnown).await;
                 Settlement::NothingOwed
             }
-            (StopReason::OwnershipUnconfirmed, _, _) => {
+            (StopReason::OwnershipUnconfirmed, _) => {
                 self.release(task, "the start of the attempt was not confirmed")
                     .await
             }
-            (StopReason::NodeNotLinked, _, OrphanSelfHeal::On) => {
-                self.phase_one(
-                    task,
-                    PhaseOneWrite::CancelOrphan,
-                    ClaimedRowRule::Refuse,
-                    WriteStage::PhaseOne,
-                )
-                .await
-            }
-            (StopReason::NodeNotLinked, _, OrphanSelfHeal::Off) => {
+            (StopReason::NodeNotLinked, _) => {
                 tracing::debug!(
                     task_id = %task.task_id,
                     "Task {} terminalization classified as no-op: ORPHAN_SELF_HEAL_DISABLED",
@@ -921,7 +849,6 @@ impl OutcomeWriter {
                 | StopReason::ClaimLost
                 | StopReason::WorkflowStopped
                 | StopReason::OrphanCancelled,
-                _,
                 _,
             ) => Settlement::NothingOwed,
         }
