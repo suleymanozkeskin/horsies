@@ -14,12 +14,17 @@ from horsies.core.types.result import Err, Ok, Result
 from tests.dualrun.catalog import (
     ATTEMPT_ARCHIVE,
     LEAF_NAME,
+    NODE_RESULT,
     RUN_CLOCK,
     TASK_OPTIONS,
     WORKER_ID,
+    WORKFLOW_ERROR,
+    WORKFLOW_ID,
 )
 from tests.dualrun.cells import (
     NormalizeError,
+    PendingId,
+    PendingText,
     RawRow,
     RawSnapshot,
     RawTable,
@@ -27,6 +32,7 @@ from tests.dualrun.cells import (
     UnreadableJson,
     UnsupportedStoredFormat,
     generated_name,
+    text_with_ids,
 )
 from tests.dualrun.compare import ColumnDifference, compare_snapshots
 from tests.dualrun.normalize import NormalizedSnapshot, normalize_snapshot
@@ -56,6 +62,7 @@ from tests.dualrun.values import (
     ExactValue,
     IdLabel,
     JsonDocument,
+    LabelledText,
     LiteralTime,
     NormalizedValue,
     NullValue,
@@ -337,6 +344,140 @@ def test_a_null_document_is_null() -> None:
     snapshot = _snapshot([(*row[:2], None, *row[3:])], RUN_A)
 
     assert _cell(snapshot, 'doc') == NullValue()
+
+
+# ---- Ids inside a text ----
+
+WORKFLOWS: Final = SnapshotCatalog(
+    tables=(
+        TableRules(
+            name='workflows',
+            columns=(
+                ColumnSpec(name='id', rule=WORKFLOW_ID),
+                ColumnSpec(name='name', rule=Exact()),
+                ColumnSpec(name='error', rule=WORKFLOW_ERROR),
+                ColumnSpec(name='result', rule=NODE_RESULT),
+            ),
+            order_by=('name',),
+            identity=('id',),
+        ),
+    ),
+)
+"""A parent that a failed child paused, and the child: the error of the
+parent and the result of its node name the child."""
+
+CHILD_A: Final = '0190b2c4-1a2b-7c3d-8e4f-5a6b7c8d9e01'
+PARENT_A: Final = '0190b2c4-1a2b-7c3d-8e4f-5a6b7c8d9e02'
+CHILD_B: Final = '0191aaaa-bbbb-7ccc-8ddd-eeeeffff0001'
+PARENT_B: Final = '0191aaaa-bbbb-7ccc-8ddd-eeeeffff0002'
+
+
+def _parent_and_child(parent: str, child: str, named: str) -> list[RawRow]:
+    error = json.dumps(
+        {
+            'error_code': 'SUBWORKFLOW_FAILED',
+            'message': f'Subworkflow {named} failed',
+            'sub_workflow_id': child,
+        }
+    )
+    result = json.dumps(
+        {
+            '__h_task_result__': True,
+            'ok': None,
+            'err': {
+                'error_code': 'SUBWORKFLOW_FAILED',
+                'message': f'Subworkflow {named} failed with status FAILED',
+                'sub_workflow_id': child,
+            },
+        }
+    )
+    return [(parent, 'parent', error, result), (child, 'child', None, None)]
+
+
+def _workflows(rows: Sequence[RawRow], run: datetime) -> NormalizedSnapshot:
+    raw = RawSnapshot(tables=(RawTable(name='workflows', rows=tuple(rows)),))
+    match normalize_snapshot(raw, WORKFLOWS, _window(run)):
+        case Ok(snapshot):
+            return snapshot
+        case Err(error):
+            raise AssertionError(f'normalize failed: {error}')
+
+
+def test_a_child_id_in_the_error_and_the_node_result_compares_by_its_label() -> None:
+    reference = _workflows(_parent_and_child(PARENT_A, CHILD_A, CHILD_A), RUN_A)
+    candidate = _workflows(_parent_and_child(PARENT_B, CHILD_B, CHILD_B), RUN_B)
+
+    assert compare_snapshots(reference, candidate).entries == ()
+    table = reference.table('workflows')
+    child_row, parent_row = table.rows  # ordered by name: child, parent
+    child = IdLabel(family=IdFamily.WORKFLOW, ordinal=1)
+    assert child_row[table.rules.position('id')] == child
+    error = _leaves(parent_row[table.rules.position('error')])
+    result = _leaves(parent_row[table.rules.position('result')])
+    # keys sorted: message, then sub_workflow_id
+    assert error == [
+        LabelledText(parts=('Subworkflow ', child, ' failed')),
+        child,
+    ]
+    assert result == [
+        LabelledText(parts=('Subworkflow ', child, ' failed with status FAILED')),
+        child,
+    ]
+
+
+def test_a_message_that_names_another_workflow_is_a_difference() -> None:
+    reference = _workflows(_parent_and_child(PARENT_A, CHILD_A, CHILD_A), RUN_A)
+    candidate = _workflows(_parent_and_child(PARENT_B, CHILD_B, PARENT_B), RUN_B)
+
+    assert [
+        entry.column
+        for entry in compare_snapshots(reference, candidate).entries
+        if isinstance(entry, ColumnDifference)
+    ] == ['error', 'result']
+
+
+def test_a_text_path_that_holds_no_text_is_an_error() -> None:
+    raw = RawSnapshot(
+        tables=(
+            RawTable(
+                name='workflows',
+                rows=((PARENT_A, 'parent', '{"message": 12}', None),),
+            ),
+        ),
+    )
+
+    match normalize_snapshot(raw, WORKFLOWS, _window(RUN_A)):
+        case Err(UnreadableJson(table='workflows', column='error', cause=cause)):
+            assert 'text path' in cause
+        case other:
+            raise AssertionError(f'expected UnreadableJson, got {other}')
+
+
+def _id(raw: str) -> PendingId:
+    return PendingId(raw=raw, family=IdFamily.WORKFLOW)
+
+
+@pytest.mark.parametrize(
+    ('text', 'parts'),
+    [
+        pytest.param('no id here', ('no id here',), id='no-id'),
+        pytest.param('', (), id='empty'),
+        pytest.param(CHILD_A, (_id(CHILD_A),), id='only-an-id'),
+        pytest.param(
+            f'{CHILD_A} and {PARENT_A}.',
+            (_id(CHILD_A), ' and ', _id(PARENT_A), '.'),
+            id='two-ids',
+        ),
+        pytest.param(CHILD_A.upper(), (CHILD_A.upper(),), id='upper-case'),
+        pytest.param(f'x{CHILD_A}', (f'x{CHILD_A}',), id='letter-before'),
+        pytest.param(f'{CHILD_A}-1', (f'{CHILD_A}-1',), id='hyphen-after'),
+        pytest.param(f'{CHILD_A}0', (f'{CHILD_A}0',), id='digit-after'),
+    ],
+)
+def test_text_with_ids_takes_only_canonical_lower_case_uuids(
+    text: str, parts: tuple[str | PendingId, ...]
+) -> None:
+    assert text_with_ids(text, IdFamily.WORKFLOW) == PendingText(parts=parts)
 
 
 # ---- Attempt archive ----

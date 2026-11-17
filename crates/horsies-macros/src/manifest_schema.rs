@@ -15,6 +15,12 @@
 //! `untagged`, `content`, `transparent`, `try_from`, `from`, `into`, and
 //! any serde attribute on a field or a variant) are refused: such a type
 //! implements `ManifestValue` by hand.
+//!
+//! One serde attribute of a variant is read: `deserialize_with` with a
+//! function named `no_member_after_the_tag`, on a unit variant of a tagged
+//! enum. serde skips the members after the tag of such a variant, also
+//! under `deny_unknown_fields`; the function refuses them. The wire form
+//! stays the tag alone.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -110,10 +116,15 @@ fn tagged_shape(
 ) -> syn::Result<TokenStream> {
     let mut variants = Vec::with_capacity(data.variants.len());
     for variant in &data.variants {
-        refuse_serde_attributes(&variant.attrs)?;
         let fields = match &variant.fields {
-            Fields::Unit => quote!(&[]),
-            Fields::Named(fields) => field_list(fields)?,
+            Fields::Unit => {
+                check_unit_variant_attributes(&variant.attrs)?;
+                quote!(&[])
+            }
+            Fields::Named(fields) => {
+                refuse_serde_attributes(&variant.attrs)?;
+                field_list(fields)?
+            }
             Fields::Unnamed(_) => {
                 return Err(syn::Error::new_spanned(
                     variant,
@@ -245,5 +256,136 @@ fn refuse_serde_attributes(attrs: &[Attribute]) -> syn::Result<()> {
             "ManifestSchema does not read serde attributes of a field or a variant",
         )),
         None => Ok(()),
+    }
+}
+
+/// The name of the function that refuses the members after the tag of a
+/// unit variant (`horsies_core::core::config::no_member_after_the_tag`).
+const NO_MEMBER_AFTER_THE_TAG: &str = "no_member_after_the_tag";
+
+/// The serde attributes of a unit variant of a tagged enum: none, or
+/// `deserialize_with` with a function named [`NO_MEMBER_AFTER_THE_TAG`].
+/// That function refuses a member after the tag and keeps the wire form;
+/// any other serde attribute is refused.
+fn check_unit_variant_attributes(attrs: &[Attribute]) -> syn::Result<()> {
+    for attr in attrs.iter().filter(|attr| attr.path().is_ident("serde")) {
+        attr.parse_nested_meta(|meta| match meta.path.is_ident("deserialize_with") {
+            true => {
+                let value: LitStr = meta.value()?.parse()?;
+                let function = value.value();
+                let name = match function.rsplit_once("::") {
+                    Some((_module, name)) => name,
+                    None => function.as_str(),
+                };
+                match name == NO_MEMBER_AFTER_THE_TAG {
+                    true => Ok(()),
+                    false => Err(syn::Error::new_spanned(
+                        &value,
+                        "ManifestSchema reads deserialize_with on a unit variant only with \
+                         the function no_member_after_the_tag",
+                    )),
+                }
+            }
+            false => Err(meta.error(
+                "ManifestSchema reads only deserialize_with = \"no_member_after_the_tag\" \
+                 on a unit variant",
+            )),
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_manifest_schema;
+
+    /// The derive output as text without spaces, or the error message.
+    fn derive_text(input: syn::DeriveInput) -> Result<String, String> {
+        derive_manifest_schema(input)
+            .map(|tokens| tokens.to_string().replace(' ', ""))
+            .map_err(|error| error.to_string())
+    }
+
+    /// A unit variant of a tagged enum with `deserialize_with` and the
+    /// function `no_member_after_the_tag`, by its name or by a path, has
+    /// the Python form of the same variant without the attribute.
+    #[test]
+    fn a_unit_variant_that_refuses_a_member_after_the_tag_keeps_its_form() {
+        let plain = derive_text(syn::parse_quote! {
+            #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+            enum Recycle {
+                Never,
+                AfterSeconds { seconds: u32 },
+            }
+        })
+        .expect("the derive accepts the enum");
+        for function in [
+            "no_member_after_the_tag",
+            "crate::core::config::no_member_after_the_tag",
+        ] {
+            let function = syn::LitStr::new(function, proc_macro2::Span::call_site());
+            let marked = derive_text(syn::parse_quote! {
+                #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+                enum Recycle {
+                    #[serde(deserialize_with = #function)]
+                    Never,
+                    AfterSeconds { seconds: u32 },
+                }
+            });
+            assert_eq!(marked, Ok(plain.clone()), "{}", function.value());
+        }
+    }
+
+    /// Every other serde attribute of a variant is refused: another
+    /// function or another key on a unit variant of a tagged enum, any
+    /// attribute on a variant with fields, and any attribute on a variant
+    /// of an enum without a tag.
+    #[test]
+    fn every_other_serde_attribute_of_a_variant_is_refused() {
+        let cases: [(syn::DeriveInput, &str); 4] = [
+            (
+                syn::parse_quote! {
+                    #[serde(tag = "kind")]
+                    enum Recycle {
+                        #[serde(deserialize_with = "read_never")]
+                        Never,
+                    }
+                },
+                "only with the function no_member_after_the_tag",
+            ),
+            (
+                syn::parse_quote! {
+                    #[serde(tag = "kind")]
+                    enum Recycle {
+                        #[serde(rename = "NEVER")]
+                        Never,
+                    }
+                },
+                "reads only deserialize_with",
+            ),
+            (
+                syn::parse_quote! {
+                    #[serde(tag = "kind")]
+                    enum Recycle {
+                        #[serde(deserialize_with = "no_member_after_the_tag")]
+                        AfterSeconds { seconds: u32 },
+                    }
+                },
+                "does not read serde attributes of a field or a variant",
+            ),
+            (
+                syn::parse_quote! {
+                    enum Mode {
+                        #[serde(deserialize_with = "no_member_after_the_tag")]
+                        Observe,
+                    }
+                },
+                "does not read serde attributes of a field or a variant",
+            ),
+        ];
+        for (input, expected) in cases {
+            let refused = derive_text(input).expect_err("the derive refuses the attribute");
+            assert!(refused.contains(expected), "{refused}");
+        }
     }
 }

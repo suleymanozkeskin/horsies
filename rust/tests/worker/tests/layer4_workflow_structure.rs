@@ -1,805 +1,338 @@
-#![allow(clippy::unwrap_used)]
-
-//! Layer 4 e2e tests: workflow structure (DAG patterns).
-//!
-//! Mirrors Python's `tests/e2e/test_layer4_workflow_structure.py`.
-//!
-//! Run with:
-//!   cargo test -p horsies-test-worker --test layer4_workflow_structure -- --test-threads=1
+//! Layer 4: workflow structure (Python
+//! `tests/e2e/test_layer4_workflow_structure.py`). The specs are built in
+//! the test process with the typed DSL and started with `Horsies::start`;
+//! the worker runs their nodes.
 
 use std::time::Duration;
 
-use serial_test::serial;
-use sqlx::PgPool;
-use uuid::Uuid;
-
-use std::sync::Arc;
-
-use horsies::{Horsies, PostgresBroker, WorkflowHandle, WorkflowSpecBuilder};
-use horsies_test_support::{
-    db,
-    e2e::{
-        db_poll::{wait_for_task_status, wait_for_workflow_terminal},
-        worker::start_worker,
-        workflow::{get_workflow_task_status, get_workflow_tasks, wait_for_workflow_completion},
-    },
-    fixtures,
+use chrono::Utc;
+use horsies::{
+    HorsiesError, OutputlessResults, TaskNode, TaskOutcome, WorkflowHandle, WorkflowSpecBuilder,
 };
-use horsies_test_worker::tasks::{wf_fail, wf_slow_step, wf_step};
+use horsies_test_support::rows::{self, NodeRow};
+use horsies_test_worker::harness::{within, Suite};
+use horsies_test_worker::instance::{Instance, Profile};
+use horsies_test_worker::tasks::workflow;
+use serde::de::DeserializeOwned;
+use serial_test::serial;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+const BIN: &str = env!("CARGO_BIN_EXE_horsies-test-worker");
 
-fn ensure_tasks_registered() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let mut app = Horsies::new(fixtures::default_app_config()).unwrap();
-        horsies_test_worker::tasks::register(&mut app).unwrap();
-    });
+/// The longest wait for a workflow to end.
+const WORKFLOW_WAIT: Duration = Duration::from_secs(30);
+
+fn builder(name: &str) -> WorkflowSpecBuilder {
+    let mut builder = WorkflowSpecBuilder::new(name);
+    let _key = builder.definition_key(format!("tests.e2e.{name}.v1"));
+    builder
 }
 
-async fn pool() -> PgPool {
-    ensure_tasks_registered();
-    let p = db::create_pool().await;
-    db::run_migrations(&p).await;
-    p
+/// A step node `id` that returns `completed_<id>`.
+fn step(suite: &Suite, id: &str) -> TaskNode<String, workflow::step::Input> {
+    suite
+        .function(workflow::step::handle)
+        .node()
+        .node_id(id)
+        .set(workflow::step::params::step(), id.to_owned())
+        .expect("a step input")
 }
 
-fn db_url() -> String {
-    db::db_url()
+/// A slow step node `id` that runs `delay_ms`.
+fn slow_step(
+    suite: &Suite,
+    id: &str,
+    delay_ms: u64,
+) -> TaskNode<String, workflow::slow_step::Input> {
+    suite
+        .function(workflow::slow_step::handle)
+        .node()
+        .node_id(id)
+        .set(workflow::slow_step::params::step(), id.to_owned())
+        .and_then(|node| node.set(workflow::slow_step::params::delay_ms(), delay_ms))
+        .expect("a slow step input")
 }
 
-fn write_prefetch_config() -> tempfile::NamedTempFile {
-    use std::io::Write;
-
-    let url = db_url();
-    let config = serde_json::json!({
-        "queue_mode": "default",
-        "broker": {
-            "database_url": url,
-            "pool_pre_ping": true,
-            "pool_size": 5,
-            "max_overflow": 5,
-            "pool_timeout": 10,
-            "pool_recycle": 600,
-            "echo": false
-        },
-        "prefetch_buffer": 2,
-        "claim_lease_ms": 5000,
-        "max_claim_renew_age_ms": 180000,
-        "recovery": {
-            "auto_requeue_stale_claimed": true,
-            "claimed_stale_threshold_ms": 120000,
-            "auto_fail_stale_running": true,
-            "running_stale_threshold_ms": 300000,
-            "check_interval_ms": 30000,
-            "runner_heartbeat_interval_ms": 30000,
-            "claimer_heartbeat_interval_ms": 1000
-        },
-        "resend_on_transient_err": false
-    });
-
-    let mut f = tempfile::NamedTempFile::new().unwrap();
-    f.write_all(serde_json::to_string_pretty(&config).unwrap().as_bytes())
-        .unwrap();
-    f.flush().unwrap();
-    f
+/// A node `id` that fails with `DELIBERATE_FAILURE`.
+fn fail(suite: &Suite, id: &str) -> TaskNode<i64, ()> {
+    suite.function(workflow::fail::handle).node().node_id(id)
 }
 
-async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> Uuid {
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
-    let mut app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
-    let handle: WorkflowHandle<serde_json::Value> = app
-        .start(spec.clone())
+async fn start<T: DeserializeOwned + 'static>(
+    suite: &Suite,
+    builder: WorkflowSpecBuilder,
+) -> WorkflowHandle<T> {
+    let spec = builder
+        .build()
+        .unwrap_or_else(|refused: HorsiesError| panic!("build the spec: {refused}"));
+    suite
+        .app
+        .start::<T>(&spec)
         .await
-        .unwrap_or_else(|e| panic!("app.start failed: {}", e));
-    handle.workflow_id().to_owned()
+        .unwrap_or_else(|refused| panic!("start the workflow: {refused}"))
 }
 
-async fn enqueue_blocker_task(pool: &PgPool, duration_ms: i64) -> Uuid {
-    let broker = PostgresBroker::from_pool(pool.clone());
-    broker
-        .enqueue(
-            "e2e_slow",
-            None,
-            Some(&format!(r#"{{"duration_ms":{duration_ms}}}"#)),
-            "default",
-            100,
-            None,
-            None,
-            None,
-            None,
-            &format!("test-{}", uuid::Uuid::new_v4()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+/// The nodes of a workflow once it ended with `status`.
+async fn ended_nodes<T>(suite: &Suite, handle: &WorkflowHandle<T>, status: &str) -> Vec<NodeRow> {
+    let client = suite.client().await;
+    let ended = rows::wait_for_workflow_end(&client, handle.workflow_id(), WORKFLOW_WAIT).await;
+    assert_eq!(ended, status, "the workflow status");
+    rows::workflow_nodes(&client, handle.workflow_id()).await
+}
+
+fn statuses(nodes: &[NodeRow]) -> Vec<&str> {
+    nodes.iter().map(|node| node.status.as_str()).collect()
+}
+
+/// The failure code of a workflow read through its handle.
+async fn failed_code<T: DeserializeOwned + Clone + std::fmt::Debug + 'static>(
+    handle: &WorkflowHandle<T>,
+) -> String {
+    match handle
+        .get(within(WORKFLOW_WAIT))
         .await
-        .unwrap()
+        .expect("read the workflow")
+    {
+        TaskOutcome::Failed(error) => error.code().text(),
+        TaskOutcome::Succeeded(value) => panic!("the workflow succeeded with {value:?}"),
+    }
 }
 
-// ---------------------------------------------------------------------------
-// L4.1: Linear Chain (A → B → C)
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer4_workflow_structure.py::test_linear_workflow`.
 #[tokio::test]
 #[serial]
 async fn test_linear_workflow() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_linear");
-    let a = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B"}"#.to_owned())
-            .waits_for(a),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C"}"#.to_owned())
-            .waits_for(bnode),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    let tasks = get_workflow_tasks(&pool, &wf_id).await;
-    assert_eq!(tasks.len(), 3);
-    for t in &tasks {
-        assert_eq!(t.status, "COMPLETED");
-    }
-
-    // Verify sequential: B started after A completed, C after B.
-    assert!(
-        tasks[1].started_at.unwrap() > tasks[0].completed_at.unwrap(),
-        "B should start after A completes"
-    );
-    assert!(
-        tasks[2].started_at.unwrap() > tasks[1].completed_at.unwrap(),
-        "C should start after B completes"
-    );
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("linear");
+    let a = spec.task(step(&suite, "a"));
+    let b = spec.task(step(&suite, "b").waits_for(a));
+    let c = spec.task(step(&suite, "c").waits_for(b));
+    let _output = spec.output(c);
+    let handle = start::<String>(&suite, spec).await;
+    let outcome = handle
+        .get(within(WORKFLOW_WAIT))
+        .await
+        .expect("read the workflow");
+    assert_eq!(outcome, TaskOutcome::Succeeded("completed_c".to_owned()));
+    let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
+    assert_eq!(statuses(&nodes), vec!["COMPLETED"; 3]);
+    assert!(nodes[0].started_at < nodes[1].started_at);
+    assert!(nodes[1].started_at < nodes[2].started_at);
 }
 
-// ---------------------------------------------------------------------------
-// L4.2: Fan-Out (root → B, C, D)
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer4_workflow_structure.py::test_fanout_parallel_execution`.
 #[tokio::test]
 #[serial]
 async fn test_fanout_parallel_execution() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_fanout");
-    let root = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("root")
-            .kwargs(r#"{"step":"root"}"#.to_owned()),
-    );
-    b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B","delay_ms":500}"#.to_owned())
-            .waits_for(root),
-    );
-    b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C","delay_ms":500}"#.to_owned())
-            .waits_for(root),
-    );
-    b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("d")
-            .kwargs(r#"{"step":"D","delay_ms":500}"#.to_owned())
-            .waits_for(root),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    let tasks = get_workflow_tasks(&pool, &wf_id).await;
-    assert_eq!(tasks.len(), 4);
-    for t in &tasks {
-        assert_eq!(t.status, "COMPLETED");
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated4).await;
+    let mut spec = builder("fanout");
+    let root = spec.task(step(&suite, "root"));
+    for id in ["b", "c", "d"] {
+        let _branch = spec.task(slow_step(&suite, id, 1_000).waits_for(root));
     }
-
-    // Parallel tasks started after root completed.
-    let root_completed = tasks[0].completed_at.unwrap();
-    for t in &tasks[1..4] {
-        assert!(
-            t.started_at.unwrap() > root_completed,
-            "parallel task should start after root"
-        );
-    }
+    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
+    let branches = &nodes[1..];
+    let latest_start = branches.iter().map(|node| node.started_at).max().flatten();
+    let first_end = branches
+        .iter()
+        .map(|node| node.completed_at)
+        .min()
+        .flatten();
+    assert!(
+        latest_start < first_end,
+        "the branches ran at once: {branches:?}"
+    );
 }
 
-// ---------------------------------------------------------------------------
-// L4.3: Fan-In (A, B, C → AGG)
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer4_workflow_structure.py::test_fanin_waits_for_all`.
 #[tokio::test]
 #[serial]
 async fn test_fanin_waits_for_all() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_fanin");
-    let a = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B"}"#.to_owned()),
-    );
-    let c = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C"}"#.to_owned()),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("agg")
-            .kwargs(r#"{"step":"AGG"}"#.to_owned())
-            .waits_for(a)
-            .waits_for(bnode)
-            .waits_for(c),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    let tasks = get_workflow_tasks(&pool, &wf_id).await;
-    assert_eq!(tasks.len(), 4);
-
-    let agg = &tasks[3];
-    let latest_root = tasks[..3]
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated4).await;
+    let mut spec = builder("fanin");
+    let sources: Vec<_> = [("a", 200), ("b", 400), ("c", 600)]
+        .into_iter()
+        .map(|(id, delay)| spec.task(slow_step(&suite, id, delay)))
+        .collect();
+    let aggregate = spec.task(step(&suite, "aggregate").waits_for_all(sources.iter().copied()));
+    let _output = spec.output(aggregate);
+    let handle = start::<String>(&suite, spec).await;
+    let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
+    let last_source_end = nodes[..3]
         .iter()
-        .filter_map(|t| t.completed_at)
+        .map(|node| node.completed_at)
         .max()
-        .unwrap();
+        .flatten();
     assert!(
-        agg.started_at.unwrap() > latest_root,
-        "AGG should start after all roots complete"
+        nodes[3].started_at > last_source_end,
+        "the aggregate waited: {nodes:?}"
     );
 }
 
-// ---------------------------------------------------------------------------
-// L4.4: Diamond (A → B, C → D)
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer4_workflow_structure.py::test_diamond_structure`.
 #[tokio::test]
 #[serial]
 async fn test_diamond_structure() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_diamond");
-    let a = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B","delay_ms":200}"#.to_owned())
-            .waits_for(a),
-    );
-    let c = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C","delay_ms":200}"#.to_owned())
-            .waits_for(a),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("d")
-            .kwargs(r#"{"step":"D"}"#.to_owned())
-            .waits_for(bnode)
-            .waits_for(c),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "COMPLETED");
-
-    let tasks = get_workflow_tasks(&pool, &wf_id).await;
-    assert_eq!(tasks.len(), 4);
-    for t in &tasks {
-        assert_eq!(t.status, "COMPLETED");
-    }
-
-    // D started after both B and C completed.
-    let d = &tasks[3];
-    let b_completed = tasks[1].completed_at.unwrap();
-    let c_completed = tasks[2].completed_at.unwrap();
-    let latest = b_completed.max(c_completed);
-    assert!(
-        d.started_at.unwrap() > latest,
-        "D should start after both B and C"
-    );
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated2).await;
+    let mut spec = builder("diamond");
+    let a = spec.task(step(&suite, "a"));
+    let b = spec.task(step(&suite, "b").waits_for(a));
+    let c = spec.task(step(&suite, "c").waits_for(a));
+    let d = spec.task(step(&suite, "d").waits_for(b).waits_for(c));
+    let _output = spec.output(d);
+    let handle = start::<String>(&suite, spec).await;
+    let outcome = handle
+        .get(within(WORKFLOW_WAIT))
+        .await
+        .expect("read the workflow");
+    assert_eq!(outcome, TaskOutcome::Succeeded("completed_d".to_owned()));
+    let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
+    assert!(nodes[3].started_at > nodes[1].completed_at.max(nodes[2].completed_at));
 }
 
-// ---------------------------------------------------------------------------
-// L4.9: Single Node Workflow
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer4_workflow_structure.py::test_single_node_workflow`.
 #[tokio::test]
 #[serial]
 async fn test_single_node_workflow() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_single");
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("only")
-            .kwargs(r#"{"step":"only"}"#.to_owned()),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(10)).await;
-    assert_eq!(status, "COMPLETED");
-
-    let tasks = get_workflow_tasks(&pool, &wf_id).await;
-    assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0].status, "COMPLETED");
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("single");
+    let only = spec.task(step(&suite, "only"));
+    let _output = spec.output(only);
+    let handle = start::<String>(&suite, spec).await;
+    let outcome = handle
+        .get(within(WORKFLOW_WAIT))
+        .await
+        .expect("read the workflow");
+    assert_eq!(outcome, TaskOutcome::Succeeded("completed_only".to_owned()));
 }
 
-// ---------------------------------------------------------------------------
-// L4.10: Linear Failure Cascades to Skip
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer4_workflow_structure.py::test_linear_failure_cascades_to_skip`.
 #[tokio::test]
 #[serial]
 async fn test_linear_failure_cascades_to_skip() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_fail_cascade");
-    let a = b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"error_code":"DELIBERATE"}"#.to_owned()),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B"}"#.to_owned())
-            .waits_for(a),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(10)).await;
-    assert_eq!(status, "FAILED");
-
-    let a_status = get_workflow_task_status(&pool, &wf_id, 0).await;
-    let b_status = get_workflow_task_status(&pool, &wf_id, 1).await;
-    assert_eq!(a_status, "FAILED");
-    assert_eq!(b_status, "SKIPPED", "B should be SKIPPED when A fails");
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("linear_fail_first");
+    let a = spec.task(fail(&suite, "a"));
+    let b = spec.task(step(&suite, "b").waits_for(a));
+    let _c = spec.task(step(&suite, "c").waits_for(b));
+    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let nodes = ended_nodes(&suite, &handle, "FAILED").await;
+    assert_eq!(statuses(&nodes), vec!["FAILED", "SKIPPED", "SKIPPED"]);
 }
 
-// ---------------------------------------------------------------------------
-// L4.11: Handle.get() Returns Error on Failed Workflow
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer4_workflow_structure.py::test_handle_get_returns_error_on_failed_workflow`.
 #[tokio::test]
 #[serial]
 async fn test_workflow_fails_with_error() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_fail_wf");
-    b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"error_code":"BOOM"}"#.to_owned()),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(10)).await;
-    assert_eq!(status, "FAILED");
-
-    // Verify error is stored.
-    let error: Option<String> =
-        sqlx::query_scalar("SELECT error FROM horsies_workflows WHERE id = $1")
-            .bind(&wf_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert!(error.is_some(), "workflow error should be set");
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("linear_fail_mid");
+    let a = spec.task(step(&suite, "a"));
+    let b = spec.task(fail(&suite, "b").waits_for(a));
+    let c = spec.task(step(&suite, "c").waits_for(b));
+    let _output = spec.output(c);
+    let handle = start::<String>(&suite, spec).await;
+    let _nodes = ended_nodes(&suite, &handle, "FAILED").await;
+    assert_eq!(failed_code(&handle).await, "DELIBERATE_FAILURE");
 }
 
-// ---------------------------------------------------------------------------
-// L4.12: Fan-Out One Branch Fails
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer4_workflow_structure.py::test_fanout_one_branch_fails`.
 #[tokio::test]
 #[serial]
 async fn test_fanout_one_branch_fails() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_fanout_fail");
-    let root = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("root")
-            .kwargs(r#"{"step":"root"}"#.to_owned()),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("ok1")
-            .kwargs(r#"{"step":"ok1"}"#.to_owned())
-            .waits_for(root),
-    );
-    b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("fail")
-            .kwargs(r#"{"error_code":"BRANCH_FAIL"}"#.to_owned())
-            .waits_for(root),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("ok2")
-            .kwargs(r#"{"step":"ok2"}"#.to_owned())
-            .waits_for(root),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
-    assert_eq!(status, "FAILED");
-
-    // Root and ok branches completed, fail branch failed.
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated4).await;
+    let mut spec = builder("fanout_one_fail");
+    let root = spec.task(step(&suite, "root"));
+    let _b = spec.task(fail(&suite, "b").waits_for(root));
+    let _c = spec.task(step(&suite, "c").waits_for(root));
+    let _d = spec.task(step(&suite, "d").waits_for(root));
+    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let nodes = ended_nodes(&suite, &handle, "FAILED").await;
     assert_eq!(
-        get_workflow_task_status(&pool, &wf_id, 0).await,
-        "COMPLETED"
-    ); // root
-    assert_eq!(
-        get_workflow_task_status(&pool, &wf_id, 1).await,
-        "COMPLETED"
-    ); // ok1
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 2).await, "FAILED"); // fail
-    assert_eq!(
-        get_workflow_task_status(&pool, &wf_id, 3).await,
-        "COMPLETED"
-    ); // ok2
+        statuses(&nodes),
+        vec!["COMPLETED", "FAILED", "COMPLETED", "COMPLETED"]
+    );
 }
 
-// ---------------------------------------------------------------------------
-// L4.13: Fan-In One Dep Fails → Aggregator Skipped
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer4_workflow_structure.py::test_fanin_one_dep_fails_skips_aggregator`.
 #[tokio::test]
 #[serial]
 async fn test_fanin_one_dep_fails_skips_aggregator() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "4"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let mut b = WorkflowSpecBuilder::new("e2e_fanin_fail");
-    let a = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    let fail = b.task(
-        wf_fail::node()
-            .unwrap()
-            .node_id("fail")
-            .kwargs(r#"{"error_code":"FAIL"}"#.to_owned()),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("agg")
-            .kwargs(r#"{"step":"AGG"}"#.to_owned())
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated4).await;
+    let mut spec = builder("fanin_one_fail");
+    let a = spec.task(fail(&suite, "a"));
+    let b = spec.task(step(&suite, "b"));
+    let c = spec.task(step(&suite, "c"));
+    let _aggregate = spec.task(
+        step(&suite, "aggregate")
             .waits_for(a)
-            .waits_for(fail),
+            .waits_for(b)
+            .waits_for(c),
     );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(10)).await;
-    assert_eq!(status, "FAILED");
-
+    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let nodes = ended_nodes(&suite, &handle, "FAILED").await;
     assert_eq!(
-        get_workflow_task_status(&pool, &wf_id, 0).await,
-        "COMPLETED"
-    ); // a
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 1).await, "FAILED"); // fail
-    assert_eq!(get_workflow_task_status(&pool, &wf_id, 2).await, "SKIPPED"); // agg
+        statuses(&nodes),
+        vec!["FAILED", "COMPLETED", "COMPLETED", "SKIPPED"]
+    );
+    assert!(nodes[3].started_at.is_none(), "the aggregate never started");
+    assert!(nodes[3].completed_at.is_some(), "the skip has its time");
 }
 
-// ---------------------------------------------------------------------------
-// L4.14: Workflow Cancellation
-// ---------------------------------------------------------------------------
-
+/// Python: `test_layer4_workflow_structure.py::test_workflow_cancellation`.
 #[tokio::test]
 #[serial]
 async fn test_workflow_cancellation() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-    // Build a chain where B is slow — we cancel while B is enqueued/running.
-    let mut b = WorkflowSpecBuilder::new("e2e_cancel");
-    let a = b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("a")
-            .kwargs(r#"{"step":"A"}"#.to_owned()),
-    );
-    let bnode = b.task(
-        wf_slow_step::node()
-            .unwrap()
-            .node_id("b")
-            .kwargs(r#"{"step":"B","delay_ms":5000}"#.to_owned())
-            .waits_for(a),
-    );
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("c")
-            .kwargs(r#"{"step":"C"}"#.to_owned())
-            .waits_for(bnode),
-    );
-    let spec = b.build().unwrap();
-
-    let _worker = start_worker(
-        &db_url(),
-        &["--concurrency", "2"],
-        "worker started",
-        Duration::from_secs(10),
-    );
-
-    let wf_id = start_wf(&pool, &spec).await;
-
-    // Wait for A to complete.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < deadline {
-        let s = get_workflow_task_status(&pool, &wf_id, 0).await;
-        if s == "COMPLETED" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let client = suite.client().await;
+    let mut spec = builder("slow_linear");
+    let a = spec.task(slow_step(&suite, "a", 500));
+    let b = spec.task(slow_step(&suite, "b", 3_000).waits_for(a));
+    let c = spec.task(slow_step(&suite, "c", 3_000).waits_for(b));
+    let _output = spec.output(c);
+    let handle = start::<String>(&suite, spec).await;
+    rows::wait_for_node_status(&client, handle.workflow_id(), 0, "COMPLETED", WORKFLOW_WAIT).await;
+    handle.cancel().await.expect("cancel the workflow");
+    let nodes = ended_nodes(&suite, &handle, "CANCELLED").await;
+    for node in &nodes[1..] {
+        assert!(
+            ["SKIPPED", "COMPLETED", "RUNNING"].contains(&node.status.as_str()),
+            "node {} is {}",
+            node.task_index,
+            node.status
+        );
     }
-
-    // Cancel the workflow.
-    horsies::cancel_workflow(&pool, wf_id).await.unwrap();
-
-    let status: String = sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
-        .bind(&wf_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(status, "CANCELLED");
+    assert_eq!(failed_code(&handle).await, "WORKFLOW_CANCELLED");
 }
 
+/// Python: `test_layer4_workflow_structure.py::test_workflow_task_expires_before_claim`.
+/// The second node's deadline passes while the first node holds the only
+/// child: the node never runs, and the workflow fails.
 #[tokio::test]
 #[serial]
 async fn test_workflow_task_expired_while_claimed_before_start() {
-    let pool = pool().await;
-    db::clean_tables(&pool).await;
-
-    let config_file = write_prefetch_config();
-    let config_path = config_file.path().to_str().unwrap().to_owned();
-
-    let _worker = start_worker(
-        &config_path,
-        &["--concurrency", "1"],
-        "worker started",
-        Duration::from_secs(10),
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let mut spec = builder("expiring_node");
+    let a = spec.task(slow_step(&suite, "a", 3_000));
+    let b = spec.task(
+        step(&suite, "b")
+            .waits_for(a)
+            .good_until(Utc::now() + chrono::Duration::seconds(1)),
     );
-
-    let blocker_id = enqueue_blocker_task(&pool, 1500).await;
-
-    let mut b = WorkflowSpecBuilder::new("e2e_claimed_expiry");
-    b.task(
-        wf_step::node()
-            .unwrap()
-            .node_id("expires")
-            .kwargs(r#"{"step":"EXP"}"#.to_owned())
-            .good_until(chrono::Utc::now() + chrono::Duration::milliseconds(500)),
-    );
-    let spec = b.build().unwrap();
-
-    let wf_id = start_wf(&pool, &spec).await;
-
-    let claim_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < claim_deadline {
-        let row: (Option<Uuid>, Option<String>) = sqlx::query_as(
-            "SELECT wt.task_id, t.status \
-             FROM horsies_workflow_tasks wt \
-             LEFT JOIN horsies_tasks t ON t.id = wt.task_id \
-             WHERE wt.workflow_id = $1 AND wt.task_index = 0",
-        )
-        .bind(&wf_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
-        if row.1.as_deref() == Some("CLAIMED") {
-            break;
-        }
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    let claimed_status: String = sqlx::query_scalar(
-        "SELECT t.status \
-         FROM horsies_workflow_tasks wt \
-         JOIN horsies_tasks t ON t.id = wt.task_id \
-         WHERE wt.workflow_id = $1 AND wt.task_index = 0",
-    )
-    .bind(&wf_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        claimed_status, "CLAIMED",
-        "workflow task should be buffered as CLAIMED before its deadline passes",
-    );
-
-    let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(20)).await;
-    assert_eq!(
-        status, "FAILED",
-        "workflow should fail on expired root task",
-    );
-
-    wait_for_task_status(&pool, &blocker_id, "COMPLETED", Duration::from_secs(15)).await;
-    assert_eq!(
-        get_workflow_task_status(&pool, &wf_id, 0).await,
-        "FAILED",
-        "expired task should be reported as failed to the workflow engine",
-    );
-
-    let row: (
-        String,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<String>,
-        Option<bool>,
-        Option<String>,
-        Option<String>,
-    ) = sqlx::query_as(
-        "SELECT (detail.task_row).status, (detail.task_row).started_at, \
-                (detail.task_row).last_claimed_worker_id, FALSE, \
-                (detail.task_row).error_code, wt.status \
-         FROM horsies_workflow_tasks wt \
-         JOIN LATERAL horsies_task_detail_staged(wt.task_id) AS detail ON TRUE \
-         WHERE wt.workflow_id = $1 AND wt.task_index = 0 \
-           AND detail.location = 'HISTORY'",
-    )
-    .bind(&wf_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-
-    assert_eq!(row.0, "EXPIRED");
-    assert!(
-        row.1.is_none(),
-        "underlying task should never transition to RUNNING",
-    );
-    assert!(
-        row.2.is_some(),
-        "claimed_by_worker_id should be preserved on claimed expiry",
-    );
-    assert_eq!(row.3, Some(false));
-    assert_eq!(row.4.as_deref(), Some("TASK_EXPIRED"));
-    assert_eq!(row.5.as_deref(), Some("FAILED"));
-
-    let attempts: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) \
-         FROM horsies_task_attempts ta \
-         JOIN horsies_workflow_tasks wt ON wt.task_id = ta.task_id \
-         WHERE wt.workflow_id = $1 AND wt.task_index = 0",
-    )
-    .bind(&wf_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        attempts, 0,
-        "workflow expired-before-start should record no attempts"
-    );
+    let _output = spec.output(b);
+    let handle = start::<String>(&suite, spec).await;
+    let nodes = ended_nodes(&suite, &handle, "FAILED").await;
+    assert_eq!(nodes[0].status, "COMPLETED");
+    assert_eq!(nodes[1].status, "FAILED");
+    assert_eq!(failed_code(&handle).await, "TASK_EXPIRED");
 }

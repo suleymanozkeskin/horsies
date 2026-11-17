@@ -18,14 +18,17 @@ use crate::db::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatementLog {
     Off,
-    /// Statement name and SQL text at debug level, target `horsies.sql`.
-    Debug,
+    /// One INFO event per statement on the target `horsies.sql`: the SQL
+    /// text is the message, the statement name is the field `statement`.
+    /// Bound values are never logged. INFO is the level of Python's `echo`
+    /// (SQLAlchemy's `sqlalchemy.engine.Engine` records).
+    Info,
 }
 
 impl StatementLog {
     pub(crate) fn from_echo(echo: bool) -> Self {
         match echo {
-            true => Self::Debug,
+            true => Self::Info,
             false => Self::Off,
         }
     }
@@ -34,12 +37,10 @@ impl StatementLog {
     pub(crate) fn log(self, statement: &TypedStatement) {
         match self {
             Self::Off => {}
-            Self::Debug => tracing::debug!(
-                target: "horsies.sql",
-                statement = statement.name(),
-                sql = statement.sql(),
-                "statement",
-            ),
+            Self::Info => {
+                let sql = statement.sql();
+                tracing::info!(target: "horsies.sql", statement = statement.name(), "{sql}");
+            }
         }
     }
 
@@ -47,12 +48,10 @@ impl StatementLog {
     pub(crate) fn log_ddl(self, ddl: &PartitionDdl) {
         match self {
             Self::Off => {}
-            Self::Debug => tracing::debug!(
-                target: "horsies.sql",
-                statement = ddl.name(),
-                sql = ddl.sql(),
-                "statement",
-            ),
+            Self::Info => {
+                let sql = ddl.sql();
+                tracing::info!(target: "horsies.sql", statement = ddl.name(), "{sql}");
+            }
         }
     }
 }
@@ -386,3 +385,6 @@ pub(crate) fn read_rows<T>(
 ) -> Result<Vec<T>, RowDecodeError> {
     rows.iter().map(|row| read(row, statement)).collect()
 }
+
+#[cfg(test)]
+mod tests;
