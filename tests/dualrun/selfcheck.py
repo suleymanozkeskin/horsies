@@ -199,7 +199,10 @@ _MOVED_TASK_SQL: Final[LiteralString] = """
 """
 
 _COMPLETE_SQL: Final[LiteralString] = """
-    SELECT outcome FROM horsies_complete_locked_task(%(task_id)s, %(worker_id)s, '{"rows":12}')
+    SELECT outcome FROM horsies_complete_task_fused(
+        %(task_id)s, %(worker_id)s, (SELECT claimed_at FROM horsies_tasks WHERE id = %(task_id)s),
+        '{"rows":12}', TRUE
+    )
 """
 
 _FAILED_ATTEMPT_SQL: Final[LiteralString] = """
@@ -279,7 +282,7 @@ def _seeded_writes(connection: Connection) -> None:
     outcome = connection.execute(
         _COMPLETE_SQL, {'task_id': task_id, 'worker_id': worker_id}
     ).fetchone()
-    assert outcome == ('APPLIED',), f'complete_locked_task returned {outcome!r}'
+    assert outcome == ('APPLIED',), f'complete_task_fused returned {outcome!r}'
     latest = connection.execute(_LEAF_OF_TASK_SQL, {'task_id': task_id}).fetchone()
     assert latest is not None, 'the moved task has no history row'
     _ = connection.execute(

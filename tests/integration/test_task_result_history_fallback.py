@@ -47,6 +47,7 @@ from tests.integration.test_task_history_schema_emission import (
     make_database,
 )
 from tests.broker_resources_support import current_resources
+from tests.dualrun.reference import result_caller
 from horsies.core.utils.url import sqlalchemy_url
 
 __all__ = ['make_database']
@@ -140,11 +141,12 @@ async def _drop_result_function(url: str) -> None:
 
 async def _probe_statements(
     broker: PostgresBroker,
-    task_id: str,
+    task_id: uuid.UUID,
     *,
     non_terminal_snapshot: bool = False,
 ) -> tuple[BrokerResult[RawResultRecord | None], list[str]]:
-    """One result probe that ends the wait, and the statements it sent."""
+    """One probe of the Python result read (kept as the dual-run reference)
+    that ends the wait, and the statements it sent."""
     statements: list[str] = []
 
     def record(
@@ -185,14 +187,14 @@ class TestHistoryFallback:
             await broker.ensure_schema_initialized()
             completed, cancelled = await populated_history(url)
 
-            outcome = await broker.get_raw_result_record_async(completed)
+            outcome = await broker.get_raw_result_record_async(uuid.UUID(completed))
             assert not is_err(outcome), outcome
             record = outcome.ok_value
             assert record is not None
             assert record.status is TaskStatus.COMPLETED
             assert record.raw_result == {'ok': {'value': 7}}
 
-            outcome = await broker.get_raw_result_record_async(cancelled)
+            outcome = await broker.get_raw_result_record_async(uuid.UUID(cancelled))
             assert not is_err(outcome), outcome
             record = outcome.ok_value
             assert record is not None
@@ -214,7 +216,7 @@ class TestHistoryFallback:
         try:
             await broker.ensure_schema_initialized()
             outcome = await broker.get_raw_result_record_async(
-                '11111111-1111-1111-1111-111111111111'
+                uuid.UUID('11111111-1111-1111-1111-111111111111')
             )
             assert not is_err(outcome), outcome
             assert outcome.ok_value is None
@@ -246,12 +248,12 @@ class TestHistoryFallback:
                     )
             finally:
                 await engine.dispose()
-            outcome = await broker.get_raw_result_record_async(completed)
+            outcome = await broker.get_raw_result_record_async(uuid.UUID(completed))
             assert is_err(outcome)
             assert 'digest mismatch' in outcome.err_value.message
 
             info = await broker.get_task_info_async(
-                completed, include_result=True
+                uuid.UUID(completed), include_result=True
             )
             assert is_err(info)
             assert info.err_value.code.value == 'INVALID_JSON_PAYLOAD'
@@ -272,10 +274,12 @@ class TestStagedResultReader:
         try:
             await broker.ensure_schema_initialized()
             completed, _ = await populated_history(url)
-            warm = await broker.get_raw_result_record_async(completed)
+            warm = await result_caller.get_raw_result_record_async(
+                broker, uuid.UUID(completed),
+            )
             assert not is_err(warm), warm
 
-            outcome, statements = await _probe_statements(broker, completed)
+            outcome, statements = await _probe_statements(broker, uuid.UUID(completed))
             assert len(statements) == 1, statements
             assert TASK_RESULT_FUNCTION in statements[0]
             assert not is_err(outcome), outcome
@@ -298,19 +302,17 @@ class TestStagedResultReader:
         try:
             await broker.ensure_schema_initialized()
             await populated_history(url)
-            task_id = str(uuid.uuid4())
+            task_id = uuid.uuid4()
             enqueued = await broker.enqueue_async(
                 'result.reader.task',
                 task_id=task_id,
                 send_kind=SendKind.FIRST,
-                enqueue_sha='d' * 64,
                 sent_at=datetime.now(timezone.utc),
-                args_json='[]',
-                kwargs_json='{}',
+                input_json='{}',
             )
             assert not is_err(enqueued), enqueued
-            warm = await broker.get_raw_result_record_async(
-                task_id, timeout_ms=1
+            warm = await result_caller.get_raw_result_record_async(
+                broker, task_id, timeout_ms=1
             )
             assert not is_err(warm), warm
 
@@ -359,7 +361,7 @@ class TestStagedResultReader:
             finally:
                 await engine.dispose()
 
-            outcome = await broker.get_raw_result_record_async(completed)
+            outcome = await broker.get_raw_result_record_async(uuid.UUID(completed))
             assert not is_err(outcome), outcome
             record = outcome.ok_value
             assert record is not None
@@ -381,7 +383,7 @@ class TestStagedResultReader:
             completed, _ = await populated_history(url)
             await _drop_result_function(url)
 
-            outcome, statements = await _probe_statements(broker, completed)
+            outcome, statements = await _probe_statements(broker, uuid.UUID(completed))
             assert not any(
                 TASK_RESULT_FUNCTION in statement
                 and 'to_regprocedure' not in statement
@@ -405,16 +407,16 @@ class TestStagedResultReader:
         try:
             await broker.ensure_schema_initialized()
             completed, _ = await populated_history(url)
-            warm = await broker.get_raw_result_record_async(completed)
+            warm = await broker.get_raw_result_record_async(uuid.UUID(completed))
             assert not is_err(warm), warm
             await _drop_result_function(url)
 
-            failed = await broker.get_raw_result_record_async(completed)
+            failed = await broker.get_raw_result_record_async(uuid.UUID(completed))
             assert is_err(failed)
             assert failed.err_value.code is BrokerErrorCode.TASK_INFO_QUERY_FAILED
             assert TASK_RESULT_FUNCTION in failed.err_value.message
 
-            outcome = await broker.get_raw_result_record_async(completed)
+            outcome = await broker.get_raw_result_record_async(uuid.UUID(completed))
             assert not is_err(outcome), outcome
             record = outcome.ok_value
             assert record is not None

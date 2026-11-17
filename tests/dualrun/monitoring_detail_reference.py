@@ -48,7 +48,7 @@ from horsies.monitoring.models import (
     TaskDetailNotFound,
     WorkflowTaskDetail,
 )
-from horsies.monitoring.queries import (
+from tests.dualrun.reference.monitoring_queries import (
     _category_value,
     _contract_err,
     _db_err,

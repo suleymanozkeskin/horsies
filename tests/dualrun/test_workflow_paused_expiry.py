@@ -6,6 +6,10 @@ a PAUSED tree paused two hours ago (a PENDING, a CLAIMED and a RUNNING task
 and a waiting node in the root; a CLAIMED task in the child), a workflow
 PAUSED ten minutes ago, and a RUNNING bystander with a claimed task. Each
 side expires the workflows PAUSED for more than one hour.
+
+The caller pair runs the same seed with the reaper's call before the switch
+(``tests/dualrun/reference/paused_expiry_caller.py``) against the reaper on
+the core (``CoreHandle.expire_paused_workflows_async``).
 """
 
 from __future__ import annotations
@@ -21,12 +25,14 @@ import psycopg
 import pytest
 
 from horsies.core.types.result import Err, Ok
+from horsies.core.worker.reaper import ReaperMixin
 from horsies.core.workflows.lifecycle import expire_paused_workflows
 from tests.dualrun.capture import Connection
 from tests.dualrun.clients import open_broker
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationSide, dual_run
+from tests.dualrun.reference import paused_expiry_caller as caller_reference
 from tests.dualrun.reference import workflow_paused_expiry as reference
 from tests.dualrun.workflow_seeds import (
     ChildOf,
@@ -180,6 +186,51 @@ def test_paused_expiry_writes_what_the_session_statements_wrote(
             _seed,
             OperationSide(name='session statements', act=_reference),
             OperationSide(name='horsies_workflow_expire_paused', act=_candidate),
+        )
+    )
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    assert run.reference.report == 2
+    assert run.candidate.report == 2
+
+
+class _Reaper(ReaperMixin):
+    """The reaper mixin alone: the paused expiry reads no worker state."""
+
+
+async def _caller_reference_async(database: DualRunDatabase) -> int:
+    async with open_broker(database) as broker:
+        return await caller_reference.expire_paused_workflows(
+            _Reaper(), broker, older_than=_OLDER_THAN,
+        )
+
+
+def _caller_reference(database: DualRunDatabase, _seed_facts: _Seed) -> int:
+    cover_history(database)
+    return asyncio.run(_caller_reference_async(database))
+
+
+async def _core_caller_async(database: DualRunDatabase) -> int:
+    async with open_broker(database) as broker:
+        return await _Reaper()._expire_paused_workflows(  # pyright: ignore[reportPrivateUsage]
+            broker, older_than=_OLDER_THAN,
+        )
+
+
+def _core_caller(database: DualRunDatabase, _seed_facts: _Seed) -> int:
+    cover_history(database)
+    return asyncio.run(_core_caller_async(database))
+
+
+def test_the_core_paused_expiry_writes_what_the_python_reaper_wrote(
+    empty_database: MakeDatabase,
+) -> None:
+    run = run_or_fail(
+        dual_run(
+            empty_database,
+            _seed,
+            OperationSide(name='python reaper', act=_caller_reference),
+            OperationSide(name='core reaper', act=_core_caller),
         )
     )
 

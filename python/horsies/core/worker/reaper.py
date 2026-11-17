@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal, assert_never
 
 from horsies.core.brokers.result_types import BrokerOperationError, broker_error_cause
@@ -31,7 +32,6 @@ from horsies.core.worker.class_coverage_log import (
 from horsies.core.worker.runtime import _ReaperPassState
 from horsies.core.worker.sql import (
     DELETE_EXPIRED_WORKER_STATES_SQL,
-    DELETE_EXPIRED_WORKFLOWS_SQL,
     REAPER_GATE_TRY_LOCK_SQL,
     _RETENTION_PASS_TIME_BUDGET_S,
 )
@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from horsies.core.app import Horsies
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.brokers.resources import BrokerResources
+    from horsies.core.history.maintenance.coverage import CoverageOutcome
     from horsies.core.models.recovery import RecoveryConfig
     from horsies.core.models.retention import RetentionConfig
     from horsies.core.worker.config import WorkerConfig
@@ -368,20 +369,15 @@ class ReaperMixin:
                 if retention_cfg.terminal_record_retention_hours is not None:
                     # Workflows and their node rows go together in one
                     # workflow-batched statement (node purge is a CTE inside
-                    # it). The all-backing-tasks-terminal guard makes
-                    # partial progress safe. The statement's rowcount
-                    # counts workflows, which the node budget keeps below
-                    # :batch_size while backlog remains — hence
-                    # drained_when='empty_batch'.
-                    deleted_workflows = await self._delete_expired_in_batches(
-                        resources.session_factory,
-                        DELETE_EXPIRED_WORKFLOWS_SQL,
-                        {
-                            'retention_hours': retention_cfg.terminal_record_retention_hours,
-                        },
-                        deadline,
-                        batch_size,
-                        drained_when='empty_batch',
+                    # it), which the core runs in batches until one deletes
+                    # nothing or the pass budget has passed. The
+                    # all-backing-tasks-terminal guard makes partial
+                    # progress safe.
+                    deleted_workflows = await self._delete_expired_workflows(
+                        temp_broker,
+                        retention_hours=retention_cfg.terminal_record_retention_hours,
+                        batch_size=batch_size,
+                        deadline_monotonic=deadline,
                     )
 
                 if deleted_worker_states > 0 or deleted_workflows > 0:
@@ -400,20 +396,14 @@ class ReaperMixin:
         # Paused-age expiry: the declared policy's sweep. Gated on the
         # opt-in knob (None = the pass reads nothing) and running under
         # the same cluster-wide reaper gate; the writer is the cancel
-        # path's locked sequence with EXPIRED as the terminal status,
-        # so an expiring workflow leaves no claimable backing rows and
-        # no ENQUEUED nodes behind.
+        # body of horsies_workflow_expire_paused with EXPIRED as the
+        # terminal status, so an expiring workflow leaves no claimable
+        # backing rows and no ENQUEUED nodes behind.
         if retention_cfg.paused_workflow_auto_cancel_after is not None:
-            from horsies.core.workflows.lifecycle import (
-                expire_paused_workflows,
-            )
-
             try:
-                expired = await expire_paused_workflows(
-                    resources.session_factory,
-                    older_than=(
-                        retention_cfg.paused_workflow_auto_cancel_after
-                    ),
+                expired = await self._expire_paused_workflows(
+                    temp_broker,
+                    older_than=retention_cfg.paused_workflow_auto_cancel_after,
                 )
                 if expired > 0:
                     logger.info(
@@ -437,7 +427,6 @@ class ReaperMixin:
                 CoverageEnsureFailed,
                 CoverageEnsured,
                 history_coverage_payload,
-                maintain_partition_coverage,
             )
             from horsies.core.history.maintenance.pruning import (
                 prune_expired_partitions,
@@ -447,16 +436,10 @@ class ReaperMixin:
             )
 
             try:
-                coverage = await maintain_partition_coverage(
-                    resources.partition_maintenance,
-                    history_horizon_days=(
-                        retention_cfg.history_leaf_horizon_days
-                    ),
-                    heartbeat_horizon_hours=(
-                        retention_cfg.heartbeat_leaf_horizon_hours
-                    ),
-                    declared_classes=retention_cfg.registrable_classes(),
-                    serialize_damaged_work=False,
+                coverage = await self._run_partition_coverage(
+                    temp_broker,
+                    resources,
+                    retention_cfg,
                 )
                 # A leaf the catalog still calls attached whose relation
                 # is gone means someone dropped it behind the manager's
@@ -574,6 +557,35 @@ class ReaperMixin:
         except Exception as coverage_err:
             logger.error(f'Class coverage check error: {coverage_err}')
 
+    async def _run_partition_coverage(
+        self,
+        temp_broker: 'PostgresBroker',
+        resources: 'BrokerResources',
+        retention_cfg: 'RetentionConfig',
+    ) -> 'CoverageOutcome':
+        """One periodic coverage pass in the core, on the core handle of
+        ``temp_broker`` (``maintain_partition_coverage_in_core``,
+        ``PER_LEAF_LOCKS``): no coverage gate; the per-leaf locks contain an
+        overlap with a worker's startup pass. ``resources`` is not read: the
+        pass runs on the core pools, not on ``partition_maintenance``.
+
+        Returns the outcome; raises ``CoreOperationFailed`` when the pass has
+        no outcome and ``CoreError`` when the core of this process cannot run
+        it. The caller logs both and records the health.
+        """
+        from horsies.core.history.maintenance.coverage import (
+            CoverageSerialization,
+            maintain_partition_coverage_in_core,
+        )
+
+        return await maintain_partition_coverage_in_core(
+            temp_broker._core_handle,
+            history_horizon_days=retention_cfg.history_leaf_horizon_days,
+            heartbeat_horizon_hours=retention_cfg.heartbeat_leaf_horizon_hours,
+            declared_classes=retention_cfg.registrable_classes(),
+            serialization=CoverageSerialization.PER_LEAF_LOCKS,
+        )
+
     async def _check_class_coverage(
         self,
         temp_broker: 'PostgresBroker',
@@ -609,6 +621,85 @@ class ReaperMixin:
                     raise AssertionError('take_uncovered returned a served stream')
                 case _ as unreachable:
                     assert_never(unreachable)
+
+    async def _expire_paused_workflows(
+        self,
+        temp_broker: 'PostgresBroker',
+        *,
+        older_than: timedelta,
+    ) -> int:
+        """The paused expiry of the retention policy, in the core
+        (``CoreHandle.expire_paused_workflows_async``): the PAUSED workflows
+        older than ``older_than``, at most ``PAUSED_EXPIRY_BATCH_SIZE``,
+        oldest first, one ``horsies_workflow_expire_paused`` each. The age
+        goes in exact microseconds.
+
+        Returns the number of workflows expired.
+
+        Raises:
+            CoreOperationFailed: the call failed; the candidates before the
+                failed one are expired, the rest wait for the next pass.
+            CoreError: the core of this process cannot run the call.
+        """
+        from horsies._core import PausedExpired, PausedExpiryFailed
+        from horsies.core.types.core_failure import CoreOperationFailed
+        from horsies.core.workflows.lifecycle import PAUSED_EXPIRY_BATCH_SIZE
+
+        record = await temp_broker._core_handle.expire_paused_workflows_async(
+            older_than // timedelta(microseconds=1), PAUSED_EXPIRY_BATCH_SIZE,
+        )
+        match record:
+            case PausedExpired(expired=expired):
+                return expired
+            case PausedExpiryFailed(message=message, retryable=retryable):
+                raise CoreOperationFailed('expire_paused_workflows', message, retryable)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _delete_expired_workflows(
+        self,
+        temp_broker: 'PostgresBroker',
+        *,
+        retention_hours: int,
+        batch_size: int,
+        deadline_monotonic: float,
+    ) -> int:
+        """The workflow part of the retention cleanup, in the core
+        (``CoreHandle.delete_expired_workflows_async``): batches of terminal
+        workflows older than ``retention_hours`` with no live backing task,
+        with their node rows, until a batch deletes no workflow or the pass
+        deadline has passed after a batch. The first batch always runs.
+
+        Returns the number of workflows deleted.
+
+        Raises:
+            CoreOperationFailed: the pass failed; the batches before the
+                failure stay committed (their count is in the message), and
+                the backlog resumes on the next pass.
+            CoreError: the core of this process cannot run the call.
+        """
+        from horsies._core import WorkflowDeleteFailed, WorkflowsDeleted
+        from horsies.core.types.core_failure import CoreOperationFailed
+
+        budget_ms = max(0, int((deadline_monotonic - time.monotonic()) * 1000))
+        record = await temp_broker._core_handle.delete_expired_workflows_async(
+            retention_hours, batch_size, budget_ms,
+        )
+        match record:
+            case WorkflowsDeleted(deleted=deleted):
+                return deleted
+            case WorkflowDeleteFailed(
+                deleted_before=deleted_before,
+                message=message,
+                retryable=retryable,
+            ):
+                raise CoreOperationFailed(
+                    'delete_expired_workflows',
+                    f'{message} ({deleted_before} workflow(s) deleted before the failure)',
+                    retryable,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _delete_expired_in_batches(
         self,

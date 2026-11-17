@@ -46,6 +46,7 @@ from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.typed import encode_task_result
 from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.history.errors import HistoryContractError
@@ -2976,7 +2977,9 @@ class TestDatabaseFailure:
         assert isinstance(error, MonitoringQueryDbOperationFailed)
         assert error.retryable is True
         assert 'task list query failed' in error.message
-        assert isinstance(error.exception, SQLAlchemyError)
+        # The driver error of Python's read, or the core's failure record
+        # (the interim class of #1363) of the read on the core.
+        assert isinstance(error.exception, SQLAlchemyError | CoreOperationFailed)
 
     async def test_detail_failure_is_not_confused_with_absence(
         self, unreachable_broker: PostgresBroker
@@ -3033,10 +3036,12 @@ class _StatementCapture:
         event.remove(self._engine, 'before_cursor_execute', self._collect)
 
 
-async def _unfiltered_list(broker: PostgresBroker) -> Any:
+async def _unfiltered_list(
+    broker: PostgresBroker, window: MonitoringWindow | None = None,
+) -> Any:
     return await list_tasks(
         broker,
-        window=_test_window(),
+        window=window if window is not None else _test_window(),
         statuses=[],
         task_names=[],
         queues=[],
@@ -3058,18 +3063,18 @@ class TestUnfilteredHistoryTotalContract:
     estimate: the live side and the history side estimate together, and
     count exactly together when any filter is active. The function answers
     which one it ran in its TOTALS row; the history estimate is EXPLAIN
-    text that ``list_tasks`` decodes, so the decode runs only for the
-    estimate.
+    text that the read decodes, so the decode runs only for the estimate.
+    A history estimate that does not decode is a contract violation: the
+    reference's decode seam and the core's own test
+    (``an_unreadable_estimate_is_a_contract_violation_that_is_not_retryable``)
+    cover it, since the read of the core has no seam to inject it here.
     """
 
     async def test_unfiltered_total_estimates_and_never_counts_history(
         self,
         broker: PostgresBroker,
         session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from horsies.monitoring import queries as queries_module
-
         await insert_rows(
             session,
             make_task(),
@@ -3082,29 +3087,35 @@ class TestUnfilteredHistoryTotalContract:
             text('ANALYZE horsies_tasks, horsies_task_history')
         )
         await session.commit()
-        decoded: list[object] = []
+        window = _test_window()
 
-        def _decode(payload: object) -> int:
-            decoded.append(payload)
-            return plan_rows_from_explain(payload)
-
-        monkeypatch.setattr(queries_module, 'plan_rows_from_explain', _decode)
-
-        result = await _unfiltered_list(broker)
+        result = await _unfiltered_list(broker, window)
+        totals = (
+            await session.execute(
+                text(
+                    'SELECT total_kind, live_total, history_estimate_plan '
+                    'FROM horsies_monitoring_task_list('
+                    'CAST(:window_lower AS timestamptz), CAST(:window_upper AS timestamptz), '
+                    "CAST('{}' AS text[]), CAST('{}' AS text[]), CAST('{}' AS text[]), "
+                    "CAST('{}' AS text[]), CAST('{}' AS text[]), CAST('{}' AS text[]), FALSE, "
+                    "CAST('{}' AS text[]), CAST('{}' AS text[]), 'enqueued_at', 'DESC', 0, 50) "
+                    "WHERE row_kind = 'TOTALS'"
+                ),
+                {'window_lower': window.lower, 'window_upper': window.upper},
+            )
+        ).one()
 
         assert is_ok(result)
-        assert len(decoded) == 1
-        assert str(decoded[0]).startswith('[')
-        assert result.ok_value.total == 2 + plan_rows_from_explain(decoded[0])
+        assert totals.total_kind == 'ESTIMATE_HISTORY_PLAN'
+        assert totals.live_total == 2
+        assert str(totals.history_estimate_plan).startswith('[')
+        assert result.ok_value.total == 2 + plan_rows_from_explain(totals.history_estimate_plan)
 
     async def test_filtered_total_counts_history_exactly(
         self,
         broker: PostgresBroker,
         session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from horsies.monitoring import queries as queries_module
-
         await insert_rows(
             session,
             make_task(),
@@ -3112,11 +3123,6 @@ class TestUnfilteredHistoryTotalContract:
             make_task(status=TaskStatus.COMPLETED),
             make_task(status=TaskStatus.COMPLETED),
         )
-
-        def _refuse(payload: object) -> int:
-            raise AssertionError('a filtered total is exact; no estimate may be decoded')
-
-        monkeypatch.setattr(queries_module, 'plan_rows_from_explain', _refuse)
 
         result = await list_tasks(
             broker,
@@ -3168,38 +3174,3 @@ class TestUnfilteredHistoryTotalContract:
 
         assert is_ok(result)
         assert result.ok_value.total == 2
-
-    async def test_estimate_decode_failure_is_a_typed_error(
-        self,
-        broker: PostgresBroker,
-        session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """An unrecognized EXPLAIN payload surfaces as ``Err``, not a raise.
-
-        The failure is injected at the decode seam because a real
-        payload-shape drift needs a server this suite does not run;
-        what the boundary owes is the same either way: a typed,
-        non-retryable monitoring error and no silent exact fallback.
-        """
-        from horsies.monitoring import queries as queries_module
-
-        await insert_rows(
-            session, make_task(status=TaskStatus.COMPLETED)
-        )
-
-        def _refuse(payload: object) -> int:
-            raise HistoryContractError('injected decode failure')
-
-        monkeypatch.setattr(
-            queries_module, 'plan_rows_from_explain', _refuse
-        )
-
-        result = await _unfiltered_list(broker)
-
-        assert is_err(result)
-        error = result.err_value
-        assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert isinstance(error.exception, HistoryContractError)
-        assert error.retryable is False
-        assert 'estimate decode failed' in error.message

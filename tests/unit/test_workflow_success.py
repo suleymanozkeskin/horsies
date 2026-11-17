@@ -11,7 +11,6 @@ import pytest
 
 from horsies.core.history.terminalization.move import (
     FINISH_WORKFLOW_SUCCESS_FUNCTION,
-    WORKFLOW_SUCCESS_OUTCOME_TYPE,
 )
 from horsies.core.lifecycle.commands import CompleteLockedTask
 from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead
@@ -35,7 +34,11 @@ from horsies.core.worker.workflow_success import (
     success_for,
     success_statement,
 )
-from tests.baseline_sql import baseline_function, baseline_sql, baseline_type
+from tests.baseline_sql import (
+    baseline_function,
+    baseline_returned_columns,
+    baseline_type,
+)
 
 pytestmark = [pytest.mark.unit]
 
@@ -238,18 +241,24 @@ class TestCommand:
 
 _COLUMN = re.compile(r'^\s+(\w+) (\w[\w ]*?),?$', re.M)
 OUTCOME_TYPE_DDL = baseline_type('horsies_terminalization_outcome')
-WORKFLOW_SUCCESS_OUTCOME_TYPE_DDL = baseline_type(WORKFLOW_SUCCESS_OUTCOME_TYPE)
 _BODY = baseline_function(FINISH_WORKFLOW_SUCCESS_FUNCTION)
 
 
 class TestProgram:
     def test_the_first_ten_columns_are_the_shared_outcome_row(self) -> None:
-        shared = _COLUMN.findall(OUTCOME_TYPE_DDL)
-        success = _COLUMN.findall(WORKFLOW_SUCCESS_OUTCOME_TYPE_DDL)
+        """By name: the decoders read the columns by name. The routing facts
+        of phase 2 follow them."""
+        shared = [column for column, _ in _COLUMN.findall(OUTCOME_TYPE_DDL)]
+        success = baseline_returned_columns(FINISH_WORKFLOW_SUCCESS_FUNCTION)
 
         assert len(shared) == 10
-        assert success[:10] == shared
-        assert success[10:] == [('queue_name', 'text'), ('task_name', 'text')]
+        assert [column for column, _ in success[:10]] == shared
+        assert success[10:] == (
+            ('queue_name', 'text'),
+            ('task_name', 'text'),
+            ('node_has_dependents', 'boolean'),
+            ('downstream_subworkflow', 'text'),
+        )
 
     def test_the_result_is_checked_before_any_lock(self) -> None:
         assert _BODY.index('not_null_violation') < _BODY.index('pg_advisory_xact_lock')
@@ -294,11 +303,4 @@ class TestProgram:
 
     def test_it_sends_no_wake(self) -> None:
         assert 'pg_notify' not in _BODY
-
-    def test_installation_has_the_type_before_the_function(self) -> None:
-        sql = baseline_sql()
-        type_at = sql.index(f'CREATE TYPE {WORKFLOW_SUCCESS_OUTCOME_TYPE}')
-        function_at = sql.index(f'CREATE FUNCTION {FINISH_WORKFLOW_SUCCESS_FUNCTION}')
-
-        assert type_at < function_at
 

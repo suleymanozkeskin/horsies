@@ -1,11 +1,13 @@
 //! The terminal-transition vocabulary (parity with Python's
 //! `python/horsies/core/lifecycle/`).
 //!
-//! Every way a task reaches a terminal status is one of fifteen commands
-//! (`commands`), each with the ownership fence its site requires (`fences`),
-//! a frozen provenance kind and database function name (`operations`), and a
-//! typed outcome decoded from the one row shape every operation returns
-//! (`outcomes`). The SQL bodies installed by migration 0032 are the
+//! Every way a task reaches a terminal status is one of eleven commands
+//! (`commands`) or one of four writers with no command: the three attempt
+//! writers, whose rows `attempt_outcomes` decodes, and the administrative
+//! cancel (`horsies_cancel_task`). A command has the ownership fence its site
+//! requires (`fences`), a frozen provenance kind and database function name
+//! (`operations`), and a typed outcome decoded from the one row shape every
+//! operation returns (`outcomes`). The SQL bodies installed by migration 0032 are the
 //! projection of this vocabulary; the catalog-conformance test pins the two
 //! against each other.
 
@@ -22,9 +24,7 @@ pub use attempt_outcomes::{
     WorkflowSuccessOutcome,
 };
 pub use commands::{BatchSize, TerminalizationCommand};
-pub use fences::{
-    CallerHoldsRowLock, OwnedClaim, OwnedClaimBatch, PriorLockedRead, TerminalFence, WorkerOwned,
-};
+pub use fences::{OwnedClaim, OwnedClaimBatch, TerminalFence, WorkerOwned};
 pub use operations::{
     equivalence_class_of, function_name_of, is_already_applied, kind_of, TerminalizationKind,
     EQUIVALENCE_CLASSES,
@@ -57,13 +57,12 @@ pub enum LifecycleValidationError {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::commands::{BatchSize, TerminalizationCommand};
-    use super::fences::{OwnedClaim, OwnedClaimBatch, PriorLockedRead, WorkerOwned};
+    use super::fences::{OwnedClaim, OwnedClaimBatch, WorkerOwned};
     use super::operations::{
         equivalence_class_of, function_name_of, is_already_applied, kind_of, TerminalizationKind,
         EQUIVALENCE_CLASSES,
     };
     use super::*;
-    use crate::core::types::status::TaskStatus;
     use uuid::Uuid;
 
     fn snake(variant: &str) -> String {
@@ -77,54 +76,22 @@ pub(crate) mod tests {
         out
     }
 
-    /// One command of each of the fifteen variants, with its variant name.
+    /// One command of each of the eleven variants, with its variant name.
     pub(crate) fn sample_commands() -> Vec<(&'static str, TerminalizationCommand)> {
         let generation = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
         let owned = OwnedClaim {
             worker_id: "w1".to_owned(),
             claimed_at: generation,
         };
-        let prior = PriorLockedRead {
-            worker_id: "w1".to_owned(),
-        };
         let batch = OwnedClaimBatch::new("w1".to_owned(), vec![(Uuid::nil(), generation)]).unwrap();
         let bound = BatchSize::new(500).unwrap();
         vec![
-            (
-                "CompleteLockedTask",
-                TerminalizationCommand::CompleteLockedTask {
-                    task_id: Uuid::nil(),
-                    fence: prior.clone(),
-                    result_json: "{}".into(),
-                },
-            ),
             (
                 "CompleteTaskFused",
                 TerminalizationCommand::CompleteTaskFused {
                     task_id: Uuid::nil(),
                     fence: owned.clone(),
                     result_json: "{}".into(),
-                },
-            ),
-            (
-                "FailLockedTask",
-                TerminalizationCommand::FailLockedTask {
-                    task_id: Uuid::nil(),
-                    fence: prior,
-                    result_json: "{}".into(),
-                    error_code: None,
-                    failed_reason: None,
-                },
-            ),
-            (
-                "FailStaleTask",
-                TerminalizationCommand::FailStaleTask {
-                    task_id: Uuid::nil(),
-                    stale_after_ms: 1000,
-                    finalizing_stale_after_ms: 1000,
-                    result_json: "{}".into(),
-                    error_code: "E".into(),
-                    failed_reason: "r".into(),
                 },
             ),
             (
@@ -144,14 +111,6 @@ pub(crate) mod tests {
                     batch_size: bound,
                     result_json: "{}".into(),
                     error_code: "E".into(),
-                },
-            ),
-            (
-                "CancelLockedTask",
-                TerminalizationCommand::CancelLockedTask {
-                    task_id: Uuid::nil(),
-                    fence: super::fences::CallerHoldsRowLock,
-                    permitted_source_statuses: vec![TaskStatus::Pending],
                 },
             ),
             (
@@ -245,14 +204,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn fifteen_commands_fifteen_kinds() {
+    fn eleven_commands_eleven_kinds() {
         let commands = sample_commands();
-        assert_eq!(commands.len(), 15);
+        assert_eq!(commands.len(), 11);
         let mut kinds: Vec<TerminalizationKind> =
             commands.iter().map(|(_, c)| kind_of(c)).collect();
         kinds.sort_by_key(|k| k.as_str());
         kinds.dedup();
-        assert_eq!(kinds.len(), 15, "each command commits a distinct kind");
+        assert_eq!(kinds.len(), 11, "each command commits a distinct kind");
     }
 
     #[test]
@@ -329,12 +288,8 @@ pub(crate) mod tests {
     /// its subject here before the tests below compile.
     fn subject_of(command: &TerminalizationCommand) -> Subject {
         match command {
-            TerminalizationCommand::CompleteLockedTask { .. }
-            | TerminalizationCommand::CompleteTaskFused { .. }
-            | TerminalizationCommand::FailLockedTask { .. }
-            | TerminalizationCommand::FailStaleTask { .. }
+            TerminalizationCommand::CompleteTaskFused { .. }
             | TerminalizationCommand::ExpireOwnedClaim { .. }
-            | TerminalizationCommand::CancelLockedTask { .. }
             | TerminalizationCommand::CancelOwnedOrphan { .. }
             | TerminalizationCommand::AbandonOwnedNode { .. }
             | TerminalizationCommand::CancelOwnedNode { .. } => Subject::OneTask,
@@ -380,7 +335,7 @@ pub(crate) mod tests {
     #[test]
     fn a_command_of_one_task_carries_no_batch_fence() {
         let single = variants_where(|command| subject_of(command) == Subject::OneTask);
-        assert_eq!(single.len(), 9, "{single:?}");
+        assert_eq!(single.len(), 5, "{single:?}");
         for (variant, command) in sample_commands() {
             match subject_of(&command) {
                 Subject::OneTask => assert!(!has_batch_fence(&command), "{variant}"),

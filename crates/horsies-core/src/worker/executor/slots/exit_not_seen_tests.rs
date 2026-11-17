@@ -294,6 +294,7 @@ async fn a_deadline_kill_waits_for_the_late_exit_with_recovery_off() {
         AttemptEnd::TimedOut {
             timeout: timeout_ms(SHORT_DEADLINE_MS),
             retry: RetryPlacement::SameClass,
+            cancel: TimeoutCancel::NoSignal,
         }
     );
     held.stop().await;
@@ -555,6 +556,7 @@ async fn a_late_exit_after_the_backstop_kill_gives_the_timeout_with_recovery_off
         AttemptEnd::TimedOut {
             timeout: timeout_ms(SHORT_DEADLINE_MS),
             retry: RetryPlacement::SameClass,
+            cancel: TimeoutCancel::NoSignal,
         }
     );
     held.stop().await;

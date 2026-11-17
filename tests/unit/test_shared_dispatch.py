@@ -91,6 +91,9 @@ from horsies.core.worker.shared_finalize import (
 from horsies.core.worker.shared_stop import (
     BesideBlockedLoop,
     BlockedTheLoop,
+    CancelEnd,
+    EndedByKill,
+    NoCancelSignal,
     RetryPlacement,
     ReturnedBeforeKill,
     TimedOutAtKill,
@@ -462,14 +465,20 @@ class TestFinalizeShared:
         )
 
     @pytest.mark.parametrize('retry', list(RetryPlacement))
+    @pytest.mark.parametrize('cancel_end', list(CancelEnd))
     async def test_a_reported_deadline_writes_the_timeout(
         self,
         retry: RetryPlacement,
+        cancel_end: CancelEnd,
     ) -> None:
-        """The retry of a run that the child reported stuck runs isolated."""
+        """The retry of a run that the child reported stuck runs isolated.
+        The write records how the run ended after its cancel."""
         worker = self._worker_with_paths()
 
-        result = await self._finalize(worker, SeatDeadlineEnded(retry=retry))
+        result = await self._finalize(
+            worker,
+            SeatDeadlineEnded(retry=retry, cancel=cancel_end),
+        )
 
         assert result == Ok(None)
         worker._record_task_timeout.assert_awaited_once_with(  # type: ignore[attr-defined]
@@ -477,6 +486,7 @@ class TestFinalizeShared:
             1500,
             CLAIM,
             retry=retry,
+            cancel=cancel_end,
         )
         worker._recover_worker_future_failure.assert_not_awaited()  # type: ignore[attr-defined]
 
@@ -490,7 +500,10 @@ class TestFinalizeShared:
 
         result: Result[None, _FinalizeError] = await self._finalize(
             worker,
-            SeatDeadlineEnded(retry=RetryPlacement.ISOLATED),
+            SeatDeadlineEnded(
+                retry=RetryPlacement.ISOLATED,
+                cancel=CancelEnd.DROPPED_AFTER_GRACE,
+            ),
         )
 
         match result:
@@ -501,6 +514,7 @@ class TestFinalizeShared:
                     1500,
                     RetryPlacement.ISOLATED,
                     CLAIM,
+                    CancelEnd.DROPPED_AFTER_GRACE,
                 )
             case Ok():
                 raise AssertionError(result)
@@ -537,7 +551,10 @@ class TestFinalizeShared:
         with pytest.raises(AssertionError, match='deadline it does not have'):
             await self._finalize(
                 worker,
-                SeatDeadlineEnded(retry=RetryPlacement.SAME_CLASS),
+                SeatDeadlineEnded(
+                    retry=RetryPlacement.SAME_CLASS,
+                    cancel=CancelEnd.RETURNED_AFTER_SIGNAL,
+                ),
                 refusal,
             )
 
@@ -617,6 +634,7 @@ class TestFinalizeKilledRun:
             1500,
             CLAIM,
             retry=retry,
+            cancel=EndedByKill(),
         )
         writes.recovery.assert_not_awaited()
 
@@ -948,7 +966,10 @@ class TestBackstopDecision:
         worker = _worker()
         worker._record_task_timeout = AsyncMock()
         handle = _handle(asyncio.get_running_loop())
-        ended = SeatDeadlineEnded(retry=RetryPlacement.ISOLATED)
+        ended = SeatDeadlineEnded(
+            retry=RetryPlacement.ISOLATED,
+            cancel=CancelEnd.DROPPED_AFTER_GRACE,
+        )
         asyncio.get_running_loop().call_later(0.02, handle.finish, ended)
 
         outcome = await self._backstop(worker, DeadlineAcknowledged(pid=7), handle)
@@ -1006,7 +1027,10 @@ class TestBackstopDecision:
         monkeypatch.setattr(dispatch_module, 'SHARED_STUCK_BACKSTOP_S', 0.01)
         worker = _worker()
         handle = _handle(asyncio.get_running_loop())
-        ended = SeatDeadlineEnded(retry=RetryPlacement.ISOLATED)
+        ended = SeatDeadlineEnded(
+            retry=RetryPlacement.ISOLATED,
+            cancel=CancelEnd.DROPPED_AFTER_GRACE,
+        )
         handle.stuck_backstop_kill = AsyncMock(return_value=StuckAcknowledged(pid=7))
         asyncio.get_running_loop().call_later(0.05, handle.finish, ended)
 
@@ -1029,7 +1053,10 @@ class TestBackstopDecision:
         handle.backstop_kill = AsyncMock(return_value=DeadlineAcknowledged(pid=7))
         stuck_backstop = AsyncMock()
         handle.stuck_backstop_kill = stuck_backstop
-        ended = SeatDeadlineEnded(retry=RetryPlacement.SAME_CLASS)
+        ended = SeatDeadlineEnded(
+            retry=RetryPlacement.SAME_CLASS,
+            cancel=NoCancelSignal(),
+        )
         asyncio.get_running_loop().call_later(0.05, handle.finish, ended)
 
         outcome = await asyncio.wait_for(
@@ -1058,6 +1085,7 @@ class _TimeoutWriteRetries:
             1500,
             CLAIM,
             RetryPlacement.ISOLATED,
+            CancelEnd.DROPPED_AFTER_GRACE,
         )
 
 
@@ -1076,6 +1104,7 @@ class TestTimeoutWriteRetry:
             1500,
             CLAIM,
             retry=RetryPlacement.ISOLATED,
+            cancel=CancelEnd.DROPPED_AFTER_GRACE,
         )
         retries.recovery.assert_not_awaited()
 
@@ -1149,7 +1178,12 @@ def test_the_data_of_a_timeout_write_is_a_closed_shape() -> None:
 
 
 def test_the_data_of_a_timeout_write_needs_a_claim() -> None:
-    data = timeout_retry_data(1500, RetryPlacement.SAME_CLASS, CLAIM)
+    data = timeout_retry_data(
+        1500,
+        RetryPlacement.SAME_CLASS,
+        CLAIM,
+        CancelEnd.RETURNED_AFTER_SIGNAL,
+    )
     data['claim'] = None
 
     with pytest.raises(AssertionError, match='no TASK_TIMEOUT write'):

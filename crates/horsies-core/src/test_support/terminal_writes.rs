@@ -10,8 +10,10 @@
 //!
 //! The fence is the claim of the live row: the worker that the caller names,
 //! and the claim generation (`claimed_at`) that the statement reads from the
-//! row it ends. A test of the generation fence passes its own generation
-//! through `broker::terminalization` instead.
+//! row it ends. The `_at` forms take the generation from the caller instead:
+//! a replay after the move, when no live row is left to read it from, or a
+//! fence test. A test of the generation fence of the plain success passes
+//! its own generation through `broker::terminalization`.
 //!
 //! Every end except the cancel writes an attempt row from the process facts
 //! of the live row (`worker_pid`, `worker_hostname`, `worker_process_name`,
@@ -20,6 +22,7 @@
 //! `retry_count + 1`; an attempt row of that number that the seed wrote
 //! before is replaced.
 
+use chrono::{DateTime, Utc};
 use sqlx::postgres::PgRow;
 use sqlx::PgExecutor;
 use uuid::Uuid;
@@ -44,6 +47,13 @@ const COMPLETE_WORKFLOW_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, t
      FROM horsies_finish_workflow_success(
          $1, $2, (SELECT t.claimed_at FROM horsies_tasks t WHERE t.id = $1), $3)";
 
+/// [`COMPLETE_WORKFLOW_TASK_SQL`] under the caller's claim generation.
+/// Parameters: task id, worker id, claim generation, result.
+const COMPLETE_WORKFLOW_TASK_AT_SQL: &str = "SELECT task_id, ordinality, outcome, terminal_at,
+        terminalization_kind, observed_status, observed_worker_id, observed_claimed_at,
+        guard_kind, observed_guard
+     FROM horsies_finish_workflow_success($1, $2, $3, $4)";
+
 /// `horsies_finish_failed_attempt` with no retry, under the claimed-row rule
 /// `REFUSE` and with the capacity wake, as the worker's failure of a task
 /// whose child reported. Parameters: task id, worker id, result, error code,
@@ -54,6 +64,15 @@ const FAIL_RUNNING_TASK_SQL: &str = "SELECT task_id, ordinality, outcome, termin
      FROM horsies_finish_failed_attempt(
          $1, $2, (SELECT t.claimed_at FROM horsies_tasks t WHERE t.id = $1),
          'NONE', NULL, NULL, NULL, $3, $4, $5, $6, $7, $8, 'REFUSE', TRUE)";
+
+/// [`FAIL_RUNNING_TASK_SQL`] under the caller's claim generation.
+/// Parameters: task id, worker id, claim generation, result, error code,
+/// failed reason, attempt outcome, attempt message, attempt reason.
+const FAIL_RUNNING_TASK_AT_SQL: &str = "SELECT task_id, ordinality, outcome, terminal_at,
+        terminalization_kind, observed_status, observed_worker_id, observed_claimed_at,
+        guard_kind, observed_guard
+     FROM horsies_finish_failed_attempt(
+         $1, $2, $3, 'NONE', NULL, NULL, NULL, $4, $5, $6, $7, $8, $9, 'REFUSE', TRUE)";
 
 /// `horsies_finish_stale_attempt` with no retry, as the stale RUNNING pass
 /// writes the failure: the attempt message and reason are the failed reason.
@@ -166,6 +185,31 @@ pub(crate) async fn complete_workflow_task<'e>(
     Ok(decoded("horsies_finish_workflow_success", task_id, &rows))
 }
 
+/// [`complete_workflow_task`] under the fence of `worker_id` at
+/// `claimed_at`.
+///
+/// Errors: the database's refusal of the statement.
+///
+/// # Panics
+///
+/// When a row does not decode as an outcome.
+pub(crate) async fn complete_workflow_task_at<'e>(
+    executor: impl PgExecutor<'e>,
+    task_id: Uuid,
+    worker_id: &str,
+    claimed_at: DateTime<Utc>,
+    result_json: &str,
+) -> Result<Vec<TerminalizationOutcome>, sqlx::Error> {
+    let rows = sqlx::query(COMPLETE_WORKFLOW_TASK_AT_SQL)
+        .bind(task_id)
+        .bind(worker_id)
+        .bind(claimed_at)
+        .bind(result_json)
+        .fetch_all(executor)
+        .await?;
+    Ok(decoded("horsies_finish_workflow_success", task_id, &rows))
+}
+
 /// The terminal failure of the RUNNING task `task_id` that `worker_id`
 /// holds, plain or workflow. The move of a workflow task writes the phase-2
 /// record of its node, so the node row must exist first.
@@ -181,17 +225,42 @@ pub(crate) async fn fail_running_task<'e>(
     worker_id: &str,
     failure: &TerminalFailure,
 ) -> Result<Vec<TerminalizationOutcome>, sqlx::Error> {
-    let attempt_outcome = match failure.attempt.kind {
-        AttemptFailureKind::Failed => "FAILED",
-        AttemptFailureKind::WorkerFailure => "WORKER_FAILURE",
-    };
     let rows = sqlx::query(FAIL_RUNNING_TASK_SQL)
         .bind(task_id)
         .bind(worker_id)
         .bind(failure.result_json.as_str())
         .bind(failure.error_code.as_deref())
         .bind(failure.failed_reason.as_deref())
-        .bind(attempt_outcome)
+        .bind(attempt_outcome_of(failure))
+        .bind(failure.attempt.error_message.as_deref())
+        .bind(failure.attempt.failed_reason.as_deref())
+        .fetch_all(executor)
+        .await?;
+    Ok(decoded("horsies_finish_failed_attempt", task_id, &rows))
+}
+
+/// [`fail_running_task`] under the fence of `worker_id` at `claimed_at`.
+///
+/// Errors: the database's refusal of the statement.
+///
+/// # Panics
+///
+/// When a row does not decode as an outcome.
+pub(crate) async fn fail_running_task_at<'e>(
+    executor: impl PgExecutor<'e>,
+    task_id: Uuid,
+    worker_id: &str,
+    claimed_at: DateTime<Utc>,
+    failure: &TerminalFailure,
+) -> Result<Vec<TerminalizationOutcome>, sqlx::Error> {
+    let rows = sqlx::query(FAIL_RUNNING_TASK_AT_SQL)
+        .bind(task_id)
+        .bind(worker_id)
+        .bind(claimed_at)
+        .bind(failure.result_json.as_str())
+        .bind(failure.error_code.as_deref())
+        .bind(failure.failed_reason.as_deref())
+        .bind(attempt_outcome_of(failure))
         .bind(failure.attempt.error_message.as_deref())
         .bind(failure.attempt.failed_reason.as_deref())
         .fetch_all(executor)
@@ -243,6 +312,14 @@ pub(crate) async fn cancel_live_task<'e>(
         .fetch_all(executor)
         .await?;
     Ok(decoded("horsies_cancel_task", task_id, &rows))
+}
+
+/// The `p_attempt_outcome` of the attempt row of `failure`.
+fn attempt_outcome_of(failure: &TerminalFailure) -> &'static str {
+    match failure.attempt.kind {
+        AttemptFailureKind::Failed => "FAILED",
+        AttemptFailureKind::WorkerFailure => "WORKER_FAILURE",
+    }
 }
 
 /// The outcome of each row of `function` for `task_id`.

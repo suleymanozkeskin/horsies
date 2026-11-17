@@ -13,9 +13,10 @@ relies on.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, assert_never, cast
+from typing import TYPE_CHECKING, Any, Final, assert_never, cast
 
 from sqlalchemy import text
 
@@ -74,7 +75,6 @@ from horsies.core.lifecycle.persistence import (
     BatchRolledBack,
     BatchWriteError,
     FusedCompletionBatch,
-    apply_in_autocommit,
     complete_fused_batch_in_core,
 )
 from horsies.core.logging import get_logger
@@ -139,6 +139,7 @@ from horsies.core.worker.runtime import (
     _RequeueOutcome,
 )
 from horsies.core.worker.dispatch_claim import DispatchClaim
+from horsies.core.lifecycle.core_records import task_row_end_of
 from horsies.core.worker.failed_attempt import (
     AttemptFailure,
     AttemptFailureKind,
@@ -155,7 +156,13 @@ from horsies.core.worker.shared_finalize import (
     timeout_retry_data,
     timeout_retry_write,
 )
-from horsies.core.worker.shared_stop import RetryPlacement, culprit_retry
+from horsies.core.worker.shared_stop import (
+    EndedByKill,
+    NoCancelSignal,
+    RetryPlacement,
+    TimeoutCancel,
+    culprit_retry,
+)
 from horsies.core.worker.stored_timeout import (
     CancelGraceInvalid,
     NoTimeout,
@@ -192,6 +199,9 @@ if TYPE_CHECKING:
     from horsies.core.worker.finalize_batch import FinalizeBatcher
 
 logger = get_logger('worker')
+
+_CANCEL_OWNED_ORPHAN_SUBJECT: Final = 'FinalizeMixin._cancel_owned_orphan'
+"""The subject of a failed orphan self-heal write."""
 
 GET_TASK_STATUS_SQL = text("""
     SELECT status, queue_name, is_workflow_task
@@ -356,6 +366,24 @@ def _shared_timeout_ms(task_id: str, work: SharedWork) -> int:
             assert_never(unreachable)
 
 
+def cancel_at_kill(task_id: str, work: SharedWork) -> TimeoutCancel:
+    """What a shared run that passed its deadline and ended at a kill of its
+    child records about its cancel: ``EndedByKill`` for an async run,
+    ``NoCancelSignal`` for a thread run. A refusal has no deadline:
+    ``AssertionError``. Pure."""
+    match work:
+        case SeatTask():
+            return EndedByKill()
+        case ThreadSeatTask():
+            return NoCancelSignal()
+        case SeatRefusal():
+            raise AssertionError(
+                f'the refused task {task_id} was killed past a deadline it does not have',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _max_retries_of(stage: FinalizeStage) -> int:
     """The bound of the finalize retries of ``stage``. Pure."""
     match stage:
@@ -411,6 +439,7 @@ class FinalizeMixin:
             claim: DispatchClaim,
             *,
             retry: RetryPlacement,
+            cancel: TimeoutCancel,
         ) -> _TimeoutSettled | _TimeoutWriteFailed: ...
         async def _wait_for_unseen_exit(
             self,
@@ -592,6 +621,7 @@ class FinalizeMixin:
                                 timeout_ms,
                                 claim,
                                 RetryPlacement.SAME_CLASS,
+                                NoCancelSignal(),
                             ),
                         )
                     case (
@@ -880,12 +910,13 @@ class FinalizeMixin:
                     task_name=task_name,
                     claim=claim,
                 )
-            case SeatDeadlineEnded(retry=retry):
+            case SeatDeadlineEnded(retry=retry, cancel=cancel):
                 return await self._finalize_shared_timeout(
                     task_id,
                     _shared_timeout_ms(task_id, work),
                     claim,
                     retry,
+                    cancel,
                 )
             case ChildKilledPastDeadlines(culprit=culprit):
                 return await self._finalize_shared_timeout(
@@ -893,6 +924,7 @@ class FinalizeMixin:
                     _shared_timeout_ms(task_id, work),
                     claim,
                     culprit_retry(culprit, handle.frame.dispatch),
+                    cancel_at_kill(task_id, work),
                 )
             case SeatKilled():
                 return await self._finalize_killed_run(
@@ -924,10 +956,12 @@ class FinalizeMixin:
         timeout_ms: int,
         claim: DispatchClaim,
         retry: RetryPlacement,
+        cancel: TimeoutCancel,
     ) -> Result[None, _FinalizeError]:
         """Record the timeout of a shared task whose attempt has ended: its
         coroutine and its marked work ended, or its child exited. ``retry``
-        is where the retry runs.
+        is where the retry runs; ``cancel`` is what the attempt records about
+        the cancel at the deadline.
 
         A failed write gives a timeout-stage error, as the timeout of an
         isolated task does: the finalize retry handler runs the same write
@@ -939,12 +973,19 @@ class FinalizeMixin:
             timeout_ms,
             claim,
             retry=retry,
+            cancel=cancel,
         ):
             case _TimeoutSettled():
                 return Ok(None)
             case _TimeoutWriteFailed():
                 return Err(
-                    self._timeout_write_error(task_id, timeout_ms, claim, retry),
+                    self._timeout_write_error(
+                        task_id,
+                        timeout_ms,
+                        claim,
+                        retry,
+                        cancel,
+                    ),
                 )
             case _ as unreachable:
                 assert_never(unreachable)
@@ -955,6 +996,7 @@ class FinalizeMixin:
         timeout_ms: int,
         claim: DispatchClaim,
         retry: RetryPlacement,
+        cancel: TimeoutCancel,
     ) -> _FinalizeError:
         """The retryable timeout-stage error of an attempt that has ended and
         whose TASK_TIMEOUT write failed. Its data keeps that write
@@ -967,7 +1009,7 @@ class FinalizeMixin:
                 'write failed'
             ),
             retryable=True,
-            data=timeout_retry_data(timeout_ms, retry, claim),
+            data=timeout_retry_data(timeout_ms, retry, claim, cancel),
         )
 
     async def _finalize_child_loss(
@@ -1242,7 +1284,7 @@ class FinalizeMixin:
                 )
             case ApplyTerminalization(command=CancelOwnedOrphan() as command):
                 try:
-                    outcome = await apply_in_autocommit(self.sf, command)
+                    outcome = await self._cancel_owned_orphan(command)
                     match outcome:
                         case Applied():
                             terminated = True
@@ -1483,6 +1525,34 @@ class FinalizeMixin:
                 'outcome': outcome_data,
             },
         )
+
+    async def _cancel_owned_orphan(
+        self,
+        command: CancelOwnedOrphan,
+    ) -> TerminalizationOutcome:
+        """Cancel a claimed workflow task that no runnable node links, through
+        the core: ``horsies_cancel_owned_orphan``, one statement that commits
+        alone, fenced to this claim (worker and claim generation).
+
+        ``Applied``: the task moved to history as CANCELLED
+        (``CANCEL_ORPHAN``, ``WORKFLOW_CHECK_FAILED``). A refusal
+        (``AlreadyApplied``, ``LostClaim``, ``SourceStateConflict``,
+        ``TaskAbsent``) wrote nothing.
+
+        Raises:
+            CoreOperationFailed: the statement failed (``retryable`` is the
+                core's classification). A lost reply leaves the outcome
+                unknown; a replay of the same command reports a committed
+                cancel as ``AlreadyApplied``.
+            CoreError: the core of this process cannot run the call.
+            OutcomeDecodeError: a record outside the Python catalogs.
+        """
+        record = await self.core_handle.cancel_owned_orphan_async(
+            uuid.UUID(command.task_id),
+            worker_id=command.fence.worker_id,
+            claimed_at=command.fence.claimed_at,
+        )
+        return task_row_end_of(record, _CANCEL_OWNED_ORPHAN_SUBJECT)
 
     async def _persist_failed_attempt(
         self,
@@ -1985,12 +2055,13 @@ class FinalizeMixin:
         await self._sleep_with_stop(delay_s)
         if self._stop.is_set():
             return
-        timeout_ms, retry, claim = timeout_retry_write(err.data)
+        timeout_ms, retry, claim, cancel = timeout_retry_write(err.data)
         match await self._record_task_timeout(
             err.task_id,
             timeout_ms,
             claim,
             retry=retry,
+            cancel=cancel,
         ):
             case _TimeoutSettled():
                 self._clear_finalize_retry_attempts(
@@ -2012,7 +2083,7 @@ class FinalizeMixin:
         a future-stage error whose data keeps the same code and placement
         (``future_retry_data``).
         """
-        timeout_ms, retry, claim = timeout_retry_write(err.data)
+        timeout_ms, retry, claim, _cancel = timeout_retry_write(err.data)
         code: CrashRecoveryCode = OutcomeCode.TASK_TIMEOUT
         reason = (
             f'Task reached timeout_ms={timeout_ms}, and the TASK_TIMEOUT write '

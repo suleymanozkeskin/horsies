@@ -79,6 +79,15 @@ pub use crate::broker::{
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 
+// partition maintenance of a client handle (`PostgresBroker::ensure_partition_coverage`)
+pub use crate::broker::CoveragePassError;
+pub use crate::core::history::errors::HistoryError;
+pub use crate::core::history::maintenance::coverage::{
+    CoverageEnsureFailed, CoverageEnsured, CoverageOutcome, CoverageRequest, CoverageSerialization,
+    HistoryCoverage,
+};
+pub use crate::core::history::periods::RetentionDays;
+
 // The baseline SQL files, which horsies._core hands to the Python install.
 pub use crate::broker::migrations::BASELINE_SQL_FILE_TEXTS;
 
@@ -103,6 +112,7 @@ pub use crate::broker::stale_recovery::{
 };
 pub use crate::broker::{
     CancelAnswer, CancelTaskError, EnqueueRefusal, EnqueueRefusalCause, SendKind,
+    WorkflowRetentionFailed, WorkflowRetentionPass,
 };
 pub use crate::core::history::enqueue::SendPart;
 pub use crate::worker::execution::FinalizingMark;

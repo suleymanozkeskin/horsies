@@ -33,6 +33,7 @@ from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.shared_stop import (
     BesideBlockedLoop,
     BlockedTheLoop,
+    CancelEnd,
     KilledRunVerdict,
     RetryPlacement,
     ReturnedBeforeKill,
@@ -244,8 +245,20 @@ async def _attempt(session: AsyncSession, task_id: str) -> Row[Any]:
         (_no_time_left(culprit_dispatch=1), 'ISOLATED'),
         (_no_time_left(culprit_dispatch=2), 'SHARED_ASYNC'),
         (_killed(TimedOutAtKill(retry=RetryPlacement.SAME_CLASS)), 'SHARED_ASYNC'),
-        (SeatDeadlineEnded(retry=RetryPlacement.ISOLATED), 'ISOLATED'),
-        (SeatDeadlineEnded(retry=RetryPlacement.SAME_CLASS), 'SHARED_ASYNC'),
+        (
+            SeatDeadlineEnded(
+                retry=RetryPlacement.ISOLATED,
+                cancel=CancelEnd.DROPPED_AFTER_GRACE,
+            ),
+            'ISOLATED',
+        ),
+        (
+            SeatDeadlineEnded(
+                retry=RetryPlacement.SAME_CLASS,
+                cancel=CancelEnd.RETURNED_AFTER_SIGNAL,
+            ),
+            'SHARED_ASYNC',
+        ),
     ],
     ids=[
         'killed-as-culprit',
@@ -273,6 +286,64 @@ async def test_a_timeout_retry_runs_where_its_verdict_says(
         True,
         OutcomeCode.TASK_TIMEOUT.value,
     )
+
+
+@pytest.mark.asyncio(loop_scope='function')
+@pytest.mark.parametrize(
+    ('outcome', 'cancel_end'),
+    [
+        (
+            SeatDeadlineEnded(
+                retry=RetryPlacement.SAME_CLASS,
+                cancel=CancelEnd.RETURNED_AFTER_SIGNAL,
+            ),
+            {'cancel_end': 'RETURNED_AFTER_SIGNAL'},
+        ),
+        (
+            SeatDeadlineEnded(
+                retry=RetryPlacement.ISOLATED,
+                cancel=CancelEnd.DROPPED_AFTER_GRACE,
+            ),
+            {'cancel_end': 'DROPPED_AFTER_GRACE'},
+        ),
+        (_killed(TimedOutAtKill(retry=RetryPlacement.SAME_CLASS)), {}),
+        (_no_time_left(culprit_dispatch=1), {}),
+    ],
+    ids=[
+        'returned-after-signal',
+        'dropped-after-grace',
+        'killed-past-deadline',
+        'killed-with-no-time-left',
+    ],
+)
+async def test_the_timeout_data_names_how_the_run_ended(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+    outcome: SharedOutcome,
+    cancel_end: dict[str, str],
+) -> None:
+    """The data of the TASK_TIMEOUT error names the task and its
+    ``timeout_ms``. A run that its child ended also names how it ended after
+    the cancel at its deadline; a run that ended at a kill of its child does
+    not."""
+    task_id = await _insert_shared_task(session, [])
+
+    await _finalize(_worker(engine), task_id, outcome)
+
+    row = await _terminal_row(session, task_id)
+    assert (row.status, row.error_code) == ('FAILED', OutcomeCode.TASK_TIMEOUT.value)
+    stored = (
+        await session.execute(
+            text('SELECT result FROM itest_task_rows WHERE id = :id'),
+            {'id': task_id},
+        )
+    ).scalar_one()
+    assert json.loads(stored)['err']['data'] == {
+        'task_id': task_id,
+        'timeout_ms': TIMEOUT_MS,
+        **cancel_end,
+    }
 
 
 @pytest.mark.asyncio(loop_scope='function')

@@ -55,6 +55,10 @@ impl MonitoringQueryError {
                 MonitoringQueryErrorCode::DbOperationFailed,
                 is_retryable_sqlx_error(database),
             ),
+            HistoryError::Statement(_) | HistoryError::RowDecode(_) => (
+                MonitoringQueryErrorCode::DbOperationFailed,
+                error.is_retryable(),
+            ),
             HistoryError::ArchiveDecode(_)
             | HistoryError::Contract(_)
             | HistoryError::LeafLockNotHeld

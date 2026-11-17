@@ -131,6 +131,10 @@ class CoreHandle:
         """
     def release_claims_async(self, request: ReleaseClaimsRequest) -> asyncio.Future[ClaimsReleased | ReleaseFailed]:
         """Release the claims of one request. Writes, in one statement."""
+    def ensure_partition_coverage_async(self, request: CoverageRequest) -> asyncio.Future[CoverageEnsuredRecord | CoverageEnsureFailedRecord | CoverageFailed]:
+        """One partition coverage pass on the session-work pool. Writes (DDL and catalog rows);
+        each leaf commits alone.
+        """
     def cancel_task_async(self, task_id: uuid.UUID, *, include_running: bool) -> asyncio.Future[TaskCancelledRecord | CancelRefusedWorkflowTask | CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid]:
         """Cancel one plain task; a RUNNING task only with include_running. Writes, in one
         statement. An outcome that contradicts the function raises PanicException.
@@ -143,6 +147,23 @@ class CoreHandle:
         """Cancel one claimed workflow task that this claim holds and that no runnable node
         links. Writes, in one statement. A naive claimed_at raises TypeError.
         """
+    def pause_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed]:
+        """Pause one workflow tree. Writes, in one statement. A row outside the function's contract
+        raises PanicException.
+        """
+    def cancel_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleFailed]:
+        """Cancel one workflow tree. Writes, in one statement. A row outside the function's contract
+        raises PanicException.
+        """
+    def delete_expired_workflows_async(self, older_than_hours: int, batch_size: int, budget_ms: int) -> asyncio.Future[WorkflowsDeleted | WorkflowDeleteFailed]:
+        """One workflow retention pass of the reaper, in batches until one deletes nothing or the
+        budget has passed. Writes; each batch commits alone. A negative value raises
+        OverflowError.
+        """
+    def expire_paused_workflows_async(self, older_than_us: int, batch_size: int) -> asyncio.Future[PausedExpired | PausedExpiryFailed]:
+        """Expire the PAUSED workflows older than older_than_us microseconds, at most batch_size,
+        oldest first. Writes; each candidate commits alone.
+        """
     def task_info(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> TaskInfoRecord | TaskInfoNotFound | BrokerFailure:
         """The info of one task. Installs the schema once per handle first; then reads only."""
     def task_info_async(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> asyncio.Future[TaskInfoRecord | TaskInfoNotFound | BrokerFailure]:
@@ -154,6 +175,18 @@ class CoreHandle:
         """
     def raw_result_record_async(self, task_id: uuid.UUID, *, timeout_ms: int | None) -> asyncio.Future[RawResultRecordRecord | RawResultAbsent | BrokerFailure]:
         """The awaitable form of the method above. A cancelled await drops the wait."""
+    def monitoring_list_tasks_async(self, query: TaskListQuery) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+        """One page of the task list: the JSON text of the core's TaskListPage. Reads only, in one
+        statement. A cancelled await drops the read.
+        """
+    def monitoring_task_detail_async(self, task_id: uuid.UUID) -> asyncio.Future[MonitoringJson | TaskDetailAbsent | MonitoringFailed]:
+        """One task with its attempts: the JSON text of the core's TaskDetail, or the reason it is
+        absent. Reads only, in one statement. A cancelled await drops the read.
+        """
+    def monitoring_task_facets_async(self, query: TaskFacetsQuery) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+        """The facets of one scope: the JSON text of the core's Facets. Reads only, in one
+        statement. A cancelled await drops the read.
+        """
 
 
 @final
@@ -1195,6 +1228,215 @@ class WindowRefusedRecord:
     """The requested window is not servable; reason names why."""
     @property
     def reason(self) -> str: ...
+
+
+@final
+class TaskListQuery:
+    """One frozen task list read: the window, the filters, the sort and the page. A value
+    outside its rule raises ValueError; a naive bound raises TypeError.
+    """
+    def __init__(self, *, window_lower: datetime.datetime, window_upper: datetime.datetime, statuses: list[str], task_names: list[str], queues: list[str], workers: list[str], error_codes: list[str], error_categories: list[str], retried_only: bool, sort_by: str, sort_dir: str, offset: int, limit: int) -> None: ...
+
+
+@final
+class TaskFacetsQuery:
+    """One frozen task facets read: the window, the statuses, the error categories that narrow
+    the code list, and the retried filter. A value outside its rule raises ValueError; a naive
+    bound raises TypeError.
+    """
+    def __init__(self, *, window_lower: datetime.datetime, window_upper: datetime.datetime, statuses: list[str], error_categories: list[str], retried_only: bool) -> None: ...
+
+
+@final
+class MonitoringJson:
+    """The JSON text of the core model of one monitoring read."""
+    @property
+    def json(self) -> str: ...
+
+
+@final
+class MonitoringFailed:
+    """An expected failure of a monitoring read. Nothing changed: a read writes nothing."""
+    @property
+    def code(self) -> Literal['DB_OPERATION_FAILED', 'EVENT_LOOP_LIMIT', 'HISTORY_CONTRACT_VIOLATION']: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class TaskDetailAbsent:
+    """Neither the live table nor the history holds the task."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def reason(self) -> Literal['PREDATES_RETAINED_HISTORY', 'WITHIN_RETAINED_HISTORY', 'NOT_CLASSIFIED']: ...
+
+
+@final
+class WorkflowPaused:
+    """The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed
+    tasks of the paused tree are abandoned.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowNotRunning:
+    """The workflow exists and is not RUNNING. Nothing was written."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowCancelled:
+    """The workflow was PENDING, RUNNING or PAUSED; its tree is CANCELLED."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowNotCancellable:
+    """The workflow is COMPLETED, FAILED, CANCELLED or EXPIRED. Nothing was written."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class WorkflowAbsent:
+    """No workflow has this id. Nothing was written."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class HandleFailed:
+    """The connect, the client family check or the statement failed (DB_OPERATION_FAILED), or a
+    stored value of the workflow does not parse (STORED_DATA_INVALID, not retryable). After
+    DB_OPERATION_FAILED the statement wrote nothing, or it committed and its reply was lost.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def code(self) -> Literal['DB_OPERATION_FAILED', 'STORED_DATA_INVALID']: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class WorkflowsDeleted:
+    """The workflow retention pass ended: a batch deleted no workflow, or the budget passed
+    after a batch.
+    """
+    @property
+    def deleted(self) -> int: ...
+
+
+@final
+class WorkflowDeleteFailed:
+    """The workflow retention pass failed. deleted_before counts the workflows of the batches
+    that committed first; a batch whose reply was lost may have committed.
+    """
+    @property
+    def deleted_before(self) -> int: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class PausedExpired:
+    """The paused expiry call ended; expired counts the workflows it expired."""
+    @property
+    def expired(self) -> int: ...
+
+
+@final
+class PausedExpiryFailed:
+    """The paused expiry call failed. The candidates before a failed one are expired; a
+    statement whose reply was lost may have committed.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class CoverageRequest:
+    """One frozen coverage pass: the two horizons, the declared retention periods in whole days,
+    and how a damaged pass is serialized. A period outside 1 to 1825 days, a horizon below two
+    leaves, or another serialization raises ValueError.
+    """
+    def __init__(self, *, history_horizon_days: int, heartbeat_horizon_hours: int, declared_period_days: list[int], serialization: Literal['GATED', 'PER_LEAF_LOCKS']) -> None: ...
+
+
+@final
+class CoveredForeverRecord:
+    """No history class has an end of coverage: only the forever class has leaves, and its leaf
+    has an open upper bound.
+    """
+
+
+@final
+class CoveredUntilRecord:
+    """The first instant (UTC) at which a history class has no leaf."""
+    @property
+    def at(self) -> datetime.datetime: ...
+
+
+@final
+class CoverageEnsuredRecord:
+    """The pass ended with the expected leaves conformant: what it created, whether it published
+    the readers, and how far coverage reaches. absent_leaves names cataloged leaves whose
+    relation is gone.
+    """
+    @property
+    def created_history_leaves(self) -> int: ...
+    @property
+    def created_heartbeat_leaves(self) -> int: ...
+    @property
+    def republished(self) -> bool: ...
+    @property
+    def heartbeat_covered_now(self) -> bool: ...
+    @property
+    def history_covered_through(self) -> CoveredForeverRecord | CoveredUntilRecord: ...
+    @property
+    def heartbeats_covered_through(self) -> datetime.datetime: ...
+    @property
+    def absent_leaves(self) -> list[str]: ...
+
+
+@final
+class CoverageEnsureFailedRecord:
+    """The pass stopped at a refusal; stage, class_key and refusal name where and why."""
+    @property
+    def stage(self) -> str: ...
+    @property
+    def class_key(self) -> str | None: ...
+    @property
+    def refusal(self) -> str: ...
+    @property
+    def heartbeat_covered_now(self) -> bool: ...
+    @property
+    def absent_leaves(self) -> list[str]: ...
+
+
+@final
+class CoverageFailed:
+    """The pass has no outcome: the connect, the client family check, a probe, the coverage
+    gate, the class registration or the final publication failed, or a row broke its
+    function's contract.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
 
 
 @final

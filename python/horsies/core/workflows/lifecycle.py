@@ -55,11 +55,6 @@ from horsies.core.workflows.start_types import (
     WorkflowStartValidationFailed,
 )
 from horsies.core.history.periods import RetentionClassKey
-from horsies.core.workflows.functions import (
-    PAUSE_WORKFLOW_FUNCTION_SQL,
-    PauseOutcome,
-    decode_pause_outcome,
-)
 from horsies.core.workflows.start_tree import start_parameters, start_tree
 from horsies.core.workflows.steps import (
     RESUME_WORKFLOW_FUNCTION_SQL,
@@ -87,6 +82,9 @@ logger = get_logger('workflow.engine')
 _START_RETRY_COUNT: Final[int] = 3
 _START_RETRY_INITIAL_MS: Final[int] = 200
 _START_RETRY_MAX_MS: Final[int] = 2000
+
+PAUSED_EXPIRY_BATCH_SIZE: Final[int] = 50
+"""The most PAUSED workflows that one expiry call reads and expires."""
 
 
 def _ser_or_raise(result: SerdeResult[str], context: str) -> str:
@@ -645,7 +643,9 @@ async def pause_workflow(
     Also pauses every RUNNING descendant workflow, and abandons the claimed
     tasks of the paused tree: their nodes go back to READY, so the resume
     enqueues new tasks. One statement in autocommit
-    (``horsies_workflow_pause``).
+    (``horsies_workflow_pause``) that the core runs on the broker's core
+    handle (``CoreHandle.pause_workflow_async``); a cancel of the caller
+    does not stop it.
 
     Use resume_workflow() to continue execution.
 
@@ -657,46 +657,53 @@ async def pause_workflow(
         ``Ok(True)`` if workflow was paused.
         ``Ok(False)`` if workflow exists but is not RUNNING (no-op).
         ``Err(HandleWorkflowNotFound)`` if workflow does not exist.
-        ``Err(HandleDbOperationFailed)`` on a database error; the
-        statement wrote nothing, or its commit outcome is unknown.
-        ``Err(HandleEventLoopLimit)`` if the broker already serves its limit
-        of open event loops and this is a new one; nothing ran.
-        ``OutcomeDecodeError`` if the function returns a row outside its
-        contract (a defect). Any other exception propagates.
+        ``Err(HandleDbOperationFailed)`` on a database error or a core
+        boundary error; the statement wrote nothing, or its commit outcome
+        is unknown. An id that is not a UUID is not retryable.
+        ``Err(HandleStoredDataInvalid)`` if a stored value does not parse.
+
+    Raises:
+        PanicException: the function returned a row outside its contract
+            (a defect of the core).
     """
-    match await broker.select_resources():
-        case Err(loop_limit):
-            return _event_loop_limit(workflow_id, 'pause', loop_limit)
-        case Ok(resources):
+    from horsies._core import (
+        CoreError,
+        HandleFailed,
+        WorkflowAbsent,
+        WorkflowNotRunning,
+        WorkflowPaused,
+    )
+    from horsies.core.workflows.handle_records import (
+        WorkflowOperation,
+        core_call_error,
+        handle_failed_error,
+        workflow_uuid,
+    )
+
+    match workflow_uuid(workflow_id, WorkflowOperation.PAUSE):
+        case Err(not_an_id):
+            return Err(not_an_id)
+        case Ok(workflow_key):
             pass
     try:
-        async with resources.session_factory() as session:
-            connection = await autocommit_connection(session)
-            result = await connection.execute(
-                PAUSE_WORKFLOW_FUNCTION_SQL,
-                {'wf_id': workflow_id},
-            )
-            rows = result.fetchall()
-    except SQLAlchemyError as exc:
-        return Err(HandleDbOperationFailed(
-            message=f'Pause failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
-            retryable=is_retryable_connection_error(exc),
-            workflow_id=workflow_id,
-            exception=exc,
-        ))
+        record = await broker._core_handle.pause_workflow_async(workflow_key)  # pyright: ignore[reportPrivateUsage]
+    except CoreError as exc:
+        return Err(core_call_error(exc, workflow_id, WorkflowOperation.PAUSE))
     # The status trigger (horsies_notify_workflow_changes) sends
     # workflow_done for each paused workflow at commit, so get() returns
     # WORKFLOW_PAUSED without waiting for a poll.
-    match decode_pause_outcome(rows):
-        case PauseOutcome.PAUSED:
+    match record:
+        case WorkflowPaused():
             return Ok(True)
-        case PauseOutcome.NOT_RUNNING:
+        case WorkflowNotRunning():
             return Ok(False)
-        case PauseOutcome.NOT_FOUND:
+        case WorkflowAbsent():
             return Err(HandleWorkflowNotFound(
                 message=f'Workflow {workflow_id} not found',
                 workflow_id=workflow_id,
             ))
+        case HandleFailed():
+            return Err(handle_failed_error(record, workflow_id, WorkflowOperation.PAUSE))
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -964,7 +971,7 @@ async def expire_paused_workflows(
     session_factory: 'async_sessionmaker[AsyncSession]',
     *,
     older_than: timedelta,
-    batch_size: int = 50,
+    batch_size: int = PAUSED_EXPIRY_BATCH_SIZE,
 ) -> int:
     """Expire PAUSED workflows older than the declared age policy.
 
