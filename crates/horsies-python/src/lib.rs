@@ -200,6 +200,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::enqueue::EnqueueRequest>()?;
     module.add_class::<operations::enqueue::Enqueued>()?;
     module.add_class::<operations::enqueue::SendSuppressed>()?;
+    module.add_class::<operations::enqueue::SendAsyncContext>()?;
     module.add_class::<operations::enqueue::SendValidationFailed>()?;
     module.add_class::<operations::enqueue::SendEnqueueFailed>()?;
     module.add_class::<operations::enqueue::SendPayloadMismatch>()?;
