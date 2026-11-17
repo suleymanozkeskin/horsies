@@ -1,8 +1,15 @@
 # Acme Clothing showcase
 
-The showcase is a runnable Acme Clothing application. It demonstrates tasks,
-workflows, queues, schedules, deterministic business faults, and the Horsies
-monitoring UI.
+The showcase is a runnable Acme Clothing application on the Rust client of
+horsies. It demonstrates typed tasks with a code enum of their own, workflows
+and a sub-workflow, queues, schedules, a worker profile with isolated and
+shared async children, deterministic business faults, and the monitoring UI.
+
+`acme` is one binary. It is the producer of the scenarios, the worker, each
+worker child, the scheduler and the web server: `main` builds the app, serves
+child mode first (`horsies::child_mode`, `Horsies::serve_child`), then runs
+its command through the plain methods of the app (`run_worker`,
+`run_scheduler`, `check`).
 
 ## Start the demo
 
@@ -12,9 +19,10 @@ The compose service listens on port `5433`.
 For that compose service, set
 `ACME_DATABASE_URL=postgresql://postgres:postgres@localhost:5433/acme_demo`.
 
-Set `ACME_DATABASE_URL` to a native SQLx URL. The accepted forms are
+Set `ACME_DATABASE_URL` to a PostgreSQL URL. The accepted forms are
 `postgresql://`, `postgres://`, and `postgresql+psycopg://`. The last form is
-accepted for Python `.env` compatibility and is normalized before SQLx uses it.
+accepted for Python `.env` compatibility and is normalized before horsies and
+SQLx use it.
 The resolver checks these sources in order:
 
 1. `ACME_DATABASE_URL` in the environment.
@@ -39,9 +47,16 @@ cargo run -p acme-showcase --bin acme -- scheduler
 cargo run -p acme-showcase --features web --bin acme -- web --auth none
 ```
 
-`--auth none` is valid only on a loopback host. Use the Horsies trusted-header
-policy behind a reverse proxy for a non-loopback host. The proxy must replace,
-not forward, the trusted header from a client.
+`worker` runs the profile `acme` of the app config (`--profile` names
+another): 6 isolated children for the tasks that read and write the Acme
+tables, and 1 shared async child of 32 seats for the other tasks. Each child
+is the `acme` binary again, in child mode. `SIGTERM` or `SIGINT` stops the
+worker after its children drain.
+
+`--auth none` is valid only on a loopback host. Use `--auth trusted-header`
+behind a reverse proxy for a non-loopback host. The proxy must replace, not
+forward, the trusted header from a client. `acme check` checks the app, its
+workflows and its schedules without a database.
 
 Place bounded orders and stop cleanly:
 
@@ -49,13 +64,19 @@ Place bounded orders and stop cleanly:
 cargo run -p acme-showcase --bin acme -- steady --orders 10 --cover-errors
 ```
 
-The monitoring UI is at `http://127.0.0.1:8600`. The web command uses the
-read-only monitoring mode. It never runs schema migrations.
+The monitoring UI is at `http://127.0.0.1:8600`. The web command is view
+only unless `--enable-actions` is given, and it never runs schema DDL
+(`SchemaMode::ObserveOnly`). It mounts `horsies::web::router` on the app,
+so a resume of a paused workflow can build the sub-workflows it owes.
 
 ## Surface and counts
 
 The Rust showcase registers 36 tasks, 12 workflows, 32 schedule entries, and
-29 enabled schedule entries. It serves four queues:
+29 enabled schedule entries. Every task returns `TaskError<AcmeCode>`, the
+showcase's code enum (`#[derive(horsies::UserErrorCode)]`). The 15 tasks
+that use the Acme tables run in isolated children; the other 21 declare
+`execution = shared_async` with `timeout_ms = 30_000`. It serves four
+queues:
 
 | Queue | Priority | Limit |
 | --- | ---: | ---: |
@@ -83,13 +104,14 @@ attempts even when the final task row completes.
 | 8% | Card declined | `CARD_DECLINED` | The order fails without a retry. |
 | 5% | Stock is unavailable | `INSUFFICIENT_STOCK` | The order fails and releases reservations. |
 | 10% | Courier booking fails | `COURIER_UNAVAILABLE` | The booking retries once. |
-| 4% | Bundle pricing divides by zero | `UNHANDLED_ERROR` | The worker captures the panic as data. |
+| 4% | Bundle pricing divides by zero | `UNHANDLED_EXCEPTION` | The worker child records the panic as data. |
 | 4% | Invalid size code | `DATA_CORRUPTION` | The showcase mapping returns a typed task error. |
 | 2% | Loyalty engine panics | `LOYALTY_ENGINE_BUG` | The showcase catch helper returns a typed task error. |
+| 30% of returns | Item came back damaged | `DAMAGED_ITEM` | The returns workflow pauses; a resume writes the item off. |
 
-The library captures task panics. The worker remains alive. The Rust showcase
-does not add a global error mapper. Its size-code mapper and loyalty panic
-helper are demo-owned functions.
+A panic in a task body ends that run as `UNHANDLED_EXCEPTION`, with the panic
+text in its exception record; the worker stays up. The size-code mapper and
+the loyalty panic helper are functions of the showcase.
 
 The old manual-retry claim is not part of this application. Cancel a live
 operation or use the history rerun API when a retained task is eligible.
@@ -129,7 +151,10 @@ cargo test -p acme-showcase --features web --all-targets
 ```
 
 Database tests are opt-in through `ACME_DATABASE_URL`. Use a disposable
-database and drop it after the run.
+database and drop it after the run. The tests that need a worker start the
+`acme` binary as `acme worker` and stop it with `SIGTERM`: a Rust worker runs
+task bodies in children of its own binary, so a test process cannot run one
+itself.
 
 ## Deployment inputs
 

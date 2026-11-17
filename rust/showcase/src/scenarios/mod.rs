@@ -1,14 +1,15 @@
 //! Operator-facing Acme scenarios.
 
 use chrono::Utc;
-use horsies::TaskHandle;
-use serde_json::{json, Value};
+use horsies::{SchemaMode, WorkflowHandle};
 
-use crate::app::build_app_with_handles_for_url;
-use crate::domain::{CatalogEntry, Order, OrderLine, Product, StockLevel};
+use crate::app::{build_app_for_url, ShowcaseApp};
+use crate::domain::{CatalogEntry, Order, OrderLine, PaymentCapture, Product, StockLevel};
 use crate::settings::{resolve_database_settings, DatabaseSettings};
 use crate::store::{ensure_database, Store};
-use crate::tasks::TaskHandles;
+use crate::tasks::promotions::{apply_promotions, compute_loyalty_points};
+use crate::tasks::AcmeTasks;
+use crate::workflows::RegisteredWorkflows;
 use crate::{simulate, tuning};
 
 pub mod bulk_import;
@@ -239,31 +240,17 @@ pub async fn store_order(
     Ok(order)
 }
 
-pub fn register_runtime(
-    url: &str,
-) -> ScenarioResult<(
-    horsies::Horsies,
-    TaskHandles,
-    crate::workflows::RegisteredWorkflows,
-)> {
-    build_app_with_handles_for_url(url).map_err(|error| error.to_string())
+/// The showcase app of the database at `url`, whose handle installs the
+/// schema at its first operation.
+pub fn register_runtime(url: &str) -> ScenarioResult<ShowcaseApp> {
+    build_app_for_url(url, SchemaMode::MigrateAndValidate).map_err(|error| error.to_string())
 }
 
-pub async fn send_json_task(
-    handles: &TaskHandles,
-    task_name: &str,
-    args: serde_json::Value,
-) -> ScenarioResult<TaskHandle<Value>> {
-    let task = handles
-        .get(task_name)
-        .ok_or_else(|| format!("task {task_name} is not registered"))?;
-    task.send(args).await.map_err(|error| error.to_string())
-}
-
+/// Start the order workflow of `order`.
 pub async fn start_order(
-    workflows: &crate::workflows::RegisteredWorkflows,
+    workflows: &RegisteredWorkflows,
     order: Order,
-) -> ScenarioResult<horsies::WorkflowHandle<Value>> {
+) -> ScenarioResult<WorkflowHandle<PaymentCapture>> {
     workflows
         .order_fulfillment
         .start(order)
@@ -271,22 +258,22 @@ pub async fn start_order(
         .map_err(|error| error.to_string())
 }
 
-pub async fn send_standalone(handles: &TaskHandles, order: &Order) -> ScenarioResult<()> {
-    send_json_task(
-        handles,
-        "apply_promotions",
-        json!({"order_id": order.order_id}),
-    )
-    .await?;
-    send_json_task(
-        handles,
-        "compute_loyalty_points",
-        json!({"customer_id": order.customer_id, "order_id": order.order_id}),
-    )
-    .await?;
+/// Send the promotion and loyalty tasks of `order`, outside its workflow.
+pub async fn send_standalone(tasks: &AcmeTasks, order: &Order) -> ScenarioResult<()> {
+    let _promotions = tasks
+        .apply_promotions
+        .send(apply_promotions::Input {
+            order_id: order.order_id.clone(),
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let _loyalty = tasks
+        .compute_loyalty_points
+        .send(compute_loyalty_points::Input {
+            customer_id: order.customer_id.clone(),
+            order_id: order.order_id.clone(),
+        })
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(())
-}
-
-pub fn task_name(task: &crate::tasks::JsonTask) -> &str {
-    task.task_name()
 }
