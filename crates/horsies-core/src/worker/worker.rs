@@ -34,8 +34,8 @@ use crate::core::history::maintenance::coverage::{
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::db::{
-    ChannelName, PayloadEvent, PayloadFilter, PayloadSubscription, Reserve, WakeEvent,
-    WakeSubscription,
+    ChannelName, CheckoutClass, ParameterType, PayloadEvent, PayloadFilter, PayloadSubscription,
+    Reserve, StatementBound, TypedStatement, WakeEvent, WakeSubscription,
 };
 use crate::worker::backoff::RetryBackoff;
 use crate::worker::children::{
@@ -214,8 +214,25 @@ fn compute_claim_lock_keys(
     keys
 }
 
+/// The pong of a ping: `$1` the reply channel of the request, `$2` the pong
+/// JSON.
+static NOTIFY_WORKER_PONG: TypedStatement = TypedStatement::new(
+    "notify_worker_pong",
+    "SELECT pg_notify($1, $2)",
+    &[ParameterType::Text, ParameterType::Text],
+);
+
+/// Answer one ping addressed to this worker (or to every worker) with one
+/// `pg_notify` on the main core pool of `broker`, in autocommit. A payload
+/// that does not parse, or a ping for another worker, is answered with
+/// nothing.
+///
+/// Errors: `BrokerError::Serialization` for a pong that does not encode;
+/// `BrokerError::PoolSettings` when a closed handle cannot open its pools
+/// again; `BrokerError::Statement` for a failed `pg_notify`. The sender of
+/// an unanswered ping times out.
 async fn handle_worker_ping(
-    pool: &sqlx::PgPool,
+    broker: &PostgresBroker,
     worker_id: &str,
     hostname: &str,
     pid: i32,
@@ -245,12 +262,22 @@ async fn handle_worker_ping(
     let payload =
         serde_json::to_string(&pong).map_err(crate::broker::BrokerError::Serialization)?;
 
-    sqlx::query("SELECT pg_notify($1, $2)")
-        .bind(&request.reply_channel)
-        .bind(&payload)
-        .execute(pool)
-        .await
-        .map_err(crate::broker::BrokerError::Database)?;
+    let (open, _write) = broker.core_pools_for_write()?;
+    let statement = &NOTIFY_WORKER_PONG;
+    let bound = statement
+        .bind()
+        .value(&request.reply_channel)
+        .value(&payload)
+        .finish();
+    broker.statement_log().log(statement);
+    let _notified = open
+        .main()
+        .execute(
+            CheckoutClass::Batch,
+            &bound,
+            StatementBound::ConnectionTimeouts,
+        )
+        .await?;
     Ok(())
 }
 
@@ -578,7 +605,7 @@ fn return_held_rows(
 /// What the ping responder needs to answer a ping.
 #[derive(Clone)]
 struct PingResponder {
-    pool: sqlx::PgPool,
+    broker: Arc<PostgresBroker>,
     worker_id: String,
     hostname: String,
     pid: i32,
@@ -605,7 +632,7 @@ fn spawn_ping_responder(
                     let responder = responder.clone();
                     let _reply = tokio::spawn(async move {
                         if let Err(error) = handle_worker_ping(
-                            &responder.pool,
+                            &responder.broker,
                             &responder.worker_id,
                             &responder.hostname,
                             responder.pid,
@@ -1294,7 +1321,7 @@ impl Worker {
         let ping_responder = spawn_ping_responder(
             pings,
             PingResponder {
-                pool: self.broker.pool().clone(),
+                broker: Arc::clone(&self.broker),
                 worker_id: self.worker_id.clone(),
                 hostname: self.hostname.clone(),
                 pid: std::process::id() as i32,
@@ -1665,7 +1692,8 @@ fn reap_finished(writes: &mut JoinSet<()>) {
 mod tests {
     use super::*;
     use crate::worker::execution::{
-        capacity_wake, execute_and_finalize, persist_terminal_state, run_phase2, FinalizeStage,
+        capacity_wake, persist_ok_result, persist_terminal_state, run_phase2, FinalizeOutcome,
+        FinalizeStage, Phase2Work,
     };
     use crate::workflow_engine::phase2_recovery::send_phase2_wake;
 
@@ -1841,7 +1869,7 @@ mod tests {
         let responder = spawn_ping_responder(
             pings,
             PingResponder {
-                pool: broker.pool().clone(),
+                broker: Arc::clone(&broker),
                 worker_id: worker.worker_id().to_owned(),
                 hostname: "listener-boot-host".to_owned(),
                 pid: 1,
@@ -2044,19 +2072,6 @@ mod tests {
             is_workflow_task: false,
             task_options,
             claimed_at: test_claim_generation(),
-        }
-    }
-
-    /// Like `claimed_task_row` but marked as a workflow task, mirroring a row
-    /// claimed for a task that `link_task_to_workflow` attached to a workflow.
-    fn claimed_workflow_task_row(
-        task_id: &Uuid,
-        queue_name: &str,
-        task_options: Option<String>,
-    ) -> ClaimedTaskRow {
-        ClaimedTaskRow {
-            is_workflow_task: true,
-            ..claimed_task_row(task_id, queue_name, task_options)
         }
     }
 
@@ -2814,33 +2829,179 @@ mod tests {
         }
     }
 
-    /// Helper: run execute_and_finalize + Phase 2 with an empty workflow registry.
-    async fn run_finalize(
+    /// The claimed row of `task_id` as the claim returns it, read from the
+    /// seeded row. The in-process run is an isolated run: a row of another
+    /// class is a defect of the test.
+    async fn claimed_from_database(pool: &PgPool, task_id: Uuid) -> Claimed {
+        #[allow(clippy::type_complexity)]
+        let (
+            task_name,
+            queue_name,
+            input,
+            task_options,
+            execution,
+            is_workflow_task,
+            claimed_at,
+            retry_count,
+            max_retries,
+        ): (
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            bool,
+            chrono::DateTime<Utc>,
+            i32,
+            i32,
+        ) = sqlx::query_as(
+            "SELECT task_name, queue_name, input::text, task_options::text, execution::text,
+                    is_workflow_task, claimed_at, retry_count, max_retries
+             FROM horsies_tasks WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("read the claimed row");
+        assert_eq!(
+            execution, "ISOLATED",
+            "the in-process run is an isolated run"
+        );
+        claimed_of(ClaimedRow {
+            id: task_id,
+            task_name,
+            queue_name,
+            input,
+            task_options,
+            execution: crate::core::task::Execution::Isolated,
+            is_workflow_task,
+            claimed_at,
+            retry_count,
+            max_retries,
+        })
+    }
+
+    /// The end that the run of the claimed row `task_id` reports, run as an
+    /// isolated child runs it (in this process): the start write, the refusal
+    /// of the stored options or the body, the result envelope, the
+    /// finalizing marker. The parent's route decides the refusal.
+    async fn run_in_process(
         broker: &Arc<PostgresBroker>,
         task_fn: RegisteredTask,
-        row: ClaimedTaskRow,
-    ) {
-        let phase2_work = execute_and_finalize(
+        claimed: &Claimed,
+    ) -> crate::worker::executor::protocol::RunEnd {
+        let task = &claimed.task;
+        let mut registry = crate::core::registry::task::TaskRegistry::new();
+        registry
+            .register(task.task_name.clone(), task_fn)
+            .expect("one task registers");
+        let work = match crate::worker::executor::slots::dispatch_route(
+            task.execution,
+            crate::worker::executor::slots::ClaimPlan::for_children(1, 0, 0),
+            &task.options,
+        ) {
+            Ok(crate::worker::executor::slots::DispatchRoute::Isolated { work, .. }) => work,
+            Ok(_) | Err(_) => panic!("an isolated row on a plan of one isolated child runs there"),
+        };
+        let frame = crate::worker::executor::protocol::RunFrame {
+            task_id: task.task_id,
+            task_name: task.task_name.clone(),
+            worker_id: "worker-1".to_owned(),
+            claimed_at: task.claimed_at,
+            work,
+            input: claimed.input.clone(),
+        };
+        crate::worker::executor::child_host::in_process::run_isolated_in_process(
             Arc::clone(broker),
-            task_fn,
-            row,
+            Arc::new(registry),
+            frame,
+        )
+        .await
+    }
+
+    /// Run the claimed row `task_id` as the worker does: the isolated run
+    /// ([`run_in_process`]), then the outcome writer with the reported end,
+    /// phase 2 included, under the orphan rule `self_heal`. Returns the end
+    /// and the settlement.
+    async fn run_finalize_with(
+        broker: &Arc<PostgresBroker>,
+        task_fn: RegisteredTask,
+        task_id: Uuid,
+        self_heal: OrphanSelfHeal,
+    ) -> (
+        crate::worker::executor::protocol::RunEnd,
+        crate::worker::executor::slots::Settlement,
+    ) {
+        let claimed = claimed_from_database(broker.pool(), task_id).await;
+        let end = run_in_process(broker, task_fn, &claimed).await;
+        let writer = OutcomeWriter::new(
+            Arc::clone(broker),
+            Arc::new(WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
             "worker-1".to_owned(),
-            "localhost".to_owned(),
-            RecoveryConfig::default(),
             crate::core::config::payload::PayloadPolicy::default(),
+            crate::core::RetentionConfig::default(),
+            crate::worker::executor::slots::test_successes(broker, "worker-1"),
+            self_heal,
+        );
+        let settled = writer
+            .settle(&claimed.task, AttemptEnd::Reported(end.clone()))
+            .await;
+        (end, settled)
+    }
+
+    /// [`run_finalize_with`] under the default recovery config's orphan
+    /// rule.
+    async fn run_finalize(broker: &Arc<PostgresBroker>, task_fn: RegisteredTask, task_id: Uuid) {
+        let (_end, _settled) = run_finalize_with(
+            broker,
+            task_fn,
+            task_id,
+            OrphanSelfHeal::of_recovery_flag(
+                RecoveryConfig::default().auto_terminate_orphaned_workflow_tasks,
+            ),
         )
         .await;
+    }
 
-        if let Some(work) = phase2_work {
-            let registry =
-                WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-            run_phase2(
-                &broker,
-                &registry,
-                work,
-                &crate::core::RetentionConfig::default(),
-            )
-            .await;
+    /// Phase 1 of the success of the workflow task `task_id`, as the outcome
+    /// writer writes it, with no phase 2: the in-process run, then the
+    /// success write (`persist_ok_result`) of the value the envelope reports.
+    /// Returns the phase 2 that the write owes.
+    async fn run_phase_one(
+        broker: &Arc<PostgresBroker>,
+        task_fn: RegisteredTask,
+        task_id: Uuid,
+    ) -> Phase2Work {
+        let claimed = claimed_from_database(broker.pool(), task_id).await;
+        let value = match run_in_process(broker, task_fn, &claimed).await {
+            crate::worker::executor::protocol::RunEnd::Result(envelope) => {
+                let envelope: serde_json::Value =
+                    serde_json::from_str(envelope.as_str()).expect("the envelope is JSON");
+                serde_json::to_vec(&envelope["ok"]).expect("the value encodes")
+            }
+            other => panic!("expected the result of the run, got {other:?}"),
+        };
+        let task = claimed.task;
+        let fence = crate::core::lifecycle::OwnedClaim {
+            worker_id: "worker-1".to_owned(),
+            claimed_at: task.claimed_at,
+        };
+        let is_workflow_task = task.kind.is_workflow_task();
+        match persist_ok_result(broker, task_id, &value, fence, is_workflow_task).await {
+            Ok(FinalizeOutcome::Terminal {
+                capacity_notified,
+                phase_two,
+            }) => Phase2Work {
+                task_id,
+                queue_name: task.queue_name,
+                is_workflow_task,
+                capacity_notified,
+                phase_two,
+            },
+            Ok(_) => panic!("the success of a held row is terminal"),
+            Err(error) => panic!("the success write failed: {error}"),
         }
     }
 
@@ -2854,12 +3015,7 @@ mod tests {
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
 
-        run_finalize(
-            &broker,
-            async_task_fn!(succeed, ()),
-            claimed_task_row(&task_id, "default", None),
-        )
-        .await;
+        run_finalize(&broker, async_task_fn!(succeed, ()), task_id).await;
 
         let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "COMPLETED");
@@ -3091,12 +3247,7 @@ mod tests {
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
 
-        run_finalize(
-            &broker,
-            async_task_fn!(callback_success_task, ()),
-            claimed_workflow_task_row(&task_id, "default", None),
-        )
-        .await;
+        run_finalize(&broker, async_task_fn!(callback_success_task, ()), task_id).await;
 
         let (task_status, _, _) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(task_status, "COMPLETED");
@@ -3198,17 +3349,8 @@ mod tests {
         let workflow_id = link_task_to_workflow(&pool, &task_id, None).await;
         add_dependent_node(&pool, workflow_id).await;
 
-        let phase2_work = execute_and_finalize(
-            Arc::clone(&broker),
-            async_task_fn!(callback_success_task, ()),
-            claimed_workflow_task_row(&task_id, "default", None),
-            "worker-1".to_owned(),
-            "localhost".to_owned(),
-            RecoveryConfig::default(),
-            crate::core::config::payload::PayloadPolicy::default(),
-        )
-        .await
-        .expect("terminal success should produce phase 2 work");
+        let phase2_work =
+            run_phase_one(&broker, async_task_fn!(callback_success_task, ()), task_id).await;
         assert_eq!(
             phase2_work.phase_two,
             crate::worker::execution::PhaseTwoForm::Step(
@@ -3258,17 +3400,8 @@ mod tests {
         let child_id = link_task_to_workflow(&pool, &task_id, None).await;
         let parent_id = adopt_as_child_workflow(&pool, child_id).await;
 
-        let phase2_work = execute_and_finalize(
-            Arc::clone(&broker),
-            async_task_fn!(callback_success_task, ()),
-            claimed_workflow_task_row(&task_id, "default", None),
-            "worker-1".to_owned(),
-            "localhost".to_owned(),
-            RecoveryConfig::default(),
-            crate::core::config::payload::PayloadPolicy::default(),
-        )
-        .await
-        .expect("terminal success should produce phase 2 work");
+        let phase2_work =
+            run_phase_one(&broker, async_task_fn!(callback_success_task, ()), task_id).await;
         run_phase2(
             &broker,
             &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
@@ -3302,17 +3435,8 @@ mod tests {
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
 
-        let phase2_work = execute_and_finalize(
-            Arc::clone(&broker),
-            async_task_fn!(callback_success_task, ()),
-            claimed_workflow_task_row(&task_id, "default", None),
-            "worker-1".to_owned(),
-            "localhost".to_owned(),
-            RecoveryConfig::default(),
-            crate::core::config::payload::PayloadPolicy::default(),
-        )
-        .await
-        .expect("terminal success should produce phase 2 work");
+        let phase2_work =
+            run_phase_one(&broker, async_task_fn!(callback_success_task, ()), task_id).await;
 
         let (task_status, _, _) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(task_status, "COMPLETED");
@@ -3361,17 +3485,8 @@ mod tests {
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
 
-        let phase2_work = execute_and_finalize(
-            Arc::clone(&broker),
-            async_task_fn!(callback_success_task, ()),
-            claimed_workflow_task_row(&task_id, "default", None),
-            "worker-1".to_owned(),
-            "localhost".to_owned(),
-            RecoveryConfig::default(),
-            crate::core::config::payload::PayloadPolicy::default(),
-        )
-        .await
-        .expect("terminal success should produce phase 2 work");
+        let phase2_work =
+            run_phase_one(&broker, async_task_fn!(callback_success_task, ()), task_id).await;
 
         // A broker on a database that does not exist: every checkout fails
         // with a server refusal (3D000), which is not retryable.
@@ -3427,12 +3542,7 @@ mod tests {
 
         let (function_name, trigger_name) = install_fail_workflow_task_running_trigger(&pool).await;
         let result = AssertUnwindSafe(async {
-            run_finalize(
-                &broker,
-                async_task_fn!(counted_success_task, ()),
-                claimed_workflow_task_row(&task_id, "default", None),
-            )
-            .await;
+            run_finalize(&broker, async_task_fn!(counted_success_task, ()), task_id).await;
 
             assert_eq!(
                 EXECUTION_COUNT.load(Ordering::SeqCst),
@@ -3482,22 +3592,24 @@ mod tests {
         .unwrap();
         EXECUTION_COUNT.store(0, Ordering::SeqCst);
 
-        let outcome = crate::worker::execution::confirm_ownership_and_set_running(
+        let (end, settled) = run_finalize_with(
             &broker,
+            async_task_fn!(counted_success_task, ()),
             task_id,
-            "worker-1",
-            1,
-            "localhost",
-            true,
-            test_claim_generation(),
-            false,
+            OrphanSelfHeal::Off,
         )
         .await;
 
         assert!(matches!(
-            outcome,
-            crate::worker::execution::OwnershipOutcome::Aborted
+            end,
+            crate::worker::executor::protocol::RunEnd::StoppedBeforeRunning(
+                crate::worker::executor::protocol::StopReason::NodeNotLinked
+            )
         ));
+        assert_eq!(
+            settled,
+            crate::worker::executor::slots::Settlement::NothingOwed
+        );
         assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
         let (status, _, _) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "CLAIMED");
@@ -3520,12 +3632,7 @@ mod tests {
             .unwrap();
         EXECUTION_COUNT.store(0, Ordering::SeqCst);
 
-        run_finalize(
-            &broker,
-            async_task_fn!(counted_success_task, ()),
-            claimed_task_row(&task_id, "default", None),
-        )
-        .await;
+        run_finalize(&broker, async_task_fn!(counted_success_task, ()), task_id).await;
 
         assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
 
@@ -3560,12 +3667,7 @@ mod tests {
             .unwrap();
         EXECUTION_COUNT.store(0, Ordering::SeqCst);
 
-        run_finalize(
-            &broker,
-            async_task_fn!(counted_success_task, ()),
-            claimed_task_row(&task_id, "default", None),
-        )
-        .await;
+        run_finalize(&broker, async_task_fn!(counted_success_task, ()), task_id).await;
 
         assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
 
@@ -3594,12 +3696,7 @@ mod tests {
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 3, Some("{")).await;
 
-        run_finalize(
-            &broker,
-            async_task_fn!(succeed, ()),
-            claimed_task_row(&task_id, "default", Some("{".to_owned())),
-        )
-        .await;
+        run_finalize(&broker, async_task_fn!(succeed, ()), task_id).await;
 
         let (status, _result, error_code) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "FAILED", "a run of `succeed` would have completed");
@@ -3639,12 +3736,7 @@ mod tests {
         .to_string();
         insert_claimed_task(&pool, &task_id, "default", 0, 2, Some(&task_options)).await;
 
-        run_finalize(
-            &broker,
-            async_task_fn!(succeed, ()),
-            claimed_task_row(&task_id, "default", Some(task_options)),
-        )
-        .await;
+        run_finalize(&broker, async_task_fn!(succeed, ()), task_id).await;
 
         let (status, _result, _error_code) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "PENDING", "the refusal is retried, not run");
@@ -3680,12 +3772,7 @@ mod tests {
         .to_string();
         insert_claimed_task(&pool, &task_id, "default", 0, 3, Some(&task_options)).await;
 
-        run_finalize(
-            &broker,
-            async_task_fn!(retryable_failure, ()),
-            claimed_task_row(&task_id, "default", Some(task_options)),
-        )
-        .await;
+        run_finalize(&broker, async_task_fn!(retryable_failure, ()), task_id).await;
 
         let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "PENDING");
@@ -3728,12 +3815,7 @@ mod tests {
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
 
-        run_finalize(
-            &broker,
-            async_task_fn!(fatal_failure, ()),
-            claimed_task_row(&task_id, "default", None),
-        )
-        .await;
+        run_finalize(&broker, async_task_fn!(fatal_failure, ()), task_id).await;
 
         let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "FAILED");
@@ -3764,12 +3846,7 @@ mod tests {
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
 
-        run_finalize(
-            &broker,
-            async_task_fn!(panic_task, ()),
-            claimed_task_row(&task_id, "default", None),
-        )
-        .await;
+        run_finalize(&broker, async_task_fn!(panic_task, ()), task_id).await;
 
         let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "FAILED");
@@ -3898,7 +3975,7 @@ mod tests {
                 task: Arc::new(InvalidJsonTask),
                 meta: TaskMeta::default(),
             },
-            claimed_task_row(&task_id, "default", None),
+            task_id,
         )
         .await;
 

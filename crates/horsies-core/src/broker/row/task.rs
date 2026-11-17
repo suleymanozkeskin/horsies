@@ -7,13 +7,6 @@ use crate::core::{Execution, ExecutionClass, TaskInfo, TaskStatus};
 
 use crate::broker::error::BrokerError;
 
-/// Minimal row returned by the claim CTE (just the ID).
-#[derive(Debug, FromRow)]
-pub struct ClaimedId {
-    #[allow(dead_code)] // populated by FromRow; used as existence check
-    pub id: Uuid,
-}
-
 /// Row returned by SET_RUNNING_SQL — the attempt context read atomically
 /// with the CLAIMED → RUNNING transition.
 ///

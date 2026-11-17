@@ -8,6 +8,15 @@
 //! - [`PostgresBroker::mark_stale_running_as_failed`]: one stale RUNNING
 //!   pass, `horsies_stale_running_scan` and one `horsies_finish_stale_attempt`
 //!   per candidate.
+//! - [`PostgresBroker::finish_failed_attempt`] and
+//!   [`PostgresBroker::finish_ended_attempt`]: `horsies_finish_failed_attempt`
+//!   under the claimed-row rules `REFUSE` and `RELEASE`.
+//! - [`PostgresBroker::complete_successes`]: `horsies_complete_tasks_fused`,
+//!   the plain successes of one worker (1 to 64 rows) in one statement.
+//! - [`PostgresBroker::finish_workflow_success`]:
+//!   `horsies_finish_workflow_success`, phase 1 of a workflow task's success.
+//! - [`PostgresBroker::claim_pass`]: `horsies_claim`, one claim pass of one
+//!   worker.
 //! - [`PostgresBroker::cancel_task`]: `horsies_cancel_task`, the
 //!   administrative cancel of one plain task (Python
 //!   `horsies.monitoring.task_actions.cancel_task`, and the core's monitoring
@@ -24,7 +33,10 @@
 
 use uuid::Uuid;
 
-use crate::broker::claims::{release_claims, ReleaseClaims, ReleaseOutcome};
+use crate::broker::attempt_writes::{self, FinishFailedAttempt, FinishWorkflowSuccess};
+use crate::broker::claims::{
+    claim_pass, release_claims, ClaimPass, ClaimPassRequest, ReleaseClaims, ReleaseOutcome,
+};
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::stale_recovery::{
@@ -32,11 +44,14 @@ use crate::broker::stale_recovery::{
     StaleRunningThresholds, ThresholdMs, STALE_RUNNING_SCAN_BATCH,
 };
 use crate::core::lifecycle::{
-    decode_outcome_row, GuardEvidence, ObservedTaskState, ObservedWorkflowTask, OutcomeDecodeError,
-    TerminalizationOutcome,
+    decode_outcome_row, FailedAttemptOutcome, GuardEvidence, ObservedTaskState,
+    ObservedWorkflowTask, OutcomeDecodeError, TerminalizationOutcome, UnreportedAttemptOutcome,
+    WorkflowSuccessOutcome,
 };
 use crate::core::types::status::TaskStatus;
-use crate::db::{CheckoutClass, ParameterType, StatementBound, TypedStatement};
+use crate::db::{CheckoutClass, ParameterType, StatementBound, Transience, TypedStatement};
+use crate::worker::finalize_batch::statement::complete_plain_successes;
+use crate::worker::finalize_batch::{BatchOutcomes, BatchWriteError, SuccessBatch};
 use crate::worker::recovery::stale_running_pass;
 
 /// `horsies_cancel_task`. Parameters in order: task id, whether a RUNNING
@@ -169,6 +184,128 @@ impl PostgresBroker {
             STALE_RUNNING_SCAN_BATCH,
         )
         .await
+    }
+
+    /// Write the failed attempt of a task whose child reported a result
+    /// (Python `horsies.core.worker.failed_attempt.finish_failed_attempt`,
+    /// claimed-row rule `REFUSE`): `horsies_finish_failed_attempt`, one
+    /// statement in autocommit on the main core pool, checked out as
+    /// reserved work. Under the full fence (worker, claim generation, and
+    /// the retry count of a retry) it writes the attempt row and the retry,
+    /// or the terminal failure with its capacity wake (a plain task), or
+    /// nothing on a refusal. The retry request is the caller's.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); [`BrokerError::Statement`] (nothing written,
+    /// or `OutcomeUnknown`: the same command sent again reports a committed
+    /// failure as `AlreadyApplied` and a committed retry as `LostClaim`);
+    /// [`BrokerError::TerminalizationContract`] for a row outside the wire
+    /// contract.
+    pub async fn finish_failed_attempt(
+        &self,
+        command: &FinishFailedAttempt,
+    ) -> Result<FailedAttemptOutcome, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        attempt_writes::finish_failed_attempt(open.main(), self.statement_log(), command).await
+    }
+
+    /// Write the end of an attempt whose child ended without a result
+    /// (Python `horsies.core.worker.failed_attempt.finish_ended_attempt`,
+    /// claimed-row rule `RELEASE`): a row still CLAIMED by this worker at
+    /// this claim generation goes back to the queue with no attempt row
+    /// (`Released`); any other row is written or refused as
+    /// [`PostgresBroker::finish_failed_attempt`] does. One statement, as
+    /// there.
+    ///
+    /// Errors: as [`PostgresBroker::finish_failed_attempt`]; after
+    /// `OutcomeUnknown` a committed release is reported as a refusal.
+    pub async fn finish_ended_attempt(
+        &self,
+        command: &FinishFailedAttempt,
+    ) -> Result<UnreportedAttemptOutcome, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        attempt_writes::finish_unreported_attempt(open.main(), self.statement_log(), command).await
+    }
+
+    /// Write the plain successes of one worker (Python
+    /// `horsies.core.lifecycle.persistence.apply_fused_batch`):
+    /// `horsies_complete_tasks_fused`, one statement in autocommit for 1 to
+    /// 64 rows, on the main core pool, checked out as batch work. Each row
+    /// keeps its own fence (`worker_id` and its claim generation) and
+    /// outcome; an `Applied` row committed with the statement, a refused row
+    /// wrote nothing; the rows of one queue send one capacity wake. A batch
+    /// of one row runs the same function with one row; Python runs
+    /// `horsies_complete_task_fused` for it, with the same effects.
+    ///
+    /// Errors: [`BatchWriteError::NotSent`] (the pools, the client family
+    /// check, or the checkout failed: no row changed);
+    /// [`BatchWriteError::Refused`] (no row changed);
+    /// [`BatchWriteError::CommitUnknown`] (each row may have committed; a
+    /// replay of a row finds it `AlreadyApplied` when it did);
+    /// [`BatchWriteError::ContractBroken`] (rows outside the function's
+    /// contract).
+    pub async fn complete_successes(
+        &self,
+        worker_id: &str,
+        batch: &SuccessBatch,
+    ) -> Result<BatchOutcomes, BatchWriteError> {
+        let not_sent = |error: BrokerError| BatchWriteError::NotSent {
+            transience: match error.is_retryable() {
+                true => Transience::Transient,
+                false => Transience::Permanent,
+            },
+            detail: error.to_string(),
+        };
+        self.ensure_client_family_for_write()
+            .await
+            .map_err(not_sent)?;
+        let (open, _write) = self.core_pools_for_write().map_err(not_sent)?;
+        complete_plain_successes(open.main(), self.statement_log(), worker_id, batch).await
+    }
+
+    /// Write phase 1 of a workflow task's success (Python
+    /// `horsies.core.worker.workflow_success.finish_workflow_success`):
+    /// `horsies_finish_workflow_success`, one statement in autocommit on the
+    /// main core pool, checked out as reserved work. Under the full fence it
+    /// writes the attempt row, the move to history and the phase-2 record of
+    /// the node, or nothing on a refusal. Sends no capacity wake: phase 2
+    /// sends it, and phase 2 stays with the caller.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); [`BrokerError::Statement`] (nothing written, or
+    /// `OutcomeUnknown`: the same command sent again reports a committed
+    /// success as `AlreadyApplied`); [`BrokerError::TerminalizationContract`]
+    /// for a row outside the wire contract.
+    pub async fn finish_workflow_success(
+        &self,
+        command: &FinishWorkflowSuccess,
+    ) -> Result<WorkflowSuccessOutcome, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        attempt_writes::finish_workflow_success(open.main(), self.statement_log(), command).await
+    }
+
+    /// One claim pass of one worker (Python `ClaimMixin._claim_and_dispatch_all`,
+    /// the claim statement only): `horsies_claim`, one statement in
+    /// autocommit on the main core pool, checked out as batch work, so its
+    /// cap locks end with the statement. It claims rows (CLAIMED, a new claim
+    /// generation, a lease) within the class budgets, the per-worker limit,
+    /// the queue caps and the cluster cap, and writes nothing else. The
+    /// dispatch of the claimed rows is the caller's.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); [`BrokerError::InvalidClaimArgument`] for a
+    /// count above the function's integer range (nothing sent);
+    /// [`BrokerError::Statement`] (after `OutcomeUnknown` the pass may have
+    /// claimed rows; they return to the queue when their lease expires);
+    /// [`BrokerError::RowDecode`] and [`BrokerError::ClaimContract`] for rows
+    /// outside the function's contract.
+    pub async fn claim_pass(&self, request: &ClaimPassRequest) -> Result<ClaimPass, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        claim_pass(open.main(), self.statement_log(), request).await
     }
 
     /// Cancel one plain task (Python `horsies.monitoring.task_actions.cancel_task`):

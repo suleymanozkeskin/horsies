@@ -19,8 +19,8 @@ use crate::broker::core_rows::{
 use crate::broker::error::BrokerError;
 use crate::core::history::errors::HistoryError;
 use crate::core::history::reads::detail::{
-    history_detail_from_wire, task_detail_function_signature, task_detail_sql,
-    HistoryDetailWireRow, TaskAbsenceReason, TaskDetailResult, TASK_ABSENCE_REASON_SQL,
+    history_detail_from_wire, task_detail_sql, HistoryDetailWireRow, TaskAbsenceReason,
+    TaskDetailResult, TASK_ABSENCE_REASON_SQL,
 };
 use crate::core::history::reads::result::{
     decode_result_row, task_result_function_signature, task_result_sql, ResultWireRow,
@@ -99,24 +99,26 @@ pub(crate) async fn read_task_result(
     }
 }
 
-/// The staged detail of one task, or `None` while the staged detail
-/// function is not published.
+/// The staged detail of one task: live, history, or absent with its reason.
 ///
-/// Statements: the publication probe, the detail read, and for a task that
-/// neither the live table nor the history holds, the absence reason. Reads
-/// only.
+/// Statements: the detail read and, for a task that neither the live table
+/// nor the history holds, the absence reason. Reads only. The install and
+/// every coverage pass publish the detail reader, so the read sends no
+/// publication probe.
 ///
-/// Errors: as [`read_task_result`].
+/// Errors: [`BrokerError::Statement`], [`BrokerError::RowDecode`], and
+/// [`BrokerError::HistoryReadContract`] for a row that breaks the read
+/// contract. A detail reader removed out of band is a
+/// [`BrokerError::Statement`] refusal with SQLSTATE `42883` that names
+/// `horsies_task_detail_staged`. The next coverage pass publishes the
+/// reader again, and the call after it finds the reader.
 pub(crate) async fn read_history_detail(
     pool: &CorePool,
     log: StatementLog,
     task_id: Uuid,
-) -> Result<Option<TaskDetailResult>, BrokerError> {
-    let mut connection = checkout_batch(pool, &FUNCTION_PUBLISHED).await?;
+) -> Result<TaskDetailResult, BrokerError> {
+    let mut connection = checkout_batch(pool, &TASK_DETAIL).await?;
     let connection = &mut connection;
-    if !function_published(connection, log, &task_detail_function_signature()).await? {
-        return Ok(None);
-    }
     let rows = query_on(
         connection,
         log,
@@ -125,13 +127,13 @@ pub(crate) async fn read_history_detail(
     .await?;
     let Some(row) = first_row(rows) else {
         let reason = absence_reason(connection, log, task_id).await?;
-        return Ok(Some(TaskDetailResult::Absent { task_id, reason }));
+        return Ok(TaskDetailResult::Absent { task_id, reason });
     };
     let location: String = column(&row, &TASK_DETAIL, "location")?;
     match location.as_str() {
-        "LIVE" => Ok(Some(TaskDetailResult::Live { task_id })),
+        "LIVE" => Ok(TaskDetailResult::Live { task_id }),
         "HISTORY" => history_detail_from_wire(history_detail_wire_row(&row)?)
-            .map(|detail| Some(TaskDetailResult::History(detail)))
+            .map(TaskDetailResult::History)
             .map_err(history_contract),
         other => Err(history_contract(HistoryError::contract(format!(
             "staged detail returned unknown location {other:?}"

@@ -94,6 +94,8 @@ pub use dispatch::{
     AttemptEnd, Claimed, ClaimedTask, ExecutionClass, LoopKillCode, NotRunCause, RetryFacts,
     Settlement, TaskKind,
 };
+#[cfg(test)]
+pub(crate) use outcome::test_successes;
 pub use outcome::{OrphanSelfHeal, OutcomeWriter};
 pub use pool::{
     ExitNotSeen, IsolatedPool, IsolatedPoolConfig, MemoryLimit, PoolStopReport, Submitted,

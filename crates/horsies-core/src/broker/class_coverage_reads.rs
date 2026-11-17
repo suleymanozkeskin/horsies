@@ -5,6 +5,9 @@
 //! Python reference: `horsies/core/brokers/class_coverage_reads.py`. Python
 //! runs each read as several statements in one transaction. Here each read is
 //! one autocommit statement, so its parts read one snapshot and one `now()`.
+//! The broker's reads run on the main core pool; the reaper's fleet check
+//! ([`read_class_coverage`]) runs the same statement on the reaper's sqlx
+//! pool until the reaper loop runs on the core pools.
 //! The parts come back as JSON arrays in one row. Every part is bounded by a
 //! named limit; a part that returns more than its limit refuses the read
 //! instead of answering in part.
@@ -27,11 +30,13 @@ use crate::broker::class_coverage::{
     class_coverage, class_report, live_worker, refused, ClassCoverage, ClassReadRefused,
     ClassReport, LiveWorker, StreamHead,
 };
-use crate::broker::error::is_retryable_sqlx_error;
+use crate::broker::core_rows::{column, one_row};
+use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult};
 use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
 use crate::core::task::Execution;
+use crate::db::{ParameterType, TypedStatement};
 
 /// The most snapshot rows inside the live window that a read takes. A worker
 /// writes `WORKER_STATE_LIVE_WINDOW_S` / snapshot interval rows into the
@@ -188,6 +193,22 @@ SELECT
     (SELECT coalesce(jsonb_agg(jsonb_build_array(f.worker_id, f.execution, f.held)), '[]'::jsonb)
      FROM in_flight f) AS in_flight";
 
+/// The parameters of both class reads: the live window in seconds, the
+/// snapshot row limit + 1, the stream or head limit + 1.
+const CLASS_READ_PARAMETERS: &[ParameterType] = &[
+    ParameterType::Float8,
+    ParameterType::Int8,
+    ParameterType::Int8,
+];
+
+/// [`CLASS_COVERAGE_SQL`] on the statement layer.
+static CLASS_COVERAGE: TypedStatement =
+    TypedStatement::new("class_coverage", CLASS_COVERAGE_SQL, CLASS_READ_PARAMETERS);
+
+/// [`CLASS_REPORT_SQL`] on the statement layer.
+static CLASS_REPORT: TypedStatement =
+    TypedStatement::new("class_report", CLASS_REPORT_SQL, CLASS_READ_PARAMETERS);
+
 /// The row of [`CLASS_COVERAGE_SQL`].
 #[derive(Debug, FromRow)]
 struct CoverageRow {
@@ -198,7 +219,7 @@ struct CoverageRow {
 }
 
 /// The row of [`CLASS_REPORT_SQL`].
-#[derive(Debug, FromRow)]
+#[derive(Debug)]
 struct ReportRow {
     checked_at: DateTime<Utc>,
     recent_rows: i64,
@@ -224,17 +245,23 @@ impl PostgresBroker {
     /// A worker is live while its latest snapshot is at most
     /// `WORKER_STATE_LIVE_WINDOW_S` old. It serves a (queue, class) when the
     /// queue is one of its queues and one of its budgets serves the class.
-    /// One autocommit statement; reads only.
+    /// One autocommit statement on the main core pool; reads only.
     ///
     /// Errors, all `MONITORING_QUERY_FAILED`:
-    /// - a database or network failure; `retryable` is the driver
-    ///   classification;
+    /// - a database or network failure; `retryable` is the statement layer's
+    ///   classification ([`BrokerError::is_retryable`]); a closed handle that
+    ///   cannot open its pools again, and a row that does not read, are not
+    ///   retryable;
     /// - a live snapshot whose `class_capacity` is unreadable, or a part
     ///   that reached its bound ([`LIVE_SNAPSHOT_ROW_LIMIT`],
     ///   [`PENDING_STREAM_LIMIT`]); not retryable, since the same rows give
     ///   the same answer.
     pub async fn get_class_coverage(&self) -> BrokerResult<ClassCoverage> {
-        read_class_coverage(self.pool()).await
+        let row = self
+            .coverage_row()
+            .await
+            .map_err(|error| class_statement_failed("get_class_coverage", &error))?;
+        coverage_from_row(row).map_err(|cause| class_read_refused("get_class_coverage", &cause))
     }
 
     /// The class report: pending streams with the wait of their oldest due
@@ -242,7 +269,7 @@ impl PostgresBroker {
     /// (Python `get_class_report_async`,
     /// `horsies/core/brokers/postgres.py:3135-3162`).
     ///
-    /// One autocommit statement; reads only.
+    /// One autocommit statement on the main core pool; reads only.
     ///
     /// Errors, all `MONITORING_QUERY_FAILED`: as
     /// [`get_class_coverage`](Self::get_class_coverage) with
@@ -250,20 +277,67 @@ impl PostgresBroker {
     /// that holds rows of a class that its recorded budgets do not serve
     /// (not retryable).
     pub async fn get_class_report(&self) -> BrokerResult<ClassReport> {
-        let row: ReportRow = sqlx::query_as(CLASS_REPORT_SQL)
-            .bind(LIVE_WINDOW_SECONDS)
-            .bind(LIVE_SNAPSHOT_READ_LIMIT)
-            .bind(PENDING_HEAD_READ_LIMIT)
-            .fetch_one(self.pool())
+        let row = self
+            .report_row()
             .await
-            .map_err(|error| class_read_failed("get_class_report", &error))?;
+            .map_err(|error| class_statement_failed("get_class_report", &error))?;
         report_from_row(row).map_err(|cause| class_read_refused("get_class_report", &cause))
+    }
+
+    /// The row of [`CLASS_COVERAGE_SQL`], read on the main core pool
+    /// ([`PostgresBroker::query_main`]). Reads only.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`], [`BrokerError::Statement`],
+    /// [`BrokerError::RowDecode`].
+    async fn coverage_row(&self) -> Result<CoverageRow, BrokerError> {
+        let statement = &CLASS_COVERAGE;
+        let rows = self
+            .query_main(
+                &statement
+                    .bind()
+                    .value(&LIVE_WINDOW_SECONDS)
+                    .value(&LIVE_SNAPSHOT_READ_LIMIT)
+                    .value(&PENDING_STREAM_READ_LIMIT)
+                    .finish(),
+            )
+            .await?;
+        let row = one_row(rows, statement)?;
+        Ok(CoverageRow {
+            checked_at: column(&row, statement, "checked_at")?,
+            recent_rows: column(&row, statement, "recent_rows")?,
+            live: column(&row, statement, "live")?,
+            streams: column(&row, statement, "streams")?,
+        })
+    }
+
+    /// The row of [`CLASS_REPORT_SQL`], read on the main core pool. Reads
+    /// only. Errors as [`PostgresBroker::coverage_row`].
+    async fn report_row(&self) -> Result<ReportRow, BrokerError> {
+        let statement = &CLASS_REPORT;
+        let rows = self
+            .query_main(
+                &statement
+                    .bind()
+                    .value(&LIVE_WINDOW_SECONDS)
+                    .value(&LIVE_SNAPSHOT_READ_LIMIT)
+                    .value(&PENDING_HEAD_READ_LIMIT)
+                    .finish(),
+            )
+            .await?;
+        let row = one_row(rows, statement)?;
+        Ok(ReportRow {
+            checked_at: column(&row, statement, "checked_at")?,
+            recent_rows: column(&row, statement, "recent_rows")?,
+            live: column(&row, statement, "live")?,
+            heads: column(&row, statement, "heads")?,
+            in_flight: column(&row, statement, "in_flight")?,
+        })
     }
 }
 
-/// The fleet check of [`PostgresBroker::get_class_coverage`], read on
-/// `pool`. The reaper reads it on its own pool after each pass. Same
-/// statement, same answers and errors; reads only.
+/// The fleet check of [`PostgresBroker::get_class_coverage`], read on the
+/// sqlx `pool` of the reaper after each pass. Same statement, same answers
+/// and errors; reads only.
 pub(crate) async fn read_class_coverage(pool: &PgPool) -> BrokerResult<ClassCoverage> {
     let row: CoverageRow = sqlx::query_as(CLASS_COVERAGE_SQL)
         .bind(LIVE_WINDOW_SECONDS)
@@ -282,6 +356,18 @@ fn class_read_failed(operation: &str, error: &sqlx::Error) -> BrokerOperationErr
         code: BrokerErrorCode::MonitoringQueryFailed,
         message: format!("{operation} failed: {error}"),
         retryable: is_retryable_sqlx_error(error),
+    }
+}
+
+/// A class read on the core pool that the database did not answer, or whose
+/// row did not read. `retryable` is the statement layer's classification
+/// ([`BrokerError::is_retryable`]); a row that does not read is not
+/// retryable.
+fn class_statement_failed(operation: &str, error: &BrokerError) -> BrokerOperationError {
+    BrokerOperationError {
+        code: BrokerErrorCode::MonitoringQueryFailed,
+        message: format!("{operation} failed: {error}"),
+        retryable: error.is_retryable(),
     }
 }
 

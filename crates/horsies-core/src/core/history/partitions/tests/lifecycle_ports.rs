@@ -264,12 +264,14 @@ async fn a_request_whose_bounds_differ_from_the_catalog_is_a_catalog_conflict() 
     database.drop().await;
 }
 
-/// `test_catalog_rejects_caller_supplied_bounds_that_do_not_match_leaf`
-/// (prototype): a detach whose bounds differ from the cataloged leaf is
-/// refused as a metadata conflict, and the leaf stays attached.
+/// `TestRetentionFunctionsPath.test_a_ref_that_differs_from_the_catalog_raises_and_releases_the_lock`
+/// and `test_catalog_rejects_caller_supplied_bounds_that_do_not_match_leaf`
+/// (prototype): a detach whose bounds differ from the cataloged leaf is a
+/// contract error, the leaf lock that `horsies_begin_leaf_detach` took is
+/// free again, and the leaf stays attached and detachable.
 #[tokio::test]
 #[serial]
-async fn a_detach_whose_bounds_differ_from_the_catalog_is_refused() {
+async fn a_detach_whose_bounds_differ_from_the_catalog_raises_and_frees_the_lock() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
     let parent = register_class(&database.pool, class_key, 30).await;
@@ -287,20 +289,36 @@ async fn a_detach_whose_bounds_differ_from_the_catalog_is_refused() {
     )
     .expect("shifted leaf ref");
     let command = DetachExpiredHistoryLeaf::new(shifted, Some(5_000)).expect("detach");
-    let outcome = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader)
+    let error = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader)
         .await
-        .expect("detach outcome");
+        .expect_err("a ref that differs from the catalog is a caller defect");
     assert!(
         matches!(
-            outcome,
-            DetachExpiredLeafOutcome::Inspection(LeafInspection::CatalogConflict {
-                kind: CatalogConflictKind::MetadataMismatch,
-                ..
-            })
+            &error,
+            crate::core::history::errors::HistoryError::Contract(detail)
+                if detail.contains("catalog row has class")
         ),
-        "{outcome:?}"
+        "{error:?}"
     );
+    let try_xact = format!("SELECT pg_try_advisory_xact_lock({LEAF_LOCK_KEY_FUNCTION}($1, $2))");
+    let mut probe = database.pool.begin().await.expect("begin lock probe");
+    let free: bool = sqlx::query_scalar(&try_xact)
+        .bind(class_key)
+        .bind(lower)
+        .fetch_one(probe.as_mut())
+        .await
+        .expect("probe the leaf lock");
+    probe.rollback().await.expect("end lock probe");
+    assert!(free, "the leaf lock is free after the refused detach");
     assert!(is_attached(&database.pool, leaf.leaf_name()).await);
+    let mut connection = database.pool.acquire().await.expect("acquire inspector");
+    assert!(matches!(
+        inspect_leaf(&mut connection, &InspectHistoryLeaf::new(leaf.clone()))
+            .await
+            .expect("inspect the leaf"),
+        LeafInspection::Detachable { .. }
+    ));
+    drop(connection);
     database.drop().await;
 }
 
@@ -470,13 +488,10 @@ async fn a_detach_cancelled_right_after_the_lock_frees_the_lock() {
         create_leaf(&database.pool, &leaf).await,
         LeafCreation::Created { .. }
     ));
-    // The first statement after the session lock is the class read of the
-    // inspection; the proxy holds its response.
-    let (proxy, detach_pool, pause) = pausing_proxied_pool(
-        &database,
-        "SELECT class_key, class_kind, retention_days, heartbeat_horizon_hours",
-    )
-    .await;
+    // `horsies_begin_leaf_detach` takes the session lock inside its call. The
+    // read of the session's lock timeout comes after it; the proxy holds that
+    // statement.
+    let (proxy, detach_pool, pause) = pausing_proxied_pool(&database, "SHOW lock_timeout").await;
     let command = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(5_000)).expect("detach");
     let detach = tokio::spawn(async move {
         detach_expired_leaf(&detach_pool, &command, &UnpublishedLoader).await
@@ -550,7 +565,6 @@ async fn a_drop_keeps_an_out_of_band_detached_leaf_with_a_pending_row() {
     let outcome = drop_detached_leaf(
         &mut transaction,
         &DropDetachedHistoryLeaf::new(leaf.clone()),
-        &UnpublishedLoader,
     )
     .await
     .expect("drop outcome");

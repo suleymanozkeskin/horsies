@@ -149,6 +149,61 @@ const RELEASE_CLAIMS_REQUEST_PARAMETERS: &[StubParameter] = &[
 const RELEASE_CLAIMS_PARAMETERS: &[StubParameter] =
     &[positional("request", "ReleaseClaimsRequest")];
 const REQUEUE_STALE_CLAIMED_PARAMETERS: &[StubParameter] = &[positional("stale_after_ms", "int")];
+const NO_RETRY_PARAMETERS: &[StubParameter] = &[];
+const RETRY_AFTER_PARAMETERS: &[StubParameter] = &[
+    keyword("expected_retry_count", "int"),
+    keyword("delay_s", "float"),
+    keyword("placement", "Literal['SAME_CLASS', 'ISOLATED']"),
+];
+const FINISH_FAILED_ATTEMPT_REQUEST_PARAMETERS: &[StubParameter] = &[
+    keyword("task_id", "uuid.UUID"),
+    keyword("worker_id", "str"),
+    keyword("claimed_at", "datetime.datetime"),
+    keyword("retry", "NoRetry | RetryAfter"),
+    keyword("result_json", "str"),
+    keyword("error_code", "str | None"),
+    keyword("failed_reason", "str | None"),
+    keyword("attempt_outcome", "Literal['FAILED', 'WORKER_FAILURE']"),
+    keyword("attempt_error_message", "str | None"),
+    keyword("attempt_failed_reason", "str | None"),
+];
+const FINISH_FAILED_ATTEMPT_PARAMETERS: &[StubParameter] =
+    &[positional("request", "FinishFailedAttemptRequest")];
+const SUCCESS_BATCH_REQUEST_PARAMETERS: &[StubParameter] = &[
+    keyword("worker_id", "str"),
+    keyword("rows", "list[tuple[uuid.UUID, datetime.datetime, str]]"),
+];
+const COMPLETE_SUCCESSES_PARAMETERS: &[StubParameter] =
+    &[positional("request", "SuccessBatchRequest")];
+const FINISH_WORKFLOW_SUCCESS_PARAMETERS: &[StubParameter] = &[
+    positional("task_id", "uuid.UUID"),
+    keyword("worker_id", "str"),
+    keyword("claimed_at", "datetime.datetime"),
+    keyword("result_json", "str"),
+];
+const CLAIM_PASS_REQUEST_PARAMETERS: &[StubParameter] = &[
+    keyword("worker_id", "str"),
+    keyword("queues", "list[str]"),
+    keyword("queue_priority", "dict[str, int]"),
+    keyword("queue_max_concurrency", "dict[str, int]"),
+    keyword("hard_cap_mode", "bool"),
+    keyword(
+        "budgets",
+        "dict[Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'], int]",
+    ),
+    keyword(
+        "routes",
+        "dict[Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'], \
+         Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']]",
+    ),
+    keyword("prefetch_buffer", "int"),
+    keyword("max_claim_per_worker", "int"),
+    keyword("max_claim_batch", "int"),
+    keyword("cluster_wide_cap", "int | None"),
+    keyword("claim_lease_ms", "int"),
+    keyword("lock_keys", "list[int]"),
+];
+const CLAIM_PASS_PARAMETERS: &[StubParameter] = &[positional("request", "ClaimPassRequest")];
 const MARK_STALE_RUNNING_PARAMETERS: &[StubParameter] = &[
     positional("stale_after_ms", "int"),
     positional("finalizing_stale_after_ms", "int"),
@@ -172,12 +227,24 @@ const TASK_INFO_OUTCOME: &str = "TaskInfoRecord | TaskInfoNotFound | BrokerFailu
 const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
     "StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed";
 const RELEASE_CLAIMS_OUTCOME: &str = "ClaimsReleased | ReleaseFailed";
+const FINISH_FAILED_ATTEMPT_OUTCOME: &str = "AttemptFailureApplied | AttemptRetryScheduled | \
+     AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | \
+     AttemptWriteFailed";
+const FINISH_ENDED_ATTEMPT_OUTCOME: &str = "AttemptClaimReleased | AttemptFailureApplied | \
+     AttemptRetryScheduled | AttemptAlreadyApplied | AttemptLostClaim | \
+     AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed";
+const COMPLETE_SUCCESSES_OUTCOME: &str = "SuccessesWritten | BatchRolledBack | BatchCommitUnknown";
+const FINISH_WORKFLOW_SUCCESS_OUTCOME: &str = "WorkflowSuccessApplied | AttemptAlreadyApplied | \
+     AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed";
+const GUARD_TEXT: &str = "Literal['CLAIM', 'DEADLINE', 'STALENESS', 'RETRY_COUNT', \
+     'WORKFLOW_STATUS', 'WORKFLOW_LINK_ABSENT', 'WORKFLOW_LINK_STATE', \
+     'FOREIGN_TERMINALIZATION', 'WORKFLOW_TASK']";
 const MARK_STALE_RUNNING_OUTCOME: &str =
     "StaleRunningRecovered | StaleRunningScanFull | StaleRunningScanFailed";
 const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
      CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
 
-const CORE_HANDLE_METHODS: [StubFunction; 16] = [
+const CORE_HANDLE_METHODS: [StubFunction; 21] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -249,6 +316,36 @@ const CORE_HANDLE_METHODS: [StubFunction; 16] = [
         parameters: MARK_STALE_RUNNING_PARAMETERS,
         returns: TypeText::FutureOf(MARK_STALE_RUNNING_OUTCOME),
         doc: "One stale RUNNING recovery pass. Writes; each candidate commits alone. A threshold\nthat does not fit in 64 bits raises OverflowError.",
+    },
+    StubFunction {
+        name: "finish_failed_attempt_async",
+        parameters: FINISH_FAILED_ATTEMPT_PARAMETERS,
+        returns: TypeText::FutureOf(FINISH_FAILED_ATTEMPT_OUTCOME),
+        doc: "Write the failed attempt of a child that reported a result (claimed-row rule REFUSE).\nWrites, in one statement.",
+    },
+    StubFunction {
+        name: "finish_ended_attempt_async",
+        parameters: FINISH_FAILED_ATTEMPT_PARAMETERS,
+        returns: TypeText::FutureOf(FINISH_ENDED_ATTEMPT_OUTCOME),
+        doc: "Write the end of an attempt whose child ended without a result (claimed-row rule\nRELEASE). Writes, in one statement.",
+    },
+    StubFunction {
+        name: "complete_successes_async",
+        parameters: COMPLETE_SUCCESSES_PARAMETERS,
+        returns: TypeText::FutureOf(COMPLETE_SUCCESSES_OUTCOME),
+        doc: "Write the plain successes of one request in one statement. Writes. Rows outside the\nfunction's contract raise PanicException.",
+    },
+    StubFunction {
+        name: "finish_workflow_success_async",
+        parameters: FINISH_WORKFLOW_SUCCESS_PARAMETERS,
+        returns: TypeText::FutureOf(FINISH_WORKFLOW_SUCCESS_OUTCOME),
+        doc: "Write phase 1 of a workflow task's success. Writes, in one statement. A naive\nclaimed_at raises TypeError.",
+    },
+    StubFunction {
+        name: "claim_pass_async",
+        parameters: CLAIM_PASS_PARAMETERS,
+        returns: TypeText::FutureOf("ClaimPassRecord | ClaimPassFailed"),
+        doc: "One claim pass. Writes, in one statement; the dispatch stays with the caller.",
     },
     StubFunction {
         name: "release_claims_async",
@@ -329,7 +426,7 @@ const EXCEPTIONS: &[StubException] = &[
     },
 ];
 
-const ARGUMENT_CLASSES: [StubClass; 8] = [
+const ARGUMENT_CLASSES: [StubClass; 13] = [
     StubClass {
         name: "StartNow",
         doc: "Start the task as soon as a worker can claim it.",
@@ -380,6 +477,41 @@ const ARGUMENT_CLASSES: [StubClass; 8] = [
         methods: &[],
     },
     StubClass {
+        name: "NoRetry",
+        doc: "The failed attempt writes the terminal failure.",
+        constructor: Constructor::Parameters(NO_RETRY_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "RetryAfter",
+        doc: "The failed attempt writes the retry, unless its next attempt would start at or after\ngood_until. expected_retry_count is part of the fence. Another placement raises ValueError.",
+        constructor: Constructor::Parameters(RETRY_AFTER_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "FinishFailedAttemptRequest",
+        doc: "One frozen failed attempt of a RUNNING task. A naive claimed_at raises TypeError; another\nattempt_outcome raises ValueError.",
+        constructor: Constructor::Parameters(FINISH_FAILED_ATTEMPT_REQUEST_PARAMETERS),
+        properties: &[property("task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "SuccessBatchRequest",
+        doc: "The plain successes of one worker for one statement: 1 to 64 rows, each task once. A\nnaive claimed_at raises TypeError; no row, more rows or a repeated task id raises\nValueError.",
+        constructor: Constructor::Parameters(SUCCESS_BATCH_REQUEST_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "ClaimPassRequest",
+        doc: "One frozen claim pass. A negative count or one above 32 bits raises OverflowError; an\nunknown class name, a route to a budget the pass does not hold or a lease of 0 raises\nValueError.",
+        constructor: Constructor::Parameters(CLAIM_PASS_REQUEST_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
         name: "ReleaseClaimsRequest",
         doc: "One frozen release: the claims of one worker, at most 1000, each task once, each with\nthe claim generation of its dispatch. A naive datetime raises TypeError; more claims, a\nrepeated task id or another placement raises ValueError.",
         constructor: Constructor::Parameters(RELEASE_CLAIMS_REQUEST_PARAMETERS),
@@ -388,7 +520,7 @@ const ARGUMENT_CLASSES: [StubClass; 8] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 33] = [
+const RECORD_CLASSES: [StubClass; 53] = [
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -623,6 +755,234 @@ const RECORD_CLASSES: [StubClass; 33] = [
         methods: &[],
     },
     StubClass {
+        name: "AttemptAlreadyApplied",
+        doc: "The writer's own effect was already committed: a replay after a lost reply. Nothing was\nwritten.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("terminal_at", "datetime.datetime"),
+            property("kind", "str"),
+            property("observed_status", "str | None"),
+            property("observed_worker_id", "str | None"),
+            property("observed_claimed_at", "datetime.datetime | None"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "AttemptLostClaim",
+        doc: "The row is live, and the fence does not match it. Nothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("observed_status", "str | None"),
+            property("observed_worker_id", "str | None"),
+            property("observed_claimed_at", "datetime.datetime | None"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "AttemptSourceStateConflict",
+        doc: "The row exists and is not this writer's to end; guard names the guard that refused it.\nNothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("guard", GUARD_TEXT),
+            property("observed_status", "str | None"),
+            property("observed_worker_id", "str | None"),
+            property("observed_claimed_at", "datetime.datetime | None"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "AttemptTaskAbsent",
+        doc: "No live or history row has this id. Nothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "AttemptWriteFailed",
+        doc: "The statement failed. It wrote nothing, or it committed and its reply was lost.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "PhaseTwoOwedRecord",
+        doc: "Phase 2 of a workflow task is owed: it advances the node and wakes the queue.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_name", "str"),
+            property("queue_name", "str"),
+            property(
+                "step",
+                "Literal['NO_DEPENDENTS', 'DEPENDENTS_WITHOUT_SUBWORKFLOW', 'SUBWORKFLOW_REACHABLE']",
+            ),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "RetryNotRequested",
+        doc: "The caller asked for no retry.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "RetryPastDeadline",
+        doc: "The caller asked for a retry, and its next attempt would start at or after good_until.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("next_retry_at", "datetime.datetime"),
+            property("good_until", "datetime.datetime"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "CapacityWoken",
+        doc: "A plain task: the statement sent its capacity wake. Nothing is owed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "AttemptFailureApplied",
+        doc: "The terminal failure and its attempt row committed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("terminal_at", "datetime.datetime"),
+            property("observed_status", "str | None"),
+            property("observed_worker_id", "str | None"),
+            property("observed_claimed_at", "datetime.datetime | None"),
+            property("retry", "RetryNotRequested | RetryPastDeadline"),
+            property("after", "CapacityWoken | PhaseTwoOwedRecord"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "AttemptRetryScheduled",
+        doc: "The retry and its attempt row committed; retry_count is the count the row now holds.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("retry_count", "int"),
+            property("next_retry_at", "datetime.datetime"),
+            property("queue_name", "str"),
+            property("observed_status", "str | None"),
+            property("observed_worker_id", "str | None"),
+            property("observed_claimed_at", "datetime.datetime | None"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "AttemptClaimReleased",
+        doc: "Rule RELEASE: the row was still CLAIMED by this claim; it is PENDING again with no\nattempt row.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("queue_name", "str"),
+            property("observed_status", "str | None"),
+            property("observed_worker_id", "str | None"),
+            property("observed_claimed_at", "datetime.datetime | None"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "SuccessApplied",
+        doc: "The success of this row committed with the statement.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("terminal_at", "datetime.datetime"),
+            property("observed_status", "str | None"),
+            property("observed_worker_id", "str | None"),
+            property("observed_claimed_at", "datetime.datetime | None"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "SuccessesWritten",
+        doc: "The batch statement ran: one row record per success, in the request order.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property(
+            "rows",
+            "list[SuccessApplied | AttemptAlreadyApplied | AttemptLostClaim | \
+             AttemptSourceStateConflict | AttemptTaskAbsent]",
+        )],
+        methods: &[],
+    },
+    StubClass {
+        name: "BatchRolledBack",
+        doc: "No row of the batch changed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
+        name: "BatchCommitUnknown",
+        doc: "The reply of the batch statement was lost: each row may have committed or not.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowSuccessApplied",
+        doc: "Phase 1 of the workflow task's success committed; phase_two is the phase 2 owed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("terminal_at", "datetime.datetime"),
+            property("observed_status", "str | None"),
+            property("observed_worker_id", "str | None"),
+            property("observed_claimed_at", "datetime.datetime | None"),
+            property("phase_two", "PhaseTwoOwedRecord"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ClaimedRowRecord",
+        doc: "One row the claim pass took; claimed_at is the claim generation of this claim.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("id", "uuid.UUID"),
+            property("task_name", "str"),
+            property("queue_name", "str"),
+            property("input", "str"),
+            property("task_options", "str | None"),
+            property(
+                "execution",
+                "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']",
+            ),
+            property("is_workflow_task", "bool"),
+            property("claimed_at", "datetime.datetime"),
+            property("retry_count", "int"),
+            property("max_retries", "int"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ClaimPassRecord",
+        doc: "The claim pass ran: the claimed rows in dispatch order, and the rows its plan chose and\nits take did not get.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("claimed", "list[ClaimedRowRecord]"),
+            property("short_of_plan", "int"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ClaimPassFailed",
+        doc: "The claim pass failed. It wrote nothing, or it committed and its reply was lost; claimed\nrows then return to the queue when their lease expires.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
         name: "ClaimsReleased",
         doc: "The release statement ran: one row outcome per claim, in the request order.",
         constructor: Constructor::NoConstructor,
@@ -724,8 +1084,8 @@ const HANDLE_CLASSES: [StubClass; 1] = [StubClass {
     methods: &CORE_HANDLE_METHODS,
 }];
 
-const CLASSES: [StubClass; 42] = {
-    let mut classes = [HANDLE_CLASSES[0]; 42];
+const CLASSES: [StubClass; 67] = {
+    let mut classes = [HANDLE_CLASSES[0]; 67];
     let mut position = 0;
     while position < ARGUMENT_CLASSES.len() {
         classes[1 + position] = ARGUMENT_CLASSES[position];
