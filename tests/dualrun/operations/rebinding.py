@@ -2,8 +2,9 @@
 
 Python run: every module global and class attribute that *is* a production
 entry point of the table is replaced with a counted copy of its reference,
-and each broker built during the test gets a core handle whose switched
-methods raise ``TripwireHit``. Core run: every module global and class
+each broker built during the test gets a core handle whose switched
+methods raise ``TripwireHit``, and every module global that *is* a switched
+function of ``horsies._core`` raises it too. Core run: every module global and class
 attribute that is a production entry point is replaced with a counted copy of
 itself, and every one that is a reference is replaced with a tripwire.
 
@@ -196,13 +197,22 @@ def install_python_run(
         for resolved in operations
         for method in resolved.operation.core_methods
     }
-    core_handle_class: object = getattr(importlib.import_module(CORE_HANDLE_MODULE), 'CoreHandle')
+    core_module = importlib.import_module(CORE_HANDLE_MODULE)
+    core_handle_class: object = getattr(core_module, 'CoreHandle')
     assert callable(core_handle_class), 'horsies._core.CoreHandle is a class'
 
     def build_tripwire_handle(*args: object, **kwargs: object) -> TripwireCoreHandle:
         return TripwireCoreHandle(core_handle_class(*args, **kwargs), tripped)
 
     _ = rebind(core_handle_class, build_tripwire_handle, monkeypatch)
+    for resolved in operations:
+        for function_name in resolved.operation.core_functions:
+            core_function: object = getattr(core_module, function_name)
+            _ = rebind(
+                core_function,
+                tripwire(resolved.operation.name, Implementation.PYTHON_REFERENCE),
+                monkeypatch,
+            )
 
 
 def install_core_run(

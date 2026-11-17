@@ -50,6 +50,19 @@ class TestResolution:
         window = resolve_monitoring_window(since=since, until=NOW, now=NOW)
         assert isinstance(window, MonitoringWindow)
 
+    def test_bounds_with_an_offset_come_back_as_the_same_instants_in_utc(self) -> None:
+        plus_three = timezone(timedelta(hours=3))
+        since = datetime(2026, 8, 8, 10, 0, tzinfo=plus_three)
+        until = datetime(2026, 8, 8, 14, 0, tzinfo=plus_three)
+        window = resolve_monitoring_window(since=since, until=until, now=NOW)
+        assert isinstance(window, MonitoringWindow)
+        assert (window.lower, window.upper) == (since, until)
+        assert window.lower.utcoffset() == window.upper.utcoffset() == timedelta(0)
+
+    def test_a_naive_now_is_a_defect_of_the_caller(self) -> None:
+        with pytest.raises(TypeError):
+            resolve_monitoring_window(since=None, until=None, now=datetime(2026, 8, 8, 12, 0))
+
 
 class TestTypedRefusals:
     def test_over_maximum_names_the_bound_never_clamps(self) -> None:
