@@ -208,6 +208,16 @@ written in Rust, on a new baseline schema.
   cancel route does; they answered 503 with the driver's text. A
   `urn:uuid:` or braced id is read as its UUID.
 
+- **A workflow id text of a read names the run that `uuid.UUID(text)`
+  reads.** `horsies.monitoring.get_workflow_run` and `get_workflow_node`,
+  and the web routes `GET /api/workflows/{workflow_id}` and
+  `GET /api/workflows/{workflow_id}/tasks/{task_index}`, read the id text
+  as Python's `uuid.UUID` does. A text that it refuses names no run: `None`,
+  or 404 on the web. 0.7 passed the text to PostgreSQL, which refuses some
+  forms that `uuid.UUID` reads (for example `uuid:<id>`, or a `-` that does
+  not follow a group of four digits). Such a read failed with
+  `DB_OPERATION_FAILED`, or 503 on the web.
+
 - **`ping_workers` refuses a `timeout_seconds` of NaN.** It answers
   `INVALID_INPUT` (`timeout_seconds must be positive, got nan`) before any
   I/O; it sent the ping and returned at once with no reply. An infinite
@@ -232,6 +242,17 @@ written in Rust, on a new baseline schema.
   timestamp (4714-11-24 BC). 0.7.0 accepted any positive `timedelta`, and
   such an age failed every sweep with `timestamp out of range`.
 
+- **The claim values and the payload thresholds are within the bounds of
+  the worker.** `prefetch_buffer`, `cluster_wide_cap` and a custom queue's
+  `max_concurrency` are at most 2,147,483,647; `claim_lease_ms` and
+  `max_claim_renew_age_ms` at most 4,294,967,295; `PayloadPolicy.warn_bytes`
+  and `reject_bytes` at most 2^64 - 1. A larger value is refused when the
+  config is built: `AppConfig` raises `ConfigurationError` with the code of
+  the field (`CONFIG_INVALID_PREFETCH` HRS-202, `CONFIG_INVALID_CLUSTER_CAP`
+  HRS-201, `CONFIG_INVALID_QUEUE_MODE` HRS-200), and `PayloadPolicy` raises
+  `ValidationError`. The bounds are those of the worker manifest of the
+  core. 0.7.0 accepted these values.
+
 - **`check(live=True)` runs the core's connectivity check.** The check
   builds a core handle of its own (observe-only, producer pools) and calls
   `CoreHandle.check_connectivity`, the rule of the Python and Rust clients:
@@ -255,6 +276,26 @@ written in Rust, on a new baseline schema.
   The errors keep `CHECK_WORKER_CONNECTIONS` (`HRS-219`) and their texts; a
   limit that is not read, or a core that cannot run the call, is one error
   with the cause as its note, as before.
+
+- **The workflow spec data is written by `dumps_json`.** The text that a
+  workflow start and a sub-workflow child build send the core (the
+  generated `dump_workflow_spec_data`, which now returns `SerdeResult[str]`)
+  writes a character outside ASCII as the character, not as a `\u` escape,
+  as every other stored form does. A spec whose text holds a lone surrogate
+  is refused before the core call: the start returns
+  `WorkflowStartValidationFailed`, and a child build fails its node with
+  `WORKFLOW_ENQUEUE_FAILED`.
+
+- **A log record of the core holds its fields as attributes.** The core
+  logs to the `horsies.*` loggers through Python `logging`. The message of
+  such a record is the text of the event alone, and each other field of the
+  event is an attribute of the `LogRecord`, as `extra` sets it: a bool, an
+  integer or a float as a Python `bool`, `int` or `float`, any other value
+  as its text. For example, the warning of a monitoring list cut at its
+  bound has `read` and `bound`. A field whose name `LogRecord` already uses
+  (`name`, `created`, `asctime`, ...) is set as `field_<name>`. The horsies
+  log format writes the message only; a handler with its own formatter can
+  read the attributes.
 
 ### Fixed
 
@@ -627,7 +668,7 @@ unless it starts with "Added".
   `register` returns `TaskFunction<validate_order::Input, T, E>`, and
   `validate_order::params::order()` is the field token of a node. A task
   with no parameters, or with one parameter written `()`, has the input
-  `()`: a send stores `null`, a node `{}`. A parameter whose value is
+  `()`: a send and a node store `{}`. A parameter whose value is
   stored needs a name: `_` is a compile error for it.
   `#[derive(WorkflowInput)]` gives the field tokens of a sub-workflow's
   params type.
@@ -715,6 +756,11 @@ unless it starts with "Added".
   workflow definitions registered on the app. The query types take a
   `HistoryWindow` from `resolve_monitoring_window`; the error catalogs are
   Python's (`HISTORY_CONTRACT_VIOLATION`, `STORED_DATA_INVALID`).
+- **The times of the monitoring models serialize in pydantic's JSON
+  form.** A time with a microsecond other than 0 has 6 fraction digits
+  (`2026-11-17T13:59:14.500000Z`), and one with 0 has none; chrono's form
+  wrote `.500Z` for a whole millisecond. The web answers of the Python and
+  Rust apps carry this text. The read accepts any count of fraction digits.
 - **`web::create_monitoring_router` becomes `web::router(&app,
   MonitoringConfig, policy)`** (feature `web`), an axum mount of the core's
   monitoring handler: the core serves every route, the event frames and
@@ -747,6 +793,31 @@ unless it starts with "Added".
   `rerun::SqlxCaller` (feature `sqlx`). Errors are `CallerRerunError<E>`:
   `Driver(E)`, `ClassNotRegistered { key }`, `ClientFamilyMismatch
   { stored }`, `CallerKeyRefused`, `IdMintRefused`, `Row`.
+- **The client writes each stored form as Python writes it**, as the shared
+  vectors of `crates/horsies-core/tests/fixtures/stored_forms/` pin it:
+  - Task input: a send of a task with no parameters, and a schedule
+    without input, store `{}` (no keyword arguments), not `null`.
+  - Task options of a workflow node: the deadline `good_until` is written
+    as Python's `isoformat()`, with 6 fraction digits when the microsecond
+    is not 0 (`…12.500000+00:00`, not `…12.500+00:00`).
+  - Task options of a send with a deadline (`TaskSendOptions::good_until`):
+    the options text holds the deadline in `good_until`, in Python's
+    `isoformat()`; before, `null`. A task with no options and a send with a
+    deadline stores the options of an `ISOLATED` task with the deadline. The
+    command fingerprint of a send hashes this text, as Python's does.
+    `TaskOptions::stored_send_options_text` (added) writes it.
+  - Workflow spec data, the text that a workflow start sends the core:
+    `queue_classes` lists the task queues in the order of the nodes that
+    first name them, as a Python dict does; before, sorted by name.
+  - Task input and result: a date-time of type `StoredDateTime` (below) is
+    written with Python's fraction (`…12.500000Z`). A plain chrono
+    `DateTime` or `NaiveDateTime` keeps chrono's serde form (`…12.500Z`);
+    both clients read either text to the same value.
+- **Added: `StoredDateTime<T>`**, a chrono date-time
+  (`DateTime<Tz>` or `NaiveDateTime`) that a task input or result stores in
+  Python's text: no fraction for a whole second, 6 digits for a whole
+  microsecond, 9 digits below the microsecond; the offset `Z` when it is 0.
+  It reads any RFC 3339 fraction.
 
 ## 0.7.0 — 2026-11-15
 
