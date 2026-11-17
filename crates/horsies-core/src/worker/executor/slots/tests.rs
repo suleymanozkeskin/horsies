@@ -616,7 +616,6 @@ fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
         task_id: claimed.task_id,
         task_name: claimed.task_name.clone(),
         worker_id: "worker-1".to_owned(),
-        task_kind: claimed.kind,
         claimed_at: claimed.claimed_at,
         work: IsolatedWork::Run,
         input: TaskInputText::new("{}".to_owned()),
