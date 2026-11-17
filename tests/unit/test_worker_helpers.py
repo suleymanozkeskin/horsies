@@ -922,14 +922,14 @@ class TestReaperRetentionPass:
                 self._core_handle.delete_expired_workflows_async = delete_workflows
                 created_brokers.append(self)
 
+        # The pass runs workflow recovery through the core
+        # (``ReaperMixin._recover_workflows``, ``recover_workflows_async``);
+        # its record conversion is tested in test_reaper_workflow_core_calls.
         recover_mock = AsyncMock(return_value=_empty_workflow_recovery_report())
         monkeypatch.setattr(
             'horsies.core.brokers.postgres.PostgresBroker', _FakeBroker
         )
-        monkeypatch.setattr(
-            'horsies.core.workflows.recovery.recover_stuck_workflows_global',
-            recover_mock,
-        )
+        monkeypatch.setattr(worker, '_recover_workflows', recover_mock)
 
         _install_reaper_gate_session(worker)
         await worker._reaper_loop()
@@ -955,6 +955,7 @@ class TestReaperRetentionPass:
             for stmt in executed
         )
         assert recover_mock.await_args is not None
+        assert recover_mock.await_args.args == (created_brokers[0],)
         assert recover_mock.await_args.kwargs['failure_limit'] == 7
         assert len(created_brokers) == 1
         created_brokers[0].close_async.assert_awaited_once()
@@ -6482,17 +6483,19 @@ async def test_workflow_recovery_failure_publishes_partial_health() -> None:
     )
     report = RecoveryReport(errors=1)
     report.metrics['case_0'].errors = 1
-    failure = RecoveryPassFailure(report, RuntimeError('discovery failed'))
+    failure = RecoveryPassFailure(
+        report, CoreOperationFailed('recover_workflows', 'discovery failed', False),
+    )
     config = RecoveryConfig(
         auto_requeue_stale_claimed=False,
         auto_fail_stale_running=False,
         auto_terminate_orphaned_workflow_tasks=False,
     )
 
-    with patch(
-        'horsies.core.workflows.recovery.recover_stuck_workflows_global',
-        AsyncMock(side_effect=failure),
-    ):
+    # The pass runs workflow recovery through the core
+    # (``ReaperMixin._recover_workflows``), which raises RecoveryPassFailure
+    # for a ``RecoveryPassFailed`` record (test_reaper_workflow_core_calls).
+    with patch.object(worker, '_recover_workflows', AsyncMock(side_effect=failure)):
         await worker._run_reaper_pass(
             broker,
             await resources_of(broker),

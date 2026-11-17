@@ -315,6 +315,7 @@ class TestRecordedRaiseRows:
 @pytest.mark.unit
 def test_the_case_4_error_is_the_catalog_code_with_the_workflow_name() -> None:
     from horsies.core.codec.json_io import loads_json
+    from horsies.core.models.tasks import OperationalErrorCode
     from horsies.core.types.result import Ok
 
     workflow_id = str(uuid.uuid4())
@@ -326,7 +327,9 @@ def test_the_case_4_error_is_the_catalog_code_with_the_workflow_name() -> None:
             pass
         case other:
             raise AssertionError(f'the case 4 error is not an object: {other!r}')
-    assert decoded['error_code'] == 'WORKFLOW_START_INCOMPLETE'
+    assert decoded['error_code'] == {
+        '__builtin_task_code__': OperationalErrorCode.WORKFLOW_START_INCOMPLETE.value,
+    }
     assert decoded['message'] == (
         "Orphaned workflow 'orphan.name': no workflow_tasks found. "
         'Workflow task insertion did not complete.'
