@@ -2,7 +2,9 @@
 
 With the option, each integration test (under ``tests/integration``) runs
 twice through the ``implementation`` fixture: first with the Python reference
-of each operation of the module's table, then on the core. Each run counts
+of each operation of the module's table, then on the core. A test that the
+module lists as core-only runs once, on the core; one that it lists as
+reference-only runs once, on the reference. Each run counts
 the calls of the table's operations; the terminal summary lists the tests
 that called at least one operation (the informative ones) and the count of
 the others. Without the option the fixture changes nothing.
@@ -20,7 +22,7 @@ from typing import Final, assert_never
 
 import pytest
 
-from tests.dualrun.operations.broker import BROKER_OPERATIONS
+from tests.dualrun.operations.broker import BROKER_OPERATIONS, BROKER_REFERENCE_ONLY_TESTS
 from tests.dualrun.operations.history import HISTORY_OPERATIONS
 from tests.dualrun.operations.lifecycle import (
     LIFECYCLE_CORE_ONLY_TESTS,
@@ -41,6 +43,7 @@ from tests.dualrun.operations.table import (
     CoreOnlyTest,
     DualRunOperation,
     Implementation,
+    ReferenceOnlyTest,
     SwitchModule,
 )
 
@@ -64,6 +67,15 @@ CORE_ONLY_TESTS: Final[Mapping[SwitchModule, tuple[CoreOnlyTest, ...]]] = {
     SwitchModule.WORKFLOW_ENGINE: WORKFLOW_ENGINE_CORE_ONLY_TESTS,
 }
 """The tests that run once, on the core, in the dual-run of each module."""
+
+REFERENCE_ONLY_TESTS: Final[Mapping[SwitchModule, tuple[ReferenceOnlyTest, ...]]] = {
+    SwitchModule.LIFECYCLE: (),
+    SwitchModule.HISTORY: (),
+    SwitchModule.BROKER: BROKER_REFERENCE_ONLY_TESTS,
+    SwitchModule.MONITORING_AND_WEB: (),
+    SwitchModule.WORKFLOW_ENGINE: (),
+}
+"""The tests that run once, on the Python reference, in the dual-run of each module."""
 
 _COUNTS_KEY: Final = pytest.StashKey[dict[str, int]]()
 """Calls of the table's operations per test id (both runs together)."""
@@ -116,6 +128,26 @@ def _dual_runs(config: pytest.Config, test_path: Path) -> bool:
     return test_path.is_relative_to(config.rootpath / DUAL_RUN_TESTS)
 
 
+def _implementations(module: SwitchModule, node_id: str) -> list[Implementation]:
+    """The runs of the test ``node_id`` in the dual-run of ``module``: the
+    core alone for a core-only test, the reference alone for a
+    reference-only test, else the reference and then the core. A test in
+    both lists is a defect of the tables."""
+    core_only = any(test.node_id == node_id for test in CORE_ONLY_TESTS[module])
+    reference_only = any(test.node_id == node_id for test in REFERENCE_ONLY_TESTS[module])
+    match (core_only, reference_only):
+        case (True, False):
+            return [Implementation.CORE]
+        case (False, True):
+            return [Implementation.PYTHON_REFERENCE]
+        case (False, False):
+            return [Implementation.PYTHON_REFERENCE, Implementation.CORE]
+        case (True, True):
+            raise AssertionError(
+                f'{node_id} is listed as core-only and as reference-only for {module.value}'
+            )
+
+
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     if selected_module(metafunc.config) is None:
         return
@@ -125,12 +157,7 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         return
     module = selected_module(metafunc.config)
     assert module is not None, 'the dual-run option was checked above'
-    core_only = {test.node_id for test in CORE_ONLY_TESTS[module]}
-    implementations = (
-        [Implementation.CORE]
-        if metafunc.definition.nodeid in core_only
-        else [Implementation.PYTHON_REFERENCE, Implementation.CORE]
-    )
+    implementations = _implementations(module, metafunc.definition.nodeid)
     metafunc.parametrize(
         'implementation',
         implementations,
