@@ -21,6 +21,7 @@ use crate::core::history::archive::attempts::{
 };
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
 use crate::core::history::reads::aggregates::plan_rows_from_explain_text;
+use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::task::error::{ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode};
 use crate::core::task::result::TaskResult;
 use crate::core::types::status::TaskStatus;
@@ -28,8 +29,9 @@ use crate::db::{ParameterType, Row, TypedStatement};
 
 use super::models::{
     Breakdown, BreakdownCounts, BreakdownGroup, ErrorCategory, GroupRow, LeafTaskInfo,
-    ScheduleStateInfo, StatusCount, TaskAttemptInfo, TaskDetail, TaskSummary, WorkflowEdge,
-    WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
+    ScheduleStateInfo, StatusCount, TaskAttemptInfo, TaskDetail, TaskDetailNotFound,
+    TaskDetailRead, TaskSummary, WorkflowEdge, WorkflowNodeInfo, WorkflowRunDetail,
+    WorkflowRunSummary, WorkflowTaskDetail,
 };
 use super::queries::{elapsed_s, normalize_optional_text, span_s, TaskGroupBy};
 
@@ -83,14 +85,15 @@ pub(super) static MONITORING_TASK_FACETS: TypedStatement = TypedStatement::new(
     ],
 );
 
-/// One task with its attempts and workflow link. Parameters: task id, with
-/// result, with attempts.
+/// One task with its attempts and workflow link, or the reason it is
+/// absent. Parameters: task id, with result, with attempts.
 pub(super) static MONITORING_TASK_DETAIL: TypedStatement = TypedStatement::new(
     "monitoring_task_detail",
     "SELECT location, task_id, task_name, queue_name, priority, status, is_workflow_task,
             retry_count, max_retries, enqueued_at, started_at, good_until, worker_hostname,
             terminal_at, error_code, final_failed_reason, attempt_archive_version,
-            attempt_snapshot, attempt_snapshot_digest, workflow_id, workflow_task_index
+            attempt_snapshot, attempt_snapshot_digest, workflow_id, workflow_task_index,
+            absence_reason
      FROM horsies_monitoring_task_detail($1, $2, $3)",
     &[
         ParameterType::Uuid,
@@ -199,7 +202,7 @@ pub(super) static MONITORING_WORKFLOW_NODE: TypedStatement = TypedStatement::new
             priority, status, is_workflow_task, retry_count, max_retries, enqueued_at,
             started_at, good_until, worker_hostname, terminal_at, error_code,
             final_failed_reason, attempt_archive_version, attempt_snapshot,
-            attempt_snapshot_digest, workflow_id, workflow_task_index
+            attempt_snapshot_digest, workflow_id, workflow_task_index, absence_reason
      FROM horsies_monitoring_workflow_node($1, $2)",
     &[ParameterType::Uuid, ParameterType::Int4],
 );
@@ -459,14 +462,6 @@ pub(super) fn page_from_rows(
     Ok((totals, summaries))
 }
 
-/// The answer of the detail function.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) enum DetailRead {
-    Found(TaskDetail),
-    /// Neither the live table nor the history holds the task.
-    Absent,
-}
-
 /// What a detail row breaks: a row shape defect, or stored history data
 /// that does not decode (a status that is not a task status, an attempt
 /// snapshot that fails its check).
@@ -482,14 +477,16 @@ impl From<RowDecodeError> for DetailRowError {
     }
 }
 
-/// Reads the one row of the detail function.
+/// Reads the one row of the detail function: the task, or the reason the
+/// function gives for its absence. A reason the function does not define is
+/// a row shape defect, as a location it does not define is.
 pub(super) fn task_detail_row(
     row: &Row,
     statement: &TypedStatement,
-) -> Result<DetailRead, DetailRowError> {
+) -> Result<TaskDetailRead, DetailRowError> {
     let place: String = column(row, statement, "location")?;
     let location = match place.as_str() {
-        "ABSENT" => return Ok(DetailRead::Absent),
+        "ABSENT" => return Ok(TaskDetailRead::NotFound(absent_task(row, statement)?)),
         other => location(statement, other)?,
     };
     let task_id: Uuid = column(row, statement, "task_id")?;
@@ -577,7 +574,7 @@ pub(super) fn task_detail_row(
         worker_hostname: column(row, statement, "worker_hostname")?,
         good_until: column(row, statement, "good_until")?,
     };
-    Ok(DetailRead::Found(TaskDetail {
+    Ok(TaskDetailRead::Found(TaskDetail {
         leaf,
         task_name: column(row, statement, "task_name")?,
         queue_name: column(row, statement, "queue_name")?,
@@ -589,6 +586,19 @@ pub(super) fn task_detail_row(
         workflow_id: column(row, statement, "workflow_id")?,
         workflow_task_index: column(row, statement, "workflow_task_index")?,
     }))
+}
+
+/// The `ABSENT` row of the detail function: the task id and the reason
+/// that `horsies_task_absence_reason` classifies in the same snapshot.
+fn absent_task(
+    row: &Row,
+    statement: &TypedStatement,
+) -> Result<TaskDetailNotFound, RowDecodeError> {
+    let task_id: Uuid = column(row, statement, "task_id")?;
+    let reason: String = column(row, statement, "absence_reason")?;
+    let reason =
+        TaskAbsenceReason::parse(&reason).map_err(|error| shape(statement, error.to_string()))?;
+    Ok(TaskDetailNotFound { task_id, reason })
 }
 
 fn attempt_info(record: &AttemptRecord) -> TaskAttemptInfo {
@@ -1012,8 +1022,8 @@ fn node_detail(
     let (leaf, attempts) = match location {
         None => (None, Vec::new()),
         Some(_) => match task_detail_row(row, statement)? {
-            DetailRead::Found(detail) => (Some(detail.leaf), detail.attempts),
-            DetailRead::Absent => (None, Vec::new()),
+            TaskDetailRead::Found(detail) => (Some(detail.leaf), detail.attempts),
+            TaskDetailRead::NotFound(_) => (None, Vec::new()),
         },
     };
     Ok(WorkflowTaskDetail {

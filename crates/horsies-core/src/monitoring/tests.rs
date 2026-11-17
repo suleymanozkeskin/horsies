@@ -23,6 +23,15 @@ use super::*;
 
 mod history_detail_ports;
 
+/// The detail of a task that the read finds; a not-found answer fails the
+/// test.
+fn found_detail(read: TaskDetailRead) -> TaskDetail {
+    match read {
+        TaskDetailRead::Found(detail) => detail,
+        TaskDetailRead::NotFound(absent) => panic!("the task detail is not found: {absent:?}"),
+    }
+}
+
 #[test]
 fn monitoring_window_defaults_and_refusals_match_the_contract() {
     let now = Utc.with_ymd_and_hms(2026, 8, 8, 12, 0, 0).unwrap();
@@ -1456,10 +1465,11 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
     )
     .await;
 
-    let live = get_task_detail(&broker, task.id)
-        .await
-        .expect("live detail")
-        .expect("live task");
+    let live = found_detail(
+        get_task_detail(&broker, task.id)
+            .await
+            .expect("live detail"),
+    );
     assert_eq!(live.leaf.status, "RUNNING");
     assert_eq!(live.workflow_id, Some(workflow_id));
     assert_eq!(live.workflow_task_index, Some(3));
@@ -1476,10 +1486,11 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
     );
 
     fail_task(&pool, task.id, "TASK_EXCEPTION").await;
-    let history = get_task_detail(&broker, task.id)
-        .await
-        .expect("history detail")
-        .expect("history task");
+    let history = found_detail(
+        get_task_detail(&broker, task.id)
+            .await
+            .expect("history detail"),
+    );
     assert_eq!(history.leaf.status, "FAILED");
     assert!(history.leaf.failed_at.is_some());
     assert_eq!(history.leaf.completed_at, None);
@@ -1518,9 +1529,13 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
     assert!(!error.retryable);
     assert!(error.message.contains("digest"));
 
+    let unknown = Uuid::new_v4();
     assert_eq!(
-        get_task_detail(&broker, Uuid::new_v4()).await.unwrap(),
-        None
+        get_task_detail(&broker, unknown).await.unwrap(),
+        TaskDetailRead::NotFound(TaskDetailNotFound {
+            task_id: unknown,
+            reason: TaskAbsenceReason::NotClassified,
+        })
     );
     clean_w2(&pool, &scope).await;
 }
@@ -1712,7 +1727,10 @@ async fn a_dropped_staged_reader_fails_the_detail_until_it_is_published_again() 
     let task = scope.running("unpublished_detail");
     seed_task(&pool, &task).await;
     complete_task(&pool, task.id).await;
-    assert!(get_task_detail(&broker, task.id).await.unwrap().is_some());
+    assert!(matches!(
+        get_task_detail(&broker, task.id).await.unwrap(),
+        TaskDetailRead::Found(_)
+    ));
 
     sqlx::query(&format!(
         "DROP FUNCTION {}(uuid)",
@@ -1739,6 +1757,9 @@ async fn a_dropped_staged_reader_fails_the_detail_until_it_is_published_again() 
         .await
         .expect("restore staged readers");
     transaction.commit().await.expect("commit staged readers");
-    assert!(get_task_detail(&broker, task.id).await.unwrap().is_some());
+    assert!(matches!(
+        get_task_detail(&broker, task.id).await.unwrap(),
+        TaskDetailRead::Found(_)
+    ));
     clean_w2(&pool, &scope).await;
 }

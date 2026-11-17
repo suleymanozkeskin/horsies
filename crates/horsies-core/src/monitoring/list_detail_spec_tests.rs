@@ -6,9 +6,10 @@
 //! version on `program/0.8.0`. Each database test runs on a database of its
 //! own ([`SpecDatabase`]).
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::spec_support::{
@@ -21,7 +22,8 @@ use crate::core::history::reads::aggregates::plan_rows_from_explain;
 use crate::core::lifecycle::{BatchSize, TerminalizationCommand, TerminalizationOutcome};
 use crate::monitoring::{
     get_task_detail, list_tasks, task_stats, MonitoringQueryError, MonitoringQueryErrorCode,
-    SortDirection, TaskDetail, TaskListPage, TaskListQuery, TaskSortField, TaskStatsQuery,
+    SortDirection, TaskAbsenceReason, TaskDetail, TaskDetailNotFound, TaskDetailRead, TaskListPage,
+    TaskListQuery, TaskSortField, TaskStatsQuery,
 };
 
 /// Upper bound of a span that counts up to now (Python
@@ -51,10 +53,55 @@ fn names_of(page: &TaskListPage) -> Vec<&str> {
 }
 
 async fn detail_of(broker: &PostgresBroker, task_id: Uuid) -> TaskDetail {
+    match get_task_detail(broker, task_id)
+        .await
+        .expect("read the task detail")
+    {
+        TaskDetailRead::Found(detail) => detail,
+        TaskDetailRead::NotFound(absent) => panic!("the task has no detail: {absent:?}"),
+    }
+}
+
+/// The detail read of a task id that no table holds: its absence reason.
+async fn absence_of(broker: &PostgresBroker, task_id: Uuid) -> TaskDetailRead {
     get_task_detail(broker, task_id)
         .await
         .expect("read the task detail")
-        .expect("the task has a detail")
+}
+
+fn not_found(task_id: Uuid, reason: TaskAbsenceReason) -> TaskDetailRead {
+    TaskDetailRead::NotFound(TaskDetailNotFound { task_id, reason })
+}
+
+/// A UUIDv7 whose embedded birth is `birth`, with random tail bits (Python
+/// `_uuid7_born_at`).
+fn uuid7_born_at(birth: DateTime<Utc>) -> Uuid {
+    let milliseconds =
+        u128::try_from(birth.timestamp_millis()).expect("the birth is after the Unix epoch");
+    let tail = Uuid::new_v4().as_u128() & ((1_u128 << 80) - 1);
+    let value = (milliseconds << 80) | tail;
+    let value = (value & !(0xF_u128 << 76)) | (0x7_u128 << 76);
+    let value = (value & !(0x3_u128 << 62)) | (0x2_u128 << 62);
+    Uuid::from_u128(value)
+}
+
+/// The catalog row of a detached and dropped leaf of the default class
+/// (`standard_30d`) whose upper anchor is `upper_anchor` (Python
+/// `_detached_period_leaf`). Only the absence rule reads it: it names no
+/// relation. The database of the test is dropped with it.
+async fn record_detached_period_leaf(pool: &PgPool, upper_anchor: DateTime<Utc>) {
+    sqlx::query(
+        "INSERT INTO horsies_task_history_leaf_catalog (
+             leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor,
+             index_schema_version, created_at, detached_at, dropped_at
+         ) VALUES ($1, 'standard_30d', 'AT', $2, $3, 1, now(), now(), now())",
+    )
+    .bind(format!("spec_detached_{}", Uuid::new_v4().simple()))
+    .bind(upper_anchor - Duration::days(1))
+    .bind(upper_anchor)
+    .execute(pool)
+    .await
+    .expect("record a detached period leaf");
 }
 
 /// The spans of the only row of the list (Python `_only_row`).
@@ -260,6 +307,63 @@ fn an_unreadable_estimate_is_a_contract_violation_that_is_not_retryable() {
         "{}",
         error.message
     );
+}
+
+/// Python `TestGetTaskDetail::test_missing_task_is_not_found`: a UUIDv4 has
+/// no birth, so the absence is not classified.
+#[tokio::test]
+#[serial]
+async fn a_missing_task_is_not_found_and_a_v4_id_is_not_classified() {
+    let database = SpecDatabase::create().await;
+    let task_id = Uuid::new_v4();
+
+    let read = absence_of(&database.broker(), task_id).await;
+
+    assert_eq!(read, not_found(task_id, TaskAbsenceReason::NotClassified));
+    database.drop().await;
+}
+
+/// Python `TestGetTaskDetail::test_an_absent_v7_task_with_no_detached_leaf_is_within_retained_history`.
+#[tokio::test]
+#[serial]
+async fn an_absent_v7_task_with_no_detached_leaf_is_within_retained_history() {
+    let database = SpecDatabase::create().await;
+    let task_id = uuid7_born_at(Utc::now() - Duration::days(2));
+
+    let read = absence_of(&database.broker(), task_id).await;
+
+    assert_eq!(
+        read,
+        not_found(task_id, TaskAbsenceReason::WithinRetainedHistory)
+    );
+    database.drop().await;
+}
+
+/// Python `TestGetTaskDetail::test_an_absent_v7_task_born_before_a_detached_leaf_predates_retained_history`:
+/// a birth before the upper anchor of a detached period leaf predates the
+/// retained history; a birth after it is within it.
+#[tokio::test]
+#[serial]
+async fn an_absent_v7_task_born_before_a_detached_leaf_predates_retained_history() {
+    let database = SpecDatabase::create().await;
+    let detached_upper = Utc::now() - Duration::days(1);
+    let before = uuid7_born_at(detached_upper - Duration::hours(1));
+    let after = uuid7_born_at(detached_upper + Duration::hours(1));
+    record_detached_period_leaf(&database.pool, detached_upper).await;
+
+    let broker = database.broker();
+    let before_read = absence_of(&broker, before).await;
+    let after_read = absence_of(&broker, after).await;
+
+    assert_eq!(
+        before_read,
+        not_found(before, TaskAbsenceReason::PredatesRetainedHistory)
+    );
+    assert_eq!(
+        after_read,
+        not_found(after, TaskAbsenceReason::WithinRetainedHistory)
+    );
+    database.drop().await;
 }
 
 /// Python `TestGetTaskDetail::test_history_row_with_an_unknown_status_is_a_contract_violation`:

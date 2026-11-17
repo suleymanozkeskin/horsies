@@ -9,6 +9,8 @@
 //!   released and checks signals every 100 ms; an async call returns an
 //!   asyncio future that the loop's completion queue sets (`bridge`). No
 //!   runtime thread takes the GIL.
+//! - A Python callback of the core runs on the process's one callback
+//!   thread, started at the first callback (`bridge::callback_thread`).
 //! - A panic in an operation raises `PanicException` (a `BaseException`); a
 //!   panic in a core background task stops the core in this process, or
 //!   aborts a worker process (`set_panic_rule`).
@@ -169,6 +171,9 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::failed_attempt::AttemptFailureApplied>()?;
     module.add_class::<operations::failed_attempt::AttemptRetryScheduled>()?;
     module.add_class::<operations::failed_attempt::AttemptClaimReleased>()?;
+    module.add_class::<operations::queue_starts::QueueStartsRequest>()?;
+    module.add_class::<operations::queue_starts::QueueStartsRecord>()?;
+    module.add_class::<operations::queue_starts::QueueStartsFailed>()?;
     module.add_class::<operations::release::ReleaseClaimsRequest>()?;
     module.add_class::<operations::release::ClaimsReleased>()?;
     module.add_class::<operations::release::ReleasedRow>()?;

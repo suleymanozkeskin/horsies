@@ -28,6 +28,7 @@ use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
 use crate::operations::failed_attempt::{
     finish_ended_attempt_operation, finish_failed_attempt_operation, FinishFailedAttemptRequest,
 };
+use crate::operations::queue_starts::{count_queue_starts_operation, QueueStartsRequest};
 use crate::operations::release::{release_claims_operation, ReleaseClaimsRequest};
 use crate::operations::schema::{install_operation, schema_status_operation};
 use crate::operations::stale_claims::requeue_stale_claimed_operation;
@@ -55,6 +56,18 @@ impl BrokerConnection {
             .get_or_try_init(|| connect(&self.manifest))
             .await
             .map(Arc::clone)
+    }
+
+    /// The connected broker, with the schema installed once per handle
+    /// first ([`PostgresBroker::ensure_schema_initialized`]: nothing in an
+    /// `OBSERVE_ONLY` or `ASSUME_INITIALIZED` handle), as Python's broker
+    /// installs at its first enqueue or read. A failure of the connect or
+    /// of the install is returned and not kept, so the next call runs it
+    /// again.
+    pub async fn initialized_broker(&self) -> Result<Arc<PostgresBroker>, BrokerError> {
+        let broker = self.broker().await?;
+        broker.ensure_schema_initialized().await?;
+        Ok(broker)
     }
 
     /// The schema mode of the handle's manifest.
@@ -434,6 +447,25 @@ impl CoreHandle {
         )
     }
 
+    /// Count the capped queues of one soft-cap start check: `QueueStartsRecord`
+    /// or `QueueStartsFailed`. Reads only, in one statement; a check with no
+    /// queue sends nothing. Awaitable only: its caller, the worker's claim
+    /// loop, runs on the worker's event loop.
+    fn count_queue_starts_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, QueueStartsRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.count_queue_starts_async",
+            CallKind::Read,
+            count_queue_starts_operation(self.connection(), request.get().check()),
+        )
+    }
+
     /// Release the claims of one request: `ClaimsReleased` or
     /// `ReleaseFailed`. Writes, in one statement. Awaitable only: its
     /// callers run on the worker's event loop.
@@ -477,7 +509,9 @@ impl CoreHandle {
     }
 
     /// The info of one task: `TaskInfoRecord`, `TaskInfoNotFound`, or
-    /// `BrokerFailure` with `TASK_INFO_QUERY_FAILED`. Reads only.
+    /// `BrokerFailure` with `TASK_INFO_QUERY_FAILED` or
+    /// `INVALID_JSON_PAYLOAD`. Installs the schema once per handle first;
+    /// then reads only.
     #[pyo3(signature = (task_id, *, include_result, include_failed_reason, include_attempts))]
     fn task_info(
         &self,

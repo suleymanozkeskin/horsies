@@ -189,9 +189,6 @@ pub(crate) fn terminal_status_of_pending_kind(
     }
 }
 
-/// The statement of a phase-2 wake.
-const SEND_WAKE_SQL: &str = "SELECT pg_notify($1, $2)";
-
 /// The capacity wake that phase 2 sends (Python `QueueWake | NoQueueWake`,
 /// `core/workflows/engine.py:1766-1780`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,25 +198,6 @@ pub enum Phase2Wake {
     Queue { channel: String, payload: String },
     /// The caller sends no wake.
     NoWake,
-}
-
-/// Send `wake` as one statement on `executor`. Writes nothing else.
-///
-/// Errors: the database error of the statement, for example a dead
-/// connection or a channel name that the server refuses.
-pub(crate) async fn send_phase2_wake(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
-    wake: &Phase2Wake,
-) -> Result<(), sqlx::Error> {
-    match wake {
-        Phase2Wake::Queue { channel, payload } => sqlx::query(SEND_WAKE_SQL)
-            .bind(channel.as_str())
-            .bind(payload.as_str())
-            .execute(executor)
-            .await
-            .map(|_notified| ()),
-        Phase2Wake::NoWake => Ok(()),
-    }
 }
 
 /// One bounded pass over the phase-2 records.
