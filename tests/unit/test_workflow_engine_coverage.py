@@ -59,6 +59,7 @@ from horsies.core.workflows.sql import (
     MARK_WORKFLOW_FAILED_SQL,
     MARK_TASK_READY_SQL,
     SET_WORKFLOW_ERROR_SQL,
+    SKIP_WORKFLOW_TASK_SQL,
 )
 
 
@@ -1147,7 +1148,10 @@ class TestCheckAndPromoteTask:
         await try_make_ready_and_enqueue(session, None, 'wf-1', 0)
 
     @pytest.mark.asyncio
-    async def test_no_dependencies_returns(self) -> None:
+    async def test_a_pending_node_without_dependencies_is_enqueued(self) -> None:
+        """Join all with 0 of 0 dependencies terminal is met: the node goes
+        READY and is enqueued with no dependency results (#1224, the core's
+        rule: it recovers a root that a start left PENDING)."""
         config_row = SimpleNamespace(
             status='PENDING',
             dependencies=[],
@@ -1162,11 +1166,59 @@ class TestCheckAndPromoteTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is GET_TASK_CONFIG_SQL:
                 return _one_result(config_row)
-            return _one_result(SimpleNamespace())
+            if stmt is MARK_TASK_READY_SQL:
+                return _one_result(SimpleNamespace(task_index=0))
+            raise AssertionError(f'unexpected statement {stmt!r}')
 
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
-        await try_make_ready_and_enqueue(session, None, 'wf-1', 0)
+        with patch(
+            'horsies.core.workflows.engine.enqueue_workflow_task',
+            new=AsyncMock(),
+        ) as regular_enqueue:
+            await try_make_ready_and_enqueue(session, None, 'wf-1', 0)
+
+        statements = [call.args[0] for call in session.execute.await_args_list]
+        assert statements == [GET_TASK_CONFIG_SQL, MARK_TASK_READY_SQL]
+        regular_enqueue.assert_awaited_once()
+        assert regular_enqueue.await_args is not None
+        assert regular_enqueue.await_args.args[3] == {}
+
+    @pytest.mark.asyncio
+    async def test_a_pending_node_without_dependencies_and_join_any_is_skipped(
+        self,
+    ) -> None:
+        """Join any with no dependencies can never be met: the node is
+        SKIPPED and its dependents are processed, as in the core."""
+        config_row = SimpleNamespace(
+            status='PENDING',
+            dependencies=[],
+            allow_failed_deps=False,
+            join_type='any',
+            min_success=None,
+            workflow_ctx_from=None,
+            is_subworkflow=False,
+            wf_status='RUNNING',
+        )
+
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            if stmt is GET_TASK_CONFIG_SQL:
+                return _one_result(config_row)
+            if stmt is SKIP_WORKFLOW_TASK_SQL:
+                return _one_result(None)
+            raise AssertionError(f'unexpected statement {stmt!r}')
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+        with patch(
+            'horsies.core.workflows.engine._process_dependents',
+            new=AsyncMock(),
+        ) as process_dependents:
+            await try_make_ready_and_enqueue(session, None, 'wf-1', 0)
+
+        statements = [call.args[0] for call in session.execute.await_args_list]
+        assert statements == [GET_TASK_CONFIG_SQL, SKIP_WORKFLOW_TASK_SQL]
+        process_dependents.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_mark_ready_race_returns(self) -> None:
