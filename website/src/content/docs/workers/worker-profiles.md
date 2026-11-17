@@ -811,6 +811,18 @@ claim_at_capacity = WorkerProfile(
 
 **Don't size the memory limits for one machine and ignore the boot warning on another.** The warning names the sum, the usable memory of the worker that started, and its source.
 
+**Don't set `PSYCOPG_IMPL` in a `.env` file that the app loads.** `ChildPreload.LIBRARY` and `ChildPreload.APP` import psycopg, SQLAlchemy and pydantic before the app runs, so `load_dotenv()` in the app is too late. See [Things to Avoid](/horsies/workers/worker-architecture/#things-to-avoid) of Worker Architecture.
+
+```bash
+# Wrong: in a .env file that the app loads
+PSYCOPG_IMPL=binary
+
+# Correct: in the environment of the worker process
+PSYCOPG_IMPL=binary horsies worker myapp.instance:app --profile default
+```
+
+Monkeypatching has the same limit: a patch that must run before those imports, such as gevent, is too late. Use `preload=ChildPreload.NONE`.
+
 ## Migrating from Worker Flags
 
 The worker flags `--processes`, `--max-claim-batch`, `--max-claim-per-worker`, `--max-tasks-per-child`, `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload` are removed. Each one exits with a message that names the profile field that replaces it. The `PostgresConfig` fields `worker_child_pool_min_size`, `worker_child_pool_max_size` and `worker_child_pool_check` are removed: the `pool` of each child kind replaces them. `worker_pool_size` and `worker_max_overflow` are removed: `WorkerProfile.pool` replaces them for the worker process, and the `task_send_pool` of each child kind for task code that sends. A config that still sets one of these fields fails with `HRS-213`. See [Migrating to 0.7.0](/horsies/migrations/migration-to-0-7-0/) for the tables.
