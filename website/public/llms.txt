@@ -780,7 +780,7 @@ Each entry: Title -- summary -> URL
 - Queue Modes -- DEFAULT vs CUSTOM, priorities -> /horsies/concepts/queue-modes/
 - AppConfig -- root application config -> /horsies/configuration/app-config/
 - Broker Config -- the broker fields with defaults and ranges, URL format, PgBouncer transaction pooling, JIT, pool sizing, schema initialization -> /horsies/configuration/broker-config/
-- Broker Connections -- PostgresConfig in Python: examples, field types, refusals, psycopg and libpq, event loops, sync calls in async code (ASYNC_CONTEXT), the connection ceiling -> /horsies/configuration/broker-connections/
+- Broker Connections -- PostgresConfig in Python: examples (transaction pooling, connection checks at checkout, keepalives), field types, refusals, psycopg and libpq, event loops, sync calls in async code (ASYNC_CONTEXT), the connection ceiling -> /horsies/configuration/broker-connections/
 - Remote PostgreSQL -- remote or managed PostgreSQL, connection budget, pooled multi-worker setups, health-check tuning -> /horsies/configuration/remote-postgres/
 - Recovery Config -- stale task detection -> /horsies/configuration/recovery-config/
 - Retention Config -- record lifetime, retention classes, per-queue retention, partition upkeep -> /horsies/configuration/retention-config/

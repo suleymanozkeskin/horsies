@@ -84,22 +84,9 @@ Run multiple workers against a slot-capped server through a transaction-mode
 pooler (PgBouncer or the provider's built-in equivalent). Point
 `database_url` at the pooled endpoint and `session_database_url` at a direct
 endpoint — `LISTEN` requires a real session and does not survive transaction
-pooling:
-
-```python
-from pydantic import SecretStr
-import os
-
-from horsies import AppConfig, PostgresConfig
-
-config = AppConfig(
-    broker=PostgresConfig(
-        database_url=SecretStr(os.environ['DATABASE_URL_POOLED']),
-        session_database_url=SecretStr(os.environ['DATABASE_URL_DIRECT']),
-        pgbouncer_transaction_mode=True,
-    ),
-)
-```
+pooling — and set `pgbouncer_transaction_mode` to true. The API is on the client
+pages: [PgBouncer / Transaction Pooling](/horsies/configuration/broker-connections/#pgbouncer--transaction-pooling)
+(Python) and [PostgresConfig](/horsies/rust/configuration/app-config/#postgresconfig) (Rust).
 
 Direct slots consumed per worker drop to the 2 `LISTEN` connections;
 everything else multiplexes over the pooler's server pool. See
@@ -122,17 +109,11 @@ With `prefetch_buffer=0` (the default), a worker claims new tasks only
 when a process slot is free, and each claim pass costs a round trip. At 30ms+ RTT this serializes into the task rate and caps
 throughput near the number of children in tasks per second, regardless of task duration.
 
-Set a prefetch buffer and claim lease for remote deployments:
-
-```python
-from horsies import AppConfig, PostgresConfig
-
-config = AppConfig(
-    prefetch_buffer=24,        # claim ahead: 2–3× the children
-    claim_lease_ms=120_000,    # required when prefetch_buffer > 0
-    broker=PostgresConfig(database_url=SecretStr(os.environ['DATABASE_URL'])),
-)
-```
+Set a prefetch buffer and claim lease for remote deployments: `prefetch_buffer`
+at 2–3× the children of the worker (for example 24 for 8 children), and
+`claim_lease_ms`, which a `prefetch_buffer` above 0 requires (for example
+120,000). The Python example is in
+[Prefetch Configuration](/horsies/configuration/app-config/#prefetch-configuration).
 
 At 33ms RTT this raises drain throughput roughly 2–3× over the default.
 Soft-cap semantics and fairness trade-offs are covered in
@@ -184,36 +165,9 @@ statement instead of a transparent reconnect:
 
 Turn the checks on for workers that sit idle for long stretches behind
 NAT or load balancers that kill idle connections, where stale connections
-occur:
-
-```python
-from horsies import (
-    AppConfig,
-    IsolatedChildren,
-    IsolatedPool,
-    PostgresConfig,
-    SharedAsyncChildren,
-    SharedPool,
-    WorkerProfile,
-)
-
-config = AppConfig(
-    broker=PostgresConfig(
-        database_url=SecretStr(os.environ['DATABASE_URL']),
-        worker_pool_pre_ping=True,
-    ),
-    worker_profiles={
-        'idle_behind_nat': WorkerProfile(
-            isolated=IsolatedChildren(count=8, pool=IsolatedPool(check=True)),
-            shared_async=SharedAsyncChildren(
-                count=2,
-                seats=50,
-                pool=SharedPool(check=True),
-            ),
-        ),
-    },
-)
-```
+occur: `worker_pool_pre_ping` for the worker process, and the `check` of the
+pool of each child kind. The Python example is in
+[Check Connections at Checkout](/horsies/configuration/broker-connections/#check-connections-at-checkout).
 
 ## TCP Keepalives for Idle Pooled Connections
 
@@ -235,17 +189,10 @@ pool and each child-process pool; the LISTEN/NOTIFY listener keeps its own.
 
 PlanetScale's PgBouncer pooler (`:6432`) reaps idle connections within ~1–2h;
 the defaults keep those sockets warm with no configuration. Lower the idle
-window only for poolers that reap faster than 30s:
-
-```python
-config = AppConfig(
-    broker=PostgresConfig(
-        database_url=SecretStr(os.environ['DATABASE_URL']),
-        tcp_keepalives_idle=15,
-        tcp_keepalives_interval=5,
-    ),
-)
-```
+window only for poolers that reap faster than 30s, for example
+`tcp_keepalives_idle` at 15 and `tcp_keepalives_interval` at 5. The Python
+example is in
+[Shorter Keepalive Idle](/horsies/configuration/broker-connections/#shorter-keepalive-idle).
 
 ## TCP User Timeout for Dead Connections
 
