@@ -10,7 +10,6 @@ from horsies.core.workflows.engine import (
 )
 from horsies.core.workflows.recovery import (
     recover_stuck_workflow_tree,
-    recover_stuck_workflows,
     recover_stuck_workflows_global,
 )
 from horsies.core.workflows.start_types import (
@@ -34,7 +33,6 @@ __all__ = [
     'pause_workflow_sync',
     'resume_workflow',
     'resume_workflow_sync',
-    'recover_stuck_workflows',
     'recover_stuck_workflow_tree',
     'recover_stuck_workflows_global',
     # Workflow start result types

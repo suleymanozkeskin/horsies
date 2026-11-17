@@ -34,7 +34,6 @@ from horsies.core.models.workflow.handle_types import (
     HandleWorkflowNotFound,
 )
 from horsies.core.types.core_failure import CoreOperationFailed
-from horsies.core.workflows.recovery import GET_WORKFLOW_TREE_IDS_SQL
 
 WORKFLOW_ID = 'wf-1'
 
@@ -266,14 +265,10 @@ class TestPauseWorkflowResult:
 
 def _resume_sessions(
     disposition: str = 'RESUMED',
-    *,
-    recovery_error: BaseException | None = None,
-) -> tuple[MagicMock, AsyncMock, AsyncMock]:
+) -> tuple[MagicMock, AsyncMock, MagicMock]:
     """A broker whose resume transaction answers ``horsies_workflow_resume``
-    with one OUTCOME row of ``disposition``.
-
-    The first session is the resume transaction, the second the recovery
-    pass. ``recovery_error`` is raised by the recovery pass's tree query.
+    with one OUTCOME row of ``disposition``, its session, and its session
+    factory, which the recovery pass of the tree receives.
     """
     resume_result = MagicMock()
     resume_result.fetchall.return_value = [outcome_row(disposition)]
@@ -282,34 +277,13 @@ def _resume_sessions(
     resume_session.execute = AsyncMock(return_value=resume_result)
     resume_session.commit = AsyncMock()
 
-    tree_row = MagicMock()
-    tree_row.id = WORKFLOW_ID
-    tree_result = MagicMock()
-    tree_result.fetchall.return_value = [tree_row]
-
-    def recovery_execute(statement: Any, *_args: Any, **_kwargs: Any) -> MagicMock:
-        assert statement is GET_WORKFLOW_TREE_IDS_SQL
-        if recovery_error is not None:
-            raise recovery_error
-        return tree_result
-
-    recovery_session = AsyncMock()
-    recovery_session.info = {}
-    recovery_session.execute = AsyncMock(side_effect=recovery_execute)
-    recovery_session.commit = AsyncMock()
-
-    contexts: list[AsyncMock] = []
-    for session in (resume_session, recovery_session):
-        cm = AsyncMock()
-        cm.__aenter__ = AsyncMock(return_value=session)
-        cm.__aexit__ = AsyncMock(return_value=False)
-        contexts.append(cm)
+    context = AsyncMock()
+    context.__aenter__ = AsyncMock(return_value=resume_session)
+    context.__aexit__ = AsyncMock(return_value=False)
+    session_factory = MagicMock(return_value=context)
     broker = MagicMock()
-    attach_resources(
-        broker,
-        fake_resources(session_factory=MagicMock(side_effect=contexts)),
-    )
-    return broker, resume_session, recovery_session
+    attach_resources(broker, fake_resources(session_factory=session_factory))
+    return broker, resume_session, session_factory
 
 
 @contextmanager
@@ -328,12 +302,14 @@ class TestResumeWorkflowResult:
         """NOT_PAUSED -> Ok(False); no recovery pass."""
         from horsies.core.workflows.lifecycle import resume_workflow
 
-        broker, _, recovery_session = _resume_sessions('NOT_PAUSED')
-        result = await resume_workflow(broker, WORKFLOW_ID)
+        broker, _, _ = _resume_sessions('NOT_PAUSED')
+        recover = AsyncMock(return_value=None)
+        with _recovery_stubbed(recover):
+            result = await resume_workflow(broker, WORKFLOW_ID)
 
         assert is_ok(result)
         assert result.ok_value is False
-        recovery_session.execute.assert_not_awaited()
+        recover.assert_not_awaited()
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_resume_not_found_returns_err(self) -> None:
@@ -390,16 +366,15 @@ class TestResumeCommitSplit:
     async def test_resume_runs_the_recovery_pass_after_the_commit(self) -> None:
         from horsies.core.workflows.lifecycle import resume_workflow
 
-        broker, resume_session, recovery_session = _resume_sessions()
-        recover = AsyncMock(return_value=0)
+        broker, resume_session, session_factory = _resume_sessions()
+        recover = AsyncMock(return_value=None)
         with _recovery_stubbed(recover):
             result = await resume_workflow(broker, WORKFLOW_ID)
 
         assert is_ok(result)
         assert result.ok_value is True
         resume_session.commit.assert_awaited_once()
-        recover.assert_awaited_once_with(recovery_session, broker, [WORKFLOW_ID])
-        recovery_session.commit.assert_awaited_once()
+        recover.assert_awaited_once_with(session_factory, broker, WORKFLOW_ID)
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_recovery_db_error_returns_resume_recovery_failed(self) -> None:
@@ -407,10 +382,8 @@ class TestResumeCommitSplit:
         from horsies.core.workflows.lifecycle import resume_workflow
 
         db_exc = _db_error()
-        broker, resume_session, recovery_session = _resume_sessions(
-            recovery_error=db_exc,
-        )
-        with _recovery_stubbed(AsyncMock(return_value=0)):
+        broker, resume_session, _ = _resume_sessions()
+        with _recovery_stubbed(AsyncMock(side_effect=db_exc)):
             result = await resume_workflow(broker, WORKFLOW_ID)
 
         assert is_err(result)
@@ -420,7 +393,6 @@ class TestResumeCommitSplit:
         assert err.exception is db_exc
         assert err.retryable is False
         resume_session.commit.assert_awaited_once()
-        recovery_session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_a_failed_parent_advance_returns_resume_recovery_failed(self) -> None:
@@ -429,12 +401,13 @@ class TestResumeCommitSplit:
         from horsies.core.workflows.steps import ParentAdvanceFailure
 
         db_exc = _db_error()
-        broker, resume_session, recovery_session = _resume_sessions()
+        broker, resume_session, _ = _resume_sessions()
         failure = ParentAdvanceFailure(
             failed_child_workflow_id='child-wf', still_owed=('child-wf',), cause=db_exc,
         )
+        recover = AsyncMock(return_value=None)
         with (
-            _recovery_stubbed(AsyncMock(return_value=0)),
+            _recovery_stubbed(recover),
             patch(
                 'horsies.core.workflows.lifecycle.advance_parents',
                 new=AsyncMock(return_value=failure),
@@ -447,7 +420,7 @@ class TestResumeCommitSplit:
         assert isinstance(err, HandleResumeRecoveryFailed)
         assert err.exception is db_exc
         resume_session.commit.assert_awaited_once()
-        recovery_session.execute.assert_not_awaited()
+        recover.assert_not_awaited()
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_commit_db_error_returns_db_operation_failed(self) -> None:
@@ -455,7 +428,7 @@ class TestResumeCommitSplit:
         from horsies.core.workflows.lifecycle import resume_workflow
 
         db_exc = _db_error()
-        broker, resume_session, recovery_session = _resume_sessions()
+        broker, resume_session, _ = _resume_sessions()
         resume_session.commit = AsyncMock(side_effect=db_exc)
         recover = AsyncMock(return_value=0)
         with _recovery_stubbed(recover):
@@ -467,7 +440,6 @@ class TestResumeCommitSplit:
         assert err.exception is db_exc
         assert err.retryable is True
         recover.assert_not_awaited()
-        recovery_session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio(loop_scope='function')
     @pytest.mark.parametrize(
@@ -479,9 +451,10 @@ class TestResumeCommitSplit:
     ) -> None:
         from horsies.core.workflows.lifecycle import resume_workflow
 
-        broker, resume_session, recovery_session = _resume_sessions()
+        broker, resume_session, _ = _resume_sessions()
+        recover = AsyncMock(return_value=None)
         with (
-            _recovery_stubbed(AsyncMock(return_value=0)),
+            _recovery_stubbed(recover),
             patch(
                 'horsies.core.workflows.steps.decode_step_rows',
                 side_effect=defect,
@@ -492,14 +465,14 @@ class TestResumeCommitSplit:
 
         assert exc_info.value is defect
         resume_session.commit.assert_not_awaited()
-        recovery_session.execute.assert_not_awaited()
+        recover.assert_not_awaited()
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_defect_in_the_recovery_pass_propagates(self) -> None:
         from horsies.core.workflows.lifecycle import resume_workflow
 
         defect = RuntimeError('logic bug')
-        broker, resume_session, recovery_session = _resume_sessions()
+        broker, resume_session, _ = _resume_sessions()
         with (
             _recovery_stubbed(AsyncMock(side_effect=defect)),
             pytest.raises(RuntimeError) as exc_info,
@@ -508,7 +481,6 @@ class TestResumeCommitSplit:
 
         assert exc_info.value is defect
         resume_session.commit.assert_awaited_once()
-        recovery_session.commit.assert_not_awaited()
 
 
 # ===========================================================================

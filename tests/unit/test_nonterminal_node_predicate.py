@@ -2,6 +2,8 @@
 
 Recovery statements and the partial recovery index spell the nonterminal
 statuses as a literal IN-list so the planner can match the index predicate.
+The audit of RUNNING workflows is the baseline function
+``horsies_workflow_recovery_audit_page``, whose list the SQL tests cover.
 A status added to ``WorkflowTaskStatus`` must reach every copy of the list.
 """
 
@@ -26,10 +28,6 @@ PREDICATE_STATEMENTS: dict[str, TextClause] = {
     'GET_TERMINAL_WORKFLOW_CANDIDATES_SQL': (
         recovery.GET_TERMINAL_WORKFLOW_CANDIDATES_SQL
     ),
-    'GLOBAL_GET_TERMINAL_WORKFLOW_CANDIDATES_SQL': (
-        recovery.GLOBAL_GET_TERMINAL_WORKFLOW_CANDIDATES_SQL
-    ),
-    'GLOBAL_WORKFLOW_AUDIT_SQL': recovery.GLOBAL_WORKFLOW_AUDIT_SQL,
 }
 
 

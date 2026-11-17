@@ -358,9 +358,14 @@ class TestRecoveryKwargsCompat:
         )
         await session.commit()
 
-        from horsies.core.workflows.recovery import recover_stuck_workflows
+        from horsies.core.workflows.recovery import recover_stuck_workflows_global
+        from tests.broker_resources_support import current_resources
 
-        recovered = await recover_stuck_workflows(session)
+        recovered = (
+            await recover_stuck_workflows_global(
+                current_resources(broker).session_factory, broker,
+            )
+        ).recovered
         await session.commit()
 
         assert recovered == 1
@@ -401,9 +406,14 @@ class TestRecoveryKwargsCompat:
         )
         await session.commit()
 
-        from horsies.core.workflows.recovery import recover_stuck_workflows
+        from horsies.core.workflows.recovery import recover_stuck_workflows_global
+        from tests.broker_resources_support import current_resources
 
-        recovered = await recover_stuck_workflows(session)
+        recovered = (
+            await recover_stuck_workflows_global(
+                current_resources(broker).session_factory, broker,
+            )
+        ).recovered
         await session.commit()
 
         assert recovered == 1
