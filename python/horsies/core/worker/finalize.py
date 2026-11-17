@@ -13,9 +13,10 @@ relies on.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, assert_never, cast
+from typing import TYPE_CHECKING, Any, Final, assert_never, cast
 
 from sqlalchemy import text
 
@@ -74,7 +75,6 @@ from horsies.core.lifecycle.persistence import (
     BatchRolledBack,
     BatchWriteError,
     FusedCompletionBatch,
-    apply_in_autocommit,
     complete_fused_batch_in_core,
 )
 from horsies.core.logging import get_logger
@@ -139,6 +139,7 @@ from horsies.core.worker.runtime import (
     _RequeueOutcome,
 )
 from horsies.core.worker.dispatch_claim import DispatchClaim
+from horsies.core.lifecycle.core_records import task_row_end_of
 from horsies.core.worker.failed_attempt import (
     AttemptFailure,
     AttemptFailureKind,
@@ -192,6 +193,9 @@ if TYPE_CHECKING:
     from horsies.core.worker.finalize_batch import FinalizeBatcher
 
 logger = get_logger('worker')
+
+_CANCEL_OWNED_ORPHAN_SUBJECT: Final = 'FinalizeMixin._cancel_owned_orphan'
+"""The subject of a failed orphan self-heal write."""
 
 GET_TASK_STATUS_SQL = text("""
     SELECT status, queue_name, is_workflow_task
@@ -1242,7 +1246,7 @@ class FinalizeMixin:
                 )
             case ApplyTerminalization(command=CancelOwnedOrphan() as command):
                 try:
-                    outcome = await apply_in_autocommit(self.sf, command)
+                    outcome = await self._cancel_owned_orphan(command)
                     match outcome:
                         case Applied():
                             terminated = True
@@ -1483,6 +1487,34 @@ class FinalizeMixin:
                 'outcome': outcome_data,
             },
         )
+
+    async def _cancel_owned_orphan(
+        self,
+        command: CancelOwnedOrphan,
+    ) -> TerminalizationOutcome:
+        """Cancel a claimed workflow task that no runnable node links, through
+        the core: ``horsies_cancel_owned_orphan``, one statement that commits
+        alone, fenced to this claim (worker and claim generation).
+
+        ``Applied``: the task moved to history as CANCELLED
+        (``CANCEL_ORPHAN``, ``WORKFLOW_CHECK_FAILED``). A refusal
+        (``AlreadyApplied``, ``LostClaim``, ``SourceStateConflict``,
+        ``TaskAbsent``) wrote nothing.
+
+        Raises:
+            CoreOperationFailed: the statement failed (``retryable`` is the
+                core's classification). A lost reply leaves the outcome
+                unknown; a replay of the same command reports a committed
+                cancel as ``AlreadyApplied``.
+            CoreError: the core of this process cannot run the call.
+            OutcomeDecodeError: a record outside the Python catalogs.
+        """
+        record = await self.core_handle.cancel_owned_orphan_async(
+            uuid.UUID(command.task_id),
+            worker_id=command.fence.worker_id,
+            claimed_at=command.fence.claimed_at,
+        )
+        return task_row_end_of(record, _CANCEL_OWNED_ORPHAN_SUBJECT)
 
     async def _persist_failed_attempt(
         self,

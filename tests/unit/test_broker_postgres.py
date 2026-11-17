@@ -37,8 +37,15 @@ from horsies._core import (
     StaleRunningScanFailed,
     StaleRunningScanFull,
     TooManyPendingCalls,
+    OrphanAuditFailed,
+    OrphanAuditLockBusy,
+    OrphanPageAudited,
+    PendingExpiryBoundReached,
+    PendingExpiryDrained,
+    PendingExpiryFailed,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
+from horsies.core.types.core_failure import CoreLockNotAvailable, CoreOperationFailed
+from horsies.core.worker.reaper import _operation_sqlstate  # pyright: ignore[reportPrivateUsage]
 from horsies.core.brokers.postgres import SIGNED_64_BIT_MAX, SIGNED_64_BIT_MIN, SyncSendRoute
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.brokers.result_types import (
@@ -135,15 +142,6 @@ def _schema_lock_connection(
     connection.execute = AsyncMock(side_effect=_execute)
     connection.close = AsyncMock()
     return connection
-
-
-def _orphan_scan_stats(rows: int, candidates: int) -> MagicMock:
-    result = MagicMock()
-    result.one.return_value = SimpleNamespace(
-        last_scan_rows=rows,
-        last_candidate_rows=candidates,
-    )
-    return result
 
 
 def _pinned(broker: Any) -> Any:
@@ -2163,116 +2161,81 @@ class TestMarkStaleTasksAsFailed:
 
 @pytest.mark.unit
 class TestExpirePendingTasks:
-    """Tests for expire_pending_tasks."""
+    """expire_pending_tasks maps the record of one core pass to its result."""
+
+    @staticmethod
+    def _handle(answer: object) -> MagicMock:
+        """A core handle whose pending expiry pass answers ``answer``: a
+        record, or an exception that the call raises."""
+        handle = MagicMock()
+        match answer:
+            case BaseException():
+                handle.expire_pending_tasks_async = AsyncMock(side_effect=answer)
+            case _:
+                handle.expire_pending_tasks_async = AsyncMock(return_value=answer)
+        return handle
+
+    @pytest.mark.parametrize('expired', [0, 3])
+    @pytest.mark.asyncio
+    async def test_a_drained_pass_returns_the_expired_count(self, expired: int) -> None:
+        broker = _make_broker()
+        broker._core_handle = self._handle(MagicMock(spec=PendingExpiryDrained, expired=expired))
+
+        result = await broker.expire_pending_tasks()
+
+        assert result == Ok(expired)
+        broker._core_handle.expire_pending_tasks_async.assert_awaited_once_with()
 
     @pytest.mark.asyncio
-    async def test_no_expired_returns_zero(self) -> None:
-        """When UPDATE matches no rows, return 0."""
+    async def test_a_pass_at_its_bound_warns_that_the_rest_waits(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
         broker = _make_broker()
+        broker._core_handle = self._handle(
+            MagicMock(spec=PendingExpiryBoundReached, expired=100_000),
+        )
 
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-
-        with patch(
-            'horsies.core.brokers.postgres.apply_batch_async',
-            new=AsyncMock(return_value=[]),
-        ) as apply_batch:
+        with caplog.at_level('WARNING', logger='horsies.broker'):
             result = await broker.expire_pending_tasks()
 
-        assert is_ok(result)
-        assert result.ok_value == 0
-        apply_batch.assert_awaited_once()
+        assert result == Ok(100_000)
+        assert 'reached the per-pass batch cap after expiring 100000 task(s)' in caplog.text
 
     @pytest.mark.asyncio
-    async def test_expired_tasks_transitioned(self) -> None:
-        """When UPDATE matches rows, return count and verify TASK_EXPIRED in params."""
-        from horsies.core.lifecycle.commands import ExpirePendingTasks
-        from horsies.core.lifecycle.outcomes import Applied
-
+    async def test_a_failed_pass_is_cleanup_failed(self) -> None:
         broker = _make_broker()
+        broker._core_handle = self._handle(
+            MagicMock(
+                spec=PendingExpiryFailed,
+                expired_before=500,
+                message='pending expiry: connection lost',
+                retryable=True,
+            ),
+        )
 
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-
-        outcomes = [MagicMock(spec=Applied) for _ in range(3)]
-        with patch(
-            'horsies.core.brokers.postgres.apply_batch_async',
-            new=AsyncMock(return_value=outcomes),
-        ) as apply_batch:
-            result = await broker.expire_pending_tasks()
-
-        assert is_ok(result)
-        assert result.ok_value == 3
-        session.commit.assert_awaited_once()
-
-        command = apply_batch.await_args.args[1]
-        assert isinstance(command, ExpirePendingTasks)
-        assert command.error_code == 'TASK_EXPIRED'
-        assert 'TASK_EXPIRED' in command.result_json
-
-    @pytest.mark.asyncio
-    async def test_a_full_batch_continues_until_a_short_batch(self) -> None:
-        """The operation's returned rows preserve the existing drain loop."""
-        from horsies.core.lifecycle.outcomes import Applied
-
-        broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-        full = [MagicMock(spec=Applied) for _ in range(500)]
-        final = [MagicMock(spec=Applied) for _ in range(2)]
-
-        with patch(
-            'horsies.core.brokers.postgres.apply_batch_async',
-            new=AsyncMock(side_effect=[full, final]),
-        ) as apply_batch:
-            result = await broker.expire_pending_tasks()
-
-        assert is_ok(result)
-        assert result.ok_value == 502
-        assert apply_batch.await_count == 2
-        assert session.commit.await_count == 2
-
-    @pytest.mark.asyncio
-    async def test_a_non_applied_batch_outcome_fails_closed(self) -> None:
-        """Discovery functions report transitions, never refusal-shaped rows."""
-        from horsies.core.lifecycle.outcomes import TaskAbsent
-
-        broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-
-        with patch(
-            'horsies.core.brokers.postgres.apply_batch_async',
-            new=AsyncMock(return_value=[MagicMock(spec=TaskAbsent)]),
-        ):
-            result = await broker.expire_pending_tasks()
+        result = await broker.expire_pending_tasks()
 
         assert is_err(result)
-        session.commit.assert_not_awaited()
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.retryable is True
+        assert failed.message == 'expire_pending_tasks failed: pending expiry: connection lost'
+        assert isinstance(failed.exception, CoreOperationFailed)
 
     @pytest.mark.asyncio
-    async def test_db_error_returns_err(self) -> None:
-        """DB exception is wrapped in BrokerOperationError."""
+    async def test_a_core_that_cannot_run_the_pass_is_cleanup_failed(self) -> None:
         broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
+        error = TooManyPendingCalls('CoreHandle.expire_pending_tasks_async', 65_536)
+        broker._core_handle = self._handle(error)
 
-        with patch(
-            'horsies.core.brokers.postgres.apply_batch_async',
-            new=AsyncMock(side_effect=Exception('db down')),
-        ):
-            result = await broker.expire_pending_tasks()
-        assert not is_ok(result)
+        result = await broker.expire_pending_tasks()
+
+        assert is_err(result)
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.retryable is True
+        assert failed.exception is error
 
 
 # ---------------------------------------------------------------------------
@@ -2282,160 +2245,113 @@ class TestExpirePendingTasks:
 
 @pytest.mark.unit
 class TestTerminateOrphanedWorkflowTasks:
-    """Tests for the bounded orphan discovery operation."""
+    """The orphan audit maps the record of one core page to its result."""
 
+    @staticmethod
+    def _handle(answer: object) -> MagicMock:
+        """A core handle whose orphan page answers ``answer``: a record, or
+        an exception that the call raises."""
+        handle = MagicMock()
+        match answer:
+            case BaseException():
+                handle.audit_orphaned_workflow_tasks_async = AsyncMock(side_effect=answer)
+            case _:
+                handle.audit_orphaned_workflow_tasks_async = AsyncMock(return_value=answer)
+        return handle
+
+    @staticmethod
+    def _page(rows_selected: int, candidates_returned: int) -> MagicMock:
+        return MagicMock(
+            spec=OrphanPageAudited,
+            rows_selected=rows_selected,
+            candidates_returned=candidates_returned,
+            cancelled=candidates_returned,
+        )
+
+    @pytest.mark.parametrize('cancelled', [0, 3])
     @pytest.mark.asyncio
-    async def test_no_orphans_returns_zero(self) -> None:
-        from horsies.core.lifecycle.commands import CancelOrphanedTasks
-
+    async def test_terminate_returns_the_cancelled_count_of_one_page(
+        self, cancelled: int,
+    ) -> None:
         broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute.return_value = _orphan_scan_stats(0, 0)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
+        broker._core_handle = self._handle(self._page(cancelled, cancelled))
 
-        with patch(
-            'horsies.core.brokers.postgres.apply_batch_async',
-            new=AsyncMock(return_value=[]),
-        ) as apply_batch:
-            result = await broker.terminate_orphaned_workflow_tasks()
+        result = await broker.terminate_orphaned_workflow_tasks()
 
-        assert is_ok(result)
-        assert result.ok_value == 0
-        assert apply_batch.await_args is not None
-        command = apply_batch.await_args.args[1]
-        assert isinstance(command, CancelOrphanedTasks)
-        assert command.batch_size == 500
-        session.commit.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_counts_only_transitioned_rows(self) -> None:
-        from horsies.core.lifecycle.outcomes import Applied
-
-        broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute.return_value = _orphan_scan_stats(3, 3)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-        outcomes = [MagicMock(spec=Applied) for _ in range(3)]
-
-        with patch(
-            'horsies.core.brokers.postgres.apply_batch_async',
-            new=AsyncMock(return_value=outcomes),
-        ):
-            result = await broker.terminate_orphaned_workflow_tasks()
-
-        assert is_ok(result)
-        assert result.ok_value == 3
-        session.commit.assert_awaited_once()
+        assert result == Ok(cancelled)
+        broker._core_handle.audit_orphaned_workflow_tasks_async.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_audit_reports_cursor_metrics(self) -> None:
-        from horsies.core.lifecycle.outcomes import Applied
-
         broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute.return_value = _orphan_scan_stats(500, 2)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-        outcomes = [MagicMock(spec=Applied) for _ in range(2)]
+        broker._core_handle = self._handle(self._page(500, 2))
 
-        with patch(
-            'horsies.core.brokers.postgres.apply_batch_async',
-            new=AsyncMock(return_value=outcomes),
-        ):
-            result = await broker.audit_orphaned_workflow_tasks()
+        result = await broker.audit_orphaned_workflow_tasks()
 
         assert is_ok(result)
         report = result.ok_value
         assert report.rows_selected == 500
         assert report.candidates_returned == 2
         assert report.cancelled == 2
+        assert report.duration_ms >= 0
         assert report.health()['state'] == 'ready'
-        session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_audit_refuses_cursor_outcome_count_drift(self) -> None:
-        from horsies.core.lifecycle.outcomes import Applied
-
+    async def test_a_held_cursor_is_a_refusal_with_its_sqlstate(self) -> None:
         broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute.return_value = _orphan_scan_stats(10, 2)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
+        broker._core_handle = self._handle(
+            MagicMock(
+                spec=OrphanAuditLockBusy,
+                message='orphan page: lock not available',
+                retryable=True,
+            ),
+        )
 
-        with patch(
-            'horsies.core.brokers.postgres.apply_batch_async',
-            new=AsyncMock(return_value=[MagicMock(spec=Applied)]),
-        ):
-            result = await broker.audit_orphaned_workflow_tasks()
+        result = await broker.audit_orphaned_workflow_tasks()
 
-        assert not is_ok(result)
-        session.commit.assert_not_awaited()
+        assert is_err(result)
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.retryable is True
+        assert isinstance(failed.exception, CoreLockNotAvailable)
+        assert failed.exception.sqlstate == '55P03'
+        assert _operation_sqlstate(failed) == '55P03'
 
     @pytest.mark.asyncio
-    async def test_a_full_batch_stops_after_one_cursor_page(self) -> None:
-        from horsies.core.lifecycle.outcomes import Applied
-
+    async def test_a_failed_page_is_cleanup_failed(self) -> None:
         broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute.return_value = _orphan_scan_stats(500, 500)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-        full = [MagicMock(spec=Applied) for _ in range(500)]
-        final = [MagicMock(spec=Applied) for _ in range(2)]
+        broker._core_handle = self._handle(
+            MagicMock(
+                spec=OrphanAuditFailed,
+                message='horsies_cancel_orphaned_tasks: the cursor candidate count 2 differs',
+                retryable=False,
+            ),
+        )
 
-        with patch(
-            'horsies.core.brokers.postgres.apply_batch_async',
-            new=AsyncMock(side_effect=[full, final]),
-        ) as apply_batch:
-            result = await broker.terminate_orphaned_workflow_tasks()
+        result = await broker.audit_orphaned_workflow_tasks()
 
-        assert is_ok(result)
-        assert result.ok_value == 500
-        assert apply_batch.await_count == 1
-        assert session.commit.await_count == 1
+        assert is_err(result)
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.retryable is False
+        assert failed.message.startswith('audit_orphaned_workflow_tasks failed: ')
+        assert isinstance(failed.exception, CoreOperationFailed)
+        assert not isinstance(failed.exception, CoreLockNotAvailable)
+        assert _operation_sqlstate(failed) is None
 
     @pytest.mark.asyncio
-    async def test_a_non_applied_outcome_fails_closed(self) -> None:
-        from horsies.core.lifecycle.outcomes import TaskAbsent
-
+    async def test_a_core_that_cannot_run_the_page_is_cleanup_failed(self) -> None:
         broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
+        error = TooManyPendingCalls('CoreHandle.audit_orphaned_workflow_tasks_async', 65_536)
+        broker._core_handle = self._handle(error)
 
-        with patch(
-            'horsies.core.brokers.postgres.apply_batch_async',
-            new=AsyncMock(return_value=[MagicMock(spec=TaskAbsent)]),
-        ):
-            result = await broker.terminate_orphaned_workflow_tasks()
+        result = await broker.terminate_orphaned_workflow_tasks()
 
-        assert not is_ok(result)
-        session.commit.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_database_error_returns_err(self) -> None:
-        broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-
-        with patch(
-            'horsies.core.brokers.postgres.apply_batch_async',
-            new=AsyncMock(side_effect=Exception('db down')),
-        ):
-            result = await broker.terminate_orphaned_workflow_tasks()
-
-        assert not is_ok(result)
-        session.commit.assert_not_awaited()
+        assert is_err(result)
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.retryable is True
+        assert failed.exception is error
 
 
 # ---------------------------------------------------------------------------
