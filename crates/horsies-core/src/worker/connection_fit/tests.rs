@@ -776,6 +776,7 @@ fn task_send_pool_of_the_init_frame(profile: &WorkerProfile) -> u64 {
             program: PathBuf::from("/bin/sh"),
             args: Vec::new(),
         },
+        preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
         program: ChildProgram::Rust,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u:p@localhost/db".to_owned()),

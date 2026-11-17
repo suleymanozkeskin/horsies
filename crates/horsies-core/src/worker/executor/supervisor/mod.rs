@@ -2,16 +2,13 @@
 //! read their frames, and name how each one ended.
 //!
 //! - [`spawner`]: the spawner thread, the one owner of every spawn, kill
-//!   and reap. It publishes each child's [`exit::ExitState`].
+//!   and reap. It publishes each child's [`exit::ExitState`]. On Linux it
+//!   also runs the preload process and forks children from it.
 //! - [`socket`]: the socket pair of a child, with explicit buffer sizes.
 //! - [`channel`]: the parent side of one child: the reader task, the frame
 //!   writer, and the verdict rules after an exit, an EOF or a bad frame.
 //! - [`exit`]: reaped exits and their meaning in the protocol.
 //! - [`boot`]: boot failure causes and the restart rules of a slot.
-//!
-//! The preload fork path (a child forked from the Python preload process)
-//! is not here: it needs the preload process, which the Python bridge
-//! starts. Every child of this module comes from `exec`.
 
 pub mod boot;
 pub mod channel;
@@ -40,6 +37,8 @@ pub use exit_watch::POLLED_EXIT_INTERVAL;
 pub use socket::{child_socket_pair, ChildSocketPair, SOCKET_BUFFER_BYTES};
 pub use source::{ChildSource, SpawnFuture};
 pub use spawner::{
-    wait_for_exit, ChildCommand, ChildId, KillOutcome, SpawnError, SpawnedChild, Spawner,
-    SpawnerHandle, SpawnerStartError, SpawnerStopReport,
+    wait_for_exit, ChildCommand, ChildId, KillOutcome, PreloadMode, PreloadPlan, PreloadStart,
+    PreloadUnsupported, SpawnError, SpawnedChild, Spawner, SpawnerHandle, SpawnerStartError,
+    SpawnerStopReport, ORPHAN_SWEEP_LIMIT, PRELOAD_FORK_TIMEOUT, PRELOAD_READY_TIMEOUT,
+    PRELOAD_RESTART_DELAY, PRELOAD_RESTART_LIMIT, PRELOAD_STOP_TIMEOUT,
 };
