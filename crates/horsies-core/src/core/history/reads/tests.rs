@@ -26,7 +26,7 @@ use crate::core::history::names::{LEAF_CATALOG, TASK_HISTORY_PARENT};
 use crate::core::history::outcomes::{LeafCreation, LeafDrop};
 use crate::core::history::partitions::catalog::database_now;
 use crate::core::history::partitions::manager::{
-    create_daily_leaf, detach_expired_leaf, drop_detached_leaf, NoQuarantine,
+    create_daily_leaf, detach_expired_leaf, drop_detached_leaf,
 };
 use crate::core::history::partitions::publication::LoaderPublication;
 use crate::core::history::periods::RetentionDays;
@@ -818,10 +818,8 @@ async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
 
     detach_expired_leaf(
         &database.pool,
-        &DetachExpiredHistoryLeaf::new(old_leaf.clone(), None, Some(5_000))
-            .expect("detach command"),
+        &DetachExpiredHistoryLeaf::new(old_leaf.clone(), Some(5_000)).expect("detach command"),
         &StagedLoaderPublisher,
-        &NoQuarantine,
     )
     .await
     .expect("detach old P4 leaf");

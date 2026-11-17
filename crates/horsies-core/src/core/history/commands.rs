@@ -162,21 +162,14 @@ impl EnsureLeafCoverage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetachExpiredHistoryLeaf {
     leaf: LeafRef,
-    quarantine_horizon: Option<Duration>,
     statement_timeout_ms: Option<u64>,
 }
 
 impl DetachExpiredHistoryLeaf {
     pub fn new(
         leaf: LeafRef,
-        quarantine_horizon: Option<Duration>,
         statement_timeout_ms: Option<u64>,
     ) -> Result<Self, HistoryCommandError> {
-        if quarantine_horizon.is_some_and(|duration| duration <= Duration::zero()) {
-            return Err(HistoryCommandError::Invalid(
-                "quarantine horizon must be positive",
-            ));
-        }
         if statement_timeout_ms == Some(0) {
             return Err(HistoryCommandError::Invalid(
                 "statement timeout must be positive",
@@ -184,17 +177,12 @@ impl DetachExpiredHistoryLeaf {
         }
         Ok(Self {
             leaf,
-            quarantine_horizon,
             statement_timeout_ms,
         })
     }
 
     pub fn leaf(&self) -> &LeafRef {
         &self.leaf
-    }
-
-    pub fn quarantine_horizon(&self) -> Option<Duration> {
-        self.quarantine_horizon
     }
 
     pub fn statement_timeout_ms(&self) -> Option<u64> {
@@ -321,8 +309,8 @@ mod tests {
 
     #[test]
     fn detach_and_finalize_require_explicit_positive_values() {
-        assert!(DetachExpiredHistoryLeaf::new(leaf(1), None, None).is_ok());
-        assert!(DetachExpiredHistoryLeaf::new(leaf(1), None, Some(0)).is_err());
+        assert!(DetachExpiredHistoryLeaf::new(leaf(1), None).is_ok());
+        assert!(DetachExpiredHistoryLeaf::new(leaf(1), Some(0)).is_err());
         assert!(FinalizeInterruptedLeafDetach::new(leaf(1), None).is_ok());
         assert!(FinalizeInterruptedLeafDetach::new(leaf(1), Some(0)).is_err());
     }
@@ -338,7 +326,7 @@ mod tests {
                 EnsureLeafCoverage::new("finite", 2).unwrap(),
             ),
             PartitionMaintenanceCommand::DetachExpiredHistoryLeaf(
-                DetachExpiredHistoryLeaf::new(leaf(1), None, Some(5_000)).unwrap(),
+                DetachExpiredHistoryLeaf::new(leaf(1), Some(5_000)).unwrap(),
             ),
             PartitionMaintenanceCommand::FinalizeInterruptedLeafDetach(
                 FinalizeInterruptedLeafDetach::new(leaf(1), Some(5_000)).unwrap(),
