@@ -26,6 +26,7 @@ use pyo3::IntoPyObjectExt;
 use crate::handle::BrokerConnection;
 
 /// One frozen coverage pass: its request and its serialization.
+#[derive(Debug)]
 pub struct CoveragePass {
     pub request: CoverageRequest,
     pub serialization: CoverageSerialization,
