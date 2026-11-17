@@ -16,6 +16,14 @@ use horsies_core::manifest::{
 
 use crate::{ErrorCode, HorsiesError};
 
+mod scheduler_manifest;
+mod worker_manifest;
+
+pub(crate) use scheduler_manifest::{scheduler_manifest, ScheduleManifestRefused};
+pub(crate) use worker_manifest::{
+    rust_child_launch, task_classes, worker_manifest, ChildLaunchRefused, ManifestBoundRefused,
+};
+
 pub use horsies_core::core::config::bounded::{BoundedU32, OutOfBounds};
 pub use horsies_core::core::config::worker_profile::{
     ClaimLimits, DrainTimeout, DrainTimeoutRefused, ExecutorThreadCount, ExecutorThreadsSetting,
@@ -83,11 +91,17 @@ pub(crate) fn producer_manifest(
         manifest_version: ManifestVersion::CURRENT,
         database: database_manifest(config)?,
         schema,
-        send: SendManifest {
-            retain_rerun_input_default: config.retain_rerun_input_default,
-            idempotency_reservation_window: default_reservation_window(),
-        },
+        send: send_manifest(config),
     })
+}
+
+/// The send section of a manifest: the rerun-input default of the config
+/// and the reservation window of every app-built broker. Pure.
+pub(crate) fn send_manifest(config: &PostgresConfig) -> SendManifest {
+    SendManifest {
+        retain_rerun_input_default: config.retain_rerun_input_default,
+        idempotency_reservation_window: default_reservation_window(),
+    }
 }
 
 fn database_manifest(config: &PostgresConfig) -> Result<DatabaseManifest, BrokerSettingRefused> {
