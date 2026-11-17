@@ -8,6 +8,8 @@
 //! (`_probe_complete_coverage`, `_coverage_probe_of`,
 //! `_register_required_classes`, `leaf_creation_of`).
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Duration, Timelike, Utc};
 use sqlx::{FromRow, PgConnection};
 
@@ -21,11 +23,11 @@ use crate::core::history::outcomes::{CatalogConflictKind, LeafCreation};
 use crate::core::history::partitions::catalog::LeafLowerBound;
 use crate::core::history::periods::RetentionDays;
 
-use super::coverage::registered_periods;
+use super::coverage::{registered_periods, HistoryCoverage};
 
 const COVERAGE_PROBE_SQL: &str = "SELECT checked_at, leaf_kind, class_key, leaf_name, \
-     lower_bound_kind, lower_anchor, upper_anchor, conformant, registration_healthy, \
-     publication_healthy, absent_leaves \
+     lower_bound_kind, lower_anchor, upper_bound_kind, upper_anchor, conformant, \
+     registration_healthy, publication_healthy, absent_leaves \
      FROM horsies_coverage_probe($1::smallint[], $2::smallint, $3::smallint)";
 
 const REGISTER_CLASSES_SQL: &str = "SELECT class_key, outcome \
@@ -109,9 +111,10 @@ pub(crate) struct CoverageProbe {
     pub(crate) publication_healthy: bool,
     /// A conformant heartbeat leaf covers the probe's `checked_at`.
     pub(crate) heartbeat_covered_now: bool,
-    /// The start of the UTC day of `checked_at` plus the history horizon
-    /// plus one day: the end of the last daily leaf the pass keeps.
-    pub(crate) history_covered_through: DateTime<Utc>,
+    /// The earliest, over the history classes, of the upper bound of each
+    /// class's newest expected leaf; `Forever` when only the forever leaf
+    /// (open upper bound) is expected.
+    pub(crate) history_covered_through: HistoryCoverage,
     /// The start of the UTC hour of `checked_at` plus the heartbeat horizon
     /// plus one hour: the end of the last hourly leaf the pass keeps.
     pub(crate) heartbeats_covered_through: DateTime<Utc>,
@@ -171,7 +174,8 @@ struct CoverageProbeRow {
     leaf_name: String,
     lower_bound_kind: String,
     lower_anchor: Option<DateTime<Utc>>,
-    upper_anchor: DateTime<Utc>,
+    upper_bound_kind: String,
+    upper_anchor: Option<DateTime<Utc>>,
     conformant: bool,
     registration_healthy: bool,
     publication_healthy: bool,
@@ -196,6 +200,46 @@ pub(crate) async fn probe_coverage(
     coverage_probe_of(rows, request)
 }
 
+/// The bounds of one probe row. The forever leaf has OPEN lower and upper
+/// bounds and no anchors; every other expected leaf is AT with both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeLeafBounds {
+    Open,
+    At {
+        lower: DateTime<Utc>,
+        upper: DateTime<Utc>,
+    },
+}
+
+impl ProbeLeafBounds {
+    /// The bounds of a row; another pair breaks the probe's contract.
+    fn of(row: &CoverageProbeRow) -> Result<Self, HistoryError> {
+        match (
+            row.lower_bound_kind.as_str(),
+            row.lower_anchor,
+            row.upper_bound_kind.as_str(),
+            row.upper_anchor,
+        ) {
+            ("OPEN", None, "OPEN", None) => Ok(Self::Open),
+            ("AT", Some(lower), "AT", Some(upper)) => Ok(Self::At { lower, upper }),
+            (lower_kind, lower_anchor, upper_kind, upper_anchor) => {
+                Err(HistoryError::contract(format!(
+                    "probe row {}: lower bound {lower_kind:?} {lower_anchor:?} and upper bound \
+                     {upper_kind:?} {upper_anchor:?} are not a pair of the probe",
+                    row.leaf_name
+                )))
+            }
+        }
+    }
+
+    fn lower(self) -> LeafLowerBound {
+        match self {
+            Self::Open => LeafLowerBound::Open,
+            Self::At { lower, .. } => LeafLowerBound::At(lower),
+        }
+    }
+}
+
 /// The probe of the rows of one coverage probe call, in probe order. Pure.
 fn coverage_probe_of(
     rows: Vec<CoverageProbeRow>,
@@ -213,46 +257,63 @@ fn coverage_probe_of(
     let mut damaged_history = Vec::new();
     let mut damaged_heartbeats = Vec::new();
     let mut heartbeat_covered_now = false;
+    let mut history_rows: usize = 0;
+    // The upper bound of each class's newest expected daily leaf.
+    let mut newest_history_ends: BTreeMap<String, DateTime<Utc>> = BTreeMap::new();
     for row in rows {
-        let lower = LeafLowerBound::decode(&row.lower_bound_kind, row.lower_anchor)?;
-        match (row.leaf_kind.as_str(), row.conformant) {
-            ("history", true) => {}
-            ("history", false) => damaged_history.push(DamagedHistoryLeaf {
-                class_key: row.class_key,
-                leaf_name: row.leaf_name,
-                lower,
-            }),
-            ("heartbeat", conformant) => {
-                let LeafLowerBound::At(lower_anchor) = lower else {
-                    return Err(HistoryError::contract(format!(
-                        "heartbeat leaf {} has an open lower bound",
-                        row.leaf_name
-                    )));
-                };
-                match conformant {
-                    true => {
-                        heartbeat_covered_now |=
-                            lower_anchor <= row.checked_at && row.checked_at < row.upper_anchor;
+        let bounds = ProbeLeafBounds::of(&row)?;
+        match (row.leaf_kind.as_str(), row.conformant, bounds) {
+            ("history", conformant, bounds) => {
+                history_rows += 1;
+                match bounds {
+                    ProbeLeafBounds::Open => {}
+                    ProbeLeafBounds::At { upper, .. } => {
+                        let end = newest_history_ends
+                            .entry(row.class_key.clone())
+                            .or_insert(upper);
+                        *end = (*end).max(upper);
                     }
-                    false => damaged_heartbeats.push(DamagedHeartbeatLeaf {
+                }
+                match conformant {
+                    true => {}
+                    false => damaged_history.push(DamagedHistoryLeaf {
+                        class_key: row.class_key,
                         leaf_name: row.leaf_name,
-                        lower_anchor,
+                        lower: bounds.lower(),
                     }),
                 }
             }
-            (other, _) => {
+            ("heartbeat", _, ProbeLeafBounds::Open) => {
+                return Err(HistoryError::contract(format!(
+                    "heartbeat leaf {} has an open bound",
+                    row.leaf_name
+                )));
+            }
+            ("heartbeat", conformant, ProbeLeafBounds::At { lower, upper }) => match conformant {
+                true => {
+                    heartbeat_covered_now |= lower <= row.checked_at && row.checked_at < upper;
+                }
+                false => damaged_heartbeats.push(DamagedHeartbeatLeaf {
+                    leaf_name: row.leaf_name,
+                    lower_anchor: lower,
+                }),
+            },
+            (other, _, _) => {
                 return Err(HistoryError::contract(format!(
                     "coverage probe returned unknown leaf kind {other:?}"
                 )));
             }
         }
     }
-    let day_start = checked_at
-        .with_hour(0)
-        .and_then(|value| value.with_minute(0))
-        .and_then(|value| value.with_second(0))
-        .and_then(|value| value.with_nanosecond(0))
-        .ok_or_else(|| HistoryError::contract("probe timestamp cannot be truncated"))?;
+    if history_rows == 0 {
+        return Err(HistoryError::contract(
+            "coverage probe returned no history leaf",
+        ));
+    }
+    let history_covered_through = match newest_history_ends.values().min() {
+        Some(earliest) => HistoryCoverage::Until { at: *earliest },
+        None => HistoryCoverage::Forever,
+    };
     let hour_start = checked_at
         .with_minute(0)
         .and_then(|value| value.with_second(0))
@@ -264,8 +325,7 @@ fn coverage_probe_of(
         registration_healthy,
         publication_healthy,
         heartbeat_covered_now,
-        history_covered_through: day_start
-            + Duration::days(i64::from(request.history_horizon_days) + 1),
+        history_covered_through,
         heartbeats_covered_through: hour_start
             + Duration::hours(i64::from(request.heartbeat_horizon_hours) + 1),
         absent_leaves,
@@ -536,28 +596,27 @@ mod tests {
         }
     }
 
+    /// One probe row of `class_key`. A missing anchor is an OPEN bound.
     fn probe_row(
         leaf_kind: &str,
+        class_key: &str,
         leaf_name: &str,
         lower: Option<DateTime<Utc>>,
-        upper: DateTime<Utc>,
+        upper: Option<DateTime<Utc>>,
         conformant: bool,
     ) -> CoverageProbeRow {
+        let kind = |anchor: Option<DateTime<Utc>>| match anchor {
+            Some(_) => "AT".to_owned(),
+            None => "OPEN".to_owned(),
+        };
         CoverageProbeRow {
-            checked_at: DateTime::parse_from_rfc3339("2026-11-17T13:20:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
+            checked_at: at("2026-11-17T13:20:00Z"),
             leaf_kind: leaf_kind.to_owned(),
-            class_key: match leaf_kind {
-                "heartbeat" => HEARTBEAT_CLASS_KEY.to_owned(),
-                _ => "standard_30d".to_owned(),
-            },
+            class_key: class_key.to_owned(),
             leaf_name: leaf_name.to_owned(),
-            lower_bound_kind: match lower {
-                Some(_) => "AT".to_owned(),
-                None => "OPEN".to_owned(),
-            },
+            lower_bound_kind: kind(lower),
             lower_anchor: lower,
+            upper_bound_kind: kind(upper),
             upper_anchor: upper,
             conformant,
             registration_healthy: true,
@@ -572,41 +631,52 @@ mod tests {
             .with_timezone(&Utc)
     }
 
+    fn heartbeat_row(hour: u32, conformant: bool) -> CoverageProbeRow {
+        let lower = at(&format!("2026-11-17T{hour:02}:00:00Z"));
+        probe_row(
+            "heartbeat",
+            HEARTBEAT_CLASS_KEY,
+            &format!("horsies_heartbeats_2026_11_17_{hour:02}"),
+            Some(lower),
+            Some(lower + Duration::hours(1)),
+            conformant,
+        )
+    }
+
+    fn forever_row(conformant: bool) -> CoverageProbeRow {
+        probe_row(
+            "history",
+            FOREVER_CLASS_KEY,
+            TASK_HISTORY_FOREVER_LEAF,
+            None,
+            None,
+            conformant,
+        )
+    }
+
+    fn daily_row(class_key: &str, day: u32, conformant: bool) -> CoverageProbeRow {
+        let lower = at(&format!("2026-11-{day:02}T00:00:00Z"));
+        probe_row(
+            "history",
+            class_key,
+            &format!("horsies_task_history_{class_key}_2026_11_{day:02}"),
+            Some(lower),
+            Some(lower + Duration::days(1)),
+            conformant,
+        )
+    }
+
     /// The probe rows decode into the damaged leaves in probe order, the
-    /// current-hour heartbeat verdict and the covered-through instants of the
-    /// horizons; a probe with no row is refused.
+    /// current-hour heartbeat verdict and the covered-through instants; a
+    /// probe with no row is refused.
     #[test]
     fn probe_rows_decode_damage_and_coverage() {
         let request = CoverageRequest::new(2, 2, &[]).unwrap();
         let rows = vec![
-            probe_row(
-                "heartbeat",
-                "horsies_heartbeats_2026_11_17_13",
-                Some(at("2026-11-17T13:00:00Z")),
-                at("2026-11-17T14:00:00Z"),
-                true,
-            ),
-            probe_row(
-                "heartbeat",
-                "horsies_heartbeats_2026_11_17_14",
-                Some(at("2026-11-17T14:00:00Z")),
-                at("2026-11-17T15:00:00Z"),
-                false,
-            ),
-            probe_row(
-                "history",
-                "horsies_task_history_forever_open",
-                None,
-                at("9999-01-01T00:00:00Z"),
-                true,
-            ),
-            probe_row(
-                "history",
-                LEAF,
-                Some(at("2026-11-17T00:00:00Z")),
-                at("2026-11-18T00:00:00Z"),
-                false,
-            ),
+            heartbeat_row(13, true),
+            heartbeat_row(14, false),
+            forever_row(true),
+            daily_row("standard_30d", 17, false),
         ];
         let probe = coverage_probe_of(rows, &request).unwrap();
         assert!(!probe.is_healthy());
@@ -630,12 +700,110 @@ mod tests {
             probe.first_damaged_class_key().as_deref(),
             Some("standard_30d")
         );
-        assert_eq!(probe.history_covered_through, at("2026-11-20T00:00:00Z"));
+        assert_eq!(
+            probe.history_covered_through,
+            HistoryCoverage::Until {
+                at: at("2026-11-18T00:00:00Z")
+            }
+        );
         assert_eq!(probe.heartbeats_covered_through, at("2026-11-17T16:00:00Z"));
         assert!(matches!(
             coverage_probe_of(Vec::new(), &request),
             Err(HistoryError::Contract(_))
         ));
+    }
+
+    /// Python `test_coverage_function_rows.py::TestCoverageProbeRows`: each
+    /// class reaches the end of its newest leaf, and the probe reports the
+    /// earliest; the forever leaf has no end and does not move it.
+    #[test]
+    fn history_coverage_is_the_earliest_newest_end_over_the_classes() {
+        let request = CoverageRequest::new(2, 2, &[]).unwrap();
+        let rows = vec![
+            heartbeat_row(13, true),
+            forever_row(true),
+            daily_row("standard_30d", 17, true),
+            daily_row("standard_30d", 18, true),
+            daily_row("standard_30d", 19, false),
+            daily_row("standard_7d", 17, true),
+            daily_row("standard_7d", 18, true),
+        ];
+        let probe = coverage_probe_of(rows, &request).unwrap();
+        assert_eq!(
+            probe.history_covered_through,
+            HistoryCoverage::Until {
+                at: at("2026-11-19T00:00:00Z")
+            }
+        );
+    }
+
+    /// A fresh install has no period class yet: the forever leaf is the
+    /// only history row, and the history coverage has no end. The forever
+    /// row has OPEN bounds and no anchors.
+    #[test]
+    fn history_coverage_is_forever_when_only_the_forever_leaf_is_expected() {
+        let request = CoverageRequest::new(2, 2, &[]).unwrap();
+        let probe =
+            coverage_probe_of(vec![heartbeat_row(13, true), forever_row(false)], &request).unwrap();
+        assert_eq!(probe.history_covered_through, HistoryCoverage::Forever);
+        assert_eq!(
+            probe.damaged_history,
+            vec![DamagedHistoryLeaf {
+                class_key: FOREVER_CLASS_KEY.to_owned(),
+                leaf_name: TASK_HISTORY_FOREVER_LEAF.to_owned(),
+                lower: LeafLowerBound::Open,
+            }]
+        );
+    }
+
+    /// A row whose bound kinds and anchors are not a pair of the probe, a
+    /// heartbeat row with open bounds, and a probe with no history row are
+    /// contract errors.
+    #[test]
+    fn probe_rows_outside_the_contract_are_refused() {
+        let request = CoverageRequest::new(2, 2, &[]).unwrap();
+        let mut open_upper = daily_row("standard_30d", 17, true);
+        open_upper.upper_bound_kind = "OPEN".to_owned();
+        open_upper.upper_anchor = None;
+        let mut open_lower = daily_row("standard_30d", 17, true);
+        open_lower.lower_bound_kind = "OPEN".to_owned();
+        open_lower.lower_anchor = None;
+        let mut anchored_forever = forever_row(true);
+        anchored_forever.upper_anchor = Some(at("9999-01-01T00:00:00Z"));
+        let mut open_heartbeat = heartbeat_row(13, true);
+        open_heartbeat.lower_bound_kind = "OPEN".to_owned();
+        open_heartbeat.lower_anchor = None;
+        open_heartbeat.upper_bound_kind = "OPEN".to_owned();
+        open_heartbeat.upper_anchor = None;
+        for refused in [
+            vec![heartbeat_row(13, true), open_upper],
+            vec![heartbeat_row(13, true), open_lower],
+            vec![heartbeat_row(13, true), anchored_forever],
+            vec![open_heartbeat, forever_row(true)],
+            vec![heartbeat_row(13, true)],
+        ] {
+            assert!(matches!(
+                coverage_probe_of(refused, &request),
+                Err(HistoryError::Contract(_))
+            ));
+        }
+    }
+
+    /// The health payload form of the history coverage, as Python's
+    /// `history_coverage_payload` writes it.
+    #[test]
+    fn history_coverage_serializes_as_the_health_payload() {
+        assert_eq!(
+            serde_json::to_value(HistoryCoverage::Forever).unwrap(),
+            serde_json::json!({"kind": "FOREVER"})
+        );
+        assert_eq!(
+            serde_json::to_value(HistoryCoverage::Until {
+                at: at("2026-11-19T00:00:00Z")
+            })
+            .unwrap(),
+            serde_json::json!({"kind": "UNTIL", "at": "2026-11-19T00:00:00Z"})
+        );
     }
 
     /// The declared periods reach the functions as day counts, with the

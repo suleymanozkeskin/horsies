@@ -25,13 +25,29 @@ use super::coverage_functions::{
     CoverageProbe, CoverageRequest, DamagedHeartbeatLeaf, DamagedHistoryLeaf,
 };
 
+/// How far the history leaves reach (Python `HistoryCoverage`).
+///
+/// Serialized as the worker health payload form: `{"kind": "FOREVER"}` or
+/// `{"kind": "UNTIL", "at": <RFC 3339 instant>}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum HistoryCoverage {
+    /// No history class has an end of coverage: only the forever class has
+    /// leaves, and its leaf has an open upper bound.
+    Forever,
+    /// The first instant at which a history class has no leaf: the earliest,
+    /// over the classes with daily leaves, of the upper bound of each
+    /// class's newest leaf.
+    Until { at: DateTime<Utc> },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverageEnsured {
     pub created_history_leaves: u64,
     pub created_heartbeat_leaves: u64,
     pub republished: bool,
     pub heartbeat_covered_now: bool,
-    pub history_covered_through: DateTime<Utc>,
+    pub history_covered_through: HistoryCoverage,
     pub heartbeats_covered_through: DateTime<Utc>,
     pub absent_leaves: Vec<String>,
 }
@@ -273,7 +289,9 @@ pub async fn ensure_partition_coverage<P: LoaderPublication>(
         created_heartbeat_leaves: created_heartbeats,
         republished,
         heartbeat_covered_now: heartbeat_coverage_present(connection).await?,
-        history_covered_through: day + Duration::days(i64::from(history_horizon_days) + 1),
+        history_covered_through: HistoryCoverage::Until {
+            at: day + Duration::days(i64::from(history_horizon_days) + 1),
+        },
         heartbeats_covered_through: hour + Duration::hours(i64::from(heartbeat_horizon_hours) + 1),
         absent_leaves,
     }))
