@@ -234,9 +234,9 @@ where
     /// wrote answers with its id, also after it finished.
     ///
     /// Errors: `VALIDATION_FAILED` for an error the retry does not accept
-    /// (only `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT` carry a payload
-    /// to send again), for the error of another task, and for the error of
-    /// a `schedule`; else the errors of a send.
+    /// (only `ASYNC_CONTEXT`, `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`
+    /// carry a payload to send again), for the error of another task, and
+    /// for the error of a `schedule`; else the errors of a send.
     pub async fn retry_send(
         &self,
         error: &TaskSendError,
@@ -386,8 +386,8 @@ where
     ) -> Result<(Uuid, TaskSendPayload), TaskSendError> {
         let Some(target) = error.resend_target() else {
             return Err(self.validation_failed(format!(
-                "cannot retry a send that failed with {}: only ENQUEUE_FAILED and \
-                 IDEMPOTENCY_KEY_CONFLICT carry a payload to send again",
+                "cannot retry a send that failed with {}: only ASYNC_CONTEXT, \
+                 ENQUEUE_FAILED and IDEMPOTENCY_KEY_CONFLICT carry a payload to send again",
                 error.code()
             )));
         };
@@ -756,6 +756,24 @@ mod tests {
         assert!(function(&app)
             .retry_target(&scheduled, RetryOf::Schedule)
             .is_ok());
+    }
+
+    /// Python `_validate_retry` accepts `TaskSendAsyncContext`: the
+    /// prepared task id and payload of a blocking send on a runtime thread.
+    #[test]
+    fn a_retry_takes_the_task_id_and_payload_of_an_async_context() {
+        let app = app_with(config());
+        let (task_id, payload) = function(&app)
+            .prepare(SendStart::Now, &TaskSendOptions::new(), &invoice())
+            .unwrap();
+        let error = TaskSendError::AsyncContext {
+            task_id,
+            payload: Box::new(payload),
+            message: "blocking send on a runtime thread".to_owned(),
+        };
+        let (retried_id, retried) = function(&app).retry_target(&error, RetryOf::Send).unwrap();
+        assert_eq!(retried_id, task_id);
+        assert_eq!(retried.input_json, r#"{"id":7,"amount":12.5}"#);
     }
 
     #[test]

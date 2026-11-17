@@ -1,5 +1,6 @@
 ---
 title: Scheduler Overview
+section: shared
 summary: How the scheduler process enqueues tasks on a schedule.
 related: [schedule-patterns, schedule-config, ../../configuration/app-config]
 tags: [scheduling, scheduler, process]

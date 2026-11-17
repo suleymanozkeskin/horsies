@@ -23,11 +23,28 @@ Use these sections. Include only what applies.
 ```yaml
 ---
 title: Short Title
+section: shared
 summary: One sentence. What this page covers.
 related: [other-page, another-page]
 tags: [task, retry, configuration]
 ---
 ```
+
+`section` is required on every site page outside `rust/`:
+
+| Value | The page holds |
+|-------|----------------|
+| `shared` | Behaviour and guarantees of the core. They hold for the Python client and the Rust client |
+| `python` | The API of the Python client |
+| `site` | The landing page, the changelog or a migration guide |
+
+A page under `rust/` is a Rust API page by its path and has no `section`. The build refuses a page that breaks this rule.
+
+### Shared Pages and Client Pages
+
+- State each behaviour once, on its shared page. A client page links to the shared page instead of repeating it.
+- A client page states the API of its client: names, signatures, parameters, return types, examples.
+- A Rust API page that is not written yet is listed in the sidebar with the badge "not written". It has no placeholder page.
 
 ### Title
 

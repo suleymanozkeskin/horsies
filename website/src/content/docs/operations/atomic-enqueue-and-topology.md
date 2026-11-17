@@ -1,5 +1,6 @@
 ---
 title: Atomic Enqueue and Topology
+section: shared
 summary: Why a send cannot join the caller's database transaction, and the pattern that replaces it - send after commit, automatic resend, and an idempotency key.
 related: [../tasks/sending-tasks, ../tasks/errors, ../configuration/app-config, ../configuration/broker-config, ../concepts/workflows/workflow-api]
 tags: [operations, topology, enqueue, idempotency, idempotency_key, resend_on_transient_err, transaction]

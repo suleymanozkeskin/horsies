@@ -1,5 +1,6 @@
 ---
 title: Heartbeats & Recovery
+section: shared
 summary: Detecting and recovering from worker crashes via heartbeats.
 related: [../../configuration/recovery-config, worker-architecture]
 tags: [workers, heartbeats, recovery, crash-detection]

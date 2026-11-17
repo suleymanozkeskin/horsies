@@ -373,8 +373,9 @@ const CORE_SCHEDULER_PARAMETERS: &[StubParameter] = &[
 
 const PING_OUTCOME: &str = "DatabasePingRecord | BrokerFailure";
 const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerFailure";
-const SEND_OUTCOME: &str = "Enqueued | SendSuppressed | SendValidationFailed | \
-     SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict";
+const SEND_OUTCOME: &str = "Enqueued | SendSuppressed | SendAsyncContext | \
+     SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | \
+     SendKeyConflict";
 const TASK_INFO_OUTCOME: &str = "TaskInfoRecord | TaskInfoNotFound | BrokerFailure";
 const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | BrokerFailure";
 const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
@@ -1107,6 +1108,13 @@ const RECORD_CLASSES: [StubClass; 78] = [
         doc: "Sends are suppressed. Nothing was written.",
         constructor: Constructor::NoConstructor,
         properties: &[property("message", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "SendAsyncContext",
+        doc: "A blocking send ran on a thread that runs an event loop or a tokio runtime. Nothing was\nwritten. A client produces it before the send, never the core's enqueue.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID"), property("message", "str")],
         methods: &[],
     },
     StubClass {

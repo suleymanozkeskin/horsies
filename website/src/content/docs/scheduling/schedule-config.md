@@ -1,5 +1,6 @@
 ---
 title: Schedule Config
+section: python
 summary: ScheduleConfig and TaskSchedule configuration models.
 related: [scheduler-overview, schedule-patterns]
 tags: [scheduling, configuration, TaskSchedule]

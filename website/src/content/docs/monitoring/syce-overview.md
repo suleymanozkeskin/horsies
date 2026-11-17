@@ -1,5 +1,6 @@
 ---
 title: Syce Overview
+section: shared
 summary: Monitoring TUI for horsies task library.
 related: [../workers/worker-architecture, ../workers/heartbeats-recovery, ../internals/database-schema]
 tags: [monitoring, syce, tui, dashboard]

@@ -1,5 +1,6 @@
 ---
 title: Retention Config
+section: shared
 summary: How long records live, and how their storage is kept ahead.
 related: [recovery-config, app-config, ../../tasks/sending-tasks]
 tags: [configuration, retention, partitions]

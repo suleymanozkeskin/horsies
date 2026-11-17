@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use crate::core::TaskStatus;
+use crate::core::history::reads::detail::TaskAbsenceReason;
+use crate::core::{TaskInfo, TaskStatus};
 
 /// Categorized broker operation failure codes.
 ///
@@ -115,6 +116,54 @@ pub struct RawResultRecord {
     pub task_name: String,
     pub status: TaskStatus,
     pub raw_result: Option<Map<String, Value>>,
+}
+
+/// What a raw result read found: the record of the task, or why neither
+/// the live table nor the task history holds it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RawResultRead {
+    Found(RawResultRecord),
+    /// `reason` tells a task that retention can have removed from an id
+    /// that no retained history held.
+    Absent {
+        reason: TaskAbsenceReason,
+    },
+}
+
+#[cfg(test)]
+impl RawResultRead {
+    /// The record of a read that found the task. Panics on an absent task.
+    pub(crate) fn expect_found(self) -> RawResultRecord {
+        match self {
+            Self::Found(record) => record,
+            Self::Absent { reason } => panic!("the task is absent: {}", reason.as_str()),
+        }
+    }
+
+    pub(crate) fn is_absent(&self) -> bool {
+        matches!(self, Self::Absent { .. })
+    }
+}
+
+/// What a task info read found: the info of the task, or why neither the
+/// live table nor the task history holds it.
+#[derive(Debug, Clone)]
+pub enum TaskInfoRead {
+    /// Boxed: the info is many times larger than the reason.
+    Found(Box<TaskInfo>),
+    /// `reason` as in [`RawResultRead::Absent`].
+    Absent { reason: TaskAbsenceReason },
+}
+
+#[cfg(test)]
+impl TaskInfoRead {
+    /// The info of a read that found the task. Panics on an absent task.
+    pub(crate) fn expect_found(self) -> TaskInfo {
+        match self {
+            Self::Found(info) => *info,
+            Self::Absent { reason } => panic!("the task is absent: {}", reason.as_str()),
+        }
+    }
 }
 
 #[cfg(test)]

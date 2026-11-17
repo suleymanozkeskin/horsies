@@ -249,9 +249,9 @@ on-demand loading by agents that support markdown skill files.
 | `horsies web` | Graceful shutdown | No handler; the default signal action ends the process |
 
 SIGTERM handling is Unix-only. The worker shutdown steps are in
-[Worker Architecture](../workers/worker-architecture/#graceful-shutdown). The
+[Worker Architecture](/horsies/workers/worker-architecture/#graceful-shutdown). The
 scheduler shutdown is in
-[Scheduler Overview](../scheduling/scheduler-overview/#graceful-shutdown).
+[Scheduler Overview](/horsies/scheduling/scheduler-overview/#graceful-shutdown).
 
 ## Exit Codes
 

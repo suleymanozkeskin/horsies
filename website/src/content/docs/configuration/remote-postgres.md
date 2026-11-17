@@ -1,5 +1,6 @@
 ---
 title: Remote PostgreSQL
+section: shared
 summary: Deploy workers against a remote or managed PostgreSQL — connection budgeting, pooled multi-worker setups, prefetch, and health-check tuning.
 related: [broker-config, ../workers/concurrency, ../troubleshooting/pgbouncer]
 tags: [configuration, deployment, postgres, pgbouncer, connections, latency]

@@ -1,5 +1,6 @@
 ---
 title: Scheduling Tasks
+section: python
 summary: Run tasks on recurring schedules.
 related: [03-defining-workflows]
 tags: [quickstart, scheduling]

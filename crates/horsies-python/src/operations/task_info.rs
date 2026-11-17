@@ -3,7 +3,7 @@
 
 use chrono::{DateTime, Utc};
 use horsies_core::catalog::CodeEnum;
-use horsies_core::{BrokerErrorCode, ExecutionClass, TaskAttemptInfo, TaskInfo};
+use horsies_core::{BrokerErrorCode, ExecutionClass, TaskAttemptInfo, TaskInfo, TaskInfoRead};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -141,7 +141,9 @@ fn execution_of(execution: ExecutionClass) -> Option<String> {
     }
 }
 
-/// Neither the live table nor the task history holds the task.
+/// Neither the live table nor the task history holds the task. The core's
+/// absence reason is not kept: Python's `TASK_NOT_FOUND` carries the task id
+/// only.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct TaskInfoNotFound {
@@ -192,7 +194,7 @@ pub async fn task_info_operation(
         .get_task_info_with_attempts(task_id, parts.result, parts.failed_reason, parts.attempts)
         .await;
     match read {
-        Ok(Some(info)) => match TaskInfoRecord::from_core(info) {
+        Ok(TaskInfoRead::Found(info)) => match TaskInfoRecord::from_core(*info) {
             Ok(record) => TaskInfoOutcome::Found(Box::new(record)),
             Err(error) => TaskInfoOutcome::Failed(BrokerFailure {
                 code: BrokerErrorCode::InvalidJsonPayload.to_string(),
@@ -200,7 +202,9 @@ pub async fn task_info_operation(
                 retryable: false,
             }),
         },
-        Ok(None) => TaskInfoOutcome::NotFound(TaskInfoNotFound { task_id }),
+        Ok(TaskInfoRead::Absent { reason: _ }) => {
+            TaskInfoOutcome::NotFound(TaskInfoNotFound { task_id })
+        }
         Err(error) => TaskInfoOutcome::Failed(BrokerFailure::from(error)),
     }
 }

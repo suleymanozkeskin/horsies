@@ -1,5 +1,6 @@
 ---
 title: Result Handling
+section: python
 summary: TaskResult pattern, error types, and explicit error handling.
 related: [task-lifecycle, ../../tasks/retrieving-results]
 tags: [concepts, results, errors, TaskResult]

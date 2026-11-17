@@ -1,5 +1,6 @@
 ---
 title: Async Frameworks
+section: python
 summary: Own the broker in a FastAPI lifespan, call the async forms from coroutines, and stay inside the event-loop limit.
 related: [../configuration/broker-config, ../quick-start/getting-started, ../tasks/sending-tasks]
 tags: [guides, async, fastapi, asgi, broker, event-loop]

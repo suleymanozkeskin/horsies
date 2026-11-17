@@ -1,5 +1,6 @@
 ---
 title: Concurrency
+section: shared
 summary: Worker, queue, and cluster-level concurrency controls.
 related: [worker-architecture, ../../concepts/queue-modes, ../../configuration/app-config]
 tags: [workers, concurrency, claiming, limits]

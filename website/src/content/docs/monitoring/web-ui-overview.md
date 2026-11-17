@@ -1,5 +1,6 @@
 ---
 title: Web UI Overview
+section: shared
 summary: Browser dashboard for tasks, workflows, and workers, shipped in the horsies[web] extra.
 related: [web-ui-deployment, action-semantics, syce-overview, worker-health]
 tags: [monitoring, web, dashboard, ui, sse]

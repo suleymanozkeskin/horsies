@@ -94,11 +94,11 @@ class CoreHandle:
         """The schema state of the database. Reads only."""
     def schema_status_async(self) -> asyncio.Future[SchemaStatusRecord]:
         """The awaitable form of the method above."""
-    def enqueue(self, request: EnqueueRequest) -> Enqueued | SendSuppressed | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict:
+    def enqueue(self, request: EnqueueRequest) -> Enqueued | SendSuppressed | SendAsyncContext | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict:
         """Enqueue one task, in one statement. Installs the schema once per handle first. Writes; a
         resend with send_kind REPEAT is safe.
         """
-    def enqueue_async(self, request: EnqueueRequest) -> asyncio.Future[Enqueued | SendSuppressed | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict]:
+    def enqueue_async(self, request: EnqueueRequest) -> asyncio.Future[Enqueued | SendSuppressed | SendAsyncContext | SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict]:
         """The awaitable form of the method above."""
     def requeue_stale_claimed_async(self, stale_after_ms: int) -> asyncio.Future[StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed]:
         """One stale CLAIMED requeue pass. Writes; each batch commits alone. A threshold that
@@ -494,6 +494,17 @@ class Enqueued:
 @final
 class SendSuppressed:
     """Sends are suppressed. Nothing was written."""
+    @property
+    def message(self) -> str: ...
+
+
+@final
+class SendAsyncContext:
+    """A blocking send ran on a thread that runs an event loop or a tokio runtime. Nothing was
+    written. A client produces it before the send, never the core's enqueue.
+    """
+    @property
+    def task_id(self) -> uuid.UUID: ...
     @property
     def message(self) -> str: ...
 
