@@ -8,7 +8,6 @@
 //! the worker's outcome writer share:
 //!
 //! - **Phase 1a** — `build_task_input`: the stored input, with workflow context
-//! - **Phase 1b** — `execute_task`: async/blocking invocation with panic isolation
 //! - **Phase 2a** — `schedule_retry_for_task`: atomic requeue + attempt record
 //! - **Finalize Phase 1** — `persist_terminal_state`: terminal DB write
 //! - **Finalize Phase 2** — `finalize_workflow_phase`: workflow callback + NOTIFY
@@ -29,7 +28,7 @@ use crate::broker::core_rows::{column, one_row, scalar, StatementLog};
 use crate::broker::error::is_retryable_sqlx_error;
 use crate::broker::listener::notify_task_queue;
 use crate::broker::terminalization::terminalize;
-use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
+use crate::broker::PostgresBroker;
 use crate::core::codec::user_value::check_task_input;
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::config::retention::RetentionConfig;
@@ -39,8 +38,7 @@ use crate::core::lifecycle::{
     WorkflowSuccessOutcome,
 };
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
-use crate::core::task::fn_trait::RegisteredTask;
+use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::core::task::result::TaskResult;
 use crate::core::workflow::context::{WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
 use crate::db::{
@@ -53,6 +51,7 @@ use crate::workflow_engine::steps::{
     NodeFinishDisposition, OwedParentAdvances,
 };
 
+use crate::worker::executor::slots::{ClaimedTask, RetryFacts};
 use crate::worker::retry::{admit_retry, RetryAdmission, StoredOptions};
 
 // Re-export for worker.rs orchestrator.
@@ -246,94 +245,6 @@ fn serialization_error(message: String) -> TaskError {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 1b: Task execution (with panic isolation)
-// ---------------------------------------------------------------------------
-
-/// Execute a registered task function with panic isolation.
-///
-/// Async tasks are spawned into a new tokio task for cancellation safety.
-/// Blocking tasks use `spawn_blocking` with `catch_unwind` for panic safety.
-///
-/// `timeout` is the per-task `timeout_ms` deadline (if any), measured around
-/// user-code execution. On expiry the task resolves to `OutcomeCode::TaskTimeout`
-/// and the normal finalize path decides fail-vs-retry (via `auto_retry_for`).
-/// Async tasks are aborted on timeout; blocking threads cannot be aborted and
-/// run to completion with their result discarded (see `TaskOptions::timeout_ms`).
-pub(crate) async fn execute_task(
-    task_fn: RegisteredTask,
-    task_input: Vec<u8>,
-    timeout: Option<Duration>,
-) -> TaskResult<Vec<u8>> {
-    match task_fn {
-        RegisteredTask::Async { task: f, .. } => {
-            let mut handle = tokio::spawn(async move { f.execute(&task_input).await });
-            let join = match timeout {
-                Some(dur) => {
-                    tokio::select! {
-                        joined = &mut handle => joined,
-                        _ = tokio::time::sleep(dur) => {
-                            // Cancel the running future at its next await point;
-                            // unlike a blocking thread, an async task is abortable.
-                            handle.abort();
-                            return task_timeout_error(dur);
-                        }
-                    }
-                }
-                None => handle.await,
-            };
-            match join {
-                Ok(r) => r,
-                Err(join_err) if join_err.is_cancelled() => {
-                    task_timeout_error(timeout.unwrap_or_default())
-                }
-                Err(join_err) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledException,
-                    format!("async task panicked: {}", join_err),
-                )),
-            }
-        }
-        RegisteredTask::Blocking { task: f, .. } => {
-            let handle = tokio::task::spawn_blocking(move || {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f.execute(&task_input)))
-            });
-            let join = match timeout {
-                Some(dur) => {
-                    tokio::select! {
-                        joined = handle => joined,
-                        _ = tokio::time::sleep(dur) => {
-                            // A blocking thread cannot be aborted in-process: it
-                            // runs to completion and its result is discarded. We
-                            // only stop awaiting it and finalize as TASK_TIMEOUT.
-                            return task_timeout_error(dur);
-                        }
-                    }
-                }
-                None => handle.await,
-            };
-            match join {
-                Ok(Ok(r)) => r,
-                Ok(Err(_panic)) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledException,
-                    "blocking task panicked".to_owned(),
-                )),
-                Err(join_err) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledException,
-                    format!("blocking task join error: {}", join_err),
-                )),
-            }
-        }
-    }
-}
-
-/// Build the `TASK_TIMEOUT` error for a task that exceeded its `timeout_ms`.
-fn task_timeout_error(timeout: Duration) -> TaskResult<Vec<u8>> {
-    TaskResult::Err(TaskError::builtin(
-        OutcomeCode::TaskTimeout,
-        format!("task exceeded timeout_ms={}", timeout.as_millis()),
-    ))
-}
-
-// ---------------------------------------------------------------------------
 // Finalize Phase 1: Persist the outcome of the attempt
 // ---------------------------------------------------------------------------
 
@@ -351,20 +262,22 @@ fn task_timeout_error(timeout: Duration) -> TaskResult<Vec<u8>> {
 /// retryable when the connection failed, and the next try sends the same
 /// statement (Python `core/worker/finalize.py`, `_persist_failed_attempt`).
 /// A refusal is an outcome ([`FinalizeOutcome::Refused`]), not an error.
-#[allow(clippy::too_many_arguments)]
+///
+/// `task` is the claimed task as the claim returned it: its claim generation
+/// fences every write, and its retry facts and stored options decide the
+/// retry of a failure.
 pub(crate) async fn persist_terminal_state(
     broker: &PostgresBroker,
-    task_id: Uuid,
+    task: &ClaimedTask,
     result: TaskResult<Vec<u8>>,
-    row: &ClaimedTaskRow,
-    stored_options: &StoredOptions,
-    running: &SetRunningRow,
     worker_id: &str,
     payload_policy: &PayloadPolicy,
 ) -> Result<FinalizeOutcome, FinalizeError> {
+    let task_id = task.task_id;
+    let is_workflow_task = task.kind.is_workflow_task();
     let fence = OwnedClaim {
         worker_id: worker_id.to_owned(),
-        claimed_at: row.claimed_at,
+        claimed_at: task.claimed_at,
     };
     match result {
         TaskResult::Ok(ref result_bytes) => {
@@ -373,11 +286,11 @@ pub(crate) async fn persist_terminal_state(
             // loss). Parity with horsies PR #208.
             enforce_payload_policy(
                 payload_policy,
-                &row.task_name,
+                &task.task_name,
                 PayloadKind::Result,
                 result_bytes.len(),
             );
-            persist_ok_result(broker, task_id, result_bytes, fence, row.is_workflow_task).await
+            persist_ok_result(broker, task_id, result_bytes, fence, is_workflow_task).await
         }
         TaskResult::Err(ref task_error) => {
             // The stored error keeps its code when its `data` cannot be stored:
@@ -392,14 +305,14 @@ pub(crate) async fn persist_terminal_state(
                 );
             }
             let error_code = Some(task_error.error_code.to_string());
-            let retry = retry_request_for(running, stored_options, error_code.as_deref());
+            let retry = retry_request_for(&task.retry, &task.options, error_code.as_deref());
             let result_json =
                 serde_json::to_string(&TaskResult::<serde_json::Value>::Err(task_error.clone()))
                     .map_err(|error| envelope_error(task_id, error))?;
             // Warn-only: error envelopes can carry oversized data too.
             enforce_payload_policy(
                 payload_policy,
-                &row.task_name,
+                &task.task_name,
                 PayloadKind::Result,
                 result_json.len(),
             );
@@ -416,29 +329,29 @@ pub(crate) async fn persist_terminal_state(
                     failed_reason: None,
                 },
             };
-            persist_failed_attempt(broker, &command, row.is_workflow_task).await
+            persist_failed_attempt(broker, &command, is_workflow_task).await
         }
     }
 }
 
 /// The retry that the task's policy admits for this failure, with its delay
 /// (Python `retry_request_for`). Pure. `retry_count` and `max_retries` come
-/// from the start of this claim generation; the write fences on that count.
+/// from the claim of this claim generation; the write fences on that count.
 /// The deadline is judged by the write, on the database clock.
 fn retry_request_for(
-    running: &SetRunningRow,
+    retry: &RetryFacts,
     stored_options: &StoredOptions,
     error_code: Option<&str>,
 ) -> RetryRequest {
     match admit_retry(
-        running.retry_count,
-        running.max_retries,
+        retry.retry_count,
+        retry.max_retries,
         stored_options.retry(),
         error_code,
     ) {
         RetryAdmission::Admitted(rule) => RetryRequest::RetryAfter {
-            expected_retry_count: running.retry_count,
-            delay_seconds: rule.delay_seconds((running.retry_count + 1).unsigned_abs()),
+            expected_retry_count: retry.retry_count,
+            delay_seconds: rule.delay_seconds((retry.retry_count + 1).unsigned_abs()),
             placement: RetryPlacement::SameClass,
         },
         RetryAdmission::RetriesSpent | RetryAdmission::NoPolicy | RetryAdmission::CodeNotListed => {

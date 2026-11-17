@@ -1,4 +1,11 @@
-"""A sync send of a producer writes its row on the calling thread.
+"""The Python sync send of a producer writes its row on the calling thread.
+
+These tests observe the Python sync send before the switch to the core, kept
+as the dual-run reference (``tests/dualrun/reference/enqueue_caller.py``):
+the autouse fixture ``python_send`` puts it in the place of
+``PostgresBroker.enqueue`` and ``enqueue_async``. The send through the core
+runs ``CoreHandle.enqueue`` on the calling thread with no sync runner; its
+tests are in ``tests/dualrun/test_enqueue_task.py`` and the unit tests.
 
 ``PostgresBroker.send_route`` decides. A send of a process that runs no
 task bodies, once the schema is initialized, with or without an
@@ -41,6 +48,9 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.process_role import ProcessRole
 from horsies.core.task_decorator import TaskFunction, TaskHandle
 from horsies.core.types.result import Err, Ok
+from tests.dualrun.operations.plugin import DualRunCase, ImplementationRun, SingleRun
+from tests.dualrun.operations.table import Implementation
+from tests.dualrun.reference import enqueue_caller
 from tests.integration.conftest import DB_URL
 
 pytestmark = [pytest.mark.integration]
@@ -52,6 +62,21 @@ SENDS_PER_THREAD: Final = 25
 THREAD_JOIN_BOUND_S: Final = 60.0
 BACKEND_EXIT_POLLS: Final = 100
 BACKEND_EXIT_POLL_S: Final = 0.02
+
+
+@pytest.fixture(autouse=True)
+def python_send(
+    implementation: ImplementationRun, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Python send in the place of the broker's send methods. The core
+    run of ``--dual-run=broker`` has no Python send to observe: skipped."""
+    match implementation:
+        case DualRunCase(implementation=Implementation.CORE):
+            pytest.skip('these tests observe the Python send, which the core run does not have')
+        case DualRunCase() | SingleRun():
+            pass
+    monkeypatch.setattr(PostgresBroker, 'enqueue', enqueue_caller.enqueue)
+    monkeypatch.setattr(PostgresBroker, 'enqueue_async', enqueue_caller.enqueue_async)
 
 
 @pytest.fixture(scope='module')

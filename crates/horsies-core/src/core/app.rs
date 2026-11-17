@@ -2075,6 +2075,8 @@ mod tests {
             )]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300, 900], true).unwrap()),
             timeout_ms: None,
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
         app.register("retryable_task", registered_with_options(opts))
             .unwrap();
@@ -2138,6 +2140,8 @@ mod tests {
             )]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300, 900], true).unwrap()),
             timeout_ms: None,
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
         app.register("retryable_task", registered_with_options(opts))
             .unwrap();
@@ -2595,6 +2599,8 @@ mod tests {
             auto_retry_for: None,
             retry_policy: None,
             timeout_ms: Some(5_000),
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
         app.register_with_queue("my_task", registered_with_options(options), "slow")
             .unwrap();
@@ -2822,6 +2828,8 @@ mod tests {
             auto_retry_for: None,
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300], true).unwrap()),
             timeout_ms: None,
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
 
         app.register("retry_me", registered_with_options(opts))
@@ -2844,6 +2852,8 @@ mod tests {
             auto_retry_for: Some(Vec::new()),
             retry_policy: None,
             timeout_ms: None,
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
 
         app.register("empty_retry_codes", registered_with_options(opts))
@@ -2876,6 +2886,8 @@ mod tests {
             auto_retry_for: None,
             retry_policy: None,
             timeout_ms: None,
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
 
         let err = app
@@ -2898,6 +2910,8 @@ mod tests {
             auto_retry_for: None,
             retry_policy: None,
             timeout_ms: None,
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
 
         let err = app
@@ -2918,6 +2932,8 @@ mod tests {
             auto_retry_for: None,
             retry_policy: None,
             timeout_ms: None,
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
 
         let err = app
@@ -2938,6 +2954,8 @@ mod tests {
             auto_retry_for: None,
             retry_policy: None,
             timeout_ms: None,
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
 
         app.register("good_task", registered_with_options(opts))
@@ -2955,6 +2973,8 @@ mod tests {
             auto_retry_for: None,
             retry_policy: None,
             timeout_ms: None,
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
 
         app.register("no_queue", registered_with_options(opts))
@@ -2976,6 +2996,8 @@ mod tests {
                     auto_retry_for: None,
                     retry_policy: None,
                     timeout_ms: None,
+                    execution: crate::core::task::Execution::Isolated,
+                    cancel_grace_ms: None,
                 }),
             )
             .unwrap();
@@ -2999,6 +3021,8 @@ mod tests {
             auto_retry_for: None,
             retry_policy: None,
             timeout_ms: None,
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
         app.register("good_task", registered_with_options(good_opts))
             .unwrap();
@@ -3011,6 +3035,8 @@ mod tests {
             auto_retry_for: None,
             retry_policy: None,
             timeout_ms: None,
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
         let err = app
             .register("bad_task", registered_with_options(bad_opts))
@@ -3030,6 +3056,8 @@ mod tests {
             auto_retry_for: None,
             retry_policy: None,
             timeout_ms: None,
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
 
         let err = app
@@ -3052,6 +3080,8 @@ mod tests {
             )]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300], true).unwrap()),
             timeout_ms: None,
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
 
         app.register("valid_retry_task", registered_with_options(opts))

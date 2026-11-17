@@ -6,8 +6,7 @@
 //!
 //! The start is one `horsies_start_attempt` call (`broker::claims::start_attempt`),
 //! as in Python. Its row read is planned here from the installed function
-//! body. The inline start statement `SET_RUNNING_SQL` has no production
-//! caller left and is removed with the in-process run path (#1056).
+//! body.
 
 use serial_test::serial;
 

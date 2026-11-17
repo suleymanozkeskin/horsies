@@ -5,6 +5,12 @@ Each list sends one statement in autocommit (``horsies_list_stale_tasks``,
 client statements it replaced; its LIST_END row says whether the function
 cut the list at ``TASK_LIST_ROW_BOUND`` rows. The stale threshold is
 checked before any statement.
+
+Since the monitoring switch the broker methods run in the core; this file
+tests Python's bodies before the switch, the dual-run reference
+(``tests/dualrun/reference/broker_monitoring.py``), which specifies the
+answers that the dual-run pair holds the core to. The broker facade is
+tested in ``tests/unit/test_broker_task_lists_in_core.py``.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from horsies.core.brokers.postgres import MAX_STALE_THRESHOLD_MINUTES, TASK_LIST
 from horsies.core.brokers.result_types import BrokerInvalidInput
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import is_err, is_ok
+from tests.dualrun.reference import broker_monitoring as reference
 from tests.unit.test_broker_postgres import _make_broker, _set_resources  # pyright: ignore[reportPrivateUsage]
 
 pytestmark = pytest.mark.unit
@@ -81,7 +88,7 @@ class TestStaleList:
         broker = _make_broker()
         _ = _answer(broker, [_stale_row(str(_TASK_1)), _stale_row(str(_TASK_2)), _list_end('COMPLETE')])
 
-        result = await broker.get_stale_tasks(stale_threshold_minutes=5)
+        result = await reference.get_stale_tasks(broker, stale_threshold_minutes=5)
 
         assert is_ok(result)
         assert result.ok_value[0] == {
@@ -100,7 +107,7 @@ class TestStaleList:
         broker = _make_broker()
         _ = _answer(broker, [_list_end('COMPLETE')])
 
-        result = await broker.get_stale_tasks()
+        result = await reference.get_stale_tasks(broker)
 
         assert is_ok(result)
         assert result.ok_value == []
@@ -110,7 +117,7 @@ class TestStaleList:
         broker = _make_broker()
         connection = _answer(broker, [_list_end('COMPLETE')])
 
-        _ = await broker.get_stale_tasks(stale_threshold_minutes=7)
+        _ = await reference.get_stale_tasks(broker, stale_threshold_minutes=7)
 
         assert connection.execute.await_args.args[1] == {'threshold_minutes': 7}
 
@@ -120,7 +127,7 @@ class TestStaleList:
         _ = _answer(broker, [_stale_row(str(_TASK_1)), _list_end('COMPLETE')])
 
         with caplog.at_level('WARNING'):
-            result = await broker.get_stale_tasks(stale_threshold_minutes=5)
+            result = await reference.get_stale_tasks(broker, stale_threshold_minutes=5)
 
         assert is_ok(result)
         assert not [r for r in caplog.records if r.levelname == 'WARNING']
@@ -131,7 +138,7 @@ class TestStaleList:
         _ = _answer(broker, [_stale_row(str(_TASK_1)), _list_end('TRUNCATED')])
 
         with caplog.at_level('WARNING'):
-            result = await broker.get_stale_tasks(stale_threshold_minutes=5)
+            result = await reference.get_stale_tasks(broker, stale_threshold_minutes=5)
 
         assert is_ok(result)
         assert [row['id'] for row in result.ok_value] == [_TASK_1]
@@ -147,7 +154,7 @@ class TestStaleList:
             broker = _make_broker()
             connection = _answer(broker, [_list_end('COMPLETE')])
 
-            result = await broker.get_stale_tasks(stale_threshold_minutes=minutes)
+            result = await reference.get_stale_tasks(broker, stale_threshold_minutes=minutes)
 
             assert is_ok(result), minutes
             assert connection.execute.await_args.args[1] == {'threshold_minutes': minutes}
@@ -172,7 +179,7 @@ class TestStaleList:
         broker = _make_broker()
         connection = _answer(broker, [_list_end('COMPLETE')])
 
-        result = await broker.get_stale_tasks(stale_threshold_minutes=cast(int, minutes))
+        result = await reference.get_stale_tasks(broker, stale_threshold_minutes=cast(int, minutes))
 
         assert is_err(result)
         match result.err_value:
@@ -189,7 +196,7 @@ class TestExpiredList:
         broker = _make_broker()
         connection = _answer(broker, [_expired_row(str(_TASK_1)), _list_end('COMPLETE')])
 
-        result = await broker.get_expired_tasks()
+        result = await reference.get_expired_tasks(broker)
 
         assert is_ok(result)
         assert list(result.ok_value[0]) == [
@@ -211,7 +218,7 @@ class TestExpiredList:
         _ = _answer(broker, [_expired_row(str(_TASK_1)), _list_end('TRUNCATED')])
 
         with caplog.at_level('WARNING'):
-            result = await broker.get_expired_tasks()
+            result = await reference.get_expired_tasks(broker)
 
         assert is_ok(result)
         warnings = [r.getMessage() for r in caplog.records if r.levelname == 'WARNING']

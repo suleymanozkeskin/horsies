@@ -61,4 +61,32 @@ BROKER_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=('raw_result_record',),
     ),
+    DualRunOperation(
+        name='send',
+        production_path='horsies.core.brokers.postgres:PostgresBroker.enqueue_async',
+        reference_path='tests.dualrun.reference.enqueue_caller:enqueue_async',
+        mode=PoolMode(),
+        core_methods=('enqueue_async',),
+    ),
+    DualRunOperation(
+        name='send, blocking',
+        production_path='horsies.core.brokers.postgres:PostgresBroker.enqueue',
+        reference_path='tests.dualrun.reference.enqueue_caller:enqueue',
+        mode=PoolMode(),
+        core_methods=('enqueue',),
+    ),
+    DualRunOperation(
+        name='claim pass',
+        production_path='horsies.core.worker.claiming:ClaimMixin._claim_rows',
+        reference_path='tests.dualrun.reference.claim_caller:claim_rows',
+        mode=PoolMode(),
+        core_methods=('claim_pass_async',),
+    ),
+    DualRunOperation(
+        name='soft-cap start count',
+        production_path='horsies.core.worker.claiming:ClaimMixin._count_queue_starts',
+        reference_path='tests.dualrun.reference.claim_caller:count_queue_starts',
+        mode=PoolMode(),
+        core_methods=('count_queue_starts_async',),
+    ),
 )

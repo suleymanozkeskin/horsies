@@ -297,8 +297,48 @@ const TASK_FACETS_QUERY_PARAMETERS: &[StubParameter] = &[
     keyword("error_categories", "list[str]"),
     keyword("retried_only", "bool"),
 ];
+const TASK_STATS_QUERY_PARAMETERS: &[StubParameter] = &[
+    keyword("window_lower", "datetime.datetime"),
+    keyword("window_upper", "datetime.datetime"),
+    keyword("task_names", "list[str]"),
+    keyword("queues", "list[str]"),
+    keyword("workers", "list[str]"),
+    keyword("error_codes", "list[str]"),
+    keyword("error_categories", "list[str]"),
+    keyword("retried_only", "bool"),
+];
+const TASK_BREAKDOWN_QUERY_PARAMETERS: &[StubParameter] = &[
+    keyword("window_lower", "datetime.datetime"),
+    keyword("window_upper", "datetime.datetime"),
+    keyword("group_by", "str"),
+    keyword("statuses", "list[str]"),
+    keyword("task_names", "list[str]"),
+    keyword("queues", "list[str]"),
+    keyword("workers", "list[str]"),
+    keyword("error_codes", "list[str]"),
+    keyword("error_categories", "list[str]"),
+    keyword("retried_only", "bool"),
+    keyword("limit", "int"),
+];
+const WORKFLOW_RUNS_QUERY_PARAMETERS: &[StubParameter] = &[
+    keyword("name", "str | None"),
+    keyword("status", "str | None"),
+    keyword("limit", "int"),
+];
+const MONITORING_TASK_STATS_PARAMETERS: &[StubParameter] = &[positional("query", "TaskStatsQuery")];
+const MONITORING_TASK_BREAKDOWN_PARAMETERS: &[StubParameter] =
+    &[positional("query", "TaskBreakdownQuery")];
+const MONITORING_WORKFLOW_RUNS_PARAMETERS: &[StubParameter] =
+    &[positional("query", "WorkflowRunsQuery")];
+const MONITORING_WORKFLOW_RUN_PARAMETERS: &[StubParameter] =
+    &[positional("workflow_id", "uuid.UUID")];
+const MONITORING_WORKFLOW_NODE_PARAMETERS: &[StubParameter] = &[
+    positional("workflow_id", "uuid.UUID"),
+    keyword("task_index", "int"),
+];
 const MONITORING_LIST_TASKS_PARAMETERS: &[StubParameter] = &[positional("query", "TaskListQuery")];
 const MONITORING_TASK_DETAIL_PARAMETERS: &[StubParameter] = &[positional("task_id", "uuid.UUID")];
+const STALE_TASKS_PARAMETERS: &[StubParameter] = &[positional("threshold_minutes", "object")];
 const MONITORING_TASK_FACETS_PARAMETERS: &[StubParameter] =
     &[positional("query", "TaskFacetsQuery")];
 
@@ -625,10 +665,11 @@ const CORE_HANDLE_METHODS: [StubFunction; 32] = [
 ];
 
 const MONITORING_READ_OUTCOME: &str = "MonitoringJson | MonitoringFailed";
+const TASK_LIST_OUTCOME: &str = "TaskListComplete | TaskListTruncated | BrokerFailure";
 const MONITORING_DETAIL_OUTCOME: &str = "MonitoringJson | TaskDetailAbsent | MonitoringFailed";
 
 /// The monitoring methods of `CoreHandle`.
-const MONITORING_HANDLE_METHODS: [StubFunction; 3] = [
+const MONITORING_HANDLE_METHODS: [StubFunction; 12] = [
     StubFunction {
         name: "monitoring_list_tasks_async",
         parameters: MONITORING_LIST_TASKS_PARAMETERS,
@@ -646,6 +687,60 @@ const MONITORING_HANDLE_METHODS: [StubFunction; 3] = [
         parameters: MONITORING_TASK_FACETS_PARAMETERS,
         returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
         doc: "The facets of one scope: the JSON text of the core's Facets. Reads only, in one\nstatement. A cancelled await drops the read.",
+    },
+    StubFunction {
+        name: "monitoring_task_stats_async",
+        parameters: MONITORING_TASK_STATS_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "The count of each task status: the JSON text of the core's list of StatusCount. Reads\nonly, in one statement.",
+    },
+    StubFunction {
+        name: "monitoring_task_breakdown_async",
+        parameters: MONITORING_TASK_BREAKDOWN_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "The task counts per group: the JSON text of the core's Breakdown. Reads only, in one\nstatement.",
+    },
+    StubFunction {
+        name: "monitoring_workflow_names_async",
+        parameters: &[],
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "The names of the root runs: the JSON text of a list of str. Reads only, in one statement.",
+    },
+    StubFunction {
+        name: "monitoring_workflow_runs_async",
+        parameters: MONITORING_WORKFLOW_RUNS_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "The newest root runs: the JSON text of the core's list of WorkflowRunSummary. Reads only,\nin one statement.",
+    },
+    StubFunction {
+        name: "monitoring_workflow_run_async",
+        parameters: MONITORING_WORKFLOW_RUN_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "One run with its nodes and edges: the JSON text of the core's WorkflowRunDetail, or null\nwhen no run has the id. Reads only, in one statement.",
+    },
+    StubFunction {
+        name: "monitoring_workflow_node_async",
+        parameters: MONITORING_WORKFLOW_NODE_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "One node with its task: the JSON text of the core's WorkflowTaskDetail, or null when the\nrun has no node at the index. Reads only, in one statement. An index outside 32 bits\nraises OverflowError.",
+    },
+    StubFunction {
+        name: "monitoring_schedules_async",
+        parameters: &[],
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "Every schedule state: the JSON text of the core's list of ScheduleStateInfo. Reads only,\nin one statement.",
+    },
+    StubFunction {
+        name: "stale_tasks_async",
+        parameters: STALE_TASKS_PARAMETERS,
+        returns: TypeText::FutureOf(TASK_LIST_OUTCOME),
+        doc: "The RUNNING tasks whose latest runner beat, or their start, is older than the\nthreshold. A bool, a value that is not an int, or one outside 0 to 525600 minutes is\nINVALID_INPUT before any core call. Reads only, in one statement.",
+    },
+    StubFunction {
+        name: "expired_tasks_async",
+        parameters: &[],
+        returns: TypeText::FutureOf(TASK_LIST_OUTCOME),
+        doc: "The PENDING tasks whose good_until passed before a worker took them. Reads only, in\none statement.",
     },
 ];
 
@@ -1612,7 +1707,7 @@ const HANDLE_CLASSES: [StubClass; 3] = [
 ];
 
 /// The classes of the monitoring reads and the web handler.
-const MONITORING_CLASSES: [StubClass; 7] = [
+const MONITORING_CLASSES: [StubClass; 12] = [
     StubClass {
         name: "MonitoringWindowRecord",
         doc: "The window of one monitoring request: UTC bounds, increasing, at most the core's maximum\napart.",
@@ -1641,6 +1736,27 @@ const MONITORING_CLASSES: [StubClass; 7] = [
         name: "TaskFacetsQuery",
         doc: "One frozen task facets read: the window, the statuses, the error categories that narrow\nthe code list, and the retried filter. A value outside its rule raises ValueError; a naive\nbound raises TypeError.",
         constructor: Constructor::Parameters(TASK_FACETS_QUERY_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskStatsQuery",
+        doc: "One frozen task stats read: the window and every filter but the status. A value outside\nits rule raises ValueError; a naive bound raises TypeError.",
+        constructor: Constructor::Parameters(TASK_STATS_QUERY_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskBreakdownQuery",
+        doc: "One frozen task breakdown read: the window, the group column, the filters and the group\nlimit. A value outside its rule raises ValueError; a naive bound raises TypeError.",
+        constructor: Constructor::Parameters(TASK_BREAKDOWN_QUERY_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowRunsQuery",
+        doc: "One frozen workflow runs read: the exact name and status filters (None for none) and the\nlimit. A limit outside 1 to 200 raises ValueError.",
+        constructor: Constructor::Parameters(WORKFLOW_RUNS_QUERY_PARAMETERS),
         properties: &[],
         methods: &[],
     },
@@ -1675,6 +1791,23 @@ const MONITORING_CLASSES: [StubClass; 7] = [
                 name: "reason",
                 annotation: TypeText::WireValuesOf(<TaskAbsenceReason as CodeEnum>::CATALOG),
             },
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskListComplete",
+        doc: "Every matching row of a task list: one dict per row, with the task id as uuid.UUID.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("rows", "list[dict[str, object]]")],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskListTruncated",
+        doc: "The first bound matching rows of a task list; more rows match.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("rows", "list[dict[str, object]]"),
+            property("bound", "int"),
         ],
         methods: &[],
     },
@@ -1825,12 +1958,312 @@ const HISTORY_CLASSES: [StubClass; 6] = [
     },
 ];
 
+/// The classes of the parent-child frame codec, for the Python child program
+/// and the preload process.
+const FRAME_CLASSES: [StubClass; 41] = [
+    StubClass {
+        name: "PythonProgram",
+        doc: "What a Python child imports before it reports ready.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("app_locator", "str"), property("imports", "list[str]"), property("sys_path_roots", "list[str]"), property("parent_sys_path", "list[str]"), property("parent_argv", "list[str]")],
+        methods: &[],
+    },
+    StubClass {
+        name: "IsolatedChildKind",
+        doc: "An isolated child: one task at a time.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_send_pool", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "SharedAsyncChildKind",
+        doc: "A shared async child: up to seats async tasks on one event loop.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("seats", "int"), property("executor_threads", "int"), property("task_send_pool", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "SharedThreadChildKind",
+        doc: "A shared thread child: up to seats blocking tasks, each on a thread.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("seats", "int"), property("task_send_pool", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "InitFrame",
+        doc: "The first frame to a child or to the preload process. The database URL and the\nconnection settings stay in the core.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("program", "PythonProgram | Literal['RUST']"), property("log_level", "Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']"), property("process_name", "str"), property("child_kind", "IsolatedChildKind | SharedAsyncChildKind | SharedThreadChildKind")],
+        methods: &[],
+    },
+    StubClass {
+        name: "StoredOptionsRefused",
+        doc: "Stored options of the row that the worker cannot use: the child sets the row\nRUNNING and fails the task before it resolves the task.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("kind", "Literal['OPTIONS_UNREADABLE', 'TIMEOUT_VALUE_INVALID', 'CANCEL_GRACE_INVALID']"), property("reason", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RunFrame",
+        doc: "Run one task in an isolated child. The parent holds the deadline.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID"), property("task_name", "str"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("work", "Literal['RUN'] | StoredOptionsRefused"), property("input", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "AsyncTaskWork",
+        doc: "Cancel the task timeout_ms after its start, then give it cancel_grace_ms to stop.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("timeout_ms", "int"), property("cancel_grace_ms", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "ThreadTaskWork",
+        doc: "Report the deadline timeout_ms after the child takes the run.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("timeout_ms", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "SharedRunFrame",
+        doc: "Run one task on a free seat of a shared child.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("dispatch", "int"), property("task_id", "uuid.UUID"), property("task_name", "str"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("work", "AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused"), property("input", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "StopFrame",
+        doc: "Exit normally. Sent only to a child with no task.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "FrameRefused",
+        doc: "A parent frame that the child refuses: the child exits with the bad-frame code.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("reason", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "ParentProtocolMismatch",
+        doc: "An init frame of another protocol version: the child logs both numbers and exits\nwith the protocol-mismatch code.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("received", "int | Literal['NOT_NAMED']"), property("expected", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "FrameOverBound",
+        doc: "A header over the bounds: nothing was allocated for its frame, and the channel\ncannot be read on.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("meta_bytes", "int"), property("body_bytes", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "FrameTooLarge",
+        doc: "A frame that cannot be sent: its metadata or its body is over a bound of the\nheader. Nothing was encoded.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("part", "Literal['METADATA', 'BODY']"), property("bytes", "int"), property("bound", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "ProtocolNumbers",
+        doc: "The protocol version, the exit codes of a child and the spawn request byte.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("protocol_version", "int"), property("parent_gone_exit_code", "int"), property("bad_parent_frame_exit_code", "int"), property("bad_arguments_exit_code", "int"), property("stopped_with_executor_threads_exit_code", "int"), property("boot_failed_exit_code", "int"), property("reparent_failed_exit_code", "int"), property("protocol_mismatch_exit_code", "int"), property("child_hook_failed_exit_code", "int"), property("spawn_request_byte", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "FrameReader",
+        doc: "The read buffer of the channel from the worker parent, with the bounds of the core\nreader.",
+        constructor: Constructor::Parameters(&[]),
+        properties: &[],
+        methods: &[
+            StubFunction {
+                name: "feed",
+                parameters: &[positional("data", "bytes")],
+                returns: TypeText::Plain("list[InitFrame | RunFrame | SharedRunFrame | StopFrame] | FrameOverBound | FrameRefused | ParentProtocolMismatch"),
+                doc: "Take the bytes that arrived and give the whole parent frames they complete, in\norder. A refusal means the channel cannot be read on.",
+            },
+        ],
+    },
+    StubClass {
+        name: "TaskResult",
+        doc: "The task produced a result envelope: a value or a task error.",
+        constructor: Constructor::Parameters(&[keyword("envelope", "str")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "StoppedBeforeRunning",
+        doc: "The child stopped before it set the row RUNNING; no task code ran.",
+        constructor: Constructor::Parameters(&[keyword("reason", "Literal['CLAIM_LOST', 'OWNERSHIP_UNCONFIRMED', 'WORKFLOW_STOPPED', 'TASK_EXPIRED', 'NODE_NOT_LINKED']")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkerFailure",
+        doc: "The worker code of the child failed, not the task. The detail is cut to its bound.",
+        constructor: Constructor::Parameters(&[keyword("detail", "str")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "LoopHoldsTasks",
+        doc: "count asyncio tasks that are not done are on a task loop; names holds\nmin(count, 10) names, each cut to its bound.",
+        constructor: Constructor::Parameters(&[keyword("count", "int"), keyword("names", "list[str]")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "StuckWork",
+        doc: "The work of a run that did not stop after its cancel rounds: at least one task or\nexecutor item; names holds min(tasks, 10) names.",
+        constructor: Constructor::Parameters(&[keyword("tasks", "int"), keyword("executor_items", "int"), keyword("names", "list[str]")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "BlockingRun",
+        doc: "The run whose task held a blocked loop.",
+        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "ResourceShortage",
+        doc: "A boot step failed with an errno of a resource limit.",
+        constructor: Constructor::Parameters(&[keyword("errno", "Literal['EMFILE', 'ENFILE', 'ENOMEM', 'EAGAIN']")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "ReadyFrame",
+        doc: "Boot finished; the child can take a task.",
+        constructor: Constructor::Parameters(&[keyword("pid", "int"), keyword("rss_mb", "float | Literal['UNREADABLE']")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "BootFailedFrame",
+        doc: "In place of the ready frame: the boot failed, and the child exits. Texts are cut\nto their bounds.",
+        constructor: Constructor::Parameters(&[keyword("cause", "ResourceShortage | Literal['APP_LOAD_FAILED', 'CHILD_POOL_SETUP_FAILED', 'TASK_LOOP_CREATE_FAILED', 'THREAD_START_REFUSED']"), keyword("error_name", "str"), keyword("detail", "str")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "ResultFrame",
+        doc: "An isolated task ended and left no work on a task loop.",
+        constructor: Constructor::Parameters(&[keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure"), keyword("rss_mb", "float | Literal['UNREADABLE']"), keyword("task_loop", "Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK']")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "BodyReturnedFrame",
+        doc: "The body of an isolated task returned, and work it started is still on the task\nloop.",
+        constructor: Constructor::Parameters(&[keyword("task_id", "uuid.UUID"), keyword("returned", "TaskResult | WorkerFailure"), keyword("left", "LoopHoldsTasks")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "LeftWorkEndedFrame",
+        doc: "The work that an isolated task left has ended.",
+        constructor: Constructor::Parameters(&[keyword("task_id", "uuid.UUID"), keyword("end", "Literal['IN_GRACE', 'CANCELLED']"), keyword("rss_mb", "float | Literal['UNREADABLE']")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "LeftWorkStuckFrame",
+        doc: "The work that an isolated task left did not stop after the cancel rounds.",
+        constructor: Constructor::Parameters(&[keyword("task_id", "uuid.UUID"), keyword("still", "LoopHoldsTasks")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "SharedResultFrame",
+        doc: "A run of a shared child ended; its seat is free.",
+        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT']"), keyword("rss_mb", "float | Literal['UNREADABLE']")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "DeadlineFiredFrame",
+        doc: "The deadline of a run fired.",
+        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "SecondCancelFrame",
+        doc: "The cancel grace of a run ran out while it was alive.",
+        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "RunStuckFrame",
+        doc: "A run did not stop after its second cancel and its cancel rounds.",
+        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID"), keyword("work", "StuckWork")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "LeftoverCancelFrame",
+        doc: "The body of a run returned before its deadline, and its marked work was alive one\ncancel grace later.",
+        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID"), keyword("returned", "TaskResult | WorkerFailure")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "LeftoverStuckFrame",
+        doc: "The work a run left after its return did not stop after its cancel rounds.",
+        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID"), keyword("work", "StuckWork"), keyword("returned", "TaskResult | WorkerFailure")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "LoopBlockedFrame",
+        doc: "The event loop of a shared async child has not turned for blocked_ms. The location\nis cut to its bound.",
+        constructor: Constructor::Parameters(&[keyword("culprit", "BlockingRun | Literal['UNKNOWN']"), keyword("blocked_ms", "int"), keyword("location", "str")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "PreloadReadyFrame",
+        doc: "Imports are done, so forks can start.",
+        constructor: Constructor::Parameters(&[keyword("pid", "int")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "ChildForkedFrame",
+        doc: "The child exists, and it has left the preload process.",
+        constructor: Constructor::Parameters(&[keyword("pid", "int")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "ForkFailedFrame",
+        doc: "This fork failed. The preload process stays up. The reason is cut to its bound.",
+        constructor: Constructor::Parameters(&[keyword("reason", "str")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "PreloadRefusedFrame",
+        doc: "The preload process cannot fork safely, and it exits. The reason is cut to its\nbound.",
+        constructor: Constructor::Parameters(&[keyword("reason", "str")]),
+        properties: &[],
+        methods: &[],
+    },
+];
+
 const CLASS_COUNT: usize = HANDLE_CLASSES.len()
     + ARGUMENT_CLASSES.len()
     + RECORD_CLASSES.len()
     + MONITORING_CLASSES.len()
     + WORKFLOW_CLASSES.len()
-    + HISTORY_CLASSES.len();
+    + HISTORY_CLASSES.len()
+    + FRAME_CLASSES.len();
 
 const CLASSES: [StubClass; CLASS_COUNT] = {
     let mut classes = [HANDLE_CLASSES[0]; CLASS_COUNT];
@@ -1868,6 +2301,12 @@ const CLASSES: [StubClass; CLASS_COUNT] = {
         classes[history_start + history_position] = HISTORY_CLASSES[history_position];
         history_position += 1;
     }
+    let frame_start = history_start + HISTORY_CLASSES.len();
+    let mut frame_position = 0;
+    while frame_position < FRAME_CLASSES.len() {
+        classes[frame_start + frame_position] = FRAME_CLASSES[frame_position];
+        frame_position += 1;
+    }
     classes
 };
 
@@ -1885,10 +2324,34 @@ const FUNCTIONS: &[StubFunction] = &[
         doc: "The state of the core in this process. Starts nothing.",
     },
     StubFunction {
+        name: "decode_parent_frame",
+        parameters: &[positional("meta", "bytes"), positional("body", "bytes")],
+        returns: TypeText::Plain("InitFrame | RunFrame | SharedRunFrame | StopFrame | FrameRefused | ParentProtocolMismatch"),
+        doc: "Decode one parent frame from its metadata and its body. Pure.",
+    },
+    StubFunction {
+        name: "encode_child_frame",
+        parameters: &[positional("frame", "ReadyFrame | BootFailedFrame | ResultFrame | BodyReturnedFrame | LeftWorkEndedFrame | LeftWorkStuckFrame | SharedResultFrame | DeadlineFiredFrame | SecondCancelFrame | RunStuckFrame | LeftoverCancelFrame | LeftoverStuckFrame | LoopBlockedFrame")],
+        returns: TypeText::Plain("bytes | FrameTooLarge"),
+        doc: "Encode a child frame: its bytes, or FrameTooLarge when it is over a bound of the\nheader. Pure.",
+    },
+    StubFunction {
+        name: "encode_preload_frame",
+        parameters: &[positional("frame", "PreloadReadyFrame | ChildForkedFrame | ForkFailedFrame | PreloadRefusedFrame")],
+        returns: TypeText::Plain("bytes"),
+        doc: "Encode a preload frame: its bytes. Pure.",
+    },
+    StubFunction {
         name: "mint_task_id",
         parameters: &[],
         returns: TypeText::Plain("uuid.UUID | IdMintRefused"),
         doc: "Mint a new task id (UUIDv7). Starts no runtime.",
+    },
+    StubFunction {
+        name: "protocol_numbers",
+        parameters: &[],
+        returns: TypeText::Plain("ProtocolNumbers"),
+        doc: "The protocol version, the exit codes of a child and the spawn request byte. Pure.",
     },
     StubFunction {
         name: "refresh_log_levels",

@@ -15,9 +15,6 @@
 //!   `horsies._core` ([`BASELINE_SQL_FILE_TEXTS`]) and installs them as its
 //!   migration 1000 with the same checksum rule, so both write the same
 //!   bookkeeping row.
-//! - Version 1001 holds the claim functions of the copied Rust worker, which
-//!   have no counterpart in migration 1000. It goes when the worker claims
-//!   through the functions of migration 1000.
 //!
 //! The install ([`install_schema_on`]; Python reference:
 //! `python/horsies/core/baseline/install.py`, and `_run_fleet_schema_init` in
@@ -127,7 +124,10 @@ enum FamilyRow {
     /// Migration 1000 creates the family table; its transaction writes the
     /// row (Python `install_baseline`).
     WrittenWithMigration,
-    /// The migration writes no family row.
+    /// The migration writes no family row: every migration after the
+    /// baseline. The chain holds the baseline only until the first migration
+    /// after it, so only tests construct this variant now.
+    #[cfg_attr(not(test), allow(dead_code))]
     NotWritten,
 }
 
@@ -139,7 +139,10 @@ enum ReaderPublication {
     /// the publication function; its transaction publishes the readers, so a
     /// recorded version 1000 always has them.
     PublishedWithMigration,
-    /// The migration does not change what the readers read.
+    /// The migration does not change what the readers read. As
+    /// [`FamilyRow::NotWritten`], only tests construct it while the chain
+    /// holds the baseline only.
+    #[cfg_attr(not(test), allow(dead_code))]
     NotPublished,
 }
 
@@ -152,26 +155,15 @@ struct MigrationSource {
     readers: ReaderPublication,
 }
 
-/// The embedded chain, in apply order.
-const MIGRATION_SOURCES: [MigrationSource; 2] = [
-    MigrationSource {
-        version: BASELINE_MIGRATION_VERSION,
-        description: "baseline",
-        script: SqlScript::new("migration_1000_baseline", BASELINE_SQL),
-        family_row: FamilyRow::WrittenWithMigration,
-        readers: ReaderPublication::PublishedWithMigration,
-    },
-    MigrationSource {
-        version: 1001,
-        description: "interim rust claim functions",
-        script: SqlScript::new(
-            "migration_1001_interim_rust_claim_functions",
-            include_str!("../../migrations/1001_interim_rust_claim_functions.sql"),
-        ),
-        family_row: FamilyRow::NotWritten,
-        readers: ReaderPublication::NotPublished,
-    },
-];
+/// The embedded chain, in apply order: the baseline only, the chain that
+/// the Python client installs too.
+const MIGRATION_SOURCES: [MigrationSource; 1] = [MigrationSource {
+    version: BASELINE_MIGRATION_VERSION,
+    description: "baseline",
+    script: SqlScript::new("migration_1000_baseline", BASELINE_SQL),
+    family_row: FamilyRow::WrittenWithMigration,
+    readers: ReaderPublication::PublishedWithMigration,
+}];
 
 /// The most rows that one state read returns: `horsies_` table names, and
 /// bookkeeping rows (Python `CATALOG_NAME_LIMIT`).

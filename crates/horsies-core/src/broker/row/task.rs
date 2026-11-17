@@ -7,64 +7,6 @@ use crate::core::{Execution, ExecutionClass, TaskInfo, TaskStatus};
 
 use crate::broker::error::BrokerError;
 
-/// Row returned by SET_RUNNING_SQL — the attempt context read atomically
-/// with the CLAIMED → RUNNING transition.
-///
-/// `retry_count`, `max_retries`, and `good_until` are threaded through
-/// execution into finalize with NO re-read: `admit_retry`, the retry-delay
-/// math, and the expired-vs-reclaimed postcheck all consume them directly.
-/// That is sound under three invariants the schema and statements maintain:
-///
-/// 1. `max_retries` and `good_until` are frozen at enqueue — no statement
-///    mutates them.
-/// 2. `retry_count` changes only in statements that simultaneously move the
-///    row out of RUNNING-owned (the owner's `REQUEUE_SQL`) or clear
-///    ownership (reaper requeue).
-/// 3. Every terminal/requeue write CASes on
-///    `status = 'RUNNING' AND claimed_by_worker_id = <me>` (plus the
-///    optional `started_at` generation fence); a CAS miss aborts the
-///    finalize.
-///
-/// Together these make the snapshot provably equal to the row whenever a
-/// write lands — the values were read under the row lock of the transition
-/// itself. A feature that mutates `retry_count` (or any column above) on a
-/// live RUNNING-owned row breaks invariant 2 and must revisit the
-/// finalize/retry flow, not just its own write.
-#[derive(Debug, Clone, FromRow)]
-pub struct SetRunningRow {
-    #[allow(dead_code)] // populated by FromRow; used as existence check
-    pub id: Uuid,
-    pub started_at: DateTime<Utc>,
-    pub retry_count: i32,
-    pub max_retries: i32,
-    pub good_until: Option<DateTime<Utc>>,
-}
-
-/// Task columns returned by the claim (and the buffered-claimed reload).
-///
-/// `claimed_at` is the claim generation this dispatch was born from: set by
-/// the claim, cleared by every requeue, and threaded through dispatch so
-/// every statement acting on a row this worker believes it owns can fence on
-/// it. `started_at` cannot serve there — a CLAIMED row has none. Both reads
-/// that build this row select rows that the claim wrote, and the claim sets
-/// `claimed_at` on every row it takes, so the generation is required: a NULL
-/// fails the decode instead of turning the fence off.
-///
-/// The attempt context (`retry_count`, `max_retries`, `good_until`) is NOT
-/// part of this row; the dispatch reads it from [`SetRunningRow`], returned
-/// by the transition that locks the row.
-#[derive(Debug, Clone, FromRow)]
-pub struct ClaimedTaskRow {
-    pub id: Uuid,
-    pub task_name: String,
-    /// The encoded task input as one JSON value, as the send wrote it.
-    pub input: String,
-    pub queue_name: String,
-    pub is_workflow_task: bool,
-    pub task_options: Option<String>,
-    pub claimed_at: DateTime<Utc>,
-}
-
 /// Columns fetched for result retrieval.
 #[derive(Debug, FromRow)]
 pub struct TaskResultRow {
@@ -216,9 +158,9 @@ pub struct ExpiredTaskRow {
     pub sent_at: DateTime<Utc>,
     pub enqueued_at: DateTime<Utc>,
     pub good_until: DateTime<Utc>,
-    /// How long ago `good_until` passed, in milliseconds, on the database
-    /// clock (Python's `expired_for`).
-    pub expired_for_ms: i64,
+    /// How long ago `good_until` passed, in microseconds, on the database
+    /// clock: the exact length of Python's `expired_for` interval.
+    pub expired_for_us: i64,
 }
 
 #[cfg(test)]

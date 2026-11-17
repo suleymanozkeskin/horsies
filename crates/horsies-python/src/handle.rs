@@ -5,21 +5,20 @@
 //! Building a handle parses the manifest and starts nothing: no runtime, no
 //! connection. The first operation starts the core of the process and
 //! connects the handle's broker; a failed connect is not kept, so the next
-//! operation connects again.
+//! operation connects again. The lazy handle is the core's
+//! ([`horsies_core::handle::CoreHandle`]), with the client family
+//! `PYTHON`.
 
 use std::future::Future;
 use std::sync::Arc;
 
 use horsies_core::core::lifecycle::OwnedClaim;
+use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
-use horsies_core::{
-    BrokerError, BrokerErrorCode, ClientFamily, PoolProfile, PostgresBroker,
-    SchemaInitializationMode,
-};
+use horsies_core::{BrokerError, BrokerErrorCode, ClientFamily, PoolProfile, PostgresBroker};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
-use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use crate::bridge::blocking::{call_blocking, call_blocking_within};
@@ -39,8 +38,10 @@ use crate::operations::failed_attempt::{
     finish_ended_attempt_operation, finish_failed_attempt_operation, FinishFailedAttemptRequest,
 };
 use crate::operations::monitoring_reads::{
-    list_tasks_operation, task_detail_operation, task_facets_operation, TaskFacetsQuery,
-    TaskListQuery,
+    list_tasks_operation, schedules_operation, task_breakdown_operation, task_detail_operation,
+    task_facets_operation, task_stats_operation, workflow_names_operation, workflow_node_operation,
+    workflow_run_operation, workflow_runs_operation, TaskBreakdownQuery, TaskFacetsQuery,
+    TaskListQuery, TaskStatsQuery, WorkflowRunsQuery,
 };
 use crate::operations::paused_expiry::expire_paused_workflows_operation;
 use crate::operations::queue_starts::{count_queue_starts_operation, QueueStartsRequest};
@@ -54,18 +55,20 @@ use crate::operations::success::{
     SuccessBatchRequest,
 };
 use crate::operations::task_info::{task_info_operation, TaskInfoParts};
+use crate::operations::task_lists::{
+    expired_tasks_operation, stale_tasks_operation, stale_threshold,
+};
 use crate::operations::workflow_lifecycle::{cancel_workflow_operation, pause_workflow_operation};
 use crate::operations::workflow_retention::delete_expired_workflows_operation;
 use crate::process_core::{core_for_call, Core};
 use crate::records::{BrokerFailure, DatabasePingRecord, HandleClosed, Outcome};
 
-/// The manifest of a handle, the pool profile of its process, and its
-/// broker, connected at first use.
+/// The core's lazy handle of a Python process: a manifest, the pool
+/// profile of the process, the client family `PYTHON`, and the broker,
+/// connected at first use. Clones share one handle.
 #[derive(Clone)]
 pub struct BrokerConnection {
-    manifest: Arc<ProducerManifest>,
-    profile: PoolProfile,
-    broker: Arc<OnceCell<Arc<PostgresBroker>>>,
+    handle: Arc<LazyHandle>,
 }
 
 impl BrokerConnection {
@@ -73,79 +76,38 @@ impl BrokerConnection {
     /// nothing: the first operation connects.
     pub fn new(manifest: ProducerManifest, profile: PoolProfile) -> Self {
         Self {
-            manifest: Arc::new(manifest),
-            profile,
-            broker: Arc::new(OnceCell::new()),
+            handle: Arc::new(LazyHandle::new(manifest, profile, ClientFamily::Python)),
         }
     }
 
     /// The connected broker. Connects at the first call; a failure is
-    /// returned and not kept.
+    /// returned and not kept ([`LazyHandle::broker`]).
     pub async fn broker(&self) -> Result<Arc<PostgresBroker>, BrokerError> {
-        self.broker
-            .get_or_try_init(|| connect(&self.manifest, self.profile))
-            .await
-            .map(Arc::clone)
+        self.handle.broker().await
     }
 
     /// The connected broker, with the schema installed once per handle
-    /// first ([`PostgresBroker::ensure_schema_initialized`]: nothing in an
-    /// `OBSERVE_ONLY` or `ASSUME_INITIALIZED` handle), as Python's broker
-    /// installs at its first enqueue or read. A failure of the connect or
-    /// of the install is returned and not kept, so the next call runs it
-    /// again.
+    /// first ([`LazyHandle::initialized_broker`]).
     pub async fn initialized_broker(&self) -> Result<Arc<PostgresBroker>, BrokerError> {
-        let broker = self.broker().await?;
-        broker.ensure_schema_initialized().await?;
-        Ok(broker)
+        self.handle.initialized_broker().await
     }
 
     /// The schema mode of the handle's manifest.
     pub fn schema_mode(&self) -> SchemaMode {
-        self.manifest.schema
+        self.handle.schema_mode()
+    }
+
+    /// The manifest of the handle.
+    fn manifest(&self) -> &ProducerManifest {
+        self.handle.manifest()
     }
 
     /// Whether a connect succeeded on this handle. Starts nothing and waits
-    /// for nothing: a connect still in flight is `NeverConnected`.
-    fn connect_state(&self) -> ConnectState {
-        match self.broker.get() {
-            Some(broker) => ConnectState::Connected(Arc::clone(broker)),
-            None => ConnectState::NeverConnected,
-        }
+    /// for nothing: a connect still in flight is `NeverConnected`, and the
+    /// core of the process may not have started then.
+    fn connect_state(&self) -> HandleConnection {
+        self.handle.connection()
     }
-}
-
-/// Whether a handle holds a connected broker.
-enum ConnectState {
-    /// No connect succeeded: the handle holds no pool, and the core of the
-    /// process may not have started.
-    NeverConnected,
-    Connected(Arc<PostgresBroker>),
-}
-
-async fn connect(
-    manifest: &ProducerManifest,
-    profile: PoolProfile,
-) -> Result<Arc<PostgresBroker>, BrokerError> {
-    let config = manifest
-        .database
-        .to_postgres_config(manifest.send.retain_rerun_input_default);
-    // `AssumeInitialized` runs no schema step, as `ObserveOnly`, and has no
-    // listener (Python's `assume_initialized=True`): a result wait polls.
-    let mode = match manifest.schema {
-        SchemaMode::MigrateAndValidate => SchemaInitializationMode::MigrateAndValidate,
-        SchemaMode::ObserveOnly | SchemaMode::AssumeInitialized => {
-            SchemaInitializationMode::ObserveOnly
-        }
-    };
-    let window = manifest.send.idempotency_reservation_window.as_duration();
-    let broker = PostgresBroker::connect_with_policies(&config, mode, window, profile)
-        .await?
-        .with_client_family(ClientFamily::Python);
-    Ok(Arc::new(match manifest.schema {
-        SchemaMode::AssumeInitialized => broker.without_listener(),
-        SchemaMode::MigrateAndValidate | SchemaMode::ObserveOnly => broker,
-    }))
 }
 
 /// The pool profile of a `CoreHandle`'s process: `PRODUCER` or `WORKER`.
@@ -196,7 +158,7 @@ impl CoreHandle {
     /// The version of the manifest this handle was built from.
     #[getter]
     fn manifest_version(&self) -> u32 {
-        self.connection.manifest.manifest_version.get()
+        self.connection.manifest().manifest_version.get()
     }
 
     /// Close the handle's core pools: `HandleClosed`. No new operation takes
@@ -207,8 +169,8 @@ impl CoreHandle {
     /// opens new core pools. Runs on to its end when the caller leaves.
     fn close(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let broker = match self.connection.connect_state() {
-            ConnectState::NeverConnected => return HandleClosed {}.into_py_any(py),
-            ConnectState::Connected(broker) => broker,
+            HandleConnection::NeverConnected => return HandleClosed {}.into_py_any(py),
+            HandleConnection::Connected(broker) => broker,
         };
         let core = checked_core(py)?;
         call_blocking(
@@ -224,8 +186,8 @@ impl CoreHandle {
     /// a future that is already done, and starts nothing.
     fn close_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let broker = match self.connection.connect_state() {
-            ConnectState::NeverConnected => return done_future(py, HandleClosed {}),
-            ConnectState::Connected(broker) => broker,
+            HandleConnection::NeverConnected => return done_future(py, HandleClosed {}),
+            HandleConnection::Connected(broker) => broker,
         };
         let core = checked_core(py)?;
         call_async(
@@ -897,6 +859,181 @@ impl CoreHandle {
             task_facets_operation(self.connection(), query.get().query()),
         )
     }
+
+    /// The count of each task status (`horsies_monitoring_task_stats`):
+    /// `MonitoringJson` of the core's `Vec<StatusCount>`, or
+    /// `MonitoringFailed`. Reads only, in one statement. Awaitable only: its
+    /// caller, `horsies.monitoring.task_stats`, is a coroutine. A cancelled
+    /// await drops the read.
+    fn monitoring_task_stats_async<'py>(
+        &self,
+        py: Python<'py>,
+        query: &Bound<'_, TaskStatsQuery>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_task_stats_async",
+            CallKind::Read,
+            task_stats_operation(self.connection(), query.get().query()),
+        )
+    }
+
+    /// The task counts per group (`horsies_monitoring_task_breakdown`):
+    /// `MonitoringJson` of the core's `Breakdown`, or `MonitoringFailed`.
+    /// Reads only, in one statement. Awaitable only. A cancelled await drops
+    /// the read.
+    fn monitoring_task_breakdown_async<'py>(
+        &self,
+        py: Python<'py>,
+        query: &Bound<'_, TaskBreakdownQuery>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_task_breakdown_async",
+            CallKind::Read,
+            task_breakdown_operation(self.connection(), query.get().query()),
+        )
+    }
+
+    /// The names of the root runs (`horsies_monitoring_workflow_names`):
+    /// `MonitoringJson` of the core's `Vec<String>`, or `MonitoringFailed`.
+    /// Reads only, in one statement. Awaitable only. A cancelled await drops
+    /// the read.
+    fn monitoring_workflow_names_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_workflow_names_async",
+            CallKind::Read,
+            workflow_names_operation(self.connection()),
+        )
+    }
+
+    /// The newest root runs (`horsies_monitoring_workflow_runs`):
+    /// `MonitoringJson` of the core's `Vec<WorkflowRunSummary>`, or
+    /// `MonitoringFailed`. Reads only, in one statement. Awaitable only. A
+    /// cancelled await drops the read.
+    fn monitoring_workflow_runs_async<'py>(
+        &self,
+        py: Python<'py>,
+        query: &Bound<'_, WorkflowRunsQuery>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_workflow_runs_async",
+            CallKind::Read,
+            workflow_runs_operation(self.connection(), query.get().query()),
+        )
+    }
+
+    /// One run with its nodes and edges (`horsies_monitoring_workflow_run`):
+    /// `MonitoringJson` of the core's `Option<WorkflowRunDetail>` (`null`
+    /// when no run has the id), or `MonitoringFailed`. Reads only, in one
+    /// statement. Awaitable only. A cancelled await drops the read.
+    fn monitoring_workflow_run_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_workflow_run_async",
+            CallKind::Read,
+            workflow_run_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// One node with its task (`horsies_monitoring_workflow_node`):
+    /// `MonitoringJson` of the core's `Option<WorkflowTaskDetail>` (`null`
+    /// when the run has no node at the index), or `MonitoringFailed`. Reads
+    /// only, in one statement. Awaitable only. A cancelled await drops the
+    /// read. An index outside 32 bits raises `OverflowError`.
+    #[pyo3(signature = (workflow_id, *, task_index))]
+    fn monitoring_workflow_node_async<'py>(
+        &self,
+        py: Python<'py>,
+        workflow_id: Uuid,
+        task_index: i32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_workflow_node_async",
+            CallKind::Read,
+            workflow_node_operation(self.connection(), workflow_id, task_index),
+        )
+    }
+
+    /// Every schedule state (`horsies_monitoring_schedules`):
+    /// `MonitoringJson` of the core's `Vec<ScheduleStateInfo>`, or
+    /// `MonitoringFailed`. Reads only, in one statement. Awaitable only. A
+    /// cancelled await drops the read.
+    fn monitoring_schedules_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_schedules_async",
+            CallKind::Read,
+            schedules_operation(self.connection()),
+        )
+    }
+
+    /// The RUNNING tasks whose latest runner beat, or their start when they
+    /// have no beat, is older than `threshold_minutes`
+    /// (`horsies_list_stale_tasks`): `TaskListComplete`,
+    /// `TaskListTruncated`, or `BrokerFailure` with `INVALID_INPUT` or
+    /// `MONITORING_QUERY_FAILED`. The threshold follows Python's rule: a
+    /// `bool`, a value that is not an `int`, or one outside 0 to 525,600
+    /// minutes is `INVALID_INPUT` in a future that is already done, before
+    /// any core call. Reads only, in one statement. Awaitable only: its
+    /// caller, `PostgresBroker.get_stale_tasks`, is a coroutine. A cancelled
+    /// await drops the read.
+    fn stale_tasks_async<'py>(
+        &self,
+        py: Python<'py>,
+        threshold_minutes: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let threshold = match stale_threshold(threshold_minutes)? {
+            Ok(threshold) => threshold,
+            Err(refused) => return done_future(py, BrokerFailure::from(refused.error())),
+        };
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.stale_tasks_async",
+            CallKind::Read,
+            stale_tasks_operation(self.connection(), threshold),
+        )
+    }
+
+    /// The PENDING tasks whose `good_until` passed before a worker took them
+    /// (`horsies_list_expired_tasks`): `TaskListComplete`,
+    /// `TaskListTruncated`, or `BrokerFailure` with
+    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement. Awaitable
+    /// only: its caller, `PostgresBroker.get_expired_tasks`, is a coroutine.
+    /// A cancelled await drops the read.
+    fn expired_tasks_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.expired_tasks_async",
+            CallKind::Read,
+            expired_tasks_operation(self.connection()),
+        )
+    }
 }
 
 /// The core of this process for one call, or the refusal as a Python error.
@@ -976,10 +1113,11 @@ mod tests {
     #[test]
     fn a_worker_process_handle_keeps_its_profile_and_starts_nothing() {
         let handle = CoreHandle::new(MANIFEST, "WORKER").expect("the manifest is complete");
-        assert_eq!(handle.connection.profile, PoolProfile::Worker);
+        assert_eq!(handle.connection.handle.profile(), PoolProfile::Worker);
+        assert_eq!(handle.connection.handle.family(), ClientFamily::Python);
         assert!(matches!(
             handle.connection.connect_state(),
-            ConnectState::NeverConnected
+            HandleConnection::NeverConnected
         ));
     }
 
@@ -988,7 +1126,7 @@ mod tests {
         let handle = CoreHandle::new(MANIFEST, "PRODUCER").expect("the manifest is complete");
         assert!(matches!(
             handle.connection.connect_state(),
-            ConnectState::NeverConnected
+            HandleConnection::NeverConnected
         ));
         Python::initialize();
         Python::attach(|py| {
@@ -999,7 +1137,7 @@ mod tests {
         });
         assert!(matches!(
             handle.connection.connect_state(),
-            ConnectState::NeverConnected
+            HandleConnection::NeverConnected
         ));
     }
 }
