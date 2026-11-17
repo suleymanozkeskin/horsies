@@ -296,3 +296,210 @@ fn a_handle_error_maps_to_its_read_failure() {
         WorkflowReadError::AsyncContext { .. }
     ));
 }
+
+/// Python's handle: an outputless entry that is `null`, has no task name,
+/// or is not a result envelope is a `RESULT_DESERIALIZATION_ERROR` outcome
+/// with its node in `data.node_id`; the other entries stay readable.
+#[test]
+fn an_outputless_entry_without_a_payload_a_task_name_or_an_envelope_names_its_node() {
+    let stored = json!({
+        "__h_task_result__": true,
+        "__h_outputless_terminals__": true,
+        "ok": {
+            "results_by_id": {
+                "a": {"__h_task_result__": true, "ok": 1, "err": null},
+                "b": null,
+                "c": {"not": "an envelope"},
+                "d": {"__h_task_result__": true, "ok": 2, "err": null},
+            },
+            "task_name_by_id": {"a": "t", "b": "t", "c": "t"},
+            "definition_key_by_id": {"a": null, "b": null, "c": null, "d": null},
+        },
+        "err": null,
+    });
+    let TaskOutcome::Succeeded(results) =
+        end_outcome::<OutputlessResults>(workflow(), completed(Some(stored))).unwrap()
+    else {
+        panic!("an outputless result reads as Succeeded");
+    };
+    assert_eq!(results.get("a"), Some(&TaskOutcome::Succeeded(json!(1))));
+    for node in ["b", "c", "d"] {
+        let Some(TaskOutcome::Failed(error)) = results.get(node) else {
+            panic!("entry {node} reads as Failed");
+        };
+        assert_eq!(
+            error.code().text(),
+            "RESULT_DESERIALIZATION_ERROR",
+            "{node}"
+        );
+        assert_eq!(error.data(), Some(&json!({ "node_id": node })), "{node}");
+    }
+}
+
+/// Python's handle refuses an outputless envelope whose `ok` slot is not an
+/// object, or whose `results_by_id`, `task_name_by_id` or
+/// `definition_key_by_id` is not an object; a missing map is empty.
+#[test]
+fn a_malformed_outputless_envelope_is_unreadable_and_a_missing_map_is_empty() {
+    let envelope = |ok: serde_json::Value| {
+        json!({
+            "__h_task_result__": true,
+            "__h_outputless_terminals__": true,
+            "ok": ok,
+            "err": null,
+        })
+    };
+    for ok in [
+        json!(5),
+        json!({"results_by_id": [1]}),
+        json!({"results_by_id": {}, "task_name_by_id": [1]}),
+        json!({"results_by_id": {}, "definition_key_by_id": "x"}),
+    ] {
+        let read =
+            end_outcome::<OutputlessResults>(workflow(), completed(Some(envelope(ok.clone()))));
+        assert!(
+            matches!(read, Err(WorkflowReadError::StoredResultUnreadable { .. })),
+            "{ok}"
+        );
+    }
+    let TaskOutcome::Succeeded(results) =
+        end_outcome::<OutputlessResults>(workflow(), completed(Some(envelope(json!({}))))).unwrap()
+    else {
+        panic!("an outputless result reads as Succeeded");
+    };
+    assert!(results.is_empty());
+}
+
+/// A stored result that is not JSON is unreadable.
+#[test]
+fn a_completed_result_that_is_not_json_is_unreadable() {
+    let end = WorkflowEnd::Completed {
+        result: Some("{not valid json".to_owned()),
+    };
+    assert!(matches!(
+        end_outcome::<u32>(workflow(), end),
+        Err(WorkflowReadError::StoredResultUnreadable { .. })
+    ));
+}
+
+/// Python `_decode_stored_workflow_error`: the stored error is the answer of
+/// every ended status, a cancel included; an empty one is unreadable.
+#[test]
+fn every_ended_status_reads_its_stored_error_and_refuses_an_empty_one() {
+    let stored = json!({"error_code": "STOPPED_BY_OPERATOR", "message": "stopped"}).to_string();
+    for status in [
+        TerminalErrorStatus::Failed,
+        TerminalErrorStatus::Cancelled,
+        TerminalErrorStatus::Expired,
+    ] {
+        let end = WorkflowEnd::Ended {
+            status,
+            error: Some(stored.clone()),
+        };
+        let outcome = end_outcome::<u32>(workflow(), end).unwrap();
+        assert_eq!(library_code(&outcome), "STOPPED_BY_OPERATOR", "{status:?}");
+        let empty = WorkflowEnd::Ended {
+            status,
+            error: Some(String::new()),
+        };
+        assert!(
+            matches!(
+                end_outcome::<u32>(workflow(), empty),
+                Err(WorkflowReadError::StoredResultUnreadable { .. })
+            ),
+            "{status:?}"
+        );
+    }
+}
+
+/// A stored sub-workflow node of node 0 with `status` and `summary`.
+fn stored_node(status: &str, summary: Option<&str>) -> StoredNode {
+    StoredNode {
+        node_id: Some("node-9".to_owned()),
+        task_index: 0,
+        task_name: "child".to_owned(),
+        status: status.to_owned(),
+        result: None,
+        started_at: None,
+        completed_at: None,
+        sub_workflow_id: None,
+        sub_workflow_summary: summary.map(str::to_owned),
+        is_subworkflow: true,
+        sub_definition_key: Some("tests.child.v1".to_owned()),
+    }
+}
+
+/// A stored node reads its status, its result and its summary.
+#[test]
+fn a_stored_node_reads_its_status_result_and_summary() {
+    let mut node = stored_node(
+        "COMPLETED",
+        Some(
+            r#"{"status": "COMPLETED", "output": null, "total_tasks": 3, "completed_tasks": 3, "failed_tasks": 0, "skipped_tasks": 0, "error_summary": null}"#,
+        ),
+    );
+    node.result = Some(json!({"__h_task_result__": true, "ok": 42, "err": null}).to_string());
+    let info = node_info(workflow(), node).unwrap();
+    assert_eq!(info.status, WorkflowTaskStatus::Completed);
+    assert_eq!(
+        info.result,
+        Some(NodeResult::Outcome(TaskOutcome::Succeeded(json!(42))))
+    );
+    let summary = info
+        .sub_workflow_summary
+        .expect("the node gives its summary");
+    assert_eq!(summary.status, WorkflowStatus::Completed);
+    assert_eq!(
+        (
+            summary.total_tasks,
+            summary.completed_tasks,
+            summary.failed_tasks,
+            summary.skipped_tasks,
+        ),
+        (3, 3, 0, 0)
+    );
+}
+
+/// Python `stored_node_status`: a stored status outside the node statuses
+/// is `STORED_DATA_INVALID`, not retryable, and names its node and value.
+#[test]
+fn a_node_status_outside_the_enum_is_stored_data_invalid() {
+    let refused = node_info(workflow(), stored_node("BOGUS", None)).unwrap_err();
+    assert_eq!(refused.code, HandleErrorCode::StoredDataInvalid);
+    assert!(!refused.retryable);
+    assert_eq!(refused.workflow_id, workflow());
+    assert!(refused.message.contains("node 0"), "{}", refused.message);
+    assert!(refused.message.contains("\"BOGUS\""), "{}", refused.message);
+}
+
+/// A stored summary that is not JSON, that breaks the summary rules (an
+/// unknown status, never read as FAILED), or that is nested past the read's
+/// depth bound is `STORED_DATA_INVALID`, not retryable.
+#[test]
+fn a_summary_that_does_not_read_is_stored_data_invalid() {
+    let deep = format!("{{\"status\":{}{}}}", "[".repeat(1_100), "]".repeat(1_100));
+    for summary in [
+        "{not valid json!!!",
+        r#"{"status": "NOT_A_STATUS", "total_tasks": 1}"#,
+        deep.as_str(),
+    ] {
+        let refused = node_info(workflow(), stored_node("COMPLETED", Some(summary))).unwrap_err();
+        assert_eq!(refused.code, HandleErrorCode::StoredDataInvalid);
+        assert!(!refused.retryable);
+        assert!(
+            refused.message.contains("sub-workflow summary"),
+            "{}",
+            refused.message
+        );
+    }
+}
+
+/// A handle prints and crosses threads for any output type: Debug, Send and
+/// Sync.
+#[test]
+fn a_workflow_handle_is_debug_send_and_sync() {
+    fn assert_debug_send_sync<V: std::fmt::Debug + Send + Sync>() {}
+    assert_debug_send_sync::<WorkflowHandle<u32>>();
+    assert_debug_send_sync::<WorkflowHandle<serde_json::Value>>();
+    assert_debug_send_sync::<WorkflowHandle<std::rc::Rc<u8>>>();
+}

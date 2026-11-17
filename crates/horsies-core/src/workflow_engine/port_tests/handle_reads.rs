@@ -21,6 +21,7 @@ use crate::core::{
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle::expire_paused_workflows;
+use crate::workflow_engine::query::NodesRead;
 
 /// How long `get()` waits for a workflow that is terminal before the call.
 const GET_WAIT: Duration = Duration::from_secs(1);
@@ -320,10 +321,12 @@ async fn result_for_gives_the_typed_result_of_one_node() {
     }
 }
 
-/// `TestWorkflowHandleResults.test_result_for_returns_error_when_not_ready`
+/// `TestWorkflowHandleResults.test_result_for_returns_error_when_not_ready`:
+/// the node of an unfinished workflow stores no result, which a client reads
+/// as `RESULT_NOT_READY`.
 #[tokio::test]
 #[serial]
-async fn result_for_an_unfinished_node_gives_result_not_ready() {
+async fn an_unfinished_node_stores_no_result() {
     let pool = shared_pool().await;
     let workflow_id = start(
         &pool,
@@ -332,12 +335,12 @@ async fn result_for_an_unfinished_node_gives_result_not_ready() {
     )
     .await;
 
-    let result = handle(&pool, workflow_id)
-        .result_for::<serde_json::Value>("node_0")
+    let stored = handle(&pool, workflow_id)
+        .node_result("node_0")
         .await
         .expect("the node result read");
 
-    assert_eq!(code(error_of(&result)).as_deref(), Some("RESULT_NOT_READY"));
+    assert_eq!(stored, None);
 }
 
 /// `TestWorkflowHandleResults.test_results_empty_when_no_tasks_completed`
@@ -519,53 +522,45 @@ async fn a_finished_sub_workflow_node_gives_its_summary() {
     end_workflows(&pool, &[parent, child]).await;
 }
 
-/// `TestWorkflowHandleSubWorkflowFields.test_subworkflow_node_with_corrupt_summary_returns_err`
+/// The stored sub-workflow summary of the node 0 of `parent`, as the node
+/// read returns it.
+async fn stored_summary_of(pool: &PgPool, parent: Uuid) -> Option<String> {
+    match handle(pool, parent).nodes().await.expect("the node read") {
+        NodesRead::Nodes(nodes) => nodes[0].sub_workflow_summary.clone(),
+        NodesRead::WorkflowAbsent => panic!("the parent {parent} has a row"),
+    }
+}
+
+/// `TestWorkflowHandleSubWorkflowFields.test_subworkflow_node_with_corrupt_summary_returns_err`:
+/// the node read returns a summary that is not JSON as stored; a client
+/// refuses it with `STORED_DATA_INVALID`.
 #[tokio::test]
 #[serial]
-async fn a_corrupt_summary_makes_tasks_return_stored_data_invalid() {
+async fn a_corrupt_summary_is_read_as_stored() {
     let pool = shared_pool().await;
     let (parent, child) =
         seed_linked_child(&pool, "FAILED", "FAILED", Some("{not valid json!!!")).await;
 
-    let refused = handle(&pool, parent).tasks().await;
+    let summary = stored_summary_of(&pool, parent).await;
 
     end_workflows(&pool, &[parent, child]).await;
-    let error = refused.expect_err("a summary that does not parse is refused");
-
-    assert_eq!(error.code, HandleErrorCode::StoredDataInvalid);
-    assert!(!error.retryable);
-    assert!(
-        error.message.contains("sub_workflow_summary"),
-        "{}",
-        error.message
-    );
+    assert_eq!(summary.as_deref(), Some("{not valid json!!!"));
 }
 
 /// `TestWorkflowHandleSubWorkflowFields.test_subworkflow_node_with_bad_status_summary_returns_err`:
-/// an unknown status is never read as FAILED.
+/// the node read returns a summary with an unknown status as stored; a
+/// client refuses it with `STORED_DATA_INVALID` and never reads it as FAILED.
 #[tokio::test]
 #[serial]
-async fn a_summary_with_an_unknown_status_makes_tasks_return_stored_data_invalid() {
+async fn a_summary_with_an_unknown_status_is_read_as_stored() {
     let pool = shared_pool().await;
-    let (parent, child) = seed_linked_child(
-        &pool,
-        "COMPLETED",
-        "COMPLETED",
-        Some(r#"{"status": "NOT_A_STATUS", "total_tasks": 1}"#),
-    )
-    .await;
+    let stored = r#"{"status": "NOT_A_STATUS", "total_tasks": 1}"#;
+    let (parent, child) = seed_linked_child(&pool, "COMPLETED", "COMPLETED", Some(stored)).await;
 
-    let refused = handle(&pool, parent).tasks().await;
+    let summary = stored_summary_of(&pool, parent).await;
 
     end_workflows(&pool, &[parent, child]).await;
-    let error = refused.expect_err("a summary with an unknown status is refused");
-
-    assert_eq!(error.code, HandleErrorCode::StoredDataInvalid);
-    assert!(
-        error.message.contains("sub_workflow_summary"),
-        "{}",
-        error.message
-    );
+    assert_eq!(summary.as_deref(), Some(stored));
 }
 
 /// `TestWorkflowHandleOutput.test_output_failed_returns_failed`

@@ -77,7 +77,6 @@ fn child_spec() -> WorkflowSpec {
             dependencies: Vec::new(),
             args_from: HashMap::new(),
             workflow_ctx_from: None,
-            workflow_ctx_from_refs: None,
             queue: Some("default".to_owned()),
             priority: Some(100),
             allow_failed_deps: false,
@@ -106,7 +105,6 @@ fn sub_workflow_node(index: usize, name: &str, definition_key: &str) -> AnyNode 
         dependencies: Vec::new(),
         args_from: HashMap::new(),
         workflow_ctx_from: None,
-        workflow_ctx_from_refs: None,
         queue: None,
         priority: None,
         allow_failed_deps: false,
@@ -742,7 +740,8 @@ fn a_stored_input_that_does_not_read_fails_the_node() {
 /// with `WORKER_SERIALIZATION_ERROR`, `args_from has non-int values for
 /// subworkflow task <index>` (Python `_args_from_map`); `null` as the whole
 /// text fails it with `Corrupt args_from JSON for subworkflow task <index>`.
-/// `true` is refused as a non-integer, where Python's `isinstance` takes it.
+/// `true` is refused as a non-integer, as Python's `_args_from_map` refuses a
+/// `bool`.
 #[test]
 fn an_args_from_value_that_is_not_an_index_fails_the_node() {
     let workflow_id = Uuid::new_v4();

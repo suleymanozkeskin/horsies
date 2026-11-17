@@ -1167,9 +1167,9 @@ $$;
 --    null: WORKER_SERIALIZATION_ERROR, 'Corrupt kwargs JSON for task <index>';
 -- 3. an args_from string other than "" whose text does not read, or reads as null: WORKER_SERIALIZATION_ERROR,
 --    'Corrupt args_from JSON for task <index>';
--- 4. an args_from member (horsies_workflow_args_from_entries) whose value is not a JSON integer:
---    WORKER_SERIALIZATION_ERROR, 'args_from has non-int values for task <index>'. Python's isinstance(value, int)
---    also takes true and false; this check refuses them;
+-- 4. an args_from member (horsies_workflow_args_from_entries) whose value is not a JSON integer literal:
+--    WORKER_SERIALIZATION_ERROR, 'args_from has non-int values for task <index>'. true and false are refused, as
+--    Python's _validate_args_from_map (core/workflows/engine.py) refuses a bool;
 -- 5. the first args_from member, in the order of 4, whose key is also a member of an object input:
 --    WORKFLOW_ENQUEUE_FAILED, 'args_from key '<key>' conflicts with static kwarg (task <index>)' (the spec refuses
 --    the overlap when it is built; this check guards stored rows).

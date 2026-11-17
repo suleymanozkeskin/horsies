@@ -992,6 +992,14 @@ mod tests {
         assert_eq!(limit_duration(limit), Some(Duration::from_secs(2)));
     }
 
+    /// A handle prints and crosses threads: Debug, Send and Sync.
+    #[test]
+    fn a_task_handle_is_debug_send_and_sync() {
+        fn assert_debug_send_sync<V: std::fmt::Debug + Send + Sync>() {}
+        assert_debug_send_sync::<TaskHandle<u32, ChargeCode>>();
+        assert_debug_send_sync::<TaskHandle<Value, std::convert::Infallible>>();
+    }
+
     /// A kept read is returned with no statement: the app's handle never
     /// connects to the address, which has no database.
     #[tokio::test]

@@ -17,10 +17,10 @@ use super::support::{
     ParentLink, WorkflowSeed,
 };
 use crate::broker::workflow_start::ClientStartError;
-use crate::core::workflow::handle_types::HandleErrorCode;
 use crate::core::{AnyNode, WorkflowTaskStatus};
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::workflow_engine::error::WorkflowError;
+use crate::workflow_engine::query::{NodeResultsRead, NodesRead};
 
 /// Every node status, in the order of the enum. The match does not compile
 /// when a status is added, so the list follows the enum.
@@ -237,33 +237,33 @@ async fn the_start_stores_a_success_policy_that_names_sub_workflow_nodes() {
 }
 
 /// `TestResults::test_no_workflow_row_is_workflow_not_found`
-/// (`test_workflow_handle_missing_workflow.py`).
+/// (`test_workflow_handle_missing_workflow.py`): the node results read of a
+/// missing workflow is absent, not an empty list; a client reads it as
+/// `WORKFLOW_NOT_FOUND`.
 #[tokio::test]
 #[serial]
-async fn results_of_a_missing_workflow_is_workflow_not_found() {
+async fn the_node_results_of_a_missing_workflow_are_absent() {
     let pool = shared_pool().await;
     let workflow_id = Uuid::new_v4();
 
-    let read = handle(&pool, workflow_id).results().await;
+    let read = handle(&pool, workflow_id).node_results().await;
 
-    let error = read.expect_err("a missing workflow is not an empty map");
-    assert_eq!(error.code, HandleErrorCode::WorkflowNotFound);
-    assert_eq!(error.workflow_id, workflow_id);
+    assert_eq!(read.expect("the read"), NodeResultsRead::WorkflowAbsent);
 }
 
 /// `TestTasks::test_no_workflow_row_is_workflow_not_found`
-/// (`test_workflow_handle_missing_workflow.py`).
+/// (`test_workflow_handle_missing_workflow.py`): the node read of a missing
+/// workflow is absent, not an empty list; a client reads it as
+/// `WORKFLOW_NOT_FOUND`.
 #[tokio::test]
 #[serial]
-async fn tasks_of_a_missing_workflow_is_workflow_not_found() {
+async fn the_nodes_of_a_missing_workflow_are_absent() {
     let pool = shared_pool().await;
     let workflow_id = Uuid::new_v4();
 
-    let read = handle(&pool, workflow_id).tasks().await;
+    let read = handle(&pool, workflow_id).nodes().await;
 
-    let error = read.expect_err("a missing workflow is not an empty list");
-    assert_eq!(error.code, HandleErrorCode::WorkflowNotFound);
-    assert_eq!(error.workflow_id, workflow_id);
+    assert_eq!(read.expect("the read"), NodesRead::WorkflowAbsent);
 }
 
 /// `TestTasks::test_a_workflow_without_a_node_is_an_empty_list`
@@ -281,11 +281,12 @@ async fn tasks_of_a_workflow_without_a_node_is_an_empty_list() {
 }
 
 /// `TestStoredSubworkflowSummary::test_a_summary_past_the_depth_bound_is_stored_data_invalid`
-/// (`test_workflow_handle_error_variants.py`): a stored summary nested past
-/// the read's depth bound makes `tasks()` return `STORED_DATA_INVALID`.
+/// (`test_workflow_handle_error_variants.py`): the node read returns a
+/// stored summary nested past the read's depth bound as stored; a client
+/// refuses it with `STORED_DATA_INVALID`.
 #[tokio::test]
 #[serial]
-async fn a_summary_past_the_depth_bound_makes_tasks_return_stored_data_invalid() {
+async fn a_summary_past_the_depth_bound_is_read_as_stored() {
     let pool = shared_pool().await;
     let parent = seed_workflow(&pool, &WorkflowSeed::running()).await;
     let child_key = "tests.start_branch.deep_summary_child.v1";
@@ -298,18 +299,24 @@ async fn a_summary_past_the_depth_bound_makes_tasks_return_stored_data_invalid()
     let _node = seed_node(
         &pool,
         &NodeSeed {
-            sub_workflow_summary: Some(deep_summary),
+            sub_workflow_summary: Some(deep_summary.clone()),
             ..NodeSeed::sub_workflow(parent, 0, "COMPLETED", child_key, Some(child))
         },
     )
     .await;
 
-    let read = handle(&pool, parent).tasks().await;
+    let read = handle(&pool, parent).nodes().await;
 
     end_workflows(&pool, &[parent, child]).await;
-    let error = read.expect_err("a summary past the depth bound is refused");
-    assert_eq!(error.code, HandleErrorCode::StoredDataInvalid);
-    assert!(!error.retryable);
+    match read.expect("the node read") {
+        NodesRead::Nodes(nodes) => {
+            assert_eq!(
+                nodes[0].sub_workflow_summary.as_deref(),
+                Some(deep_summary.as_str())
+            );
+        }
+        NodesRead::WorkflowAbsent => panic!("the parent {parent} has a row"),
+    }
 }
 
 /// A workflow with one task node per status of the enum, in the order of
@@ -389,13 +396,12 @@ async fn tasks_reads_each_stored_node_status_as_its_enum_member() {
 }
 
 /// `TestTasksAsync::test_another_stored_value_crashes_with_its_subject`
-/// (`test_workflow_node_status_check.py`): a stored status outside the enum
-/// (possible only without the CHECK) fails `tasks()` with a message that
-/// names the workflow, the node and the value.
+/// (`test_workflow_node_status_check.py`): the node read returns a stored
+/// status outside the enum (possible only without the CHECK) as stored; a
+/// client refuses it with `STORED_DATA_INVALID`.
 #[tokio::test]
 #[serial]
-async fn tasks_of_a_node_with_a_status_outside_the_enum_names_the_workflow_the_node_and_the_value()
-{
+async fn a_node_status_outside_the_enum_is_read_as_stored() {
     let db = IsolatedDatabase::create().await;
     execute(
         &db.pool,
@@ -412,18 +418,14 @@ async fn tasks_of_a_node_with_a_status_outside_the_enum_names_the_workflow_the_n
     )
     .await;
 
-    let read = handle(&db.pool, workflow_id).tasks().await;
+    let read = handle(&db.pool, workflow_id).nodes().await;
 
     db.drop().await;
-    let error = read.expect_err("a status outside the enum is refused");
-    assert_eq!(error.code, HandleErrorCode::StoredDataInvalid);
-    assert!(!error.retryable);
-    let workflow_text = workflow_id.to_string();
-    for subject in [workflow_text.as_str(), "node-9", "'BOGUS'"] {
-        assert!(
-            error.message.contains(subject),
-            "{subject}: {}",
-            error.message
-        );
+    match read.expect("the node read") {
+        NodesRead::Nodes(nodes) => {
+            assert_eq!(nodes[0].node_id.as_deref(), Some("node-9"));
+            assert_eq!(nodes[0].status, "BOGUS");
+        }
+        NodesRead::WorkflowAbsent => panic!("the workflow {workflow_id} has a row"),
     }
 }
