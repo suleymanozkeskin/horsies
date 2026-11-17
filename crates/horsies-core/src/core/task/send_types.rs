@@ -385,7 +385,10 @@ mod tests {
     #[test]
     fn a_refusal_is_validation_failed_and_refused_for_a_resend() {
         for refusal in [
-            BrokerError::EnqueueContract("bad options".to_owned()),
+            BrokerError::EnqueueContract(crate::broker::EnqueueRefusal::by_rule(
+                crate::core::history::enqueue::SendPart::TaskOptions,
+                "bad options".to_owned(),
+            )),
             BrokerError::InvalidIdempotencyReservationWindow("0s".to_owned()),
         ] {
             let error = send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &refusal);

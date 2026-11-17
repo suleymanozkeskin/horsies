@@ -6,7 +6,87 @@ use uuid::Uuid;
 
 use crate::broker::core_rows::RowDecodeError;
 use crate::broker::pools::PoolSettingsError;
+use crate::core::codec::JsonReadError;
+use crate::core::history::enqueue::{EnqueuePreparationError, SendPart};
 use crate::db::{StatementFailure, Transience};
+
+/// Why the core refused a send before any statement (Python's
+/// `BrokerInvalidInput` and `BrokerInvalidTaskOptions`). Nothing was
+/// written.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct EnqueueRefusal {
+    /// The part of the send that the rule refused.
+    pub part: SendPart,
+    /// What was refused and why.
+    pub message: String,
+    pub cause: EnqueueRefusalCause,
+}
+
+/// What a send refusal carries besides its message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnqueueRefusalCause {
+    /// The refused text does not read as JSON: the reader's error text
+    /// (Python passes its `StrictJsonError` as the `exception`).
+    JsonUnreadable(String),
+    /// A rule refused a value that reads (Python passes `NoCause()`).
+    RuleRefused,
+}
+
+impl EnqueueRefusal {
+    /// A refusal of `part` by a rule, with no cause besides `message`.
+    pub fn by_rule(part: SendPart, message: String) -> Self {
+        Self {
+            part,
+            message,
+            cause: EnqueueRefusalCause::RuleRefused,
+        }
+    }
+
+    /// A refusal of `part` whose text does not read as strict JSON.
+    pub fn unreadable_json(part: SendPart, message: String, error: &JsonReadError) -> Self {
+        Self {
+            part,
+            message,
+            cause: EnqueueRefusalCause::JsonUnreadable(error.to_string()),
+        }
+    }
+}
+
+impl From<EnqueuePreparationError> for EnqueueRefusal {
+    /// The part and the cause of a preparation error: a JSON text that does
+    /// not read keeps the reader's error; the options' shape and execution
+    /// class are the task options; the fingerprint and the idempotency key
+    /// are the input.
+    fn from(error: EnqueuePreparationError) -> Self {
+        let message = error.to_string();
+        let (part, cause) = match &error {
+            EnqueuePreparationError::StrictJson { field, source } => (
+                *field,
+                EnqueueRefusalCause::JsonUnreadable(source.to_string()),
+            ),
+            EnqueuePreparationError::Json { field, source } => (
+                *field,
+                EnqueueRefusalCause::JsonUnreadable(source.to_string()),
+            ),
+            EnqueuePreparationError::NumberDomain { field, .. } => {
+                (*field, EnqueueRefusalCause::RuleRefused)
+            }
+            EnqueuePreparationError::InvalidTaskOptions
+            | EnqueuePreparationError::InvalidExecution(_) => {
+                (SendPart::TaskOptions, EnqueueRefusalCause::RuleRefused)
+            }
+            EnqueuePreparationError::Fingerprint(_) | EnqueuePreparationError::Idempotency(_) => {
+                (SendPart::Input, EnqueueRefusalCause::RuleRefused)
+            }
+        };
+        Self {
+            part,
+            message,
+            cause,
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrokerError {
@@ -74,9 +154,11 @@ pub enum BrokerError {
     )]
     IdempotencyKeyConflict { task_name: String, task_id: Uuid },
 
-    /// Enqueue-time history facts could not be prepared or decoded.
+    /// The core refused a send before any statement: its input, a fact of
+    /// the call, or its task options break a rule. Nothing was written. Not
+    /// retryable: the same send is refused again.
     #[error("enqueue contract violation: {0}")]
-    EnqueueContract(String),
+    EnqueueContract(EnqueueRefusal),
 
     /// The broker's keyed-enqueue reservation window is outside `(0, 30d]`.
     #[error("invalid idempotency reservation window: {0}")]
