@@ -27,6 +27,14 @@
 //!   administrative cancel of one plain task (Python
 //!   `horsies.monitoring.task_actions.cancel_task`, and the core's monitoring
 //!   cancel).
+//! - [`PostgresBroker::expire_pending_tasks`]: one pending expiry pass,
+//!   `horsies_expire_pending_tasks` in bounded batches.
+//! - [`PostgresBroker::audit_orphaned_workflow_tasks`]: one page of the
+//!   orphan sweep, `horsies_cancel_orphaned_tasks` with its cursor counts.
+//! - [`PostgresBroker::expire_owned_claim`]: `horsies_expire_owned_claim`,
+//!   the expiry of a claimed row whose deadline passed before its start.
+//! - [`PostgresBroker::cancel_owned_orphan`]: `horsies_cancel_owned_orphan`,
+//!   the cancel of a claimed workflow task that no node links.
 //!
 //! These are the entry points of the Python client while its own worker
 //! still runs the parent loop: the client calls them through `horsies._core`
@@ -47,6 +55,10 @@ use crate::broker::claims::{
     StartWindow, WindowedStart,
 };
 use crate::broker::error::BrokerError;
+use crate::broker::expiry_and_orphans::{
+    cancel_orphan_page, cancel_owned_orphan, expire_owned_claim, expire_pending_pass,
+    OrphanAuditPage, PendingExpiryFailed, PendingExpiryPass, TaskRowEnd,
+};
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::stale_recovery::{
     requeue_stale_claimed_pass, StaleClaimsRequeueFailed, StaleClaimsRequeuePass, StaleRunningPass,
@@ -450,6 +462,94 @@ impl PostgresBroker {
         };
         let outcome = decode_outcome_row(row).map_err(CancelTaskError::StoredDataInvalid)?;
         Ok(cancel_answer(task_id, &outcome))
+    }
+
+    /// One pending expiry pass (Python `PostgresBroker.expire_pending_tasks`):
+    /// `horsies_expire_pending_tasks` in batches of 500 rows on the main core
+    /// pool, until a batch is short, at most 200 batches. Each batch is one
+    /// transaction checked out as reserved work and commits alone; a PENDING
+    /// row whose deadline passed moves to history as EXPIRED with
+    /// `TASK_EXPIRED`. Sends no queue wake.
+    ///
+    /// Errors: [`PendingExpiryFailed`]: the pools could not open, the client
+    /// family check refused or could not read (`expired_before` 0), or a
+    /// batch failed after the batches before it committed.
+    pub async fn expire_pending_tasks(&self) -> Result<PendingExpiryPass, PendingExpiryFailed> {
+        let not_started = |error: BrokerError| PendingExpiryFailed {
+            expired_before: 0,
+            error,
+        };
+        self.ensure_client_family_for_write()
+            .await
+            .map_err(not_started)?;
+        let (open, _write) = self.core_pools_for_write().map_err(not_started)?;
+        expire_pending_pass(open.main(), self.statement_log()).await
+    }
+
+    /// One page of the orphan sweep (Python
+    /// `PostgresBroker.audit_orphaned_workflow_tasks`):
+    /// `horsies_cancel_orphaned_tasks` with a page of 500 rows and the page's
+    /// cursor counts, in one transaction on the main core pool, checked out
+    /// as reserved work. The page cancels the scanned PENDING and CLAIMED
+    /// workflow tasks that no runnable node links (`CANCEL_ORPHAN_SWEEP`).
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); [`BrokerError::Statement`] (nothing committed,
+    /// or `OutcomeUnknown` at `COMMIT`; a second sweep that holds the cursor
+    /// refuses the page at once, [`BrokerError::is_lock_not_available`]);
+    /// [`BrokerError::TerminalizationContract`] and [`BrokerError::RowDecode`]
+    /// for a page outside the function's contract (rolled back).
+    pub async fn audit_orphaned_workflow_tasks(&self) -> Result<OrphanAuditPage, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        cancel_orphan_page(open.main(), self.statement_log()).await
+    }
+
+    /// Expire one CLAIMED task of `worker_id` whose deadline passed before its
+    /// start (the child miss path of Python, `_expire_claimed_task_before_start`):
+    /// `horsies_expire_owned_claim`, one statement in autocommit on the main
+    /// core pool, checked out as reserved work. The row moves to history as
+    /// EXPIRED (`EXPIRE_CLAIMED`) with Python's stored error
+    /// ([`TaskRowEnd::Ended`]); a row whose deadline has not passed, or that
+    /// this worker does not hold, is refused with no write.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); [`BrokerError::Serialization`] (nothing sent);
+    /// [`BrokerError::Statement`] (nothing written, or `OutcomeUnknown`: the
+    /// same call sent again reports a committed expiry as `AlreadyApplied`);
+    /// [`BrokerError::TerminalizationContract`] for a row outside the wire
+    /// contract.
+    pub async fn expire_owned_claim(
+        &self,
+        task_id: Uuid,
+        worker_id: &str,
+    ) -> Result<TaskRowEnd, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        expire_owned_claim(open.main(), self.statement_log(), task_id, worker_id).await
+    }
+
+    /// Cancel one CLAIMED workflow task that `fence` holds and that no
+    /// runnable node links (the orphan self-heal of Python's finalize):
+    /// `horsies_cancel_owned_orphan`, one statement in autocommit on the main
+    /// core pool, checked out as reserved work. The task moves to history as
+    /// CANCELLED (`CANCEL_ORPHAN`, `WORKFLOW_CHECK_FAILED`)
+    /// ([`TaskRowEnd::Ended`]); a task with a runnable node link, or that the
+    /// fence does not hold, is refused with no write.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] and the client family check's
+    /// errors (nothing sent); [`BrokerError::Statement`] (nothing written, or
+    /// `OutcomeUnknown`: the same call sent again reports a committed cancel
+    /// as `AlreadyApplied`); [`BrokerError::TerminalizationContract`] for a
+    /// row outside the wire contract.
+    pub async fn cancel_owned_orphan(
+        &self,
+        task_id: Uuid,
+        fence: &OwnedClaim,
+    ) -> Result<TaskRowEnd, BrokerError> {
+        self.ensure_client_family_for_write().await?;
+        let (open, _write) = self.core_pools_for_write()?;
+        cancel_owned_orphan(open.main(), self.statement_log(), task_id, fence).await
     }
 }
 

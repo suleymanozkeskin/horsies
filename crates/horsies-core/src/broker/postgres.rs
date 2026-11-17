@@ -1725,16 +1725,17 @@ impl PostgresBroker {
 
     /// Expire a CLAIMED task whose `good_until` passed before user code started.
     ///
-    /// Runs through `horsies_expire_owned_claim`, which fences on worker
-    /// ownership but deliberately not on the claim generation: once the
-    /// deadline has passed, expiry is the correct outcome for whichever
-    /// generation holds the row. One statement on the main core pool,
-    /// checked out as reserved work. `Applied` and `AlreadyApplied` both mean
-    /// the task is expired, as Python's `_expire_claimed_task_before_start`
-    /// (`core/worker/child_runner.py`) reads them; any other outcome is
-    /// logged with its evidence at the adapter boundary. The stored error is
-    /// Python's: `TASK_EXPIRED` with its message and the task and worker ids
-    /// as `data`.
+    /// Runs through `horsies_expire_owned_claim`
+    /// ([`crate::broker::expiry_and_orphans::expire_owned_claim`]), which
+    /// fences on worker ownership but deliberately not on the claim
+    /// generation: once the deadline has passed, expiry is the correct
+    /// outcome for whichever generation holds the row. One statement on the
+    /// main core pool, checked out as reserved work. An end and a replay of
+    /// the expiry both mean the task is expired, as Python's
+    /// `_expire_claimed_task_before_start` (`core/worker/child_runner.py`)
+    /// reads them; any other outcome is logged with its evidence at the
+    /// adapter boundary. The stored error is Python's: `TASK_EXPIRED` with
+    /// its message and the task and worker ids as `data`.
     ///
     /// Errors: [`BrokerError::Statement`], or
     /// [`BrokerError::TerminalizationContract`] for a row outside the wire
@@ -1744,44 +1745,24 @@ impl PostgresBroker {
         task_id: Uuid,
         worker_id: &str,
     ) -> Result<PrestartExpiry, BrokerError> {
-        let mut task_error = crate::core::TaskError::builtin(
-            crate::core::OutcomeCode::TaskExpired,
-            "Task expired: good_until deadline passed before execution started",
-        );
-        task_error.data = Some(serde_json::json!({
-            "task_id": task_id.to_string(),
-            "worker_id": worker_id,
-        }));
-        let task_result = crate::core::TaskResult::<serde_json::Value>::Err(task_error);
-        let result_json =
-            serde_json::to_string(&task_result).map_err(BrokerError::Serialization)?;
-
         let (open, _write) = self.core_pools_for_write()?;
-        let outcomes = crate::broker::terminalization::terminalize(
+        let end = crate::broker::expiry_and_orphans::expire_owned_claim(
             open.main(),
             self.statement_log,
-            &crate::core::lifecycle::TerminalizationCommand::ExpireOwnedClaim {
-                task_id,
-                fence: crate::core::lifecycle::WorkerOwned {
-                    worker_id: worker_id.to_owned(),
-                },
-                result_json,
-                error_code: "TASK_EXPIRED".to_owned(),
-            },
+            task_id,
+            worker_id,
         )
         .await?;
-
-        Ok(match outcomes.first() {
-            Some(
-                crate::core::lifecycle::TerminalizationOutcome::Applied { .. }
-                | crate::core::lifecycle::TerminalizationOutcome::AlreadyApplied { .. },
+        Ok(match end {
+            crate::broker::expiry_and_orphans::TaskRowEnd::Ended { .. }
+            | crate::broker::expiry_and_orphans::TaskRowEnd::Refused(
+                crate::core::lifecycle::AttemptWriteRefusal::AlreadyApplied { .. },
             ) => PrestartExpiry::Expired,
-            Some(
-                crate::core::lifecycle::TerminalizationOutcome::LostClaim { .. }
-                | crate::core::lifecycle::TerminalizationOutcome::SourceStateConflict { .. }
-                | crate::core::lifecycle::TerminalizationOutcome::TaskAbsent { .. },
-            )
-            | None => PrestartExpiry::NotExpired,
+            crate::broker::expiry_and_orphans::TaskRowEnd::Refused(
+                crate::core::lifecycle::AttemptWriteRefusal::LostClaim { .. }
+                | crate::core::lifecycle::AttemptWriteRefusal::SourceStateConflict { .. }
+                | crate::core::lifecycle::AttemptWriteRefusal::TaskAbsent { .. },
+            ) => PrestartExpiry::NotExpired,
         })
     }
 
