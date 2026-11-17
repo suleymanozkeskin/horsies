@@ -143,9 +143,17 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::enqueue::SendPayloadMismatch>()?;
     module.add_class::<operations::enqueue::SendPayloadTooLarge>()?;
     module.add_class::<operations::enqueue::SendKeyConflict>()?;
+    module.add_class::<operations::release::ReleaseClaimsRequest>()?;
+    module.add_class::<operations::release::ClaimsReleased>()?;
+    module.add_class::<operations::release::ReleasedRow>()?;
+    module.add_class::<operations::release::NotHeldRow>()?;
+    module.add_class::<operations::release::ReleaseFailed>()?;
     module.add_class::<operations::schema::SchemaInstalled>()?;
     module.add_class::<operations::schema::SchemaInstallNotRun>()?;
     module.add_class::<operations::schema::SchemaStatusRecord>()?;
+    module.add_class::<operations::stale_claims::StaleClaimsDrained>()?;
+    module.add_class::<operations::stale_claims::StaleClaimsBoundReached>()?;
+    module.add_class::<operations::stale_claims::StaleClaimsRequeueFailed>()?;
     module.add_class::<operations::task_info::TaskInfoRecord>()?;
     module.add_class::<operations::task_info::TaskAttemptRecord>()?;
     module.add_class::<operations::task_info::TaskInfoNotFound>()?;

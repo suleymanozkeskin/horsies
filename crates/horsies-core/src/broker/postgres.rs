@@ -7305,7 +7305,103 @@ mod task_info_code_tests {
         assert_eq!(undecodable.code, BrokerErrorCode::TaskInfoQueryFailed);
         assert!(!undecodable.retryable);
     }
+
+    /// A FAILED history row whose stored result is `payload`, with a
+    /// matching digest and envelope version 1.
+    fn history_detail_with_result(payload: &[u8]) -> HistoryTaskDetail {
+        let at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 8, 7, 0, 0, 0).unwrap();
+        HistoryTaskDetail {
+            task_id: test_uuid("0192b3a4-0000-7000-8000-000000000001"),
+            task_name: "stored_result".to_owned(),
+            queue_name: "default".to_owned(),
+            priority: 100,
+            status: crate::core::TaskStatus::Failed,
+            terminalization_kind: "FAIL_RUNNING".to_owned(),
+            terminal_at: at,
+            retention_class_key: "forever".to_owned(),
+            enqueued_at: at,
+            created_at: at,
+            sent_at: Some(at),
+            claimed_at: Some(at),
+            started_at: Some(at),
+            good_until: None,
+            retry_count: 0,
+            max_retries: 0,
+            last_claimed_worker_id: Some("w-1".to_owned()),
+            last_worker_hostname: Some("host-1".to_owned()),
+            last_worker_pid: Some(100),
+            result_envelope_version: crate::core::history::archive::versions::ARCHIVE_VERSION_1,
+            result_codec: crate::core::history::archive::versions::JSON_UTF8_CODEC.to_owned(),
+            result_content_type: crate::core::history::archive::versions::JSON_CONTENT_TYPE
+                .to_owned(),
+            result_payload: Some(payload.to_vec()),
+            result_digest: Some(
+                crate::core::history::archive::versions::archive_digest(payload).to_vec(),
+            ),
+            error_code: Some("BOOM".to_owned()),
+            final_failed_reason: None,
+            rerun_of_task_id: None,
+            rerun_root_task_id: None,
+            workflow_id: None,
+            is_workflow_task: false,
+            rerun_input_disposition: "NOT_REQUESTED".to_owned(),
+            rerun_input_version: None,
+            rerun_input_codec: None,
+            rerun_input_content_type: None,
+            rerun_input_digest: None,
+            rerun_input_inline: None,
+            attempts: Vec::new(),
+        }
+    }
+
+    /// Asserts that the task info of a history row with `payload` as its
+    /// stored result is `INVALID_JSON_PAYLOAD`, not retryable.
+    fn assert_refused_as_invalid_json_payload(payload: &[u8]) {
+        let shown = String::from_utf8_lossy(payload);
+        let Err(refused) =
+            history_task_info(history_detail_with_result(payload), true, false, false)
+        else {
+            panic!("a stored result of {shown:.40} must not read");
+        };
+        assert_eq!(
+            refused.code,
+            BrokerErrorCode::InvalidJsonPayload,
+            "{shown:.40}"
+        );
+        assert!(!refused.retryable, "{shown:.40}");
+    }
+
+    /// Python `test_broker_postgres.py::TestHistoryTaskInfoResultDecode::test_stored_result_is_refused_as_invalid_json_payload`,
+    /// the payloads that every build refuses: `NaN` and an empty payload.
+    #[test]
+    fn a_stored_result_outside_strict_json_is_invalid_json_payload() {
+        for payload in [&b"{\"x\":NaN}"[..], &b""[..]] {
+            assert_refused_as_invalid_json_payload(payload);
+        }
+    }
+
+    /// Python `test_broker_postgres.py::TestHistoryTaskInfoResultDecode::test_stored_result_is_refused_as_invalid_json_payload`,
+    /// the payloads past the strict read rule (`core::codec::check_json_bytes`):
+    /// a float out of range and an integer of 5000 digits (refused in a
+    /// default build by serde_json's range check, read as text under its
+    /// `arbitrary_precision` feature), and a repeated key (read in every
+    /// build).
+    #[test]
+    #[ignore = "waits on #1233"]
+    fn a_stored_result_past_the_strict_rule_is_invalid_json_payload_in_every_build() {
+        let long_integer = format!("{{\"x\":{}}}", "1".repeat(5000));
+        for payload in [
+            &b"{\"x\":1e9999}"[..],
+            long_integer.as_bytes(),
+            &b"{\"x\":1,\"x\":2}"[..],
+        ] {
+            assert_refused_as_invalid_json_payload(payload);
+        }
+    }
 }
 
 #[cfg(test)]
 mod result_read_spec_tests;
+
+#[cfg(test)]
+mod ping_and_wait_tests;

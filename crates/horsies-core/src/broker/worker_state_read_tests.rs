@@ -196,3 +196,162 @@ async fn an_unreadable_class_capacity_fails_the_read() {
     assert!(failed.message.contains("'EXCLUSIVE'"), "{}", failed.message);
     database.drop().await;
 }
+
+/// One snapshot of `worker_id` taken `seconds_ago` before the database clock,
+/// with `tasks_running` rows running; every other column as
+/// [`insert_snapshot`] writes it, with all slots serving and no budget.
+async fn insert_snapshot_at(pool: &PgPool, worker_id: &str, seconds_ago: f64, tasks_running: i32) {
+    sqlx::query(
+        "INSERT INTO horsies_worker_states (
+            worker_id, snapshot_at, hostname, pid, processes,
+            max_claim_batch, max_claim_per_worker, queues,
+            queue_priorities, queue_max_concurrency, recovery_config,
+            tasks_running, tasks_claimed, children_memory_mb, worker_started_at,
+            slots_down, class_capacity
+        ) VALUES (
+            $1, now() - make_interval(secs => $2::float8), 'itest-host', 4242, 2,
+            2, 2, ARRAY['default'],
+            '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+            $3, 0, 96.5, now() - interval '1 hour',
+            '[]'::jsonb, '{}'::jsonb
+        )",
+    )
+    .bind(worker_id)
+    .bind(seconds_ago)
+    .bind(tasks_running)
+    .execute(pool)
+    .await
+    .expect("insert a worker snapshot");
+}
+
+/// Python `test_broker_postgres.py::TestWorkerStateReads::test_list_maps_rows_to_snapshots`:
+/// the list holds the latest snapshot of each worker, in worker id order,
+/// with the stored counts and queues.
+#[tokio::test]
+async fn the_list_holds_the_latest_snapshot_of_each_worker() {
+    let database = MonitoringTestDatabase::create().await;
+    insert_snapshot_at(&database.pool, "w2", 5.0, 1).await;
+    insert_snapshot_at(&database.pool, "w1", 60.0, 1).await;
+    insert_snapshot_at(&database.pool, "w1", 5.0, 2).await;
+    let broker = database.broker();
+
+    let listed = broker
+        .list_worker_states()
+        .await
+        .expect("the list read answers");
+
+    let read: Vec<(&str, i32, &[String], &str, i32)> = listed
+        .iter()
+        .map(|snapshot| {
+            (
+                snapshot.worker_id.as_str(),
+                snapshot.tasks_running,
+                snapshot.queues.as_slice(),
+                snapshot.hostname.as_str(),
+                snapshot.pid,
+            )
+        })
+        .collect();
+    let default_queue = ["default".to_owned()];
+    assert_eq!(
+        read,
+        [
+            ("w1", 2, default_queue.as_slice(), "itest-host", 4242),
+            ("w2", 1, default_queue.as_slice(), "itest-host", 4242),
+        ]
+    );
+    database.drop().await;
+}
+
+/// Python `test_broker_postgres.py::TestWorkerStateReads::test_get_returns_none_when_unknown`:
+/// a worker that never reported reads as `None`, not as an error.
+#[tokio::test]
+async fn a_worker_that_never_reported_reads_as_none() {
+    let database = MonitoringTestDatabase::create().await;
+    insert_snapshot_at(&database.pool, "w-known", 5.0, 0).await;
+    let broker = database.broker();
+
+    let read = broker
+        .get_worker_state("missing")
+        .await
+        .expect("the read answers");
+
+    assert_eq!(read, None);
+    database.drop().await;
+}
+
+/// Python `test_broker_postgres.py::TestWorkerStateReads::test_get_returns_snapshot`:
+/// a worker that reported reads as its latest snapshot.
+#[tokio::test]
+async fn a_worker_that_reported_reads_as_its_latest_snapshot() {
+    let database = MonitoringTestDatabase::create().await;
+    insert_snapshot_at(&database.pool, "w9", 60.0, 1).await;
+    insert_snapshot_at(&database.pool, "w9", 5.0, 2).await;
+    let broker = database.broker();
+
+    let read = broker
+        .get_worker_state("w9")
+        .await
+        .expect("the read answers")
+        .expect("the worker reported");
+
+    assert_eq!(read.worker_id, "w9");
+    assert_eq!(read.tasks_running, 2);
+    database.drop().await;
+}
+
+/// Python `test_broker_postgres.py::TestWorkerStateReads::test_history_returns_snapshots`:
+/// the history holds every snapshot of the worker, newest first, up to the
+/// limit, and no snapshot of another worker.
+#[tokio::test]
+async fn the_history_holds_the_snapshots_of_the_worker_newest_first_up_to_the_limit() {
+    let database = MonitoringTestDatabase::create().await;
+    insert_snapshot_at(&database.pool, "worker-1", 60.0, 1).await;
+    insert_snapshot_at(&database.pool, "worker-1", 5.0, 2).await;
+    insert_snapshot_at(&database.pool, "worker-2", 5.0, 3).await;
+    let broker = database.broker();
+
+    let within_limit = broker
+        .get_worker_state_history("worker-1", Some(10))
+        .await
+        .expect("the history read answers");
+    let at_limit = broker
+        .get_worker_state_history("worker-1", Some(1))
+        .await
+        .expect("the history read answers");
+
+    let running: Vec<i32> = within_limit
+        .iter()
+        .map(|snapshot| snapshot.tasks_running)
+        .collect();
+    assert_eq!(running, [2, 1]);
+    assert!(within_limit
+        .iter()
+        .all(|snapshot| snapshot.worker_id == "worker-1"));
+    assert_eq!(at_limit.len(), 1);
+    assert_eq!(at_limit[0].tasks_running, 2);
+    database.drop().await;
+}
+
+/// Python `test_broker_postgres.py::TestWorkerStateReads::test_the_snapshot_carries_the_class_capacity`,
+/// case `serves-no-class`: a worker with no budget reads as no budgets. The
+/// case `one-budget` is [`worker_state_reads_the_class_capacity`].
+#[tokio::test]
+async fn a_worker_with_no_budget_reads_as_no_budgets() {
+    let database = MonitoringTestDatabase::create().await;
+    insert_snapshot(&database.pool, "w-none", json!([]), json!({})).await;
+    let broker = database.broker();
+
+    let read = broker
+        .get_worker_state("w-none")
+        .await
+        .expect("the read answers")
+        .expect("the worker reported");
+
+    assert!(
+        read.class_capacity.as_slice().is_empty(),
+        "{:?}",
+        read.class_capacity
+    );
+    database.drop().await;
+}

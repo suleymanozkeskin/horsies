@@ -458,6 +458,48 @@ mod tests {
         assert!(!error.retryable());
     }
 
+    /// Python `test_broker_postgres.py::TestEnqueueCatch::test_schema_init_operator_state_stays_enqueue_failed`:
+    /// a schema state that an operator must repair (a newer schema, a cutover
+    /// that is not complete, a lost install lock) fails the send as
+    /// `ENQUEUE_FAILED`, not retryable, and never as a refusal of the input.
+    #[test]
+    fn a_schema_state_for_the_operator_is_an_enqueue_failure_that_is_not_retryable() {
+        for state in [
+            BrokerError::SchemaRefused(crate::broker::migrations::SchemaRefusal::SchemaNewer {
+                stored: 1099,
+                own: 1000,
+            }),
+            BrokerError::IncompleteTaskHistoryCutover,
+            BrokerError::InstallLock(crate::broker::error::InstallLockFailure::OwnershipLost),
+        ] {
+            let error = send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &state);
+
+            assert_eq!(error.code(), TaskSendErrorCode::EnqueueFailed, "{state}");
+            assert!(!error.retryable(), "{state}");
+            assert_eq!(error.message(), state.to_string());
+        }
+    }
+
+    /// Python `test_broker_postgres.py::TestEnqueueCatch::test_write_error_keeps_its_classification`:
+    /// a failed write is `ENQUEUE_FAILED` with the retry flag of its own
+    /// cause, in both directions.
+    #[test]
+    fn a_failed_write_keeps_the_retry_flag_of_its_cause() {
+        for (cause, retryable) in [
+            (sqlx::Error::PoolTimedOut, true),
+            (sqlx::Error::Protocol("connection reset".to_owned()), true),
+            (sqlx::Error::PoolClosed, false),
+            (sqlx::Error::RowNotFound, false),
+        ] {
+            let failure = BrokerError::Database(cause);
+
+            let error = send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &failure);
+
+            assert_eq!(error.code(), TaskSendErrorCode::EnqueueFailed, "{failure}");
+            assert_eq!(error.retryable(), retryable, "{failure}");
+        }
+    }
+
     #[test]
     fn a_vanished_conflict_row_is_an_enqueue_failure_that_is_not_retryable() {
         let error = send_error_from_enqueue(
