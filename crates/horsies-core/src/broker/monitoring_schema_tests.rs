@@ -306,6 +306,10 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
         .expect("listen worker channel");
     seed_worker_state(&pool, &worker_id).await;
     assert_notification(&mut worker_listener, WORKER_STATE_CHANNEL, &worker_id).await;
+    // The worker-state trigger fires on INSERT only (0001_tables.sql): an
+    // update of a snapshot sends nothing. A marker sent after the update
+    // commits is the next event on the channel; an event of the update
+    // would arrive before it.
     sqlx::query(
         "UPDATE horsies_worker_states
          SET tasks_running = 1
@@ -315,7 +319,14 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
     .execute(&pool)
     .await
     .expect("update worker state");
-    assert_notification(&mut worker_listener, WORKER_STATE_CHANNEL, &worker_id).await;
+    let marker = format!("{worker_id}-after-update");
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(WORKER_STATE_CHANNEL)
+        .bind(&marker)
+        .execute(&pool)
+        .await
+        .expect("send the marker event");
+    assert_notification(&mut worker_listener, WORKER_STATE_CHANNEL, &marker).await;
 
     sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
         .bind(&worker_id)
