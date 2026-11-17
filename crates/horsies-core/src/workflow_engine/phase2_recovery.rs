@@ -10,7 +10,6 @@
 //! quarantined. Python: `drive_phase2_recovery`
 //! (`core/workflows/phase2_recovery.py:381-576`).
 
-use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use crate::broker::core_rows::{column, first_row, one_row, RowDecodeError};
@@ -31,19 +30,35 @@ use crate::workflow_engine::steps::{
 
 use super::WorkflowError;
 
-/// Oldest first, past the grace window, under the attempt bound, capped.
-/// The record kind is read by `horsies_workflow_phase2_recover`, not here.
-const DISCOVER_PENDING_SQL: &str = "
-SELECT task_id
-FROM horsies_workflow_phase2_pending
-WHERE created_at < NOW() - ($1::double precision / 1000.0) * INTERVAL '1 second'
-  AND attempt_count < $2::integer
-ORDER BY created_at, task_id
-LIMIT $3::bigint";
+/// The phase-2 records older than the grace window (`$1` milliseconds) and
+/// under the attempt bound (`$2`), oldest first, at most `$3`. The record
+/// kind is read by `horsies_workflow_phase2_recover`, not here. Python:
+/// `DISCOVER_PENDING_SQL` (`core/workflows/phase2_recovery.py:72-82`).
+static DISCOVER_PENDING: TypedStatement = TypedStatement::new(
+    "phase2_discover_pending",
+    "SELECT task_id
+     FROM horsies_workflow_phase2_pending
+     WHERE created_at < now() - $1 * interval '1 millisecond'
+       AND attempt_count < $2
+     ORDER BY created_at, task_id
+     LIMIT $3",
+    &[
+        ParameterType::Int8,
+        ParameterType::Int4,
+        ParameterType::Int8,
+    ],
+);
 
-const COUNT_OVER_ATTEMPT_BOUND_SQL: &str = "
-SELECT count(*) FROM horsies_workflow_phase2_pending
-WHERE attempt_count >= $1::integer";
+/// The count of the records at or over the attempt bound `$1`, which
+/// discovery no longer selects. Python: `COUNT_OVER_ATTEMPT_BOUND_SQL`
+/// (`core/workflows/phase2_recovery.py:100-103`).
+static COUNT_OVER_ATTEMPT_BOUND: TypedStatement = TypedStatement::new(
+    "phase2_count_over_attempt_bound",
+    "SELECT count(*) AS over_attempt_bound
+     FROM horsies_workflow_phase2_pending
+     WHERE attempt_count >= $1",
+    &[ParameterType::Int4],
+);
 
 /// The workflow and the node of a phase-2 record, for the limit error of a
 /// raise. Python: `RAISED_ROW_CONTEXT_SQL`
@@ -71,11 +86,6 @@ static RECORD_RAISE: TypedStatement = TypedStatement::new(
         ParameterType::Text,
     ],
 );
-
-#[derive(Debug, FromRow)]
-struct PendingCandidate {
-    task_id: Uuid,
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Phase2RecoverySummary {
@@ -202,8 +212,10 @@ pub enum Phase2Wake {
 
 /// One bounded pass over the phase-2 records.
 ///
-/// - Discovery and the count over the bound read `pool` (the reaper's
-///   reserve pool).
+/// - Discovery ([`DISCOVER_PENDING`]) and the count over the bound
+///   ([`COUNT_OVER_ATTEMPT_BOUND`]) run on the main core pool of `broker`
+///   with the reserve ([`CheckoutClass::Reserved`]), one statement each in
+///   autocommit.
 /// - Each record runs [`phase2_recover`] in its own transaction on the main
 ///   core pool of `broker` with the reserve, with the child starts it owes.
 ///   The parent advances that it owes run after its commit
@@ -215,11 +227,13 @@ pub enum Phase2Wake {
 ///   database error) is not, so an outage cannot march records to the bound.
 /// - The pass never stops at a record: the records behind it still run.
 ///
-/// Errors: [`WorkflowError::Database`] when discovery or the count fails;
-/// [`WorkflowError::Validation`] for an attempt bound above `i32::MAX` (the
-/// config bounds it to 3-1000). Nothing was recovered then.
+/// Errors (nothing was recovered):
+/// - [`WorkflowError::Validation`] for a grace above `i64::MAX` milliseconds
+///   or an attempt bound above `i32::MAX` (the config bounds them to one hour
+///   and to 3-1000);
+/// - [`WorkflowError::Broker`] when discovery or the count fails;
+/// - [`WorkflowError::StepContract`] for a row that does not decode.
 pub async fn drive_phase2_recovery(
-    pool: &PgPool,
     broker: &PostgresBroker,
     registry: &WorkflowSpecRegistry,
     grace_ms: u64,
@@ -227,21 +241,44 @@ pub async fn drive_phase2_recovery(
     quarantine_after_attempts: u32,
     retention: &RetentionConfig,
 ) -> Result<Phase2RecoverySummary, WorkflowError> {
+    let grace_ms = i64::try_from(grace_ms).map_err(|_| {
+        WorkflowError::Validation(format!(
+            "phase-2 grace of {grace_ms} ms is above the integer range"
+        ))
+    })?;
     let attempt_bound = i32::try_from(quarantine_after_attempts).map_err(|_| {
         WorkflowError::Validation(format!(
             "phase-2 attempt bound {quarantine_after_attempts} is above the integer range"
         ))
     })?;
-    let candidates = sqlx::query_as::<_, PendingCandidate>(DISCOVER_PENDING_SQL)
-        .bind(grace_ms as f64)
-        .bind(attempt_bound)
-        .bind(max_rows)
-        .fetch_all(pool)
-        .await?;
-    let over_attempt_bound = sqlx::query_scalar(COUNT_OVER_ATTEMPT_BOUND_SQL)
-        .bind(attempt_bound)
-        .fetch_one(pool)
-        .await?;
+    let candidate_rows = run_alone(
+        broker,
+        CheckoutClass::Reserved,
+        &DISCOVER_PENDING
+            .bind()
+            .value(&grace_ms)
+            .value(&attempt_bound)
+            .value(&max_rows)
+            .finish(),
+    )
+    .await?;
+    let candidates = candidate_rows
+        .iter()
+        .map(|row| column::<Uuid>(row, &DISCOVER_PENDING, "task_id"))
+        .collect::<Result<Vec<Uuid>, RowDecodeError>>()
+        .map_err(StepContractError::from)?;
+    let count_rows = run_alone(
+        broker,
+        CheckoutClass::Reserved,
+        &COUNT_OVER_ATTEMPT_BOUND
+            .bind()
+            .value(&attempt_bound)
+            .finish(),
+    )
+    .await?;
+    let over_attempt_bound: i64 = one_row(count_rows, &COUNT_OVER_ATTEMPT_BOUND)
+        .and_then(|row| column(&row, &COUNT_OVER_ATTEMPT_BOUND, "over_attempt_bound"))
+        .map_err(StepContractError::from)?;
     let mut summary = Phase2RecoverySummary {
         over_attempt_bound,
         ..Phase2RecoverySummary::default()
@@ -250,9 +287,8 @@ pub async fn drive_phase2_recovery(
         registry,
         retention,
     };
-    for candidate in candidates {
+    for task_id in candidates {
         summary.considered += 1;
-        let task_id = candidate.task_id;
         match run_catching_panic(phase2_recover(broker, task_id, attempt_bound, build)).await {
             Ok(committed) => {
                 count_recovered(&mut summary, task_id, &committed);
@@ -529,6 +565,7 @@ mod tests {
     use crate::core::history::phase2::consumption::{consume_phase2, Phase2DispositionKind};
     use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
     use serial_test::serial;
+    use sqlx::PgPool;
 
     /// One recovery pass with the given grace, cap and attempt bound, and an
     /// empty registry.
@@ -539,7 +576,6 @@ mod tests {
         attempt_bound: u32,
     ) -> Result<Phase2RecoverySummary, WorkflowError> {
         drive_phase2_recovery(
-            pool,
             &PostgresBroker::from_pool(pool.clone()),
             &crate::core::WorkflowSpecRegistry::new(
                 crate::core::registry::BuilderHookName::SPEC_BUILDER,
@@ -744,16 +780,17 @@ mod tests {
         assert!(!Phase2DispositionKind::SourceAbsent.is_durable());
     }
 
+    /// A discovery that fails (here: a server that refuses connections) is a
+    /// broker error, not a summary of zero records.
     #[tokio::test]
     async fn discovery_failure_is_typed_instead_of_published_as_zero_health() {
         let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgresql://postgres@localhost/postgres")
+            .connect_lazy("postgresql://postgres@127.0.0.1:1/horsies_unreachable")
             .unwrap();
-        pool.close().await;
         let error = recovery_pass(&pool, 0, 1, 3)
             .await
             .expect_err("a failed discovery/count query must cross the containment seam");
-        assert!(matches!(error, WorkflowError::Database(_)));
+        assert!(matches!(error, WorkflowError::Broker(_)), "{error:?}");
     }
 
     #[tokio::test]
@@ -1159,7 +1196,6 @@ mod tests {
         assert_eq!(kind, "FAIL_RUNNING");
 
         let summary = drive_phase2_recovery(
-            &pool,
             &PostgresBroker::from_pool(pool.clone()),
             &crate::core::WorkflowSpecRegistry::new(
                 crate::core::registry::BuilderHookName::SPEC_BUILDER,
@@ -1282,7 +1318,6 @@ mod tests {
         store_prior_attempts(&pool, task_id, 2, "SOURCE_VERSION_CONFLICT").await;
 
         let summary = drive_phase2_recovery(
-            &pool,
             &PostgresBroker::from_pool(pool.clone()),
             &crate::core::WorkflowSpecRegistry::new(
                 crate::core::registry::BuilderHookName::SPEC_BUILDER,
@@ -1885,7 +1920,6 @@ mod tests {
             .expect("age the phase-2 record");
 
             let summary = drive_phase2_recovery(
-                &pool,
                 &PostgresBroker::from_pool(pool.clone()),
                 &crate::core::WorkflowSpecRegistry::new(
                     crate::core::registry::BuilderHookName::SPEC_BUILDER,

@@ -1176,10 +1176,8 @@ async fn run_reaper_pass(
         }
     });
 
-    // Discovery reads the reserve pool; each record runs on the main core
-    // pool with the reserve.
+    // Discovery and each record run on the main core pool with the reserve.
     let phase2 = crate::workflow_engine::phase2_recovery::drive_phase2_recovery(
-        runtime_pool,
         broker,
         registry,
         config.crashed_worker_recovery_grace_ms,
@@ -1211,9 +1209,7 @@ async fn run_reaper_pass(
     }
 
     if let Some(age) = retention.paused_workflow_auto_cancel_after {
-        match crate::workflow_engine::lifecycle::expire_paused_workflows(runtime_pool, age, 50)
-            .await
-        {
+        match crate::workflow_engine::lifecycle::expire_paused_workflows(broker, age, 50).await {
             Ok(count) if count > 0 => {
                 tracing::info!(
                     count,
