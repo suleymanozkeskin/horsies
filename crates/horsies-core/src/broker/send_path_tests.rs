@@ -201,7 +201,6 @@ fn malformed_policies() -> Vec<(&'static str, String)> {
 /// and no row is written.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #622"]
 async fn a_malformed_retry_policy_is_refused_before_any_row() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_pool(pool.clone());
@@ -256,7 +255,6 @@ async fn valid_retry_policies_store_their_limits() {
 /// 0.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #622"]
 async fn a_null_retry_policy_stores_zero_retries() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_pool(pool.clone());
