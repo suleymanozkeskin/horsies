@@ -904,13 +904,13 @@ mod catalog_tests {
         (
             "horsies_expire_owned_claim",
             "p_task_id uuid, p_worker_id text, p_result text, p_error_code text",
-            "SETOF horsies_terminalization_outcome",
+            "TABLE(task_id uuid, ordinality bigint, outcome text, terminal_at timestamp with time zone, terminalization_kind text, observed_status text, observed_worker_id text, observed_claimed_at timestamp with time zone, guard_kind text, observed_guard jsonb)",
             "plpgsql",
         ),
         (
             "horsies_expire_pending_tasks",
             "p_batch_size integer, p_result text, p_error_code text",
-            "SETOF horsies_terminalization_outcome",
+            "TABLE(task_id uuid, ordinality bigint, outcome text, terminal_at timestamp with time zone, terminalization_kind text, observed_status text, observed_worker_id text, observed_claimed_at timestamp with time zone, guard_kind text, observed_guard jsonb)",
             "plpgsql",
         ),
         (
@@ -922,13 +922,13 @@ mod catalog_tests {
         (
             "horsies_cancel_owned_orphan",
             "p_task_id uuid, p_worker_id text, p_claimed_at timestamp with time zone",
-            "SETOF horsies_terminalization_outcome",
+            "TABLE(task_id uuid, ordinality bigint, outcome text, terminal_at timestamp with time zone, terminalization_kind text, observed_status text, observed_worker_id text, observed_claimed_at timestamp with time zone, guard_kind text, observed_guard jsonb)",
             "plpgsql",
         ),
         (
             "horsies_cancel_orphaned_tasks",
             "p_batch_size integer",
-            "SETOF horsies_terminalization_outcome",
+            "TABLE(task_id uuid, ordinality bigint, outcome text, terminal_at timestamp with time zone, terminalization_kind text, observed_status text, observed_worker_id text, observed_claimed_at timestamp with time zone, guard_kind text, observed_guard jsonb)",
             "plpgsql",
         ),
         (
