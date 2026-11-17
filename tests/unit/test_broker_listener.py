@@ -1553,15 +1553,10 @@ class TestCallerUnwrapContract:
     @pytest.mark.asyncio
     async def test_broker_ensure_initialized_does_not_start_listener(self) -> None:
         """Schema initialization should not eagerly start listener connections."""
-        from horsies.core.types.result import Ok, is_ok as is_ok_
+        from horsies._core import SchemaInstalled
+        from horsies.core.types.result import is_ok as is_ok_
         from horsies.core.models.broker import PostgresConfig
         from horsies.core.brokers.postgres import PostgresBroker
-        from horsies.core.baseline.install import (
-            BaselineCurrent,
-            ClientFamily,
-            FamilyRecorded,
-            ReadersPublished,
-        )
 
         with (
             patch('horsies.core.brokers.postgres.create_async_engine') as mock_engine,
@@ -1569,21 +1564,6 @@ class TestCallerUnwrapContract:
             patch(
                 'horsies.core.brokers.postgres.PostgresListener'
             ) as mock_listener_cls,
-            patch(
-                'horsies.core.brokers.postgres.psycopg.AsyncConnection.connect',
-                new=AsyncMock(return_value=AsyncMock()),
-            ),
-            patch(
-                'horsies.core.brokers.postgres.read_database_state',
-                new=AsyncMock(
-                    return_value=Ok(
-                        BaselineCurrent(
-                            family=FamilyRecorded(family=ClientFamily.PYTHON),
-                            readers=ReadersPublished(),
-                        )
-                    )
-                ),
-            ),
         ):
             mock_engine.return_value = MagicMock()
             mock_engine.return_value.dispose = AsyncMock()
@@ -1595,10 +1575,18 @@ class TestCallerUnwrapContract:
                 database_url='postgresql://u:p@localhost/db'
             )
             broker = PostgresBroker(config)
+            # The install runs in the core; it answers without a database here.
+            handle = MagicMock()
+            handle.install_schema_async = AsyncMock(
+                return_value=MagicMock(spec=SchemaInstalled, version=1000),
+            )
+            broker._core_handle = handle  # pyright: ignore[reportPrivateUsage]
 
             result = await broker.ensure_schema_initialized()
 
         assert is_ok_(result)
+        handle.install_schema_async.assert_awaited_once_with()
+        mock_listener_cls.assert_not_called()
         mock_listener.start.assert_not_awaited()
 
     @pytest.mark.asyncio

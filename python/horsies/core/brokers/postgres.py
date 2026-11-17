@@ -23,6 +23,8 @@ from horsies._core import (
     CoreError,
     CoreHandle,
     DatabasePingRecord,
+    SchemaInstalled,
+    SchemaInstallNotRun,
     StaleClaimsBoundReached,
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
@@ -1546,6 +1548,10 @@ class PostgresBroker:
     async def _maybe_run_schema_init(self, engine: AsyncEngine) -> None:
         """Install the baseline schema when this broker runs migrations.
 
+        The Python install before the switch to the core: the broker installs
+        through ``_ensure_initialized``, and only the dual-run reference
+        (``tests/dualrun/reference/install_caller.py``) runs this path.
+
         ``engine`` is the session URL's engine: the reader publication runs
         on it. The state read, the lock and the migration use their own
         direct session connection.
@@ -1731,39 +1737,68 @@ class PostgresBroker:
                     raise RuntimeError(message)
                 body_error.add_note(message)
 
-    async def _ensure_initialized(self, resources: BrokerResources) -> None:
+    async def _ensure_initialized(self) -> None:
+        """Install the schema once per broker through ``CoreHandle.install_schema_async``.
+
+        The core installs the baseline into an empty database, or completes
+        or checks an installed one, under the fleet schema lock: the
+        migration with this client's family row, then the published history
+        readers. A handle with migrations off or ``assume_initialized`` runs
+        no schema statement. After a success the broker does not call the
+        core again; a broker built with ``assume_initialized=True`` never
+        calls it.
+
+        The ``_maybe_run_schema_init`` path of this class is the Python
+        install before the switch; the dual-run reference
+        (``tests/dualrun/reference/install_caller.py``) runs it.
+
+        Raises:
+            CoreOperationFailed: the core reported ``SCHEMA_INIT_FAILED``;
+                ``retryable`` is the core's classification of the cause. The
+                broker keeps nothing, so the next call installs again.
+            CoreError: the core of this process cannot run the call.
+        """
         if self._initialized:
             return
-        await self._run_with_schema_engine(resources, self._maybe_run_schema_init)
-        self._initialized = True
+        match await self._core_handle.install_schema_async():
+            case SchemaInstalled() | SchemaInstallNotRun():
+                self._initialized = True
+            case BrokerFailure(code='SCHEMA_INIT_FAILED', message=message, retryable=retryable):
+                raise CoreOperationFailed(
+                    'PostgresBroker.ensure_schema_initialized', message, retryable,
+                )
+            case BrokerFailure(code=code):
+                raise AssertionError(f'the core schema install answered the code {code}')
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def ensure_schema_initialized(
         self,
     ) -> Result[None, BrokerOperationFailed | BrokerEventLoopLimit]:
-        """
-        Public entry point to ensure tables and triggers exist.
+        """Install the schema, or check it, once per broker. Writes.
 
-        Safe to call multiple times and from multiple processes; internally
-        guarded by a PostgreSQL advisory lock to avoid DDL races.
+        Safe to call many times and from many processes: the core guards the
+        install with the fleet schema advisory lock, and waits for another
+        installer's lock for at most the core's bound.
 
-        Returns Ok(None) on success. On failure: ``BrokerOperationFailed``
-        with ``SCHEMA_INIT_FAILED`` and its cause, or ``BrokerEventLoopLimit``
-        when the call ran on one loop more than the broker's limit.
+        Returns ``Ok(None)`` on success. On failure ``BrokerOperationFailed``
+        with ``SCHEMA_INIT_FAILED`` and its cause: the core reported the
+        install failed (``exception`` is a ``CoreOperationFailed``), for
+        example a database of the other client family or one this build
+        cannot install into (not retryable), or the core of this process
+        cannot run the call (``exception`` is the ``CoreError``). The install
+        runs on the core pools, so ``BrokerEventLoopLimit`` is no longer a
+        failure exit. A cancel of the caller does not stop the install.
         """
-        match await self.select_resources():
-            case Err(loop_limit):
-                return _loop_limit_err('ensure_schema_initialized', loop_limit)
-            case Ok(resources):
-                pass
         try:
-            await self._ensure_initialized(resources)
-            return Ok(None)
-        except Exception as exc:
+            await self._ensure_initialized()
+        except (CoreOperationFailed, CoreError) as exc:
             return _operation_failed(
                 BrokerErrorCode.SCHEMA_INIT_FAILED,
                 f'Schema initialization failed: {exc}',
                 exc,
             )
+        return Ok(None)
 
     # ----------------- Async API -----------------
 
@@ -1946,7 +1981,7 @@ class PostgresBroker:
         # it raises RuntimeError for operator states such as an incomplete
         # cutover, and each of those is a failed enqueue, not a crash.
         try:
-            await self._ensure_initialized(resources)
+            await self._ensure_initialized()
         except Exception as exc:
             return _enqueue_failed(
                 f'Failed to enqueue task {task_name}: {exc}',
@@ -2278,7 +2313,7 @@ class PostgresBroker:
             case Ok(resources):
                 pass
         try:
-            await self._ensure_initialized(resources)
+            await self._ensure_initialized()
 
             start_time = asyncio.get_event_loop().time()
 
@@ -3693,7 +3728,7 @@ class PostgresBroker:
             case Ok(resources):
                 pass
         try:
-            await self._ensure_initialized(resources)
+            await self._ensure_initialized()
 
             async with resources.session_factory() as session:
                 base_columns = [
