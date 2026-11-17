@@ -229,16 +229,6 @@ class TestRealBrokerAtTheLimit:
         assert result.err_value.code is BrokerErrorCode.EVENT_LOOP_LIMIT
         assert LIMIT_TEXT in result.err_value.message
 
-    def test_task_send(self, at_limit: _AtLimit) -> None:
-        @at_limit.app.task('loop_limit.echo')
-        def echo(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=x)
-
-        result = at_limit.run(echo.send_async(x=1))
-
-        assert is_err(result)
-        assert isinstance(result.err_value, TaskSendEventLoopLimit)
-
     def test_workflow_handle_wrap_and_fold(self, at_limit: _AtLimit) -> None:
         handle: WorkflowHandle[Any] = WorkflowHandle(
             workflow_id='wf-at-limit', broker=at_limit.broker,

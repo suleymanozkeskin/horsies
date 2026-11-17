@@ -44,9 +44,7 @@ use crate::broker::history_reads::{read_history_detail, read_task_result, Result
 use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
 };
-use crate::broker::row::task::{
-    ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow, TaskResultRow,
-};
+use crate::broker::row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskResultRow};
 use crate::broker::workflow_claim_settle::{settle_claimed_workflow_tasks, ClaimDisposition};
 
 use crate::broker::client_family::{
@@ -144,73 +142,6 @@ fn test_uuid(value: &str) -> Uuid {
 // ---------------------------------------------------------------------------
 // SQL constants
 // ---------------------------------------------------------------------------
-
-// One server-side call performs advisory-lock acquisition + cap counts + the
-// windowed claim (see horsies_claim, migrations/0027_claim_function_v12.sql;
-// parity with horsies PR #160). The xact-scoped locks live only for the
-// statement's own transaction — never across a client round trip. Replaces
-// the per-pass lock loop + count statements + per-queue CLAIM_SQL loop.
-//
-// The return shape is identical to the Python implementation's horsies_claim
-// (its schema v12), so both stacks can share one database: either side's
-// ensure-schema (re)creates the same function, and the trailing claimed_at
-// OUT column — the claim-generation fence both sides thread through dispatch —
-// is always present. 0024's extra columns (retry_count, max_retries,
-// good_until) are gone from the function; the dispatch path reads them from
-// SET_RUNNING_SQL's RETURNING instead.
-const HORSIES_CLAIM_SQL: &str = "\
-SELECT id::uuid AS id, task_name, input, queue_name, is_workflow_task, \
-       task_options, claimed_at \
-FROM horsies_claim($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
-
-// CLAIMED -> RUNNING transition with the first runner heartbeat fused in (parity
-// with horsies PR #134): the heartbeat row is inserted in the same statement as the
-// transition, so a task is never observable RUNNING without heartbeat coverage, and
-// a transition that does not apply (expiry / PAUSED / CANCELLED / ownership change)
-// inserts no orphan beat. The heartbeat thread no longer sends an immediate beat.
-//
-// The `claimed_at` fence ($6) scopes the transition to the claim generation
-// the dispatch was born from (set by the claim, cleared by every requeue).
-// Without it, a stale buffered dispatch could start a row the same worker
-// re-claimed after lease expiry — worker_id and status both match. The
-// comparison has no NULL arm: a NULL generation matches no row, as in
-// Python's child ownership confirm (`core/worker/child_runner.py`).
-//
-// RETURNING also carries retry_count, max_retries, and good_until: the
-// finalize/retry path consumes them, and this locked UPDATE is where the
-// dispatch reads them now that `horsies_claim`'s v12 return shape (shared
-// with Python) no longer includes them. The values are exact — read under
-// the row lock, atomically with the transition.
-pub(crate) const SET_RUNNING_SQL: &str = "\
-WITH upd AS (
-    UPDATE horsies_tasks
-    SET status = 'RUNNING',
-        claim_expires_at = NULL,
-        started_at = NOW(),
-        worker_pid = $2,
-        worker_hostname = $3,
-        worker_process_name = $4,
-        updated_at = NOW()
-    WHERE id = $1
-      AND status = 'CLAIMED'
-      AND claimed_by_worker_id = $5
-      AND claimed_at = $6
-      AND (claim_expires_at IS NULL OR claim_expires_at > now())
-      AND (good_until IS NULL OR good_until > now())
-      AND NOT EXISTS (
-          SELECT 1
-          FROM horsies_workflow_tasks wt
-          JOIN horsies_workflows w ON w.id = wt.workflow_id
-          WHERE wt.task_id = $1
-            AND w.status IN ('PAUSED', 'CANCELLED')
-      )
-    RETURNING id, started_at, retry_count, max_retries, good_until
-),
-hb AS (
-    INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
-    SELECT id, $5, 'runner', NOW(), $3, $2 FROM upd
-)
-SELECT id, started_at, retry_count, max_retries, good_until FROM upd";
 
 /// What the pre-start expiry of a claimed task found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,14 +245,6 @@ SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
        NULL::text AS failed_reason, NULL::text AS result, execution
 FROM horsies_tasks
 WHERE id = $1";
-
-/// Count all RUNNING + active CLAIMED tasks across every worker in the cluster.
-/// Excludes expired claims (reclaimable, must not consume cap budget).
-const COUNT_GLOBAL_IN_FLIGHT_SQL: &str = "\
-SELECT COUNT(*) FROM horsies_tasks \
-WHERE status = 'RUNNING' \
-   OR (status = 'CLAIMED' \
-       AND (claim_expires_at IS NULL OR claim_expires_at > now()))";
 
 /// Skip workflow_tasks for tasks belonging to CANCELLED workflows.
 const SKIP_CANCELLED_WORKFLOW_TASKS_SQL: &str = "\
@@ -689,45 +612,6 @@ fn prepared_statement_tracking_error(err: sqlx::Error) -> BrokerError {
          statement support, or use a direct/session-capable database_url for Rust \
          SQLx clients: {err}",
     ))
-}
-
-/// A claim-pass count as the claim function's `integer` argument.
-fn claim_argument(name: &str, value: u32) -> Result<i32, BrokerError> {
-    i32::try_from(value).map_err(|_| {
-        BrokerError::InvalidClaimArgument(format!(
-            "{name} = {value} is above the claim function's limit of {}",
-            i32::MAX
-        ))
-    })
-}
-
-/// Inputs to one `horsies_claim` pass (parity with horsies PR #160): the
-/// serviced queue set with its priority/cap config, the budget knobs, and the
-/// advisory lock keys the pass must hold.
-#[derive(Debug, Clone)]
-pub struct ClaimPassParams {
-    pub worker_id: String,
-    /// Queues this pass claims from, in claim order.
-    pub queues: Vec<String>,
-    /// Queue priority per serviced queue (absent entries default to 100
-    /// server-side; callers pass the resolved map for parity with Python).
-    pub queue_priority: std::collections::HashMap<String, i32>,
-    /// `max_concurrency` for the capped queues in `queues` only.
-    pub queue_max_concurrency: std::collections::HashMap<String, u32>,
-    /// `prefetch_buffer == 0`: budget counts RUNNING + active CLAIMED.
-    pub hard_cap_mode: bool,
-    pub processes: u32,
-    pub prefetch_buffer: u32,
-    pub max_claim_per_worker: u32,
-    pub max_claim_batch: u32,
-    pub cluster_wide_cap: Option<u32>,
-    /// The lease of every claim this pass takes. Every claim has a lease
-    /// (Python `core/worker/claiming.py`; the baseline CHECK requires
-    /// `claim_expires_at` on every CLAIMED row), so a missing or zero lease
-    /// is not representable.
-    pub claim_lease_ms: std::num::NonZeroU32,
-    /// Advisory keys for consistent cap accounting; acquired ascending.
-    pub lock_keys: Vec<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1633,96 +1517,6 @@ impl PostgresBroker {
         )
     }
 
-    /// Run one collapsed claim pass via `horsies_claim` (parity with horsies
-    /// PR #160).
-    ///
-    /// One server-side statement acquires the advisory locks (ascending key
-    /// order), computes all cap accounting under that lock snapshot, and runs
-    /// the two-arm windowed claim. The statement executes in its own implicit
-    /// transaction, so the xact-scoped locks are released at statement end —
-    /// never held across a client round trip.
-    pub async fn claim_batch(
-        &self,
-        params: &ClaimPassParams,
-    ) -> Result<Vec<ClaimedTaskRow>, BrokerError> {
-        // Every count is refused, not clamped, when the claim function's
-        // integer argument cannot hold it.
-        let processes = claim_argument("processes", params.processes)?;
-        let prefetch_buffer = claim_argument("prefetch_buffer", params.prefetch_buffer)?;
-        let max_claim_per_worker =
-            claim_argument("max_claim_per_worker", params.max_claim_per_worker)?;
-        let max_claim_batch = claim_argument("max_claim_batch", params.max_claim_batch)?;
-        let cluster_wide_cap = params
-            .cluster_wide_cap
-            .map(|cap| claim_argument("cluster_wide_cap", cap))
-            .transpose()?;
-        let started = std::time::Instant::now();
-        let mut connection = self.pool.acquire().await.map_err(BrokerError::Database)?;
-        let acquired = std::time::Instant::now();
-        let result = sqlx::query_as::<_, ClaimedTaskRow>(HORSIES_CLAIM_SQL)
-            .bind(&params.worker_id)
-            .bind(sqlx::types::Json(&params.queues))
-            .bind(sqlx::types::Json(&params.queue_priority))
-            .bind(sqlx::types::Json(&params.queue_max_concurrency))
-            .bind(params.hard_cap_mode)
-            .bind(processes)
-            .bind(prefetch_buffer)
-            .bind(max_claim_per_worker)
-            .bind(max_claim_batch)
-            .bind(cluster_wide_cap)
-            .bind(i64::from(params.claim_lease_ms.get()))
-            .bind(sqlx::types::Json(&params.lock_keys))
-            .fetch_all(&mut *connection)
-            .await;
-        let finished = std::time::Instant::now();
-        drop(connection);
-        tracing::debug!(
-            target: "horsies::claim",
-            worker_id = %params.worker_id,
-            pool_wait_ms = acquired.duration_since(started).as_secs_f64() * 1000.0,
-            query_ms = finished.duration_since(acquired).as_secs_f64() * 1000.0,
-            elapsed_ms = finished.duration_since(started).as_secs_f64() * 1000.0,
-            count = result.as_ref().map_or(0, Vec::len),
-            success = result.is_ok(),
-            "claim call completed"
-        );
-        let rows = result.map_err(BrokerError::Database)?;
-
-        tracing::debug!(count = rows.len(), "claim pass claimed tasks");
-        Ok(rows)
-    }
-
-    /// Transition a task from CLAIMED to RUNNING.
-    ///
-    /// Verifies ownership and checks that the parent workflow (if any)
-    /// is not paused or cancelled. `claimed_at` fences the transition to the
-    /// claim generation of the dispatch's claimed row. Returns the attempt
-    /// context row (`started_at` plus the retry/expiry columns the finalize
-    /// path consumes) on success, `None` if the task was not in CLAIMED state
-    /// (e.g. reaper already handled it, or workflow is PAUSED/CANCELLED).
-    pub async fn set_running(
-        &self,
-        task_id: Uuid,
-        worker_id: &str,
-        pid: i32,
-        hostname: &str,
-        process_name: &str,
-        claimed_at: DateTime<Utc>,
-    ) -> Result<Option<SetRunningRow>, BrokerError> {
-        let result: Option<SetRunningRow> = sqlx::query_as(SET_RUNNING_SQL)
-            .bind(task_id)
-            .bind(pid)
-            .bind(hostname)
-            .bind(process_name)
-            .bind(worker_id)
-            .bind(claimed_at)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-
-        Ok(result)
-    }
-
     /// Expire a CLAIMED task whose `good_until` passed before user code started.
     ///
     /// Runs through `horsies_expire_owned_claim`
@@ -2093,18 +1887,6 @@ impl PostgresBroker {
                 }
             }
         }
-    }
-
-    /// Count all RUNNING + CLAIMED tasks across every worker in the cluster.
-    ///
-    /// Used to enforce `cluster_wide_cap`: the total number of in-flight
-    /// tasks globally must not exceed the cap.
-    pub async fn count_global_in_flight(&self) -> Result<i64, BrokerError> {
-        let count: (i64,) = sqlx::query_as(COUNT_GLOBAL_IN_FLIGHT_SQL)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(count.0)
     }
 
     /// Stop a claimed workflow task before it started because its workflow
@@ -3989,488 +3771,6 @@ fn sent_at_at_stored_precision(sent_at: DateTime<Utc>) -> Result<DateTime<Utc>, 
 }
 
 #[cfg(test)]
-mod horsies_claim_tests {
-    //! Contract pins for the collapsed server-side claim (parity with horsies
-    //! PR #160 tests `463e665`): selection order, per-queue/cluster caps,
-    //! max_claim_batch, max_claim_per_worker guard, expired-CLAIMED reclaim,
-    //! nullable lease.
-    use super::*;
-    use serial_test::serial;
-    use uuid::Uuid;
-
-    /// Connect and ensure migrations (incl. `horsies_claim`) are applied.
-    async fn connect_migrated() -> PostgresBroker {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
-        broker.migrate().await.expect("migrate");
-        broker
-    }
-
-    /// Insert a task; `lease_offset_secs` (negative = expired) and `owner`
-    /// only matter for CLAIMED/RUNNING rows.
-    async fn seed(
-        pool: &sqlx::PgPool,
-        queue: &str,
-        status: &str,
-        priority: i32,
-        owner: Option<&str>,
-        lease_offset_secs: Option<i64>,
-    ) -> Uuid {
-        let id = Uuid::new_v4();
-        let expires = lease_offset_secs.map(|s| Utc::now() + chrono::Duration::seconds(s));
-        sqlx::query(
-            "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, input, task_options, execution,
-                retention_class_key, sent_at, created_at,
-                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
-                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
-                started_at, finalizing_at, finalizing_by_worker_id,
-                worker_pid, worker_hostname, worker_process_name,
-                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
-                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
-            ) VALUES (
-                $1, 'pr160_task', $2, $3, 'null', NULL, 'ISOLATED',
-                'standard_30d', NOW(), NOW(),
-                1, decode(repeat('00', 32), 'hex'), NULL,
-                $4, NOW(), CASE WHEN $4 IN ('CLAIMED', 'RUNNING') THEN NOW() END, $5, CASE WHEN $4 = 'CLAIMED' THEN COALESCE($6, NOW() + interval '1 minute') END,
-                NULL, NULL, NULL,
-                CASE WHEN $4 = 'RUNNING' THEN 4242 END, CASE WHEN $4 = 'RUNNING' THEN 'test-host' END, CASE WHEN $4 = 'RUNNING' THEN 'test-process' END,
-                0, 0, NULL, NULL, FALSE,
-                NOW(), FALSE, NULL, NULL
-            )",
-        )
-        .bind(id)
-        .bind(queue)
-        .bind(priority)
-        .bind(status)
-        .bind(owner)
-        .bind(expires)
-        .execute(pool)
-        .await
-        .expect("seed task");
-        id
-    }
-
-    fn base_params(worker_id: &str, queues: &[String]) -> ClaimPassParams {
-        ClaimPassParams {
-            worker_id: worker_id.to_owned(),
-            queues: queues.to_vec(),
-            queue_priority: queues.iter().map(|q| (q.clone(), 100)).collect(),
-            queue_max_concurrency: std::collections::HashMap::new(),
-            hard_cap_mode: true,
-            processes: 10,
-            prefetch_buffer: 0,
-            max_claim_per_worker: 0,
-            max_claim_batch: 0,
-            cluster_wide_cap: None,
-            claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("positive lease"),
-            lock_keys: Vec::new(),
-        }
-    }
-
-    async fn cleanup(pool: &sqlx::PgPool, queues: &[String]) {
-        sqlx::query("DELETE FROM horsies_tasks WHERE queue_name = ANY($1)")
-            .bind(queues)
-            .execute(pool)
-            .await
-            .expect("cleanup");
-    }
-
-    /// Interop pin: `horsies_claim`'s OUT columns must equal the Python
-    /// implementation's schema-v12 return shape exactly, so both stacks can
-    /// (re)create the function on a shared database without breaking the
-    /// other's consumer. Any OUT-column change on either side must be a
-    /// coordinated DROP + CREATE with the same shape (migration 0027).
-    #[tokio::test]
-    #[serial]
-    async fn claim_function_returns_python_v12_shape() {
-        let broker = connect_migrated().await;
-        let pool = broker.pool().clone();
-
-        let result_shape: String = sqlx::query_scalar(
-            "SELECT pg_get_function_result(
-                 'horsies_claim(text, jsonb, jsonb, jsonb, boolean, int, int, int, int, int, bigint, jsonb)'::regprocedure
-             )",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("function must exist with the pinned signature");
-        assert_eq!(
-            result_shape,
-            "TABLE(id text, task_name character varying, input text, \
-             queue_name character varying, is_workflow_task boolean, task_options text, \
-             claimed_at timestamp with time zone)",
-            "OUT columns diverged from the Python v12 shape",
-        );
-
-        // A claimed row carries its claim generation.
-        let suffix = Uuid::new_v4().simple().to_string();
-        let wid = format!("w-{suffix}");
-        let qa = format!("pr160_v12_{suffix}");
-        let queues = vec![qa.clone()];
-        let id = seed(&pool, &qa, "PENDING", 1, None, None).await;
-
-        let rows = broker
-            .claim_batch(&base_params(&wid, &queues))
-            .await
-            .expect("claim");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, id);
-        let claimed_at = rows[0].claimed_at;
-        let db_claimed_at: DateTime<Utc> =
-            sqlx::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
-                .bind(&id)
-                .fetch_one(&pool)
-                .await
-                .expect("row claimed_at");
-        assert_eq!(
-            claimed_at, db_claimed_at,
-            "returned generation must match the row"
-        );
-
-        cleanup(&pool, &queues).await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn budget_one_picks_higher_priority_queue_then_task_priority() {
-        let broker = connect_migrated().await;
-        let pool = broker.pool().clone();
-        let suffix = Uuid::new_v4().simple().to_string();
-        let wid = format!("w-{suffix}");
-        let qa = format!("pr160_a_{suffix}");
-        let qb = format!("pr160_b_{suffix}");
-        let queues = vec![qa.clone(), qb.clone()];
-
-        // qb carries the better task priority (1 vs 5), but qa has the better
-        // QUEUE priority — queue rank must win the global ordering.
-        seed(&pool, &qa, "PENDING", 5, None, None).await;
-        let qb_id = seed(&pool, &qb, "PENDING", 1, None, None).await;
-
-        let mut params = base_params(&wid, &queues);
-        params.processes = 1; // budget of exactly 1
-        params.queue_priority.insert(qa.clone(), 10);
-        params.queue_priority.insert(qb.clone(), 20);
-
-        let rows = broker.claim_batch(&params).await.expect("claim");
-        assert_eq!(rows.len(), 1, "budget of 1 claims exactly one row");
-        assert_eq!(
-            rows[0].queue_name, qa,
-            "queue priority outranks task priority"
-        );
-
-        // Same budget, equal queue priorities: task priority decides.
-        cleanup(&pool, &queues).await;
-        seed(&pool, &qa, "PENDING", 5, None, None).await;
-        let qb_id2 = seed(&pool, &qb, "PENDING", 1, None, None).await;
-        let params_flat = {
-            let mut p = base_params(&wid, &queues);
-            p.processes = 1;
-            p.worker_id = format!("w2-{suffix}");
-            p
-        };
-        let rows = broker.claim_batch(&params_flat).await.expect("claim");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0].id, qb_id2,
-            "equal queue rank falls back to task priority"
-        );
-
-        let _ = qb_id;
-        cleanup(&pool, &queues).await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn per_queue_cap_subtracts_in_flight_and_never_over_claims() {
-        let broker = connect_migrated().await;
-        let pool = broker.pool().clone();
-        let suffix = Uuid::new_v4().simple().to_string();
-        let wid = format!("w-{suffix}");
-        let qa = format!("pr160_cap_{suffix}");
-        let queues = vec![qa.clone()];
-
-        // Cap 2 with one RUNNING (other worker) -> exactly 1 claimable.
-        seed(&pool, &qa, "RUNNING", 1, Some("other-worker"), None).await;
-        for _ in 0..5 {
-            seed(&pool, &qa, "PENDING", 1, None, None).await;
-        }
-
-        let mut params = base_params(&wid, &queues);
-        params.queue_max_concurrency.insert(qa.clone(), 2);
-
-        let rows = broker.claim_batch(&params).await.expect("claim");
-        assert_eq!(rows.len(), 1, "cap 2 minus 1 in-flight = 1 claim");
-
-        // A second pass sees cap exhausted (1 RUNNING + 1 CLAIMED) -> 0.
-        let rows = broker.claim_batch(&params).await.expect("claim");
-        assert!(rows.is_empty(), "cap exhausted, nothing claimed");
-
-        cleanup(&pool, &queues).await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn cluster_cap_limits_total_claims() {
-        let broker = connect_migrated().await;
-        let pool = broker.pool().clone();
-        let suffix = Uuid::new_v4().simple().to_string();
-        let wid = format!("w-{suffix}");
-        let qa = format!("pr160_cluster_{suffix}");
-        let queues = vec![qa.clone()];
-
-        for _ in 0..5 {
-            seed(&pool, &qa, "PENDING", 1, None, None).await;
-        }
-
-        // The global in-flight count spans the whole table; anchor the cap on
-        // the current value so leftover rows from other suites don't skew it.
-        let global_now = broker.count_global_in_flight().await.expect("count") as u32;
-        let mut params = base_params(&wid, &queues);
-        params.cluster_wide_cap = Some(global_now + 2);
-
-        let rows = broker.claim_batch(&params).await.expect("claim");
-        assert_eq!(rows.len(), 2, "cluster cap leaves room for exactly 2");
-
-        cleanup(&pool, &queues).await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn max_claim_batch_caps_each_queue() {
-        let broker = connect_migrated().await;
-        let pool = broker.pool().clone();
-        let suffix = Uuid::new_v4().simple().to_string();
-        let wid = format!("w-{suffix}");
-        let qa = format!("pr160_batch_{suffix}");
-        let queues = vec![qa.clone()];
-
-        for _ in 0..5 {
-            seed(&pool, &qa, "PENDING", 1, None, None).await;
-        }
-
-        let mut params = base_params(&wid, &queues);
-        params.max_claim_batch = 2;
-
-        let rows = broker.claim_batch(&params).await.expect("claim");
-        assert_eq!(rows.len(), 2, "max_claim_batch bounds the per-queue window");
-
-        cleanup(&pool, &queues).await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn expired_claimed_row_is_reclaimed() {
-        let broker = connect_migrated().await;
-        let pool = broker.pool().clone();
-        let suffix = Uuid::new_v4().simple().to_string();
-        let wid = format!("w-{suffix}");
-        let qa = format!("pr160_exp_{suffix}");
-        let queues = vec![qa.clone()];
-
-        let expired_id = seed(&pool, &qa, "CLAIMED", 1, Some("dead-worker"), Some(-600)).await;
-        // Active claim by another worker must NOT be reclaimed.
-        seed(&pool, &qa, "CLAIMED", 1, Some("live-worker"), Some(600)).await;
-
-        let params = base_params(&wid, &queues);
-        let rows = broker.claim_batch(&params).await.expect("claim");
-        assert_eq!(rows.len(), 1, "only the expired claim is eligible");
-        assert_eq!(rows[0].id, expired_id);
-
-        let owner: (Option<String>,) =
-            sqlx::query_as("SELECT claimed_by_worker_id FROM horsies_tasks WHERE id = $1")
-                .bind(&expired_id)
-                .fetch_one(&pool)
-                .await
-                .expect("read owner");
-        assert_eq!(owner.0.as_deref(), Some(wid.as_str()));
-
-        cleanup(&pool, &queues).await;
-    }
-
-    /// Python `core/worker/claiming.py`: every claim carries a lease. A
-    /// claim pass sets `claim_expires_at` on every row it takes; a pass
-    /// without a lease is not representable (`ClaimPassParams.claim_lease_ms`
-    /// is `NonZeroU32`).
-    #[tokio::test]
-    #[serial]
-    async fn every_claim_carries_its_lease() {
-        let broker = connect_migrated().await;
-        let pool = broker.pool().clone();
-        let suffix = Uuid::new_v4().simple().to_string();
-        let wid = format!("w-{suffix}");
-        let qa = format!("pr160_lease_{suffix}");
-        let queues = vec![qa.clone()];
-
-        let _task = seed(&pool, &qa, "PENDING", 1, None, None).await;
-
-        let params = base_params(&wid, &queues);
-        let rows = broker.claim_batch(&params).await.expect("claim");
-        assert_eq!(rows.len(), 1);
-
-        let lease: Option<DateTime<Utc>> =
-            sqlx::query_scalar("SELECT claim_expires_at FROM horsies_tasks WHERE id = $1")
-                .bind(rows[0].id)
-                .fetch_one(&pool)
-                .await
-                .expect("read lease");
-        assert!(lease.is_some(), "every claim sets claim_expires_at");
-
-        cleanup(&pool, &queues).await;
-    }
-
-    /// A count that the claim function's integer argument cannot hold is
-    /// refused before any statement, never clamped to `i32::MAX`.
-    #[tokio::test]
-    #[serial]
-    async fn a_claim_count_above_the_integer_range_is_refused() {
-        let broker = connect_migrated().await;
-        let mut params = base_params("w-range", &["range_queue".to_owned()]);
-        params.max_claim_batch = u32::MAX;
-        match broker.claim_batch(&params).await {
-            Err(BrokerError::InvalidClaimArgument(message)) => {
-                assert!(message.contains("max_claim_batch"), "{message}");
-            }
-            other => panic!("expected InvalidClaimArgument, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn max_claim_per_worker_guard_returns_empty() {
-        let broker = connect_migrated().await;
-        let pool = broker.pool().clone();
-        let suffix = Uuid::new_v4().simple().to_string();
-        let wid = format!("w-{suffix}");
-        let qa = format!("pr160_guard_{suffix}");
-        let queues = vec![qa.clone()];
-
-        // Worker already holds 2 active claims; guard is 2 -> nothing claimed.
-        seed(&pool, &qa, "CLAIMED", 1, Some(&wid), Some(600)).await;
-        seed(&pool, &qa, "CLAIMED", 1, Some(&wid), Some(600)).await;
-        seed(&pool, &qa, "PENDING", 1, None, None).await;
-
-        let mut params = base_params(&wid, &queues);
-        params.max_claim_per_worker = 2;
-
-        let rows = broker.claim_batch(&params).await.expect("claim");
-        assert!(rows.is_empty(), "max_claim_per_worker guard short-circuits");
-
-        cleanup(&pool, &queues).await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn soft_cap_budget_subtracts_running_and_claimed() {
-        let broker = connect_migrated().await;
-        let pool = broker.pool().clone();
-        let suffix = Uuid::new_v4().simple().to_string();
-        let wid = format!("w-{suffix}");
-        let qa = format!("pr160_soft_{suffix}");
-        let queues = vec![qa.clone()];
-
-        // budget = (processes 1 + prefetch 2) - RUNNING 1 - CLAIMED 1 = 1.
-        seed(&pool, &qa, "RUNNING", 1, Some(&wid), None).await;
-        seed(&pool, &qa, "CLAIMED", 1, Some(&wid), Some(600)).await;
-        for _ in 0..3 {
-            seed(&pool, &qa, "PENDING", 1, None, None).await;
-        }
-
-        let mut params = base_params(&wid, &queues);
-        params.hard_cap_mode = false;
-        params.processes = 1;
-        params.prefetch_buffer = 2;
-
-        let rows = broker.claim_batch(&params).await.expect("claim");
-        assert_eq!(
-            rows.len(),
-            1,
-            "soft budget = concurrency + prefetch - running - claimed"
-        );
-
-        cleanup(&pool, &queues).await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn claimed_rows_keep_dispatch_order_across_eligibility_arms() {
-        let broker = connect_migrated().await;
-        let pool = broker.pool();
-        let queue = format!("claim_order_{}", Uuid::new_v4().simple());
-        let queues = vec![queue.clone()];
-        let middle = seed(pool, &queue, "PENDING", 50, None, None).await;
-        let last = seed(pool, &queue, "PENDING", 100, None, None).await;
-        let second = seed(pool, &queue, "PENDING", 2, None, None).await;
-        let first = seed(pool, &queue, "CLAIMED", 1, Some("old_worker"), Some(-60)).await;
-        let rows = broker
-            .claim_batch(&base_params("claim_order_worker", &queues))
-            .await
-            .unwrap();
-        let returned: Vec<Uuid> = rows.into_iter().map(|row| row.id).collect();
-        assert_eq!(returned, vec![first, second, middle, last]);
-        cleanup(pool, &queues).await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn queue_and_batch_limits_leave_unused_candidates_unlocked() {
-        let broker = connect_migrated().await;
-        let pool = broker.pool();
-        let suffix = Uuid::new_v4().simple().to_string();
-        let blocked = format!("claim_blocked_{suffix}");
-        let ready = format!("claim_ready_{suffix}");
-        let queues = vec![blocked.clone(), ready.clone()];
-        let mut unused = Vec::new();
-        for priority in 1..=10 {
-            unused.push(seed(pool, &blocked, "PENDING", priority, None, None).await);
-        }
-        let mut expected = Vec::new();
-        for priority in 1..=10 {
-            let id = seed(pool, &ready, "PENDING", priority, None, None).await;
-            match priority {
-                1 | 2 => expected.push(id),
-                _ => unused.push(id),
-            }
-        }
-        let mut claim = pool.begin().await.unwrap();
-        let returned: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM horsies_claim($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
-        )
-        .bind("claim_lock_budget_worker")
-        .bind(serde_json::json!(queues))
-        .bind(serde_json::json!({}))
-        .bind(serde_json::json!({blocked: 0, ready: 2}))
-        .bind(true)
-        .bind(100_i32)
-        .bind(0_i32)
-        .bind(100_i32)
-        .bind(2_i32)
-        .bind(None::<i32>)
-        .bind(60_000_i64)
-        .bind(serde_json::json!([]))
-        .fetch_all(&mut *claim)
-        .await
-        .unwrap();
-        assert_eq!(
-            returned,
-            expected.iter().map(Uuid::to_string).collect::<Vec<_>>()
-        );
-
-        let mut other = pool.begin().await.unwrap();
-        let unlocked: Vec<Uuid> =
-            sqlx::query_scalar("SELECT id FROM horsies_tasks WHERE id = ANY($1) FOR UPDATE NOWAIT")
-                .bind(&unused)
-                .fetch_all(&mut *other)
-                .await
-                .expect("unused queue and batch candidates must remain available");
-        assert_eq!(unlocked.len(), unused.len());
-        other.rollback().await.unwrap();
-        claim.rollback().await.unwrap();
-        cleanup(pool, &queues).await;
-    }
-}
-
-#[cfg(test)]
 mod fused_finalize_tests {
     //! Behavior pins for the fused ok-path finalize (parity with horsies PR
     //! #134, re-anchored on `horsies_complete_task_fused`): one statement
@@ -4713,12 +4013,9 @@ mod fused_finalize_tests {
 }
 
 #[cfg(test)]
-mod set_running_heartbeat_tests {
-    //! Pin that the CLAIMED -> RUNNING transition writes the first runner
-    //! heartbeat atomically (parity with horsies PR #134): an applied transition
-    //! leaves a 'runner' heartbeat row; a non-applied one writes none.
-    use chrono::DurationRound;
-
+mod prestart_expiry_tests {
+    //! The expiry of a claimed row whose deadline passed before its start
+    //! (`expire_claimed_task_before_start`, `horsies_expire_owned_claim`).
     use super::*;
     use serial_test::serial;
     use uuid::Uuid;
@@ -4752,25 +4049,6 @@ mod set_running_heartbeat_tests {
         .expect("seed claimed");
     }
 
-    async fn runner_beats(pool: &sqlx::PgPool, id: &str) -> i64 {
-        sqlx::query_scalar(
-            "SELECT COUNT(*) FROM horsies_heartbeats WHERE task_id = $1 AND role = 'runner'",
-        )
-        .bind(test_uuid(id))
-        .fetch_one(pool)
-        .await
-        .expect("count beats")
-    }
-
-    /// The claim generation the seeded row carries.
-    async fn generation(pool: &sqlx::PgPool, id: &str) -> DateTime<Utc> {
-        sqlx::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
-            .bind(test_uuid(id))
-            .fetch_one(pool)
-            .await
-            .expect("seeded claim generation")
-    }
-
     async fn cleanup(pool: &sqlx::PgPool, id: &str) {
         sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id = $1")
             .bind(test_uuid(id))
@@ -4784,177 +4062,23 @@ mod set_running_heartbeat_tests {
             .expect("cleanup");
     }
 
+    /// The expiry of a claimed row before its start carries no claim
+    /// generation: once the deadline has passed, expiry is the correct outcome
+    /// for whichever generation of this worker holds the row, so a stale
+    /// dispatch and a live one commit the same event. Before the deadline, the
+    /// deadline guard (not a generation fence) refuses. The start of a stale
+    /// generation is
+    /// `lifecycle_tests::claim_start_release::start::a_start_that_does_not_hold_writes_nothing_and_names_its_reason`.
     #[tokio::test]
     #[serial]
-    async fn running_transition_writes_first_heartbeat() {
+    async fn prestart_expiry_waits_for_the_deadline_and_then_expires_any_generation() {
         let broker =
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
         seed_claimed(&pool, &id, "w1").await;
-        let live_generation = generation(&pool, &id).await;
 
-        let started = broker
-            .set_running(
-                Uuid::parse_str(&id).unwrap(),
-                "w1",
-                321,
-                "host1",
-                "worker",
-                live_generation,
-            )
-            .await
-            .expect("set_running");
-        assert!(started.is_some(), "transition must apply");
-        assert_eq!(
-            runner_beats(&pool, &id).await,
-            1,
-            "exactly one fused first beat"
-        );
-
-        cleanup(&pool, &id).await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn non_applied_transition_writes_no_heartbeat() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
-        broker.ensure_schema_initialized().await.expect("schema");
-        let pool = broker.pool().clone();
-        let id = Uuid::new_v4().to_string();
-        seed_claimed(&pool, &id, "w1").await;
-        let live_generation = generation(&pool, &id).await;
-
-        // Ownership mismatch → transition does not apply.
-        let started = broker
-            .set_running(
-                Uuid::parse_str(&id).unwrap(),
-                "w2",
-                321,
-                "host1",
-                "worker",
-                live_generation,
-            )
-            .await
-            .expect("set_running");
-        assert!(
-            started.is_none(),
-            "transition must not apply for wrong worker"
-        );
-        assert_eq!(
-            runner_beats(&pool, &id).await,
-            0,
-            "no orphan beat on non-applied transition"
-        );
-
-        cleanup(&pool, &id).await;
-    }
-
-    /// The transition's RETURNING must carry the attempt context (retry_count,
-    /// max_retries, good_until) read under the row lock — the dispatch path
-    /// consumes it from here now that `horsies_claim`'s v12 return shape no
-    /// longer includes those columns.
-    #[tokio::test]
-    #[serial]
-    async fn set_running_returns_attempt_context() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
-        broker.ensure_schema_initialized().await.expect("schema");
-        let pool = broker.pool().clone();
-        let id = Uuid::new_v4().to_string();
-        // timestamptz stores microseconds; truncate so the round-trip compares
-        // equal on nanosecond-resolution clocks (Linux). Without it this
-        // passes only where Utc::now() already yields whole microseconds.
-        let good_until = (Utc::now() + chrono::Duration::hours(1))
-            .duration_trunc(chrono::Duration::microseconds(1))
-            .expect("truncate to microseconds");
-        sqlx::query(
-            "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, input, task_options, execution,
-                retention_class_key, sent_at, created_at,
-                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
-                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
-                started_at, finalizing_at, finalizing_by_worker_id,
-                worker_pid, worker_hostname, worker_process_name,
-                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
-                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
-            ) VALUES (
-                $1, 'hb_task', 'default', 100, 'null', NULL, 'ISOLATED',
-                'standard_30d', NOW(), NOW(),
-                1, decode(repeat('00', 32), 'hex'), NULL,
-                'CLAIMED', NOW(), NOW(), 'w1', NOW() + interval '1 minute',
-                NULL, NULL, NULL,
-                NULL, NULL, NULL,
-                2, 7, NULL, $2, FALSE,
-                NOW(), FALSE, NULL, NULL
-            )",
-        )
-        .bind(test_uuid(&id))
-        .bind(good_until)
-        .execute(&pool)
-        .await
-        .expect("seed claimed");
-        let live_generation = generation(&pool, &id).await;
-
-        let running = broker
-            .set_running(
-                Uuid::parse_str(&id).unwrap(),
-                "w1",
-                321,
-                "host1",
-                "worker",
-                live_generation,
-            )
-            .await
-            .expect("set_running")
-            .expect("transition must apply");
-        assert_eq!(running.retry_count, 2);
-        assert_eq!(running.max_retries, 7);
-        assert_eq!(running.good_until, Some(good_until));
-
-        cleanup(&pool, &id).await;
-    }
-
-    /// C10 for CLAIMED rows: a stale dispatch (born from an earlier claim
-    /// generation) must not start or expire a row the same worker re-claimed
-    /// — worker_id and status match, only `claimed_at` differs.
-    #[tokio::test]
-    #[serial]
-    async fn claimed_row_statements_fenced_by_claimed_at() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
-        broker.ensure_schema_initialized().await.expect("schema");
-        let pool = broker.pool().clone();
-        let id = Uuid::new_v4().to_string();
-        seed_claimed(&pool, &id, "w1").await;
-        let live_generation = generation(&pool, &id).await;
-        let stale_generation = live_generation - chrono::Duration::seconds(30);
-
-        // Stale set_running: no transition, no orphan first beat.
-        let started = broker
-            .set_running(
-                Uuid::parse_str(&id).unwrap(),
-                "w1",
-                321,
-                "host1",
-                "worker",
-                stale_generation,
-            )
-            .await
-            .expect("set_running");
-        assert!(started.is_none(), "stale generation must not start the row");
-        assert_eq!(runner_beats(&pool, &id).await, 0);
-
-        // The release of a stale generation is
-        // `lifecycle_tests::claim_start_release::release::a_held_claim_is_released_and_another_generation_is_not`.
-
-        // Expire-before-start deliberately carries no claim generation: once
-        // the deadline has passed, expiry is the correct outcome for
-        // whichever generation holds the row — a stale dispatch and a live
-        // one commit the same correct event. Before the deadline, the
-        // deadline guard (not a generation fence) refuses.
         let not_due = broker
             .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
             .await
@@ -4986,38 +4110,7 @@ mod set_running_heartbeat_tests {
             .await
             .expect("expire replay");
         assert_eq!(replayed, PrestartExpiry::Expired);
-        let _ = live_generation;
 
-        cleanup(&pool, &id).await;
-    }
-
-    /// The live generation passes the set_running fence. The release of the
-    /// live generation is
-    /// `lifecycle_tests::claim_start_release::release::a_held_claim_is_released_and_another_generation_is_not`.
-    #[tokio::test]
-    #[serial]
-    async fn claimed_at_fence_admits_live_generation() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
-        broker.ensure_schema_initialized().await.expect("schema");
-        let pool = broker.pool().clone();
-
-        let id = Uuid::new_v4().to_string();
-        seed_claimed(&pool, &id, "w1").await;
-        let live_generation = generation(&pool, &id).await;
-        let running = broker
-            .set_running(
-                Uuid::parse_str(&id).unwrap(),
-                "w1",
-                321,
-                "host1",
-                "worker",
-                live_generation,
-            )
-            .await
-            .expect("set_running");
-        assert!(running.is_some(), "live generation must start the row");
-        assert_eq!(runner_beats(&pool, &id).await, 1);
         cleanup(&pool, &id).await;
     }
 }
@@ -6532,6 +5625,8 @@ mod enqueue_task_options_tests {
             )]),
             retry_policy: Some(crate::core::RetryPolicy::exponential(30, 4, true).unwrap()),
             timeout_ms: Some(1_000),
+            execution: crate::core::task::Execution::Isolated,
+            cancel_grace_ms: None,
         };
         let text = options.serialize_retry_options().expect("options are set");
 
@@ -6588,6 +5683,53 @@ mod client_family_tests {
         ));
         assert!(!refused.is_retryable());
         assert_eq!(family_row(&pool).await.as_deref(), Some("RUST"));
+    }
+
+    /// A handle with migrations off (observe only) runs no install, so its
+    /// first send checks the family: on a database of the other family the
+    /// send is refused before the insert, not retryable, and writes no row.
+    #[tokio::test]
+    #[serial]
+    async fn a_send_of_a_handle_with_migrations_off_into_the_other_family_is_refused() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let broker = PostgresBroker::from_pool_observe_only(pool.clone())
+            .with_client_family(ClientFamily::Python);
+        let task_id = Uuid::new_v4();
+
+        let refused = broker
+            .enqueue(
+                "family.send",
+                "{}",
+                "default",
+                50,
+                Some(Utc::now()),
+                None,
+                None,
+                None,
+                Some(task_id),
+                None,
+                None,
+                EnqueueRetention::Default,
+                None,
+                SendKind::First,
+            )
+            .await
+            .expect_err("a Python handle does not send into a Rust database");
+
+        assert!(matches!(
+            refused,
+            BrokerError::ClientFamilyMismatch {
+                own: ClientFamily::Python,
+                ..
+            }
+        ));
+        assert!(!refused.is_retryable());
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count the rows of the refused send");
+        assert_eq!(rows, 0);
     }
 }
 

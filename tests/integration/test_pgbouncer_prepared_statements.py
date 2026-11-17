@@ -78,7 +78,7 @@ async def test_horsies_transaction_mode_disables_psycopg_prepared_statements(
         for idx in range(12):
             sent_at = datetime.now(timezone.utc)
             task_name = "pgbouncer_prepared_probe"
-            task_id = str(uuid4())
+            task_id = uuid4()
             enqueue_r = await broker.enqueue_async(
                 task_name,
                 task_id=task_id,
