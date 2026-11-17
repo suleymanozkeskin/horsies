@@ -812,7 +812,7 @@ Each entry: Title -- summary -> URL
 - PgBouncer Troubleshooting -- transaction pooling issues with horsies and Syce, and the PgBouncer pool size for workers -> /horsies/troubleshooting/pgbouncer/
 
 ### Scheduling
-- Scheduler Overview -- how scheduler enqueues -> /horsies/scheduling/scheduler-overview/
+- Scheduler Overview -- how the scheduler enqueues: state rows, one fire per statement, database clock, slot task ids, configuration changes, catch-up, validation, task options -> /horsies/scheduling/scheduler-overview/
 - Schedule Patterns -- Interval, Daily, Weekly, etc. -> /horsies/scheduling/schedule-patterns/
 - Schedule Config -- ScheduleConfig model -> /horsies/scheduling/schedule-config/
 

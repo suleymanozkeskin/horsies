@@ -2,7 +2,7 @@
 title: Scheduler Overview
 section: shared
 summary: How the scheduler process enqueues tasks on a schedule.
-related: [schedule-patterns, schedule-config, ../../configuration/app-config]
+related: [schedule-config, schedule-patterns, ../concepts/task-lifecycle]
 tags: [scheduling, scheduler, process]
 ---
 
@@ -41,83 +41,27 @@ The scheduler:
 
 ## Configuration
 
-Add a `ScheduleConfig` to your `AppConfig`:
+The app config holds the schedule config: whether the scheduler is enabled, the check interval, and the list of schedules. Each schedule names itself, the task it sends, its pattern, its keyword arguments, an optional queue, its timezone and its catch-up rule.
 
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
-```python
-from horsies.core.models.schedule import ScheduleConfig, TaskSchedule, DailySchedule
-from datetime import time
-
-config = AppConfig(
-    broker=PostgresConfig(...),
-    schedule=ScheduleConfig(
-        enabled=True,
-        check_interval_seconds=1,
-        schedules=[
-            TaskSchedule(
-                name="daily-cleanup",
-                task_name="cleanup_old_data",
-                pattern=DailySchedule(time=time(3, 0, 0)),
-                timezone="UTC",
-            ),
-        ],
-    ),
-)
-```
+The API is on the client pages: [Schedule Config](/horsies/scheduling/schedule-config/) and [Schedule Patterns](/horsies/scheduling/schedule-patterns/) (Python). The Rust page is not written yet.
 
 ## Running the Scheduler
 
-```bash
-horsies scheduler myapp.instance:app --loglevel=INFO
-```
-
-Run separately from workers. One scheduler per cluster is sufficient.
+Run the scheduler as its own process, separate from the workers. One scheduler per cluster is sufficient. The Python command is `horsies scheduler`: see the [CLI Reference](/horsies/cli/#horsies-scheduler).
 
 ## Key Concepts
 
 ### Schedule Name
 
-Each schedule has a unique name used for state tracking:
-
-<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
-```python
-TaskSchedule(
-    name="daily-report",  # Must be unique
-    task_name="generate_report",
-    ...
-)
-```
+Each schedule has a name. The name is unique across the schedules, and the state row of the schedule is keyed by it.
 
 ### Task Name
 
-The `task_name` must match a registered `@app.task()`:
-
-<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
-```python
-@app.task("generate_report")
-def generate_report() -> TaskResult[str, TaskError]:
-    ...
-
-TaskSchedule(
-    name="...",
-    task_name="generate_report",  # Must match decorator
-    ...
-)
-```
+The task name of a schedule must be the name of a registered task.
 
 ### Check Interval
 
-How often the scheduler checks for due schedules:
-
-<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
-```python
-ScheduleConfig(
-    check_interval_seconds=1,  # Check every second
-    ...
-)
-```
-
-Range: 1-60 seconds. Lower values provide better precision but more database queries.
+The check interval is how often the scheduler checks for due schedules. Range: 1-60 seconds. Lower values provide better precision but more database queries.
 
 ## State Tracking
 
@@ -183,42 +127,28 @@ The same check recovers a row deleted externally. The recreated row's
 `next_run_at` is computed from the database time of the tick, so no
 missed-slot backlog is replayed.
 
+## Configuration Changes
+
+The state row stores a hash of the schedule config (`config_hash`). When the config of a schedule changes:
+
+1. At startup, the scheduler detects the change through `config_hash`.
+2. It computes `next_run_at` again from the database time; `run_count`, `last_run_at` and `last_task_id` stay.
+3. It logs a warning about the configuration change.
+
+This prevents issues when the pattern changes (for example hourly to daily), the timezone changes, or a time within the pattern changes.
+
 ## Catch-Up Logic
 
-When `catch_up_missed=True`, missed runs are executed:
+When catch-up is on (`catch_up_missed`), missed runs are executed. If the scheduler was down for 3 hours on an hourly schedule, it enqueues 3 tasks on restart (bounded by `max_catch_up_runs`). The due slots of one tick fire in one statement: all of them or none, and the fire counts as one run.
 
-```python
-TaskSchedule(
-    name="hourly-sync",
-    task_name="sync_data",
-    pattern=IntervalSchedule(hours=1),
-    catch_up_missed=True,  # Execute missed runs
-)
-```
-
-If the scheduler was down for 3 hours, it will enqueue 3 tasks on restart
-(bounded by `max_catch_up_runs`). The due slots of one tick fire in one
-statement: all of them or none, and the fire counts as one run.
-
-When `catch_up_missed=False` (default), missed runs are dropped: after
+When catch-up is off (the default), missed runs are dropped: after
 downtime the scheduler fires at most one run — the most recent due slot —
 logs how many older slots were skipped, and resumes at the next future
 slot. Slot alignment is preserved, so task ids stay deterministic.
 
 ## Timezone Support
 
-Each schedule can have its own timezone:
-
-```python
-TaskSchedule(
-    name="morning-report",
-    task_name="send_report",
-    pattern=DailySchedule(time=time(9, 0, 0)),
-    timezone="America/New_York",  # 9 AM Eastern
-)
-```
-
-Uses Python's `zoneinfo` module. Default is "UTC".
+Each schedule has its own timezone, an IANA name such as `America/New_York`. The default is `UTC`.
 
 ## Validation
 
@@ -229,23 +159,13 @@ Schedules are validated at startup:
 - Required arguments must be provided
 - Kwargs must encode against the task's types and fit `payload.reject_bytes`
 
-<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
-```python
-# This will fail at scheduler start:
-TaskSchedule(
-    name="bad",
-    task_name="nonexistent_task",  # Not registered
-    ...
-)
-```
-
-The scheduler encodes the kwargs of each schedule once at startup and sends that text for every slot until the next start. A kwargs model field with a `default_factory`, or a validator that reads the clock, runs once per start, not once per fire. If such a validator refuses the value later, the task is enqueued and fails at the worker with `WORKER_SERIALIZATION_ERROR`.
+The scheduler encodes the kwargs of each schedule once at startup and sends that text for every slot until the next start. A value that the encoding computes, such as a default that reads the clock, is computed once per start, not once per fire. If the worker refuses the stored value later, the task is enqueued and fails at the worker with `WORKER_SERIALIZATION_ERROR`.
 
 ## Task Options
 
-A scheduled run stores the options of its task, as a plain `.send()` of the task does. The worker reads `timeout_ms`, `retry_policy`, `execution` and `cancel_grace_ms` from the row, so a scheduled run gets the same timeout, retries and execution class as a sent one. A schedule has no options of its own: set them on `@app.task()`.
+A scheduled run stores the options of its task, as a plain send of the task does. The worker reads `timeout_ms`, `retry_policy`, `execution` and `cancel_grace_ms` from the row, so a scheduled run gets the same timeout, retries and execution class as a sent one. A schedule has no options of its own: set them on the task definition.
 
-`@app.task()` encodes the options once, when the task is defined. The scheduler takes that text at startup and sends it for every slot until the next start. If the options do not encode, `@app.task()` raises `ValueError` with the task name and the cause, and the task is not registered. `horsies scheduler` then exits 1 at startup: the startup check reports the module import with `MODULE_EXEC_ERROR`, and `Scheduler.start()` refuses the schedule with `TASK_NOT_REGISTERED`.
+The scheduler takes the encoded options of each task at startup and sends that text for every slot until the next start. A task whose options do not encode is not registered, so the scheduler refuses to start. The Python messages are in [Task Options](/horsies/scheduling/schedule-config/#task-options).
 
 ## Graceful Shutdown
 
