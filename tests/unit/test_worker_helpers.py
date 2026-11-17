@@ -3918,7 +3918,7 @@ class TestStartupRegistersEveryClassItRuns:
             )
 
         monkeypatch.setattr(
-            coverage_module, 'ensure_startup_coverage_in_database', _ensured
+            coverage_module, 'ensure_startup_coverage_in_core', _ensured
         )
         worker.broker = MagicMock()
         attach_resources(worker.broker, fake_resources())
@@ -3970,7 +3970,7 @@ class TestStartGuardsKindsDownAtTheFirstStart:
             )
 
         monkeypatch.setattr(
-            coverage_module, 'ensure_startup_coverage_in_database', _ensured
+            coverage_module, 'ensure_startup_coverage_in_core', _ensured
         )
         worker = _make_worker()
         worker.broker = MagicMock()
@@ -4016,7 +4016,7 @@ class TestWorkerStartupCoverageOutcome:
         )
         monkeypatch.setattr(
             coverage_module,
-            'ensure_startup_coverage_in_database',
+            'ensure_startup_coverage_in_core',
             AsyncMock(return_value=failure),
         )
         worker.broker = MagicMock()
@@ -4050,7 +4050,7 @@ class TestWorkerStartupCoverageOutcome:
         worker = _make_worker()
         monkeypatch.setattr(
             coverage_module,
-            'ensure_startup_coverage_in_database',
+            'ensure_startup_coverage_in_core',
             AsyncMock(
                 return_value=coverage_module.CoverageEnsureFailed(
                     stage='ensure_leaf_coverage',
@@ -4118,7 +4118,7 @@ class TestWorkerStartConnectionOrdering:
             )
 
         monkeypatch.setattr(
-            coverage_module, 'ensure_startup_coverage_in_database', _ensured
+            coverage_module, 'ensure_startup_coverage_in_core', _ensured
         )
         worker.broker = MagicMock()
         attach_resources(worker.broker, fake_resources())
@@ -4180,7 +4180,7 @@ class TestWorkerStartConnectionOrdering:
             )
 
         monkeypatch.setattr(
-            coverage_module, 'ensure_startup_coverage_in_database', _ensured
+            coverage_module, 'ensure_startup_coverage_in_core', _ensured
         )
         worker.broker = MagicMock()
         attach_resources(worker.broker, fake_resources())
