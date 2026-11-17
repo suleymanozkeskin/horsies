@@ -123,6 +123,22 @@ def _record(record_class: type, **fields: object) -> MagicMock:
     return record
 
 
+# The most time that a miss path of these tests may report as spent in its
+# start attempt: the fakes answer at once.
+_MOST_ELAPSED_MS = 5_000
+
+
+def _attempt_elapsed_ms(arguments: dict[str, object]) -> dict[str, object]:
+    """The arguments of a miss path call without its ``attempt_elapsed_ms``,
+    after a check that it is the whole milliseconds of a start attempt that
+    began right before the call."""
+    rest = dict(arguments)
+    elapsed = rest.pop('attempt_elapsed_ms')
+    assert isinstance(elapsed, int)
+    assert 0 <= elapsed <= _MOST_ELAPSED_MS
+    return rest
+
+
 _STARTED = _record(core.AttemptStarted)
 
 
@@ -342,14 +358,21 @@ class TestRefusalBound:
         )
 
     def test_the_writes_of_a_thread_refusal_have_a_named_bound(self) -> None:
-        write_s = (
+        """Each start attempt has the bound of the core, with the end of a
+        statement that the core cancelled; the marker has the bounds of the
+        sync pool of the child."""
+        attempt_s = (
+            shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S
+            + shared_lifecycle.CANCELLED_WRITE_END_S
+        )
+        marker_s = (
             CHILD_POOL_CONNECTION_WAIT_S
             + thread_runner.REFUSAL_STATEMENTS_TIMEOUT_S
             + CANCEL_REQUEST_TIMEOUT_S
         )
 
         assert thread_runner.THREAD_REFUSAL_WRITES_BOUND_S == (
-            (_PRE_START_CONFIRM_ATTEMPTS + 1) * write_s
+            _PRE_START_CONFIRM_ATTEMPTS * attempt_s + marker_s
         )
 
     def test_the_refusal_backstop_comes_after_the_writes_and_a_block_report(
@@ -375,7 +398,7 @@ class TestMissedStart:
 
         assert result == (False, '', OutcomeCode.TASK_EXPIRED.value)
         name, task_id, arguments = handle.calls[1]
-        assert (name, task_id, arguments) == (
+        assert (name, task_id, _attempt_elapsed_ms(arguments)) == (
             'expire_owned_claim_async',
             uuid.UUID(TASK_ID),
             {'worker_id': 'worker-1'},
@@ -430,7 +453,7 @@ class TestMissedStart:
         result = _confirm(handle, is_workflow_task=True)
 
         assert result == (False, '', 'WORKFLOW_STOPPED')
-        assert handle.calls[1][2] == {
+        assert _attempt_elapsed_ms(handle.calls[1][2]) == {
             'worker_id': 'worker-1',
             'claimed_at': CLAIMED_AT,
             'orphan_self_heal': True,

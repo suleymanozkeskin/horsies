@@ -159,6 +159,7 @@ async fn stop_dispatched_with(
             claimed_at: dispatched,
         },
         self_heal,
+        crate::broker::child_writes::WriteDeadline::start_attempt(),
     )
     .await
     .expect("stop before start")

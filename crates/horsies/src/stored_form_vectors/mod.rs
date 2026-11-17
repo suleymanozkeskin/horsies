@@ -12,6 +12,7 @@
 mod error_data;
 mod result_envelope;
 mod task_input;
+mod task_options;
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -27,7 +28,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 /// The text of the vector file `name` of the core's vector folder.
-fn vector_file(name: &str) -> String {
+pub(crate) fn vector_file(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../horsies-core/tests/fixtures/stored_forms")
         .join(name);
@@ -38,14 +39,14 @@ fn vector_file(name: &str) -> String {
 /// The text that the client writes today in place of Python's, and the name
 /// of the finding in the README.
 #[derive(Debug, Clone, Deserialize)]
-struct RustDrift {
+pub(crate) struct RustDrift {
     text: String,
     finding: String,
 }
 
 /// What the client does with a vector.
 #[derive(Debug, Clone)]
-enum RustCase {
+pub(crate) enum RustCase {
     /// It writes Python's text.
     Same,
     /// It writes `RustDrift::text`.
@@ -57,7 +58,7 @@ enum RustCase {
 impl RustCase {
     /// The case of a vector row from its two optional notes. A row with both
     /// is a defect of the file.
-    fn of(name: &str, cannot_express: Option<String>, drift: Option<RustDrift>) -> Self {
+    pub(crate) fn of(name: &str, cannot_express: Option<String>, drift: Option<RustDrift>) -> Self {
         match (cannot_express, drift) {
             (None, None) => Self::Same,
             (None, Some(drift)) => {
@@ -80,7 +81,7 @@ impl RustCase {
 
     /// The text that the client writes for a vector whose Python text is
     /// `python`; `None` when it cannot express the value.
-    fn expected_text<'a>(&'a self, python: &'a str) -> Option<&'a str> {
+    pub(crate) fn expected_text<'a>(&'a self, python: &'a str) -> Option<&'a str> {
         match self {
             Self::Same => Some(python),
             Self::Drift(drift) => Some(drift.text.as_str()),

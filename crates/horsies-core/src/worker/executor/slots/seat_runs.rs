@@ -35,6 +35,7 @@ use super::shared_stop::{
     LoopHolder,
 };
 use crate::broker::attempt_writes::RetryPlacement;
+use crate::broker::child_writes::CHILD_REFUSAL_WRITES_BOUND;
 use crate::worker::executor::protocol::{
     BodyEnd, CancelGraceMs, DispatchNumber, FailureDetail, LeftoverCancelFrame, LeftoverStuckFrame,
     LoopBlockedFrame, LoopCulprit, RssReading, RunEnd, RunRef, RunStuckFrame, SeatEnd,
@@ -52,9 +53,12 @@ pub const SHARED_BACKSTOP_MARGIN: Duration =
 pub const SHARED_STUCK_BACKSTOP: Duration =
     STUCK_REPORT_DELAY.saturating_add(SHARED_BACKSTOP_MARGIN);
 /// A refusal runs only the RUNNING transition and the finalizing marker; a
-/// refusal in flight longer than their bound (135 s in a thread child) and
-/// the margin means a frozen child (Python `SHARED_REFUSAL_BACKSTOP_S`).
-pub const SHARED_REFUSAL_BACKSTOP: Duration = Duration::from_secs(145);
+/// refusal in flight longer than the bound of these writes in the child
+/// ([`CHILD_REFUSAL_WRITES_BOUND`], 120 s) and the margin means a frozen
+/// child (Python `SHARED_REFUSAL_BACKSTOP_S`). A refusal whose writes end
+/// within their bound never meets it.
+pub const SHARED_REFUSAL_BACKSTOP: Duration =
+    CHILD_REFUSAL_WRITES_BOUND.saturating_add(SHARED_BACKSTOP_MARGIN);
 
 /// The kind of a shared child.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

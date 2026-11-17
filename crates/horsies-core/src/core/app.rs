@@ -241,7 +241,7 @@ impl Horsies {
                     .get(task_name)
                     .ok()
                     .and_then(|t| t.task_options())
-                    .and_then(|opts| opts.serialize_retry_options())
+                    .map(|opts| opts.stored_options_text())
             },
         );
 
@@ -535,9 +535,7 @@ impl Horsies {
         let mut map = std::collections::HashMap::new();
         for (name, task) in self.registry.iter() {
             if let Some(opts) = task.task_options() {
-                if let Some(json) = opts.serialize_retry_options() {
-                    map.insert(name.to_owned(), json);
-                }
+                map.insert(name.to_owned(), opts.stored_options_text());
             }
         }
         map
@@ -861,7 +859,7 @@ impl Horsies {
                     queue_name: schedule_queue(task_schedule, Some(task)).to_owned(),
                     task_options: task
                         .task_options()
-                        .and_then(|options| options.serialize_retry_options()),
+                        .map(|options| options.stored_options_text()),
                 },
             );
         }
@@ -2579,7 +2577,7 @@ mod tests {
     /// slot carries the task's options text. The text is the one a send of
     /// the task stores: the five keys of Python `serialize_task_options`
     /// (`python/horsies/core/codec/task_options.py:27-50`), as
-    /// `TaskOptions::serialize_retry_options` writes them since #622.
+    /// `TaskOptions::stored_options_text` writes them since #622.
     #[test]
     fn prepare_schedules_uses_the_task_queue_and_options() {
         use crate::core::config::schedule::ScheduleConfig;

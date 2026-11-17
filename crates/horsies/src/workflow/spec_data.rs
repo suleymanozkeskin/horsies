@@ -37,6 +37,19 @@ pub(crate) fn client_spec(
     spec: &WorkflowSpec,
     config: &AppConfig,
 ) -> Result<ClientSpec, HorsiesError> {
+    let text = spec_data_text(spec, config)?;
+    parse_workflow_spec_data(&text).map_err(|refused| data_refused(spec, &refused))
+}
+
+/// The spec data text of `spec` in the app of `config`: the document that
+/// the core's parser reads (`tests/fixtures/stored_forms/workflow_spec_data.json`
+/// of the core pins it). Pure. Errors: `WORKFLOW_UNRESOLVED_QUEUE` (HRS-014)
+/// for a task node on a queue that the app does not admit; a task options
+/// text that does not take the node's deadline.
+pub(crate) fn spec_data_text(
+    spec: &WorkflowSpec,
+    config: &AppConfig,
+) -> Result<String, HorsiesError> {
     let mut queue_classes: BTreeMap<String, String> = BTreeMap::new();
     let mut nodes = Vec::with_capacity(spec.nodes.len());
     for node in &spec.nodes {
@@ -79,7 +92,7 @@ pub(crate) fn client_spec(
         "queue_classes": queue_classes,
         "nodes": nodes,
     });
-    parse_workflow_spec_data(&document.to_string()).map_err(|refused| data_refused(spec, &refused))
+    Ok(document.to_string())
 }
 
 /// The document of one node.
@@ -165,7 +178,7 @@ fn node_document(
 /// a task with no options and a node with no deadline. Pure.
 ///
 /// Errors: the cause, for an options text that is not a JSON object.
-fn task_options_text(
+pub(crate) fn task_options_text(
     options: Option<&str>,
     deadline: NodeDeadline,
 ) -> Result<Option<String>, String> {

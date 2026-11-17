@@ -138,6 +138,7 @@ mod start {
             &core_pool_for_test_pool(&pool),
             StatementLog::Off,
             &start(task_id),
+            crate::broker::child_writes::WriteDeadline::start_attempt(),
         )
         .await
         .expect("start");
@@ -196,6 +197,7 @@ mod start {
                 &core_pool_for_test_pool(&pool),
                 StatementLog::Off,
                 &start(task_id),
+                crate::broker::child_writes::WriteDeadline::start_attempt(),
             )
             .await
             .expect("start");
@@ -229,6 +231,7 @@ mod start {
             StatementLog::Off,
             &start(closed),
             StartWindow::Until(passed),
+            crate::broker::child_writes::WriteDeadline::start_attempt(),
         )
         .await
         .expect("start");
@@ -241,10 +244,15 @@ mod start {
             (still_open, StartWindow::Until(later)),
             (open, StartWindow::Open),
         ] {
-            let outcome =
-                start_attempt_within(&core_pool, StatementLog::Off, &start(task_id), window)
-                    .await
-                    .expect("start");
+            let outcome = start_attempt_within(
+                &core_pool,
+                StatementLog::Off,
+                &start(task_id),
+                window,
+                crate::broker::child_writes::WriteDeadline::start_attempt(),
+            )
+            .await
+            .expect("start");
             assert!(
                 matches!(outcome, WindowedStart::Ran(StartOutcome::Started { .. })),
                 "{outcome:?}"

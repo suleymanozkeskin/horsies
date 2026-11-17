@@ -576,7 +576,11 @@ async fn an_expired_workflow_task_replays_its_phase_two() {
         seed_task(&pool, &queue, CLAIMED_WORKFLOW_TASK_PAST_ITS_DEADLINE).await;
     let workflow_id = seed_workflow(&pool, task_id, &queue, "ENQUEUED").await;
     let expired = PostgresBroker::from_pool(pool.clone())
-        .expire_claimed_task_before_start(task_id, WORKER)
+        .expire_claimed_task_before_start(
+            task_id,
+            WORKER,
+            crate::broker::child_writes::WriteDeadline::start_attempt(),
+        )
         .await
         .expect("the expiry that the child writes");
     assert_eq!(expired, PrestartExpiry::Expired);

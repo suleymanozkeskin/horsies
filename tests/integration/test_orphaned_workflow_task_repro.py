@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -243,6 +244,7 @@ async def test_the_stop_before_start_does_not_cancel_a_task_with_a_runnable_node
         'NODE_NOT_LINKED',
         CLAIMED_AT,
         orphan_self_heal=True,
+        attempt_began=time.monotonic(),
     )
 
     assert stopped == _WorkflowResumedBeforeStart()

@@ -29,6 +29,7 @@
 use sqlx::postgres::{PgArguments, PgRow};
 use sqlx::{Postgres, Transaction};
 
+use crate::broker::child_writes::{query_within, WriteDeadline};
 use crate::broker::core_rows::{roll_back, StatementLog};
 use crate::core::lifecycle::operations::function_name_of;
 use crate::core::lifecycle::outcomes::{decode_outcome_pg_row, decode_outcome_row};
@@ -207,6 +208,9 @@ enum StatementTarget<'t, 'c> {
     /// Alone on the pool, in autocommit, on a connection checked out as
     /// reserved work.
     Pool(&'t CorePool),
+    /// Alone on the pool, in autocommit, as a child write within the
+    /// deadline ([`crate::broker::child_writes::query_within`]).
+    PoolWithin(&'t CorePool, WriteDeadline),
     /// In an open transaction on a core connection; the owner of the
     /// transaction commits or rolls it back.
     Transaction(&'t mut crate::db::Transaction<'c>),
@@ -214,8 +218,8 @@ enum StatementTarget<'t, 'c> {
 
 /// Bind the command's arguments to its statement and run it on `target`.
 ///
-/// Bounded by the connection's own timeouts. Errors:
-/// [`BrokerError::Statement`].
+/// Bounded by the connection's own timeouts, or by the deadline of a
+/// [`StatementTarget::PoolWithin`]. Errors: [`BrokerError::Statement`].
 async fn run_command(
     target: &mut StatementTarget<'_, '_>,
     log: StatementLog,
@@ -290,7 +294,7 @@ async fn run_command(
 }
 
 /// Run one bound statement on `target`, bounded by the connection's own
-/// timeouts.
+/// timeouts, or by the deadline of a [`StatementTarget::PoolWithin`].
 async fn run_bound(
     target: &mut StatementTarget<'_, '_>,
     log: StatementLog,
@@ -305,6 +309,9 @@ async fn run_bound(
                 StatementBound::ConnectionTimeouts,
             )
             .await?
+        }
+        StatementTarget::PoolWithin(pool, deadline) => {
+            query_within(pool, &bound, *deadline).await?
         }
         StatementTarget::Transaction(transaction) => {
             transaction
@@ -566,6 +573,29 @@ pub(crate) async fn terminalize(
     command: &TerminalizationCommand,
 ) -> Result<Vec<TerminalizationOutcome>, BrokerError> {
     let rows = run_command(&mut StatementTarget::Pool(pool), log, command).await?;
+    decode_outcomes(&rows, command)
+}
+
+/// [`terminalize`] as a child write within `deadline`
+/// ([`crate::broker::child_writes::query_within`]): the checkout and the
+/// statement end by it, and a statement past its time gets a cancel
+/// request.
+///
+/// Errors: as [`terminalize`]; [`BrokerError::Statement`] with nothing sent
+/// when `deadline` passed first, and refused when the cancel at the bound
+/// ended the statement (nothing committed).
+pub(crate) async fn terminalize_within(
+    pool: &CorePool,
+    log: StatementLog,
+    command: &TerminalizationCommand,
+    deadline: WriteDeadline,
+) -> Result<Vec<TerminalizationOutcome>, BrokerError> {
+    let rows = run_command(
+        &mut StatementTarget::PoolWithin(pool, deadline),
+        log,
+        command,
+    )
+    .await?;
     decode_outcomes(&rows, command)
 }
 
