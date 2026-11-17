@@ -337,7 +337,7 @@ def test_get_folds_each_wait_failure(answer: Any, folded_code: object) -> None:
 # =============================================================================
 
 
-def _task_row(summary: str) -> MagicMock:
+def _task_row(summary: str | None) -> MagicMock:
     return _core_record(
         core.StoredNodeRecord,
         node_id='parent:0',
@@ -354,7 +354,7 @@ def _task_row(summary: str) -> MagicMock:
     )
 
 
-def _tasks_handle(summary: str) -> WorkflowHandle[Any]:
+def _tasks_handle(summary: str | None) -> WorkflowHandle[Any]:
     return _handle_answering(
         'workflow_nodes_async',
         _core_record(core.WorkflowNodesRead, nodes=[_task_row(summary)]),
@@ -378,6 +378,31 @@ class TestStoredSubworkflowSummary:
         summary = result.ok_value[0].sub_workflow_summary
         assert summary is not None
         assert summary.status is WorkflowStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_a_stored_null_is_no_summary(self) -> None:
+        handle = _tasks_handle(None)
+
+        result = await handle.tasks_async()
+
+        assert is_ok(result)
+        assert result.ok_value[0].sub_workflow_summary is None
+
+    @pytest.mark.asyncio
+    async def test_an_empty_summary_is_stored_data_invalid(self) -> None:
+        handle = _tasks_handle('')
+
+        result = await handle.tasks_async()
+
+        assert is_err(result)
+        err = result.err_value
+        assert isinstance(err, HandleStoredDataInvalid)
+        assert err.code is HandleErrorCode.STORED_DATA_INVALID
+        assert not err.retryable
+        assert isinstance(err.exception, SerializationError)
+        assert err.message == (
+            'sub_workflow_summary JSON corrupt for node parent:0: the stored text is empty'
+        )
 
     @pytest.mark.asyncio
     async def test_corrupt_summary_json_is_stored_data_invalid(self) -> None:
