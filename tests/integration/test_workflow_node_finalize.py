@@ -49,6 +49,7 @@ from tests.integration.autocommit_support import (
     open_proxied_worker,
     proxied_url,
     upstream_of,
+    warm_core_handle,
 )
 from tests.integration.round_trip_proxy import RoundTripProxy
 
@@ -227,13 +228,6 @@ async def _pending_rows(session: AsyncSession, task_id: str) -> int:
     return count
 
 
-async def _one_pooled_connection(opened: ProxiedWorker) -> None:
-    """Use the worker's pool once, so its next statement needs no connect."""
-    async with opened.worker.sf() as worker_session:
-        _ = await worker_session.execute(text('SELECT 1'))
-        await worker_session.commit()
-
-
 def _retryable_phase1_error(result: Result[None, _FinalizeError]) -> _FinalizeError:
     match result:
         case Err(error):
@@ -308,7 +302,7 @@ async def test_a_lost_reply_is_retried_and_the_replay_runs_phase_two(
 ) -> None:
     """The success commits and its reply never reaches the worker."""
     node = await _run_node_a(session, await _start_chain(app, broker))
-    await _one_pooled_connection(worker_of)
+    await warm_core_handle(worker_of)
     proxy.drop_next_execute_reply()
 
     first = await _finalize(worker_of, node)

@@ -46,10 +46,12 @@ from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.claiming import (
     SHORT_PASS_REPASS_LIMIT,
+    ClaimMixin,
     ClaimPass,
     claim_time_of,
     read_claim_rows,
 )
+from tests.dualrun.reference import claim_caller
 from horsies.core.utils.db import PooledStatements
 import horsies._core as core
 from horsies._core import ClaimsReleased, NotHeldRow, ReleasedRow, ReleaseFailed, TooManyPendingCalls
@@ -3477,6 +3479,12 @@ class TestClaimTimeOf:
 
 @pytest.mark.unit
 class TestClaimPass:
+    @pytest.fixture(autouse=True)
+    def python_claim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The claim statement of the Python worker, kept as the dual-run
+        reference: these tests drive it through a mocked session."""
+        monkeypatch.setattr(ClaimMixin, '_claim_rows', claim_caller.claim_rows)
+
     @pytest.mark.parametrize(
         ('claim_pass', 'limited', 'expected'),
         [

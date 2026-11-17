@@ -27,6 +27,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from horsies._core import CoreHandle
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.claiming import ClaimMixin
 from horsies.core.worker.config import WorkerConfig
@@ -120,6 +121,11 @@ def _probe(broker: PostgresBroker, **cfg_kwargs: Any) -> ClaimMixin:
             self._queue_cap_hold = QueueCapHold(
                 start_check_caps(cfg.prefetch_buffer, cfg.queue_max_concurrency),
             )
+
+        @property
+        def core_handle(self) -> CoreHandle:
+            # The claim pass runs in the core, on the broker's handle.
+            return broker._core_handle  # pyright: ignore[reportPrivateUsage]
 
         def _claim_slot_count(self) -> int:
             # No slot pool: every configured slot counts.
