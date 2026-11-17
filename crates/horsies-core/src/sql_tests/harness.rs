@@ -123,6 +123,7 @@ struct Received {
 pub(super) struct Session {
     client: Client,
     received: Arc<Mutex<Received>>,
+    backend_pid: i32,
 }
 
 impl Session {
@@ -166,12 +167,26 @@ impl Session {
                 }
             }
         }));
-        Session { client, received }
+        let backend_pid: i32 = client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .await
+            .unwrap_or_else(|error| panic!("read the backend pid: {}", describe(&error)))
+            .get(0);
+        Session {
+            client,
+            received,
+            backend_pid,
+        }
     }
 
     /// The connection of the session.
     pub(super) fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// The process id of the server backend of the session.
+    pub(super) fn backend_pid(&self) -> i32 {
+        self.backend_pid
     }
 
     /// Runs `text` as one simple-query message.
