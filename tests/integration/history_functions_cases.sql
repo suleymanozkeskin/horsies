@@ -12,9 +12,13 @@ SET TimeZone = 'UTC';
 SET client_min_messages = notice;
 
 CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
-RETURNS TABLE (task_id uuid, status text, terminal_at timestamptz, terminalization_kind text, is_workflow_task boolean)
+RETURNS TABLE (
+    task_id uuid, status text, terminal_at timestamptz, terminalization_kind text, is_workflow_task boolean,
+    command_fingerprint_version smallint, command_fingerprint bytea, sent_at timestamptz
+)
 LANGUAGE sql STABLE AS $$
-    SELECT h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text, h.is_workflow_task
+    SELECT h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text, h.is_workflow_task,
+        h.command_fingerprint_version, h.command_fingerprint, h.sent_at
     FROM horsies_task_history AS h WHERE h.task_id = p_task_id LIMIT 1
 $$;
 
@@ -953,6 +957,26 @@ SELECT fixture_check(
     'begin detach: an attached leaf without its task index is CATALOG_CONFLICT PHYSICAL_NONCONFORMANT',
     (SELECT b.outcome = 'CATALOG_CONFLICT' AND b.conflict_kind = 'PHYSICAL_NONCONFORMANT'
      FROM horsies_begin_leaf_detach('horsies_task_history_standard_1d_2021_01_10') AS b)
+);
+-- Index conformance of the inspection is the rule of horsies_history_leaf_indexes, applied to the id index only.
+SELECT fixture_leaf('standard_1d', '2021-01-20 00:00:00+00');
+DROP INDEX horsies_task_history_standard_1d_2021_01_20_task_idx;
+CREATE INDEX horsies_task_history_standard_1d_2021_01_20_task_idx
+    ON horsies_task_history_standard_1d_2021_01_20 USING btree (task_id DESC);
+SELECT fixture_check(
+    'inspect: a task index of another shape (task_id DESC) is CATALOG_CONFLICT PHYSICAL_NONCONFORMANT',
+    (SELECT i.state = 'CATALOG_CONFLICT' AND i.conflict_kind = 'PHYSICAL_NONCONFORMANT'
+     FROM horsies_inspect_history_leaf('horsies_task_history_standard_1d_2021_01_20') AS i)
+    AND (SELECT NOT x.conformant
+         FROM horsies_history_leaf_indexes('HISTORY', 'horsies_task_history_standard_1d_2021_01_20') AS x
+         WHERE x.index_name = 'horsies_task_history_standard_1d_2021_01_20_task_idx')
+);
+SELECT fixture_leaf('standard_1d', '2021-01-21 00:00:00+00');
+DROP INDEX horsies_task_history_standard_1d_2021_01_21_enqueued_idx;
+SELECT fixture_check(
+    'inspect: a leaf without its enqueued index is still classified by its task index (DETACHABLE)',
+    (SELECT i.state = 'DETACHABLE'
+     FROM horsies_inspect_history_leaf('horsies_task_history_standard_1d_2021_01_21') AS i)
 );
 SELECT fixture_leaf('standard_1d', '2021-01-11 00:00:00+00');
 UPDATE horsies_task_history_leaf_catalog SET upper_anchor = '2021-01-11 12:00:00+00'

@@ -12,9 +12,13 @@
 -- The published provenance reader is rendered by horsies_publish_history_readers. This stand-in reads the
 -- history parent: one row when history holds the id, no row otherwise.
 CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
-RETURNS TABLE (task_id uuid, status text, terminal_at timestamptz, terminalization_kind text, is_workflow_task boolean)
+RETURNS TABLE (
+    task_id uuid, status text, terminal_at timestamptz, terminalization_kind text, is_workflow_task boolean,
+    command_fingerprint_version smallint, command_fingerprint bytea, sent_at timestamptz
+)
 LANGUAGE sql STABLE AS $$
-    SELECT h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text, h.is_workflow_task
+    SELECT h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text, h.is_workflow_task,
+        h.command_fingerprint_version, h.command_fingerprint, h.sent_at
     FROM horsies_task_history h
     WHERE h.task_id = p_task_id
     LIMIT 1

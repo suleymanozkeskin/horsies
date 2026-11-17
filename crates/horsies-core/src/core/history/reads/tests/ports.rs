@@ -267,10 +267,12 @@ async fn one_republish_heals_a_stale_provenance_body() {
     sqlx::query(
         "CREATE OR REPLACE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
          RETURNS TABLE(task_id uuid, status text, terminal_at timestamp with time zone,
-                       terminalization_kind text, is_workflow_task boolean)
+                       terminalization_kind text, is_workflow_task boolean,
+                       command_fingerprint_version smallint, command_fingerprint bytea,
+                       sent_at timestamp with time zone)
          LANGUAGE sql STABLE STRICT AS $$
              SELECT h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text,
-                 h.is_workflow_task
+                 h.is_workflow_task, h.command_fingerprint_version, h.command_fingerprint, h.sent_at
              FROM horsies_task_history AS h
              WHERE h.retention_class_key = 'standard_30d' AND h.task_id = p_task_id
          $$",
