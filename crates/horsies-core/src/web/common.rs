@@ -450,8 +450,9 @@ pub(crate) fn parse_path_uuid(field: &'static str, raw: &str) -> Result<uuid::Uu
     })
 }
 
-/// Parse a workflow path id. Text that is not a UUID is refused with
-/// FastAPI's 422 `uuid_parsing` body before any database call.
+/// Parse the workflow path id of an action route. Text that is not a UUID
+/// is refused with FastAPI's 422 `uuid_parsing` body before any database
+/// call. The read routes answer such a text with their 404 instead.
 pub(crate) fn parse_workflow_path_uuid(raw: &str) -> Result<uuid::Uuid, ApiError> {
     uuid::Uuid::parse_str(raw).map_err(|error| {
         ApiError::Validation(vec![ApiError::path_uuid("workflow_id", raw, &error)])
