@@ -543,8 +543,9 @@ async fn an_undecodable_result_fails_the_task_as_a_serialization_error_with_no_r
         .await;
 
     assert_eq!(settled, Settlement::Written);
-    let (status, _kind, error_code, final_failed_reason) =
-        history_facts(&pool, task_id).await.expect("the task moved to history");
+    let (status, _kind, error_code, final_failed_reason) = history_facts(&pool, task_id)
+        .await
+        .expect("the task moved to history");
     assert_eq!(status, "FAILED");
     assert_eq!(error_code.as_deref(), Some("WORKER_SERIALIZATION_ERROR"));
     assert_eq!(final_failed_reason, None);
@@ -650,8 +651,9 @@ async fn a_plain_success_completes_in_the_fused_write_and_wakes_its_queue() {
         .await;
 
     assert_eq!(settled, Settlement::Written);
-    let (status, kind, error_code, final_failed_reason) =
-        history_facts(&pool, task_id).await.expect("the task moved to history");
+    let (status, kind, error_code, final_failed_reason) = history_facts(&pool, task_id)
+        .await
+        .expect("the task moved to history");
     assert_eq!(status, "COMPLETED");
     assert_eq!(kind, "COMPLETE_FUSED");
     assert_eq!(error_code, None);
@@ -683,8 +685,9 @@ async fn a_workflow_success_completes_in_the_locked_write_and_finishes_its_node(
         .await;
 
     assert_eq!(settled, Settlement::Written);
-    let (status, kind, _error_code, _final_failed_reason) =
-        history_facts(&pool, task_id).await.expect("the task moved to history");
+    let (status, kind, _error_code, _final_failed_reason) = history_facts(&pool, task_id)
+        .await
+        .expect("the task moved to history");
     assert_eq!(status, "COMPLETED");
     assert_eq!(kind, "COMPLETE_LOCKED");
     assert_eq!(

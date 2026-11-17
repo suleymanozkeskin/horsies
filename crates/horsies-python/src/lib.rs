@@ -142,6 +142,12 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::cancel::CancelTaskAbsent>()?;
     module.add_class::<operations::cancel::CancelFailed>()?;
     module.add_class::<operations::cancel::CancelStoredDataInvalid>()?;
+    module.add_class::<operations::attempt_records::AttemptAlreadyApplied>()?;
+    module.add_class::<operations::attempt_records::AttemptLostClaim>()?;
+    module.add_class::<operations::attempt_records::AttemptSourceStateConflict>()?;
+    module.add_class::<operations::attempt_records::AttemptTaskAbsent>()?;
+    module.add_class::<operations::attempt_records::AttemptWriteFailed>()?;
+    module.add_class::<operations::attempt_records::PhaseTwoOwedRecord>()?;
     module.add_class::<operations::enqueue::EnqueueRequest>()?;
     module.add_class::<operations::enqueue::Enqueued>()?;
     module.add_class::<operations::enqueue::SendSuppressed>()?;
@@ -150,6 +156,15 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::enqueue::SendPayloadMismatch>()?;
     module.add_class::<operations::enqueue::SendPayloadTooLarge>()?;
     module.add_class::<operations::enqueue::SendKeyConflict>()?;
+    module.add_class::<operations::failed_attempt::NoRetry>()?;
+    module.add_class::<operations::failed_attempt::RetryAfter>()?;
+    module.add_class::<operations::failed_attempt::FinishFailedAttemptRequest>()?;
+    module.add_class::<operations::failed_attempt::RetryNotRequested>()?;
+    module.add_class::<operations::failed_attempt::RetryPastDeadline>()?;
+    module.add_class::<operations::failed_attempt::CapacityWoken>()?;
+    module.add_class::<operations::failed_attempt::AttemptFailureApplied>()?;
+    module.add_class::<operations::failed_attempt::AttemptRetryScheduled>()?;
+    module.add_class::<operations::failed_attempt::AttemptClaimReleased>()?;
     module.add_class::<operations::release::ReleaseClaimsRequest>()?;
     module.add_class::<operations::release::ClaimsReleased>()?;
     module.add_class::<operations::release::ReleasedRow>()?;
@@ -161,6 +176,9 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::stale_claims::StaleClaimsDrained>()?;
     module.add_class::<operations::stale_claims::StaleClaimsBoundReached>()?;
     module.add_class::<operations::stale_claims::StaleClaimsRequeueFailed>()?;
+    module.add_class::<operations::stale_running::StaleRunningRecovered>()?;
+    module.add_class::<operations::stale_running::StaleRunningScanFull>()?;
+    module.add_class::<operations::stale_running::StaleRunningScanFailed>()?;
     module.add_class::<operations::task_info::TaskInfoRecord>()?;
     module.add_class::<operations::task_info::TaskAttemptRecord>()?;
     module.add_class::<operations::task_info::TaskInfoNotFound>()?;
