@@ -230,7 +230,9 @@ $$;
 --   is CONFLICT_UNVERIFIABLE.
 -- - A REPEAT send (the core's send retry sends the same id again) probes history before the insert, under the task
 --   advisory lock, so no move can finish between the probe and the insert: a history row answers SAME_COMMAND or
---   PAYLOAD_MISMATCH by the same comparison, never a second run. A FIRST send pays nothing for this.
+--   PAYLOAD_MISMATCH by the same comparison, never a second run. The provenance reader returns the row's
+--   fingerprint version, fingerprint and sent_at from its one leaf probe, so the probe is one read. A FIRST send pays
+--   nothing for this.
 -- - Every outcome other than INSERTED and a SAME_COMMAND that bound the key to a live row deletes the reservation
 --   that the key claim inserted, so a refusal leaves no reservation of this send. (The key claim also deletes an
 --   expired TERMINAL reservation of the same key; an expired reservation already counts as absent.)
@@ -289,7 +291,6 @@ DECLARE
     v_keyed boolean;
     v_claim horsies_key_reservation_outcome;
     v_provenance record;
-    v_history record;
     v_outcome text;
     v_bound_digest bytea;
 BEGIN
@@ -389,16 +390,10 @@ BEGIN
         PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
         SELECT p.* INTO v_provenance FROM horsies_task_provenance_staged(p_task_id) AS p;
         IF FOUND THEN
-            SELECT h.command_fingerprint_version, h.command_fingerprint, h.sent_at
-            INTO v_history
-            FROM horsies_task_history h
-            WHERE h.task_id = p_task_id
-              AND h.terminal_at = v_provenance.terminal_at;
             v_outcome := CASE
-                WHEN NOT FOUND THEN 'CONFLICT_UNVERIFIABLE'
-                WHEN v_history.command_fingerprint_version = p_fingerprint_version
-                     AND v_history.command_fingerprint = p_fingerprint
-                     AND v_history.sent_at = p_sent_at THEN 'SAME_COMMAND'
+                WHEN v_provenance.command_fingerprint_version = p_fingerprint_version
+                     AND v_provenance.command_fingerprint = p_fingerprint
+                     AND v_provenance.sent_at = p_sent_at THEN 'SAME_COMMAND'
                 ELSE 'PAYLOAD_MISMATCH'
             END;
             IF v_keyed THEN
