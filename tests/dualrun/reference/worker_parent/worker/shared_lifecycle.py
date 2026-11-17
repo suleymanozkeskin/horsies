@@ -7,7 +7,8 @@ that an isolated child makes in ``child_runner``:
 - the RUNNING transition with the first runner heartbeat
   (``horsies_start_attempt``), and its miss path (the expiry before start,
   the stop of a workflow task, a lost claim), through the awaitable methods
-  of the core handle of the child (``CoreChildHandle``);
+  of the core handle of the child (``CoreChildHandle``), with the bound of
+  one start attempt in the core;
 - the finalizing marker after the task body, with the SQL text of
   ``child_runner`` on a psycopg ``AsyncConnectionPool`` that the child opens
   on its loop. The pool is in autocommit (``child_pool``).
@@ -25,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Final, assert_never
@@ -50,6 +52,7 @@ from tests.dualrun.reference.worker_parent.worker.child_runner import (
     _claim_lost,
     _start_unconfirmed,
     _WorkflowResumedBeforeStart,
+    attempt_elapsed_ms,
     expired_before_start_of,
     mark_finalizing_params,
     read_finalizing_mark,
@@ -64,21 +67,26 @@ is best effort: past this time the seat logs and reports its end, and the
 runner heartbeat of the task ends when the parent reads that end."""
 
 RUNNING_STATEMENTS_TIMEOUT_S: Final = 10.0
-"""The longest time that the statements of one attempt of the RUNNING
-transition take once the attempt holds its connection: the start and, when
-it missed, the statement of its miss path."""
+"""The longest run of one statement of an attempt of the RUNNING transition
+before the core sends its cancel request: the start and, when it missed,
+the statement of its miss path (the core's ``CHILD_STATEMENT_BOUND``)."""
 
 RUNNING_ATTEMPT_TIMEOUT_S: Final = (
     SHARED_POOL_CONNECTION_WAIT_S + RUNNING_STATEMENTS_TIMEOUT_S
 )
-"""The bound of the wait of one attempt of the RUNNING transition: the wait
-for a pooled connection and the statements. Past it the attempt ends with
+"""The bound of one attempt of the RUNNING transition: the wait for a pooled
+connection and the statements (the core's ``START_ATTEMPT_BOUND``). The
+core ends each write of the attempt by it, and a statement past it gets a
+cancel request, so the start does not commit after the bound. A seat also
+ends its wait for the attempt here; past it the attempt ends with
 ``OWNERSHIP_UNCONFIRMED``."""
 
 CANCELLED_WRITE_END_S: Final = 10.0
-"""The longest time that a write which a bound cancelled takes to end:
-psycopg asks the server to cancel the statement and waits for the reply,
-each for at most 5 s, before the cancel leaves the write."""
+"""The longest time that a statement which a bound cancelled takes to end:
+the core sends the cancel request within 5 s and waits 5 s for the reply
+(the core's ``CANCELLED_WRITE_END``). The finalizing marker of this module
+takes the same time: psycopg asks the server to cancel the statement and
+waits for the reply."""
 
 _EXPIRE_BEFORE_START_SUBJECT: Final = 'CoreChildHandle.expire_owned_claim_async'
 """The subject of a failed expiry of the miss path."""
@@ -102,9 +110,11 @@ async def _after_missed_start(
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
+    attempt_began: float,
 ) -> WireResult | _WorkflowResumedBeforeStart:
     """The path of a start that missed, by its reason. Same contract as the
-    sync function of this name in ``child_runner``."""
+    sync function of this name in ``child_runner``: the path ends by the end
+    of the start attempt that began at ``attempt_began``."""
     match reason:
         case 'WORKFLOW_PAUSED' | 'WORKFLOW_CANCELLED' | 'NODE_NOT_LINKED':
             logger.info(
@@ -118,6 +128,7 @@ async def _after_missed_start(
                     worker_id=worker_id,
                     claimed_at=claimed_at,
                     orphan_self_heal=orphan_self_heal,
+                    attempt_elapsed_ms=attempt_elapsed_ms(attempt_began),
                 ),
             )
         case 'DEADLINE_PASSED':
@@ -127,6 +138,7 @@ async def _after_missed_start(
                     await handle.expire_owned_claim_async(
                         uuid.UUID(task_id),
                         worker_id=worker_id,
+                        attempt_elapsed_ms=attempt_elapsed_ms(attempt_began),
                     ),
                     _EXPIRE_BEFORE_START_SUBJECT,
                 ),
@@ -149,12 +161,13 @@ async def _confirm_ownership_and_set_running(
 
     Same contract as the sync function of this name in ``child_runner``. A
     failure record of the core and a ``CoreError`` of the core boundary
-    become ``OWNERSHIP_UNCONFIRMED``, and so does an attempt whose wait runs
-    past ``RUNNING_ATTEMPT_TIMEOUT_S``. The bound ends the wait, not the
-    write: the core runs a write that it started to its end, so a start
-    that commits after the bound leaves its row RUNNING with no run, and
-    the recovery of stale RUNNING rows ends it. A cancel of the calling task
-    propagates.
+    become ``OWNERSHIP_UNCONFIRMED``. The core bounds each write of the
+    attempt by ``RUNNING_ATTEMPT_TIMEOUT_S`` (its ``START_ATTEMPT_BOUND``): a
+    start that waits on a row lock gets a cancel request at its bound and
+    ends with a failure record, and it does not commit after the bound. The
+    wait of the seat ends at ``RUNNING_ATTEMPT_TIMEOUT_S`` too, also when
+    the core call does not answer; the write then ends at the bound of the
+    core. A cancel of the calling task propagates.
     """
     try:
         async with asyncio.timeout(RUNNING_ATTEMPT_TIMEOUT_S):
@@ -187,16 +200,18 @@ async def _set_running(
     *,
     orphan_self_heal: bool,
 ) -> WireResult | None | _WorkflowResumedBeforeStart:
-    """One attempt of ``_confirm_ownership_and_set_running``, unbounded: one
+    """One attempt of ``_confirm_ownership_and_set_running``: one
     ``horsies_start_attempt`` statement through ``handle``, then the miss
-    path. ``is_workflow_task`` is not sent: the function reads it from the
-    locked row. A shared async seat starts the deadline of its task after
-    the start, so the start has no deadline.
+    path, each within the bound of the attempt in the core.
+    ``is_workflow_task`` is not sent: the function reads it from the locked
+    row. A shared async seat starts the deadline of its task after the
+    start, so the start has no deadline.
 
     Raises:
         CoreError: the core of this process cannot run the call.
         CoreOperationFailed: the expiry of the miss path failed.
     """
+    attempt_began = time.monotonic()
     record = await handle.start_attempt_async(
         uuid.UUID(task_id),
         worker_id=worker_id,
@@ -216,6 +231,7 @@ async def _set_running(
                 reason,
                 claimed_at,
                 orphan_self_heal=orphan_self_heal,
+                attempt_began=attempt_began,
             )
         case core.DeadlineBeforeStart():
             raise AssertionError(

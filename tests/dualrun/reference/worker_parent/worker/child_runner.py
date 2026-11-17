@@ -4,9 +4,11 @@
 
 from __future__ import annotations
 
+import math
 import os
 import socket
 import threading
+import time
 import uuid
 from collections.abc import Callable, Coroutine, Generator, Mapping, Sequence
 from contextlib import contextmanager
@@ -237,6 +239,14 @@ def start_always_allowed() -> StartCheck:
 # between the two ends as OWNERSHIP_UNCONFIRMED; the worker then releases the
 # claim (ReleaseUnconfirmedClaim), and the task goes back to the queue.
 _PRE_START_CONFIRM_ATTEMPTS = 2
+
+
+def attempt_elapsed_ms(attempt_began: float) -> int:
+    """The time since a start attempt began at ``attempt_began`` (a
+    ``time.monotonic()`` reading), in whole milliseconds, rounded up. The
+    miss path of the attempt sends it to the core, which ends the path by
+    the end of the attempt (``START_ATTEMPT_BOUND``). Reads the clock."""
+    return max(0, math.ceil((time.monotonic() - attempt_began) * 1000.0))
 
 
 def _serialization_error_response(
@@ -918,10 +928,15 @@ def _confirm_ownership_and_set_running(
     returns; the row stays CLAIMED.
 
     A failure record of the core, or a ``CoreError`` of the core boundary,
-    gives OWNERSHIP_UNCONFIRMED. The statements have the bounds of the core
-    pool: the wait for a connection and the connection timeouts.
+    gives OWNERSHIP_UNCONFIRMED. The start and its miss path are one start
+    attempt with the bound of the core (``START_ATTEMPT_BOUND``, 40 s): the
+    wait for a connection is at most 30 s, and a statement gets a cancel
+    request after 10 s or at the end of the attempt. A start that waits on a
+    row lock past its bound ends with a failure record, and it does not
+    commit after the bound.
     """
     handle = _get_child_core_handle()
+    attempt_began = time.monotonic()
     match start_check():
         case StartAllowed():
             deadline_in_ms: int | None = None
@@ -951,6 +966,7 @@ def _confirm_ownership_and_set_running(
                     reason,
                     claimed_at,
                     orphan_self_heal=orphan_self_heal,
+                    attempt_began=attempt_began,
                 )
             case core.DeadlineBeforeStart():
                 return DeadlineBeforeStart()
@@ -970,8 +986,11 @@ def _after_missed_start(
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
+    attempt_began: float,
 ) -> WireResult | _WorkflowResumedBeforeStart:
-    """The path of a start that missed, by its reason. One statement at most.
+    """The path of a start that missed, by its reason. One statement at most,
+    which ends by the end of the start attempt that began at
+    ``attempt_began`` (``attempt_elapsed_ms``).
 
     - ``WORKFLOW_PAUSED``, ``WORKFLOW_CANCELLED``, ``NODE_NOT_LINKED``: the
       miss of a workflow task. One ``horsies_workflow_task_stop_before_start``
@@ -1008,13 +1027,18 @@ def _after_missed_start(
                     worker_id=worker_id,
                     claimed_at=claimed_at,
                     orphan_self_heal=orphan_self_heal,
+                    attempt_elapsed_ms=attempt_elapsed_ms(attempt_began),
                 ),
             )
         case 'DEADLINE_PASSED':
             return expired_before_start_of(
                 task_id,
                 task_row_end_of(
-                    handle.expire_owned_claim(uuid.UUID(task_id), worker_id=worker_id),
+                    handle.expire_owned_claim(
+                        uuid.UUID(task_id),
+                        worker_id=worker_id,
+                        attempt_elapsed_ms=attempt_elapsed_ms(attempt_began),
+                    ),
                     _EXPIRE_BEFORE_START_SUBJECT,
                 ),
             )
