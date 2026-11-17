@@ -54,7 +54,7 @@ async def _notify(database_url: str, channel: str, payload: str) -> None:
 
 async def _enqueue_probe(broker: PostgresBroker, task_name: str = "pgbouncer_probe"):
     sent_at = datetime.now(timezone.utc)
-    task_id = str(uuid4())
+    task_id = uuid4()
     return await broker.enqueue_async(
         task_name,
         task_id=task_id,

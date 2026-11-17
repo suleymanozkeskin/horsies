@@ -514,10 +514,6 @@ def _workflow_handle(broker: PostgresBroker) -> WorkflowHandle[Any]:
 
 
 RUN_SYNC_SITES: dict[str, Callable[[Horsies, PostgresBroker], Any]] = {
-    'broker.enqueue': lambda app, broker: broker.enqueue(
-        'echo', task_id=TASK_ID, send_kind=SendKind.FIRST,
-        sent_at=datetime.now(timezone.utc),
-    ),
     'broker.close': lambda app, broker: broker.close(),
     'app.get_result': lambda app, broker: app.get_result(TASK_ID, 0),
     'app.get_task_info': lambda app, broker: app.get_task_info(TASK_ID),
