@@ -34,7 +34,7 @@ from horsies.core.brokers.resources import (
     EventLoopLimit,
 )
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.json_io import loads_json
+from horsies.core.codec.json_io import SerializationError, loads_json
 from horsies.core.codec.typed import (
     Json,
     TypeAnnotation,
@@ -1218,6 +1218,9 @@ class WorkflowHandle(Generic[OutT]):
 
         ``Ok([])``: the workflow exists and has no node.
         ``Err(HandleWorkflowNotFound)``: no workflow has this id.
+        ``Err(HandleStoredDataInvalid)``: a stored sub-workflow summary does
+        not read; an empty text is refused. A node without a summary stores
+        NULL and has ``sub_workflow_summary=None``.
         """
         return self._sync_call(self.tasks_async, 'tasks')
 
@@ -1285,29 +1288,45 @@ class WorkflowHandle(Generic[OutT]):
                         ),
                     )
 
-            summary: SubWorkflowSummary[Any] | None = None
-            if row.sub_workflow_summary_json:
-                summary_loads_r = loads_json(row.sub_workflow_summary_json)
-                if is_err(summary_loads_r):
+            summary: SubWorkflowSummary[Any] | None
+            match row.sub_workflow_summary_json:
+                case None:
+                    summary = None
+                case '':
+                    # NULL is the one stored form of "no summary". loads_json
+                    # reads an empty text as None, so it is refused here.
                     return Err(HandleStoredDataInvalid(
                         message=(
                             f'sub_workflow_summary JSON corrupt for node '
-                            f'{row.node_id}: {summary_loads_r.err_value}'
+                            f'{row.node_id}: the stored text is empty'
                         ),
                         workflow_id=self.workflow_id,
-                        exception=summary_loads_r.err_value,
-                    ))
-                try:
-                    summary = SubWorkflowSummary.from_json(summary_loads_r.ok_value)
-                except ValueError as summary_exc:
-                    return Err(HandleStoredDataInvalid(
-                        message=(
-                            f'sub_workflow_summary invalid for node '
-                            f'{row.node_id}: {summary_exc}'
+                        exception=SerializationError(
+                            'JSON parse failed: the stored text is empty',
                         ),
-                        workflow_id=self.workflow_id,
-                        exception=summary_exc,
                     ))
+                case summary_json:
+                    summary_loads_r = loads_json(summary_json)
+                    if is_err(summary_loads_r):
+                        return Err(HandleStoredDataInvalid(
+                            message=(
+                                f'sub_workflow_summary JSON corrupt for node '
+                                f'{row.node_id}: {summary_loads_r.err_value}'
+                            ),
+                            workflow_id=self.workflow_id,
+                            exception=summary_loads_r.err_value,
+                        ))
+                    try:
+                        summary = SubWorkflowSummary.from_json(summary_loads_r.ok_value)
+                    except ValueError as summary_exc:
+                        return Err(HandleStoredDataInvalid(
+                            message=(
+                                f'sub_workflow_summary invalid for node '
+                                f'{row.node_id}: {summary_exc}'
+                            ),
+                            workflow_id=self.workflow_id,
+                            exception=summary_exc,
+                        ))
 
             out.append(WorkflowTaskInfo(
                 node_id=row.node_id,
