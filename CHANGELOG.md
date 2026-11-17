@@ -622,7 +622,7 @@ unless it starts with "Added".
   `register` returns `TaskFunction<validate_order::Input, T, E>`, and
   `validate_order::params::order()` is the field token of a node. A task
   with no parameters, or with one parameter written `()`, has the input
-  `()`: a send stores `null`, a node `{}`. A parameter whose value is
+  `()`: a send and a node store `{}`. A parameter whose value is
   stored needs a name: `_` is a compile error for it.
   `#[derive(WorkflowInput)]` gives the field tokens of a sub-workflow's
   params type.
@@ -742,6 +742,10 @@ unless it starts with "Added".
   `rerun::SqlxCaller` (feature `sqlx`). Errors are `CallerRerunError<E>`:
   `Driver(E)`, `ClassNotRegistered { key }`, `ClientFamilyMismatch
   { stored }`, `CallerKeyRefused`, `IdMintRefused`, `Row`.
+- **The client writes each stored form as Python writes it**, as the shared
+  vectors of `crates/horsies-core/tests/fixtures/stored_forms/` pin it:
+  - Task input: a send of a task with no parameters, and a schedule
+    without input, store `{}` (no keyword arguments), not `null`.
 
 ## [0.7.0] - 2026-11-15
 

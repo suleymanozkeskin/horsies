@@ -35,7 +35,7 @@ use uuid::Uuid;
 
 use super::options::{send_retention, TaskSendOptions};
 use crate::app::SendSuppression;
-use crate::task::body::encode_read_back;
+use crate::task::body::encode_send_input;
 use crate::{ErrorCode, Horsies, HorsiesError, TaskHandle, UserErrorCode};
 
 /// Resends of a retryable `ENQUEUE_FAILED` after the first send (Python
@@ -339,9 +339,10 @@ where
     }
 
     /// The input as one JSON text that reads back as `A` to the same text
-    /// (#569, #578). A refusal names `A` and the failure, never the value.
+    /// (#569, #578); `{}` for a task with no parameters. A refusal names `A`
+    /// and the failure, never the value.
     fn encoded_input(&self, input: &A) -> Result<String, TaskSendError> {
-        let bytes = encode_read_back(input).map_err(|cause| {
+        let bytes = encode_send_input(input).map_err(|cause| {
             self.validation_failed(format!(
                 "Failed to encode the input of {} as {}: {cause}",
                 self.task_name,

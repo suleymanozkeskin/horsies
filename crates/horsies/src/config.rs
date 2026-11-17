@@ -19,7 +19,9 @@ use crate::{ErrorCode, HorsiesError};
 mod scheduler_manifest;
 mod worker_manifest;
 
-pub(crate) use scheduler_manifest::{scheduler_manifest, ScheduleManifestRefused};
+pub(crate) use scheduler_manifest::{
+    schedule_input_text, scheduler_manifest, ScheduleManifestRefused,
+};
 pub(crate) use worker_manifest::{
     rust_child_launch, task_classes, worker_manifest, ChildLaunchRefused, ManifestBoundRefused,
 };
