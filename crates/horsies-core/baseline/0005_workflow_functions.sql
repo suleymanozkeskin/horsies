@@ -89,7 +89,9 @@ END;
 $$;
 
 -- The stored text of an engine error: {"__h_task_result__":true,"ok":null,"err":{...}} with a built-in error code,
--- the shape of Python's serialize_error_payload (core/codec/error_payload.py:45-71). p_data is JSON text or NULL.
+-- Python's serialize_error_payload text (core/codec/error_payload.py:51-79): the error keys in the order of
+-- encode_task_error, exception, error_code, data, message (tests/fixtures/stored_forms/error_data.json). p_data is
+-- JSON text or NULL.
 -- p_sub_workflow_id and p_sub_workflow_summary (JSON text) are set together, only for SUBWORKFLOW_FAILED: they are
 -- top-level fields of the stored error, as SubWorkflowError.model_dump writes them (core/workflows/engine.py:3238-3281).
 -- Refuses a code outside the engine's closed set, a NULL message, and a lone sub-workflow field (22023).
@@ -118,11 +120,10 @@ BEGIN
         AND ((p_sub_workflow_id IS NOT NULL) = (p_error_code = 'SUBWORKFLOW_FAILED')),
         'sub_workflow_id and sub_workflow_summary are set together, only for SUBWORKFLOW_FAILED'
     );
-    RETURN '{"__h_task_result__":true,"ok":null,"err":{"error_code":{"__builtin_task_code__":'
+    RETURN '{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":'
         || to_json(p_error_code)::text
-        || '},"message":' || to_json(p_message)::text
-        || ',"data":' || coalesce(p_data, 'null')
-        || ',"exception":null'
+        || '},"data":' || coalesce(p_data, 'null')
+        || ',"message":' || to_json(p_message)::text
         || CASE
             WHEN p_sub_workflow_id IS NULL THEN ''
             ELSE ',"sub_workflow_id":' || to_json(p_sub_workflow_id::text)::text
