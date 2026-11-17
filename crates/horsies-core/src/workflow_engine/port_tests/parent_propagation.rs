@@ -140,11 +140,9 @@ async fn recovery_contains_a_failing_parent_advance_and_completes_the_next_paren
     .await;
 
     let report = recover_stuck_workflows(
-        &db.pool,
+        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        0,
         RECOVERY_FAILURE_LIMIT,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await

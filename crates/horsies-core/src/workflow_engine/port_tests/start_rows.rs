@@ -955,11 +955,9 @@ async fn recovery_enqueues_a_ready_node_with_its_input() {
     .await;
 
     let report = recover_stuck_workflows(
-        &db.pool,
+        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        0,
         3,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
