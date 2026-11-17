@@ -16,8 +16,8 @@ The refusals that the database decides before it changes a row (the live
 status check, the batch bounds, the id-keyed batch arrays) are Rust database
 tests of the core crate, in
 ``crates/horsies-core/src/sql_tests/terminalization_functions.rs``. The tests
-that called the writer of COMPLETE_LOCKED with their own SQL and only decoded
-its outcome with ``decode_outcome_row`` are there too. The tests here read
+that called the writers of COMPLETE_LOCKED and FAIL_RUNNING with their own
+SQL and only decoded the outcome with ``decode_outcome_row`` are there too. The tests here read
 each outcome through the Python lifecycle.
 """
 
@@ -297,14 +297,6 @@ _WORKFLOW_SUCCESS_SQL: Final = text(f"""
     )
 """)
 
-_FAILED_ATTEMPT_SQL: Final = text(f"""
-    SELECT {_OUTCOME_COLUMNS} FROM horsies_finish_failed_attempt(
-        CAST(:task_id AS uuid), :worker_id, CAST(:claimed_at AS TIMESTAMPTZ),
-        'NONE', NULL, NULL, NULL, :result, :error_code, :failed_reason,
-        'FAILED', NULL, :failed_reason, 'REFUSE', TRUE
-    )
-""")
-
 _STALE_ATTEMPT_SQL: Final = text(f"""
     SELECT {_OUTCOME_COLUMNS} FROM horsies_finish_stale_attempt(
         CAST(:task_id AS uuid), CAST(:stale_after_ms AS INTEGER),
@@ -476,28 +468,6 @@ STALE_AFTER_SECONDS = STALE_AFTER_MS // 1000
 FINALIZING_STALE_AFTER_SECONDS = FINALIZING_STALE_AFTER_MS // 1000
 
 
-async def _fail_locked(
-    session: AsyncSession,
-    task_id: str,
-    failed_reason: str | None = None,
-) -> TerminalizationOutcome:
-    """The writer of FAIL_RUNNING: a failed attempt with no retry
-    (``horsies_finish_failed_attempt``) under ``WORKER`` at ``GENERATION``.
-    The attempt row records ``failed_reason`` too."""
-    return await _outcome_of(
-        session,
-        _FAILED_ATTEMPT_SQL,
-        {
-            'task_id': task_id,
-            'worker_id': WORKER,
-            'claimed_at': GENERATION,
-            'result': '{"err": 1}',
-            'error_code': 'TASK_EXCEPTION',
-            'failed_reason': failed_reason,
-        },
-    )
-
-
 async def _fail_stale(
     session: AsyncSession,
     task_id: str,
@@ -571,150 +541,6 @@ async def _heartbeat(
         {'id': task_id, 'role': role, 'ago': seconds_ago},
     )
     await session.commit()
-
-
-class TestFailLocked:
-    """The writer of FAIL_RUNNING, ``horsies_finish_failed_attempt``."""
-
-    async def test_applies_and_stamps_its_kind(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session)
-        outcome = await _fail_locked(session, task_id, 'worker failure')
-        await session.commit()
-
-        assert isinstance(outcome, Applied)
-        assert outcome.kind is TerminalizationKind.FAIL_RUNNING
-        row = (
-            await session.execute(
-                text("""
-                    SELECT status, failed_at, failed_reason, error_code, result
-                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
-                """),
-                {'id': task_id},
-            )
-        ).one()
-        assert row.status == 'FAILED'
-        assert row.failed_at is not None
-        assert row.failed_reason == 'worker failure'
-        assert row.error_code == 'TASK_EXCEPTION'
-        assert row.result == '{"err": 1}'
-
-    async def test_a_null_reason_clears_an_earlier_attempts_reason(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """The terminal writer owns the complete final-attempt summary.
-
-        Attempt one failed with a reason and requeued; the final attempt
-        fails with none. A NULL reason means this final attempt has no
-        failure reason: the requeued attempt's residue on the row is cleared,
-        while attempt one's history row keeps its reason untouched.
-        """
-        task_id = await _seed(session)
-        await _requeued_after_failed_attempt(
-            session, task_id, failed_reason='attempt one crashed',
-        )
-
-        outcome = await _fail_locked(session, task_id, None)
-        await session.commit()
-        assert isinstance(outcome, Applied)
-
-        reason = (
-            await session.execute(
-                text('SELECT failed_reason FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
-                {'id': task_id},
-            )
-        ).scalar_one()
-        assert reason is None
-
-        attempts = await read_attempt_history(session, task_id)
-        assert attempts == [
-            (1, 'FAILED', 'attempt one crashed'),
-            (2, 'FAILED', None),
-        ]
-
-    async def test_a_supplied_reason_overwrites(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session)
-
-        await _fail_locked(session, task_id, 'attempt two crashed')
-        await session.commit()
-
-        reason = (
-            await session.execute(
-                text('SELECT failed_reason FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
-                {'id': task_id},
-            )
-        ).scalar_one()
-        assert reason == 'attempt two crashed'
-
-    async def test_replay_is_already_applied(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session)
-        await _fail_locked(session, task_id)
-        await session.commit()
-
-        replay = await _fail_locked(session, task_id)
-        await session.commit()
-        assert isinstance(replay, AlreadyApplied)
-        assert replay.kind is TerminalizationKind.FAIL_RUNNING
-
-    async def test_a_stale_failure_is_a_conflict_not_a_replay(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        """Both write FAILED; they are deliberately not one class.
-
-        Distinctness is the conservative direction: a conflict makes the
-        caller look, an already-applied lets it walk away.
-        """
-        task_id = await _seed(session)
-        await _force_terminal(session, task_id, status='FAILED', kind='FAIL_STALE')
-
-        outcome = await _fail_locked(session, task_id)
-        await session.commit()
-        assert isinstance(outcome, SourceStateConflict)
-        assert isinstance(outcome.evidence, ObservedForeignTerminalization)
-        assert outcome.evidence.committed_kind is TerminalizationKind.FAIL_STALE
-
-    async def test_another_worker_holds_the_claim(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session, worker_id='someone-else')
-        outcome = await _fail_locked(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, LostClaim)
-        assert outcome.observed.worker_id == 'someone-else'
-
-    async def test_the_source_status_is_wrong(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session, status='CLAIMED')
-        outcome = await _fail_locked(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, SourceStateConflict)
-        assert outcome.observed.status is TaskStatus.CLAIMED
-        assert outcome.evidence == ObservedClaim(
-            worker_id=WORKER, claimed_at=GENERATION,
-        )
-
-    async def test_a_task_that_does_not_exist(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        outcome = await _fail_locked(session, str(uuid.uuid4()))
-        await session.commit()
-        assert isinstance(outcome, TaskAbsent)
 
 
 class TestFailStale:
