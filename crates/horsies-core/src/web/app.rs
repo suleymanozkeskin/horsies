@@ -1,4 +1,5 @@
-//! Axum monitoring router factory and runtime state.
+//! The router of the monitoring handler and its state: the routes, the
+//! access guards, `/api/meta` and the page.
 
 use std::sync::Arc;
 
@@ -12,7 +13,6 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::broker::PostgresBroker;
-use crate::core::Horsies;
 use crate::monitoring::ResumeChildren;
 
 use super::auth::{
@@ -20,19 +20,19 @@ use super::auth::{
 };
 use super::common::{ApiError, CodeBody, DetailBody, InvalidInputRefused, INVALID_INPUT};
 use super::events::EventBroadcaster;
-use super::events::HEARTBEAT;
 use super::routes;
 use super::schema::{
     SchemaIncompatible, SchemaProbe, SchemaState, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
 };
 use super::spa::{
-    inject, normalize_base_path, safe_asset_path, AssetStore, EmbeddedAssets, MonitoringUiConfig,
+    inject, normalize_base_path, safe_asset_path, AssetStore, MonitoringUiConfig,
     ASSETS_MISSING_DETAIL,
 };
 use super::task_stats_cache::{ReadCache, TaskStatsCache};
 
+/// The body of `/api/meta`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetaResponse {
+pub(crate) struct MetaResponse {
     pub horsies_version: String,
     pub base_path: String,
     pub actions_enabled: bool,
@@ -71,43 +71,6 @@ pub(crate) struct WebState {
 /// path of the page and of `/api/meta` in place of axum's nested path.
 #[derive(Debug, Clone)]
 pub(crate) struct MountPath(pub(crate) String);
-
-/// Build a monitoring router for an already connected broker.
-///
-/// The event stream and the worker ping subscribe on the broker's listener;
-/// an observe-only broker has one. A broker built from a pool with no session
-/// URL has no listener: it sends the degraded frame on the event stream and
-/// answers the worker ping with 503.
-pub fn create_monitoring_router<P>(
-    app: &Horsies,
-    broker: Arc<PostgresBroker>,
-    auth_policy: P,
-    config: MonitoringUiConfig,
-    actions_enabled: bool,
-) -> Router
-where
-    P: MonitoringAuthPolicy,
-{
-    let state = WebState {
-        schema_probe: Arc::new(SchemaProbe::new(Arc::clone(&broker))),
-        task_stats_cache: Arc::new(TaskStatsCache::new()),
-        task_facets_cache: Arc::new(ReadCache::new()),
-        task_breakdown_cache: Arc::new(ReadCache::new()),
-        events: EventBroadcaster::new(Arc::clone(&broker)),
-        broker,
-        auth_policy: Arc::new(auth_policy),
-        actions_enabled,
-        ui_config: config,
-        assets: Arc::new(EmbeddedAssets),
-        children: ResumeChildren::Registry {
-            registry: Arc::new(app.workflow_registry().clone()),
-            retention: app.config().retention.clone(),
-        },
-        heartbeat: HEARTBEAT,
-        client_version: env!("CARGO_PKG_VERSION").to_owned(),
-    };
-    build_router(state)
-}
 
 pub(crate) fn build_router(state: WebState) -> Router {
     let read_routes = routes::read_router()
