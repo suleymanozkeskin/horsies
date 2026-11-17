@@ -526,6 +526,15 @@ unless it starts with "Added".
   `TaskResult<T>` is removed. A task whose one parameter is a
   `TaskOutcome` or a `WorkflowContext` gets an `Input` struct, so a node
   binds the parameter by name.
+- **A single task parameter that is not a struct is stored under its
+  name.** The task attribute wraps it in the generated `Input` struct, as
+  Python stores each keyword argument: `fn double(x: i64)` stores the input
+  `{"x": 2}` for a plain send and as a workflow node (before: `2`), and
+  `register` returns `TaskFunction<double::Input, i64, E>` with
+  `double::params::x()`. The attribute reads the type's name: a primitive,
+  a string, a sequence, a set, a map, an `Option`, a tuple, an array, a
+  JSON value, a UUID, a date or time is wrapped, read through `Box`, `Arc`
+  and `Rc`. A single struct parameter, and `()`, stay the input itself.
 - **A node's input is one JSON object.** `TaskNode::args_json` and
   `kwargs_json` are replaced by `input_json(text)`, which returns a
   `Result`; `set_input` of a value that does not encode as an object is
