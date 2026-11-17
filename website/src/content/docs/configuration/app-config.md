@@ -44,34 +44,81 @@ Every config model refuses unknown keys. This includes the nested models (`Postg
 
 ## Queue Mode Configuration
 
+The rules of each mode are on [Queue Modes](/horsies/concepts/queue-modes/).
+
 ### DEFAULT Mode
 
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
+`custom_queues` must be `None` or omitted. A task names no queue: it goes to the `default` queue.
+
 ```python
+from pydantic import SecretStr
+from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
+from horsies import QueueMode
+
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(...),
-    # custom_queues must be None or omitted
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
+app = Horsies(config)
+
+@app.task("cleanup_sessions")  # Goes to "default" queue
+def cleanup_sessions() -> TaskResult[str, TaskError]:
+    return TaskResult(ok="done")
 ```
 
 ### CUSTOM Mode
 
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
+Each task names its queue with `queue_name`.
+
 ```python
-from horsies import CustomQueueConfig
+from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, QueueMode, CustomQueueConfig
 
 config = AppConfig(
     queue_mode=QueueMode.CUSTOM,
     custom_queues=[
-        CustomQueueConfig(name="high", priority=1, max_concurrency=10),
-        CustomQueueConfig(name="low", priority=100, max_concurrency=3),
+        CustomQueueConfig(name="critical", priority=1, max_concurrency=10),
+        CustomQueueConfig(name="normal", priority=50, max_concurrency=5),
+        CustomQueueConfig(name="low", priority=100, max_concurrency=2),
     ],
-    broker=PostgresConfig(...),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
+app = Horsies(config)
+
+@app.task("urgent_alert", queue_name="critical")
+def urgent_alert() -> TaskResult[str, TaskError]:
+    return TaskResult(ok="alerted")
+
+@app.task("process_order", queue_name="normal")
+def process_order() -> TaskResult[str, TaskError]:
+    return TaskResult(ok="processed")
+
+@app.task("ship_item", queue_name="low")
+def ship_to_address() -> TaskResult[str, TaskError]:
+    return TaskResult(ok="shipped")
 ```
 
-See [Queue Modes](../../concepts/queue-modes) for details.
+### Unknown Queue Names
+
+A `queue_name` that the config does not list raises `ConfigurationError` with code `HRS-103` when the decorator runs:
+
+```python
+# This raises ConfigurationError (HRS-103) at definition time:
+@app.task("bad_task", queue_name="nonexistent")
+def bad_task() -> TaskResult[str, TaskError]:
+    ...
+```
+
+```text
+error[HRS-103]: invalid queue_name 'nonexistent'
+  --> /app/tasks.py:12
+   |
+12 | @app.task("bad_task", queue_name="nonexistent")
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: valid queues: ['critical', 'normal', 'low']
+
+   = help:
+        use one of the configured queue names
+```
 
 ## Cluster-Wide Concurrency
 
