@@ -348,7 +348,7 @@ index 3a7ca1388..78cfe7190 100644
  
  def _payload_bytes(scenario: Scenario) -> int:
 diff --git a/tests/perf/scenarios.py b/tests/perf/scenarios.py
-index f67e92133..34a8a5e93 100644
+index f67e92133..d4d7900d9 100644
 --- a/tests/perf/scenarios.py
 +++ b/tests/perf/scenarios.py
 @@ -10,9 +10,16 @@ consumes one seeded row per call, and a batch operation selects its own rows
@@ -386,9 +386,22 @@ index f67e92133..34a8a5e93 100644
  
  from sqlalchemy import text
  from sqlalchemy.engine import Connection
-@@ -48,6 +57,10 @@ from horsies.core.lifecycle.commands import (
+@@ -46,8 +55,22 @@ from horsies.core.lifecycle.commands import (
+     TerminalizationCommand,
+ )
  from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead, WorkerOwned
- from horsies.core.lifecycle.outcomes import Applied, decode_outcome_row
+-from horsies.core.lifecycle.outcomes import Applied, decode_outcome_row
++from horsies.core.lifecycle.outcomes import (
++    Applied,
++    CapacityWoken,
++    FailureApplied,
++    PhaseTwoOwed,
++    RetryNotRequested,
++    SuccessApplied,
++    decode_failed_attempt_row,
++    decode_outcome_row,
++    decode_workflow_success_row,
++)
  from horsies.core.lifecycle.persistence import (
 +    FUSED_BATCH_MAX_ROWS,
 +    FusedCompletionBatch,
@@ -397,7 +410,38 @@ index f67e92133..34a8a5e93 100644
      _log_outcome,
      apply_sync,
      batch_call_for,
-@@ -76,8 +89,21 @@ from tests.perf.legacy_terminalization_sql import (
+@@ -60,24 +83,49 @@ from horsies.core.models.tasks import (
+     TaskResult,
+ )
+ from horsies.core.lifecycle.persistence import LOCK_TASK_SQL
++from horsies.core.worker.failed_attempt import (
++    FINISH_FAILED_ATTEMPT_SQL,
++    AttemptFailure,
++    AttemptFailureKind,
++    NoRetry,
++    RetryRequest,
++    RunningAttempt,
++    finish_for,
++    finish_parameters,
++    retry_request_for,
++)
++from horsies.core.worker.shared_stop import RetryPlacement
+ from horsies.core.worker.sql import (
+-    NOTIFY_TASK_QUEUE_SQL,
++    READ_IN_FLIGHT_ATTEMPT_SQL,
+     UPSERT_TASK_ATTEMPT_SQL,
+ )
+-from horsies.core.workflows.engine import on_workflow_task_complete
++from horsies.core.worker.workflow_success import success_for, success_statement
++from horsies.core.workflows.engine import QueueWake, on_workflow_task_complete
+ from tests.perf.legacy_terminalization_sql import (
+     EXPIRE_CLAIMED_TASK_BEFORE_START_SQL as _EXPIRE_CLAIMED_TASK_BEFORE_START_SQL,
+     EXPIRE_PENDING_TASKS_SQL,
+     FINALIZE_TASK_COMPLETED_SQL,
+     MARK_STALE_TASK_FAILED_SQL,
+     MARK_TASK_COMPLETED_SQL,
+-    MARK_TASK_FAILED_SQL,
+ )
  from tests.perf.statistics import Budget
  
  WORKER_ID = 'perf-harness'
@@ -419,7 +463,7 @@ index f67e92133..34a8a5e93 100644
  # Budgets as declared for each path, before anything was measured.
  FUSED_P50 = Budget(fraction=0.05, floor_ms=0.2)
  FUSED_P99 = Budget(fraction=0.10, floor_ms=1.0)
-@@ -86,41 +112,69 @@ SINGLE_ROW_P99 = Budget(fraction=0.15, floor_ms=1.5)
+@@ -86,41 +134,69 @@ SINGLE_ROW_P99 = Budget(fraction=0.15, floor_ms=1.5)
  BATCH_LOCK_P95 = Budget(fraction=0.10, floor_ms=1.0)
  MINIMUM_BATCH_THROUGHPUT_RATIO = 0.90
  
@@ -501,7 +545,7 @@ index f67e92133..34a8a5e93 100644
  """)
  
  _EXPIRE_OWNED_BASELINE_PLAN_SQL = text("""
-@@ -143,25 +197,17 @@ _EXPIRE_OWNED_BASELINE_PLAN_SQL = text("""
+@@ -143,25 +219,17 @@ _EXPIRE_OWNED_BASELINE_PLAN_SQL = text("""
      RETURNING id
  """)
  
@@ -536,7 +580,7 @@ index f67e92133..34a8a5e93 100644
  
  _INSERT_WORKFLOWS_SQL = text("""
      INSERT INTO horsies_workflows (
-@@ -169,9 +215,12 @@ _INSERT_WORKFLOWS_SQL = text("""
+@@ -169,9 +237,12 @@ _INSERT_WORKFLOWS_SQL = text("""
          root_workflow_id, sent_at, created_at, started_at, updated_at
      )
      SELECT
@@ -552,7 +596,7 @@ index f67e92133..34a8a5e93 100644
  """)
  
  _INSERT_WORKFLOW_TASKS_SQL = text("""
-@@ -181,21 +230,122 @@ _INSERT_WORKFLOW_TASKS_SQL = text("""
+@@ -181,21 +252,122 @@ _INSERT_WORKFLOW_TASKS_SQL = text("""
          join_type, is_subworkflow, status, task_id, created_at
      )
      SELECT
@@ -586,7 +630,9 @@ index f67e92133..34a8a5e93 100644
 +
 +class Role(Enum):
 +    """Whose rows a seeded id names."""
-+
+ 
+-type Seed = Callable[[Connection, str, int], None]
+-type Cleanup = Callable[[Connection, str], None]
 +    BASELINE = 'base'
 +    CANDIDATE = 'cand'
 +    BALLAST = 'ball'
@@ -677,16 +723,14 @@ index f67e92133..34a8a5e93 100644
 +        workflows=seed_ids(scenario_name, role, RowKind.WORKFLOW),
 +        nodes=seed_ids(scenario_name, role, RowKind.WORKFLOW_NODE),
 +    )
- 
--type Seed = Callable[[Connection, str, int], None]
--type Cleanup = Callable[[Connection, str], None]
++
 +
 +type Seed = Callable[[Connection, SeedRows, int], None]
 +type Cleanup = Callable[[Connection, SeedRows], None]
  
  
  @dataclass(frozen=True, slots=True)
-@@ -254,27 +404,19 @@ class BatchScenario:
+@@ -254,27 +426,19 @@ class BatchScenario:
  type Scenario = SingleRowScenario | BatchScenario
  
  
@@ -719,7 +763,7 @@ index f67e92133..34a8a5e93 100644
      count: int,
      *,
      is_workflow_task: bool = False,
-@@ -282,11 +424,13 @@ def seed_running_tasks(
+@@ -282,11 +446,13 @@ def seed_running_tasks(
      connection.execute(
          _INSERT_RUNNING_SQL,
          {
@@ -735,7 +779,7 @@ index f67e92133..34a8a5e93 100644
          },
      )
      connection.commit()
-@@ -294,26 +438,25 @@ def seed_running_tasks(
+@@ -294,26 +460,25 @@ def seed_running_tasks(
  
  def seed_expired_pending_tasks(
      connection: Connection,
@@ -766,7 +810,7 @@ index f67e92133..34a8a5e93 100644
              'worker_id': WORKER_ID,
              'claimed_at': CLAIMED_AT,
          },
-@@ -324,60 +467,105 @@ def seed_expired_claimed_tasks(
+@@ -324,60 +489,105 @@ def seed_expired_claimed_tasks(
  def seed_terminal_ballast(
      connection: Connection,
      *,
@@ -894,7 +938,328 @@ index f67e92133..34a8a5e93 100644
  def _baseline_applied(result: Any, *, operation: str) -> int:
      if result.fetchone() is None:
          raise RuntimeError(f'{operation} did not transition its seeded task')
-@@ -929,10 +1117,10 @@ SCENARIOS: tuple[Scenario, ...] = (
+@@ -490,11 +700,13 @@ def _locked_completion_invocation(
+     return build
+ 
+ 
++_FAILURE_ERROR_CODE = 'PERF_FAILURE'
++_FAILURE_MESSAGE = 'terminal application failure measurement'
+ _FAILURE_RESULT = serialize_error_payload(
+     TaskResult(
+         err=TaskError(
+-            error_code='PERF_FAILURE',
+-            message='terminal application failure measurement',
++            error_code=_FAILURE_ERROR_CODE,
++            message=_FAILURE_MESSAGE,
+         )
+     )
+ )
+@@ -521,37 +733,108 @@ _STALE_FAILURE_RESULT = serialize_error_payload(
+ )
+ 
+ 
+-def _failure_invocation(*, candidate: bool) -> InvocationFactory:
+-    def build(task_id: str) -> Invocation:
+-        if candidate:
+-            command = FailLockedTask(
+-                task_id=task_id,
+-                fence=PriorLockedRead(worker_id=WORKER_ID),
+-                result_json=_FAILURE_RESULT,
+-                error_code='PERF_FAILURE',
+-                failed_reason=None,
+-            )
+-            statement, parameters = call_for(command)
+-            return Invocation(
+-                statement=statement,
+-                parameters=dict(parameters),
+-                candidate=True,
+-                operation='terminal application failure operation',
+-                command=command,
+-            )
+-        return Invocation(
+-            statement=MARK_TASK_FAILED_SQL,
+-            parameters={
+-                'id': task_id,
+-                'wid': WORKER_ID,
+-                'result_json': _FAILURE_RESULT,
+-                'error_code': 'PERF_FAILURE',
+-            },
+-            candidate=False,
+-            operation='terminal application failure statement',
++# What the attempt row records for a task error: ``_attempt_failure_of`` of
++# ``ErrorProduced`` (horsies/core/worker/finalize.py:273-298 at v0.7.0).
++_FAILURE_ATTEMPT = AttemptFailure(
++    kind=AttemptFailureKind.FAILED,
++    error_message=_FAILURE_MESSAGE,
++    failed_reason=None,
++)
++
++
++def _failed_attempt_parameters(task_id: str, retry: RetryRequest) -> dict[str, Any]:
++    """The parameters of ``FINISH_FAILED_ATTEMPT_SQL`` for a task error with
++    ``retry``, as the worker builds them: the terminal failure of the retry
++    refusal (``FailLockedTask``), then ``finish_for``. Pure."""
++    failure = FailLockedTask(
++        task_id=task_id,
++        fence=PriorLockedRead(worker_id=WORKER_ID),
++        result_json=_FAILURE_RESULT,
++        error_code=_FAILURE_ERROR_CODE,
++        failed_reason=None,
++    )
++    return finish_parameters(
++        finish_for(
++            failure,
++            claimed_at=CLAIMED_AT,
++            retry=retry,
++            attempt=_FAILURE_ATTEMPT,
+         )
++    )
+ 
+-    return build
++
++def _failed_attempt_invocation(task_id: str) -> Invocation:
++    """The finish statement, with the retry that the read gives a seeded task
++    (none: ``max_retries`` 0). The plan evidence explains it."""
++    return Invocation(
++        statement=FINISH_FAILED_ATTEMPT_SQL,
++        parameters=_failed_attempt_parameters(task_id, NoRetry()),
++        candidate=True,
++        operation='failed attempt operation',
++    )
++
++
++def _retry_request(connection: Connection, task_id: str) -> RetryRequest:
++    """The unlocked read of the retry facts and the retry that the policy
++    asks for: ``_finalize_retry_request`` (horsies/core/worker/finalize.py:
++    1525-1554 at v0.7.0) on the synchronous connection.
++
++    Raises:
++        RuntimeError: the read did not find the seeded task RUNNING under
++            the harness's claim generation.
++    """
++    row = connection.execute(
++        READ_IN_FLIGHT_ATTEMPT_SQL,
++        {'id': task_id, 'wid': WORKER_ID, 'claimed_at': CLAIMED_AT},
++    ).fetchone()
++    if row is None or row.status != 'RUNNING':
++        raise RuntimeError(
++            f'the retry-facts read found {row!r} for a seeded RUNNING task'
++        )
++    return retry_request_for(
++        RunningAttempt(
++            retry_count=int(row.retry_count),
++            max_retries=int(row.max_retries),
++            task_options=row.task_options,
++        ),
++        _FAILURE_ERROR_CODE,
++        RetryPlacement.SAME_CLASS,
++    )
++
++
++def _run_failed_attempt(connection: Connection, task_id: str) -> int:
++    """The failure path of the v0.7.0 worker for a task error
++    (``_persist_failed_attempt``, horsies/core/worker/finalize.py:1467-1523 at
++    v0.7.0): the retry-facts read, then ``horsies_finish_failed_attempt``.
++
++    The worker sends the two statements in autocommit; here they share the
++    one transaction of an operation, as in every scenario of the harness.
++
++    Raises:
++        RuntimeError: the read or the finish did not find the seeded task, or
++            the finish did not write its terminal failure.
++    """
++    retry = _retry_request(connection, task_id)
++    rows = (
++        connection.execute(
++            FINISH_FAILED_ATTEMPT_SQL,
++            _failed_attempt_parameters(task_id, retry),
++        )
++        .mappings()
++        .all()
++    )
++    if len(rows) != 1:
++        connection.rollback()
++        raise RuntimeError(f'failed attempt operation returned {len(rows)} rows')
++    match decode_failed_attempt_row(_mappings(rows)[0]):
++        case FailureApplied(retry=RetryNotRequested(), after=CapacityWoken()):
++            connection.commit()
++            return 1
++        case other:
++            connection.rollback()
++            raise RuntimeError(
++                f'failed attempt operation returned {other!r} for a seeded task'
++            )
+ 
+ 
+ def _owned_expiry_invocation(*, candidate: bool) -> InvocationFactory:
+@@ -720,49 +1003,6 @@ def _run_terminal_invocation(
+     return run
+ 
+ 
+-# The locking read of a RUNNING task of one claim generation, after the task
+-# advisory lock: the order of every move function.
+-_LOCK_RUNNING_CONTEXT_SQL = text("""
+-    SELECT retry_count, started_at, claimed_by_worker_id, worker_hostname,
+-           worker_pid, worker_process_name, clock_timestamp() AS db_now
+-    FROM horsies_tasks
+-    WHERE id = CAST(:id AS uuid)
+-      AND status = 'RUNNING'
+-      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
+-      AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)
+-    FOR UPDATE
+-""")
+-
+-
+-def _upsert_completed_attempt(connection: Connection, task_id: str) -> None:
+-    connection.execute(LOCK_TASK_SQL, {'task_id': task_id})
+-    context = connection.execute(
+-        _LOCK_RUNNING_CONTEXT_SQL,
+-        {'id': task_id, 'wid': WORKER_ID, 'claimed_at': CLAIMED_AT},
+-    ).fetchone()
+-    if context is None:
+-        raise RuntimeError('workflow completion could not lock its seeded task')
+-    db_now = context.db_now
+-    connection.execute(
+-        UPSERT_TASK_ATTEMPT_SQL,
+-        {
+-            'task_id': task_id,
+-            'attempt': (context.retry_count or 0) + 1,
+-            'outcome': 'COMPLETED',
+-            'will_retry': False,
+-            'started_at': context.started_at or db_now,
+-            'finished_at': db_now,
+-            'error_code': None,
+-            'error_message': None,
+-            'failed_reason': None,
+-            'worker_id': context.claimed_by_worker_id,
+-            'worker_hostname': context.worker_hostname,
+-            'worker_pid': context.worker_pid,
+-            'worker_process_name': context.worker_process_name,
+-        },
+-    )
+-
+-
+ class _SyncConnectionAsAsyncSession:
+     """The workflow engine's async execute seam over the measured connection."""
+ 
+@@ -780,32 +1020,72 @@ _WORKFLOW_RESULT: TaskResult[int, Any] = TaskResult(ok=1)
+ _WORKFLOW_RESULT_JSON = dumps_json(encode_task_result(_WORKFLOW_RESULT, int)).unwrap()
+ 
+ 
+-def _run_workflow_success(
+-    invocation_for: InvocationFactory,
+-) -> Callable[[Connection, str], int]:
+-    def run(connection: Connection, task_id: str) -> int:
+-        _upsert_completed_attempt(connection, task_id)
+-        _execute_invocation(connection, invocation_for(task_id))
+-        connection.commit()
++def _workflow_success_invocation(task_id: str) -> Invocation:
++    """Phase 1 of a workflow task's success as the v0.7.0 worker sends it
++    (``_finish_workflow_success``, horsies/core/worker/finalize.py:1322-1373
++    at v0.7.0): ``horsies_finish_workflow_success``, which writes the attempt
++    row, the move to history and the phase-2 record."""
++    completion = CompleteLockedTask(
++        task_id=task_id,
++        fence=PriorLockedRead(worker_id=WORKER_ID),
++        result_json=_WORKFLOW_RESULT_JSON,
++    )
++    statement = success_statement(success_for(completion, claimed_at=CLAIMED_AT))
++    return Invocation(
++        statement=statement.statement,
++        parameters=dict(statement.parameters),
++        candidate=True,
++        operation='workflow success operation',
++    )
++
++
++def _run_workflow_success(connection: Connection, task_id: str) -> int:
++    """Phase 1 and phase 2 of a one-node workflow's success, each its own
++    write transaction.
+ 
+-        session = _SyncConnectionAsAsyncSession(connection)
+-        _WORKFLOW_RUNNER.run(
+-            on_workflow_task_complete(
+-                cast(Any, session),
+-                task_id,
+-                _WORKFLOW_RESULT,
+-                None,
+-                task_name='perf.task',
++    Phase 2 is the worker's (``_finalize_workflow_phase``,
++    horsies/core/worker/finalize.py:1619-1674 at v0.7.0): the engine's node
++    write, which sends the capacity wake of the task's queue in its first
++    statement, and the progression, which completes the workflow.
++
++    Raises:
++        RuntimeError: phase 1 did not write the success of the seeded task.
++    """
++    invocation = _workflow_success_invocation(task_id)
++    rows = (
++        connection.execute(invocation.statement, invocation.parameters)
++        .mappings()
++        .all()
++    )
++    if len(rows) != 1:
++        connection.rollback()
++        raise RuntimeError(f'workflow success operation returned {len(rows)} rows')
++    match decode_workflow_success_row(_mappings(rows)[0]):
++        case SuccessApplied(phase_two=PhaseTwoOwed()):
++            connection.commit()
++        case other:
++            connection.rollback()
++            raise RuntimeError(
++                f'workflow success operation returned {other!r} for a seeded '
++                'workflow task'
+             )
+-        )
+-        connection.execute(
+-            NOTIFY_TASK_QUEUE_SQL,
+-            {'c2': 'task_queue_default', 'p': f'capacity:{task_id}'},
+-        )
+-        connection.commit()
+-        return 1
+ 
+-    return run
++    session = _SyncConnectionAsAsyncSession(connection)
++    _WORKFLOW_RUNNER.run(
++        on_workflow_task_complete(
++            cast(Any, session),
++            task_id,
++            _WORKFLOW_RESULT,
++            None,
++            task_name='perf.task',
++            wake=QueueWake(
++                channel='task_queue_default',
++                payload=f'capacity:{task_id}',
++            ),
++        )
++    )
++    connection.commit()
++    return 1
+ 
+ 
+ def _pending_expiry_invocation(
+@@ -905,20 +1185,10 @@ _FUSED_LARGE_CANDIDATE = _fused_invocation(
+ )
+ _LOCKED_BASELINE = _locked_completion_invocation(payload_of(200), candidate=False)
+ _LOCKED_CANDIDATE = _locked_completion_invocation(payload_of(200), candidate=True)
+-_FAILURE_BASELINE = _failure_invocation(candidate=False)
+-_FAILURE_CANDIDATE = _failure_invocation(candidate=True)
+ _OWNED_EXPIRY_BASELINE = _owned_expiry_invocation(candidate=False)
+ _OWNED_EXPIRY_CANDIDATE = _owned_expiry_invocation(candidate=True)
+ _STALE_FAILURE_BASELINE = _stale_failure_invocation(candidate=False)
+ _STALE_FAILURE_CANDIDATE = _stale_failure_invocation(candidate=True)
+-_WORKFLOW_BASELINE = _locked_completion_invocation(
+-    _WORKFLOW_RESULT_JSON,
+-    candidate=False,
+-)
+-_WORKFLOW_CANDIDATE = _locked_completion_invocation(
+-    _WORKFLOW_RESULT_JSON,
+-    candidate=True,
+-)
+ 
+ SCENARIOS: tuple[Scenario, ...] = (
+     SingleRowScenario(
+@@ -929,10 +1199,10 @@ SCENARIOS: tuple[Scenario, ...] = (
          payload_bytes=200,
          seed=seed_running_tasks,
          cleanup=delete_seeded,
@@ -909,7 +1274,7 @@ index f67e92133..34a8a5e93 100644
          exact_client_statements_per_operation=1,
      ),
      SingleRowScenario(
-@@ -943,10 +1131,10 @@ SCENARIOS: tuple[Scenario, ...] = (
+@@ -943,10 +1213,10 @@ SCENARIOS: tuple[Scenario, ...] = (
          payload_bytes=1024 * 1024,
          seed=seed_running_tasks,
          cleanup=delete_seeded,
@@ -924,7 +1289,7 @@ index f67e92133..34a8a5e93 100644
          exact_client_statements_per_operation=1,
      ),
      SingleRowScenario(
-@@ -957,10 +1145,10 @@ SCENARIOS: tuple[Scenario, ...] = (
+@@ -957,25 +1227,28 @@ SCENARIOS: tuple[Scenario, ...] = (
          payload_bytes=200,
          seed=seed_running_tasks,
          cleanup=delete_seeded,
@@ -939,7 +1304,14 @@ index f67e92133..34a8a5e93 100644
          exact_client_statements_per_operation=1,
      ),
      SingleRowScenario(
-@@ -971,10 +1159,10 @@ SCENARIOS: tuple[Scenario, ...] = (
+         name='terminal-application-failure',
+-        description='terminal application failure transition, retry already denied',
++        description=(
++            'terminal failure of a task error with no retry: the retry-facts '
++            'read, then attempt row, move and capacity wake in one statement'
++        ),
+         p50_budget=SINGLE_ROW_P50,
+         p99_budget=SINGLE_ROW_P99,
          payload_bytes=len(_FAILURE_RESULT.encode('utf-8')),
          seed=seed_running_tasks,
          cleanup=delete_seeded,
@@ -947,14 +1319,16 @@ index f67e92133..34a8a5e93 100644
 -        candidate=_run_terminal_invocation(_FAILURE_CANDIDATE),
 -        baseline_invocation=_FAILURE_BASELINE,
 -        candidate_invocation=_FAILURE_CANDIDATE,
-+        baseline=_run_terminal_invocation(_FAILURE_CANDIDATE),
+-        exact_client_statements_per_operation=1,
++        baseline=_run_failed_attempt,
 +        candidate=None,
-+        baseline_invocation=_FAILURE_CANDIDATE,
++        baseline_invocation=_failed_attempt_invocation,
 +        candidate_invocation=None,
-         exact_client_statements_per_operation=1,
++        exact_client_statements_per_operation=2,
      ),
      SingleRowScenario(
-@@ -985,10 +1173,10 @@ SCENARIOS: tuple[Scenario, ...] = (
+         name='owned-claim-expiry',
+@@ -985,10 +1258,10 @@ SCENARIOS: tuple[Scenario, ...] = (
          payload_bytes=len(_EXPIRY_RESULT.encode('utf-8')),
          seed=seed_expired_claimed_tasks,
          cleanup=delete_seeded,
@@ -969,7 +1343,7 @@ index f67e92133..34a8a5e93 100644
          exact_client_statements_per_operation=1,
      ),
      SingleRowScenario(
-@@ -1001,10 +1189,10 @@ SCENARIOS: tuple[Scenario, ...] = (
+@@ -1001,27 +1274,28 @@ SCENARIOS: tuple[Scenario, ...] = (
          payload_bytes=len(_STALE_FAILURE_RESULT.encode('utf-8')),
          seed=seed_running_tasks,
          cleanup=delete_seeded,
@@ -984,7 +1358,16 @@ index f67e92133..34a8a5e93 100644
          exact_client_statements_per_operation=3,
      ),
      SingleRowScenario(
-@@ -1018,10 +1206,10 @@ SCENARIOS: tuple[Scenario, ...] = (
+         name='workflow-success-phase2',
+         description=(
+-            'one-node workflow success through terminal persistence, phase 2, '
+-            'workflow completion and queue wake'
++            'one-node workflow success: phase 1 (attempt row, move, phase-2 '
++            'record), then phase 2 (node write with the capacity wake, '
++            'workflow completion)'
+         ),
+         p50_budget=SINGLE_ROW_P50,
+         p99_budget=Budget(fraction=0.15, floor_ms=2.0),
          payload_bytes=len(_WORKFLOW_RESULT_JSON.encode('utf-8')),
          seed=seed_workflow_success_tasks,
          cleanup=delete_workflow_seeded,
@@ -992,14 +1375,14 @@ index f67e92133..34a8a5e93 100644
 -        candidate=_run_workflow_success(_WORKFLOW_CANDIDATE),
 -        baseline_invocation=_WORKFLOW_BASELINE,
 -        candidate_invocation=_WORKFLOW_CANDIDATE,
-+        baseline=_run_workflow_success(_WORKFLOW_CANDIDATE),
++        baseline=_run_workflow_success,
 +        candidate=None,
-+        baseline_invocation=_WORKFLOW_CANDIDATE,
++        baseline_invocation=_workflow_success_invocation,
 +        candidate_invocation=None,
          exact_write_transactions_per_operation=2,
      ),
      BatchScenario(
-@@ -1033,15 +1221,12 @@ SCENARIOS: tuple[Scenario, ...] = (
+@@ -1033,15 +1307,12 @@ SCENARIOS: tuple[Scenario, ...] = (
          seed=seed_expired_pending_tasks,
          cleanup=delete_seeded,
          baseline=_run_pending_expiry(
