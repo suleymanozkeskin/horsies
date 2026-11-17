@@ -1339,15 +1339,26 @@ pub(super) async fn history_row(pool: &PgPool, task_id: Uuid) -> Option<(String,
     .expect("read the history row")
 }
 
-/// The parameters of one claim pass of [`WORKER`] over `queue`, with no cap.
-pub(super) fn claim_pass(queue: &str) -> crate::broker::postgres::ClaimPassParams {
-    crate::broker::postgres::ClaimPassParams {
+/// The request of one claim pass (`horsies_claim`) of [`WORKER`] over
+/// `queue`, with no cap: one `ISOLATED` budget of `budget` rows that every
+/// class routes to.
+pub(super) fn claim_pass(queue: &str, budget: u32) -> crate::broker::claims::ClaimPassRequest {
+    use crate::core::task::Execution;
+    crate::broker::claims::ClaimPassRequest {
         worker_id: WORKER.to_owned(),
         queues: vec![queue.to_owned()],
         queue_priority: std::iter::once((queue.to_owned(), 100)).collect(),
         queue_max_concurrency: std::collections::HashMap::new(),
         hard_cap_mode: true,
-        processes: 10,
+        classes: crate::broker::claims::ClaimClasses::new(
+            std::collections::HashMap::from([(Execution::Isolated, budget)]),
+            std::collections::HashMap::from([
+                (Execution::Isolated, Execution::Isolated),
+                (Execution::SharedAsync, Execution::Isolated),
+                (Execution::SharedThread, Execution::Isolated),
+            ]),
+        )
+        .expect("every route names the ISOLATED budget"),
         prefetch_buffer: 0,
         max_claim_per_worker: 0,
         max_claim_batch: 0,
@@ -1355,6 +1366,23 @@ pub(super) fn claim_pass(queue: &str) -> crate::broker::postgres::ClaimPassParam
         claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("a positive lease"),
         lock_keys: Vec::new(),
     }
+}
+
+/// Run one claim pass of `request` on a core pool of `pool`, and return the
+/// claimed rows in claim order.
+pub(super) async fn claim_once(
+    pool: &PgPool,
+    request: &crate::broker::claims::ClaimPassRequest,
+) -> Vec<crate::broker::claims::ClaimedRow> {
+    let core = crate::broker::pools::core_pool_for_test_pool(pool);
+    let pass = crate::broker::claims::claim_pass(
+        &core,
+        crate::broker::core_rows::StatementLog::Off,
+        request,
+    )
+    .await;
+    core.close();
+    pass.expect("claim pass").claimed
 }
 
 /// How long a listener collects notifications after the action.

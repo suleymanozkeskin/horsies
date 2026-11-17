@@ -187,6 +187,15 @@ class CoreHandle:
         """The facets of one scope: the JSON text of the core's Facets. Reads only, in one
         statement. A cancelled await drops the read.
         """
+    def stale_tasks_async(self, threshold_minutes: object) -> asyncio.Future[TaskListComplete | TaskListTruncated | BrokerFailure]:
+        """The RUNNING tasks whose latest runner beat, or their start, is older than the
+        threshold. A bool, a value that is not an int, or one outside 0 to 525600 minutes is
+        INVALID_INPUT before any core call. Reads only, in one statement.
+        """
+    def expired_tasks_async(self) -> asyncio.Future[TaskListComplete | TaskListTruncated | BrokerFailure]:
+        """The PENDING tasks whose good_until passed before a worker took them. Reads only, in
+        one statement.
+        """
 
 
 @final
@@ -1272,6 +1281,22 @@ class TaskDetailAbsent:
     def task_id(self) -> uuid.UUID: ...
     @property
     def reason(self) -> Literal['PREDATES_RETAINED_HISTORY', 'WITHIN_RETAINED_HISTORY', 'NOT_CLASSIFIED']: ...
+
+
+@final
+class TaskListComplete:
+    """Every matching row of a task list: one dict per row, with the task id as uuid.UUID."""
+    @property
+    def rows(self) -> list[dict[str, object]]: ...
+
+
+@final
+class TaskListTruncated:
+    """The first bound matching rows of a task list; more rows match."""
+    @property
+    def rows(self) -> list[dict[str, object]]: ...
+    @property
+    def bound(self) -> int: ...
 
 
 @final
