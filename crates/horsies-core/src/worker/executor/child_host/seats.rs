@@ -134,6 +134,7 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
         task_name,
         worker_id,
         claimed_at,
+        orphan_self_heal,
         work,
         input,
     } = run;
@@ -142,6 +143,7 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
         task_name,
         worker_id,
         claimed_at,
+        orphan_self_heal,
     };
     if let Started::Stopped(reason) = start_attempt(context, &facts).await {
         send_isolated_result(context, task_id, RunEnd::StoppedBeforeRunning(reason)).await;
@@ -267,6 +269,7 @@ fn facts_of(run: &SharedRunFrame) -> RunFacts {
         task_name: run.task_name.clone(),
         worker_id: run.worker_id.clone(),
         claimed_at: run.claimed_at,
+        orphan_self_heal: run.orphan_self_heal,
     }
 }
 

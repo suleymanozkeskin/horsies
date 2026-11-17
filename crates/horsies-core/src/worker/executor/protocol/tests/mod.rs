@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use self::python_vectors::*;
 use super::*;
+use crate::broker::OrphanSelfHeal;
 use crate::core::codec::StrictJsonError;
 use crate::core::config::socket::{
     KeepaliveProbes, KeepaliveSeconds, TcpKeepalivesConfig, TcpUserTimeoutConfig, TcpUserTimeoutMs,
@@ -629,6 +630,7 @@ fn the_isolated_run_frame_carries_the_input_as_its_body() {
             task_name: "app.tasks.add".to_owned(),
             worker_id: "worker-1".to_owned(),
             claimed_at: claim_time(),
+            orphan_self_heal: OrphanSelfHeal::On,
             work: IsolatedWork::Run,
             input: TaskInputText::new(r#"{"a":1,"b":2}"#.to_owned()),
         }),
@@ -636,7 +638,8 @@ fn the_isolated_run_frame_carries_the_input_as_its_body() {
             concat!(
                 r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
                 r#""task_name":"app.tasks.add","worker_id":"worker-1","#,
-                r#""claimed_at":"2026-11-16T09:30:00.123456Z","work":{"kind":"run"}}"#,
+                r#""claimed_at":"2026-11-16T09:30:00.123456Z","orphan_self_heal":true,"#,
+                r#""work":{"kind":"run"}}"#,
             ),
             br#"{"a":1,"b":2}"#,
         ),
@@ -651,6 +654,7 @@ fn the_isolated_run_frame_carries_a_refusal_of_stored_options() {
             task_name: "app.tasks.add".to_owned(),
             worker_id: "worker-1".to_owned(),
             claimed_at: whole_second_claim_time(),
+            orphan_self_heal: OrphanSelfHeal::Off,
             work: IsolatedWork::Refusal(StoredOptionsRefusal::TimeoutValueInvalid(
                 RefusalReason::new("timeout_ms is below 1000".to_owned()).unwrap(),
             )),
@@ -660,7 +664,8 @@ fn the_isolated_run_frame_carries_a_refusal_of_stored_options() {
             concat!(
                 r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
                 r#""task_name":"app.tasks.add","worker_id":"worker-1","#,
-                r#""claimed_at":"2026-11-16T09:30:00Z","work":{"kind":"refusal","#,
+                r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"#,
+                r#""work":{"kind":"refusal","#,
                 r#""refusal":{"kind":"value_invalid","reason":"timeout_ms is below 1000"}}}"#,
             ),
             b"null",
@@ -677,6 +682,7 @@ fn the_shared_run_frame_carries_the_seat_work() {
             task_name: "app.tasks.fetch".to_owned(),
             worker_id: "worker-1".to_owned(),
             claimed_at: whole_second_claim_time(),
+            orphan_self_heal: OrphanSelfHeal::Off,
             work,
             input: TaskInputText::new("{}".to_owned()),
         })
@@ -687,7 +693,7 @@ fn the_shared_run_frame_carries_the_seat_work() {
                 r#"{{"kind":"shared_run","dispatch":9,"#,
                 r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
                 r#""task_name":"app.tasks.fetch","worker_id":"worker-1","#,
-                r#""claimed_at":"2026-11-16T09:30:00Z","work":{}}}"#,
+                r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{}}}"#,
             ),
             work
         )
@@ -991,6 +997,7 @@ fn the_claim_generation_round_trips_exactly() {
         task_name: "t".to_owned(),
         worker_id: "w".to_owned(),
         claimed_at,
+        orphan_self_heal: OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
         input: TaskInputText::new("{}".to_owned()),
     });
@@ -1001,6 +1008,62 @@ fn the_claim_generation_round_trips_exactly() {
     }
 }
 
+/// The orphan self-heal of the app reaches each run: both run frames carry
+/// it, on or off.
+#[test]
+fn the_orphan_self_heal_round_trips_in_both_run_frames() {
+    for self_heal in [OrphanSelfHeal::On, OrphanSelfHeal::Off] {
+        let run = ParentFrame::Run(RunFrame {
+            task_id: task_id(T5),
+            task_name: "t".to_owned(),
+            worker_id: "w".to_owned(),
+            claimed_at: claim_time(),
+            orphan_self_heal: self_heal,
+            work: IsolatedWork::Run,
+            input: TaskInputText::new("{}".to_owned()),
+        });
+        let shared = ParentFrame::SharedRun(SharedRunFrame {
+            dispatch: DispatchNumber::new(3).unwrap(),
+            task_id: task_id(T5),
+            task_name: "t".to_owned(),
+            worker_id: "w".to_owned(),
+            claimed_at: claim_time(),
+            orphan_self_heal: self_heal,
+            work: SharedWork::ThreadTask {
+                timeout_ms: TaskTimeoutMs::new(5_000).unwrap(),
+            },
+            input: TaskInputText::new("{}".to_owned()),
+        });
+        for frame in [run, shared] {
+            let bytes = encode_parent_frame(&frame).unwrap().to_bytes();
+            assert_eq!(decode_parent_bytes(&bytes).unwrap(), frame);
+        }
+    }
+}
+
+/// The setting has no default: a run frame without it is refused.
+#[test]
+fn a_run_frame_without_its_orphan_self_heal_is_refused() {
+    let run = format!(
+        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"run"}}}}"#
+    );
+    assert_eq!(
+        malformed_parent(&framed(&run, b"{}")),
+        MalformedFrame::MissingField {
+            field: "orphan_self_heal".to_owned(),
+        },
+    );
+    let shared = format!(
+        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"thread_task","timeout_ms":5000}}}}"#
+    );
+    assert_eq!(
+        malformed_parent(&framed(&shared, b"{}")),
+        MalformedFrame::MissingField {
+            field: "orphan_self_heal".to_owned(),
+        },
+    );
+}
+
 /// Python writes `isoformat()`, with `+00:00`; the decoder reads it too.
 #[test]
 fn a_claim_generation_with_an_offset_is_read() {
@@ -1008,7 +1071,8 @@ fn a_claim_generation_with_an_offset_is_read() {
         concat!(
             r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
             r#""task_name":"t","worker_id":"w","#,
-            r#""claimed_at":"2026-11-16T09:30:00.123456+00:00","work":{"kind":"run"}}"#,
+            r#""claimed_at":"2026-11-16T09:30:00.123456+00:00","orphan_self_heal":false,"#,
+            r#""work":{"kind":"run"}}"#,
         ),
         b"{}",
     );
@@ -1107,7 +1171,7 @@ fn a_body_on_a_frame_without_one_is_refused() {
 #[test]
 fn input_that_is_not_utf8_is_refused() {
     let meta = format!(
-        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"run"}}}}"#
+        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"run"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&meta, &[0x7b, 0xff])),
@@ -1183,7 +1247,7 @@ fn a_stuck_report_names_live_work() {
 #[test]
 fn seat_work_outside_its_bounds_is_refused() {
     let meta = format!(
-        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"task","timeout_ms":999,"cancel_grace_ms":1000}}}}"#
+        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"task","timeout_ms":999,"cancel_grace_ms":1000}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&meta, b"{}")),

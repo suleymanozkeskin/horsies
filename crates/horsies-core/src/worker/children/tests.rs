@@ -43,6 +43,7 @@ fn launch() -> ChildLaunch {
 fn facts(pending: usize) -> PoolFacts {
     PoolFacts {
         worker_id: "worker-1".to_owned(),
+        orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         pending_limit: NonZeroUsize::new(pending).expect("a test pending limit above 0"),
         exit_not_seen: ExitNotSeen::LeaveToRecovery,
         placement: CpuPlacement::SharedCpus,
