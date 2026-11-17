@@ -29,6 +29,8 @@ pub mod monitoring;
 pub mod process_runtime;
 pub mod scheduler_manifest;
 #[cfg(test)]
+mod sql_tests;
+#[cfg(test)]
 mod stored_form_vectors;
 #[cfg(test)]
 pub(crate) mod test_support;
