@@ -24,7 +24,6 @@ use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::worker::executor::protocol::{
     CancelGraceMs, DispatchNumber, FailureDetail, IsolatedWork, ParentFrame, ProcessId, RssReading,
     RunRef, SeatEnd, SharedResultFrame, TaskTimeoutMs,
@@ -132,7 +131,6 @@ fn unreachable_writer() -> OutcomeWriter {
         crate::test_support::child_specs::no_child_specs(),
         WORKER_ID.to_owned(),
         PayloadPolicy::default(),
-        RetentionConfig::default(),
         successes,
     )
 }
@@ -237,7 +235,6 @@ async fn a_crash_whose_exit_was_seen_fails_the_row_with_worker_crashed() {
         crate::test_support::child_specs::no_child_specs(),
         WORKER_ID.to_owned(),
         PayloadPolicy::default(),
-        RetentionConfig::default(),
         successes,
     );
     let claimed = ClaimedTask {

@@ -20,7 +20,6 @@ use super::*;
 use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::task::error::{OperationalErrorCode, TaskErrorCode};
 use crate::core::task::result::{read_task_result_text, TaskResultText};
 use crate::test_support::{CapturedEvent, LogCapture};
@@ -94,7 +93,6 @@ fn writer_with_payload(pool: &PgPool, payload: PayloadPolicy) -> OutcomeWriter {
         crate::test_support::child_specs::no_child_specs(),
         WORKER.to_owned(),
         payload,
-        RetentionConfig::default(),
         successes,
     )
 }

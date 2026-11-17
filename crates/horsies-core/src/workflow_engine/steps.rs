@@ -35,8 +35,6 @@ use uuid::Uuid;
 
 use crate::broker::core_rows::{column, one_row, query_in, query_on, roll_back, RowDecodeError};
 use crate::broker::{BrokerError, PostgresBroker};
-use crate::core::config::retention::RetentionConfig;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::workflow::node::SubWorkflowParams;
 use crate::db::{
     BoundStatement, CheckoutClass, CorePool, IsolationLevel, NotSentCause, ParameterType,
@@ -469,18 +467,11 @@ pub(crate) struct CommittedStep<D> {
 }
 
 /// Where the host build of a child gets the child's spec
-/// (`child_spec.rs`), and where the typed facts of the child's task nodes
-/// get the retention class of their queue.
+/// (`child_spec.rs`): a client that builds the child in its own language and
+/// sends the spec as data, with the class of each task queue.
 #[derive(Clone, Copy)]
 pub(crate) enum ChildBuild<'a> {
-    /// The registered definitions of the Rust client, and the retention
-    /// config of the process.
-    Registry {
-        registry: &'a WorkflowSpecRegistry,
-        retention: &'a RetentionConfig,
-    },
-    /// A client that builds the child in its own language and sends the
-    /// spec as data, with the class of each task queue.
+    /// The client's child spec source.
     Client(&'a dyn ChildSpecSource),
 }
 
