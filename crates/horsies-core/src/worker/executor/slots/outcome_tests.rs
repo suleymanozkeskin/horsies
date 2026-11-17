@@ -192,7 +192,8 @@ async fn an_unconfirmed_start_does_not_touch_a_later_claim() {
 
 /// Every other stop of a plain task owes nothing: the child's start wrote
 /// what its case needs, and the parent leaves the row alone. With the
-/// orphan self-heal off, `NODE_NOT_LINKED` writes nothing either.
+/// orphan self-heal off, `NODE_NOT_LINKED` writes nothing either, and an
+/// orphan that the child's stop function cancelled owes nothing.
 #[tokio::test]
 #[serial]
 async fn other_stops_of_a_plain_task_write_nothing() {
@@ -202,6 +203,7 @@ async fn other_stops_of_a_plain_task_write_nothing() {
         StopReason::WorkflowStopped,
         StopReason::TaskExpired,
         StopReason::NodeNotLinked,
+        StopReason::OrphanCancelled,
     ] {
         let task_id = Uuid::new_v4();
         let generation = seed_claimed(&pool, task_id).await;

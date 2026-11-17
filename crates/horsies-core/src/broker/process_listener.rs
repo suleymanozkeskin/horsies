@@ -4,9 +4,14 @@
 //! connection of its own.
 //!
 //! - Brokers on the same session URL with the same socket settings share one
-//!   listener and its one connection. The listener stops when the last broker that uses it drops.
-//!   A listener task runs on one tokio runtime, so a broker on another
-//!   runtime of the process gets its own listener.
+//!   listener and its one connection, from every runtime of the process: the
+//!   listener task and its connection run on the runtime of the process
+//!   ([`crate::process_runtime`]). The listener stops when the last broker
+//!   that uses it drops.
+//! - When the runtime of the process cannot be used, each broker gets a
+//!   listener of its own that refuses every subscription with the cause. It
+//!   runs on the caller's runtime, so it is not shared, and a fork of the
+//!   process never takes a listener of its parent.
 //! - The listener starts at the first subscription. The session URL is
 //!   parsed and its connection plan is loaded then, not when the broker is
 //!   built, so building a broker reads no file.
@@ -24,6 +29,7 @@ use tokio::sync::OnceCell;
 
 use crate::broker::error::is_retryable_statement_failure;
 use crate::broker::pools::PoolSettingsError;
+use crate::process_runtime::process_runtime;
 
 use crate::db::{
     parse_connection_url, ChannelName, ConnectPlan, ConnectPlanError, ConnectionEnvironment,
@@ -226,6 +232,16 @@ pub struct StartedListener {
 }
 
 impl StartedListener {
+    /// Starts the listener of `plan` ([`Listener::start`]). The connection
+    /// opens at the first subscription.
+    fn start(plan: ConnectPlan) -> StartedListener {
+        let masked_url = plan.masked_url().clone();
+        StartedListener {
+            listener: Listener::start(Arc::new(plan)),
+            masked_url,
+        }
+    }
+
     /// The session URL, with the password masked.
     pub fn masked_url(&self) -> &MaskedUrl {
         &self.masked_url
@@ -299,9 +315,9 @@ impl ProcessListener {
     }
 
     /// The started listener. The first call takes the running process
-    /// listener of the session URL on this runtime, or loads the connection
-    /// plan (blocking reads run off the runtime threads) and starts one. The
-    /// connection opens at the first subscription.
+    /// listener of the session URL, or loads the connection plan (blocking
+    /// reads run off the runtime threads) and starts one. The connection
+    /// opens at the first subscription.
     pub async fn start(&self) -> Result<&StartedListener, ListenError> {
         match &self.source {
             ListenerSource::NoSessionUrl => Err(ListenError::NoSessionUrl),
@@ -345,7 +361,7 @@ impl ProcessListener {
 }
 
 /// What makes two brokers share one listener: the same session URL text and
-/// the same socket settings (on the same runtime).
+/// the same socket settings.
 #[derive(Clone)]
 struct ListenerKey {
     session_url: SessionUrl,
@@ -358,10 +374,9 @@ impl ListenerKey {
     }
 }
 
-/// A process listener of one runtime and key. The entry holds no strong
-/// reference, so it does not keep its listener alive.
+/// The process listener of one key. The entry holds no strong reference, so
+/// it does not keep its listener alive.
 struct RegisteredListener {
-    runtime: tokio::runtime::Id,
     key: ListenerKey,
     listener: Weak<StartedListener>,
 }
@@ -379,15 +394,14 @@ fn lock_process_listeners() -> MutexGuard<'static, Vec<RegisteredListener>> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The running listener of `runtime` and `key`, when one is registered.
+/// The running listener of `key`, when one is registered.
 fn find_running(
     registered: &[RegisteredListener],
-    runtime: tokio::runtime::Id,
     key: &ListenerKey,
 ) -> Option<Arc<StartedListener>> {
     registered
         .iter()
-        .filter(|entry| entry.runtime == runtime && entry.key.matches(key))
+        .filter(|entry| entry.key.matches(key))
         .find_map(|entry| {
             entry
                 .listener
@@ -396,13 +410,31 @@ fn find_running(
         })
 }
 
-/// The process listener of `key` on the current runtime: the running one,
-/// or a new one. A refused plan starts nothing.
+/// The listener of a broker on `key`. A refused plan starts nothing.
+///
+/// - The runtime of the process can be used: the shared listener of `key`
+///   ([`shared_listener`]).
+/// - It cannot: a listener of this broker alone. [`Listener::start`] meets
+///   the same refusal and runs a task on the caller's runtime that refuses
+///   every subscription with it. It is not registered, so no broker on
+///   another runtime depends on the caller's runtime.
 async fn process_listener(key: ListenerKey) -> Result<Arc<StartedListener>, ListenError> {
-    let runtime = tokio::runtime::Handle::current().id();
+    match process_runtime() {
+        Ok(_runtime) => shared_listener(key).await,
+        Err(_refusal) => {
+            let plan = load_plan(key).await.map_err(ListenError::PlanRefused)?;
+            Ok(Arc::new(StartedListener::start(plan)))
+        }
+    }
+}
+
+/// The process listener of `key`, shared by every runtime of the process:
+/// the running one, or a new one. Call it only when the runtime of the
+/// process can be used, so the listener task runs there.
+async fn shared_listener(key: ListenerKey) -> Result<Arc<StartedListener>, ListenError> {
     let running = {
         let registered = lock_process_listeners();
-        find_running(&registered, runtime, &key)
+        find_running(&registered, &key)
     };
     if let Some(running) = running {
         return Ok(running);
@@ -410,29 +442,20 @@ async fn process_listener(key: ListenerKey) -> Result<Arc<StartedListener>, List
     let plan = load_plan(key.clone())
         .await
         .map_err(ListenError::PlanRefused)?;
-    Ok(register(runtime, key, plan))
+    Ok(register(key, plan))
 }
 
 /// Starts and registers the listener of `plan`. When another broker of the
-/// same runtime registered a running listener on the same URL while this plan
+/// process registered a running listener on the same key while this plan
 /// loaded, that listener is returned and `plan` is dropped unused.
-fn register(
-    runtime: tokio::runtime::Id,
-    key: ListenerKey,
-    plan: ConnectPlan,
-) -> Arc<StartedListener> {
+fn register(key: ListenerKey, plan: ConnectPlan) -> Arc<StartedListener> {
     let mut registered = lock_process_listeners();
     registered.retain(|entry| entry.listener.strong_count() > 0);
-    if let Some(running) = find_running(&registered, runtime, &key) {
+    if let Some(running) = find_running(&registered, &key) {
         return running;
     }
-    let masked_url = plan.masked_url().clone();
-    let started = Arc::new(StartedListener {
-        listener: Listener::start(Arc::new(plan)),
-        masked_url,
-    });
+    let started = Arc::new(StartedListener::start(plan));
     registered.push(RegisteredListener {
-        runtime,
         key,
         listener: Arc::downgrade(&started),
     });
@@ -544,6 +567,78 @@ mod tests {
 
         assert!(std::ptr::eq(first_started, second_started));
         assert!(!std::ptr::eq(first_started, other_started));
+    }
+
+    /// A runtime of a caller, as a test, a second `#[tokio::main]` or a
+    /// blocking call has.
+    fn caller_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a caller runtime starts")
+    }
+
+    /// #1495: brokers on one session URL share one listener from every
+    /// runtime of the process. The listener runs on the runtime of the
+    /// process, so it keeps running after the runtime of its first broker
+    /// ends. Starting connects to nothing.
+    #[test]
+    fn every_runtime_of_the_process_shares_one_listener() {
+        let url = format!("{PLAN_ONLY_URL}?application_name=two_runtimes");
+        let in_first = ProcessListener::on_session_url(&url, DEFAULT_SOCKET_SETTINGS);
+        let in_second = ProcessListener::on_session_url(&url, DEFAULT_SOCKET_SETTINGS);
+        let first = caller_runtime();
+        let first_started = first.block_on(in_first.start()).expect("the plan loads");
+        drop(first);
+
+        let second = caller_runtime();
+        let second_started = second.block_on(in_second.start()).expect("the plan loads");
+
+        assert!(std::ptr::eq(first_started, second_started));
+        assert!(second_started.listener.is_running());
+    }
+
+    /// #1495: two runtimes of one process subscribe on one session URL, and
+    /// the database sees one listener connection.
+    #[test]
+    #[serial_test::serial]
+    fn two_runtimes_listen_on_one_connection() {
+        let first = caller_runtime();
+        let second = caller_runtime();
+        let application_name = format!("process_listener_{}", uuid::Uuid::new_v4().simple());
+        let (pool, url) = first.block_on(async {
+            let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+            let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+            (pool, url)
+        });
+        let separator = match url.contains('?') {
+            true => '&',
+            false => '?',
+        };
+        let session_url = format!("{url}{separator}application_name={application_name}");
+        let in_first = ProcessListener::on_session_url(&session_url, DEFAULT_SOCKET_SETTINGS);
+        let in_second = ProcessListener::on_session_url(&session_url, DEFAULT_SOCKET_SETTINGS);
+        let channel = fixed_channel("horsies_listener_two_runtimes");
+
+        let from_first = first
+            .block_on(in_first.subscribe_wake(channel.clone(), PayloadFilter::AnyPayload))
+            .expect("the first runtime subscribes");
+        let from_second = second
+            .block_on(in_second.subscribe_wake(channel, PayloadFilter::AnyPayload))
+            .expect("the second runtime subscribes");
+        let connections: i64 = first
+            .block_on(
+                sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1",
+                )
+                .bind(&application_name)
+                .fetch_one(&pool),
+            )
+            .expect("count the listener connections");
+
+        assert_eq!(connections, 1);
+        drop((from_first, from_second, in_first, in_second));
+        first.block_on(pool.close());
     }
 
     /// Other socket settings on the same URL get their own listener: one

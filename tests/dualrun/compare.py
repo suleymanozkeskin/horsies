@@ -13,7 +13,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
-from tests.dualrun.normalize import NormalizedRow, NormalizedSnapshot, NormalizedTable
+from tests.dualrun.normalize import (
+    PARTITION_TREE,
+    NormalizedRow,
+    NormalizedSnapshot,
+    NormalizedTable,
+)
 from tests.dualrun.rules import AnchorReference, ColumnRule, TimeWithin
 from tests.dualrun.values import (
     Cell,
@@ -180,7 +185,8 @@ def compare_snapshots(
     """Every difference between two snapshots made with the same catalog (asserted).
 
     Ambiguous groups of either side come first, then row and column
-    differences in catalog table order and identity order.
+    differences in catalog table order and identity order, then the
+    differences of the partition tree (``PARTITION_TREE``).
     """
     reference_rules = tuple(table.rules for table in reference.tables)
     candidate_rules = tuple(table.rules for table in candidate.tables)
@@ -201,6 +207,12 @@ def compare_snapshots(
         reference.tables, candidate.tables, strict=True
     ):
         entries.extend(_table_entries(reference_table, candidate_table))
+    entries.extend(
+        _table_entries(
+            NormalizedTable(rules=PARTITION_TREE, rows=reference.partition_tree),
+            NormalizedTable(rules=PARTITION_TREE, rows=candidate.partition_tree),
+        )
+    )
     return SnapshotDiff(entries=tuple(entries))
 
 

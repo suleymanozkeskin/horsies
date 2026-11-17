@@ -2,10 +2,12 @@
 
 ``capture_snapshot`` runs one read-only REPEATABLE READ transaction on the
 caller's connection: one statement reads the live schema, one statement
-reads every catalog table. Partitioned tables are read through their
-parent, with the leaf of each row (``tableoid``). The transaction is
-rolled back at the end; the capture changes no data and no setting that
-outlives it.
+reads every catalog table, one statement reads the partition tree.
+Partitioned tables are read through their parent, with the leaf of each row
+(``tableoid``). The partition tree is every leaf that ``pg_inherits``
+attaches to a partitioned ``horsies_`` parent, with its bound (detached
+leaves come from the leaf catalog). The transaction is rolled back at the
+end; the capture changes no data and no setting that outlives it.
 """
 
 from __future__ import annotations
@@ -49,6 +51,12 @@ TABLE_ROW_LIMIT: Final = 10_000
 
 SCHEMA_COLUMN_LIMIT: Final = 2_000
 """Most ``horsies_`` columns the schema read accepts; a schema with more fails the capture."""
+
+PARTITION_TREE_LIMIT: Final = 10_000
+"""Most attached leaves the partition tree read accepts; a tree with more fails the capture."""
+
+PARTITION_TREE_SECTION: Final = 'partition tree'
+"""The name of the partition tree section in a capture error and in a diff."""
 
 DETACHED_LEAF_LIMIT: Final = 1_000
 """Most detached leaves the capture reads; the read stops there and the leaves past it fail the capture as unclassified tables."""
@@ -161,6 +169,79 @@ _DETACHED_SQL: Final[LiteralString] = """
     ORDER BY leaf_name
     LIMIT %(limit)s
 """
+
+
+_CATALOG_BOUND: Final = 'the catalog bounds'
+"""The bound of a cataloged leaf whose partition bound is the range of its
+catalog row. The catalog row's anchors compare by their own rules, so a bound
+that matches them is not compared as text (its text holds dates)."""
+
+_PARTITION_TREE_SQL: Final[LiteralString] = """
+    SELECT
+        parent.relname::text,
+        leaf.relname::text,
+        i.inhdetachpending::text,
+        CASE
+            WHEN c.lower_anchor IS NOT NULL
+                 AND pg_get_expr(leaf.relpartbound, leaf.oid)
+                     = format('FOR VALUES FROM (%%L) TO (%%L)', c.lower_anchor, c.upper_anchor)
+            THEN %(catalog_bound)s
+            ELSE pg_get_expr(leaf.relpartbound, leaf.oid)
+        END
+    FROM pg_catalog.pg_inherits AS i
+    JOIN pg_catalog.pg_class AS parent ON parent.oid = i.inhparent
+    JOIN pg_catalog.pg_class AS leaf ON leaf.oid = i.inhrelid
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = parent.relnamespace
+    LEFT JOIN horsies_task_history_leaf_catalog AS c ON c.leaf_name = leaf.relname::text
+    WHERE n.nspname = current_schema()
+      AND parent.relkind = 'p'
+      AND leaf.relkind IN ('r', 'p')
+      AND starts_with(parent.relname::text, 'horsies_')
+    ORDER BY parent.relname, leaf.relname
+    LIMIT %(limit)s
+"""
+
+_UNCATALOGED_PARTITION_TREE_SQL: Final[LiteralString] = """
+    SELECT
+        parent.relname::text,
+        leaf.relname::text,
+        i.inhdetachpending::text,
+        pg_get_expr(leaf.relpartbound, leaf.oid)
+    FROM pg_catalog.pg_inherits AS i
+    JOIN pg_catalog.pg_class AS parent ON parent.oid = i.inhparent
+    JOIN pg_catalog.pg_class AS leaf ON leaf.oid = i.inhrelid
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = parent.relnamespace
+    WHERE n.nspname = current_schema()
+      AND parent.relkind = 'p'
+      AND leaf.relkind IN ('r', 'p')
+      AND starts_with(parent.relname::text, 'horsies_')
+    ORDER BY parent.relname, leaf.relname
+    LIMIT %(limit)s
+"""
+"""The partition tree of a schema without the leaf catalog: every bound as text."""
+
+
+def _partition_tree(
+    connection: Connection, schema: tuple[SchemaColumn, ...]
+) -> Result[tuple[RawRow, ...], TableRowLimitExceeded]:
+    """The attached leaves of every partitioned ``horsies_`` parent, in
+    (parent, leaf) order. Raises ``psycopg.Error`` on a database error."""
+    params = {
+        'limit': PARTITION_TREE_LIMIT + 1,
+        'catalog_bound': _CATALOG_BOUND,
+    }
+    match any(column.table == _LEAF_CATALOG for column in schema):
+        case True:
+            records = connection.execute(_PARTITION_TREE_SQL, params).fetchall()
+        case False:
+            records = connection.execute(
+                _UNCATALOGED_PARTITION_TREE_SQL, {'limit': params['limit']}
+            ).fetchall()
+    if len(records) > PARTITION_TREE_LIMIT:
+        return Err(
+            TableRowLimitExceeded(table=PARTITION_TREE_SECTION, limit=PARTITION_TREE_LIMIT)
+        )
+    return Ok(tuple(_raw_row(list(record), 4) for record in records))
 
 
 def _text(value: object, subject: str) -> str:
@@ -334,7 +415,16 @@ def _read_statements(
     rows = connection.execute(
         _rows_statement(catalog, types, detached, row_limit)
     ).fetchall()
-    return _raw_snapshot(catalog, rows, row_limit)
+    match _partition_tree(connection, schema):
+        case Err(limit):
+            return Err(limit)
+        case Ok(tree):
+            pass
+    match _raw_snapshot(catalog, rows, row_limit):
+        case Err(limit):
+            return Err(limit)
+        case Ok(raw):
+            return Ok(RawSnapshot(tables=raw.tables, partition_tree=tree))
 
 
 def read_raw_snapshot(

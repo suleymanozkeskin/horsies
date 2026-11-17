@@ -2312,7 +2312,14 @@ class TestClassReadOutcomes:
 
 @pytest.mark.unit
 class TestPingWorkers:
-    """ping_workers_async validation and pong decoding."""
+    """ping_workers_async validation and pong decoding.
+
+    The refusals and the disabled listener run on the broker, which pings
+    through the core since the monitoring switch; the refusals come before
+    any core call. The pong decoding, the early return and the request
+    model run on Python's body before the switch, the dual-run reference
+    (``tests/dualrun/reference/broker_monitoring.py``).
+    """
 
     @pytest.mark.asyncio
     async def test_rejects_nonpositive_timeout(self) -> None:
@@ -2353,7 +2360,9 @@ class TestPingWorkers:
             ).model_dump()
         ).ok_value
 
-        pong = broker._decode_pong(payload, 'corr-1', 0.05)
+        pong = reference._decode_pong(  # pyright: ignore[reportPrivateUsage]
+            broker, cast(str, payload), 'corr-1', 0.05,
+        )
 
         assert pong is not None
         assert pong.worker_id == 'w1'
@@ -2370,13 +2379,17 @@ class TestPingWorkers:
             ).model_dump()
         ).ok_value
 
-        assert broker._decode_pong(payload, 'corr-1', 0.05) is None
+        assert reference._decode_pong(  # pyright: ignore[reportPrivateUsage]
+            broker, cast(str, payload), 'corr-1', 0.05,
+        ) is None
 
     def test_decode_pong_drops_malformed_payload(self) -> None:
         broker = _make_broker()
-        assert broker._decode_pong('not json', 'corr-1', 0.05) is None
+        assert reference._decode_pong(broker, 'not json', 'corr-1', 0.05) is None  # pyright: ignore[reportPrivateUsage]
         assert (
-            broker._decode_pong('{"correlation_id": "corr-1"}', 'corr-1', 0.05) is None
+            reference._decode_pong(  # pyright: ignore[reportPrivateUsage]
+                broker, '{"correlation_id": "corr-1"}', 'corr-1', 0.05,
+            ) is None
         )
 
     @pytest.mark.asyncio
@@ -2414,10 +2427,10 @@ class TestPingWorkers:
         _setup_session_returning(broker)  # NOTIFY send is a no-op
 
         loop = asyncio.get_running_loop()
-        with patch('horsies.core.brokers.postgres.uuid.uuid4', return_value=fixed):
+        with patch('tests.dualrun.reference.broker_monitoring.uuid.uuid4', return_value=fixed):
             start = loop.time()
-            result = await broker.ping_workers_async(
-                timeout_seconds=5.0, min_responses=1
+            result = await reference.ping_workers_async(
+                broker, timeout_seconds=5.0, min_responses=1
             )
             elapsed = loop.time() - start
 
@@ -2432,11 +2445,11 @@ class TestPingWorkers:
         _listener_of(broker).listen = AsyncMock()
 
         with patch(
-            'horsies.core.brokers.postgres.dumps_json',
+            'tests.dualrun.reference.broker_monitoring.dumps_json',
             return_value=Err(SerializationError('cannot encode')),
         ):
             with pytest.raises(AssertionError, match='ping_workers request encode failed'):
-                await broker.ping_workers_async(timeout_seconds=1.0)
+                await reference.ping_workers_async(broker, timeout_seconds=1.0)
 
         _listener_of(broker).listen.assert_not_awaited()
 
@@ -2451,7 +2464,8 @@ class TestPingWorkers:
         _listener_of(broker).listen = AsyncMock(return_value=Ok(reply_queue))
         _listener_of(broker).unsubscribe = AsyncMock()
 
-        result = await broker.ping_workers_async(
+        result = await reference.ping_workers_async(
+            broker,
             target_worker_id=cast(Any, {'secret': marker}),
             timeout_seconds=1.0,
         )

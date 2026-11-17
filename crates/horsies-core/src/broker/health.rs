@@ -265,6 +265,29 @@ fn json_object(value: &Value) -> Result<Map<String, Value>, String> {
     }
 }
 
+/// The refusal of a worker ping window of 0 seconds or less:
+/// `INVALID_INPUT`, not retryable, with Python's text
+/// (`ping_workers_async`). `timeout_seconds` is the given value as the
+/// caller wrote it. Nothing ran.
+pub fn ping_timeout_refused(timeout_seconds: &dyn std::fmt::Display) -> BrokerOperationError {
+    BrokerOperationError {
+        code: BrokerErrorCode::InvalidInput,
+        message: format!("timeout_seconds must be positive, got {timeout_seconds}"),
+        retryable: false,
+    }
+}
+
+/// The refusal of a worker ping `min_responses` below 1: `INVALID_INPUT`,
+/// not retryable, with Python's text (`ping_workers_async`).
+/// `min_responses` is the given value as the caller wrote it. Nothing ran.
+pub fn ping_min_responses_refused(min_responses: &dyn std::fmt::Display) -> BrokerOperationError {
+    BrokerOperationError {
+        code: BrokerErrorCode::InvalidInput,
+        message: format!("min_responses must be >= 1 when set, got {min_responses}"),
+        retryable: false,
+    }
+}
+
 /// The worker state history limit, by Python's rule
 /// (`get_worker_state_history_async`): `None` reads every retained row; a
 /// limit of 0 or less is refused ([`worker_history_limit_refused`]). Pure.
@@ -562,6 +585,25 @@ mod tests {
 
         assert_eq!(failed.code, BrokerErrorCode::MonitoringQueryFailed);
         assert!(!failed.retryable);
+    }
+
+    #[test]
+    fn the_ping_refusals_carry_python_text() {
+        let timeout = ping_timeout_refused(&"-1.5");
+        assert_eq!(timeout.code, BrokerErrorCode::InvalidInput);
+        assert_eq!(
+            timeout.message,
+            "timeout_seconds must be positive, got -1.5"
+        );
+        assert!(!timeout.retryable);
+
+        let minimum = ping_min_responses_refused(&0);
+        assert_eq!(minimum.code, BrokerErrorCode::InvalidInput);
+        assert_eq!(
+            minimum.message,
+            "min_responses must be >= 1 when set, got 0"
+        );
+        assert!(!minimum.retryable);
     }
 
     #[test]

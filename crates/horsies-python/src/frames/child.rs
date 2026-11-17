@@ -104,7 +104,8 @@ pub struct StoppedBeforeRunning {
 #[pymethods]
 impl StoppedBeforeRunning {
     /// `reason`: `'CLAIM_LOST'`, `'OWNERSHIP_UNCONFIRMED'`,
-    /// `'WORKFLOW_STOPPED'`, `'TASK_EXPIRED'` or `'NODE_NOT_LINKED'`.
+    /// `'WORKFLOW_STOPPED'`, `'TASK_EXPIRED'`, `'NODE_NOT_LINKED'` or
+    /// `'ORPHAN_CANCELLED'`.
     #[new]
     #[pyo3(signature = (*, reason))]
     fn new(reason: &str) -> PyResult<Self> {
@@ -114,10 +115,12 @@ impl StoppedBeforeRunning {
             "WORKFLOW_STOPPED" => StopReason::WorkflowStopped,
             "TASK_EXPIRED" => StopReason::TaskExpired,
             "NODE_NOT_LINKED" => StopReason::NodeNotLinked,
+            "ORPHAN_CANCELLED" => StopReason::OrphanCancelled,
             other => {
                 return Err(PyValueError::new_err(format!(
                     "reason must be 'CLAIM_LOST', 'OWNERSHIP_UNCONFIRMED', \
-                     'WORKFLOW_STOPPED', 'TASK_EXPIRED' or 'NODE_NOT_LINKED', not {other:?}"
+                     'WORKFLOW_STOPPED', 'TASK_EXPIRED', 'NODE_NOT_LINKED' or \
+                     'ORPHAN_CANCELLED', not {other:?}"
                 )))
             }
         };

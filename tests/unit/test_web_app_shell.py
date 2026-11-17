@@ -18,6 +18,7 @@ import json
 import subprocess
 import sys
 import textwrap
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -377,19 +378,22 @@ class TestRequestValidation:
         assert response.status_code == 422
 
     @pytest.mark.parametrize(
-        ('method', 'path'),
+        ('method', 'path', 'parameter'),
         [
-            ('GET', '/api/tasks/not-a-uuid'),
-            ('POST', '/api/tasks/not-a-uuid/cancel'),
+            ('GET', '/api/tasks/not-a-uuid', 'task_id'),
+            ('POST', '/api/tasks/not-a-uuid/cancel', 'task_id'),
+            ('POST', '/api/workflows/not-a-uuid/pause', 'workflow_id'),
+            ('POST', '/api/workflows/not-a-uuid/resume', 'workflow_id'),
+            ('POST', '/api/workflows/not-a-uuid/cancel', 'workflow_id'),
         ],
-        ids=['detail', 'cancel'],
+        ids=['detail', 'cancel', 'workflow-pause', 'workflow-resume', 'workflow-cancel'],
     )
-    async def test_a_task_id_that_is_not_a_uuid_is_invalid_input(
-        self, method: str, path: str, monkeypatch: pytest.MonkeyPatch,
+    async def test_a_path_id_that_is_not_a_uuid_is_invalid_input(
+        self, method: str, path: str, parameter: str, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Nothing is read: with an unreachable database a read would
         answer 503. The schema probe reports a match, so the action gate
-        lets the cancel through to its path check."""
+        lets each action through to its path check."""
 
         class MatchingProbe(SchemaProbe):
             def __init__(self, broker: object) -> None:
@@ -413,8 +417,24 @@ class TestRequestValidation:
         assert set(body) == {'code', 'detail'}
         assert body['code'] == 'INVALID_INPUT'
         assert body['detail'].startswith(
-            'Path parameter task_id: Input should be a valid UUID, ',
+            f'Path parameter {parameter}: Input should be a valid UUID, ',
         )
+
+    @pytest.mark.parametrize('task_index', ['2147483648', '-2147483649', '1' * 40])
+    async def test_a_node_index_outside_the_integer_column_is_not_found(
+        self, task_index: str,
+    ) -> None:
+        """An index that names no node is 404 with no read: with an
+        unreachable database a read would answer 503."""
+        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+
+        async with client_for(app) as client:
+            response = await client.get(
+                f'/api/workflows/{uuid.uuid4()}/tasks/{task_index}',
+            )
+
+        assert response.status_code == 404
+        assert response.json() == {'detail': 'Workflow task not found.'}
 
     async def test_task_page_reach_past_five_hundred_is_rejected(self) -> None:
         app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
