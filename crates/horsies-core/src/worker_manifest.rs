@@ -656,6 +656,25 @@ pub fn parse_worker_manifest(text: &str) -> Result<WorkerManifest, ManifestRefus
     parse_manifest(text)
 }
 
+/// Parse a set of worker profiles from its JSON text: an object of
+/// [`WorkerProfileManifest`] by profile name, the form of the `profiles`
+/// member of a worker manifest. The Python live check sends it
+/// (`check_handle_worker_connections`); the worker manifest that holds the
+/// same profiles is not built for a check.
+///
+/// Pure: no I/O. Refuses unknown fields, missing fields and values outside
+/// their bounds, as [`parse_worker_manifest`] does for the member. It does
+/// not check the set: AppConfig validation did.
+pub fn parse_worker_profiles(
+    text: &str,
+) -> Result<BTreeMap<String, WorkerProfile>, ManifestRefused> {
+    let manifests: BTreeMap<String, WorkerProfileManifest> = parse_manifest(text)?;
+    Ok(manifests
+        .iter()
+        .map(|(name, profile)| (name.clone(), profile.to_profile()))
+        .collect())
+}
+
 impl WorkerManifest {
     /// Every profile of the manifest as the config type, by name. Pure.
     pub fn profile_set(&self) -> BTreeMap<String, WorkerProfile> {
