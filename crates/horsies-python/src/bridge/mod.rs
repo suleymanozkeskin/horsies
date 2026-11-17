@@ -16,6 +16,11 @@
 //! A cancel depends on the [`CallKind`]: a read is dropped; a write runs on
 //! to its end and the caller sees the outcome as unknown.
 //!
+//! A service run (a worker, the scheduler loop) lasts until a stop request,
+//! so it has its own form with no total bound ([`service_run`]): a blocking
+//! form on the main thread that runs the signal handlers between slices,
+//! and an async form whose cancel asks the run to stop.
+//!
 //! The other direction, the core calling Python, goes through the callback
 //! thread ([`callback_thread`]): a core task queues the Python call and
 //! awaits its outcome, and only that thread attaches.
@@ -23,6 +28,7 @@
 pub mod blocking;
 pub mod callback_thread;
 pub mod completion_queue;
+pub mod service_run;
 
 use std::future::Future;
 use std::panic::AssertUnwindSafe;

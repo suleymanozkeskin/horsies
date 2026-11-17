@@ -433,6 +433,11 @@ const EXCEPTIONS: &[StubException] = &[
         doc: "The panic rule of this process was set to another rule before, or fixed when the core\nstarted. args: (current_rule,).",
     },
     StubException {
+        name: "NotMainThread",
+        base: "CoreDefect",
+        doc: "A run form was called off the main thread, where Python runs signal handlers.\n\nThe run did not start. args: (subject,).",
+    },
+    StubException {
         name: "PanicException",
         base: "BaseException",
         doc: "Rust code called from Python panicked.",
