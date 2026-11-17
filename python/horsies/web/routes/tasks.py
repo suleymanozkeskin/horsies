@@ -51,6 +51,7 @@ from horsies.web.routes._common import (
     parse_sort_by,
     parse_statuses,
     query_failed,
+    require_path_uuid,
 )
 
 
@@ -265,8 +266,13 @@ def build_router(
 
     @router.get('/{task_id}')
     async def read_task(task_id: str) -> TaskDetail:
-        """One task with its full attempt history."""
-        result = await get_task_detail(broker, task_id)
+        """One task with its full attempt history.
+
+        A path id that is not a UUID answers 400 ``INVALID_INPUT``; nothing
+        is read.
+        """
+        parsed_id = require_path_uuid('task_id', task_id)
+        result = await get_task_detail(broker, parsed_id)
         if is_err(result):
             raise query_failed('Task detail', result.err_value)
         match result.ok_value:

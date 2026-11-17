@@ -163,7 +163,9 @@ async def _candidate_cancel_async(
     answers: dict[str, _Answer] = {}
     async with open_broker(database) as broker:
         for case in cases:
-            match await cancel_task(broker, case.task_id, include_running=case.include_running):
+            match await cancel_task(
+                broker, uuid.UUID(case.task_id), include_running=case.include_running,
+            ):
                 case Ok(cancelled):
                     answers[case.name] = cancelled
                 case Err(TaskActionNotFound() | TaskActionWorkflowTask() | TaskActionNotCancellable() as refused):

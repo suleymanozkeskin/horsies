@@ -46,7 +46,7 @@ class TaskActionErrorCode(str, Enum):
     STORED_DATA_INVALID = 'STORED_DATA_INVALID'
     """Stored task data does not parse: a history status that is not a task
     status, or a cancel outcome row that does not decode. Nothing changed:
-    the transaction did not commit. Not retryable: a repeat gives the
-    same result until the stored row changes (Python
-    `python/horsies/monitoring/task_actions.py:69-197`).
+    the cancel refused the task. Not retryable: a repeat gives the same
+    result until the stored row changes (Python
+    `python/horsies/monitoring/task_actions.py`, `TaskActionStoredDataInvalid`).
     """

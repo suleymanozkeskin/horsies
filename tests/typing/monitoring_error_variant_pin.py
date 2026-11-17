@@ -11,6 +11,8 @@ parsed history status fails the check.
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from horsies import NoCause, TaskStatus
 from horsies.core.history.reads.detail import HistoryTaskDetail
 from horsies.monitoring import (
@@ -26,6 +28,8 @@ from horsies.monitoring import (
     TaskActionStoredDataInvalid,
     TaskActionWorkflowTask,
 )
+
+TASK_ID = UUID('0b1c2d3e-4f50-4a61-8b72-c3d4e5f60718')
 
 
 def chain_the_query_database_cause(db_failed: MonitoringQueryDbOperationFailed) -> None:
@@ -91,17 +95,17 @@ def task_action_fields_on_their_variants(
 def the_status_is_total() -> None:
     _ = TaskActionNotCancellable(
         message='refused',
-        task_id='id',
+        task_id=TASK_ID,
         current_status=TaskStatus.COMPLETED,
     )
     _ = TaskActionNotCancellable(
         message='refused',
-        task_id='id',
+        task_id=TASK_ID,
         current_status=None,  # pyright: ignore[reportArgumentType]
     )
     _ = TaskActionWorkflowTask(
         message='refused',
-        task_id='id',
+        task_id=TASK_ID,
         current_status=None,  # pyright: ignore[reportArgumentType]
     )
 
@@ -110,12 +114,12 @@ def task_action_causes_are_exceptions() -> None:
     _ = TaskActionDbOperationFailed(
         message='failed',
         retryable=True,
-        task_id='id',
+        task_id=TASK_ID,
         exception=NoCause(),  # pyright: ignore[reportArgumentType]
     )
     _ = TaskActionStoredDataInvalid(
         message='failed',
-        task_id='id',
+        task_id=TASK_ID,
         exception=NoCause(),  # pyright: ignore[reportArgumentType]
     )
 

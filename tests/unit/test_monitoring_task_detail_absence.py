@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
@@ -34,7 +35,7 @@ from tests.monitoring_function_support import (
 
 pytestmark = [pytest.mark.unit]
 
-TASK_ID = '0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b'
+TASK_ID = UUID('0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b')
 WORKFLOW_ID = '7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d'
 LIVE_MISS_MESSAGE = (
     f'horsies_monitoring_task_detail: the published reader reports task {TASK_ID} '
@@ -44,17 +45,6 @@ LIVE_MISS_MESSAGE = (
 
 class TestTaskDetailNotFound:
     @pytest.mark.asyncio
-    async def test_a_non_uuid_id_is_not_classified_and_reads_nothing(self) -> None:
-        broker = MagicMock()
-
-        result = await get_task_detail(broker, 'not-a-task-id')
-
-        assert result == Ok(TaskDetailNotFound(
-            task_id='not-a-task-id', reason=TaskAbsenceReason.NOT_CLASSIFIED,
-        ))
-        broker.select_resources.assert_not_called()
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         'reason',
         list(TaskAbsenceReason),
@@ -63,7 +53,7 @@ class TestTaskDetailNotFound:
     async def test_the_reason_is_the_function_classification(
         self, reason: TaskAbsenceReason,
     ) -> None:
-        broker, _ = function_broker([absent_row(TASK_ID, reason.value)])
+        broker, _ = function_broker([absent_row(str(TASK_ID), reason.value)])
 
         result = await get_task_detail(broker, TASK_ID)
 
@@ -81,7 +71,7 @@ class TestLiveInTheSnapshotOfTheLiveMiss:
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
         assert isinstance(error.exception, HistoryContractError)
-        assert TASK_ID in error.message
+        assert str(TASK_ID) in error.message
         assert 'after a live miss in the same snapshot' in error.message
 
     @pytest.mark.asyncio
@@ -97,7 +87,7 @@ class TestLiveInTheSnapshotOfTheLiveMiss:
 class TestOneStatement:
     @pytest.mark.asyncio
     async def test_task_detail_sends_one_statement_in_autocommit(self) -> None:
-        broker, connection = function_broker([detail_row(TASK_ID)])
+        broker, connection = function_broker([detail_row(str(TASK_ID))])
 
         _ = await get_task_detail(broker, TASK_ID)
 
@@ -110,7 +100,7 @@ class TestOneStatement:
 
     @pytest.mark.asyncio
     async def test_workflow_node_sends_one_statement_in_autocommit(self) -> None:
-        broker, connection = function_broker([node_row(0, detail_row(TASK_ID))])
+        broker, connection = function_broker([node_row(0, detail_row(str(TASK_ID)))])
 
         _ = await get_workflow_node(broker, WORKFLOW_ID, 0)
 
