@@ -240,6 +240,11 @@ class CoreHandle:
         """The PENDING tasks whose good_until passed before a worker took them. Reads only, in
         one statement.
         """
+    def ping_workers_async(self, *, target_worker_id: str | None, timeout_seconds: float, min_responses: int | None) -> asyncio.Future[WorkerPongsRecord | BrokerFailure]:
+        """Ping the workers and collect the distinct replies within the window, on the process
+        listener. A refused argument is INVALID_INPUT before any core call; a handle with no
+        listener is LISTENER_DISABLED. Sends one NOTIFY; writes no row.
+        """
     def worker_states_async(self) -> asyncio.Future[WorkerStatesRecord | BrokerFailure]:
         """The latest state snapshot per worker, idle workers included. Reads only, in one
         statement. A cancelled await drops the read.
@@ -1387,6 +1392,26 @@ class TaskListTruncated:
     def rows(self) -> list[dict[str, object]]: ...
     @property
     def bound(self) -> int: ...
+
+
+@final
+class WorkerPongRecord:
+    """One worker's reply to a ping, with the measured round trip."""
+    @property
+    def worker_id(self) -> str: ...
+    @property
+    def hostname(self) -> str: ...
+    @property
+    def pid(self) -> int: ...
+    @property
+    def round_trip_ms(self) -> float: ...
+
+
+@final
+class WorkerPongsRecord:
+    """The distinct workers that replied within the window, in reply order."""
+    @property
+    def pongs(self) -> list[WorkerPongRecord]: ...
 
 
 @final

@@ -10,6 +10,11 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **`ping_workers` refuses a `timeout_seconds` of NaN.** It answers
+  `INVALID_INPUT` (`timeout_seconds must be positive, got nan`) before any
+  I/O; it sent the ping and returned at once with no reply. An infinite
+  `timeout_seconds` still waits with no deadline.
+
 - **The `TASK_TIMEOUT` error of a `SHARED_ASYNC` task tells how the task
   ended.** Its `data` gets the key `cancel_end`: `RETURNED_AFTER_SIGNAL`
   when the task and its work ended within `cancel_grace_ms` after the

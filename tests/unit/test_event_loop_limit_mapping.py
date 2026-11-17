@@ -25,6 +25,9 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.monitoring.errors import MonitoringQueryErrorCode
 from tests.dualrun.reference.monitoring_queries import list_workflow_names
+from tests.dualrun.reference.broker_monitoring import (
+    ping_workers_async as reference_ping_workers,
+)
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendEventLoopLimit
 from horsies.core.models.tasks import TaskError, TaskResult
@@ -176,10 +179,12 @@ class TestRealBrokerAtTheLimit:
     """Each entry point returns its own catalog's EVENT_LOOP_LIMIT."""
 
     def test_broker_call(self, at_limit: _AtLimit) -> None:
-        # A broker method that still selects a SQLAlchemy resource set; the
-        # database ping, the task lists and the worker state and class reads
-        # run on the core pool and have no loop limit.
-        result = at_limit.run(at_limit.broker.ping_workers_async(timeout_seconds=0.01))
+        # Python's worker ping before the monitoring switch: no broker method
+        # selects a SQLAlchemy resource set any longer, and the reads and the
+        # ping on the core have no loop limit.
+        result = at_limit.run(
+            reference_ping_workers(at_limit.broker, timeout_seconds=0.01),
+        )
 
         assert is_err(result)
         assert result.err_value.code is BrokerErrorCode.EVENT_LOOP_LIMIT

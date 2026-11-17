@@ -71,8 +71,9 @@ pub use error::{
     EnqueueRefusalCause,
 };
 pub use health::{
-    checked_history_limit, worker_history_limit_refused, DatabasePing, WorkerPingRequest,
-    WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
+    checked_history_limit, ping_min_responses_refused, ping_timeout_refused,
+    worker_history_limit_refused, DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload,
+    WorkerStateSnapshot, WORKER_PING_CHANNEL,
 };
 pub use lifecycle_operations::{CancelAnswer, CancelTaskError};
 pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};
