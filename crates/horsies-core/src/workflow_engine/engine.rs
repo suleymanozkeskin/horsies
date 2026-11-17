@@ -186,7 +186,7 @@ WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND w.status = 'RUNNING'";
 
 /// Every dependency row, with its task name and definition key for the `args_from` wrap; a dependency that is
-/// not terminal is classified by its status (`args_merge::dependency_result`).
+/// not terminal gets no `args_from` member (`args_merge::dependency_result`).
 const GET_DEP_RESULTS_SQL: &str = "\
 SELECT task_index, node_id, task_name, sub_definition_key, status, result
 FROM horsies_workflow_tasks
