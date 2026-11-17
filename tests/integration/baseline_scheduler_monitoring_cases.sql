@@ -458,7 +458,7 @@ CREATE OR REPLACE FUNCTION horsies_insert_task_rows(
     p_max_retries integer[], p_good_untils timestamp with time zone[], p_sent_ats timestamp with time zone[],
     p_enqueued_ats timestamp with time zone[], p_is_workflow_tasks boolean[], p_fingerprint_versions smallint[],
     p_fingerprints bytea[], p_key_digests bytea[], p_rerun_of_task_ids uuid[], p_rerun_root_task_ids uuid[],
-    p_conflict_lock text
+    p_row_time timestamp with time zone, p_conflict_lock text
 ) RETURNS TABLE(ordinality bigint, task_id uuid, outcome text)
     LANGUAGE sql AS $$
     SELECT u.position, u.id, 'CONFLICT_UNVERIFIABLE'::text FROM unnest(p_ids) WITH ORDINALITY AS u(id, position)

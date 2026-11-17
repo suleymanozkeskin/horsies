@@ -1694,8 +1694,14 @@ BEGIN
         AND v_two.rerun_of_task_id IS NULL AND v_two.rerun_root_task_id IS NULL AND NOT v_two.retain_rerun_input
         AND v_two.retry_count = 0 AND v_two.max_retries = 2 AND v_two.execution = 'SHARED_ASYNC'
         AND v_two.retention_class_key = 'forever' AND v_two.sent_at = '2030-01-01 00:00:00+00'
-        AND v_two.enqueued_at = now() AND v_two.created_at = now() AND v_two.claimed_at IS NULL,
+        AND v_two.enqueued_at = now() AND v_two.created_at = now() AND v_two.updated_at = now()
+        AND v_two.claimed_at IS NULL,
         'node task insert: the helper writes the values of a workflow task row'
+    );
+    -- The cases are one message after their BEGIN, so statement_timestamp() is later than now().
+    PERFORM wft_check(
+        v_three.created_at = (wft_node(v_wf, 3)).started_at AND v_three.created_at < statement_timestamp(),
+        'node task insert: the row time is the start of the transaction, as the started_at of the node'
     );
 END $$;
 
@@ -1718,7 +1724,8 @@ BEGIN
             p_max_retries integer[], p_good_untils timestamp with time zone[], p_sent_ats timestamp with time zone[],
             p_enqueued_ats timestamp with time zone[], p_is_workflow_tasks boolean[],
             p_fingerprint_versions smallint[], p_fingerprints bytea[], p_key_digests bytea[],
-            p_rerun_of_task_ids uuid[], p_rerun_root_task_ids uuid[], p_conflict_lock text
+            p_rerun_of_task_ids uuid[], p_rerun_root_task_ids uuid[], p_row_time timestamp with time zone,
+            p_conflict_lock text
         ) RETURNS TABLE(ordinality bigint, task_id uuid, outcome text) LANGUAGE sql AS $f$
             SELECT u.position, u.id, 'PAYLOAD_MISMATCH'::text FROM unnest(p_ids) WITH ORDINALITY AS u(id, position)
         $f$;

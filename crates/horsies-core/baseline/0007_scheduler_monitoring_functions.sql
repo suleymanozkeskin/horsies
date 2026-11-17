@@ -77,9 +77,9 @@ $$;
 -- - Each slot's task id is horsies_schedule_slot_task_id(name, slot time) and its sent_at is the slot time, so a
 --   repeated fire of one slot carries the same id, fingerprint and sent_at, and the exact-id check of
 --   horsies_insert_task_rows sees the same command.
--- - Each slot row is the row of an unkeyed send: PENDING, enqueued_at now(), no deadline, no key, no lineage, the
---   task's options, retry limit, execution class and retention class, and the command fingerprint (one value for
---   every slot of a schedule: the version-1 fingerprint leaves sent_at out).
+-- - Each slot row is the row of an unkeyed send: PENDING, enqueued_at, created_at and updated_at now(), no deadline,
+--   no key, no lineage, the task's options, retry limit, execution class and retention class, and the command
+--   fingerprint (one value for every slot of a schedule: the version-1 fingerprint leaves sent_at out).
 -- - Slot outcomes are those of horsies_insert_task_rows: INSERTED; SAME_COMMAND (an earlier fire of this slot
 --   committed its task); PAYLOAD_MISMATCH (the slot's id holds another command, for example after the task's
 --   options changed: the slot counts as fired); CONFLICT_UNVERIFIABLE (the slot's task existed and moved to history
@@ -215,6 +215,7 @@ BEGIN
             array_fill(NULL::bytea, ARRAY[v_slot_count]),
             array_fill(NULL::uuid, ARRAY[v_slot_count]),
             array_fill(NULL::uuid, ARRAY[v_slot_count]),
+            v_now,
             'NONE'
         ) AS r;
         IF cardinality(v_outcomes) IS DISTINCT FROM v_slot_count THEN
