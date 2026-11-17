@@ -23,6 +23,7 @@ use crate::bridge::completion_queue::{call_async, done_future};
 use crate::bridge::CallKind;
 use crate::errors::{refusal_error, ManifestRefused};
 use crate::operations::cancel::cancel_task_operation;
+use crate::operations::claim::{claim_pass_operation, ClaimPassRequest};
 use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
 use crate::operations::failed_attempt::{
     finish_ended_attempt_operation, finish_failed_attempt_operation, FinishFailedAttemptRequest,
@@ -411,6 +412,25 @@ impl CoreHandle {
             "CoreHandle.finish_workflow_success_async",
             CallKind::Write,
             finish_workflow_success_operation(self.connection(), command),
+        )
+    }
+
+    /// One claim pass (`horsies_claim`): `ClaimPassRecord` with the claimed
+    /// rows in dispatch order, or `ClaimPassFailed`. Writes, in one
+    /// statement; the dispatch stays with the caller. Awaitable only: its
+    /// caller, the worker's claim loop, runs on the worker's event loop.
+    fn claim_pass_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, ClaimPassRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.claim_pass_async",
+            CallKind::Write,
+            claim_pass_operation(self.connection(), request.get().request()),
         )
     }
 
