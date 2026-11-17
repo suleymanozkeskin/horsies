@@ -1832,8 +1832,9 @@ BEGIN
     SELECT count(*) FILTER (WHERE row_kind = 'CHILD_START' AND task_index = 2) INTO v_owed
     FROM wft_child_fail(v_wf, 1, v_error);
     PERFORM wft_check((wft_node(v_wf, 1)).status = 'FAILED' AND (wft_node(v_wf, 1)).result = v_error
-                      AND (wft_node(v_wf, 1)).completed_at IS NOT NULL AND (wft_node(v_wf, 1)).sub_workflow_id IS NULL,
-                      'child start FAILURE: the node is FAILED with the envelope and no child');
+                      AND (wft_node(v_wf, 1)).completed_at IS NOT NULL AND (wft_node(v_wf, 1)).sub_workflow_id IS NULL
+                      AND (wft_node(v_wf, 1)).started_at IS NOT NULL,
+                      'child start FAILURE: the node is FAILED with the envelope and no child, and keeps its enqueue time');
     PERFORM wft_check((wft_workflow(v_wf)).error = (v_error::json -> 'err')::text
                       AND (wft_workflow(v_wf)).status = 'RUNNING',
                       'child start FAILURE: on_error fail stores the node error and keeps going');
