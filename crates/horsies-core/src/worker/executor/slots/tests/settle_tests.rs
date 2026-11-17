@@ -22,7 +22,6 @@ use sqlx::PgPool;
 use super::*;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::worker::execution::{phase_retry_delay, run_phase2, Phase2Work, PhaseTwoForm};
 use crate::worker::executor::protocol::FailureDetail;
 use crate::workflow_engine::steps::ChildBuild;
@@ -37,7 +36,6 @@ fn writer(broker: Arc<PostgresBroker>) -> OutcomeWriter {
         crate::test_support::child_specs::no_child_specs(),
         WORKER.to_owned(),
         PayloadPolicy::default(),
-        RetentionConfig::default(),
         successes,
     )
 }

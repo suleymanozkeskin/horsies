@@ -1,9 +1,14 @@
 # Changelog
 
-All notable changes to horsies-rust are documented in this file.
+From 0.8.0, the `horsies` crate, `horsies-core`, `horsies-macros` and the
+Python package carry one version and one changelog: the
+[`CHANGELOG.md`](https://github.com/suleymanozkeskin/horsies/blob/main/CHANGELOG.md)
+at the root of the repository. Its section "Rust client (crate `horsies`)"
+lists the changes of the Rust API.
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-The project is pre-1.0. Breaking changes may ship in alpha releases.
+The entries below are the releases of horsies-rust, `0.1.0-alpha.1` to
+`0.1.0-alpha.36`, before the crate moved onto `horsies-core`. They follow
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.1.0-alpha.36] - 2026-10-25
 

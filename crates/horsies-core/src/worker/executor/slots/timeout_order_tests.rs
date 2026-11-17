@@ -20,7 +20,6 @@ use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::worker::executor::protocol::{
     BodyEnd, BodyReturnedFrame, ChildFrame, LeftoverName, LoopHoldsTasks,
 };
@@ -245,7 +244,6 @@ fn writer(pool: PgPool) -> OutcomeWriter {
         crate::test_support::child_specs::no_child_specs(),
         WORKER_ID.to_owned(),
         PayloadPolicy::default(),
-        RetentionConfig::default(),
         successes,
     )
 }

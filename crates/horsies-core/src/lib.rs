@@ -29,6 +29,8 @@ pub mod monitoring;
 pub mod process_runtime;
 pub mod scheduler_manifest;
 #[cfg(test)]
+mod sql_tests;
+#[cfg(test)]
 mod stored_form_vectors;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -218,7 +220,6 @@ pub use crate::core::history::rerun::{
     decode_rerun_write, prepare_rerun_write, rerun_read, RerunPreparation, RerunRefusal,
     RerunRowError, RerunWrite, RerunWriteOutcome,
 };
-pub use crate::workflow_engine::bound_handle::WorkflowHandle;
 // The child spec source of a client that keeps its workflow DSL in its own
 // language, and the spec data it sends.
 pub use crate::broker::workflow_phase2::{NodeFinishForm, NodeFinished, ParentAdvanceStopped};
@@ -245,7 +246,7 @@ pub use crate::workflow_engine::error::WorkflowError;
 // the cause of a failed operation, which a client names to its user
 pub use crate::failure_cause::{FailureCause, ServerErrorFacts};
 pub use crate::workflow_engine::info::WorkflowTaskInfo;
-pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_workflow};
+pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow};
 pub use crate::workflow_engine::phase2_recovery::Phase2RecoverySummary;
 pub use crate::workflow_engine::query::{
     get_workflow_result, NodeResultsRead, NodesRead, StoredNode, StoredNodeResult,
@@ -258,7 +259,6 @@ pub use crate::workflow_engine::recovery::{
 pub use crate::workflow_engine::spec_data::{
     parse_workflow_spec_data, SpecDataRefused, WorkflowSpecData, WORKFLOW_SPEC_DATA_VERSION,
 };
-pub use crate::workflow_engine::start::{retry_start, start_workflow, start_workflow_with_retry};
 
 #[cfg(test)]
 #[doc(hidden)]

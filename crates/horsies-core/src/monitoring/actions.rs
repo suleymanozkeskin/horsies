@@ -7,8 +7,6 @@ use uuid::Uuid;
 
 use crate::broker::PostgresBroker;
 use crate::catalog::CodeEnum;
-use crate::core::config::retention::RetentionConfig;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError};
 use crate::core::workflow::status::WorkflowStatus;
 use crate::workflow_engine::child_spec::{ChildSpecSource, ChildSpecUnavailable};
@@ -51,15 +49,9 @@ impl ActionConflictCode {
 /// sub-workflow child that the resume owes.
 #[derive(Clone)]
 pub enum ResumeChildren {
-    /// The registered definitions of the Rust client. The task queues of a
-    /// child take their retention class from `retention`.
-    Registry {
-        registry: Arc<WorkflowSpecRegistry>,
-        retention: RetentionConfig,
-    },
     /// A client that builds each child in its own language and sends its
     /// spec as data, with the retention class of each task queue (the
-    /// `build_with` of the Python client).
+    /// `build_with` of the Python client, the registry of the Rust client).
     Client(Arc<dyn ChildSpecSource>),
 }
 
@@ -67,13 +59,6 @@ impl ResumeChildren {
     /// The child build of one resume. Pure.
     fn build(&self) -> ChildBuild<'_> {
         match self {
-            Self::Registry {
-                registry,
-                retention,
-            } => ChildBuild::Registry {
-                registry: registry.as_ref(),
-                retention,
-            },
             Self::Client(source) => ChildBuild::Client(source.as_ref()),
         }
     }

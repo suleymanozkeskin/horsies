@@ -31,7 +31,6 @@ use crate::broker::attempt_writes::{
 use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::{PostgresBroker, PrestartExpiry};
 use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::RetentionConfig;
 use crate::core::history::archive::attempts::{decode_attempt_snapshot, AttemptRecord};
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
@@ -384,7 +383,6 @@ fn writer(pool: &PgPool) -> OutcomeWriter {
         crate::test_support::child_specs::no_child_specs(),
         WORKER.to_owned(),
         PayloadPolicy::default(),
-        RetentionConfig::default(),
         successes,
     )
 }
