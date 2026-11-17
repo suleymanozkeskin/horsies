@@ -69,10 +69,8 @@ impl From<EnqueuePreparationError> for EnqueueRefusal {
                 *field,
                 EnqueueRefusalCause::JsonUnreadable(source.to_string()),
             ),
-            EnqueuePreparationError::NumberDomain { field, .. } => {
-                (*field, EnqueueRefusalCause::RuleRefused)
-            }
-            EnqueuePreparationError::InvalidTaskOptions
+            EnqueuePreparationError::OptionsIntegerOutOfRange
+            | EnqueuePreparationError::InvalidTaskOptions
             | EnqueuePreparationError::InvalidExecution(_) => {
                 (SendPart::TaskOptions, EnqueueRefusalCause::RuleRefused)
             }
