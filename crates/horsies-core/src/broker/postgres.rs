@@ -5491,17 +5491,15 @@ mod terminal_at_stamp_tests {
         seed(&pool, &id, "RUNNING", Some("w1"), None).await;
         let before = database_now(&pool).await;
 
-        let outcomes = crate::broker::terminalization::on_test_pool::terminalize(
+        let outcomes = crate::test_support::terminal_writes::fail_running_task(
             &pool,
-            &crate::core::lifecycle::TerminalizationCommand::FailLockedTask {
-                task_id: Uuid::parse_str(&id).expect("test identity must be UUID"),
-                fence: crate::core::lifecycle::PriorLockedRead {
-                    worker_id: "w1".to_owned(),
-                },
-                result_json: "{\"Err\":{}}".to_owned(),
-                error_code: Some("TASK_EXCEPTION".to_owned()),
-                failed_reason: None,
-            },
+            Uuid::parse_str(&id).expect("test identity must be UUID"),
+            "w1",
+            &crate::test_support::terminal_writes::TerminalFailure::of_task(
+                "{\"Err\":{}}",
+                Some("TASK_EXCEPTION"),
+                None,
+            ),
         )
         .await
         .expect("fail");

@@ -18,13 +18,13 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::enqueue_history_tests::migrated_pool;
-use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::{BrokerError, PostgresBroker, SendKind};
 use crate::core::config::retention::{EnqueueRetention, RetentionConfig};
 use crate::core::history::identity::uuid7::mint_task_id;
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
-use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
+use crate::core::lifecycle::TerminalizationOutcome;
+use crate::test_support::terminal_writes;
 
 const TASK_NAME: &str = "port.identity";
 const INPUT: &str = "{\"order_id\":\"order-1\"}";
@@ -128,13 +128,15 @@ async fn ensure_history_coverage(pool: &PgPool) {
 }
 
 /// Moves a PENDING task to history: the row becomes RUNNING under
-/// `PORT_WORKER`, then completes. The move terminalizes the task's key
+/// `PORT_WORKER`, with the process facts of its start, then completes
+/// (`horsies_complete_task_fused`). The move terminalizes the task's key
 /// reservation.
 async fn move_to_history(pool: &PgPool, task_id: Uuid) {
     let started = sqlx::query(
         "UPDATE horsies_tasks
          SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
-             started_at = NOW(), updated_at = NOW()
+             started_at = NOW(), worker_pid = 4242, worker_hostname = 'port-host',
+             worker_process_name = 'port-process', updated_at = NOW()
          WHERE id = $1 AND status = 'PENDING'",
     )
     .bind(task_id)
@@ -147,18 +149,9 @@ async fn move_to_history(pool: &PgPool, task_id: Uuid) {
         serde_json::json!({"value": 7}),
     ))
     .expect("encode the result");
-    let outcomes = terminalize(
-        pool,
-        &TerminalizationCommand::CompleteLockedTask {
-            task_id,
-            fence: PriorLockedRead {
-                worker_id: PORT_WORKER.to_owned(),
-            },
-            result_json,
-        },
-    )
-    .await
-    .expect("complete the task");
+    let outcomes = terminal_writes::complete_plain_task(pool, task_id, PORT_WORKER, &result_json)
+        .await
+        .expect("complete the task");
     assert!(
         matches!(
             outcomes.as_slice(),
