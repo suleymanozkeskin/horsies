@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from tests.dualrun.operations.table import DualRunOperation, PoolMode
+from tests.dualrun.operations.table import CoreOnlyTest, DualRunOperation, PoolMode
 
 MONITORING_AND_WEB_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
     DualRunOperation(
@@ -156,5 +156,14 @@ MONITORING_AND_WEB_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=(),
         core_functions=('MonitoringHandler',),
+    ),
+)
+
+MONITORING_AND_WEB_CORE_ONLY_TESTS: Final[tuple[CoreOnlyTest, ...]] = (
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_monitoring_queries.py::TestListBounds::test_the_fields_of_the_cut_warning_are_attributes_of_the_record'
+        ),
+        reason="asserts the attributes that the core's log bridge sets from tracing fields; the reference logs the text only",
     ),
 )
