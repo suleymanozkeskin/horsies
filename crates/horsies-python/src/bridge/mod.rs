@@ -15,8 +15,13 @@
 //!
 //! A cancel depends on the [`CallKind`]: a read is dropped; a write runs on
 //! to its end and the caller sees the outcome as unknown.
+//!
+//! The other direction, the core calling Python, goes through the callback
+//! thread ([`callback_thread`]): a core task queues the Python call and
+//! awaits its outcome, and only that thread attaches.
 
 pub mod blocking;
+pub mod callback_thread;
 pub mod completion_queue;
 
 use std::future::Future;
