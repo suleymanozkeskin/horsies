@@ -229,9 +229,7 @@ mod tests {
             ..RecoveryConfig::default()
         };
         let handle = spawn_reaper(
-            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
-            pool.clone(),
-            pool,
+            Arc::new(crate::broker::PostgresBroker::from_pool(pool)),
             crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
                 WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             )),

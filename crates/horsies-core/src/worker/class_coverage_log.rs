@@ -14,12 +14,12 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use sqlx::PgPool;
 use tokio::time::Instant;
 
 use crate::broker::class_coverage::{ClassCoverage, StreamCoverage, StreamCoverageState};
 use crate::broker::class_coverage_reads::read_class_coverage;
 use crate::broker::result_types::BrokerResult;
+use crate::broker::PostgresBroker;
 use crate::core::task::Execution;
 
 /// The least time between two log lines of one stream, or of a failed
@@ -248,13 +248,14 @@ impl ClassCoverageLog {
 /// `ReaperMixin._check_class_coverage`, `reaper.py:630-664`).
 ///
 /// Before the first check time of `log` it reads nothing. Then it reads the
-/// fleet check on `pool` and logs the lines of [`ClassCoverageLog::lines`].
-/// Reads only; a failed read is one of the lines, not an error of the call.
-pub(crate) async fn check_class_coverage(pool: &PgPool, log: &mut ClassCoverageLog) {
+/// fleet check on the main core pool of `broker`, as reserved work, and logs
+/// the lines of [`ClassCoverageLog::lines`]. Reads only; a failed read is
+/// one of the lines, not an error of the call.
+pub(crate) async fn check_class_coverage(broker: &PostgresBroker, log: &mut ClassCoverageLog) {
     if !log.due(Instant::now()) {
         return;
     }
-    let coverage = read_class_coverage(pool).await;
+    let coverage = read_class_coverage(broker).await;
     for line in log.lines(&coverage, Instant::now()) {
         line.emit();
     }
