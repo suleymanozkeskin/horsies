@@ -4950,7 +4950,9 @@ WHERE wt.workflow_id = $1
         let task_id = Uuid::new_v4().to_string();
         let node_row_id = Uuid::new_v4();
 
-        // Parent RUNNING (on_error=pause) with a RUNNING child workflow.
+        // Parent RUNNING (on_error=pause) with a RUNNING child workflow. The child row names its parent
+        // node (`horsies_workflows_parent_pair`) and sits one level below its parent
+        // (`horsies_workflows_root_depth`).
         for (id, status, parent_of) in [
             (&parent, "RUNNING", None),
             (&child, "RUNNING", Some(&parent)),
@@ -4958,14 +4960,17 @@ WHERE wt.workflow_id = $1
             sqlx::query(
                 "INSERT INTO horsies_workflows (
                     id, name, status, on_error, output_task_index,
-                    definition_key, depth, root_workflow_id, parent_workflow_id,
+                    definition_key, depth, root_workflow_id, parent_workflow_id, parent_task_index,
                     sent_at, created_at, started_at, updated_at
-                ) VALUES ($1, 'c16c_wf', $2, 'pause', NULL, 'test.c16c.v1', 0, $1, $3,
+                ) VALUES ($1, 'c16c_wf', $2, 'pause', NULL, 'test.c16c.v1', $3, $4, $5, $6,
                           NOW(), NOW(), NOW(), NOW())",
             )
             .bind(test_uuid(id))
             .bind(status)
+            .bind(if parent_of.is_some() { 1_i32 } else { 0_i32 })
+            .bind(test_uuid(parent_of.unwrap_or(id)))
             .bind(parent_of.map(|value| test_uuid(value)))
+            .bind(parent_of.map(|_| 0_i32))
             .execute(&pool)
             .await
             .expect("insert workflow");
