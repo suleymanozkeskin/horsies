@@ -43,7 +43,7 @@ pytestmark = [pytest.mark.unit]
 
 MESSAGE_MARKER = 'message-marker-7d2e'
 CAUSE_MARKER = 'cause-marker-7d2e'
-TASK_ID = '3f9c1a2b-4d5e-4f60-8a71-b2c3d4e5f607'
+TASK_ID = uuid.UUID('3f9c1a2b-4d5e-4f60-8a71-b2c3d4e5f607')
 NOW = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
 LOOP_LIMIT = EventLoopLimit(
     limit=5,
@@ -104,7 +104,7 @@ class TestVariantCatalog:
         assert MESSAGE_MARKER not in text
         assert CAUSE_MARKER not in text
         assert type(error).__name__ in text
-        assert TASK_ID in text
+        assert str(TASK_ID) in text
 
     @pytest.mark.parametrize(
         'error', _every_variant(RuntimeError('x')), ids=_variant_id,
@@ -142,7 +142,7 @@ def _row(
 ) -> dict[str, Any]:
     """One row of ``horsies_cancel_task`` as the driver returns it."""
     return {
-        'task_id': uuid.UUID(TASK_ID),
+        'task_id': TASK_ID,
         'ordinality': None,
         'outcome': outcome,
         'terminal_at': NOW if kind is not None else None,
@@ -202,7 +202,7 @@ class TestCancelOutcome:
         assert result == Ok(TaskCancelled(task_id=TASK_ID, was_status=TaskStatus.RUNNING))
         assert connection.execute.await_args is not None
         assert connection.execute.await_args.args[1] == {
-            'task_id': TASK_ID,
+            'task_id': str(TASK_ID),
             'include_running': True,
         }
         session.commit.assert_not_awaited()
@@ -318,38 +318,21 @@ class TestCancelOutcome:
 
 class TestCancelBoundaries:
     @pytest.mark.asyncio
-    async def test_an_id_that_is_not_a_uuid_is_not_found(self) -> None:
-        broker = MagicMock()
-
-        result = await cancel_task(broker, 'not-a-uuid')
-
-        assert is_err(result)
-        assert isinstance(result.err_value, TaskActionNotFound)
-        assert result.err_value.task_id == 'not-a-uuid'
-
-    @pytest.mark.parametrize(
-        'form',
-        [f'urn:uuid:{TASK_ID.upper()}', '{' + TASK_ID.replace('-', '') + '}'],
-        ids=['urn', 'braces'],
-    )
-    @pytest.mark.asyncio
-    async def test_a_uuid_form_reaches_the_statement_as_canonical_text(
-        self, form: str,
-    ) -> None:
+    async def test_the_cancel_statement_gets_the_canonical_text_of_the_id(self) -> None:
         broker, _, connection = _broker_with_rows([_row('TASK_ABSENT')])
 
-        result = await cancel_task(broker, form)
+        result = await cancel_task(broker, TASK_ID)
 
         assert is_err(result)
         assert result.err_value.task_id == TASK_ID
         assert connection.execute.await_args is not None
-        assert connection.execute.await_args.args[1]['task_id'] == TASK_ID
+        assert connection.execute.await_args.args[1]['task_id'] == str(TASK_ID)
 
     @pytest.mark.asyncio
     async def test_a_database_failure_keeps_the_cause(self) -> None:
         cause = OperationalError('SELECT 1', {}, Exception('connection lost'))
         broker, _, _ = _broker_with_rows(cause)
-        task_id = str(uuid.uuid4())
+        task_id = uuid.uuid4()
 
         result = await cancel_task(broker, task_id)
 

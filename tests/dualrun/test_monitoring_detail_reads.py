@@ -168,7 +168,6 @@ _TASK_IDS: Final = (
     _CANCELLED,
     _ABSENT_V7,
     _ABSENT_V4,
-    'not-a-task-id',
 )
 
 
@@ -225,10 +224,10 @@ type _Read = Callable[[PostgresBroker], Awaitable[object]]
 
 def _detail_pair(task_id: str) -> ReadPair[object]:
     async def candidate(broker: PostgresBroker) -> object:
-        return await get_task_detail(broker, task_id)
+        return await get_task_detail(broker, uuid.UUID(task_id))
 
     async def reference_read(broker: PostgresBroker) -> object:
-        return await reference.get_task_detail(broker, task_id)
+        return await reference.get_task_detail(broker, uuid.UUID(task_id))
 
     return ReadPair(name=f'detail {task_id}', reference=reference_read, candidate=candidate)
 
@@ -278,7 +277,6 @@ def test_the_functions_answer_what_the_client_statements_answered(
         'task',
         'absent WITHIN_RETAINED_HISTORY',
         'absent NOT_CLASSIFIED',
-        'absent NOT_CLASSIFIED',
         'node with task',
         'node with task',
         'node without task',
@@ -297,7 +295,7 @@ def test_the_comparison_sees_a_candidate_that_reads_another_task(
     pair = _detail_pair(_FAILED)
 
     async def wrong(broker: PostgresBroker) -> object:
-        return await get_task_detail(broker, _RUNNING)
+        return await get_task_detail(broker, uuid.UUID(_RUNNING))
 
     answers = read_dual_run(
         empty_database,

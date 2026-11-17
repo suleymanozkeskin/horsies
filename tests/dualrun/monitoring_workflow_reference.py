@@ -8,7 +8,8 @@
 each in a session, with the child counts of a run as a second statement.
 The decided changes of these reads are applied (runs and schedules of one
 time ordered by id and by name, the 10,000-row bound of the names and
-schedules lists), so the reference and the functions answer the same.
+schedules lists, the last task id of a schedule as ``uuid.UUID``), so the
+reference and the functions answer the same.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.task_pg import ScheduleStateModel
 from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.types.result import Err, Ok
+from horsies.core.utils.db import uuid_column_value
 from horsies.monitoring.errors import MonitoringResult
 from horsies.monitoring.models import (
     ScheduleStateInfo,
@@ -299,7 +301,14 @@ async def list_schedules(
                 schedule_name=row.schedule_name,
                 last_run_at=row.last_run_at,
                 next_run_at=row.next_run_at,
-                last_task_id=row.last_task_id,
+                last_task_id=(
+                    uuid_column_value(
+                        row.last_task_id,
+                        column='horsies_schedule_state.last_task_id',
+                    )
+                    if row.last_task_id is not None
+                    else None
+                ),
                 run_count=row.run_count,
                 updated_at=row.updated_at,
             )

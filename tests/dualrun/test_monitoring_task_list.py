@@ -264,7 +264,7 @@ def fixed_read_time(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _labels(answer: object) -> list[str]:
     match answer:
         case Ok(TaskListPage(rows=rows)):
-            return [_LABEL[row.id] for row in rows]
+            return [_LABEL[str(row.id)] for row in rows]
         case _:
             raise AssertionError(f'expected a page, got {answer!r}')
 
