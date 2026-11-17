@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::TaskErrorCode;
 use super::execution::{Execution, MAX_CANCEL_GRACE_MS, MIN_CANCEL_GRACE_MS};
+use crate::core::python_text::python_isoformat_utc;
 
 /// The cancel grace of a `SHARED_ASYNC` task: the time from the cancel at
 /// its deadline to the second cancel (Rust: the drop of its future), from
@@ -281,8 +282,9 @@ impl TaskOptions {
     /// - `retry_policy` holds the policy with `auto_retry_for` inside it, and
     ///   `max_delay_seconds` only when set; it is `null` with no policy. Codes
     ///   without a policy are not stored: with no policy a task has no retry.
-    /// - `good_until` is `null`: the deadline of a send or a workflow node is
-    ///   its own column, not a task option.
+    /// - `good_until` is `null`: a task has no deadline of its own. A send
+    ///   with a deadline stores [`Self::stored_send_options_text`]; a workflow
+    ///   node merges its deadline into this text.
     /// - `execution` is the class of the task, and `cancel_grace_ms` its
     ///   grace, `null` when it has none. The text holds what the options say:
     ///   a grace on another class than `SHARED_ASYNC`, or a `SHARED_ASYNC`
@@ -292,6 +294,22 @@ impl TaskOptions {
     /// task with no grace, no retry policy and no timeout stores the text
     /// with nulls (`tests/fixtures/stored_forms/task_options.json`).
     pub fn stored_options_text(&self) -> String {
+        self.stored_text(None)
+    }
+
+    /// The stored `task_options` text of a send of this task with the
+    /// deadline `good_until` (Python `serialize_task_options` of the send's
+    /// options, `python/horsies/core/task_decorator.py`): the text of
+    /// [`Self::stored_options_text`] with `good_until` as Python's
+    /// `isoformat()` writes an aware UTC time (`+00:00`, 6 fraction digits
+    /// when the microsecond is not 0). The send also stores the deadline in
+    /// the row's `good_until` column. Pure.
+    pub fn stored_send_options_text(&self, good_until: chrono::DateTime<chrono::Utc>) -> String {
+        self.stored_text(Some(python_isoformat_utc(good_until)))
+    }
+
+    /// The stored text with `good_until` as given (`None` is `null`).
+    fn stored_text(&self, good_until: Option<String>) -> String {
         let stored = StoredTaskOptions {
             retry_policy: self.retry_policy.as_ref().map(|policy| StoredRetryPolicy {
                 max_retries: policy.max_retries,
@@ -309,7 +327,7 @@ impl TaskOptions {
                     .map(ToString::to_string)
                     .collect(),
             }),
-            good_until: None,
+            good_until,
             timeout_ms: self.timeout_ms,
             execution: self.execution.as_str(),
             cancel_grace_ms: self.cancel_grace_ms.map(CancelGraceMs::get),
@@ -324,7 +342,7 @@ impl TaskOptions {
 #[derive(Serialize)]
 struct StoredTaskOptions<'a> {
     retry_policy: Option<StoredRetryPolicy<'a>>,
-    good_until: Option<chrono::DateTime<chrono::Utc>>,
+    good_until: Option<String>,
     timeout_ms: Option<u32>,
     execution: &'static str,
     cancel_grace_ms: Option<u32>,

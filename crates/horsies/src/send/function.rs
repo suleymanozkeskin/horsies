@@ -20,14 +20,14 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use horsies_core::core::config::payload::{enforce_payload_policy, PayloadKind};
 use horsies_core::core::task::send_types::send_error_from_enqueue;
 use horsies_core::handle::CoreHandle;
 use horsies_core::manifest::WholeSeconds;
 use horsies_core::{
-    child_producer, mint_task_id, ChildProducer, PayloadPolicy, RetentionConfig, SendKind,
-    TaskOptions, TaskSendError, TaskSendPayload,
+    child_producer, mint_task_id, ChildProducer, Execution, PayloadPolicy, RetentionConfig,
+    SendKind, TaskOptions, TaskSendError, TaskSendPayload,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -35,7 +35,7 @@ use uuid::Uuid;
 
 use super::options::{send_retention, TaskSendOptions};
 use crate::app::SendSuppression;
-use crate::task::body::encode_read_back;
+use crate::task::body::encode_send_input;
 use crate::{ErrorCode, Horsies, HorsiesError, TaskHandle, UserErrorCode};
 
 /// Resends of a retryable `ENQUEUE_FAILED` after the first send (Python
@@ -316,10 +316,11 @@ where
         })?;
         let task_id = mint_task_id()
             .map_err(|refused| self.validation_failed(format!("task id mint failed: {refused}")))?;
-        let task_options = self
-            .task_options
-            .as_ref()
-            .map(TaskOptions::stored_options_text);
+        let task_options = send_options_text(
+            &self.task_name,
+            self.task_options.as_ref(),
+            options.deadline(),
+        );
         let payload = TaskSendPayload {
             task_name: self.task_name.clone(),
             queue_name: self.queue_name.clone(),
@@ -339,9 +340,10 @@ where
     }
 
     /// The input as one JSON text that reads back as `A` to the same text
-    /// (#569, #578). A refusal names `A` and the failure, never the value.
+    /// (#569, #578); `{}` for a task with no parameters. A refusal names `A`
+    /// and the failure, never the value.
     fn encoded_input(&self, input: &A) -> Result<String, TaskSendError> {
-        let bytes = encode_read_back(input).map_err(|cause| {
+        let bytes = encode_send_input(input).map_err(|cause| {
             self.validation_failed(format!(
                 "Failed to encode the input of {} as {}: {cause}",
                 self.task_name,
@@ -506,6 +508,42 @@ async fn enqueue_once(
         .map_err(|error| send_error_from_enqueue(task_id, payload.clone(), &error))
 }
 
+/// The stored options text of a send (Python `_serialize_options_for_send`,
+/// `python/horsies/core/task_decorator.py`). Pure.
+///
+/// - No options and no deadline: `None`, no text.
+/// - Options and no deadline: [`TaskOptions::stored_options_text`].
+/// - A deadline: [`TaskOptions::stored_send_options_text`], the deadline in
+///   `good_until`, of the task's options; of an `ISOLATED` task with no
+///   policy, timeout or grace when the task has none.
+pub(crate) fn send_options_text(
+    task_name: &str,
+    task_options: Option<&TaskOptions>,
+    deadline: Option<DateTime<Utc>>,
+) -> Option<String> {
+    match (task_options, deadline) {
+        (None, None) => None,
+        (Some(options), None) => Some(options.stored_options_text()),
+        (Some(options), Some(at)) => Some(options.stored_send_options_text(at)),
+        (None, Some(at)) => Some(isolated_options(task_name).stored_send_options_text(at)),
+    }
+}
+
+/// The options of an `ISOLATED` task with no policy, timeout or grace: what
+/// Python's send builds for a task with no options and a deadline.
+fn isolated_options(task_name: &str) -> TaskOptions {
+    TaskOptions {
+        task_name: task_name.to_owned(),
+        queue_name: None,
+        good_until: None,
+        auto_retry_for: None,
+        retry_policy: None,
+        timeout_ms: None,
+        execution: Execution::Isolated,
+        cancel_grace_ms: None,
+    }
+}
+
 /// The sends of one task with per-send options.
 pub struct TaskFunctionSendOptions<'a, A, T, E> {
     function: &'a TaskFunction<A, T, E>,
@@ -542,6 +580,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::convert::Infallible;
 
+    use horsies_core::core::python_text::python_isoformat_utc;
     use horsies_core::EnqueueRetention;
     use serde::Deserialize;
 
@@ -651,7 +690,15 @@ mod tests {
         assert_eq!(payload.enqueue_delay_seconds, Some(30));
         assert_eq!(payload.idempotency_key.as_deref(), Some("invoice-7"));
         assert_eq!(payload.retention, EnqueueRetention::Forever);
-        assert_eq!(payload.task_options, None);
+        // A task with no options and a send with a deadline: Python stores
+        // the options of an ISOLATED task with the deadline.
+        assert_eq!(
+            payload.task_options,
+            Some(format!(
+                r#"{{"retry_policy":null,"good_until":"{}","timeout_ms":null,"execution":"ISOLATED","cancel_grace_ms":null}}"#,
+                python_isoformat_utc(deadline)
+            ))
+        );
     }
 
     #[test]
