@@ -1,9 +1,17 @@
-"""Child-process helpers: import resolution and task execution."""
+"""Child-process helpers: import resolution and task execution.
+
+A child runs from its version-2 init frame (``core.InitFrame``): the start
+of each run and its miss path go through the core handle that the child
+builds from that frame, and every run ends with a ``RunReturn``
+(``run_return``): its result envelope after the RUNNING update, or the
+reason of a stop before it.
+"""
 
 # pyright: reportPrivateUsage=false
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import threading
@@ -14,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from importlib import import_module
-from typing import Any, Final, Literal, LiteralString, Optional, Tuple, assert_never, cast
+from typing import Any, Final, Literal, LiteralString, assert_never, cast
 
 from psycopg import Connection
 
@@ -51,7 +59,6 @@ _ENGINE_KEY_WORKFLOW_CTX = '__h_workflow_ctx__'
 _ENGINE_KEY_WORKFLOW_META = '__h_workflow_meta__'
 _ENGINE_KEY_TASKRESULT_ENVELOPE = '__h_taskresult_envelope__'
 from horsies.core.models.boot_failure import ThreadStartRefusedError
-from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.models.tasks import (
     MAX_CANCEL_GRACE_MS,
     MAX_TASK_TIMEOUT_MS,
@@ -60,22 +67,19 @@ from horsies.core.models.tasks import (
     TaskResult,
     TaskError,
     OperationalErrorCode,
-    OutcomeCode,
 )
 from horsies.core.worker.stored_timeout import (
     CancelGraceInvalid,
-    NoTimeout,
     OptionsUnreadable,
-    StoredTimeout,
-    TaskTimeout,
     TimeoutRefusal,
     TimeoutValueInvalid,
 )
-from horsies.core.worker.child_protocol import WireResult
+from horsies.core.worker.child_frames import PROTOCOL_NUMBERS, stored_refusal_of
 from horsies.core.worker.run_return import (
     IsolatedMarkerWindow,
     MarkerAfterLeftWork,
     MarkerAtReturn,
+    ResultEnvelope,
     RunReturn,
     SetRunning,
     StoppedBeforeRunning,
@@ -239,10 +243,31 @@ def start_always_allowed() -> StartCheck:
 _PRE_START_CONFIRM_ATTEMPTS = 2
 
 
+@dataclass(frozen=True, slots=True)
+class RunTheTask:
+    """The run frame asks for the task: its stored options are usable."""
+
+
+type IsolatedWork = RunTheTask | TimeoutRefusal
+"""What an isolated run does after its RUNNING update: run the task, or fail
+it for stored options that the worker cannot use."""
+
+
+def isolated_work_of(work: Literal['RUN'] | core.StoredOptionsRefused) -> IsolatedWork:
+    """The work of an isolated run frame. Pure."""
+    match work:
+        case 'RUN':
+            return RunTheTask()
+        case core.StoredOptionsRefused():
+            return stored_refusal_of(work)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _serialization_error_response(
     task_name: str,
     error: SerializationError,
-) -> tuple[bool, str, str | None]:
+) -> ResultEnvelope:
     """Build a WORKER_SERIALIZATION_ERROR response for a serde failure."""
     logger.error(f'Serialization error for task {task_name}: {error}')
     tr: TaskResult[None, TaskError] = TaskResult(
@@ -252,13 +277,13 @@ def _serialization_error_response(
             data={'task_name': task_name},
         ),
     )
-    return (True, serialize_error_payload(tr), f'SerializationError: {error}')
+    return ResultEnvelope(serialize_error_payload(tr))
 
 
 def _stored_timeout_refusal_response(
     task_name: str,
     refusal: TimeoutRefusal,
-) -> tuple[bool, str, str | None]:
+) -> ResultEnvelope:
     """Build a WORKER_SERIALIZATION_ERROR response for a stored timeout.
 
     The row is RUNNING when this runs, so the normal persist path fails the
@@ -292,7 +317,7 @@ def _stored_timeout_refusal_response(
             data=data,
         ),
     )
-    return (True, serialize_error_payload(tr), f'StoredTimeoutRefused: {reason}')
+    return ResultEnvelope(serialize_error_payload(tr))
 
 
 from horsies.core.errors import ConfigurationError, ErrorCode
@@ -305,6 +330,8 @@ from horsies.core.worker.child_pool import (
     _get_worker_pool,
     _initialize_child_core_handle,
     _initialize_worker_pool,
+    marker_pool_url,
+    pool_of,
 )
 from horsies.core.utils.imports import import_file_path
 import sys
@@ -444,7 +471,7 @@ def _discard_inherited_broker(app: Horsies) -> None:
 # Exit code for a failed/hung on_child_process_start hook. Distinct from
 # generic child crashes so the parent stops the worker instead of
 # restart-looping on an unfixable child boot.
-CHILD_HOOK_FAILURE_EXIT_CODE = 173
+CHILD_HOOK_FAILURE_EXIT_CODE: Final = PROTOCOL_NUMBERS.child_hook_failed_exit_code
 
 # Per-hook execution budget (cf. Celery's 4s worker_process_init limit).
 CHILD_HOOK_TIMEOUT_SECONDS = 10.0
@@ -524,17 +551,26 @@ def _run_child_start_hooks(app: Horsies) -> None:
         )
 
 
-def _child_initializer(
-    app_locator: str,
-    imports: Sequence[str],
-    sys_path_roots: Sequence[str],
-    loglevel: int,
-    database_url: str,
-    pool: ResolvedPool,
-    task_send_pool: int,
-    connect_kwargs: Mapping[str, object] | None = None,
-) -> None:
-    """Child-process bootstrap: locate the app, import tasks, open the pool.
+_LOG_LEVELS: Final[Mapping[str, int]] = {
+    'DEBUG': logging.DEBUG,
+    'INFO': logging.INFO,
+    'WARNING': logging.WARNING,
+    'ERROR': logging.ERROR,
+    'CRITICAL': logging.CRITICAL,
+}
+
+
+def log_level_of(
+    level: Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+) -> int:
+    """The ``logging`` level of the log level of an init frame. Pure."""
+    return _LOG_LEVELS[level]
+
+
+def _child_initializer(init: core.InitFrame, program: core.PythonProgram) -> Horsies:
+    """Child-process bootstrap from the init frame: locate the app, import
+    its tasks, then run the per-child start steps of the kind of the child
+    (``finish_child_start``). Returns the app.
 
     Raises:
         Exception: any bootstrap failure propagates out of the initializer,
@@ -544,13 +580,14 @@ def _child_initializer(
             CHILD_HOOK_FAILURE_EXIT_CODE (fail-closed).
     """
     app = import_app_for_child(
-        app_locator,
-        imports,
-        sys_path_roots,
-        loglevel,
-        task_send_pool,
+        program.app_locator,
+        program.imports,
+        program.sys_path_roots,
+        log_level_of(init.log_level),
+        init.child_kind.task_send_pool,
     )
-    finish_child_start(app, database_url, connect_kwargs, pool)
+    finish_child_start(app, init)
+    return app
 
 
 def import_app_for_child(
@@ -623,18 +660,16 @@ def import_app_for_child(
     return app
 
 
-def finish_child_start(
-    app: Horsies,
-    database_url: str,
-    connect_kwargs: Mapping[str, object] | None,
-    pool: ResolvedPool,
-) -> None:
-    """Run the per-child steps. Each child runs these itself, after any fork.
+def finish_child_start(app: Horsies, init: core.InitFrame) -> None:
+    """Run the per-child steps of an isolated or a shared thread child. Each
+    child runs these itself, after any fork.
 
-    The sync connection pool of the child opens with the bounds of ``pool``,
-    and the core handle of the child is built with the same bounds, from the
-    broker config of ``app`` (``_initialize_child_core_handle``). Building
-    the handle starts nothing.
+    The sync connection pool of the finalizing marker opens with the bounds
+    of the pool of the child kind in ``init``, on the database URL and the
+    connection settings of the broker config of ``app``, the source of the
+    parent's own (``marker_pool_url``, ``PostgresConfig.pooled_connect_args``).
+    The core handle of the child is built from ``init``
+    (``_initialize_child_core_handle``). Building the handle starts nothing.
 
     Raises:
         Exception: a pool setup failure propagates to the caller. A failing
@@ -649,33 +684,31 @@ def finish_child_start(
     _run_child_start_hooks(app)
 
     # Initialize per-process connection pool (after all imports complete)
+    pool = pool_of(init.child_kind)
     _initialize_worker_pool(
-        database_url,
-        connect_kwargs=connect_kwargs,
+        marker_pool_url(app.config.broker),
+        connect_kwargs=app.config.broker.pooled_connect_args,
         min_size=pool.min_size,
         max_size=pool.max_size,
         check_on_checkout=pool.check,
     )
-    _initialize_child_core_handle(app.config.broker, pool)
+    _initialize_child_core_handle(init)
     logger.debug(f'[child {os.getpid()}] Connection pool initialized')
 
 
-def finish_shared_child_start(app: Horsies, pool: ResolvedPool) -> None:
+def finish_shared_child_start(app: Horsies, init: core.InitFrame) -> None:
     """Run the per-child steps of a shared async child that need no loop.
 
     The same steps as ``finish_child_start`` up to the pool: the process
     runs task bodies from here on, the ``on_child_process_start`` hooks run,
-    and the core handle of the child is built with the bounds of ``pool``. A
-    shared async child opens no sync pool: it opens an async pool on its
-    event loop afterwards (``shared_runner``). A failing hook exits the
-    child with CHILD_HOOK_FAILURE_EXIT_CODE.
-
-    Raises:
-        ManifestRefused: the core refused the manifest of the handle.
+    and the core handle of the child is built from ``init``. A shared async
+    child opens no sync pool: it opens an async pool on its event loop
+    afterwards (``shared_runner``). A failing hook exits the child with
+    CHILD_HOOK_FAILURE_EXIT_CODE.
     """
     mark_process_runs_task_bodies()
     _run_child_start_hooks(app)
-    _initialize_child_core_handle(app.config.broker, pool)
+    _initialize_child_core_handle(init)
 
 
 # ---------- Child-process execution ----------
@@ -756,29 +789,28 @@ def mark_finalizing_params(
     return (task_id, worker_id, claimed_at)
 
 
-def _claim_lost(task_id: str) -> WireResult:
-    """The wire tuple of a start whose claim is gone. Logs a warning."""
+def _claim_lost(task_id: str) -> StoppedBeforeRunning:
+    """The stop of a start whose claim is gone. Logs a warning."""
     logger.warning(
         f'Task {task_id} ownership lost - claim was reclaimed or status changed. '
         f'Aborting execution to prevent double-execution.'
     )
-    return (False, '', 'CLAIM_LOST')
+    return StoppedBeforeRunning('CLAIM_LOST')
 
 
-def _start_unconfirmed(task_id: str, cause: object) -> WireResult:
-    """The wire tuple of a start whose write failed: OWNERSHIP_UNCONFIRMED.
-    The worker then releases the claim (``ReleaseUnconfirmedClaim``). Logs
-    an error with ``cause``."""
+def _start_unconfirmed(task_id: str, cause: object) -> StoppedBeforeRunning:
+    """The stop of a start whose write failed: OWNERSHIP_UNCONFIRMED. The
+    worker then releases the claim. Logs an error with ``cause``."""
     logger.error(f'Failed to transition task {task_id} to RUNNING: {cause}')
-    return (False, '', 'OWNERSHIP_UNCONFIRMED')
+    return StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
 
 def expired_before_start_of(
     task_id: str,
     outcome: TerminalizationOutcome,
-) -> WireResult:
-    """The wire tuple of the expiry of a claim whose deadline passed before
-    its start (``horsies_expire_owned_claim``): ``Applied`` and
+) -> StoppedBeforeRunning:
+    """The stop of the expiry of a claim whose deadline passed before its
+    start (``horsies_expire_owned_claim``): ``Applied`` and
     ``AlreadyApplied`` mean the task is EXPIRED; a refusal means the claim
     is gone. Logs the end. Pure but the log."""
     match outcome:
@@ -786,7 +818,7 @@ def expired_before_start_of(
             logger.info(
                 f'Task {task_id} expired before actual execution start; marked EXPIRED.',
             )
-            return (False, '', OutcomeCode.TASK_EXPIRED.value)
+            return StoppedBeforeRunning('TASK_EXPIRED')
         case LostClaim() | SourceStateConflict() | TaskAbsent():
             return _claim_lost(task_id)
         case _ as unreachable:
@@ -796,15 +828,15 @@ def expired_before_start_of(
 def stopped_before_start_of(
     task_id: str,
     record: StopRecord,
-) -> WireResult | _WorkflowResumedBeforeStart:
-    """The wire tuple of the stop of a workflow task whose start missed
+) -> StoppedBeforeRunning | _WorkflowResumedBeforeStart:
+    """The stop of a workflow task whose start missed
     (``horsies_workflow_task_stop_before_start``), by the step that ran:
 
     - ``EXPIRED``: TASK_EXPIRED; phase 2 of the node is owed.
     - ``ABANDONED`` (PAUSED workflow), ``CANCELLED`` (CANCELLED workflow):
       WORKFLOW_STOPPED, whatever the outcome of the move.
     - ``ORPHAN_CANCELLED``: ORPHAN_CANCELLED; nothing is owed.
-    - ``NODE_NOT_LINKED`` (the orphan self-heal is off): WORKFLOW_CHECK_FAILED;
+    - ``NODE_NOT_LINKED`` (the orphan self-heal is off): NODE_NOT_LINKED;
       the row stays CLAIMED.
     - ``NOT_HELD``: CLAIM_LOST.
     - ``ResumedBeforeStart``: a resume came first; the start runs again.
@@ -830,20 +862,20 @@ def stopped_before_start_of(
             logger.info(
                 f'Task {task_id} expired before actual execution start; marked EXPIRED.',
             )
-            return (False, '', OutcomeCode.TASK_EXPIRED.value)
+            return StoppedBeforeRunning('TASK_EXPIRED')
         case 'ABANDONED' | 'CANCELLED':
-            return (False, '', 'WORKFLOW_STOPPED')
+            return StoppedBeforeRunning('WORKFLOW_STOPPED')
         case 'ORPHAN_CANCELLED':
             logger.info(
                 f'Task {task_id} orphaned workflow task (no live workflow_task '
                 f'linkage): the cancel ended {move_outcome}'
             )
-            return (False, '', 'ORPHAN_CANCELLED')
+            return StoppedBeforeRunning('ORPHAN_CANCELLED')
         case 'NODE_NOT_LINKED':
             logger.error(
                 f'Failed to update workflow_tasks to RUNNING for task {task_id}'
             )
-            return (False, '', 'WORKFLOW_CHECK_FAILED')
+            return StoppedBeforeRunning('NODE_NOT_LINKED')
         case 'NOT_HELD':
             return _claim_lost(task_id)
         case _ as unreachable:
@@ -853,15 +885,14 @@ def stopped_before_start_of(
 def _confirm_until_not_resumed(
     task_id: str,
     worker_id: str,
-    is_workflow_task: bool,
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
     start_check: Callable[[], StartCheck] = start_always_allowed,
-) -> WireResult | None | DeadlineBeforeStart:
+) -> StoppedBeforeRunning | None | DeadlineBeforeStart:
     """Run the RUNNING transition again when a resume came before the stop.
 
-    Returns None to start the task, or the wire tuple that stops it. A
+    Returns None to start the task, or the stop that ends it. A
     workflow resumed on every one of ``_PRE_START_CONFIRM_ATTEMPTS`` tries
     returns OWNERSHIP_UNCONFIRMED; the worker then releases the claim
     (``ReleaseUnconfirmedClaim``). ``DeadlineBeforeStart``: the deadline of
@@ -871,7 +902,6 @@ def _confirm_until_not_resumed(
         result = _confirm_ownership_and_set_running(
             task_id,
             worker_id,
-            is_workflow_task,
             claimed_at=claimed_at,
             orphan_self_heal=orphan_self_heal,
             start_check=start_check,
@@ -879,7 +909,7 @@ def _confirm_until_not_resumed(
         match result:
             case _WorkflowResumedBeforeStart():
                 continue
-            case None | tuple() | DeadlineBeforeStart():
+            case None | StoppedBeforeRunning() | DeadlineBeforeStart():
                 return result
             case _ as unreachable:
                 assert_never(unreachable)
@@ -888,18 +918,17 @@ def _confirm_until_not_resumed(
         f'{_PRE_START_CONFIRM_ATTEMPTS} start attempts; the worker releases '
         f'the claim'
     )
-    return (False, '', 'OWNERSHIP_UNCONFIRMED')
+    return StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
 
 def _confirm_ownership_and_set_running(
     task_id: str,
     worker_id: str,
-    is_workflow_task: bool = True,
     *,
     claimed_at: datetime,
     orphan_self_heal: bool,
     start_check: Callable[[], StartCheck] = start_always_allowed,
-) -> WireResult | None | _WorkflowResumedBeforeStart | DeadlineBeforeStart:
+) -> StoppedBeforeRunning | None | _WorkflowResumedBeforeStart | DeadlineBeforeStart:
     """Set the row RUNNING with its first runner heartbeat. None: started.
 
     One ``horsies_start_attempt`` statement through the core handle of the
@@ -907,7 +936,7 @@ def _confirm_ownership_and_set_running(
     claim generation ``claimed_at``: a row requeued and claimed again since
     the dispatch of this child no longer matches, so the stale child stops
     with CLAIM_LOST instead of running the task twice. The function reads
-    ``is_workflow_task`` from the locked row, so the argument is not sent. A
+    whether the task is a workflow task from the locked row. A
     miss runs its path (``_after_missed_start``) after the statement, with no
     lock held.
 
@@ -970,7 +999,7 @@ def _after_missed_start(
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
-) -> WireResult | _WorkflowResumedBeforeStart:
+) -> StoppedBeforeRunning | _WorkflowResumedBeforeStart:
     """The path of a start that missed, by its reason. One statement at most.
 
     - ``WORKFLOW_PAUSED``, ``WORKFLOW_CANCELLED``, ``NODE_NOT_LINKED``: the
@@ -1119,12 +1148,8 @@ def async_task_presence(app: Horsies) -> AsyncTaskPresence:
     return AsyncTaskPresence.NO_ASYNC_TASK
 
 
-def _resolution_failure(
-    task_name: str,
-    message: str,
-    reason: str,
-) -> Tuple[bool, str, Optional[str]]:
-    """The wire tuple of a task the worker cannot resolve: WORKER_RESOLUTION_ERROR."""
+def _resolution_failure(task_name: str, message: str) -> ResultEnvelope:
+    """The result of a task the worker cannot resolve: WORKER_RESOLUTION_ERROR."""
     tr: TaskResult[Any, TaskError] = TaskResult(
         err=TaskError(
             error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
@@ -1132,7 +1157,7 @@ def _resolution_failure(
             data={'task_name': task_name},
         )
     )
-    return (True, serialize_error_payload(tr), reason)
+    return ResultEnvelope(serialize_error_payload(tr))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1244,18 +1269,19 @@ def _task_call_result(
 
 def _prepare_task_call(
     task_name: str,
-    args_json: Optional[str],
-    kwargs_json: Optional[str],
+    input_json: str,
     place: RunPlace,
-) -> _PreparedCall | Tuple[bool, str, Optional[str]]:
+) -> _PreparedCall | ResultEnvelope:
     """Resolve a task from the registry and decode the arguments of its call.
 
-    Returns the task and its arguments, or the wire tuple that ends the run
-    before user code: a task that cannot be resolved or cannot run in
-    ``place`` (``WORKER_RESOLUTION_ERROR``), or arguments that do not
-    decode (``WORKER_SERIALIZATION_ERROR``). Runs no user code but the
-    pydantic validators of the declared types. An exception propagates to
-    the caller, whose containment seam maps it. No I/O.
+    ``input_json`` is the stored input of the row, the body of the run
+    frame: the keyword arguments as one JSON object. Returns the task and
+    its arguments, or the result that ends the run before user code: a task
+    that cannot be resolved or cannot run in ``place``
+    (``WORKER_RESOLUTION_ERROR``), or an input that does not decode
+    (``WORKER_SERIALIZATION_ERROR``). Runs no user code but the pydantic
+    validators of the declared types. An exception propagates to the
+    caller, whose containment seam maps it. No I/O.
     """
     # Resolve from TaskRegistry
     try:
@@ -1267,7 +1293,6 @@ def _prepare_task_call(
         return _resolution_failure(
             task_name,
             f'Failed to resolve {task_name}: {type(e).__name__}: {e}',
-            f'{type(e).__name__}: {e}',
         )
     match _why_not_runnable(body_kind, place):
         case None:
@@ -1277,46 +1302,24 @@ def _prepare_task_call(
             return _resolution_failure(
                 task_name,
                 f'Failed to resolve {task_name}: {not_runnable}',
-                not_runnable,
             )
 
-    # Deserialize task arguments. Strict-serde: positional args are
-    # rejected at every producer; the wire shape for args is always
-    # `null` or `[]`. Inspect the raw loaded JSON to enforce this
-    # before any typed decode runs.
-    args_json_result = loads_json(args_json)
-    if is_err(args_json_result):
-        return _serialization_error_response(task_name, args_json_result.err_value)
-    raw_args = args_json_result.ok_value
-    if raw_args is not None and raw_args != []:
+    # Deserialize the task input: the keyword arguments as one JSON object.
+    # Strict-serde: a task takes no positional arguments.
+    args: tuple[Any, ...] = ()
+    input_result = loads_json(input_json)
+    if is_err(input_result):
+        return _serialization_error_response(task_name, input_result.err_value)
+    decoded_kwargs = input_result.ok_value
+    if not isinstance(decoded_kwargs, dict):
         return _serialization_error_response(
             task_name,
             SerializationError(
-                f'Task {task_name!r} row carries positional args; '
-                f'strict-serde rejects positional args. '
-                f'Drop in-flight pre-strict rows before upgrading.',
+                f'kwargs must be a JSON object, got '
+                f'{type(decoded_kwargs).__name__}',
             ),
         )
-    args: tuple[Any, ...] = ()
-
-    if kwargs_json is None:
-        raw_kwargs: dict[str, Any] = {}
-    else:
-        kwargs_json_result = loads_json(kwargs_json)
-        if is_err(kwargs_json_result):
-            return _serialization_error_response(
-                task_name, kwargs_json_result.err_value
-            )
-        decoded_kwargs = kwargs_json_result.ok_value
-        if not isinstance(decoded_kwargs, dict):
-            return _serialization_error_response(
-                task_name,
-                SerializationError(
-                    f'kwargs must be a JSON object, got '
-                    f'{type(decoded_kwargs).__name__}',
-                ),
-            )
-        raw_kwargs = decoded_kwargs
+    raw_kwargs: dict[str, Any] = decoded_kwargs
 
     # Strict-serde phase 3+4: decode user kwargs using the receiver's
     # declared parameter types. Engine-private transport keys
@@ -1571,11 +1574,8 @@ def _prepare_task_call(
     return _PreparedCall(task=task, app=app, args=args, kwargs=kwargs)
 
 
-def _task_exception_response(
-    task_name: str,
-    e: BaseException,
-) -> Tuple[bool, str, Optional[str]]:
-    """The wire tuple of a task that raised: ``TASK_EXCEPTION``. Logs it."""
+def _task_exception_response(task_name: str, e: BaseException) -> ResultEnvelope:
+    """The result of a task that raised: ``TASK_EXCEPTION``. Logs it."""
     logger.error(f'Task exception: {task_name}: {exception_text(e)}')
     # If the task raised an exception, we wrap it in a TaskError
     tr: TaskResult[None, TaskError] = TaskResult(
@@ -1586,16 +1586,18 @@ def _task_exception_response(
             exception=e,  # pydantic will accept and we flatten on serialization if needed elsewhere
         )
     )
-    return (True, serialize_error_payload(tr), None)
+    return ResultEnvelope(serialize_error_payload(tr))
 
 
 def _encode_task_outcome(
     task_name: str,
     task: Any,
     out: TaskResult[Any, TaskError],
-) -> Tuple[bool, str, Optional[str]]:
-    """Encode the result of a task call for the wire, against the declared
-    ok type of the task. A value that does not fit ends the run with
+) -> ResultEnvelope:
+    """Encode the result of a task call for the frame, against the declared
+    ok type of the task, and read the ok value back with that type
+    (``encode_returned_result``): the worker stores the envelope as it is. A
+    value that does not fit, or that does not read back, ends the run with
     ``WORKER_SERIALIZATION_ERROR``. An exception propagates. No I/O."""
     # Strict-serde phase 5: result encoding routes through
     # ``encode_task_result(result, ok_type)`` so the wire envelope
@@ -1625,29 +1627,26 @@ def _encode_task_outcome(
     ser = dumps_json(envelope)
     if is_err(ser):
         return _serialization_error_response(task_name, ser.err_value)
-    return (True, ser.ok_value, None)
+    return ResultEnvelope(ser.ok_value)
 
 
 def _run_task_entry(
     task_name: str,
-    args_json: Optional[str],
-    kwargs_json: Optional[str],
+    input_json: str,
     task_id: str,
     master_worker_id: str,
-    is_workflow_task: bool = True,
-    timeout: StoredTimeout = NoTimeout(),
+    work: IsolatedWork,
     *,
     claimed_at: datetime,
     task_loop: TaskLoop,
     orphan_self_heal: bool,
 ) -> RunReturn:
-    """Run one task in an isolated child, up to its wire tuple.
+    """Run one task in an isolated child, up to its result.
 
-    Returns the wire tuple ``(ok, serialized_task_result_json,
-    worker_failure_reason)`` in ``SetRunning`` when the run set its row
-    RUNNING, and in ``StoppedBeforeRunning`` when the ownership confirm
-    ended it first (a lost claim, an expiry, a stopped workflow, a failed
-    RUNNING update).
+    Returns ``SetRunning`` with the result envelope when the run set its row
+    RUNNING, and ``StoppedBeforeRunning`` with its reason when the ownership
+    confirm ended it first (a lost claim, an expiry, a stopped workflow, a
+    failed RUNNING update).
 
     An ``async def`` task runs on ``task_loop``, the one loop of this child.
     A ``def`` task runs on this thread with no running event loop.
@@ -1657,17 +1656,12 @@ def _run_task_entry(
     stop of a workflow task whose node is not linked cancels the task
     (ORPHAN_CANCELLED).
 
-    ok=True: we produced a valid TaskResult JSON (success *or* failure).
-    ok=False: worker couldn't even produce a TaskResult (infra error).
-
-    Do not mistake the 'ok' here as the task's own success/failure.
-    It's only a signal that the worker was able to produce a valid JSON.
-    The task's own success/failure is determined by the TaskResult's ok/err fields.
+    The envelope holds the task's success or its task error; the task's own
+    outcome is in its ``ok`` and ``err`` members.
 
     This is the child's containment seam: the execution body is wrapped in
-    ``except BaseException`` and folds everything into the wire tuple. The
-    pre-try steps (preflight, ownership confirm) return wire tuples
-    themselves.
+    ``except BaseException`` and folds everything into the result envelope.
+    The ownership confirm returns its stop itself.
 
     Writes no finalizing marker: the child writes it when the run has
     ended, after the work that the task left on its task loop
@@ -1687,15 +1681,14 @@ def _run_task_entry(
     ownership_result = _confirm_until_not_resumed(
         task_id,
         master_worker_id,
-        is_workflow_task,
         claimed_at,
         orphan_self_heal=orphan_self_heal,
     )
     match ownership_result:
         case None:
             pass
-        case tuple():
-            return StoppedBeforeRunning(ownership_result)
+        case StoppedBeforeRunning():
+            return ownership_result
         case DeadlineBeforeStart():
             raise AssertionError(
                 'an isolated child checks no deadline before its RUNNING update',
@@ -1705,10 +1698,9 @@ def _run_task_entry(
     return SetRunning(
         _run_isolated_after_running(
             task_name,
-            args_json,
-            kwargs_json,
+            input_json,
             task_id,
-            timeout,
+            work,
             task_loop,
         ),
     )
@@ -1716,36 +1708,34 @@ def _run_task_entry(
 
 def _run_isolated_after_running(
     task_name: str,
-    args_json: Optional[str],
-    kwargs_json: Optional[str],
+    input_json: str,
     task_id: str,
-    timeout: StoredTimeout,
+    work: IsolatedWork,
     task_loop: TaskLoop,
-) -> WireResult:
+) -> ResultEnvelope:
     """The steps of an isolated run after its RUNNING update: the stored
-    timeout check, the resolve, the call and the result encode. Any
+    options refusal, the resolve, the call and the result encode. Any
     exception becomes ``TASK_EXCEPTION``."""
     try:
-        # A stored timeout that the worker cannot use fails the task before
-        # it resolves the task, so no user code runs.
-        match timeout:
+        # Stored options that the worker cannot use fail the task before it
+        # resolves the task, so no user code runs.
+        match work:
             case OptionsUnreadable() | TimeoutValueInvalid() | CancelGraceInvalid():
-                return _stored_timeout_refusal_response(task_name, timeout)
-            case NoTimeout() | TaskTimeout():
+                return _stored_timeout_refusal_response(task_name, work)
+            case RunTheTask():
                 pass
             case _ as unreachable:
                 assert_never(unreachable)
 
         prepared = _prepare_task_call(
             task_name,
-            args_json,
-            kwargs_json,
+            input_json,
             OnIsolatedChild(task_loop),
         )
         match prepared:
             case _PreparedCall(task=task, args=args, kwargs=kwargs):
                 pass
-            case tuple():
+            case ResultEnvelope():
                 return prepared
         out = _task_call_result(
             task_name,

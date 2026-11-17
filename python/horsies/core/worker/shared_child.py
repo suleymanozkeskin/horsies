@@ -77,47 +77,43 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Final, NoReturn, Protocol, assert_never
 
+from horsies import _core as core
 from horsies.core.logging import get_logger
 from horsies.core.models.boot_failure import ThreadStartRefused
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_inbox import NoFrameYet, ParentFrameInbox
 from horsies.core.worker.child_main import (
     BAD_PARENT_FRAME_EXIT_CODE,
-    _bounded_result,
+    bounded_end,
+    bounded_envelope,
     _read_rss,
     _send_child_frame,
     exit_after_stop,
     fail_boot,
     flush_output,
 )
-from horsies.core.worker.child_protocol import (
+from horsies.core.worker.child_frames import (
     MAX_LEFTOVER_TASK_NAMES,
     BootFailedFrame,
     ChildFrame,
     DeadlineFiredFrame,
-    InitFrame,
     LeftoverCancelFrame,
     LeftoverStuckFrame,
     ReadyFrame,
     RssReading,
-    RunFrame,
+    RunEnd,
     RunStuckFrame,
     SecondCancelFrame,
     SeatEnd,
-    SeatFinished,
-    SeatRefusal,
-    SeatTask,
     SeatTimedOut,
-    SharedAsyncChild,
     SharedResultFrame,
-    SharedRunFrame,
-    StopFrame,
-    ThreadSeatTask,
     boot_failed_frame,
 )
 from horsies.core.models.worker_profile import ResolvedPool
+from horsies.core.worker.child_pool import pool_of
 from horsies.core.worker.loop_watchdog import LoopWatchdog
 from horsies.core.worker.run_return import (
+    ResultEnvelope,
     SetRunning as SetRunning,
     StoppedBeforeRunning as StoppedBeforeRunning,
 )
@@ -190,7 +186,7 @@ class NoMarker:
 class StartedSeats(Protocol):
     """The seats of a shared async child after its start steps."""
 
-    async def run(self, frame: SharedRunFrame) -> SeatReturn:
+    async def run(self, frame: core.SharedRunFrame) -> SeatReturn:
         """Run the task of ``frame`` on a seat, up to its result. Writes no
         finalizing marker.
 
@@ -201,7 +197,7 @@ class StartedSeats(Protocol):
         ...
 
     async def mark_finalizing(
-        self, frame: SharedRunFrame, window: MarkerWindow
+        self, frame: core.SharedRunFrame, window: MarkerWindow
     ) -> None:
         """Write the finalizing marker of the run of ``frame``, which ended,
         within ``window``. A failed, skipped or late write is logged only:
@@ -218,7 +214,7 @@ class SeatProgram(Protocol):
 
     async def start(
         self,
-        init: InitFrame,
+        init: core.InitFrame,
         pool: ResolvedPool,
     ) -> Result[StartedSeats, BootFailedFrame]:
         """Run the start steps on the task loop, before the ready frame.
@@ -255,19 +251,10 @@ class _ResultToWrite:
     frame: FrameWithResult
 
 
-def _bounded_finished(task_name: str, finished: SeatFinished) -> SeatFinished:
-    """A result too large to store becomes a typed failure, and a long
-    failure reason is cut, as for an isolated child. Pure."""
-    ok, result_json, failed_reason = _bounded_result(
-        task_name,
-        (finished.ok, finished.result_json, finished.failed_reason),
-    )
-    return SeatFinished(ok, result_json, failed_reason)
-
-
 def bounded_result_frame(task_name: str, frame: FrameWithResult) -> FrameWithResult:
-    """Make a frame with a result safe to write (``_bounded_finished``). A
-    timed-out end has no result and passes unchanged. Pure."""
+    """Make a frame with a result safe to write: a result too large to store
+    becomes a typed failure, as for an isolated child (``bounded_envelope``).
+    A stop or a timed-out end has no result and passes unchanged."""
     match frame:
         case SharedResultFrame():
             return _bounded_shared_result(task_name, frame)
@@ -275,7 +262,7 @@ def bounded_result_frame(task_name: str, frame: FrameWithResult) -> FrameWithRes
             return LeftoverCancelFrame(
                 dispatch=frame.dispatch,
                 task_id=frame.task_id,
-                returned=_bounded_finished(task_name, returned),
+                returned=bounded_envelope(task_name, returned),
             )
         case LeftoverStuckFrame(returned=returned):
             return LeftoverStuckFrame(
@@ -284,7 +271,7 @@ def bounded_result_frame(task_name: str, frame: FrameWithResult) -> FrameWithRes
                 tasks=frame.tasks,
                 executor_items=frame.executor_items,
                 names=frame.names,
-                returned=_bounded_finished(task_name, returned),
+                returned=bounded_envelope(task_name, returned),
             )
         case _ as unreachable:
             assert_never(unreachable)
@@ -294,11 +281,11 @@ def _bounded_shared_result(
     task_name: str, frame: SharedResultFrame
 ) -> SharedResultFrame:
     match frame.end:
-        case SeatFinished() as finished:
+        case ResultEnvelope() | StoppedBeforeRunning() as finished:
             return SharedResultFrame(
                 dispatch=frame.dispatch,
                 task_id=frame.task_id,
-                end=_bounded_finished(task_name, finished),
+                end=bounded_end(task_name, finished),
                 rss=frame.rss,
             )
         case SeatTimedOut():
@@ -437,7 +424,7 @@ class _Finalizing:
     """The run ended with ``end``. Its finalizing marker is in flight, and
     the end report follows it."""
 
-    end: SeatFinished
+    end: RunEnd
 
 
 type _RunStop = _Stop | _LeftoverGrace | _LeftoverCancel | _LeftoverStuck | _Finalizing
@@ -455,7 +442,8 @@ class _DeadlineAt:
 
 @dataclass(frozen=True, slots=True)
 class _NoDeadline:
-    """The run of a ``SeatRefusal``: no task code runs, so no deadline."""
+    """The run of stored options that the worker refused
+    (``core.StoredOptionsRefused``): no task code runs, so no deadline."""
 
 
 class _LeftWorkEnd(Enum):
@@ -481,7 +469,7 @@ class _Seat:
     ``program`` runs the task and writes its finalizing marker.
     """
 
-    frame: SharedRunFrame
+    frame: core.SharedRunFrame
     mark: RunMark
     task: asyncio.Task[SeatReturn]
     deadline: _DeadlineAt | _NoDeadline
@@ -562,9 +550,9 @@ class SeatLoop:
         while True:
             frame = await _next_frame(inbox, arrived)
             match frame:
-                case SharedRunFrame():
+                case core.SharedRunFrame():
                     self._start(frame, started)
-                case StopFrame():
+                case core.StopFrame():
                     if self._seats:
                         _exit_for_defect(
                             f'parent sent a stop frame while {len(self._seats)} '
@@ -572,7 +560,7 @@ class SeatLoop:
                             BAD_PARENT_FRAME_EXIT_CODE,
                         )
                     return
-                case RunFrame():
+                case core.RunFrame():
                     _exit_for_defect(
                         'parent sent an isolated run frame to a shared async child',
                         BAD_PARENT_FRAME_EXIT_CODE,
@@ -580,9 +568,9 @@ class SeatLoop:
                 case _ as unreachable:
                     assert_never(unreachable)
 
-    def _start(self, frame: SharedRunFrame, started: StartedSeats) -> None:
+    def _start(self, frame: core.SharedRunFrame, started: StartedSeats) -> None:
         """Start the run of ``frame`` on a free seat, in a context with its
-        mark, with the deadline of a ``SeatTask``."""
+        mark, with the deadline of a task (``core.AsyncTaskWork``)."""
         if len(self._seats) >= self._capacity:
             _exit_for_defect(
                 f'parent sent run {frame.dispatch} while all {self._capacity} '
@@ -607,15 +595,15 @@ class SeatLoop:
         deadline: _DeadlineAt | _NoDeadline
         timer: asyncio.TimerHandle | _NoTimer
         match frame.work:
-            case SeatTask(timeout_ms=timeout_ms):
+            case core.AsyncTaskWork(timeout_ms=timeout_ms):
                 stop = _Stop.BEFORE_DEADLINE
                 deadline = _DeadlineAt(self._loop.time() + timeout_ms / 1000.0)
                 timer = self._loop.call_at(deadline.at, self._fire, frame.dispatch)
-            case SeatRefusal():
+            case core.StoredOptionsRefused():
                 stop = _Stop.NO_DEADLINE
                 deadline = _NoDeadline()
                 timer = _NoTimer()
-            case ThreadSeatTask():
+            case core.ThreadTaskWork():
                 _exit_for_defect(
                     f'parent sent run {frame.dispatch} of a shared thread child '
                     'to a shared async child',
@@ -730,7 +718,7 @@ class SeatLoop:
             LeftoverCancelFrame(
                 dispatch=dispatch,
                 task_id=seat.frame.task_id,
-                returned=_returned_end(seat),
+                returned=_returned_result(seat),
             ),
         )
         self._cancel_round(dispatch, 0)
@@ -803,7 +791,7 @@ class SeatLoop:
                         tasks=len(tasks),
                         executor_items=alive.executor_items,
                         names=bounded_names,
-                        returned=_returned_end(seat),
+                        returned=_returned_result(seat),
                     ),
                 )
             case (
@@ -918,7 +906,7 @@ class SeatLoop:
         match end, _marker_window(seat, self._loop.time()):
             case _, NoMarker():
                 self._send_end(dispatch, seat, end)
-            case SeatFinished() as finished, (
+            case ResultEnvelope() | StoppedBeforeRunning() as finished, (
                 MarkerBeforeDeadline()
                 | MarkerWithoutDeadline() as window
             ):
@@ -983,7 +971,7 @@ class SeatLoop:
 async def _next_frame(
     inbox: ParentFrameInbox,
     arrived: asyncio.Event,
-) -> SharedRunFrame | StopFrame | RunFrame:
+) -> core.SharedRunFrame | core.StopFrame | core.RunFrame:
     """The next frame of the inbox. Waits on ``arrived``, which each later
     ``put`` sets, so no frame is missed between the check and the wait."""
     while True:
@@ -993,22 +981,22 @@ async def _next_frame(
                 match inbox.take():
                     case NoFrameYet():
                         await arrived.wait()
-                    case SharedRunFrame() | StopFrame() | RunFrame() as frame:
+                    case core.SharedRunFrame() | core.StopFrame() | core.RunFrame() as frame:
                         return frame
                     case _ as unreachable:
                         assert_never(unreachable)
-            case SharedRunFrame() | StopFrame() | RunFrame() as frame:
+            case core.SharedRunFrame() | core.StopFrame() | core.RunFrame() as frame:
                 return frame
             case _ as unreachable:
                 assert_never(unreachable)
 
 
-def _grace_s(frame: SharedRunFrame) -> float:
+def _grace_s(frame: core.SharedRunFrame) -> float:
     """The cancel grace of a run with a deadline, in seconds."""
     match frame.work:
-        case SeatTask(cancel_grace_ms=cancel_grace_ms):
+        case core.AsyncTaskWork(cancel_grace_ms=cancel_grace_ms):
             return cancel_grace_ms / 1000.0
-        case SeatRefusal() | ThreadSeatTask():
+        case core.StoredOptionsRefused() | core.ThreadTaskWork():
             raise AssertionError(
                 f'run {frame.dispatch} has no cancel grace on a shared async child',
             )
@@ -1064,15 +1052,29 @@ def _seat_return(seat: _Seat) -> SeatReturn:
     return seat.task.result()
 
 
-def _returned_end(seat: _Seat) -> SeatFinished:
-    """The end of a run with what its coroutine returned (``_seat_return``)."""
+def _returned_end(seat: _Seat) -> RunEnd:
+    """The end of a run with what its coroutine returned (``_seat_return``):
+    its result envelope, or its stop before its start."""
     match _seat_return(seat):
-        case SetRunning(wire=wire) | StoppedBeforeRunning(wire=wire):
-            ok, result_json, failed_reason = wire
-            return SeatFinished(
-                ok=ok,
-                result_json=result_json,
-                failed_reason=failed_reason,
+        case SetRunning(result=result):
+            return result
+        case StoppedBeforeRunning() as stopped:
+            return stopped
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _returned_result(seat: _Seat) -> ResultEnvelope:
+    """The result envelope of a run whose body returned and left work. A run
+    that stopped before its start ran no task code and left no work, so a
+    stop here is a defect: ``AssertionError``."""
+    match _returned_end(seat):
+        case ResultEnvelope() as result:
+            return result
+        case StoppedBeforeRunning() as stopped:
+            raise AssertionError(
+                f'run {seat.frame.dispatch} stopped before running ({stopped.reason}) '
+                'and left work',
             )
         case _ as unreachable:
             assert_never(unreachable)
@@ -1147,7 +1149,7 @@ def _left_work(alive: AliveWork) -> _LeftWork:
     )
 
 
-def _log_left_work(frame: SharedRunFrame, left: _LeftWork, end: _LeftWorkEnd) -> None:
+def _log_left_work(frame: core.SharedRunFrame, left: _LeftWork, end: _LeftWorkEnd) -> None:
     """One log line for a run that returned before its deadline and left
     work: the task, the run, that work, and how it ended."""
     match end:
@@ -1191,9 +1193,9 @@ def _wake_from_thread(loop: asyncio.AbstractEventLoop, arrived: asyncio.Event) -
 
 async def _live(
     sock: socket.socket,
-    init: InitFrame,
+    init: core.InitFrame,
     work: ParentFrameInbox,
-    kind: SharedAsyncChild,
+    kind: core.SharedAsyncChildKind,
     program: SeatProgram,
     writer: FrameWriter,
 ) -> None:
@@ -1204,7 +1206,7 @@ async def _live(
     child."""
     seat_loop = SeatLoop(kind.seats, kind.executor_threads, writer, _read_rss)
     seat_loop.install_marks()
-    match await program.start(init, kind.pool):
+    match await program.start(init, pool_of(kind)):
         case Ok(started):
             pass
         case Err(failed):
@@ -1225,10 +1227,10 @@ async def _live(
 
 def serve_shared(
     sock: socket.socket,
-    init: InitFrame,
+    init: core.InitFrame,
     work: ParentFrameInbox,
     task_loop: TaskLoop,
-    kind: SharedAsyncChild,
+    kind: core.SharedAsyncChildKind,
     program: SeatProgram,
 ) -> NoReturn:
     """Run a shared async child from its start steps to its exit.

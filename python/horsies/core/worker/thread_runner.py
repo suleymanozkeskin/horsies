@@ -2,7 +2,8 @@
 
 A shared thread child boots as an isolated child does (``child_main.boot_app``):
 the app import, the ``on_child_process_start`` hooks, and the sync connection
-pool of the child, with the bounds of ``SharedThreadChildren.pool``.
+pool of the finalizing marker, with the bounds of ``SharedThreadChildren.pool``
+(the pool of the child kind in the init frame).
 Every seat thread writes through that pool, and waits for a connection at
 most ``CHILD_POOL_CONNECTION_WAIT_S``. ``run_thread_seat_task`` runs one task
 on the calling seat thread: the RUNNING transition and the task body, with
@@ -17,16 +18,11 @@ from __future__ import annotations
 from collections.abc import Callable, Coroutine
 from typing import Any, Final, assert_never
 
+from horsies import _core as core
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.worker.child_protocol import (
-    SeatRefusal,
-    SeatTask,
-    SharedRunFrame,
-    ThreadSeatTask,
-    ThreadSeatWork,
-    WireResult,
-)
+from horsies.core.worker.child_frames import ThreadSeatWork, stored_refusal_of
+from horsies.core.worker.run_return import ResultEnvelope
 from horsies.core.worker.shared_child import (
     MarkerBeforeDeadline,
     MarkerWindow,
@@ -62,7 +58,7 @@ class PostgresThreadSeats:
 
     def run(
         self,
-        frame: SharedRunFrame,
+        frame: core.SharedRunFrame,
         work: ThreadSeatWork,
         start_check: Callable[[], StartCheck],
     ) -> ThreadSeatReturn:
@@ -70,7 +66,7 @@ class PostgresThreadSeats:
         ``run_thread_seat_task``."""
         return run_thread_seat_task(frame, work, start_check)
 
-    def mark_finalizing(self, frame: SharedRunFrame, window: MarkerWindow) -> None:
+    def mark_finalizing(self, frame: core.SharedRunFrame, window: MarkerWindow) -> None:
         """Write the finalizing marker of the run of ``frame``; see
         ``mark_thread_seat_finalizing``."""
         mark_thread_seat_finalizing(frame, window)
@@ -126,20 +122,20 @@ def _statements_of(work: ThreadSeatWork) -> StatementsLimit:
     never meets a database that does not answer; a task keeps the wait of its
     deadline backstop."""
     match work:
-        case SeatRefusal():
+        case core.StoredOptionsRefused():
             return StatementsBound(REFUSAL_STATEMENTS_TIMEOUT_S)
-        case ThreadSeatTask():
+        case core.ThreadTaskWork():
             return StatementsUnbounded()
         case _ as unreachable:
             assert_never(unreachable)
 
 
 def run_thread_seat_task(
-    frame: SharedRunFrame,
+    frame: core.SharedRunFrame,
     work: ThreadSeatWork,
     start_check: Callable[[], StartCheck],
 ) -> ThreadSeatReturn:
-    """Run one task on the calling seat thread, up to its wire tuple.
+    """Run one task on the calling seat thread, up to its result.
 
     The steps and outcomes of ``child_runner._run_task_entry`` but the
     finalizing marker: the RUNNING transition with the first runner
@@ -149,9 +145,9 @@ def run_thread_seat_task(
     connection. A deadline that passed first returns ``DeadlineBeforeStart``,
     and the task does not start; its row stays CLAIMED. A stop before the
     RUNNING update commits returns ``StoppedBeforeRunning``; every other end
-    returns ``SetRunning``. A ``SeatRefusal`` returns
-    ``WORKER_SERIALIZATION_ERROR`` after the RUNNING transition, before it
-    resolves the task. An ``async def`` task cannot run on a thread seat:
+    returns ``SetRunning``. Refused stored options
+    (``core.StoredOptionsRefused``) return ``WORKER_SERIALIZATION_ERROR``
+    after the RUNNING transition, before the task is resolved. An ``async def`` task cannot run on a thread seat:
     ``WORKER_RESOLUTION_ERROR``. An exception of the body becomes
     ``TASK_EXCEPTION``. A deadline does not stop the body: the run table
     fixes the end at the return. The seat writes the marker after the
@@ -159,9 +155,8 @@ def run_thread_seat_task(
     """
     logger.info(f'Starting task execution: {frame.task_name} ({frame.task_id})')
     ownership_result = _confirm_until_not_resumed(
-        frame.task_id,
+        str(frame.task_id),
         frame.worker_id,
-        frame.is_workflow_task,
         frame.claimed_at,
         orphan_self_heal=frame.orphan_self_heal,
         start_check=start_check,
@@ -169,8 +164,8 @@ def run_thread_seat_task(
     match ownership_result:
         case None:
             return SetRunning(_run_after_running(frame, work))
-        case tuple():
-            return StoppedBeforeRunning(ownership_result)
+        case StoppedBeforeRunning():
+            return ownership_result
         case DeadlineBeforeStart():
             logger.info(
                 'Task %s (%s) did not start: its deadline fired while it waited '
@@ -183,27 +178,24 @@ def run_thread_seat_task(
             assert_never(unreachable)
 
 
-def _run_after_running(frame: SharedRunFrame, work: ThreadSeatWork) -> WireResult:
+def _run_after_running(frame: core.SharedRunFrame, work: ThreadSeatWork) -> ResultEnvelope:
     """The steps of a run after its RUNNING update, as in
     ``_run_task_entry``. Any exception becomes ``TASK_EXCEPTION``."""
     try:
         match work:
-            case SeatRefusal(refusal=refusal):
-                return _stored_timeout_refusal_response(frame.task_name, refusal)
-            case ThreadSeatTask():
+            case core.StoredOptionsRefused() as refused:
+                return _stored_timeout_refusal_response(
+                    frame.task_name, stored_refusal_of(refused),
+                )
+            case core.ThreadTaskWork():
                 pass
             case _ as unreachable:
                 assert_never(unreachable)
-        prepared = _prepare_task_call(
-            frame.task_name,
-            frame.args_json,
-            frame.kwargs_json,
-            OnSharedThreadSeat(),
-        )
+        prepared = _prepare_task_call(frame.task_name, frame.input, OnSharedThreadSeat())
         match prepared:
             case _PreparedCall(task=task, args=args, kwargs=kwargs):
                 pass
-            case tuple():
+            case ResultEnvelope():
                 return prepared
         out = _thread_call_result(frame.task_name, task(*args, **kwargs))
         logger.info(f'Task execution completed: {frame.task_name} ({frame.task_id})')
@@ -212,14 +204,14 @@ def _run_after_running(frame: SharedRunFrame, work: ThreadSeatWork) -> WireResul
         return _task_exception_response(frame.task_name, e)
 
 
-def _refusal_or_task_statements(frame: SharedRunFrame) -> StatementsLimit:
+def _refusal_or_task_statements(frame: core.SharedRunFrame) -> StatementsLimit:
     """The bound of the statements of the writes of the run of ``frame``,
     as ``_statements_of``. A frame of a shared async run on a thread seat is
     a defect: ``AssertionError``."""
     match frame.work:
-        case SeatRefusal() | ThreadSeatTask() as work:
+        case core.StoredOptionsRefused() | core.ThreadTaskWork() as work:
             return _statements_of(work)
-        case SeatTask():
+        case core.AsyncTaskWork():
             raise AssertionError(
                 f'run {frame.dispatch} of a shared async child reached a thread seat',
             )
@@ -227,7 +219,7 @@ def _refusal_or_task_statements(frame: SharedRunFrame) -> StatementsLimit:
             assert_never(unreachable)
 
 
-def mark_thread_seat_finalizing(frame: SharedRunFrame, window: MarkerWindow) -> None:
+def mark_thread_seat_finalizing(frame: core.SharedRunFrame, window: MarkerWindow) -> None:
     """Write the finalizing marker of a run whose task returned, within
     ``window``, on the sync pool of the child.
 
@@ -242,14 +234,14 @@ def mark_thread_seat_finalizing(frame: SharedRunFrame, window: MarkerWindow) -> 
     match window:
         case MarkerWithoutDeadline():
             _mark_task_finalizing(
-                frame.task_id,
+                str(frame.task_id),
                 frame.worker_id,
                 frame.claimed_at,
                 statements=_refusal_or_task_statements(frame),
             )
         case MarkerBeforeDeadline(seconds=seconds):
             _mark_task_finalizing(
-                frame.task_id,
+                str(frame.task_id),
                 frame.worker_id,
                 frame.claimed_at,
                 connection_wait_s=seconds,

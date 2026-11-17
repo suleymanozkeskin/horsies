@@ -13,12 +13,8 @@ import queue
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeAlias
 
-from horsies.core.worker.child_protocol import RunFrame, SharedRunFrame, StopFrame
-
-WorkFrame: TypeAlias = RunFrame | SharedRunFrame | StopFrame
-"""The frames that the control thread hands to the main thread."""
+from horsies.core.worker.child_frames import WorkFrame
 
 
 @dataclass(frozen=True, slots=True)

@@ -41,7 +41,6 @@ from horsies.core.worker.child_pool import (
     SHARED_POOL_CONNECTION_WAIT_S,
     _get_child_core_handle,
 )
-from horsies.core.worker.child_protocol import WireResult
 from horsies.core.worker.child_runner import (
     MARK_FINALIZING_SQL,
     _PRE_START_CONFIRM_ATTEMPTS,
@@ -55,6 +54,7 @@ from horsies.core.worker.child_runner import (
     read_finalizing_mark,
     stopped_before_start_of,
 )
+from horsies.core.worker.run_return import StoppedBeforeRunning
 
 logger = get_logger('worker')
 
@@ -102,7 +102,7 @@ async def _after_missed_start(
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
-) -> WireResult | _WorkflowResumedBeforeStart:
+) -> StoppedBeforeRunning | _WorkflowResumedBeforeStart:
     """The path of a start that missed, by its reason. Same contract as the
     sync function of this name in ``child_runner``."""
     match reason:
@@ -140,11 +140,10 @@ async def _after_missed_start(
 async def _confirm_ownership_and_set_running(
     task_id: str,
     worker_id: str,
-    is_workflow_task: bool,
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
-) -> WireResult | None | _WorkflowResumedBeforeStart:
+) -> StoppedBeforeRunning | None | _WorkflowResumedBeforeStart:
     """Set the row RUNNING with its first runner heartbeat. None: started.
 
     Same contract as the sync function of this name in ``child_runner``. A
@@ -162,7 +161,6 @@ async def _confirm_ownership_and_set_running(
                 _get_child_core_handle(),
                 task_id,
                 worker_id,
-                is_workflow_task,
                 claimed_at,
                 orphan_self_heal=orphan_self_heal,
             )
@@ -173,7 +171,7 @@ async def _confirm_ownership_and_set_running(
             task_id,
             RUNNING_ATTEMPT_TIMEOUT_S,
         )
-        return (False, '', 'OWNERSHIP_UNCONFIRMED')
+        return StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
     except (CoreError, CoreOperationFailed) as exc:
         return _start_unconfirmed(task_id, exc)
 
@@ -182,14 +180,13 @@ async def _set_running(
     handle: CoreChildHandle,
     task_id: str,
     worker_id: str,
-    is_workflow_task: bool,
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
-) -> WireResult | None | _WorkflowResumedBeforeStart:
+) -> StoppedBeforeRunning | None | _WorkflowResumedBeforeStart:
     """One attempt of ``_confirm_ownership_and_set_running``, unbounded: one
     ``horsies_start_attempt`` statement through ``handle``, then the miss
-    path. ``is_workflow_task`` is not sent: the function reads it from the
+    path. The function reads whether the task is a workflow task from the
     locked row. A shared async seat starts the deadline of its task after
     the start, so the start has no deadline.
 
@@ -231,28 +228,27 @@ async def _set_running(
 async def confirm_until_not_resumed(
     task_id: str,
     worker_id: str,
-    is_workflow_task: bool,
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
-) -> WireResult | None:
+) -> StoppedBeforeRunning | None:
     """Run the RUNNING transition, again when a resume came before the stop.
 
-    None: the task starts. A wire tuple: the task stops before user code.
+    None: the task starts. ``StoppedBeforeRunning``: the task stops before
+    user code.
     Same contract as ``_confirm_until_not_resumed`` in ``child_runner``.
     """
     for _ in range(_PRE_START_CONFIRM_ATTEMPTS):
         result = await _confirm_ownership_and_set_running(
             task_id,
             worker_id,
-            is_workflow_task,
             claimed_at,
             orphan_self_heal=orphan_self_heal,
         )
         match result:
             case _WorkflowResumedBeforeStart():
                 continue
-            case None | tuple():
+            case None | StoppedBeforeRunning():
                 return result
             case _ as unreachable:
                 assert_never(unreachable)
@@ -261,7 +257,7 @@ async def confirm_until_not_resumed(
         f'{_PRE_START_CONFIRM_ATTEMPTS} start attempts; the worker releases '
         f'the claim'
     )
-    return (False, '', 'OWNERSHIP_UNCONFIRMED')
+    return StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
 
 
 async def mark_task_finalizing(

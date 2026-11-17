@@ -49,6 +49,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import threading
+import uuid
 import weakref
 from collections.abc import Callable, Coroutine
 from contextvars import ContextVar
@@ -66,7 +67,7 @@ class RunMark:
     unique in a child, so the mark names one run."""
 
     dispatch: int
-    task_id: str
+    task_id: uuid.UUID
 
 
 @dataclass(frozen=True, slots=True)

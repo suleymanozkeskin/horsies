@@ -27,13 +27,24 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Final, NoReturn, assert_never
 
+from horsies import _core as core
 from horsies._core import core_state
 from horsies.core.logging import configure_logging, get_logger
+from horsies.core.worker.child_frames import (
+    PROTOCOL_NUMBERS,
+    ChildForkedFrame,
+    ForkFailedFrame,
+    PreloadFrame,
+    PreloadReadyFrame,
+    PreloadRefusedFrame,
+    encode_preload_frame,
+)
 from horsies.core.worker.child_main import (
     BAD_ARGUMENTS_EXIT_CODE,
     BAD_PARENT_FRAME_EXIT_CODE,
     PARENT_GONE_EXIT_CODE,
     BootFn,
+    ParentFrameReader,
     TaskRunners,
     bind_to_parent,
     boot_app,
@@ -41,30 +52,25 @@ from horsies.core.worker.child_main import (
     flush_output,
     ignore_stop_signals,
     production_runners,
+    python_program_of,
     read_init_frame,
     restore_parent_state,
     serve,
 )
-from horsies.core.worker.child_protocol import (
-    ChildForkedFrame,
-    ForkFailedFrame,
-    InitFrame,
-    PreloadFrame,
-    PreloadReadyFrame,
-    PreloadRefusedFrame,
-    encode_preload_frame,
-)
 from horsies.core.worker.config import ChildPreload
-from horsies.core.worker.preload_protocol import SPAWN_REQUEST
 
 logger = get_logger('worker')
 
 # A forked child runs ``child_main.serve`` after the reparent, so this code
-# must differ from every exit code of ``child_main``.
-REPARENT_FAILED_EXIT_CODE: Final = 76
+# differs from every exit code of ``child_main``.
+REPARENT_FAILED_EXIT_CODE: Final = PROTOCOL_NUMBERS.reparent_failed_exit_code
 REPARENT_TIMEOUT_S: Final = 5.0
 REPARENT_POLL_S: Final = 0.0002
 MAX_REFUSAL_CHARS: Final = 4096
+"""The longest reason of a refused preload (the core cuts the same); the
+text is made valid UTF-8 first (``bounded_text``)."""
+SPAWN_REQUEST: Final = bytes([PROTOCOL_NUMBERS.spawn_request_byte])
+"""The one byte of a spawn request, sent with the socket of the child."""
 # Importing these gives a child the library code that it would otherwise load
 # after its start. Task code stays out, so module state stays per child.
 LIBRARY_MODULES: Final[tuple[str, ...]] = (
@@ -75,13 +81,13 @@ LIBRARY_MODULES: Final[tuple[str, ...]] = (
     'horsies.core.worker.shared_runner',
 )
 
-PrepareFn = Callable[[InitFrame], BootFn]
+PrepareFn = Callable[[core.InitFrame], BootFn]
 
 
 def _send_frame(ctrl: socket.socket, frame: PreloadFrame) -> None:
     """Write one frame. A failed write means the worker is gone."""
     try:
-        ctrl.sendall(encode_preload_frame(frame).head)
+        ctrl.sendall(encode_preload_frame(frame))
     except OSError:
         os._exit(PARENT_GONE_EXIT_CODE)
 
@@ -92,7 +98,7 @@ def _refuse(ctrl: socket.socket, reason: str) -> NoReturn:
     os._exit(1)
 
 
-def _prepare_library(init: InitFrame) -> BootFn:
+def _prepare_library(init: core.InitFrame) -> BootFn:
     """Import the library only. Each child still imports the app itself."""
     restore_parent_state(init)
     for module in LIBRARY_MODULES:
@@ -100,7 +106,7 @@ def _prepare_library(init: InitFrame) -> BootFn:
     return boot_app
 
 
-def _prepare_app(init: InitFrame) -> BootFn:
+def _prepare_app(init: core.InitFrame) -> BootFn:
     """Import the library and the app. Children then share module state.
 
     A child still runs the normal boot: the import cache makes that step
@@ -108,14 +114,15 @@ def _prepare_app(init: InitFrame) -> BootFn:
     sets the task-send pool of its own kind. A broker that an import built
     here, with the task-send pool of ``init``, is discarded in each child.
     """
-    from horsies.core.worker.child_runner import import_app_for_child
+    from horsies.core.worker.child_runner import import_app_for_child, log_level_of
 
     boot = _prepare_library(init)
-    import_app_for_child(
-        init.app_locator,
-        list(init.imports),
-        list(init.sys_path_roots),
-        init.loglevel,
+    program = python_program_of(init)
+    _ = import_app_for_child(
+        program.app_locator,
+        program.imports,
+        program.sys_path_roots,
+        log_level_of(init.log_level),
         init.child_kind.task_send_pool,
     )
     return boot
@@ -241,13 +248,13 @@ def _fork_child(
     try:
         read_end, write_end = os.pipe()
     except OSError as exc:
-        return ForkFailedFrame(f'{type(exc).__name__}: {exc}')
+        return ForkFailedFrame(bounded_text(f'{type(exc).__name__}: {exc}', MAX_REFUSAL_CHARS))
     try:
         middle = os.fork()
     except OSError as exc:
         os.close(read_end)
         os.close(write_end)
-        return ForkFailedFrame(f'{type(exc).__name__}: {exc}')
+        return ForkFailedFrame(bounded_text(f'{type(exc).__name__}: {exc}', MAX_REFUSAL_CHARS))
     if middle == 0:
         os.close(read_end)
         _run_middle(ctrl, child_fd, write_end, worker_pid, boot, runners)
@@ -294,10 +301,14 @@ def run(
     from, becomes a refused frame and exit 1. The worker decides what that
     means for this mode.
     """
+    from horsies.core.worker.child_runner import log_level_of
+
     ignore_stop_signals()
     bind_to_parent(worker_pid)
-    init = read_init_frame(ctrl)
-    configure_logging(init.loglevel)
+    # Nothing follows the init frame on this socket before the ready frame,
+    # so the reader holds no byte of a spawn request.
+    init = read_init_frame(ctrl, ParentFrameReader(ctrl))
+    configure_logging(log_level_of(init.log_level))
     try:
         boot = prepare(init)
     except (Exception, SystemExit) as exc:

@@ -1,6 +1,9 @@
 """Child program: ``python -m horsies.core.worker.child_main <fd> <parent pid>``.
 
-The init frame names the kind of the child. An isolated child has two
+The child speaks the core frame codec at version 2 (``horsies._core``,
+``child_frames``). The init frame names the protocol version first: a frame
+of another version ends the child with ``PROTOCOL_MISMATCH_EXIT_CODE``, after
+a log line with both numbers. The init frame names the kind of the child. An isolated child has two
 threads. The control thread owns socket reads, so EOF means the parent is
 gone, whatever the main thread is doing. The main thread boots the app, runs
 tasks one at a time, and writes results. An ``async def`` task runs on the
@@ -22,6 +25,7 @@ and a run that continues could overlap a retry of the same task.
 from __future__ import annotations
 
 import atexit
+import collections
 import ctypes
 import gc
 import logging
@@ -38,6 +42,7 @@ from enum import Enum
 from types import ModuleType
 from typing import TYPE_CHECKING, Final, NoReturn, assert_never
 
+from horsies import _core as core
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.logging import get_logger
 from horsies.core.models.boot_failure import (
@@ -50,16 +55,12 @@ from horsies.core.models.boot_failure import (
 )
 from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.worker.child_protocol import (
-    FRAME_HEADER,
+from horsies.core.worker.child_frames import (
     MAX_BODY_BYTES,
+    PROTOCOL_NUMBERS,
     BodyReturnedFrame,
     BootFailedFrame,
     ChildFrame,
-    FrameOverBound,
-    FrameSizes,
-    InitFrame,
-    IsolatedChild,
     LeftWorkEnd,
     LeftWorkEndedFrame,
     LeftWorkStuckFrame,
@@ -72,35 +73,16 @@ from horsies.core.worker.child_protocol import (
     RssMb,
     RssReading,
     RssUnreadable,
-    RunFrame,
-    SeatFinished,
-    SharedAsyncChild,
-    SharedRunFrame,
-    SharedThreadChild,
-    StopFrame,
-    WireResult,
+    RunEnd,
     boot_failed_frame,
-    decode_parent_frame,
     encode_child_frame,
-    parse_header,
 )
 from horsies.core.worker.child_inbox import ParentFrameInbox
-from horsies.core.worker.frame_parser import (
-    FRAME_READ_BUFFER_BYTES,
-    MoveAndGrow,
-    MoveToFront,
-    NeedBytes,
-    ReadBodyDirectly,
-    ReadFromFront,
-    ReadIntoTail,
-    WholeFrame,
-    next_step,
-    plan_read,
-)
 from horsies.core.worker.run_return import (
     IsolatedMarkerWindow,
     MarkerAfterLeftWork,
     MarkerAtReturn,
+    ResultEnvelope,
     RunReturn,
     SetRunning,
     StoppedBeforeRunning,
@@ -123,34 +105,36 @@ if TYPE_CHECKING:
 
 logger = get_logger('worker')
 
-PARENT_GONE_EXIT_CODE: Final = 71
-BAD_PARENT_FRAME_EXIT_CODE: Final = 72
-BAD_ARGUMENTS_EXIT_CODE: Final = 73
+PARENT_GONE_EXIT_CODE: Final = PROTOCOL_NUMBERS.parent_gone_exit_code
+BAD_PARENT_FRAME_EXIT_CODE: Final = PROTOCOL_NUMBERS.bad_parent_frame_exit_code
+BAD_ARGUMENTS_EXIT_CODE: Final = PROTOCOL_NUMBERS.bad_arguments_exit_code
 # After a stop frame, when threads of the task loop's executor still run:
 # the child leaves without waiting for them, so ``atexit`` handlers do not run.
-STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE: Final = 74
+STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE: Final = (
+    PROTOCOL_NUMBERS.stopped_with_executor_threads_exit_code
+)
 # At boot, after ``BootFailedFrame``: the frame names the cause.
-BOOT_FAILED_EXIT_CODE: Final = 75
+BOOT_FAILED_EXIT_CODE: Final = PROTOCOL_NUMBERS.boot_failed_exit_code
+# The init frame names another protocol version: the child and the worker
+# come from different builds.
+PROTOCOL_MISMATCH_EXIT_CODE: Final = PROTOCOL_NUMBERS.protocol_mismatch_exit_code
+CHILD_DEFECT_EXIT_CODE: Final = 1
+"""A defect inside the child, as when a task escapes the task runner."""
 INIT_FRAME_TIMEOUT_S: Final = 30.0
-JOINED_CHILD_WRITE_BODY_BYTES: Final = 1 << 16
-"""A child frame with a body up to this size goes to the socket in one write:
-header, metadata and body joined. A larger body goes in a write of its own, so
-it is not copied."""
-# Metadata holds this text as JSON, and one character takes at most 12 bytes
-# there, so the reason stays well under ``MAX_META_BYTES``.
-MAX_FAILED_REASON_CHARS: Final = 64 * 1024
+READ_CHUNK_BYTES: Final = 1 << 16
+"""The most bytes that one read of the parent socket takes."""
 
 _PR_SET_PDEATHSIG: Final = 1
 
 # A boot step returns whether the booted app has an ``async def`` task, or the
 # frame that reports why it failed.
-BootFn = Callable[[InitFrame], Result[AsyncTaskPresence, BootFailedFrame]]
-# Runs one task of an isolated child, up to its wire tuple, and writes no
+BootFn = Callable[[core.InitFrame], Result[AsyncTaskPresence, BootFailedFrame]]
+# Runs one task of an isolated child, up to its result, and writes no
 # finalizing marker.
-RunTaskFn = Callable[[RunFrame, InitFrame, TaskLoop], RunReturn]
+RunTaskFn = Callable[[core.RunFrame, core.InitFrame, TaskLoop], RunReturn]
 # Writes the finalizing marker of an isolated run that set its row RUNNING
 # and has ended. Logs a failed write; nothing escapes.
-MarkFinalizingFn = Callable[[RunFrame, IsolatedMarkerWindow], None]
+MarkFinalizingFn = Callable[[core.RunFrame, IsolatedMarkerWindow], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,74 +150,41 @@ class TaskRunners:
     threads: ThreadSeatProgram
 
 
-def _recv_exact(sock: socket.socket, count: int) -> bytes:
-    """Read exactly ``count`` bytes. Raises ``EOFError`` when the peer is gone."""
-    data = bytearray(count)
-    view = memoryview(data)
-    filled = 0
-    while filled < count:
-        got = sock.recv_into(view[filled:])
-        if got == 0:
-            raise EOFError
-        filled += got
-    return bytes(data)
-
-
-def _exit_over_bound(over: FrameOverBound) -> NoReturn:
-    """A parent frame header over the bounds is a defect of the parent: exit
-    loud."""
-    logger.critical('Parent sent a frame over the bounds: %s', over)
+def _exit_bad_parent_frame(message: str) -> NoReturn:
+    """A bad frame from the parent is a defect of the parent: exit loud."""
+    logger.critical(message)
+    flush_output()
     os._exit(BAD_PARENT_FRAME_EXIT_CODE)
 
 
-def _sizes_or_exit(header: bytes) -> FrameSizes:
-    """The sizes of a parent frame header. A header over the bounds is a
-    defect of the parent: exit loud."""
-    match parse_header(header):
-        case Ok(sizes):
-            return sizes
-        case Err(FrameOverBound() as over):
-            _exit_over_bound(over)
-
-
-def _parent_frame_or_exit(meta: bytes, body: bytes) -> ParentFrame:
-    """Decode a parent frame. A bad frame from the parent is a defect: exit
-    loud."""
-    match decode_parent_frame(meta, body):
-        case Ok(frame):
-            return frame
-        case Err(malformed):
-            logger.critical('Parent sent a bad frame: %s', malformed.reason)
-            os._exit(BAD_PARENT_FRAME_EXIT_CODE)
-
-
-def _recv_parent_frame(sock: socket.socket) -> ParentFrame:
-    """Read exactly one frame, and no byte after it. A bad frame from the
-    parent is a defect: exit loud."""
-    sizes = _sizes_or_exit(_recv_exact(sock, FRAME_HEADER.size))
-    meta = _recv_exact(sock, sizes.meta_bytes)
-    body = _recv_exact(sock, sizes.body_bytes)
-    return _parent_frame_or_exit(meta, body)
+def _exit_protocol_mismatch(mismatch: core.ParentProtocolMismatch) -> NoReturn:
+    """An init frame of another protocol version: log both numbers and exit
+    with the protocol-mismatch code."""
+    logger.critical(
+        'The worker sent an init frame of protocol %s; this child speaks '
+        'protocol %s. The worker and its children come from different builds',
+        mismatch.received,
+        mismatch.expected,
+    )
+    flush_output()
+    os._exit(PROTOCOL_MISMATCH_EXIT_CODE)
 
 
 class ParentFrameReader:
-    """Reads the parent frames of the control thread from a blocking socket.
+    """Reads the parent frames from a blocking socket, with the read buffer
+    of the core codec (``core.FrameReader``) and its bounds.
 
-    One ``recv_into`` fills the free tail of the read buffer, and
-    ``next_frame`` takes the frames from it in order with
-    ``frame_parser.next_step``: it reads again only when the next frame is not
-    fully at hand. A body larger than ``DIRECT_BODY_BYTES`` is read straight
-    into a buffer of its own. ``frame_parser.plan_read`` keeps the read buffer
-    within ``READ_BUFFER_BOUND``. Not safe to share between threads.
+    One ``recv`` takes at most ``READ_CHUNK_BYTES``; ``next_frame`` reads
+    again only when no whole frame is at hand. The main thread reads the init
+    frame with it, then the control thread reads every later frame with the
+    same reader, so no byte that arrived is lost between them. Not safe to
+    share between threads at the same time.
     """
 
     def __init__(self, sock: socket.socket) -> None:
         self._sock = sock
-        self._buffer = bytearray(FRAME_READ_BUFFER_BYTES)
-        self._start: int = 0
-        """The first byte of the read buffer that no returned frame used."""
-        self._end: int = 0
-        """The end of the bytes that arrived in the read buffer."""
+        self._reader = core.FrameReader()
+        self._ready: collections.deque[ParentFrame] = collections.deque()
 
     def next_frame(self) -> ParentFrame:
         """The next parent frame.
@@ -242,103 +193,69 @@ class ParentFrameReader:
             EOFError: the parent closed the socket.
             OSError: the socket failed.
 
-        A bad frame from the parent ends the process (``_exit_over_bound``,
-        ``_parent_frame_or_exit``).
-
-        The loop runs at most three times: for the header, then for the header
-        and metadata or for the whole frame, then for the frame or its large
-        body.
+        A frame that the core refuses ends the process: a header over the
+        bounds or a malformed frame with the bad-frame code, an init frame of
+        another protocol version with the protocol-mismatch code.
         """
-        while True:
-            match next_step(self._buffer, self._start, self._end):
-                case WholeFrame() as whole:
-                    meta = bytes(self._buffer[whole.meta_at : whole.body_at])
-                    body = bytes(self._buffer[whole.body_at : whole.frame_end])
-                    self._start = whole.frame_end
-                    return _parent_frame_or_exit(meta, body)
-                case NeedBytes() as waiting:
-                    self._fill_to(waiting.wanted)
-                case ReadBodyDirectly() as direct:
-                    meta = bytes(self._buffer[direct.meta_at : direct.body_at])
-                    return _parent_frame_or_exit(meta, self._take_body(direct))
-                case FrameOverBound() as over:
-                    _exit_over_bound(over)
+        while not self._ready:
+            data = self._sock.recv(READ_CHUNK_BYTES)
+            if not data:
+                raise EOFError
+            match self._reader.feed(data):
+                case list() as frames:
+                    self._ready.extend(frames)
+                case core.FrameOverBound(meta_bytes=meta_bytes, body_bytes=body_bytes):
+                    _exit_bad_parent_frame(
+                        f'Parent sent a frame over the bounds: {meta_bytes} metadata '
+                        f'bytes, {body_bytes} body bytes',
+                    )
+                case core.FrameRefused(reason=reason):
+                    _exit_bad_parent_frame(f'Parent sent a bad frame: {reason}')
+                case core.ParentProtocolMismatch() as mismatch:
+                    _exit_protocol_mismatch(mismatch)
                 case _ as unreachable:
                     assert_never(unreachable)
-
-    def _fill_to(self, wanted: int) -> None:
-        """Read until ``wanted`` bytes from ``_start`` have arrived, after the
-        move or the growth that ``plan_read`` names."""
-        match plan_read(len(self._buffer), self._start, self._end, wanted):
-            case ReadIntoTail():
-                pass
-            case ReadFromFront():
-                self._start = self._end = 0
-            case MoveToFront():
-                self._move_to_front()
-            case MoveAndGrow(buffer_bytes=buffer_bytes):
-                self._move_to_front()
-                self._buffer.extend(bytes(buffer_bytes - len(self._buffer)))
-            case _ as unreachable:
-                assert_never(unreachable)
-        view = memoryview(self._buffer)
-        while self._end - self._start < wanted:
-            got = self._sock.recv_into(view[self._end :])
-            if got == 0:
-                raise EOFError
-            self._end += got
-
-    def _move_to_front(self) -> None:
-        """Move the bytes at hand to the front of the read buffer."""
-        pending = self._end - self._start
-        self._buffer[:pending] = self._buffer[self._start : self._end]
-        self._start, self._end = 0, pending
-
-    def _take_body(self, direct: ReadBodyDirectly) -> bytes:
-        """The large body of ``direct``: the part at hand, then the rest read
-        straight into a buffer of the body's size. The read buffer is empty
-        after this: every byte at hand belongs to that body."""
-        body = bytearray(direct.body_bytes)
-        filled = self._end - direct.body_at
-        body[:filled] = self._buffer[direct.body_at : self._end]
-        self._start = self._end = 0
-        view = memoryview(body)
-        while filled < direct.body_bytes:
-            got = self._sock.recv_into(view[filled:])
-            if got == 0:
-                raise EOFError
-            filled += got
-        return bytes(body)
+        return self._ready.popleft()
 
 
 def _send_child_frame(sock: socket.socket, frame: ChildFrame) -> None:
-    """Write one frame: one write up to ``JOINED_CHILD_WRITE_BODY_BYTES`` of
-    body, else the body in a write of its own. A failed write means the
-    parent is gone."""
-    encoded = encode_child_frame(frame)
+    """Write one frame in one write. A failed write means the parent is
+    gone. A frame over a bound of the header is a defect of the child: every
+    body is bounded before (``bounded_end``), and every text is cut by the
+    core."""
+    match encode_child_frame(frame):
+        case bytes() as encoded:
+            pass
+        case core.FrameTooLarge(part=part, bytes=size, bound=bound):
+            logger.critical(
+                'The child built a %s frame whose %s has %s bytes, over the bound '
+                'of %s',
+                type(frame).__name__,
+                part,
+                size,
+                bound,
+            )
+            flush_output()
+            os._exit(CHILD_DEFECT_EXIT_CODE)
+        case _ as unreachable:
+            assert_never(unreachable)
     try:
-        if len(encoded.body) <= JOINED_CHILD_WRITE_BODY_BYTES:
-            sock.sendall(encoded.head + encoded.body)
-        else:
-            sock.sendall(encoded.head)
-            sock.sendall(encoded.body)
+        sock.sendall(encoded)
     except OSError:
         os._exit(PARENT_GONE_EXIT_CODE)
 
 
 def _read_parent_frames(
-    sock: socket.socket,
+    reader: ParentFrameReader,
     work: ParentFrameInbox,
 ) -> None:
     """Control thread body. Ends the process when the parent is gone."""
-    reader = ParentFrameReader(sock)
     try:
         while True:
             match reader.next_frame():
-                case InitFrame():
-                    logger.critical('Parent sent a second init frame')
-                    os._exit(BAD_PARENT_FRAME_EXIT_CODE)
-                case RunFrame() | SharedRunFrame() | StopFrame() as frame:
+                case core.InitFrame():
+                    _exit_bad_parent_frame('Parent sent a second init frame')
+                case core.RunFrame() | core.SharedRunFrame() | core.StopFrame() as frame:
                     work.put(frame)
                 case _ as unreachable:
                     assert_never(unreachable)
@@ -374,20 +291,35 @@ def ignore_stop_signals() -> None:
     signal.signal(signal.SIGTERM, lambda _signum, _frame: None)
 
 
-def read_init_frame(sock: socket.socket) -> InitFrame:
-    """Read the first frame, bounded. Exits when the parent never sends it."""
+def read_init_frame(sock: socket.socket, reader: ParentFrameReader) -> core.InitFrame:
+    """Read the first frame with ``reader``, bounded. Exits when the parent
+    never sends it, when it is another frame, and when it names a program
+    other than the Python child (``python_program_of``)."""
     sock.settimeout(INIT_FRAME_TIMEOUT_S)
     try:
-        frame = _recv_parent_frame(sock)
+        frame = reader.next_frame()
     except (EOFError, OSError):
         os._exit(PARENT_GONE_EXIT_CODE)
     sock.settimeout(None)
     match frame:
-        case InitFrame():
+        case core.InitFrame(program=core.PythonProgram()):
             return frame
-        case RunFrame() | SharedRunFrame() | StopFrame():
-            logger.critical('First parent frame was not an init frame')
-            os._exit(BAD_PARENT_FRAME_EXIT_CODE)
+        case core.InitFrame():
+            _exit_bad_parent_frame('Parent sent the init frame of a Rust child')
+        case core.RunFrame() | core.SharedRunFrame() | core.StopFrame():
+            _exit_bad_parent_frame('First parent frame was not an init frame')
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def python_program_of(init: core.InitFrame) -> core.PythonProgram:
+    """The Python program of an init frame that ``read_init_frame`` took. A
+    Rust program here is a defect: ``AssertionError``."""
+    match init.program:
+        case core.PythonProgram() as program:
+            return program
+        case 'RUST':
+            raise AssertionError('read_init_frame takes only the init frame of a Python child')
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -409,18 +341,13 @@ def bounded_text(text: str, limit: int) -> str:
     return f'{safe[:limit]} [cut from {len(safe)} characters]'
 
 
-def _bounded_result(task_name: str, wire: WireResult) -> WireResult:
-    """Make a wire result safe to frame.
-
-    A result too large to ever be stored becomes a typed failure. A long
-    failure reason is cut: the result beside it stays valid.
-    """
-    ok, result_json, failed_reason = wire
-    size = len(result_json.encode('utf-8'))
+def bounded_envelope(task_name: str, result: ResultEnvelope) -> ResultEnvelope:
+    """Make a result envelope safe to frame: an envelope too large to ever
+    be stored (over ``MAX_BODY_BYTES``) becomes ``WORKER_SERIALIZATION_ERROR``.
+    Logs that case."""
+    size = len(result.text.encode('utf-8'))
     if size <= MAX_BODY_BYTES:
-        if failed_reason is not None:
-            failed_reason = bounded_text(failed_reason, MAX_FAILED_REASON_CHARS)
-        return ok, result_json, failed_reason
+        return result
     message = (
         f'result of task {task_name} is {size} bytes, above the '
         f'{MAX_BODY_BYTES} byte bound'
@@ -433,7 +360,18 @@ def _bounded_result(task_name: str, wire: WireResult) -> WireResult:
             data={'task_name': task_name, 'result_bytes': size},
         ),
     )
-    return True, serialize_error_payload(failure), message
+    return ResultEnvelope(serialize_error_payload(failure))
+
+
+def bounded_end(task_name: str, end: RunEnd) -> RunEnd:
+    """``bounded_envelope`` of a result; a stop passes unchanged."""
+    match end:
+        case ResultEnvelope():
+            return bounded_envelope(task_name, end)
+        case StoppedBeforeRunning():
+            return end
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def flush_output() -> None:
@@ -447,8 +385,8 @@ def flush_output() -> None:
 
 def _run_or_exit(
     run_task: RunTaskFn,
-    frame: RunFrame,
-    init: InitFrame,
+    frame: core.RunFrame,
+    init: core.InitFrame,
     task_loop: TaskLoop,
 ) -> RunReturn:
     """Run one task. Anything that escapes ends this process at once.
@@ -480,7 +418,7 @@ class _AfterRun(Enum):
     cancelled code can leave broken state in the process."""
 
 
-def _refuse_run_on_a_child_to_retire(after_run: _AfterRun, frame: RunFrame) -> None:
+def _refuse_run_on_a_child_to_retire(after_run: _AfterRun, frame: core.RunFrame) -> None:
     """Exit loud when an earlier run of this child left work on its loop.
 
     The child reports that work (``BodyReturnedFrame``), and the parent
@@ -499,7 +437,7 @@ def _refuse_run_on_a_child_to_retire(after_run: _AfterRun, frame: RunFrame) -> N
             os._exit(BAD_PARENT_FRAME_EXIT_CODE)
 
 
-def _end_left_work_or_exit(task_loop: TaskLoop, frame: RunFrame) -> LeftWorkOutcome:
+def _end_left_work_or_exit(task_loop: TaskLoop, frame: core.RunFrame) -> LeftWorkOutcome:
     """Run ``TaskLoop.end_left_work``. Anything that escapes it ends this
     process at once, as for the run itself (``_run_or_exit``).
 
@@ -525,7 +463,7 @@ def _end_left_work_or_exit(task_loop: TaskLoop, frame: RunFrame) -> LeftWorkOutc
 
 def _report_run(
     sock: socket.socket,
-    frame: RunFrame,
+    frame: core.RunFrame,
     returned: RunReturn,
     task_loop: TaskLoop,
     mark_finalizing: MarkFinalizingFn,
@@ -544,43 +482,45 @@ def _report_run(
       the child, and its runner heartbeats cover the row until the exit.
 
     A run that stopped before its RUNNING update (``StoppedBeforeRunning``)
-    writes no marker. The wire tuple is bounded here (``_bounded_result``).
-    A parent that is gone ends the process (``_send_child_frame``).
+    writes no marker and ran no task code, so it left no work. The result
+    envelope is bounded here (``bounded_envelope``). A parent that is gone
+    ends the process (``_send_child_frame``).
     """
     match returned:
-        case SetRunning(wire=wire) | StoppedBeforeRunning(wire=wire):
-            ok, result_json, failed_reason = _bounded_result(frame.task_name, wire)
+        case SetRunning(result=result):
+            end: RunEnd = bounded_envelope(frame.task_name, result)
+        case StoppedBeforeRunning():
+            end = returned
         case _ as unreachable:
             assert_never(unreachable)
-    match task_loop.report():
-        case NoTaskLoop() | LoopHoldsNoTask() as nothing_left:
+    match task_loop.report(), end:
+        case NoTaskLoop() | LoopHoldsNoTask() as nothing_left, _:
             _mark_when_set_running(frame, returned, MarkerAtReturn(), mark_finalizing)
             _send_child_frame(
                 sock,
                 ResultFrame(
                     task_id=frame.task_id,
-                    ok=ok,
-                    result_json=result_json,
-                    failed_reason=failed_reason,
+                    end=end,
                     rss=_read_rss(),
                     task_loop=nothing_left,
                 ),
             )
             return _AfterRun.SERVES
-        case LoopHoldsTasks() as left:
+        case LoopHoldsTasks() as left, ResultEnvelope() as body_result:
             pass
+        case LoopHoldsTasks(), StoppedBeforeRunning():
+            raise AssertionError(
+                f'task {frame.task_id} stopped before running and left work on '
+                'the task loop',
+            )
         case _ as unreachable:
             assert_never(unreachable)
     _send_child_frame(
         sock,
-        BodyReturnedFrame(
-            task_id=frame.task_id,
-            returned=SeatFinished(ok, result_json, failed_reason),
-            left=left,
-        ),
+        BodyReturnedFrame(task_id=frame.task_id, returned=body_result, left=left),
     )
     match _end_left_work_or_exit(task_loop, frame):
-        case LeftWorkEnd() as end:
+        case LeftWorkEnd() as left_end:
             _mark_when_set_running(
                 frame,
                 returned,
@@ -589,7 +529,7 @@ def _report_run(
             )
             _send_child_frame(
                 sock,
-                LeftWorkEndedFrame(task_id=frame.task_id, end=end, rss=_read_rss()),
+                LeftWorkEndedFrame(task_id=frame.task_id, end=left_end, rss=_read_rss()),
             )
         case LeftWorkStuck(still=still):
             _send_child_frame(
@@ -602,7 +542,7 @@ def _report_run(
 
 
 def _mark_when_set_running(
-    frame: RunFrame,
+    frame: core.RunFrame,
     returned: RunReturn,
     window: IsolatedMarkerWindow,
     mark_finalizing: MarkFinalizingFn,
@@ -643,7 +583,7 @@ def boot_failure_from_exception(
 
 
 def start_control_thread(
-    sock: socket.socket,
+    reader: ParentFrameReader,
     work: ParentFrameInbox,
 ) -> Result[None, BootFailedFrame]:
     """Start the thread that reads parent frames into ``work``.
@@ -654,7 +594,7 @@ def start_control_thread(
     """
     control = threading.Thread(
         target=_read_parent_frames,
-        args=(sock, work),
+        args=(reader, work),
         name='horsies-child-control',
         daemon=True,
     )
@@ -711,7 +651,8 @@ def fail_boot(sock: socket.socket, failed: BootFailedFrame) -> NoReturn:
 
 def _boot_or_exit(
     sock: socket.socket,
-    init: InitFrame,
+    reader: ParentFrameReader,
+    init: core.InitFrame,
     boot: BootFn,
     work: ParentFrameInbox,
 ) -> TaskLoop:
@@ -724,7 +665,7 @@ def _boot_or_exit(
     that fails ends the process through ``fail_boot``, with the cause of
     that step.
     """
-    match start_control_thread(sock, work):
+    match start_control_thread(reader, work):
         case Ok():
             pass
         case Err(failed):
@@ -735,11 +676,11 @@ def _boot_or_exit(
         case Err(failed):
             fail_boot(sock, failed)
     match init.child_kind:
-        case IsolatedChild():
+        case core.IsolatedChildKind():
             pass
-        case SharedAsyncChild():
+        case core.SharedAsyncChildKind():
             presence = AsyncTaskPresence.HAS_ASYNC_TASKS
-        case SharedThreadChild():
+        case core.SharedThreadChildKind():
             presence = AsyncTaskPresence.NO_ASYNC_TASK
         case _ as unreachable:
             assert_never(unreachable)
@@ -917,17 +858,18 @@ def serve(
     """
     ignore_stop_signals()
     bind_to_parent(parent_pid)
-    init = read_init_frame(sock)
+    reader = ParentFrameReader(sock)
+    init = read_init_frame(sock, reader)
     work = ParentFrameInbox()
-    task_loop = _boot_or_exit(sock, init, boot, work)
+    task_loop = _boot_or_exit(sock, reader, init, boot, work)
     match init.child_kind:
-        case IsolatedChild():
+        case core.IsolatedChildKind():
             _serve_isolated(sock, init, work, task_loop, runners)
-        case SharedAsyncChild() as kind:
+        case core.SharedAsyncChildKind() as kind:
             from horsies.core.worker.shared_child import serve_shared
 
             serve_shared(sock, init, work, task_loop, kind, runners.seats)
-        case SharedThreadChild(seats=seats):
+        case core.SharedThreadChildKind(seats=seats):
             from horsies.core.worker.thread_child import serve_thread
 
             serve_thread(sock, init, work, task_loop, seats, runners.threads)
@@ -937,7 +879,7 @@ def serve(
 
 def _serve_isolated(
     sock: socket.socket,
-    init: InitFrame,
+    init: core.InitFrame,
     work: ParentFrameInbox,
     task_loop: TaskLoop,
     runners: TaskRunners,
@@ -956,7 +898,7 @@ def _serve_isolated(
     after_run = _AfterRun.SERVES
     while True:
         match work.get():
-            case RunFrame() as frame:
+            case core.RunFrame() as frame:
                 _refuse_run_on_a_child_to_retire(after_run, frame)
                 after_run = _report_run(
                     sock,
@@ -965,31 +907,31 @@ def _serve_isolated(
                     task_loop,
                     runners.mark_finalizing,
                 )
-            case SharedRunFrame():
-                logger.critical('Parent sent a shared run frame to an isolated child')
-                flush_output()
-                os._exit(BAD_PARENT_FRAME_EXIT_CODE)
-            case StopFrame():
+            case core.SharedRunFrame():
+                _exit_bad_parent_frame('Parent sent a shared run frame to an isolated child')
+            case core.StopFrame():
                 exit_after_stop(task_loop.close())
             case _ as unreachable:
                 assert_never(unreachable)
 
 
-def restore_parent_state(init: InitFrame) -> None:
+def restore_parent_state(init: core.InitFrame) -> None:
     """Restore the import state and the names that the worker's process had."""
-    sys.path[:] = list(init.parent_sys_path)
-    sys.argv[:] = list(init.parent_argv)
+    program = python_program_of(init)
+    sys.path[:] = list(program.parent_sys_path)
+    sys.argv[:] = list(program.parent_argv)
     multiprocessing.current_process().name = init.process_name
 
 
-def boot_app(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
+def boot_app(init: core.InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
     """Restore the parent's import state, import the app, then run the
     per-child start steps of the kind of the child.
 
     An isolated child and a shared thread child open their sync connection
-    pool here. A shared async child opens no pool here: it opens an async
-    pool on its event loop, after the ready steps of ``shared_child``. Every
-    kind builds its core handle here (``_initialize_child_core_handle``).
+    pool of the finalizing marker here. A shared async child opens no pool
+    here: it opens an async pool on its event loop, after the ready steps of
+    ``shared_child``. Every kind builds its core handle from ``init`` here
+    (``_initialize_child_core_handle``).
 
     ``Ok``: whether the booted app has an ``async def`` task, which decides
     whether the child creates its task loop.
@@ -1006,30 +948,27 @@ def boot_app(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
         finish_child_start,
         finish_shared_child_start,
         import_app_for_child,
+        log_level_of,
     )
 
     restore_parent_state(init)
+    program = python_program_of(init)
     try:
         app = import_app_for_child(
-            init.app_locator,
-            list(init.imports),
-            list(init.sys_path_roots),
-            init.loglevel,
+            program.app_locator,
+            program.imports,
+            program.sys_path_roots,
+            log_level_of(init.log_level),
             init.child_kind.task_send_pool,
         )
     except Exception as exc:
         return Err(boot_failure_from_exception(exc, AppLoadFailed()))
     try:
         match init.child_kind:
-            case IsolatedChild(pool=pool) | SharedThreadChild(pool=pool):
-                finish_child_start(
-                    app,
-                    init.database_url,
-                    dict(init.connect_kwargs),
-                    pool,
-                )
-            case SharedAsyncChild(pool=pool):
-                finish_shared_child_start(app, pool)
+            case core.IsolatedChildKind() | core.SharedThreadChildKind():
+                finish_child_start(app, init)
+            case core.SharedAsyncChildKind():
+                finish_shared_child_start(app, init)
             case _ as unreachable:
                 assert_never(unreachable)
     except Exception as exc:
@@ -1037,19 +976,21 @@ def boot_app(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
     return Ok(async_task_presence(app))
 
 
-def run_child_task(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> RunReturn:
+def run_child_task(
+    frame: core.RunFrame,
+    init: core.InitFrame,
+    task_loop: TaskLoop,
+) -> RunReturn:
     """Run the task of ``frame`` (``child_runner._run_task_entry``). Writes
     no finalizing marker."""
-    from horsies.core.worker.child_runner import _run_task_entry
+    from horsies.core.worker.child_runner import _run_task_entry, isolated_work_of
 
     return _run_task_entry(
         frame.task_name,
-        frame.args_json,
-        frame.kwargs_json,
-        frame.task_id,
+        frame.input,
+        str(frame.task_id),
         frame.worker_id,
-        frame.is_workflow_task,
-        frame.timeout,
+        isolated_work_of(frame.work),
         claimed_at=frame.claimed_at,
         task_loop=task_loop,
         orphan_self_heal=frame.orphan_self_heal,
@@ -1057,7 +998,7 @@ def run_child_task(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> Run
 
 
 def mark_child_task_finalizing(
-    frame: RunFrame,
+    frame: core.RunFrame,
     window: IsolatedMarkerWindow,
 ) -> None:
     """Write the finalizing marker of the isolated run of ``frame``, which
@@ -1066,7 +1007,7 @@ def mark_child_task_finalizing(
     from horsies.core.worker.child_runner import mark_isolated_run_finalizing
 
     mark_isolated_run_finalizing(
-        frame.task_id,
+        str(frame.task_id),
         frame.worker_id,
         frame.claimed_at,
         window,
