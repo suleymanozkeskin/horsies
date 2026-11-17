@@ -3547,19 +3547,21 @@ $$;
 -- Expires one PAUSED workflow older than the age policy, in one statement in autocommit; the caller reads the
 -- candidates (idx_horsies_workflows_paused_age) and calls this once per workflow. The body of horsies_workflow_cancel
 -- for one workflow, with EXPIRED: lock the workflow row FOR UPDATE; the status write needs PAUSED and updated_at
--- before now() minus p_older_than_ms (a resume that committed first wins); lock the live backing task rows in id
+-- before now() minus p_older_than_us (a resume that committed first wins); lock the live backing task rows in id
 -- order and the live node rows in id order; EXPIRED with p_error and completed_at; the tasks behind ENQUEUED nodes are
 -- moved to history (horsies_cancel_nodes_of_cancelled_workflow, WORKFLOW_CANCEL_WORKFLOW); SKIPPED with completed_at
 -- for PENDING and READY nodes, for the ENQUEUED nodes of the moved tasks, and for ENQUEUED sub-workflow nodes with no
 -- child. No cascade: each paused child expires on its own age. The status trigger sends workflow_done at commit.
--- Arguments: p_older_than_ms >= 0; p_error, the stored error object (WORKFLOW_EXPIRED) built by the core. Refused
--- (22023): a NULL argument, a negative age.
+-- Arguments: p_older_than_us >= 0, the age in microseconds; p_error, the stored error object (WORKFLOW_EXPIRED) built
+-- by the core. Refused (22023): a NULL argument, a negative age.
+-- The age is a time interval with no day field (p_older_than_us * interval '1 microsecond'), so now() minus the age is
+-- exactly that much time before now() in any session time zone, also across a daylight-saving change.
 -- Outcomes: EXPIRED (expired_task_ids); NOT_EXPIRED (observed_status: not PAUSED, or PAUSED for less than the age;
 -- nothing written); NOT_FOUND.
 -- Lock order: workflow row, task rows in id order, node rows in id order.
 -- Python: expire_paused_workflows (core/workflows/lifecycle.py:1408-1540), one transaction per workflow.
 -- Returns one row (outcome, observed_status, expired_task_ids).
-CREATE FUNCTION horsies_workflow_expire_paused(p_workflow_id uuid, p_older_than_ms bigint, p_error text)
+CREATE FUNCTION horsies_workflow_expire_paused(p_workflow_id uuid, p_older_than_us bigint, p_error text)
     RETURNS TABLE (outcome text, observed_status text, expired_task_ids uuid[])
     LANGUAGE plpgsql
     SET plan_cache_mode TO 'force_generic_plan'
@@ -3569,8 +3571,8 @@ DECLARE
     v_moved uuid[];
 BEGIN
     PERFORM horsies_workflow_require(
-        p_workflow_id IS NOT NULL AND p_error IS NOT NULL AND p_older_than_ms >= 0,
-        'the workflow id and error must not be NULL, and the age must be 0 or more milliseconds'
+        p_workflow_id IS NOT NULL AND p_error IS NOT NULL AND p_older_than_us >= 0,
+        'the workflow id and error must not be NULL, and the age must be 0 or more microseconds'
     );
     SELECT w.status, w.updated_at INTO v_workflow FROM horsies_workflows w WHERE w.id = p_workflow_id FOR UPDATE;
     IF NOT FOUND THEN
@@ -3578,7 +3580,7 @@ BEGIN
         RETURN;
     END IF;
     IF v_workflow.status <> 'PAUSED'
-       OR v_workflow.updated_at >= now() - p_older_than_ms * interval '1 millisecond' THEN
+       OR v_workflow.updated_at >= now() - p_older_than_us * interval '1 microsecond' THEN
         RETURN QUERY SELECT 'NOT_EXPIRED'::text, v_workflow.status::text, NULL::uuid[];
         RETURN;
     END IF;

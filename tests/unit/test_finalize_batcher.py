@@ -744,11 +744,11 @@ def test_the_flusher_bound_must_be_positive() -> None:
 @pytest.mark.parametrize(
     ('pool', 'flushers'),
     [
-        (PARENT_POOL_MIN_CONNECTIONS, FINALIZE_BATCH_FLUSHERS),
-        (20, 17),
+        (PARENT_POOL_MIN_CONNECTIONS, 1),
+        (20, 18),
     ],
 )
-def test_the_worker_leaves_the_claim_loop_and_the_reserve_free(
+def test_the_worker_leaves_the_reserve_of_the_core_pool_free(
     pool: int,
     flushers: int,
 ) -> None:
