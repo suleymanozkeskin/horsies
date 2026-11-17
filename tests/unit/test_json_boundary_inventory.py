@@ -13,8 +13,7 @@ and also counts a reference that is passed without a call, such as
 The ``json.dumps`` sites listed here serialize values the library builds, and
 stay outside ``dumps_json`` because that returns a Result each site cannot
 fail on, and runs the strict walker on the claim path. Each one sets
-``allow_nan=False``. ``enqueue_fingerprint`` also stays outside
-``dumps_canonical_json``: see ``tests/unit/test_enqueue_fingerprint.py``.
+``allow_nan=False``.
 
 Known limits:
 
@@ -60,7 +59,6 @@ _FROZEN_DUMPS: Final = Counter(
         ('python/horsies/_catalog/worker_manifest.py', 'dump_worker_manifest'): 1,
         ('python/horsies/_catalog/scheduler_manifest.py', 'dump_scheduler_manifest'): 1,
         ('python/horsies/core/lifecycle/persistence.py', '_fused_batch_parameters'): 1,
-        ('python/horsies/core/utils/fingerprint.py', 'enqueue_fingerprint'): 1,
         ('python/horsies/core/worker/claiming.py', 'ClaimMixin._claim_params'): 6,
         ('python/horsies/core/workflows/recovery.py', 'recover_stuck_workflows'): 1,
         ('python/horsies/core/workflows/recovery.py', '_recover_global_orphan_candidate'): 1,
