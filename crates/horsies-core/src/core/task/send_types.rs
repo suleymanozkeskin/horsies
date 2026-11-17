@@ -322,7 +322,7 @@ pub fn send_error_from_enqueue(
 
 /// Result type for task send/schedule operations.
 ///
-/// `Ok(T)` on success (typically `TaskHandle<T>`),
+/// `Ok(T)` on success (typically a client's task handle),
 /// `Err(TaskSendError)` on failure.
 pub type TaskSendResult<T> = Result<T, TaskSendError>;
 
