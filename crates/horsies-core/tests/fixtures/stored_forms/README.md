@@ -41,7 +41,11 @@ encoder, and the Python tests check that it still does.
     Rust tests still read Python's text back to the value.
 - `refused_values`: values that every encoder refuses.
 - `refused_texts`: texts that every reader refuses. `core_refusal` names the
-  core's `StrictJsonError` variant. In `result_envelope.json`, `refusal` is
+  core's `StrictJsonError` variant. `refusal_text`, for a refusal that
+  Python's reader words itself (a non-standard constant, a number outside
+  finite binary64, a lone surrogate), is Python's text of the refusal; the
+  core's `StrictJsonError` writes the same text, and Python's `loads_json`
+  writes it after `JSON parse failed: `. In `result_envelope.json`, `refusal` is
   `envelope` (the shape is refused) or `ok value` (the decode of the `ok` slot
   is refused; the core's `read_task_result_text` keeps that slot as text, as
   Python's `validate_task_result_envelope` does).

@@ -7,7 +7,7 @@ mod strict_read;
 pub mod user_value;
 pub use strict::{to_json_bytes_strict, to_json_value_strict};
 pub use strict_read::{
-    check_json_bytes, check_json_bytes_with, check_json_text, check_json_text_with,
+    check_json_bytes, check_json_bytes_with, check_json_text, check_json_text_with, JsonConstant,
     StrictJsonError, SyntaxReason, TextRule, MAX_INT_DIGITS, MAX_JSON_DEPTH,
 };
 pub use user_value::{check_user_value, UserValueRefused, MAX_VALUE_JSON_DEPTH};
