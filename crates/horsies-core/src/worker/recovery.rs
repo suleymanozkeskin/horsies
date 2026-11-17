@@ -19,6 +19,7 @@ use crate::broker::stale_recovery::{
 };
 use crate::broker::CoveragePassError;
 use crate::broker::PostgresBroker;
+use crate::core::codec::task_result_to_json_string;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::identity::reservations::{
@@ -29,6 +30,7 @@ use crate::core::history::maintenance::coverage::{
 };
 use crate::core::history::maintenance::pruning::PruneReach;
 use crate::core::lifecycle::StaleAttemptOutcome;
+use crate::core::python_text::python_isoformat_utc;
 use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
 use crate::db::CorePool;
 use crate::log_targets::STALE_RUNNING_PASS;
@@ -1466,11 +1468,11 @@ fn stale_attempt_command(
             "worker_pid": candidate.worker_pid,
             "worker_hostname": candidate.worker_hostname,
             "worker_id": candidate.claimed_by_worker_id,
-            "started_at": candidate.started_at.to_rfc3339(),
-            "detected_at": candidate.db_now.to_rfc3339(),
+            "started_at": python_isoformat_utc(candidate.started_at),
+            "detected_at": python_isoformat_utc(candidate.db_now),
         })),
     };
-    let result_json = serde_json::to_string(&TaskResult::<()>::Err(task_error))?;
+    let result_json = task_result_to_json_string(&TaskResult::<()>::Err(task_error))?;
     Ok(FinishStaleAttempt {
         task_id: candidate.task_id,
         thresholds,

@@ -126,9 +126,11 @@ pub(crate) fn merge_good_until_into_options(
     let mut object = crate::core::history::enqueue::parse_optional_object(task_options_json)
         .map_err(|error| node_options_refused(&task_index, task_name, error))?
         .unwrap_or_default();
+    // Python merges `node.good_until.isoformat()`: 6 fraction digits when
+    // the microsecond is not 0.
     object.insert(
         "good_until".to_owned(),
-        serde_json::Value::String(deadline.to_rfc3339()),
+        serde_json::Value::String(crate::core::python_text::python_isoformat_utc(deadline)),
     );
     let merged = serde_json::to_string(&serde_json::Value::Object(object))
         .expect("an object of values parsed from JSON text serializes");
