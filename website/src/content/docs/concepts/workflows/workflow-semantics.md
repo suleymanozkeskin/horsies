@@ -13,7 +13,7 @@ Workflows in Horsies are Directed Acyclic Graphs (DAGs) where:
 - **Edges** are dependencies between tasks
 - **Execution** proceeds as dependencies are satisfied
 
-The API is on the client pages: [Workflow API](/horsies/concepts/workflows/workflow-api/) and [Workflow Examples](/horsies/concepts/workflows/workflow-examples/) (Python). The Rust workflow pages are not written yet.
+The API is on the client pages: [Workflow API](/horsies/concepts/workflows/workflow-api/) and [Workflow Examples](/horsies/concepts/workflows/workflow-examples/) (Python), and [Workflow API](/horsies/rust/concepts/workflows/workflow-api/) and [Typed Node Builder](/horsies/rust/concepts/workflows/typed-node-builder/) (Rust).
 
 ## Workflow Status Lifecycle
 

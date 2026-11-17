@@ -37,7 +37,7 @@ export default defineConfig({
 		'/rust/workers/concurrency': '/horsies/workers/concurrency/',
 		'/rust/internals/serialization': '/horsies/internals/serialization/',
 		'/rust/scheduling/schedule-patterns': '/horsies/rust/scheduling/schedule-config/',
-		'/rust/monitoring/web-ui-deployment': '/horsies/rust/',
+		'/rust/monitoring/web-ui-deployment': '/horsies/rust/monitoring/web-ui-mount/',
 		'/rust/operations/cutover-runbook': '/horsies/rust/',
 		'/rust/quick-start/getting-started': '/horsies/rust/',
 		'/rust/quick-start/01-configuring-horsies': '/horsies/rust/',
@@ -304,8 +304,8 @@ export default defineConfig({
 							label: 'Monitoring',
 							items: [
 								{ label: 'Health Reads', slug: 'rust/monitoring/health-reads' },
-								{ label: 'Monitoring Queries', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
-								{ label: 'Web UI Mount', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Monitoring Queries', slug: 'rust/monitoring/monitoring-queries' },
+								{ label: 'Web UI Mount', slug: 'rust/monitoring/web-ui-mount' },
 							],
 						},
 						{
