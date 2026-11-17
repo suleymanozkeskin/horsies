@@ -22,7 +22,10 @@ import pytest
 
 from tests.dualrun.operations.broker import BROKER_OPERATIONS
 from tests.dualrun.operations.history import HISTORY_OPERATIONS
-from tests.dualrun.operations.lifecycle import LIFECYCLE_OPERATIONS
+from tests.dualrun.operations.lifecycle import (
+    LIFECYCLE_CORE_ONLY_TESTS,
+    LIFECYCLE_OPERATIONS,
+)
 from tests.dualrun.operations.monitoring_and_web import MONITORING_AND_WEB_OPERATIONS
 from tests.dualrun.operations.workflow_engine import WORKFLOW_ENGINE_OPERATIONS
 from tests.dualrun.operations.rebinding import (
@@ -32,6 +35,7 @@ from tests.dualrun.operations.rebinding import (
     resolve_operation,
 )
 from tests.dualrun.operations.table import (
+    CoreOnlyTest,
     DualRunOperation,
     Implementation,
     SwitchModule,
@@ -48,6 +52,15 @@ OPERATION_TABLES: Final[Mapping[SwitchModule, tuple[DualRunOperation, ...]]] = {
     SwitchModule.MONITORING_AND_WEB: MONITORING_AND_WEB_OPERATIONS,
     SwitchModule.WORKFLOW_ENGINE: WORKFLOW_ENGINE_OPERATIONS,
 }
+
+CORE_ONLY_TESTS: Final[Mapping[SwitchModule, tuple[CoreOnlyTest, ...]]] = {
+    SwitchModule.LIFECYCLE: LIFECYCLE_CORE_ONLY_TESTS,
+    SwitchModule.HISTORY: (),
+    SwitchModule.BROKER: (),
+    SwitchModule.MONITORING_AND_WEB: (),
+    SwitchModule.WORKFLOW_ENGINE: (),
+}
+"""The tests that run once, on the core, in the dual-run of each module."""
 
 _COUNTS_KEY: Final = pytest.StashKey[dict[str, int]]()
 """Calls of the table's operations per test id (both runs together)."""
@@ -107,11 +120,19 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         return
     if not _dual_runs(metafunc.config, metafunc.definition.path):
         return
+    module = selected_module(metafunc.config)
+    assert module is not None, 'the dual-run option was checked above'
+    core_only = {test.node_id for test in CORE_ONLY_TESTS[module]}
+    implementations = (
+        [Implementation.CORE]
+        if metafunc.definition.nodeid in core_only
+        else [Implementation.PYTHON_REFERENCE, Implementation.CORE]
+    )
     metafunc.parametrize(
         'implementation',
-        [Implementation.PYTHON_REFERENCE, Implementation.CORE],
+        implementations,
         indirect=True,
-        ids=[Implementation.PYTHON_REFERENCE.value, Implementation.CORE.value],
+        ids=[each.value for each in implementations],
     )
 
 
