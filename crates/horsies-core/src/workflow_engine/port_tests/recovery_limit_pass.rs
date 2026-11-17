@@ -1185,7 +1185,7 @@ async fn count_rows_go_with_their_workflow_and_with_a_cascaded_child() {
     }
 
     crate::worker::recovery::run_retention_cleanup(
-        &db.pool,
+        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
         &RetentionConfig {
             worker_state_retention_hours: None,
             terminal_record_retention_hours: Some(24),

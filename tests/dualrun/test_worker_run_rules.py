@@ -6,13 +6,19 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
+from pydantic import SecretStr
 
-from tests.dualrun.catalog import BASELINE_CATALOG
+from horsies.core.models.broker import PostgresConfig
+from tests.dualrun.apps import whole_run_app
+from tests.dualrun.catalog import ATTEMPT_ARCHIVE, BASELINE_CATALOG
+from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.normalize import AmbiguousGroup, NormalizedSnapshot, NormalizedTable
-from tests.dualrun.rules import Ignored
+from tests.dualrun.rules import EachItem, Ignored, Index, JsonPath
 from tests.dualrun.worker_run import (
+    ARCHIVE_PROCESS_ID_POSITIONS,
     PROCESS_ID_COLUMNS,
     UNCOMPARED_TABLES,
+    WHOLE_RUN_ATTEMPT_ARCHIVE,
     WHOLE_RUN_CATALOG,
     Absent,
     AttemptReport,
@@ -28,6 +34,7 @@ from tests.dualrun.worker_run import (
     Terminal,
     compare_reports,
     compared_part,
+    worker_environment,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -46,11 +53,30 @@ def test_only_the_process_id_columns_change_rule() -> None:
         for base_column, whole_column in zip(base.columns, whole.columns, strict=True):
             assert base_column.name == whole_column.name
             if base_column != whole_column:
-                assert isinstance(whole_column.rule, Ignored)
+                match base_column.rule == ATTEMPT_ARCHIVE:
+                    case True:
+                        assert whole_column.rule == WHOLE_RUN_ATTEMPT_ARCHIVE
+                    case False:
+                        assert isinstance(whole_column.rule, Ignored)
                 changed.add((base.name, base_column.name))
     assert changed, 'the catalog has process id columns to ignore'
-    assert {column for _, column in changed} == PROCESS_ID_COLUMNS
+    assert {column for _, column in changed} == PROCESS_ID_COLUMNS | {'attempt_snapshot'}
     assert not {table for table, _ in changed} & UNCOMPARED_TABLES
+
+
+def test_the_attempt_archive_ignores_only_the_process_id_fields() -> None:
+    added = WHOLE_RUN_ATTEMPT_ARCHIVE.paths[len(ATTEMPT_ARCHIVE.paths):]
+    assert WHOLE_RUN_ATTEMPT_ARCHIVE.paths[: len(ATTEMPT_ARCHIVE.paths)] == ATTEMPT_ARCHIVE.paths
+    assert (WHOLE_RUN_ATTEMPT_ARCHIVE.storage, WHOLE_RUN_ATTEMPT_ARCHIVE.format) == (
+        ATTEMPT_ARCHIVE.storage,
+        ATTEMPT_ARCHIVE.format,
+    )
+    assert [path.steps for path in added] == [
+        (EachItem(), Index(position=position)) for position in ARCHIVE_PROCESS_ID_POSITIONS
+    ]
+    assert all(
+        isinstance(path, JsonPath) and isinstance(path.rule, Ignored) for path in added
+    )
 
 
 def test_the_compared_part_leaves_out_the_time_driven_tables() -> None:
@@ -106,3 +132,17 @@ def test_a_report_covers_nodes_and_workflows_by_their_fixed_workflow_id() -> Non
     assert [difference.key for difference in differences] == [
         WorkflowKey(workflow_id=workflow_id)
     ]
+
+
+def test_the_worker_gets_the_libpq_url_that_the_config_accepts() -> None:
+    database = DualRunDatabase(
+        name='dualrun_' + uuid4().hex,
+        url='postgresql://postgres@127.0.0.1:55432/dualrun_x',
+    )
+    env = worker_environment(database, marker_dir='/markers')
+    assert env[whole_run_app.DATABASE_URL_ENV] == database.url
+    assert env[whole_run_app.MARKER_DIR_ENV] == '/markers'
+    config = PostgresConfig(
+        database_url=SecretStr(env[whole_run_app.DATABASE_URL_ENV]),
+    )
+    assert config.database_url.get_secret_value() == database.url

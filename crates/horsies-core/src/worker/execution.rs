@@ -26,7 +26,6 @@ use crate::broker::attempt_writes::{
 };
 use crate::broker::child_writes::{query_within, WriteDeadline};
 use crate::broker::core_rows::{column, one_row, scalar, StatementLog};
-use crate::broker::error::is_retryable_sqlx_error;
 use crate::broker::listener::notify_task_queue;
 use crate::broker::terminalization::terminalize;
 use crate::broker::PostgresBroker;
@@ -692,27 +691,6 @@ fn envelope_error(task_id: Uuid, error: serde_json::Error) -> FinalizeError {
 // Finalize Phase 2: Workflow advancement + capacity notifications
 // ---------------------------------------------------------------------------
 
-/// Classify whether a `WorkflowError` is transient (retryable).
-///
-/// Mirrors Python's `is_retryable_connection_error(exc)`
-/// (`core/worker/finalize.py:1676-1697`) — only DB/broker connection errors
-/// are considered transient, by the core's SQLSTATE rule
-/// (`is_retryable_sqlx_error`). Logic errors (serialization, not-found,
-/// invalid status) and a database refusal (for example a wake on a channel
-/// name the server refuses) are permanent.
-fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> bool {
-    match e {
-        crate::workflow_engine::WorkflowError::Database(error) => is_retryable_sqlx_error(error),
-        crate::workflow_engine::WorkflowError::Broker(be) => be.is_retryable(),
-        crate::workflow_engine::WorkflowError::ChildSpecSource(error) => error.is_retryable(),
-        crate::workflow_engine::WorkflowError::Serialization(_)
-        | crate::workflow_engine::WorkflowError::WorkflowNotFound { .. }
-        | crate::workflow_engine::WorkflowError::InvalidStatus(_)
-        | crate::workflow_engine::WorkflowError::Validation(_)
-        | crate::workflow_engine::WorkflowError::StepContract(_) => false,
-    }
-}
-
 /// Phase 2 of finalization: the node finish of a workflow task, or the
 /// capacity wake of a plain task (Python `_finalize_workflow_phase`,
 /// `core/worker/finalize.py:1619-1674`).
@@ -747,7 +725,16 @@ pub(crate) async fn finalize_workflow_phase(
     // Workflow membership is carried on the task row (is_workflow_task), set at
     // insert time — no per-task JOIN to horsies_workflow_tasks needed here.
     match is_workflow_task {
-        true => finish_workflow_node(broker, build, task_id, capacity_notified, phase_two).await,
+        true => {
+            Box::pin(finish_workflow_node(
+                broker,
+                build,
+                task_id,
+                capacity_notified,
+                phase_two,
+            ))
+            .await
+        }
         false => {
             // Skipped when phase 1's statement already sent the wake in the
             // same commit as the transition: no statement, no checkout.
@@ -849,18 +836,21 @@ async fn finish_workflow_node(
 ) -> Result<OwedParentAdvances, FinalizeError> {
     let wake = !capacity_notified;
     let finished = match phase_two {
-        PhaseTwoForm::Step(PhaseTwoStep::NoDependents) => {
-            node_finish_alone(broker, task_id, wake, Dependents::NoneToRead)
-                .await
-                .map(|outcome| {
-                    (
-                        outcome.disposition,
-                        OwedParentAdvances::of(outcome.parent_advance),
-                    )
-                })
-        }
+        PhaseTwoForm::Step(PhaseTwoStep::NoDependents) => Box::pin(node_finish_alone(
+            broker,
+            task_id,
+            wake,
+            Dependents::NoneToRead,
+        ))
+        .await
+        .map(|outcome| {
+            (
+                outcome.disposition,
+                OwedParentAdvances::of(outcome.parent_advance),
+            )
+        }),
         PhaseTwoForm::Step(PhaseTwoStep::DependentsWithoutSubworkflow) => {
-            node_finish_alone(broker, task_id, wake, Dependents::Read)
+            Box::pin(node_finish_alone(broker, task_id, wake, Dependents::Read))
                 .await
                 .map(|outcome| {
                     (
@@ -870,7 +860,7 @@ async fn finish_workflow_node(
                 })
         }
         PhaseTwoForm::Step(PhaseTwoStep::SubworkflowReachable) | PhaseTwoForm::NotKnown => {
-            node_finish_in_transaction(broker, task_id, wake, build)
+            Box::pin(node_finish_in_transaction(broker, task_id, wake, build))
                 .await
                 .map(|committed| (committed.disposition, committed.parent_advances))
         }
@@ -879,7 +869,7 @@ async fn finish_workflow_node(
         stage: FinalizeStage::Phase2Workflow,
         task_id,
         message: format!("workflow node finish failed: {error}"),
-        retryable: is_retryable_workflow_error(&error),
+        retryable: error.is_retryable(),
     })?;
     node_finish_outcome(task_id, disposition, parent_advances)
 }
@@ -1085,10 +1075,10 @@ pub(crate) async fn mark_task_finalizing(
 /// ([`retry_parent_advances`]). Both build the child of each sub-workflow
 /// node that they promote with `build`.
 pub(crate) async fn run_phase2(broker: &PostgresBroker, build: ChildBuild<'_>, work: Phase2Work) {
-    let finished = retry_phase2(broker, build, &work).await;
+    let finished = Box::pin(retry_phase2(broker, build, &work)).await;
     match finished {
         Ok(owed) if !owed.is_empty() => {
-            retry_parent_advances(broker, build, work.task_id, owed).await;
+            Box::pin(retry_parent_advances(broker, build, work.task_id, owed)).await;
         }
         // Each failure was logged where it happened; workflow recovery
         // applies the durable phase-2 record.
@@ -1125,7 +1115,7 @@ async fn retry_phase2(
             );
             tokio::time::sleep(Duration::from_secs_f64(delay)).await;
         }
-        let finished = finalize_workflow_phase(
+        let finished = Box::pin(finalize_workflow_phase(
             broker,
             build,
             work.task_id,
@@ -1133,7 +1123,7 @@ async fn retry_phase2(
             work.is_workflow_task,
             work.capacity_notified,
             work.phase_two,
-        )
+        ))
         .await;
         match finished {
             Ok(owed) => return Ok(owed),
@@ -1194,11 +1184,18 @@ async fn retry_parent_advances(
             let delay = phase_retry_delay(attempt);
             tokio::time::sleep(Duration::from_secs_f64(delay)).await;
         }
-        let failure = match advance_parents(broker, CheckoutClass::Reserved, owed, build).await {
+        let failure = match Box::pin(advance_parents(
+            broker,
+            CheckoutClass::Reserved,
+            owed,
+            build,
+        ))
+        .await
+        {
             Ok(()) => return,
             Err(failure) => failure,
         };
-        match is_retryable_workflow_error(&failure.error) {
+        match failure.error.is_retryable() {
             true => tracing::warn!(
                 task_id = %task_id,
                 child_workflow_id = %failure.failed_child_workflow_id,

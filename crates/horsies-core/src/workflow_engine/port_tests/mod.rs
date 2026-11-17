@@ -23,6 +23,9 @@ mod promotion_rows;
 mod recovery_cases;
 mod recovery_limit_pass;
 mod round_trips;
+// The stack margin is a statement about debug builds.
+#[cfg(debug_assertions)]
+mod stack_margin;
 mod start_and_handle_branches;
 mod start_rows;
 mod subworkflow_lifecycle;

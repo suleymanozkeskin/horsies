@@ -155,10 +155,10 @@ async fn a_started_reaper_drops_an_overdue_heartbeat_leaf() {
         "setup failed: the overdue leaf was not created"
     );
     let cancel = CancellationToken::new();
+    // The reaper's broker has no sqlx connection: the drop runs on the core
+    // pools.
     let reaper = spawn_reaper(
-        Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
-        pool.clone(),
-        pool.clone(),
+        Arc::new(crate::test_support::broker_with_closed_sqlx_pools(&pool).await),
         crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
             WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         )),
