@@ -653,6 +653,18 @@ def read_task_report(
     return report
 
 
+def worker_environment(database: DualRunDatabase, marker_dir: str) -> dict[str, str]:
+    """The environment of a worker process of one side: this process's
+    environment, the repository on ``PYTHONPATH``, the libpq URL of
+    ``database`` (the URL that ``PostgresConfig`` accepts) and the marker
+    directory of the side."""
+    env = os.environ.copy()
+    env['PYTHONPATH'] = REPO_ROOT
+    env[whole_run_app.DATABASE_URL_ENV] = database.url
+    env[whole_run_app.MARKER_DIR_ENV] = marker_dir
+    return env
+
+
 def _start_worker(
     command: WorkerCommand,
     database: DualRunDatabase,
@@ -660,11 +672,7 @@ def _start_worker(
     log_path: str,
     marker_dir: str,
 ) -> subprocess.Popen[bytes]:
-    env = os.environ.copy()
-    env['PYTHONPATH'] = REPO_ROOT
-    # The libpq URL: the config refuses a SQLAlchemy driver scheme.
-    env[whole_run_app.DATABASE_URL_ENV] = database.url
-    env[whole_run_app.MARKER_DIR_ENV] = marker_dir
+    env = worker_environment(database, marker_dir)
     with open(log_path, 'wb') as log:
         return subprocess.Popen(
             [*command.argv, APP_LOCATOR, f'--profile={profile}', '--loglevel=info'],

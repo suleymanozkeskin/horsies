@@ -6,8 +6,12 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
+from pydantic import SecretStr
 
+from horsies.core.models.broker import PostgresConfig
+from tests.dualrun.apps import whole_run_app
 from tests.dualrun.catalog import ATTEMPT_ARCHIVE, BASELINE_CATALOG
+from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.normalize import AmbiguousGroup, NormalizedSnapshot, NormalizedTable
 from tests.dualrun.rules import EachItem, Ignored, Index, JsonPath
 from tests.dualrun.worker_run import (
@@ -30,6 +34,7 @@ from tests.dualrun.worker_run import (
     Terminal,
     compare_reports,
     compared_part,
+    worker_environment,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -127,3 +132,17 @@ def test_a_report_covers_nodes_and_workflows_by_their_fixed_workflow_id() -> Non
     assert [difference.key for difference in differences] == [
         WorkflowKey(workflow_id=workflow_id)
     ]
+
+
+def test_the_worker_gets_the_libpq_url_that_the_config_accepts() -> None:
+    database = DualRunDatabase(
+        name='dualrun_' + uuid4().hex,
+        url='postgresql://postgres@127.0.0.1:55432/dualrun_x',
+    )
+    env = worker_environment(database, marker_dir='/markers')
+    assert env[whole_run_app.DATABASE_URL_ENV] == database.url
+    assert env[whole_run_app.MARKER_DIR_ENV] == '/markers'
+    config = PostgresConfig(
+        database_url=SecretStr(env[whole_run_app.DATABASE_URL_ENV]),
+    )
+    assert config.database_url.get_secret_value() == database.url
