@@ -55,7 +55,7 @@ from horsies.monitoring import (
     TaskActionWorkflowTask,
     cancel_task,
 )
-from horsies.web.routes._common import require_path_uuid
+from tests.dualrun.reference.web_routes._common import require_path_uuid
 
 logger = get_logger('web')
 

@@ -63,8 +63,6 @@ _FROZEN_DUMPS: Final = Counter(
         ('python/horsies/_catalog/workflow_spec.py', 'dump_workflow_spec_data'): 1,
         ('python/horsies/core/lifecycle/persistence.py', '_fused_batch_parameters'): 1,
         ('python/horsies/core/worker/claiming.py', 'ClaimMixin._claim_params'): 6,
-        ('python/horsies/web/app.py', '_inject'): 1,
-        ('python/horsies/web/routes/events.py', 'build_router.stream'): 2,
     }
 )
 

@@ -1,8 +1,10 @@
 """Unit tests for the monitoring authorization policies and guards.
 
-Covers each shipped policy's verdicts and the two dependencies that enforce
-them: the read gate on every API route, and the action gate that additionally
-demands the intent header.
+Covers each shipped policy's verdicts and the two dependencies that enforced
+them in the Python app before it mounted the core's handler
+(``tests/dualrun/reference/web_guards.py``, the reference of the web
+dual-run): the read gate on every API route, and the action gate that
+additionally demands the intent header.
 """
 
 from __future__ import annotations
@@ -17,9 +19,8 @@ from horsies.web.auth import (
     AllowAll,
     TrustedHeader,
     ViewOnly,
-    act_guard,
-    view_guard,
 )
+from tests.dualrun.reference.web_guards import act_guard, view_guard
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio(loop_scope='function')]
 

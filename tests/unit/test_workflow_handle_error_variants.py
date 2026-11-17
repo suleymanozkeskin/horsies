@@ -39,8 +39,8 @@ from horsies.core.models.workflow.handle_types import (
 )
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.core_failure import CoreOperationFailed
-from horsies.web.routes import actions as actions_module
-from horsies.web.routes.actions import (
+from tests.dualrun.reference.web_routes import actions as actions_module
+from tests.dualrun.reference.web_routes.actions import (
     RESUME_RECOVERY_WARNING,
     _handle_failed,
     build_router,
