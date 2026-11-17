@@ -219,6 +219,7 @@ pub use crate::workflow_engine::engine::{
 pub use crate::workflow_engine::error::WorkflowError;
 pub use crate::workflow_engine::info::WorkflowTaskInfo;
 pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_workflow};
+pub use crate::workflow_engine::phase2_recovery::Phase2RecoverySummary;
 pub use crate::workflow_engine::query::{
     get_workflow_result, NodeResultsRead, NodesRead, StoredNode, StoredNodeResult,
     TerminalErrorStatus, WorkflowEnd, WorkflowWait,

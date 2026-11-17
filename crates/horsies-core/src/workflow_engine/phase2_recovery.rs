@@ -241,6 +241,28 @@ pub async fn drive_phase2_recovery(
     quarantine_after_attempts: u32,
     retention: &RetentionConfig,
 ) -> Result<Phase2RecoverySummary, WorkflowError> {
+    drive_phase2_recovery_with(
+        broker,
+        ChildBuild::Registry {
+            registry,
+            retention,
+        },
+        grace_ms,
+        max_rows,
+        quarantine_after_attempts,
+    )
+    .await
+}
+
+/// [`drive_phase2_recovery`] with the children of the owed child starts
+/// built by `build`. Outcomes and errors as [`drive_phase2_recovery`].
+pub(crate) async fn drive_phase2_recovery_with(
+    broker: &PostgresBroker,
+    build: ChildBuild<'_>,
+    grace_ms: u64,
+    max_rows: i64,
+    quarantine_after_attempts: u32,
+) -> Result<Phase2RecoverySummary, WorkflowError> {
     let grace_ms = i64::try_from(grace_ms).map_err(|_| {
         WorkflowError::Validation(format!(
             "phase-2 grace of {grace_ms} ms is above the integer range"
@@ -282,10 +304,6 @@ pub async fn drive_phase2_recovery(
     let mut summary = Phase2RecoverySummary {
         over_attempt_bound,
         ..Phase2RecoverySummary::default()
-    };
-    let build = ChildBuild::Registry {
-        registry,
-        retention,
     };
     for task_id in candidates {
         summary.considered += 1;

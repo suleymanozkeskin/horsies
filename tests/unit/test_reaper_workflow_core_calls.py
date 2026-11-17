@@ -126,3 +126,57 @@ async def test_a_failed_retention_delete_raises_with_the_count_before_it() -> No
     assert 'statement timeout' in raised.value.message
     assert '4 workflow(s)' in raised.value.message
     assert raised.value.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_the_phase2_recovery_maps_the_pass_and_folds_pending_absent() -> None:
+    broker = _broker(
+        'recover_workflow_phase2_async',
+        _record(
+            core.Phase2RecoveryRecord,
+            considered=6,
+            applied=2,
+            already_applied=1,
+            superseded=1,
+            pending_absent=1,
+            retained=1,
+            failed=0,
+            quarantined=1,
+            raised_counted=0,
+            over_attempt_bound=4,
+            retained_details=['t1: SOURCE_ABSENT'],
+            quarantine_refusals=[],
+        ),
+    )
+
+    summary = await _Reaper()._recover_phase2(
+        broker, grace_ms=30_000, max_rows=100, quarantine_after_attempts=3,
+    )
+
+    assert summary.considered == 6
+    assert summary.applied == 2
+    # The Python pass counted a record gone with its node not terminal as
+    # already applied.
+    assert summary.already_applied == 2
+    assert summary.over_attempt_bound == 4
+    assert summary.retained_details == ('t1: SOURCE_ABSENT',)
+    assert summary.quarantine_refusals == ()
+    broker._core_handle.recover_workflow_phase2_async.assert_awaited_once_with(
+        grace_ms=30_000, max_rows=100, quarantine_after_attempts=3,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_phase2_recovery_raises_with_its_cause() -> None:
+    broker = _broker(
+        'recover_workflow_phase2_async',
+        _record(core.Phase2RecoveryFailed, message='discovery failed', retryable=True),
+    )
+
+    with pytest.raises(CoreOperationFailed) as raised:
+        await _Reaper()._recover_phase2(
+            broker, grace_ms=0, max_rows=100, quarantine_after_attempts=3,
+        )
+
+    assert raised.value.subject == 'recover_workflow_phase2'
+    assert raised.value.retryable is True
