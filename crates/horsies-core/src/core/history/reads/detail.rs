@@ -6,16 +6,10 @@ use uuid::Uuid;
 
 use crate::core::history::archive::attempts::{decode_attempt_snapshot, AttemptRecord};
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
-use crate::core::history::ddl::classes::PERIOD_CLASS_KIND;
 use crate::core::history::errors::HistoryError;
-use crate::core::history::names::{LEAF_CATALOG, RETENTION_CLASSES, TASK_DETAIL_FUNCTION};
+use crate::core::history::names::TASK_DETAIL_FUNCTION;
 use crate::core::history::reads::result::FUNCTION_PUBLISHED_SQL;
 use crate::core::types::status::TaskStatus;
-
-/// The clock bound of a UUIDv7 birth, in seconds: the published readers
-/// probe from the birth minus this bound (`horsies_render_history_reader`,
-/// `0008_history_maintenance_functions.sql`).
-pub const CLOCK_BOUND_SECONDS: i64 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryTaskDetail {
@@ -162,10 +156,10 @@ pub(crate) fn task_detail_sql() -> String {
     )
 }
 
-/// The absence reason of the task id `$1`, as one text column.
-pub(crate) fn task_absence_reason_query_sql() -> String {
-    format!("SELECT {}", task_absence_reason_sql("$1"))
-}
+/// The absence reason of the task id `$1`, as one text column. The rule is
+/// `horsies_task_absence_reason` (`0006_history_functions.sql`); the
+/// monitoring task detail and the rerun read call the same function.
+pub(crate) const TASK_ABSENCE_REASON_SQL: &str = "SELECT horsies_task_absence_reason($1)";
 
 /// The `regprocedure` text of the staged detail function.
 pub(crate) fn task_detail_function_signature() -> String {
@@ -273,36 +267,12 @@ pub(crate) fn history_detail_from_wire(
     })
 }
 
-/// The absence reason of the id bound to `task_id_parameter` (for example
-/// `$1`), as one SQL expression. The record of what retention removed is the
-/// detached period-class leaves: a v7 birth before the latest upper bound of
-/// such a leaf, plus the clock bound, can have been in a removed leaf. A leaf
-/// destroyed out of band is not detached in the catalog, so its tasks answer
-/// `WITHIN_RETAINED_HISTORY`. The monitoring task detail and the rerun read
-/// share this one rule.
-pub(crate) fn task_absence_reason_sql(task_id_parameter: &str) -> String {
-    format!(
-        "CASE
-             WHEN horsies_uuid7_birth({task_id_parameter}) IS NULL THEN 'NOT_CLASSIFIED'
-             WHEN horsies_uuid7_birth({task_id_parameter}) < (
-                 SELECT max(removed.upper_anchor)
-                 FROM {LEAF_CATALOG} AS removed
-                 JOIN {RETENTION_CLASSES} AS removed_class
-                   ON removed_class.class_key = removed.class_key
-                 WHERE removed_class.class_kind = '{PERIOD_CLASS_KIND}'
-                   AND removed.detached_at IS NOT NULL
-             ) + interval '{CLOCK_BOUND_SECONDS} seconds' THEN 'PREDATES_RETAINED_HISTORY'
-             ELSE 'WITHIN_RETAINED_HISTORY'
-         END"
-    )
-}
-
 /// Reads only; one statement.
 async fn classify_absence(
     connection: &mut PgConnection,
     task_id: Uuid,
 ) -> Result<TaskAbsenceReason, HistoryError> {
-    let reason: String = sqlx::query_scalar(&task_absence_reason_query_sql())
+    let reason: String = sqlx::query_scalar(TASK_ABSENCE_REASON_SQL)
         .bind(task_id)
         .fetch_one(connection)
         .await?;
