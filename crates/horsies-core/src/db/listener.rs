@@ -29,7 +29,7 @@ use tokio::time::Instant;
 use tokio_postgres::{AsyncMessage, Client};
 
 use super::connect::{open_connection, ConnectPlan, DriverConnection};
-use super::failure::{ConnectError, ConnectFailure, Transience};
+use super::failure::{ConnectError, ConnectFailure, DriverErrorText, Transience};
 use crate::process_runtime::spawn_on_process_runtime;
 
 /// PostgreSQL's identifier limit (NAMEDATALEN - 1).
@@ -170,7 +170,7 @@ pub enum PayloadEvent {
 pub enum ListenerStartFailure {
     #[error("{0}")]
     Connect(ConnectError),
-    #[error("LISTEN failed: {0}")]
+    #[error("LISTEN failed: {}", DriverErrorText(.0))]
     Listen(tokio_postgres::Error),
     #[error("LISTEN did not end within {bound:?}")]
     ListenTimedOut { bound: Duration },
