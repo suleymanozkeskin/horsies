@@ -52,6 +52,18 @@ fn the_parent_waits_past_the_child_bound_after_a_return() {
     assert!(ISOLATED_LEFTOVER_BACKSTOP > child_bound);
 }
 
+/// The leftover backstop follows from its named parts: the grace, the
+/// cancel rounds, the marker of a Python child and the margin (Python
+/// `ISOLATED_LEFTOVER_BACKSTOP_S`).
+#[test]
+fn the_leftover_backstop_keeps_its_time() {
+    assert_eq!(
+        super::isolated::LEFT_WORK_MARKER_END,
+        Duration::from_secs(15)
+    );
+    assert_eq!(ISOLATED_LEFTOVER_BACKSTOP, Duration::from_millis(26_300));
+}
+
 // ---------------------------------------------------------------------------
 // A second return
 // ---------------------------------------------------------------------------

@@ -39,8 +39,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// each checkout fails at once, and the release after a failed start is
 /// sent three times with waits of 0.5 s and 1 s.
 const UNREACHABLE_BOUND: Duration = Duration::from_secs(30);
-/// The abandon of a claimed task whose workflow is paused.
-const ABANDON_FUNCTION: &str = "horsies_abandon_owned_node";
+/// The miss path of a workflow task whose workflow stopped: one statement
+/// that takes the workflow row and abandons the claim of a paused workflow.
+const STOP_BEFORE_START_FUNCTION: &str = "horsies_workflow_task_stop_before_start";
 /// The expiry of an owned claim whose deadline passed.
 const EXPIRY_FUNCTION: &str = "horsies_expire_owned_claim";
 
@@ -474,9 +475,12 @@ async fn a_refused_expiry_before_the_start_is_a_lost_claim() {
 
 /// Python `TestMissedStart::test_a_resume_before_the_abandon_starts_the_task_on_the_next_attempt`:
 /// the start finds the workflow paused, and the workflow is resumed before
-/// the abandon: the abandon is refused, and the next start attempt sets the
-/// row and its node RUNNING. The test holds the workflow row with an
-/// uncommitted resume, which the abandon waits for and the start does not.
+/// the abandon: the miss path answers that the workflow was resumed, and the
+/// next start attempt sets the row and its node RUNNING. The test holds the
+/// workflow row with an uncommitted resume, which the miss path statement
+/// waits for and the start does not, and commits the resume while that
+/// statement waits, within its statement bound: the miss path ends by the
+/// resume, not by its bound.
 #[tokio::test]
 #[serial]
 async fn a_resume_before_the_abandon_starts_the_task_on_the_next_attempt() {
@@ -489,12 +493,18 @@ async fn a_resume_before_the_abandon_starts_the_task_on_the_next_attempt() {
     let mut resume = pool.begin().await.expect("begin the resume");
     set_workflow_status(&mut resume, workflow_id, "RUNNING").await;
     let driver = async {
-        until_a_backend_waits_in(&pool, ABANDON_FUNCTION).await;
+        until_a_backend_waits_in(&pool, STOP_BEFORE_START_FUNCTION).await;
         resume.commit().await.expect("commit the resume");
     };
+    let began = std::time::Instant::now();
 
     let (started, ()) = tokio::join!(start_attempt(&context, &run), driver);
 
+    assert!(
+        began.elapsed() < CHILD_STATEMENT_BOUND,
+        "{:?}",
+        began.elapsed()
+    );
     assert!(matches!(started, Started::Running));
     let row = live_row(&pool, task_id).await.expect("the row stays live");
     assert_eq!(row["status"], "RUNNING");
@@ -506,9 +516,13 @@ async fn a_resume_before_the_abandon_starts_the_task_on_the_next_attempt() {
 /// Python `TestMissedStart::test_a_resume_on_every_attempt_leaves_the_claim_to_its_lease`:
 /// a resume before the abandon on each of the two start attempts ends the
 /// run `OWNERSHIP_UNCONFIRMED` with nothing written; the worker's outcome
-/// writer releases the claim. The child's core pool holds one connection:
-/// the test holds it while it pauses the workflow again for the second
-/// attempt and opens the second resume.
+/// writer releases the claim. The child's core pool holds one connection,
+/// and the miss path statement holds it while it waits on the workflow row
+/// of the first resume: the test queues its checkout behind that statement
+/// before it commits the first resume, so it takes the connection before
+/// the second attempt, and holds it while it pauses the workflow again and
+/// opens the second resume. Each miss path ends by its resume, within its
+/// statement bound.
 #[tokio::test]
 #[serial]
 async fn a_resume_on_every_attempt_leaves_the_claim_to_its_lease() {
@@ -521,36 +535,42 @@ async fn a_resume_on_every_attempt_leaves_the_claim_to_its_lease() {
         .broker
         .core_pools_for_write()
         .expect("the core pools of the child");
+    let main = pools.main();
     let run = workflow_facts(task_id, generation);
     let mut first_resume = pool.begin().await.expect("begin the first resume");
     set_workflow_status(&mut first_resume, workflow_id, "RUNNING").await;
     let driver = async {
-        until_a_backend_waits_in(&pool, ABANDON_FUNCTION).await;
-        let held = pools
-            .main()
-            .checkout(CheckoutClass::Reserved)
-            .await
-            .expect("hold the connection of the child's core pool");
-        first_resume
-            .commit()
-            .await
-            .expect("commit the first resume");
-        until_a_checkout_waits(pools.main()).await;
+        until_a_backend_waits_in(&pool, STOP_BEFORE_START_FUNCTION).await;
+        let (held, ()) = tokio::join!(main.checkout(CheckoutClass::Reserved), async {
+            until_a_checkout_waits(main).await;
+            first_resume
+                .commit()
+                .await
+                .expect("commit the first resume");
+        });
+        let held = held.expect("hold the connection of the child's core pool");
+        until_a_checkout_waits(main).await;
         let mut pause = pool.acquire().await.expect("acquire a connection");
         set_workflow_status(&mut pause, workflow_id, "PAUSED").await;
         drop(pause);
         let mut second_resume = pool.begin().await.expect("begin the second resume");
         set_workflow_status(&mut second_resume, workflow_id, "RUNNING").await;
         drop(held);
-        until_a_backend_waits_in(&pool, ABANDON_FUNCTION).await;
+        until_a_backend_waits_in(&pool, STOP_BEFORE_START_FUNCTION).await;
         second_resume
             .commit()
             .await
             .expect("commit the second resume");
     };
+    let began = std::time::Instant::now();
 
     let (started, ()) = tokio::join!(start_attempt(&context, &run), driver);
 
+    assert!(
+        began.elapsed() < CHILD_STATEMENT_BOUND,
+        "{:?}",
+        began.elapsed()
+    );
     assert!(matches!(
         started,
         Started::Stopped(StopReason::OwnershipUnconfirmed)

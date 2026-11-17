@@ -611,25 +611,39 @@ fn a_late_exit_after_the_first_backstop_is_a_timeout_or_a_crash() {
 
 #[test]
 fn the_backstops_keep_their_times() {
+    assert_eq!(LOOP_BLOCK_REPORT_WAIT, Duration::from_secs(5));
     assert_eq!(SHARED_BACKSTOP_MARGIN, Duration::from_secs(10));
     assert_eq!(SHARED_STUCK_BACKSTOP, Duration::from_millis(10_300));
-    assert_eq!(SHARED_REFUSAL_BACKSTOP, Duration::from_secs(130));
+    assert_eq!(SHARED_REFUSAL_BACKSTOP, Duration::from_secs(155));
     assert_eq!(first_backstop(async_work()), Duration::from_millis(11_500));
     assert_eq!(first_backstop(thread_work()), Duration::from_secs(11));
-    assert_eq!(first_backstop(RunWork::Refusal), Duration::from_secs(130));
+    assert_eq!(first_backstop(RunWork::Refusal), Duration::from_secs(155));
 }
 
 /// Python `TestRefusalBound::test_the_refusal_backstop_comes_after_the_writes_and_a_block_report`:
-/// the refusal backstop is the bound of the writes of a refusal in the
-/// child, each start attempt and the finalizing marker with the end of a
-/// cancelled statement, and the margin.
+/// the refusal backstop is the longest bound of the writes of a refusal in
+/// a child of any kind, each start attempt and the finalizing marker with
+/// the end of a cancelled statement, and the margin. A refusal whose writes
+/// end within the bound of its child kind never meets it.
 #[test]
 fn the_refusal_backstop_comes_after_the_refusal_writes() {
-    let writes = crate::broker::child_writes::START_ATTEMPT_END
-        * crate::broker::child_writes::PRE_START_CONFIRM_ATTEMPTS
-        + crate::broker::child_writes::FINALIZING_MARKER_END;
-    assert_eq!(SHARED_REFUSAL_BACKSTOP, writes + SHARED_BACKSTOP_MARGIN);
-    assert!(SHARED_REFUSAL_BACKSTOP > writes);
+    use crate::broker::child_writes::{
+        CHILD_STATEMENT_BOUND, CHILD_WRITE_CHECKOUT_WAIT, FINALIZING_MARKER_END,
+        PRE_START_CONFIRM_ATTEMPTS, START_ATTEMPT_END,
+    };
+    use crate::db::CANCEL_REQUEST_BOUND;
+
+    let attempts = START_ATTEMPT_END * PRE_START_CONFIRM_ATTEMPTS;
+    let async_child_writes = attempts + FINALIZING_MARKER_END;
+    let thread_child_writes =
+        attempts + CHILD_WRITE_CHECKOUT_WAIT + CHILD_STATEMENT_BOUND + CANCEL_REQUEST_BOUND;
+    assert_eq!(
+        SHARED_REFUSAL_BACKSTOP,
+        async_child_writes.max(thread_child_writes) + SHARED_BACKSTOP_MARGIN
+    );
+    for writes in [async_child_writes, thread_child_writes] {
+        assert!(SHARED_REFUSAL_BACKSTOP > writes, "{writes:?}");
+    }
 }
 
 #[test]
