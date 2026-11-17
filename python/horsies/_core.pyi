@@ -193,6 +193,10 @@ class CoreHandle:
         SystemExit raises it again after the pass. A negative value raises OverflowError; with
         no child spec source it raises RuntimeError.
         """
+    def settle_claimed_workflow_tasks_async(self, request: SettleRequest) -> asyncio.Future[ClaimsSettled | SettleFailed]:
+        """Settle the claimed workflow tasks of one claim pass. Writes, one statement per 1000
+        claims. A request with no claim sends nothing.
+        """
     def pause_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed]:
         """Pause one workflow tree. Writes, in one statement. A row outside the function's contract
         raises PanicException.
@@ -2138,6 +2142,34 @@ class RecoveryPassFailed:
     """
     @property
     def report(self) -> RecoveryPassRecord: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class SettleRequest:
+    """The claims of one settle: the worker and each claimed workflow task with its claim
+    generation. A naive datetime raises TypeError.
+    """
+    def __init__(self, *, worker_id: str, claims: list[tuple[uuid.UUID, datetime.datetime]]) -> None: ...
+
+
+@final
+class ClaimsSettled:
+    """The settle committed: the tasks of PAUSED and CANCELLED workflows, never to dispatch, in
+    input order. Every other claim dispatches.
+    """
+    @property
+    def blocked_task_ids(self) -> list[uuid.UUID]: ...
+
+
+@final
+class SettleFailed:
+    """The settle failed: the client family check, a statement, or rows outside the function's
+    contract (not retryable). The statements before the failed one stay committed.
+    """
     @property
     def message(self) -> str: ...
     @property

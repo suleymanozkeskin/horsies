@@ -246,7 +246,11 @@ impl Horsies {
     /// parameter: it reads the app's state. The `#[horsies::task]` attribute
     /// calls it when the task registers.
     pub fn task_runtime(&self) -> TaskRuntime {
-        TaskRuntime::new(Arc::clone(self.state()), Arc::clone(&self.functions))
+        TaskRuntime::new(
+            Arc::clone(self.state()),
+            Arc::clone(&self.functions),
+            crate::workflow::WorkflowStarter::of(self),
+        )
     }
 
     /// The core handle of the app.

@@ -36,12 +36,7 @@ from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import Execution
 from horsies.core.types.core_failure import CoreOperationFailed
-from horsies.core.utils.db import (
-    SingleStatement,
-    StatementRunner,
-    rows_or_raise,
-    run_in_autocommit_result,
-)
+from horsies.core.utils.db import StatementRunner
 from horsies.core.worker.claim_plan import (
     BudgetCapacity,
     ClaimPlan,
@@ -79,8 +74,6 @@ from horsies.core.worker.sql import (
     COUNT_CLAIMED_FOR_WORKER_SQL,
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
     COUNT_RUNNING_FOR_WORKER_SQL,
-    SETTLE_CLAIMED_WORKFLOW_TASKS_BOUND,
-    SETTLE_CLAIMED_WORKFLOW_TASKS_SQL,
 )
 
 if TYPE_CHECKING:
@@ -760,10 +753,11 @@ class ClaimMixin:
         """Settle the claimed tasks of PAUSED and CANCELLED workflows, and
         return the rows to dispatch, in their order.
 
-        One ``horsies_workflow_claimed_tasks_settle`` per
-        ``SETTLE_CLAIMED_WORKFLOW_TASKS_BOUND`` workflow tasks, each in
-        autocommit. Under the lock of each workflow row the function reads
-        the workflow status again:
+        The core runs it on the worker's core handle
+        (``CoreHandle.settle_claimed_workflow_tasks_async``): one
+        ``horsies_workflow_claimed_tasks_settle`` per 1000 workflow tasks,
+        each in autocommit. Under the lock of each workflow row the function
+        reads the workflow status again:
         - PAUSED: this worker's claim at its claim generation is abandoned,
           and the node of an abandoned task goes back to READY with no task;
         - CANCELLED: the claim is cancelled, and the node of a cancelled
@@ -775,12 +769,15 @@ class ClaimMixin:
         nothing.
 
         Raises:
-            OutcomeDecodeError: rows outside the function's contract.
-            Exception: what the pool and the driver raise; it propagates to
-                the main loop. The statements before a failed one stay
-                committed; the claims of the failed one are recovered by
-                lease expiry (a lost reply may have committed its moves).
+            CoreOperationFailed: the settle failed; it propagates to the main
+                loop, which retries a retryable one as a connection error.
+                The statements before a failed one stay committed; the claims
+                of the failed one are recovered by lease expiry (a lost reply
+                may have committed its moves).
+            CoreError: the core of this process cannot run the call.
         """
+        from horsies._core import ClaimsSettled, SettleFailed, SettleRequest
+
         if not rows:
             return rows
 
@@ -790,29 +787,22 @@ class ClaimMixin:
         if not workflow_rows:
             return rows
 
-        blocked_task_ids: set[str] = set()
-        for start in range(
-            0, len(workflow_rows), SETTLE_CLAIMED_WORKFLOW_TASKS_BOUND,
-        ):
-            chunk = workflow_rows[start:start + SETTLE_CLAIMED_WORKFLOW_TASKS_BOUND]
-            task_ids = [str(row['id']) for row in chunk]
-            # The claim generation each row was dispatched from: the moves
-            # are fenced to it, so a lapsed-and-re-claimed row of this
-            # worker is not ended under its new claim.
-            settled = rows_or_raise(
-                await run_in_autocommit_result(
-                    self.sf,
-                    SingleStatement(
-                        statement=SETTLE_CLAIMED_WORKFLOW_TASKS_SQL,
-                        parameters={
-                            'ids': task_ids,
-                            'claimed_ats': [claim_time_of(row) for row in chunk],
-                            'worker_id': self.worker_instance_id,
-                        },
-                    ),
-                ),
-            )
-            blocked_task_ids |= blocked_claims_of(task_ids, settled.mappings())
+        # The claim generation each row was dispatched from: the moves are
+        # fenced to it, so a lapsed-and-re-claimed row of this worker is not
+        # ended under its new claim.
+        request = SettleRequest(
+            worker_id=self.worker_instance_id,
+            claims=[
+                (UUID(str(row['id'])), claim_time_of(row)) for row in workflow_rows
+            ],
+        )
+        match await self.core_handle.settle_claimed_workflow_tasks_async(request):
+            case ClaimsSettled(blocked_task_ids=blocked):
+                blocked_task_ids = {str(task_id) for task_id in blocked}
+            case SettleFailed(message=message, retryable=retryable):
+                raise CoreOperationFailed('settle_claimed_workflow_tasks', message, retryable)
+            case _ as unreachable:
+                assert_never(unreachable)
 
         return [row for row in rows if str(row['id']) not in blocked_task_ids]
 
