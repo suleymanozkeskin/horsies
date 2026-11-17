@@ -5,9 +5,11 @@
 //! [`envelope_of_value`]). A task body's error is stored by `body_result` and
 //! written by the child host's `error_envelope` through
 //! `task_result_to_json_string`. A read of a stored envelope is
-//! `outcome_of_record`. The client builds an error from a code, a message and
-//! `data`; the exception record and the sub-workflow failure are written by
-//! the library, so those vectors are read only.
+//! `outcome_of_record`; an ok value is also read as a dependency result
+//! (`TaskOutcome` in a task input) and by `WorkflowContext::result_for`. The
+//! client builds an error from a code, a message and `data`; the exception
+//! record and the sub-workflow failure are written by the library, so those
+//! vectors are read only.
 
 use std::fmt::Debug;
 
@@ -25,8 +27,8 @@ use super::{
     check_typed, error_code, record, stored_error, vector_file, RustCase, RustDrift, TypedCheck,
 };
 use crate::handle::outcome_of_record;
-use crate::task::body::{body_result, encode_output};
-use crate::{TaskError, TaskOutcome};
+use crate::task::body::{body_result, decode_input, encode_output};
+use crate::{NodeKey, TaskError, TaskOutcome, WorkflowContext};
 
 #[derive(Deserialize)]
 struct ResultEnvelopeForm {
@@ -71,8 +73,9 @@ fn envelope_of_value(name: &str, bytes: &[u8]) -> String {
     serde_json::to_string(&TaskResult::Ok(raw)).expect("an envelope of a JSON text encodes")
 }
 
-/// The check of an ok vector: the client's text of the value, and the read
-/// of Python's text.
+/// The check of an ok vector: the client's text of the value, and the three
+/// reads of Python's text: the result read, the dependency read and the
+/// context read.
 struct OkValue<'a> {
     name: &'a str,
     python: &'a str,
@@ -95,7 +98,31 @@ impl TypedCheck for OkValue<'_> {
             Ok(TaskOutcome::Failed(error)) => panic!("{name}: read an error: {error}"),
             Err(error) => panic!("{name}: the read refused Python's text: {error}"),
         }
+        match decode_input::<TaskOutcome<T, UserCode>>(self.python.as_bytes()) {
+            Ok(TaskOutcome::Succeeded(read)) => assert_eq!(read, value, "{name}: dependency"),
+            Ok(TaskOutcome::Failed(error)) => panic!("{name}: dependency read an error: {error}"),
+            Err(error) => panic!("{name}: the dependency read refused Python's text: {error}"),
+        }
+        let context = decode_input::<WorkflowContext>(context_text(self.python).as_bytes())
+            .unwrap_or_else(|error| panic!("{name}: the context refused Python's text: {error}"));
+        match context.result_for::<T, UserCode>(&NodeKey::new(CONTEXT_NODE_ID)) {
+            Ok(TaskOutcome::Succeeded(read)) => assert_eq!(read, value, "{name}: context"),
+            Ok(TaskOutcome::Failed(error)) => panic!("{name}: context read an error: {error}"),
+            Err(error) => panic!("{name}: the context read refused Python's text: {error}"),
+        }
     }
+}
+
+/// The node id of the one result of [`context_text`].
+const CONTEXT_NODE_ID: &str = "node";
+
+/// The text of a workflow context that holds `envelope` as the result of
+/// the node [`CONTEXT_NODE_ID`], as the child of the worker writes it.
+fn context_text(envelope: &str) -> String {
+    format!(
+        r#"{{"workflow_id":"{workflow_id}","task_index":0,"task_name":"","results_by_id":{{"{CONTEXT_NODE_ID}":{envelope}}},"summaries_by_id":{{}}}}"#,
+        workflow_id = Uuid::nil(),
+    )
 }
 
 /// The error that a task body builds for the notation, or `None` when the
