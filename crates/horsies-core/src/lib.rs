@@ -81,13 +81,15 @@ pub use crate::broker::{
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 
-// partition maintenance of a client handle (`PostgresBroker::ensure_partition_coverage`)
-pub use crate::broker::CoveragePassError;
+// partition maintenance of a client handle (`PostgresBroker::ensure_partition_coverage`,
+// `PostgresBroker::prune_expired_partitions`)
+pub use crate::broker::{CoveragePassError, PrunePassError};
 pub use crate::core::history::errors::HistoryError;
 pub use crate::core::history::maintenance::coverage::{
     CoverageEnsureFailed, CoverageEnsured, CoverageOutcome, CoverageRequest, CoverageSerialization,
     HistoryCoverage,
 };
+pub use crate::core::history::maintenance::pruning::{PrunePass, PruneReach};
 pub use crate::core::history::periods::RetentionDays;
 
 // The baseline SQL files, which horsies._core hands to the Python install.
@@ -153,7 +155,8 @@ pub use crate::worker::{
 
 // worker state snapshot values
 pub use crate::broker::{
-    ClassBudget, ClassBudgets, ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
+    checked_history_limit, worker_history_limit_refused, ClassBudget, ClassBudgets,
+    ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
     MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
 

@@ -135,6 +135,10 @@ class CoreHandle:
         """One partition coverage pass on the session-work pool. Writes (DDL and catalog rows);
         each leaf commits alone.
         """
+    def prune_expired_partitions_async(self) -> asyncio.Future[PrunePassRecord | PruneFailed]:
+        """One pruning pass on the session-work pool. Writes (DDL and catalog rows); each leaf's
+        detach and drop commit alone.
+        """
     def cancel_task_async(self, task_id: uuid.UUID, *, include_running: bool) -> asyncio.Future[TaskCancelledRecord | CancelRefusedWorkflowTask | CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid]:
         """Cancel one plain task; a RUNNING task only with include_running. Writes, in one
         statement. An outcome that contradicts the function raises PanicException.
@@ -222,6 +226,28 @@ class CoreHandle:
     def expired_tasks_async(self) -> asyncio.Future[TaskListComplete | TaskListTruncated | BrokerFailure]:
         """The PENDING tasks whose good_until passed before a worker took them. Reads only, in
         one statement.
+        """
+    def worker_states_async(self) -> asyncio.Future[WorkerStatesRecord | BrokerFailure]:
+        """The latest state snapshot per worker, idle workers included. Reads only, in one
+        statement. A cancelled await drops the read.
+        """
+    def worker_state_async(self, worker_id: str) -> asyncio.Future[WorkerStateRecord | WorkerStateAbsent | BrokerFailure]:
+        """The latest state snapshot of one worker, or WorkerStateAbsent when it wrote none. Reads
+        only, in one statement.
+        """
+    def worker_state_history_async(self, worker_id: str, *, limit: int | None) -> asyncio.Future[WorkerStatesRecord | BrokerFailure]:
+        """The state snapshots of one worker, newest first: at most limit, or every retained one for
+        None. A limit of 0 or less is INVALID_INPUT; a limit that PostgreSQL refuses as a bigint
+        is MONITORING_QUERY_FAILED, not retryable; both before any core call. Reads only, in one
+        statement.
+        """
+    def class_coverage_async(self) -> asyncio.Future[ClassCoverageRecord | BrokerFailure]:
+        """The fleet check: for each (queue, class) with PENDING rows, whether a live worker serves
+        it. Reads only, in one statement.
+        """
+    def class_report_async(self) -> asyncio.Future[ClassReportRecord | BrokerFailure]:
+        """The pending streams with their oldest wait and coverage, and the budget load of each
+        live worker. Reads only, in one statement.
         """
 
 
@@ -1351,6 +1377,221 @@ class TaskListTruncated:
 
 
 @final
+class ResourceShortageRecord:
+    """The cause of a down slot that ran short of an OS resource."""
+    @property
+    def errno(self) -> Literal['EMFILE', 'ENFILE', 'ENOMEM', 'EAGAIN']: ...
+
+
+@final
+class DownSlotRecord:
+    """A worker slot whose last child boot failed for a cause that can clear."""
+    @property
+    def slot(self) -> int: ...
+    @property
+    def cause(self) -> ResourceShortageRecord | Literal['THREAD_START_REFUSED']: ...
+    @property
+    def detail(self) -> str: ...
+    @property
+    def down_since(self) -> datetime.datetime: ...
+    @property
+    def failed_boots(self) -> int: ...
+
+
+@final
+class AllSlotsServingRecord:
+    """No slot of the worker was down when it wrote the snapshot."""
+
+
+@final
+class SlotsDownRecord:
+    """The worker was degraded: these slots were down, in slot order. Never empty."""
+    @property
+    def slots(self) -> list[DownSlotRecord]: ...
+
+
+@final
+class ClassBudgetRecord:
+    """One claim budget of a worker, as its snapshot recorded it; serves is in Execution order."""
+    @property
+    def budget(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']: ...
+    @property
+    def capacity(self) -> int: ...
+    @property
+    def serves(self) -> list[Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']]: ...
+
+
+@final
+class WorkerStateRecord:
+    """One horsies_worker_states row. recovery_config_json is the JSON text of the stored object."""
+    @property
+    def worker_id(self) -> str: ...
+    @property
+    def snapshot_at(self) -> datetime.datetime: ...
+    @property
+    def hostname(self) -> str: ...
+    @property
+    def pid(self) -> int: ...
+    @property
+    def processes(self) -> int: ...
+    @property
+    def max_claim_batch(self) -> int: ...
+    @property
+    def max_claim_per_worker(self) -> int: ...
+    @property
+    def cluster_wide_cap(self) -> int | None: ...
+    @property
+    def queues(self) -> list[str]: ...
+    @property
+    def queue_priorities(self) -> dict[str, int]: ...
+    @property
+    def queue_max_concurrency(self) -> dict[str, int]: ...
+    @property
+    def recovery_config_json(self) -> str: ...
+    @property
+    def tasks_running(self) -> int: ...
+    @property
+    def tasks_claimed(self) -> int: ...
+    @property
+    def memory_usage_mb(self) -> float | None: ...
+    @property
+    def memory_percent(self) -> float | None: ...
+    @property
+    def cpu_percent(self) -> float | None: ...
+    @property
+    def children_memory_mb(self) -> float | None: ...
+    @property
+    def worker_started_at(self) -> datetime.datetime: ...
+    @property
+    def slot_health(self) -> AllSlotsServingRecord | SlotsDownRecord: ...
+    @property
+    def class_capacity(self) -> list[ClassBudgetRecord]: ...
+
+
+@final
+class WorkerStatesRecord:
+    """The snapshots of a worker state read: the latest per worker, or the history of one worker,
+    newest first.
+    """
+    @property
+    def states(self) -> list[WorkerStateRecord]: ...
+
+
+@final
+class WorkerStateAbsent:
+    """The worker has written no snapshot."""
+    @property
+    def worker_id(self) -> str: ...
+
+
+@final
+class StreamServedRecord:
+    """Live workers serve the stream with capacity in service."""
+    @property
+    def workers(self) -> int: ...
+    @property
+    def capacity(self) -> int: ...
+
+
+@final
+class StreamWithoutCapacityRecord:
+    """Live workers serve the stream, and none has capacity in service."""
+    @property
+    def workers(self) -> int: ...
+
+
+@final
+class StreamUnservedRecord:
+    """No live worker serves the stream."""
+
+
+@final
+class StreamCoverageRecord:
+    """The coverage of one pending stream."""
+    @property
+    def queue_name(self) -> str: ...
+    @property
+    def execution(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']: ...
+    @property
+    def state(self) -> StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord: ...
+
+
+@final
+class ClassCoverageRecord:
+    """The fleet check, read at checked_at (database time)."""
+    @property
+    def checked_at(self) -> datetime.datetime: ...
+    @property
+    def live_workers(self) -> int: ...
+    @property
+    def streams(self) -> list[StreamCoverageRecord]: ...
+
+
+@final
+class OldestWaitingRecord:
+    """At least one row of the stream is due; wait is how long the oldest due row waited."""
+    @property
+    def enqueued_at(self) -> datetime.datetime: ...
+    @property
+    def wait(self) -> datetime.timedelta: ...
+
+
+@final
+class NoneDueRecord:
+    """Every row of the stream is due later."""
+    @property
+    def next_due_at(self) -> datetime.datetime: ...
+
+
+@final
+class PendingStreamRecord:
+    """One pending stream of the class report."""
+    @property
+    def queue_name(self) -> str: ...
+    @property
+    def execution(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']: ...
+    @property
+    def wait(self) -> OldestWaitingRecord | NoneDueRecord: ...
+    @property
+    def state(self) -> StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord: ...
+
+
+@final
+class BudgetLoadRecord:
+    """One claim budget of a live worker, with the rows it holds."""
+    @property
+    def budget(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']: ...
+    @property
+    def capacity(self) -> int: ...
+    @property
+    def serves(self) -> list[Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']]: ...
+    @property
+    def in_flight(self) -> int: ...
+
+
+@final
+class WorkerClassLoadRecord:
+    """The claim budgets of one live worker, in Execution order."""
+    @property
+    def worker_id(self) -> str: ...
+    @property
+    def snapshot_at(self) -> datetime.datetime: ...
+    @property
+    def budgets(self) -> list[BudgetLoadRecord]: ...
+
+
+@final
+class ClassReportRecord:
+    """The class report, read at checked_at (database time); workers by worker id."""
+    @property
+    def checked_at(self) -> datetime.datetime: ...
+    @property
+    def streams(self) -> list[PendingStreamRecord]: ...
+    @property
+    def workers(self) -> list[WorkerClassLoadRecord]: ...
+
+
+@final
 class WorkflowPaused:
     """The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed
     tasks of the paused tree are abandoned.
@@ -1508,6 +1749,37 @@ class CoverageFailed:
     """The pass has no outcome: the connect, the client family check, a probe, the coverage
     gate, the class registration or the final publication failed, or a row broke its
     function's contract.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class PrunePassRecord:
+    """One pruning pass: the finalized leaves, the counts of the swept leaves left detached and
+    dropped, the refusals and errors (one entry per leaf), and whether a per-pass bound left
+    expired leaves for the next pass.
+    """
+    @property
+    def finalized_leaves(self) -> list[str]: ...
+    @property
+    def detached(self) -> int: ...
+    @property
+    def dropped(self) -> int: ...
+    @property
+    def refusals(self) -> list[str]: ...
+    @property
+    def errors(self) -> list[str]: ...
+    @property
+    def reach(self) -> Literal['WITHIN_BOUNDS', 'TRUNCATED']: ...
+
+
+@final
+class PruneFailed:
+    """The pass has no report: the connect, the client family check or the candidate read
+    failed, or a candidate row broke its function's contract. Nothing was detached or dropped.
     """
     @property
     def message(self) -> str: ...

@@ -330,13 +330,13 @@ async fn retry_busy_leaf(attempt: u32) {
     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
 }
 
-/// Checks out a session-work connection for maintenance work whose first
-/// statement is `first`. The reaper's maintenance runs on the reserve
-/// ([`CheckoutClass::Reserved`]), as the reaper's recovery statements do;
-/// on a pool with no reserve the class changes nothing.
+/// Checks out a session-work connection for maintenance work (coverage and
+/// pruning) whose first statement is `first`. The reaper's maintenance runs
+/// on the reserve ([`CheckoutClass::Reserved`]), as the reaper's recovery
+/// statements do; on a pool with no reserve the class changes nothing.
 ///
 /// Errors: the failed checkout as `first`'s `NotSent`.
-async fn maintenance_connection(
+pub(crate) async fn maintenance_connection(
     pool: &CorePool,
     first: &TypedStatement,
 ) -> Result<PooledConnection, HistoryError> {

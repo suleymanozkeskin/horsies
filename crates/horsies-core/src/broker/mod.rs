@@ -70,12 +70,12 @@ pub use error::{
     EnqueueRefusalCause,
 };
 pub use health::{
-    DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
-    WORKER_PING_CHANNEL,
+    checked_history_limit, worker_history_limit_refused, DatabasePing, WorkerPingRequest,
+    WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
 };
 pub use lifecycle_operations::{CancelAnswer, CancelTaskError};
 pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};
-pub use partition_maintenance::CoveragePassError;
+pub use partition_maintenance::{CoveragePassError, PrunePassError};
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
     PostgresBroker, PrestartExpiry, SchemaInitializationMode, WorkflowStop, WorkflowStopBeforeStart,
