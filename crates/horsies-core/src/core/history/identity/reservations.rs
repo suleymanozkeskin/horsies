@@ -34,14 +34,14 @@ struct ReservationRow {
 }
 
 /// The key reservation claim: `$1` key digest, `$2` key scope version, `$3`
-/// reservation window in seconds, `$4` fingerprint version, `$5`
-/// fingerprint, `$6` task id. One row: `outcome`, `task_id`,
-/// `observed_fingerprint_version`.
+/// reservation window in microseconds (made into the exact `interval`), `$4`
+/// fingerprint version, `$5` fingerprint, `$6` task id. One row: `outcome`,
+/// `task_id`, `observed_fingerprint_version`.
 pub(crate) fn key_reservation_claim_sql() -> String {
     format!(
         "SELECT outcome, task_id, observed_fingerprint_version
          FROM {KEY_RESERVATION_CLAIM_FUNCTION}(
-             $1, $2, make_interval(secs => $3::double precision), $4, $5, $6
+             $1, $2, $3::bigint * interval '1 microsecond', $4, $5, $6
          )"
     )
 }
@@ -50,7 +50,7 @@ pub async fn claim_key_reservation(
     connection: &mut PgConnection,
     key_digest: &[u8],
     key_scope_version: i16,
-    reservation_window_seconds: i64,
+    reservation_window_micros: i64,
     fingerprint_version: i16,
     fingerprint: &[u8],
     task_id: Uuid,
@@ -59,7 +59,7 @@ pub async fn claim_key_reservation(
     let row: ReservationRow = sqlx::query_as(&claim_sql)
         .bind(key_digest)
         .bind(key_scope_version)
-        .bind(reservation_window_seconds)
+        .bind(reservation_window_micros)
         .bind(fingerprint_version)
         .bind(fingerprint)
         .bind(task_id)

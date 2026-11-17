@@ -100,7 +100,7 @@ _SEND_SQL: Final[LiteralString] = """
     SELECT outcome, task_id FROM horsies_enqueue_task(
         %s, 'key.claim', 'q_key_claim', 100, '{"order_id":"order-1"}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL,
         now(), 'NOW', NULL, NULL, 1::smallint, %s, 'FIRST_RUN', NULL, NULL,
-        'KEYED', %s, 1::smallint, 3600, 'FIRST')
+        'KEYED', %s, 1::smallint, interval '1 hour', 'FIRST')
 """
 
 

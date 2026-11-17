@@ -1341,7 +1341,9 @@ $$;
 --   claim raises 40001 (serialization_failure); a resend of the command claims again.
 -- - Under REPEATABLE READ or SERIALIZABLE, an insert that meets a reservation committed after the transaction
 --   snapshot raises 40001 (PostgreSQL's ON CONFLICT rule).
--- Refuses with 22023, before any write: a digest or fingerprint that is not 32 bytes; a window outside (0, 30 days].
+-- Refuses with 22023, before any write: a digest or fingerprint that is not 32 bytes; a window outside (0, 30 days];
+-- a window with a year, month or day field (terminal time plus such a window depends on the session time zone; the
+-- clients send a time interval, made from microseconds).
 -- Locks the read reservation FOR UPDATE and the deleted expired reservation until the caller's transaction ends.
 -- It does not commit.
 CREATE FUNCTION horsies_key_reservation_claim(p_key_digest bytea, p_key_scope_version smallint, p_reservation_window interval, p_fingerprint_version smallint, p_fingerprint bytea, p_task_id uuid) RETURNS horsies_key_reservation_outcome
@@ -1365,6 +1367,12 @@ BEGIN
        OR p_reservation_window > interval '30 days' THEN
         RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
             MESSAGE = 'reservation window must be positive and at most 30 days';
+    END IF;
+    IF extract(year FROM p_reservation_window) <> 0 OR extract(month FROM p_reservation_window) <> 0
+       OR extract(day FROM p_reservation_window) <> 0 THEN
+        RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+            MESSAGE = 'reservation window must be a time interval with no year, month or day field',
+            HINT = 'Make it from microseconds: <microseconds>::bigint * interval ''1 microsecond''.';
     END IF;
 
     FOR v_round IN 1..c_claim_rounds LOOP

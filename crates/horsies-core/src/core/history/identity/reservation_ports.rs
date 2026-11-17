@@ -15,8 +15,8 @@ use super::reservations::{
     ReservationClaim,
 };
 
-const HOUR_SECONDS: i64 = 3_600;
-const THIRTY_ONE_DAYS_SECONDS: i64 = 31 * 86_400;
+const HOUR_MICROS: i64 = 3_600 * 1_000_000;
+const THIRTY_ONE_DAYS_MICROS: i64 = 31 * 86_400 * 1_000_000;
 
 fn digest(text: &str) -> Vec<u8> {
     Sha256::digest(text.as_bytes()).to_vec()
@@ -33,7 +33,7 @@ async fn claim(
     fingerprint: &[u8],
     task_id: Uuid,
 ) -> ReservationClaim {
-    claim_key_reservation(connection, key, 1, HOUR_SECONDS, 1, fingerprint, task_id)
+    claim_key_reservation(connection, key, 1, HOUR_MICROS, 1, fingerprint, task_id)
         .await
         .expect("claim a reservation")
 }
@@ -69,7 +69,7 @@ async fn a_window_above_thirty_days_is_refused_before_any_write() {
         &mut connection,
         &key,
         1,
-        THIRTY_ONE_DAYS_SECONDS,
+        THIRTY_ONE_DAYS_MICROS,
         1,
         &digest("command"),
         Uuid::new_v4(),

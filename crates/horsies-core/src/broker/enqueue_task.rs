@@ -31,14 +31,16 @@ use crate::db::{ParameterType, TypedStatement};
 /// execution, retention class key, retain rerun input, max retries, good
 /// until, sent at, start kind, start time, start delay in seconds,
 /// fingerprint version, fingerprint, key kind, key digest, key scope
-/// version, key window in seconds, send kind. The delay and the window are
-/// cast to `integer` by the server, as Python's statement does, so a value
-/// outside the integer range is the server's refusal.
+/// version, key window in microseconds, send kind. The delay is cast to
+/// `integer` by the server, as Python's statement does, so a value outside
+/// the integer range is the server's refusal. The window is made into the
+/// exact `interval` (`$21::bigint * interval '1 microsecond'`); NULL for an
+/// unkeyed send.
 pub(crate) static ENQUEUE_TASK: TypedStatement = TypedStatement::new(
     "enqueue_task",
     "SELECT outcome, task_id FROM horsies_enqueue_task(\
      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::integer, $16, $17, \
-     'FIRST_RUN', NULL, NULL, $18, $19, $20, $21::integer, $22)",
+     'FIRST_RUN', NULL, NULL, $18, $19, $20, $21::bigint * interval '1 microsecond', $22)",
     &[
         ParameterType::Uuid,
         ParameterType::Text,
@@ -131,35 +133,35 @@ impl EnqueueStart {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EnqueueKey {
     Unkeyed,
-    /// The scoped key digest, reserved for `window_seconds` after its task
-    /// finishes.
+    /// The scoped key digest, reserved for `window_micros` microseconds
+    /// after its task finishes.
     Keyed {
         digest: [u8; 32],
-        window_seconds: i64,
+        window_micros: i64,
     },
 }
 
 impl EnqueueKey {
     /// The key of a send with the optional digest of its scoped key.
-    pub(crate) fn of(digest: Option<[u8; 32]>, window_seconds: i64) -> EnqueueKey {
+    pub(crate) fn of(digest: Option<[u8; 32]>, window_micros: i64) -> EnqueueKey {
         match digest {
             Some(digest) => Self::Keyed {
                 digest,
-                window_seconds,
+                window_micros,
             },
             None => Self::Unkeyed,
         }
     }
 
-    /// `p_key_kind`, `p_key_scope_version` and `p_key_window_s`; the digest
-    /// is [`EnqueueKey::digest`].
+    /// `p_key_kind`, `p_key_scope_version` and the microseconds of
+    /// `p_key_window`; the digest is [`EnqueueKey::digest`].
     pub(crate) fn columns(&self) -> (&'static str, Option<i16>, Option<i64>) {
         match self {
             Self::Unkeyed => ("UNKEYED", None, None),
-            Self::Keyed { window_seconds, .. } => (
+            Self::Keyed { window_micros, .. } => (
                 "KEYED",
                 Some(IDEMPOTENCY_SCOPE_VERSION),
-                Some(*window_seconds),
+                Some(*window_micros),
             ),
         }
     }
@@ -328,13 +330,13 @@ mod tests {
 
     #[test]
     fn a_key_names_its_digest_scope_and_window_and_no_key_names_none() {
-        let keyed = EnqueueKey::of(Some([7; 32]), 86_400);
+        let keyed = EnqueueKey::of(Some([7; 32]), 1_500_000);
         assert_eq!(
             keyed.columns(),
-            ("KEYED", Some(IDEMPOTENCY_SCOPE_VERSION), Some(86_400))
+            ("KEYED", Some(IDEMPOTENCY_SCOPE_VERSION), Some(1_500_000))
         );
         assert_eq!(keyed.digest(), Some([7_u8; 32].as_slice()));
-        let unkeyed = EnqueueKey::of(None, 86_400);
+        let unkeyed = EnqueueKey::of(None, 1_500_000);
         assert_eq!(unkeyed.columns(), ("UNKEYED", None, None));
         assert_eq!(unkeyed.digest(), None);
     }

@@ -586,8 +586,8 @@ def _enqueue_key(
     key_window: timedelta,
 ) -> Result[EnqueueKey, BrokerInvalidInput]:
     """The key of a send: none, or the digest of the key scoped to the task
-    name with its reservation window in whole seconds. A key that the scope
-    refuses is ``INVALID_INPUT``. Pure."""
+    name with its reservation window, exact to the microsecond. A key that the
+    scope refuses is ``INVALID_INPUT``. Pure."""
     if idempotency_key is None:
         return Ok(Unkeyed())
     from horsies.core.history.identity.keys import (
@@ -605,7 +605,7 @@ def _enqueue_key(
     return Ok(Keyed(
         digest=digest,
         scope_version=IDEMPOTENCY_SCOPE_VERSION,
-        window_s=int(key_window.total_seconds()),
+        window=key_window,
     ))
 
 
