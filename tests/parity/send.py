@@ -1,11 +1,18 @@
 """The send process of the Python side of a parity run.
 
-`python -m tests.parity.send <scenario>` sends the scenario's tasks, starts
-its workflows, then runs its actions on the started workflows, through the
-parity app on the database of `HORSIES_PARITY_DATABASE_URL`. It prints one
-JSON line per send and per start, in order: `{"kind": "task", "index": 0, "id": "<uuid>"}` and
-`{"kind": "workflow", "index": 0, "id": "<uuid>"}`. Exit status 0 when
-every send and start was written; 1 with the refusal on stderr.
+`python -m tests.parity.send <scenario>` sends the scenario's tasks, reruns
+the tasks of its reruns, starts its workflows, runs its actions on the
+started workflows, then pings, through the parity app on the database of
+`HORSIES_PARITY_DATABASE_URL`. It prints one JSON line per send, rerun,
+start and ping, in this order:
+- `{"kind": "task", "index": 0, "id": "<uuid>"}` for each send, then for
+  each rerun (the new task), with one index sequence;
+- `{"kind": "workflow", "index": 0, "id": "<uuid>"}` for each start;
+- `{"kind": "ping", "index": 0, "workers": 2, "targeted": 1}`: the count of
+  workers that answered the ping of every worker, and the count that
+  answered the ping of the first of them by its id.
+
+Exit status 0 when every step was written; 1 with the refusal on stderr.
 
 The Rust side runs `horsies-parity send <scenario>`, which prints the same
 lines.
@@ -17,13 +24,52 @@ import asyncio
 import json
 import sys
 from collections.abc import Mapping
-from typing import Any
+from datetime import timedelta
+from typing import Any, Final
+from uuid import UUID
 
-from horsies import TaskSendAsyncContext
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from horsies import (
+    RerunEnqueued,
+    RerunEnqueuePolicy,
+    RerunTask,
+    TaskSendAsyncContext,
+    WorkerPong,
+    rerun_task,
+)
+from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import WorkflowHandle
 from horsies.core.types.result import Err, Ok
+from horsies.core.utils.url import sqlalchemy_url
 from tests.parity import app as parity
-from tests.parity.scenarios import ActionKind, Send, SendForm, WorkflowAction, scenario_named
+from tests.parity.scenarios import (
+    ActionKind,
+    Health,
+    Rerun,
+    Send,
+    SendForm,
+    WorkflowAction,
+    scenario_named,
+)
+
+RESULT_WAIT_MS: Final = 30_000
+"""The longest wait for the end of a rerun source."""
+
+RERUN_POLICY: Final = RerunEnqueuePolicy(
+    retention=timedelta(days=30),
+    retain_rerun_input=True,
+    reservation_window=timedelta(hours=24),
+)
+"""The default retention class (`standard_30d`), the input retained, a
+24 h key reservation: Rust `RerunEnqueuePolicy::standard(true)`."""
+
+PING_WINDOW_S: Final = 2.0
+"""The window of one worker ping."""
+
+PING_ATTEMPTS: Final = 10
+"""The pings of every worker before the send process gives up: a worker
+that has just started may not listen yet."""
 
 
 class SendRefused(Exception):
@@ -130,6 +176,75 @@ async def _send_one(send: Send) -> str:
             raise SendRefused(f'the send of {send.task_name} was refused: {refused}')
 
 
+async def _rerun_one(rerun: Rerun, sent: list[str]) -> str:
+    """The id of the new task of `rerun`, after the end of its source."""
+    if not 0 <= rerun.source < len(sent):
+        raise SendRefused(f'{rerun} names no earlier task line')
+    source = UUID(sent[rerun.source])
+    match await parity.app.get_result_async(source, timeout_ms=RESULT_WAIT_MS):
+        case Ok(TaskResult(err=TaskError(error_code='REFUSED'))):
+            pass
+        case other:
+            raise SendRefused(f'the rerun source {source} did not end with REFUSED: {other}')
+    database_url = parity.config.broker.database_url.get_secret_value()
+    engine = create_async_engine(sqlalchemy_url(database_url))
+    try:
+        async with engine.begin() as connection:
+            outcome = await rerun_task(
+                connection,
+                RerunTask(source_task_id=source, deadline=None),
+                RERUN_POLICY,
+            )
+    finally:
+        await engine.dispose()
+    match outcome:
+        case RerunEnqueued(new_task_id=new_task_id):
+            return str(new_task_id)
+        case refused:
+            raise SendRefused(f'the rerun of {source} answered {refused}')
+
+
+async def _every_worker(expected: int) -> list[WorkerPong]:
+    """The answers to a ping of every worker, once `expected` workers
+    answered one ping."""
+    answered: list[WorkerPong] = []
+    for _attempt in range(PING_ATTEMPTS):
+        match await parity.app.ping_workers_async(
+            timeout_seconds=PING_WINDOW_S, min_responses=expected,
+        ):
+            case Ok(pongs):
+                answered = pongs
+            case Err(refused):
+                raise SendRefused(f'ping_workers was refused: {refused}')
+        if len(answered) >= expected:
+            return answered
+    raise SendRefused(
+        f'{len(answered)} of {expected} workers answered the last of '
+        f'{PING_ATTEMPTS} pings',
+    )
+
+
+async def _ping(expected: int) -> str:
+    """The ping line: the database answers, then each of the `expected`
+    workers, then the first of them by its id."""
+    match await parity.app.ping_database_async():
+        case Ok(_):
+            pass
+        case Err(refused):
+            raise SendRefused(f'ping_database was refused: {refused}')
+    answered = await _every_worker(expected)
+    match await parity.app.ping_workers_async(
+        target_worker_id=answered[0].worker_id, timeout_seconds=PING_WINDOW_S,
+    ):
+        case Ok(targeted):
+            pass
+        case Err(refused):
+            raise SendRefused(f'the ping of worker {answered[0].worker_id} was refused: {refused}')
+    return json.dumps(
+        {'kind': 'ping', 'index': 0, 'workers': len(answered), 'targeted': len(targeted)},
+    )
+
+
 async def _start_one(workflow_name: str) -> WorkflowHandle[Any]:
     """The handle of the started workflow `workflow_name`."""
     match workflow_name:
@@ -177,8 +292,12 @@ async def _act(action: WorkflowAction, handles: list[WorkflowHandle[Any]]) -> No
 async def _run(scenario_name: str) -> list[str]:
     scenario = scenario_named(scenario_name)
     lines: list[str] = []
-    for index, send in enumerate(scenario.sends):
-        task_id = await _send_one(send)
+    sent: list[str] = []
+    for send in scenario.sends:
+        sent.append(await _send_one(send))
+    for rerun in scenario.reruns:
+        sent.append(await _rerun_one(rerun, sent))
+    for index, task_id in enumerate(sent):
         lines.append(json.dumps({'kind': 'task', 'index': index, 'id': task_id}))
     handles: list[WorkflowHandle[Any]] = []
     for index, workflow_name in enumerate(scenario.workflows):
@@ -189,6 +308,11 @@ async def _run(scenario_name: str) -> list[str]:
         )
     for action in scenario.actions:
         await _act(action, handles)
+    match scenario.health:
+        case Health.PINGED:
+            lines.append(await _ping(len(scenario.profiles)))
+        case Health.NOT_PINGED:
+            pass
     return lines
 
 
