@@ -36,6 +36,7 @@ export default defineConfig({
 		'/rust/monitoring/broker-methods': '/horsies/rust/monitoring/health-reads/',
 		'/rust/workers/concurrency': '/horsies/workers/concurrency/',
 		'/rust/internals/serialization': '/horsies/internals/serialization/',
+		'/rust/scheduling/schedule-patterns': '/horsies/rust/scheduling/schedule-config/',
 		'/rust/monitoring/web-ui-deployment': '/horsies/rust/',
 		'/rust/operations/cutover-runbook': '/horsies/rust/',
 		'/rust/quick-start/getting-started': '/horsies/rust/',
@@ -44,8 +45,6 @@ export default defineConfig({
 		'/rust/quick-start/03-defining-workflows': '/horsies/rust/',
 		'/rust/quick-start/04-scheduling': '/horsies/rust/',
 		'/rust/quick-start/05-workflow-patterns': '/horsies/rust/',
-		'/rust/scheduling/schedule-config': '/horsies/rust/',
-		'/rust/scheduling/schedule-patterns': '/horsies/rust/',
 	},
 	integrations: [
 		starlight({
@@ -292,13 +291,13 @@ export default defineConfig({
 						{
 							label: 'Workers',
 							items: [
-								{ label: 'Worker Setup', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Worker Setup', slug: 'rust/workers/worker-setup' },
 							],
 						},
 						{
 							label: 'Scheduling',
 							items: [
-								{ label: 'Schedule Config', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Schedule Config', slug: 'rust/scheduling/schedule-config' },
 							],
 						},
 						{
