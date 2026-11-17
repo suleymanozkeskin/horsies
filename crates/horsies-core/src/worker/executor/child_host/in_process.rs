@@ -41,6 +41,7 @@ pub(crate) async fn run_isolated_in_process(
             registry,
             hostname: IN_PROCESS_HOSTNAME.to_owned(),
             start_hook: ChildStartHook::NoHook,
+            producer_manifest: super::producer::test_producer_manifest(),
         }),
         pid: IN_PROCESS_PID,
         writer,

@@ -59,6 +59,7 @@ fn context_on(broker: PostgresBroker) -> (HostContext, UnixStream) {
             registry: Arc::new(TaskRegistry::new()),
             hostname: "start-host".to_owned(),
             start_hook: ChildStartHook::NoHook,
+            producer_manifest: super::producer::test_producer_manifest(),
         }),
         pid: PID,
         writer,

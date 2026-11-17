@@ -14,6 +14,7 @@ use std::time::Duration;
 use super::args::{ChildArgs, CHILD_MODE_ARGUMENT};
 use super::link::{read_frame, start_control_thread, write_frame, FrameWriter, ReadEnd};
 use super::panic::{install_panic_hook, CatchPanic};
+use super::producer::{publish_child_producer, task_send_manifest, task_send_pool_of};
 use super::role::mark_process_runs_task_bodies;
 use super::rss::read_rss;
 use super::run::HostContext;
@@ -22,7 +23,7 @@ use crate::broker::PostgresBroker;
 use crate::core::config::PostgresConfig;
 use crate::core::TaskRegistry;
 use crate::db::KeptOpen;
-use crate::manifest::PoolRecycle;
+use crate::manifest::{PoolRecycle, ProducerManifest};
 use crate::worker::executor::protocol::{
     decode_parent_frame, BootDetail, BootErrorName, BootFailedFrame, ChildConnection,
     ChildExitCode, ChildFrame, ChildKind, ChildPool, ChildProgram, FrameReader, InitFrame,
@@ -54,6 +55,10 @@ pub struct ChildApp {
     pub hostname: String,
     /// What the child runs before it reports ready.
     pub start_hook: ChildStartHook,
+    /// The app's producer manifest. Task code in the child sends through a
+    /// handle of it whose pool is the `task_send_pool` of the child's kind
+    /// ([`super::child_producer`]).
+    pub producer_manifest: ProducerManifest,
 }
 
 /// Why a start hook failed, as the hook names it. The child logs it.
@@ -422,6 +427,10 @@ fn boot_and_serve(
     reader: FrameReader,
     init: InitFrame,
 ) -> ChildHostExit {
+    publish_child_producer(task_send_manifest(
+        &app.producer_manifest,
+        task_send_pool_of(init.child_kind),
+    ));
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(runtime_threads(init.child_kind))
         .thread_name(RUNTIME_THREAD_NAME)
