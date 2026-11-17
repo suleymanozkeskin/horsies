@@ -21,6 +21,7 @@ from typing import Final, assert_never
 import pytest
 
 from tests.dualrun.operations.broker import BROKER_OPERATIONS
+from tests.dualrun.operations.history import HISTORY_OPERATIONS
 from tests.dualrun.operations.lifecycle import LIFECYCLE_OPERATIONS
 from tests.dualrun.operations.monitoring_and_web import MONITORING_AND_WEB_OPERATIONS
 from tests.dualrun.operations.workflow_engine import WORKFLOW_ENGINE_OPERATIONS
@@ -42,6 +43,7 @@ DUAL_RUN_TESTS: Final = Path('tests') / 'integration'
 
 OPERATION_TABLES: Final[Mapping[SwitchModule, tuple[DualRunOperation, ...]]] = {
     SwitchModule.LIFECYCLE: LIFECYCLE_OPERATIONS,
+    SwitchModule.HISTORY: HISTORY_OPERATIONS,
     SwitchModule.BROKER: BROKER_OPERATIONS,
     SwitchModule.MONITORING_AND_WEB: MONITORING_AND_WEB_OPERATIONS,
     SwitchModule.WORKFLOW_ENGINE: WORKFLOW_ENGINE_OPERATIONS,

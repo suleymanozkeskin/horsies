@@ -83,6 +83,9 @@ _START_RETRY_COUNT: Final[int] = 3
 _START_RETRY_INITIAL_MS: Final[int] = 200
 _START_RETRY_MAX_MS: Final[int] = 2000
 
+PAUSED_EXPIRY_BATCH_SIZE: Final[int] = 50
+"""The most PAUSED workflows that one expiry call reads and expires."""
+
 
 def _ser_or_raise(result: SerdeResult[str], context: str) -> str:
     """Extract a serde Result or raise with context.
@@ -968,7 +971,7 @@ async def expire_paused_workflows(
     session_factory: 'async_sessionmaker[AsyncSession]',
     *,
     older_than: timedelta,
-    batch_size: int = 50,
+    batch_size: int = PAUSED_EXPIRY_BATCH_SIZE,
 ) -> int:
     """Expire PAUSED workflows older than the declared age policy.
 

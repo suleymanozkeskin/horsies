@@ -172,16 +172,19 @@ from horsies.core.worker.shared_lifecycle import REFUSAL_WRITES_BOUND_S
 from horsies.core.worker.thread_runner import THREAD_REFUSAL_WRITES_BOUND_S
 from horsies.core.worker.shared_stop import (
     BlockedLoopKill,
+    CancelEnd,
     ChildKill,
     CrashPath,
     DeadlineState,
     KilledRunVerdict,
     LoopHeldBy,
     LoopHolderUnknown,
+    NoCancelSignal,
     NoNamedKill,
     RetryPlacement,
     ReturnedBeforeKill,
     StopState,
+    TimeoutCancel,
     retry_placement,
     verdict_at_kill,
 )
@@ -392,9 +395,11 @@ class SeatDeadlineEnded:
     """The deadline of the task fired in the child, the child cancelled the
     task, and its coroutine and its marked work have ended. The outcome is
     the timeout. ``retry`` is ``ISOLATED`` when the child reported the run
-    stuck before it ended."""
+    stuck before it ended. ``cancel`` is the ``CancelEnd`` of an async run,
+    and ``NoCancelSignal`` for a thread run."""
 
     retry: RetryPlacement
+    cancel: TimeoutCancel
 
 
 @dataclass(frozen=True, slots=True)
@@ -2526,6 +2531,25 @@ def _deadline_state(
             assert_never(unreachable)
 
 
+def _cancel_end(
+    report: DeadlineNotReported
+    | DeadlineReported
+    | SecondCancelReported
+    | StuckReported,
+) -> CancelEnd:
+    """How an async run that its child ended at its timeout ended: within
+    the grace after the cancel at its deadline, or after the second cancel.
+    The child sends the second cancel only when the run is alive after the
+    grace. Pure."""
+    match report:
+        case DeadlineNotReported() | DeadlineReported():
+            return CancelEnd.RETURNED_AFTER_SIGNAL
+        case SecondCancelReported() | StuckReported():
+            return CancelEnd.DROPPED_AFTER_GRACE
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _stop_state(
     report: DeadlineNotReported
     | DeadlineReported
@@ -3909,9 +3933,15 @@ class SlotPool:
                 | StuckReported() as report
             ):
                 match run.handle.frame.work:
-                    case SeatTask() | ThreadSeatTask():
+                    case SeatTask():
                         outcome = SeatDeadlineEnded(
                             retry=retry_placement(_stop_state(report)),
+                            cancel=_cancel_end(report),
+                        )
+                    case ThreadSeatTask():
+                        outcome = SeatDeadlineEnded(
+                            retry=retry_placement(_stop_state(report)),
+                            cancel=NoCancelSignal(),
                         )
                     case SeatRefusal():
                         return False

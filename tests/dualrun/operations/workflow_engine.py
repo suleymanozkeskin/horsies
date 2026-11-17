@@ -34,4 +34,11 @@ WORKFLOW_ENGINE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=('delete_expired_workflows_async',),
     ),
+    DualRunOperation(
+        name='paused workflow expiry',
+        production_path='horsies.core.worker.reaper:ReaperMixin._expire_paused_workflows',
+        reference_path='tests.dualrun.reference.paused_expiry_caller:expire_paused_workflows',
+        mode=PoolMode(),
+        core_methods=('expire_paused_workflows_async',),
+    ),
 )
