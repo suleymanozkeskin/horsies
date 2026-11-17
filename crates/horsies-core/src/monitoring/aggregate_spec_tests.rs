@@ -538,7 +538,6 @@ async fn the_filters_scope_the_groups_and_the_total() {
 /// (every family, also CONTRACT, RETRIEVAL and DOMAIN).
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn each_family_selects_exactly_its_own_codes() {
     let database = SpecDatabase::create().await;
     seed_one_failure_per_family(&database.pool).await;
@@ -556,7 +555,6 @@ async fn each_family_selects_exactly_its_own_codes() {
 /// Python `TestErrorCategoryFilter::test_a_user_defined_code_is_domain_and_no_family_claims_it`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn a_user_code_is_domain_and_no_built_in_family_selects_it() {
     let database = SpecDatabase::create().await;
     seed_terminal(
@@ -584,7 +582,6 @@ async fn a_user_code_is_domain_and_no_built_in_family_selects_it() {
 /// DOMAIN means "carries a code the library does not define", not "no code".
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn absent_and_empty_codes_match_no_category() {
     let database = SpecDatabase::create().await;
     seed_terminal(
@@ -611,7 +608,6 @@ async fn absent_and_empty_codes_match_no_category() {
 /// Python `TestErrorCategoryFilter::test_categories_are_or_combined`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn two_categories_select_the_codes_of_either() {
     let database = SpecDatabase::create().await;
     seed_one_failure_per_family(&database.pool).await;
@@ -648,7 +644,6 @@ fn built_in_codes() -> Vec<String> {
 /// mapping, so a row is reachable from the category it shows.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn every_built_in_code_is_selected_by_the_category_it_reports() {
     let database = SpecDatabase::create().await;
     let codes = built_in_codes();
