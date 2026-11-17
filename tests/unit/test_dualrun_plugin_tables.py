@@ -1,0 +1,85 @@
+"""The once-only lists of the integration dual-run plugin.
+
+Each listed node id names a test that exists, and no test is both core-only
+and reference-only for one module. A wrong id runs the test twice, and its
+run on the other implementation trips.
+"""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+from typing import Final
+
+import pytest
+
+from tests.dualrun.operations.plugin import (
+    CORE_ONLY_TESTS,
+    REFERENCE_ONLY_TESTS,
+    _implementations,  # pyright: ignore[reportPrivateUsage]
+)
+from tests.dualrun.operations.table import Implementation, SwitchModule
+
+pytestmark = [pytest.mark.unit]
+
+ROOT: Final = Path(__file__).resolve().parents[2]
+"""The repository root, which the node ids are relative to."""
+
+type Definition = ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
+
+
+def _named(body: list[ast.stmt], name: str) -> list[Definition]:
+    return [
+        node
+        for node in body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == name
+    ]
+
+
+def _defines(node_id: str) -> bool:
+    """Whether the file of ``node_id`` defines its class and function path."""
+    path, *names = node_id.split('::')
+    body: list[ast.stmt] = ast.parse((ROOT / path).read_text(encoding='utf-8')).body
+    for name in names:
+        match _named(body, name):
+            case [definition]:
+                body = definition.body
+            case _:
+                return False
+    return bool(names)
+
+
+def _listed() -> list[tuple[SwitchModule, str]]:
+    return [
+        (module, test.node_id)
+        for tables in (CORE_ONLY_TESTS, REFERENCE_ONLY_TESTS)
+        for module, tests in tables.items()
+        for test in tests
+    ]
+
+
+@pytest.mark.parametrize(('module', 'node_id'), _listed())
+def test_each_listed_test_exists(module: SwitchModule, node_id: str) -> None:
+    assert _defines(node_id), f'{module.value}: {node_id} names no test'
+
+
+def test_no_test_is_core_only_and_reference_only() -> None:
+    for module in SwitchModule:
+        core_only = {test.node_id for test in CORE_ONLY_TESTS[module]}
+        reference_only = {test.node_id for test in REFERENCE_ONLY_TESTS[module]}
+        assert core_only.isdisjoint(reference_only), module
+
+
+def test_a_listed_test_runs_once_on_its_implementation() -> None:
+    reference_only = REFERENCE_ONLY_TESTS[SwitchModule.BROKER][0].node_id
+    core_only = CORE_ONLY_TESTS[SwitchModule.LIFECYCLE][0].node_id
+
+    assert _implementations(SwitchModule.BROKER, reference_only) == [
+        Implementation.PYTHON_REFERENCE
+    ]
+    assert _implementations(SwitchModule.LIFECYCLE, core_only) == [Implementation.CORE]
+    assert _implementations(SwitchModule.HISTORY, reference_only) == [
+        Implementation.PYTHON_REFERENCE,
+        Implementation.CORE,
+    ]

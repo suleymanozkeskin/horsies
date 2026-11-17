@@ -271,6 +271,17 @@ written in Rust, on a new baseline schema.
   `WorkflowStartValidationFailed`, and a child build fails its node with
   `WORKFLOW_ENQUEUE_FAILED`.
 
+- **A log record of the core holds its fields as attributes.** The core
+  logs to the `horsies.*` loggers through Python `logging`. The message of
+  such a record is the text of the event alone, and each other field of the
+  event is an attribute of the `LogRecord`, as `extra` sets it: a bool, an
+  integer or a float as a Python `bool`, `int` or `float`, any other value
+  as its text. For example, the warning of a monitoring list cut at its
+  bound has `read` and `bound`. A field whose name `LogRecord` already uses
+  (`name`, `created`, `asctime`, ...) is set as `field_<name>`. The horsies
+  log format writes the message only; a handler with its own formatter can
+  read the attributes.
+
 ### Fixed
 
 - **A stored retry policy that does not validate fails the task at claim.**

@@ -84,7 +84,7 @@ pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};
 pub use partition_maintenance::{CoveragePassError, PrunePassError};
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
-    ConnectivityRefusal, ListenProbeFailure, PostgresBroker, PrestartExpiry,
+    CheckedSend, ConnectivityRefusal, ListenProbeFailure, PostgresBroker, PrestartExpiry,
     SchemaInitializationMode,
 };
 pub use process_listener::{

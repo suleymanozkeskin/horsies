@@ -9,7 +9,10 @@
 //! bind and a cast for each parameter (`CAST(:p1 AS uuid)`, the SQLAlchemy
 //! `text()` form), one Python value per bind, and its result columns. The
 //! caller passes the row back as a tuple in column order; a value of another
-//! type than its column is a defect of the caller (`CoreDefect`).
+//! type than its column is a defect of the caller (`CoreDefect`). A uuid
+//! column takes a `uuid.UUID` or its text: a psycopg connection that reads
+//! uuid columns as text (`register_identity_text_reads`, the broker's own
+//! engines) gives the text, as Python's `uuid_column_value` takes.
 //!
 //! The functions do no I/O and start no runtime; the fork and stop rules
 //! apply, as for `mint_task_id`.
@@ -171,8 +174,9 @@ fn caller_row(statement: &CallerStatement, row: &Bound<'_, PyTuple>) -> PyResult
     Ok(CallerRow::new(values))
 }
 
-/// One cell as a value of `value_type`; `None` is SQL `NULL`. The refusal
-/// names what the cell holds.
+/// One cell as a value of `value_type`; `None` is SQL `NULL`. A uuid column
+/// takes a `uuid.UUID` or the text of a UUID. The refusal names what the cell
+/// holds.
 fn statement_value(
     cell: &Bound<'_, PyAny>,
     value_type: CallerType,
@@ -212,10 +216,18 @@ fn statement_value(
             Ok(bytes) => Ok(StatementValue::Bytea(bytes.as_bytes().to_vec())),
             Err(_) => Err(held()),
         },
-        CallerType::Uuid => cell
-            .extract::<Uuid>()
-            .map(StatementValue::Uuid)
-            .map_err(|_| held()),
+        CallerType::Uuid => match cell.is_instance_of::<PyString>() {
+            true => {
+                let text = cell.extract::<String>().map_err(|_| held())?;
+                Uuid::parse_str(&text)
+                    .map(StatementValue::Uuid)
+                    .map_err(|error| format!("the row holds a str that is not a UUID: {error}"))
+            }
+            false => cell
+                .extract::<Uuid>()
+                .map(StatementValue::Uuid)
+                .map_err(|_| held()),
+        },
         CallerType::Timestamptz => utc_instant(cell)
             .map(StatementValue::Timestamptz)
             .map_err(|_| held()),
@@ -595,6 +607,40 @@ mod tests {
     use super::*;
 
     const SOURCE: Uuid = Uuid::from_u128(0x0190_f0f0_0000_7000_8000_0000_0000_00e0);
+
+    /// A connection that reads uuid columns as text gives the UUID's text;
+    /// the cell is the uuid, as a `uuid.UUID` is. Any other text or type is
+    /// a defect of the caller.
+    #[test]
+    fn a_uuid_column_takes_a_uuid_or_its_text() {
+        Python::initialize();
+        Python::attach(|py| {
+            let value = |source: &str| {
+                py.eval(&std::ffi::CString::new(source).expect("no NUL"), None, None)
+                    .expect("the expression evaluates")
+            };
+            for source in [
+                format!("'{SOURCE}'"),
+                format!("__import__('uuid').UUID('{SOURCE}')"),
+            ] {
+                assert!(
+                    matches!(
+                        statement_value(&value(&source), CallerType::Uuid),
+                        Ok(StatementValue::Uuid(id)) if id == SOURCE
+                    ),
+                    "{source}"
+                );
+            }
+            assert!(matches!(
+                statement_value(&value("'not-a-uuid'"), CallerType::Uuid),
+                Err(ref held) if held.starts_with("the row holds a str that is not a UUID")
+            ));
+            assert!(matches!(
+                statement_value(&value("7"), CallerType::Uuid),
+                Err(ref held) if held == "the row holds a int"
+            ));
+        });
+    }
 
     #[test]
     fn each_refusal_has_its_record_with_python_values() {

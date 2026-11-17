@@ -9,7 +9,9 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::core::history::archive::results::{decode_result_envelope, decode_result_envelope_text};
-use crate::core::history::enqueue::{parse_optional_object, prepare_enqueue_facts, SendPart};
+use crate::core::history::enqueue::{
+    parse_optional_object, prepare_enqueue_facts, PreparedEnqueueFacts, SendPart,
+};
 use crate::core::history::identity::keys::{
     reservation_window_micros, IDEMPOTENCY_WINDOW_DEFAULT_HOURS, IDEMPOTENCY_WINDOW_DEFAULT_MICROS,
 };
@@ -132,6 +134,167 @@ mod sent_input_tests {
         assert!(check_sent_input(r#"{"x": {"y": [1, 2]}}"#).is_ok());
         assert!(check_sent_input("[1]").is_ok());
         assert!(check_sent_input("null").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod checked_send_tests {
+    use super::*;
+
+    const TASK_ID: Uuid = Uuid::from_u128(7);
+
+    fn checked(idempotency_key: Option<&str>) -> Result<CheckedSend<'static>, BrokerError> {
+        CheckedSend::check(
+            "send.task",
+            "{}",
+            "default",
+            100,
+            Some(Utc::now()),
+            None,
+            None,
+            None,
+            Some(TASK_ID),
+            None,
+            idempotency_key,
+            EnqueueRetention::Forever,
+            false,
+        )
+    }
+
+    /// Python refuses an empty key before any I/O (`_enqueue_key`, through
+    /// `ScopedIdempotencyKey`): the send answers `VALIDATION_FAILED`. The
+    /// check needs no connection, so a caller runs it before its connect.
+    #[test]
+    fn an_empty_idempotency_key_is_refused_by_the_check() {
+        match checked(Some("")) {
+            Err(BrokerError::EnqueueContract(refusal)) => {
+                assert_eq!(refusal.part, SendPart::Input);
+                assert!(
+                    refusal.message.contains("must be non-empty"),
+                    "{}",
+                    refusal.message
+                );
+            }
+            Err(other) => panic!("an empty key gave {other}"),
+            Ok(send) => panic!("an empty key passed the check: {send:?}"),
+        }
+    }
+
+    #[test]
+    fn a_key_of_at_most_255_bytes_passes_and_a_longer_one_is_refused() {
+        let over = "k".repeat(256);
+        assert!(matches!(
+            checked(Some(&over)),
+            Err(BrokerError::EnqueueContract(_))
+        ));
+        let at_bound = "k".repeat(255);
+        let send = checked(Some(&at_bound)).expect("a key of 255 bytes passes");
+        assert_eq!(send.task_id(), TASK_ID);
+        assert_eq!(
+            checked(None).expect("an unkeyed send passes").task_id(),
+            TASK_ID
+        );
+    }
+}
+
+#[cfg(test)]
+mod raw_result_probe_tests {
+    //! The probe records of the staged result reader's rows. Pure.
+    use super::*;
+    use crate::core::history::archive::versions::{
+        archive_digest, JSON_CONTENT_TYPE, JSON_UTF8_CODEC,
+    };
+
+    const TASK_ID: Uuid = Uuid::from_u128(9);
+
+    fn history(status: &str, payload: HistoryResultPayload) -> HistoryTaskResult {
+        HistoryTaskResult {
+            task_name: "result.task".to_owned(),
+            status: status.to_owned(),
+            failed_reason: None,
+            envelope_version: 1,
+            codec: JSON_UTF8_CODEC.to_owned(),
+            content_type: JSON_CONTENT_TYPE.to_owned(),
+            payload,
+        }
+    }
+
+    fn stored(text: &str) -> HistoryResultPayload {
+        HistoryResultPayload::Stored {
+            payload: text.as_bytes().to_vec(),
+            digest: archive_digest(text.as_bytes()).to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_history_row_is_a_record_with_its_stored_envelope() {
+        let envelope = r#"{"ok":{"value":7}}"#;
+        let Ok(RawResultProbe::Record(record)) =
+            raw_result_from_history_result(TASK_ID, history("COMPLETED", stored(envelope)))
+        else {
+            panic!("a completed history row is a record");
+        };
+        assert_eq!(record.task_id, TASK_ID);
+        assert_eq!(record.task_name, "result.task");
+        assert_eq!(record.status, crate::core::TaskStatus::Completed);
+        assert_eq!(
+            record.raw_result.as_ref().map(StoredEnvelopeText::as_str),
+            Some(envelope)
+        );
+        let Ok(RawResultProbe::Record(cancelled)) = raw_result_from_history_result(
+            TASK_ID,
+            history("CANCELLED", HistoryResultPayload::Absent),
+        ) else {
+            panic!("a cancelled history row without a result is a record");
+        };
+        assert_eq!(cancelled.raw_result, None);
+    }
+
+    #[test]
+    fn a_history_row_whose_digest_does_not_match_is_invalid_json_payload() {
+        let tampered = HistoryResultPayload::Stored {
+            payload: br#"{"ok":1}"#.to_vec(),
+            digest: vec![0; 32],
+        };
+        let Err(refused) = raw_result_from_history_result(TASK_ID, history("COMPLETED", tampered))
+        else {
+            panic!("a digest mismatch is refused");
+        };
+        assert_eq!(refused.code, BrokerErrorCode::InvalidJsonPayload);
+        assert!(!refused.retryable);
+    }
+
+    #[test]
+    fn a_history_row_with_a_live_status_is_invalid_json_payload() {
+        let Err(refused) = raw_result_from_history_result(
+            TASK_ID,
+            history("RUNNING", HistoryResultPayload::Absent),
+        ) else {
+            panic!("a live status in history is refused");
+        };
+        assert_eq!(refused.code, BrokerErrorCode::InvalidJsonPayload);
+    }
+
+    #[test]
+    fn a_live_row_waits_until_its_status_is_terminal() {
+        assert!(matches!(
+            raw_result_from_live(TASK_ID, "result.task".to_owned(), "RUNNING"),
+            Ok(RawResultProbe::Waiting(_))
+        ));
+        assert!(matches!(
+            raw_result_from_live(TASK_ID, "result.task".to_owned(), "CANCELLED"),
+            Ok(RawResultProbe::Record(RawResultRecord {
+                raw_result: None,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            raw_result_from_live(TASK_ID, "result.task".to_owned(), "NOT_A_STATUS"),
+            Err(BrokerOperationError {
+                code: BrokerErrorCode::InvalidJsonPayload,
+                ..
+            })
+        ));
     }
 }
 
@@ -682,6 +845,121 @@ impl SendCommand {
             fingerprint_version: facts.command_fingerprint_version,
             fingerprint: facts.command_fingerprint.to_vec(),
         })
+    }
+}
+
+/// One send after every refusal that needs no connection: the values that
+/// [`PostgresBroker::enqueue_checked`] binds to `horsies_enqueue_task`,
+/// except the key's reservation window, which is the broker's. It borrows
+/// the texts of the send. Only [`CheckedSend::check`] builds it.
+#[derive(Debug, Clone)]
+pub struct CheckedSend<'a> {
+    task_id: Uuid,
+    task_name: &'a str,
+    input: &'a str,
+    queue_name: &'a str,
+    priority: i32,
+    good_until: Option<DateTime<Utc>>,
+    task_options: Option<&'a str>,
+    start: EnqueueStart,
+    sent_at: DateTime<Utc>,
+    max_retries: i32,
+    facts: PreparedEnqueueFacts,
+}
+
+impl<'a> CheckedSend<'a> {
+    /// The refusals of one send that need no connection, in the order of
+    /// Python's `_prepare_enqueue`, which runs before the schema install:
+    /// both `enqueued_at` and `enqueue_delay_seconds`; a `sent_at` in the
+    /// future of a send that starts now; an input that the rules of a user
+    /// value refuse (`check_sent_input`); options that do not read by the
+    /// strict rule, or whose retry limit does not fit; a `sent_at` with no
+    /// whole-microsecond form; and the facts of the row
+    /// (`prepare_enqueue_facts`): the strict JSON rule, the execution
+    /// class, the command fingerprint and the scope of the idempotency key.
+    /// A send with no id mints it here. `retain_rerun_input` is resolved:
+    /// the send's choice, or the default of the handle. Touches no
+    /// database; reads the clock.
+    ///
+    /// Errors: `EnqueueContract`, which the send maps to
+    /// `VALIDATION_FAILED`. Nothing is written.
+    #[allow(clippy::too_many_arguments)]
+    pub fn check(
+        task_name: &'a str,
+        input: &'a str,
+        queue_name: &'a str,
+        priority: i32,
+        sent_at: Option<DateTime<Utc>>,
+        enqueued_at: Option<DateTime<Utc>>,
+        good_until: Option<DateTime<Utc>>,
+        task_options: Option<&'a str>,
+        predetermined_task_id: Option<Uuid>,
+        enqueue_delay_seconds: Option<i64>,
+        idempotency_key: Option<&str>,
+        retention: EnqueueRetention,
+        retain_rerun_input: bool,
+    ) -> Result<Self, BrokerError> {
+        let start = EnqueueStart::of(enqueued_at, enqueue_delay_seconds)?;
+        if sent_at.is_some_and(|value| value > Utc::now() + chrono::Duration::seconds(5))
+            && matches!(start, EnqueueStart::Now)
+        {
+            return Err(BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
+                SendPart::Input,
+                "sent_at is in the future without enqueued_at or enqueue_delay_seconds; sent_at is a call-site timestamp".to_owned(),
+            )));
+        }
+        check_sent_input(input)?;
+        let task_id = match predetermined_task_id {
+            Some(task_id) => task_id,
+            // The task id is a fact of the send's input; a send with no id
+            // mints it here.
+            None => crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
+                BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
+                    SendPart::Input,
+                    format!("task identity mint failed: {error}"),
+                ))
+            })?,
+        };
+        // The options are read with the strict rule before the retry limit,
+        // so a text that does not read names its reader's error (Python
+        // `_parse_enqueue_task_options`).
+        let _options = parse_optional_object(task_options)
+            .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
+        let max_retries = enqueue_max_retries(task_name, task_options)?;
+        let sent_at = sent_at_at_stored_precision(sent_at.unwrap_or_else(Utc::now))?;
+        let retention_class_key = retention.class_key();
+        let facts = prepare_enqueue_facts(
+            task_name,
+            queue_name,
+            priority,
+            input,
+            good_until,
+            enqueue_delay_seconds,
+            task_options,
+            Some(&retention_class_key),
+            retain_rerun_input,
+            idempotency_key,
+        )
+        .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
+        Ok(Self {
+            task_id,
+            task_name,
+            input,
+            queue_name,
+            priority,
+            good_until,
+            task_options,
+            start,
+            sent_at,
+            max_retries,
+            facts,
+        })
+    }
+
+    /// The task id of the send: the given one, or the one minted by the
+    /// check.
+    pub fn task_id(&self) -> Uuid {
+        self.task_id
     }
 }
 
@@ -1289,12 +1567,17 @@ impl PostgresBroker {
     // Task lifecycle operations
     // -----------------------------------------------------------------------
 
-    /// Enqueue a new task: one `horsies_enqueue_task` statement in
-    /// autocommit on the main core pool, checked out as batch work, after
-    /// the client family check (Python `PostgresBroker.enqueue_async`).
-    /// Returns the id of the task that holds the send: the sent id (minted
-    /// here when `predetermined_task_id` is `None`), or the task that holds
-    /// the idempotency key with the same command.
+    /// Enqueue a new task: the refusals that need no connection
+    /// ([`CheckedSend::check`], with the broker's rerun-input default when
+    /// `retain_rerun_input` is `None`), then one `horsies_enqueue_task`
+    /// statement in autocommit on the main core pool, checked out as batch
+    /// work, after the client family check ([`Self::enqueue_checked`];
+    /// Python `PostgresBroker.enqueue_async`). A caller that connects or
+    /// installs the schema first runs the check before those steps, as
+    /// Python's `_prepare_enqueue` ran before its install. Returns the id of
+    /// the task that holds the send: the sent id (minted here when
+    /// `predetermined_task_id` is `None`), or the task that holds the
+    /// idempotency key with the same command.
     ///
     /// `input` is the encoded task input as one JSON value; it is stored as
     /// written. The input follows the rules of a user value
@@ -1307,7 +1590,8 @@ impl PostgresBroker {
     ///
     /// Errors: `EnqueueContract` (refused before any statement: both
     /// `enqueued_at` and `enqueue_delay_seconds`, a future `sent_at` with
-    /// neither, an input or options that the rules refuse);
+    /// neither, an input, options or an idempotency key that the rules
+    /// refuse);
     /// `IdempotencyKeyConflict`, `PayloadMismatch` and
     /// `EnqueueConflictUnverifiable` (nothing written, no reservation left);
     /// the client family check's errors; `PoolSettings`; `Statement` (nothing
@@ -1334,59 +1618,54 @@ impl PostgresBroker {
         retain_rerun_input: Option<bool>,
         send_kind: SendKind,
     ) -> Result<Uuid, BrokerError> {
-        let start = EnqueueStart::of(enqueued_at, enqueue_delay_seconds)?;
-        if sent_at.is_some_and(|value| value > Utc::now() + chrono::Duration::seconds(5))
-            && matches!(start, EnqueueStart::Now)
-        {
-            return Err(BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
-                SendPart::Input,
-                "sent_at is in the future without enqueued_at or enqueue_delay_seconds; sent_at is a call-site timestamp".to_owned(),
-            )));
-        }
-        check_sent_input(input)?;
-        let task_id = match predetermined_task_id {
-            Some(task_id) => task_id,
-            // The task id is a fact of the send's input; a send with no id
-            // mints it here.
-            None => crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
-                BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
-                    SendPart::Input,
-                    format!("task identity mint failed: {error}"),
-                ))
-            })?,
-        };
-        // The options are read with the strict rule before the retry limit,
-        // so a text that does not read names its reader's error (Python
-        // `_parse_enqueue_task_options`).
-        let _options = parse_optional_object(task_options)
-            .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
-        let max_retries = enqueue_max_retries(task_name, task_options)?;
-        let effective_sent_at = sent_at_at_stored_precision(sent_at.unwrap_or_else(Utc::now))?;
-        let retain_rerun_input = retain_rerun_input.unwrap_or(self.retain_rerun_input_default);
-        let retention_class_key = retention.class_key();
-        let facts = prepare_enqueue_facts(
+        let send = CheckedSend::check(
             task_name,
+            input,
             queue_name,
             priority,
-            input,
+            sent_at,
+            enqueued_at,
             good_until,
-            enqueue_delay_seconds,
             task_options,
-            Some(&retention_class_key),
-            retain_rerun_input,
+            predetermined_task_id,
+            enqueue_delay_seconds,
             idempotency_key,
-        )
-        .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
+            retention,
+            retain_rerun_input.unwrap_or(self.retain_rerun_input_default),
+        )?;
+        self.enqueue_checked(&send, send_kind).await
+    }
+
+    /// Write one checked send ([`CheckedSend::check`]): the client family
+    /// check, then one `horsies_enqueue_task` statement in autocommit on the
+    /// main core pool, checked out as batch work, with the broker's key
+    /// reservation window. Returns the id of the task that holds the send,
+    /// as [`PostgresBroker::enqueue`].
+    ///
+    /// Errors: those of [`PostgresBroker::enqueue`] after its check:
+    /// `IdempotencyKeyConflict`, `PayloadMismatch`,
+    /// `EnqueueConflictUnverifiable`, the client family check's errors,
+    /// `PoolSettings`, `Statement`, `RowDecode`.
+    ///
+    /// Panics: as [`PostgresBroker::enqueue`].
+    pub async fn enqueue_checked(
+        &self,
+        send: &CheckedSend<'_>,
+        send_kind: SendKind,
+    ) -> Result<Uuid, BrokerError> {
         let key = EnqueueKey::of(
-            facts.idempotency_key_digest,
+            send.facts.idempotency_key_digest,
             self.idempotency_reservation_window_micros,
         );
         self.ensure_client_family_for_write().await?;
         let (open, _write) = self.core.pools_for_write()?;
 
-        let execution = facts.execution.as_str();
-        let fingerprint: &[u8] = facts.command_fingerprint.as_slice();
-        let (start_kind, start_at, start_delay_seconds) = start.columns();
+        let task_id = send.task_id;
+        let task_name = send.task_name;
+        let queue_name = send.queue_name;
+        let execution = send.facts.execution.as_str();
+        let fingerprint: &[u8] = send.facts.command_fingerprint.as_slice();
+        let (start_kind, start_at, start_delay_seconds) = send.start.columns();
         let (key_kind, key_scope_version, key_window_micros) = key.columns();
         let key_digest = key.digest();
         let send_kind_text = send_kind.as_sql();
@@ -1396,19 +1675,19 @@ impl PostgresBroker {
             .value(&task_id)
             .value(&task_name)
             .value(&queue_name)
-            .value(&priority)
-            .value(&input)
-            .value(&task_options)
+            .value(&send.priority)
+            .value(&send.input)
+            .value(&send.task_options)
             .value(&execution)
-            .value(&facts.retention_class_key)
-            .value(&facts.retain_rerun_input)
-            .value(&max_retries)
-            .value(&good_until)
-            .value(&effective_sent_at)
+            .value(&send.facts.retention_class_key)
+            .value(&send.facts.retain_rerun_input)
+            .value(&send.max_retries)
+            .value(&send.good_until)
+            .value(&send.sent_at)
             .value(&start_kind)
             .value(&start_at)
             .value(&start_delay_seconds)
-            .value(&facts.command_fingerprint_version)
+            .value(&send.facts.command_fingerprint_version)
             .value(&fingerprint)
             .value(&key_kind)
             .value(&key_digest)
@@ -2395,12 +2674,45 @@ impl PostgresBroker {
         self.confirm_result_absence(task_id).await
     }
 
-    /// One probe of the raw result wait. A live row holds no result, so the
-    /// live read takes the id, name and status only, as Python's
-    /// `_probe_live_result_row` (`python/horsies/core/brokers/postgres.py:2156-2191`):
-    /// a terminal status is a record with no result, a live status waits, and
-    /// a row that is not live is read from history.
+    /// One probe of the raw result wait, as Python's `_probe_result_row`
+    /// (the dual-run reference `tests/dualrun/reference/result_caller.py`
+    /// runs it): one statement through the staged result function
+    /// ([`read_task_result`], with the broker's [`ResultReaderSeen`]). While
+    /// that function is not published, the live probe and the staged detail
+    /// read run instead ([`Self::raw_result_probe_unstaged`]). An absence
+    /// from the function is confirmed by the detail reader: a reader
+    /// published before a leaf existed does not probe that leaf. A function
+    /// dropped out of band after this broker saw it fails one probe with the
+    /// `42883` refusal that names it (`TASK_INFO_QUERY_FAILED`); the next
+    /// probe checks the publication again and falls back.
     async fn raw_result_probe(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
+        let open = self
+            .core
+            .pools()
+            .map_err(|error| raw_result_operation_error(BrokerError::from(error)))?;
+        let read = read_task_result(
+            open.main(),
+            self.statement_log,
+            &self.result_reader,
+            task_id,
+        )
+        .await
+        .map_err(raw_result_operation_error)?;
+        match read {
+            TaskResultRead::Live(live) => {
+                raw_result_from_live(task_id, live.task_name, &live.status)
+            }
+            TaskResultRead::History(history) => raw_result_from_history_result(task_id, history),
+            TaskResultRead::Absent => self.history_raw_result_probe(task_id).await,
+            TaskResultRead::NotPublished => self.raw_result_probe_unstaged(task_id).await,
+        }
+    }
+
+    /// The probe of a schema whose staged result function is not published.
+    /// A live row holds no result, so the live read takes the id, name and
+    /// status only, as Python's `_probe_live_result_row`; a row that is not
+    /// live is read from history.
+    async fn raw_result_probe_unstaged(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
         let live = self
             .read_main(
                 &GET_RAW_RESULT_PROBE.bind().value(&task_id).finish(),
@@ -2411,25 +2723,7 @@ impl PostgresBroker {
         let Some(row) = live.into_iter().next() else {
             return self.history_raw_result_probe(task_id).await;
         };
-        let status: crate::core::TaskStatus = row
-            .status
-            .parse()
-            .map_err(|error| raw_result_operation_error(BrokerError::InvalidStatus(error)))?;
-        let record = RawResultRecord {
-            task_id: row.id,
-            task_name: row.task_name,
-            status,
-            raw_result: None,
-        };
-        Ok(match status {
-            crate::core::TaskStatus::Completed
-            | crate::core::TaskStatus::Failed
-            | crate::core::TaskStatus::Cancelled
-            | crate::core::TaskStatus::Expired => RawResultProbe::Record(record),
-            crate::core::TaskStatus::Pending
-            | crate::core::TaskStatus::Claimed
-            | crate::core::TaskStatus::Running => RawResultProbe::Waiting(record),
-        })
+        raw_result_from_live(row.id, row.task_name, &row.status)
     }
 
     async fn history_raw_result_probe(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
@@ -2620,6 +2914,76 @@ enum TaskInfoPass {
     /// The live read found no row, and the history read found the task
     /// live: a send of the id committed between the two statements.
     BecameLive,
+}
+
+/// The probe of a live row: a terminal status is a record with no result (a
+/// live row holds none), a live status waits. A status that is not a task
+/// status is `INVALID_JSON_PAYLOAD`. Pure.
+fn raw_result_from_live(
+    task_id: Uuid,
+    task_name: String,
+    status: &str,
+) -> BrokerResult<RawResultProbe> {
+    let status: crate::core::TaskStatus = status
+        .parse()
+        .map_err(|error| raw_result_operation_error(BrokerError::InvalidStatus(error)))?;
+    let record = RawResultRecord {
+        task_id,
+        task_name,
+        status,
+        raw_result: None,
+    };
+    Ok(match status {
+        crate::core::TaskStatus::Completed
+        | crate::core::TaskStatus::Failed
+        | crate::core::TaskStatus::Cancelled
+        | crate::core::TaskStatus::Expired => RawResultProbe::Record(record),
+        crate::core::TaskStatus::Pending
+        | crate::core::TaskStatus::Claimed
+        | crate::core::TaskStatus::Running => RawResultProbe::Waiting(record),
+    })
+}
+
+/// The record of a history row read through the staged result function,
+/// with the rules of [`raw_result_from_history_detail`]: a terminal status,
+/// and a stored result that passes its version, digest and UTF-8 checks and
+/// is a JSON object or `null`. A failed check is `INVALID_JSON_PAYLOAD`.
+/// Pure.
+fn raw_result_from_history_result(
+    task_id: Uuid,
+    history: HistoryTaskResult,
+) -> BrokerResult<RawResultProbe> {
+    let status: crate::core::TaskStatus = history
+        .status
+        .parse()
+        .map_err(|error| raw_result_operation_error(BrokerError::InvalidStatus(error)))?;
+    if !status.is_terminal() {
+        return Err(raw_result_operation_error(BrokerError::InvalidStatus(
+            format!("history task {task_id} has non-terminal status {status}"),
+        )));
+    }
+    let text = match &history.payload {
+        HistoryResultPayload::Absent => None,
+        HistoryResultPayload::Stored { payload, digest } => Some(
+            decode_result_envelope_text(
+                history.envelope_version,
+                &history.codec,
+                &history.content_type,
+                payload,
+                digest,
+            )
+            .map_err(|error| {
+                raw_result_operation_error(BrokerError::HistoryReadContract(error.to_string()))
+            })?,
+        ),
+    };
+    let raw_result = text.map(stored_envelope_text).transpose()?.flatten();
+    Ok(RawResultProbe::Record(RawResultRecord {
+        task_id,
+        task_name: history.task_name,
+        status,
+        raw_result,
+    }))
 }
 
 fn raw_result_from_history_detail(
