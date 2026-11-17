@@ -206,19 +206,45 @@ fn each_location_answer_of_the_read_has_its_refusal() {
         "location",
         StatementValue::Text("ABSENT".to_owned()),
     );
-    assert!(matches!(
+    assert_eq!(
         refusal(no_reason),
-        RerunRefusal::SourceCorrupt { ref detail, .. } if detail.contains("returned no reason")
-    ));
+        RerunRefusal::SourceCorrupt {
+            task_id: SOURCE,
+            detail: format!(
+                "absence reason of {SOURCE} is None, which is not a task absence reason"
+            ),
+        }
+    );
+    let purged = with(
+        with(
+            history_values(),
+            "location",
+            StatementValue::Text("ABSENT".to_owned()),
+        ),
+        "absence_reason",
+        StatementValue::Text("PURGED".to_owned()),
+    );
+    assert_eq!(
+        refusal(purged),
+        RerunRefusal::SourceCorrupt {
+            task_id: SOURCE,
+            detail: format!(
+                "absence reason of {SOURCE} is 'PURGED', which is not a task absence reason"
+            ),
+        }
+    );
     let unknown = with(
         history_values(),
         "location",
         StatementValue::Text("ELSEWHERE".to_owned()),
     );
-    assert!(matches!(
+    assert_eq!(
         refusal(unknown),
-        RerunRefusal::SourceCorrupt { ref detail, .. } if detail.contains("unknown location")
-    ));
+        RerunRefusal::SourceCorrupt {
+            task_id: SOURCE,
+            detail: "staged detail returned unknown location 'ELSEWHERE'".to_owned(),
+        }
+    );
 }
 
 #[test]
@@ -228,10 +254,15 @@ fn a_history_row_that_does_not_decode_is_a_corrupt_source() {
         "status",
         StatementValue::Text("RETIRED".to_owned()),
     );
-    assert!(matches!(
+    assert_eq!(
         refusal(status),
-        RerunRefusal::SourceCorrupt { ref detail, .. } if detail.contains("not a task status")
-    ));
+        RerunRefusal::SourceCorrupt {
+            task_id: SOURCE,
+            detail: format!(
+                "history row {SOURCE} has status 'RETIRED', which is not a task status"
+            ),
+        }
+    );
     let snapshot = with(
         history_values(),
         "attempt_snapshot_digest",
@@ -491,4 +522,13 @@ fn a_conflict_that_cannot_be_verified_on_a_minted_id_panics() {
 fn an_outcome_outside_the_function_set_panics() {
     let write = write(None);
     let _outcome = decode_rerun_write(&write, &written("RETRIED", write.new_task_id()));
+}
+
+/// Python's `repr` of a stored text, as the corrupt-source details show it.
+#[test]
+fn a_stored_text_is_shown_as_python_shows_it() {
+    assert_eq!(python_repr("BOGUS"), "'BOGUS'");
+    assert_eq!(python_repr("it's"), "\"it's\"");
+    assert_eq!(python_repr("a'b\"c"), "'a\\'b\"c'");
+    assert_eq!(python_repr("x\ny\\"), "'x\\ny\\\\'");
 }

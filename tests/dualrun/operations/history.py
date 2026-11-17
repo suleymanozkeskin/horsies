@@ -2,7 +2,9 @@
 
 One row per Python entry point of the history and retention module that
 calls the core. The coverage and pruning passes are in pool mode: the core
-opens and commits its own transactions on its session-work pool. Run:
+opens and commits its own transactions on its session-work pool. The rerun is
+in statement mode: the core builds its statements, and the caller's
+connection runs them. Run:
 ``pytest tests/integration --dual-run=history``.
 """
 
@@ -10,7 +12,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from tests.dualrun.operations.table import DualRunOperation, PoolMode
+from tests.dualrun.operations.table import DualRunOperation, PoolMode, StatementMode
 
 HISTORY_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
     DualRunOperation(
@@ -33,5 +35,13 @@ HISTORY_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         reference_path='tests.dualrun.reference.pruning_caller:run_partition_pruning',
         mode=PoolMode(),
         core_methods=('prune_expired_partitions_async',),
+    ),
+    DualRunOperation(
+        name='rerun in the caller transaction',
+        production_path='horsies.core.history.rerun.operations:rerun_task',
+        reference_path='tests.dualrun.reference.rerun_caller:rerun_task',
+        mode=StatementMode(),
+        core_methods=(),
+        core_functions=('rerun_read', 'prepare_rerun_write', 'decode_rerun_write'),
     ),
 )
