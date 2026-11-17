@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, AsyncGenerator, Generator
@@ -24,6 +25,13 @@ from tests.session_database import suite_database_url
 AppConfig.model_rebuild()
 from horsies.core.codec.json_value import JsonValue
 from horsies.core.lifecycle.outcomes import PhaseTwoStep
+from horsies.core.workflows.node_finish import (
+    CapacityWake,
+    FactsUnknown,
+    NodeFinishFacts,
+    finish_node,
+)
+from horsies.core.workflows.steps import advance_parents
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import (
     TaskNode,
@@ -430,33 +438,32 @@ async def _phase_one(
                     pytest.fail(f'phase 1 of the failure of task {task_id}: {failed!r}')
 
 
-async def finish_task(
+@dataclass(frozen=True, slots=True)
+class PhaseOneDone:
+    """Phase 1 of a node's task committed (or had committed earlier): the
+    task and the node facts that phase 2 takes."""
+
+    task_id: str
+    facts: NodeFinishFacts
+
+
+async def finish_phase_one(
     session: AsyncSession,
     broker: PostgresBroker,
     workflow_id: str,
     task_index: int,
     result: TaskResult[Any, TaskError],
-) -> None:
-    """End the task of node ``task_index`` as a worker does.
+) -> PhaseOneDone:
+    """Phase 1 of the task of node ``task_index``, as a worker writes it.
 
     Commits ``session`` first. A PENDING or CLAIMED task is claimed and run
     by ``FINISH_WORKER_ID``; then phase 1 writes the success, or the failure
     of an error result with no retry (``horsies_finish_workflow_success``,
-    ``horsies_finish_failed_attempt``); then phase 2 runs
-    ``horsies_workflow_node_finish`` in the form of the node facts that phase
-    1 read, with the child starts it owes, and the parent advances after it.
-    A task that is no longer live (its phase 1 committed earlier) gets phase
-    2 alone in the transaction form, as a replay. Fails the test for a node
-    with no task, any other phase-1 outcome, or a failed parent advance.
+    ``horsies_finish_failed_attempt``), and returns the node facts it read.
+    A task that is no longer live (its phase 1 committed earlier) returns
+    ``FactsUnknown``: phase 2 replays in the transaction form. Fails the test
+    for a node with no task and for any other phase-1 outcome.
     """
-    from horsies.core.workflows.node_finish import (
-        CapacityWake,
-        FactsUnknown,
-        NodeFinishFacts,
-        finish_node,
-    )
-    from horsies.core.workflows.steps import advance_parents
-
     await session.commit()
     node = (
         await session.execute(
@@ -476,19 +483,44 @@ async def finish_task(
         )
     ).scalar_one_or_none()
     await session.commit()
-    facts: NodeFinishFacts
     match claimed_at:
         case datetime():
-            facts = await _phase_one(broker, task_id, str(node.task_name), claimed_at, result)
+            return PhaseOneDone(
+                task_id=task_id,
+                facts=await _phase_one(
+                    broker, task_id, str(node.task_name), claimed_at, result,
+                ),
+            )
         case _:
-            facts = FactsUnknown()
+            return PhaseOneDone(task_id=task_id, facts=FactsUnknown())
+
+
+async def finish_phase_two(broker: PostgresBroker, done: PhaseOneDone) -> None:
+    """Phase 2 as the worker runs it: ``horsies_workflow_node_finish`` in the
+    form of the node facts, with the child starts it owes and the capacity
+    wake, then the parent advances after the commit. Fails the test for a
+    failed parent advance."""
     session_factory = current_resources(broker).session_factory
     committed = await finish_node(
-        session_factory, broker, task_id, facts, CapacityWake.SEND,
+        session_factory, broker, done.task_id, done.facts, CapacityWake.SEND,
     )
     failure = await advance_parents(broker, session_factory, committed.parent_advances)
     if failure is not None:
-        pytest.fail(f'parent advance after task {task_id}: {failure!r}')
+        pytest.fail(f'parent advance after task {done.task_id}: {failure!r}')
+
+
+async def finish_task(
+    session: AsyncSession,
+    broker: PostgresBroker,
+    workflow_id: str,
+    task_index: int,
+    result: TaskResult[Any, TaskError],
+) -> None:
+    """End the task of node ``task_index`` as a worker does: phase 1
+    (``finish_phase_one``), then phase 2 (``finish_phase_two``)."""
+    await finish_phase_two(
+        broker, await finish_phase_one(session, broker, workflow_id, task_index, result),
+    )
 
 
 async def get_task_status(
