@@ -48,8 +48,6 @@ impl StopSignal {
     /// A signal that calls `request` at each stop request. `request` must be
     /// idempotent, must return at once, and must not take the GIL: it may
     /// run on an event loop thread inside a done callback.
-    // The first callers are the worker run and the scheduler run.
-    #[allow(dead_code)]
     pub fn new<F>(request: F) -> Self
     where
         F: Fn() + Send + Sync + 'static,
