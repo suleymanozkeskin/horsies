@@ -142,6 +142,10 @@ pub use crate::worker::executor::child_host::{
 pub use crate::worker::executor::protocol as frame_protocol;
 
 // worker re-exports
+pub use crate::worker::from_manifest::{WorkerPlan, WorkerPlanRefused};
+pub use crate::worker::run_end::{
+    run_end_of, RunPhase, WorkerBootCause, WorkerFailCause, WorkerRunEnd,
+};
 pub use crate::worker::{
     cli::LogLevel,
     config::WorkerConfig,
@@ -149,7 +153,7 @@ pub use crate::worker::{
         spawn_scheduler, ActiveScheduler, SchedulerService, SchedulerStartError, SchedulerStarted,
         SchedulerStop, SchedulerTickError,
     },
-    worker::Worker,
+    worker::{OnStarted, Worker, WorkerStop},
     WorkerError,
 };
 

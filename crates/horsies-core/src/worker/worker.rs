@@ -11,6 +11,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
@@ -65,6 +66,7 @@ use crate::worker::profile_fit::{log_connection_fit_at_boot, log_memory_fit_at_b
 use crate::worker::queue_cap_hold::{admit_held_rows, QueueCapHold, StartCheckCaps, StartCount};
 use crate::worker::recovery::{new_reaper_health, spawn_reaper, ReaperHealth};
 use crate::worker::retry::read_stored_options;
+use crate::worker::run_end::{run_end_of, RunPhase, WorkerRunEnd};
 use crate::worker::runner_beats::{
     launch_runner_beats, runner_beat_pool, BeatSender, FailClosedState, FailClosedStop,
     LiveDispatches, RunnerBeatWatch, StaleRunningRecovery,
@@ -730,6 +732,35 @@ fn queue_channel(queue: &str) -> Result<ChannelName, WorkerError> {
     })
 }
 
+/// The hook of a host that a worker calls once per run, after its start and
+/// before its first claim (Python `run_forever`, `freeze_startup_objects`).
+#[derive(Clone)]
+pub enum OnStarted {
+    /// No hook.
+    Nothing,
+    /// The host's hook. It must not fail: it handles and logs its own
+    /// failure, and the worker runs on.
+    Call(Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>),
+}
+
+/// Asks a worker to stop, from any thread, before or during its run.
+/// Clones ask the same worker.
+#[derive(Clone, Default)]
+pub struct WorkerStop {
+    cancel: CancellationToken,
+}
+
+impl WorkerStop {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask for the stop. Idempotent; returns at once; never blocks.
+    pub fn request_stop(&self) {
+        self.cancel.cancel();
+    }
+}
+
 /// Task queue worker.
 ///
 /// Claims tasks from PostgreSQL with the budgets of its children, runs each
@@ -751,6 +782,9 @@ pub struct Worker {
     capacity_released: Arc<Notify>,
     cancel: CancellationToken,
     hostname: String,
+    on_started: OnStarted,
+    /// Set when the start ended and the claim loop begins.
+    serving: AtomicBool,
 }
 
 impl Worker {
@@ -797,7 +831,38 @@ impl Worker {
             worker_id: Uuid::new_v4().to_string(),
             cancel: CancellationToken::new(),
             hostname,
+            on_started: OnStarted::Nothing,
+            serving: AtomicBool::new(false),
         })
+    }
+
+    /// This worker with `on_started` as its start hook.
+    pub fn with_on_started(self, on_started: OnStarted) -> Self {
+        Self { on_started, ..self }
+    }
+
+    /// This worker stopped by `stop`: a request through it, also one made
+    /// before the run, ends the run as [`Worker::request_stop`] does.
+    pub fn with_stop(self, stop: &WorkerStop) -> Self {
+        Self {
+            cancel: stop.cancel.clone(),
+            ..self
+        }
+    }
+
+    /// Run the worker ([`Worker::run`]) and name how the run ended. A failed
+    /// run's error is logged with its subject and cause before this
+    /// returns.
+    pub async fn run_to_end(&self) -> WorkerRunEnd {
+        let result = self.run().await;
+        if let Err(error) = &result {
+            tracing::error!("worker run ended: {error}");
+        }
+        let phase = match self.serving.load(Ordering::Acquire) {
+            true => RunPhase::Serving,
+            false => RunPhase::Starting,
+        };
+        run_end_of(result, phase)
     }
 
     /// Run the worker with automatic SIGINT/SIGTERM signal handling.
@@ -1431,6 +1496,12 @@ impl Worker {
                 return Err(error);
             }
         };
+        // The start ended: the first generation is in, and no claim ran.
+        self.serving.store(true, Ordering::Release);
+        match &self.on_started {
+            OnStarted::Nothing => {}
+            OnStarted::Call(hook) => hook().await,
+        }
         tracing::info!(worker_id = %self.worker_id, "worker ready");
 
         let mut writes: JoinSet<()> = JoinSet::new();

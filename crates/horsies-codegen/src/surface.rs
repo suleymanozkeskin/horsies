@@ -2685,13 +2685,90 @@ const FRAME_CLASSES: [StubClass; 41] = [
     },
 ];
 
+const WORKER_BOOT_CAUSE: &str = "Literal['SCHEMA_REFUSED', 'CLIENT_FAMILY_REFUSED', \
+     'STATEMENT_POOLED_URL', 'SESSION_NOT_CAPABLE', 'START_TIMED_OUT', 'DATABASE_UNAVAILABLE', \
+     'DATABASE_REFUSED', 'BOOT_ATTEMPTS_EXHAUSTED', 'CHILD_HOOK_FAILED', 'PRELOAD_REFUSED', \
+     'BASELINE_OVER_LIMIT', 'PLACEMENT_REFUSED', 'SPAWNER_START_FAILED', 'CONFIG_REFUSED', \
+     'LISTENER_REFUSED']";
+const WORKER_FAIL_CAUSE: &str = "Literal['SERVICE_LOOP_DIED', 'RUNNER_HEARTBEAT_LOST', \
+     'POOL_FAILED', 'BASELINE_OVER_LIMIT', 'CLAIM_FAILED']";
+const WORKER_RUN_OUTCOME: &str = "WorkerStopped | WorkerBootFailed | WorkerFailed";
+
+const PREPARED_WORKER_METHODS: [StubFunction; 2] = [
+    StubFunction {
+        name: "run",
+        parameters: &[],
+        returns: TypeText::Plain(WORKER_RUN_OUTCOME),
+        doc: "Build the worker and run it until a stop request or a failure. Main thread only: the\nsignal handlers run between wait slices, and there is no total bound. Raises\nNotMainThread off the main thread, RuntimeError for a second run, and the exception of\na signal handler after the run ended.",
+    },
+    StubFunction {
+        name: "request_stop",
+        parameters: &[],
+        returns: TypeText::Plain("StopRequested"),
+        doc: "Ask the run to stop: the claim loop ends and the children drain within the profile's\ndrain timeout. Idempotent; any thread; returns at once.",
+    },
+];
+
+/// The classes of the worker run.
+const WORKER_CLASSES: [StubClass; 6] = [
+    StubClass {
+        name: "PreparedWorker",
+        doc: "The worker of one worker manifest, not run yet. host.on_started() runs once per run on\nthe callback thread, after the start and before the first claim; an exception from it is\nlogged at ERROR and the worker runs on.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &PREPARED_WORKER_METHODS,
+    },
+    StubClass {
+        name: "WorkerProfileRefused",
+        doc: "The profile of the manifest is refused: the profile set fails its checks, or the start\nnames no profile or an unknown one. refusals are the lines of the report.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("refusals", "list[str]")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkerStopped",
+        doc: "The run ended at a stop request.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkerBootFailed",
+        doc: "The start of the worker failed; it claimed nothing. message names the subject and the\ncause.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("cause", WORKER_BOOT_CAUSE),
+            property("message", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkerFailed",
+        doc: "The worker was ready, then failed; its running tasks drained first. message names the\nsubject and the cause.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("cause", WORKER_FAIL_CAUSE),
+            property("message", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "StopRequested",
+        doc: "The stop request is recorded.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+];
+
 const CLASS_COUNT: usize = HANDLE_CLASSES.len()
     + ARGUMENT_CLASSES.len()
     + RECORD_CLASSES.len()
     + MONITORING_CLASSES.len()
     + WORKFLOW_CLASSES.len()
     + HISTORY_CLASSES.len()
-    + FRAME_CLASSES.len();
+    + FRAME_CLASSES.len()
+    + WORKER_CLASSES.len();
 
 const CLASSES: [StubClass; CLASS_COUNT] = {
     let mut classes = [HANDLE_CLASSES[0]; CLASS_COUNT];
@@ -2735,6 +2812,12 @@ const CLASSES: [StubClass; CLASS_COUNT] = {
         classes[frame_start + frame_position] = FRAME_CLASSES[frame_position];
         frame_position += 1;
     }
+    let worker_start = frame_start + FRAME_CLASSES.len();
+    let mut worker_position = 0;
+    while worker_position < WORKER_CLASSES.len() {
+        classes[worker_start + worker_position] = WORKER_CLASSES[worker_position];
+        worker_position += 1;
+    }
     classes
 };
 
@@ -2774,6 +2857,12 @@ const FUNCTIONS: &[StubFunction] = &[
         parameters: &[],
         returns: TypeText::Plain("uuid.UUID | IdMintRefused"),
         doc: "Mint a new task id (UUIDv7). Starts no runtime.",
+    },
+    StubFunction {
+        name: "prepare_worker",
+        parameters: &[positional("manifest_json", "str"), keyword("host", "object")],
+        returns: TypeText::Plain("PreparedWorker | WorkerProfileRefused"),
+        doc: "Parse a worker manifest and pick its profile. Pure: starts no runtime. host has an\non_started() method. A refused manifest raises ManifestRefused.",
     },
     StubFunction {
         name: "protocol_numbers",

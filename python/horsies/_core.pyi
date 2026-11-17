@@ -2278,6 +2278,65 @@ class PreloadRefusedFrame:
     def __init__(self, *, reason: str) -> None: ...
 
 
+@final
+class PreparedWorker:
+    """The worker of one worker manifest, not run yet. host.on_started() runs once per run on
+    the callback thread, after the start and before the first claim; an exception from it is
+    logged at ERROR and the worker runs on.
+    """
+    def run(self) -> WorkerStopped | WorkerBootFailed | WorkerFailed:
+        """Build the worker and run it until a stop request or a failure. Main thread only: the
+        signal handlers run between wait slices, and there is no total bound. Raises
+        NotMainThread off the main thread, RuntimeError for a second run, and the exception of
+        a signal handler after the run ended.
+        """
+    def request_stop(self) -> StopRequested:
+        """Ask the run to stop: the claim loop ends and the children drain within the profile's
+        drain timeout. Idempotent; any thread; returns at once.
+        """
+
+
+@final
+class WorkerProfileRefused:
+    """The profile of the manifest is refused: the profile set fails its checks, or the start
+    names no profile or an unknown one. refusals are the lines of the report.
+    """
+    @property
+    def refusals(self) -> list[str]: ...
+
+
+@final
+class WorkerStopped:
+    """The run ended at a stop request."""
+
+
+@final
+class WorkerBootFailed:
+    """The start of the worker failed; it claimed nothing. message names the subject and the
+    cause.
+    """
+    @property
+    def cause(self) -> Literal['SCHEMA_REFUSED', 'CLIENT_FAMILY_REFUSED', 'STATEMENT_POOLED_URL', 'SESSION_NOT_CAPABLE', 'START_TIMED_OUT', 'DATABASE_UNAVAILABLE', 'DATABASE_REFUSED', 'BOOT_ATTEMPTS_EXHAUSTED', 'CHILD_HOOK_FAILED', 'PRELOAD_REFUSED', 'BASELINE_OVER_LIMIT', 'PLACEMENT_REFUSED', 'SPAWNER_START_FAILED', 'CONFIG_REFUSED', 'LISTENER_REFUSED']: ...
+    @property
+    def message(self) -> str: ...
+
+
+@final
+class WorkerFailed:
+    """The worker was ready, then failed; its running tasks drained first. message names the
+    subject and the cause.
+    """
+    @property
+    def cause(self) -> Literal['SERVICE_LOOP_DIED', 'RUNNER_HEARTBEAT_LOST', 'POOL_FAILED', 'BASELINE_OVER_LIMIT', 'CLAIM_FAILED']: ...
+    @property
+    def message(self) -> str: ...
+
+
+@final
+class StopRequested:
+    """The stop request is recorded."""
+
+
 def baseline_sql_files() -> list[tuple[str, str]]:
     """The baseline SQL files as (file name, text) pairs, in run order. Starts nothing."""
 
@@ -2302,6 +2361,12 @@ def encode_preload_frame(frame: PreloadReadyFrame | ChildForkedFrame | ForkFaile
 
 def mint_task_id() -> uuid.UUID | IdMintRefused:
     """Mint a new task id (UUIDv7). Starts no runtime."""
+
+
+def prepare_worker(manifest_json: str, *, host: object) -> PreparedWorker | WorkerProfileRefused:
+    """Parse a worker manifest and pick its profile. Pure: starts no runtime. host has an
+    on_started() method. A refused manifest raises ManifestRefused.
+    """
 
 
 def protocol_numbers() -> ProtocolNumbers:

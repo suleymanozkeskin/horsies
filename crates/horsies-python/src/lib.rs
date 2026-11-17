@@ -25,6 +25,8 @@
 //!   broker of a `CoreHandle` (`scheduler`).
 //! - The Python child program and the preload process speak the core's
 //!   parent-child frame codec through pure calls (`frames`).
+//! - `prepare_worker` builds the worker of a worker manifest, and
+//!   `PreparedWorker.run` runs it on the main thread (`worker`).
 
 mod bridge;
 mod child_handle;
@@ -36,6 +38,7 @@ mod operations;
 mod process_core;
 mod records;
 mod scheduler;
+mod worker;
 
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
@@ -295,9 +298,16 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<scheduler::SchedulerTicked>()?;
     module.add_class::<scheduler::SchedulerTickFailed>()?;
     module.add_class::<scheduler::SchedulerStopped>()?;
+    module.add_class::<worker::PreparedWorker>()?;
+    module.add_class::<worker::WorkerProfileRefused>()?;
+    module.add_class::<worker::WorkerStopped>()?;
+    module.add_class::<worker::WorkerBootFailed>()?;
+    module.add_class::<worker::WorkerFailed>()?;
+    module.add_class::<worker::StopRequested>()?;
     module.add_function(wrap_pyfunction!(baseline_sql_files, module)?)?;
     module.add_function(wrap_pyfunction!(core_state, module)?)?;
     module.add_function(wrap_pyfunction!(mint_task_id, module)?)?;
+    module.add_function(wrap_pyfunction!(worker::prepare_worker, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_log_levels, module)?)?;
     module.add_function(wrap_pyfunction!(
         operations::monitoring_window::resolve_monitoring_window,
