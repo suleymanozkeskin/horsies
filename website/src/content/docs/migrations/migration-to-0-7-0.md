@@ -1,5 +1,6 @@
 ---
 title: Migrating to 0.7.0
+section: site
 summary: What to change to upgrade from 0.6.x to 0.7.0, in upgrade order - psycopg 3.3.7, worker profiles in place of worker flags, child pools per child kind in place of the PostgresConfig child pool fields, the snapshot interval cap, new error code cases, result waits inside a task, workflow limits, a stop of every 0.6.x worker before schema v58, exit codes, and the changes in behaviour after the upgrade.
 related: [../changelog, ../workers/worker-profiles, ../workers/execution-modes, ../cli, ../configuration/recovery-config, migration-to-0-6-0]
 tags: [migration, 0.7.0, breaking-changes, worker, profiles, cli, schema, execution]

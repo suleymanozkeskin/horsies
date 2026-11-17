@@ -1,5 +1,6 @@
 ---
 title: Workflows and Subworkflows
+section: python
 summary: Defining, composing, and running workflows with SubWorkflowNode.
 related: [workflow-semantics, ../../concepts/result-handling]
 tags: [concepts, workflows, subworkflows, composition]

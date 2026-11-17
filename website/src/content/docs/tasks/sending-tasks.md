@@ -1,5 +1,6 @@
 ---
 title: Sending Tasks
+section: python
 summary: How to enqueue tasks for background execution.
 related: [defining-tasks, retrieving-results]
 tags: [tasks, send, async, scheduling]

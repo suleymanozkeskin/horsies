@@ -1,5 +1,6 @@
 ---
 title: Start a Workflow Once per Entity
+section: python
 summary: Derive a deterministic workflow_id from an entity key so that repeated starts for the same entity create one workflow.
 related: [../concepts/workflows/workflow-api, ../concepts/workflows/workflow-semantics, ../configuration/retention-config]
 tags: [guides, workflows, idempotency, workflow_id]

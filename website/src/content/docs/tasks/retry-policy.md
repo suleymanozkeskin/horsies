@@ -1,5 +1,6 @@
 ---
 title: Retry Policy
+section: shared
 summary: Automatic retry behavior with fixed or exponential backoff.
 related: [defining-tasks, ../../concepts/task-lifecycle]
 tags: [tasks, retry, backoff]

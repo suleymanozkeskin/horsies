@@ -1,5 +1,6 @@
 ---
 title: Queue Modes
+section: shared
 summary: DEFAULT vs CUSTOM queue modes, priorities, and per-queue concurrency.
 related: [../../configuration/app-config, ../../workers/concurrency]
 tags: [concepts, queues, mode, configuration]

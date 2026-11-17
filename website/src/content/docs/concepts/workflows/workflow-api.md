@@ -1,5 +1,6 @@
 ---
 title: Workflow API
+section: python
 summary: Signatures and return types for WorkflowSpec and WorkflowHandle.
 related: [workflow-semantics, subworkflows]
 tags: [concepts, workflows, api, reference]

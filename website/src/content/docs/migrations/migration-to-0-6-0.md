@@ -1,5 +1,6 @@
 ---
 title: Migrating to 0.6.0
+section: site
 summary: What an operator does to upgrade from 0.5.x to 0.6.0 - the stop-all upgrade rule, schema v52, new settings and flags, worker behaviour changes, and a checklist of required code changes.
 related: [../changelog, ../workers/worker-architecture, ../configuration/recovery-config, ../internals/database-schema, migration-to-0-5-0]
 tags: [migration, 0.6.0, schema-v52, breaking-changes, worker, upgrade]

@@ -1,5 +1,6 @@
 ---
 title: Defining Tasks
+section: python
 summary: How to define tasks with the @app.task decorator.
 related: [sending-tasks, retrieving-results, ../../concepts/result-handling]
 tags: [tasks, decorator, definition]

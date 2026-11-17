@@ -1,5 +1,6 @@
 ---
 title: Typed Node Builder
+section: python
 summary: Create TaskNodes with static type safety using the .node() API.
 related: [workflow-api, workflow-semantics, subworkflows]
 tags: [concepts, workflows, types, api]

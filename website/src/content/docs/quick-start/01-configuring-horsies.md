@@ -1,5 +1,6 @@
 ---
 title: Configuring Horsies
+section: python
 summary: Set up the app instance and broker connection.
 related: [02-producing-tasks]
 tags: [quickstart, configuration]

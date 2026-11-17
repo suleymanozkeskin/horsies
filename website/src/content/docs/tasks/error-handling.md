@@ -1,5 +1,6 @@
 ---
 title: Error Handling
+section: python
 summary: Patterns for handling TaskResult errors with explicit control flow.
 related: [errors, retrieving-results, retry-policy]
 tags: [tasks, errors, TaskResult, patterns]
