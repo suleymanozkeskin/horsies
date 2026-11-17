@@ -1,5 +1,6 @@
 ---
 title: Workflow API
+section: python
 summary: Signatures and return types for WorkflowSpec and WorkflowHandle.
 related: [workflow-semantics, subworkflows]
 tags: [concepts, workflows, api, reference]
@@ -154,7 +155,7 @@ Returned by the `WorkflowHandle` methods `.status()`, `.results()`, `.tasks()`, 
 | `HandleStoredDataInvalid` | `STORED_DATA_INVALID` | `exception: BaseException` | `False` | Nothing changed; a stored workflow status or subworkflow summary does not parse |
 | `HandleResumeRecoveryFailed` | `RESUME_RECOVERY_FAILED` | `exception: BaseException` | `False` | The resume committed and the workflow is `RUNNING`; the recovery pass after the commit failed |
 | `HandleLoopRunnerFailed` | `LOOP_RUNNER_FAILED` | `exception: BaseException` (the `LoopRunnerError`) | `False` | Nothing ran |
-| `HandleEventLoopLimit` | `EVENT_LOOP_LIMIT` | `loop_limit: EventLoopLimit` | `False` | Nothing ran |
+| `HandleEventLoopLimit` | `EVENT_LOOP_LIMIT` | `loop_limit: EventLoopLimit` | `False` | Nothing ran. Only `resume()` and `resume_workflow()` return it |
 | `HandleAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing ran |
 
 See [Errors Reference](/horsies/tasks/errors/#workflow-handle-errors-handleresult) for when each code occurs.

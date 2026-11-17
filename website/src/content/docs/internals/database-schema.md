@@ -1,5 +1,6 @@
 ---
 title: Database Schema
+section: shared
 summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (baseline schema, migration 1000).
 related: [../../configuration/broker-config]
 tags: [internals, database, schema, PostgreSQL, task-history]

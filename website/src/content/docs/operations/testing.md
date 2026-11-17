@@ -1,5 +1,6 @@
 ---
 title: Testing
+section: python
 summary: How to test tasks and workflow tasks without a database, and how HORSIES_SUPPRESS_SENDS stops sends in code that calls .send().
 related: [../tasks/defining-tasks, ../tasks/sending-tasks, ../tasks/retrieving-results, ../concepts/workflows/workflow-semantics, ../configuration/broker-config]
 tags: [testing, pytest, HORSIES_SUPPRESS_SENDS, WorkflowContext, from_serialized, TaskSendSuppressed, direct call]

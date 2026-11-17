@@ -1,5 +1,6 @@
 ---
 title: Retrieving Results
+section: python
 summary: Getting task outcomes via TaskHandle.get().
 related: [sending-tasks, ../../concepts/result-handling]
 tags: [tasks, results, TaskHandle, errors]

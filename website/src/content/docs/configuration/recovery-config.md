@@ -1,5 +1,6 @@
 ---
 title: Recovery Config
+section: shared
 summary: Automatic detection and recovery of stale tasks.
 related: [retention-config, ../../workers/heartbeats-recovery, app-config]
 tags: [configuration, recovery, heartbeats]

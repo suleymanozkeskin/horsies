@@ -1,5 +1,6 @@
 ---
 title: Task Lifecycle
+section: shared
 summary: Task states and transitions from submission to completion.
 related: [result-handling, ../../workers/heartbeats-recovery, ../../tasks/retry-policy]
 tags: [concepts, tasks, states]

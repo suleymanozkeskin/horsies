@@ -1,5 +1,6 @@
 ---
 title: Shared Async Tasks
+section: shared
 summary: SHARED_ASYNC tasks run as coroutines, many at once, in shared async children - what runs where, the timeout (cancel, second cancel, close, kill), a return that leaves work alive, a blocked event loop, the rules for task authors, recycling and sizing.
 related: [execution-modes, worker-profiles, worker-architecture, child-process-hooks, ../tasks/defining-tasks]
 tags: [workers, async, shared-async, execution, timeouts, cancellation, concurrency]

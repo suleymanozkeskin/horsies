@@ -1,5 +1,6 @@
 ---
 title: Broker Config
+section: shared
 summary: PostgreSQL connection settings via PostgresConfig.
 related: [app-config]
 tags: [configuration, PostgresConfig, database]
@@ -211,15 +212,24 @@ a child inherits no database socket from the worker.
 
 ## Event Loops
 
-A broker keeps one resource set per open event loop that calls it. A set is a
-runtime engine with its own pool, a session engine when `session_database_url`
-differs from `database_url`, and a LISTEN/NOTIFY listener. Sync calls
-(`send()`, `TaskHandle.get()`, `spec.start()`, the sync `WorkflowHandle`
-methods, `app.ping_workers()`) run on the broker's own sync runner loop, which
-has its own set. One exception: in a process that runs no task bodies, a sync
-send, with or without an idempotency key, writes on the calling thread,
-through the sync send pool of the broker, once the broker checked the
-schema. See [Connection Ceiling](#connection-ceiling).
+A workflow start (`spec.start()`, `start_async()`, `retry_start()`,
+`retry_start_async()`) and a workflow resume (`WorkflowHandle.resume()`,
+`resume_async()`, `resume_workflow()`, `resume_workflow_sync()`) use a
+resource set of the calling event loop. The other calls of the app, the
+broker, and the task and workflow handles run on the core of the process: a
+broker has one set of core pools for every thread and event loop that calls
+it, so these calls have no event loop limit. See
+[Calls That Run on the Core](/horsies/tasks/errors/#calls-that-run-on-the-core)
+for the failure exits of the broker calls and the sends.
+
+A broker keeps one resource set per open event loop that starts or resumes a
+workflow. A set is a runtime engine with its own pool, a session engine when
+`session_database_url` differs from `database_url`, and a LISTEN/NOTIFY
+listener. The sync forms of the workflow calls and the sync reads of the app
+(for example `app.ping_workers()`) run on the broker's own sync runner loop.
+`send()`, `broker.enqueue()`, `broker.get_task_info()` and
+`broker.get_raw_result_record()` call the core on the calling thread. See
+[Connection Ceiling](#connection-ceiling).
 
 - A set is built on the first call from its loop. Its pools open connections
   on demand, so a set that makes no database call opens none.
@@ -227,11 +237,12 @@ schema. See [Connection Ceiling](#connection-ceiling).
   set: its idle connections and its listener connections close. A connection
   that a task of the closed loop still held is closed by garbage collection.
 - A broker serves at most 5 open loops other than its sync runner loop and, in
-  a worker child, the task loop that runs `async def` tasks. A call
-  from one more open loop returns `EVENT_LOOP_LIMIT` in the error type of that
-  call, and nothing runs. The error clears when one of those loops closes.
-  The limit covers pytest-asyncio, which keeps one loop open per fixture scope
-  (session, package, module, class, function).
+  a worker child, the task loop that runs `async def` tasks. A workflow start
+  or resume from one more open loop returns
+  `EVENT_LOOP_LIMIT` in the error type of that call, and nothing runs. The
+  error clears when one of those loops closes. The limit covers
+  pytest-asyncio, which keeps one loop open per fixture scope (session,
+  package, module, class, function).
 - `close_async()` and `close()` close every set: the calling loop's set
   directly, the set of a closed loop by release, and the set of another open
   loop on that loop. When that loop does not run the close within 5 s, the
@@ -240,9 +251,10 @@ schema. See [Connection Ceiling](#connection-ceiling).
 
 ### Async Code and Jupyter
 
-A sync call blocks its thread until the sync runner loop completes the call.
-On a thread that runs an event loop, this wait stops every coroutine on that
-loop. Coroutines and Jupyter notebook cells run on such a thread.
+A sync call blocks its thread until the call completes, on the core or on the
+sync runner loop. On a thread that runs an event loop, this wait stops every
+coroutine on that loop. Coroutines and Jupyter notebook cells run on such a
+thread.
 
 On such a thread, a sync call returns `ASYNC_CONTEXT` in the error type of
 that call. Nothing runs, and the sync runner does not start.
@@ -273,56 +285,57 @@ result = await handle.get_async(timeout_ms=5000)
 
 ### Connection Ceiling
 
-Each set can open:
+The core pools of a broker, for every thread and event loop, can open:
+
+```text
+pool_size + max_overflow      # main pool on database_url
++ pool_size + max_overflow    # session pool, only when session_database_url differs
+```
+
+The core's listener is one connection per process on the session URL
+(`session_database_url`, else `database_url`). It opens at the first result
+wait or worker ping.
+
+Each resource set can open:
 
 ```text
 pool_size + max_overflow      # runtime engine
 + pool_size + max_overflow    # session engine, only when session_database_url differs
-+ 2                           # listener, from the first result wait, workflow wait or worker ping
++ 2                           # listener of the set
 ```
-
-In a process that runs no task bodies, the broker has one more pool, the
-sync send pool: up to `pool_size + max_overflow` connections, with the same
-URL, connect args and idle ping as the runtime engine. A sync send (`send()`,
-`schedule()`, `retry_send()`, `retry_schedule()`), with or without an
-idempotency key, writes on the calling thread through this pool, once the
-broker checked the schema. The first send of a broker (it checks the schema)
-and the other sync calls use the set of the sync runner.
-Task code in a worker child sends through the set of its `task_send_pool`
-only, and has no sync send pool.
 
 ```text
-connections of one process = sets × (the ceiling of one set)
-                           + pool_size + max_overflow    # sync send pool, when the table says Yes
+connections of one process = the core pools + the core listener
+                           + sets × (the ceiling of one set)
 ```
 
-| Process | Sets | Sync send pool |
-|---|---|---|
-| Sync calls only, for example a WSGI app or a script | 1 (the sync runner loop) | Yes, when it sends |
-| Async calls from one loop only | 1 | No |
-| ASGI app with async endpoints and sync calls in a thread pool | 2 | Yes, when the sync calls send |
-| pytest run with a session-scoped broker and function-scoped async tests | 2 (session loop, current test loop), plus 1 when tests make sync calls | Yes, when tests send with `send()` |
-| Worker child whose task code sends | 1 for the sync tasks (the runner loop), plus 1 for the async tasks (the task loop) | No |
+| Process | Sets |
+|---|---|
+| No workflow start or resume, for example a script that sends and reads results | 0 |
+| Workflow starts or resumes from sync code only | 1 (the sync runner loop) |
+| Workflow starts or resumes from one event loop only | 1 |
+| ASGI app with async workflow starts and sync workflow starts in a thread pool | 2 |
+| pytest run with a session-scoped broker and function-scoped async tests that start workflows | 2 (session loop, current test loop), plus 1 when tests start workflows with sync calls |
 
 At the defaults (`pool_size=5`, `max_overflow=10`, no `session_database_url`),
-a process that sends only with `send()` opens up to `15 + 15 = 30`
-connections, and 2 more when it waits for a result. Each pool opens a
-connection only when a call finds none free.
+a process that only sends and reads task results opens up to 15 connections,
+and 1 more when it waits for a result. Each pool opens a connection only when
+a call finds none free.
 
 ### Things to Avoid
 
 **Don't leave event loops open after their work is done.** Each open loop
-keeps its set and its idle connections, and the sixth open loop gets
-`EVENT_LOOP_LIMIT`.
+that made a workflow call keeps its set and its idle connections, and the
+sixth open loop gets `EVENT_LOOP_LIMIT`.
 
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong: each call leaves one more open loop
 loop = asyncio.new_event_loop()
-loop.run_until_complete(broker.ping_database_async())
+loop.run_until_complete(spec.start_async())
 
 # Correct: asyncio.run() closes its loop
-asyncio.run(broker.ping_database_async())
+asyncio.run(spec.start_async())
 ```
 
 **Don't call sync `close()` inside a coroutine.** It returns `ASYNC_CONTEXT`

@@ -378,7 +378,7 @@ Non-blocking single DB query. Returns `RESULT_NOT_READY` if the task hasn't comp
 | `STORED_DATA_INVALID` | `HandleStoredDataInvalid` | `exception: BaseException` | No | A stored workflow status or subworkflow summary does not parse; nothing changed, a repeat returns the same error |
 | `RESUME_RECOVERY_FAILED` | `HandleResumeRecoveryFailed` | `exception: BaseException` | No | `resume` committed and the recovery pass after the commit failed; the workflow is `RUNNING`, the worker reaper runs the same pass, a repeated `resume` returns `Ok(False)` |
 | `LOOP_RUNNER_FAILED` | `HandleLoopRunnerFailed` | `exception: BaseException` | No | A sync method could not run the call on the broker's sync runner; nothing ran |
-| `EVENT_LOOP_LIMIT` | `HandleEventLoopLimit` | `loop_limit: EventLoopLimit` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
+| `EVENT_LOOP_LIMIT` | `HandleEventLoopLimit` | `loop_limit: EventLoopLimit` | No | `resume()` or `resume_workflow()` (and their sync and async forms) ran on a new event loop while the broker serves its limit of open event loops; nothing ran. The other handle methods run on the core and do not return it |
 | `ASYNC_CONTEXT` | `HandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `RetrievalCode.ASYNC_CONTEXT` instead) |
 
 ```python

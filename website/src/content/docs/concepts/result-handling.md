@@ -1,5 +1,6 @@
 ---
 title: Result Handling
+section: python
 summary: TaskResult pattern, error types, and explicit error handling.
 related: [task-lifecycle, ../../tasks/retrieving-results]
 tags: [concepts, results, errors, TaskResult]
@@ -113,7 +114,7 @@ Returned by `handle.get()` for issues retrieving results:
 | `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database, or retention removed the workflow after `get()` read its terminal status |
 | `RESULT_NOT_AVAILABLE` | Result cache is empty for an immediate/sync handle |
 | `RESULT_NOT_READY` | Result not yet available; task is still running |
-| `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops and this is a new one; not cached, clears when one of those loops closes |
+| `EVENT_LOOP_LIMIT` | Not returned: `get()` and `get_async()` read on the core of the process, which has no event loop limit. The member stays in the enum |
 | `ASYNC_CONTEXT` | Sync `get()` / `result_for()` was called on a thread that runs an event loop; nothing ran; not cached. Call `await handle.get_async()` / `result_for_async()` |
 | `INVALID_INPUT` | An argument of `get()` / `get_async()` was refused before any read, for example a `timeout_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS`; not cached |
 | `WAIT_INSIDE_TASK` | A result wait was called inside a worker child, where task bodies run; it waited for nothing; not cached. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](#waiting-for-a-result-inside-a-task) |

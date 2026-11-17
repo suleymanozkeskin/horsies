@@ -1,5 +1,6 @@
 ---
 title: Child-Process Hooks
+section: python
 summary: Per-child-process initialization with @app.on_child_process_start, for app-owned engine disposal and worker-specific pool policy.
 related: [worker-architecture, ../configuration/app-config]
 tags: [workers, hooks, connections, pooling]

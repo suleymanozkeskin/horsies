@@ -1,5 +1,6 @@
 ---
 title: Performance
+section: shared
 summary: Measured per-statement latencies of the hot path under a real workload shape, and what governs them.
 related: [../../questions-and-answers, database-schema]
 tags: [internals, performance, latency, postgres]

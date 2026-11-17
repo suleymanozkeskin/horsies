@@ -1,5 +1,6 @@
 ---
 title: Action Semantics
+section: shared
 summary: Exactly what task cancel, the `rerun_task` function, and workflow pause, resume, and cancel do to the rows and the processes behind them.
 related: [web-ui-overview, web-ui-deployment, ../concepts/task-lifecycle, ../concepts/workflows/workflow-api]
 tags: [monitoring, actions, cancel, rerun, pause, resume, workflow]

@@ -6,8 +6,18 @@ sequence of reruns, each in its own caller transaction:
 - reference side: ``reference/rerun_write.py``, the key claim
   (``horsies_key_reservation_claim``) and the INSERT that ``rerun_task`` sent
   before the switch;
-- candidate side: ``rerun_task``, one call of ``horsies_enqueue_task`` with
+- candidate side: the Python ``rerun_task`` on the function
+  (``reference/rerun_caller.py``), one call of ``horsies_enqueue_task`` with
   the lineage ``RERUN`` (0004_lifecycle_functions.sql).
+
+Caller pairs (the switch of ``rerun_task`` to the core), on the same seeds
+and sequences: reference = the Python ``rerun_task`` on the function
+(``reference/rerun_caller.py``); candidate = the production ``rerun_task``,
+whose read and write the core builds and decides
+(``horsies._core.rerun_read``, ``prepare_rerun_write``,
+``decode_rerun_write``) and the test's connection runs. Both write through
+``horsies_enqueue_task``, so the snapshots and the answers must be equal with
+no exception.
 
 Sequences: an unkeyed rerun; a keyed rerun sent twice (key replay); a keyed
 rerun sent again with another deadline (key conflict); a rerun that the
@@ -56,6 +66,7 @@ from tests.dualrun.clients import sqlalchemy_url
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
+from tests.dualrun.reference.rerun_caller import rerun_task as python_rerun_task
 from tests.dualrun.reference.rerun_write import rerun_task_before
 from tests.dualrun.seeds import SeedCoverage, SeedStatus, TaskSeed, insert_task
 
@@ -323,7 +334,7 @@ def _pair(
         make_database,
         _seed,
         _side('key claim and INSERT', rerun_task_before, steps),
-        _side('horsies_enqueue_task', rerun_task, steps),
+        _side('horsies_enqueue_task', python_rerun_task, steps),
         SeedCoverage.HISTORY_AND_BEATS,
     ):
         case Ok(pair):
@@ -424,4 +435,54 @@ def test_refused_sources_write_nothing_as_before(empty_database: MakeDatabase) -
         Refused(outcome='RerunSourceLive', source='source live'),
         Refused(outcome='RerunNotEligible', source='source completed'),
     )
+    assert pair.candidate.report == pair.reference.report
+
+
+# ---- The caller switch: the Python rerun against the core's steps ----
+
+
+def _caller_pair(
+    make_database: MakeDatabase, steps: tuple[RerunStep, ...]
+) -> OperationDualRun[tuple[StepAnswer, ...], tuple[StepAnswer, ...]]:
+    match dual_run(
+        make_database,
+        _seed,
+        _side('Python rerun_task', python_rerun_task, steps),
+        _side('rerun_task through the core', rerun_task, steps),
+        SeedCoverage.HISTORY_AND_BEATS,
+    ):
+        case Ok(pair):
+            return pair
+        case Err(failed):
+            pytest.fail(f'{failed.step}: {failed.cause}')
+
+
+_CALLER_SEQUENCES: Final = {
+    'unkeyed': (RerunStep(Source.FAILED, None, DEADLINE, TransactionEnd.COMMIT),),
+    'keyed twice': (
+        RerunStep(Source.FAILED, CALLER_KEY, None, TransactionEnd.COMMIT),
+        RerunStep(Source.FAILED, CALLER_KEY, None, TransactionEnd.COMMIT),
+    ),
+    'key conflict': (
+        RerunStep(Source.FAILED, CALLER_KEY, None, TransactionEnd.COMMIT),
+        RerunStep(Source.FAILED, CALLER_KEY, DEADLINE, TransactionEnd.COMMIT),
+    ),
+    'rolled back': (
+        RerunStep(Source.FAILED, CALLER_KEY, None, TransactionEnd.ROLLBACK),
+        RerunStep(Source.FAILED, CALLER_KEY, DEADLINE, TransactionEnd.COMMIT),
+    ),
+    'refused sources': (
+        RerunStep(Source.LIVE, CALLER_KEY, None, TransactionEnd.COMMIT),
+        RerunStep(Source.COMPLETED, CALLER_KEY, None, TransactionEnd.COMMIT),
+    ),
+}
+
+
+@pytest.mark.parametrize('sequence', sorted(_CALLER_SEQUENCES))
+def test_the_core_rerun_writes_and_answers_as_the_python_rerun(
+    empty_database: MakeDatabase, sequence: str
+) -> None:
+    pair = _caller_pair(empty_database, _CALLER_SEQUENCES[sequence])
+
+    assert pair.diff.entries == (), render_diff(pair.diff)
     assert pair.candidate.report == pair.reference.report

@@ -1,5 +1,6 @@
 ---
 title: Workflow Patterns
+section: python
 summary: Real-world workflow patterns for production use.
 related: [03-defining-workflows, 04-scheduling]
 tags: [quickstart, workflows, patterns]

@@ -102,7 +102,7 @@ error changes stored data. HTTP is the status of the web read routes.
 | Code | Variant | Fields | `retryable` | HTTP | When |
 |---|---|---|---|---|---|
 | `DB_OPERATION_FAILED` | `MonitoringQueryDbOperationFailed` | `exception` (the `SQLAlchemyError`) | driver classification | 503 | The database operation failed |
-| `EVENT_LOOP_LIMIT` | `MonitoringQueryEventLoopLimit` | `loop_limit` | `False` | 503 | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
+| `EVENT_LOOP_LIMIT` | `MonitoringQueryEventLoopLimit` | `loop_limit` | `False` | 503 | Not returned: the reads run on the core of the process, which has no event loop limit. The variant stays in the union |
 | `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `task_stats`, `list_tasks`, `get_task_detail` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
@@ -247,7 +247,7 @@ cancel_task(broker, task_id: uuid.UUID, *, include_running=False) -> Result[Task
 | `TASK_NOT_CANCELLABLE` | `TaskActionNotCancellable` | `current_status: TaskStatus` | `False` | 409 | The task is terminal, or `RUNNING` without `include_running=True`; nothing changed |
 | `TASK_IS_WORKFLOW_TASK` | `TaskActionWorkflowTask` | `current_status: TaskStatus` | `False` | 400 | The task belongs to a workflow; nothing changed |
 | `DB_OPERATION_FAILED` | `TaskActionDbOperationFailed` | `exception` (the `SQLAlchemyError`) | driver classification | 503 | The cancel statement failed: it wrote nothing, or it committed and its reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
-| `EVENT_LOOP_LIMIT` | `TaskActionEventLoopLimit` | `loop_limit` | `False` | 503 | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
+| `EVENT_LOOP_LIMIT` | `TaskActionEventLoopLimit` | `loop_limit` | `False` | 503 | Not returned: the actions run on the core of the process, which has no event loop limit. The variant stays in the union |
 | `STORED_DATA_INVALID` | `TaskActionStoredDataInvalid` | `exception` (the `OutcomeDecodeError`) | `False` | 500 | Stored data does not parse: the cancel outcome row does not decode, for example a history status that is not a `TaskStatus` member; nothing changed |
 
 `cancel_task` raises `RuntimeError` when the cancel outcome contradicts the

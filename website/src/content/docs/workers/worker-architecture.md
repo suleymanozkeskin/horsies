@@ -1,5 +1,6 @@
 ---
 title: Worker Architecture
+section: shared
 summary: Worker-owned child processes for claiming and executing tasks.
 related: [concurrency, heartbeats-recovery, shared-async-tasks, shared-thread-tasks, ../../concepts/architecture]
 tags: [workers, architecture, child-processes]

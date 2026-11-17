@@ -1,5 +1,6 @@
 ---
 title: Serialization
+section: shared
 summary: Wire envelope and type-driven decoding for task arguments and results.
 related: [../../tasks/defining-tasks, ../../concepts/result-handling]
 tags: [internals, serialization, codec, JsonValue, envelope]

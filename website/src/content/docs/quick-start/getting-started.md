@@ -1,5 +1,6 @@
 ---
 title: Getting Started
+section: python
 summary: Minimal working example with a task producer and worker.
 related: [../../tasks/defining-tasks, ../../tasks/sending-tasks, ../../concepts/task-lifecycle]
 tags: [quickstart, installation, tutorial]

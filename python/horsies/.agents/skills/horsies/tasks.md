@@ -207,7 +207,7 @@ Results from `handle.get()` / `handle.result_for()` when data is not (yet) avail
 - `WORKFLOW_NOT_FOUND` — workflow ID does not exist, or retention removed the workflow after `get()` read its terminal status
 - `RESULT_NOT_AVAILABLE` — result cache never set
 - `RESULT_NOT_READY` — result not ready yet
-- `EVENT_LOOP_LIMIT` — the broker serves its limit of open event loops and this is a new one; not cached, clears when one of those loops closes
+- `EVENT_LOOP_LIMIT` — not returned: `TaskHandle.get()` / `get_async()` read on the core of the process, which has no event loop limit. The member stays in the enum
 - `ASYNC_CONTEXT` — sync `get()` / `result_for()` called on a thread that runs an event loop; nothing ran, not cached — call `get_async()` / `result_for_async()`
 - `INVALID_INPUT` — an argument of `get()` / `get_async()` was refused before any read: `timeout_ms` must be None or an int from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached
 - `WAIT_INSIDE_TASK` — a result wait (`TaskHandle.get()` / `get_async()`, `app.get_result()` / `get_result_async()`, `WorkflowHandle.get()` / `get_async()`) was called inside a worker child, also from a thread that the task started; it waited for nothing, not cached. It is the first check of the call, before `timeout_ms` and `ASYNC_CONTEXT`. The raw reads `app.get_raw_result()` and `broker.get_raw_result_record()` (and `*_async`) return `Err(BrokerWaitInsideTask)` there. A task never waits for another task: compose them as a workflow. `send()`, starting a workflow, `info()` and `workflow_ctx.result_for()` still work in a task
@@ -489,12 +489,12 @@ Validation failure text never contains the refused value: each failure is `<loc>
 | `SEND_SUPPRESSED` | Refused | `.send()` called during worker import/discovery |
 | `ASYNC_CONTEXT` | Accepted | Sync `.send()` / `.schedule()` (or a sync retry) called inside a running event loop; nothing was enqueued — the error keeps the payload, so `retry_send_async(err)` / `retry_schedule_async(err)` completes the same send |
 | `VALIDATION_FAILED` | Refused | Serialization failed, invalid queue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or cross-method retry attempted |
-| `ENQUEUE_FAILED` | Accepted | Broker/DB failure. The `TaskSendPayload` keeps the task id, command and `sent_at` for the retry, which returns the task id if the first send was written; `retryable` is the driver classification |
+| `ENQUEUE_FAILED` | Accepted | Broker/DB failure, or the core of this process could not run the send (`exception` is the core error: `TooManyPendingCalls` and `CoreCallTimedOut` are retryable; `CoreStopped`, `CoreStartFailed` and `ForkedAfterCoreStart` are not). The row may or may not exist. The `TaskSendPayload` keeps the task id, command and `sent_at` for the retry, which returns the task id if the first send was written; `retryable` is the core's classification |
 | `PAYLOAD_MISMATCH` | Refused | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and retry |
 | `IDEMPOTENCY_KEY_CONFLICT` | Accepted | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted |
 | `PAYLOAD_TOO_LARGE` | Refused | Serialized kwargs exceeded `payload.reject_bytes` (off by default); nothing was enqueued — shrink the payload (pass a reference to external storage) or raise the limit |
-| `EVENT_LOOP_LIMIT` | Refused | The broker serves its limit of open event loops (5, plus its sync runner loop and, in a worker child, the task loop) and this send ran on a new one; nothing was enqueued — close loops that are done |
-| `LOOP_RUNNER_FAILED` | Accepted | Sync `.send()` / `.schedule()` (or a sync retry) could not run the enqueue on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was enqueued. A stopped runner does not start again, so a sync retry returns the same error — `retry_send_async(err)` / `retry_schedule_async(err)` completes the same send |
+| `EVENT_LOOP_LIMIT` | Refused | Not returned: a send runs on the core of the process, which has no event loop limit. The variant stays in `TaskSendError`, so an exhaustive `match` names it |
+| `LOOP_RUNNER_FAILED` | Accepted | Not returned: a sync send calls the core on the calling thread, not on the broker's sync runner. The variant stays in `TaskSendError` and in `TaskSendRetryable` |
 
 ### `TaskSendPayload`
 
@@ -761,14 +761,16 @@ def t() -> TaskResult[str, TaskError]: ...
 
 ### Open event loops that are never closed → `EVENT_LOOP_LIMIT`
 
+A workflow start (`spec.start()`, `start_async()`) and a workflow resume (`resume()`, `resume_workflow()`) keep one broker resource set per open event loop. Sends and task result reads run on the core and have no such limit.
+
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # WRONG — every call leaves one more open loop; the sixth gets EVENT_LOOP_LIMIT
 loop = asyncio.new_event_loop()
-loop.run_until_complete(my_task.send_async(value="test"))
+loop.run_until_complete(spec.start_async())
 
 # CORRECT — asyncio.run() closes its loop, so the next call releases its set
-asyncio.run(my_task.send_async(value="test"))
+asyncio.run(spec.start_async())
 ```
 
 ### Sync calls inside a coroutine or a Jupyter cell → `ASYNC_CONTEXT`
