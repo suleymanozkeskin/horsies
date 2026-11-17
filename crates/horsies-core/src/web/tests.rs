@@ -122,9 +122,10 @@ fn test_state(
         actions_enabled,
         ui_config: MonitoringUiConfig::default(),
         assets,
-        workflow_registry: Arc::new(app.workflow_registry().clone()),
-        payload: app.config().payload.clone(),
-        retention: app.config().retention.clone(),
+        children: crate::monitoring::ResumeChildren::Registry {
+            registry: Arc::new(app.workflow_registry().clone()),
+            retention: app.config().retention.clone(),
+        },
         heartbeat: Duration::from_millis(25),
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
@@ -1172,9 +1173,10 @@ async fn migrated_state() -> WebState {
         actions_enabled: true,
         ui_config: MonitoringUiConfig::default(),
         assets: MemoryAssets::standard(),
-        workflow_registry: Arc::new(app.workflow_registry().clone()),
-        payload: app.config().payload.clone(),
-        retention: app.config().retention.clone(),
+        children: crate::monitoring::ResumeChildren::Registry {
+            registry: Arc::new(app.workflow_registry().clone()),
+            retention: app.config().retention.clone(),
+        },
         heartbeat: Duration::from_millis(25),
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
@@ -2315,4 +2317,93 @@ async fn the_event_stream_has_no_single_response() {
             grant(Verdict::Allowed, Verdict::NotAsked),
         )
         .await;
+}
+
+/// The event stream path answers a refused view with the 403 of the guard:
+/// the host has no stream to open.
+#[tokio::test]
+async fn a_refused_view_of_the_event_stream_is_answered_by_the_guard() {
+    let handler = granted_handler(true);
+
+    let refused = handler
+        .handle(
+            parts(Method::GET, "/api/events"),
+            grant(Verdict::Refused, Verdict::NotAsked),
+        )
+        .await;
+
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body_json(&refused),
+        serde_json::json!({"detail": "Not authorized."})
+    );
+}
+
+/// A body over the bound is refused with 413 before any route reads it; a
+/// refused verdict is answered first by the guards.
+#[tokio::test]
+async fn a_body_over_the_bound_is_refused_after_the_verdicts() {
+    let handler = granted_handler(true);
+    let over = axum::body::Bytes::from(vec![b' '; super::handler::MAX_REQUEST_BODY_BYTES + 1]);
+
+    let too_large = handler
+        .handle(
+            RequestParts {
+                body: over.clone(),
+                ..action_parts(&format!("/api/tasks/{}/cancel", Uuid::nil()))
+            },
+            grant(Verdict::Allowed, Verdict::Allowed),
+        )
+        .await;
+    assert_eq!(too_large.status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        body_json(&too_large),
+        serde_json::json!({"detail": format!(
+            "The request body is over {} bytes.",
+            super::handler::MAX_REQUEST_BODY_BYTES
+        )})
+    );
+
+    let refused = handler
+        .handle(
+            RequestParts {
+                body: over,
+                ..action_parts(&format!("/api/tasks/{}/cancel", Uuid::nil()))
+            },
+            grant(Verdict::Allowed, Verdict::Refused),
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+}
+
+/// The free `route_access` is the handler's answer for the same switch.
+#[test]
+fn route_access_follows_the_actions_switch() {
+    let path = format!("/api/workflows/{}/resume", Uuid::nil());
+    assert_eq!(
+        super::handler::route_access(true, &Method::POST, &path),
+        granted_handler(true).route_access(&Method::POST, &path)
+    );
+    assert_eq!(
+        super::handler::route_access(false, &Method::POST, &path).need,
+        AccessNeed::View
+    );
+}
+
+/// A broker without a session URL has no listener: the stream sends the
+/// degraded frame and ends.
+#[tokio::test]
+async fn an_event_stream_without_a_listener_degrades_and_ends() {
+    let handler = granted_handler(true);
+    let mut frames = handler.subscribe_events().await;
+
+    let first = tokio::time::timeout(Duration::from_secs(5), frames.next())
+        .await
+        .expect("the first frame comes");
+
+    assert_eq!(
+        first,
+        super::events::EventStreamItem::Frame("data: {\"topic\": \"degraded\"}\n\n".to_owned())
+    );
+    assert_eq!(frames.next().await, super::events::EventStreamItem::Ended);
 }
