@@ -4,7 +4,8 @@ A worker reads the workflow as PAUSED, a resume commits, and then the
 worker abandons its claim. Without a pause re-check under the workflow
 lock, the abandon cancels the task and the node is reset to READY with no
 task while the workflow is RUNNING; only workflow recovery enqueues it.
-With the re-check, the abandon refuses and the claim is run instead.
+With the re-check, the abandon refuses and the claim is run instead. The
+claim-time settle reads the status again under the workflow row lock.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing import Any
 import psycopg
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.lifecycle.commands import AbandonOwnedNode, AbandonOwnedNodes
@@ -30,7 +31,7 @@ from horsies.core.lifecycle.outcomes import (
 from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.types.result import is_ok
 from horsies.core.utils.url import to_psycopg_url
-from horsies.core.worker import child_runner, claiming
+from horsies.core.worker import child_runner
 from horsies.core.worker.child_pool import _initialize_worker_pool
 from horsies.core.worker.claiming import ClaimMixin
 from horsies.core.worker.config import WorkerConfig
@@ -154,32 +155,71 @@ async def _node_and_task(
     return str(node.status), node_task, str(node.workflow_status), live_task
 
 
+_LOCK_WAIT_POLLS = 200
+_LOCK_WAIT_POLL_S = 0.05
+_SETTLE_END_S = 10.0
+
+
+async def _until_a_backend_waits_on_a_lock(
+    session_factory: async_sessionmaker[AsyncSession],
+    query_part: str,
+) -> None:
+    """Return once a backend whose query contains ``query_part`` waits on a lock."""
+    for _ in range(_LOCK_WAIT_POLLS):
+        async with session_factory() as probe:
+            waiting = (
+                await probe.execute(
+                    text("""
+                        SELECT count(*) FROM pg_stat_activity
+                        WHERE datname = current_database()
+                          AND wait_event_type = 'Lock'
+                          AND query LIKE '%' || :part || '%'
+                          AND pid <> pg_backend_pid()
+                    """),
+                    {'part': query_part},
+                )
+            ).scalar_one()
+        if waiting > 0:
+            return
+        await asyncio.sleep(_LOCK_WAIT_POLL_S)
+    raise AssertionError(f'no backend waited on a lock running {query_part!r}')
+
+
 @pytest.mark.asyncio(loop_scope='function')
-async def test_claim_filter_dispatches_a_claim_resumed_before_its_abandon(
+async def test_claim_filter_dispatches_a_claim_resumed_before_its_settle(
     session: AsyncSession,
     broker: PostgresBroker,
     clean_workflow_tables: None,  # noqa: ARG001
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The post-claim filter reads PAUSED; the resume commits before the abandon."""
+    """The settle reads the workflow PAUSED, then waits for its row lock; a
+    transaction that holds the row makes it RUNNING, as a resume does, and
+    commits. The settle reads the status again under the lock and the claim
+    is dispatched, with nothing written."""
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     workflow_id, task_id = await _seed_paused_workflow_with_claimed_node(
         session,
         claimed_at,
     )
-    real_apply_batch = claiming.apply_batch_async
-
-    async def _resume_then_apply(connection: Any, command: Any) -> Any:
-        resumed = await resume_workflow(broker, workflow_id)
-        assert is_ok(resumed) and resumed.ok_value is True
-        return await real_apply_batch(connection, command)
-
-    monkeypatch.setattr(claiming, 'apply_batch_async', _resume_then_apply)
+    session_factory = current_resources(broker).session_factory
     rows = [{'id': task_id, 'is_workflow_task': True, 'claimed_at': claimed_at}]
 
-    dispatched = await _claim_filter_probe(broker)._filter_nonrunnable_workflow_tasks(
-        rows,
-    )
+    async with session_factory() as holder:
+        _ = await holder.execute(
+            text("""
+                UPDATE horsies_workflows SET status = 'RUNNING', updated_at = NOW()
+                WHERE id = CAST(:wf AS uuid) AND status = 'PAUSED'
+            """),
+            {'wf': workflow_id},
+        )
+        settle = asyncio.ensure_future(
+            _claim_filter_probe(broker)._filter_nonrunnable_workflow_tasks(rows),
+        )
+        await _until_a_backend_waits_on_a_lock(
+            session_factory,
+            'horsies_workflow_claimed_tasks_settle',
+        )
+        await holder.commit()
+    dispatched = await asyncio.wait_for(settle, _SETTLE_END_S)
 
     assert [row['id'] for row in dispatched] == [task_id]
     assert await _node_and_task(session, workflow_id, task_id) == (

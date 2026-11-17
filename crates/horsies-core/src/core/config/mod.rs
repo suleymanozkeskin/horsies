@@ -18,8 +18,8 @@ pub use queue::{CustomQueueConfig, CustomQueueConfigError, QueueMode};
 pub use recovery::{RecoveryConfig, RecoveryConfigError};
 pub use resilience::{ResilienceConfigError, WorkerResilienceConfig};
 pub use retention::{
-    EnqueueRetention, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
-    RetentionConfigError,
+    EnqueueRetention, PausedAgeRefused, PausedWorkflowAge, RetentionChoice,
+    RetentionClassKeyRefused, RetentionConfig, RetentionConfigError,
 };
 pub use schedule::{
     CronEnumTerm, CronNumericTerm, CronOrdinal, CronSchedule, DailySchedule, DaySelector,

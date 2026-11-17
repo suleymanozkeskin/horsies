@@ -250,11 +250,13 @@ class TestClosedLoopRelease:
         broker = PostgresBroker(_one_connection_config())
         paused = asyncio.new_event_loop()
         try:
-            assert is_ok(paused.run_until_complete(broker.ping_database_async()))
+            # get_stale_tasks reads on the loop's SQLAlchemy set; the database
+            # ping runs on the core pool and selects no set.
+            assert is_ok(paused.run_until_complete(broker.get_stale_tasks()))
             for _ in range(3):
-                assert is_ok(asyncio.run(broker.ping_database_async()))
+                assert is_ok(asyncio.run(broker.get_stale_tasks()))
                 assert len(broker._loop_sets) == 2  # pyright: ignore[reportPrivateUsage]
-            assert is_ok(paused.run_until_complete(broker.ping_database_async()))
+            assert is_ok(paused.run_until_complete(broker.get_stale_tasks()))
         finally:
             closed = paused.run_until_complete(broker.close_async())
             paused.close()

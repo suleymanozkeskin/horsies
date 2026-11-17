@@ -263,7 +263,8 @@ SELECT lc_expect(
 SELECT lc_expect(
     'enqueue: the row names every value',
     (SELECT concat_ws('|', status, task_name, queue_name, priority, input, execution, retention_class_key,
-        retain_rerun_input, max_retries, retry_count, enqueued_at = now(), sent_at = now(), is_workflow_task,
+        retain_rerun_input, max_retries, retry_count, enqueued_at = statement_timestamp(), sent_at = now(),
+        is_workflow_task,
         command_fingerprint_version, command_fingerprint = sha256('b01'::bytea), idempotency_key_digest IS NULL,
         rerun_of_task_id IS NULL AND rerun_root_task_id IS NULL, claimed_at IS NULL AND claim_expires_at IS NULL)
      FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000b01'),
@@ -308,7 +309,8 @@ SELECT lc_expect(
 );
 SELECT lc_expect(
     'enqueue: start AFTER_DELAY, the stored time',
-    (SELECT (enqueued_at - now())::text FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000b03'),
+    (SELECT (enqueued_at - statement_timestamp())::text
+     FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000b03'),
     '00:00:30'
 );
 SELECT lc_expect(

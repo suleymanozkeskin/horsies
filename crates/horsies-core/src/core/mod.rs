@@ -21,11 +21,11 @@ pub use app::{
 pub use config::{
     mask_database_url, AppConfig, AppConfigError, CronEnumTerm, CronNumericTerm, CronOrdinal,
     CronSchedule, CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector,
-    EnqueueRetention, HourlySchedule, IntervalSchedule, Month, MonthlySchedule, PayloadPolicy,
-    PostgresConfig, PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
-    ResilienceConfigError, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
-    RetentionConfigError, ScheduleConfig, SchedulePattern, TaskSchedule, Weekday, WeeklySchedule,
-    WorkerResilienceConfig,
+    EnqueueRetention, HourlySchedule, IntervalSchedule, Month, MonthlySchedule, PausedAgeRefused,
+    PausedWorkflowAge, PayloadPolicy, PostgresConfig, PostgresConfigError, QueueMode,
+    RecoveryConfig, RecoveryConfigError, ResilienceConfigError, RetentionChoice,
+    RetentionClassKeyRefused, RetentionConfig, RetentionConfigError, ScheduleConfig,
+    SchedulePattern, TaskSchedule, Weekday, WeeklySchedule, WorkerResilienceConfig,
 };
 pub use error::{ErrorCategory, ErrorCode, HorsiesError, ValidationReport};
 pub use registry::{

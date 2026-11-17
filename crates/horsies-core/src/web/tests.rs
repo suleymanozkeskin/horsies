@@ -420,10 +420,10 @@ async fn query_and_path_validation_preserve_location_input_and_window_refusals()
             "int_parsing",
         ),
         (
-            "/api/workflows/not-a-uuid",
-            serde_json::json!(["path", "workflow_id"]),
-            serde_json::json!("not-a-uuid"),
-            "uuid_parsing",
+            "/api/workflows/not-a-uuid/tasks/not-an-int",
+            serde_json::json!(["path", "task_index"]),
+            serde_json::json!("not-an-int"),
+            "int_parsing",
         ),
     ] {
         let response = router
@@ -1523,35 +1523,67 @@ async fn a_task_path_id_that_is_not_a_uuid_is_invalid_input() {
     assert_eq!(json(cancel).await, task_path_id_refusal("not-a-uuid"));
 }
 
-/// A workflow path id that is not a UUID answers FastAPI's 422
-/// `uuid_parsing` body, as a `uuid.UUID` path parameter does, with no
-/// database call (the router's pool is lazy and unreachable).
+/// A workflow id text that is not a UUID names no run on the two read
+/// routes: 404 with the not-found text of the Python web app, which takes
+/// the id as text (`get_workflow_run`, `get_workflow_node`), and no database
+/// call (the router's pool is lazy and unreachable). An index that is not an
+/// integer is still FastAPI's 422, and it names only `task_index`.
 #[tokio::test]
-async fn a_workflow_path_id_that_is_not_a_uuid_is_fastapi_uuid_parsing() {
+async fn a_workflow_read_path_id_that_is_not_a_uuid_is_not_found() {
     let router = test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
         true,
     );
-    let response = router
+    let run = router
         .clone()
         .oneshot(request(Method::GET, "/api/workflows/not-a-uuid"))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let body = json(response).await;
-    let issue = &body["detail"][0];
-    assert_eq!(issue["type"], "uuid_parsing");
-    assert_eq!(issue["loc"], serde_json::json!(["path", "workflow_id"]));
-    assert_eq!(issue["input"], "not-a-uuid");
-    let reason = issue["ctx"]["error"]
-        .as_str()
-        .expect("ctx.error is the parser's reason");
+    assert_eq!(run.status(), StatusCode::NOT_FOUND);
     assert_eq!(
-        issue["msg"],
-        serde_json::json!(format!("Input should be a valid UUID, {reason}"))
+        json(run).await,
+        serde_json::json!({"detail": "Workflow run not found."})
     );
 
+    let node = router
+        .clone()
+        .oneshot(request(Method::GET, "/api/workflows/not-a-uuid/tasks/3"))
+        .await
+        .unwrap();
+    assert_eq!(node.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        json(node).await,
+        serde_json::json!({"detail": "Workflow task not found."})
+    );
+
+    let both = router
+        .oneshot(request(
+            Method::GET,
+            "/api/workflows/not-a-uuid/tasks/not-an-int",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(both.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(both).await;
+    let issues = body["detail"]
+        .as_array()
+        .expect("the 422 body lists the refused parameters");
+    assert_eq!(issues.len(), 1, "{body}");
+    assert_eq!(issues[0]["loc"], serde_json::json!(["path", "task_index"]));
+    assert_eq!(issues[0]["type"], "int_parsing");
+}
+
+/// A workflow path id that is not a UUID on an action route answers
+/// FastAPI's 422 `uuid_parsing` body, with no database call (the router's
+/// pool is lazy and unreachable).
+#[tokio::test]
+async fn a_workflow_action_path_id_that_is_not_a_uuid_is_fastapi_uuid_parsing() {
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        true,
+    );
     for path in [
         "/api/workflows/not-a-uuid/pause",
         "/api/workflows/not-a-uuid/resume",
@@ -1563,30 +1595,24 @@ async fn a_workflow_path_id_that_is_not_a_uuid_is_fastapi_uuid_parsing() {
             StatusCode::UNPROCESSABLE_ENTITY,
             "{path}"
         );
+        let body = json(response).await;
+        let issue = &body["detail"][0];
+        assert_eq!(issue["type"], "uuid_parsing", "{path}");
         assert_eq!(
-            json(response).await["detail"][0]["loc"],
+            issue["loc"],
             serde_json::json!(["path", "workflow_id"]),
             "{path}"
         );
+        assert_eq!(issue["input"], "not-a-uuid", "{path}");
+        let reason = issue["ctx"]["error"]
+            .as_str()
+            .expect("ctx.error is the parser's reason");
+        assert_eq!(
+            issue["msg"],
+            serde_json::json!(format!("Input should be a valid UUID, {reason}")),
+            "{path}"
+        );
     }
-
-    let both = router
-        .oneshot(request(
-            Method::GET,
-            "/api/workflows/not-a-uuid/tasks/not-an-int",
-        ))
-        .await
-        .unwrap();
-    assert_eq!(both.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let body = json(both).await;
-    assert_eq!(
-        body["detail"][0]["loc"],
-        serde_json::json!(["path", "workflow_id"])
-    );
-    assert_eq!(
-        body["detail"][1]["loc"],
-        serde_json::json!(["path", "task_index"])
-    );
 }
 
 /// Python `tests/unit/test_monitoring_task_detail_absence.py`,
