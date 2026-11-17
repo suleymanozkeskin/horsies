@@ -26,6 +26,7 @@ encoder, and the Python tests check that it still does.
 |---|---|
 | `task_input.json` | Task input (`input_json`) |
 | `result_envelope.json` | Result envelope (`{"__h_task_result__": true, "ok": ..., "err": ...}`) |
+| `error_data.json` | Library errors with `data`, as stored |
 
 ## Rows
 
@@ -166,6 +167,43 @@ exception record and the sub-workflow failure are written by the library, and
 `TaskError::user` and `TaskError::library` take a message: the Rust tests only
 read those vectors.
 
+## Error data (`error_data.json`)
+
+One vector per library error with `data` that the core writes, in the form
+that it is stored: `stored_as` is `envelope` (the task or node result) or
+`error` (the error object of the workflow error column). `python_writer` and
+`core_writer` name the two writers; `inputs` holds the inputs of a writer that
+the tests call. The texts are Python's encoder output for the data of
+Python's writer; for `TASK_TIMEOUT`, `WORKER_CRASHED` (stale),
+`WORKFLOW_START_INCOMPLETE` and `WORKFLOW_RECOVERY_LIMIT_REACHED` the Python
+test calls the writer itself.
+
+| Code | `data` keys, in order | Python writer | Core writer |
+|---|---|---|---|
+| `TASK_TIMEOUT` (4 vectors: `cancel_end` `RETURNED_AFTER_SIGNAL`, `DROPPED_AFTER_GRACE`, `KILLED_WITH_CHILD`, and none) | `task_id`, `timeout_ms`, `cancel_end` | `python/horsies/core/worker/shared_stop.py:148` (`timeout_error_data`), `python/horsies/core/worker/dispatch.py:1101` | `crates/horsies-core/src/worker/executor/slots/outcome.rs:243` (`timeout_write`) |
+| `WORKER_CRASHED`, killed child | `task_id`, `worker_id` | `python/horsies/core/worker/dispatch.py:333-339` | `crates/horsies-core/src/worker/executor/slots/outcome.rs:212` (`killed_child_write`) |
+| `WORKER_CRASHED`, stale | `stale_threshold_ms`, `stale_threshold_seconds`, `worker_pid`, `worker_hostname`, `worker_id`, `started_at`, `detected_at` | `python/horsies/core/brokers/stale_running.py:178` (`crash_result_json`) | `crates/horsies-core/src/worker/recovery.rs:1450` (`stale_attempt_command`) |
+| `UPSTREAM_SKIPPED` | `dependency_index` | `python/horsies/core/workflows/engine.py:2496-2499` | `crates/horsies-core/src/workflow_engine/args_merge.rs:330`; SQL `horsies_task_error_envelope` |
+| `RESULT_DESERIALIZATION_ERROR`, dependency without a result | `dependency_index` | `python/horsies/core/workflows/engine.py:186-193` | `crates/horsies-core/src/workflow_engine/args_merge.rs:345` |
+| `WORKFLOW_OUTPUT_SKIPPED` | `workflow_id`, `output_node_id`, `output_task_index`, `output_task_name` | `python/horsies/core/workflows/engine.py:3398-3420` | SQL `horsies_workflow_output_error_data` (`crates/horsies-core/baseline/0005_workflow_functions.sql:1309`) |
+| `WORKFLOW_ENQUEUE_FAILED`, `args_from` conflict | `workflow_id`, `task_index` | `python/horsies/core/workflows/engine.py:545-551` | `crates/horsies-core/src/workflow_engine/args_merge.rs:111` (`node_error`); SQL |
+| `SUBWORKFLOW_DEPTH_LIMIT_REACHED` | `workflow_id`, `task_index` | `python/horsies/core/workflows/engine.py:1068-1078` | `crates/horsies-core/src/workflow_engine/start.rs:193`; SQL |
+| `SUBWORKFLOW_LOAD_FAILED` | `definition_key` | `python/horsies/core/workflows/engine.py:616-619` | `crates/horsies-core/src/workflow_engine/start_statement.rs:707` |
+| `WORKFLOW_RECOVERY_LIMIT_REACHED` | `workflow_id`, `case`, `task_index`, `failed_passes`, `exception_type` | `python/horsies/core/workflows/recovery_limit.py:525` (`recovery_limit_error`) | `crates/horsies-core/src/workflow_engine/recovery_limit.rs:526`; SQL (`0005_workflow_functions.sql:4099`) |
+| `WORKFLOW_START_INCOMPLETE` (error object) | `workflow_id`, `recovery` | `python/horsies/core/workflows/recovery.py:580` (`orphaned_workflow_error`) | `crates/horsies-core/src/workflow_engine/recovery.rs:1748` |
+| `WORKFLOW_EXPIRED` (error object) | `policy`, `older_than_seconds` | `python/horsies/core/workflows/lifecycle.py:845-857` | `crates/horsies-core/src/workflow_engine/lifecycle.rs:300` |
+| `UNHANDLED_EXCEPTION`, with the exception record | `exception_type` | `python/horsies/core/task_decorator.py:2031-2036` | `crates/horsies-core/src/worker/executor/child_host/panic.rs:175` (a Rust panic) |
+
+The SQL writer is `horsies_task_error_envelope`
+(`crates/horsies-core/baseline/0005_workflow_functions.sql:99`); a DB test
+calls it with the code, the message and the data text of each engine vector.
+The core's tests call `timeout_write`, `killed_child_write`,
+`stale_attempt_command`, `upstream_skipped_error`, `missing_result_error` and
+`node_error`; the other core writers build their data with `json!` in the key
+order of the table, and the generic test pins the encoding of each vector.
+The Rust client writes none of these errors; its test reads each envelope
+through `outcome_of_record`.
+
 ## Findings
 
 Differences that the vectors found. A fixed one names its PR; an open one is a
@@ -175,6 +213,8 @@ Differences that the vectors found. A fixed one names its PR; an open one is a
 |---|---|---|---|
 | member order | every form | serde_json without `preserve_order` wrote each object with sorted keys; Python writes insertion order (`TASK_TIMEOUT` data: `task_id`, `timeout_ms`, `cancel_end`) | fixed, #1610 |
 | float notation | every form | serde_json wrote `0.00001` and `1.5e-7`; Python writes `1e-05` and `1.5e-07` | fixed in the codec encoders, #1613 |
+| SQL error key order | error data | `horsies_task_error_envelope` wrote `error_code`, `message`, `data`, `exception`; Python writes `exception`, `error_code`, `data`, `message` | fixed, #1623 |
+| instants in stored data | error data, task options | the stale-crash `started_at` and `detected_at` and a node's merged `good_until` used `to_rfc3339()` (`.500`); Python's `isoformat()` writes `.500000` | fixed, #1623 |
 | result read of a big integer | result envelope | the core's result read parsed the envelope into a `serde_json::Map`: `2**64` came back as `1.8446744073709552e+19`, which Python's and the Rust client's typed reads refuse | fixed, #1617 |
 | `no-parameter-input` | task input | a task with no parameters: Python stores `{}`, the Rust client stores `null` (its input is `()`) | open |
 | `datetime-milliseconds` | task input, result | chrono writes a fraction of whole milliseconds with 3 digits (`.500Z`); Python writes 6 (`.500000Z`). Microseconds and whole seconds agree | open |
