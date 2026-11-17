@@ -47,6 +47,9 @@ pub(super) struct RunFacts {
     pub(super) task_name: String,
     pub(super) worker_id: String,
     pub(super) claimed_at: DateTime<Utc>,
+    /// Whether the stop before start cancels the task when no node links it
+    /// live; the run frame carries it.
+    pub(super) orphan_self_heal: OrphanSelfHeal,
 }
 
 /// How the start write ended.
@@ -146,8 +149,7 @@ pub(super) async fn start_attempt(context: &HostContext, facts: &RunFacts) -> St
 /// |---|---|---|
 /// | `DeadlinePassed` | the expiry of the owned claim | `TaskExpired`, or `ClaimLost` when the expiry is refused |
 /// | `NotHeld`, `LeaseExpired` | none | `ClaimLost` |
-/// | `WorkflowPaused`, `WorkflowCancelled` | `horsies_workflow_task_stop_before_start`, one statement that judges the task again: the abandon and node reset, or the cancel and node skip | `WorkflowStopped`; a new start after a resume; `TaskExpired`, `NodeNotLinked` or `ClaimLost` by what it found |
-/// | `NodeNotLinked` | none in the child; the worker's outcome writer cancels the owned orphan | `NodeNotLinked` |
+/// | `WorkflowPaused`, `WorkflowCancelled`, `NodeNotLinked` | `horsies_workflow_task_stop_before_start` with the orphan self-heal of the run, one statement that judges the task again: the abandon and node reset, the cancel and node skip, or the orphan cancel | `WorkflowStopped`; a new start after a resume; `TaskExpired`, `OrphanCancelled`, `NodeNotLinked` or `ClaimLost` by what it found |
 ///
 /// Each write of the path ends by `deadline`, the deadline of the start
 /// attempt.
@@ -179,10 +181,9 @@ async fn after_missed_start(
             }
         }
         StartMiss::NotHeld | StartMiss::LeaseExpired => Ok(claim_lost(facts)),
-        StartMiss::WorkflowPaused | StartMiss::WorkflowCancelled => {
+        StartMiss::WorkflowPaused | StartMiss::WorkflowCancelled | StartMiss::NodeNotLinked => {
             stop_for_workflow(context, facts, miss, deadline).await
         }
-        StartMiss::NodeNotLinked => Ok(node_not_linked(facts)),
     }
 }
 
@@ -198,15 +199,13 @@ fn claim_lost(facts: &RunFacts) -> MissedStart {
     MissedStart::Stop(StopReason::ClaimLost)
 }
 
-/// Stop a workflow task whose workflow stopped: one
+/// Stop a workflow task whose start missed for a workflow reason (its
+/// workflow stopped, or no node links it): one
 /// `horsies_workflow_task_stop_before_start` statement on the main core
 /// pool, as the start, within `deadline`, which judges the task again under
-/// its own locks.
-///
-/// The child host sends the orphan self-heal off: the run frames do not
-/// carry the app's setting, so a task whose node is not linked ends
-/// `NodeNotLinked`, and the worker's outcome writer cancels the owned orphan
-/// when the setting is on.
+/// its own locks. With the orphan self-heal of the run on, a task that no
+/// node links live is cancelled in the same statement (`OrphanCancelled`);
+/// with it off the task ends `NodeNotLinked` and its row stays CLAIMED.
 async fn stop_for_workflow(
     context: &HostContext,
     facts: &RunFacts,
@@ -229,7 +228,7 @@ async fn stop_for_workflow(
         context.broker.statement_log(),
         facts.task_id,
         &fence,
-        OrphanSelfHeal::Off,
+        facts.orphan_self_heal,
         deadline,
     )
     .await?;
@@ -252,13 +251,11 @@ async fn stop_for_workflow(
     }
 }
 
-/// The stop of a workflow task start whose node is not linked to the task.
-/// Logs an error and writes nothing (Python
-/// `python/horsies/core/worker/child_runner.py:1233-1247`, the node check of
-/// `_confirm_ownership_and_set_running`). The worker's outcome writer
-/// cancels the owned orphan when the app's
-/// `auto_terminate_orphaned_workflow_tasks` is on
-/// (`slots::outcome::OutcomeWriter`); with it off the row stays CLAIMED.
+/// The stop of a workflow task start whose node is not linked to the task,
+/// with the orphan self-heal off: the stop wrote nothing, and the row stays
+/// CLAIMED for inspection. Logs an error (Python
+/// `python/horsies/core/worker/child_runner.py`, the node check of
+/// `_confirm_ownership_and_set_running`).
 fn node_not_linked(facts: &RunFacts) -> MissedStart {
     tracing::error!(
         task_id = %facts.task_id,

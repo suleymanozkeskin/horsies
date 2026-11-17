@@ -221,6 +221,17 @@ written in Rust, on a new baseline schema.
   timestamp (4714-11-24 BC). 0.7.0 accepted any positive `timedelta`, and
   such an age failed every sweep with `timestamp out of range`.
 
+- **The claim values and the payload thresholds are within the bounds of
+  the worker.** `prefetch_buffer`, `cluster_wide_cap` and a custom queue's
+  `max_concurrency` are at most 2,147,483,647; `claim_lease_ms` and
+  `max_claim_renew_age_ms` at most 4,294,967,295; `PayloadPolicy.warn_bytes`
+  and `reject_bytes` at most 2^64 - 1. A larger value is refused when the
+  config is built: `AppConfig` raises `ConfigurationError` with the code of
+  the field (`CONFIG_INVALID_PREFETCH` HRS-202, `CONFIG_INVALID_CLUSTER_CAP`
+  HRS-201, `CONFIG_INVALID_QUEUE_MODE` HRS-200), and `PayloadPolicy` raises
+  `ValidationError`. The bounds are those of the worker manifest of the
+  core. 0.7.0 accepted these values.
+
 - **`check(live=True)` runs the core's connectivity check.** The check
   builds a core handle of its own (observe-only, producer pools) and calls
   `CoreHandle.check_connectivity`, the rule of the Python and Rust clients:
@@ -234,6 +245,16 @@ written in Rust, on a new baseline schema.
   (`HRS-203`, "broker connectivity check failed" with the cause, "broker
   listener capability check failed"); the listener refusal adds the core's
   cause as a second note.
+- **`check(live=True)` compares the worker profiles through the core.**
+  The worker connection phase runs the core's check
+  (`CoreHandle.check_worker_connections`, the rule of the Python and Rust
+  clients) on the handle of the connectivity phase; the live check opens no
+  SQLAlchemy engine. The count is that of the core's worker: its listener
+  opens one connection (before: 2), and a `session_database_url` that
+  differs from `database_url` adds a session pool of the parent pool's size.
+  The errors keep `CHECK_WORKER_CONNECTIONS` (`HRS-219`) and their texts; a
+  limit that is not read, or a core that cannot run the call, is one error
+  with the cause as its note, as before.
 
 ### Fixed
 
@@ -639,7 +660,9 @@ unless it starts with "Added".
   `UnknownUserCode`); `summary_for` returns `&SubWorkflowSummary`, and
   `output_for` the child's output read as `T`.
 - **`UserErrorCode::code` returns `&str`.** Added: `UserCode` implements
-  `UserErrorCode`, with every user code as checked text.
+  `UserErrorCode`, with every user code as checked text. `UserCode` and
+  `UserCodeRefused` are exported at the crate root, so the outcome type of
+  `WorkflowHandle::get` can be named without a `horsies-core` dependency.
 - **A workflow start converts the spec to the core's spec data and runs
   on the core.** `register_workflow_definition::<D>()` (a definition without
   params) returns `WorkflowFunction<T>`; `workflow_template::<D>()` (a

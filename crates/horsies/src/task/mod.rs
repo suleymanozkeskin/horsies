@@ -21,6 +21,12 @@ pub(crate) use user_code::{
 /// in UPPER_SNAKE_CASE; a built-in or reserved name is a compile error.
 pub use horsies_macros::UserErrorCode;
 
+/// Any user code as checked text: the code type of a read that takes the
+/// codes of several tasks (`WorkflowHandle::get`, a dependency result of
+/// another code type). `UserCode::parse` refuses a built-in or reserved
+/// name with `UserCodeRefused`.
+pub use horsies_core::{UserCode, UserCodeRefused};
+
 // The library's code catalogs, with Python's names and wire values.
 pub use horsies_core::core::task::error::ExceptionRecord;
 pub use horsies_core::{

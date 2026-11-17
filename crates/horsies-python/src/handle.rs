@@ -14,6 +14,7 @@ use std::sync::{Arc, OnceLock};
 
 use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
+use horsies_core::worker_manifest::parse_worker_profiles;
 use horsies_core::{BrokerError, BrokerErrorCode, ClientFamily, PoolProfile, PostgresBroker};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -59,6 +60,7 @@ use crate::operations::task_info::{task_info_operation, TaskInfoParts};
 use crate::operations::task_lists::{
     expired_tasks_operation, stale_tasks_operation, stale_threshold,
 };
+use crate::operations::worker_connections::check_worker_connections_operation;
 use crate::operations::worker_ping::{ping_request, ping_workers_operation};
 use crate::operations::worker_reads::{
     class_coverage_operation, class_report_operation, history_limit,
@@ -117,6 +119,12 @@ impl BrokerConnection {
     /// The manifest of the handle.
     fn manifest(&self) -> &ProducerManifest {
         self.handle.manifest()
+    }
+
+    /// The core's lazy handle, for a core function that connects only when
+    /// its rule needs a read.
+    pub fn lazy_handle(&self) -> &LazyHandle {
+        &self.handle
     }
 
     /// Whether a connect succeeded on this handle. Starts nothing and waits
@@ -292,6 +300,30 @@ impl CoreHandle {
             "CoreHandle.check_connectivity",
             CallKind::Read,
             check_connectivity_operation(self.connection()),
+        )
+    }
+
+    /// The worker connection step of the live check
+    /// (`check_handle_worker_connections`, the rule of both clients): one
+    /// `WorkerConnectionError` per profile of `profiles_json` whose worker
+    /// needs more connections than the server has usable slots, or one when
+    /// the limit was not read; an empty list when every profile fits. No
+    /// profile, or PgBouncer transaction mode in the handle's manifest,
+    /// connects nothing. Reads only; no schema step. Blocking only: its
+    /// caller, `Horsies.check(live=True)`, is sync.
+    ///
+    /// `profiles_json` is the `profiles` member of a worker manifest. A
+    /// refused text raises `ManifestRefused`, a defect of the client.
+    fn check_worker_connections(&self, py: Python<'_>, profiles_json: &str) -> PyResult<Py<PyAny>> {
+        let profiles = parse_worker_profiles(profiles_json)
+            .map_err(|refused| ManifestRefused::new_err((refused.field_path, refused.cause)))?;
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.check_worker_connections",
+            CallKind::Read,
+            check_worker_connections_operation(self.connection(), profiles),
         )
     }
 

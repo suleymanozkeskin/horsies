@@ -154,6 +154,7 @@ pub(super) fn run_frame(task: &ClaimedTask) -> ParentFrame {
         task_name: task.task_name.clone(),
         worker_id: WORKER_ID.to_owned(),
         claimed_at: task.claimed_at,
+        orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
         input: input(),
     })
@@ -167,6 +168,7 @@ pub(super) fn shared_run_frame(task: &ClaimedTask, dispatch: u64, work: SharedWo
         task_name: task.task_name.clone(),
         worker_id: WORKER_ID.to_owned(),
         claimed_at: task.claimed_at,
+        orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work,
         input: input(),
     })
@@ -510,6 +512,7 @@ pub(super) fn isolated_config(command: ChildCommand) -> IsolatedPoolConfig {
         command,
         init: isolated_init(),
         worker_id: WORKER_ID.to_owned(),
+        orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         pending_limit: NonZeroUsize::new(16).unwrap(),
         tasks_per_child: TaskLimit::Off,
         memory_per_child: MemoryLimit::Off,
@@ -524,6 +527,7 @@ pub(super) fn shared_config(command: ChildCommand, init: InitFrame) -> SharedPoo
         command,
         init,
         worker_id: WORKER_ID.to_owned(),
+        orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         pending_limit: NonZeroUsize::new(16).unwrap(),
         tasks_per_seat: TaskLimit::Off,
         memory_per_child: MemoryLimit::Off,

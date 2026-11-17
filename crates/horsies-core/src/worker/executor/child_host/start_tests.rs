@@ -21,7 +21,7 @@ use crate::broker::child_writes::{
     START_ATTEMPT_END,
 };
 use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
-use crate::broker::{PostgresBroker, PrestartExpiry};
+use crate::broker::{OrphanSelfHeal, PostgresBroker, PrestartExpiry};
 use crate::core::config::PostgresConfig;
 use crate::core::registry::task::TaskRegistry;
 use crate::db::{CheckoutClass, CorePool, KeptOpen};
@@ -126,12 +126,15 @@ async fn seed_claimed(pool: &PgPool, expired: bool) -> (Uuid, DateTime<Utc>) {
     (id, generation)
 }
 
+/// The facts of a run of the seeded row, with the orphan self-heal off:
+/// a stop before start writes nothing for an unlinked task.
 fn facts(task_id: Uuid, claimed_at: DateTime<Utc>) -> RunFacts {
     RunFacts {
         task_id,
         task_name: "app.tasks.start".to_owned(),
         worker_id: WORKER_ID.to_owned(),
         claimed_at,
+        orphan_self_heal: OrphanSelfHeal::Off,
     }
 }
 
@@ -362,9 +365,10 @@ async fn a_passed_deadline_expires_the_claim_before_the_start() {
 }
 
 /// Python `test_shared_lifecycle.py::TestSetRunning::test_a_node_that_is_not_linked_fails_the_workflow_check`:
-/// the start of a workflow task whose node is not linked to it writes
-/// nothing and stops with `NODE_NOT_LINKED` (Python's
-/// `WORKFLOW_CHECK_FAILED`); the worker's outcome writer decides the orphan.
+/// the start of a workflow task whose node is not linked to it, with the
+/// orphan self-heal off, writes nothing and stops with `NODE_NOT_LINKED`
+/// (Python's `WORKFLOW_CHECK_FAILED`). With the self-heal on, the stop
+/// before start cancels the orphan (`start_node_tests`).
 #[tokio::test]
 #[serial]
 async fn a_workflow_task_whose_node_is_not_linked_stops_and_writes_nothing() {

@@ -1,206 +1,102 @@
-//! Basic task example: send tasks and get results.
+//! Async and blocking tasks, a task with codes of its own, and the reads of
+//! their outcomes.
 //!
-//! This is a **sender only** — it enqueues tasks and collects results.
-//! A worker must be running separately to execute the tasks.
-//!
-//! Run with:
-//!   # Terminal 1: start the worker
-//!   cargo run --example worker_default -p horsies-worker
-//!
-//!   # Terminal 2: run this sender
-//!   cargo run --example basic_tasks -p horsies-worker
+//! ```text
+//! cargo run -p horsies-examples --example basic_tasks -- worker --profile default
+//! cargo run -p horsies-examples --example basic_tasks -- demo
+//! ```
 
-use horsies_examples::common;
-
+use std::collections::BTreeMap;
+use std::convert::Infallible;
+use std::fmt::Debug;
+use std::process::ExitCode;
 use std::time::Duration;
 
-use horsies::{Horsies, TaskResult};
+use horsies::{
+    blocking_task, task, AppConfig, Horsies, HorsiesError, ReadError, TaskError, TaskOutcome,
+    UserErrorCode, WaitLimit,
+};
+use horsies_examples::{
+    app_refused, database_url, isolated_profile, main_of, DemoResult, DEFAULT_PROFILE,
+};
 
-use common::tasks::basic::Computed;
+/// The codes of `charge`'s own errors: `OVER_LIMIT`.
+#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+enum ChargeCode {
+    OverLimit,
+}
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
+/// The largest charge that `charge` accepts.
+const CHARGE_LIMIT_CENTS: u64 = 100_000;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db_url = common::db_url();
-    let config = common::default_mode::app_config(&db_url);
+/// An async task. Stored input: `{"a": 2, "b": 3}`.
+#[task("add")]
+async fn add(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
+    Ok(a + b)
+}
 
-    println!("=== Basic Tasks Example (sender) ===\n");
-    println!("NOTE: Ensure worker_default is running in another terminal.\n");
-    println!("Connecting to database...\n");
+/// A blocking task: a `fn` on a thread of its child.
+#[blocking_task("word_count")]
+fn word_count(text: String) -> Result<usize, TaskError<Infallible>> {
+    Ok(text.split_whitespace().count())
+}
 
-    // Create Horsies app and register tasks (needed for resolve_enqueue).
+/// A task that fails with a code of its own and data for the reader.
+#[task("charge")]
+async fn charge(amount_cents: u64) -> Result<String, TaskError<ChargeCode>> {
+    match amount_cents > CHARGE_LIMIT_CENTS {
+        true => Err(
+            TaskError::user(ChargeCode::OverLimit, "the amount is over the limit")
+                .with_data(serde_json::json!({ "limit_cents": CHARGE_LIMIT_CENTS })),
+        ),
+        false => Ok(format!("charged {amount_cents} cents")),
+    }
+}
+
+fn build_app() -> Result<Horsies, HorsiesError> {
+    let mut config = AppConfig::for_database_url(database_url());
+    config.worker_profiles = BTreeMap::from([(DEFAULT_PROFILE.to_owned(), isolated_profile())]);
     let mut app = Horsies::new(config)?;
-    common::tasks::basic::register(&mut app)?;
+    let _add = add::register(&mut app)?;
+    let _word_count = word_count::register(&mut app)?;
+    let _charge = charge::register(&mut app)?;
+    Ok(app)
+}
 
-    // Resolve enqueue for each task BEFORE dropping the app.
-    let resolved_compute = app.resolve_enqueue("do_compute", None, None)?;
-    let resolved_failing = app.resolve_enqueue("failing_task", None, None)?;
-    let resolved_divide = app.resolve_enqueue("divide", None, None)?;
-    let resolved_ping = app.resolve_enqueue("ping", None, None)?;
-
-    let broker = common::connect_broker(&db_url).await;
-
-    println!("Broker connected.\n");
-
-    // Send tasks and print results.
-    println!("--- Sending tasks ---\n");
-
-    let mut passed = 0u32;
-    let mut failed = 0u32;
-    let timeout = Some(Duration::from_secs(30));
-
-    // (a) do_compute with {a: 10, b: 20} -> expect Ok(30)
-    {
-        let kwargs = serde_json::to_string(&serde_json::json!({"a": 10.0, "b": 20.0}))?;
-        let handle = broker
-            .send_task::<Computed>(&resolved_compute, None, Some(&kwargs), None)
-            .await?;
-        let result: TaskResult<Computed> = handle.get(timeout).await;
-        match result {
-            TaskResult::Ok(v) => {
-                println!("[PASS] do_compute(10, 20) = {:?} (expected 30)", v.value);
-                passed += 1;
-            }
-            TaskResult::Err(e) => {
-                println!("[FAIL] do_compute(10, 20) returned error: {:?}", e);
-                failed += 1;
-            }
+/// Print the outcome of a read: the value, the task's error, or why the
+/// read gave no outcome.
+fn report<T: Debug, E: UserErrorCode>(label: &str, read: Result<TaskOutcome<T, E>, ReadError>) {
+    match read {
+        Ok(TaskOutcome::Succeeded(value)) => println!("{label}: {value:?}"),
+        Ok(TaskOutcome::Failed(error)) => println!("{label}: failed: {error}"),
+        Err(ReadError::WaitTimedOut { task_id, .. }) => {
+            println!("{label}: task {task_id} has not finished; is a worker running?");
         }
+        Err(error) => println!("{label}: the read failed ({:?}): {error}", error.code()),
     }
+}
 
-    // (b) do_compute with {a: 999, b: 999} -> expect Err(TOO_LARGE)
-    {
-        let kwargs = serde_json::to_string(&serde_json::json!({"a": 999.0, "b": 999.0}))?;
-        let handle = broker
-            .send_task::<Computed>(&resolved_compute, None, Some(&kwargs), None)
-            .await?;
-        let result: TaskResult<Computed> = handle.get(timeout).await;
-        match result {
-            TaskResult::Err(e) => {
-                println!("[PASS] do_compute(999, 999) errored as expected: {}", e);
-                passed += 1;
-            }
-            TaskResult::Ok(v) => {
-                println!(
-                    "[FAIL] do_compute(999, 999) should have errored but got: {:?}",
-                    v
-                );
-                failed += 1;
-            }
-        }
+async fn demo(_app: Horsies) -> DemoResult {
+    let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
+    let sum = add::send(2, 3).await?;
+    let words = word_count::send("the quick brown fox".to_owned()).await?;
+    let small = charge::send(500).await?;
+    let large = charge::send(500_000).await?;
+
+    report("add", sum.get(limit).await);
+    report("word_count", words.get(limit).await);
+    report("charge 500", small.get(limit).await);
+    let refused = large.get(limit).await;
+    if let Ok(TaskOutcome::Failed(error)) = &refused {
+        println!("charge 500000: data {:?}", error.data());
     }
-
-    // (c) failing_task with {should_fail: false} -> expect Ok("succeeded")
-    {
-        let kwargs = serde_json::to_string(&serde_json::json!({"should_fail": false}))?;
-        let handle = broker
-            .send_task::<String>(&resolved_failing, None, Some(&kwargs), None)
-            .await?;
-        let result: TaskResult<String> = handle.get(timeout).await;
-        match result {
-            TaskResult::Ok(v) => {
-                println!("[PASS] failing_task(false) = {:?}", v);
-                passed += 1;
-            }
-            TaskResult::Err(e) => {
-                println!("[FAIL] failing_task(false) returned error: {:?}", e);
-                failed += 1;
-            }
-        }
-    }
-
-    // (d) failing_task with {should_fail: true} -> expect Err(FORCED_FAILURE)
-    {
-        let kwargs = serde_json::to_string(&serde_json::json!({"should_fail": true}))?;
-        let handle = broker
-            .send_task::<String>(&resolved_failing, None, Some(&kwargs), None)
-            .await?;
-        let result: TaskResult<String> = handle.get(timeout).await;
-        match result {
-            TaskResult::Err(e) => {
-                println!("[PASS] failing_task(true) errored as expected: {}", e);
-                passed += 1;
-            }
-            TaskResult::Ok(v) => {
-                println!(
-                    "[FAIL] failing_task(true) should have errored but got: {:?}",
-                    v
-                );
-                failed += 1;
-            }
-        }
-    }
-
-    // (e) divide with {a: 100, b: 4} -> expect Ok(25)
-    {
-        let kwargs = serde_json::to_string(&serde_json::json!({"a": 100.0, "b": 4.0}))?;
-        let handle = broker
-            .send_task::<f64>(&resolved_divide, None, Some(&kwargs), None)
-            .await?;
-        let result: TaskResult<f64> = handle.get(timeout).await;
-        match result {
-            TaskResult::Ok(v) => {
-                println!("[PASS] divide(100, 4) = {:?} (expected 25)", v);
-                passed += 1;
-            }
-            TaskResult::Err(e) => {
-                println!("[FAIL] divide(100, 4) returned error: {:?}", e);
-                failed += 1;
-            }
-        }
-    }
-
-    // (f) divide with {a: 100, b: 0} -> expect Err(DIVISION_ERROR)
-    {
-        let kwargs = serde_json::to_string(&serde_json::json!({"a": 100.0, "b": 0.0}))?;
-        let handle = broker
-            .send_task::<f64>(&resolved_divide, None, Some(&kwargs), None)
-            .await?;
-        let result: TaskResult<f64> = handle.get(timeout).await;
-        match result {
-            TaskResult::Err(e) => {
-                println!("[PASS] divide(100, 0) errored as expected: {}", e);
-                passed += 1;
-            }
-            TaskResult::Ok(v) => {
-                println!("[FAIL] divide(100, 0) should have errored but got: {:?}", v);
-                failed += 1;
-            }
-        }
-    }
-
-    // (g) ping with no args -> expect Ok("pong")
-    {
-        let handle = broker
-            .send_task::<String>(&resolved_ping, None, None, None)
-            .await?;
-        let result: TaskResult<String> = handle.get(timeout).await;
-        match result {
-            TaskResult::Ok(v) => {
-                println!("[PASS] ping() = {:?}", v);
-                passed += 1;
-            }
-            TaskResult::Err(e) => {
-                println!("[FAIL] ping() returned error: {:?}", e);
-                failed += 1;
-            }
-        }
-    }
-
-    // Print summary
-    println!("\n=== Summary ===");
-    println!("  Passed: {}", passed);
-    println!("  Failed: {}", failed);
-    println!("  Total:  {}", passed + failed);
-
-    if failed > 0 {
-        println!("\nSome tasks did not produce the expected result.");
-    } else {
-        println!("\nAll tasks completed as expected!");
-    }
-
+    report("charge 500000", refused);
     Ok(())
+}
+
+fn main() -> ExitCode {
+    match build_app() {
+        Ok(app) => main_of(app, demo),
+        Err(error) => app_refused(&error),
+    }
 }

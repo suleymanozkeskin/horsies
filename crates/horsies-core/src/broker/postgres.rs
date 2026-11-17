@@ -8,7 +8,7 @@ use std::str::FromStr;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use crate::core::history::archive::results::decode_result_envelope;
+use crate::core::history::archive::results::{decode_result_envelope, decode_result_envelope_text};
 use crate::core::history::enqueue::{parse_optional_object, prepare_enqueue_facts, SendPart};
 use crate::core::history::identity::keys::{
     reservation_window_micros, IDEMPOTENCY_WINDOW_DEFAULT_HOURS, IDEMPOTENCY_WINDOW_DEFAULT_MICROS,
@@ -44,7 +44,7 @@ use crate::broker::health::{
 use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRead, RawResultRecord,
-    TaskInfoRead,
+    StoredEnvelopeText, TaskInfoRead,
 };
 use crate::broker::row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskResultRow};
 use crate::broker::workflow_claim_settle::{settle_claimed_workflow_tasks, ClaimDisposition};
@@ -2637,9 +2637,9 @@ fn raw_result_from_history_detail(
                     format!("history task {task_id} has non-terminal status {status}"),
                 )));
             }
-            let raw_result = decode_history_result_value(&detail)
+            let raw_result = history_result_text(&detail)
                 .map_err(raw_result_operation_error)?
-                .map(decode_raw_result_value)
+                .map(stored_envelope_text)
                 .transpose()?
                 .flatten();
             Ok(RawResultProbe::Record(RawResultRecord {
@@ -2652,28 +2652,10 @@ fn raw_result_from_history_detail(
     }
 }
 
-fn decode_raw_result_value(
-    value: serde_json::Value,
-) -> BrokerResult<Option<serde_json::Map<String, serde_json::Value>>> {
-    match value {
-        serde_json::Value::Null => Ok(None),
-        serde_json::Value::Object(object) => Ok(Some(object)),
-        other => Err(invalid_raw_result(format!(
-            "result JSON must be an object, got {}",
-            json_value_kind(&other),
-        ))),
-    }
-}
-
-fn json_value_kind(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "boolean",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
-    }
+/// The envelope text of a stored result: `None` for the JSON `null`; any
+/// other value than an object is `INVALID_JSON_PAYLOAD`.
+fn stored_envelope_text(text: String) -> BrokerResult<Option<StoredEnvelopeText>> {
+    StoredEnvelopeText::parse(text).map_err(|refused| invalid_raw_result(refused.to_string()))
 }
 
 fn invalid_raw_result(message: String) -> BrokerOperationError {
@@ -2721,10 +2703,31 @@ fn decode_history_result_value(
     .map_err(|error| BrokerError::HistoryReadContract(error.to_string()))
 }
 
+/// The text of the stored result of a history row, as stored: an integer
+/// keeps every digit (`decode_result_envelope_text`).
+fn history_result_text(detail: &HistoryTaskDetail) -> Result<Option<String>, BrokerError> {
+    let Some(payload) = detail.result_payload.as_deref() else {
+        return Ok(None);
+    };
+    let digest = detail.result_digest.as_deref().ok_or_else(|| {
+        BrokerError::HistoryReadContract(format!(
+            "history result digest is absent for task {}",
+            detail.task_id
+        ))
+    })?;
+    decode_result_envelope_text(
+        detail.result_envelope_version,
+        &detail.result_codec,
+        &detail.result_content_type,
+        payload,
+        digest,
+    )
+    .map(Some)
+    .map_err(|error| BrokerError::HistoryReadContract(error.to_string()))
+}
+
 fn history_result_row(detail: HistoryTaskDetail) -> Result<TaskResultRow, BrokerError> {
-    let result = decode_history_result_value(&detail)?
-        .map(|value| serde_json::to_string(&value))
-        .transpose()?;
+    let result = history_result_text(&detail)?;
     Ok(TaskResultRow {
         id: detail.task_id,
         status: detail.status.to_string(),
@@ -2740,7 +2743,7 @@ fn history_task_result_row(
     let result = match &history.payload {
         HistoryResultPayload::Absent => None,
         HistoryResultPayload::Stored { payload, digest } => {
-            let value = decode_result_envelope(
+            let text = decode_result_envelope_text(
                 history.envelope_version,
                 &history.codec,
                 &history.content_type,
@@ -2748,7 +2751,7 @@ fn history_task_result_row(
                 digest,
             )
             .map_err(|error| BrokerError::HistoryReadContract(error.to_string()))?;
-            Some(serde_json::to_string(&value)?)
+            Some(text)
         }
     };
     Ok(TaskResultRow {
@@ -5569,7 +5572,7 @@ mod enqueue_task_options_tests {
             execution: crate::core::task::Execution::Isolated,
             cancel_grace_ms: None,
         };
-        let text = options.serialize_retry_options().expect("options are set");
+        let text = options.stored_options_text();
 
         assert_eq!(enqueue_max_retries("t", Some(&text)).expect("accepted"), 4);
     }

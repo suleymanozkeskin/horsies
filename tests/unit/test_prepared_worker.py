@@ -17,7 +17,6 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import Execution
 from horsies.core.models.worker_profile import IsolatedChildren, WorkerProfile
-from horsies.core.types.result import Err, Ok
 from horsies.core.worker_manifest import python_child_launch, to_worker_manifest
 
 
@@ -63,17 +62,14 @@ def _manifest_json(profile: str | None) -> str:
         parent_argv=('horsies', 'worker'),
         log_level='INFO',
     )
-    match to_worker_manifest(
+    manifest = to_worker_manifest(
         config,
         profile=profile,
         tasks={'app.tasks.add': Execution.ISOLATED},
         child_launch=launch,
         idempotency_reservation_window=timedelta(minutes=1),
-    ):
-        case Ok(manifest):
-            return wire.dump_worker_manifest(manifest)
-        case Err(above):
-            raise AssertionError(f'the test config is inside the bounds: {above}')
+    )
+    return wire.dump_worker_manifest(manifest)
 
 
 def test_a_known_profile_gives_a_prepared_worker() -> None:

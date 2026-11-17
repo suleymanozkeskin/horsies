@@ -17,7 +17,9 @@ use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::broker::workflow_stop_before_start::{stop_before_start, OrphanSelfHeal};
+use crate::broker::workflow_stop_before_start::{
+    stop_before_start, OrphanSelfHeal, StopBeforeStart, StopMove,
+};
 use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand};
 
 const CLAIM_QUEUE: &str = "lifecycle_claim_fence";
@@ -141,9 +143,14 @@ async fn real_claim_path_arms_the_fence() {
 }
 
 /// The stop before start of `task_id` under the claim of the dispatch that
-/// carries `dispatched`, with the orphan self-heal off.
-async fn stop_dispatched(pool: &sqlx::PgPool, task_id: Uuid, dispatched: DateTime<Utc>) {
-    let _stopped = stop_before_start(
+/// carries `dispatched`, with the orphan self-heal `self_heal`.
+async fn stop_dispatched_with(
+    pool: &sqlx::PgPool,
+    task_id: Uuid,
+    dispatched: DateTime<Utc>,
+    self_heal: OrphanSelfHeal,
+) -> StopBeforeStart {
+    stop_before_start(
         &core_pool_for_test_pool(pool),
         StatementLog::Off,
         task_id,
@@ -151,11 +158,16 @@ async fn stop_dispatched(pool: &sqlx::PgPool, task_id: Uuid, dispatched: DateTim
             worker_id: WORKER.to_owned(),
             claimed_at: dispatched,
         },
-        OrphanSelfHeal::Off,
+        self_heal,
         crate::broker::child_writes::WriteDeadline::start_attempt(),
     )
     .await
-    .expect("stop before start");
+    .expect("stop before start")
+}
+
+/// [`stop_dispatched_with`] with the orphan self-heal off.
+async fn stop_dispatched(pool: &sqlx::PgPool, task_id: Uuid, dispatched: DateTime<Utc>) {
+    let _stopped = stop_dispatched_with(pool, task_id, dispatched, OrphanSelfHeal::Off).await;
 }
 
 /// One case of `test_child_prestart_fences_on_claim_generation`.
@@ -221,6 +233,43 @@ async fn child_prestart_fences_on_claim_generation_cancelled() {
         fresh_node_link: NodeLink::Linked,
     })
     .await;
+}
+
+/// The orphan cancel of the stop before start fences on the claim
+/// generation: a row that the same worker claimed again is not cancelled
+/// and gets no history row; the orphan of the dispatched generation is
+/// cancelled (Python
+/// `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_orphan_cancel_fences_on_the_dispatched_generation`).
+#[tokio::test]
+#[serial]
+async fn child_prestart_orphan_cancel_fences_on_claim_generation() {
+    let pool = pool().await;
+    let (dispatched, reclaimed) = generations();
+    let stale = seed_task(&pool, &workflow_task_claimed_at(reclaimed)).await;
+    let fresh = seed_task(&pool, &workflow_task_claimed_at(dispatched)).await;
+
+    let stale_stop = stop_dispatched_with(&pool, stale, dispatched, OrphanSelfHeal::On).await;
+    let fresh_stop = stop_dispatched_with(&pool, fresh, dispatched, OrphanSelfHeal::On).await;
+
+    assert!(
+        matches!(stale_stop, StopBeforeStart::NotHeld(_)),
+        "{stale_stop:?}"
+    );
+    assert_eq!(status_of(&pool, stale).await, "CLAIMED");
+    assert_eq!(history_row(&pool, stale).await, None);
+    assert_eq!(
+        fresh_stop,
+        StopBeforeStart::OrphanCancelled(StopMove::Applied)
+    );
+    let fresh_image = history_row(&pool, fresh).await.expect("fresh history row");
+    assert_eq!(fresh_image.status, "CANCELLED");
+    assert_eq!(fresh_image.terminalization_kind, "CANCEL_ORPHAN");
+    assert_eq!(
+        fresh_image.error_code.as_deref(),
+        Some("WORKFLOW_CHECK_FAILED")
+    );
+
+    cleanup_tasks(&pool, &[stale, fresh]).await;
 }
 
 /// Python `test_child_prestart_still_cancels_requeued_pending_row`: a row

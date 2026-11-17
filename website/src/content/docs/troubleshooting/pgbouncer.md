@@ -41,8 +41,9 @@ pool max_size                                           # pool of the worker pro
 
 Task code that sends through the app adds the `task_send_pool` of its child
 kind for each event loop that it sends from, also to the pooled
-`database_url`. The 2 listener connections go to `session_database_url`, not
-through PgBouncer. Each `max_size` is the resolved value; see
+`database_url`. The listener connection and the session pool of the worker
+process go to `session_database_url`, not through PgBouncer. Each `max_size`
+is the resolved value; see
 [Connections](/horsies/workers/worker-profiles/#connections).
 
 A larger pool of the worker process adds client connections, not server
@@ -105,12 +106,16 @@ server connections then add no throughput.
   a workflow task (`BEGIN`, update, node, `COMMIT`: 4 round trips) and the
   other writes of a workflow task that run as one transaction. Count each as
   its round trips × the RTT between the worker and PgBouncer.
-- The 2 listener connections of each worker go to `session_database_url`, not
+- The listener connection of each worker goes to `session_database_url`, not
   through PgBouncer: `LISTEN` needs a session, and transaction pooling does not
-  keep one. They are not part of `default_pool_size` or of the client
-  connections above. They use 2 direct Postgres slots per worker. For a worker
-  without PgBouncer, `HRS-219` counts them as `listener 2`; with
-  `pgbouncer_transaction_mode=True` it compares nothing.
+  keep one. The session pool of the worker process (schema work and partition
+  maintenance, up to the pool `max_size` of the worker process) goes there
+  too. Neither is part of `default_pool_size` or of the client connections
+  above. They use at most `1 + pool max_size` direct Postgres slots per
+  worker. `HRS-219` counts the listener as `listener 1`, and the session pool
+  as `session pool max_size N` when `session_database_url` differs from
+  `database_url`; with `pgbouncer_transaction_mode=True` it compares
+  nothing.
 
 ## Error: session_database_url required
 
