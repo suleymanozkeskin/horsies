@@ -36,9 +36,6 @@ export default defineConfig({
 		'/rust/monitoring/broker-methods': '/horsies/rust/monitoring/health-reads/',
 		'/rust/workers/concurrency': '/horsies/workers/concurrency/',
 		'/rust/internals/serialization': '/horsies/internals/serialization/',
-		'/rust/concepts/workflows/subworkflows': '/horsies/rust/',
-		'/rust/concepts/workflows/typed-node-builder': '/horsies/rust/',
-		'/rust/concepts/workflows/workflow-api': '/horsies/rust/',
 		'/rust/monitoring/web-ui-deployment': '/horsies/rust/',
 		'/rust/operations/cutover-runbook': '/horsies/rust/',
 		'/rust/quick-start/getting-started': '/horsies/rust/',
@@ -281,9 +278,9 @@ export default defineConfig({
 						{
 							label: 'Workflows',
 							items: [
-								{ label: 'Workflow API', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
-								{ label: 'Typed Node Builder', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
-								{ label: 'Subworkflows', link: 'https://github.com/suleymanozkeskin/horsies/issues/1696', badge: { text: 'not written', variant: 'caution' } },
+								{ label: 'Workflow API', slug: 'rust/concepts/workflows/workflow-api' },
+								{ label: 'Typed Node Builder', slug: 'rust/concepts/workflows/typed-node-builder' },
+								{ label: 'Subworkflows', slug: 'rust/concepts/workflows/subworkflows' },
 							],
 						},
 						{
