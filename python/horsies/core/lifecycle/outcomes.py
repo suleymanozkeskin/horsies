@@ -156,6 +156,14 @@ class ObservedRetryCount:
     retry_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class EvidenceLoggedByCore:
+    """A guard refused the write in the core. The core logged the guard's
+    evidence with the refusal; its record names the guard only."""
+
+    guard: GuardKind
+
+
 type GuardEvidence = (
     ObservedClaim
     | ObservedDeadline
@@ -165,6 +173,7 @@ type GuardEvidence = (
     | ObservedForeignTerminalization
     | ObservedWorkflowTask
     | ObservedRetryCount
+    | EvidenceLoggedByCore
 )
 
 

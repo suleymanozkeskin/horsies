@@ -2239,18 +2239,19 @@ async def try_make_ready_and_enqueue(
         cast(list[int], raw_deps) if isinstance(raw_deps, list) else []
     )
 
-    if not dependencies:
-        # No dependencies - should already be READY (root task)
-        return
-
-    # 2. Get dependency status counts
-    dep_status_result = await session.execute(
-        GET_DEP_STATUS_COUNTS_SQL,
-        {'wf_id': workflow_id, 'deps': dependencies},
-    )
-    status_counts: dict[str, int] = {
-        row.status: row.cnt for row in dep_status_result.fetchall()
-    }
+    # 2. Get dependency status counts. A node with no dependencies has none:
+    # 0 of 0 are terminal, so join all is met and the node is enqueued (it
+    # recovers a root that a start left PENDING), and any and quorum are
+    # impossible (SKIPPED), as in the core's promotion.
+    status_counts: dict[str, int] = {}
+    if dependencies:
+        dep_status_result = await session.execute(
+            GET_DEP_STATUS_COUNTS_SQL,
+            {'wf_id': workflow_id, 'deps': dependencies},
+        )
+        status_counts = {
+            row.status: row.cnt for row in dep_status_result.fetchall()
+        }
 
     completed = status_counts.get(WorkflowTaskStatus.COMPLETED.value, 0)
     failed = status_counts.get(WorkflowTaskStatus.FAILED.value, 0)

@@ -19,6 +19,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from psycopg import OperationalError
 
+from horsies.core.types.core_failure import CoreOperationFailed
+
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
@@ -160,6 +162,11 @@ class _RecordingConnection:
         return MagicMock()
 
 
+_DATABASE_DOWN = CoreOperationFailed('finish_failed_attempt', 'connection refused', True)
+"""The record of a failed-attempt write whose database is down, as the
+facade raises it: retryable."""
+
+
 class _RecordingSession:
     """An async session double whose connection records each statement."""
 
@@ -298,6 +305,9 @@ class _Rig:
         )
         self.session_factory = MagicMock(side_effect=self._open_session)
         self.worker.sf = self.session_factory
+        # The failed-attempt write runs through the core handle of the
+        # worker's broker; each test patches the write itself.
+        self.worker.broker = MagicMock()
         self.worker._wake_when_retry_due = MagicMock(  # type: ignore[method-assign]
             side_effect=self._wake_when_due,
         )
@@ -313,14 +323,6 @@ class _Rig:
 
     def _open_session(self) -> _RecordingSession:
         return self.session
-
-    def _refuse_session(self) -> _RecordingSession:
-        self.timeline.append('open session')
-        raise OperationalError('db down')
-
-    def refuse_sessions(self) -> None:
-        """Make every session open fail, as a database that is down."""
-        self.session_factory.side_effect = self._refuse_session
 
     def slot_answers_before_the_kill(self, outcome: SlotOutcome) -> None:
         """Make the slot finish the handle after the timer fired, before the kill."""
@@ -343,7 +345,7 @@ class _Rig:
         """Patch the ended-attempt finish, recording it and its command."""
 
         async def _finish(
-            _connection: object,
+            _handle: object,
             command: FinishFailedAttempt,
         ) -> FailedAttemptOutcome | ClaimReleased:
             self.timeline.append('finish attempt')
@@ -355,7 +357,7 @@ class _Rig:
                     return answer
 
         return patch(
-            'horsies.core.worker.dispatch.finish_ended_attempt',
+            'horsies.core.worker.dispatch.finish_ended_attempt_in_core',
             AsyncMock(side_effect=_finish),
         )
 
@@ -437,7 +439,7 @@ class TestTheKillComesFirst:
             OutcomeCode.TASK_TIMEOUT.value,
         ]
         assert [command.retry for command in rig.finish_commands] == [NoRetry()]
-        assert rig.session.execution_options == [{'isolation_level': 'AUTOCOMMIT'}]
+        rig.session_factory.assert_not_called()
 
     async def test_a_plain_task_failure_runs_no_phase_2(self) -> None:
         """The function sent the capacity wake of a plain task."""
@@ -487,13 +489,15 @@ class TestTheKillComesFirst:
     ) -> None:
         rig = _Rig()
         rig.child.gate.set()
-        rig.refuse_sessions()
 
-        with caplog.at_level(logging.ERROR, logger='horsies.worker'):
+        with (
+            rig.finish(_DATABASE_DOWN),
+            caplog.at_level(logging.ERROR, logger='horsies.worker'),
+        ):
             outcome = await rig.handle_timeout()
 
         assert outcome == _TimeoutWriteFailed()
-        assert rig.timeline == ['kill', 'exit seen', 'open session']
+        assert rig.timeline == ['kill', 'exit seen', 'finish attempt']
         assert 'Failed to persist TASK_TIMEOUT for task task-1' in caplog.text
 
 
@@ -596,11 +600,11 @@ class TestOneWriter:
         rig = _Rig()
         rig.child.on_exit.append(rig.handle)
         rig.child.gate.set()
-        rig.refuse_sessions()
 
-        result = await rig.finalize_after_deadline()
+        with rig.finish(_DATABASE_DOWN):
+            result = await rig.finalize_after_deadline()
 
-        assert rig.timeline == ['kill', 'exit seen', 'open session']
+        assert rig.timeline == ['kill', 'exit seen', 'finish attempt']
         _assert_timeout_write_error(result)
 
 
@@ -659,11 +663,11 @@ class TestSlotAnsweredAfterTheDeadline:
         """The late answer of the slot is not read: the deadline decides."""
         rig = _Rig()
         rig.slot_answers_before_the_kill(_KILLED_BY_PARENT)
-        rig.refuse_sessions()
 
-        result = await rig.finalize_after_deadline()
+        with rig.finish(_DATABASE_DOWN):
+            result = await rig.finalize_after_deadline()
 
-        assert rig.timeline == ['open session']
+        assert rig.timeline == ['finish attempt']
         _assert_timeout_write_error(result)
 
     async def test_a_late_loss_with_no_exit_seen_writes_nothing(

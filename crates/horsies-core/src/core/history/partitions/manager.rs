@@ -916,9 +916,10 @@ pub async fn detach_expired_leaf<P: LoaderPublication>(
 ///
 /// Acts on `DETACH_INTERRUPTED` only: `DETACH PARTITION ... FINALIZE`, then
 /// the record (and the publication) as in [`detach_expired_leaf`]. A leaf
-/// found already detached gets its detach recorded, without the lock. The
-/// result is `LeafInspection::Detached` once the detach is recorded; every
-/// other state is returned unchanged.
+/// found already detached is returned as `LeafInspection::Detached`:
+/// `horsies_begin_leaf_detach` records its detach, and this function sends no
+/// record of its own. The result is `LeafInspection::Detached` once the
+/// detach is recorded; every other state is returned unchanged.
 ///
 /// `pool` must preserve PostgreSQL session affinity. PgBouncer transaction
 /// pooling does not preserve the session advisory lock used by this function.
@@ -996,27 +997,18 @@ async fn detach_retention_leaf<P: LoaderPublication>(
     statement_timeout_ms: Option<u64>,
     publisher: &P,
 ) -> Result<RetentionDetach, HistoryError> {
-    let (parent_name, inspection) = match (begin_leaf_detach(connection, leaf).await?, step) {
-        (
-            BeginDetach::Locked {
-                parent_name,
-                inspection,
-            },
-            _,
-        ) => (parent_name, inspection),
-        (BeginDetach::Busy, _) => {
+    let (parent_name, inspection) = match begin_leaf_detach(connection, leaf).await? {
+        BeginDetach::Locked {
+            parent_name,
+            inspection,
+        } => (parent_name, inspection),
+        BeginDetach::Busy => {
             connection.mark_reusable();
             return Ok(RetentionDetach::Busy);
         }
-        (
-            BeginDetach::Unlocked(LeafInspection::Detached { eligible_at, .. }),
-            DetachStep::Finalize,
-        ) => {
-            let recorded = record_detach(connection, leaf, eligible_at, publisher).await?;
-            connection.mark_reusable();
-            return Ok(recorded);
-        }
-        (BeginDetach::Unlocked(inspection), _) => {
+        // `horsies_begin_leaf_detach` recorded the detach of a leaf it found
+        // already detached; that state is returned as it is.
+        BeginDetach::Unlocked(inspection) => {
             connection.mark_reusable();
             return Ok(RetentionDetach::Inspection(inspection));
         }
@@ -1119,8 +1111,8 @@ async fn run_detach_statement(
     }
 }
 
-/// Record the detach that the leaf's state shows, in one READ COMMITTED
-/// transaction on the connection: `horsies_record_leaf_detached` and, when the
+/// Record the detach that this connection's detach statement completed, in
+/// one READ COMMITTED transaction on the connection: `horsies_record_leaf_detached` and, when the
 /// published manifest names the leaf, the reader publication commit
 /// together. A failure rolls both back.
 ///

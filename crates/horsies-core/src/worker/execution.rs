@@ -792,8 +792,6 @@ fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> boo
         crate::workflow_engine::WorkflowError::Broker(be) => be.is_retryable(),
         crate::workflow_engine::WorkflowError::Serialization(_)
         | crate::workflow_engine::WorkflowError::WorkflowNotFound { .. }
-        | crate::workflow_engine::WorkflowError::WorkflowTimeout { .. }
-        | crate::workflow_engine::WorkflowError::WorkflowError(_)
         | crate::workflow_engine::WorkflowError::InvalidStatus(_)
         | crate::workflow_engine::WorkflowError::Validation(_)
         | crate::workflow_engine::WorkflowError::StepContract(_) => false,

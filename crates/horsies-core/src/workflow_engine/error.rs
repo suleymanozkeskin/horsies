@@ -1,5 +1,4 @@
 use crate::broker::BrokerError;
-use crate::core::TaskError;
 use uuid::Uuid;
 
 use crate::workflow_engine::steps::StepContractError;
@@ -24,14 +23,6 @@ pub enum WorkflowError {
     /// Workflow not found in the database.
     #[error("workflow not found: {workflow_id}")]
     WorkflowNotFound { workflow_id: Uuid },
-
-    /// Timeout waiting for workflow completion.
-    #[error("timeout waiting for workflow result: {workflow_id}")]
-    WorkflowTimeout { workflow_id: Uuid },
-
-    /// Task-level error propagated from a workflow task.
-    #[error("workflow task error: {0}")]
-    WorkflowError(TaskError),
 
     /// Unrecognized status string from the database.
     #[error("invalid status: {0}")]

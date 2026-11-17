@@ -487,6 +487,43 @@ class TestRetentionFunctionsPath:
         assert await self._detached_at_is_set(history_schema, ref)
 
     @pytest.mark.asyncio
+    async def test_finalize_sends_no_record_for_a_leaf_that_begin_recorded(
+        self,
+        history_schema: HistorySchema,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``horsies_begin_leaf_detach`` records the detach of a leaf detached
+        out of band; the finalize sends no record of its own."""
+        async with history_schema.engine.begin() as connection:
+            parent = await register_class(connection, CLASS_KEY)
+        ref = await make_expired_leaf(history_schema, parent)
+        async with history_schema.engine.begin() as connection:
+            await connection.execute(
+                text(f'ALTER TABLE {parent} DETACH PARTITION {ref.leaf_name}')
+            )
+        client_records: list[str] = []
+
+        async def record_in_client(
+            connection: AsyncConnection, leaf_name: str
+        ) -> DetachRecorded:
+            client_records.append(leaf_name)
+            return DetachRecorded(record=DetachRecord.RECORDED, manifest_names_leaf=False)
+
+        monkeypatch.setattr(partition_manager, 'record_leaf_detached', record_in_client)
+
+        finalized = await finalize_interrupted_detach(
+            self._database(history_schema),
+            FinalizeInterruptedLeafDetach(
+                leaf=ref, statement_timeout_ms=None, lifecycle=LeafLifecycle.RETENTION
+            ),
+            UnpublishedLoader(),
+        )
+
+        assert isinstance(finalized, LeafDetached)
+        assert client_records == []
+        assert await self._detached_at_is_set(history_schema, ref)
+
+    @pytest.mark.asyncio
     async def test_a_relation_gone_before_the_record_is_missing(
         self,
         history_schema: HistorySchema,

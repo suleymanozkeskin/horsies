@@ -341,10 +341,10 @@ async def test_good_until_is_judged_under_the_lock(
     good_until = datetime.now(tz=timezone.utc) + timedelta(hours=1)
     task_id = await _insert_task(session, task_options=opts, good_until=good_until)
     worker = _make_worker(engine)
-    finish = failed_attempt_module.finish_failed_attempt
+    finish = failed_attempt_module.finish_failed_attempt_in_core
 
     async def _shrink_then_finish(
-        connection: Any,
+        handle: Any,
         command: FinishFailedAttempt,
     ) -> FailedAttemptOutcome:
         assert isinstance(command.retry, RetryAfter)
@@ -356,10 +356,10 @@ async def test_good_until_is_judged_under_the_lock(
                 ),
                 {'id': task_id},
             )
-        return await finish(connection, command)
+        return await finish(handle, command)
 
     with patch(
-        'horsies.core.worker.finalize.finish_failed_attempt',
+        'horsies.core.worker.finalize.finish_failed_attempt_in_core',
         _shrink_then_finish,
     ):
         result = await _finalize_error(worker, task_id, await row_claim(session, task_id), 'ERR')
