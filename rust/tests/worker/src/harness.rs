@@ -99,6 +99,12 @@ impl Suite {
         self.instance
     }
 
+    /// The configuration of the suite's app: a second app of a test, on
+    /// the same database, starts from it.
+    pub fn config(&self) -> horsies::AppConfig {
+        self.instance.config(&self.connection)
+    }
+
     /// The typed function of a task of the app, through its generated
     /// `handle`: `suite.function(basic::simple::handle)`.
     pub fn function<A, T, E>(
