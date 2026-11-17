@@ -21,7 +21,8 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::broker::error::BrokerError;
+use crate::broker::error::{BrokerError, EnqueueRefusal};
+use crate::core::history::enqueue::SendPart;
 use crate::core::history::identity::keys::IDEMPOTENCY_SCOPE_VERSION;
 use crate::db::{ParameterType, TypedStatement};
 
@@ -109,9 +110,10 @@ impl EnqueueStart {
             (None, None) => Ok(Self::Now),
             (Some(at), None) => Ok(Self::At(at)),
             (None, Some(seconds)) => Ok(Self::AfterDelay { seconds }),
-            (Some(_), Some(_)) => Err(BrokerError::EnqueueContract(
+            (Some(_), Some(_)) => Err(BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
+                SendPart::Input,
                 "cannot specify both enqueued_at and enqueue_delay_seconds".to_owned(),
-            )),
+            ))),
         }
     }
 
