@@ -29,6 +29,7 @@ use crate::core::history::partitions::manager::{
     DetachExpiredLeafOutcome, IndexRepairRemoval,
 };
 use crate::core::history::partitions::publication::LoaderPublication;
+use crate::core::history::partitions::retirement::{read_prune_candidates, RetiredClassKind};
 use crate::core::history::periods::HeartbeatHorizonHours;
 
 const HOURLY: Duration = Duration::hours(1);
@@ -464,45 +465,6 @@ pub struct HeartbeatLeafSwept {
     pub drop: Option<LeafDrop>,
 }
 
-/// The oldest expired heartbeat leaves, at most
-/// `MAX_PRUNE_CANDIDATES_PER_PASS`, and whether more remain.
-async fn expired_heartbeat_leaves(
-    pool: &PgPool,
-) -> Result<(Vec<LeafRef>, PruneReach), HistoryError> {
-    let sql = format!(
-        "SELECT c.leaf_name, c.lower_anchor, c.upper_anchor
-         FROM {LEAF_CATALOG} AS c JOIN {RETENTION_CLASSES} AS r
-           ON r.class_key = c.class_key
-         WHERE c.class_key = $1 AND r.class_kind = '{HEARTBEAT_CLASS_KIND}'
-           AND c.lower_bound_kind = '{AT_LOWER_BOUND_KIND}' AND c.dropped_at IS NULL
-           AND c.upper_anchor + make_interval(hours => r.heartbeat_horizon_hours)
-               <= statement_timestamp()
-         ORDER BY c.lower_anchor
-         LIMIT $2"
-    );
-    let fetch_limit = i64::try_from(MAX_PRUNE_CANDIDATES_PER_PASS + 1).unwrap_or(i64::MAX);
-    let rows: Vec<(String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(&sql)
-        .bind(HEARTBEAT_CLASS_KEY)
-        .bind(fetch_limit)
-        .fetch_all(pool)
-        .await?;
-    let reach = match rows.len() > MAX_PRUNE_CANDIDATES_PER_PASS {
-        true => PruneReach::Truncated,
-        false => PruneReach::WithinBounds,
-    };
-    let leaves = rows
-        .into_iter()
-        .take(MAX_PRUNE_CANDIDATES_PER_PASS)
-        .map(|(leaf_name, lower, upper)| {
-            let bounds = LeafBounds::new(lower, upper)
-                .map_err(|error| HistoryError::contract(error.to_string()))?;
-            LeafRef::new(leaf_name, HEARTBEAT_CLASS_KEY, bounds)
-                .map_err(|error| HistoryError::contract(error.to_string()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((leaves, reach))
-}
-
 /// Detach one expired heartbeat leaf and drop it once detached. A leaf left
 /// detached by an earlier crash is dropped too.
 async fn sweep_heartbeat_leaf<P: LoaderPublication>(
@@ -531,7 +493,6 @@ async fn sweep_heartbeat_leaf<P: LoaderPublication>(
             let outcome = drop_detached_leaf(
                 &mut transaction,
                 &DropDetachedHistoryLeaf::new(leaf.clone()),
-                publisher,
             )
             .await?;
             transaction.commit().await?;
@@ -546,28 +507,28 @@ async fn sweep_heartbeat_leaf<P: LoaderPublication>(
     })
 }
 
-/// Sweep expired heartbeat leaves, oldest first, through a direct or
-/// session-capable pool, until `max_acted_leaves` leaves count toward the
-/// bound (`sweep_counts_toward_bound`). The `Err` side is a failed discovery,
-/// which sweeps nothing. A leaf whose sweep fails counts, since its effects
-/// are unknown; its error goes to the error list and the sweep goes on with
-/// the next leaf. `Truncated` when expired leaves remain for the next pass.
-pub async fn sweep_expired_heartbeat_leaves<P: LoaderPublication>(
+/// Detach and drop the given expired heartbeat leaves, in the given order,
+/// until `max_acted_leaves` leaves count toward the bound
+/// (`sweep_counts_toward_bound`). A leaf whose sweep fails counts, since its
+/// effects are unknown; its error goes to the error list and the sweep goes
+/// on with the next leaf. `Truncated` when the bound left leaves for the next
+/// pass.
+pub(crate) async fn sweep_heartbeat_leaves<P: LoaderPublication>(
     pool: &PgPool,
     publisher: &P,
+    leaves: &[LeafRef],
     max_acted_leaves: usize,
-) -> Result<LeafSweep<HeartbeatLeafSwept>, HistoryError> {
-    let (leaves, candidate_reach) = expired_heartbeat_leaves(pool).await?;
+) -> LeafSweep<HeartbeatLeafSwept> {
     let mut swept = Vec::new();
     let mut errors = Vec::new();
     let mut acted = 0;
-    let mut reach = candidate_reach;
+    let mut reach = PruneReach::WithinBounds;
     for leaf in leaves {
         if acted >= max_acted_leaves {
             reach = PruneReach::Truncated;
             break;
         }
-        match sweep_heartbeat_leaf(pool, &leaf, publisher).await {
+        match sweep_heartbeat_leaf(pool, leaf, publisher).await {
             Ok(entry) => {
                 acted += usize::from(sweep_counts_toward_bound(
                     &entry.detach,
@@ -581,10 +542,39 @@ pub async fn sweep_expired_heartbeat_leaves<P: LoaderPublication>(
             }
         }
     }
-    Ok(LeafSweep {
+    LeafSweep {
         swept,
         errors,
         acted,
         reach,
-    })
+    }
+}
+
+/// Sweep expired heartbeat leaves, oldest first, through a direct or
+/// session-capable pool: one candidate read (`horsies_prune_candidates`, at
+/// most `MAX_PRUNE_CANDIDATES_PER_PASS` leaves), then
+/// `sweep_heartbeat_leaves` over its heartbeat leaves. The `Err` side is a
+/// failed candidate read, which sweeps nothing. `Truncated` when the
+/// candidate read or the leaf bound left expired leaves for the next pass.
+pub async fn sweep_expired_heartbeat_leaves<P: LoaderPublication>(
+    pool: &PgPool,
+    publisher: &P,
+    max_acted_leaves: usize,
+) -> Result<LeafSweep<HeartbeatLeafSwept>, HistoryError> {
+    let candidates = {
+        let mut connection = pool.acquire().await?;
+        read_prune_candidates(&mut connection, MAX_PRUNE_CANDIDATES_PER_PASS).await?
+    };
+    let sweep = sweep_heartbeat_leaves(
+        pool,
+        publisher,
+        &candidates.of_kind(RetiredClassKind::Heartbeat),
+        max_acted_leaves,
+    )
+    .await;
+    let reach = match (candidates.reach, sweep.reach) {
+        (PruneReach::WithinBounds, PruneReach::WithinBounds) => PruneReach::WithinBounds,
+        _ => PruneReach::Truncated,
+    };
+    Ok(LeafSweep { reach, ..sweep })
 }
