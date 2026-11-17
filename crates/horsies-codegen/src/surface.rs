@@ -466,7 +466,7 @@ const SCHEDULER_TICK_OUTCOME: &str = "SchedulerTicked | SchedulerTickFailed";
 const SCHEDULER_RUN_OUTCOME: &str =
     "SchedulerStopped | SchedulerStartRefused | SchedulerStartFailed";
 
-const CORE_SCHEDULER_METHODS: [StubFunction; 4] = [
+const CORE_SCHEDULER_METHODS: &[StubFunction] = &[
     StubFunction {
         name: "start_async",
         parameters: &[],
@@ -493,7 +493,7 @@ const CORE_SCHEDULER_METHODS: [StubFunction; 4] = [
     },
 ];
 
-const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
+const CORE_CHILD_HANDLE_METHODS: &[StubFunction] = &[
     StubFunction {
         name: "start_attempt",
         parameters: START_ATTEMPT_PARAMETERS,
@@ -532,7 +532,7 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
     },
 ];
 
-const CORE_HANDLE_METHODS: [StubFunction; 38] = [
+const CORE_HANDLE_METHODS: &[StubFunction] = &[
     StubFunction {
         name: "close",
         parameters: &[],
@@ -798,7 +798,7 @@ const TASK_LIST_OUTCOME: &str = "TaskListComplete | TaskListTruncated | BrokerFa
 const MONITORING_DETAIL_OUTCOME: &str = "MonitoringJson | TaskDetailAbsent | MonitoringFailed";
 
 /// The monitoring methods of `CoreHandle`.
-const MONITORING_HANDLE_METHODS: [StubFunction; 18] = [
+const MONITORING_HANDLE_METHODS: &[StubFunction] = &[
     StubFunction {
         name: "monitoring_list_tasks_async",
         parameters: MONITORING_LIST_TASKS_PARAMETERS,
@@ -988,7 +988,7 @@ const EXCEPTIONS: &[StubException] = &[
     },
 ];
 
-const ARGUMENT_CLASSES: [StubClass; 11] = [
+const ARGUMENT_CLASSES: &[StubClass] = &[
     StubClass {
         name: "StartNow",
         doc: "Start the task as soon as a worker can claim it.",
@@ -1068,7 +1068,7 @@ const ARGUMENT_CLASSES: [StubClass; 11] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 78] = [
+const RECORD_CLASSES: &[StubClass] = &[
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -1855,7 +1855,7 @@ const RECORD_CLASSES: [StubClass; 78] = [
     },
 ];
 
-const HANDLE_CLASSES: [StubClass; 3] = [
+const HANDLE_CLASSES: &[StubClass] = &[
     StubClass {
     name: "CoreHandle",
     doc: "The core handle of one producer manifest and the pool profile of its process: PRODUCER,\nor WORKER (the main core pool keeps 2 connections free from batch checkouts for the\nper-task writes). Building it starts nothing.",
@@ -1868,19 +1868,19 @@ const HANDLE_CLASSES: [StubClass; 3] = [
         doc: "The core handle of one worker's child process: the producer manifest of its child pool,\nthe connections the pool keeps open, and the ping at checkout. Built in the child after\nits start; building it starts nothing.",
         constructor: Constructor::Parameters(CORE_CHILD_HANDLE_PARAMETERS),
         properties: &[],
-        methods: &CORE_CHILD_HANDLE_METHODS,
+        methods: CORE_CHILD_HANDLE_METHODS,
     },
     StubClass {
         name: "CoreScheduler",
         doc: "The scheduler of one scheduler manifest on the broker of a CoreHandle. Building it\nstarts nothing. A refused manifest raises ManifestRefused. One call runs at a time: a\ncall while another is in flight raises RuntimeError.",
         constructor: Constructor::Parameters(CORE_SCHEDULER_PARAMETERS),
         properties: &[],
-        methods: &CORE_SCHEDULER_METHODS,
+        methods: CORE_SCHEDULER_METHODS,
     },
 ];
 
 /// The classes of the monitoring reads and the web handler.
-const MONITORING_CLASSES: [StubClass; 33] = [
+const MONITORING_CLASSES: &[StubClass] = &[
     StubClass {
         name: "MonitoringWindowRecord",
         doc: "The window of one monitoring request: UTC bounds, increasing, at most the core's maximum\napart.",
@@ -2217,7 +2217,7 @@ const MONITORING_CLASSES: [StubClass; 33] = [
     },
 ];
 
-const WORKFLOW_CLASSES: [StubClass; 37] = [
+const WORKFLOW_CLASSES: &[StubClass] = &[
     StubClass {
         name: "WorkflowPaused",
         doc: "The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed\ntasks of the paused tree are abandoned.",
@@ -2577,7 +2577,7 @@ const WORKFLOW_CLASSES: [StubClass; 37] = [
 
 /// The classes of the history switch: the coverage pass, the pruning pass and the rerun
 /// in the caller's transaction.
-const HISTORY_CLASSES: [StubClass; 24] = [
+const HISTORY_CLASSES: &[StubClass] = &[
     StubClass {
         name: "CoverageRequest",
         doc: "One frozen coverage pass: the two horizons, the declared retention periods in whole days,\nand how a damaged pass is serialized. A period outside 1 to 1825 days, a horizon below two\nleaves, or another serialization raises ValueError.",
@@ -2774,7 +2774,7 @@ const HISTORY_CLASSES: [StubClass; 24] = [
 
 /// The classes of the parent-child frame codec, for the Python child program
 /// and the preload process.
-const FRAME_CLASSES: [StubClass; 41] = [
+const FRAME_CLASSES: &[StubClass] = &[
     StubClass {
         name: "PythonProgram",
         doc: "What a Python child imports before it reports ready.",
@@ -3080,7 +3080,7 @@ const WORKER_FAIL_CAUSE: &str = "Literal['SERVICE_LOOP_DIED', 'RUNNER_HEARTBEAT_
      'POOL_FAILED', 'BASELINE_OVER_LIMIT', 'CLAIM_FAILED']";
 const WORKER_RUN_OUTCOME: &str = "WorkerStopped | WorkerBootFailed | WorkerFailed";
 
-const PREPARED_WORKER_METHODS: [StubFunction; 2] = [
+const PREPARED_WORKER_METHODS: &[StubFunction] = &[
     StubFunction {
         name: "run",
         parameters: &[],
@@ -3096,13 +3096,13 @@ const PREPARED_WORKER_METHODS: [StubFunction; 2] = [
 ];
 
 /// The classes of the worker run.
-const WORKER_CLASSES: [StubClass; 6] = [
+const WORKER_CLASSES: &[StubClass] = &[
     StubClass {
         name: "PreparedWorker",
         doc: "The worker of one worker manifest, not run yet. host.on_started() runs once per run on\nthe callback thread, after the start and before the first claim; an exception from it is\nlogged at ERROR and the worker runs on.",
         constructor: Constructor::NoConstructor,
         properties: &[],
-        methods: &PREPARED_WORKER_METHODS,
+        methods: PREPARED_WORKER_METHODS,
     },
     StubClass {
         name: "WorkerProfileRefused",

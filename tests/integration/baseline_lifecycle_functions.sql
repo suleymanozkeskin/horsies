@@ -161,17 +161,17 @@ SELECT lc_expect(
         ARRAY[TRUE, FALSE], ARRAY[0, 2], ARRAY[NULL, now() + interval '1 hour']::timestamptz[],
         ARRAY[now(), now()], ARRAY[now(), now() + interval '5 seconds'], ARRAY[FALSE, FALSE],
         ARRAY[1, 1]::smallint[], ARRAY[sha256('a2'::bytea), sha256('a1'::bytea)], ARRAY[NULL, NULL]::bytea[],
-        ARRAY[NULL, NULL]::uuid[], ARRAY[NULL, NULL]::uuid[], 'NONE')),
+        ARRAY[NULL, NULL]::uuid[], ARRAY[NULL, NULL]::uuid[], now() - interval '7 seconds', 'NONE')),
     '1:INSERTED,2:INSERTED'
 );
 SELECT lc_expect(
-    'insert rows: every value as given, the fixed values set',
+    'insert rows: every value as given, the fixed values set, created_at and updated_at the row time',
     (SELECT string_agg(concat_ws('|', status, priority, input, task_options, execution, retain_rerun_input,
         max_retries, good_until IS NOT NULL, enqueued_at - now(), retry_count, claimed_at, claim_expires_at,
-        started_at, next_retry_at, created_at = now(), updated_at = now()), ',' ORDER BY id)
+        started_at, next_retry_at, created_at - now(), updated_at - now()), ',' ORDER BY id)
      FROM horsies_tasks WHERE id IN ('00000000-0000-7000-8000-000000000a01', '00000000-0000-7000-8000-000000000a02')),
-    'PENDING|50|{"a":1}|{"o":1}|SHARED_ASYNC|f|2|t|00:00:05|0|t|t,'
-    || 'PENDING|100|{}|ISOLATED|t|0|f|00:00:00|0|t|t'
+    'PENDING|50|{"a":1}|{"o":1}|SHARED_ASYNC|f|2|t|00:00:05|0|-00:00:07|-00:00:07,'
+    || 'PENDING|100|{}|ISOLATED|t|0|f|00:00:00|0|-00:00:07|-00:00:07'
 );
 SELECT lc_expect(
     'insert rows: a conflict with the same command, another command, and a new row',
@@ -184,7 +184,7 @@ SELECT lc_expect(
         ARRAY[NULL, NULL, NULL]::timestamptz[], ARRAY[now(), now(), now()], ARRAY[now(), now(), now()],
         ARRAY[FALSE, FALSE, FALSE], ARRAY[1, 1, 1]::smallint[],
         ARRAY[sha256('a1'::bytea), sha256('other'::bytea), sha256('a3'::bytea)], ARRAY[NULL, NULL, NULL]::bytea[],
-        ARRAY[NULL, NULL, NULL]::uuid[], ARRAY[NULL, NULL, NULL]::uuid[], 'FOR_UPDATE')),
+        ARRAY[NULL, NULL, NULL]::uuid[], ARRAY[NULL, NULL, NULL]::uuid[], now(), 'FOR_UPDATE')),
     '1:SAME_COMMAND,2:PAYLOAD_MISMATCH,3:INSERTED'
 );
 SELECT lc_expect(
@@ -202,7 +202,7 @@ SELECT lc_expect(
         ARRAY[NULL]::timestamptz[], ARRAY[(SELECT sent_at FROM horsies_tasks
                                            WHERE id = '00000000-0000-7000-8000-000000000a04')],
         ARRAY[now()], ARRAY[TRUE], ARRAY[NULL]::smallint[], ARRAY[NULL]::bytea[], ARRAY[NULL]::bytea[],
-        ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], 'NONE')),
+        ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], now(), 'NONE')),
     'PAYLOAD_MISMATCH'
 );
 SELECT lc_expect(
@@ -211,7 +211,7 @@ SELECT lc_expect(
         ARRAY[]::uuid[], ARRAY[]::text[], ARRAY[]::text[], ARRAY[]::integer[], ARRAY[]::text[], ARRAY[]::text[],
         ARRAY[]::text[], ARRAY[]::text[], ARRAY[]::boolean[], ARRAY[]::integer[], ARRAY[]::timestamptz[],
         ARRAY[]::timestamptz[], ARRAY[]::timestamptz[], ARRAY[]::boolean[], ARRAY[]::smallint[], ARRAY[]::bytea[],
-        ARRAY[]::bytea[], ARRAY[]::uuid[], ARRAY[]::uuid[], 'NONE')),
+        ARRAY[]::bytea[], ARRAY[]::uuid[], ARRAY[]::uuid[], now(), 'NONE')),
     '0'
 );
 SELECT lc_expect_sqlstate(
@@ -220,7 +220,7 @@ SELECT lc_expect_sqlstate(
         ARRAY[gen_random_uuid()], ARRAY['lc.task', 'lc.task'], ARRAY['q_lc'], ARRAY[1], ARRAY['{}'],
         ARRAY[NULL]::text[], ARRAY['ISOLATED'], ARRAY['forever'], ARRAY[TRUE], ARRAY[0], ARRAY[NULL]::timestamptz[],
         ARRAY[now()], ARRAY[now()], ARRAY[FALSE], ARRAY[1]::smallint[], ARRAY[sha256('x'::bytea)],
-        ARRAY[NULL]::bytea[], ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], 'NONE')$q$,
+        ARRAY[NULL]::bytea[], ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], now(), 'NONE')$q$,
     '22023'
 );
 SELECT lc_expect_sqlstate(
@@ -229,7 +229,7 @@ SELECT lc_expect_sqlstate(
         ARRAY[gen_random_uuid()], ARRAY[NULL]::text[], ARRAY['q_lc'], ARRAY[1], ARRAY['{}'],
         ARRAY[NULL]::text[], ARRAY['ISOLATED'], ARRAY['forever'], ARRAY[TRUE], ARRAY[0], ARRAY[NULL]::timestamptz[],
         ARRAY[now()], ARRAY[now()], ARRAY[FALSE], ARRAY[1]::smallint[], ARRAY[sha256('x'::bytea)],
-        ARRAY[NULL]::bytea[], ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], 'NONE')$q$,
+        ARRAY[NULL]::bytea[], ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], now(), 'NONE')$q$,
     '22023'
 );
 SELECT lc_expect_sqlstate(
@@ -240,7 +240,16 @@ SELECT lc_expect_sqlstate(
         ARRAY[NULL, NULL]::text[], ARRAY['ISOLATED', 'ISOLATED'], ARRAY['forever', 'forever'], ARRAY[TRUE, TRUE],
         ARRAY[0, 0], ARRAY[NULL, NULL]::timestamptz[], ARRAY[now(), now()], ARRAY[now(), now()],
         ARRAY[FALSE, FALSE], ARRAY[1, 1]::smallint[], ARRAY[sha256('x'::bytea), sha256('x'::bytea)],
-        ARRAY[NULL, NULL]::bytea[], ARRAY[NULL, NULL]::uuid[], ARRAY[NULL, NULL]::uuid[], 'NONE')$q$,
+        ARRAY[NULL, NULL]::bytea[], ARRAY[NULL, NULL]::uuid[], ARRAY[NULL, NULL]::uuid[], now(), 'NONE')$q$,
+    '22023'
+);
+SELECT lc_expect_sqlstate(
+    'insert rows: a NULL row time',
+    $q$SELECT * FROM horsies_insert_task_rows(
+        ARRAY[gen_random_uuid()], ARRAY['lc.task'], ARRAY['q_lc'], ARRAY[1], ARRAY['{}'],
+        ARRAY[NULL]::text[], ARRAY['ISOLATED'], ARRAY['forever'], ARRAY[TRUE], ARRAY[0], ARRAY[NULL]::timestamptz[],
+        ARRAY[now()], ARRAY[now()], ARRAY[FALSE], ARRAY[1]::smallint[], ARRAY[sha256('x'::bytea)],
+        ARRAY[NULL]::bytea[], ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], NULL, 'NONE')$q$,
     '22023'
 );
 SELECT lc_expect_sqlstate(
@@ -249,7 +258,7 @@ SELECT lc_expect_sqlstate(
         ARRAY[]::uuid[], ARRAY[]::text[], ARRAY[]::text[], ARRAY[]::integer[], ARRAY[]::text[], ARRAY[]::text[],
         ARRAY[]::text[], ARRAY[]::text[], ARRAY[]::boolean[], ARRAY[]::integer[], ARRAY[]::timestamptz[],
         ARRAY[]::timestamptz[], ARRAY[]::timestamptz[], ARRAY[]::boolean[], ARRAY[]::smallint[], ARRAY[]::bytea[],
-        ARRAY[]::bytea[], ARRAY[]::uuid[], ARRAY[]::uuid[], 'SKIP')$q$,
+        ARRAY[]::bytea[], ARRAY[]::uuid[], ARRAY[]::uuid[], now(), 'SKIP')$q$,
     '22023'
 );
 
@@ -269,6 +278,14 @@ SELECT lc_expect(
         rerun_of_task_id IS NULL AND rerun_root_task_id IS NULL, claimed_at IS NULL AND claim_expires_at IS NULL)
      FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000b01'),
     'PENDING|lc.task|q_lc|100|{"x":1}|ISOLATED|forever|t|3|0|t|t|f|1|t|t|t|t'
+);
+-- The script is one message after its BEGIN, so statement_timestamp() is one instant later than NOW().
+SELECT lc_expect(
+    'enqueue: created_at and updated_at are the time of the send statement, not the start of the transaction',
+    (SELECT concat_ws('|', created_at = statement_timestamp(), updated_at = statement_timestamp(),
+        statement_timestamp() > now())
+     FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000b01'),
+    't|t|t'
 );
 SELECT lc_expect(
     'enqueue: a resend with the same command and sent_at is the same command',

@@ -2,8 +2,9 @@
 -- 0004_lifecycle_functions.sql that call history, before they moved onto the row-taking move
 -- (0006_history_functions.sql), the miss classifier of 0008_history_maintenance_functions.sql and the one-argument
 -- provenance reader; the array overload of horsies_terminalization_miss with its fence kind, which they called
--- then; and a two-argument provenance stand-in that answers "not found", as the function-call script of that
--- commit defined it.
+-- then; a two-argument provenance stand-in that answers "not found", as the function-call script of that commit
+-- defined it; and the insert helper horsies_insert_task_rows with the 20 arguments that horsies_enqueue_task of
+-- that commit calls, next to the baseline helper, which also takes the row time.
 --
 -- Each definition is the text of program/0.8.0 at commit cc5a40aa (0004_lifecycle_functions.sql,
 -- 0003_interim_functions.sql, tests/integration/baseline_function_calls.sql), unchanged except CREATE OR REPLACE
@@ -104,6 +105,165 @@ BEGIN
         NULL::timestamptz, NULL::text,
         v_row.status::text, v_row.claimed_by_worker_id, v_row.claimed_at,
         NULL::text, NULL::jsonb;
+END
+$$;
+
+CREATE FUNCTION horsies_insert_task_rows(
+    p_ids uuid[],
+    p_task_names text[],
+    p_queue_names text[],
+    p_priorities integer[],
+    p_inputs text[],
+    p_task_options text[],
+    p_executions text[],
+    p_retention_class_keys text[],
+    p_retain_rerun_inputs boolean[],
+    p_max_retries integer[],
+    p_good_untils timestamp with time zone[],
+    p_sent_ats timestamp with time zone[],
+    p_enqueued_ats timestamp with time zone[],
+    p_is_workflow_tasks boolean[],
+    p_fingerprint_versions smallint[],
+    p_fingerprints bytea[],
+    p_key_digests bytea[],
+    p_rerun_of_task_ids uuid[],
+    p_rerun_root_task_ids uuid[],
+    p_conflict_lock text
+) RETURNS TABLE(ordinality bigint, task_id uuid, outcome text)
+    LANGUAGE plpgsql
+    AS $$
+#variable_conflict use_column
+DECLARE
+    v_count integer;
+    v_inserted uuid[];
+    v_conflicts uuid[];
+BEGIN
+    IF p_conflict_lock IS NULL OR p_conflict_lock NOT IN ('NONE', 'FOR_UPDATE') THEN
+        RAISE EXCEPTION 'horsies_insert_task_rows: unknown conflict lock'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF num_nulls(
+        p_ids, p_task_names, p_queue_names, p_priorities, p_inputs, p_task_options, p_executions,
+        p_retention_class_keys, p_retain_rerun_inputs, p_max_retries, p_good_untils, p_sent_ats, p_enqueued_ats,
+        p_is_workflow_tasks, p_fingerprint_versions, p_fingerprints, p_key_digests, p_rerun_of_task_ids,
+        p_rerun_root_task_ids
+    ) <> 0 THEN
+        RAISE EXCEPTION 'horsies_insert_task_rows: row arrays must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    v_count := cardinality(p_ids);
+    IF cardinality(p_task_names) <> v_count OR cardinality(p_queue_names) <> v_count
+       OR cardinality(p_priorities) <> v_count OR cardinality(p_inputs) <> v_count
+       OR cardinality(p_task_options) <> v_count OR cardinality(p_executions) <> v_count
+       OR cardinality(p_retention_class_keys) <> v_count OR cardinality(p_retain_rerun_inputs) <> v_count
+       OR cardinality(p_max_retries) <> v_count OR cardinality(p_good_untils) <> v_count
+       OR cardinality(p_sent_ats) <> v_count OR cardinality(p_enqueued_ats) <> v_count
+       OR cardinality(p_is_workflow_tasks) <> v_count OR cardinality(p_fingerprint_versions) <> v_count
+       OR cardinality(p_fingerprints) <> v_count OR cardinality(p_key_digests) <> v_count
+       OR cardinality(p_rerun_of_task_ids) <> v_count OR cardinality(p_rerun_root_task_ids) <> v_count THEN
+        RAISE EXCEPTION 'horsies_insert_task_rows: row array lengths differ'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF array_position(p_task_names, NULL) IS NOT NULL OR array_position(p_queue_names, NULL) IS NOT NULL
+       OR array_position(p_priorities, NULL) IS NOT NULL OR array_position(p_inputs, NULL) IS NOT NULL
+       OR array_position(p_executions, NULL) IS NOT NULL
+       OR array_position(p_retention_class_keys, NULL) IS NOT NULL
+       OR array_position(p_retain_rerun_inputs, NULL) IS NOT NULL
+       OR array_position(p_max_retries, NULL) IS NOT NULL OR array_position(p_sent_ats, NULL) IS NOT NULL
+       OR array_position(p_enqueued_ats, NULL) IS NOT NULL
+       OR array_position(p_is_workflow_tasks, NULL) IS NOT NULL THEN
+        RAISE EXCEPTION 'horsies_insert_task_rows: a required row value is NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- count(DISTINCT) skips NULL, so a NULL id fails this check too.
+    IF v_count <> (SELECT count(DISTINCT u.id) FROM unnest(p_ids) AS u(id)) THEN
+        RAISE EXCEPTION 'horsies_insert_task_rows: task ids must be distinct and non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF v_count = 0 THEN
+        RETURN;
+    END IF;
+
+    WITH inserted AS (
+        INSERT INTO horsies_tasks (
+            id, task_name, queue_name, priority, input, task_options, execution, retention_class_key, sent_at,
+            created_at, command_fingerprint_version, command_fingerprint, idempotency_key_digest, status,
+            enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at, started_at, finalizing_at,
+            finalizing_by_worker_id, worker_pid, worker_hostname, worker_process_name, retry_count, max_retries,
+            next_retry_at, good_until, is_workflow_task, updated_at, retain_rerun_input, rerun_of_task_id,
+            rerun_root_task_id
+        )
+        SELECT
+            r.id, r.task_name, r.queue_name, r.priority, r.input, r.task_options, r.execution,
+            r.retention_class_key, r.sent_at,
+            NOW(), r.fingerprint_version, r.fingerprint, r.key_digest, 'PENDING',
+            r.enqueued_at, NULL, NULL, NULL, NULL, NULL,
+            NULL, NULL, NULL, NULL, 0, r.max_retries,
+            NULL, r.good_until, r.is_workflow_task, NOW(), r.retain_rerun_input, r.rerun_of_task_id,
+            r.rerun_root_task_id
+        FROM unnest(
+            p_ids, p_task_names, p_queue_names, p_priorities, p_inputs, p_task_options, p_executions,
+            p_retention_class_keys, p_retain_rerun_inputs, p_max_retries, p_good_untils, p_sent_ats,
+            p_enqueued_ats, p_is_workflow_tasks, p_fingerprint_versions, p_fingerprints, p_key_digests,
+            p_rerun_of_task_ids, p_rerun_root_task_ids
+        ) AS r(
+            id, task_name, queue_name, priority, input, task_options, execution, retention_class_key,
+            retain_rerun_input, max_retries, good_until, sent_at, enqueued_at, is_workflow_task,
+            fingerprint_version, fingerprint, key_digest, rerun_of_task_id, rerun_root_task_id
+        )
+        ORDER BY r.id
+        ON CONFLICT (id) DO NOTHING
+        RETURNING horsies_tasks.id
+    )
+    SELECT COALESCE(array_agg(i.id), ARRAY[]::uuid[]) INTO v_inserted FROM inserted i;
+
+    IF cardinality(v_inserted) = v_count THEN
+        RETURN QUERY
+        SELECT u.position, u.id, 'INSERTED'::text
+        FROM unnest(p_ids) WITH ORDINALITY AS u(id, position)
+        ORDER BY u.position;
+        RETURN;
+    END IF;
+
+    SELECT array_agg(u.id ORDER BY u.id) INTO v_conflicts
+    FROM unnest(p_ids) AS u(id)
+    WHERE u.id <> ALL (v_inserted);
+
+    -- New statements, so their snapshots see a row whose insert committed while the insert above waited on it.
+    -- FOR_UPDATE locks the conflicting rows in id order first; a row that a move deleted meanwhile is skipped by
+    -- the lock and absent from the read that follows.
+    IF p_conflict_lock = 'FOR_UPDATE' THEN
+        PERFORM 1
+        FROM horsies_tasks t
+        WHERE t.id = ANY (v_conflicts)
+        ORDER BY t.id
+        FOR UPDATE;
+    END IF;
+
+    RETURN QUERY
+    WITH requested AS (
+        SELECT r.id, r.position, r.fingerprint_version, r.fingerprint, r.sent_at
+        FROM unnest(p_ids, p_fingerprint_versions, p_fingerprints, p_sent_ats) WITH ORDINALITY
+            AS r(id, fingerprint_version, fingerprint, sent_at, position)
+    ),
+    stored AS (
+        SELECT t.id, t.command_fingerprint_version, t.command_fingerprint, t.sent_at
+        FROM horsies_tasks t
+        WHERE t.id = ANY (v_conflicts)
+    )
+    SELECT q.position, q.id,
+        CASE
+            WHEN q.id = ANY (v_inserted) THEN 'INSERTED'
+            WHEN s.id IS NULL THEN 'CONFLICT_UNVERIFIABLE'
+            WHEN q.fingerprint IS NULL OR s.command_fingerprint IS NULL THEN 'PAYLOAD_MISMATCH'
+            WHEN s.command_fingerprint_version = q.fingerprint_version
+                 AND s.command_fingerprint = q.fingerprint
+                 AND s.sent_at = q.sent_at THEN 'SAME_COMMAND'
+            ELSE 'PAYLOAD_MISMATCH'
+        END::text
+    FROM requested q
+    LEFT JOIN stored s ON s.id = q.id
+    ORDER BY q.position;
 END
 $$;
 

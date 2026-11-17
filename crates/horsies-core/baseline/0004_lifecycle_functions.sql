@@ -37,27 +37,30 @@
 
 -- horsies_insert_task_rows: internal. The one place that holds the column list of a new task row.
 --
--- Guarantee: each row is inserted as PENDING with every column named (retry_count 0; created_at, updated_at NOW();
--- every claim and run field NULL), or it is not inserted and its conflict is classified. The conflict read runs in a
--- statement after the insert, never inside it: a lock taken inside the insert would wait for a move that holds the
--- row, and after the move deletes it PostgreSQL would retry the insert and write a second live row with the same id.
--- The read after the insert sees the row gone and answers CONFLICT_UNVERIFIABLE.
+-- Guarantee: each row is inserted as PENDING with every column named (retry_count 0; created_at, updated_at
+-- p_row_time; every claim and run field NULL), or it is not inserted and its conflict is classified. The conflict
+-- read runs in a statement after the insert, never inside it: a lock taken inside the insert would wait for a move
+-- that holds the row, and after the move deletes it PostgreSQL would retry the insert and write a second live row
+-- with the same id. The read after the insert sees the row gone and answers CONFLICT_UNVERIFIABLE.
 --
 -- Exact-id check of a conflict: the stored command_fingerprint_version, command_fingerprint and sent_at equal the
 -- requested ones. A row with no fingerprint (an engine-minted workflow task) has no command to compare, so its
 -- conflict is never SAME_COMMAND. Callers that mint the ids (workflow start, node task insert) treat every outcome
 -- other than INSERTED as a defect.
 --
--- Arguments: one parallel array per column (built-in types, one element per row). p_conflict_lock: NONE (the
+-- Arguments: one parallel array per column (built-in types, one element per row). p_row_time: the created_at and
+-- updated_at of every row. The caller passes the time that the Python writer of that row used: the time of the
+-- writing statement (statement_timestamp()) or the start of its transaction (now()). p_conflict_lock: NONE (the
 -- conflict read takes no lock) or FOR_UPDATE (it locks the conflicting rows in id order, for a caller that writes
 -- the row next). Refused (22023): a NULL array, arrays of different lengths, a NULL element in a NOT NULL column,
--- a repeated id, an unknown p_conflict_lock.
+-- a repeated id, a NULL p_row_time, an unknown p_conflict_lock.
 --
 -- Locks: the inserted rows; with FOR_UPDATE also the conflicting rows, in id order.
 -- Returns one row per input row: its 1-based position, its id, and INSERTED, SAME_COMMAND, PAYLOAD_MISMATCH or
 -- CONFLICT_UNVERIFIABLE.
--- Callers: horsies_enqueue_task (FOR_UPDATE for a keyed send, else NONE), the schedule fire, the workflow start and
--- the node task insert.
+-- Callers, with the row time each passes: horsies_enqueue_task (statement_timestamp(); FOR_UPDATE for a keyed send,
+-- else NONE), the schedule fire (now()), and the node task insert (the time its caller passes; the workflow start
+-- and each promotion pass now()).
 -- Python: ENQUEUE_INSERT_SQL (core/brokers/postgres.py:906-935), the conflict read of _verify_enqueue_conflict
 -- (:2861-2925) and of _bind_key_after_task_id_conflict (:2780-2859).
 CREATE FUNCTION horsies_insert_task_rows(
@@ -80,6 +83,7 @@ CREATE FUNCTION horsies_insert_task_rows(
     p_key_digests bytea[],
     p_rerun_of_task_ids uuid[],
     p_rerun_root_task_ids uuid[],
+    p_row_time timestamp with time zone,
     p_conflict_lock text
 ) RETURNS TABLE(ordinality bigint, task_id uuid, outcome text)
     LANGUAGE plpgsql
@@ -92,6 +96,10 @@ DECLARE
 BEGIN
     IF p_conflict_lock IS NULL OR p_conflict_lock NOT IN ('NONE', 'FOR_UPDATE') THEN
         RAISE EXCEPTION 'horsies_insert_task_rows: unknown conflict lock'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_row_time IS NULL THEN
+        RAISE EXCEPTION 'horsies_insert_task_rows: the row time must be non-NULL'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
     IF num_nulls(
@@ -148,10 +156,10 @@ BEGIN
         SELECT
             r.id, r.task_name, r.queue_name, r.priority, r.input, r.task_options, r.execution,
             r.retention_class_key, r.sent_at,
-            NOW(), r.fingerprint_version, r.fingerprint, r.key_digest, 'PENDING',
+            p_row_time, r.fingerprint_version, r.fingerprint, r.key_digest, 'PENDING',
             r.enqueued_at, NULL, NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL, 0, r.max_retries,
-            NULL, r.good_until, r.is_workflow_task, NOW(), r.retain_rerun_input, r.rerun_of_task_id,
+            NULL, r.good_until, r.is_workflow_task, p_row_time, r.retain_rerun_input, r.rerun_of_task_id,
             r.rerun_root_task_id
         FROM unnest(
             p_ids, p_task_names, p_queue_names, p_priorities, p_inputs, p_task_options, p_executions,
@@ -222,7 +230,10 @@ $$;
 -- horsies_enqueue_task: one send (plain, keyed, a repeat of a send, a rerun) in one statement.
 --
 -- Guarantee:
--- - The send writes one PENDING row that names every value, or it writes nothing.
+-- - The send writes one PENDING row that names every value, or it writes nothing. Its created_at and updated_at
+--   are statement_timestamp(), the time of the send's statement: a rerun in its caller's transaction gets the
+--   created_at of Python's rerun insert, not the start of that transaction. In autocommit, statement_timestamp()
+--   = now().
 -- - Keyed: the key reservation is claimed first (horsies_key_reservation_claim). A key that a live or recent task
 --   holds with the same command is KEY_REPLAY with that task's id; with another command it is KEY_CONFLICT with the
 --   owner's id. Nothing is written for either.
@@ -420,7 +431,7 @@ BEGIN
         ARRAY[p_max_retries], ARRAY[p_good_until], ARRAY[p_sent_at], ARRAY[v_enqueued_at], ARRAY[FALSE],
         ARRAY[p_fingerprint_version], ARRAY[p_fingerprint],
         ARRAY[CASE WHEN v_keyed THEN p_key_digest END], ARRAY[p_rerun_of_task_id], ARRAY[p_rerun_root_task_id],
-        CASE WHEN v_keyed THEN 'FOR_UPDATE' ELSE 'NONE' END
+        statement_timestamp(), CASE WHEN v_keyed THEN 'FOR_UPDATE' ELSE 'NONE' END
     ) AS i;
 
     -- 4. A keyed send on a live row of the same command binds its key; the row is locked by the read in step 3.
