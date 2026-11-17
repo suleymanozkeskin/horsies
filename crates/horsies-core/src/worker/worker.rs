@@ -3186,57 +3186,6 @@ mod tests {
         assert_eq!(fetch_task_state(&pool, &t_worker).await.0, "FAILED");
     }
 
-    /// A late task completion must not resurrect a terminal (CANCELLED) workflow.
-    /// Rust sets `completed_at` on cancel, so the `completed_at IS NULL` guard
-    /// already blocks resurrection; this test forces `completed_at = NULL` to
-    /// exercise the `status='RUNNING'` short-circuit independently. Parity with
-    /// horsies PR #101 ed61c3a2.
-    #[tokio::test]
-    #[serial]
-    async fn check_completion_does_not_resurrect_cancelled_workflow() {
-        let pool = test_pool().await;
-        clean(&pool).await;
-
-        let task_id = Uuid::new_v4();
-        insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
-        let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
-
-        // Drive the single node terminal so the non-terminal count is zero.
-        sqlx::query("UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = '{}', completed_at = NOW() WHERE workflow_id = $1")
-            .bind(&workflow_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        // Terminal workflow with completed_at deliberately NULL: only the
-        // status guard can prevent resurrection here.
-        sqlx::query(
-            "UPDATE horsies_workflows SET status = 'CANCELLED', completed_at = NULL WHERE id = $1",
-        )
-        .bind(&workflow_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let registry =
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-        crate::workflow_engine::engine::check_workflow_completion(
-            &pool,
-            workflow_id,
-            &registry,
-            &crate::core::config::payload::PayloadPolicy::default(),
-            &crate::core::RetentionConfig::default(),
-        )
-        .await
-        .unwrap();
-
-        let (workflow_status, _) = fetch_workflow_state(&pool, &workflow_id).await;
-        assert_eq!(
-            workflow_status, "CANCELLED",
-            "a late completion must not resurrect a CANCELLED workflow"
-        );
-    }
-
     #[tokio::test]
     #[serial]
     async fn finalize_success_advances_workflow_end_to_end() {

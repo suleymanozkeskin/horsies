@@ -29,6 +29,19 @@ e2e runs of another checkout on the same machine keep their workers."""
 STALE_WORKER_TERM_WAIT_S: Final = 3
 """Seconds that stale workers get to stop after SIGTERM, before SIGKILL."""
 
+UNREADABLE_PROCESS_ERRORS: Final = (
+    psutil.AccessDenied,
+    psutil.NoSuchProcess,
+    psutil.ZombieProcess,
+    SystemError,
+)
+"""The errors of a ``cmdline()`` or ``environ()`` read that mean: this
+process is not this checkout's worker. Another user's process raises
+``AccessDenied``; a process that exited raises ``NoSuchProcess`` or
+``ZombieProcess``. On macOS, psutil raises ``SystemError`` ("returned a
+result with an exception set") for a process whose arguments it cannot
+read."""
+
 
 def worker_env() -> dict[str, str]:
     """The environment of a worker that these helpers start: the current
@@ -57,20 +70,21 @@ def own_stale_worker_pids(owner: str = REPO_ROOT) -> list[int]:
     """The pids of ``horsies worker`` processes whose environment holds
     ``WORKER_OWNER_ENV`` equal to ``owner``.
 
-    A process whose environment cannot be read (another user's, or one that
-    exited) is not this checkout's worker and is left alone.
+    A process whose command line or environment cannot be read
+    (``UNREADABLE_PROCESS_ERRORS``) is not this checkout's worker and is
+    left alone.
     """
     pids: list[int] = []
     for process in psutil.process_iter():
         try:
             cmdline = process.cmdline()
-        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+        except UNREADABLE_PROCESS_ERRORS:
             continue
         if not _is_worker_command(cmdline):
             continue
         try:
             environment = process.environ()
-        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+        except UNREADABLE_PROCESS_ERRORS:
             continue
         if environment.get(WORKER_OWNER_ENV) == owner:
             pids.append(process.pid)
@@ -88,7 +102,7 @@ def _signal_pids(pids: Sequence[int], signal_number: int) -> None:
 # Number of active run_worker/run_workers contexts created by this module.
 # Prevents stale-worker cleanup from killing intentionally running workers in
 # nested contexts (e.g., tests that start worker A then worker B).
-_ACTIVE_WORKER_CONTEXTS = 0
+_active_worker_contexts = 0
 
 
 # Worker output goes to a FILE, never a pipe. Nothing reads a worker's
@@ -161,17 +175,17 @@ def kill_stale_workers() -> None:
 
 def _enter_worker_context() -> None:
     """Enter a managed worker context and reap stale workers if outermost."""
-    global _ACTIVE_WORKER_CONTEXTS
-    if _ACTIVE_WORKER_CONTEXTS == 0:
+    global _active_worker_contexts
+    if _active_worker_contexts == 0:
         kill_stale_workers()
-    _ACTIVE_WORKER_CONTEXTS += 1
+    _active_worker_contexts += 1
 
 
 def _exit_worker_context() -> None:
     """Exit a managed worker context and opportunistically reap stale workers."""
-    global _ACTIVE_WORKER_CONTEXTS
-    _ACTIVE_WORKER_CONTEXTS = max(0, _ACTIVE_WORKER_CONTEXTS - 1)
-    if _ACTIVE_WORKER_CONTEXTS == 0:
+    global _active_worker_contexts
+    _active_worker_contexts = max(0, _active_worker_contexts - 1)
+    if _active_worker_contexts == 0:
         kill_stale_workers()
 
 

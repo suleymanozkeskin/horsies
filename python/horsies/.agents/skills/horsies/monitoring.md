@@ -111,7 +111,7 @@ task_stats(broker, *, window, task_names, queues, workers, error_codes, error_ca
 task_facets(broker, *, window, statuses, retried_only)          # + error_categories scoping of the code list
 task_breakdown(broker, *, window, group_by, ..., limit)         # limit: BreakdownLimit; group_by: 'worker' | 'task_name' | 'queue'
 list_tasks(broker, *, window, statuses, ..., sort_by, sort_dir, page)  # page: TaskPage
-get_task_detail(broker, task_id)                        # Ok(TaskDetailNotFound) when absent
+get_task_detail(broker, task_id)                        # task_id: uuid.UUID; Ok(TaskDetailNotFound) when absent
 list_workflow_names(broker)                             # at most 10,000 names; a cut is logged as a warning
 list_workflow_runs(broker, *, name, status, limit)      # limit: WorkflowRunsLimit
 get_workflow_run(broker, workflow_id)                   # full DAG: nodes, edges, failed_indices
@@ -187,7 +187,8 @@ the live read and the history read see the same rows.
 404 for each reason. `get_task_detail` derives it from the detached history
 leaves: a UUIDv7 id born before the latest upper bound of a detached leaf of a
 period class (plus 5 s) predates retained history; any other UUIDv7 id is
-within it.
+within it. A path id that is not a UUID answers 400 with
+`{"code": "INVALID_INPUT", "detail": ...}` before any read.
 
 <!-- members: TaskAbsenceReason -->
 | Reason | Meaning |
@@ -219,7 +220,7 @@ not reorder between polls.
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
-cancel_task(broker, task_id, *, include_running=False) -> Result[TaskCancelled, TaskActionError]
+cancel_task(broker, task_id: uuid.UUID, *, include_running=False) -> Result[TaskCancelled, TaskActionError]
 ```
 
 - Single-transaction compare-and-set. A committed CANCELLED cannot be
@@ -234,13 +235,15 @@ cancel_task(broker, task_id, *, include_running=False) -> Result[TaskCancelled, 
   re-execution is a new request through the rerun contract.
 - `TaskActionError` is a union of frozen variants, one per
   `TaskActionErrorCode` member; match on the variant. Every variant has
-  `code`, `message`, `retryable` and `task_id`. HTTP is the status of
-  `POST /api/tasks/{task_id}/cancel`.
+  `code`, `message`, `retryable` and `task_id` (a `uuid.UUID`). HTTP is the
+  status of `POST /api/tasks/{task_id}/cancel`. A path id that is not a UUID
+  answers 400 with `{"code": "INVALID_INPUT", "detail": ...}` before the
+  action runs.
 
 <!-- members: TaskActionErrorCode -->
 | Code | Variant | Fields | `retryable` | HTTP | When |
 |---|---|---|---|---|---|
-| `TASK_NOT_FOUND` | `TaskActionNotFound` | — | `False` | 404 | No live or history row has the id, or the id is not a UUID; nothing changed |
+| `TASK_NOT_FOUND` | `TaskActionNotFound` | — | `False` | 404 | No live or history row has the id; nothing changed |
 | `TASK_NOT_CANCELLABLE` | `TaskActionNotCancellable` | `current_status: TaskStatus` | `False` | 409 | The task is terminal, or `RUNNING` without `include_running=True`; nothing changed |
 | `TASK_IS_WORKFLOW_TASK` | `TaskActionWorkflowTask` | `current_status: TaskStatus` | `False` | 400 | The task belongs to a workflow; nothing changed |
 | `DB_OPERATION_FAILED` | `TaskActionDbOperationFailed` | `exception` (the `SQLAlchemyError`) | driver classification | 503 | The cancel statement failed: it wrote nothing, or it committed and its reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |

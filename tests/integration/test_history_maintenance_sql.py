@@ -29,7 +29,7 @@ pytestmark = [pytest.mark.integration]
 _CASES_SQL: Final = Path(__file__).with_name('history_maintenance_cases.sql')
 _CONCURRENCY_SQL: Final = Path(__file__).with_name('history_maintenance_concurrency.sql')
 
-PASSED_CASES: Final = 114
+PASSED_CASES: Final = 119
 """The checks of ``history_maintenance_cases.sql``. A check added to the file changes it."""
 
 PASSED_CONCURRENCY_CASES: Final = 36

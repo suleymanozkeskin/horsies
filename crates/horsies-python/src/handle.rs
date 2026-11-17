@@ -55,6 +55,16 @@ pub struct BrokerConnection {
 }
 
 impl BrokerConnection {
+    /// The connection of `manifest` with the pools of `profile`. Starts
+    /// nothing: the first operation connects.
+    pub fn new(manifest: ProducerManifest, profile: PoolProfile) -> Self {
+        Self {
+            manifest: Arc::new(manifest),
+            profile,
+            broker: Arc::new(OnceCell::new()),
+        }
+    }
+
     /// The connected broker. Connects at the first call; a failure is
     /// returned and not kept.
     pub async fn broker(&self) -> Result<Arc<PostgresBroker>, BrokerError> {
@@ -165,11 +175,7 @@ impl CoreHandle {
         let manifest = parse_producer_manifest(manifest_json)
             .map_err(|refused| ManifestRefused::new_err((refused.field_path, refused.cause)))?;
         Ok(Self {
-            connection: BrokerConnection {
-                manifest: Arc::new(manifest),
-                profile,
-                broker: Arc::new(OnceCell::new()),
-            },
+            connection: BrokerConnection::new(manifest, profile),
         })
     }
 

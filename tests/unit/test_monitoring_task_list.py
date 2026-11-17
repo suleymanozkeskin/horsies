@@ -133,14 +133,14 @@ class TestTotals:
 class TestRows:
     @pytest.mark.asyncio
     async def test_rows_keep_the_order_of_the_function(self) -> None:
-        ids = [str(uuid.uuid4()) for _ in range(3)]
+        ids = [uuid.uuid4() for _ in range(3)]
 
         page = await _page(
             [
                 list_totals_row('EXACT', live_total=1, history_total=2),
-                list_task_row('HISTORY', ids[0], row_position=1),
-                list_task_row('LIVE', ids[1], row_position=2),
-                list_task_row('HISTORY', ids[2], row_position=3),
+                list_task_row('HISTORY', str(ids[0]), row_position=1),
+                list_task_row('LIVE', str(ids[1]), row_position=2),
+                list_task_row('HISTORY', str(ids[2]), row_position=3),
             ],
         )
 
@@ -148,7 +148,7 @@ class TestRows:
 
     @pytest.mark.asyncio
     async def test_a_live_row_has_no_end_time_and_its_open_span_counts_up(self) -> None:
-        task_id = str(uuid.uuid4())
+        task_id = uuid.uuid4()
         started = datetime.now(UTC) - timedelta(seconds=30)
 
         page = await _page(
@@ -156,7 +156,7 @@ class TestRows:
                 list_totals_row('EXACT', live_total=1, history_total=0),
                 list_task_row(
                     'LIVE',
-                    task_id,
+                    str(task_id),
                     status='RUNNING',
                     worker_id='worker-1',
                     worker_hostname='host-1',
