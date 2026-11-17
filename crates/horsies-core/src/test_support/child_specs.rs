@@ -17,8 +17,8 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::history::ddl::classes::FOREVER_CLASS_KEY;
 use crate::core::{HorsiesError, TaskError, WorkflowSpec};
 use crate::workflow_engine::child_spec::{
-    ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ClientChildSpec,
-    ClientSpec,
+    ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ChildSpecs,
+    ClientChildSpec, ClientSpec,
 };
 use crate::workflow_engine::start::ChildSpecError;
 use crate::workflow_engine::start_statement::{
@@ -193,6 +193,12 @@ impl TestChildSpecs {
         };
         node_fails(request, failure)
     }
+}
+
+/// The child specs of a process with no child: every child build fails its
+/// node with `SUBWORKFLOW_LOAD_FAILED`.
+pub(crate) fn no_child_specs() -> ChildSpecs {
+    ChildSpecs::Client(Arc::new(TestChildSpecs::empty()))
 }
 
 /// The source answers when the future is made: the build runs on the

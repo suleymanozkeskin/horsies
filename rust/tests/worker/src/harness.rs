@@ -23,7 +23,7 @@ use serde::de::DeserializeOwned;
 
 use crate::instance::{Connection, Instance, Profile, ReadyClass, INSTANCE_ENV};
 use crate::markers::{MarkerDir, MARKER_DIR_ENV};
-use crate::tasks::{basic, classes, custom};
+use crate::tasks::{basic, classes, custom, recovery};
 
 /// The longest wait for a worker to run its readiness task: the start of
 /// the parent, its children and the first claim.
@@ -184,6 +184,12 @@ impl Suite {
             }
             (Instance::CustomQueues, ReadyClass::SharedAsync | ReadyClass::SharedThread) => {
                 panic!("the custom queue instance has no shared readiness task")
+            }
+            (Instance::RecoveryQueues, ReadyClass::Isolated) => {
+                self.function(recovery::recovery_healthcheck::handle)
+            }
+            (Instance::RecoveryQueues, ReadyClass::SharedAsync | ReadyClass::SharedThread) => {
+                panic!("the recovery queue instance has no shared readiness task")
             }
             (_, ReadyClass::Isolated) => self.function(basic::healthcheck::handle),
             (_, ReadyClass::SharedAsync) => self.function(classes::shared_healthcheck::handle),

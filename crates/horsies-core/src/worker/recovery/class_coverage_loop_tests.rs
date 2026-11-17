@@ -18,7 +18,6 @@ use crate::broker::monitoring_test_database::MonitoringTestDatabase;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 
 /// The least reaper check interval. The loop reads the fleet check from one
 /// interval after its start on.
@@ -160,9 +159,7 @@ async fn a_started_reaper_logs_an_unserved_isolated_stream() {
     // core pools, and a failed check would log a warning, not this error.
     let reaper = spawn_reaper(
         Arc::new(crate::test_support::broker_with_closed_sqlx_pools(&database.pool).await),
-        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        )),
+        crate::test_support::child_specs::no_child_specs(),
         RecoveryConfig {
             check_interval_ms: CHECK_INTERVAL_MS,
             ..RecoveryConfig::default()
