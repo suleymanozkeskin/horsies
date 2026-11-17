@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use super::no_member_after_the_tag;
 use crate::db::{Keepalives, SocketSettings, TcpUserTimeout};
 use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
 
@@ -156,6 +157,7 @@ impl ManifestValue for TcpUserTimeoutMs {
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum TcpKeepalivesConfig {
+    #[serde(deserialize_with = "no_member_after_the_tag")]
     Off,
     On {
         /// Idle time before the first probe (libpq `keepalives_idle`).
@@ -204,6 +206,7 @@ impl TcpKeepalivesConfig {
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum TcpUserTimeoutConfig {
     /// The operating system's timeout.
+    #[serde(deserialize_with = "no_member_after_the_tag")]
     SystemDefault,
     /// Sent data may stay unacknowledged this long before the kernel closes
     /// the connection (libpq `tcp_user_timeout`).
