@@ -34,7 +34,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.result import Err, is_err, is_ok
 from horsies.monitoring.task_actions import TaskActionEventLoopLimit
-from horsies.web.routes.actions import _task_action_failed
+from tests.dualrun.reference.web_routes.actions import _task_action_failed
 
 LIMIT_MESSAGE = 'this broker already holds async resources for 5 open event loops'
 

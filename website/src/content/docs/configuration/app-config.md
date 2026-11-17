@@ -44,34 +44,81 @@ Every config model refuses unknown keys. This includes the nested models (`Postg
 
 ## Queue Mode Configuration
 
+The rules of each mode are on [Queue Modes](/horsies/concepts/queue-modes/).
+
 ### DEFAULT Mode
 
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
+`custom_queues` must be `None` or omitted. A task names no queue: it goes to the `default` queue.
+
 ```python
+from pydantic import SecretStr
+from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
+from horsies import QueueMode
+
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(...),
-    # custom_queues must be None or omitted
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
+app = Horsies(config)
+
+@app.task("cleanup_sessions")  # Goes to "default" queue
+def cleanup_sessions() -> TaskResult[str, TaskError]:
+    return TaskResult(ok="done")
 ```
 
 ### CUSTOM Mode
 
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
+Each task names its queue with `queue_name`.
+
 ```python
-from horsies import CustomQueueConfig
+from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, QueueMode, CustomQueueConfig
 
 config = AppConfig(
     queue_mode=QueueMode.CUSTOM,
     custom_queues=[
-        CustomQueueConfig(name="high", priority=1, max_concurrency=10),
-        CustomQueueConfig(name="low", priority=100, max_concurrency=3),
+        CustomQueueConfig(name="critical", priority=1, max_concurrency=10),
+        CustomQueueConfig(name="normal", priority=50, max_concurrency=5),
+        CustomQueueConfig(name="low", priority=100, max_concurrency=2),
     ],
-    broker=PostgresConfig(...),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
+app = Horsies(config)
+
+@app.task("urgent_alert", queue_name="critical")
+def urgent_alert() -> TaskResult[str, TaskError]:
+    return TaskResult(ok="alerted")
+
+@app.task("process_order", queue_name="normal")
+def process_order() -> TaskResult[str, TaskError]:
+    return TaskResult(ok="processed")
+
+@app.task("ship_item", queue_name="low")
+def ship_to_address() -> TaskResult[str, TaskError]:
+    return TaskResult(ok="shipped")
 ```
 
-See [Queue Modes](../../concepts/queue-modes) for details.
+### Unknown Queue Names
+
+A `queue_name` that the config does not list raises `ConfigurationError` with code `HRS-103` when the decorator runs:
+
+```python
+# This raises ConfigurationError (HRS-103) at definition time:
+@app.task("bad_task", queue_name="nonexistent")
+def bad_task() -> TaskResult[str, TaskError]:
+    ...
+```
+
+```text
+error[HRS-103]: invalid queue_name 'nonexistent'
+  --> /app/tasks.py:12
+   |
+12 | @app.task("bad_task", queue_name="nonexistent")
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: valid queues: ['critical', 'normal', 'low']
+
+   = help:
+        use one of the configured queue names
+```
 
 ## Cluster-Wide Concurrency
 
@@ -155,41 +202,130 @@ nothing.
 
 ## Recovery Configuration
 
-Override crash recovery defaults:
+Override crash recovery defaults. The fields, their defaults and their ranges are on [Recovery Config](/horsies/configuration/recovery-config/#fields). The heartbeat timing rules are on [Timing Guidelines](/horsies/workers/heartbeats-recovery/#timing-guidelines).
 
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 from horsies import RecoveryConfig
 
 config = AppConfig(
-    broker=PostgresConfig(...),
+    broker=broker,
     recovery=RecoveryConfig(
+        # Claimer detection
         auto_requeue_stale_claimed=True,
-        claimed_stale_threshold_ms=120_000,  # 2 minutes
+        claimed_stale_threshold_ms=120_000,     # 2 minutes
+        claimer_heartbeat_interval_ms=30_000,   # 30 seconds
+
+        # Runner detection
         auto_fail_stale_running=True,
-        running_stale_threshold_ms=300_000,  # 5 minutes
+        running_stale_threshold_ms=300_000,     # 5 minutes
         finalizing_stale_threshold_ms=300_000,  # 5 minutes
+        runner_heartbeat_interval_ms=30_000,    # 30 seconds
+
+        # Check frequency
+        check_interval_ms=30_000,               # 30 seconds
     ),
 )
 ```
 
-See [Recovery Config](/horsies/configuration/recovery-config/) for all options.
+### Threshold Rules
+
+`RecoveryConfig` raises `ConfigurationError` with code `HRS-204` when a threshold breaks a [timing rule](/horsies/workers/heartbeats-recovery/#rule-thresholds-hold-the-heartbeats). The error names the fields and the smallest valid value.
+
+<!-- check: skip elided -- shows a wrong form next to the right one -->
+```python
+# Valid
+RecoveryConfig(
+    runner_heartbeat_interval_ms=30_000,  # 30s
+    running_stale_threshold_ms=64_000,    # 64s = 2 x (30s + 2s)
+    finalizing_stale_threshold_ms=60_000, # 60s (2x)
+)
+
+# Invalid - raises ConfigurationError (HRS-204)
+RecoveryConfig(
+    runner_heartbeat_interval_ms=30_000,  # 30s
+    running_stale_threshold_ms=60_000,    # half is 30s: no time for a heartbeat to land
+)
+```
+
+### Quick Tasks
+
+```python
+quick_recovery = RecoveryConfig(
+    runner_heartbeat_interval_ms=10_000,   # 10 seconds
+    running_stale_threshold_ms=40_000,     # 40 seconds
+)
+```
+
+### Disable Recovery
+
+```python
+no_recovery = RecoveryConfig(
+    auto_requeue_stale_claimed=False,
+    auto_fail_stale_running=False,
+)
+```
+
+Stale tasks then stay stuck until they are resolved by hand. See [Manual Recovery](/horsies/workers/heartbeats-recovery/#manual-recovery).
+
+## Retention Configuration
+
+How long records live, the retention classes and the partition settings are on [Retention Config](/horsies/configuration/retention-config/).
+
+```python
+from datetime import timedelta
+from horsies import AppConfig, RetentionConfig
+
+config = AppConfig(
+    broker=broker,
+    retention=RetentionConfig(
+        queue_retention={
+            'emails': timedelta(days=7),
+            'audit': None,
+        },
+        terminal_record_retention_hours=24 * 90,
+        retention_periods=(timedelta(days=365),),
+    ),
+)
+```
+
+### Retention per Queue
+
+`queue_retention` maps a queue name to a `timedelta` of whole days, or to `None` to keep the records of the queue forever.
+
+```python
+retention = RetentionConfig(
+    queue_retention={
+        'emails': timedelta(days=7),     # noisy, short-lived
+        'reports': timedelta(days=90),
+        'audit': None,                   # keep forever
+    },
+)
+```
+
+### Periods a Send Chooses
+
+List each finite period that a send asks for and no queue maps. The send is in [Send With a Listed Retention Period](/horsies/tasks/sending-tasks/#send-with-a-listed-retention-period).
+
+```python
+RetentionConfig(
+    retention_periods=(timedelta(days=365), timedelta(days=2)),
+)
+```
 
 ## Resilience Configuration
 
-Configure worker retry/backoff and NOTIFY fallback polling:
+Configure worker retry/backoff and NOTIFY fallback polling. The fields and their ranges are on [Resilience](/horsies/workers/worker-architecture/#resilience).
 
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 from horsies import WorkerResilienceConfig
 
 config = AppConfig(
-    broker=PostgresConfig(...),
+    broker=broker,
     resilience=WorkerResilienceConfig(
-        db_retry_initial_ms=500,
-        db_retry_max_ms=30_000,
-        db_retry_max_attempts=0,  # 0 = infinite
-        notify_poll_interval_ms=5_000,
+        db_retry_initial_ms=500,      # initial backoff on DB errors
+        db_retry_max_ms=30_000,       # backoff cap
+        db_retry_max_attempts=0,      # 0 = retry forever
+        notify_poll_interval_ms=5_000, # poll fallback when NOTIFY is silent
     ),
 )
 ```
@@ -307,6 +443,63 @@ For deterministic, high-confidence workflow validity in CI:
 3. Ensure all builder modules are imported by the app used in `horsies check` (no hidden or dynamic registration paths).
 4. Run `horsies check` in CI and fail the pipeline on any errors.
 5. Treat HRS-030 as additional lint signal, not the primary guarantee mechanism.
+
+## Example Configurations
+
+The limits that these configs set are on [Concurrency](/horsies/workers/concurrency/).
+
+### Single Worker, Simple
+
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
+```python
+config = AppConfig(
+    queue_mode=QueueMode.DEFAULT,
+    broker=PostgresConfig(...),
+)
+```
+
+```bash
+horsies worker myapp.instance:app --profile default
+```
+
+The `default` profile holds `isolated=IsolatedChildren(count=8)`.
+
+### Multi-Worker with Global Cap
+
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
+```python
+config = AppConfig(
+    queue_mode=QueueMode.DEFAULT,
+    cluster_wide_cap=20,
+    broker=PostgresConfig(...),
+)
+```
+
+```bash
+# Machine 1
+horsies worker myapp.instance:app --profile default
+
+# Machine 2
+horsies worker myapp.instance:app --profile default
+
+# Total: 16 children (8 each), but max 20 RUNNING tasks cluster-wide
+```
+
+### Priority Queues with Rate Limiting
+
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
+```python
+config = AppConfig(
+    queue_mode=QueueMode.CUSTOM,
+    custom_queues=[
+        CustomQueueConfig(name="stripe", priority=1, max_concurrency=3),
+        CustomQueueConfig(name="email", priority=50, max_concurrency=10),
+        CustomQueueConfig(name="reports", priority=100, max_concurrency=2),
+    ],
+    cluster_wide_cap=15,
+    broker=PostgresConfig(...),
+)
+```
 
 ## Logging Configuration
 

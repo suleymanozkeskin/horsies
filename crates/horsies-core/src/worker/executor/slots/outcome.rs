@@ -39,7 +39,6 @@ use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{BuiltInTaskCode, OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
 use crate::db::Transience;
@@ -52,6 +51,7 @@ use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason, 
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
 use crate::worker::finalize_batch::{FinalizeBatcher, PlainSuccess, RowNotWritten};
 use crate::worker::retry::{admit_retry, RetryAdmission};
+use crate::workflow_engine::child_spec::ChildSpecs;
 
 /// The text of a worker failure with no detail (Python
 /// `_WORKER_FAILURE_FALLBACK`).
@@ -416,7 +416,8 @@ fn release_failed(
 /// outcome writes (`finalize_batch::stop::drain_then_close`).
 pub struct OutcomeWriter {
     broker: Arc<PostgresBroker>,
-    workflows: Arc<WorkflowSpecRegistry>,
+    /// Where phase 2 gets the spec of a sub-workflow child that it starts.
+    child_specs: ChildSpecs,
     worker_id: String,
     payload_policy: PayloadPolicy,
     retention: RetentionConfig,
@@ -427,7 +428,7 @@ pub struct OutcomeWriter {
 impl OutcomeWriter {
     pub fn new(
         broker: Arc<PostgresBroker>,
-        workflows: Arc<WorkflowSpecRegistry>,
+        child_specs: ChildSpecs,
         worker_id: String,
         payload_policy: PayloadPolicy,
         retention: RetentionConfig,
@@ -436,7 +437,7 @@ impl OutcomeWriter {
     ) -> Self {
         Self {
             broker,
-            workflows,
+            child_specs,
             worker_id,
             payload_policy,
             retention,
@@ -830,7 +831,7 @@ impl OutcomeWriter {
     ) {
         Box::pin(run_phase2(
             &self.broker,
-            &self.workflows,
+            self.child_specs.build(&self.retention),
             Phase2Work {
                 task_id: task.task_id,
                 queue_name: task.queue_name.clone(),
@@ -838,7 +839,6 @@ impl OutcomeWriter {
                 capacity_notified,
                 phase_two,
             },
-            &self.retention,
         ))
         .await;
     }

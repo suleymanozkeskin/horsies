@@ -96,6 +96,22 @@ def report() -> TaskResult[int, TaskError]:
 
 **Don't register async functions.** Hooks run during child boot, before any event loop exists; registration rejects coroutine functions (`HRS-214`). Dispose async engines via `async_engine.sync_engine.dispose(close=False)`.
 
+**Don't build a client at import with `preload=ChildPreload.APP`.** The client exists before the fork, and a client with native threads, such as gRPC, can hang in a child. See [Preload Parent](/horsies/workers/worker-architecture/#preload-parent).
+
+<!-- check: skip partial -- uses names that the page does not define -->
+```python
+# Wrong: this runs once, in the preload parent
+client = firestore.Client()
+
+# Correct: this runs in every child, after the fork
+client = None
+
+@app.on_child_process_start
+def build_client() -> None:
+    global client
+    client = firestore.Client()
+```
+
 ## Limits
 
 - Engines created lazily after the hook runs, raw psycopg clients outside any pool, and pools hidden in C extensions are out of reach — only app-side close-per-use helps there.

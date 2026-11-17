@@ -88,10 +88,10 @@ The selected run and open node are URL search parameters (`?run=&node=`).
 
 ## Freshness
 
-Freshness is events-first. The web app runs its own `PostgresListener` on the
-monitoring NOTIFY channels (`horsies_task_status`, `horsies_workflow_status`,
-`horsies_worker_state`) and fans coalesced invalidation events out over SSE at
-`GET /api/events`. Payloads are ids, never data: an event says which surface
+Freshness is events-first. The web app subscribes on the process listener of
+its broker to the monitoring NOTIFY channels (`horsies_task_status`,
+`horsies_workflow_status`, `horsies_worker_state`) and fans coalesced
+invalidation events out over SSE at `GET /api/events`. Payloads are ids, never data: an event says which surface
 changed, and the browser refetches through the normal endpoints.
 
 Each stream queues at most 256 events (`SUBSCRIBER_QUEUE_CAPACITY`). When a
@@ -146,9 +146,12 @@ One load serves every open dashboard with the same filters, and an answer is
 kept for 10 seconds after its load ends. The task list's `total` is a planner estimate on the
 unfiltered view and exact under any active filter.
 
-If the server's listener fails and cannot reconnect, the stream emits a
-`degraded` event and closes; the client falls back to polling and keeps
-retrying. The server never fabricates events.
+When the listener loses its connection, it reconnects, and each stream then
+gets one event with no ids per topic: notifications sent during the gap may
+be lost, so the browser re-reads every surface. If the app's broker has no
+listener (a broker built with `assume_initialized=True`) or the listener
+stopped, the stream emits a `degraded` event and closes; the client falls
+back to polling and keeps retrying. The server never fabricates events.
 
 ## Actions
 

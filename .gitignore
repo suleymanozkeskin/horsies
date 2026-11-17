@@ -57,8 +57,6 @@ ignored-content/
 .env.planetscale
 
 
-# built web UI assets (produced by the webui build, never committed)
-python/horsies/web/static/
 
 # horsies._core as a local maturin build places it next to the sources
 python/horsies/_core.*.so

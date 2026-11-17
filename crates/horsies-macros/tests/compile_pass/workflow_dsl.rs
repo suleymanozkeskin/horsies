@@ -46,7 +46,8 @@ impl WorkflowDefinition for Pipeline {
     }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        let produced = builder.task(produce::node()?.set_input(Order { order_id: 7 })?);
+        let produced =
+            builder.task(produce::node()?.set(produce::params::order(), Order { order_id: 7 })?);
         let consumed = builder.task(consume::node()?.arg_from(consume::params::total(), produced));
         let _summary = builder.task(
             summarize::node()?

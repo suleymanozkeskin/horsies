@@ -316,7 +316,7 @@ static GET_TASK_INFO: TypedStatement =
 /// Each row also has `read_at`, the `statement_timestamp()` of this
 /// statement: the database clock, one value for every row. The web worker
 /// list measures ages from it (Python measures them with the web host clock,
-/// `python/horsies/web/routes/workers.py:108-119`).
+/// `tests/dualrun/reference/web_routes/workers.py:108-119`).
 const LIST_WORKER_STATES_SQL: &str = "\
 WITH RECURSIVE latest AS (
     (

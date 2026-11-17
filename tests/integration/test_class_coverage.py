@@ -64,8 +64,8 @@ from horsies.core.worker.runtime import _ReaperPassState
 from horsies.core.worker.slots import SlotPool
 from horsies.core.worker.worker import Worker, WorkerConfig
 from tests.dualrun.reference.class_coverage_reads import (
-    _PENDING_HEADS_SQL,  # pyright: ignore[reportPrivateUsage]
-    _PENDING_STREAMS_SQL,  # pyright: ignore[reportPrivateUsage]
+    _PENDING_HEADS_SQL,
+    _PENDING_STREAMS_SQL,
 )
 from tests.broker_resources_support import current_resources
 

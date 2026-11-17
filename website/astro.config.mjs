@@ -210,6 +210,7 @@ export default defineConfig({
 							label: 'Workflows',
 							items: [
 								{ label: 'Workflow API', slug: 'concepts/workflows/workflow-api' },
+								{ label: 'Workflow Examples', slug: 'concepts/workflows/workflow-examples' },
 								{ label: 'Subworkflows', slug: 'concepts/workflows/subworkflows' },
 								{ label: 'Typed Node Builder', slug: 'concepts/workflows/typed-node-builder' },
 								{ label: 'Start a Workflow Once', slug: 'guides/start-workflow-once' },
@@ -219,6 +220,7 @@ export default defineConfig({
 							label: 'Configuration',
 							items: [
 								{ label: 'App Config', slug: 'configuration/app-config' },
+								{ label: 'Broker Connections', slug: 'configuration/broker-connections' },
 							],
 						},
 						{
@@ -246,6 +248,8 @@ export default defineConfig({
 						{
 							label: 'Operations',
 							items: [
+								{ label: 'Rerun in Your Transaction', slug: 'operations/rerun-in-your-transaction' },
+								{ label: 'Code Change Examples', slug: 'operations/code-change-examples' },
 								{ label: 'Async Frameworks', slug: 'guides/async-frameworks' },
 								{ label: 'Testing', slug: 'operations/testing' },
 								{ label: 'CLI Reference', slug: 'cli' },

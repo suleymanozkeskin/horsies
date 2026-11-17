@@ -29,13 +29,13 @@ use crate::core::history::maintenance::coverage::{
 };
 use crate::core::history::maintenance::pruning::PruneReach;
 use crate::core::lifecycle::StaleAttemptOutcome;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
 use crate::db::CorePool;
 use crate::log_targets::STALE_RUNNING_PASS;
 
 use crate::worker::class_coverage_log::{check_class_coverage, ClassCoverageLog};
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
+use crate::workflow_engine::child_spec::ChildSpecs;
 
 #[cfg(test)]
 mod p7_maintenance_tests {
@@ -55,6 +55,7 @@ mod p7_maintenance_tests {
     use crate::core::history::periods::RetentionDays;
     use crate::core::history::reads::publisher::StagedLoaderPublisher;
     use crate::core::lifecycle::TerminalizationOutcome;
+    use crate::core::registry::workflow::WorkflowSpecRegistry;
     use crate::test_support::terminal_writes;
     use chrono::Timelike;
     use serial_test::serial;
@@ -841,7 +842,7 @@ pub fn spawn_reaper(
     broker: Arc<PostgresBroker>,
     runtime_pool: PgPool,
     maintenance_pool: PgPool,
-    registry: Arc<WorkflowSpecRegistry>,
+    child_specs: ChildSpecs,
     config: RecoveryConfig,
     retention: RetentionConfig,
     health: ReaperHealth,
@@ -882,7 +883,7 @@ pub fn spawn_reaper(
                         &broker,
                         &runtime_pool,
                         &maintenance_pool,
-                        &registry,
+                        &child_specs,
                         &config,
                         &retention,
                         &health,
@@ -898,7 +899,7 @@ pub fn spawn_reaper(
                         &broker,
                         &runtime_pool,
                         &maintenance_pool,
-                        &registry,
+                        &child_specs,
                         &config,
                         &retention,
                         &health,
@@ -1003,7 +1004,7 @@ async fn run_reaper_pass(
     broker: &PostgresBroker,
     runtime_pool: &PgPool,
     maintenance_pool: &PgPool,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &ChildSpecs,
     config: &RecoveryConfig,
     retention: &RetentionConfig,
     health: &ReaperHealth,
@@ -1172,13 +1173,15 @@ async fn run_reaper_pass(
 
     // Exact outbox recovery. Each candidate owns its transaction; retaining
     // dispositions remain visible and count toward bounded quarantine.
-    let workflow_recovery = crate::workflow_engine::recovery::recover_stuck_workflows_observed(
-        broker,
-        registry,
-        config.workflow_recovery_failure_limit,
-        retention,
-    )
-    .await;
+    // The children of the sub-workflow nodes that a step starts come from
+    // the worker's child spec source.
+    let workflow_recovery =
+        crate::workflow_engine::recovery::recover_stuck_workflows_observed_with(
+            broker,
+            child_specs.build(retention),
+            config.workflow_recovery_failure_limit,
+        )
+        .await;
     health.write().await.workflow_recovery = Some(match workflow_recovery {
         Ok(report) => serde_json::to_value(report).unwrap_or_else(
             |error| serde_json::json!({"state": "error", "error": error.to_string()}),
@@ -1190,13 +1193,12 @@ async fn run_reaper_pass(
     });
 
     // Discovery and each record run on the main core pool with the reserve.
-    let phase2 = crate::workflow_engine::phase2_recovery::drive_phase2_recovery(
+    let phase2 = crate::workflow_engine::phase2_recovery::drive_phase2_recovery_with(
         broker,
-        registry,
+        child_specs.build(retention),
         config.crashed_worker_recovery_grace_ms,
         crate::workflow_engine::recovery::GLOBAL_SCAN_ROW_CAP,
         config.phase2_quarantine_after_attempts,
-        retention,
     )
     .await;
     health.write().await.phase2_recovery = Some(match phase2 {
@@ -1922,6 +1924,7 @@ mod tests {
         ensure_startup_coverage, StartupCoverageOutcome,
     };
     use crate::core::history::reads::publisher::StagedLoaderPublisher;
+    use crate::core::registry::workflow::WorkflowSpecRegistry;
     use serial_test::serial;
     use uuid::Uuid;
 

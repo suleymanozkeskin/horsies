@@ -33,9 +33,9 @@ from horsies.web.schema import (
     SchemaStatus,
     classify_stored_version,
     classify_without_migrations,
-    schema_guard,
 )
 from tests.broker_resources_support import resources_of
+from tests.dualrun.reference.web_guards import schema_guard
 
 pytestmark = [pytest.mark.unit]
 
@@ -183,7 +183,8 @@ class TestProbeFailureHandling:
 
 
 class TestSchemaGuard:
-    """The dependency every action route inherits."""
+    """The dependency every action route of the Python app inherited before
+    the switch (``tests/dualrun/reference/web_guards.py``)."""
 
     pytestmark = [asyncio_tests]
 

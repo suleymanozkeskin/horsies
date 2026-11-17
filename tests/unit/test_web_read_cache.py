@@ -16,7 +16,7 @@ from horsies.monitoring import (
     StatusCount,
 )
 from horsies.monitoring.errors import MonitoringQueryDbOperationFailed
-from horsies.web.read_cache import (
+from tests.dualrun.reference.web_read_cache import (
     ReadCache,
     TaskBreakdownScope,
     TaskFacetsScope,

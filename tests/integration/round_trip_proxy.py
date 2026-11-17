@@ -38,6 +38,11 @@ class Turn:
         """Whether the turn sent ``sql`` as a simple query."""
         return f'Q:{sql}' in self.messages
 
+    def executes(self) -> bool:
+        """Whether the turn executes a statement of the extended protocol
+        (an Execute message, after its Bind)."""
+        return 'E' in self.messages
+
 
 @dataclass
 class _OpenTurn:

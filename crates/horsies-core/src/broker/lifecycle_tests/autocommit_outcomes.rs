@@ -34,6 +34,7 @@ use crate::db::StatementFailure;
 use crate::worker::execution::{
     finalize_workflow_phase, FinalizeError, FinalizeStage, PhaseTwoForm,
 };
+use crate::workflow_engine::steps::ChildBuild;
 
 const QUEUE: &str = "lifecycle_autocommit";
 const CHANNEL: &str = "task_queue_lifecycle_autocommit";
@@ -256,13 +257,17 @@ async fn a_dead_connection_fails_the_completion_and_the_retry_applies() {
 async fn plain_phase_two(broker: &PostgresBroker) -> Result<(), FinalizeError> {
     finalize_workflow_phase(
         broker,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        ChildBuild::Registry {
+            registry: &WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            ),
+            retention: &RetentionConfig::default(),
+        },
         Uuid::new_v4(),
         QUEUE,
         false,
         false,
         PhaseTwoForm::NotKnown,
-        &RetentionConfig::default(),
     )
     .await
     .map(|_parent_advances| ())

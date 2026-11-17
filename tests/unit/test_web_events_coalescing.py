@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from horsies.web.events import (
+from tests.dualrun.reference.web_events import (
     CHANNEL_TOPICS,
     MAX_IDS_PER_EVENT,
     EventCoalescer,

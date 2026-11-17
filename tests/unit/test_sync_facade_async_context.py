@@ -64,7 +64,7 @@ from horsies.core.workflows.start_types import (
     WorkflowStartErrorCode,
     WorkflowStartLoopRunnerFailed,
 )
-from horsies.web.routes.actions import _handle_failed
+from tests.dualrun.reference.web_routes.actions import _handle_failed
 
 pytestmark = [pytest.mark.unit]
 

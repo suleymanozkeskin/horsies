@@ -1,0 +1,316 @@
+# pyright: reportUnusedFunction=false
+# Route handlers are registered by their decorator, not called by name.
+"""Action endpoints.
+
+Every action's authority is a compare-and-set in the database, so there is no
+optimistic-concurrency field to send: a lost race surfaces as 409 carrying the
+status actually observed, and the client refetches.
+
+Two primitive outcomes cannot be interpreted alone, and each is resolved by
+re-reading the run's status server-side rather than pushing the ambiguity to
+the browser:
+
+* pause/resume answer ``Ok(False)`` when the run existed but was not in the
+  expected state — not an error, but not the requested effect either.
+* workflow cancel answers ``Ok(None)`` even when it was a no-op on an already
+  finished run.
+
+Resume returns ``HandleResumeRecoveryFailed`` when it committed and its
+recovery pass, which runs in a second transaction, failed. The run was
+resumed; the response says so and carries a warning.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, assert_never
+
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.logging import get_logger
+from horsies.core.models.workflow.enums import WorkflowStatus
+from horsies.core.models.workflow.handle import WorkflowHandle
+from horsies.core.models.workflow.handle_types import (
+    HandleAsyncContext,
+    HandleDbOperationFailed,
+    HandleEventLoopLimit,
+    HandleLoopRunnerFailed,
+    HandleOperationError,
+    HandleResumeRecoveryFailed,
+    HandleStoredDataInvalid,
+    HandleWorkflowNotFound,
+)
+from horsies.core.types.result import is_err
+from horsies.core.workflows.lifecycle import pause_workflow, resume_workflow
+from horsies.monitoring import (
+    TaskActionDbOperationFailed,
+    TaskActionError,
+    TaskActionEventLoopLimit,
+    TaskActionNotCancellable,
+    TaskActionNotFound,
+    TaskActionStoredDataInvalid,
+    TaskActionWorkflowTask,
+    cancel_task,
+)
+from tests.dualrun.reference.web_routes._common import require_path_uuid
+
+logger = get_logger('web')
+
+STATE_CONFLICT = 'STATE_CONFLICT'
+RESUME_RECOVERY_WARNING = 'post_resume_recovery_failed'
+
+
+class CancelTaskBody(BaseModel):
+    """Cancelling a RUNNING task requires saying so explicitly."""
+
+    include_running: bool = False
+
+
+class ActionResponse(BaseModel):
+    """The success envelope shared by every action."""
+
+    outcome: str
+    was_status: str | None = None
+    warning: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Outcome:
+    """A decided response, before it is logged and rendered."""
+
+    status_code: int
+    content: dict[str, Any]
+
+
+def _succeeded(
+    outcome: str,
+    *,
+    was_status: str | None = None,
+    warning: str | None = None,
+) -> _Outcome:
+    return _Outcome(
+        status_code=200,
+        content=ActionResponse(
+            outcome=outcome,
+            was_status=was_status,
+            warning=warning,
+        ).model_dump(),
+    )
+
+
+def _conflict(code: str, current_status: str | None) -> _Outcome:
+    return _Outcome(
+        status_code=409,
+        content={'code': code, 'current_status': current_status},
+    )
+
+
+def _task_action_failed(error: TaskActionError) -> _Outcome:
+    """Map a task action failure onto its response.
+
+    Stored data that does not parse is 500: the request was valid, and a
+    repeat gives the same answer until the stored row changes.
+    """
+    match error:
+        case TaskActionNotFound():
+            return _Outcome(status_code=404, content={'detail': error.message})
+        case TaskActionWorkflowTask():
+            return _Outcome(status_code=400, content={'code': error.code.value})
+        case TaskActionNotCancellable(current_status=current_status):
+            return _conflict(error.code.value, current_status.value)
+        case TaskActionDbOperationFailed():
+            return _Outcome(status_code=503, content={'detail': error.message})
+        case TaskActionEventLoopLimit():
+            return _Outcome(status_code=503, content={'detail': error.message})
+        case TaskActionStoredDataInvalid():
+            return _Outcome(status_code=500, content={'detail': error.message})
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _handle_failed(error: HandleOperationError) -> _Outcome:
+    """Map a workflow primitive's failure onto its response.
+
+    Stored data that does not parse answers 500: the request was valid, and
+    a repeat gets the same answer. The routes call only async workflow
+    primitives, so ``HandleAsyncContext`` (returned by sync facades only)
+    fails an assertion. Only resume returns ``HandleResumeRecoveryFailed``,
+    and the resume route answers it before it calls this function, so here
+    it fails an assertion.
+    """
+    match error:
+        case HandleWorkflowNotFound():
+            return _Outcome(status_code=404, content={'detail': error.message})
+        case HandleDbOperationFailed():
+            return _Outcome(status_code=503, content={'detail': error.message})
+        case HandleLoopRunnerFailed():
+            return _Outcome(status_code=503, content={'detail': error.message})
+        case HandleEventLoopLimit():
+            return _Outcome(status_code=503, content={'detail': error.message})
+        case HandleStoredDataInvalid():
+            return _Outcome(status_code=500, content={'detail': error.message})
+        case HandleResumeRecoveryFailed():
+            raise AssertionError(
+                f'web workflow action for workflow {error.workflow_id} got '
+                'RESUME_RECOVERY_FAILED; the resume route answers it first',
+            )
+        case HandleAsyncContext():
+            raise AssertionError(
+                f'web workflow action for workflow {error.workflow_id} got '
+                'ASYNC_CONTEXT; the routes call only async workflow primitives',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _respond(route: str, entity_id: str, outcome: _Outcome) -> JSONResponse:
+    """Log the decision and render it.
+
+    One line per action: what was attempted, on what, and how it ended.
+    """
+    logger.info(
+        f'monitoring action route={route} id={entity_id} '
+        f'http={outcome.status_code} '
+        f'result={outcome.content.get("outcome") or outcome.content.get("code") or "error"}'
+    )
+    return JSONResponse(status_code=outcome.status_code, content=outcome.content)
+
+
+def build_router(broker: PostgresBroker) -> APIRouter:
+    """Build the action router bound to one broker."""
+    router = APIRouter(tags=['actions'])
+
+    async def _current_status(workflow_id: str) -> WorkflowStatus | _Outcome:
+        """Re-read a run's status, or the response explaining why we cannot."""
+        handle: WorkflowHandle[Any] = WorkflowHandle(
+            workflow_id=workflow_id, broker=broker
+        )
+        result = await handle.status_async()
+        if is_err(result):
+            return _handle_failed(result.err_value)
+        return result.ok_value
+
+    @router.post('/tasks/{task_id}/cancel')
+    async def cancel_task_route(
+        task_id: str, body: CancelTaskBody = CancelTaskBody()
+    ) -> JSONResponse:
+        """Cancel a task. RUNNING requires ``include_running``.
+
+        A path id that is not a UUID answers 400 ``INVALID_INPUT``; nothing
+        is read or changed.
+        """
+        parsed_id = require_path_uuid('task_id', task_id)
+        result = await cancel_task(
+            broker, parsed_id, include_running=body.include_running
+        )
+        if is_err(result):
+            return _respond(
+                'tasks.cancel',
+                str(parsed_id),
+                _task_action_failed(result.err_value),
+            )
+        return _respond(
+            'tasks.cancel',
+            str(parsed_id),
+            _succeeded('cancelled', was_status=result.ok_value.was_status.value),
+        )
+
+    @router.post('/workflows/{workflow_id}/pause')
+    async def pause_workflow_route(workflow_id: str) -> JSONResponse:
+        """Stop scheduling new nodes. Executing nodes finish.
+
+        A path id that is not a UUID answers 400 ``INVALID_INPUT``; nothing
+        is read or changed.
+        """
+        workflow_id = str(require_path_uuid('workflow_id', workflow_id))
+        result = await pause_workflow(broker, workflow_id)
+        if is_err(result):
+            return _respond(
+                'workflows.pause', workflow_id, _handle_failed(result.err_value)
+            )
+        if result.ok_value:
+            return _respond('workflows.pause', workflow_id, _succeeded('paused'))
+
+        current = await _current_status(workflow_id)
+        if isinstance(current, _Outcome):
+            return _respond('workflows.pause', workflow_id, current)
+        return _respond(
+            'workflows.pause',
+            workflow_id,
+            _conflict(STATE_CONFLICT, current.value),
+        )
+
+    @router.post('/workflows/{workflow_id}/resume')
+    async def resume_workflow_route(workflow_id: str) -> JSONResponse:
+        """Re-enqueue paused nodes.
+
+        ``HandleResumeRecoveryFailed`` means the resume committed and only
+        the recovery pass, which runs in its own transaction after the state
+        change, failed. The run was resumed, so the response says so and
+        carries a warning.
+
+        A path id that is not a UUID answers 400 ``INVALID_INPUT``; nothing
+        is read or changed.
+        """
+        workflow_id = str(require_path_uuid('workflow_id', workflow_id))
+        result = await resume_workflow(broker, workflow_id)
+        if is_err(result):
+            error = result.err_value
+            match error:
+                case HandleResumeRecoveryFailed():
+                    return _respond(
+                        'workflows.resume',
+                        workflow_id,
+                        _succeeded('resumed', warning=RESUME_RECOVERY_WARNING),
+                    )
+                case _:
+                    return _respond(
+                        'workflows.resume', workflow_id, _handle_failed(error),
+                    )
+        if result.ok_value:
+            return _respond('workflows.resume', workflow_id, _succeeded('resumed'))
+
+        current = await _current_status(workflow_id)
+        if isinstance(current, _Outcome):
+            return _respond('workflows.resume', workflow_id, current)
+        return _respond(
+            'workflows.resume',
+            workflow_id,
+            _conflict(STATE_CONFLICT, current.value),
+        )
+
+    @router.post('/workflows/{workflow_id}/cancel')
+    async def cancel_workflow_route(workflow_id: str) -> JSONResponse:
+        """Cancel a run and its descendants.
+
+        ``cancel_async`` reports success even when it was a no-op on a run
+        that had already finished, so the run's status decides the response.
+
+        A path id that is not a UUID answers 400 ``INVALID_INPUT``; nothing
+        is read or changed.
+        """
+        workflow_id = str(require_path_uuid('workflow_id', workflow_id))
+        handle: WorkflowHandle[Any] = WorkflowHandle(
+            workflow_id=workflow_id, broker=broker
+        )
+        result = await handle.cancel_async()
+        if is_err(result):
+            return _respond(
+                'workflows.cancel', workflow_id, _handle_failed(result.err_value)
+            )
+
+        current = await _current_status(workflow_id)
+        if isinstance(current, _Outcome):
+            return _respond('workflows.cancel', workflow_id, current)
+        if current is WorkflowStatus.CANCELLED:
+            return _respond('workflows.cancel', workflow_id, _succeeded('cancelled'))
+        return _respond(
+            'workflows.cancel',
+            workflow_id,
+            _conflict(STATE_CONFLICT, current.value),
+        )
+
+    return router

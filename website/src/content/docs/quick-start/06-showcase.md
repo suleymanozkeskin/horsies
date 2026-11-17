@@ -56,13 +56,6 @@ uv run python -m showcase.acme.scenarios steady
 
 Open `http://127.0.0.1:8600`.
 
-Working from a clone, build the dashboard assets once before starting the web
-process. A `horsies` installed from PyPI already ships them:
-
-```bash
-cd webui && bun install && bun run build
-```
-
 ### Validate without a database
 
 `horsies check` imports the app, builds every registered workflow, and validates
