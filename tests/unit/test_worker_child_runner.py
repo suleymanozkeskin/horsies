@@ -1441,6 +1441,7 @@ class TestRunTaskEntryErrorPaths:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='success')
+        mock_task.task_ok_type = str
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
@@ -1631,6 +1632,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='meta_ok')
+        mock_task.task_ok_type = str
         mock_task._original_fn = _task_with_meta
         mock_task._fn = _task_with_meta
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -2051,6 +2053,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='ctx_ok')
+        mock_task.task_ok_type = str
         mock_task._original_fn = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
