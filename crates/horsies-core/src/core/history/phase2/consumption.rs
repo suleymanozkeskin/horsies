@@ -75,7 +75,6 @@ struct Phase2DispositionRow {
     root_workflow_id: Option<Uuid>,
     on_error: Option<String>,
     node_status: Option<String>,
-    terminal_status: Option<String>,
     detail: Option<String>,
 }
 
@@ -90,7 +89,6 @@ pub struct Phase2Disposition {
     pub root_workflow_id: Option<Uuid>,
     pub on_error: Option<String>,
     pub node_status: Option<String>,
-    pub terminal_status: Option<String>,
     pub detail: Option<String>,
 }
 
@@ -114,7 +112,6 @@ pub async fn consume_phase2(
         root_workflow_id: row.root_workflow_id,
         on_error: row.on_error,
         node_status: row.node_status,
-        terminal_status: row.terminal_status,
         detail: row.detail,
     })
 }

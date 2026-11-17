@@ -885,14 +885,15 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        // A transient failure (lock_not_available): it rolls the row back
-        // and adds no attempt. A persistent raise adds one (#819).
+        // A persistent raise (P0001, the RAISE default): it rolls the row
+        // back and adds one attempt (#819). A transient raise adds none
+        // (`a_transient_raise_adds_no_attempt`).
         sqlx::query(&format!(
             "CREATE OR REPLACE FUNCTION p7_phase2_inject_row_failure() RETURNS trigger
              LANGUAGE plpgsql AS $body$
              BEGIN
                  IF NEW.workflow_id = '{bad_workflow}'::uuid THEN
-                     RAISE EXCEPTION 'injected phase-2 row failure' USING ERRCODE = '55P03';
+                     RAISE EXCEPTION 'injected phase-2 row failure';
                  END IF;
                  RETURN NEW;
              END
@@ -1269,7 +1270,9 @@ mod tests {
     /// Python: `horsies/core/workflows/phase2_recovery.py:681-725`
     /// (`_quarantine_exhausted_row`). The history row and the pending row
     /// agree on schema version 2: the consumer refuses it
-    /// (`SOURCE_VERSION_CONFLICT`), and the copy check accepts it.
+    /// (`SOURCE_VERSION_CONFLICT`), and the copy check accepts it. Two earlier
+    /// passes retained the row; this pass reaches the bound of 3, the smallest
+    /// bound that `horsies_workflow_phase2_recover` takes (3..1000).
     #[tokio::test]
     #[serial]
     async fn the_recovery_loop_quarantines_a_retaining_row_at_the_attempt_bound() {
@@ -1291,14 +1294,14 @@ mod tests {
         .expect("set the history schema version");
         sqlx::query(
             "UPDATE horsies_workflow_phase2_pending
-             SET history_schema_version = 2,
-                 created_at = NOW() - INTERVAL '1 hour'
+             SET history_schema_version = 2
              WHERE task_id = $1",
         )
         .bind(task_id)
         .execute(&pool)
         .await
-        .expect("age the pending row");
+        .expect("set the pending schema version");
+        store_prior_attempts(&pool, task_id, 2, "SOURCE_VERSION_CONFLICT").await;
 
         let summary = drive_phase2_recovery(
             &pool,
@@ -1308,7 +1311,7 @@ mod tests {
             ),
             0,
             1,
-            1,
+            3,
             &RetentionConfig::default(),
         )
         .await
@@ -1332,7 +1335,7 @@ mod tests {
             .await
             .expect("read the pending row");
         assert_eq!(source, "QUARANTINE");
-        assert_eq!(attempts, 1);
+        assert_eq!(attempts, 3);
         assert_eq!(failure_class.as_deref(), Some("SOURCE_VERSION_CONFLICT"));
         assert_eq!(copies, 1);
         cleanup_case(&pool, workflow_id, task_id).await;
@@ -1381,7 +1384,9 @@ mod tests {
     }
 
     /// A completed workflow task whose phase-2 record is the only one, past
-    /// any grace, with `attempts` stored.
+    /// any grace, with `attempts` stored. Earlier attempts were raises: a
+    /// record with attempts holds the time and the class of the last one
+    /// (`horsies_workflow_phase2_pending_attempts`).
     async fn lone_record(pool: &PgPool, workflow_id: Uuid, task_id: Uuid, attempts: i32) {
         sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
             .execute(pool)
@@ -1389,13 +1394,29 @@ mod tests {
             .expect("clear pending rows before global recovery");
         seed_workflow_task(pool, workflow_id, task_id, false).await;
         terminalize_workflow_task(pool, task_id).await;
+        store_prior_attempts(pool, task_id, attempts, "RAISED").await;
+    }
+
+    /// Stores `attempts` earlier attempts on the record of `task_id`, the last
+    /// one of `failure_class`, and ages the record past any grace. With no
+    /// attempt, the time and the class stay NULL.
+    async fn store_prior_attempts(
+        pool: &PgPool,
+        task_id: Uuid,
+        attempts: i32,
+        failure_class: &str,
+    ) {
         sqlx::query(
             "UPDATE horsies_workflow_phase2_pending
-             SET attempt_count = $2, created_at = NOW() - INTERVAL '1 hour'
+             SET attempt_count = $2,
+                 last_attempt_at = CASE WHEN $2 = 0 THEN NULL ELSE NOW() - INTERVAL '30 minutes' END,
+                 last_failure_class = CASE WHEN $2 = 0 THEN NULL ELSE $3 END,
+                 created_at = NOW() - INTERVAL '1 hour'
              WHERE task_id = $1",
         )
         .bind(task_id)
         .bind(attempts)
+        .bind(failure_class)
         .execute(pool)
         .await
         .unwrap();
@@ -1516,7 +1537,10 @@ mod tests {
             .expect("record the raise");
 
         assert_eq!(record, RaiseRecord::NotRecorded { attempt_count: 2 });
-        assert_eq!(record_attempts(&pool, task_id).await, (2, None));
+        assert_eq!(
+            record_attempts(&pool, task_id).await,
+            (2, Some("RAISED".to_owned()))
+        );
         cleanup_case(&pool, workflow_id, task_id).await;
     }
 

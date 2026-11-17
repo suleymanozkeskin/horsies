@@ -1819,6 +1819,18 @@ mod tests {
         Arc::new(PostgresBroker::from_pool(test_pool().await))
     }
 
+    /// A broker on a loopback port where no server listens: every statement
+    /// of its core pools fails at the checkout with a refused connection,
+    /// which is retryable. A closed sqlx pool does not stop the phase-1
+    /// writes: they run on the core pools, and `PostgresBroker::close` leaves
+    /// those pools to reopen at the next statement.
+    fn unreachable_broker() -> PostgresBroker {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
+            .expect("a lazy pool opens no connection");
+        PostgresBroker::from_pool(pool)
+    }
+
     /// The claim generation of every row that `insert_claimed_task` seeds and
     /// of every dispatch row that `claimed_task_row` builds, so a test's
     /// dispatch fences on the generation its row carries.
@@ -1999,27 +2011,33 @@ mod tests {
         workflow_id
     }
 
+    /// The status, result and error code of a task. A live row holds no
+    /// result and no error code (baseline `horsies_tasks`,
+    /// `0001_tables.sql:59-139`): they are on the history row that the move
+    /// writes. The move deletes the live row in the same statement, so a task
+    /// is in exactly one of the two tables; two rows or none fail the test.
     async fn fetch_task_state(
         pool: &PgPool,
         task_id: &Uuid,
     ) -> (String, Option<String>, Option<String>) {
-        sqlx::query_as(
-            "SELECT status, result, error_code
-             FROM (
-                 SELECT status, result, error_code, 0 AS source
-                 FROM horsies_tasks WHERE id = $1
-                 UNION ALL
-                 SELECT status, convert_from(result_payload, 'UTF8') AS result,
-                        error_code, 1 AS source
-                 FROM horsies_task_history WHERE task_id = $1
-             ) AS task_state
-             ORDER BY source
-             LIMIT 1",
+        let states: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT status, NULL::text AS result, NULL::text AS error_code
+             FROM horsies_tasks WHERE id = $1
+             UNION ALL
+             SELECT status, convert_from(result_payload, 'UTF8') AS result, error_code
+             FROM horsies_task_history WHERE task_id = $1",
         )
         .bind(*task_id)
-        .fetch_one(pool)
+        .fetch_all(pool)
         .await
-        .unwrap()
+        .unwrap();
+        match <[_; 1]>::try_from(states) {
+            Ok([state]) => state,
+            Err(states) => panic!(
+                "task {task_id} must be in exactly one of horsies_tasks and \
+                 horsies_task_history: {states:?}"
+            ),
+        }
     }
 
     async fn fetch_attempt_state(
@@ -2212,8 +2230,10 @@ mod tests {
     }
 
     /// Python `test_shared_dispatch.py::TestCapacityAndConfig::test_a_worker_with_no_child_is_refused`.
-    #[test]
-    fn a_worker_with_no_child_is_refused() {
+    /// A Tokio test: a lazy sqlx pool starts its reaper task at construction,
+    /// which needs a Tokio context.
+    #[tokio::test]
+    async fn a_worker_with_no_child_is_refused() {
         use crate::worker::executor::protocol::{
             ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
         };
@@ -3317,11 +3337,19 @@ mod tests {
 
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
-        sqlx::query("UPDATE horsies_tasks SET is_workflow_task = TRUE WHERE id = $1")
-            .bind(task_id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        // A workflow task carries no command fingerprint
+        // (`horsies_tasks_command_fingerprint_by_origin`).
+        sqlx::query(
+            "UPDATE horsies_tasks
+             SET is_workflow_task = TRUE,
+                 command_fingerprint = NULL,
+                 command_fingerprint_version = NULL
+             WHERE id = $1",
+        )
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
         EXECUTION_COUNT.store(0, Ordering::SeqCst);
 
         let outcome = crate::worker::execution::confirm_ownership_and_set_running(
@@ -3651,11 +3679,10 @@ mod tests {
         .to_string();
         insert_running_task(&pool, &task_id, "default", 0, 3, Some(&task_options)).await;
 
-        let closed_broker = test_broker().await;
-        closed_broker.pool().close().await;
+        let unreachable = unreachable_broker();
 
         let Err(err) = persist_terminal_state(
-            &closed_broker,
+            &unreachable,
             task_id,
             TaskResult::Err(TaskError::new("RETRY_ME", "try again").unwrap()),
             &claimed_task_row(&task_id, "default", Some(task_options.clone())),
@@ -3672,7 +3699,7 @@ mod tests {
         )
         .await
         else {
-            panic!("a closed pool must fail the failed-attempt write");
+            panic!("an unreachable database must fail the failed-attempt write");
         };
 
         assert_eq!(err.stage, FinalizeStage::Phase1Persist);
@@ -3692,11 +3719,10 @@ mod tests {
         let task_id = Uuid::new_v4();
         insert_running_task(&pool, &task_id, "default", 0, 0, None).await;
 
-        let closed_broker = test_broker().await;
-        closed_broker.pool().close().await;
+        let unreachable = unreachable_broker();
 
         let Err(err) = persist_terminal_state(
-            &closed_broker,
+            &unreachable,
             task_id,
             TaskResult::Ok(br#""phase1-durable""#.to_vec()),
             &claimed_task_row(&task_id, "default", None),
@@ -3713,7 +3739,7 @@ mod tests {
         )
         .await
         else {
-            panic!("closed broker should exhaust phase 1 retries");
+            panic!("an unreachable database must fail the phase-1 write");
         };
 
         assert_eq!(err.stage, FinalizeStage::Phase1Persist);
@@ -3758,7 +3784,8 @@ mod tests {
     }
 
     /// Capacity signals go only to the per-queue channel; workers no longer
-    /// listen on task_new (parity with horsies PR #101 cafc9200).
+    /// listen on task_new (parity with horsies PR #101 cafc9200). The payload
+    /// is the constant `capacity` that the baseline functions also send.
     #[tokio::test]
     #[serial]
     async fn capacity_wake_emits_queue_specific_signal_only() {
@@ -3771,8 +3798,7 @@ mod tests {
         listener.listen("task_new").await.unwrap();
         listener.listen("task_queue_high-priority").await.unwrap();
 
-        let task_id = Uuid::new_v4();
-        send_phase2_wake(&pool, &capacity_wake("high-priority", task_id))
+        send_phase2_wake(&pool, &capacity_wake("high-priority"))
             .await
             .expect("send the capacity wake");
 
@@ -3782,10 +3808,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             (first.channel().to_owned(), first.payload().to_owned()),
-            (
-                "task_queue_high-priority".to_owned(),
-                format!("capacity:{task_id}"),
-            ),
+            ("task_queue_high-priority".to_owned(), "capacity".to_owned()),
         );
 
         // No second signal: task_new must not be emitted.
@@ -3803,50 +3826,40 @@ mod tests {
     async fn capacity_wake_on_a_closed_pool_is_an_error() {
         let pool = test_pool().await;
         pool.close().await;
-        let sent = send_phase2_wake(&pool, &capacity_wake("default", Uuid::new_v4())).await;
+        let sent = send_phase2_wake(&pool, &capacity_wake("default")).await;
         assert!(matches!(sent, Err(sqlx::Error::PoolClosed)), "{sent:?}");
     }
 
     /// A database of its own, migrated without the install's family record,
     /// for a worker start. Dropped with `FreshDatabase::drop`.
     struct FreshDatabase {
-        admin: sqlx::PgConnection,
         pool: PgPool,
-        name: String,
+        database: crate::test_support::TestDatabase,
         /// The shared test database URL, for the worker's config only: the
         /// worker reaches this database through `pool`.
         config_url: String,
     }
 
     impl FreshDatabase {
+        /// A copy of the installed test template (`crate::test_support`)
+        /// with its family row removed.
         async fn create() -> Self {
-            use sqlx::Connection;
-            use std::str::FromStr;
-
             let config_url = crate::broker::terminalization_matrix::migrated_database_url().await;
-            let base_options =
-                sqlx::postgres::PgConnectOptions::from_str(&config_url).expect("test database URL");
-            let mut admin =
-                sqlx::PgConnection::connect_with(&base_options.clone().database("postgres"))
-                    .await
-                    .expect("connect admin database");
-            let name = format!("core_worker_start_{}", Uuid::new_v4().simple());
-            sqlx::query(&format!("CREATE DATABASE \"{name}\""))
-                .execute(&mut admin)
-                .await
-                .expect("create start test database");
+            let database = crate::test_support::TestDatabase::create().await;
             let pool = sqlx::postgres::PgPoolOptions::new()
                 .max_connections(8)
-                .connect_with(base_options.database(&name))
+                .connect(database.url())
                 .await
                 .expect("connect start test database");
-            crate::broker::migrations::run_horsies_migrations(&pool)
+            // The template holds this client's family row; a start test
+            // records the family it needs itself.
+            sqlx::query("DELETE FROM horsies_client_family")
+                .execute(&pool)
                 .await
-                .expect("migrate start test database");
+                .expect("remove the family row of the install");
             Self {
-                admin,
                 pool,
-                name,
+                database,
                 config_url,
             }
         }
@@ -3862,12 +3875,9 @@ mod tests {
             .expect("record a client family");
         }
 
-        async fn drop(mut self) {
+        async fn drop(self) {
             self.pool.close().await;
-            sqlx::query(&format!("DROP DATABASE \"{}\" WITH (FORCE)", self.name))
-                .execute(&mut self.admin)
-                .await
-                .expect("drop start test database");
+            self.database.drop().await;
         }
     }
 
@@ -4236,7 +4246,7 @@ mod tests {
         .expect("install the lease log");
         // The worker writes its plain successes on the worker pool and
         // claims on the wakes of its listener: a broker of a worker.
-        let worker_url = database_url_for(&database.config_url, &database.name);
+        let worker_url = database_url_for(&database.config_url, database.database.name());
         let broker =
             PostgresBroker::connect_worker_with(&test_app_config(worker_url.clone()).broker)
                 .await
@@ -4315,7 +4325,7 @@ mod tests {
         .execute(&database.pool)
         .await
         .expect("install the pool write log");
-        let database_url = database_url_for(&database.config_url, &database.name);
+        let database_url = database_url_for(&database.config_url, database.database.name());
         let broker = PostgresBroker::connect_with(&PostgresConfig {
             database_url: with_application_name(&database_url, "reaper_runtime"),
             session_database_url: Some(with_application_name(&database_url, "reaper_session")),

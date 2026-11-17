@@ -3,11 +3,16 @@
 //!
 //! Python specification: `tests/integration/test_task_result_history_fallback.py`
 //! (`TestStagedResultReader`). The tests live here for the statement-counting
-//! proxy of this module.
+//! proxy of this module. The read is the broker's statement-layer reader
+//! (`broker::history_reads::read_task_result`) on a core pool of one
+//! connection through the proxy.
 
 use super::*;
+use crate::broker::core_rows::StatementLog;
+use crate::broker::history_reads::read_task_result;
+use crate::broker::pools::unpinged_single_connection_core_pool;
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::core::history::reads::result::{read_task_result, TaskResultRead};
+use crate::core::history::reads::result::TaskResultRead;
 use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
 
 const PORT_WORKER: &str = "port-round-trip-worker";
@@ -45,6 +50,23 @@ async fn seed_task(pool: &PgPool, task_id: Uuid, status: &str) {
     .execute(pool)
     .await
     .expect("insert task");
+}
+
+/// The result of `task_id`, read twice on `reader`: the first read opens the
+/// connection, so its session setup is not counted; the proxy counts only
+/// the second read.
+async fn counted_result_read(
+    proxy: &SqlStatementProxy,
+    reader: &crate::db::CorePool,
+    task_id: Uuid,
+) -> TaskResultRead {
+    let _opened = read_task_result(reader, StatementLog::Off, task_id)
+        .await
+        .expect("open the reader connection with a first read");
+    proxy.reset();
+    read_task_result(reader, StatementLog::Off, task_id)
+        .await
+        .expect("read the result")
 }
 
 async fn published_database() -> TestDatabase {
@@ -87,14 +109,11 @@ async fn a_history_result_read_is_one_statement() {
         "{outcomes:?}"
     );
     let (proxy, pool) = proxied_pool(&database, 0, 1).await;
-    let mut connection = pool.acquire().await.expect("acquire reader");
-    proxy.reset();
-    let read = read_task_result(&mut connection, task_id)
-        .await
-        .expect("read the result");
+    let reader = unpinged_single_connection_core_pool(&pool.connect_options());
+    let read = counted_result_read(&proxy, &reader, task_id).await;
     assert!(matches!(read, TaskResultRead::History(_)), "{read:?}");
     assert_eq!(proxy.statement_count(), 1, "{:?}", proxy.sql());
-    drop(connection);
+    reader.close();
     pool.close().await;
     proxy.stop().await;
     database.drop().await;
@@ -108,14 +127,11 @@ async fn a_live_result_read_is_one_statement() {
     let task_id = Uuid::new_v4();
     seed_task(&database.pool, task_id, "PENDING").await;
     let (proxy, pool) = proxied_pool(&database, 0, 1).await;
-    let mut connection = pool.acquire().await.expect("acquire reader");
-    proxy.reset();
-    let read = read_task_result(&mut connection, task_id)
-        .await
-        .expect("read the result");
+    let reader = unpinged_single_connection_core_pool(&pool.connect_options());
+    let read = counted_result_read(&proxy, &reader, task_id).await;
     assert!(matches!(read, TaskResultRead::Live(_)), "{read:?}");
     assert_eq!(proxy.statement_count(), 1, "{:?}", proxy.sql());
-    drop(connection);
+    reader.close();
     pool.close().await;
     proxy.stop().await;
     database.drop().await;

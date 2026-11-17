@@ -266,6 +266,10 @@ mod finish {
         let pool = pool().await;
         let core = core_pool_for_test_pool(&pool);
         let task_id = stale_task(&pool).await;
+        // A row at retry count 1 holds its attempt 1: the archive numbers
+        // attempts from 1 with no gap, and its decoder refuses a gap
+        // (`non_contiguous_attempts`, Python's `archive/attempts.py`).
+        record_failed_first_attempt(&pool, task_id, "attempt one crashed").await;
 
         let outcome = recover(&core, &finish(task_id, StaleRetry::NoRetry)).await;
 
@@ -302,7 +306,14 @@ mod finish {
         );
         assert_eq!(
             archived_attempts(&pool, task_id).await,
-            vec![(2, "FAILED".to_owned(), Some("crash reason".to_owned()))]
+            vec![
+                (
+                    1,
+                    "FAILED".to_owned(),
+                    Some("attempt one crashed".to_owned())
+                ),
+                (2, "FAILED".to_owned(), Some("crash reason".to_owned())),
+            ]
         );
         core.close();
         cleanup_tasks(&pool, &[task_id]).await;

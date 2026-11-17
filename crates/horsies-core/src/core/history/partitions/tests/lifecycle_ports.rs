@@ -37,9 +37,7 @@ fn past_fold() -> DateTime<Utc> {
 }
 
 fn test_options(database: &TestDatabase) -> PgConnectOptions {
-    PgConnectOptions::from_str(&database_url())
-        .expect("invalid test database URL")
-        .database(&database.database_name)
+    PgConnectOptions::from_str(database.url()).expect("invalid test database URL")
 }
 
 /// A pool on the test database whose sessions run in `zone`.

@@ -3,12 +3,17 @@
 //!
 //! Each test enters from the pass that the reaper calls and asserts on stored
 //! rows; each has its own database, because a global pass reads every
-//! workflow. Three stored rows raise on every pass:
+//! workflow. Three stored rows raise on every pass, as in Python:
 //!
-//! - [`POISON_TASK_OPTIONS`] on a node: the core refuses them when it builds
-//!   the node's task (a `Validation` error).
+//! - [`BAD_GOOD_UNTIL`] on a node: the insert of its task refuses the
+//!   deadline text (a data exception). Phase-2 recovery tests refuse the
+//!   insert of the workflow's task rows with a trigger instead
+//!   ([`start_a_then_b`]), as Python's do.
 //! - [`poison_success_policy`] on a workflow: the success evaluation fails.
 //! - An output index with no node row: the final result fails.
+//!
+//! A child start raises on [`POISON_TASK_OPTIONS`] with a deadline
+//! ([`poison_child_registry`]).
 
 use serial_test::serial;
 use sqlx::PgPool;
@@ -44,6 +49,13 @@ const POISON_CHILD_KEY: &str = "tests.port.poison_options_child.v1";
 
 /// Text that the limit error message starts with (Python `recovery_limit_error`).
 const LIMIT_MESSAGE: &str = "Workflow recovery raised a persistent error";
+
+/// Stored task options whose `good_until` the database cannot read (Python's
+/// `BAD_GOOD_UNTIL`). The options parse, so the node is not refused when its
+/// task is built; the deadline text goes to the task insert, which raises
+/// (Python `_build_enqueued_task_params`,
+/// `horsies/core/workflows/engine.py:831-835`).
+const BAD_GOOD_UNTIL: &str = r#"{"good_until":"not-a-date"}"#;
 
 async fn pass(pool: &PgPool, registry: &WorkflowSpecRegistry) -> RecoveryReport {
     recover_stuck_workflows(
@@ -98,12 +110,13 @@ async fn failure_rows(pool: &PgPool) -> i64 {
         .expect("count the failure rows")
 }
 
-/// A RUNNING workflow with one READY node whose task options do not parse.
+/// A RUNNING workflow with one READY node whose task insert raises
+/// ([`BAD_GOOD_UNTIL`]).
 async fn seed_poison_ready(pool: &PgPool, seed: WorkflowSeed) -> Uuid {
     let workflow_id = seed_workflow(pool, &seed).await;
     seed_node(
         pool,
-        &NodeSeed::task(workflow_id, 0, "READY").options(POISON_TASK_OPTIONS),
+        &NodeSeed::task(workflow_id, 0, "READY").options(BAD_GOOD_UNTIL),
     )
     .await;
     workflow_id
@@ -184,12 +197,14 @@ async fn stop_killing(pool: &PgPool, table: &str) {
     super::support::execute(pool, "DROP FUNCTION port_test_kill()").await;
 }
 
-/// A registry with a child whose task node stores task options that do not
-/// parse, so each start of the child fails (Python's `PoisonOptionsChild`).
-/// The node has no `good_until`: a deadline would be merged into the options.
+/// A registry with a child whose task has options that are not a JSON object
+/// and a `good_until` (Python's `PoisonOptionsChild`): the merge of the
+/// deadline into the options raises at each start of the child (Python
+/// `_child_task_options_json`, `horsies/core/workflows/engine.py:425-475`).
 fn poison_child_registry() -> WorkflowSpecRegistry {
     let mut child_task = task_node(0, "limit_child_task");
     child_task.task_options_json = Some(POISON_TASK_OPTIONS.to_owned());
+    child_task.good_until = Some(chrono::Utc::now() + chrono::Duration::hours(1));
     let mut child = spec("poison_options_child", vec![child_task]);
     child.definition_key = Some(POISON_CHILD_KEY.to_owned());
     child.output_index = Some(0);
@@ -204,9 +219,37 @@ fn poison_child_registry() -> WorkflowSpecRegistry {
     registry
 }
 
-/// Starts A then B, makes B's task options poison, and runs phase 1 of A, so
-/// phase-2 recovery owes A's progression, and that progression raises on B.
-/// Returns the workflow id and A's task id. Python: `_start_a_then_b`.
+/// Makes every insert of a task row of `workflow_id` refuse with a data
+/// exception (22007), as the insert of a stored deadline that does not parse
+/// does (Python `_refuse_task_inserts`).
+async fn refuse_task_inserts(pool: &PgPool, workflow_id: Uuid) {
+    super::support::execute(
+        pool,
+        &format!(
+            "CREATE FUNCTION port_test_refuse_task() RETURNS trigger
+             LANGUAGE plpgsql AS $body$
+             BEGIN
+                 IF NEW.input::jsonb -> '__h_workflow_meta__' ->> 'workflow_id' = '{workflow_id}' THEN
+                     RAISE EXCEPTION 'refused by the test' USING ERRCODE = '22007';
+                 END IF;
+                 RETURN NEW;
+             END
+             $body$"
+        ),
+    )
+    .await;
+    super::support::execute(
+        pool,
+        "CREATE TRIGGER port_test_refuse_task BEFORE INSERT ON horsies_tasks
+         FOR EACH ROW EXECUTE FUNCTION port_test_refuse_task()",
+    )
+    .await;
+}
+
+/// Starts A then B, refuses the task row of B, and runs phase 1 of A, so
+/// phase-2 recovery owes A's progression, and that progression raises on the
+/// task row of B. Returns the workflow id and A's task id. Python:
+/// `_start_a_then_b`.
 async fn start_a_then_b(pool: &PgPool) -> (Uuid, Uuid) {
     let first = task_node(0, "limit_task");
     let mut second = task_node(1, "limit_task");
@@ -217,15 +260,7 @@ async fn start_a_then_b(pool: &PgPool) -> (Uuid, Uuid) {
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
-    sqlx::query(
-        "UPDATE horsies_workflow_tasks SET task_options = $2
-         WHERE workflow_id = $1 AND task_index = 1",
-    )
-    .bind(workflow_id)
-    .bind(POISON_TASK_OPTIONS)
-    .execute(pool)
-    .await
-    .expect("make B poison");
+    refuse_task_inserts(pool, workflow_id).await;
     let task_id = node(pool, workflow_id, 0)
         .await
         .task_id
@@ -308,12 +343,12 @@ async fn two_cases_of_one_workflow_count_once_in_one_pass() {
         &db.pool,
         &NodeSeed::task(workflow_id, 1, "PENDING")
             .deps(&[0])
-            .options(POISON_TASK_OPTIONS),
+            .options(BAD_GOOD_UNTIL),
     )
     .await;
     seed_node(
         &db.pool,
-        &NodeSeed::task(workflow_id, 2, "READY").options(POISON_TASK_OPTIONS),
+        &NodeSeed::task(workflow_id, 2, "READY").options(BAD_GOOD_UNTIL),
     )
     .await;
 
@@ -539,7 +574,7 @@ async fn the_limit_bounds_case_0() {
         &db.pool,
         &NodeSeed::task(workflow_id, 1, "PENDING")
             .deps(&[0])
-            .options(POISON_TASK_OPTIONS),
+            .options(BAD_GOOD_UNTIL),
     )
     .await;
 
@@ -658,7 +693,7 @@ async fn the_limit_bounds_case_1_6_and_fails_the_parent_workflow() {
         &db.pool,
         &NodeSeed::task(parent, 1, "PENDING")
             .deps(&[0])
-            .options(POISON_TASK_OPTIONS),
+            .options(BAD_GOOD_UNTIL),
     )
     .await;
 
@@ -883,7 +918,7 @@ async fn a_parent_advance_raise_keeps_the_child_and_counts_on_the_parent() {
         &db.pool,
         &NodeSeed::task(parent, 1, "PENDING")
             .deps(&[0])
-            .options(POISON_TASK_OPTIONS),
+            .options(BAD_GOOD_UNTIL),
     )
     .await;
 

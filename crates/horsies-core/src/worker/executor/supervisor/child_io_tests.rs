@@ -109,7 +109,13 @@ async fn a_frame_reaches_the_child_whole_with_a_small_or_a_large_body() {
         });
         let bytes = encode_parent_frame(&frame).unwrap().to_bytes();
         let path = test_file("frame");
-        let script = format!(r#"head -c {} <&"$0" > "{}""#, bytes.len(), path.display());
+        // `dd` with one-byte blocks takes exactly the frame; BSD `head -c`
+        // (macOS) reads a full stdio buffer and drops what it does not write.
+        let script = format!(
+            r#"dd bs=1 count={} <&"$0" 2>/dev/null > "{}""#,
+            bytes.len(),
+            path.display()
+        );
         let spawner = Spawner::start().unwrap();
         let spawned = spawner.handle().spawn(shell(&script)).await.unwrap();
         let mut channel = ChildChannel::attach(

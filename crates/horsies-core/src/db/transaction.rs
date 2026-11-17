@@ -25,7 +25,7 @@ use tokio_postgres::Row;
 
 use super::failure::{NotSentCause, StatementFailure};
 use super::pool::PooledConnection;
-use super::statement::{BoundStatement, StatementBound};
+use super::statement::{BoundStatement, SqlScript, StatementBound};
 
 /// The isolation level of a transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +157,21 @@ impl Transaction<'_> {
         let name = statement.statement().name();
         self.ensure_open(name)?;
         let result = self.connection.execute(statement, bound).await;
+        self.observe(name, &result);
+        result
+    }
+
+    /// Runs a script in the transaction (simple query protocol, no
+    /// parameters). Failures as in [`Transaction::query`]: a server ERROR in
+    /// any statement of the script aborts the transaction.
+    pub async fn run_script(
+        &mut self,
+        script: &SqlScript,
+        bound: StatementBound,
+    ) -> Result<(), StatementFailure> {
+        let name = script.name();
+        self.ensure_open(name)?;
+        let result = self.connection.run_script(script, bound).await;
         self.observe(name, &result);
         result
     }

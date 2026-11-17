@@ -1336,10 +1336,12 @@ mod tests {
         }
     }
 
+    /// A node with no input stores `{}`, as Python does: the start and the resume refuse a node input that
+    /// is not a JSON object text (`horsies_workflow_task_input`, `0005_workflow_functions.sql:341-343`).
     fn node_with(is_subworkflow: bool, priority: Option<i32>) -> AnyNode {
         AnyNode {
             task_name: "t".to_owned(),
-            input_json: "null".to_owned(),
+            input_json: "{}".to_owned(),
             dependencies: vec![],
             args_from: std::collections::HashMap::new(),
             workflow_ctx_from: None,
@@ -2031,7 +2033,6 @@ mod tests {
         slow.index = 1;
         // A root that names a context source takes the per-row slow path.
         slow.workflow_ctx_from = Some(vec!["fast".to_owned()]);
-        slow.input_json = "{}".to_owned();
         let spec = keyed_spec(Some("tests.enqueue_time.root.v1"), vec![fast, slow]);
         let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
         let workflow_id = Uuid::new_v4();
@@ -2180,7 +2181,7 @@ mod tests {
         let mut root = node_with(false, Some(17));
         root.task_name = task_name.to_owned();
         root.queue = Some("bulk".to_owned());
-        root.input_json = "[1]".to_owned();
+        root.input_json = r#"{"value": 1}"#.to_owned();
         let spec = WorkflowSpec {
             name: workflow_name.to_owned(),
             definition_key: Some("p6.workflow.facts.v1".to_owned()),

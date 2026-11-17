@@ -14,7 +14,7 @@ use super::*;
 #[serial]
 async fn a_moved_task_detail_carries_the_end_stamp_of_its_status() {
     let pool = migrated_pool().await;
-    let scope = TestScope::new("detail_stamps");
+    let scope = TestScope::new("end_stamp");
     clean_w2(&pool, &scope).await;
     let broker = PostgresBroker::from_pool(pool.clone());
 

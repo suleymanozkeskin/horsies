@@ -691,7 +691,8 @@ async fn a_task_that_reached_no_child_leaves_a_row_of_another_claim_alone() {
 // ---------------------------------------------------------------------------
 
 /// A CLAIMED workflow task held by [`WORKER_ID`] with no workflow node
-/// linked to it. Returns the claimed task.
+/// linked to it. Returns the claimed task. A workflow task row has no
+/// command fingerprint (baseline `horsies_tasks_command_fingerprint_by_origin`).
 async fn seed_unlinked_workflow_task(pool: &PgPool, queue: &str) -> ClaimedTask {
     let (task_id, generation) = seed(
         pool,
@@ -702,11 +703,17 @@ async fn seed_unlinked_workflow_task(pool: &PgPool, queue: &str) -> ClaimedTask 
         0,
     )
     .await;
-    sqlx::query("UPDATE horsies_tasks SET is_workflow_task = TRUE WHERE id = $1")
-        .bind(task_id)
-        .execute(pool)
-        .await
-        .expect("mark the row a workflow task");
+    sqlx::query(
+        "UPDATE horsies_tasks
+         SET is_workflow_task = TRUE,
+             command_fingerprint = NULL,
+             command_fingerprint_version = NULL
+         WHERE id = $1",
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .expect("mark the row a workflow task");
     ClaimedTask {
         kind: TaskKind::WorkflowTask,
         ..claimed_row(

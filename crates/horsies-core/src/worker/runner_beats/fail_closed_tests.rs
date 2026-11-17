@@ -717,6 +717,14 @@ fn printf_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("\\{byte:03o}")).collect()
 }
 
+/// Shell step that reads and drops the next `count` bytes of the socket.
+/// `dd` with one-byte blocks reads one byte per `read`, so it never takes a
+/// byte past `count`. Not `head -c`: BSD `head` (macOS) reads a full stdio
+/// buffer from the socket and drops the bytes it does not write.
+fn drop_socket_bytes(count: usize) -> String {
+    format!(r#"dd bs=1 count={count} <&"$0" >/dev/null 2>&1"#)
+}
+
 /// The bytes of the run frame the pool sends for `claimed`.
 fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
     encode_parent_frame(&ParentFrame::Run(RunFrame {
@@ -745,10 +753,10 @@ fn scripted_child(claimed: &ClaimedTask, after_run: &str) -> ChildCommand {
     .expect("the ready frame encodes")
     .to_bytes();
     let script = format!(
-        r#"head -c {init} <&"$0" >/dev/null; printf '{ready}' >&"$0"; head -c {run} <&"$0" >/dev/null; {after_run}"#,
-        init = init.len(),
+        r#"{take_init}; printf '{ready}' >&"$0"; {take_run}; {after_run}"#,
+        take_init = drop_socket_bytes(init.len()),
         ready = printf_bytes(&ready),
-        run = run_frame_bytes(claimed).len(),
+        take_run = drop_socket_bytes(run_frame_bytes(claimed).len()),
     );
     ChildCommand {
         program: "/bin/sh".into(),
@@ -770,8 +778,9 @@ fn answer_after_a_second(claimed: &ClaimedTask) -> String {
     .expect("the result frame encodes")
     .to_bytes();
     format!(
-        r#"sleep 1; printf '{}' >&"$0"; head -c 27 <&"$0" >/dev/null; exit 0"#,
-        printf_bytes(&result)
+        r#"sleep 1; printf '{}' >&"$0"; {}; exit 0"#,
+        printf_bytes(&result),
+        drop_socket_bytes(27),
     )
 }
 
