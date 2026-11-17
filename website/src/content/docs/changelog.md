@@ -239,6 +239,16 @@ written in Rust, on a new baseline schema.
   (`HRS-203`, "broker connectivity check failed" with the cause, "broker
   listener capability check failed"); the listener refusal adds the core's
   cause as a second note.
+- **`check(live=True)` compares the worker profiles through the core.**
+  The worker connection phase runs the core's check
+  (`CoreHandle.check_worker_connections`, the rule of the Python and Rust
+  clients) on the handle of the connectivity phase; the live check opens no
+  SQLAlchemy engine. The count is that of the core's worker: its listener
+  opens one connection (before: 2), and a `session_database_url` that
+  differs from `database_url` adds a session pool of the parent pool's size.
+  The errors keep `CHECK_WORKER_CONNECTIONS` (`HRS-219`) and their texts; a
+  limit that is not read, or a core that cannot run the call, is one error
+  with the cause as its note, as before.
 
 ### Fixed
 
@@ -507,6 +517,21 @@ unless it starts with "Added".
   `WebCliError`, `execute_cutover`, `CutoverArgs`, `CutoverCliError`,
   `CutoverCommand`, `execute_transcode`, `TranscodeArgs`,
   `TranscodeCliError` and `TranscodeCommand` are removed from the library.
+- **The shipped `horsies` binary has `web`, `get-docs` and `skills
+  install`.** `cutover` and `transcode` are removed. `worker`, `scheduler`
+  and `check` are refused by name with exit code 2: they run from the
+  app's own binary through `horsies::cli::run(app)`, and `horsies --help`
+  says so. `web` serves one database, from a TOML file of `AppConfig` (a
+  key that no section has is refused by name) or from `--database-url`,
+  and never installs or migrates a schema; it takes Python's flags and
+  `--custom-css-url`, and refuses a blank `--trusted-header` as Python
+  does. `get-docs` fetches the docs of the tag `v<crate version>` (a
+  pre-release version needs `--ref main`) and keeps only the Rust pages
+  and the shared pages, with the Rust `llms.txt`.
+- **Added: `horsies skills install --target <dir> [--force]`.** It writes
+  the skill files that the binary carries to `<dir>/horsies/`, as Python's
+  command does, and replaces a copy that differs only with `--force`. The
+  skill files of the crate are in `.agents/skills/horsies/`.
 - **Task bodies run in child processes of the worker.** The worker starts
   the user's binary again in child mode (`--horsies-child <fd> <pid>`) for
   every execution class, as the Python worker starts Python children.
@@ -629,7 +654,9 @@ unless it starts with "Added".
   `UnknownUserCode`); `summary_for` returns `&SubWorkflowSummary`, and
   `output_for` the child's output read as `T`.
 - **`UserErrorCode::code` returns `&str`.** Added: `UserCode` implements
-  `UserErrorCode`, with every user code as checked text.
+  `UserErrorCode`, with every user code as checked text. `UserCode` and
+  `UserCodeRefused` are exported at the crate root, so the outcome type of
+  `WorkflowHandle::get` can be named without a `horsies-core` dependency.
 - **A workflow start converts the spec to the core's spec data and runs
   on the core.** `register_workflow_definition::<D>()` (a definition without
   params) returns `WorkflowFunction<T>`; `workflow_template::<D>()` (a

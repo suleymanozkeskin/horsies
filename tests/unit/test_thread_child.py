@@ -52,6 +52,7 @@ from horsies.core.worker.child_runner import (
     DeadlineBeforeStart,
     StartAllowed,
     StartCheck,
+    StartWithin,
 )
 from horsies.core.worker.stored_timeout import NoTimeout, TimeoutValueInvalid
 from horsies.core.worker.thread_child import (
@@ -59,6 +60,7 @@ from horsies.core.worker.thread_child import (
     ThreadRunTable,
     ThreadSeatReturn,
     ThreadSeats,
+    _milliseconds_left,
     serve_runs,
 )
 
@@ -132,6 +134,7 @@ def _frame(
         is_workflow_task=False,
         claimed_at=CLAIMED_AT,
         work=work or ThreadSeatTask(timeout_ms=1000),
+        orphan_self_heal=True,
     )
 
 
@@ -344,14 +347,68 @@ class TestRunTable:
 
         assert table.returned(1, SetRunning(OK_WIRE)) == MarkerWithoutDeadline()
 
-    def test_a_start_before_the_deadline_is_allowed(self) -> None:
+    def test_a_start_before_the_deadline_is_allowed_with_the_time_left(self) -> None:
+        """The core checks the time left again once the pool gave the
+        connection, before the statement."""
+        table, writer, clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+        clock.now += 0.75
+
+        assert table.start_check(1) == StartWithin(milliseconds=250)
+        assert writer.frames == []
+
+    def test_a_start_just_before_the_deadline_is_allowed(self) -> None:
         table, writer, clock = self._table()
         frame = _frame(1)
         table.add(frame, _thread_work(frame))
         clock.now += 0.999
 
-        assert table.start_check(1) == StartAllowed()
+        check = table.start_check(1)
+        assert isinstance(check, StartWithin)
+        assert check.milliseconds >= 1
         assert writer.frames == []
+
+    def test_a_refusal_starts_with_no_deadline(self) -> None:
+        table, _writer, clock = self._table()
+        frame = _frame(1, work=SeatRefusal(refusal=TimeoutValueInvalid(reason='y')))
+        table.add(frame, _thread_work(frame))
+        clock.now += 100.0
+
+        assert table.start_check(1) == StartAllowed()
+
+    def test_the_time_left_rounds_up_to_a_whole_millisecond(self) -> None:
+        """The check of the core never passes before the deadline of the
+        table: the time left rounds up, and is 1 ms at least."""
+        assert _milliseconds_left(0.25) == 250
+        assert _milliseconds_left(0.0001) == 1
+        assert _milliseconds_left(0.0015) == 2
+        assert _milliseconds_left(0.0) == 1
+        assert _milliseconds_left(-0.5) == 1
+
+    def test_a_start_that_the_core_refused_at_the_deadline_fires_it(self) -> None:
+        """The core refused the start at the deadline (DeadlineBeforeStart)
+        before the deadline thread reached it: the return fires the deadline
+        first, so the deadline report comes first, and the run ends with the
+        timeout."""
+        table, writer, clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+        assert table.start_check(1) == StartWithin(milliseconds=1000)
+        clock.now += 1.0
+
+        assert table.returned(1, DeadlineBeforeStart()) == NoMarker()
+        table.finish(1, RssMb(5.0))
+
+        assert writer.frames == [
+            DeadlineFiredFrame(dispatch=1, task_id='task-1'),
+            SharedResultFrame(
+                dispatch=1,
+                task_id='task-1',
+                end=SeatTimedOut(),
+                rss=RssMb(5.0),
+            ),
+        ]
 
     def test_a_start_after_the_deadline_fires_it_and_is_refused(self) -> None:
         """The seat waited for a connection past the deadline, and the
@@ -421,7 +478,7 @@ class _Program:
             match start_check():
                 case DeadlineBeforeStart() as passed:
                     return passed
-                case StartAllowed():
+                case StartAllowed() | StartWithin():
                     pass
         with self._lock:
             self.threads.append(threading.current_thread().name)
@@ -742,6 +799,7 @@ class TestServeRuns:
             is_workflow_task=False,
             timeout=NoTimeout(),
             claimed_at=CLAIMED_AT,
+            orphan_self_heal=True,
         )
         with pytest.raises(_Exited):
             self._serve(_Taker(), run, StopFrame())

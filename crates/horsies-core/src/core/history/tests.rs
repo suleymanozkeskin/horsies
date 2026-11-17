@@ -12,7 +12,9 @@ use super::archive::rerun_input::{
     store_unavailable_rerun_input, DecodedRerunInput, RerunInputDisposition,
     RerunInputUnavailability, RerunInputUnavailableReason, RERUN_INPUT_INLINE_MAX_BYTES,
 };
-use super::archive::results::{decode_result_envelope, encode_result_envelope};
+use super::archive::results::{
+    decode_result_envelope, decode_result_envelope_text, encode_result_envelope,
+};
 use super::archive::versions::{
     ArchiveDecodeError, ArchiveDomain, ARCHIVE_VERSION_1, JSON_CONTENT_TYPE, JSON_UTF8_CODEC,
 };
@@ -91,7 +93,57 @@ fn result_vectors_match_python_bytes() {
             &encoded.digest,
         )
         .unwrap();
+        assert_eq!(
+            decode_result_envelope_text(
+                encoded.version,
+                encoded.codec,
+                encoded.content_type,
+                &encoded.payload,
+                &encoded.digest,
+            )
+            .unwrap()
+            .as_bytes(),
+            encoded.payload.as_slice()
+        );
     }
+}
+
+/// The text read of a stored result keeps an integer outside the `i64` and
+/// `u64` range digit for digit; the value read holds it as an `f64`.
+#[test]
+fn the_text_read_of_a_result_keeps_every_digit_of_an_integer() {
+    let text =
+        r#"{"__h_task_result__":true,"ok":340282366920938463463374607431768211456,"err":null}"#;
+    let encoded = encode_result_envelope(text).unwrap();
+    let read = decode_result_envelope_text(
+        encoded.version,
+        encoded.codec,
+        encoded.content_type,
+        &encoded.payload,
+        &encoded.digest,
+    )
+    .unwrap();
+    assert_eq!(read, text);
+    let value = decode_result_envelope(
+        encoded.version,
+        encoded.codec,
+        encoded.content_type,
+        &encoded.payload,
+        &encoded.digest,
+    )
+    .unwrap();
+    assert!(value["ok"].is_f64());
+}
+
+/// The text read refuses what the value read refuses.
+#[test]
+fn the_text_read_of_a_result_refuses_a_text_that_breaks_the_strict_rule() {
+    let payload = br#"{"ok":1,"ok":2}"#;
+    let digest = Sha256::digest(payload);
+    assert!(matches!(
+        decode_result_envelope_text(1, JSON_UTF8_CODEC, JSON_CONTENT_TYPE, payload, &digest),
+        Err(ArchiveDecodeError::Corrupt { .. })
+    ));
 }
 
 #[test]

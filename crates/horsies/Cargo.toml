@@ -20,8 +20,9 @@ cli = [
     "dep:toml",
     "dep:tracing-subscriber",
 ]
-# The axum mount of the core's monitoring handler (`horsies::web`).
-web = ["dep:axum", "dep:futures-util", "horsies-core/web"]
+# The axum mount of the core's monitoring handler (`horsies::web`), and the
+# server of the shipped binary's `horsies web`.
+web = ["dep:axum", "dep:futures-util", "horsies-core/web", "tokio/net"]
 # The rerun adapter for a `tokio_postgres::Transaction`.
 tokio-postgres = ["dep:tokio-postgres"]
 # The rerun adapter for a `sqlx::Transaction<'_, Postgres>`.
@@ -30,6 +31,15 @@ sqlx = ["dep:sqlx"]
 [[bin]]
 name = "horsies"
 path = "src/bin/horsies.rs"
+required-features = ["cli"]
+
+# The tests of the shipped binary run it.
+[[test]]
+name = "web_cli"
+required-features = ["cli"]
+
+[[test]]
+name = "tools_cli"
 required-features = ["cli"]
 
 [dependencies]

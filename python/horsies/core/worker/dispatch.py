@@ -537,6 +537,7 @@ class DispatchMixin:
                         is_workflow_task=is_workflow_task,
                         claim=claim,
                         work=thread_work,
+                        orphan_self_heal=self.cfg.orphan_self_heal(),
                     ),
                     queue_name,
                 )
@@ -554,6 +555,7 @@ class DispatchMixin:
                 is_workflow_task=is_workflow_task,
                 timeout=isolated_timeout,
                 claimed_at=claim.claimed_at,
+                orphan_self_heal=self.cfg.orphan_self_heal(),
             ),
         )
 
@@ -597,6 +599,7 @@ class DispatchMixin:
                 is_workflow_task=is_workflow_task,
                 claim=claim,
                 work=work,
+                orphan_self_heal=self.cfg.orphan_self_heal(),
             ),
         )
         return self._spawn_background(

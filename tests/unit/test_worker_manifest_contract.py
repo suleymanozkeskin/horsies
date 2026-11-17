@@ -22,7 +22,7 @@ from typing import Any, Final, cast
 
 import pytest
 from annotated_types import Ge, Le
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from horsies._catalog import worker_manifest as wire
 from horsies.core.errors import ConfigurationError
@@ -72,13 +72,11 @@ from horsies.core.models.worker_profile import (
     TaskLimit,
     WorkerProfile,
 )
-from horsies.core.types.result import Err, Ok
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.cpu_placement import ParentCpu
 from horsies.core.worker_manifest import (
     CHILD_MAIN_MODULE,
     PRELOAD_MAIN_MODULE,
-    ValueAboveManifestBound,
     current_interpreter_flags,
     drain_timeout_ms,
     execution_of,
@@ -458,17 +456,13 @@ class TestDrainTimeout:
 
 class TestClaim:
     def test_the_default_queue_mode_has_no_queue_list(self) -> None:
-        match worker_claim_manifest(_app_config()):
-            case Ok(claim):
-                assert claim == wire.WorkerClaimManifest(
-                    queues=wire.QueuesDefault(),
-                    prefetch_buffer=0,
-                    claim_lease=wire.ClaimLeaseWorkerDefault(),
-                    max_claim_renew_age_ms=180_000,
-                    cluster_wide_cap=wire.ClusterWideCapNoLimit(),
-                )
-            case Err(above):
-                pytest.fail(f'refused: {above}')
+        assert worker_claim_manifest(_app_config()) == wire.WorkerClaimManifest(
+            queues=wire.QueuesDefault(),
+            prefetch_buffer=0,
+            claim_lease=wire.ClaimLeaseWorkerDefault(),
+            max_claim_renew_age_ms=180_000,
+            cluster_wide_cap=wire.ClusterWideCapNoLimit(),
+        )
 
     def test_custom_queues_keep_their_order_priority_and_limit(self) -> None:
         config = _app_config(
@@ -480,36 +474,32 @@ class TestClaim:
             claim_lease_ms=90_000,
             cluster_wide_cap=20,
         )
-        match worker_claim_manifest(config):
-            case Ok(claim):
-                assert claim == wire.WorkerClaimManifest(
-                    queues=wire.QueuesCustom(
-                        queues=(
-                            wire.CustomQueueManifest(
-                                name='high',
-                                priority=1,
-                                max_concurrency=wire.QueueConcurrencyTasks(tasks=0),
-                            ),
-                            wire.CustomQueueManifest(
-                                name='low',
-                                priority=100,
-                                max_concurrency=wire.QueueConcurrencyNoLimit(),
-                            ),
-                        ),
+        assert worker_claim_manifest(config) == wire.WorkerClaimManifest(
+            queues=wire.QueuesCustom(
+                queues=(
+                    wire.CustomQueueManifest(
+                        name='high',
+                        priority=1,
+                        max_concurrency=wire.QueueConcurrencyTasks(tasks=0),
                     ),
-                    prefetch_buffer=0,
-                    claim_lease=wire.ClaimLeaseMilliseconds(ms=90_000),
-                    max_claim_renew_age_ms=180_000,
-                    cluster_wide_cap=wire.ClusterWideCapTasks(tasks=20),
-                )
-            case Err(above):
-                pytest.fail(f'refused: {above}')
+                    wire.CustomQueueManifest(
+                        name='low',
+                        priority=100,
+                        max_concurrency=wire.QueueConcurrencyNoLimit(),
+                    ),
+                ),
+            ),
+            prefetch_buffer=0,
+            claim_lease=wire.ClaimLeaseMilliseconds(ms=90_000),
+            max_claim_renew_age_ms=180_000,
+            cluster_wide_cap=wire.ClusterWideCapTasks(tasks=20),
+        )
 
     @pytest.mark.parametrize(
         ('overrides', 'path', 'maximum'),
         [
             (
-                {'prefetch_buffer': wire.CLAIM_COUNT_MAX + 1, 'claim_lease_ms': 60_000},
+                {'prefetch_buffer': wire.CLAIM_COUNT_MAX + 1},
                 'prefetch_buffer',
                 wire.CLAIM_COUNT_MAX,
             ),
@@ -519,11 +509,7 @@ class TestClaim:
                 wire.MILLISECONDS_MAX,
             ),
             (
-                # AppConfig keeps the renew age at or above the lease.
-                {
-                    'claim_lease_ms': wire.MILLISECONDS_MAX + 1,
-                    'max_claim_renew_age_ms': wire.MILLISECONDS_MAX + 1,
-                },
+                {'claim_lease_ms': wire.MILLISECONDS_MAX + 1},
                 'claim_lease_ms',
                 wire.MILLISECONDS_MAX,
             ),
@@ -547,15 +533,20 @@ class TestClaim:
             ),
         ],
     )
-    def test_a_value_above_its_manifest_bound_is_refused_with_its_path(
+    def test_a_value_above_its_manifest_bound_is_a_defect_that_names_it(
         self,
         overrides: dict[str, Any],
         path: str,
         maximum: int,
     ) -> None:
-        config = _app_config(**overrides)
-        assert worker_claim_manifest(config) == Err(
-            ValueAboveManifestBound(path=path, value=maximum + 1, maximum=maximum),
+        # AppConfig validation refuses such a value (test_app_config.py,
+        # TestWorkerManifestBounds); model_copy skips validation, so the value
+        # reaches the manifest only through a defect.
+        config = _app_config().model_copy(update=overrides)
+        with pytest.raises(AssertionError) as defect:
+            worker_claim_manifest(config)
+        assert str(defect.value).startswith(
+            f'{path} = {maximum + 1} is above the bound that a worker takes ({maximum})'
         )
 
     def test_the_largest_values_that_fit_are_kept(self) -> None:
@@ -565,22 +556,14 @@ class TestClaim:
             claim_lease_ms=wire.MILLISECONDS_MAX,
             max_claim_renew_age_ms=wire.MILLISECONDS_MAX,
         )
-        match worker_claim_manifest(soft_cap):
-            case Ok(claim):
-                assert claim.prefetch_buffer == wire.CLAIM_COUNT_MAX
-                assert claim.claim_lease == wire.ClaimLeaseMilliseconds(
-                    ms=wire.MILLISECONDS_MAX
-                )
-                assert claim.max_claim_renew_age_ms == wire.MILLISECONDS_MAX
-            case Err(above):
-                pytest.fail(f'refused: {above}')
-        match worker_claim_manifest(_app_config(cluster_wide_cap=wire.TASK_LIMIT_MAX)):
-            case Ok(claim):
-                assert claim.cluster_wide_cap == wire.ClusterWideCapTasks(
-                    tasks=wire.TASK_LIMIT_MAX
-                )
-            case Err(above):
-                pytest.fail(f'refused: {above}')
+        claim = worker_claim_manifest(soft_cap)
+        assert claim.prefetch_buffer == wire.CLAIM_COUNT_MAX
+        assert claim.claim_lease == wire.ClaimLeaseMilliseconds(ms=wire.MILLISECONDS_MAX)
+        assert claim.max_claim_renew_age_ms == wire.MILLISECONDS_MAX
+        capped = worker_claim_manifest(_app_config(cluster_wide_cap=wire.TASK_LIMIT_MAX))
+        assert capped.cluster_wide_cap == wire.ClusterWideCapTasks(
+            tasks=wire.TASK_LIMIT_MAX
+        )
 
 
 class TestDatabase:
@@ -967,51 +950,51 @@ class TestPayload:
         fields = {field.name for field in dataclasses.fields(wire.PayloadManifest)}
         assert set(PayloadPolicy.model_fields) == fields
 
-    def test_the_low_bound_is_the_pydantic_bound(self) -> None:
+    def test_the_bounds_are_the_pydantic_bounds(self) -> None:
         for field in PayloadPolicy.model_fields:
             lower, upper = _pydantic_bounds(PayloadPolicy, field)
-            assert (lower, upper) == ([wire.PAYLOAD_BYTES_MIN], []), field
+            assert (lower, upper) == (
+                [wire.PAYLOAD_BYTES_MIN],
+                [wire.PAYLOAD_BYTES_MAX],
+            ), field
         assert wire.PAYLOAD_BYTES_MAX == 2**64 - 1
 
     def test_none_is_no_limit(self) -> None:
-        assert payload_manifest(PayloadPolicy()) == Ok(
-            wire.PayloadManifest(
-                warn_bytes=wire.PayloadLimitBytes(bytes=1_048_576),
-                reject_bytes=wire.PayloadLimitNoLimit(),
-            ),
+        assert payload_manifest(PayloadPolicy()) == wire.PayloadManifest(
+            warn_bytes=wire.PayloadLimitBytes(bytes=1_048_576),
+            reject_bytes=wire.PayloadLimitNoLimit(),
         )
         config = PayloadPolicy(warn_bytes=None, reject_bytes=wire.PAYLOAD_BYTES_MAX)
-        assert payload_manifest(config) == Ok(
-            wire.PayloadManifest(
-                warn_bytes=wire.PayloadLimitNoLimit(),
-                reject_bytes=wire.PayloadLimitBytes(bytes=wire.PAYLOAD_BYTES_MAX),
-            ),
+        assert payload_manifest(config) == wire.PayloadManifest(
+            warn_bytes=wire.PayloadLimitNoLimit(),
+            reject_bytes=wire.PayloadLimitBytes(bytes=wire.PAYLOAD_BYTES_MAX),
         )
 
-    def test_a_threshold_above_its_bound_stops_the_section(self) -> None:
+    @pytest.mark.parametrize('field', ['warn_bytes', 'reject_bytes'])
+    def test_a_threshold_above_its_bound_is_refused_by_the_model(
+        self, field: str,
+    ) -> None:
+        with pytest.raises(ValidationError) as refused:
+            PayloadPolicy.model_validate({field: wire.PAYLOAD_BYTES_MAX + 1})
+        [error] = refused.value.errors()
+        assert error['loc'] == (field,)
+        assert error['type'] == 'less_than_equal'
+
+    def test_a_threshold_above_its_bound_is_a_defect_that_names_it(self) -> None:
         above = wire.PAYLOAD_BYTES_MAX + 1
-        assert payload_manifest(PayloadPolicy(reject_bytes=above)) == Err(
-            ValueAboveManifestBound(
-                path='payload.reject_bytes',
-                value=above,
-                maximum=wire.PAYLOAD_BYTES_MAX,
-            ),
-        )
-        assert payload_manifest(
-            PayloadPolicy(warn_bytes=above, reject_bytes=above),
-        ) == Err(
-            ValueAboveManifestBound(
-                path='payload.warn_bytes',
-                value=above,
-                maximum=wire.PAYLOAD_BYTES_MAX,
-            ),
+        config = PayloadPolicy().model_copy(update={'reject_bytes': above})
+        with pytest.raises(AssertionError) as defect:
+            payload_manifest(config)
+        assert str(defect.value).startswith(
+            f'payload.reject_bytes = {above} is above the bound that a worker '
+            f'takes ({wire.PAYLOAD_BYTES_MAX})'
         )
 
 
 class TestDocument:
     def _document(self) -> dict[str, Any]:
         config = _app_config(worker_profiles={'batch': _full_profile()})
-        match to_worker_manifest(
+        manifest = to_worker_manifest(
             config,
             profile='batch',
             tasks={
@@ -1020,13 +1003,8 @@ class TestDocument:
             },
             child_launch=_launch(),
             idempotency_reservation_window=WINDOW,
-        ):
-            case Ok(manifest):
-                return cast(
-                    'dict[str, Any]', json.loads(wire.dump_worker_manifest(manifest))
-                )
-            case Err(above):
-                pytest.fail(f'refused: {above}')
+        )
+        return cast('dict[str, Any]', json.loads(wire.dump_worker_manifest(manifest)))
 
     def test_the_document_holds_every_section(self) -> None:
         document = self._document()
@@ -1085,23 +1063,6 @@ class TestDocument:
         assert launch['program']['imports'] == ['app.tasks']
         assert launch['log_level'] == 'INFO'
 
-    def test_a_claim_value_above_its_bound_stops_the_manifest(self) -> None:
-        config = _app_config(cluster_wide_cap=wire.TASK_LIMIT_MAX + 1)
-        result = to_worker_manifest(
-            config,
-            profile=None,
-            tasks={},
-            child_launch=_launch(),
-            idempotency_reservation_window=WINDOW,
-        )
-        assert result == Err(
-            ValueAboveManifestBound(
-                path='cluster_wide_cap',
-                value=wire.TASK_LIMIT_MAX + 1,
-                maximum=wire.TASK_LIMIT_MAX,
-            ),
-        )
-
     def test_the_sections_are_written_in_the_form_the_core_parses(self) -> None:
         document = self._document()
         assert document['recovery']['running_stale_threshold_ms'] == 300_000
@@ -1117,22 +1078,3 @@ class TestDocument:
             'warn_bytes': {'kind': 'BYTES', 'bytes': 1_048_576},
             'reject_bytes': {'kind': 'NO_LIMIT'},
         }
-
-    def test_a_payload_threshold_above_its_bound_stops_the_manifest(self) -> None:
-        config = _app_config(
-            payload=PayloadPolicy(warn_bytes=wire.PAYLOAD_BYTES_MAX + 1),
-        )
-        result = to_worker_manifest(
-            config,
-            profile=None,
-            tasks={},
-            child_launch=_launch(),
-            idempotency_reservation_window=WINDOW,
-        )
-        assert result == Err(
-            ValueAboveManifestBound(
-                path='payload.warn_bytes',
-                value=wire.PAYLOAD_BYTES_MAX + 1,
-                maximum=wire.PAYLOAD_BYTES_MAX,
-            ),
-        )

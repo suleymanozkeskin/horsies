@@ -177,7 +177,10 @@ pub(crate) fn merge_args_from_sync(
 
     insert_args_from_entries(&mut object, args_from_map, dep_results)?;
 
-    Ok(ArgsFromMerge::Merged(serde_json::to_string(&object)?))
+    // The codec's encoder writes each float as Python's `json.dumps` does.
+    Ok(ArgsFromMerge::Merged(crate::core::codec::to_json_string(
+        &object,
+    )?))
 }
 
 /// Insert one `args_from` entry per kwarg of `args_from_map` into `kwargs`.

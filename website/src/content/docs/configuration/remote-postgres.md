@@ -21,7 +21,8 @@ Each worker holds, under load:
 
 ```text
 pool max_size                                           # pool of the worker process
-+ 2                                                     # LISTEN connections (tasks, ping)
++ pool max_size                                         # session pool, when session_database_url differs from database_url
++ 1                                                     # listener: every LISTEN of the worker process
 + 1                                                     # runner heartbeat connection
 + isolated children × isolated.pool max_size            # isolated child pools
 + shared async children × shared_async.pool max_size    # shared async child pools
@@ -33,15 +34,16 @@ Each `max_size` is the resolved value: a `PoolSize`, or the size that
 pool of the worker process, of the profile (see
 [Sizes Derived from the Seats](/horsies/workers/worker-profiles/#sizes-derived-from-the-seats)).
 At defaults (a pool of the worker process of 5 for 8 seats, an isolated pool
-`max_size` of 1) with a profile of 8 isolated children:
+`max_size` of 1) with a profile of 8 isolated children and no
+`session_database_url`:
 
 ```text
-5 + 2 + 1 + 8 × 1 = 16 connections per worker
+5 + 1 + 1 + 8 × 1 = 15 connections per worker
 ```
 
 Task code that sends through the app adds the `task_send_pool` of its child
 kind (default 2) in its child for each event loop that it sends from:
-`8 × 2 = 16` more with one sending loop per child, `32` in all. See
+`8 × 2 = 16` more with one sending loop per child, `31` in all. See
 [Worker Profiles](/horsies/workers/worker-profiles/#connections).
 
 The pool of the worker process writes the outcome of each task. At a high RTT
@@ -63,9 +65,10 @@ connection when it waits for a result. Each pool has a twin of
 Size against the server's effective capacity, not its nominal
 `max_connections`: subtract superuser-reserved slots and any connections
 held by the provider's infrastructure. A managed instance with
-`max_connections=50` and 3 reserved slots fits two workers of 8 isolated
-children on direct connections (`2 × 16 = 32`), not three (`48`). When
-their task code sends, each worker can open 16 more, and one worker fits.
+`max_connections=50` and 3 reserved slots fits three workers of 8 isolated
+children on direct connections (`3 × 15 = 45`), not four (`60`). When
+their task code sends, each worker can open 16 more (`31`), and one worker
+fits.
 
 When workers exhaust the server's slots, connection attempts fail with:
 
@@ -88,8 +91,10 @@ pooling — and set `pgbouncer_transaction_mode` to true. The API is on the clie
 pages: [PgBouncer / Transaction Pooling](/horsies/configuration/broker-connections/#pgbouncer--transaction-pooling)
 (Python) and [PostgresConfig](/horsies/rust/configuration/app-config/#postgresconfig) (Rust).
 
-Direct slots consumed per worker drop to the 2 `LISTEN` connections;
-everything else multiplexes over the pooler's server pool. See
+Direct slots per worker drop to the listener connection and the session
+pool (schema work and partition maintenance) on `session_database_url`: at
+most `1 + pool max_size`. Everything else multiplexes over the pooler's
+server pool. See
 [PgBouncer pool size](/horsies/troubleshooting/pgbouncer/#pool-size) for
 `default_pool_size` and `max_client_conn`, and
 [PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) for

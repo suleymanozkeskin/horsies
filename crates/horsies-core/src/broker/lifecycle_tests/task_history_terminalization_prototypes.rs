@@ -27,13 +27,16 @@ use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::attempt_writes::FinishWorkflowSuccess;
+use crate::broker::core_rows::StatementLog;
 use crate::broker::error::BrokerError;
-use crate::broker::postgres::{PostgresBroker, WorkflowStop};
+use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::terminalization::terminalize_in_tx;
+use crate::broker::workflow_stop_before_start::{stop_before_start, OrphanSelfHeal};
 use crate::core::history::archive::attempts::{encode_attempt_snapshot, AttemptRecord};
 use crate::core::lifecycle::{
-    BatchSize, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
+    BatchSize, OwnedClaim, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
     WorkflowSuccessOutcome,
 };
 
@@ -332,10 +335,19 @@ async fn coupled_node_failure_rolls_back_history_and_live_delete() {
     .await;
     let workflow_id = link_workflow_task(&pool, task_id, "COMPLETED", "PAUSED").await;
 
-    let _stopped = PostgresBroker::from_pool(pool.clone())
-        .stop_workflow_task_before_start(task_id, WorkflowStop::Paused, WORKER, generation())
-        .await
-        .expect("stop before start");
+    let _stopped = stop_before_start(
+        &core_pool_for_test_pool(&pool),
+        StatementLog::Off,
+        task_id,
+        &OwnedClaim {
+            worker_id: WORKER.to_owned(),
+            claimed_at: generation(),
+        },
+        OrphanSelfHeal::Off,
+        crate::broker::child_writes::WriteDeadline::start_attempt(),
+    )
+    .await
+    .expect("stop before start");
 
     assert_eq!(
         node_state(&pool, workflow_id).await,

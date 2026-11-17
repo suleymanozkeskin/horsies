@@ -94,7 +94,7 @@ fn prepared_schedules(schedule_name: &str, task_name: &str) -> PreparedSchedules
         schedule_name.to_owned(),
         ScheduleSendFacts {
             queue_name: "default".to_owned(),
-            task_options: options.serialize_retry_options(),
+            task_options: Some(options.stored_options_text()),
         },
     )])
 }

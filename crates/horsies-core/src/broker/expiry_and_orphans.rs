@@ -27,10 +27,11 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use crate::broker::child_writes::WriteDeadline;
 use crate::broker::core_rows::{column, one_row, roll_back, StatementLog};
 use crate::broker::error::BrokerError;
 use crate::broker::terminalization::{
-    terminalize, terminalize_and_commit_if, terminalize_in_core_transaction,
+    terminalize, terminalize_and_commit_if, terminalize_in_core_transaction, terminalize_within,
 };
 use crate::core::lifecycle::{
     AttemptWriteRefusal, BatchSize, ObservedTaskState, OwnedClaim, TerminalizationCommand,
@@ -376,23 +377,27 @@ fn orphan_audit_page(
 
 /// Expire one CLAIMED row whose deadline passed before its start
 /// (`horsies_expire_owned_claim`, Python `_expire_claimed_task_before_start`):
-/// one statement alone on `pool`, checked out as reserved work. The fence is
-/// the worker, not the claim generation: once the deadline passed, the
-/// expiry is right for every generation of this worker. A row whose deadline
-/// has not passed is refused with the `DEADLINE` guard; any other row is
-/// refused as the shared miss classifier says. The stored error is Python's
+/// one statement alone on `pool`, as a child write within `deadline`, the
+/// deadline of the start attempt whose miss path it is
+/// ([`crate::broker::child_writes::query_within`]). The fence is the worker,
+/// not the claim generation: once the deadline passed, the expiry is right
+/// for every generation of this worker. A row whose deadline has not passed
+/// is refused with the `DEADLINE` guard; any other row is refused as the
+/// shared miss classifier says. The stored error is Python's
 /// ([`prestart_expiry_result`]).
 ///
 /// Errors: [`BrokerError::Serialization`] for the stored result (nothing
-/// sent); [`BrokerError::Statement`] (nothing written, or `OutcomeUnknown`:
-/// the same call sent again reports a committed expiry as `AlreadyApplied`);
-/// [`BrokerError::TerminalizationContract`] for a row outside the wire
-/// contract.
+/// sent); [`BrokerError::Statement`] (nothing sent when `deadline` passed
+/// first; nothing written, a cancel at the bound included; or
+/// `OutcomeUnknown`: the same call sent again reports a committed expiry as
+/// `AlreadyApplied`); [`BrokerError::TerminalizationContract`] for a row
+/// outside the wire contract.
 pub(crate) async fn expire_owned_claim(
     pool: &CorePool,
     log: StatementLog,
     task_id: Uuid,
     worker_id: &str,
+    deadline: WriteDeadline,
 ) -> Result<TaskRowEnd, BrokerError> {
     let command = TerminalizationCommand::ExpireOwnedClaim {
         task_id,
@@ -402,7 +407,10 @@ pub(crate) async fn expire_owned_claim(
         result_json: prestart_expiry_result(task_id, worker_id)?,
         error_code: EXPIRY_ERROR_CODE.to_owned(),
     };
-    single_row_end(terminalize(pool, log, &command).await?, task_id)
+    single_row_end(
+        terminalize_within(pool, log, &command, deadline).await?,
+        task_id,
+    )
 }
 
 /// Cancel one CLAIMED workflow task that `fence` holds and that no runnable

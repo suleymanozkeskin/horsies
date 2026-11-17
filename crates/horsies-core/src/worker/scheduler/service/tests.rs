@@ -720,7 +720,7 @@ async fn a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task() {
     };
     let facts = ScheduleSendFacts {
         queue_name: "default".to_owned(),
-        task_options: options.serialize_retry_options(),
+        task_options: Some(options.stored_options_text()),
     };
     let database_now = database_time(&pool).await;
     let slot = database_now - chrono::Duration::seconds(1);

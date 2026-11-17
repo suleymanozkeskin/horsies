@@ -75,6 +75,8 @@ mod start_tests;
 #[cfg(test)]
 mod stop_and_loss_tests;
 #[cfg(test)]
+mod stored_form_vector_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod timeout_order_tests;
@@ -89,6 +91,10 @@ pub use budgets::{
     isolated_capacity, shared_capacity, BudgetCapacity, FreeCapacity, PoolService,
     SharedSlotService, SlotService,
 };
+// Whether the stop before start of a workflow task cancels the task when no
+// node links it live (the app's `auto_terminate_orphaned_workflow_tasks`).
+// Each run frame of a pool carries it.
+pub use crate::broker::OrphanSelfHeal;
 pub use defects::{SlotDefect, SLOT_DEFECT_LIMIT};
 pub use dispatch::{
     AttemptEnd, CancelEnd, Claimed, ClaimedTask, ExecutionClass, LoopKillCode, NotRunCause,
@@ -96,7 +102,7 @@ pub use dispatch::{
 };
 #[cfg(test)]
 pub(crate) use outcome::test_successes;
-pub use outcome::{OrphanSelfHeal, OutcomeWriter};
+pub use outcome::OutcomeWriter;
 pub use pool::{
     ExitNotSeen, IsolatedPool, IsolatedPoolConfig, MemoryLimit, PoolStopReport, Submitted,
     TaskLimit,

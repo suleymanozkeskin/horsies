@@ -34,19 +34,18 @@ pub struct RawResultRecordRecord {
 }
 
 impl RawResultRecordRecord {
-    /// The record of a core `RawResultRecord`. Fails only when the envelope
-    /// does not serialize, which a value read from JSON cannot do.
-    fn from_core(record: RawResultRecord) -> Result<Self, serde_json::Error> {
-        let result_json = match &record.raw_result {
-            Some(envelope) => Some(serde_json::to_string(envelope)?),
-            None => None,
-        };
-        Ok(Self {
+    /// The record of a core `RawResultRecord`: the envelope text as the row
+    /// stores it, so an integer outside the `i64` and `u64` range keeps
+    /// every digit.
+    fn from_core(record: RawResultRecord) -> Self {
+        Self {
             task_id: record.task_id,
             task_name: record.task_name,
             status: record.status.wire_value().to_owned(),
-            result_json,
-        })
+            result_json: record
+                .raw_result
+                .map(|envelope| envelope.as_str().to_owned()),
+        }
     }
 }
 
@@ -98,14 +97,9 @@ fn read_outcome(
     read: Result<RawResultRead, horsies_core::BrokerOperationError>,
 ) -> RawResultOutcome {
     match read {
-        Ok(RawResultRead::Found(record)) => match RawResultRecordRecord::from_core(record) {
-            Ok(found) => RawResultOutcome::Found(found),
-            Err(error) => RawResultOutcome::Failed(BrokerFailure {
-                code: BrokerErrorCode::InvalidJsonPayload.to_string(),
-                message: format!("the stored result of task {task_id} does not serialize: {error}"),
-                retryable: false,
-            }),
-        },
+        Ok(RawResultRead::Found(record)) => {
+            RawResultOutcome::Found(RawResultRecordRecord::from_core(record))
+        }
         Ok(RawResultRead::Absent { reason: _ }) => {
             RawResultOutcome::Absent(RawResultAbsent { task_id })
         }
@@ -141,8 +135,7 @@ pub async fn raw_result_record_operation(
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::{BrokerOperationError, TaskAbsenceReason, TaskStatus};
-    use serde_json::{Map, Value};
+    use horsies_core::{BrokerOperationError, StoredEnvelopeText, TaskAbsenceReason, TaskStatus};
 
     use super::*;
 
@@ -152,8 +145,9 @@ mod tests {
 
     #[test]
     fn a_terminal_task_gives_its_status_and_envelope() {
-        let mut envelope = Map::new();
-        let _absent_before = envelope.insert("ok".to_owned(), Value::from(3));
+        let envelope = StoredEnvelopeText::parse(r#"{"ok":3}"#.to_owned())
+            .expect("the text is strict JSON")
+            .expect("an object is an envelope text");
         let RawResultOutcome::Found(found) = read_outcome(
             task(),
             Ok(RawResultRead::Found(RawResultRecord {

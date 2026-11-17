@@ -8,7 +8,7 @@
 //! claim (`outcome::worker_failure_write`, `task_error_write`,
 //! `killed_child_write`, `timeout_write`); those are tested here without a
 //! database. The ends whose decision is a statement choice (fused or locked
-//! success, the orphan cancel, the replay of phase 2, the serialization
+//! success, the replay of phase 2, the serialization
 //! failure) are tested through [`OutcomeWriter::settle`] on a migrated
 //! database, by the rows they leave.
 
@@ -271,12 +271,6 @@ const RUNNING_WORKFLOW_TASK: Seed = Seed {
     deadline: Deadline::NotSet,
 };
 
-const CLAIMED_WORKFLOW_TASK: Seed = Seed {
-    held: Held::Claimed,
-    kind: TaskKind::WorkflowTask,
-    deadline: Deadline::NotSet,
-};
-
 const CLAIMED_WORKFLOW_TASK_PAST_ITS_DEADLINE: Seed = Seed {
     held: Held::Claimed,
     kind: TaskKind::WorkflowTask,
@@ -384,7 +378,7 @@ fn claimed(task_id: Uuid, queue: &str, generation: DateTime<Utc>, kind: TaskKind
 }
 
 /// The outcome writer of [`WORKER`] on `pool`.
-fn writer(pool: &PgPool, orphan_self_heal: OrphanSelfHeal) -> OutcomeWriter {
+fn writer(pool: &PgPool) -> OutcomeWriter {
     let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
     let successes = test_successes(&broker, WORKER);
     OutcomeWriter::new(
@@ -396,7 +390,6 @@ fn writer(pool: &PgPool, orphan_self_heal: OrphanSelfHeal) -> OutcomeWriter {
         PayloadPolicy::default(),
         RetentionConfig::default(),
         successes,
-        orphan_self_heal,
     )
 }
 
@@ -408,14 +401,6 @@ fn stopped(reason: StopReason) -> AttemptEnd {
 /// channel limit.
 fn test_queue() -> String {
     format!("report_{}", &Uuid::new_v4().simple().to_string()[..8])
-}
-
-async fn live_row(pool: &PgPool, task_id: Uuid) -> Option<serde_json::Value> {
-    sqlx::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
-        .bind(task_id)
-        .fetch_optional(pool)
-        .await
-        .expect("read the live row")
 }
 
 /// The terminal facts of a history row: status, terminalization kind, error
@@ -549,7 +534,7 @@ async fn an_undecodable_result_fails_the_task_as_a_serialization_error_with_no_r
     let (task_id, generation) = seed_task(&pool, &queue, RUNNING_PLAIN).await;
     let envelope = ResultEnvelopeText::new("{not an envelope".to_owned());
 
-    let settled = writer(&pool, OrphanSelfHeal::On)
+    let settled = writer(&pool)
         .settle(
             &claimed(task_id, &queue, generation, TaskKind::Plain),
             AttemptEnd::Reported(RunEnd::Result(envelope)),
@@ -591,7 +576,11 @@ async fn an_expired_workflow_task_replays_its_phase_two() {
         seed_task(&pool, &queue, CLAIMED_WORKFLOW_TASK_PAST_ITS_DEADLINE).await;
     let workflow_id = seed_workflow(&pool, task_id, &queue, "ENQUEUED").await;
     let expired = PostgresBroker::from_pool(pool.clone())
-        .expire_claimed_task_before_start(task_id, WORKER)
+        .expire_claimed_task_before_start(
+            task_id,
+            WORKER,
+            crate::broker::child_writes::WriteDeadline::start_attempt(),
+        )
         .await
         .expect("the expiry that the child writes");
     assert_eq!(expired, PrestartExpiry::Expired);
@@ -600,7 +589,7 @@ async fn an_expired_workflow_task_replays_its_phase_two() {
         ("ENQUEUED".to_owned(), true)
     );
 
-    let settled = writer(&pool, OrphanSelfHeal::On)
+    let settled = writer(&pool)
         .settle(
             &claimed(task_id, &queue, generation, TaskKind::WorkflowTask),
             stopped(StopReason::TaskExpired),
@@ -616,35 +605,6 @@ async fn an_expired_workflow_task_replays_its_phase_two() {
     remove_workflow(&pool, workflow_id).await;
 }
 
-/// Python `TestOrphanedWorkflowTask::test_orphan_cancel_fences_on_the_dispatched_generation`:
-/// the cancel of an orphan is fenced on the claim generation of its
-/// dispatch. A row that the same worker claimed again (another generation)
-/// is not touched, and no history row is written.
-#[tokio::test]
-#[serial]
-async fn the_orphan_cancel_leaves_a_claim_of_another_generation() {
-    let pool = migrated_pool().await;
-    let queue = test_queue();
-    let (task_id, generation) = seed_task(&pool, &queue, CLAIMED_WORKFLOW_TASK).await;
-    let before = live_row(&pool, task_id).await;
-    let dispatched = claimed(
-        task_id,
-        &queue,
-        generation - chrono::Duration::microseconds(1),
-        TaskKind::WorkflowTask,
-    );
-
-    // The settlement of a refused cancel is not the subject here; the rows
-    // are.
-    let _settled = writer(&pool, OrphanSelfHeal::On)
-        .settle(&dispatched, stopped(StopReason::NodeNotLinked))
-        .await;
-
-    assert_eq!(live_row(&pool, task_id).await, before);
-    assert_eq!(history_facts(&pool, task_id).await, None);
-    remove_task(&pool, task_id).await;
-}
-
 /// Python `TestSuccess::test_plain_task_completion_fuses_and_wakes_capacity`:
 /// the success of a plain task owes nothing after its write, so it ends in
 /// the fused write (`COMPLETE_FUSED`), which sends one capacity wake on the
@@ -657,7 +617,7 @@ async fn a_plain_success_completes_in_the_fused_write_and_wakes_its_queue() {
     let (task_id, generation) = seed_task(&pool, &queue, RUNNING_PLAIN).await;
     let mut listener = listen_on_queue(&pool, &queue).await;
 
-    let settled = writer(&pool, OrphanSelfHeal::On)
+    let settled = writer(&pool)
         .settle(
             &claimed(task_id, &queue, generation, TaskKind::Plain),
             AttemptEnd::Reported(RunEnd::Result(ok_envelope(42))),
@@ -691,7 +651,7 @@ async fn a_workflow_success_completes_in_the_locked_write_and_finishes_its_node(
     let (task_id, generation) = seed_task(&pool, &queue, RUNNING_WORKFLOW_TASK).await;
     let workflow_id = seed_workflow(&pool, task_id, &queue, "RUNNING").await;
 
-    let settled = writer(&pool, OrphanSelfHeal::On)
+    let settled = writer(&pool)
         .settle(
             &claimed(task_id, &queue, generation, TaskKind::WorkflowTask),
             AttemptEnd::Reported(RunEnd::Result(ok_envelope(7))),
