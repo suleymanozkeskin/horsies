@@ -52,8 +52,9 @@ fn node_options_refused(
     ))
 }
 
-/// The deadline that a node's `task_options` store, for the node row and the
-/// task row minted from it.
+/// The deadline that a workflow start writes on a task node row and on the
+/// task row of a root, read from the node's merged `task_options`
+/// ([`merge_good_until_into_options`]).
 ///
 /// - No options, no `good_until` key, or `null`: no deadline.
 /// - An RFC 3339 text: that time. The core writes this form
@@ -64,10 +65,14 @@ fn node_options_refused(
 ///   not strict JSON, or is not an object), a `good_until` that is not text,
 ///   or text that is not an RFC 3339 time. No deadline is guessed.
 ///
-/// Python passes the text to the database, which refuses what it cannot
-/// read (`horsies/core/workflows/lifecycle.py:192-193`,
-/// `horsies/core/workflows/engine.py:792-795`); the core reads it here,
-/// before any statement. Pure.
+/// The options of a start come from the task function, and the start reads
+/// them here, before any statement (Python passes the text to the database,
+/// which refuses what it cannot read, `horsies/core/workflows/lifecycle.py:181-183`).
+/// A promotion or a recovery case reads the stored copy of the options
+/// instead: its task insert casts the stored `good_until` text, as
+/// `horsies_workflow_node_tasks_insert` does, and a text that the database
+/// cannot read raises from that insert (`horsies/core/workflows/engine.py:831-835`).
+/// Pure.
 pub(crate) fn node_good_until(
     task_index: impl std::fmt::Display,
     task_name: &str,

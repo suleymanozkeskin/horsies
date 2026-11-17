@@ -621,12 +621,57 @@ fn resolve_insert_priority(node: &AnyNode) -> Result<i32, WorkflowError> {
     })
 }
 
+/// Why the child start of the engine code ([`start_child_workflow_in_tx`]) did not write the child.
+///
+/// Python fails the parent node while it prepares the child (`enqueue_subworkflow_task`,
+/// `horsies/core/workflows/engine.py:1045-1260`, `:1370-1425`): the depth limit, the definition
+/// load, the `args_from` merge, the build, and the queue of a child node. The callers here check
+/// those before the start (the build resolves the queues). Once the child
+/// spec is built, a child that the start cannot write raises, and the caller's transaction rolls
+/// back: task options of the task function that do not parse (`_child_task_options_json` and
+/// `start_task_node_facts`, `:425-475`, `:1399-1401`, `:1430-1437`), a value that does not
+/// serialize, a database error. The child start through `horsies_workflow_child_start` treats a
+/// child tree that it cannot write the same way (`child_start::run_child_starts`).
+#[derive(Debug)]
+pub(crate) enum ChildStartStop {
+    /// A sub-workflow root of the child cannot start: it would pass the depth limit, its definition
+    /// is not registered, or its build failed. This start writes no failed-node record for it, so the
+    /// parent node fails instead. The error is split as
+    /// [`crate::workflow_engine::engine::PreparationStop`] splits a `WorkflowError`. (Python fails
+    /// the root node inside the child.)
+    RootSubworkflowNotStarted(WorkflowError),
+    /// Every other failure: an error of the caller's step.
+    Failed(WorkflowError),
+}
+
+/// A `WorkflowError` of the child start is an error of the caller's step.
+impl From<WorkflowError> for ChildStartStop {
+    fn from(error: WorkflowError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<sqlx::Error> for ChildStartStop {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Failed(WorkflowError::Database(error))
+    }
+}
+
+impl From<serde_json::Error> for ChildStartStop {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Failed(WorkflowError::Serialization(error))
+    }
+}
+
 /// Insert all workflow_task rows. Root tasks (no deps) are marked READY
 /// and immediately enqueued into horsies_tasks. Root sub-workflow nodes
 /// are detected and launched as child workflows.
 ///
 /// `workflow_sent_at` is the start call time of the workflow (its stored `sent_at`); every root task row
 /// stores it as its own `sent_at`.
+///
+/// Errors: [`ChildStartStop`]. Task options that do not parse or merge with the node's deadline are
+/// [`ChildStartStop::Failed`], as every failure is except a sub-workflow root that cannot start.
 ///
 /// Returns a boxed future because this function is mutually recursive with
 /// `launch_root_subworkflow` → `start_child_workflow_in_tx`.
@@ -637,7 +682,7 @@ fn insert_workflow_tasks<'a>(
     tasks: &'a [AnyNode],
     registry: &'a WorkflowSpecRegistry,
     retention: &'a RetentionConfig,
-) -> Pin<Box<dyn Future<Output = Result<(), WorkflowError>> + Send + 'a>> {
+) -> Pin<Box<dyn Future<Output = Result<(), ChildStartStop>> + Send + 'a>> {
     Box::pin(async move {
         if tasks.is_empty() {
             return Ok(());
@@ -929,13 +974,17 @@ async fn enqueue_root_task(
 ///
 /// Resolves the spec from the registry and starts the child workflow,
 /// linking the parent workflow_task to it.
+///
+/// Errors: a child past the depth limit, or a child that cannot be built, is
+/// [`ChildStartStop::RootSubworkflowNotStarted`]; the errors of its own start
+/// are passed on unchanged.
 async fn launch_root_subworkflow(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workflow_id: Uuid,
     task: &AnyNode,
     registry: &WorkflowSpecRegistry,
     retention: &RetentionConfig,
-) -> Result<(), WorkflowError> {
+) -> Result<(), ChildStartStop> {
     let spec_name = task
         .task_name
         .strip_prefix("__sub_workflow:")
@@ -957,7 +1006,9 @@ async fn launch_root_subworkflow(
         &depth_row.name,
         task.index as i32,
     )
-    .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+    .map_err(|error| {
+        ChildStartStop::RootSubworkflowNotStarted(WorkflowError::Validation(error.to_string()))
+    })?;
 
     // Build the child spec (supports dynamic parameterization if a builder is registered).
     let child_spec = build_child_spec(
@@ -965,7 +1016,8 @@ async fn launch_root_subworkflow(
         task.sub_definition_key.as_deref(),
         task,
         registry,
-    )?;
+    )
+    .map_err(ChildStartStop::RootSubworkflowNotStarted)?;
 
     // Start the child workflow within the same transaction.
     let child_id = start_child_workflow_in_tx(
@@ -1005,9 +1057,15 @@ async fn launch_root_subworkflow(
 
 /// Start a child workflow within an existing transaction.
 ///
-/// Used by `launch_root_subworkflow` and `enqueue_subworkflow_task` to keep
-/// child creation + parent link inside a single transaction.
-pub async fn start_child_workflow_in_tx(
+/// Used by `launch_root_subworkflow`, `enqueue_subworkflow_task` and recovery
+/// case 1.5 to keep child creation + parent link inside a single transaction.
+///
+/// Errors: [`ChildStartStop`]. Only a sub-workflow root of the child that
+/// cannot start refuses the parent node; every other failure (task options of
+/// the task function that do not parse or do not merge with the node's
+/// deadline, a database error) is an error of the caller's step. Nothing is
+/// committed here: the caller rolls its transaction back.
+pub(crate) async fn start_child_workflow_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     spec: &WorkflowSpec,
     parent_workflow_id: Uuid,
@@ -1016,7 +1074,7 @@ pub async fn start_child_workflow_in_tx(
     root_workflow_id: Uuid,
     registry: &WorkflowSpecRegistry,
     retention: &RetentionConfig,
-) -> Result<Uuid, WorkflowError> {
+) -> Result<Uuid, ChildStartStop> {
     let child_id = Uuid::new_v4();
     let sent_at = chrono::Utc::now();
     require_subworkflow_node_keys(spec)?;
@@ -1546,6 +1604,39 @@ mod tests {
                  and the limit is 32 (workflow deep_parent:4)"
             )
         );
+    }
+
+    /// Only a sub-workflow root of the child that cannot start refuses the parent node. Every other
+    /// failure of the engine code's child start is an error of the step, as Python raises it: an
+    /// options merge that fails, for example (`_child_task_options_json`,
+    /// `horsies/core/workflows/engine.py:425-475`). A `?` on a `WorkflowError` inside the start takes
+    /// the second form.
+    #[test]
+    fn only_a_root_sub_workflow_that_cannot_start_refuses_the_parent_node() {
+        use crate::workflow_engine::engine::{NodeRefusal, PreparationStop};
+
+        let refused = PreparationStop::from(ChildStartStop::RootSubworkflowNotStarted(
+            WorkflowError::Validation("depth limit".to_owned()),
+        ));
+        assert!(matches!(
+            refused,
+            PreparationStop::Refused(NodeRefusal::NotPrepared(ref message))
+                if message == "depth limit"
+        ));
+
+        let raised = PreparationStop::from(ChildStartStop::Failed(WorkflowError::Validation(
+            "options merge refused".to_owned(),
+        )));
+        assert!(matches!(
+            raised,
+            PreparationStop::Failed(WorkflowError::Validation(ref message))
+                if message == "options merge refused"
+        ));
+
+        assert!(matches!(
+            ChildStartStop::from(WorkflowError::Validation("unresolved queue".to_owned())),
+            ChildStartStop::Failed(WorkflowError::Validation(_))
+        ));
     }
 
     /// A builder error takes the Python class of its error category; an error with no code takes
