@@ -219,6 +219,7 @@ export default defineConfig({
 							label: 'Configuration',
 							items: [
 								{ label: 'App Config', slug: 'configuration/app-config' },
+								{ label: 'Broker Connections', slug: 'configuration/broker-connections' },
 							],
 						},
 						{

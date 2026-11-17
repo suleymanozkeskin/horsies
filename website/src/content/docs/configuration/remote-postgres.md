@@ -58,7 +58,7 @@ only sends and reads results can open 15 at the defaults, and 1 listener
 connection when it waits for a result. Each pool has a twin of
 `pool_size + max_overflow` on `session_database_url` when that URL differs
 (see
-[Connection Ceiling](/horsies/configuration/broker-config/#connection-ceiling)).
+[Connection Ceiling](/horsies/configuration/broker-connections/#connection-ceiling)).
 
 Size against the server's effective capacity, not its nominal
 `max_connections`: subtract superuser-reserved slots and any connections
