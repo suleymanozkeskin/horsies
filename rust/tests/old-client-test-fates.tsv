@@ -1,5 +1,5 @@
 # One fate for every test function of the old rust/tests crates (#1410).
-# fate: PORTED (detail: the new test), COVERED_BY_CORE (detail: the core test), DELETED (detail: the decision or the covering test), TO_PORT (detail: the issue that ports it).
+# fate: PORTED (detail: the new test), COVERED_BY_CORE (detail: the core test), DELETED (detail: the decision or the covering test).
 file	test	fate	detail
 worker/tests/layer0_migration_isolation.rs	horsies_migrate_does_not_write_to_sqlx_migrations	DELETED	clean-slate baseline: the install writes no sqlx table; horsies-core broker::migrations::tests::an_empty_database_gets_the_chain_the_guard_row_and_the_family
 worker/tests/layer0_migration_isolation.rs	horsies_migrate_on_clean_db_does_not_create_sqlx_table	DELETED	clean-slate baseline: the install writes no sqlx table; horsies-core broker::migrations::tests::an_empty_database_gets_the_chain_the_guard_row_and_the_family
@@ -191,15 +191,15 @@ worker/tests/layer6_workflow_advanced.rs	test_cancel_cancels_running_backing_tas
 worker/tests/layer6_workflow_advanced.rs	test_cancel_makes_queued_backing_task_unclaimable	COVERED_BY_CORE	horsies-core workflow_engine::port_tests::pause_resume_cancel::cancel_leaves_no_queueable_node_and_moves_the_root_task_to_history
 worker/tests/layer6_workflow_advanced.rs	test_backing_task_lock_blocks_concurrent_claim	COVERED_BY_CORE	horsies-core workflow_engine::port_tests::pause_resume_cancel::a_claim_cannot_take_a_task_while_its_cancel_is_uncommitted
 worker/tests/layer6_workflow_advanced.rs	test_cancel_cascades_to_child_workflow	PORTED	worker/tests/layer6_workflow_advanced.rs::test_cancel_cascades_to_child_workflow
-worker/tests/layer7_subworkflows.rs	subworkflow_success_full_surface_matrix	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
-worker/tests/layer7_subworkflows.rs	subworkflow_failure_fail_policy_preserves_error_everywhere	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
-worker/tests/layer7_subworkflows.rs	subworkflow_failure_pause_policy_preserves_error_after_resume	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
-worker/tests/layer7_subworkflows.rs	successful_subworkflow_is_available_through_workflow_ctx	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
-worker/tests/layer7_subworkflows.rs	failed_subworkflow_flows_through_args_from_and_workflow_ctx	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
-worker/tests/layer7_subworkflows.rs	outputless_success_policy_keeps_failed_subworkflow_result	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
-worker/tests/layer7_subworkflows.rs	parallel_subworkflows_preserve_independent_success_and_failure	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
-worker/tests/layer7_subworkflows.rs	nested_subworkflow_success_records_depth_root_and_result	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
-worker/tests/layer7_subworkflows.rs	nested_subworkflow_failure_surfaces_each_child_error	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
-worker/tests/layer7_subworkflows.rs	subworkflow_build_with_args_from_receives_typed_task_result	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
-worker/tests/layer7_subworkflows.rs	subworkflow_allow_failed_deps_passes_failed_task_result_to_build_with	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
-worker/tests/layer7_subworkflows.rs	subworkflow_static_kwargs_preserve_build_with_types	TO_PORT	#1754; the old test is at worker/old/layer7_subworkflows.rs
+worker/tests/layer7_subworkflows.rs	subworkflow_success_full_surface_matrix	PORTED	worker/tests/layer7_subworkflows.rs::test_subworkflow_success_full_surface_matrix
+worker/tests/layer7_subworkflows.rs	subworkflow_failure_fail_policy_preserves_error_everywhere	PORTED	worker/tests/layer7_subworkflows.rs::test_subworkflow_failure_fail_policy_preserves_error_everywhere
+worker/tests/layer7_subworkflows.rs	subworkflow_failure_pause_policy_preserves_error_after_resume	PORTED	worker/tests/layer7_subworkflows.rs::test_subworkflow_failure_pause_policy_preserves_error_after_resume
+worker/tests/layer7_subworkflows.rs	successful_subworkflow_is_available_through_workflow_ctx	PORTED	worker/tests/layer7_subworkflows.rs::test_successful_subworkflow_is_available_through_workflow_ctx
+worker/tests/layer7_subworkflows.rs	failed_subworkflow_flows_through_args_from_and_workflow_ctx	PORTED	worker/tests/layer7_subworkflows.rs::test_failed_subworkflow_flows_through_args_from_and_workflow_ctx
+worker/tests/layer7_subworkflows.rs	outputless_success_policy_keeps_failed_subworkflow_result	PORTED	worker/tests/layer7_subworkflows.rs::test_outputless_success_policy_keeps_failed_subworkflow_result
+worker/tests/layer7_subworkflows.rs	parallel_subworkflows_preserve_independent_success_and_failure	PORTED	worker/tests/layer7_subworkflows.rs::test_parallel_subworkflows_preserve_independent_success_and_failure
+worker/tests/layer7_subworkflows.rs	nested_subworkflow_success_records_depth_root_and_result	PORTED	worker/tests/layer7_subworkflows.rs::test_nested_subworkflow_success_records_depth_root_and_result
+worker/tests/layer7_subworkflows.rs	nested_subworkflow_failure_surfaces_each_child_error	PORTED	worker/tests/layer7_subworkflows.rs::test_nested_subworkflow_failure_surfaces_each_child_error
+worker/tests/layer7_subworkflows.rs	subworkflow_build_with_args_from_receives_typed_task_result	PORTED	worker/tests/layer7_subworkflows.rs::test_subworkflow_build_with_args_from_receives_typed_task_result
+worker/tests/layer7_subworkflows.rs	subworkflow_allow_failed_deps_passes_failed_task_result_to_build_with	PORTED	worker/tests/layer7_subworkflows.rs::test_subworkflow_allow_failed_deps_passes_failed_task_result_to_build_with
+worker/tests/layer7_subworkflows.rs	subworkflow_static_kwargs_preserve_build_with_types	PORTED	worker/tests/layer7_subworkflows.rs::test_subworkflow_static_kwargs_preserve_build_with_types
