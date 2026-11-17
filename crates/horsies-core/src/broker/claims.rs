@@ -368,12 +368,18 @@ fn decode_claimed_row(row: ClaimWireRow) -> Result<ClaimedRow, String> {
         return Err("a CLAIMED row of horsies_claim carries short_by".to_owned());
     }
     let required = |name: &str| format!("a CLAIMED row of horsies_claim has no {name}");
+    let id = row.id.ok_or_else(|| required("id"))?;
     let execution_text = row.execution.ok_or_else(|| required("execution"))?;
+    // Python `parse_row_class` (`horsies/core/worker/row_class.py:75-88`):
+    // the refusal names the task and the stored value.
     let execution = Execution::from_stored(&execution_text).ok_or_else(|| {
-        format!("a CLAIMED row of horsies_claim has execution {execution_text:?}")
+        format!(
+            "a CLAIMED row of horsies_claim: claimed task {id} has execution \
+             {execution_text:?}, which is not an Execution value"
+        )
     })?;
     Ok(ClaimedRow {
-        id: row.id.ok_or_else(|| required("id"))?,
+        id,
         task_name: row.task_name.ok_or_else(|| required("task_name"))?,
         queue_name: row.queue_name.ok_or_else(|| required("queue_name"))?,
         input: row.input.ok_or_else(|| required("input"))?,
