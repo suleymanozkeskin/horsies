@@ -57,6 +57,18 @@ impl BrokerConnection {
             .map(Arc::clone)
     }
 
+    /// The connected broker, with the schema installed once per handle
+    /// first ([`PostgresBroker::ensure_schema_initialized`]: nothing in an
+    /// `OBSERVE_ONLY` or `ASSUME_INITIALIZED` handle), as Python's broker
+    /// installs at its first enqueue or read. A failure of the connect or
+    /// of the install is returned and not kept, so the next call runs it
+    /// again.
+    pub async fn initialized_broker(&self) -> Result<Arc<PostgresBroker>, BrokerError> {
+        let broker = self.broker().await?;
+        broker.ensure_schema_initialized().await?;
+        Ok(broker)
+    }
+
     /// The schema mode of the handle's manifest.
     pub fn schema_mode(&self) -> SchemaMode {
         self.manifest.schema
@@ -477,7 +489,9 @@ impl CoreHandle {
     }
 
     /// The info of one task: `TaskInfoRecord`, `TaskInfoNotFound`, or
-    /// `BrokerFailure` with `TASK_INFO_QUERY_FAILED`. Reads only.
+    /// `BrokerFailure` with `TASK_INFO_QUERY_FAILED` or
+    /// `INVALID_JSON_PAYLOAD`. Installs the schema once per handle first;
+    /// then reads only.
     #[pyo3(signature = (task_id, *, include_result, include_failed_reason, include_attempts))]
     fn task_info(
         &self,

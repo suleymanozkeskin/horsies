@@ -363,7 +363,7 @@ const CORE_HANDLE_METHODS: [StubFunction; 21] = [
         name: "task_info",
         parameters: TASK_INFO_PARAMETERS,
         returns: TypeText::Plain(TASK_INFO_OUTCOME),
-        doc: "The info of one task. Reads only.",
+        doc: "The info of one task. Installs the schema once per handle first; then reads only.",
     },
     StubFunction {
         name: "task_info_async",
@@ -671,7 +671,7 @@ const RECORD_CLASSES: [StubClass; 53] = [
     },
     StubClass {
         name: "TaskInfoRecord",
-        doc: "The metadata of one task, with the fields of TaskInfo. result_json is the\nstored result envelope as JSON text.",
+        doc: "The metadata of one task, with the fields of TaskInfo. result_json is the\nstored result envelope as JSON text; execution is None for a task read from history.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("task_id", "uuid.UUID"),
@@ -698,6 +698,10 @@ const RECORD_CLASSES: [StubClass; 53] = [
             property("failed_reason", "str | None"),
             property("result_json", "str | None"),
             property("attempts", "list[TaskAttemptRecord] | None"),
+            property(
+                "execution",
+                "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'] | None",
+            ),
         ],
         methods: &[],
     },
