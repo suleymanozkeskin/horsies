@@ -4,7 +4,7 @@
 //!   and applies the baseline migration text, then each setup text, in one
 //!   transaction that commits.
 //! - A [`Session`] is one connection to that database. It keeps the notices
-//!   that the server sends to it, in arrival order.
+//!   and the notifications that the server sends to it, in arrival order.
 //! - [`Session::run_script`] sends a text as one simple-query message, so
 //!   every statement of the text runs, in order, as psql runs a file.
 
@@ -110,17 +110,27 @@ async fn run(client: &Client, name: &str, text: &str) {
         .unwrap_or_else(|error| panic!("{name}: {}", describe(&error)));
 }
 
-/// One connection to a test database, with its notices.
+/// What a session receives from the server outside the replies to its
+/// statements, in arrival order.
+#[derive(Default)]
+struct Received {
+    notices: Vec<String>,
+    /// `(channel, payload)` of each notification.
+    notifications: Vec<(String, String)>,
+}
+
+/// One connection to a test database, with its notices and notifications.
 pub(super) struct Session {
     client: Client,
-    notices: Arc<Mutex<Vec<String>>>,
+    received: Arc<Mutex<Received>>,
 }
 
 impl Session {
     /// Opens a connection to `url`. Its driver runs as a task of the current
-    /// runtime and ends with it. The driver hands a notice to the session
-    /// before it reads the messages after it, so the notices of a statement
-    /// are kept when the call of that statement returns.
+    /// runtime and ends with it. The driver hands a notice or a notification
+    /// to the session before it reads the messages after it, so what a
+    /// statement causes on its own session is kept when the call of that
+    /// statement returns.
     ///
     /// # Panics
     ///
@@ -135,22 +145,28 @@ impl Session {
         let (client, mut connection) = open_connection(&plan)
             .await
             .unwrap_or_else(|error| panic!("connecting to the test server failed: {error}"));
-        let notices = Arc::new(Mutex::new(Vec::new()));
-        let collected = Arc::clone(&notices);
+        let received = Arc::new(Mutex::new(Received::default()));
+        let collected = Arc::clone(&received);
         drop(tokio::spawn(async move {
             while let Some(Ok(message)) =
                 std::future::poll_fn(|context| connection.poll_message(context)).await
             {
+                let mut received = collected.lock().unwrap_or_else(PoisonError::into_inner);
                 match message {
-                    AsyncMessage::Notice(notice) => collected
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .push(notice.message().to_owned()),
+                    AsyncMessage::Notice(notice) => {
+                        received.notices.push(notice.message().to_owned());
+                    }
+                    AsyncMessage::Notification(notification) => {
+                        received.notifications.push((
+                            notification.channel().to_owned(),
+                            notification.payload().to_owned(),
+                        ));
+                    }
                     _ => {}
                 }
             }
         }));
-        Session { client, notices }
+        Session { client, received }
     }
 
     /// The connection of the session.
@@ -182,13 +198,26 @@ impl Session {
     /// The notices received so far whose message starts with `prefix`, in
     /// arrival order, with the prefix removed.
     pub(super) fn notices_after(&self, prefix: &str) -> Vec<String> {
-        self.notices
+        self.received
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .notices
             .iter()
             .filter_map(|notice| notice.strip_prefix(prefix))
             .map(str::to_owned)
             .collect()
+    }
+
+    /// Takes the notifications received so far, as `(channel, payload)` in
+    /// arrival order.
+    pub(super) fn take_notifications(&self) -> Vec<(String, String)> {
+        std::mem::take(
+            &mut self
+                .received
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .notifications,
+        )
     }
 }
 

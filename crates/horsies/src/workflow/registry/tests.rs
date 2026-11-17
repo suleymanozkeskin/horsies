@@ -336,8 +336,35 @@ fn unit_params_read_an_empty_object() {
     assert!(decode_params::<()>("null").is_ok());
     assert!(matches!(
         decode_params::<Level>("{}"),
-        Err(ParamsBuildRefused::Failed(_))
+        Err(ParamsBuildRefused::Undecodable { .. })
     ));
+}
+
+/// A params field with no member: `build_with` does not run, and the node
+/// stores `WORKFLOW_ENQUEUE_FAILED` with Python's prefix, the decode's text
+/// (no exception class) and Python's suffix, and the workflow id and the
+/// node in `data`.
+#[test]
+fn a_params_field_with_no_member_fails_the_build_with_the_decode_text() {
+    let registry = registry();
+    registry
+        .register(Definition::with_params::<Countdown>())
+        .unwrap();
+    let error = node_error(registry.child_spec_answer(&child_request("tests.countdown.v1", "{}")));
+    let expected = format!(
+        "Subworkflow build failed: the params do not decode as {}: .: missing field `n` \
+         (workflow parent:0)",
+        std::any::type_name::<Level>()
+    );
+    assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
+    assert_eq!(error.message.as_deref(), Some(expected.as_str()));
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({
+            "workflow_id": uuid::Uuid::nil().to_string(),
+            "task_index": 0,
+        }))
+    );
 }
 
 /// A recursive definition whose nesting ends stays valid.

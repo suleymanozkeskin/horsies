@@ -1407,7 +1407,7 @@ pub(super) fn sha256_of(bytes: &[u8]) -> Vec<u8> {
 /// Call the internal move of a live task directly, as the deferred guard
 /// of every deferring family sees it. The move takes the live row that its
 /// caller locked (`horsies_move_task_to_history(horsies_tasks, ...)`), read
-/// here FOR UPDATE as Python's `baseline_function_calls.sql` reads it.
+/// here FOR UPDATE as `sql_tests/cases/baseline_function_calls.sql` reads it.
 pub(super) async fn move_to_history(
     pool: &PgPool,
     task_id: Uuid,
