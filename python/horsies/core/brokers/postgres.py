@@ -1318,6 +1318,11 @@ class PostgresBroker:
             ),
             pool_profile=self._CORE_POOL_PROFILE,
         )
+        # The workflow operations of the core build each sub-workflow child
+        # through this source, which runs the child's build_with.
+        from horsies.core.workflows.child_spec_source import child_spec_source_of
+
+        self._core_handle.register_child_spec_source(child_spec_source_of(self))
 
         # Each worker child builds its own broker, so this fires on every
         # recycle (max_tasks_per_child); keep it at DEBUG in child processes.

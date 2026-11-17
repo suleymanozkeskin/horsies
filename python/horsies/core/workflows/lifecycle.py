@@ -8,7 +8,6 @@ from datetime import datetime, timedelta, timezone
 from collections import deque
 from typing import TYPE_CHECKING, Any, TypeVar, assert_never, cast
 
-from psycopg import Error as PsycopgError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -22,10 +21,6 @@ from horsies.core.codec.typed import encode_task_error
 from horsies.core.models.tasks import Execution, OutcomeCode, TaskError
 from horsies.core.types.result import Ok, Err, is_err as _is_err
 from horsies.core.brokers.resources import EventLoopLimit
-from horsies.core.brokers.result_types import (
-    BrokerEventLoopLimit,
-    BrokerOperationFailed,
-)
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     WorkflowHandle,
@@ -48,23 +43,17 @@ from horsies.core.models.workflow.handle_types import (
 from horsies.core.workflows.start_types import (
     WorkflowStartAsyncContext,
     WorkflowStartEnqueueFailed,
-    WorkflowStartEventLoopLimit,
     WorkflowStartIdConflict,
     WorkflowStartLoopRunnerFailed,
     WorkflowStartResult,
     WorkflowStartValidationFailed,
 )
 from horsies.core.history.periods import RetentionClassKey
-from horsies.core.workflows.start_tree import start_parameters, start_tree
 from horsies.core.workflows.steps import (
     RESUME_WORKFLOW_FUNCTION_SQL,
-    START_WORKFLOW_FUNCTION_SQL,
     ParentAdvanceFailure,
     ResumeDisposition,
-    StartDisposition,
     advance_parents,
-    decode_step_rows,
-    require_no_child_starts,
     run_in_transaction,
 )
 from horsies.core.workflows.sql import (
@@ -78,10 +67,6 @@ from horsies.core.workflows.sql import (
 logger = get_logger('workflow.engine')
 
 # Internal retry constants for resend_on_transient_err.
-# 1 initial attempt + _START_RETRY_COUNT retries = 4 total attempts.
-_START_RETRY_COUNT: Final[int] = 3
-_START_RETRY_INITIAL_MS: Final[int] = 200
-_START_RETRY_MAX_MS: Final[int] = 2000
 
 PAUSED_EXPIRY_BATCH_SIZE: Final[int] = 50
 """The most PAUSED workflows that one expiry call reads and expires."""
@@ -254,48 +239,6 @@ def subworkflow_params_of(node: SubWorkflowNode[Any]) -> SubWorkflowParams:
             return SubWorkflowParams.GIVEN
 
 
-def _start_loop_limit(
-    workflow_name: str, workflow_id: str, loop_limit: EventLoopLimit,
-) -> WorkflowStartEventLoopLimit:
-    """Build the start error for the event loop limit. Nothing was written."""
-    return WorkflowStartEventLoopLimit(
-        message=f'start of workflow {workflow_name!r}: {loop_limit.describe()}',
-        workflow_name=workflow_name,
-        workflow_id=workflow_id,
-        loop_limit=loop_limit,
-    )
-
-
-_START_FUNCTION: Final = 'horsies_workflow_start'
-
-
-async def _advance_after_start(
-    broker: 'PostgresBroker',
-    session_factory: async_sessionmaker[AsyncSession],
-    workflow_id: str,
-    parent_advances: tuple[str, ...],
-) -> None:
-    """Advance the parent nodes of the child workflows that the owed child
-    starts of a start ended, one transaction per level.
-
-    The start committed, so a failed advance does not fail it: the error is
-    logged, and workflow recovery advances the node (a terminal child under
-    a live parent node). Does nothing when none is owed.
-    """
-    if not parent_advances:
-        return
-    failure = await advance_parents(broker, session_factory, parent_advances)
-    match failure:
-        case None:
-            return
-        case ParentAdvanceFailure(failed_child_workflow_id=child_id, cause=cause):
-            logger.error(
-                f'Parent advance after the start of workflow {workflow_id} failed at '
-                f'child workflow {child_id}: {type(cause).__name__}: {cause}; '
-                'workflow recovery advances it',
-            )
-
-
 async def start_workflow_async(
     spec: 'WorkflowSpec[OutT]',
     broker: 'PostgresBroker',
@@ -306,16 +249,18 @@ async def start_workflow_async(
 ) -> WorkflowStartResult[WorkflowHandle[OutT]]:
     """Start a workflow asynchronously.
 
-    The tree is built in memory first (``start_tree``): the workflow row,
-    every node row, a pre-built child for every sub-workflow root (its
-    ``build_with`` runs here, also when the id exists already, so it must
-    have no side effects), and a failed-node record for each sub-workflow
-    root whose child cannot be built. Then one call of
-    ``horsies_workflow_start`` writes it and enqueues the root nodes. The
-    sub-workflow roots of each workflow are taken in index order, each child
-    tree before the next root. A pre-built child of a root that comes after a
-    failure that pauses its parent workflow is not written: its node stays
-    READY, and the resume builds the child again. The call:
+    The spec goes to the core as data (``workflow_spec_data``), and the core
+    writes the tree (``CoreHandle.start_workflow_async``,
+    ``horsies_workflow_start``): the workflow row, every node row, a
+    pre-built child for every sub-workflow root, and a failed-node record for
+    each sub-workflow root whose child cannot be built. The core builds each
+    child through the broker's child spec source, which runs its
+    ``build_with`` once per start, also when the id exists already, so it
+    must have no side effects. The sub-workflow roots of each workflow are
+    taken in index order, each child tree before the next root. A pre-built
+    child of a root that comes after a failure that pauses its parent
+    workflow is not written: its node stays READY, and the resume builds the
+    child again. The call:
 
     - no failed-node record: one statement in autocommit;
     - failed-node records: ``BEGIN``, the start, one
@@ -325,33 +270,52 @@ async def start_workflow_async(
       transaction per level; a failed advance is logged and left to
       workflow recovery.
 
+    A cancel of the caller does not stop the start.
+
     Args:
         spec: The workflow specification.
         broker: PostgreSQL broker for database operations.
         workflow_id: Optional custom workflow ID.
         sent_at: Optional workflow call-site timestamp from Python.
-        resend_on_transient_err: When ``True``, automatically retry up to
-            ``_START_RETRY_COUNT`` times on transient infrastructure errors
-            (schema init + DB transaction) with exponential backoff.
+        resend_on_transient_err: When ``True``, the core sends the start
+            again up to 3 times on a transient failure (schema install and
+            statement), after 200 ms, doubling up to 2 s.
 
     Returns:
         ``Ok(WorkflowHandle)`` on success.
         ``Err(WorkflowStartError)`` on failure; match on the variant. A
         ``WorkflowValidationError`` from prevalidation is
-        ``WorkflowStartValidationFailed``. A database or driver error of the
-        start statement is ``WorkflowStartEnqueueFailed``; nothing committed,
-        or the commit outcome is unknown (a resend with the same id then
-        finds the workflow). Any other exception from prevalidation, from
-        the tree build or from the statement is a defect and propagates,
-        also a ``SerializationError`` (the tree encodes only values that the
-        process built and validated before the start) and an
-        ``OutcomeDecodeError`` (a row outside the function's contract).
+        ``WorkflowStartValidationFailed``. A failure of the schema install,
+        the statement, an owed child start, a child build that did not run,
+        or a core boundary error is ``WorkflowStartEnqueueFailed``; nothing
+        committed, or the commit outcome is unknown (a resend with the same
+        id then finds the workflow).
+
+    Raises:
+        SerializationError: a value of the node rows does not serialize (a
+            defect of values that the process built and validated).
+        PanicException: a row outside a function's contract, or spec data
+            that the core refuses (a defect).
+        KeyboardInterrupt, SystemExit: raised by a child's ``build_with``;
+            the start rolled back.
 
     Notes:
         If workflow_id is provided and already exists with the same name,
         returns the existing handle (best-effort idempotent by workflow_id,
         not payload-verified); with another name, ``WorkflowStartIdConflict``.
     """
+    from horsies._core import (
+        CoreError,
+        WorkflowExists,
+        WorkflowIdTaken,
+        WorkflowStartFailed,
+        WorkflowStarted,
+        WorkflowStartRequest,
+    )
+    from horsies.core.types.core_failure import CoreOperationFailed, core_error_retryable
+    from horsies.core.workflows.spec_data import workflow_spec_json
+    from horsies.core.workflows.start_tree import top_node_rows
+
     wf_id = workflow_id or str(uuid.uuid4())
     workflow_sent_at = sent_at or datetime.now(timezone.utc)
 
@@ -410,141 +374,66 @@ async def start_workflow_async(
             exception=exc,
         ))
 
-    # ── Zone 1b: the tree (no I/O) ───────────────────────────────────
-    # The child of every sub-workflow root is built here, before the
-    # statement: its build_with runs even when the id exists already.
-    tree = start_tree(broker, spec, wf_id)
-    parameters = start_parameters(tree, workflow_sent_at)
+    # ── Zone 2: the spec as data (no I/O) ────────────────────────────
+    request = WorkflowStartRequest(
+        spec_json=workflow_spec_json(spec, top_node_rows(broker, spec)),
+        workflow_id=uuid.UUID(wf_id),
+        sent_at=workflow_sent_at,
+        resend_on_transient_err=resend_on_transient_err,
+    )
 
-    # ── Zone 2: Schema init + DB transaction (retried when transient) ─
-    from horsies.core.types.result import is_err
-
-    match await broker.select_resources():
-        case Err(loop_limit):
-            return Err(_start_loop_limit(spec.name, wf_id, loop_limit))
-        case Ok(resources):
+    # ── Zone 3: the start in the core ────────────────────────────────
+    try:
+        outcome = await broker._core_handle.start_workflow_async(request)  # pyright: ignore[reportPrivateUsage]
+    except CoreError as exc:
+        return Err(WorkflowStartEnqueueFailed(
+            message=f'start of workflow {spec.name!r}: {type(exc).__name__}: {exc}',
+            retryable=core_error_retryable(exc),
+            workflow_name=spec.name,
+            workflow_id=wf_id,
+            exception=exc,
+        ))
+    match outcome:
+        case WorkflowStarted():
             pass
-
-    max_attempts = 1 + (_START_RETRY_COUNT if resend_on_transient_err else 0)
-    last_err: WorkflowStartEnqueueFailed | None = None
-
-    for attempt in range(max_attempts):
-        if attempt > 0 and last_err is not None:
-            delay_ms = min(
-                _START_RETRY_INITIAL_MS * (2 ** (attempt - 1)),
-                _START_RETRY_MAX_MS,
-            )
-            await asyncio.sleep(delay_ms / 1000.0)
-
-        # ── Schema init ──────────────────────────────────────────────
-        init_result = await broker.ensure_schema_initialized()
-        if is_err(init_result):
-            match init_result.err_value:
-                case BrokerOperationFailed(
-                    message=message, retryable=retryable, exception=cause,
-                ):
-                    last_err = WorkflowStartEnqueueFailed(
-                        message=f'Schema initialization failed: {message}',
-                        retryable=retryable,
-                        workflow_name=spec.name,
-                        workflow_id=wf_id,
-                        exception=cause,
-                    )
-                case BrokerEventLoopLimit(loop_limit=loop_limit):
-                    return Err(_start_loop_limit(spec.name, wf_id, loop_limit))
-                case _ as unreachable:
-                    assert_never(unreachable)
-            if last_err.retryable and attempt < max_attempts - 1:
-                continue
-            return Err(last_err)
-
-        # ── The start statement ──────────────────────────────────────
-        try:
-            async with resources.session_factory() as session:
-                match tree.has_failed_records:
-                    case False:
-                        connection = await autocommit_connection(session)
-                        rows = (
-                            await connection.execute(START_WORKFLOW_FUNCTION_SQL, parameters)
-                        ).fetchall()
-                        outcome = require_no_child_starts(
-                            decode_step_rows(
-                                rows, _START_FUNCTION, StartDisposition, tree.workflow_names(),
-                            ),
-                            _START_FUNCTION,
-                        )
-                        parent_advances: tuple[str, ...] = ()
-                    case True:
-                        committed = await run_in_transaction(
-                            session,
-                            broker,
-                            START_WORKFLOW_FUNCTION_SQL,
-                            parameters,
-                            _START_FUNCTION,
-                            StartDisposition,
-                            tree.workflow_names(),
-                        )
-                        outcome = committed.outcome
-                        parent_advances = committed.parent_advances
-        except asyncio.CancelledError:
-            raise
-        except (SQLAlchemyError, PsycopgError) as exc:
-            # A database or driver error. Any other exception is a defect
-            # and propagates.
-            last_err = WorkflowStartEnqueueFailed(
-                message=f'{type(exc).__name__}: {exc}',
-                retryable=is_retryable_connection_error(exc),
+        case WorkflowExists():
+            logger.warning(f'Workflow {wf_id} already exists, returning existing handle')
+        case WorkflowIdTaken(existing_name=existing_name):
+            return Err(WorkflowStartIdConflict(
+                message=(
+                    f"workflow_id '{wf_id}' already exists for workflow "
+                    f"name '{existing_name}', cannot start workflow "
+                    f"name '{spec.name}' with the same id"
+                ),
                 workflow_name=spec.name,
                 workflow_id=wf_id,
-                exception=exc,
-            )
-            if last_err.retryable and attempt < max_attempts - 1:
-                continue
-            return Err(last_err)
-
-        await _advance_after_start(broker, resources.session_factory, wf_id, parent_advances)
-        match outcome.disposition:
-            case StartDisposition.STARTED:
-                pass
-            case StartDisposition.EXISTS:
-                match outcome.detail:
-                    case str() as existing_name if existing_name != spec.name:
-                        return Err(WorkflowStartIdConflict(
-                            message=(
-                                f"workflow_id '{wf_id}' already exists for workflow "
-                                f"name '{existing_name}', cannot start workflow "
-                                f"name '{spec.name}' with the same id"
-                            ),
-                            workflow_name=spec.name,
-                            workflow_id=wf_id,
-                            existing_workflow_name=existing_name,
-                        ))
-                    case _:
-                        logger.warning(
-                            f'Workflow {wf_id} already exists, returning existing handle'
-                        )
-            case _ as unreachable:
-                assert_never(unreachable)
-
-        # Success — exit retry loop.
-        return Ok(cast(
-            'WorkflowHandle[OutT]',
-            WorkflowHandle(
+                existing_workflow_name=existing_name,
+            ))
+        case WorkflowStartFailed(message=message, retryable=retryable):
+            return Err(WorkflowStartEnqueueFailed(
+                message=message,
+                retryable=retryable,
+                workflow_name=spec.name,
                 workflow_id=wf_id,
-                broker=broker,
-                out_type=(
-                    _resolve_source_node_ok_type(spec.output)
-                    if spec.output is not None
-                    else _OUTPUTLESS_TERMINALS
+                exception=CoreOperationFailed(
+                    'start_workflow_async', message, retryable,
                 ),
-            ),
-        ))
+            ))
+        case _ as unreachable:
+            assert_never(unreachable)
 
-    # Unreachable: max_attempts >= 1, and the last attempt returns.
-    assert last_err is not None, (
-        'start attempt loop ended without a failed attempt'
-    )
-    return Err(last_err)
+    return Ok(cast(
+        'WorkflowHandle[OutT]',
+        WorkflowHandle(
+            workflow_id=wf_id,
+            broker=broker,
+            out_type=(
+                _resolve_source_node_ok_type(spec.output)
+                if spec.output is not None
+                else _OUTPUTLESS_TERMINALS
+            ),
+        ),
+    ))
 
 
 def start_workflow(

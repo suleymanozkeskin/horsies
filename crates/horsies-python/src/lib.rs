@@ -30,6 +30,7 @@
 
 mod bridge;
 mod child_handle;
+mod child_spec;
 mod errors;
 mod frames;
 mod handle;
@@ -148,6 +149,15 @@ fn refresh_log_levels(py: Python<'_>) -> PyResult<()> {
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<handle::CoreHandle>()?;
+    module.add_class::<child_spec::ChildSpecRequestRecord>()?;
+    module.add_class::<child_spec::ChildSpecSourceRow>()?;
+    module.add_class::<child_spec::ChildSpecBuilt>()?;
+    module.add_class::<child_spec::ChildSpecRefused>()?;
+    module.add_class::<operations::workflow_start::WorkflowStartRequest>()?;
+    module.add_class::<operations::workflow_start::WorkflowStarted>()?;
+    module.add_class::<operations::workflow_start::WorkflowExists>()?;
+    module.add_class::<operations::workflow_start::WorkflowIdTaken>()?;
+    module.add_class::<operations::workflow_start::WorkflowStartFailed>()?;
     module.add_class::<child_handle::CoreChildHandle>()?;
     module.add_class::<scheduler::CoreScheduler>()?;
     module.add_class::<records::BrokerFailure>()?;

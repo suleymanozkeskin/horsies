@@ -407,6 +407,23 @@ const AUDIT_ORPHANED_WORKFLOW_TASKS_OUTCOME: &str =
 const TASK_ROW_END_OUTCOME: &str = "TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | \
      AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed";
 
+const START_WORKFLOW_OUTCOME: &str =
+    "WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed";
+const START_WORKFLOW_PARAMETERS: &[StubParameter] =
+    &[positional("request", "WorkflowStartRequest")];
+const REGISTER_CHILD_SPEC_SOURCE_PARAMETERS: &[StubParameter] = &[positional(
+    "source",
+    "Callable[[ChildSpecRequest], ChildSpecBuilt | ChildSpecRefused]",
+)];
+const WORKFLOW_START_REQUEST_PARAMETERS: &[StubParameter] = &[
+    keyword("spec_json", "str"),
+    keyword("workflow_id", "uuid.UUID"),
+    keyword("sent_at", "datetime.datetime"),
+    keyword("resend_on_transient_err", "bool"),
+];
+const CHILD_SPEC_BUILT_PARAMETERS: &[StubParameter] = &[keyword("spec_json", "str")];
+const CHILD_SPEC_REFUSED_PARAMETERS: &[StubParameter] =
+    &[keyword("message", "str"), keyword("failure_result", "str")];
 const PAUSE_WORKFLOW_OUTCOME: &str =
     "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed";
 const CANCEL_WORKFLOW_OUTCOME: &str =
@@ -646,6 +663,18 @@ const CORE_HANDLE_METHODS: [StubFunction; 38] = [
         parameters: CANCEL_OWNED_ORPHAN_PARAMETERS,
         returns: TypeText::FutureOf(TASK_ROW_END_OUTCOME),
         doc: "Cancel one claimed workflow task that this claim holds and that no runnable node\nlinks. Writes, in one statement. A naive claimed_at raises TypeError.",
+    },
+    StubFunction {
+        name: "register_child_spec_source",
+        parameters: REGISTER_CHILD_SPEC_SOURCE_PARAMETERS,
+        returns: TypeText::Plain("None"),
+        doc: "Register the child spec source of the handle's workflow operations. The core calls it\non the callback thread for each sub-workflow child that an operation builds. A second\nregistration raises RuntimeError. Starts nothing.",
+    },
+    StubFunction {
+        name: "start_workflow_async",
+        parameters: START_WORKFLOW_PARAMETERS,
+        returns: TypeText::FutureOf(START_WORKFLOW_OUTCOME),
+        doc: "Start one workflow. Writes; the children of its sub-workflow roots come from the child\nspec source. A build that raised KeyboardInterrupt or SystemExit raises it again. With no\nchild spec source it raises RuntimeError.",
     },
     StubFunction {
         name: "pause_workflow_async",
@@ -2144,7 +2173,7 @@ const MONITORING_CLASSES: [StubClass; 33] = [
     },
 ];
 
-const WORKFLOW_CLASSES: [StubClass; 20] = [
+const WORKFLOW_CLASSES: [StubClass; 29] = [
     StubClass {
         name: "WorkflowPaused",
         doc: "The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed\ntasks of the paused tree are abandoned.",
@@ -2331,6 +2360,96 @@ const WORKFLOW_CLASSES: [StubClass; 20] = [
         properties: &[
             property("workflow_id", "uuid.UUID"),
             property("nodes", "list[StoredNodeRecord]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ChildSpecSourceRow",
+        doc: "One dependency of the node whose result an args_from member of the child's input takes.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_index", "int"),
+            property("node_id", "str | None"),
+            property("status", "str"),
+            property("task_name", "str"),
+            property("definition_key", "str | None"),
+            property("result", "str | None"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ChildSpecRequest",
+        doc: "The sub-workflow node whose child the Python client builds.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("parent_workflow_id", "uuid.UUID"),
+            property("parent_workflow_name", "str"),
+            property("task_index", "int"),
+            property("child_depth", "int"),
+            property("definition_key", "str | None"),
+            property("params", "Literal['GIVEN', 'NOT_GIVEN']"),
+            property("node_input", "str"),
+            property("args_from", "str | None"),
+            property("sources", "list[ChildSpecSourceRow]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ChildSpecBuilt",
+        doc: "The child built: its spec as workflow spec data.",
+        constructor: Constructor::Parameters(CHILD_SPEC_BUILT_PARAMETERS),
+        properties: &[property("spec_json", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "ChildSpecRefused",
+        doc: "The child cannot start: its node fails. message is the error text for the log;\nfailure_result is the result envelope that the node stores.",
+        constructor: Constructor::Parameters(CHILD_SPEC_REFUSED_PARAMETERS),
+        properties: &[
+            property("message", "str"),
+            property("failure_result", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowStartRequest",
+        doc: "One frozen workflow start. spec_json is the workflow spec data of the spec; spec data\nthat the core refuses raises ValueError with the field path. A naive sent_at raises\nTypeError.",
+        constructor: Constructor::Parameters(WORKFLOW_START_REQUEST_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowStarted",
+        doc: "The tree was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowExists",
+        doc: "A workflow with this id and this name exists, or the row with the id was gone by the\nread of its name. Nothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowIdTaken",
+        doc: "A workflow with this id exists under another name. Nothing was written.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("existing_name", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowStartFailed",
+        doc: "The connect, the schema install, the client family check, the statement or an owed\nchild start failed, or a child build did not run. Nothing committed, or the commit\noutcome is unknown: a resend with the same id then finds the workflow.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("message", "str"),
+            property("retryable", "bool"),
         ],
         methods: &[],
     },
