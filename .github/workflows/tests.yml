@@ -230,10 +230,8 @@ jobs:
         working-directory: webui
         run: bun run check:core-dist
 
-  # PRs into program/0.8.0 change the core and the Python package while the
-  # core is merged without compiling (it is built once the Python bridge
-  # exists). This job decides which Rust jobs those PRs need, and refuses any
-  # change to the frozen Rust client crate. Other events run every job.
+  # A PR into program/0.8.0 runs only the jobs that its paths need. Other
+  # events run every job.
   scope:
     runs-on: ubuntu-latest
     permissions:
@@ -246,7 +244,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Decide the Rust jobs and guard the frozen client
+      - name: Decide the Rust and Python jobs
         id: decide
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -259,12 +257,8 @@ jobs:
             exit 0
           fi
           base="$(git merge-base "$BASE_SHA" HEAD)"
-          if ! git diff --quiet "$base" HEAD -- crates/horsies/; then
-            echo '::error::This PR changes crates/horsies/, the frozen Rust client. It stays unchanged until it is rebuilt on the core.'
-            git diff --stat "$base" HEAD -- crates/horsies/
-            exit 1
-          fi
-          if git diff --quiet "$base" HEAD -- crates/horsies-macros/ rust/ Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml clippy.toml; then
+          # The Rust client builds on the core and the macros.
+          if git diff --quiet "$base" HEAD -- crates/horsies/ crates/horsies-core/ crates/horsies-macros/ rust/ Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml clippy.toml; then
             echo 'run_rust=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run_rust=true' >> "$GITHUB_OUTPUT"
@@ -272,8 +266,8 @@ jobs:
           # horsies._core is built from crates/horsies-python, crates/horsies-core
           # and crates/horsies-macros with the root Cargo and toolchain files, so
           # a change there can change a Python result. A PR that changes only the
-          # frozen Rust client, the generator, rust/, or the format and lint
-          # settings cannot: the Python jobs are skipped for it.
+          # Rust client, the generator, rust/, or the format and lint settings
+          # cannot: the Python jobs are skipped for it.
           if git diff --quiet "$base" HEAD -- . ':(exclude)crates/horsies/' ':(exclude)crates/horsies-codegen/' ':(exclude)rust/' ':(exclude)rustfmt.toml' ':(exclude)clippy.toml'; then
             echo 'run_python=false' >> "$GITHUB_OUTPUT"
           else
@@ -295,6 +289,10 @@ jobs:
       - name: Check formatting of every crate, the core included
         run: cargo fmt --all --check
 
+  # The Rust client (crates/horsies), its macros and the examples. The
+  # end-to-end crates under rust/tests/ and the core's own tests are not run
+  # here: rust/tests/ moves to the client of the core with #1410, and the core
+  # jobs are turned on with #846.
   rust:
     needs: scope
     if: needs.scope.outputs.run_rust == 'true'
@@ -307,7 +305,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: testpassword
-          POSTGRES_DB: horsies-rust-port
+          POSTGRES_DB: horsies
         ports:
           - 5432:5432
         options: >-
@@ -317,6 +315,8 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       # rustup is preinstalled on the runner. With no argument it installs the
       # toolchain and components that rust-toolchain.toml names.
@@ -328,29 +328,44 @@ jobs:
       - name: Cache Cargo builds
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - name: Check formatting
-        run: cargo fmt --all --check
+      # Each feature of the client has code of its own: `cli` (the default)
+      # holds horsies::cli::run and the shipped binary, `web` the axum mount,
+      # `tokio-postgres` and `sqlx` the rerun adapters.
+      - name: Check the client with default features
+        run: cargo check -p horsies --all-targets
 
-      - name: Check default features
-        run: cargo check --workspace --all-targets --exclude horsies-core --exclude horsies-codegen --exclude horsies-python
+      - name: Check the client with the web feature
+        run: cargo check -p horsies --all-targets --features web
 
-      # `web` adds the web module and the `horsies web` CLI.
-      - name: Check web feature
-        run: cargo check --workspace --all-targets --exclude horsies-core --exclude horsies-codegen --exclude horsies-python --features horsies/web
+      - name: Check the client with the tokio-postgres feature
+        run: cargo check -p horsies --all-targets --features tokio-postgres
 
-      # `arbitrary-precision` changes serde_json number handling for the whole
-      # build graph.
-      - name: Check arbitrary-precision feature
-        run: cargo check --workspace --all-targets --exclude horsies-core --exclude horsies-codegen --exclude horsies-python --features horsies/arbitrary-precision
+      - name: Check the client with the sqlx feature
+        run: cargo check -p horsies --all-targets --features sqlx
 
-      - name: Run tests
+      - name: Check the client with no default features
+        run: cargo check -p horsies --all-targets --no-default-features
+
+      - name: Build the examples
+        run: cargo build -p horsies-examples --examples
+
+      # The compile-pass and compile-fail cases of the task attributes and
+      # derives (trybuild).
+      - name: Test the macros
+        run: cargo test -p horsies-macros
+
+      # Without `web`, `horsies web` refuses with its message; that test runs
+      # only in this run.
+      - name: Test the client with default features
         env:
-          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-rust-port
-        run: cargo test --workspace --exclude horsies-core --exclude horsies-codegen --exclude horsies-python
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
+        run: cargo test -p horsies
 
-      # horsies-core, and horsies-codegen and horsies-python, which depend on
-      # it, are not built in CI until the first build: the core's work is
-      # merged without compiling and is built in one step.
+      # The rerun adapters run against the server of DATABASE_URL.
+      - name: Test the client with every feature
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
+        run: cargo test -p horsies --features web,tokio-postgres,sqlx
 
   rust-showcase:
     needs: scope
@@ -408,64 +423,3 @@ jobs:
       - name: Test web feature
         if: steps.changed.outputs.run == 'true'
         run: cargo test -p acme-showcase --features web --all-targets
-
-  rust-webui:
-    needs: scope
-    if: needs.scope.outputs.run_rust == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
-
-      - name: Detect Rust web UI changes
-        id: changed
-        run: |
-          base='${{ github.event.pull_request.base.sha }}'
-          if [ -z "$base" ]; then
-            base='${{ github.event.before }}'
-          fi
-          # Same rule as the webui job: an unknown base runs rather than skips.
-          if [ -z "$base" ] || [ "$base" = '0000000000000000000000000000000000000000' ]; then
-            echo 'run=true' >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$base" HEAD -- rust/webui/ crates/horsies/webui-dist/ rust/scripts/check-webui-dist.sh; then
-            echo 'run=false' >> "$GITHUB_OUTPUT"
-          else
-            echo 'run=true' >> "$GITHUB_OUTPUT"
-          fi
-
-      - if: steps.changed.outputs.run == 'true'
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          # The frozen rust/webui/ copy keeps the bun its CI used before the
-          # import.
-          bun-version: "1.2.23"
-
-      - name: Install dependencies
-        if: steps.changed.outputs.run == 'true'
-        working-directory: rust/webui
-        run: bun install --frozen-lockfile
-
-      - name: Typecheck
-        if: steps.changed.outputs.run == 'true'
-        working-directory: rust/webui
-        run: bun run typecheck
-
-      - name: Run tests
-        if: steps.changed.outputs.run == 'true'
-        working-directory: rust/webui
-        run: bun run test
-
-      - name: Check design tokens
-        if: steps.changed.outputs.run == 'true'
-        working-directory: rust/webui
-        run: bun run lint:tokens
-
-      # Builds into crates/horsies/webui-dist/ and fails if the committed
-      # build differs (rust/scripts/check-webui-dist.sh).
-      - name: Check committed build
-        if: steps.changed.outputs.run == 'true'
-        working-directory: rust/webui
-        run: bun run check:dist
