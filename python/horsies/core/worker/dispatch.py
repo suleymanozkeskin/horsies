@@ -47,7 +47,6 @@ from horsies.core.models.tasks import (
 from horsies.core.types.result import Result, is_err
 from horsies._core import CoreError
 from horsies.core.types.core_failure import CoreOperationFailed
-from horsies.core.utils.db import autocommit_connection
 from horsies.core.worker.child_protocol import (
     RunFrame,
     SeatRefusal,
@@ -62,7 +61,7 @@ from horsies.core.worker.failed_attempt import (
     AttemptFailure,
     AttemptFailureKind,
     RetryRequest,
-    finish_ended_attempt,
+    finish_ended_attempt_in_core,
     finish_for,
     retry_request_for,
 )
@@ -366,14 +365,16 @@ class DispatchMixin:
     ) -> _EndedAttemptWrite:
         """Write the end of an attempt whose child has ended.
 
-        One ``horsies_finish_failed_attempt`` statement in autocommit, with
-        the ``RELEASE`` rule and no read before it: a row that this claim
-        still holds CLAIMED (no task code ran) goes back to the queue; a
-        RUNNING row gets the retry that its policy asks for from the retry
-        facts of ``claim`` (placed by ``retry``), or the failure; a row that
-        this claim does not hold is classified with no write. The attempt row
-        records the error message as its message and its reason; the task's
-        summary reason is not written. Database errors raise.
+        One ``horsies_finish_failed_attempt`` statement through the core
+        (``finish_ended_attempt_in_core``), with the ``RELEASE`` rule and no
+        read before it: a row that this claim still holds CLAIMED (no task
+        code ran) goes back to the queue; a RUNNING row gets the retry that
+        its policy asks for from the retry facts of ``claim`` (placed by
+        ``retry``), or the failure; a row that this claim does not hold is
+        classified with no write. The attempt row records the error message
+        as its message and its reason; the task's summary reason is not
+        written. A failed write raises ``CoreOperationFailed``; the core
+        boundary raises ``CoreError``.
         """
         failure = FailLockedTask(
             task_id=task_id,
@@ -383,20 +384,19 @@ class DispatchMixin:
             failed_reason=None,
         )
         request = retry_request_for(claim, failure.error_code, retry)
-        async with self.sf() as s:
-            outcome = await finish_ended_attempt(
-                await autocommit_connection(s),
-                finish_for(
-                    failure,
-                    claimed_at=claim.claimed_at,
-                    retry=request,
-                    attempt=AttemptFailure(
-                        kind=AttemptFailureKind.FAILED,
-                        error_message=task_error.message,
-                        failed_reason=task_error.message,
-                    ),
+        outcome = await finish_ended_attempt_in_core(
+            self.core_handle,
+            finish_for(
+                failure,
+                claimed_at=claim.claimed_at,
+                retry=request,
+                attempt=AttemptFailure(
+                    kind=AttemptFailureKind.FAILED,
+                    error_message=task_error.message,
+                    failed_reason=task_error.message,
                 ),
-            )
+            ),
+        )
         match outcome:
             case ClaimReleased():
                 return _AttemptUnclaimed()
