@@ -77,9 +77,10 @@ async fn child_count(pool: &PgPool, workflow_id: Uuid) -> i64 {
         .expect("count the child workflows")
 }
 
-/// Node 1 is FAILED with `WORKER_SERIALIZATION_ERROR`, has no task row, and
-/// no child workflow was written.
-async fn assert_node_1_failed_alone(pool: &PgPool, workflow_id: Uuid, case: &str) {
+/// Node 1 is FAILED with `WORKER_SERIALIZATION_ERROR`, Python's `message`,
+/// and the workflow id and the node in `data` (Python `_fail_enqueued_task`,
+/// `node_error`); it has no task row, and no child workflow was written.
+async fn assert_node_1_failed_alone(pool: &PgPool, workflow_id: Uuid, case: &str, message: &str) {
     let row = node(pool, workflow_id, 1).await;
     assert_eq!(row.status, "FAILED", "{case}");
     assert_eq!(row.task_id, None, "{case}");
@@ -87,6 +88,12 @@ async fn assert_node_1_failed_alone(pool: &PgPool, workflow_id: Uuid, case: &str
     assert_eq!(
         code(&error).as_deref(),
         Some("WORKER_SERIALIZATION_ERROR"),
+        "{case}"
+    );
+    assert_eq!(error.message.as_deref(), Some(message), "{case}");
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1})),
         "{case}"
     );
     assert_eq!(child_count(pool, workflow_id).await, 0, "{case}");
@@ -101,16 +108,19 @@ async fn assert_node_1_failed_alone(pool: &PgPool, workflow_id: Uuid, case: &str
 /// `WORKER_SERIALIZATION_ERROR`, and no task row is written.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1222"]
 async fn a_promoted_node_whose_args_from_is_not_a_map_of_indexes_fails_alone() {
     let pool = shared_pool().await;
     let child_specs = child_specs_of(&[]);
-    for args_from in [
-        serde_json::json!({"x": "not_an_int"}),
-        serde_json::json!({"x": 1.5}),
-        serde_json::json!({"x": null}),
-        serde_json::json!({"x": 0, "y": "bad"}),
-        serde_json::json!("{broken"),
+    let non_int = "args_from has non-int values for task 1";
+    for (args_from, message) in [
+        (serde_json::json!({"x": "not_an_int"}), non_int),
+        (serde_json::json!({"x": 1.5}), non_int),
+        (serde_json::json!({"x": null}), non_int),
+        (serde_json::json!({"x": 0, "y": "bad"}), non_int),
+        (
+            serde_json::json!("{broken"),
+            "Corrupt args_from JSON for task 1",
+        ),
     ] {
         let case = args_from.to_string();
         let workflow_id = seed_completed_root_and_dependent(&pool, false, |mut dependent| {
@@ -121,7 +131,7 @@ async fn a_promoted_node_whose_args_from_is_not_a_map_of_indexes_fails_alone() {
 
         recover(&pool, workflow_id, &child_specs).await;
 
-        assert_node_1_failed_alone(&pool, workflow_id, &case).await;
+        assert_node_1_failed_alone(&pool, workflow_id, &case, message).await;
     }
 }
 
@@ -130,7 +140,6 @@ async fn a_promoted_node_whose_args_from_is_not_a_map_of_indexes_fails_alone() {
 /// `WORKER_SERIALIZATION_ERROR`, and no task row is written.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1222"]
 async fn a_promoted_node_whose_stored_input_does_not_parse_fails_alone() {
     let pool = shared_pool().await;
     let workflow_id =
@@ -139,7 +148,13 @@ async fn a_promoted_node_whose_stored_input_does_not_parse_fails_alone() {
 
     recover(&pool, workflow_id, &child_specs_of(&[])).await;
 
-    assert_node_1_failed_alone(&pool, workflow_id, "broken{json").await;
+    assert_node_1_failed_alone(
+        &pool,
+        workflow_id,
+        "broken{json",
+        "Corrupt kwargs JSON for task 1",
+    )
+    .await;
 }
 
 /// `TestEnqueueSubworkflowTask::test_corrupt_kwargs_json_fails`: a stored
@@ -147,7 +162,6 @@ async fn a_promoted_node_whose_stored_input_does_not_parse_fails_alone() {
 /// `WORKER_SERIALIZATION_ERROR`, and no child starts.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1120"]
 async fn a_sub_workflow_node_whose_stored_input_does_not_parse_fails_alone() {
     let pool = shared_pool().await;
     let workflow_id =
@@ -156,7 +170,13 @@ async fn a_sub_workflow_node_whose_stored_input_does_not_parse_fails_alone() {
 
     recover(&pool, workflow_id, &child_specs_of(&[child()])).await;
 
-    assert_node_1_failed_alone(&pool, workflow_id, "broken{json").await;
+    assert_node_1_failed_alone(
+        &pool,
+        workflow_id,
+        "broken{json",
+        "Corrupt kwargs JSON for subworkflow task 1",
+    )
+    .await;
 }
 
 /// `TestEnqueueSubworkflowTask::test_args_from_non_int_values_fails_task`:
@@ -164,7 +184,6 @@ async fn a_sub_workflow_node_whose_stored_input_does_not_parse_fails_alone() {
 /// with `WORKER_SERIALIZATION_ERROR`, and no child starts.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1120"]
 async fn a_sub_workflow_node_whose_args_from_holds_a_value_that_is_not_an_index_fails_alone() {
     let pool = shared_pool().await;
     let workflow_id = seed_completed_root_and_dependent(&pool, true, |mut dependent| {
@@ -175,7 +194,13 @@ async fn a_sub_workflow_node_whose_args_from_holds_a_value_that_is_not_an_index_
 
     recover(&pool, workflow_id, &child_specs_of(&[child()])).await;
 
-    assert_node_1_failed_alone(&pool, workflow_id, "not_an_int").await;
+    assert_node_1_failed_alone(
+        &pool,
+        workflow_id,
+        "not_an_int",
+        "args_from has non-int values for subworkflow task 1",
+    )
+    .await;
 }
 
 /// `TestEnqueueSubworkflowTask::test_corrupt_args_from_string_fails`: an
@@ -183,7 +208,6 @@ async fn a_sub_workflow_node_whose_args_from_holds_a_value_that_is_not_an_index_
 /// `WORKER_SERIALIZATION_ERROR`, and no child starts.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1222"]
 async fn a_sub_workflow_node_whose_args_from_is_a_json_string_fails_alone() {
     let pool = shared_pool().await;
     let workflow_id = seed_completed_root_and_dependent(&pool, true, |mut dependent| {
@@ -194,7 +218,13 @@ async fn a_sub_workflow_node_whose_args_from_is_a_json_string_fails_alone() {
 
     recover(&pool, workflow_id, &child_specs_of(&[child()])).await;
 
-    assert_node_1_failed_alone(&pool, workflow_id, "\"{broken\"").await;
+    assert_node_1_failed_alone(
+        &pool,
+        workflow_id,
+        "\"{broken\"",
+        "Corrupt args_from JSON for subworkflow task 1",
+    )
+    .await;
 }
 
 /// `TestCheckAndPromoteTask::test_no_dependencies_returns`, with the core's

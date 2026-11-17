@@ -474,20 +474,26 @@ async fn finalization_preserves_explicit_and_default_outputs() {
 /// `test_text_that_is_not_json_names_the_cause`: a workflow whose first
 /// FAILED node stores a result that is not a strict result envelope fails
 /// with the error `RESULT_DESERIALIZATION_ERROR` (the baseline
-/// `horsies_workflow_err_slot`).
+/// `horsies_workflow_err_slot`), whose message is Python's
+/// `_decode_err_only` text for that cause
+/// (`horsies_workflow_unreadable_result_cause`).
 #[tokio::test]
 #[serial]
 async fn a_first_failed_node_result_that_does_not_decode_gives_result_deserialization_error() {
     let pool = shared_pool().await;
     let error = serde_json::json!({"error_code": "BOOM", "message": "boom", "data": null});
+    let marker = "Stored task result does not decode: TaskResult envelope missing \
+                  '__h_task_result__' marker (or marker is not True); got keys";
     let undecodable = [
         (
             "missing marker",
             serde_json::json!({"ok": null, "err": error}).to_string(),
+            format!("{marker} ['err', 'ok']"),
         ),
         (
             "false marker",
             serde_json::json!({"__h_task_result__": false, "ok": null, "err": error}).to_string(),
+            format!("{marker} ['__h_task_result__', 'err', 'ok']"),
         ),
         (
             "extra key",
@@ -495,25 +501,60 @@ async fn a_first_failed_node_result_that_does_not_decode_gives_result_deserializ
                 "__h_task_result__": true, "ok": null, "err": error, "extra_key": "smuggled",
             })
             .to_string(),
+            "Stored task result does not decode: unexpected keys in TaskResult envelope: \
+             ['extra_key']"
+                .to_owned(),
         ),
         (
             "both slots",
             serde_json::json!({"__h_task_result__": true, "ok": 42, "err": error}).to_string(),
+            "Stored task result does not decode: TaskResult envelope has both ok and err \
+             populated; exactly one must be set"
+                .to_owned(),
         ),
         (
             "missing err",
             serde_json::json!({"__h_task_result__": true, "ok": null}).to_string(),
+            "Stored task result does not decode: TaskResult envelope missing required keys \
+             ['err']; got ['__h_task_result__', 'ok']"
+                .to_owned(),
         ),
         (
             "missing ok",
             serde_json::json!({"__h_task_result__": true, "err": error}).to_string(),
+            "Stored task result does not decode: TaskResult envelope missing required keys \
+             ['ok']; got ['__h_task_result__', 'err']"
+                .to_owned(),
         ),
-        ("null", "null".to_owned()),
-        ("a string", "\"a string\"".to_owned()),
-        ("an array", "[]".to_owned()),
-        ("not JSON", "not json at all".to_owned()),
+        (
+            "null",
+            "null".to_owned(),
+            "Stored task result does not decode: TaskResult envelope must be a JSON object; \
+             got NoneType"
+                .to_owned(),
+        ),
+        (
+            "a string",
+            "\"a string\"".to_owned(),
+            "Stored task result does not decode: TaskResult envelope must be a JSON object; \
+             got str"
+                .to_owned(),
+        ),
+        (
+            "an array",
+            "[]".to_owned(),
+            "Stored task result does not decode: TaskResult envelope must be a JSON object; \
+             got list"
+                .to_owned(),
+        ),
+        (
+            "not JSON",
+            "not json at all".to_owned(),
+            // The parser detail after this prefix is the database's text.
+            "Stored task result is not JSON: JSON parse failed: ".to_owned(),
+        ),
     ];
-    for (case, stored) in undecodable {
+    for (case, stored, expected) in undecodable {
         let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
         seed_node(
             &pool,
@@ -531,7 +572,11 @@ async fn a_first_failed_node_result_that_does_not_decode_gives_result_deserializ
             Some("RESULT_DESERIALIZATION_ERROR"),
             "{case}"
         );
-        assert!(error.message.is_some(), "{case}");
+        let message = error.message.as_deref().expect("the error has a message");
+        match case {
+            "not JSON" => assert!(message.starts_with(expected.as_str()), "{case}: {message}"),
+            _ => assert_eq!(message, expected, "{case}"),
+        }
     }
 }
 

@@ -25,6 +25,7 @@ from tests.dualrun.rules import (
     FormatVersion,
     GeneratedName,
     IdFamily,
+    IdsInText,
     Ignored,
     Index,
     JsonPath,
@@ -76,6 +77,12 @@ _UTC_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 _DATED_NAME: Final = re.compile(
     r'(?P<prefix>.+)_(?P<year>\d{4})_(?P<month>\d{2})_(?P<day>\d{2})(?:_(?P<hour>\d{2}))?',
 )
+_CANONICAL_UUID: Final = re.compile(
+    r'(?<![0-9A-Za-z-])'
+    r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    r'(?![0-9A-Za-z-])',
+)
+"""An id inside a text under ``IdsInText``: the text form of a uuid column."""
 
 # ---- Raw input (from the capture) ----
 
@@ -182,14 +189,39 @@ class PendingId:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingText:
+    """A text of an ``IdsInText`` path whose ids wait for their labels.
+
+    ``parts`` holds the literal text and the ids in text order.
+    """
+
+    parts: tuple[str | PendingId, ...]
+
+
+PendingLeaf = NormalizedValue | PendingId | PendingText
+"""A path-rule leaf of a document before labelling."""
+
+
+@dataclass(frozen=True, slots=True)
 class PendingDocument:
     """A JSON document whose id leaves wait for their labels."""
 
-    root: JsonNode[NormalizedValue | PendingId]
+    root: JsonNode[PendingLeaf]
 
 
 StableCell = NormalizedValue | PendingId | PendingDocument
 StableRow = tuple[StableCell, ...]
+
+
+def leaf_ids(leaf: PendingLeaf) -> list[PendingId]:
+    """The ids of a document leaf that wait for labels, in text order."""
+    match leaf:
+        case PendingId():
+            return [leaf]
+        case PendingText(parts=parts):
+            return [part for part in parts if isinstance(part, PendingId)]
+        case _:
+            return []
 
 
 def cell_ids(cell: StableCell) -> list[PendingId]:
@@ -198,9 +230,24 @@ def cell_ids(cell: StableCell) -> list[PendingId]:
         case PendingId():
             return [cell]
         case PendingDocument(root=root):
-            return [leaf for leaf in json_leaves(root) if isinstance(leaf, PendingId)]
+            return [pending for leaf in json_leaves(root) for pending in leaf_ids(leaf)]
         case _:
             return []
+
+
+def text_with_ids(text: str, family: IdFamily) -> PendingText:
+    """``text`` split into its literal parts and the ids of ``family`` that
+    ``_CANONICAL_UUID`` finds in it. Empty literal parts are left out."""
+    parts: list[str | PendingId] = []
+    position = 0
+    for found in _CANONICAL_UUID.finditer(text):
+        if found.start() > position:
+            parts.append(text[position : found.start()])
+        parts.append(PendingId(raw=found.group(), family=family))
+        position = found.end()
+    if position < len(text):
+        parts.append(text[position:])
+    return PendingText(parts=tuple(parts))
 
 
 # ---- Clock columns ----
@@ -378,7 +425,7 @@ class _ToRank:
     time: TimeValue
 
 
-_Building = NormalizedValue | PendingId | _ToRank
+_Building = PendingLeaf | _ToRank
 _Alive = tuple[tuple[int, int], ...]
 """Path rules that still match the current location: (rule index, steps matched)."""
 
@@ -444,6 +491,12 @@ def _leaf(
                     return Ok(_building_leaf(PendingId(raw=value, family=family)))
                 case _:
                     return Err(f'id path {path.steps} holds {value!r}, not text')
+        case IdsInText(family=family):
+            match value:
+                case str():
+                    return Ok(_building_leaf(text_with_ids(value, family)))
+                case _:
+                    return Err(f'text path {path.steps} holds {value!r}, not text')
         case JsonTime(encoding=encoding, rule=time_rule):
             match _json_time(value, encoding):
                 case str() as cause:
@@ -551,7 +604,7 @@ def _ranked_documents(documents: list[JsonNode[_Building] | None]) -> list[Stabl
                     by_path.setdefault(leaf.path, []).append(leaf.time)
     ranks = {path: _rank_map(times) for path, times in by_path.items()}
 
-    def settle(leaf: _Building) -> NormalizedValue | PendingId:
+    def settle(leaf: _Building) -> PendingLeaf:
         match leaf:
             case _ToRank(path=path, time=time):
                 return TimeRank(rank=ranks[path][time_sort_token(time)])

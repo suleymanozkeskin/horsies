@@ -82,6 +82,19 @@ pub(crate) async fn connect_collecting_notices(
     (client, notices)
 }
 
+/// A broker on the database of `pool` whose sqlx adapter pools are closed:
+/// every call that borrows them fails. A path that runs to its end on this
+/// broker runs on the core pools alone. The core pools connect at their first
+/// checkout.
+pub(crate) async fn broker_with_closed_sqlx_pools(
+    pool: &sqlx::PgPool,
+) -> crate::broker::PostgresBroker {
+    let adapter =
+        sqlx::postgres::PgPoolOptions::new().connect_lazy_with((*pool.connect_options()).clone());
+    adapter.close().await;
+    crate::broker::PostgresBroker::from_pool(adapter)
+}
+
 /// Installs the schema into the template of this process: the
 /// statement-layer install for the Rust client, then the handle is closed so
 /// that the template has no session left.

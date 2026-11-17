@@ -35,6 +35,22 @@ fn a_completed_result_reads_as_the_output_type() {
     );
 }
 
+/// The output decodes from its own text: an integer above `u64::MAX` reads
+/// as `u128`, as Python reads it.
+#[test]
+fn a_completed_result_above_u64_reads_as_u128() {
+    let end = WorkflowEnd::Completed {
+        result: Some(
+            r#"{"__h_task_result__":true,"ok":340282366920938463463374607431768211455,"err":null}"#
+                .to_owned(),
+        ),
+    };
+    assert_eq!(
+        end_outcome::<u128>(workflow(), end).unwrap(),
+        TaskOutcome::Succeeded(u128::MAX)
+    );
+}
+
 #[test]
 fn a_completed_error_keeps_its_user_code_as_text() {
     let end = completed(Some(json!({

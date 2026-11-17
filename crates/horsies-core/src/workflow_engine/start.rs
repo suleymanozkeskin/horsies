@@ -47,13 +47,23 @@ pub(crate) struct NodeTaskFacts {
 
 /// Parse the typed facts of a task node from its merged task options and the
 /// retention class key of its queue (`None`: forever).
+///
+/// An input or options text that does not read, and options that the reader
+/// of a task row refuses, are [`WorkflowError::Validation`] naming the node
+/// index and its task (Python's start refusal names the task,
+/// `start_task_node_facts`, `core/workflows/lifecycle.py`). Pure.
 pub(crate) fn node_task_facts(
     node: &AnyNode,
     merged_task_options: Option<&str>,
     queue_class_key: Option<&str>,
 ) -> Result<NodeTaskFacts, WorkflowError> {
     let facts = prepare_workflow_task_facts(&node.input_json, merged_task_options, queue_class_key)
-        .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+        .map_err(|error| {
+            WorkflowError::Validation(format!(
+                "workflow node {} ({}) refused: {error}",
+                node.index, node.task_name,
+            ))
+        })?;
     Ok(NodeTaskFacts {
         max_retries: node_max_retries(node.index, &node.task_name, merged_task_options)?,
         good_until: node_good_until(node.index, &node.task_name, merged_task_options)?,
@@ -76,7 +86,7 @@ pub async fn start_workflow<T>(
     retention: &RetentionConfig,
 ) -> WorkflowStartResult<WorkflowHandle<T>> {
     let wf_id = workflow_id.unwrap_or_else(Uuid::new_v4);
-    start_workflow_attempt(
+    Box::pin(start_workflow_attempt::<T>(
         broker,
         spec,
         wf_id,
@@ -84,7 +94,7 @@ pub async fn start_workflow<T>(
         registry,
         payload,
         retention,
-    )
+    ))
     .await
 }
 
@@ -120,7 +130,11 @@ async fn start_workflow_attempt<T>(
             false,
         ));
     }
-    match start_workflow_inner(broker, spec, wf_id, sent_at, registry, retention).await {
+    match Box::pin(start_workflow_inner(
+        broker, spec, wf_id, sent_at, registry, retention,
+    ))
+    .await
+    {
         Ok(WorkflowRowInsert::Inserted | WorkflowRowInsert::Existing) => Ok(WorkflowHandle::new(
             wf_id,
             Arc::clone(broker),
@@ -140,7 +154,7 @@ async fn start_workflow_attempt<T>(
         Err(error) => Err(refused(
             classify_workflow_error(&error, &spec.name, wf_id),
             error.to_string(),
-            is_retryable_workflow_error(&error),
+            error.is_retryable(),
         )),
     }
 }
@@ -232,7 +246,15 @@ pub async fn start_workflow_with_retry<T>(
     retention: &RetentionConfig,
 ) -> WorkflowStartResult<WorkflowHandle<T>> {
     if !resend_on_transient_err {
-        return start_workflow(broker, spec, workflow_id, registry, payload, retention).await;
+        return Box::pin(start_workflow::<T>(
+            broker,
+            spec,
+            workflow_id,
+            registry,
+            payload,
+            retention,
+        ))
+        .await;
     }
 
     // 1 initial attempt + START_RETRY_COUNT retries = 4 total attempts.
@@ -267,8 +289,10 @@ pub async fn start_workflow_with_retry<T>(
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         }
 
-        match start_workflow_attempt(broker, spec, wf_id, sent_at, registry, payload, retention)
-            .await
+        match Box::pin(start_workflow_attempt::<T>(
+            broker, spec, wf_id, sent_at, registry, payload, retention,
+        ))
+        .await
         {
             Ok(handle) => return Ok(handle),
             Err(e) => {
@@ -313,7 +337,7 @@ async fn start_workflow_inner(
     registry: &WorkflowSpecRegistry,
     retention: &RetentionConfig,
 ) -> Result<WorkflowRowInsert, WorkflowError> {
-    let arguments = start_arguments(spec, wf_id, registry, retention).await?;
+    let arguments = Box::pin(start_arguments(spec, wf_id, registry, retention)).await?;
 
     // The handle writes only into a database of its own client family: checked once per handle,
     // before the first write. A mismatch is not retryable and writes nothing.
@@ -323,7 +347,7 @@ async fn start_workflow_inner(
         registry,
         retention,
     };
-    let started = start_tree(broker, &arguments, sent_at, build).await?;
+    let started = Box::pin(start_tree(broker, &arguments, sent_at, build)).await?;
     let outcome = match started.outcome {
         StartOutcome::Started => WorkflowRowInsert::Inserted,
         StartOutcome::Exists { stored_name } => existing_workflow(stored_name, &spec.name),
@@ -338,8 +362,13 @@ async fn start_workflow_inner(
             "workflow id already exists; nothing was written",
         ),
     }
-    if let Err(failure) =
-        advance_parents(broker, CheckoutClass::Batch, started.parent_advances, build).await
+    if let Err(failure) = Box::pin(advance_parents(
+        broker,
+        CheckoutClass::Batch,
+        started.parent_advances,
+        build,
+    ))
+    .await
     {
         tracing::error!(
             workflow_id = %wf_id,
@@ -389,10 +418,6 @@ fn classify_workflow_error(
     }
 }
 
-fn is_retryable_workflow_error(e: &WorkflowError) -> bool {
-    e.is_retryable()
-}
-
 /// Retry a failed workflow start using the broker.
 pub async fn retry_start<T>(
     broker: &Arc<PostgresBroker>,
@@ -404,14 +429,14 @@ pub async fn retry_start<T>(
 ) -> WorkflowStartResult<WorkflowHandle<T>> {
     // Reuse the existing validation from horsies-core.
     let workflow_id = crate::core::workflow::start_types::validate_start_retry(error, &spec.name)?;
-    start_workflow(
+    Box::pin(start_workflow::<T>(
         broker,
         spec,
         Some(workflow_id),
         registry,
         payload,
         retention,
-    )
+    ))
     .await
 }
 

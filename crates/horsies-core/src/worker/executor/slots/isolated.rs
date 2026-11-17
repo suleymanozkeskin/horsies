@@ -176,6 +176,18 @@ impl TaskAnswer {
     }
 }
 
+/// Whether a slot waiting for work tells the claim loop that its child is
+/// ready (#1148).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadyNotice {
+    /// The first wait of a generation: the child is new, so no claim pass
+    /// counted it. The wait notes it on the board once.
+    AtFirstWait,
+    /// A later wait: the end of the task before it already woke the claim
+    /// loop (the outcome write).
+    Quiet,
+}
+
 /// What came first for a task in flight.
 enum FirstAnswer {
     Wait(FrameWait),
@@ -247,10 +259,12 @@ async fn serve_generation(
     defects: &mut SlotDefects,
 ) -> GenerationEnd {
     let mut tasks_done: u64 = 0;
+    let mut notice = ReadyNotice::AtFirstWait;
     loop {
-        let Some(run) = next_run(shared, &channel).await else {
+        let Some(run) = next_run(shared, &channel, notice).await else {
             break;
         };
+        notice = ReadyNotice::Quiet;
         tasks_done = tasks_done.saturating_add(1);
         let QueuedRun {
             frame,
@@ -331,8 +345,15 @@ fn recycle_reason(shared: &PoolShared, tasks_done: u64, rss: RssReading) -> Opti
 }
 
 /// Wait for work. `None`: this child must not take any. While it waits,
-/// the slot counts as idle in the free slots of its pool.
-async fn next_run(shared: &PoolShared, channel: &ChildChannel) -> Option<QueuedRun> {
+/// the slot counts as idle in the free slots of its pool. With
+/// [`ReadyNotice::AtFirstWait`], the first time the slot waits with no task
+/// queued it notes the ready child on the board, after it counts as idle:
+/// the claim pass that the note wakes counts this slot as free.
+async fn next_run(
+    shared: &PoolShared,
+    channel: &ChildChannel,
+    mut notice: ReadyNotice,
+) -> Option<QueuedRun> {
     let mut exit = channel.exit_watch();
     let mut idle = shared.idle_slot();
     loop {
@@ -343,6 +364,13 @@ async fn next_run(shared: &PoolShared, channel: &ChildChannel) -> Option<QueuedR
         }
         if let Some(run) = idle.take() {
             return Some(run);
+        }
+        match notice {
+            ReadyNotice::AtFirstWait => {
+                shared.board.note_child_ready();
+                notice = ReadyNotice::Quiet;
+            }
+            ReadyNotice::Quiet => {}
         }
         tokio::select! {
             () = shared.queued.notified() => {}
