@@ -177,7 +177,7 @@ impl Horsies {
 
 /// The report of a failed connect or ping (Python
 /// `_check_broker_connectivity`). Pure.
-fn connectivity_report(cause: &str) -> CheckReport {
+pub(crate) fn connectivity_report(cause: &str) -> CheckReport {
     CheckReport::of(
         CHECK,
         vec![HorsiesError::new("broker connectivity check failed")

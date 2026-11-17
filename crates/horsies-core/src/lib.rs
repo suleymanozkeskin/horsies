@@ -134,10 +134,10 @@ pub use crate::worker::finalize_batch::{
 // `process_role` first: a process that runs task bodies refuses it.
 pub use crate::worker::executor::child_host::{
     child_command, child_mode, child_producer, process_role, run_cancel_signal, run_child_host,
-    spawn_in_run, wait_inside_task_message, ChildApp, ChildArgs, ChildArgsError, ChildHookFailure,
-    ChildHostExit, ChildLogSetup, ChildMode, ChildProducer, ChildStartFuture, ChildStartHook,
-    ProcessRole, RunCancelSignal, RunSignalRefused, RunSpawnRefused, CHILD_MODE_ARGUMENT,
-    CHILD_START_HOOK_BOUND, MAX_RUN_WORK,
+    spawn_in_run, thread_role, wait_inside_task_message, ChildApp, ChildArgs, ChildArgsError,
+    ChildHookFailure, ChildHostExit, ChildLogSetup, ChildMode, ChildProducer, ChildStartFuture,
+    ChildStartHook, ProcessRole, RunCancelSignal, RunSignalRefused, RunSpawnRefused, ThreadRole,
+    CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, MAX_RUN_WORK,
 };
 
 // The parent-child frame codec, for the Python child program and the

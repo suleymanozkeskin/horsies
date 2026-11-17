@@ -80,7 +80,7 @@ impl SendContext {
 
 /// When a send asks the task to start.
 #[derive(Debug, Clone, Copy)]
-enum SendStart {
+pub(crate) enum SendStart {
     Now,
     AfterDelay(WholeSeconds),
 }
@@ -280,7 +280,7 @@ where
 
     /// The task id and payload of a first send, or the refusal before any
     /// statement (Python `_send_with_options`, `_prepare_send`). No I/O.
-    fn prepare(
+    pub(crate) fn prepare(
         &self,
         start: SendStart,
         options: &TaskSendOptions,
@@ -388,7 +388,7 @@ where
 
     /// The task id and payload of an error that `retry_send` or
     /// `retry_schedule` accepts (Python `_validate_retry`).
-    fn retry_target(
+    pub(crate) fn retry_target(
         &self,
         error: &TaskSendError,
         retry: RetryOf,
@@ -422,7 +422,7 @@ where
     /// Enqueue `payload` as `task_id`, and resend a retryable
     /// `ENQUEUE_FAILED` when the app asks for it. Every call after the first
     /// is `SendKind::Repeat`.
-    async fn enqueue_with_resends(
+    pub(crate) async fn enqueue_with_resends(
         &self,
         task_id: Uuid,
         payload: TaskSendPayload,
@@ -458,7 +458,7 @@ where
 
 /// Which retry method checks an error.
 #[derive(Debug, Clone, Copy)]
-enum RetryOf {
+pub(crate) enum RetryOf {
     Send,
     Schedule,
 }
