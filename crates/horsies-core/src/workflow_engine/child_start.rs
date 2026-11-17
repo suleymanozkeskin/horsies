@@ -249,8 +249,9 @@ impl OwedChildStarts {
 ///
 /// The child's input is the node's stored input with one member per
 /// `args_from` key, each the stored result of the named dependency (the
-/// `SOURCE` rows; a dependency that is not terminal gives
-/// `UPSTREAM_SKIPPED`, as the engine code does). The built child gets a new
+/// `SOURCE` rows, which name terminal dependencies only; a dependency that is
+/// not terminal gets no member, as Python and the baseline input builder do).
+/// The built child gets a new
 /// id (`Uuid::new_v4()`) and its tree as [`child_tree_arguments`] builds it.
 /// Does no I/O; it runs the registered builder.
 ///

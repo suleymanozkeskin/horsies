@@ -6,7 +6,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::broker::{BrokerError, PostgresBroker};
+use crate::broker::{BrokerError, PostgresBroker, SendKind};
 use crate::core::config::retention::{EnqueueRetention, RetentionConfig};
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
 use crate::core::history::periods::RetentionDays;
@@ -96,6 +96,7 @@ async fn enqueue_keyed(
             key,
             retention,
             Some(true),
+            SendKind::First,
         )
         .await
 }
@@ -191,6 +192,7 @@ async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
             None,
             EnqueueRetention::Forever,
             Some(false),
+            SendKind::First,
         )
         .await
         .expect("explicit forever enqueue");
@@ -231,6 +233,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
             None,
             period_days(2),
             Some(false),
+            SendKind::First,
         )
         .await
         .expect("seed unkeyed task");
@@ -249,6 +252,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
             Some("bind-key"),
             period_days(2),
             Some(false),
+            SendKind::First,
         )
         .await
         .expect("matching task-ID conflict binds key");
@@ -289,6 +293,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
             Some("different-bind-key"),
             period_days(2),
             Some(false),
+            SendKind::First,
         )
         .await
         .expect_err("matching command cannot replace its bound idempotency key");
@@ -325,6 +330,7 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
             Some("rejected-bind-key"),
             period_days(2),
             Some(false),
+            SendKind::First,
         )
         .await
         .expect_err("mismatched task-ID binding must fail closed");
@@ -405,6 +411,7 @@ async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
             None,
             EnqueueRetention::Default,
             None,
+            SendKind::First,
         )
         .await
         .unwrap();
@@ -423,6 +430,7 @@ async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
             None,
             EnqueueRetention::Default,
             Some(false),
+            SendKind::First,
         )
         .await
         .unwrap();
@@ -436,4 +444,66 @@ async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
     );
     let declined_facts = stored_facts(&pool, declined).await;
     assert_eq!(declined_facts.retain_rerun_input, Some(false));
+}
+
+/// Python `test_broker_postgres.py::TestEnqueueCatch::test_an_outcome_outside_the_contract_crashes_loud`:
+/// an outcome outside the contract of `horsies_enqueue_task` is a defect of
+/// the function, not a refusal of the send. The enqueue panics with the
+/// outcome and the task id, and answers no catalog error. The function is
+/// replaced, in this test's database, by one that reports `SOMETHING_ELSE`.
+#[tokio::test]
+#[serial]
+async fn an_enqueue_outcome_outside_the_contract_panics_with_the_outcome_and_the_task() {
+    let pool = migrated_pool().await;
+    sqlx::raw_sql(
+        "CREATE OR REPLACE FUNCTION horsies_enqueue_task(
+             p_task_id uuid, p_task_name text, p_queue_name text, p_priority integer,
+             p_input text, p_task_options text, p_execution text, p_retention_class_key text,
+             p_retain_rerun_input boolean, p_max_retries integer,
+             p_good_until timestamp with time zone, p_sent_at timestamp with time zone,
+             p_start_kind text, p_start_at timestamp with time zone, p_start_delay_s integer,
+             p_fingerprint_version smallint, p_fingerprint bytea, p_lineage_kind text,
+             p_rerun_of_task_id uuid, p_rerun_root_task_id uuid, p_key_kind text,
+             p_key_digest bytea, p_key_scope_version smallint, p_key_window_s integer,
+             p_send_kind text
+         ) RETURNS TABLE(outcome text, task_id uuid)
+         LANGUAGE sql AS $$ SELECT 'SOMETHING_ELSE'::text, p_task_id $$;",
+    )
+    .execute(&pool)
+    .await
+    .expect("replace the enqueue function");
+    let broker = PostgresBroker::from_pool(pool.clone());
+    let task_id = Uuid::from_u128(0x1232);
+
+    let sent = tokio::spawn(async move {
+        broker
+            .enqueue(
+                "p6_contract",
+                "{}",
+                "default",
+                50,
+                Some(Utc::now()),
+                None,
+                None,
+                None,
+                Some(task_id),
+                None,
+                None,
+                EnqueueRetention::Default,
+                Some(false),
+                SendKind::First,
+            )
+            .await
+    })
+    .await;
+
+    let panic = match sent {
+        Ok(answer) => panic!("the enqueue answered {answer:?} instead of a panic"),
+        Err(joined) => joined.into_panic(),
+    };
+    let message = panic
+        .downcast_ref::<String>()
+        .expect("the panic carries its formatted message");
+    assert!(message.contains("\"SOMETHING_ELSE\""), "{message}");
+    assert!(message.contains(&task_id.to_string()), "{message}");
 }

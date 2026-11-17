@@ -85,13 +85,7 @@ def create_database(base_url: str) -> Result[DualRunDatabase, DatabaseSetupFaile
 
 
 async def _install(url: str) -> Result[None, str]:
-    match load_baseline_migration():
-        case Err(unreadable):
-            return Err(
-                f'baseline SQL file {unreadable.file_name} is unreadable: {unreadable.cause}'
-            )
-        case Ok(migration):
-            pass
+    migration = load_baseline_migration()
     async with await psycopg.AsyncConnection.connect(
         url, autocommit=True
     ) as connection:

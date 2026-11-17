@@ -477,7 +477,7 @@ fn the_delay_is_at_least_one_second() {
 
 // --- stored retry limit ----------------------------------------------------
 //
-// Python `stored_max_retries` (`horsies/core/codec/task_options.py:80-103`);
+// Python `stored_max_retries` (`python/horsies/core/codec/task_options.py:80-103`);
 // `tests/unit/test_retry_utils.py::TestParseRetryPolicy` and
 // `tests/integration/test_enqueue_retry_limit.py`
 // (`test_valid_policies_store_their_limits`,

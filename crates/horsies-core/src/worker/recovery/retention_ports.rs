@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use super::*;
 use crate::broker::terminalization::on_test_pool::terminalize;
+use crate::broker::SendKind;
 use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
 use crate::core::history::ddl::classes::{finite_class_parent_name, register_period_class};
 use crate::core::history::ddl::runtime_names::daily_leaf_name;
@@ -76,7 +77,6 @@ async fn run_maintenance_pass(pool: &PgPool, retention: &RetentionConfig) -> Rea
         pool,
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &recovery,
-        &PayloadPolicy::default(),
         retention,
         &health,
         &mut next_retention_cleanup,
@@ -484,6 +484,7 @@ async fn a_delayed_send_stamps_the_mapped_period_class() {
             None,
             retention.resolve_queue_retention("bulk"),
             None,
+            SendKind::First,
         )
         .await
         .expect("delayed send");

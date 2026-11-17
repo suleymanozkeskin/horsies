@@ -42,7 +42,8 @@ from tests.baseline_sql import baseline_function_statements
 
 pytestmark = [pytest.mark.unit]
 
-_RUNTIME_ROOT = Path(__file__).resolve().parents[2] / 'horsies'
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_RUNTIME_ROOT = _REPO_ROOT / 'python' / 'horsies'
 _BASELINE = 'baseline'
 """Inventory key of a baseline function, in place of a module path."""
 
@@ -361,7 +362,7 @@ def _scan_runtime_package() -> Counter[_InventoryKey]:
     """Terminal-capable status writers across the whole runtime package."""
     found: Counter[_InventoryKey] = Counter()
     for path in sorted(_RUNTIME_ROOT.rglob('*.py')):
-        rel = str(path.relative_to(_RUNTIME_ROOT.parent))
+        rel = str(path.relative_to(_REPO_ROOT))
         tree = ast.parse(path.read_text(encoding='utf-8'))
         found.update(_scan_module(tree, rel))
     return found
@@ -403,7 +404,7 @@ def _scan_runtime_revival_windows() -> list[tuple[str, str, str]]:
     """Terminal-to-live SET windows across the whole runtime package."""
     windows: list[tuple[str, str, str]] = []
     for path in sorted(_RUNTIME_ROOT.rglob('*.py')):
-        rel = str(path.relative_to(_RUNTIME_ROOT.parent))
+        rel = str(path.relative_to(_REPO_ROOT))
         tree = ast.parse(path.read_text(encoding='utf-8'))
         windows.extend(_revival_set_windows(tree, rel))
     return windows
@@ -436,7 +437,7 @@ def _scan_runtime_history_updates() -> list[tuple[str, str]]:
     """(module, matched window) per UPDATE against the history relation."""
     found: list[tuple[str, str]] = []
     for path in sorted(_RUNTIME_ROOT.rglob('*.py')):
-        rel = str(path.relative_to(_RUNTIME_ROOT.parent))
+        rel = str(path.relative_to(_REPO_ROOT))
         for window in _scan_history_updates(path.read_text(encoding='utf-8')):
             found.append((rel, window))
     return found
@@ -469,7 +470,7 @@ class TestTerminalWriterInventory:
         """
         assert _scan_runtime_package() == Counter()
         history_inserts = sorted(
-            str(path.relative_to(_RUNTIME_ROOT.parent))
+            str(path.relative_to(_REPO_ROOT))
             for path in _RUNTIME_ROOT.rglob('*.py')
             if _SOURCE_HISTORY_INSERT_RE.search(path.read_text(encoding='utf-8'))
         )

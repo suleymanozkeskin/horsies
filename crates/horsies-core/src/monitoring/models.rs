@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::task::Execution;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -103,9 +104,23 @@ pub struct Facets {
     pub error_category_totals: BTreeMap<String, i64>,
 }
 
+/// What one breakdown group holds, tagged by `kind` (Python
+/// `BreakdownGroup`, `python/horsies/monitoring/models.py`): `value`, the tasks
+/// whose group column holds `value` (a worker id, a task name or a queue
+/// name); or `unclaimed`, the tasks that no worker claimed, which only the
+/// `worker` grouping has. A worker whose id is the text `unknown` is a
+/// `value` group of its own, never the `unclaimed` group.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BreakdownGroup {
+    Value { value: String },
+    Unclaimed,
+}
+
+/// Task counts per status, the task total, and the tasks retried at least
+/// once (Python `BreakdownCounts`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GroupRow {
-    pub group: String,
+pub struct BreakdownCounts {
     pub total: i64,
     pub pending: i64,
     pub claimed: i64,
@@ -117,28 +132,27 @@ pub struct GroupRow {
     pub retried: i64,
 }
 
-impl GroupRow {
-    pub(crate) fn empty(group: impl Into<String>) -> Self {
-        Self {
-            group: group.into(),
-            total: 0,
-            pending: 0,
-            claimed: 0,
-            running: 0,
-            completed: 0,
-            failed: 0,
-            cancelled: 0,
-            expired: 0,
-            retried: 0,
-        }
-    }
+/// One group's per-status task counts (Python `GroupRow`): the counts, then
+/// the group, in one JSON object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupRow {
+    #[serde(flatten)]
+    pub counts: BreakdownCounts,
+    pub group: BreakdownGroup,
 }
 
+/// Per-group status pivot plus the counts of every group (Python
+/// `Breakdown`). `groups` holds at most the query's limit of groups, by
+/// total, highest first, then by the group text in code-point order (the
+/// unclaimed group sorts as the text `unknown`, after a value group
+/// `unknown` with the same total). `group_count` is the number of distinct
+/// groups, and `total` covers every matching task, not only the groups
+/// shown.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Breakdown {
     pub group_by: String,
     pub groups: Vec<GroupRow>,
-    pub total: GroupRow,
+    pub total: BreakdownCounts,
     pub group_count: i64,
 }
 
@@ -181,6 +195,24 @@ pub struct TaskDetail {
     pub attempts: Vec<TaskAttemptInfo>,
     pub workflow_id: Option<Uuid>,
     pub workflow_task_index: Option<i32>,
+}
+
+/// The answer of the task detail read (Python `TaskDetail |
+/// TaskDetailNotFound`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaskDetailRead {
+    /// The live row, or the history row when the live table has no row.
+    Found(TaskDetail),
+    /// Neither the live table nor the history holds the task.
+    NotFound(TaskDetailNotFound),
+}
+
+/// No live row and no history row has this task id. `reason` says whether
+/// retention can explain the absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskDetailNotFound {
+    pub task_id: Uuid,
+    pub reason: TaskAbsenceReason,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -238,7 +270,7 @@ pub struct WorkflowTaskDetail {
 }
 
 /// One slot that was down when the worker wrote its snapshot (Python
-/// `DownSlotInfo`, `horsies/monitoring/models.py:307-318`).
+/// `DownSlotInfo`, `python/horsies/monitoring/models.py:307-318`).
 ///
 /// `cause` describes the cause of the last failed child start, and `detail`
 /// is its error text.
@@ -252,7 +284,7 @@ pub struct DownSlotInfo {
 }
 
 /// Whether any slot of a worker was down (Python `SlotHealthKind`,
-/// `horsies/monitoring/execution_classes.py:42`).
+/// `python/horsies/monitoring/execution_classes.py:42`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotHealthKind {
@@ -261,7 +293,7 @@ pub enum SlotHealthKind {
 }
 
 /// Latest state snapshot for one worker (Python `WorkerStateInfo`,
-/// `horsies/monitoring/models.py:321-351`).
+/// `python/horsies/monitoring/models.py:321-351`).
 ///
 /// `down_slots` lists the down slots in slot order; it is empty unless
 /// `slot_health` is `slots_down`.
@@ -289,7 +321,7 @@ pub struct WorkerStateInfo {
 }
 
 /// One claim budget of a live worker (Python `BudgetLoadInfo`,
-/// `horsies/monitoring/models.py:354-367`).
+/// `python/horsies/monitoring/models.py:354-367`).
 ///
 /// `capacity` (children or seats in service) and `serves` come from the
 /// worker's latest snapshot. `in_flight` counts, at the read, its `RUNNING`
@@ -315,7 +347,7 @@ pub struct WorkerClassLoadInfo {
 /// Whether live workers serve a pending stream, tagged by `kind`: `served`,
 /// `no_capacity` or `unserved` (Python `StreamServedInfo`,
 /// `StreamNoCapacityInfo`, `StreamUnservedInfo`,
-/// `horsies/monitoring/models.py:378-400`).
+/// `python/horsies/monitoring/models.py:378-400`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamCoverageInfo {
@@ -331,7 +363,7 @@ pub enum StreamCoverageInfo {
 
 /// How long the stream's rows wait, tagged by `kind`: `waiting` or
 /// `none_due` (Python `StreamWaitingInfo`, `StreamNoneDueInfo`,
-/// `horsies/monitoring/models.py:403-415`).
+/// `python/horsies/monitoring/models.py:403-415`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamWaitInfo {
@@ -355,7 +387,7 @@ pub struct PendingStreamInfo {
 }
 
 /// Pending streams and the budget load of each live worker (Python
-/// `ClassReportInfo`, `horsies/monitoring/models.py:433-447`).
+/// `ClassReportInfo`, `python/horsies/monitoring/models.py:433-447`).
 ///
 /// `checked_at` is database time. A worker is live while its latest snapshot
 /// is at most `live_window_s` old. `streams` is ordered by queue name, then
@@ -397,7 +429,7 @@ pub struct WorkerHistoryPoint {
 /// as a task id (a task id is a UUID in the public API); it serializes as the
 /// hyphenated lowercase text, as Python's `str` of the id. `next_run_at` is
 /// NOT NULL in the baseline, so every row has one.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScheduleStateInfo {
     pub schedule_name: String,
     pub last_run_at: Option<DateTime<Utc>>,

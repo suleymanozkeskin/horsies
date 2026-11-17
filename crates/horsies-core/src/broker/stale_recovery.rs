@@ -1,5 +1,5 @@
 //! The stale recovery statements of the reaper, one statement each on a core
-//! pool (`horsies/core/baseline/sql/0004_lifecycle_functions.sql`):
+//! pool (`crates/horsies-core/baseline/0004_lifecycle_functions.sql`):
 //!
 //! - `horsies_stale_running_scan`: the candidates of one stale RUNNING pass,
 //!   with the facts that the retry decision and the crash result need. It
@@ -17,7 +17,7 @@
 //! ([`BrokerError::Statement`]).
 //!
 //! Python reference: `mark_stale_tasks_as_failed`
-//! (`horsies/core/brokers/postgres.py:3129-3423`) and `requeue_stale_claimed`
+//! (`python/horsies/core/brokers/postgres.py:3129-3423`) and `requeue_stale_claimed`
 //! (`:3505-3530`).
 
 use chrono::{DateTime, Utc};
@@ -86,12 +86,43 @@ impl ThresholdMs {
 
 /// The thresholds of one stale RUNNING pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct StaleRunningThresholds {
+pub struct StaleRunningThresholds {
     /// A row is stale when its latest runner beat (its start when it has
     /// none) is older than this.
-    pub(crate) stale_after: ThresholdMs,
+    pub stale_after: ThresholdMs,
     /// A row whose finalizing marker is newer than this is not stale.
-    pub(crate) finalizing_stale_after: ThresholdMs,
+    pub finalizing_stale_after: ThresholdMs,
+}
+
+/// Candidates that one stale RUNNING pass reads at most (Python
+/// `STALE_RUNNING_SCAN_BATCH_SIZE`). Each candidate is one statement, so
+/// this bounds the length of one pass; a larger backlog drains over
+/// successive passes.
+pub(crate) const STALE_RUNNING_SCAN_BATCH: RecoveryBatch = match RecoveryBatch::new(1_000) {
+    Some(batch) => batch,
+    None => panic!("1000 rows is a recovery batch"),
+};
+
+/// How a stale RUNNING pass ended. `recovered` counts the candidates whose
+/// retry or failure committed; a refused candidate and a candidate whose
+/// statement failed are not counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaleRunningPass {
+    /// The scan read fewer candidates than its batch: every stale row that
+    /// it saw was judged.
+    Complete { recovered: u64 },
+    /// The scan read a full batch of `scan_batch` candidates; stale rows can
+    /// remain for the next pass (Python warns then).
+    ScanFull { recovered: u64, scan_batch: u32 },
+}
+
+impl StaleRunningPass {
+    /// The candidates whose retry or failure committed.
+    pub const fn recovered(self) -> u64 {
+        match self {
+            Self::Complete { recovered } | Self::ScanFull { recovered, .. } => recovered,
+        }
+    }
 }
 
 /// `horsies_stale_running_scan`. Parameters in order: stale threshold,
@@ -305,7 +336,7 @@ pub(crate) async fn finish_stale_attempt(
 
 /// Wake the queue of a retried row: `pg_notify('task_queue_<queue>',
 /// 'retry:<task id>')`, as Python's stale recovery does after its retry
-/// commits (`horsies/core/brokers/postgres.py:3307-3323`).
+/// commits (`python/horsies/core/brokers/postgres.py:3307-3323`).
 ///
 /// One statement on `pool`, checked out as reserved work. The wake is
 /// best-effort: a worker that misses it finds the row at its next poll.

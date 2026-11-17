@@ -1,4 +1,4 @@
-"""Tests for PostgresBroker (horsies/core/brokers/postgres.py).
+"""Tests for PostgresBroker (python/horsies/core/brokers/postgres.py).
 
 Strategy: mock DB layer entirely (create_async_engine, async_sessionmaker,
 PostgresListener) to avoid real PostgreSQL. Tests verify logic, branching,

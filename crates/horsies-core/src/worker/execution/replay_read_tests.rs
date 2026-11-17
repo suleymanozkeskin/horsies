@@ -1,15 +1,17 @@
 //! The read of a phase-1 replay (`replay_of_committed_write`) on the
-//! baseline phase-2 record. The replay reads only whether the record exists:
-//! the node finish takes the node status from the record's kind. Python
-//! reference: `core/worker/finalize.py`, `_phase2_of_a_replay` (a replay of a
-//! committed workflow write owes the phase 2 of its committed outcome; a
-//! plain task owes nothing).
+//! baseline phase-2 record, on the main core pool of the broker. The replay
+//! reads only whether the record exists: the node finish takes the node
+//! status from the record's kind. Python reference:
+//! `core/worker/finalize.py`, `_phase2_of_a_replay` (a replay of a committed
+//! workflow write owes the phase 2 of its committed outcome; a plain task
+//! owes nothing).
 
 use serial_test::serial;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{replay_of_committed_write, FinalizeError, FinalizeOutcome, PhaseTwoForm};
+use crate::broker::PostgresBroker;
 
 /// The ids of one seeded workflow node and its task.
 struct SeededRecord {
@@ -106,9 +108,10 @@ fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
 #[serial]
 async fn a_complete_locked_record_owes_phase_two() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let broker = PostgresBroker::from_pool(pool.clone());
     let seeded = seed_record(&pool, "COMPLETE_LOCKED").await;
 
-    let outcome = replay_of_committed_write(&pool, seeded.task_id, true).await;
+    let outcome = replay_of_committed_write(&broker, seeded.task_id, true).await;
 
     cleanup(&pool, &seeded).await;
     assert!(
@@ -129,6 +132,7 @@ async fn a_complete_locked_record_owes_phase_two() {
 #[serial]
 async fn failure_and_expiry_records_owe_phase_two() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let broker = PostgresBroker::from_pool(pool.clone());
     for kind in [
         "FAIL_RUNNING",
         "FAIL_STALE",
@@ -137,7 +141,7 @@ async fn failure_and_expiry_records_owe_phase_two() {
     ] {
         let seeded = seed_record(&pool, kind).await;
 
-        let outcome = replay_of_committed_write(&pool, seeded.task_id, true).await;
+        let outcome = replay_of_committed_write(&broker, seeded.task_id, true).await;
 
         cleanup(&pool, &seeded).await;
         assert!(
@@ -159,8 +163,9 @@ async fn failure_and_expiry_records_owe_phase_two() {
 #[serial]
 async fn a_consumed_record_owes_nothing() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let broker = PostgresBroker::from_pool(pool.clone());
 
-    let outcome = replay_of_committed_write(&pool, Uuid::new_v4(), true).await;
+    let outcome = replay_of_committed_write(&broker, Uuid::new_v4(), true).await;
 
     assert!(
         matches!(outcome, Ok(FinalizeOutcome::Finalized)),
@@ -174,8 +179,9 @@ async fn a_consumed_record_owes_nothing() {
 #[serial]
 async fn a_plain_task_replay_owes_nothing() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let broker = PostgresBroker::from_pool(pool.clone());
 
-    let outcome = replay_of_committed_write(&pool, Uuid::new_v4(), false).await;
+    let outcome = replay_of_committed_write(&broker, Uuid::new_v4(), false).await;
 
     assert!(
         matches!(outcome, Ok(FinalizeOutcome::Finalized)),

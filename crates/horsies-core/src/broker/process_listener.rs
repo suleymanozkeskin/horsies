@@ -48,7 +48,7 @@ pub const SESSION_CHECK_CHANNEL_PREFIX: &str = "horsies_check_";
 
 /// The longest the worker boot's session check waits for its NOTIFY
 /// (Python's `SESSION_CAPABILITY_TIMEOUT`,
-/// `horsies/core/brokers/session_capability.py:13`).
+/// `python/horsies/core/brokers/session_capability.py:13`).
 pub const SESSION_CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The channel name of a fixed name, or of a generated name whose length the

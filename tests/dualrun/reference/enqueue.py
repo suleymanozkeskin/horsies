@@ -1,6 +1,6 @@
 """Enqueue, before ``horsies_enqueue_task``.
 
-``PostgresBroker.enqueue_async`` (``horsies/core/brokers/postgres.py``) sent:
+``PostgresBroker.enqueue_async`` (``python/horsies/core/brokers/postgres.py``) sent:
 
 - an unkeyed send: ``ENQUEUE_INSERT_SQL`` in autocommit; a taken id then the
   read of the stored send (``_verify_enqueue_conflict``) in a second

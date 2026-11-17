@@ -363,12 +363,14 @@ async fn the_recovery_of_a_node_that_is_not_pending_promotes_nothing() {
     assert_eq!(tasks_after, tasks_before);
 }
 
-/// `TestCheckAndPromoteTask::test_no_dependencies_returns`: a PENDING node
-/// with no dependencies is not promoted; it stays PENDING with no task row.
+/// `TestCheckAndPromoteTask::test_no_dependencies_returns`, with the core's
+/// rule (#1224): a PENDING node with no dependencies meets its join `all`
+/// (0 of 0 dependencies terminal), so recovery promotes it and mints its task
+/// row. Python leaves such a node PENDING; the core keeps its rule, because it
+/// recovers a root that a start left PENDING.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1224"]
-async fn a_pending_node_without_dependencies_is_not_promoted() {
+async fn a_pending_node_without_dependencies_is_promoted() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool).await;
     seed_task_node(&pool, workflow_id, 0, &[], "PENDING").await;
@@ -377,9 +379,9 @@ async fn a_pending_node_without_dependencies_is_not_promoted() {
 
     let (status, task_id, _result) = node_state(&pool, workflow_id, 0).await;
     remove_tree(&pool, workflow_id).await;
-    assert!(matches!(promoted, Ok(false)), "{promoted:?}");
-    assert_eq!(status, "PENDING");
-    assert_eq!(task_id, None);
+    assert!(matches!(promoted, Ok(true)), "{promoted:?}");
+    assert_eq!(status, "ENQUEUED");
+    assert!(task_id.is_some(), "the promoted node links its task row");
 }
 
 /// Stored task options of the promoted node 1 that do not read, with

@@ -1,4 +1,4 @@
-"""Tests for PostgresListener (horsies/core/brokers/listener.py).
+"""Tests for PostgresListener (python/horsies/core/brokers/listener.py).
 
 Strategy: mock psycopg.AsyncConnection.connect to avoid real PostgreSQL.
 Test internal state transitions, dispatcher distribution, health monitoring,
