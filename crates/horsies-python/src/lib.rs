@@ -186,6 +186,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::release::ReleasedRow>()?;
     module.add_class::<operations::release::NotHeldRow>()?;
     module.add_class::<operations::release::ReleaseFailed>()?;
+    module.add_class::<operations::result::RawResultRecordRecord>()?;
+    module.add_class::<operations::result::RawResultAbsent>()?;
     module.add_class::<operations::schema::SchemaInstalled>()?;
     module.add_class::<operations::schema::SchemaInstallNotRun>()?;
     module.add_class::<operations::schema::SchemaStatusRecord>()?;

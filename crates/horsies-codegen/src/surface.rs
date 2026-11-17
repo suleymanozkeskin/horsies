@@ -217,6 +217,10 @@ const CANCEL_TASK_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("include_running", "bool"),
 ];
+const RAW_RESULT_RECORD_PARAMETERS: &[StubParameter] = &[
+    positional("task_id", "uuid.UUID"),
+    keyword("timeout_ms", "int | None"),
+];
 const TASK_INFO_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("include_result", "bool"),
@@ -229,6 +233,7 @@ const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerFai
 const SEND_OUTCOME: &str = "Enqueued | SendSuppressed | SendValidationFailed | \
      SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict";
 const TASK_INFO_OUTCOME: &str = "TaskInfoRecord | TaskInfoNotFound | BrokerFailure";
+const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | BrokerFailure";
 const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
     "StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed";
 const RELEASE_CLAIMS_OUTCOME: &str = "ClaimsReleased | ReleaseFailed";
@@ -249,7 +254,7 @@ const MARK_STALE_RUNNING_OUTCOME: &str =
 const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
      CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
 
-const CORE_HANDLE_METHODS: [StubFunction; 22] = [
+const CORE_HANDLE_METHODS: [StubFunction; 24] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -381,6 +386,18 @@ const CORE_HANDLE_METHODS: [StubFunction; 22] = [
         parameters: TASK_INFO_PARAMETERS,
         returns: TypeText::FutureOf(TASK_INFO_OUTCOME),
         doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "raw_result_record",
+        parameters: RAW_RESULT_RECORD_PARAMETERS,
+        returns: TypeText::Plain(RAW_RESULT_OUTCOME),
+        doc: "The result of one task, waiting up to timeout_ms (no limit for None) while it has not\nfinished. Installs the schema once per handle first; then reads only. Bounded by the limit\nplus the bound of a blocking call; not bounded with no limit.",
+    },
+    StubFunction {
+        name: "raw_result_record_async",
+        parameters: RAW_RESULT_RECORD_PARAMETERS,
+        returns: TypeText::FutureOf(RAW_RESULT_OUTCOME),
+        doc: "The awaitable form of the method above. A cancelled await drops the wait.",
     },
 ];
 
@@ -522,7 +539,7 @@ const ARGUMENT_CLASSES: [StubClass; 11] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 55] = [
+const RECORD_CLASSES: [StubClass; 57] = [
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -709,6 +726,28 @@ const RECORD_CLASSES: [StubClass; 55] = [
                 "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'] | None",
             ),
         ],
+        methods: &[],
+    },
+    StubClass {
+        name: "RawResultRecordRecord",
+        doc: "The status of one task and its stored result envelope as JSON text; result_json is None\nfor a task that had not finished when the limit passed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("task_name", "str"),
+            StubProperty {
+                name: "status",
+                annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
+            },
+            property("result_json", "str | None"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "RawResultAbsent",
+        doc: "Neither the live table nor the task history holds the task.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID")],
         methods: &[],
     },
     StubClass {
@@ -1108,8 +1147,8 @@ const HANDLE_CLASSES: [StubClass; 1] = [StubClass {
     methods: &CORE_HANDLE_METHODS,
 }];
 
-const CLASSES: [StubClass; 67] = {
-    let mut classes = [HANDLE_CLASSES[0]; 67];
+const CLASSES: [StubClass; 69] = {
+    let mut classes = [HANDLE_CLASSES[0]; 69];
     let mut position = 0;
     while position < ARGUMENT_CLASSES.len() {
         classes[1 + position] = ARGUMENT_CLASSES[position];
