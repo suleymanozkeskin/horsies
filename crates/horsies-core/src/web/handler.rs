@@ -6,10 +6,8 @@
 //! request needs, runs the user's policy for those and no other, and passes
 //! the verdicts as an [`AccessGrant`] with the request to
 //! [`MonitoringHandler::handle`]. The handler serves the request with the
-//! routes, guards, caches and page of the axum monitoring router
-//! ([`super::create_monitoring_router`]): one implementation of every route
-//! for both entry points. Its guards read the verdicts of the grant in place
-//! of calling a policy.
+//! routes, guards, caches and page of its internal router. Its guards read
+//! the verdicts of the grant.
 
 use std::sync::Arc;
 use std::time::Duration;

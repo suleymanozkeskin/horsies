@@ -319,6 +319,26 @@ fn default_cron_step() -> u32 {
     1
 }
 
+/// The body of a tagged unit variant ([`CronNumericTerm::Every`],
+/// [`CronEnumTerm::Every`], [`DaySelector::EveryDay`]): the members after the
+/// tag, which must be none. serde reads a unit variant of an internally
+/// tagged enum and skips its other members, also under
+/// `deny_unknown_fields`; Python's `CronEvery` and `EveryDay` refuse them
+/// (`extra='forbid'`).
+///
+/// Errors: serde's unknown-field error, which names the first member.
+fn no_member_after_the_tag<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    /// A body with no members.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct NoMembers {}
+
+    NoMembers::deserialize(deserializer).map(|NoMembers {}| ())
+}
+
 /// Cron term over an integer field (minute, hour, day-of-month).
 ///
 /// Per-field domain bounds are enforced by [`CronSchedule::validate`], which
@@ -328,6 +348,7 @@ fn default_cron_step() -> u32 {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CronNumericTerm {
     /// `*` — every value in the field's domain.
+    #[serde(deserialize_with = "no_member_after_the_tag")]
     Every,
     /// `*/n` — every nth value across the field's full domain (anchored at the
     /// domain start). `step` must be <= the field span.
@@ -352,6 +373,7 @@ pub enum CronNumericTerm {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CronEnumTerm<T> {
     /// `*` — every value in the field's domain.
+    #[serde(deserialize_with = "no_member_after_the_tag")]
     Every,
     /// `a,b,c` — explicit enum values.
     EnumValues { values: Vec<T> },
@@ -374,6 +396,7 @@ pub enum CronEnumTerm<T> {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DaySelector {
     /// Both day-of-month and day-of-week unrestricted.
+    #[serde(deserialize_with = "no_member_after_the_tag")]
     EveryDay,
     /// Restrict by day-of-month only.
     ByMonthDay { day_of_month: Vec<CronNumericTerm> },
@@ -2241,5 +2264,161 @@ mod tests {
             "day": {"kind": "every_day"}}}]}"#;
         let config = serde_json::from_str::<ScheduleConfig>(accepted).expect("known keys only");
         assert_eq!(config.schedules.len(), 1);
+    }
+
+    /// The schedule config of one schedule with the TOML `pattern`.
+    fn one_schedule_toml(pattern: &str) -> String {
+        format!("[[schedules]]\nname = \"a\"\ntask_name = \"t\"\npattern = {pattern}\n")
+    }
+
+    /// A TOML cron pattern with `minute`, every hour, `month` and `day`.
+    fn cron_toml(minute: &str, month: &str, day: &str) -> String {
+        format!(
+            "{{ type = \"cron\", minute = [{minute}], hour = [{{ kind = \"every\" }}], \
+             month = [{month}], day = {day} }}"
+        )
+    }
+
+    /// Python `test_config_models_forbid_extra.py` for the schedule models:
+    /// each variant of each tagged schedule enum ([`SchedulePattern`],
+    /// [`CronNumericTerm`], [`CronEnumTerm`], [`DaySelector`]) refuses a
+    /// member that it does not declare, and the error names the member. The
+    /// unit variants `every` and `every_day` refuse it too, as Python's
+    /// `CronEvery` and `EveryDay` do. The config is read from TOML, as
+    /// `horsies web <CONFIG>` reads it, and it loads without the member.
+    /// [`CronEnumTerm`] is generic over the month and the weekday; the rows
+    /// use the month.
+    #[test]
+    fn every_variant_of_the_tagged_schedule_enums_refuses_an_unknown_member() {
+        let every = r#"{ kind = "every" }"#;
+        let every_day = r#"{ kind = "every_day" }"#;
+        let both_lists =
+            r#"day_of_month = [{ kind = "every" }], day_of_week = [{ kind = "every" }]"#;
+        // Each pattern holds `EXTRA` before the closing brace of the table
+        // of one variant; the row's key goes there.
+        let rows: Vec<(&str, String)> = vec![
+            (
+                "extra_interval",
+                r#"{ type = "interval", seconds = 5 EXTRA}"#.to_owned(),
+            ),
+            (
+                "extra_hourly",
+                r#"{ type = "hourly", minute = 0 EXTRA}"#.to_owned(),
+            ),
+            (
+                "extra_daily",
+                r#"{ type = "daily", time = "09:00:00" EXTRA}"#.to_owned(),
+            ),
+            (
+                "extra_weekly",
+                r#"{ type = "weekly", days = ["monday"], time = "09:00:00" EXTRA}"#.to_owned(),
+            ),
+            (
+                "extra_monthly",
+                r#"{ type = "monthly", day = 1, time = "09:00:00" EXTRA}"#.to_owned(),
+            ),
+            (
+                "extra_cron",
+                format!(
+                    "{{ type = \"cron\", minute = [{every}], hour = [{every}], \
+                     month = [{every}], day = {every_day} EXTRA}}"
+                ),
+            ),
+            (
+                "extra_every",
+                cron_toml(r#"{ kind = "every" EXTRA}"#, every, every_day),
+            ),
+            (
+                "extra_step",
+                cron_toml(r#"{ kind = "step", step = 5 EXTRA}"#, every, every_day),
+            ),
+            (
+                "extra_values",
+                cron_toml(
+                    r#"{ kind = "values", values = [0] EXTRA}"#,
+                    every,
+                    every_day,
+                ),
+            ),
+            (
+                "extra_range",
+                cron_toml(
+                    r#"{ kind = "range", start = 0, end = 5 EXTRA}"#,
+                    every,
+                    every_day,
+                ),
+            ),
+            (
+                "extra_enum_every",
+                cron_toml(every, r#"{ kind = "every" EXTRA}"#, every_day),
+            ),
+            (
+                "extra_enum_values",
+                cron_toml(
+                    every,
+                    r#"{ kind = "enum_values", values = ["january"] EXTRA}"#,
+                    every_day,
+                ),
+            ),
+            (
+                "extra_enum_range",
+                cron_toml(
+                    every,
+                    r#"{ kind = "enum_range", start = "january", end = "march" EXTRA}"#,
+                    every_day,
+                ),
+            ),
+            (
+                "extra_enum_step",
+                cron_toml(every, r#"{ kind = "enum_step", step = 2 EXTRA}"#, every_day),
+            ),
+            (
+                "extra_every_day",
+                cron_toml(every, every, r#"{ kind = "every_day" EXTRA}"#),
+            ),
+            (
+                "extra_by_month_day",
+                cron_toml(
+                    every,
+                    every,
+                    r#"{ kind = "by_month_day", day_of_month = [{ kind = "every" }] EXTRA}"#,
+                ),
+            ),
+            (
+                "extra_by_weekday",
+                cron_toml(
+                    every,
+                    every,
+                    r#"{ kind = "by_weekday", day_of_week = [{ kind = "every" }] EXTRA}"#,
+                ),
+            ),
+            (
+                "extra_either_day",
+                cron_toml(
+                    every,
+                    every,
+                    &format!("{{ kind = \"either_day\", {both_lists} EXTRA}}"),
+                ),
+            ),
+            (
+                "extra_both_days",
+                cron_toml(
+                    every,
+                    every,
+                    &format!("{{ kind = \"both_days\", {both_lists} EXTRA}}"),
+                ),
+            ),
+        ];
+        for (key, pattern) in rows {
+            let accepted = one_schedule_toml(&pattern.replace("EXTRA", ""));
+            let _config: ScheduleConfig = toml::from_str(&accepted).unwrap_or_else(|error| {
+                panic!("{key}: the pattern without the member must load: {error}")
+            });
+            let refused = one_schedule_toml(&pattern.replace("EXTRA", &format!(", {key} = 1")));
+            let error = toml::from_str::<ScheduleConfig>(&refused)
+                .expect_err("an unknown member must be refused");
+            let unknown_field = format!("unknown field `{key}`");
+            assert!(error.to_string().contains(&unknown_field), "{key}: {error}");
+        }
     }
 }
