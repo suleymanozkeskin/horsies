@@ -32,7 +32,6 @@ use crate::core::config::worker_profile::{SelectedProfile, TaskLimitSetting};
 use crate::core::history::maintenance::coverage::{
     startup_verdict, CoverageRequest, CoverageSerialization, StartupCoverageOutcome,
 };
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::db::{
     ChannelName, CheckoutClass, ParameterType, PayloadEvent, PayloadFilter, PayloadSubscription,
     Reserve, StatementBound, TypedStatement, WakeEvent, WakeSubscription,
@@ -807,40 +806,12 @@ impl Worker {
     /// manifest selects ([`crate::worker_manifest::WorkerManifest::selected_profile`],
     /// [`crate::core::config::worker_profile::select_worker_profile`]).
     /// `launch` names what every child runs; `registered` the class of each
-    /// task of the app.
-    ///
-    /// The sub-workflow children of the worker's workflow steps are built
-    /// from the registered definitions of `workflow_registry`.
+    /// task of the app. The sub-workflow children of the worker's workflow
+    /// steps are built by `child_specs`, the child spec source of the client.
     ///
     /// Errors: [`WorkerError::Config`] for a worker config that does not
     /// validate, or a profile that starts no child (AppConfig validation
     /// refuses such a profile; Python `execution_settings`).
-    pub fn new(
-        broker: Arc<PostgresBroker>,
-        workflow_registry: Arc<WorkflowSpecRegistry>,
-        app_config: AppConfig,
-        worker_config: WorkerConfig,
-        profile: SelectedProfile,
-        launch: ChildLaunch,
-        registered: RegisteredClasses,
-    ) -> Result<Self, WorkerError> {
-        Self::of_child_specs(
-            broker,
-            ChildSpecs::Registry(workflow_registry),
-            app_config,
-            worker_config,
-            profile,
-            launch,
-            registered,
-        )
-    }
-
-    /// [`Worker::new`] with the sub-workflow children of the worker's
-    /// workflow steps built by `child_specs`: the registered definitions of
-    /// the Rust client, or the child spec source of a client that builds
-    /// each child in its own language.
-    ///
-    /// Errors: as [`Worker::new`].
     pub(crate) fn of_child_specs(
         broker: Arc<PostgresBroker>,
         child_specs: ChildSpecs,
@@ -1532,7 +1503,6 @@ impl Worker {
             self.child_specs.clone(),
             self.worker_id.clone(),
             self.app_config.payload.clone(),
-            self.app_config.retention.clone(),
             batcher.clone(),
         ));
         let stops = ChildrenStopCell::default();
@@ -3415,7 +3385,6 @@ mod tests {
             crate::test_support::child_specs::no_child_specs(),
             "worker-1".to_owned(),
             crate::core::config::payload::PayloadPolicy::default(),
-            crate::core::RetentionConfig::default(),
             crate::worker::executor::slots::test_successes(broker, "worker-1"),
         );
         let settled = writer

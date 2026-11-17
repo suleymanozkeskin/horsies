@@ -1,9 +1,7 @@
 use crate::broker::core_rows::{column, one_row, RowDecodeError};
 use crate::broker::PostgresBroker;
-use crate::core::config::payload::PayloadPolicy;
-use crate::core::config::retention::{PausedWorkflowAge, RetentionConfig};
+use crate::core::config::retention::PausedWorkflowAge;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
-use crate::core::WorkflowSpecRegistry;
 #[cfg(test)]
 use crate::test_support::child_specs::TestChildSpecs;
 #[cfg(test)]
@@ -402,31 +400,11 @@ pub async fn pause_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> Handl
 /// Panics ([`handle_operation_error`]), and nothing committed: a row outside a function's contract, or a host
 /// build of an owed child that the core refuses (`Validation`).
 ///
-/// The handle's client family is checked before the first write (`admit_workflow_write`). The payload
-/// policy is not read: the step functions and the tree recovery take no payload policy.
-pub async fn resume_workflow(
-    broker: &PostgresBroker,
-    workflow_id: Uuid,
-    registry: &WorkflowSpecRegistry,
-    _payload: &PayloadPolicy,
-    retention: &RetentionConfig,
-) -> HandleResult<bool> {
-    Box::pin(resume_with(
-        broker,
-        workflow_id,
-        ChildBuild::Registry {
-            registry,
-            retention,
-        },
-    ))
-    .await
-    .map_err(|failure| failure.into_handle_error(workflow_id))
-}
-
-/// [`resume_workflow`] of a client that builds its children through
-/// `source` (the Python client's `build_with`). Outcomes and panics as
-/// [`resume_workflow`]; a child build that `source` did not run is
+/// The children of the owed child starts come from the client's `source` (the Python client's
+/// `build_with`, the Rust client's registry); a child build that `source` did not run is
 /// `DB_OPERATION_FAILED`, retryable, and nothing committed.
+///
+/// The handle's client family is checked before the first write (`admit_workflow_write`).
 pub(crate) async fn resume_client_workflow(
     broker: &PostgresBroker,
     workflow_id: Uuid,
@@ -463,9 +441,8 @@ impl ResumeFailure {
     }
 }
 
-/// The body of [`resume_workflow`] with the children built by `build`.
-/// Outcomes as [`resume_workflow`]; with a client build, as
-/// [`resume_client_workflow`]. The error of the step is
+/// The body of [`resume_client_workflow`] with the children built by
+/// `build`. Outcomes as [`resume_client_workflow`]. The error of the step is
 /// [`ResumeFailure::Step`], unconverted, and every other failure is
 /// [`ResumeFailure::Handle`]. The monitoring resume action calls it with the
 /// build of its process.
