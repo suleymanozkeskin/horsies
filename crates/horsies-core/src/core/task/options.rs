@@ -288,19 +288,10 @@ impl TaskOptions {
     ///   a grace on another class than `SHARED_ASYNC`, or a `SHARED_ASYNC`
     ///   task without one, is refused at enqueue (`stored_execution`).
     ///
-    /// Returns `None` for an `ISOLATED` task with no grace, no retry policy
-    /// and no timeout, so the row stores no options; enqueue and dispatch
-    /// read that as no retry, no timeout and `ISOLATED`, the same as the full
-    /// text with nulls. Every other task gets the text.
-    pub fn serialize_retry_options(&self) -> Option<String> {
-        if let (None, None, Execution::Isolated, None) = (
-            &self.retry_policy,
-            self.timeout_ms,
-            self.execution,
-            self.cancel_grace_ms,
-        ) {
-            return None;
-        }
+    /// Every task gets the text, as every Python task does: an `ISOLATED`
+    /// task with no grace, no retry policy and no timeout stores the text
+    /// with nulls (`tests/fixtures/stored_forms/task_options.json`).
+    pub fn stored_options_text(&self) -> String {
         let stored = StoredTaskOptions {
             retry_policy: self.retry_policy.as_ref().map(|policy| StoredRetryPolicy {
                 max_retries: policy.max_retries,
@@ -325,7 +316,7 @@ impl TaskOptions {
         };
         // Every field is a plain number, string, bool or list of them, so the
         // encode cannot fail.
-        Some(serde_json::to_string(&stored).expect("stored task options encode to JSON"))
+        serde_json::to_string(&stored).expect("stored task options encode to JSON")
     }
 }
 
@@ -414,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn serialize_retry_options_with_both_fields() {
+    fn stored_options_text_with_both_fields() {
         use super::super::error::{TaskErrorCode, UserCode};
 
         let opts = TaskOptions {
@@ -430,7 +421,7 @@ mod tests {
             cancel_grace_ms: None,
         };
 
-        let json = opts.serialize_retry_options().expect("should produce JSON");
+        let json = opts.stored_options_text();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         // Python's layout: auto_retry_for inside retry_policy, the five keys of
@@ -470,7 +461,7 @@ mod tests {
             execution: Execution::Isolated,
             cancel_grace_ms: None,
         };
-        let json = opts.serialize_retry_options().expect("should produce JSON");
+        let json = opts.stored_options_text();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(
@@ -505,7 +496,7 @@ mod tests {
             execution: Execution::Isolated,
             cancel_grace_ms: None,
         };
-        let json = opts.serialize_retry_options().expect("should produce JSON");
+        let json = opts.stored_options_text();
 
         match read_stored_options(Some(&json)) {
             StoredOptions::Readable {
@@ -535,9 +526,7 @@ mod tests {
     }
 
     fn stored_object(options: &TaskOptions) -> serde_json::Map<String, serde_json::Value> {
-        let text = options
-            .serialize_retry_options()
-            .expect("a task with a class or a timeout stores its options");
+        let text = options.stored_options_text();
         match serde_json::from_str(&text).expect("the stored options are JSON") {
             serde_json::Value::Object(object) => object,
             other => panic!("the stored options are an object, got {other}"),
@@ -560,7 +549,7 @@ mod tests {
         assert_eq!(stored["timeout_ms"], 3_000);
         assert_eq!(stored_execution(Some(&stored)), Ok(Execution::SharedAsync));
 
-        let text = options.serialize_retry_options().expect("stored");
+        let text = options.stored_options_text();
         match read_stored_options(Some(&text)) {
             StoredOptions::Readable {
                 cancel_grace: StoredCancelGrace::Grace(grace),
@@ -637,8 +626,10 @@ mod tests {
         .is_err());
     }
 
+    /// Python stores the text for every task: an isolated task with no
+    /// options stores the nulls (`serialize_task_options`).
     #[test]
-    fn serialize_retry_options_returns_none_when_empty() {
+    fn an_isolated_task_with_no_options_stores_the_text_with_nulls() {
         let opts = TaskOptions {
             task_name: "my_task".to_owned(),
             queue_name: Some("high".to_owned()),
@@ -649,11 +640,14 @@ mod tests {
             execution: Execution::Isolated,
             cancel_grace_ms: None,
         };
-        assert!(opts.serialize_retry_options().is_none());
+        assert_eq!(
+            opts.stored_options_text(),
+            r#"{"retry_policy":null,"good_until":null,"timeout_ms":null,"execution":"ISOLATED","cancel_grace_ms":null}"#
+        );
     }
 
     #[test]
-    fn serialize_retry_options_emits_timeout_ms_alone() {
+    fn stored_options_text_emits_timeout_ms_alone() {
         // timeout_ms must reach the wire even with no retry options set — the
         // bug horsies PR #102 fixed (serializer dropped non-retry fields).
         let opts = TaskOptions {
@@ -666,7 +660,7 @@ mod tests {
             execution: Execution::Isolated,
             cancel_grace_ms: None,
         };
-        let json = opts.serialize_retry_options().expect("should produce JSON");
+        let json = opts.stored_options_text();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["timeout_ms"], 2000);
     }
@@ -720,7 +714,7 @@ mod tests {
             execution: Execution::Isolated,
             cancel_grace_ms: None,
         };
-        let json = opts.serialize_retry_options().expect("should produce JSON");
+        let json = opts.stored_options_text();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["retry_policy"]["max_delay_seconds"], 600);
     }

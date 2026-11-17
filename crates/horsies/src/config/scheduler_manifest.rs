@@ -118,7 +118,7 @@ fn send_document(
         .map_err(|cause| ScheduleManifestRefused::QueueNotAdmitted { position, cause })?;
     let task_options = match task
         .task_options()
-        .and_then(|options| options.serialize_retry_options())
+        .map(|options| options.stored_options_text())
     {
         Some(json) => json!({"kind": "ENCODED", "json": json}),
         None => json!({"kind": "NO_OPTIONS"}),

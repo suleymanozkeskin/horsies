@@ -319,7 +319,7 @@ where
         let task_options = self
             .task_options
             .as_ref()
-            .and_then(TaskOptions::serialize_retry_options);
+            .map(TaskOptions::stored_options_text);
         let payload = TaskSendPayload {
             task_name: self.task_name.clone(),
             queue_name: self.queue_name.clone(),

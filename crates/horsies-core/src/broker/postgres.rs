@@ -5551,7 +5551,7 @@ mod enqueue_task_options_tests {
             execution: crate::core::task::Execution::Isolated,
             cancel_grace_ms: None,
         };
-        let text = options.serialize_retry_options().expect("options are set");
+        let text = options.stored_options_text();
 
         assert_eq!(enqueue_max_retries("t", Some(&text)).expect("accepted"), 4);
     }
