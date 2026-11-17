@@ -846,6 +846,9 @@ class TestWorkerCommand:
             worker_command(args)
         assert exc_info.value.code == 1
 
+    # The panic rule is process-wide, and a core that another test of this
+    # process started has fixed it.
+    @patch('horsies.core.cli.set_panic_rule', autospec=True)
     @patch('horsies.core.cli.PostgresBroker', autospec=True)
     @patch('horsies.core.cli.setup_logging', autospec=True)
     @patch('horsies.core.cli.discover_app', autospec=True)
@@ -854,6 +857,7 @@ class TestWorkerCommand:
         mock_discover: MagicMock,
         _mock_logging: MagicMock,
         mock_broker_cls: MagicMock,
+        _mock_panic_rule: MagicMock,
     ) -> None:
         # Arrange
         app = _make_mock_app()
@@ -866,6 +870,9 @@ class TestWorkerCommand:
             worker_command(args)
         assert exc_info.value.code == 1
 
+    # The panic rule is process-wide, and a core that another test of this
+    # process started has fixed it.
+    @patch('horsies.core.cli.set_panic_rule', autospec=True)
     @patch('horsies.core.cli.PostgresBroker', autospec=True)
     @patch('horsies.core.cli.setup_logging', autospec=True)
     @patch('horsies.core.cli.discover_app', autospec=True)
@@ -874,6 +881,7 @@ class TestWorkerCommand:
         mock_discover: MagicMock,
         _mock_logging: MagicMock,
         mock_broker_cls: MagicMock,
+        _mock_panic_rule: MagicMock,
     ) -> None:
         # Arrange
         app = _make_mock_app()
