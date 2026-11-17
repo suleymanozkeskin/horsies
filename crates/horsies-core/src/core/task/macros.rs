@@ -175,7 +175,8 @@ macro_rules! async_task_fn {
 
         $crate::core::task::fn_trait::RegisteredTask::Async {
             task: ::std::sync::Arc::new(__AsyncTaskWrapper),
-            meta: $crate::core::task::fn_trait::TaskMeta::for_input::<$args_type>(),
+            meta: $crate::core::task::fn_trait::TaskMeta::for_input::<$args_type>()
+                .in_module(module_path!()),
         }
     }};
 }
@@ -230,7 +231,8 @@ macro_rules! blocking_task_fn {
 
         $crate::core::task::fn_trait::RegisteredTask::Blocking {
             task: ::std::sync::Arc::new(__BlockingTaskWrapper),
-            meta: $crate::core::task::fn_trait::TaskMeta::for_input::<$args_type>(),
+            meta: $crate::core::task::fn_trait::TaskMeta::for_input::<$args_type>()
+                .in_module(module_path!()),
         }
     }};
 }

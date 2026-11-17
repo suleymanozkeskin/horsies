@@ -72,9 +72,33 @@ pub struct TaskMeta {
     pub expects_input: bool,
     /// Type name of the task's input type, for diagnostics.
     pub input_type_name: Option<&'static str>,
+    /// The module that defines the task: the `module` of the exception
+    /// record of a panic of its body.
+    pub module: TaskModule,
+}
+
+/// The Rust module that defines a task.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TaskModule {
+    /// `module_path!()` where the task is defined.
+    Path(&'static str),
+    /// A registration that names no module, such as a hand-written
+    /// [`RegisteredTask`]. The exception record of a panic then has an
+    /// empty `module`.
+    #[default]
+    NotGiven,
 }
 
 impl TaskMeta {
+    /// The same metadata, for a task defined in `module_path`. The task
+    /// macros pass `module_path!()`.
+    pub fn in_module(self, module_path: &'static str) -> Self {
+        Self {
+            module: TaskModule::Path(module_path),
+            ..self
+        }
+    }
+
     /// Create metadata with input type information pre-populated.
     ///
     /// Use this in `async_task_fn!` / `blocking_task_fn!` macros so that

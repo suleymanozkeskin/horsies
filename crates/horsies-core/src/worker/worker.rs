@@ -3880,10 +3880,25 @@ mod tests {
         let persisted: TaskResult<serde_json::Value> =
             serde_json::from_str(result.as_deref().unwrap()).unwrap();
         let persisted_error = persisted.unwrap_err();
-        assert!(persisted_error
-            .message
-            .as_deref()
-            .is_some_and(|msg| msg.contains("async task panicked")),);
+        // #1402: the panic record of Python's unhandled exception, with
+        // `panic` as the exception type and the module of the task.
+        let message = persisted_error.message.clone().unwrap_or_default();
+        assert!(
+            message.starts_with("Unhandled exception in task ")
+                && message.ends_with(": panic: task panicked before finalize"),
+            "{message}"
+        );
+        assert_eq!(
+            persisted_error.data,
+            Some(serde_json::json!({ "exception_type": "panic" }))
+        );
+        let record = persisted_error
+            .exception
+            .expect("a panic stores an exception record");
+        assert_eq!(record.type_name, "panic");
+        assert_eq!(record.module, module_path!());
+        assert_eq!(record.message, "task panicked before finalize");
+        assert_eq!(record.repr, "task panicked before finalize");
     }
 
     /// A database error during the failed-attempt write decides neither the
