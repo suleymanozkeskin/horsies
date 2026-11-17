@@ -28,6 +28,7 @@ use crate::core::lifecycle::StaleAttemptOutcome;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
 use crate::db::CorePool;
+use crate::log_targets::STALE_RUNNING_PASS;
 
 use crate::worker::class_coverage_log::{check_class_coverage, ClassCoverageLog};
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
@@ -1338,6 +1339,7 @@ pub async fn mark_stale_running_as_failed(
     match pass {
         StaleRunningPass::Complete { .. } => {}
         StaleRunningPass::ScanFull { scan_batch, .. } => tracing::warn!(
+            target: STALE_RUNNING_PASS,
             scan_batch,
             "mark_stale_tasks_as_failed read a full scan batch of {scan_batch} candidates; the \
              rest is recovered next pass",
@@ -1367,6 +1369,7 @@ pub(crate) async fn stale_running_pass(
                 // Python skips the task when its crash result does not
                 // serialize (`core/brokers/postgres.py:3351-3358`).
                 tracing::error!(
+                    target: STALE_RUNNING_PASS,
                     task_id = %candidate.task_id,
                     %error,
                     "failed to serialize the crash result of a stale RUNNING task",
@@ -1381,6 +1384,7 @@ pub(crate) async fn stale_running_pass(
             },
             Err(error) => {
                 tracing::error!(
+                    target: STALE_RUNNING_PASS,
                     task_id = %candidate.task_id,
                     %error,
                     "failed to recover a stale RUNNING task",
@@ -1489,6 +1493,7 @@ async fn after_stale_attempt(
     match outcome {
         StaleAttemptOutcome::FailureApplied { retry, after, .. } => {
             tracing::info!(
+                target: STALE_RUNNING_PASS,
                 task_id = %command.task_id,
                 ?retry,
                 ?after,
@@ -1503,6 +1508,7 @@ async fn after_stale_attempt(
             ..
         } => {
             tracing::info!(
+                target: STALE_RUNNING_PASS,
                 task_id = %command.task_id,
                 retry_count,
                 %next_retry_at,
@@ -1510,6 +1516,7 @@ async fn after_stale_attempt(
             );
             if let Err(error) = wake_retried_queue(pool, log, &queue_name, command.task_id).await {
                 tracing::warn!(
+                    target: STALE_RUNNING_PASS,
                     task_id = %command.task_id,
                     queue = %queue_name,
                     %error,
@@ -1520,6 +1527,7 @@ async fn after_stale_attempt(
         }
         StaleAttemptOutcome::Refused(refusal) => {
             tracing::warn!(
+                target: STALE_RUNNING_PASS,
                 task_id = %command.task_id,
                 outcome = refusal.as_str(),
                 ?refusal,
