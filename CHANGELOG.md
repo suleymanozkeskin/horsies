@@ -502,6 +502,21 @@ unless it starts with "Added".
   `WebCliError`, `execute_cutover`, `CutoverArgs`, `CutoverCliError`,
   `CutoverCommand`, `execute_transcode`, `TranscodeArgs`,
   `TranscodeCliError` and `TranscodeCommand` are removed from the library.
+- **The shipped `horsies` binary has `web`, `get-docs` and `skills
+  install`.** `cutover` and `transcode` are removed. `worker`, `scheduler`
+  and `check` are refused by name with exit code 2: they run from the
+  app's own binary through `horsies::cli::run(app)`, and `horsies --help`
+  says so. `web` serves one database, from a TOML file of `AppConfig` (a
+  key that no section has is refused by name) or from `--database-url`,
+  and never installs or migrates a schema; it takes Python's flags and
+  `--custom-css-url`, and refuses a blank `--trusted-header` as Python
+  does. `get-docs` fetches the docs of the tag `v<crate version>` (a
+  pre-release version needs `--ref main`) and keeps only the Rust pages
+  and the shared pages, with the Rust `llms.txt`.
+- **Added: `horsies skills install --target <dir> [--force]`.** It writes
+  the skill files that the binary carries to `<dir>/horsies/`, as Python's
+  command does, and replaces a copy that differs only with `--force`. The
+  skill files of the crate are in `.agents/skills/horsies/`.
 - **Task bodies run in child processes of the worker.** The worker starts
   the user's binary again in child mode (`--horsies-child <fd> <pid>`) for
   every execution class, as the Python worker starts Python children.
