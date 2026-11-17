@@ -849,7 +849,8 @@ install, pip, setup, first task -> /horsies/quick-start/getting-started/
 Horsies, AppConfig, PostgresConfig, database_url, broker -> /horsies/configuration/app-config/
 pool_size, max_overflow, session_database_url, pgbouncer_transaction_mode, keepalives -> /horsies/configuration/broker-config/
 PostgresConfig, psycopg, libpq, event loop, EVENT_LOOP_LIMIT, ASYNC_CONTEXT, connection ceiling -> /horsies/configuration/broker-connections/
-RecoveryConfig, stale, requeue, crash recovery -> /horsies/configuration/recovery-config/
+stale, requeue, crash recovery, recovery fields -> /horsies/configuration/recovery-config/
+RecoveryConfig, HRS-204 example, disable recovery -> /horsies/configuration/app-config/#recovery-configuration
 @app.task, decorator, task definition, define task -> /horsies/tasks/defining-tasks/
 send, send_async, enqueue, dispatch, produce, TaskSendResult, TaskSendError, retry_send -> /horsies/tasks/sending-tasks/
 TaskResult, is_ok, is_err, ok_value, err_value -> /horsies/tasks/error-handling/

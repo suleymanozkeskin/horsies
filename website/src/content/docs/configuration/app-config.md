@@ -155,25 +155,70 @@ nothing.
 
 ## Recovery Configuration
 
-Override crash recovery defaults:
+Override crash recovery defaults. The fields, their defaults and their ranges are on [Recovery Config](/horsies/configuration/recovery-config/#fields). The heartbeat timing rules are on [Timing Guidelines](/horsies/workers/heartbeats-recovery/#timing-guidelines).
 
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 from horsies import RecoveryConfig
 
 config = AppConfig(
-    broker=PostgresConfig(...),
+    broker=broker,
     recovery=RecoveryConfig(
+        # Claimer detection
         auto_requeue_stale_claimed=True,
-        claimed_stale_threshold_ms=120_000,  # 2 minutes
+        claimed_stale_threshold_ms=120_000,     # 2 minutes
+        claimer_heartbeat_interval_ms=30_000,   # 30 seconds
+
+        # Runner detection
         auto_fail_stale_running=True,
-        running_stale_threshold_ms=300_000,  # 5 minutes
+        running_stale_threshold_ms=300_000,     # 5 minutes
         finalizing_stale_threshold_ms=300_000,  # 5 minutes
+        runner_heartbeat_interval_ms=30_000,    # 30 seconds
+
+        # Check frequency
+        check_interval_ms=30_000,               # 30 seconds
     ),
 )
 ```
 
-See [Recovery Config](/horsies/configuration/recovery-config/) for all options.
+### Threshold Rules
+
+`RecoveryConfig` raises `ConfigurationError` with code `HRS-204` when a threshold breaks a [timing rule](/horsies/workers/heartbeats-recovery/#rule-thresholds-hold-the-heartbeats). The error names the fields and the smallest valid value.
+
+<!-- check: skip elided -- shows a wrong form next to the right one -->
+```python
+# Valid
+RecoveryConfig(
+    runner_heartbeat_interval_ms=30_000,  # 30s
+    running_stale_threshold_ms=64_000,    # 64s = 2 x (30s + 2s)
+    finalizing_stale_threshold_ms=60_000, # 60s (2x)
+)
+
+# Invalid - raises ConfigurationError (HRS-204)
+RecoveryConfig(
+    runner_heartbeat_interval_ms=30_000,  # 30s
+    running_stale_threshold_ms=60_000,    # half is 30s: no time for a heartbeat to land
+)
+```
+
+### Quick Tasks
+
+```python
+quick_recovery = RecoveryConfig(
+    runner_heartbeat_interval_ms=10_000,   # 10 seconds
+    running_stale_threshold_ms=40_000,     # 40 seconds
+)
+```
+
+### Disable Recovery
+
+```python
+no_recovery = RecoveryConfig(
+    auto_requeue_stale_claimed=False,
+    auto_fail_stale_running=False,
+)
+```
+
+Stale tasks then stay stuck until they are resolved by hand. See [Manual Recovery](/horsies/workers/heartbeats-recovery/#manual-recovery).
 
 ## Resilience Configuration
 
