@@ -9,9 +9,10 @@
 use sha2::{Digest, Sha256};
 
 use super::*;
-use crate::broker::history_reads::read_task_result;
+use crate::broker::history_reads::{read_history_detail, read_task_result};
 use crate::broker::pools::unpinged_single_connection_core_pool;
 use crate::broker::terminalization::on_test_pool::terminalize;
+use crate::core::history::names::TASK_DETAIL_FUNCTION;
 use crate::core::history::reads::publisher::rendered_reader_signatures;
 use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
 
@@ -398,6 +399,62 @@ async fn a_result_reader_dropped_after_it_was_seen_fails_once() {
         .await
         .expect("the next call answers");
     assert!(matches!(second, TaskResultRead::NotPublished), "{second:?}");
+    reader.close();
+    database.drop().await;
+}
+
+/// A detail reader removed out of band (#838). The broker detail read sends
+/// no publication probe, because the install and every coverage pass publish
+/// the readers. The call is refused with `42883`, and the error names
+/// `horsies_task_detail_staged`. After the next coverage pass publishes the
+/// readers, the next call answers.
+#[tokio::test]
+#[serial]
+async fn a_dropped_detail_reader_fails_the_call_until_the_readers_are_published() {
+    let database = TestDatabase::create().await;
+    publish_readers(&database.pool).await;
+    let task_id = v7_with_birth(Utc::now() - Duration::minutes(1));
+    seed_live_row(
+        &mut database.pool.acquire().await.expect("acquire seed"),
+        task_id,
+        "standard_30d",
+        Utc::now(),
+    )
+    .await;
+    let reader = unpinged_single_connection_core_pool(&database.pool.connect_options());
+    let seen = read_history_detail(&reader, StatementLog::Off, task_id)
+        .await
+        .expect("read through the published reader");
+    assert!(matches!(seen, TaskDetailResult::Live { .. }), "{seen:?}");
+    sqlx::query("DROP FUNCTION horsies_task_detail_staged(uuid)")
+        .execute(&database.pool)
+        .await
+        .expect("drop the detail reader out of band");
+
+    let refused = read_history_detail(&reader, StatementLog::Off, task_id)
+        .await
+        .expect_err("a missing detail reader refuses the call");
+    assert!(
+        matches!(
+            &refused,
+            BrokerError::Statement(StatementFailure::StatementRefused { cause, .. })
+                if cause.server_error().code().code() == "42883"
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        refused.to_string().contains(TASK_DETAIL_FUNCTION),
+        "{refused}"
+    );
+
+    publish_readers(&database.pool).await;
+    let recovered = read_history_detail(&reader, StatementLog::Off, task_id)
+        .await
+        .expect("the call after the publication answers");
+    assert!(
+        matches!(recovered, TaskDetailResult::Live { .. }),
+        "{recovered:?}"
+    );
     reader.close();
     database.drop().await;
 }
