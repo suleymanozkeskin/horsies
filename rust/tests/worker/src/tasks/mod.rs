@@ -46,6 +46,7 @@ fn register_default(app: &mut Horsies) -> Result<(), HorsiesError> {
     let _panics = basic::panics::register(app)?;
     let _abort = basic::abort::register(app)?;
     let _idempotent = basic::idempotent::register(app)?;
+    let _slow_idempotent = basic::slow_idempotent::register(app)?;
     let _wait_inside_task = basic::wait_inside_task::register(app)?;
     let _async_sends = basic::async_sends::register(app)?;
     let _stamp = basic::stamp::register(app)?;
@@ -55,6 +56,7 @@ fn register_default(app: &mut Horsies) -> Result<(), HorsiesError> {
     let _exponential = retry::exponential::register(app)?;
     let _retry_error_code = retry::retry_error_code::register(app)?;
     let _retry_other_code = retry::retry_other_code::register(app)?;
+    let _retry_long_interval = retry::retry_long_interval::register(app)?;
 
     let _shared_healthcheck = classes::shared_healthcheck::register(app)?;
     let _thread_healthcheck = classes::thread_healthcheck::register(app)?;
