@@ -141,8 +141,8 @@ Encoders:
   through `task_result_to_json_string`
   (`crates/horsies-core/src/core/codec/mod.rs:99`). The child host puts the
   text of a task body's ok value in the envelope as it is (`result_end`,
-  `crates/horsies-core/src/worker/executor/child_host/run.rs:382`) and writes a
-  task error with `error_envelope` (`:327`).
+  `crates/horsies-core/src/worker/executor/child_host/run.rs:380`) and writes a
+  task error with `error_envelope` (`:325`).
 - Rust client: `encode_output` (`crates/horsies/src/task/body.rs:169`) for an
   ok value; `body_result` (`:152`) and `TaskError::into_stored`
   (`crates/horsies/src/task/error.rs:155`) for an error.
