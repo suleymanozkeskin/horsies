@@ -4,7 +4,7 @@
 //! `worker::recovery::...::a_stale_running_task_retries_when_its_policy_names_the_crash`
 //! (#613) and is not repeated.
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use serial_test::serial;
 
 use super::support::*;
@@ -15,11 +15,12 @@ use crate::broker::claims::{start_attempt, StartAttempt, StartMiss, StartOutcome
 use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::postgres::PostgresBroker;
-use crate::broker::{ClaimedTaskRow, SetRunningRow};
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::lifecycle::{FailedAttemptOutcome, OwnedClaim};
 use crate::core::task::result::TaskResult;
+use crate::core::task::Execution;
 use crate::worker::execution::{persist_terminal_state, FinalizeOutcome};
+use crate::worker::executor::slots::{ClaimedTask, RetryFacts, TaskKind};
 use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 use crate::worker::retry::read_stored_options;
 
@@ -137,33 +138,26 @@ async fn replay_does_not_create_duplicate_attempt() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
     let broker = PostgresBroker::from_pool(pool.clone());
-    let row = ClaimedTaskRow {
-        id: task_id,
+    let task = ClaimedTask {
+        task_id,
         task_name: "lifecycle.test".to_owned(),
-        input: "{}".to_owned(),
         queue_name: "default".to_owned(),
-        is_workflow_task: false,
-        task_options: None,
         claimed_at: generation(),
+        execution: Execution::SharedAsync,
+        kind: TaskKind::Plain,
+        retry: RetryFacts {
+            retry_count: 0,
+            max_retries: 0,
+        },
+        options: read_stored_options(None),
     };
-    let running = SetRunningRow {
-        id: task_id,
-        started_at: Utc::now() - Duration::seconds(1),
-        retry_count: 0,
-        max_retries: 0,
-        good_until: None,
-    };
-    let stored_options = read_stored_options(None);
     let payload_policy = PayloadPolicy::default();
 
     for write in ["first", "replay"] {
         let outcome = persist_terminal_state(
             &broker,
-            task_id,
+            &task,
             TaskResult::Ok(br#""first""#.to_vec()),
-            &row,
-            &stored_options,
-            &running,
             WORKER,
             &payload_policy,
         )
