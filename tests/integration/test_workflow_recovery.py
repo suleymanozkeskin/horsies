@@ -23,10 +23,10 @@ from horsies.core.models.workflow import (
     OnError,
 )
 from horsies.core.workflows.engine import (
-    on_workflow_task_complete,
     _queue_parent_propagation,  # pyright: ignore[reportPrivateUsage]
     pop_pending_parent_propagations,
 )
+from horsies.core.workflows.node_finish import CapacityWake, finish_node
 from horsies.core.workflows.recovery import (
     GLOBAL_SCAN_ROW_CAP,
     recover_stuck_workflows,
@@ -48,7 +48,7 @@ from .conftest import (
 )
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
 from tests.integration.history_seeding import force_terminal
-from tests.integration.conftest import task_name_for
+from tests.integration.conftest import finish_phase_one
 from tests.broker_resources_support import current_resources
 
 
@@ -84,8 +84,8 @@ def _strict_result_json(result: TaskResult[Any, TaskError]) -> str:
 
     Tests in this file seed terminal task rows directly (simulating crash /
     recovery states); they must match what production writes so the engine's
-    strict envelope decode at ``on_workflow_task_complete`` / recovery
-    finalization accepts the payload. ``ok_type=Any`` is sufficient — these
+    strict envelope decode of the node finish / recovery finalization
+    accepts the payload. ``ok_type=Any`` is sufficient — these
     tests substring-check the serialized output and don't pin the ok-payload
     type-narrowing on read.
     """
@@ -746,7 +746,7 @@ class TestWorkflowRecovery:
                 ),
         )
 
-        # Set workflow_tasks to RUNNING (simulating crash before on_workflow_task_complete)
+        # Set workflow_tasks to RUNNING (simulating a crash before phase 2)
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
@@ -1494,20 +1494,15 @@ class TestWorkflowRecovery:
         child_id = wt_result.fetchone()[0]
         assert child_id is not None
 
-        # Get child's task_id and complete it normally
-        child_task_result = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :child_id AND task_index = 0
-            """),
-            {'child_id': child_id},
-        )
-        child_task_id = child_task_result.fetchone()[0]
-        assert child_task_id is not None
-
-        await on_workflow_task_complete(
-            session, child_task_id, TaskResult(ok=42), broker,
-            task_name=await task_name_for(session, child_task_id),
+        # Complete the child's task: phase 1, then phase 2 without the
+        # parent advance that it owes (as if the worker stopped before it).
+        done = await finish_phase_one(session, broker, child_id, 0, TaskResult(ok=42))
+        _ = await finish_node(
+            current_resources(broker).session_factory,
+            broker,
+            done.task_id,
+            done.facts,
+            CapacityWake.SEND,
         )
         await session.commit()
 
