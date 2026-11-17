@@ -629,17 +629,24 @@ unless it starts with "Added".
   Both return `SchedulerStopped` or a closed `SchedulerRunError`. A schedule
   section that is missing or switched off is refused.
 - **Added: the blocking API, `horsies::blocking`.** `TaskFunction::blocking()`,
-  `TaskHandle::blocking()` and `Horsies::blocking()` give views whose
-  methods have the names, arguments and result types of the async
-  methods: the sends, the schedules and their retries, `get` and `info`,
-  the app's reads by task id, the health reads that Python's app offers in
-  sync form, and `check_live`. Each call runs on the core's process
-  runtime and blocks its thread. On a thread that runs a tokio runtime it
-  runs nothing and answers `ASYNC_CONTEXT`: `TaskSendError::AsyncContext`
-  with the prepared task id and payload (an async retry sends them),
-  `ReadError::AsyncContext` (added; not kept by the handle),
-  `BrokerErrorCode::AsyncContext`, or `HRS-217` in the check report. The
-  body of a `fn` task in a worker child may call them.
+  `TaskHandle::blocking()`, `Horsies::blocking()`,
+  `WorkflowFunction::blocking()`, `WorkflowTemplate::blocking()` and
+  `WorkflowHandle::blocking()` give views whose methods have the names,
+  arguments and result types of the async methods: the sends, the
+  schedules and their retries, `get` and `info`, the app's reads by task
+  id, the health reads that Python's app offers in sync form,
+  `check_live`, the workflow starts and `retry_start`, and the methods of
+  the workflow handle. `blocking::start_workflow` and
+  `blocking::start_workflow_with` are the process-wide starts. Each call
+  runs on the core's process runtime and blocks its thread. On a thread
+  that runs a tokio runtime it runs nothing and answers `ASYNC_CONTEXT`:
+  `TaskSendError::AsyncContext` with the prepared task id and payload (an
+  async retry sends them), `ReadError::AsyncContext` (added; not kept by
+  the handle), `BrokerErrorCode::AsyncContext`, `HRS-217` in the check
+  report, `WorkflowStartErrorCode::AsyncContext` with the workflow id of
+  the start, `HandleErrorCode::AsyncContext`, or
+  `WorkflowReadError::AsyncContext` (added). The body of a `fn` task in a
+  worker child may call them.
 - **`check` and `check_live` return `Result<CheckPassed, CheckReport>`.**
   The report holds the refusals of the first phase that refused: the task
   options of a task registered by hand, then the schedules (not for a

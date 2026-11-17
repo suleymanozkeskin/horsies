@@ -69,6 +69,11 @@ pub enum WorkflowReadError {
     /// Nothing was read.
     #[error("{message}")]
     WaitInsideTask { message: String },
+    /// `ASYNC_CONTEXT`: a blocking read on a thread that runs a tokio
+    /// runtime; its wait would stall the runtime. Nothing was read; the
+    /// async form reads.
+    #[error("{message}")]
+    AsyncContext { message: String },
     /// `BROKER_ERROR`: the database or the connection failed, with the
     /// handle code; `retryable` is the classification of the cause.
     #[error("the read failed ({code}): {message}")]
@@ -90,6 +95,7 @@ impl WorkflowReadError {
                 OperationalErrorCode::ResultDeserializationError.into()
             }
             Self::WaitInsideTask { .. } => RetrievalCode::WaitInsideTask.into(),
+            Self::AsyncContext { .. } => RetrievalCode::AsyncContext.into(),
             Self::Database { .. } => OperationalErrorCode::BrokerError.into(),
         }
     }
@@ -103,11 +109,13 @@ impl WorkflowReadError {
                 workflow_id: error.workflow_id,
                 cause: error.message,
             },
+            HandleErrorCode::AsyncContext => Self::AsyncContext {
+                message: error.message,
+            },
             code @ (HandleErrorCode::DbOperationFailed
             | HandleErrorCode::ResumeRecoveryFailed
             | HandleErrorCode::LoopRunnerFailed
-            | HandleErrorCode::EventLoopLimit
-            | HandleErrorCode::AsyncContext) => Self::Database {
+            | HandleErrorCode::EventLoopLimit) => Self::Database {
                 code,
                 message: error.message,
                 retryable: error.retryable,
