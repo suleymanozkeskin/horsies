@@ -1,6 +1,6 @@
 //! The statement of one batch: `horsies_complete_tasks_fused` of the 0004
 //! lifecycle functions, on the worker pool (Python `apply_fused_batch`,
-//! `horsies/core/lifecycle/persistence.py:624-671`).
+//! `python/horsies/core/lifecycle/persistence.py:624-671`).
 //!
 //! - One statement in autocommit for 1 to 64 rows of one worker: the task
 //!   ids, the claim generations and the result texts as arrays, the worker

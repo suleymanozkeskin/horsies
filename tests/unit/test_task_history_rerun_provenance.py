@@ -16,7 +16,6 @@ from horsies.core.history.rerun.provenance import (
     RERUN_FIELD_PROVENANCE,
     FieldProvenance,
 )
-from horsies.core.types.result import Err, Ok
 
 pytestmark = [pytest.mark.unit]
 
@@ -26,11 +25,7 @@ _COLUMN_LINE = re.compile(r'^ {4}([a-z][a-z0-9_]*) [a-z]', re.MULTILINE)
 
 def enqueue_visible_columns() -> set[str]:
     """The column names of ``horsies_tasks`` in the baseline SQL."""
-    match load_baseline_migration():
-        case Ok(ok_value=migration):
-            sql = migration.sql
-        case Err(err_value=unreadable):
-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
+    sql = load_baseline_migration().sql
     body = sql.split(_LIVE_TABLE_OPENING, 1)[1].split('\n);\n', 1)[0]
     columns = {match.group(1) for match in _COLUMN_LINE.finditer(body)}
     # A pattern that matches nothing would make every closure check pass.

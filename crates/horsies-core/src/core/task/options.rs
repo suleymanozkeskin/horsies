@@ -194,7 +194,7 @@ pub struct TaskOptions {
 
 impl TaskOptions {
     /// The stored `task_options` text of this task, in Python's layout
-    /// (`horsies/core/codec/task_options.py`, `serialize_task_options`), the
+    /// (`python/horsies/core/codec/task_options.py`, `serialize_task_options`), the
     /// one layout the core reads at enqueue and at dispatch:
     ///
     /// ```json

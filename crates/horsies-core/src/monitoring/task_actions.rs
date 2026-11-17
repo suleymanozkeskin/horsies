@@ -26,7 +26,7 @@ pub enum TaskActionErrorCode {
     /// status, or a cancel outcome row that does not decode. Nothing changed:
     /// the cancel refused the task. Not retryable: a repeat gives the same
     /// result until the stored row changes (Python
-    /// `horsies/monitoring/task_actions.py`, `TaskActionStoredDataInvalid`).
+    /// `python/horsies/monitoring/task_actions.py`, `TaskActionStoredDataInvalid`).
     StoredDataInvalid,
 }
 

@@ -1,5 +1,5 @@
 //! Lifecycle operations of a client handle on its main core pool, one 0004
-//! function each (`horsies/core/baseline/sql/0004_lifecycle_functions.sql`):
+//! function each (`crates/horsies-core/baseline/0004_lifecycle_functions.sql`):
 //!
 //! - [`PostgresBroker::requeue_stale_claimed`]: the stale CLAIMED requeue
 //!   pass, `horsies_requeue_stale_claims` in bounded batches.
@@ -17,6 +17,8 @@
 //!   `horsies_finish_workflow_success`, phase 1 of a workflow task's success.
 //! - [`PostgresBroker::claim_pass`]: `horsies_claim`, one claim pass of one
 //!   worker.
+//! - [`PostgresBroker::count_queue_starts`]: the count of the soft-cap
+//!   start check (a plain read, not a 0004 function).
 //! - [`PostgresBroker::cancel_task`]: `horsies_cancel_task`, the
 //!   administrative cancel of one plain task (Python
 //!   `horsies.monitoring.task_actions.cancel_task`, and the core's monitoring
@@ -27,15 +29,17 @@
 //! in place of its own statements. The core worker calls the same statement
 //! functions on its worker pool.
 //!
-//! Each one checks the client family once per handle before its first write
-//! ([`PostgresBroker::ensure_client_family_for_write`]) and holds a write
-//! token, so [`PostgresBroker::close`] waits for it.
+//! Each write checks the client family once per handle before its first
+//! write ([`PostgresBroker::ensure_client_family_for_write`]) and holds a
+//! write token, so [`PostgresBroker::close`] waits for it. The read checks
+//! no family and holds no token.
 
 use uuid::Uuid;
 
 use crate::broker::attempt_writes::{self, FinishFailedAttempt, FinishWorkflowSuccess};
 use crate::broker::claims::{
-    claim_pass, release_claims, ClaimPass, ClaimPassRequest, ReleaseClaims, ReleaseOutcome,
+    claim_pass, count_queue_starts, release_claims, ClaimPass, ClaimPassRequest, QueueStartCheck,
+    QueueStarts, ReleaseClaims, ReleaseOutcome,
 };
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
@@ -308,6 +312,32 @@ impl PostgresBroker {
         claim_pass(open.main(), self.statement_log(), request).await
     }
 
+    /// Count the capped queues of one soft-cap start check of one worker
+    /// (Python `ClaimMixin._start_held_rows`, the count statement only): one
+    /// statement on the main core pool, checked out as batch work. Each queue
+    /// of `check` counts its RUNNING rows on every worker, plus the started
+    /// claims of `check` that are still CLAIMED by its worker at their claim
+    /// generation. A queue with no counted row is absent. Reads only and
+    /// locks nothing, so a start of another worker in the same instant is
+    /// not seen. A check with no queue sends nothing, as Python sends no
+    /// statement when no row is held.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] (nothing sent);
+    /// [`BrokerError::Statement`]; [`BrokerError::RowDecode`] and
+    /// [`BrokerError::ClaimContract`] for rows outside the statement's
+    /// contract (a queue counted twice, a queue that the check did not
+    /// name, a negative count).
+    pub async fn count_queue_starts(
+        &self,
+        check: &QueueStartCheck,
+    ) -> Result<QueueStarts, BrokerError> {
+        if check.queues.is_empty() {
+            return Ok(QueueStarts::default());
+        }
+        let open = self.core_pools_for_read()?;
+        count_queue_starts(open.main(), self.statement_log(), check).await
+    }
+
     /// Cancel one plain task (Python `horsies.monitoring.task_actions.cancel_task`):
     /// `horsies_cancel_task`, one statement in autocommit on the main core
     /// pool, checked out as batch work (monitoring work, never reserved).
@@ -440,6 +470,28 @@ mod tests {
             worker_id: None,
             claimed_at: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_start_check_with_no_queue_sends_nothing() {
+        // No server listens on port 1: a check that reached the pool would
+        // fail instead of answering.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(1))
+            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
+            .expect("a lazy pool opens no connection");
+        let broker = PostgresBroker::from_pool(pool);
+        let check = QueueStartCheck {
+            worker_id: "worker-1".to_owned(),
+            queues: Vec::new(),
+            started: vec![(task(), Utc::now())],
+        };
+        let starts = broker
+            .count_queue_starts(&check)
+            .await
+            .expect("a check with no queue sends nothing, so it cannot fail");
+        assert_eq!(starts, QueueStarts::default());
     }
 
     #[test]

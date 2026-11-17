@@ -496,7 +496,7 @@ impl RunningChildren {
 }
 
 /// Python's line for the tasks whose children the drain deadline killed
-/// (`horsies/core/worker/worker.py`, `Worker.stop`: `'Drain exceeded %.0fs
+/// (`python/horsies/core/worker/worker.py`, `Worker.stop`: `'Drain exceeded %.0fs
 /// (hung task?); killed tasks: %s'` with the list of the task ids), or
 /// `None` when it killed none: Python logs only a list with an id. Pure.
 fn drain_kill_line(drain: Duration, killed: &[Uuid]) -> Option<String> {
@@ -1436,8 +1436,8 @@ impl Worker {
     /// with no stop request stops the worker with `ServiceLoopDied`
     /// (C11-inverse).
     ///
-    /// Errors: [`WorkerError::Config`] when the runner heartbeat watchdog
-    /// thread does not start.
+    /// Errors: [`WorkerError::Config`] when the runner heartbeat pool is
+    /// refused, or its watchdog thread does not start.
     fn spawn_services(
         &self,
         children: &WorkerChildren,
@@ -1448,7 +1448,7 @@ impl Worker {
         let claimer_interval =
             Duration::from_millis(self.app_config.recovery.claimer_heartbeat_interval_ms);
         let claimer_hb = spawn_claimer_heartbeat(
-            self.broker.pool().clone(),
+            Arc::clone(&self.broker),
             self.worker_id.clone(),
             self.hostname.clone(),
             std::process::id() as i32,
@@ -1460,7 +1460,7 @@ impl Worker {
         let reaper_health = new_reaper_health();
         let reaper = self.spawn_reaper_loop(Arc::clone(&reaper_health));
         let state_loop = crate::worker::worker_state::spawn_worker_state_loop(
-            self.broker.pool().clone(),
+            Arc::clone(&self.broker),
             self.worker_id.clone(),
             self.hostname.clone(),
             std::process::id() as i32,
@@ -1480,8 +1480,11 @@ impl Worker {
         // stops the worker through its token.
         let beats_cancel = CancellationToken::new();
         let fail_closed_stop = FailClosedStop::new(self.cancel.clone());
+        let beat_pool = runner_beat_pool(&self.app_config.broker).map_err(|error| {
+            WorkerError::Config(format!("the runner heartbeat pool is refused: {error}"))
+        })?;
         let (runner_beat_watch, runner_beats) = launch_runner_beats(
-            runner_beat_pool(self.broker.pool()),
+            Arc::new(beat_pool),
             BeatSender {
                 worker_id: self.worker_id.clone(),
                 hostname: self.hostname.clone(),
@@ -2276,7 +2279,7 @@ mod tests {
         let _: fn(&Worker) -> &str = |w| w.worker_id();
     }
 
-    /// Python `horsies/core/cli.py:886` and `:955`: the memory fit of the
+    /// Python `python/horsies/core/cli.py:886` and `:955`: the memory fit of the
     /// profile is logged before the database start, the connection fit after
     /// it and before the banner and the claim loop; neither returns an error.
     #[test]

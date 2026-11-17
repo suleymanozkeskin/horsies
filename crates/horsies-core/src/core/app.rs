@@ -493,7 +493,7 @@ impl Horsies {
     /// takes effect at the next send. Process-local.
     ///
     /// Mirrors Python's `Horsies.are_sends_suppressed()`
-    /// (`horsies/core/app.py:2269-2280`).
+    /// (`python/horsies/core/app.py:2269-2280`).
     pub fn are_sends_suppressed(&self) -> bool {
         self.suppress_sends.load(Ordering::Relaxed)
             || suppression_requested(std::env::var(SUPPRESS_SENDS_ENV).ok().as_deref())
@@ -2574,7 +2574,7 @@ mod tests {
     /// without a queue fires on the task's declared queue, and every fired
     /// slot carries the task's options text. The text is the one a send of
     /// the task stores: the five keys of Python `serialize_task_options`
-    /// (`horsies/core/codec/task_options.py:27-50`), as
+    /// (`python/horsies/core/codec/task_options.py:27-50`), as
     /// `TaskOptions::serialize_retry_options` writes them since #622.
     #[test]
     fn prepare_schedules_uses_the_task_queue_and_options() {

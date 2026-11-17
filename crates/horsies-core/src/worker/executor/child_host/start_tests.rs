@@ -1,6 +1,6 @@
 //! The start of a run in a Rust child on the test database: one
 //! `horsies_start_attempt` statement, and the stop of each miss (Python
-//! `horsies/core/worker/child_runner.py`, `_confirm_ownership_and_set_running`,
+//! `python/horsies/core/worker/child_runner.py`, `_confirm_ownership_and_set_running`,
 //! `_after_missed_start`).
 
 use std::os::unix::net::UnixStream;

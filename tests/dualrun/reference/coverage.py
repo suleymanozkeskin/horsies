@@ -1,6 +1,6 @@
 """The coverage pass statements, before the 0008 coverage functions.
 
-``maintain_partition_coverage`` (``horsies/core/history/maintenance/coverage.py``)
+``maintain_partition_coverage`` (``python/horsies/core/history/maintenance/coverage.py``)
 sent, before the switch:
 
 - the probe: ``SET LOCAL TIME ZONE 'UTC'`` and one set-based statement

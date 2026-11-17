@@ -349,7 +349,7 @@ async fn coupled_node_failure_rolls_back_history_and_live_delete() {
 /// on the post-claim path: the post-claim abandon of a task of a PAUSED
 /// workflow whose node is already COMPLETED leaves the node COMPLETED with
 /// its task link (#785; Python `RESET_PAUSED_WORKFLOW_TASKS_SQL`,
-/// `horsies/core/worker/sql.py:291-296`).
+/// `python/horsies/core/worker/sql.py:291-296`).
 #[tokio::test]
 #[serial]
 async fn post_claim_abandon_keeps_a_finished_node() {
