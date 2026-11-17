@@ -5,7 +5,7 @@ struct MyService;
 
 impl MyService {
     #[task("bad")]
-    async fn handle(&self, _: ()) -> Result<String, TaskError> {
+    async fn handle(&self, _: ()) -> Result<String, TaskError<std::convert::Infallible>> {
         Ok("nope".into())
     }
 }

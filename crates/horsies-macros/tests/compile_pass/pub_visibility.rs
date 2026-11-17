@@ -8,7 +8,7 @@ pub struct PubArgs {
 }
 
 #[task("pub_task")]
-pub async fn pub_task(args: PubArgs) -> Result<i32, TaskError> {
+pub async fn pub_task(args: PubArgs) -> Result<i32, TaskError<std::convert::Infallible>> {
     Ok(args.value)
 }
 

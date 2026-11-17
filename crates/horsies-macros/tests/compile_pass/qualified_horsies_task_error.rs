@@ -1,8 +1,8 @@
 use horsies::task;
 
-// Using fully qualified horsies::TaskError should be accepted.
+// Using fully qualified horsies::TaskError<std::convert::Infallible> should be accepted.
 #[task("qualified")]
-async fn qualified(_: ()) -> Result<String, horsies::TaskError> {
+async fn qualified(_: ()) -> Result<String, horsies::TaskError<std::convert::Infallible>> {
     Ok("ok".into())
 }
 

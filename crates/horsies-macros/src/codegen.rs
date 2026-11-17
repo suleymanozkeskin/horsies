@@ -1,688 +1,529 @@
+//! The expansion of `#[horsies::task]` and `#[horsies::blocking_task]`: the
+//! function as written, the compile-time checks of its retry codes, and a
+//! module of the same name with `register`, the send helpers, `handle`,
+//! `node` and the input field tokens.
+//!
+//! Every path in the expansion starts at `::horsies`, so the user's crate
+//! needs no other dependency for it.
+
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{quote, quote_spanned, ToTokens};
+use syn::ext::IdentExt;
 use syn::spanned::Spanned;
-use syn::{FnArg, ItemFn, Pat, ReturnType, Type};
+use syn::{Attribute, FnArg, GenericArgument, ItemFn, Pat, PathArguments, ReturnType, Type};
 
-use crate::parse::TaskAttrs;
+use crate::parse::{ExecutionClass, Retry, TaskAttrs};
 
-/// Generate the original function + companion descriptor module.
-pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Result<TokenStream> {
-    // --- Validate the function signature ---
-    let signature = validate_signature(&func, blocking)?;
-
-    // --- Extract types from signature ---
-    let (args_type, output_type) = extract_types(&func, &signature)?;
-
-    // --- Build the generated code ---
-    let fn_name = &func.sig.ident;
-    let vis = &func.vis;
-    let task_name_str = &attrs.name;
-    let task_name_value = task_name_str.value();
-
-    // Task options body
-    let task_options_body = build_task_options_body(&attrs);
-
-    // Generated registration wrapper.
-    let base_registered_task = build_registered_task(&signature, fn_name, &args_type, blocking);
-    let registered_task = if attrs.workflow_ctx {
-        quote! { { #base_registered_task }.with_workflow_ctx() }
-    } else {
-        base_registered_task
-    };
-    let runtime_capture = if signature.accepts_runtime() {
-        quote! { let __horsies_runtime = app.task_runtime(); }
-    } else {
-        quote! {}
-    };
-
-    let module_input_items = generate_module_input_items(&signature, &args_type);
-    let params_items = generate_params_items(&signature, &args_type);
-    let send_sig = generate_send_signature(&signature, &args_type);
-    let method_send_sig = generate_method_send_signature(&signature, &args_type);
-    let send_build_args = generate_send_build_args(&signature);
-
-    // Separate cfg attributes (applied to both fn and module) from
-    // other attributes (applied to fn only).
-    let cfg_attrs: Vec<_> = func
-        .attrs
-        .iter()
-        .filter(|a| a.path().is_ident("cfg"))
-        .collect();
-
-    let preserved_attrs: Vec<_> = func.attrs.iter().collect();
-
-    let func_block = &func.block;
-    let func_sig = &func.sig;
-    let helper_docs = format!(
-        "Retrieve the runtime-bound handle for `{}` from `TaskRuntime`.",
-        task_name_value
-    );
-    let send_docs = format!(
-        "Enqueue `{}` immediately. Works from any call site after `register()` is called at startup.",
-        task_name_value
-    );
-    let schedule_docs = format!(
-        "Enqueue `{}` with a delay. Works from any call site after `register()` is called at startup.",
-        task_name_value
-    );
-    let with_options_docs = format!(
-        "Configure per-send options for `{}`. Use this for dynamic deadlines such as `good_until`.",
-        task_name_value
-    );
-    let node_docs = format!(
-        "Create a workflow node for `{}`. Inherits queue, priority, and task options from the registered task. Requires `register()` first.",
-        task_name_value
-    );
-    let not_registered_msg = format!(
-        "task '{}' is not registered — call {}::register(&mut app) at startup",
-        task_name_value, task_name_value
-    );
-
-    // Build the queue setter chain
-    let queue_chain = match &attrs.queue {
-        Some(q) => quote! { let builder = builder.queue(#q); },
-        None => quote! {},
-    };
-
-    // Build the task_options setter chain
-    let opts_chain = if task_options_body.to_string() != "None" {
-        quote! {
-            let opts: Option<horsies::TaskOptions> = #task_options_body;
-            let builder = if let Some(o) = opts { builder.task_options(o) } else { builder };
-        }
-    } else {
-        quote! {}
-    };
-
-    Ok(quote! {
-        // Original function — all attributes preserved.
-        #(#preserved_attrs)*
-        #vis #func_sig #func_block
-
-        /// Generated task registration module.
-        /// cfg attributes are duplicated so the module is compiled out
-        /// when the function is compiled out.
-        #(#cfg_attrs)*
-        #[doc(hidden)]
-        #[allow(non_camel_case_types)]
-        #vis mod #fn_name {
-            use super::*;
-
-            #module_input_items
-
-            #params_items
-
-            /// Per-send options bound to this task's generated send helpers.
-            pub struct SendOptions {
-                options: horsies::TaskSendOptions,
-            }
-
-            impl SendOptions {
-                #[doc = #send_docs]
-                pub async fn send(&self #method_send_sig) -> horsies::TaskSendResult<horsies::TaskHandle<#output_type>> {
-                    let __args: #args_type = #send_build_args;
-                    __HANDLE
-                        .get()
-                        .ok_or_else(|| horsies::TaskSendError {
-                            code: horsies::TaskSendErrorCode::ValidationFailed,
-                            message: #not_registered_msg.to_owned(),
-                            retryable: false,
-                            task_id: None,
-                            payload: None,
-                        })?
-                        .send_with_options(self.options.clone(), __args)
-                        .await
-                }
-
-                #[doc = #schedule_docs]
-                pub async fn schedule(
-                    &self,
-                    delay: std::time::Duration
-                    #method_send_sig
-                ) -> horsies::TaskSendResult<horsies::TaskHandle<#output_type>> {
-                    let __args: #args_type = #send_build_args;
-                    __HANDLE
-                        .get()
-                        .ok_or_else(|| horsies::TaskSendError {
-                            code: horsies::TaskSendErrorCode::ValidationFailed,
-                            message: #not_registered_msg.to_owned(),
-                            retryable: false,
-                            task_id: None,
-                            payload: None,
-                        })?
-                        .schedule_with_options(self.options.clone(), delay, __args)
-                        .await
-                }
-            }
-
-            static __HANDLE: std::sync::OnceLock<
-                horsies::TaskFunction<#args_type, #output_type>,
-            > = std::sync::OnceLock::new();
-
-            /// Register this task on the app and return a typed `TaskFunction`.
-            ///
-            /// Also populates the global handle so that [`send`] and [`schedule`]
-            /// work from any call site without `TaskRuntime`.
-            pub fn register(
-                app: &mut horsies::Horsies,
-            ) -> Result<
-                horsies::TaskFunction<#args_type, #output_type>,
-                horsies::HorsiesError,
-            > {
-                #runtime_capture
-                let builder = app.task::<#args_type, #output_type>(
-                    #task_name_str,
-                    #registered_task,
-                )?;
-                #queue_chain
-                #opts_chain
-                let handle = builder.register()?;
-                let _ = __HANDLE.set(handle.clone());
-                Ok(handle)
-            }
-
-            #[doc = #helper_docs]
-            pub fn handle(
-                rt: &horsies::TaskRuntime,
-            ) -> Result<horsies::TaskFunction<#args_type, #output_type>, horsies::TaskError> {
-                rt.task_handle::<#args_type, #output_type>(#task_name_str)
-            }
-
-            #[doc = #send_docs]
-            pub async fn send(#send_sig) -> horsies::TaskSendResult<horsies::TaskHandle<#output_type>> {
-                let __args: #args_type = #send_build_args;
-                __HANDLE
-                    .get()
-                    .ok_or_else(|| horsies::TaskSendError {
-                        code: horsies::TaskSendErrorCode::ValidationFailed,
-                        message: #not_registered_msg.to_owned(),
-                        retryable: false,
-                        task_id: None,
-                        payload: None,
-                    })?
-                    .send(__args)
-                    .await
-            }
-
-            #[doc = #schedule_docs]
-            pub async fn schedule(
-                delay: std::time::Duration,
-                #send_sig
-            ) -> horsies::TaskSendResult<horsies::TaskHandle<#output_type>> {
-                let __args: #args_type = #send_build_args;
-                __HANDLE
-                    .get()
-                    .ok_or_else(|| horsies::TaskSendError {
-                        code: horsies::TaskSendErrorCode::ValidationFailed,
-                        message: #not_registered_msg.to_owned(),
-                        retryable: false,
-                        task_id: None,
-                        payload: None,
-                    })?
-                    .schedule(delay, __args)
-                    .await
-            }
-
-            #[doc = #with_options_docs]
-            pub fn with_options(options: horsies::TaskSendOptions) -> SendOptions {
-                SendOptions { options }
-            }
-
-            #[doc = #node_docs]
-            pub fn node() -> Result<horsies::TaskNode<#output_type, #args_type>, horsies::HorsiesError> {
-                __HANDLE
-                    .get()
-                    .ok_or_else(|| horsies::HorsiesError::new(
-                        #not_registered_msg.to_owned(),
-                    ))
-                    .map(|h| h.node())
-            }
-        }
-    })
+/// Which attribute expands: `#[task]` takes an `async fn`, `#[blocking_task]`
+/// a `fn`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyKind {
+    Async,
+    Blocking,
 }
 
+/// One parameter of the task's input.
 #[derive(Clone)]
-struct ParamSpec {
+struct Param {
     ident: syn::Ident,
     ty: Type,
 }
 
+/// How the parameters after an optional `TaskRuntime` form the input.
 #[derive(Clone)]
 enum InputShape {
+    /// No parameter: the input is `()`, sent as `null`.
     Unit,
-    Direct(ParamSpec),
-    Wrapped(Vec<ParamSpec>),
+    /// One parameter: its type is the input.
+    Direct(Param),
+    /// Several parameters, or one that a workflow fills from a dependency
+    /// result: a generated `Input` struct with one field per parameter.
+    Wrapped(Vec<Param>),
 }
 
 #[derive(Clone)]
-struct SignatureShape {
-    has_runtime: bool,
+struct Signature {
+    takes_runtime: bool,
     input: InputShape,
 }
 
-impl SignatureShape {
-    fn accepts_runtime(&self) -> bool {
-        self.has_runtime
-    }
+/// The types of the task: input `A`, output `T`, code type `E`.
+struct TaskTypes {
+    input: Type,
+    output: Type,
+    code: Type,
 }
 
-/// Validate the function signature matches task requirements.
-fn validate_signature(func: &ItemFn, blocking: bool) -> syn::Result<SignatureShape> {
-    let sig = &func.sig;
-
-    // Reject methods (self receiver).
-    for arg in &sig.inputs {
-        if let FnArg::Receiver(r) = arg {
-            return Err(syn::Error::new_spanned(
-                r,
-                "task functions must be free functions, not methods",
-            ));
-        }
-    }
-
-    // Reject generics.
-    if !sig.generics.params.is_empty() {
-        return Err(syn::Error::new_spanned(
-            &sig.generics,
-            "generic task functions are not supported",
-        ));
-    }
-
-    // Reject lifetime parameters.
-    if sig.generics.lt_token.is_some() {
-        return Err(syn::Error::new_spanned(
-            &sig.generics,
-            "task functions with lifetime parameters are not supported",
-        ));
-    }
-
-    // Task signatures may be either:
-    // - `()`
-    // - `(TaskRuntime)`
-    // - `(arg)`
-    // - `(TaskRuntime, arg)`
-    // - `(a, b, c, ...)`
-    // - `(TaskRuntime, a, b, c, ...)`
-    let typed_args: Vec<_> = sig
-        .inputs
+/// Expand the task attribute on `func`.
+pub fn generate_task(attrs: TaskAttrs, func: ItemFn, kind: BodyKind) -> syn::Result<TokenStream> {
+    let signature = validate_signature(&func, kind)?;
+    check_execution_fits(&attrs, kind)?;
+    let types = task_types(&func, &signature)?;
+    let cfg_attrs: Vec<&Attribute> = func
+        .attrs
         .iter()
-        .filter_map(|a| match a {
-            FnArg::Typed(t) => Some(t.clone()),
-            _ => None,
-        })
+        .filter(|attribute| attribute.path().is_ident("cfg"))
         .collect();
-
-    let (has_runtime, user_args) = match typed_args.as_slice() {
-        [] => (false, Vec::new()),
-        [arg] if is_task_runtime_type(&arg.ty) => (true, Vec::new()),
-        [arg] => (false, vec![arg.clone()]),
-        [first, rest @ ..] if is_task_runtime_type(&first.ty) => (true, rest.to_vec()),
-        _ => (false, typed_args),
-    };
-
-    if let Some(arg) = user_args
-        .iter()
-        .skip(usize::from(has_runtime))
-        .find(|arg| is_task_runtime_type(&arg.ty))
-    {
-        return Err(syn::Error::new_spanned(
-            arg,
-            "task functions may inject TaskRuntime only as the first argument",
-        ));
-    }
-
-    let params = user_args
-        .iter()
-        .map(param_spec_from_arg)
-        .collect::<syn::Result<Vec<_>>>()?;
-
-    let input = match params.as_slice() {
-        [] => InputShape::Unit,
-        [param] if !should_wrap_single_param(&param.ty) => InputShape::Direct(param.clone()),
-        _ => InputShape::Wrapped(params),
-    };
-
-    let signature = SignatureShape { has_runtime, input };
-
-    // Async check: #[task] requires async, #[blocking_task] requires non-async.
-    if !blocking && sig.asyncness.is_none() {
-        return Err(syn::Error::new_spanned(
-            sig.fn_token,
-            "#[horsies::task] requires an async function; use #[horsies::blocking_task] for sync functions",
-        ));
-    }
-    if blocking && sig.asyncness.is_some() {
-        return Err(syn::Error::new_spanned(
-            sig.asyncness,
-            "#[horsies::blocking_task] requires a non-async function; use #[horsies::task] for async functions",
-        ));
-    }
-
-    // Must have an explicit return type.
-    if matches!(sig.output, ReturnType::Default) {
-        return Err(syn::Error::new_spanned(
-            sig.fn_token,
-            "task functions must have an explicit return type: -> Result<T, TaskError>",
-        ));
-    }
-
-    // Return type must be Result<T, TaskError>.
-    if let ReturnType::Type(_, ty) = &sig.output {
-        if !looks_like_result(ty) {
-            return Err(syn::Error::new_spanned(
-                ty,
-                "task functions must return Result<T, TaskError>",
-            ));
-        }
-        // Validate the error type is one of the accepted TaskError paths.
-        // Syntactic check for supported forms; final type correctness is
-        // enforced by Rust compilation of the generated code.
-        validate_error_type(ty)?;
-    }
-
-    Ok(signature)
+    let retry_checks = retry_code_checks(&attrs, &types.code, &cfg_attrs);
+    let module = task_module(&attrs, &func, &signature, &types, kind);
+    Ok(quote! {
+        #func
+        #retry_checks
+        #(#cfg_attrs)*
+        #module
+    })
 }
 
-/// Extract the args type and output type from the function signature.
-fn extract_types(func: &ItemFn, signature: &SignatureShape) -> syn::Result<(Type, Type)> {
-    let args_type = match signature {
-        SignatureShape {
-            input: InputShape::Unit,
-            ..
-        } => syn::parse_quote!(()),
-        SignatureShape {
-            input: InputShape::Direct(param),
-            ..
-        } => param.ty.clone(),
-        SignatureShape {
-            input: InputShape::Wrapped(_),
-            ..
-        } => syn::parse_quote!(Input),
-    };
-
-    // Output type: extract T from Result<T, TaskError>.
-    let output_type = match &func.sig.output {
-        ReturnType::Type(_, ty) => extract_result_ok_type(ty)?,
-        _ => unreachable!("validated: explicit return type"),
-    };
-
-    Ok((args_type, output_type))
-}
-
-fn is_task_runtime_type(ty: &Type) -> bool {
-    let Type::Path(tp) = ty else {
-        return false;
-    };
-    tp.path
-        .segments
-        .last()
-        .map(|segment| segment.ident == "TaskRuntime")
-        .unwrap_or(false)
-}
-
-fn build_registered_task(
-    signature: &SignatureShape,
-    fn_name: &syn::Ident,
-    args_type: &Type,
-    blocking: bool,
+fn task_module(
+    attrs: &TaskAttrs,
+    func: &ItemFn,
+    signature: &Signature,
+    types: &TaskTypes,
+    kind: BodyKind,
 ) -> TokenStream {
-    let call_expr = build_call_expr(signature, fn_name, blocking);
+    let fn_name = &func.sig.ident;
+    let vis = &func.vis;
+    let task_name = &attrs.name;
+    let TaskTypes {
+        input,
+        output,
+        code,
+    } = types;
+    let function_type = quote! { ::horsies::TaskFunction<#input, #output, #code> };
+    let handle_type = quote! { ::horsies::TaskHandle<#output, #code> };
+    let send_result = quote! { ::std::result::Result<#handle_type, ::horsies::TaskSendError> };
+    let input_items = input_struct(signature);
+    let params_items = params_module(signature);
+    let send_params = send_params(signature);
+    let build_input = build_input(signature);
+    let registered = registered_task(signature, fn_name, input, kind);
+    let workflow_ctx = match attrs.workflow_ctx {
+        true => quote! { .with_workflow_ctx() },
+        false => quote! {},
+    };
+    let runtime_capture = match signature.takes_runtime {
+        true => quote! { let __horsies_runtime = app.task_runtime(); },
+        false => quote! {},
+    };
+    let options = task_options(attrs);
+    quote! {
+        /// The registration and the send helpers of the task.
+        #[doc(hidden)]
+        // A private task gets a private module, whose unused helpers are no
+        // defect of the user's code.
+        #[allow(non_camel_case_types, dead_code)]
+        #vis mod #fn_name {
+            use super::*;
 
-    if blocking {
-        let wrapper_runtime_field = if signature.accepts_runtime() {
-            quote! { runtime: horsies::TaskRuntime, }
-        } else {
-            quote! {}
-        };
-        let wrapper_runtime_init = if signature.accepts_runtime() {
-            quote! { runtime: __horsies_runtime.clone(), }
-        } else {
-            quote! {}
-        };
-        let wrapper_runtime_clone = if signature.accepts_runtime() {
-            quote! { let runtime = self.runtime.clone(); }
-        } else {
-            quote! {}
-        };
-        quote! {{
-            struct __BlockingTaskWrapper {
-                #wrapper_runtime_field
+            #input_items
+
+            #params_items
+
+            const TASK_NAME: &str = #task_name;
+
+            /// The function that the first `register` in this process
+            /// returned; the send helpers send through it.
+            static FUNCTION: ::std::sync::OnceLock<#function_type> =
+                ::std::sync::OnceLock::new();
+
+            /// Register the task on `app` and return its typed function.
+            /// The first registration in a process also serves `send`,
+            /// `schedule`, `with_options` and `node` of this module.
+            pub fn register(
+                app: &mut ::horsies::Horsies,
+            ) -> ::std::result::Result<#function_type, ::horsies::HorsiesError> {
+                ::horsies::__private::refuse_foreign_user_codes::<#code>(TASK_NAME)?;
+                #runtime_capture
+                let task = #registered #workflow_ctx .with_task_options(#options);
+                app.register(TASK_NAME, task)?;
+                let function =
+                    <#function_type>::__registered(app, TASK_NAME)?;
+                let _first_registration =
+                    FUNCTION.set(::std::clone::Clone::clone(&function));
+                ::std::result::Result::Ok(function)
             }
 
-            impl horsies::core::task::fn_trait::BlockingTaskFn for __BlockingTaskWrapper {
-                fn execute(&self, args: &[u8]) -> horsies::core::task::fn_trait::RawTaskResult {
-                    #wrapper_runtime_clone
-                    let deserialized: #args_type = match horsies::core::task::macros::decode_task_input(args) {
-                        Ok(v) => v,
-                        Err(task_error) => {
-                            return horsies::TaskResult::Err(task_error);
-                        }
-                    };
+            fn registered() -> ::std::result::Result<
+                &'static #function_type,
+                ::horsies::TaskSendError,
+            > {
+                FUNCTION
+                    .get()
+                    .ok_or_else(|| ::horsies::__private::send_before_register(TASK_NAME))
+            }
 
-                    #call_expr
+            /// The typed function of the task in the app of `runtime`.
+            pub fn handle(
+                runtime: &::horsies::TaskRuntime,
+            ) -> ::std::result::Result<#function_type, ::horsies::TaskFunctionNotFound> {
+                runtime.task_handle::<#input, #output, #code>(TASK_NAME)
+            }
+
+            /// Send the task now.
+            pub async fn send(#send_params) -> #send_result {
+                let input: #input = #build_input;
+                registered()?.send(input).await
+            }
+
+            /// Send the task to run after `delay`.
+            pub async fn schedule(
+                delay: ::horsies::WholeSeconds,
+                #send_params
+            ) -> #send_result {
+                let input: #input = #build_input;
+                registered()?.schedule(delay, input).await
+            }
+
+            /// The send helpers with per-send options.
+            pub fn with_options(options: ::horsies::TaskSendOptions) -> SendOptions {
+                SendOptions { options }
+            }
+
+            /// Per-send options of this task's send helpers.
+            pub struct SendOptions {
+                options: ::horsies::TaskSendOptions,
+            }
+
+            impl SendOptions {
+                /// Send the task now with these options.
+                pub async fn send(&self, #send_params) -> #send_result {
+                    let input: #input = #build_input;
+                    registered()?
+                        .with_options(::std::clone::Clone::clone(&self.options))
+                        .send(input)
+                        .await
                 }
 
-                fn validate_input(&self, args: &[u8]) -> Result<(), horsies::TaskError> {
-                    horsies::core::task::macros::decode_task_input::<#args_type>(args).map(|_| ())
+                /// Send the task to run after `delay` with these options.
+                pub async fn schedule(
+                    &self,
+                    delay: ::horsies::WholeSeconds,
+                    #send_params
+                ) -> #send_result {
+                    let input: #input = #build_input;
+                    registered()?
+                        .with_options(::std::clone::Clone::clone(&self.options))
+                        .schedule(delay, input)
+                        .await
                 }
             }
 
-            horsies::core::task::fn_trait::RegisteredTask::Blocking {
-                task: ::std::sync::Arc::new(__BlockingTaskWrapper {
-                    #wrapper_runtime_init
-                }),
-                meta: horsies::core::task::fn_trait::TaskMeta::for_input::<#args_type>(),
+            /// A workflow node of the task, with the queue, priority and
+            /// options of its registration.
+            pub fn node() -> ::std::result::Result<
+                ::horsies::TaskNode<#output, #input>,
+                ::horsies::HorsiesError,
+            > {
+                FUNCTION
+                    .get()
+                    .map(|function| function.node())
+                    .ok_or_else(|| ::horsies::__private::node_before_register(TASK_NAME))
             }
-        }}
-    } else {
-        let wrapper_runtime_field = if signature.accepts_runtime() {
-            quote! { runtime: horsies::TaskRuntime, }
-        } else {
-            quote! {}
-        };
-        let wrapper_runtime_init = if signature.accepts_runtime() {
-            quote! { runtime: __horsies_runtime.clone(), }
-        } else {
-            quote! {}
-        };
-        let wrapper_runtime_clone = if signature.accepts_runtime() {
-            quote! { let runtime = self.runtime.clone(); }
-        } else {
-            quote! {}
-        };
-        quote! {{
-            struct __AsyncTaskWrapper {
-                #wrapper_runtime_field
+        }
+    }
+}
+
+/// The `TaskOptions` of the registration: the attribute values, with the
+/// default class `ISOLATED` and the default grace of a `SHARED_ASYNC` task.
+fn task_options(attrs: &TaskAttrs) -> TokenStream {
+    let queue_name = match &attrs.queue {
+        Some(queue) => {
+            quote! { ::std::option::Option::Some(::std::string::String::from(#queue)) }
+        }
+        None => quote! { ::std::option::Option::None },
+    };
+    let (retry_policy, auto_retry_for) = match &attrs.retry {
+        Retry::NoRetry => (
+            quote! { ::std::option::Option::None },
+            quote! { ::std::option::Option::None },
+        ),
+        Retry::Policy { policy, codes } => {
+            let codes = codes.iter().map(|entry| &entry.code);
+            (
+                quote! { ::std::option::Option::Some(#policy) },
+                quote! {
+                    ::std::option::Option::Some(::std::vec![
+                        #(::horsies::__private::retry_code(#codes)),*
+                    ])
+                },
+            )
+        }
+    };
+    let timeout_ms = match &attrs.timeout_ms {
+        Some(timeout) => {
+            let value = proc_macro2::Literal::u32_suffixed(timeout.value);
+            quote! { ::std::option::Option::Some(#value) }
+        }
+        None => quote! { ::std::option::Option::None },
+    };
+    let (execution, cancel_grace_ms) = match (attrs.execution.class, &attrs.cancel_grace_ms) {
+        (ExecutionClass::Isolated, _) => (
+            quote! { ::horsies::Execution::Isolated },
+            quote! { ::std::option::Option::None },
+        ),
+        (ExecutionClass::SharedThread, _) => (
+            quote! { ::horsies::Execution::SharedThread },
+            quote! { ::std::option::Option::None },
+        ),
+        (ExecutionClass::SharedAsync, Some(grace)) => {
+            let value = proc_macro2::Literal::u32_suffixed(grace.value);
+            (
+                quote! { ::horsies::Execution::SharedAsync },
+                quote! {
+                    ::std::option::Option::Some(::horsies::__private::cancel_grace(#value))
+                },
+            )
+        }
+        (ExecutionClass::SharedAsync, None) => (
+            quote! { ::horsies::Execution::SharedAsync },
+            quote! {
+                ::std::option::Option::Some(::horsies::__private::DEFAULT_CANCEL_GRACE)
+            },
+        ),
+    };
+    quote! {
+        ::horsies::TaskOptions {
+            task_name: ::std::string::String::from(TASK_NAME),
+            queue_name: #queue_name,
+            good_until: ::std::option::Option::None,
+            auto_retry_for: #auto_retry_for,
+            retry_policy: #retry_policy,
+            timeout_ms: #timeout_ms,
+            execution: #execution,
+            cancel_grace_ms: #cancel_grace_ms,
+        }
+    }
+}
+
+/// One `const` assertion per `auto_retry_for` code: a built-in code, or a
+/// code of the task's code type `E`. The assertions sit next to the
+/// function, so `E` resolves as in its signature.
+fn retry_code_checks(attrs: &TaskAttrs, code: &Type, cfg_attrs: &[&Attribute]) -> TokenStream {
+    let Retry::Policy { codes, .. } = &attrs.retry else {
+        return quote! {};
+    };
+    let code_type_text = code.to_token_stream().to_string().replace(' ', "");
+    let checks = codes.iter().map(|entry| {
+        let literal = &entry.code;
+        // `assert!` reads its message as a format string with no argument.
+        let message = format!(
+            "auto_retry_for of task '{}': {} is neither a built-in code nor a code of {}",
+            attrs.name.value(),
+            literal.value(),
+            code_type_text
+        )
+        .replace('{', "{{")
+        .replace('}', "}}");
+        quote_spanned! {literal.span()=>
+            #(#cfg_attrs)*
+            const _: () = ::core::assert!(
+                ::horsies::__private::is_retry_code(
+                    #literal,
+                    <#code as ::horsies::UserErrorCode>::CODES,
+                ),
+                #message
+            );
+        }
+    });
+    quote! { #(#checks)* }
+}
+
+/// The `RegisteredTask` of the function: a body struct that decodes the
+/// input, calls the function and stores what it returned.
+fn registered_task(
+    signature: &Signature,
+    fn_name: &syn::Ident,
+    input: &Type,
+    kind: BodyKind,
+) -> TokenStream {
+    let (runtime_field, runtime_init, runtime_clone) = match signature.takes_runtime {
+        true => (
+            quote! { runtime: ::horsies::TaskRuntime, },
+            quote! { runtime: ::std::clone::Clone::clone(&__horsies_runtime), },
+            quote! { let runtime = ::std::clone::Clone::clone(&self.runtime); },
+        ),
+        false => (quote! {}, quote! {}, quote! {}),
+    };
+    let decode = decode_statement(signature, input);
+    let call = call_expression(signature, fn_name);
+    let meta = quote! {
+        ::horsies::__private::TaskMeta::for_input::<#input>()
+            .in_module(::horsies::__private::parent_module(::std::module_path!()))
+    };
+    let validate = quote! {
+        fn validate_input(
+            &self,
+            input: &[u8],
+        ) -> ::std::result::Result<(), ::horsies::__private::StoredTaskError> {
+            ::horsies::__private::decode_input::<#input>(input).map(|_decoded| ())
+        }
+    };
+    match kind {
+        BodyKind::Async => quote! {{
+            struct __HorsiesBody {
+                #runtime_field
             }
 
-            impl horsies::core::task::fn_trait::AsyncTaskFn for __AsyncTaskWrapper {
+            impl ::horsies::__private::AsyncTaskFn for __HorsiesBody {
                 fn execute(
                     &self,
-                    args: &[u8],
+                    input: &[u8],
                 ) -> ::std::pin::Pin<
-                    Box<
+                    ::std::boxed::Box<
                         dyn ::std::future::Future<
-                                Output = horsies::core::task::fn_trait::RawTaskResult,
-                            > + Send
+                                Output = ::horsies::__private::RawTaskResult,
+                            > + ::std::marker::Send
                             + '_,
                     >,
                 > {
-                    let args = args.to_vec();
-                    Box::pin(async move {
-                        #wrapper_runtime_clone
-                        let deserialized: #args_type = match horsies::core::task::macros::decode_task_input(&args) {
-                            Ok(v) => v,
-                            Err(task_error) => {
-                                return horsies::TaskResult::Err(task_error);
-                            }
-                        };
-
-                        #call_expr
+                    let input = input.to_vec();
+                    #runtime_clone
+                    ::std::boxed::Box::pin(async move {
+                        #decode
+                        ::horsies::__private::body_result(#call.await)
                     })
                 }
 
-                fn validate_input(&self, args: &[u8]) -> Result<(), horsies::TaskError> {
-                    horsies::core::task::macros::decode_task_input::<#args_type>(args).map(|_| ())
-                }
+                #validate
             }
 
-            horsies::core::task::fn_trait::RegisteredTask::Async {
-                task: ::std::sync::Arc::new(__AsyncTaskWrapper {
-                    #wrapper_runtime_init
-                }),
-                meta: horsies::core::task::fn_trait::TaskMeta::for_input::<#args_type>(),
+            ::horsies::__private::RegisteredTask::Async {
+                task: ::std::sync::Arc::new(__HorsiesBody { #runtime_init }),
+                meta: #meta,
             }
-        }}
+        }},
+        BodyKind::Blocking => quote! {{
+            struct __HorsiesBody {
+                #runtime_field
+            }
+
+            impl ::horsies::__private::BlockingTaskFn for __HorsiesBody {
+                fn execute(&self, input: &[u8]) -> ::horsies::__private::RawTaskResult {
+                    #runtime_clone
+                    #decode
+                    ::horsies::__private::body_result(#call)
+                }
+
+                #validate
+            }
+
+            ::horsies::__private::RegisteredTask::Blocking {
+                task: ::std::sync::Arc::new(__HorsiesBody { #runtime_init }),
+                meta: #meta,
+            }
+        }},
     }
 }
 
-fn build_call_expr(
-    signature: &SignatureShape,
-    fn_name: &syn::Ident,
-    blocking: bool,
-) -> TokenStream {
-    let call = match &signature.input {
-        InputShape::Unit => {
-            if signature.has_runtime {
-                quote! { super::#fn_name(runtime) }
-            } else {
-                quote! { super::#fn_name() }
-            }
-        }
-        InputShape::Direct(_param) => {
-            if signature.has_runtime {
-                quote! { super::#fn_name(runtime, deserialized) }
-            } else {
-                quote! { super::#fn_name(deserialized) }
-            }
-        }
+/// The decode of `input` (a byte slice or a vector in scope) into the
+/// bindings that the call takes. A refusal returns the stored error.
+fn decode_statement(signature: &Signature, input_type: &Type) -> TokenStream {
+    let pattern = match &signature.input {
+        InputShape::Unit => quote! { () },
+        InputShape::Direct(_) => quote! { decoded },
         InputShape::Wrapped(params) => {
-            let names: Vec<_> = params.iter().map(|p| &p.ident).collect();
-            let destructure = quote! {
-                let Input { #(#names),* } = deserialized;
-            };
-            let invoke = if signature.has_runtime {
-                quote! { super::#fn_name(runtime, #(#names),*) }
-            } else {
-                quote! { super::#fn_name(#(#names),*) }
-            };
-            return if blocking {
-                quote! {{
-                    #destructure
-                    match #invoke {
-                        Ok(value) => horsies::core::task::macros::encode_validated_task_output(&value),
-                        Err(task_error) => horsies::TaskResult::Err(task_error),
-                    }
-                }}
-            } else {
-                quote! {{
-                    #destructure
-                    match #invoke.await {
-                        Ok(value) => horsies::core::task::macros::encode_validated_task_output(&value),
-                        Err(task_error) => horsies::TaskResult::Err(task_error),
-                    }
-                }}
-            };
+            let names = params.iter().map(|param| &param.ident);
+            quote! { Input { #(#names),* } }
         }
     };
+    quote! {
+        let #pattern = match ::horsies::__private::decode_input::<#input_type>(&input) {
+            ::std::result::Result::Ok(decoded) => decoded,
+            ::std::result::Result::Err(refused) => {
+                return ::horsies::__private::TaskResult::Err(refused);
+            }
+        };
+    }
+}
 
-    if blocking {
+/// `super::f(...)` with the runtime and the decoded input.
+fn call_expression(signature: &Signature, fn_name: &syn::Ident) -> TokenStream {
+    let runtime = match signature.takes_runtime {
+        true => vec![quote! { runtime }],
+        false => vec![],
+    };
+    let input: Vec<TokenStream> = match &signature.input {
+        InputShape::Unit => vec![],
+        InputShape::Direct(_) => vec![quote! { decoded }],
+        InputShape::Wrapped(params) => params
+            .iter()
+            .map(|param| param.ident.to_token_stream())
+            .collect(),
+    };
+    let arguments = runtime.into_iter().chain(input);
+    quote! { super::#fn_name(#(#arguments),*) }
+}
+
+/// The `Input` struct of a wrapped input: one public field per parameter,
+/// unknown keys refused.
+fn input_struct(signature: &Signature) -> TokenStream {
+    let InputShape::Wrapped(params) = &signature.input else {
+        return quote! {};
+    };
+    let fields = params.iter().map(|param| {
+        let ident = &param.ident;
+        let ty = &param.ty;
+        quote! { pub #ident: #ty, }
+    });
+    quote! {
+        /// The input of the task: one field per parameter.
+        #[derive(
+            ::horsies::__private::serde::Serialize,
+            ::horsies::__private::serde::Deserialize,
+        )]
+        #[serde(crate = "::horsies::__private::serde", deny_unknown_fields)]
+        pub struct Input {
+            #(#fields)*
+        }
+    }
+}
+
+/// `params::<name>()`: the field token of each parameter of a wrapped
+/// input. The key is the name that serde reads: a raw identifier without
+/// its `r#`.
+fn params_module(signature: &Signature) -> TokenStream {
+    let InputShape::Wrapped(params) = &signature.input else {
+        return quote! {};
+    };
+    let tokens = params.iter().map(|param| {
+        let ident = &param.ident;
+        let ty = &param.ty;
+        let key = ident.unraw().to_string();
         quote! {
-            match #call {
-                Ok(value) => horsies::core::task::macros::encode_validated_task_output(&value),
-                Err(task_error) => horsies::TaskResult::Err(task_error),
+            pub fn #ident() -> ::horsies::InputField<Input, #ty> {
+                ::horsies::__private::input_field(#key)
             }
         }
-    } else {
-        quote! {
-            match #call.await {
-                Ok(value) => horsies::core::task::macros::encode_validated_task_output(&value),
-                Err(task_error) => horsies::TaskResult::Err(task_error),
-            }
+    });
+    quote! {
+        /// The field tokens of the task's input, for workflow nodes.
+        pub mod params {
+            use super::*;
+            #(#tokens)*
         }
     }
 }
 
-fn generate_module_input_items(signature: &SignatureShape, _args_type: &Type) -> TokenStream {
-    match &signature.input {
-        InputShape::Wrapped(params) => {
-            let fields = params.iter().map(|param| {
-                let ident = &param.ident;
-                let ty = &param.ty;
-                quote! { pub #ident: #ty, }
-            });
-            quote! {
-                #[derive(serde::Serialize, serde::Deserialize)]
-                #[serde(deny_unknown_fields)]
-                pub struct Input {
-                    #(#fields)*
-                }
-            }
-        }
-        _ => quote! {},
-    }
+/// The parameters of the send helpers: the task's input parameters.
+fn send_params(signature: &Signature) -> TokenStream {
+    let params: Vec<&Param> = match &signature.input {
+        InputShape::Unit => vec![],
+        InputShape::Direct(param) => vec![param],
+        InputShape::Wrapped(params) => params.iter().collect(),
+    };
+    let params = params.iter().map(|param| {
+        let ident = &param.ident;
+        let ty = &param.ty;
+        quote! { #ident: #ty }
+    });
+    quote! { #(#params),* }
 }
 
-fn generate_params_items(signature: &SignatureShape, _args_type: &Type) -> TokenStream {
-    match &signature.input {
-        InputShape::Unit => quote! {},
-        InputShape::Direct(_param) => quote! {},
-        InputShape::Wrapped(params) => {
-            let field_fns = params.iter().map(|param| {
-                let ident = &param.ident;
-                let ty = &param.ty;
-                let field_name = ident.to_string();
-                quote! {
-                    pub fn #ident() -> horsies::InputField<Input, #ty> {
-                        horsies::__private::input_field(#field_name)
-                    }
-                }
-            });
-            quote! {
-                pub mod params {
-                    use super::*;
-                    #(#field_fns)*
-                }
-            }
-        }
-    }
-}
-
-fn generate_send_signature(signature: &SignatureShape, args_type: &Type) -> TokenStream {
-    match &signature.input {
-        InputShape::Unit => quote! {},
-        InputShape::Direct(param) => {
-            let ident = &param.ident;
-            quote! { #ident: #args_type }
-        }
-        InputShape::Wrapped(params) => {
-            let args = params.iter().map(|param| {
-                let ident = &param.ident;
-                let ty = &param.ty;
-                quote! { #ident: #ty }
-            });
-            quote! { #(#args),* }
-        }
-    }
-}
-
-fn generate_method_send_signature(signature: &SignatureShape, args_type: &Type) -> TokenStream {
-    match &signature.input {
-        InputShape::Unit => quote! {},
-        _ => {
-            let send_sig = generate_send_signature(signature, args_type);
-            quote! { , #send_sig }
-        }
-    }
-}
-
-fn generate_send_build_args(signature: &SignatureShape) -> TokenStream {
+/// The input value from the send helper's parameters.
+fn build_input(signature: &Signature) -> TokenStream {
     match &signature.input {
         InputShape::Unit => quote! { () },
-        InputShape::Direct(param) => {
-            let ident = &param.ident;
-            quote! { #ident }
-        }
+        InputShape::Direct(param) => param.ident.to_token_stream(),
         InputShape::Wrapped(params) => {
             let names = params.iter().map(|param| &param.ident);
             quote! { Input { #(#names),* } }
@@ -690,185 +531,237 @@ fn generate_send_build_args(signature: &SignatureShape) -> TokenStream {
     }
 }
 
-fn param_spec_from_arg(arg: &syn::PatType) -> syn::Result<ParamSpec> {
-    match arg.pat.as_ref() {
-        Pat::Ident(pat_ident) => Ok(ParamSpec {
-            ident: pat_ident.ident.clone(),
-            ty: (*arg.ty).clone(),
+/// The class must fit the function: an `async fn` runs `isolated` or
+/// `shared_async`; a `fn` runs `isolated` or `shared_thread`.
+fn check_execution_fits(attrs: &TaskAttrs, kind: BodyKind) -> syn::Result<()> {
+    match (kind, attrs.execution.class) {
+        (BodyKind::Async, ExecutionClass::SharedThread) => Err(syn::Error::new(
+            attrs.execution.span,
+            "execution = shared_thread runs a blocking fn on a seat thread; an async fn runs \
+             isolated or shared_async",
+        )),
+        (BodyKind::Blocking, ExecutionClass::SharedAsync) => Err(syn::Error::new(
+            attrs.execution.span,
+            "execution = shared_async runs an async fn on a shared runtime; a blocking fn runs \
+             isolated or shared_thread",
+        )),
+        (BodyKind::Async, ExecutionClass::Isolated | ExecutionClass::SharedAsync)
+        | (BodyKind::Blocking, ExecutionClass::Isolated | ExecutionClass::SharedThread) => Ok(()),
+    }
+}
+
+/// The shape of the signature. Refuses a method, generics, lifetimes, an
+/// `async fn` under `#[blocking_task]` and a `fn` under `#[task]`, a missing
+/// return type, a `TaskRuntime` that is not the first parameter, and a
+/// parameter that is not a plain name.
+fn validate_signature(func: &ItemFn, kind: BodyKind) -> syn::Result<Signature> {
+    let sig = &func.sig;
+    if let Some(receiver) = sig.inputs.iter().find_map(|argument| match argument {
+        FnArg::Receiver(receiver) => Some(receiver),
+        FnArg::Typed(_) => None,
+    }) {
+        return Err(syn::Error::new_spanned(
+            receiver,
+            "task functions must be free functions, not methods",
+        ));
+    }
+    if sig.generics.lt_token.is_some() || !sig.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &sig.generics,
+            "task functions take no generic or lifetime parameters: the input and output types \
+             are the wire contract",
+        ));
+    }
+    match (kind, sig.asyncness.is_some()) {
+        (BodyKind::Async, false) => {
+            return Err(syn::Error::new_spanned(
+                sig.fn_token,
+                "#[horsies::task] takes an async fn; use #[horsies::blocking_task] for a fn",
+            ))
+        }
+        (BodyKind::Blocking, true) => {
+            return Err(syn::Error::new_spanned(
+                sig.asyncness,
+                "#[horsies::blocking_task] takes a fn; use #[horsies::task] for an async fn",
+            ))
+        }
+        (BodyKind::Async, true) | (BodyKind::Blocking, false) => {}
+    }
+    if matches!(sig.output, ReturnType::Default) {
+        return Err(syn::Error::new_spanned(
+            sig.fn_token,
+            "task functions return Result<T, TaskError<E>>",
+        ));
+    }
+    let typed: Vec<&syn::PatType> = sig
+        .inputs
+        .iter()
+        .filter_map(|argument| match argument {
+            FnArg::Typed(typed) => Some(typed),
+            FnArg::Receiver(_) => None,
+        })
+        .collect();
+    let (takes_runtime, user_params) = match typed.split_first() {
+        Some((first, rest)) if is_task_runtime(&first.ty) => (true, rest.to_vec()),
+        Some(_) | None => (false, typed),
+    };
+    if let Some(misplaced) = user_params.iter().find(|param| is_task_runtime(&param.ty)) {
+        return Err(syn::Error::new_spanned(
+            misplaced,
+            "TaskRuntime is the first parameter of a task function, or absent",
+        ));
+    }
+    let params = user_params
+        .iter()
+        .map(|param| param_of(param))
+        .collect::<syn::Result<Vec<_>>>()?;
+    let input = match params.as_slice() {
+        [] => InputShape::Unit,
+        [param] if !is_dependency_result(&param.ty) => InputShape::Direct(param.clone()),
+        _ => InputShape::Wrapped(params),
+    };
+    Ok(Signature {
+        takes_runtime,
+        input,
+    })
+}
+
+fn param_of(param: &syn::PatType) -> syn::Result<Param> {
+    match param.pat.as_ref() {
+        Pat::Ident(pattern) => Ok(Param {
+            ident: pattern.ident.clone(),
+            ty: (*param.ty).clone(),
         }),
-        Pat::Wild(_) => Ok(ParamSpec {
-            ident: syn::Ident::new("input", arg.pat.span()),
-            ty: (*arg.ty).clone(),
+        Pat::Wild(_) => Ok(Param {
+            ident: syn::Ident::new("input", param.pat.span()),
+            ty: (*param.ty).clone(),
         }),
-        _ => Err(syn::Error::new_spanned(
-            &arg.pat,
-            "task function parameters must be plain identifiers",
+        other => Err(syn::Error::new_spanned(
+            other,
+            "task function parameters are plain names",
         )),
     }
 }
 
-fn should_wrap_single_param(ty: &Type) -> bool {
-    is_task_result_type(ty)
+fn is_task_runtime(ty: &Type) -> bool {
+    last_segment_is(ty, "TaskRuntime")
 }
 
-fn is_task_result_type(ty: &Type) -> bool {
-    let Type::Path(tp) = ty else {
-        return false;
-    };
-    tp.path
-        .segments
-        .last()
-        .map(|segment| segment.ident == "TaskResult")
-        .unwrap_or(false)
+/// A single parameter that a workflow fills from a dependency result is
+/// wrapped, so that the node can bind it by name.
+fn is_dependency_result(ty: &Type) -> bool {
+    last_segment_is(ty, "TaskResult")
 }
 
-/// Check if a type looks like `Result<...>`.
-fn looks_like_result(ty: &Type) -> bool {
-    if let Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            return seg.ident == "Result";
-        }
+fn last_segment_is(ty: &Type, name: &str) -> bool {
+    match ty {
+        Type::Path(path) => path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == name),
+        _ => false,
     }
-    false
 }
 
-/// Check whether the error type in `Result<T, E>` is a recognized TaskError path.
-///
-/// Accepted forms:
-/// - `TaskError`
-/// - `horsies::TaskError`
-///
-/// Returns `Ok(())` if accepted or if the type is too complex to analyze
-/// (defers to compiler). Returns `Err` with a span-targeted diagnostic
-/// if the type is a simple path that doesn't match any accepted form.
-fn validate_error_type(ty: &Type) -> syn::Result<()> {
-    let err_type = match extract_result_second_arg(ty) {
-        Some(t) => t,
-        None => return Ok(()), // complex type — defer to compiler
+/// The input, output and code types of the task.
+fn task_types(func: &ItemFn, signature: &Signature) -> syn::Result<TaskTypes> {
+    let input: Type = match &signature.input {
+        InputShape::Unit => syn::parse_quote!(()),
+        InputShape::Direct(param) => param.ty.clone(),
+        InputShape::Wrapped(_) => syn::parse_quote!(Input),
     };
+    let ReturnType::Type(_, returned) = &func.sig.output else {
+        unreachable!("validate_signature refuses a function without a return type")
+    };
+    let (output, error) = result_types(returned)?;
+    let code = task_error_code(&error)?;
+    Ok(TaskTypes {
+        input,
+        output,
+        code,
+    })
+}
 
-    let Type::Path(err_tp) = &err_type else {
-        // Not a path type (tuple, reference, etc.) — reject.
+/// `T` and the error type of `Result<T, Error>`.
+fn result_types(ty: &Type) -> syn::Result<(Type, Type)> {
+    let refusal = || {
+        syn::Error::new_spanned(
+            ty,
+            "task functions return Result<T, TaskError<E>>, with E the code type of the \
+             task's own errors",
+        )
+    };
+    let Type::Path(path) = ty else {
+        return Err(refusal());
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return Err(refusal());
+    };
+    if segment.ident != "Result" {
+        return Err(refusal());
+    }
+    match generic_types(&segment.arguments).as_slice() {
+        [output, error] => Ok(((*output).clone(), (*error).clone())),
+        _ => Err(refusal()),
+    }
+}
+
+/// `E` of `TaskError<E>` or `horsies::TaskError<E>`.
+fn task_error_code(error: &Type) -> syn::Result<Type> {
+    let Type::Path(path) = error else {
         return Err(syn::Error::new_spanned(
-            &err_type,
-            "task function error type must be TaskError",
+            error,
+            "the error type of a task function is TaskError<E>",
         ));
     };
-
-    let segments: Vec<_> = err_tp
+    let names: Vec<String> = path
         .path
         .segments
         .iter()
-        .map(|s| s.ident.to_string())
+        .map(|segment| segment.ident.to_string())
         .collect();
-
-    let accepted = matches!(
-        segments
+    let is_task_error = matches!(
+        names
             .iter()
-            .map(|s| s.as_str())
+            .map(String::as_str)
             .collect::<Vec<_>>()
             .as_slice(),
         ["TaskError"] | ["horsies", "TaskError"]
     );
-
-    if !accepted {
-        let path_str = segments.join("::");
+    if !is_task_error {
         return Err(syn::Error::new_spanned(
-            &err_tp.path,
+            &path.path,
             format!(
-                "task function error type must be TaskError, found `{}`; \
-                 accepted forms: TaskError, horsies::TaskError",
-                path_str,
+                "the error type of a task function is TaskError<E>, found `{}`; accepted forms: \
+                 TaskError<E>, horsies::TaskError<E>",
+                names.join("::")
             ),
         ));
     }
-
-    Ok(())
+    let Some(segment) = path.path.segments.last() else {
+        unreachable!("a path that matched TaskError has a last segment")
+    };
+    match generic_types(&segment.arguments).as_slice() {
+        [code] => Ok((*code).clone()),
+        _ => Err(syn::Error::new_spanned(
+            &path.path,
+            "name the code type of the task's own errors: TaskError<YourCode>, or \
+             TaskError<std::convert::Infallible> for a task that has none",
+        )),
+    }
 }
 
-/// Extract the second generic argument from `Result<T, E>`.
-fn extract_result_second_arg(ty: &Type) -> Option<Type> {
-    if let Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            if seg.ident == "Result" {
-                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                    if let Some(syn::GenericArgument::Type(err_type)) = args.args.iter().nth(1) {
-                        return Some(err_type.clone());
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Extract `T` from `Result<T, E>`.
-fn extract_result_ok_type(ty: &Type) -> syn::Result<Type> {
-    if let Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            if seg.ident == "Result" {
-                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                    if let Some(syn::GenericArgument::Type(ok_type)) = args.args.first() {
-                        return Ok(ok_type.clone());
-                    }
-                }
-            }
-        }
-    }
-    Err(syn::Error::new_spanned(
-        ty,
-        "could not extract T from Result<T, TaskError>; expected Result<T, TaskError>",
-    ))
-}
-
-/// Build the body of `fn task_options(&self)` from parsed attributes.
-fn build_task_options_body(attrs: &TaskAttrs) -> TokenStream {
-    let has_retry = attrs.retry_policy.is_some();
-    let has_auto_retry = attrs.auto_retry_for.is_some();
-    let has_timeout = attrs.timeout_ms.is_some();
-
-    if !has_retry && !has_auto_retry && !has_timeout {
-        return quote! { None };
-    }
-
-    let retry_policy_expr = match &attrs.retry_policy {
-        Some(expr) => quote! { Some(#expr) },
-        None => quote! { None },
-    };
-
-    let auto_retry_for_expr = match &attrs.auto_retry_for {
-        Some(arr) => {
-            let elems: Vec<_> = arr.elems.iter().collect();
-            quote! {
-                Some(vec![#(horsies::TaskErrorCode::User(#elems.to_owned())),*])
-            }
-        }
-        None => quote! { None },
-    };
-
-    let timeout_ms_expr = match &attrs.timeout_ms {
-        // Validated as u32 >= 1000 at parse time; re-emit as a u32-suffixed
-        // literal so TaskOptions.timeout_ms (Option<u32>) types without a cast.
-        Some(lit) => {
-            let value = lit
-                .base10_parse::<u32>()
-                .expect("timeout_ms validated as u32 at parse time");
-            let suffixed = proc_macro2::Literal::u32_suffixed(value);
-            quote! { Some(#suffixed) }
-        }
-        None => quote! { None },
-    };
-
-    // task_name and queue_name are normalized by register(), so we use
-    // placeholder values here — the builder overwrites them.
-    quote! {
-        Some(horsies::TaskOptions {
-            task_name: String::new(),
-            queue_name: None,
-            retry_policy: #retry_policy_expr,
-            good_until: None,
-            auto_retry_for: #auto_retry_for_expr,
-            timeout_ms: #timeout_ms_expr,
-        })
+fn generic_types(arguments: &PathArguments) -> Vec<&Type> {
+    match arguments {
+        PathArguments::AngleBracketed(arguments) => arguments
+            .args
+            .iter()
+            .filter_map(|argument| match argument {
+                GenericArgument::Type(ty) => Some(ty),
+                _ => None,
+            })
+            .collect(),
+        PathArguments::None | PathArguments::Parenthesized(_) => vec![],
     }
 }

@@ -2,7 +2,7 @@ use horsies::task;
 use horsies::TaskError;
 
 #[task("queued", queue = "critical")]
-async fn queued(_: ()) -> Result<String, TaskError> {
+async fn queued(_: ()) -> Result<String, TaskError<std::convert::Infallible>> {
     Ok("ok".into())
 }
 
