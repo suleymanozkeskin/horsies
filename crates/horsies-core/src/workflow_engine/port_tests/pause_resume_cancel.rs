@@ -403,6 +403,69 @@ async fn a_database_error_before_the_resume_commit_keeps_the_workflow_paused() {
     db.drop().await;
 }
 
+/// `TestResumeCommitSplit.test_recovery_db_error_returns_resume_recovery_failed`:
+/// a database error that only the recovery pass after the commit meets. The
+/// resume committed: `RESUME_RECOVERY_FAILED`, not retryable, and the
+/// workflow is RUNNING with B enqueued.
+///
+/// A deferred constraint trigger on the status change PAUSED -> RUNNING runs
+/// at the resume's `COMMIT` and sets the session's `search_path` to a schema
+/// with no table. The setting outlives the commit, so the next statement on
+/// that connection, the tree read of the recovery pass, fails with 42P01.
+/// The handle's broker is new and its calls run one at a time, so its main
+/// core pool holds one connection, which the resume and the recovery pass
+/// both take.
+#[tokio::test]
+#[serial]
+async fn a_database_error_after_the_resume_commit_is_resume_recovery_failed() {
+    let db = IsolatedDatabase::create().await;
+    let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running().status("PAUSED")).await;
+    let done = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the result");
+    seed_node(
+        &db.pool,
+        &NodeSeed::task(workflow_id, 0, "COMPLETED").result(done),
+    )
+    .await;
+    seed_node(
+        &db.pool,
+        &NodeSeed::task(workflow_id, 1, "PENDING").deps(&[0]),
+    )
+    .await;
+    super::support::execute(
+        &db.pool,
+        "CREATE FUNCTION port_test_lose_search_path() RETURNS trigger
+         LANGUAGE plpgsql AS $body$
+         BEGIN
+             PERFORM set_config('search_path', 'port_test_no_tables', false);
+             RETURN NULL;
+         END
+         $body$",
+    )
+    .await;
+    super::support::execute(
+        &db.pool,
+        "CREATE CONSTRAINT TRIGGER port_test_lose_search_path
+         AFTER UPDATE ON horsies_workflows
+         DEFERRABLE INITIALLY DEFERRED
+         FOR EACH ROW
+         WHEN (OLD.status = 'PAUSED' AND NEW.status = 'RUNNING')
+         EXECUTE FUNCTION port_test_lose_search_path()",
+    )
+    .await;
+
+    let error = handle(&db.pool, workflow_id)
+        .resume()
+        .await
+        .expect_err("the recovery pass after the commit meets the lost search path");
+
+    assert_eq!(error.code, HandleErrorCode::ResumeRecoveryFailed);
+    assert!(!error.retryable);
+    assert_eq!(error.workflow_id, workflow_id);
+    assert_eq!(workflow_status(&db.pool, workflow_id).await, "RUNNING");
+    assert_eq!(node_status(&db.pool, workflow_id, 1).await, "ENQUEUED");
+    db.drop().await;
+}
+
 /// A RUNNING parent with one running child, both with no node.
 async fn seed_parent_with_child(pool: &PgPool, on_error: &'static str) -> (Uuid, Uuid) {
     let parent = seed_workflow(pool, &WorkflowSeed::running().on_error(on_error)).await;
