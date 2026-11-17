@@ -14,6 +14,7 @@ use super::support::{
     ParentLink, WorkflowSeed,
 };
 use crate::core::workflow::handle_types::HandleErrorCode;
+use crate::core::PausedWorkflowAge;
 use crate::core::{
     OnError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowSpecRegistry, WorkflowStatus,
     WorkflowTaskStatus,
@@ -158,7 +159,8 @@ async fn an_expired_pause_reads_expired_and_get_gives_workflow_expired() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = paused_an_hour_ago(&db.pool, "get_expired_pause").await;
 
-    let expired = expire_paused_workflows(&broker(&db.pool), chrono::Duration::milliseconds(1), 1)
+    let age = PausedWorkflowAge::parse(chrono::Duration::milliseconds(1)).expect("an age of 1 ms");
+    let expired = expire_paused_workflows(&broker(&db.pool), age, 1)
         .await
         .expect("paused expiry");
 
@@ -171,17 +173,21 @@ async fn an_expired_pause_reads_expired_and_get_gives_workflow_expired() {
     db.drop().await;
 }
 
-/// The call of `test_auto_expired_pause_returns_workflow_expired_error`: a
-/// zero age expires a PAUSED workflow.
+/// The call of `test_auto_expired_pause_returns_workflow_expired_error`,
+/// which passes a zero age: the smallest age the core takes (1 µs) expires a
+/// PAUSED workflow. A zero age is refused where the age enters, as Python's
+/// config refuses it (`config::retention` tests); the sweep takes only an
+/// age of the config.
 #[tokio::test]
 #[serial]
-async fn a_zero_age_expires_a_paused_workflow() {
+async fn the_smallest_age_expires_a_paused_workflow() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = paused_an_hour_ago(&db.pool, "get_expired_pause_zero_age").await;
 
-    let expired = expire_paused_workflows(&broker(&db.pool), chrono::Duration::zero(), 1)
+    let age = PausedWorkflowAge::parse(chrono::Duration::microseconds(1)).expect("an age of 1 µs");
+    let expired = expire_paused_workflows(&broker(&db.pool), age, 1)
         .await
-        .expect("paused expiry with a zero age");
+        .expect("paused expiry with the smallest age");
 
     assert_eq!(expired, 1);
     assert_eq!(status(&db.pool, workflow_id).await, WorkflowStatus::Expired);
