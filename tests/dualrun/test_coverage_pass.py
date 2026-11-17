@@ -37,6 +37,8 @@ from horsies.core.history.maintenance.coverage import (
     CoverageEnsured,
     CoverageEnsureFailed,
     CoverageOutcome,
+    CoveredForever,
+    CoveredUntil,
     maintain_partition_coverage,
 )
 from horsies.core.history.maintenance.database import PartitionMaintenanceDatabase
@@ -58,6 +60,27 @@ DECLARED: Final = (('standard_7d', timedelta(days=7)),)
 
 
 @dataclass(frozen=True, slots=True)
+class CoveredDaysAfterStart:
+    """`CoveredUntil` as whole days after the start of the run's UTC day."""
+
+    days: int
+
+
+type HistoryCoverageAnswer = CoveredForever | CoveredDaysAfterStart
+
+
+def _history_coverage_answer(
+    coverage: CoveredForever | CoveredUntil,
+    day: datetime,
+) -> HistoryCoverageAnswer:
+    match coverage:
+        case CoveredForever():
+            return coverage
+        case CoveredUntil(at=at):
+            return CoveredDaysAfterStart(days=(at - day).days)
+
+
+@dataclass(frozen=True, slots=True)
 class Answer:
     """A coverage outcome with its instants as offsets from the run start.
 
@@ -70,7 +93,7 @@ class Answer:
     created_heartbeat_leaves: int | None
     republished: bool | None
     heartbeat_covered_now: bool
-    history_covered_days: int | None
+    history_coverage: HistoryCoverageAnswer | None
     heartbeats_covered_hours: int | None
     stage: str | None
     class_key: str | None
@@ -99,7 +122,10 @@ def _answer(outcome: CoverageOutcome, run_start: datetime) -> Answer:
                 created_heartbeat_leaves=outcome.created_heartbeat_leaves,
                 republished=outcome.republished,
                 heartbeat_covered_now=outcome.heartbeat_covered_now,
-                history_covered_days=(outcome.history_covered_through - day).days,
+                history_coverage=_history_coverage_answer(
+                    outcome.history_covered_through,
+                    day,
+                ),
                 heartbeats_covered_hours=int(
                     (outcome.heartbeats_covered_through - hour) / timedelta(hours=1)
                 ),
@@ -115,7 +141,7 @@ def _answer(outcome: CoverageOutcome, run_start: datetime) -> Answer:
                 created_heartbeat_leaves=None,
                 republished=None,
                 heartbeat_covered_now=outcome.heartbeat_covered_now,
-                history_covered_days=None,
+                history_coverage=None,
                 heartbeats_covered_hours=None,
                 stage=outcome.stage,
                 class_key=outcome.class_key,
@@ -265,6 +291,11 @@ def test_a_fresh_install_is_covered_as_before(empty_database: MakeDatabase) -> N
     assert candidate.kind == 'ENSURED'
     assert candidate.created_history_leaves == 2 * (HISTORY_HORIZON_DAYS + 1)
     assert candidate.created_heartbeat_leaves == HEARTBEAT_HORIZON_HOURS + 1
+    # The period classes end with their newest daily leaf; the forever leaf
+    # has no end and does not move the answer.
+    assert candidate.history_coverage == CoveredDaysAfterStart(
+        days=HISTORY_HORIZON_DAYS + 1,
+    )
     # Decided rule: each created history leaf is published by its own call.
     assert reference.republished is True
     assert candidate.republished is False

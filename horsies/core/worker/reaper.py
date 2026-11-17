@@ -436,6 +436,7 @@ class ReaperMixin:
             from horsies.core.history.maintenance.coverage import (
                 CoverageEnsureFailed,
                 CoverageEnsured,
+                history_coverage_payload,
                 maintain_partition_coverage,
             )
             from horsies.core.history.maintenance.pruning import (
@@ -511,8 +512,8 @@ class ReaperMixin:
                             'heartbeat_covered_now': (
                                 coverage.heartbeat_covered_now
                             ),
-                            'history_covered_through': (
-                                coverage.history_covered_through.isoformat()
+                            'history_covered_through': history_coverage_payload(
+                                coverage.history_covered_through
                             ),
                             'heartbeats_covered_through': (
                                 coverage.heartbeats_covered_through.isoformat()
