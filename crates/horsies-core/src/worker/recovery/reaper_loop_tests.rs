@@ -28,7 +28,6 @@ use crate::core::history::heartbeats::partitioning::{
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
 use crate::core::history::names::HEARTBEAT_CLASS_KEY;
 use crate::core::history::outcomes::LeafCreation;
-use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 
 /// Far enough back that no configured heartbeat horizon (2 to 48 hours)
@@ -51,11 +50,11 @@ async fn pool_at_worker_start() -> PgPool {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let retention = RetentionConfig::default();
     ensure_startup_coverage_in_pool(
-        &pool,
+        &crate::broker::pools::core_pool_for_test_pool(&pool),
+        crate::broker::core_rows::StatementLog::Off,
         retention.history_leaf_horizon_days,
         retention.heartbeat_leaf_horizon_hours,
         &[],
-        &StagedLoaderPublisher,
     )
     .await
     .expect("startup coverage");

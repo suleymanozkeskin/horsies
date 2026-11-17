@@ -29,7 +29,6 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::history::maintenance::coverage::{
     ensure_partition_coverage_in_pool, CoverageOutcome,
 };
-use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::lifecycle::{OwnedClaim, TerminalizationOutcome};
 use crate::core::registry::workflow::RegisteredWorkflowSpec;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
@@ -124,11 +123,11 @@ impl IsolatedDatabase {
         let database = TestDatabase::create().await;
         let pool = connect(database.url()).await;
         let coverage = ensure_partition_coverage_in_pool(
-            &pool,
+            &crate::broker::pools::core_pool_for_test_pool(&pool),
+            crate::broker::core_rows::StatementLog::Off,
             COVERAGE_HISTORY_DAYS,
             COVERAGE_HEARTBEAT_HOURS,
             &[],
-            &StagedLoaderPublisher,
         )
         .await
         .expect("cover the history partitions");

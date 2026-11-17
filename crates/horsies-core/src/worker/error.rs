@@ -89,16 +89,22 @@ pub enum WorkerError {
     Listener(ListenError),
 }
 
+impl From<crate::broker::CoveragePassError> for WorkerError {
+    fn from(error: crate::broker::CoveragePassError) -> Self {
+        match error {
+            crate::broker::CoveragePassError::Broker(error) => Self::Broker(error),
+            crate::broker::CoveragePassError::History(error) => Self::History(error),
+        }
+    }
+}
+
 impl WorkerError {
     /// Whether this error is transient and the operation can be retried.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Broker(e) => e.is_retryable(),
             Self::Database(e) => is_retryable_sqlx_error(e),
-            Self::History(crate::core::history::errors::HistoryError::Database(e)) => {
-                is_retryable_sqlx_error(e)
-            }
-            Self::History(_) => false,
+            Self::History(error) => error.is_retryable(),
             Self::Config(_) => false,
             Self::ServiceLoopDied { .. } => false,
             Self::StartTimedOut { .. } => true,

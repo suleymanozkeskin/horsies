@@ -29,9 +29,8 @@ use crate::broker::PostgresBroker;
 use crate::core::config::app::AppConfig;
 use crate::core::config::worker_profile::{SelectedProfile, TaskLimitSetting};
 use crate::core::history::maintenance::coverage::{
-    ensure_startup_coverage_in_pool, StartupCoverageOutcome,
+    startup_verdict, CoverageRequest, CoverageSerialization, StartupCoverageOutcome,
 };
-use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::db::{
     ChannelName, CheckoutClass, ParameterType, PayloadEvent, PayloadFilter, PayloadSubscription,
@@ -859,15 +858,16 @@ impl Worker {
         // with no family row refuses the start, not retryable.
         self.broker.ensure_client_family_for_write().await?;
         let declared_periods = self.app_config.retention.registrable_periods();
-        let startup_coverage = ensure_startup_coverage_in_pool(
-            self.broker.session_pool(),
+        let request = CoverageRequest::new(
             self.app_config.retention.history_leaf_horizon_days,
             self.app_config.retention.heartbeat_leaf_horizon_hours,
             &declared_periods,
-            &StagedLoaderPublisher,
-        )
-        .await?;
-        match startup_coverage {
+        )?;
+        let coverage = self
+            .broker
+            .ensure_partition_coverage(&request, CoverageSerialization::Gated)
+            .await?;
+        match startup_verdict(coverage) {
             StartupCoverageOutcome::Ready(outcome) => {
                 tracing::info!(outcome = ?outcome, "task-history startup coverage ready");
             }
@@ -4382,7 +4382,7 @@ mod tests {
         database.drop().await;
     }
 
-    /// The startup coverage runs on the session pool: with the main pool
+    /// The startup coverage runs on the core pools: with the sqlx main pool
     /// closed, the database start still completes.
     #[tokio::test]
     #[serial]

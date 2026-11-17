@@ -17,6 +17,7 @@ use crate::broker::stale_recovery::{
     StaleRunningPass, StaleRunningThresholds, ThresholdMs, ThresholdOutOfRange,
     STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS, STALE_RUNNING_SCAN_BATCH,
 };
+use crate::broker::CoveragePassError;
 use crate::broker::PostgresBroker;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
@@ -24,7 +25,7 @@ use crate::core::history::identity::reservations::{
     cleanup_expired_reservations_pass, ReservationCleanupPass, RESERVATION_CLEANUP_BATCHES_PER_PASS,
 };
 use crate::core::history::maintenance::coverage::{
-    ensure_periodic_coverage_in_pool, CoverageOutcome,
+    CoverageOutcome, CoverageRequest, CoverageSerialization,
 };
 use crate::core::history::maintenance::pruning::{prune_expired_partitions, PruneReach};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
@@ -293,11 +294,11 @@ mod p7_maintenance_tests {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let coverage =
             crate::core::history::maintenance::coverage::ensure_partition_coverage_in_pool(
-                &pool,
+                &crate::broker::pools::core_pool_for_test_pool(&pool),
+                crate::broker::core_rows::StatementLog::Off,
                 2,
                 2,
                 &[],
-                &crate::core::history::reads::publisher::StagedLoaderPublisher,
             )
             .await
             .expect("partition coverage");
@@ -1237,15 +1238,19 @@ async fn run_reaper_pass(
 
     if tokio::time::Instant::now() >= *next_partition_maintenance {
         let declared = retention.registrable_periods();
-        let coverage_health = match ensure_periodic_coverage_in_pool(
-            maintenance_pool,
+        let coverage = match CoverageRequest::new(
             retention.history_leaf_horizon_days,
             retention.heartbeat_leaf_horizon_hours,
             &declared,
-            &StagedLoaderPublisher,
-        )
-        .await
-        {
+        ) {
+            Ok(request) => {
+                broker
+                    .ensure_partition_coverage(&request, CoverageSerialization::PerLeafLocks)
+                    .await
+            }
+            Err(refused) => Err(CoveragePassError::History(refused)),
+        };
+        let coverage_health = match coverage {
             Ok(outcome) => {
                 let encoded = match &outcome {
                     CoverageOutcome::Ensured(ensured) => serde_json::json!({
