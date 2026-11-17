@@ -1,15 +1,18 @@
 """`horsies worker` on the core: the worker manifest, the core run on the main
 thread, and the exit code.
 
-The CLI discovers the app, imports its task modules, and then hands the
-worker to the core. The core runs the claim loop, the children, the outcome
-writes, the heartbeats and the reaper on its own threads. This module:
+The CLI discovers the app, checks it, picks the profile and imports its task
+modules, and then hands the worker to the core. The core runs the claim
+loop, the children, the outcome writes, the heartbeats and the reaper on its
+own threads. This module:
 
 - builds the worker manifest of the app (`to_worker_manifest`,
-  `python_child_launch`);
+  `python_child_launch`); a value above its manifest bound is a startup
+  `ConfigurationError`;
 - sets the panic rule of a worker process before the first core call;
-- calls `prepare_worker`, then `PreparedWorker.run` on the main thread, with
-  `SIGTERM` and `SIGINT` handlers that ask the run to stop;
+- calls `prepare_worker` with a `CoreWorkerHost`, then `PreparedWorker.run`
+  on the main thread, with `SIGTERM` and `SIGINT` handlers that ask the run
+  to stop;
 - maps the end of the run to the exit contract: 0 only on an operator stop,
   else 1.
 """
@@ -23,11 +26,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from types import FrameType
-from typing import assert_never
+from typing import TYPE_CHECKING, assert_never
 
 from horsies import _core
 from horsies._catalog import worker_manifest as wire
 from horsies.core.app import Horsies
+from horsies.core.errors import ConfigurationError, ErrorCode, HorsiesError
 from horsies.core.history.identity.keys import IDEMPOTENCY_WINDOW_DEFAULT
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.gc_policy import freeze_startup_objects
@@ -39,27 +43,52 @@ from horsies.core.worker_manifest import (
     python_child_launch,
     to_worker_manifest,
 )
+from horsies.core.workflows.child_spec_source import build_child_spec
+
+if TYPE_CHECKING:
+    from horsies.core.brokers.postgres import PostgresBroker
 
 EXIT_STOPPED = 0
 """The run ended at an operator stop."""
 
 EXIT_FAILED = 1
-"""Any other end: a refused manifest or profile, a failed start, a failure
-after the start."""
+"""Any other end: a refused manifest or profile, a broker that does not
+build, a failed start, a failure after the start."""
+
+type ReportStartupErrors = Callable[[Sequence[HorsiesError]], None]
+"""Prints the startup report of the given errors."""
 
 
-class StartedHost:
-    """The host of a core worker: `on_started` freezes the objects of the
-    start, as the Python worker does before its first claim."""
+class CoreWorkerHost:
+    """The host of a core worker, which the core calls on its callback
+    thread:
 
-    def __init__(self, logger: logging.Logger) -> None:
+    - `on_started`: once, before the first claim; it freezes the objects of
+      the start, as the Python worker does before its first claim.
+    - `build_child_spec`: the child of each sub-workflow node that a
+      workflow step of the worker starts, built with the app of `broker`.
+    """
+
+    def __init__(self, broker: PostgresBroker, logger: logging.Logger) -> None:
+        self._broker = broker
         self._logger = logger
 
     def on_started(self) -> None:
-        """Called once, on the callback thread, before the first claim.
-        `freeze_startup_objects` does no I/O and cannot fail."""
+        """`freeze_startup_objects` does no I/O and cannot fail."""
         freeze_startup_objects()
         self._logger.info('Worker started')
+
+    def build_child_spec(
+        self, request: _core.ChildSpecRequest,
+    ) -> _core.ChildSpecBuilt | _core.ChildSpecRefused:
+        """The child of the node of `request`. Does no I/O; it runs the
+        child's `build_with`.
+
+        Raises:
+            SerializationError: a defect of a child node row, as
+                `build_child_spec` names it.
+        """
+        return build_child_spec(self._broker, request)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +98,7 @@ class WorkerLaunch:
     app_locator: str
     imports: tuple[str, ...]
     sys_path_roots: tuple[str, ...]
-    profile: str | None
+    profile: str
     loglevel: str
 
 
@@ -111,6 +140,33 @@ def worker_manifest_json(
             assert_never(unreachable)
 
 
+def manifest_bound_error(above: ValueAboveManifestBound) -> ConfigurationError:
+    """The startup error of a config value above its manifest bound. It
+    names the path, the value and the bound. No horsies error code covers
+    the bounds of the worker manifest, so the error has none."""
+    error = ConfigurationError(
+        message=f'{above.path} is above the bound that a worker takes',
+        notes=[
+            f'{above.path} = {above.value}',
+            f'the bound of {above.path} is {above.maximum}',
+        ],
+        help_text=f'set {above.path} to {above.maximum} or less',
+    )
+    # The cause is a config value, not a line of this module.
+    error.location = None
+    return error
+
+
+def profile_refused_error(refusal: str) -> ConfigurationError:
+    """The startup error of one line of the core's profile refusal."""
+    error = ConfigurationError(
+        message=refusal,
+        code=ErrorCode.CONFIG_INVALID_WORKER_PROFILE,
+    )
+    error.location = None
+    return error
+
+
 def _reservation_window() -> timedelta:
     """The reservation window of a keyed send from a worker child: the
     default of `PostgresBroker`, the one window the CLI broker uses."""
@@ -129,13 +185,14 @@ def _install_stop_handlers(
         _ = worker.request_stop()
 
     for stop_signal in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(stop_signal, _stop)
+        _ = signal.signal(stop_signal, _stop)
 
 
-def _exit_code_of(
+def exit_code_of(
     end: _core.WorkerStopped | _core.WorkerBootFailed | _core.WorkerFailed,
     logger: logging.Logger,
 ) -> int:
+    """The exit code of a run end, after its log line."""
     match end:
         case _core.WorkerStopped():
             logger.info('Worker stopped')
@@ -150,39 +207,55 @@ def _exit_code_of(
             assert_never(unreachable)
 
 
+def _child_spec_broker(app: Horsies) -> Result[PostgresBroker, HorsiesError]:
+    """The broker whose app builds the sub-workflow children. Built before
+    the run, so a broker that does not build is a startup error, not a
+    failure of a workflow step. Starts nothing and connects nowhere.
+
+    Errors: the `HorsiesError` of `Horsies.get_broker` (`BROKER_INIT_FAILED`).
+    """
+    try:
+        return Ok(app.get_broker())
+    except HorsiesError as error:
+        return Err(error)
+
+
 def run_core_worker(
     app: Horsies,
     launch: WorkerLaunch,
     logger: logging.Logger,
-    report_refusals: Callable[[Sequence[str]], None],
+    report: ReportStartupErrors,
 ) -> int:
     """Build the manifest, prepare the worker and run it on the main thread.
     Returns the exit code of `horsies worker`.
 
-    `report_refusals` prints a startup report of the given lines (a value
-    above its manifest bound, a refused profile).
+    `report` prints the startup report of a value above its manifest bound,
+    a broker that does not build, or a profile that the core refuses.
     """
     match worker_manifest_json(app, launch):
         case Ok(manifest_json):
             pass
         case Err(above):
-            report_refusals(
-                (
-                    f'{above.path} is {above.value}, above the manifest bound '
-                    f'{above.maximum}',
-                ),
-            )
+            report((manifest_bound_error(above),))
             return EXIT_FAILED
         case _ as unreachable:
             assert_never(unreachable)
     # A panic in a core background task aborts the worker process; its
     # supervisor restarts it. Set before the first core call.
     _core.set_panic_rule('ABORT_PROCESS')
-    match _core.prepare_worker(manifest_json, host=StartedHost(logger)):
+    match _child_spec_broker(app):
+        case Ok(broker):
+            pass
+        case Err(error):
+            report((error,))
+            return EXIT_FAILED
+        case _ as unreachable:
+            assert_never(unreachable)
+    match _core.prepare_worker(manifest_json, host=CoreWorkerHost(broker, logger)):
         case _core.PreparedWorker() as worker:
             pass
         case _core.WorkerProfileRefused(refusals=refusals):
-            report_refusals(tuple(refusals))
+            report(tuple(profile_refused_error(line) for line in refusals))
             return EXIT_FAILED
         case _ as unreachable:
             assert_never(unreachable)
@@ -193,5 +266,4 @@ def run_core_worker(
     except KeyboardInterrupt:
         logger.info('Worker interrupted by user')
         return EXIT_STOPPED
-    return _exit_code_of(end, logger)
-
+    return exit_code_of(end, logger)

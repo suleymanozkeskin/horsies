@@ -17,12 +17,10 @@ import os
 import random
 import signal
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, NoReturn, assert_never
-
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
@@ -36,7 +34,6 @@ from horsies.core.errors import (
     ValidationReport,
 )
 from horsies.core.logging import get_logger
-from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.child_sizing import DEFAULT_TASK_SEND_POOL_CONNECTIONS
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.worker_profile import (
@@ -53,31 +50,11 @@ from horsies.core.models.worker_profile import (
     SharedThreadChildren,
     TaskLimit,
     WorkerProfile,
+    describe_worker_profile,
 )
 from horsies.core.scheduler import Scheduler
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.cpu_placement import ParentCpu
-from horsies.core.worker.profile_fit import (
-    CONNECTIONS_HELP,
-    CgroupLimit,
-    CgroupUnreadable,
-    ConnectionsExceedServer,
-    ConnectionsFit,
-    MemoryLimitsExceedMachine,
-    MemoryLimitsFit,
-    MemoryLimitsNotSet,
-    NoCgroupLimit,
-    ServerConnectionLimit,
-    ServerConnectionLimitUnreadable,
-    UsableMemory,
-    UsableMemoryUnreadable,
-    compare_connections,
-    compare_memory_limits,
-    read_cgroup_memory_limit,
-    read_machine_memory,
-    read_server_connection_limit,
-    usable_memory,
-)
 from horsies.core.worker.core_run import EXIT_STOPPED, WorkerLaunch, run_core_worker
 from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 from horsies.core.utils.imports import (
@@ -205,23 +182,6 @@ def _parse_locator(locator: str) -> tuple[str, str | None]:
 def _is_file_path(path: str) -> bool:
     """Check if path looks like a file path (vs dotted module path)."""
     return path.endswith('.py') or os.path.sep in path or '/' in path
-
-
-def _build_queue_settings(app: Horsies) -> tuple[dict[str, int], dict[str, int]]:
-    """Build (queue_priorities, queue_max_concurrency) for CUSTOM mode.
-
-    Uncapped queues (``max_concurrency=None``) are omitted from the
-    concurrency map: the worker's claim pass only counts and limits
-    queues present in it.
-    """
-    queue_priorities: dict[str, int] = {}
-    queue_max_concurrency: dict[str, int] = {}
-    if app.config.queue_mode.name == 'CUSTOM' and app.config.custom_queues:
-        for q in app.config.custom_queues:
-            queue_priorities[q.name] = q.priority
-            if q.max_concurrency is not None:
-                queue_max_concurrency[q.name] = q.max_concurrency
-    return queue_priorities, queue_max_concurrency
 
 
 def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
@@ -610,139 +570,6 @@ def execution_settings(profile: WorkerProfile) -> ExecutionSettings:
     )
 
 
-def _read_usable_memory(
-    selected: SelectedProfile,
-    logger: logging.Logger,
-) -> UsableMemory | UsableMemoryUnreadable:
-    """Read the host RAM and the cgroup limit, and keep the smaller.
-
-    Warns when a cgroup limit file exists but cannot be read: the host RAM
-    is then the only bound, and inside a container it can be far too high.
-    """
-    cgroup = read_cgroup_memory_limit()
-    match cgroup:
-        case CgroupUnreadable(reason=reason):
-            logger.warning(
-                'Worker profile %r: the container memory limit could not be '
-                'read (%s); the per-child memory limits are compared with the '
-                'host RAM',
-                selected.name,
-                reason,
-            )
-        case CgroupLimit() | NoCgroupLimit():
-            pass
-        case _ as unreachable:
-            assert_never(unreachable)
-    return usable_memory(read_machine_memory(), cgroup)
-
-
-def _log_memory_fit(selected: SelectedProfile, logger: logging.Logger) -> None:
-    """Warn when the per-child memory limits add up to more than the memory
-    that the worker can use: the container limit, or the host RAM.
-
-    A warning, not a refusal: a deployment can move between machine sizes.
-    The worker starts in every outcome.
-    """
-    match _read_usable_memory(selected, logger):
-        case UsableMemoryUnreadable(reason=reason):
-            logger.warning(
-                'Worker profile %r: the memory of the machine could not be read '
-                '(%s); the per-child memory limits were not compared with it',
-                selected.name,
-                reason,
-            )
-        case UsableMemory(source=source) as usable:
-            match compare_memory_limits(selected.profile, usable):
-                case MemoryLimitsExceedMachine(total_mb=total_mb, machine_mb=usable_mb):
-                    logger.warning(
-                        'Worker profile %r: the per-child memory limits add up '
-                        'to %s MB, above the %s MB %s. Children can use more '
-                        'memory than the worker has before they are recycled.',
-                        selected.name,
-                        total_mb,
-                        usable_mb,
-                        source.value,
-                    )
-                case MemoryLimitsFit(total_mb=total_mb, machine_mb=usable_mb):
-                    logger.info(
-                        'Worker profile %r: per-child memory limits add up to '
-                        '%s MB of the %s MB %s',
-                        selected.name,
-                        total_mb,
-                        usable_mb,
-                        source.value,
-                    )
-                case MemoryLimitsNotSet():
-                    logger.info(
-                        'Worker profile %r: no per-child memory limit, so '
-                        'there is no sum to compare with the memory',
-                        selected.name,
-                    )
-                case _ as unreachable:
-                    assert_never(unreachable)
-        case _ as unreachable_memory:
-            assert_never(unreachable_memory)
-
-
-def _log_connection_limit(
-    selected: SelectedProfile,
-    limit: ServerConnectionLimit,
-    logger: logging.Logger,
-) -> None:
-    match compare_connections(selected.profile, limit):
-        case ConnectionsExceedServer() as exceed:
-            logger.warning(
-                'Worker profile %r: %s. %s; %s. To fix: %s',
-                selected.name,
-                exceed.describe(),
-                exceed.need.formula(),
-                exceed.need.task_sends_note(),
-                CONNECTIONS_HELP,
-            )
-        case ConnectionsFit() as fit:
-            logger.info('Worker profile %r: %s', selected.name, fit.describe())
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-async def _log_connection_fit(
-    selected: SelectedProfile,
-    broker: PostgresConfig,
-    session_factory: Callable[[], AsyncSession],
-    logger: logging.Logger,
-) -> None:
-    """Warn when one worker can open more connections than the server allows.
-
-    Runs at boot, before any child starts or any row is claimed. A warning,
-    not a refusal; ``horsies check --live`` reports the same fact as an
-    error. Through a transaction pooler the pooled connections do not map to
-    server connections, so nothing is compared.
-    """
-    match broker.pgbouncer_transaction_mode:
-        case True:
-            logger.info(
-                'Worker profile %r: connections go through a transaction '
-                'pooler; the server connection limit is not compared',
-                selected.name,
-            )
-            return
-        case False:
-            pass
-    match await read_server_connection_limit(session_factory):
-        case ServerConnectionLimitUnreadable(reason=reason):
-            logger.warning(
-                'Worker profile %r: the server connection limit could not be '
-                'read (%s); the connections of this worker were not compared '
-                'with it',
-                selected.name,
-                reason,
-            )
-        case ServerConnectionLimit() as limit:
-            _log_connection_limit(selected, limit, logger)
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
 def worker_command(args: argparse.Namespace) -> None:
     """Handle worker command.
 
@@ -772,14 +599,27 @@ def worker_command(args: argparse.Namespace) -> None:
         logger.error(f'Failed to discover app: {e}')
         sys.exit(1)
 
+    # The profile is chosen before anything starts. AppConfig validation
+    # already checked every profile when the app module built the config;
+    # the core checks the same choice again.
+    match select_worker_profile(app.config.worker_profiles, args.profile):
+        case Err(selection_error):
+            _print_worker_startup_report((_profile_selection_error(selection_error),))
+            sys.exit(1)
+        case Ok(selected):
+            pass
+    logger.info(
+        f'Worker profile {selected.name!r}: '
+        f'{describe_worker_profile(selected.profile)}'
+    )
+
     # Strict startup validation before worker accepts tasks.
     startup_errors = app.check(live=False)
     if startup_errors:
-        report = ValidationReport('worker-startup')
-        for error in startup_errors:
-            report.add(error)
-        print(report.format_rust_style(), file=sys.stderr)
+        _print_worker_startup_report(startup_errors)
         sys.exit(1)
+
+    logger.info(f'Worker will process queues: {app.get_valid_queue_names()}')
 
     # Build app_locator - prefer module path format
     if _is_file_path(module_locator.split(':')[0]):
@@ -795,24 +635,29 @@ def worker_command(args: argparse.Namespace) -> None:
         logger.info('Using discovered task modules')
     else:
         logger.warning('No task modules discovered.')
-    # The registered classes of the manifest come from the task modules.
+    # The registered classes of the manifest and the banner come from the
+    # task modules.
     app.import_task_modules()
+    print_banner(app, role='worker', show_tasks=True)
 
     launch = WorkerLaunch(
         app_locator=app_locator,
         imports=tuple(discovered_modules),
         sys_path_roots=(sys_path_root,) if sys_path_root else (),
-        profile=args.profile,
+        profile=selected.name,
         loglevel=loglevel,
     )
-
-    def _report_refusals(lines: Sequence[str]) -> None:
-        for line in lines:
-            print(line, file=sys.stderr)
-
-    exit_code = run_core_worker(app, launch, logger, _report_refusals)
+    exit_code = run_core_worker(app, launch, logger, _print_worker_startup_report)
     if exit_code != EXIT_STOPPED:
         sys.exit(exit_code)
+
+
+def _print_worker_startup_report(errors: Sequence[HorsiesError]) -> None:
+    """Print the ``worker-startup`` report of ``errors`` to stderr."""
+    report = ValidationReport('worker-startup')
+    for error in errors:
+        report.add(error)
+    print(report.format_rust_style(), file=sys.stderr)
 
 
 def scheduler_command(args: argparse.Namespace) -> None:
