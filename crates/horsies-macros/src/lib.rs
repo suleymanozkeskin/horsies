@@ -21,15 +21,14 @@ mod workflow_input;
 /// and `E` the code type of the task's own errors
 /// (`#[derive(horsies::UserErrorCode)]`, or `std::convert::Infallible`).
 /// Its parameters form the input, stored as Python stores keyword
-/// arguments: none is `()`; one struct is the input itself, its fields the
-/// keys; several parameters, or one that is not a struct (`fn double(x:
-/// i64)`), are a generated `Input` struct keyed by the parameter names
-/// (`{"x": 2}`). The attribute reads the type's name: a primitive, a string,
-/// a sequence, a set, a map, an `Option`, a tuple, an array, a JSON value, a
-/// UUID, a date or time, a `TaskOutcome` and a `WorkflowContext` are
-/// wrapped; a path to any other type is taken as a struct. A first
-/// parameter of type `horsies::TaskRuntime` is not input: the body gets the
-/// runtime of the app.
+/// arguments: no parameter, or one parameter written `()`, is `()` (a send
+/// stores `null`); any other parameters are a generated `Input` struct with
+/// one field per parameter, keyed by the parameter's name. A single
+/// parameter is wrapped whatever its type: `fn double(x: i64)` stores
+/// `{"x": 2}`, and `fn validate_order(order: Order)` stores `{"order":
+/// {...}}`. A parameter whose value is stored needs a name: `_` is refused
+/// for it. A first parameter of type `horsies::TaskRuntime` is not input:
+/// the body gets the runtime of the app.
 ///
 /// Attributes after the name:
 /// - `queue = "name"`: a queue of `Custom` queue mode.
@@ -48,7 +47,8 @@ mod workflow_input;
 /// The attribute generates a module of the same name:
 ///
 /// ```ignore
-/// let validate = validate_order::register(&mut app)?;   // TaskFunction<Order, ValidatedOrder, OrderCode>
+/// let validate = validate_order::register(&mut app)?;   // TaskFunction<validate_order::Input, ValidatedOrder, OrderCode>
+/// let order_field = validate_order::params::order();    // InputField<validate_order::Input, Order>
 /// let handle = validate_order::send(order).await?;      // after the first register in the process
 /// let later = validate_order::schedule(WholeSeconds::from_secs(30), order).await?;
 /// let function = validate_order::handle(&runtime)?;     // from a TaskRuntime
@@ -89,7 +89,10 @@ pub fn blocking_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Derive typed workflow field tokens for a named-field input struct.
+/// Derive typed workflow field tokens for a named-field struct: the params
+/// type of a workflow definition, which a sub-workflow node fills field by
+/// field. A task's input fields have their tokens in the task's own module
+/// (`task_name::params::<name>()`).
 ///
 /// Generates one associated function `field_<name>()` per field that serde
 /// reads, with the key that serde reads: `rename`, `rename_all` and raw
@@ -100,11 +103,12 @@ pub fn blocking_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// ```ignore
 /// #[derive(Serialize, Deserialize, horsies::WorkflowInput)]
-/// struct ProcessInput {
-///     data: String,
+/// struct RegionParams {
+///     region: String,
 /// }
 ///
-/// process_data::node()?.arg_from(ProcessInput::field_data(), fetch);
+/// RegionReport::node(SubWorkflowParams::NotGiven)?
+///     .set(RegionParams::field_region(), "eu".to_owned())?;
 /// ```
 #[proc_macro_derive(WorkflowInput)]
 pub fn derive_workflow_input(item: TokenStream) -> TokenStream {
