@@ -427,6 +427,22 @@ const CHILD_SPEC_REFUSED_PARAMETERS: &[StubParameter] =
     &[keyword("message", "str"), keyword("failure_result", "str")];
 const RESUME_WORKFLOW_OUTCOME: &str = "WorkflowResumed | WorkflowNotPaused | \
      WorkflowResumeRecoveryFailed | WorkflowAbsent | HandleFailed";
+const FINISH_WORKFLOW_NODE_PARAMETERS: &[StubParameter] =
+    &[positional("request", "NodeFinishRequest")];
+const ADVANCE_WORKFLOW_PARENTS_PARAMETERS: &[StubParameter] =
+    &[positional("child_workflow_ids", "list[uuid.UUID]")];
+const NODE_FINISH_REQUEST_PARAMETERS: &[StubParameter] = &[
+    keyword("task_id", "uuid.UUID"),
+    keyword(
+        "facts",
+        "Literal['NO_DEPENDENTS', 'DEPENDENTS_WITHOUT_SUBWORKFLOW', 'SUBWORKFLOW_REACHABLE', \
+         'UNKNOWN']",
+    ),
+    keyword("wake", "Literal['SEND', 'NONE']"),
+];
+const NODE_FINISH_DISPOSITION: &str = "Literal['APPLIED', 'APPLIED_WORKFLOW_ENDED', \
+     'ALREADY_APPLIED', 'PENDING_ABSENT', 'SOURCE_ABSENT', 'SOURCE_STATE_CONFLICT', \
+     'SOURCE_VERSION_CONFLICT', 'SOURCE_DIGEST_MISMATCH']";
 const PAUSE_WORKFLOW_OUTCOME: &str =
     "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed";
 const CANCEL_WORKFLOW_OUTCOME: &str =
@@ -684,6 +700,18 @@ const CORE_HANDLE_METHODS: [StubFunction; 38] = [
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(RESUME_WORKFLOW_OUTCOME),
         doc: "Resume one workflow tree. Writes; the child starts it owes build their children through\nthe child spec source. A build that raised KeyboardInterrupt or SystemExit raises it\nagain. With no child spec source it raises RuntimeError.",
+    },
+    StubFunction {
+        name: "finish_workflow_node_async",
+        parameters: FINISH_WORKFLOW_NODE_PARAMETERS,
+        returns: TypeText::FutureOf("NodeFinished | NodeFinishFailed"),
+        doc: "Phase 2 of one finished workflow task. Writes; the child starts it owes build their\nchildren through the child spec source. A build that raised KeyboardInterrupt or\nSystemExit raises it again. With no child spec source it raises RuntimeError.",
+    },
+    StubFunction {
+        name: "advance_workflow_parents_async",
+        parameters: ADVANCE_WORKFLOW_PARENTS_PARAMETERS,
+        returns: TypeText::FutureOf("ParentsAdvanced | ParentAdvanceStopped"),
+        doc: "Advance the parent nodes above child_workflow_ids, one transaction per level. Writes; the\nchild starts a level owes build their children through the child spec source. A build\nthat raised KeyboardInterrupt or SystemExit raises it again. With no child spec source\nit raises RuntimeError.",
     },
     StubFunction {
         name: "pause_workflow_async",
@@ -2189,7 +2217,7 @@ const MONITORING_CLASSES: [StubClass; 33] = [
     },
 ];
 
-const WORKFLOW_CLASSES: [StubClass; 32] = [
+const WORKFLOW_CLASSES: [StubClass; 37] = [
     StubClass {
         name: "WorkflowPaused",
         doc: "The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed\ntasks of the paused tree are abandoned.",
@@ -2455,6 +2483,58 @@ const WORKFLOW_CLASSES: [StubClass; 32] = [
         properties: &[
             property("workflow_id", "uuid.UUID"),
             property("existing_name", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "NodeFinishRequest",
+        doc: "One frozen phase 2. Another facts or wake value raises ValueError.",
+        constructor: Constructor::Parameters(NODE_FINISH_REQUEST_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "NodeFinished",
+        doc: "The phase 2 committed, or found nothing to write. A SOURCE_* disposition kept the\nphase-2 record and wrote nothing. parent_advances are the child workflows whose parent\nnodes advance after the commit.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            StubProperty {
+                name: "disposition",
+                annotation: TypeText::Plain(NODE_FINISH_DISPOSITION),
+            },
+            property("workflow_status", "str | None"),
+            property("parent_advances", "list[uuid.UUID]"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "NodeFinishFailed",
+        doc: "The phase 2 failed: the client family check, a statement, a child build that did not\nrun, a child tree that the core refuses, or a row outside the function's contract (not\nretryable). Nothing committed, or the outcome is unknown.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ParentsAdvanced",
+        doc: "Every parent advance committed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("child_workflow_ids", "list[uuid.UUID]")],
+        methods: &[],
+    },
+    StubClass {
+        name: "ParentAdvanceStopped",
+        doc: "The parent advance stopped at the level of failed_child_workflow_id; the levels before\nit committed. still_owed holds every advance a retry runs, the failed level first.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("failed_child_workflow_id", "uuid.UUID"),
+            property("still_owed", "list[uuid.UUID]"),
+            property("message", "str"),
+            property("retryable", "bool"),
         ],
         methods: &[],
     },

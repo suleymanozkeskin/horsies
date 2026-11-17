@@ -66,6 +66,9 @@ use crate::operations::worker_reads::{
     worker_state_history_operation, worker_state_operation, worker_states_operation,
 };
 use crate::operations::workflow_lifecycle::{cancel_workflow_operation, pause_workflow_operation};
+use crate::operations::workflow_phase2::{
+    advance_workflow_parents_operation, finish_workflow_node_operation, NodeFinishRequest,
+};
 use crate::operations::workflow_reads::{
     wait_workflow_result_operation, workflow_node_result_operation,
     workflow_node_results_operation, workflow_nodes_operation, workflow_status_operation,
@@ -731,6 +734,57 @@ impl CoreHandle {
             "CoreHandle.resume_workflow_async",
             CallKind::Write,
             resume_workflow_operation(self.connection(), workflow_id, source),
+        )
+    }
+
+    /// Phase 2 of one finished workflow task (`horsies_workflow_node_finish`):
+    /// `NodeFinished` or `NodeFinishFailed`. Writes; the child starts it owes
+    /// build their children through the child spec source. A build that
+    /// raised `KeyboardInterrupt` or `SystemExit` raises it again. Awaitable
+    /// only: its caller, the worker's finalize, is a coroutine. With no
+    /// child spec source it raises `RuntimeError`.
+    fn finish_workflow_node_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'py, NodeFinishRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        let source = self.child_spec_source(core)?;
+        let request = request.get();
+        call_async(
+            py,
+            core,
+            "CoreHandle.finish_workflow_node_async",
+            CallKind::Write,
+            finish_workflow_node_operation(
+                self.connection(),
+                request.task_id,
+                request.form,
+                request.wake,
+                source,
+            ),
+        )
+    }
+
+    /// Advance the parent nodes above `child_workflow_ids`
+    /// (`horsies_workflow_child_finish`, one transaction per level):
+    /// `ParentsAdvanced` or `ParentAdvanceStopped`. Writes; the child starts
+    /// a level owes build their children through the child spec source. A
+    /// build that raised `KeyboardInterrupt` or `SystemExit` raises it again.
+    /// With no child spec source it raises `RuntimeError`.
+    fn advance_workflow_parents_async<'py>(
+        &self,
+        py: Python<'py>,
+        child_workflow_ids: Vec<Uuid>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        let source = self.child_spec_source(core)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.advance_workflow_parents_async",
+            CallKind::Write,
+            advance_workflow_parents_operation(self.connection(), child_workflow_ids, source),
         )
     }
 
