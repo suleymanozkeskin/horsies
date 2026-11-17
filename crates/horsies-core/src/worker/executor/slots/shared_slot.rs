@@ -252,11 +252,13 @@ async fn serve_step(pool: &SharedPoolShared, local: usize, generation: &mut Gene
             Flow::Continue
         }
         SlotEvent::DrainDeadline => {
+            let task_ids = generation.runs.task_ids();
             tracing::warn!(
                 pid = generation.channel.pid().get(),
-                tasks = ?generation.runs.task_ids(),
+                tasks = ?task_ids,
                 "killing a shared child that still runs tasks at the drain deadline",
             );
+            pool.drain_kills.note(task_ids);
             send_kill(generation, KillReason::DrainDeadline).await;
             Flow::Continue
         }

@@ -24,13 +24,19 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::broker::pools::PoolSettingsError;
 use crate::core::config::recovery::{RecoveryConfig, FAIL_CLOSED_WINDOW_DIVISOR};
+use crate::core::PostgresConfig;
+use crate::db::{
+    parse_connection_url, CheckoutClass, ConnectPlan, ConnectionAge, ConnectionEnvironment,
+    CorePool, IdlePing, ParameterType, PoolPlan, PoolRole, PoolSizing, Reserve, SocketSettings,
+    StatementBound, StatementFailure, StatementProtocol, TypedStatement,
+};
 use crate::worker::executor::protocol::ProcessId;
 use crate::worker::executor::supervisor::{ChildId, KillOutcome, SpawnerHandle, WorkerKillMark};
 
@@ -87,6 +93,26 @@ WHERE t.status = 'RUNNING'
   AND t.claimed_by_worker_id = $1::varchar
   AND t.claimed_at = d.claimed_at
   AND t.finalizing_at IS NULL";
+
+/// [`INSERT_RUNNER_HEARTBEATS_SQL`] with its parameter types: worker id,
+/// hostname, pid, task ids, claim generations.
+static INSERT_RUNNER_HEARTBEATS: TypedStatement = TypedStatement::new(
+    "insert_runner_heartbeats",
+    INSERT_RUNNER_HEARTBEATS_SQL,
+    &[
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Int4,
+        ParameterType::UuidArray,
+        ParameterType::TimestamptzArray,
+    ],
+);
+
+/// The bound of one connect of the beat connection, in place of the URL's
+/// `connect_timeout` (Python `BEAT_CONNECT_TIMEOUT_S`). Only the writer
+/// checks out from the beat pool, one statement at a time, so a checkout
+/// waits for no other user; the same time bounds the checkout.
+pub const BEAT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A child that holds a dispatch: what the fail-closed watchdog needs to
 /// mark and kill it.
@@ -402,35 +428,104 @@ pub struct BeatSender {
     pub pid: i32,
 }
 
-/// Write one runner-beat statement for the given dispatches; returns the
-/// number of rows that passed the fence. It does not retry.
+/// Write one runner-beat statement for the given dispatches, in autocommit
+/// on `pool`; returns the number of rows that passed the fence. It does not
+/// retry.
+///
+/// Errors: the failed checkout or statement; nothing was written, or the
+/// outcome is unknown.
 async fn write_beats(
-    pool: &PgPool,
+    pool: &CorePool,
     sender: &BeatSender,
     task_ids: &[Uuid],
     claim_generations: &[DateTime<Utc>],
-) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(INSERT_RUNNER_HEARTBEATS_SQL)
-        .bind(&sender.worker_id)
-        .bind(&sender.hostname)
-        .bind(sender.pid)
-        .bind(task_ids)
-        .bind(claim_generations)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected())
+) -> Result<u64, StatementFailure> {
+    let bound = INSERT_RUNNER_HEARTBEATS
+        .bind()
+        .value(&sender.worker_id)
+        .value(&sender.hostname)
+        .value(&sender.pid)
+        .value(&task_ids)
+        .value(&claim_generations)
+        .finish();
+    pool.execute(
+        CheckoutClass::Reserved,
+        &bound,
+        StatementBound::ConnectionTimeouts,
+    )
+    .await
 }
 
-/// A one-connection pool for the beats, built from the runtime pool's
-/// settings. The connection opens at the first write and again after a
-/// failure; it never waits behind the shared pool.
-pub fn runner_beat_pool(runtime_pool: &PgPool) -> PgPool {
-    runtime_pool
-        .options()
-        .clone()
-        .min_connections(0)
-        .max_connections(1)
-        .connect_lazy_with((*runtime_pool.connect_options()).clone())
+/// The pool of the runner beats: one connection of its own
+/// ([`PoolRole::RunnerHeartbeat`]) on the `database_url` of `config`,
+/// outside the worker profile pool, so a busy pool cannot starve the beats
+/// (Python `PostgresBeatWriter`: one psycopg connection in autocommit, on
+/// the worker's DSN with the TCP settings of the config). The connection
+/// opens at the first write and again after it was lost; it is never
+/// pinged and never replaced for its age. Each connect is bounded by
+/// [`BEAT_CONNECT_TIMEOUT`]. Behind PgBouncer transaction pooling it sends
+/// unnamed statements only (Python `prepare_threshold=None`).
+///
+/// Reads the process connection environment (`PGPASSWORD`, `~/.pgpass`, the
+/// TLS files the URL names). Connects to nothing.
+///
+/// Errors: [`PoolSettingsError`] when the environment, the URL or its
+/// connection plan is refused; nothing was built.
+pub fn runner_beat_pool(config: &PostgresConfig) -> Result<CorePool, PoolSettingsError> {
+    let environment = ConnectionEnvironment::capture().map_err(PoolSettingsError::Environment)?;
+    let protocol = match config.pgbouncer_transaction_mode {
+        true => StatementProtocol::UnnamedOnly,
+        false => StatementProtocol::PreparedPerConnection,
+    };
+    runner_beat_pool_on(
+        &config.database_url,
+        &config.socket_settings(),
+        protocol,
+        &environment,
+    )
+}
+
+/// [`runner_beat_pool`] on `url` with the given socket settings, statement
+/// protocol and connection environment.
+///
+/// Errors: [`PoolSettingsError::Url`] or [`PoolSettingsError::Plan`].
+pub(crate) fn runner_beat_pool_on(
+    url: &str,
+    socket: &SocketSettings,
+    protocol: StatementProtocol,
+    environment: &ConnectionEnvironment,
+) -> Result<CorePool, PoolSettingsError> {
+    let role = PoolRole::RunnerHeartbeat;
+    let settings = parse_connection_url(url, environment)
+        .map_err(|cause| PoolSettingsError::Url { role, cause })?
+        .with_connect_timeout(BEAT_CONNECT_TIMEOUT);
+    let connect = ConnectPlan::load(&settings, environment, socket)
+        .map_err(|cause| PoolSettingsError::Plan { role, cause })?;
+    let plan = PoolPlan {
+        role,
+        sizing: PoolSizing::new(1, Reserve::NoReserve)
+            .expect("one connection with no reserve is a valid size"),
+        checkout_wait: BEAT_CONNECT_TIMEOUT,
+        idle_ping: IdlePing::Off,
+        max_age: ConnectionAge::Unlimited,
+        protocol,
+    };
+    Ok(CorePool::new(plan, Arc::new(connect)))
+}
+
+/// A beat pool on the test database `url`, with the default socket
+/// settings and an isolated environment (test URLs carry their password).
+#[cfg(test)]
+pub(crate) fn test_beat_pool(url: &str) -> Arc<CorePool> {
+    Arc::new(
+        runner_beat_pool_on(
+            url,
+            &crate::db::DEFAULT_SOCKET_SETTINGS,
+            StatementProtocol::PreparedPerConnection,
+            &ConnectionEnvironment::isolated(),
+        )
+        .expect("the statement layer accepts a test URL"),
+    )
 }
 
 /// The watchdog thread of the runner beats. Dropping it does not stop the
@@ -456,10 +551,12 @@ struct WatchContext {
 /// fires; the watchdog when [`RunnerBeatWatch::stop`] runs. A watchdog that
 /// fails closed asks for the stop through `fail_closed_stop`.
 ///
+/// The writer closes `pool` when it ends.
+///
 /// Errors: the OS refused to start the watchdog thread; the writer is not
 /// started then.
 pub fn launch_runner_beats(
-    pool: PgPool,
+    pool: Arc<CorePool>,
     sender: BeatSender,
     interval: Duration,
     stale_running: StaleRunningRecovery,
@@ -506,7 +603,7 @@ impl RunnerBeatWatch {
 /// The writer loop: wait one interval (the first beat is written with the
 /// RUNNING transition), then beat; a failed write is retried sooner.
 async fn run_beats(
-    pool: PgPool,
+    pool: Arc<CorePool>,
     sender: BeatSender,
     interval: Duration,
     stale_running: StaleRunningRecovery,
@@ -532,12 +629,12 @@ async fn run_beats(
         )
         .await;
     }
-    pool.close().await;
+    pool.close();
 }
 
 /// One beat pass; returns the wait before the next pass.
 async fn beat_once(
-    pool: &PgPool,
+    pool: &CorePool,
     sender: &BeatSender,
     interval: Duration,
     stale_running: StaleRunningRecovery,
@@ -904,6 +1001,8 @@ mod fail_closed_tests;
 
 #[cfg(test)]
 mod tests {
+    use sqlx::PgPool;
+
     use super::*;
 
     #[test]
@@ -1261,7 +1360,8 @@ mod tests {
             pid: 7,
         };
         let generations = vec![claimed_at; ids.len()];
-        let rows = write_beats(&pool, &sender, &ids, &generations)
+        let core_pool = crate::broker::pools::core_pool_for_test_pool(&pool);
+        let rows = write_beats(&core_pool, &sender, &ids, &generations)
             .await
             .unwrap();
         assert_eq!(rows, 1);

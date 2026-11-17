@@ -14,7 +14,7 @@ use super::support::{
 };
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::{SubWorkflowSummary, WorkflowSpecRegistry};
+use crate::core::{SubWorkflowSummary, WorkflowSpecRegistry, WorkflowStatus};
 use crate::workflow_engine::engine::{check_workflow_completion, on_subworkflow_complete};
 
 async fn complete(pool: &PgPool, workflow_id: Uuid) {
@@ -114,7 +114,7 @@ async fn a_failed_child_gives_its_parent_a_summary_without_output() {
 
     assert_eq!(workflow(&pool, child_id).await.status, "FAILED");
     let summary = parent_summary(&pool, parent_id).await;
-    assert_eq!(summary.status, "FAILED");
+    assert_eq!(summary.status, WorkflowStatus::Failed);
     assert_eq!(summary.output, None);
 }
 
@@ -173,7 +173,7 @@ async fn child_summary_counts_follow_the_child_node_statuses() {
 /// `test_terminal_two_step_handles_zero_task_workflow`: a workflow with no
 /// node has an empty terminal set, and its completion reads no row and fails
 /// on nothing. It has no output node, so it stores Python's outputless result
-/// with three empty maps (`horsies/core/workflows/engine.py:3935-3983`; the
+/// with three empty maps (`python/horsies/core/workflows/engine.py:3935-3983`; the
 /// baseline `horsies_workflow_outputless_result`).
 #[tokio::test]
 #[serial]

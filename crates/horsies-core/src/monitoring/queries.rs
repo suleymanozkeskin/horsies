@@ -1,40 +1,35 @@
-//! Monitoring query implementations over live and retained task data.
+//! Monitoring query implementations: each read is one call of its baseline
+//! function (`0007_scheduler_monitoring_functions.sql`) on the statement
+//! layer, in autocommit, so every read is one snapshot.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use sqlx::postgres::PgRow;
-use sqlx::{FromRow, PgConnection, Postgres, QueryBuilder, Row};
+use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
 use crate::broker::core_rows::{column, one_row, RowDecodeError};
+use crate::broker::task_lists::{bounded_list_from_rows, BoundedTaskList, ListRow, ListShapeError};
 use crate::broker::{BrokerError, PostgresBroker};
 use crate::db::{Row as CoreRow, StatementFailure, TypedStatement};
 
 use super::function_rows::{
-    builtin_taxonomy, detail_publication, page_from_rows, task_detail_row, task_list_row,
-    DetailPublication, DetailRead, DetailRowError, DETAIL_FUNCTIONS_PUBLISHED,
-    MONITORING_TASK_DETAIL, MONITORING_TASK_FACETS, MONITORING_TASK_LIST,
+    breakdown_from_rows, breakdown_row, builtin_taxonomy, page_from_rows, schedule_row,
+    status_counts, task_detail_row, task_list_row, workflow_name_row, workflow_node, workflow_run,
+    workflow_runs, DetailRowError, NodeRead, RunRead, MONITORING_SCHEDULES,
+    MONITORING_TASK_BREAKDOWN, MONITORING_TASK_DETAIL, MONITORING_TASK_FACETS,
+    MONITORING_TASK_LIST, MONITORING_TASK_STATS, MONITORING_WORKFLOW_NAMES,
+    MONITORING_WORKFLOW_NODE, MONITORING_WORKFLOW_RUN, MONITORING_WORKFLOW_RUNS,
 };
-use crate::core::history::archive::attempts::AttemptRecord;
 use crate::core::history::errors::HistoryError;
-use crate::core::history::reads::aggregates::{
-    history_breakdown_statement, history_scoped_status_counts_statement, HistoryBreakdownGroup,
-};
-use crate::core::history::reads::detail::{
-    read_task_detail, staged_detail_published, HistoryTaskDetail, TaskDetailResult,
-};
-use crate::core::history::reads::pages::{HistoryScope, HistoryStatement, HistoryWindow};
-use crate::core::task::error::{
-    BuiltInTaskCode, ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode,
-};
+use crate::core::history::reads::pages::HistoryWindow;
+use crate::core::task::error::BuiltInTaskCode;
 use crate::core::types::status::TaskStatus;
 
 use super::errors::{MonitoringQueryError, MonitoringResult};
 use super::models::{
-    Breakdown, ErrorCategory, ErrorFacet, FacetValue, Facets, GroupRow, LeafTaskInfo,
-    ScheduleStateInfo, StatusCount, TaskAttemptInfo, TaskDetail, TaskListPage, WorkflowEdge,
-    WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
+    Breakdown, ErrorCategory, ErrorFacet, FacetValue, Facets, ScheduleStateInfo, StatusCount,
+    TaskDetailRead, TaskListPage, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
 };
 
 pub const MAX_TASK_PAGE_REACH: i64 = 500;
@@ -132,22 +127,6 @@ impl TaskGroupBy {
             Self::Worker => "worker",
             Self::TaskName => "task_name",
             Self::Queue => "queue",
-        }
-    }
-
-    const fn live_column(self) -> &'static str {
-        match self {
-            Self::Worker => "claimed_by_worker_id",
-            Self::TaskName => "task_name",
-            Self::Queue => "queue_name",
-        }
-    }
-
-    const fn history_group(self) -> HistoryBreakdownGroup {
-        match self {
-            Self::Worker => HistoryBreakdownGroup::Worker,
-            Self::TaskName => HistoryBreakdownGroup::TaskName,
-            Self::Queue => HistoryBreakdownGroup::QueueName,
         }
     }
 }
@@ -404,210 +383,88 @@ pub fn categorize_error_code(code: Option<&str>) -> Option<ErrorCategory> {
     }
 }
 
-fn codes_for_category(category: ErrorCategory) -> Vec<String> {
-    match category {
-        ErrorCategory::Operational => OperationalErrorCode::ALL
-            .iter()
-            .map(ToString::to_string)
-            .collect(),
-        ErrorCategory::Contract => ContractCode::ALL.iter().map(ToString::to_string).collect(),
-        ErrorCategory::Retrieval => RetrievalCode::ALL.iter().map(ToString::to_string).collect(),
-        ErrorCategory::Outcome => OutcomeCode::ALL.iter().map(ToString::to_string).collect(),
-        ErrorCategory::Domain => Vec::new(),
-    }
+/// The stored text of each error category filter value.
+fn category_texts(categories: &[ErrorCategory]) -> Vec<String> {
+    categories
+        .iter()
+        .map(|category| category.as_str().to_owned())
+        .collect()
 }
 
-fn all_builtin_codes() -> Vec<String> {
-    [
-        ErrorCategory::Operational,
-        ErrorCategory::Contract,
-        ErrorCategory::Retrieval,
-        ErrorCategory::Outcome,
-    ]
-    .into_iter()
-    .flat_map(codes_for_category)
-    .collect()
-}
-
-fn history_scope(filters: &TaskFilters) -> HistoryScope {
-    let mut category_families = Vec::new();
-    let mut domain_complement = None;
-    for category in &filters.error_categories {
-        match category {
-            ErrorCategory::Domain => domain_complement = Some(all_builtin_codes()),
-            other => category_families.push(codes_for_category(*other)),
-        }
-    }
-    HistoryScope {
-        statuses: filters.statuses.iter().map(ToString::to_string).collect(),
-        task_names: filters.task_names.clone(),
-        queue_names: filters.queues.clone(),
-        workers: filters.workers.clone(),
-        error_codes: filters.error_codes.clone(),
-        category_families,
-        domain_complement,
-        retried_only: filters.retried_only,
-    }
-}
-
-fn push_error_categories(builder: &mut QueryBuilder<'_, Postgres>, categories: &[ErrorCategory]) {
-    if categories.is_empty() {
-        return;
-    }
-    builder.push(" AND (");
-    for (index, category) in categories.iter().enumerate() {
-        if index > 0 {
-            builder.push(" OR ");
-        }
-        match category {
-            ErrorCategory::Domain => {
-                builder
-                    .push("(error_code IS NOT NULL AND error_code <> '' AND error_code <> ALL(")
-                    .push_bind(all_builtin_codes())
-                    .push("::text[]))");
-            }
-            other => {
-                builder
-                    .push("error_code = ANY(")
-                    .push_bind(codes_for_category(*other))
-                    .push("::text[])");
-            }
-        }
-    }
-    builder.push(")");
-}
-
-fn push_live_scope(builder: &mut QueryBuilder<'_, Postgres>, filters: &TaskFilters) {
-    builder.push(" WHERE TRUE");
-    if !filters.statuses.is_empty() {
-        builder
-            .push(" AND status = ANY(")
-            .push_bind(
-                filters
-                    .statuses
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>(),
-            )
-            .push("::text[])");
-    }
-    for (column, values) in [
-        ("task_name", &filters.task_names),
-        ("queue_name", &filters.queues),
-        ("claimed_by_worker_id", &filters.workers),
-        ("error_code", &filters.error_codes),
-    ] {
-        if !values.is_empty() {
-            builder
-                .push(" AND ")
-                .push(column)
-                .push(" = ANY(")
-                .push_bind(values.clone())
-                .push("::text[])");
-        }
-    }
-    push_error_categories(builder, &filters.error_categories);
-    if filters.retried_only {
-        builder.push(" AND retry_count > 0");
-    }
-}
-
-fn history_attempt(record: &AttemptRecord) -> TaskAttemptInfo {
-    TaskAttemptInfo {
-        attempt: record.attempt(),
-        outcome: record.outcome().to_owned(),
-        will_retry: record.will_retry(),
-        error_code: normalize_optional_text(record.error_code()),
-        error_message: normalize_optional_text(record.error_message()),
-        failed_reason: normalize_optional_text(record.failed_reason()),
-        worker_hostname: record.worker_hostname().map(str::to_owned),
-        started_at: Some(record.started_at()),
-        finished_at: Some(record.finished_at()),
-    }
-}
-
-fn history_leaf(detail: &HistoryTaskDetail) -> LeafTaskInfo {
-    let completed_at = (detail.status == TaskStatus::Completed).then_some(detail.terminal_at);
-    let failed_at = (detail.status != TaskStatus::Completed).then_some(detail.terminal_at);
-    LeafTaskInfo {
-        task_id: detail.task_id,
-        status: detail.status.to_string(),
-        error_code: normalize_optional_text(detail.error_code.as_deref()),
-        failed_reason: normalize_optional_text(detail.final_failed_reason.as_deref()),
-        retry_count: detail.retry_count,
-        max_retries: detail.max_retries,
-        enqueued_at: Some(detail.enqueued_at),
-        started_at: detail.started_at,
-        completed_at,
-        failed_at,
-        queue_s: span_s(
-            Some(detail.enqueued_at),
-            detail.started_at.or(Some(detail.terminal_at)),
-            false,
+/// A failed call of a monitoring function that raises `data_corrupted`
+/// (XX001) for stored data that breaks the history contract: that refusal
+/// is `HISTORY_CONTRACT_VIOLATION`, not retryable; any other failure is the
+/// database failure (Python `_function_err`).
+fn function_failure(operation: &str, error: BrokerError) -> MonitoringQueryError {
+    match is_data_corrupted(&error) {
+        true => MonitoringQueryError::broker(
+            operation,
+            BrokerError::HistoryReadContract(error.to_string()),
         ),
-        exec_s: span_s(detail.started_at, Some(detail.terminal_at), false),
-        worker_hostname: detail.last_worker_hostname.clone(),
-        good_until: detail.good_until,
+        false => MonitoringQueryError::broker(operation, error),
     }
 }
 
-async fn fetch_history_rows(
-    connection: &mut PgConnection,
-    statement: &HistoryStatement,
-) -> Result<Vec<PgRow>, sqlx::Error> {
-    statement.query().fetch_all(connection).await
+/// Whether the server refused the statement with `data_corrupted` (XX001).
+fn is_data_corrupted(error: &BrokerError) -> bool {
+    match error {
+        BrokerError::Statement(StatementFailure::StatementRefused { cause, .. }) => {
+            cause.server_error().code() == &SqlState::DATA_CORRUPTED
+        }
+        _ => false,
+    }
 }
 
-pub async fn task_stats(
-    broker: &PostgresBroker,
-    query: &TaskStatsQuery,
-) -> MonitoringResult<Vec<StatusCount>> {
-    let operation = "task stats query";
-    let mut connection = broker
-        .pool()
-        .acquire()
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
+/// Rows of a monitoring function that do not decode: `DB_OPERATION_FAILED`,
+/// not retryable.
+fn row_failure(operation: &str, error: RowDecodeError) -> MonitoringQueryError {
+    MonitoringQueryError::broker(operation, BrokerError::RowDecode(error))
+}
 
-    let mut live = QueryBuilder::<Postgres>::new("SELECT status, count(*) FROM horsies_tasks");
-    push_live_scope(&mut live, &query.filters);
-    live.push(" GROUP BY status");
-    let live_rows: Vec<(String, i64)> = live
-        .build_query_as()
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
+/// Rows of a list function that break its `LIST_END` contract.
+fn list_shape_failure(
+    operation: &str,
+    statement: &TypedStatement,
+    shape: ListShapeError,
+) -> MonitoringQueryError {
+    row_failure(
+        operation,
+        RowDecodeError::Shape {
+            statement: statement.name(),
+            reason: shape.to_string(),
+        },
+    )
+}
 
-    let history_statement =
-        history_scoped_status_counts_statement(query.window, &history_scope(&query.filters));
-    let history_rows = fetch_history_rows(&mut connection, &history_statement)
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-
-    let mut counts: BTreeMap<String, i64> = live_rows.into_iter().collect();
-    for row in history_rows {
-        let status: String = row
-            .try_get("status")
-            .map_err(|error| MonitoringQueryError::database(operation, error))?;
-        let count: i64 = row
-            .try_get("terminal_count")
-            .map_err(|error| MonitoringQueryError::database(operation, error))?;
-        *counts.entry(status).or_default() += count;
+/// A task row that does not decode: a row shape defect, or stored history
+/// data that does not decode (`HISTORY_CONTRACT_VIOLATION`).
+fn detail_row_failure(operation: &str, error: DetailRowError) -> MonitoringQueryError {
+    match error {
+        DetailRowError::Row(error) => row_failure(operation, error),
+        DetailRowError::StoredData(reason) => {
+            MonitoringQueryError::history(operation, HistoryError::contract(reason))
+        }
     }
-    Ok(TaskStatus::ALL
-        .into_iter()
-        .map(|status| {
-            let status = status.to_string();
-            StatusCount {
-                count: counts.get(&status).copied().unwrap_or_default(),
-                status,
-            }
-        })
-        .collect())
+}
+
+/// The rows of a bounded list. A list that the function cut at its bound is
+/// logged as a warning (Python `_log_cut_list`).
+fn list_items<T>(list: BoundedTaskList<T>, read: &str, items: &str) -> Vec<T> {
+    match list {
+        BoundedTaskList::Complete(rows) => rows,
+        BoundedTaskList::Truncated { rows, bound } => {
+            tracing::warn!(
+                read,
+                bound,
+                "{read}: the list is cut at {bound} {items}; more exist and are not returned"
+            );
+            rows
+        }
+    }
 }
 
 /// One row of the facets function (`horsies_monitoring_task_facets`).
-#[derive(Debug, FromRow)]
+#[derive(Debug)]
 struct FacetRow {
     facet: String,
     facet_value: String,
@@ -620,7 +477,7 @@ struct FacetRow {
 }
 
 /// Build [`Facets`] from the rows of the facets function, as Python's
-/// `task_facets` (`horsies/monitoring/queries.py:942-1007`): the code list
+/// `task_facets` (`python/horsies/monitoring/queries.py:942-1007`): the code list
 /// follows the selected categories and holds at most [`ERROR_FACET_CAP`]
 /// codes; the category totals cover every category, selected or not.
 fn facets_from_rows(
@@ -723,126 +580,101 @@ fn status_texts(statuses: &[TaskStatus]) -> Vec<String> {
     statuses.iter().map(ToString::to_string).collect()
 }
 
-fn apply_group_count(
-    row: &mut GroupRow,
-    status: &str,
-    count: i64,
-    retried: i64,
-) -> Result<(), HistoryError> {
-    row.total += count;
-    row.retried += retried;
-    match status {
-        "PENDING" => row.pending += count,
-        "CLAIMED" => row.claimed += count,
-        "RUNNING" => row.running += count,
-        "COMPLETED" => row.completed += count,
-        "FAILED" => row.failed += count,
-        "CANCELLED" => row.cancelled += count,
-        "EXPIRED" => row.expired += count,
-        other => {
-            return Err(HistoryError::contract(format!(
-                "monitoring breakdown found unknown task status {other:?}"
-            )))
-        }
-    }
-    Ok(())
+/// The count of each task status over the live table and the history
+/// window, read by `horsies_monitoring_task_stats` in one statement, so a
+/// task that moves to history during the read counts once. Every filter
+/// except the status scopes the counts; an error code or category filter
+/// selects no live row (a live row has no error code). Always the seven
+/// statuses in their fixed order, zeros included. A history row in the
+/// window whose status is not a task status is
+/// `HISTORY_CONTRACT_VIOLATION`, and no count is returned.
+pub async fn task_stats(
+    broker: &PostgresBroker,
+    query: &TaskStatsQuery,
+) -> MonitoringResult<Vec<StatusCount>> {
+    let operation = "task stats query";
+    let statement = &MONITORING_TASK_STATS;
+    let lower = query.window.lower();
+    let upper = query.window.upper();
+    let categories = category_texts(&query.filters.error_categories);
+    let taxonomy = builtin_taxonomy();
+    let rows = broker
+        .query_main(
+            &statement
+                .bind()
+                .value(&lower)
+                .value(&upper)
+                .value(&query.filters.task_names)
+                .value(&query.filters.queues)
+                .value(&query.filters.workers)
+                .value(&query.filters.error_codes)
+                .value(&categories)
+                .value(&query.filters.retried_only)
+                .value(&taxonomy.codes)
+                .value(&taxonomy.categories)
+                .finish(),
+        )
+        .await
+        .map_err(|error| function_failure(operation, error))?;
+    status_counts(&rows, statement).map_err(|error| row_failure(operation, error))
 }
 
-fn add_group_rows(total: &mut GroupRow, row: &GroupRow) {
-    total.total += row.total;
-    total.pending += row.pending;
-    total.claimed += row.claimed;
-    total.running += row.running;
-    total.completed += row.completed;
-    total.failed += row.failed;
-    total.cancelled += row.cancelled;
-    total.expired += row.expired;
-    total.retried += row.retried;
-}
-
+/// The task counts per worker, task name or queue over the live table and
+/// the history window, read by `horsies_monitoring_task_breakdown` in one
+/// statement (one snapshot). Every filter scopes the rows. At most the
+/// query's limit of groups, by total, highest first, then by the group text
+/// in byte order; `total` and `group_count` cover every group. For the
+/// `worker` grouping the tasks that no worker claimed are their own group
+/// ([`crate::monitoring::BreakdownGroup::Unclaimed`]), apart from a worker
+/// whose id is `unknown`.
 pub async fn task_breakdown(
     broker: &PostgresBroker,
     query: &TaskBreakdownQuery,
 ) -> MonitoringResult<Breakdown> {
     let operation = "task breakdown query";
-    let mut connection = broker
-        .pool()
-        .acquire()
+    let statement = &MONITORING_TASK_BREAKDOWN;
+    let lower = query.window.lower();
+    let upper = query.window.upper();
+    let group_by = query.group_by.as_str();
+    let statuses = status_texts(&query.filters.statuses);
+    let categories = category_texts(&query.filters.error_categories);
+    let taxonomy = builtin_taxonomy();
+    // `with_limit` bounds the limit to 1..=500.
+    let limit = i32::try_from(query.limit).expect("the breakdown limit is at most 500");
+    let rows = broker
+        .query_main(
+            &statement
+                .bind()
+                .value(&lower)
+                .value(&upper)
+                .value(&group_by)
+                .value(&statuses)
+                .value(&query.filters.task_names)
+                .value(&query.filters.queues)
+                .value(&query.filters.workers)
+                .value(&query.filters.error_codes)
+                .value(&categories)
+                .value(&query.filters.retried_only)
+                .value(&taxonomy.codes)
+                .value(&taxonomy.categories)
+                .value(&limit)
+                .finish(),
+        )
         .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-
-    let column = query.group_by.live_column();
-    let mut live = QueryBuilder::<Postgres>::new("SELECT COALESCE(");
-    live.push(column).push(
-        ", 'unknown') AS group_value, status, count(*) AS status_count,
-         count(*) FILTER (WHERE retry_count > 0) AS retried_count
-         FROM horsies_tasks",
-    );
-    push_live_scope(&mut live, &query.filters);
-    live.push(" GROUP BY COALESCE(")
-        .push(column)
-        .push(", 'unknown'), status");
-    let live_rows: Vec<(String, String, i64, i64)> = live
-        .build_query_as()
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-
-    let history_statement = history_breakdown_statement(
-        query.window,
-        &history_scope(&query.filters),
-        query.group_by.history_group(),
-    );
-    let history_rows = fetch_history_rows(&mut connection, &history_statement)
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-
-    let mut groups: BTreeMap<String, GroupRow> = BTreeMap::new();
-    for (group, status, count, retried) in live_rows {
-        let row = groups
-            .entry(group.clone())
-            .or_insert_with(|| GroupRow::empty(group));
-        apply_group_count(row, &status, count, retried)
-            .map_err(|error| MonitoringQueryError::history(operation, error))?;
-    }
-    for history_row in history_rows {
-        let group: String = history_row
-            .try_get("group_value")
-            .map_err(|error| MonitoringQueryError::database(operation, error))?;
-        let status: String = history_row
-            .try_get("status")
-            .map_err(|error| MonitoringQueryError::database(operation, error))?;
-        let count: i64 = history_row
-            .try_get("status_count")
-            .map_err(|error| MonitoringQueryError::database(operation, error))?;
-        let retried: i64 = history_row
-            .try_get("retried_count")
-            .map_err(|error| MonitoringQueryError::database(operation, error))?;
-        let row = groups
-            .entry(group.clone())
-            .or_insert_with(|| GroupRow::empty(group));
-        apply_group_count(row, &status, count, retried)
-            .map_err(|error| MonitoringQueryError::history(operation, error))?;
-    }
-
-    let mut rows: Vec<GroupRow> = groups.into_values().collect();
-    rows.sort_by(|left, right| {
-        right
-            .total
-            .cmp(&left.total)
-            .then_with(|| left.group.cmp(&right.group))
-    });
-    let mut total = GroupRow::empty("TOTAL");
-    for row in &rows {
-        add_group_rows(&mut total, row);
-    }
-    let group_count = i64::try_from(rows.len()).unwrap_or(i64::MAX);
-    rows.truncate(query.limit as usize);
-    Ok(Breakdown {
-        group_by: query.group_by.as_str().to_owned(),
-        groups: rows,
-        total,
-        group_count,
+        .map_err(|error| MonitoringQueryError::broker(operation, error))?;
+    let rows = rows
+        .iter()
+        .map(|row| breakdown_row(row, statement))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| row_failure(operation, error))?;
+    breakdown_from_rows(query.group_by, rows).map_err(|reason| {
+        row_failure(
+            operation,
+            RowDecodeError::Shape {
+                statement: statement.name(),
+                reason,
+            },
+        )
     })
 }
 
@@ -859,12 +691,7 @@ pub async fn list_tasks(
     let lower = query.window.lower();
     let upper = query.window.upper();
     let statuses = status_texts(&query.filters.statuses);
-    let categories: Vec<String> = query
-        .filters
-        .error_categories
-        .iter()
-        .map(|category| category.as_str().to_owned())
-        .collect();
+    let categories = category_texts(&query.filters.error_categories);
     let taxonomy = builtin_taxonomy();
     let sort_key = query.sort_by.as_str();
     let sort_direction = query.sort_direction.sql();
@@ -914,128 +741,30 @@ pub async fn list_tasks(
     Ok(TaskListPage { rows, total })
 }
 
-#[derive(Debug, FromRow)]
-struct LiveTaskDetailRow {
-    id: Uuid,
-    task_name: String,
-    queue_name: String,
-    status: String,
-    priority: i32,
-    retry_count: i32,
-    max_retries: i32,
-    is_workflow_task: bool,
-    error_code: Option<String>,
-    failed_reason: Option<String>,
-    worker_hostname: Option<String>,
-    enqueued_at: DateTime<Utc>,
-    started_at: Option<DateTime<Utc>>,
-    completed_at: Option<DateTime<Utc>>,
-    failed_at: Option<DateTime<Utc>>,
-    good_until: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, FromRow)]
-struct LiveAttemptRow {
-    attempt: i32,
-    outcome: String,
-    will_retry: bool,
-    error_code: Option<String>,
-    error_message: Option<String>,
-    failed_reason: Option<String>,
-    worker_hostname: Option<String>,
-    started_at: DateTime<Utc>,
-    finished_at: DateTime<Utc>,
-}
-
-impl From<LiveAttemptRow> for TaskAttemptInfo {
-    fn from(row: LiveAttemptRow) -> Self {
-        Self {
-            attempt: row.attempt,
-            outcome: row.outcome,
-            will_retry: row.will_retry,
-            error_code: normalize_optional_text(row.error_code.as_deref()),
-            error_message: normalize_optional_text(row.error_message.as_deref()),
-            failed_reason: normalize_optional_text(row.failed_reason.as_deref()),
-            worker_hostname: row.worker_hostname,
-            started_at: Some(row.started_at),
-            finished_at: Some(row.finished_at),
-        }
-    }
-}
-
-impl LiveTaskDetailRow {
-    fn leaf(&self) -> LeafTaskInfo {
-        let terminal = self.completed_at.or(self.failed_at);
-        LeafTaskInfo {
-            task_id: self.id,
-            status: self.status.clone(),
-            error_code: normalize_optional_text(self.error_code.as_deref()),
-            failed_reason: normalize_optional_text(self.failed_reason.as_deref()),
-            retry_count: self.retry_count,
-            max_retries: self.max_retries,
-            enqueued_at: Some(self.enqueued_at),
-            started_at: self.started_at,
-            completed_at: self.completed_at,
-            failed_at: self.failed_at,
-            queue_s: span_s(
-                Some(self.enqueued_at),
-                self.started_at.or(terminal),
-                matches!(self.status.as_str(), "PENDING" | "CLAIMED"),
-            ),
-            exec_s: span_s(self.started_at, terminal, self.status.as_str() == "RUNNING"),
-            worker_hostname: self.worker_hostname.clone(),
-            good_until: self.good_until,
-        }
-    }
-}
-
-async fn live_attempts(
-    connection: &mut PgConnection,
-    task_id: Uuid,
-) -> Result<Vec<TaskAttemptInfo>, sqlx::Error> {
-    let rows: Vec<LiveAttemptRow> = sqlx::query_as(
-        "SELECT attempt, outcome, will_retry, error_code, error_message,
-                failed_reason, worker_hostname, started_at, finished_at
-         FROM horsies_task_attempts
-         WHERE task_id = $1
-         ORDER BY attempt",
-    )
-    .bind(task_id)
-    .fetch_all(connection)
-    .await?;
-    Ok(rows.into_iter().map(Into::into).collect())
-}
-
-/// The history row of a task, or `None`. A history status that is not a
-/// task status is a contract error of the detail read, as Python's detail
-/// decode (`horsies/core/history/reads/detail.py:248-259`).
-async fn history_detail_or_none(
-    connection: &mut PgConnection,
-    task_id: Uuid,
-) -> Result<Option<HistoryTaskDetail>, HistoryError> {
-    if !staged_detail_published(&mut *connection).await? {
-        return Ok(None);
-    }
-    match read_task_detail(connection, task_id).await? {
-        TaskDetailResult::History(detail) => Ok(Some(detail)),
-        TaskDetailResult::Live { .. } | TaskDetailResult::Absent { .. } => Ok(None),
-    }
-}
-
 /// One task, live or in history, with its attempts and workflow link, read
 /// by `horsies_monitoring_task_detail` in one statement (one snapshot).
-/// `None` for a task that neither place holds, and for a history task while
-/// the published history reader does not exist yet (before the first
-/// coverage pass).
+///
+/// Outcomes:
+/// - `Found`: the live row, or the history row when the live table has no
+///   row. Attempts are oldest first.
+/// - `NotFound`: neither place holds the task. The reason, classified in the
+///   same snapshot, says whether retention can explain it: an id that is not
+///   a UUIDv7 is not classified; a UUIDv7 born before the latest upper bound
+///   of a detached leaf of a period class (plus 5 s) predates retained
+///   history; any other UUIDv7 is within it.
+/// - A history row that does not decode, or a published reader that reports
+///   the task live after the live miss of the same snapshot, is
+///   `HISTORY_CONTRACT_VIOLATION`; any other failure, a missing reader too,
+///   is `DB_OPERATION_FAILED`.
 pub async fn get_task_detail(
     broker: &PostgresBroker,
     task_id: Uuid,
-) -> MonitoringResult<Option<TaskDetail>> {
+) -> MonitoringResult<TaskDetailRead> {
     let operation = "task detail query";
     let statement = &MONITORING_TASK_DETAIL;
     let with_result = false;
     let with_attempts = true;
-    let read = broker
+    let rows = broker
         .query_main(
             &statement
                 .bind()
@@ -1044,424 +773,129 @@ pub async fn get_task_detail(
                 .value(&with_attempts)
                 .finish(),
         )
-        .await;
-    let rows = match read {
-        Ok(rows) => rows,
-        Err(error) => return detail_failure(broker, operation, error).await,
-    };
-    let row = one_row(rows, statement)
-        .map_err(|error| MonitoringQueryError::broker(operation, BrokerError::RowDecode(error)))?;
-    match task_detail_row(&row, statement) {
-        Ok(DetailRead::Found(detail)) => Ok(Some(detail)),
-        Ok(DetailRead::Absent) => Ok(None),
-        Err(DetailRowError::Row(error)) => Err(MonitoringQueryError::broker(
-            operation,
-            BrokerError::RowDecode(error),
-        )),
-        Err(DetailRowError::StoredData(reason)) => Err(MonitoringQueryError::history(
-            operation,
-            HistoryError::contract(reason),
-        )),
-    }
+        .await
+        .map_err(|error| function_failure(operation, error))?;
+    let row = one_row(rows, statement).map_err(|error| row_failure(operation, error))?;
+    task_detail_row(&row, statement).map_err(|error| detail_row_failure(operation, error))
 }
 
-/// A failed detail call. `42883` (undefined function) with the detail
-/// function present and the published reader absent answers "not found", as
-/// the read did before the first coverage pass. `XX001` (the published
-/// reader broke the snapshot contract) is a history contract violation.
-/// Anything else is the database failure.
-async fn detail_failure(
-    broker: &PostgresBroker,
-    operation: &str,
-    error: BrokerError,
-) -> MonitoringResult<Option<TaskDetail>> {
-    let code = match &error {
-        BrokerError::Statement(StatementFailure::StatementRefused { cause, .. }) => {
-            Some(cause.server_error().code().code().to_owned())
-        }
-        _ => None,
-    };
-    match code.as_deref() {
-        Some("42883") => {
-            let probe = &DETAIL_FUNCTIONS_PUBLISHED;
-            let rows = broker
-                .query_main(&probe.bind().finish())
-                .await
-                .map_err(|probe_error| MonitoringQueryError::broker(operation, probe_error))?;
-            let row = one_row(rows, probe).map_err(|row_error| {
-                MonitoringQueryError::broker(operation, BrokerError::RowDecode(row_error))
-            })?;
-            let read = |name: &'static str| -> MonitoringResult<bool> {
-                column(&row, probe, name).map_err(|row_error| {
-                    MonitoringQueryError::broker(operation, BrokerError::RowDecode(row_error))
-                })
-            };
-            match detail_publication(read("detail_function")?, read("staged_reader")?) {
-                DetailPublication::ReaderNotPublished => Ok(None),
-                DetailPublication::RefusalStands => {
-                    Err(MonitoringQueryError::broker(operation, error))
-                }
-            }
-        }
-        Some("XX001") => Err(MonitoringQueryError::broker(
-            operation,
-            BrokerError::HistoryReadContract(error.to_string()),
-        )),
-        Some(_) | None => Err(MonitoringQueryError::broker(operation, error)),
-    }
-}
-
-#[derive(Debug, FromRow)]
-struct WorkflowSummaryRow {
-    id: Uuid,
-    name: String,
-    definition_key: Option<String>,
-    status: String,
-    created_at: DateTime<Utc>,
-    completed_at: Option<DateTime<Utc>>,
-}
-
-impl From<WorkflowSummaryRow> for WorkflowRunSummary {
-    fn from(row: WorkflowSummaryRow) -> Self {
-        Self {
-            id: row.id,
-            name: row.name,
-            definition_key: row.definition_key,
-            status: row.status,
-            created_at: Some(row.created_at),
-            completed_at: row.completed_at,
-            wall_s: elapsed_s(Some(row.created_at), row.completed_at),
-        }
-    }
-}
-
-#[derive(Debug, FromRow)]
-struct WorkflowNodeRow {
-    task_index: i32,
-    node_id: Option<String>,
-    task_name: String,
-    status: String,
-    dependencies: Vec<i32>,
-    allow_failed_deps: bool,
-    task_id: Option<Uuid>,
-    is_subworkflow: bool,
-    sub_workflow_id: Option<Uuid>,
-    /// The node's stored result; a failed node's error is in it.
-    result: Option<String>,
-    started_at: Option<DateTime<Utc>>,
-    completed_at: Option<DateTime<Utc>>,
-}
-
-/// The error text of a node: the message of the error that its stored
-/// `result` holds. The node `error` column has no writer (the result holds
-/// the error, and the baseline drops the column). No result, a result with a
-/// value, and an error with no message give `None`. A result that does not
-/// decode is a contract violation.
-fn node_error_from_result(
-    task_index: i32,
-    result: Option<&str>,
-) -> Result<Option<String>, HistoryError> {
-    let Some(text) = result else {
-        return Ok(None);
-    };
-    match serde_json::from_str::<crate::core::task::result::TaskResult<serde_json::Value>>(text) {
-        Ok(crate::core::task::result::TaskResult::Ok(_)) => Ok(None),
-        Ok(crate::core::task::result::TaskResult::Err(error)) => {
-            Ok(normalize_optional_text(error.message.as_deref()))
-        }
-        Err(cause) => Err(HistoryError::contract(format!(
-            "stored result of workflow node {task_index} does not decode: {cause}"
-        ))),
-    }
-}
-
-fn node_exec_s(row: &WorkflowNodeRow) -> Option<i64> {
-    match row.status.as_str() {
-        "RUNNING" => elapsed_s(row.started_at, None),
-        "COMPLETED" | "FAILED" | "SKIPPED" | "CANCELLED" if row.completed_at.is_some() => {
-            elapsed_s(row.started_at, row.completed_at)
-        }
-        _ => None,
-    }
-}
-
+/// The distinct names of the root runs, for the run filter, in the database
+/// collation, read by `horsies_monitoring_workflow_names` in one statement.
+/// At most the function's bound of names (10,000): a longer list is cut,
+/// and the cut is logged as a warning.
 pub async fn list_workflow_names(broker: &PostgresBroker) -> MonitoringResult<Vec<String>> {
     let operation = "workflow names query";
-    sqlx::query_scalar(
-        "SELECT DISTINCT name FROM horsies_workflows
-         WHERE parent_workflow_id IS NULL ORDER BY name",
-    )
-    .fetch_all(broker.pool())
-    .await
-    .map_err(|error| MonitoringQueryError::database(operation, error))
+    let statement = &MONITORING_WORKFLOW_NAMES;
+    let rows = broker
+        .query_main(&statement.bind().finish())
+        .await
+        .map_err(|error| MonitoringQueryError::broker(operation, error))?;
+    let rows = rows
+        .iter()
+        .map(|row| workflow_name_row(row, statement))
+        .collect::<Result<Vec<ListRow<String>>, _>>()
+        .map_err(|error| row_failure(operation, error))?;
+    let list = bounded_list_from_rows(rows)
+        .map_err(|shape| list_shape_failure(operation, statement, shape))?;
+    Ok(list_items(list, "workflow names", "root workflow names"))
 }
 
+/// The newest root runs, read by `horsies_monitoring_workflow_runs` in one
+/// statement. Runs created at one time come by id, highest first, so a page
+/// does not reorder between polls. The name and the status are exact
+/// filters that combine with AND; a status that no run has gives an empty
+/// list.
 pub async fn list_workflow_runs(
     broker: &PostgresBroker,
     query: &WorkflowRunsQuery,
 ) -> MonitoringResult<Vec<WorkflowRunSummary>> {
     let operation = "workflow runs query";
-    let mut builder = QueryBuilder::<Postgres>::new(
-        "SELECT id, name, definition_key, status, created_at, completed_at
-         FROM horsies_workflows WHERE parent_workflow_id IS NULL",
-    );
-    if let Some(name) = &query.name {
-        builder.push(" AND name = ").push_bind(name.clone());
-    }
-    if let Some(status) = &query.status {
-        builder.push(" AND status = ").push_bind(status.clone());
-    }
-    builder
-        .push(" ORDER BY created_at DESC LIMIT ")
-        .push_bind(query.limit);
-    let rows: Vec<WorkflowSummaryRow> = builder
-        .build_query_as()
-        .fetch_all(broker.pool())
+    let statement = &MONITORING_WORKFLOW_RUNS;
+    // `with_limit` bounds the limit to 1..=200.
+    let limit = i32::try_from(query.limit).expect("the run limit is at most 200");
+    let rows = broker
+        .query_main(
+            &statement
+                .bind()
+                .value(&query.name)
+                .value(&query.status)
+                .value(&limit)
+                .finish(),
+        )
         .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    Ok(rows.into_iter().map(Into::into).collect())
+        .map_err(|error| MonitoringQueryError::broker(operation, error))?;
+    workflow_runs(&rows, statement).map_err(|error| row_failure(operation, error))
 }
 
-async fn fetch_workflow_nodes(
-    connection: &mut PgConnection,
-    workflow_id: Uuid,
-) -> Result<Vec<WorkflowNodeRow>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT workflow_id, task_index, node_id, task_name, status,
-                dependencies, allow_failed_deps, task_id, is_subworkflow,
-                sub_workflow_id, result, started_at, completed_at
-         FROM horsies_workflow_tasks
-         WHERE workflow_id = $1
-         ORDER BY task_index",
-    )
-    .bind(workflow_id)
-    .fetch_all(connection)
-    .await
-}
-
+/// A run, root or child, with its nodes, edges and failed nodes, read by
+/// `horsies_monitoring_workflow_run` in one statement (one snapshot), or
+/// `None` when no run has the id. An edge to an index that the run does not
+/// have is dropped.
 pub async fn get_workflow_run(
     broker: &PostgresBroker,
     workflow_id: Uuid,
 ) -> MonitoringResult<Option<WorkflowRunDetail>> {
     let operation = "workflow run detail query";
-    let mut connection = broker
-        .pool()
-        .acquire()
+    let statement = &MONITORING_WORKFLOW_RUN;
+    let rows = broker
+        .query_main(&statement.bind().value(&workflow_id).finish())
         .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    let run: Option<WorkflowSummaryRow> = sqlx::query_as(
-        "SELECT id, name, definition_key, status, created_at, completed_at
-         FROM horsies_workflows WHERE id = $1",
-    )
-    .bind(workflow_id)
-    .fetch_optional(&mut *connection)
-    .await
-    .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    let Some(run) = run else {
-        return Ok(None);
-    };
-    let rows = fetch_workflow_nodes(&mut connection, workflow_id)
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    let child_ids: Vec<Uuid> = rows
-        .iter()
-        .filter(|row| row.is_subworkflow)
-        .filter_map(|row| row.sub_workflow_id)
-        .collect();
-    let child_rollup: HashMap<Uuid, (i64, i64)> = if child_ids.is_empty() {
-        HashMap::new()
-    } else {
-        let rows: Vec<(Uuid, i64, i64)> = sqlx::query_as(
-            "SELECT workflow_id, count(*)::bigint,
-                    count(*) FILTER (WHERE status = 'FAILED')::bigint
-             FROM horsies_workflow_tasks
-             WHERE workflow_id = ANY($1)
-             GROUP BY workflow_id",
-        )
-        .bind(child_ids)
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-        rows.into_iter()
-            .map(|(id, total, failed)| (id, (total, failed)))
-            .collect()
-    };
-    let known_indices: Vec<i32> = rows.iter().map(|row| row.task_index).collect();
-    let mut edges = Vec::new();
-    let mut nodes = Vec::with_capacity(rows.len());
-    for row in rows {
-        for dependency in &row.dependencies {
-            if known_indices.contains(dependency) {
-                edges.push(WorkflowEdge {
-                    from_index: *dependency,
-                    to_index: row.task_index,
-                });
-            }
-        }
-        let child_counts = match (row.is_subworkflow, row.sub_workflow_id) {
-            (true, Some(id)) => child_rollup.get(&id).copied(),
-            (true, None) | (false, _) => None,
-        };
-        let (child_total, child_failed) = child_counts
-            .map(|(total, failed)| (Some(total), Some(failed)))
-            .unwrap_or((None, None));
-        nodes.push(WorkflowNodeInfo {
-            task_index: row.task_index,
-            node_id: row.node_id.clone(),
-            task_name: row.task_name.clone(),
-            node_status: row.status.clone(),
-            is_subworkflow: row.is_subworkflow,
-            sub_workflow_id: row.sub_workflow_id,
-            allow_failed_deps: row.allow_failed_deps,
-            started_at: row.started_at,
-            completed_at: row.completed_at,
-            exec_s: node_exec_s(&row),
-            child_total,
-            child_failed,
-        });
+        .map_err(|error| function_failure(operation, error))?;
+    match workflow_run(&rows, statement).map_err(|error| row_failure(operation, error))? {
+        RunRead::Found(detail) => Ok(Some(detail)),
+        RunRead::Absent => Ok(None),
     }
-    let failed_indices: Vec<i32> = nodes
-        .iter()
-        .filter(|node| node.node_status == "FAILED")
-        .map(|node| node.task_index)
-        .collect();
-    Ok(Some(WorkflowRunDetail {
-        run: run.into(),
-        nodes,
-        edges,
-        failed_count: i64::try_from(failed_indices.len()).unwrap_or(i64::MAX),
-        failed_indices,
-    }))
 }
 
+/// One node with its error, its backing task and the task's attempts, read
+/// by `horsies_monitoring_workflow_node` in one statement (one snapshot), or
+/// `None` when the run has no node at the index. A sub-workflow node, and a
+/// node whose task no table holds, have no leaf and no attempt. A stored
+/// node result or a history row that does not decode is
+/// `HISTORY_CONTRACT_VIOLATION`.
 pub async fn get_workflow_node(
     broker: &PostgresBroker,
     workflow_id: Uuid,
     task_index: i32,
 ) -> MonitoringResult<Option<WorkflowTaskDetail>> {
     let operation = "workflow node detail query";
-    let mut connection = broker
-        .pool()
-        .acquire()
-        .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    let row: Option<WorkflowNodeRow> = sqlx::query_as(
-        "SELECT workflow_id, task_index, node_id, task_name, status,
-                dependencies, allow_failed_deps, task_id, is_subworkflow,
-                sub_workflow_id, result, started_at, completed_at
-         FROM horsies_workflow_tasks
-         WHERE workflow_id = $1 AND task_index = $2",
-    )
-    .bind(workflow_id)
-    .bind(task_index)
-    .fetch_optional(&mut *connection)
-    .await
-    .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let mut leaf = None;
-    let mut attempts = Vec::new();
-    if let Some(task_id) = row.task_id {
-        attempts = live_attempts(&mut connection, task_id)
-            .await
-            .map_err(|error| MonitoringQueryError::database(operation, error))?;
-        let live: Option<LiveTaskDetailRow> = sqlx::query_as(
-            "SELECT id, task_name, queue_name, status, priority, retry_count,
-                    max_retries, is_workflow_task, error_code, failed_reason,
-                    worker_hostname, enqueued_at, started_at, completed_at,
-                    failed_at, good_until
-             FROM horsies_tasks WHERE id = $1",
+    let statement = &MONITORING_WORKFLOW_NODE;
+    let rows = broker
+        .query_main(
+            &statement
+                .bind()
+                .value(&workflow_id)
+                .value(&task_index)
+                .finish(),
         )
-        .bind(task_id)
-        .fetch_optional(&mut *connection)
         .await
-        .map_err(|error| MonitoringQueryError::database(operation, error))?;
-        if let Some(live) = live {
-            leaf = Some(live.leaf());
-        } else if let Some(history) = history_detail_or_none(&mut connection, task_id)
-            .await
-            .map_err(|error| MonitoringQueryError::history(operation, error))?
-        {
-            leaf = Some(history_leaf(&history));
-            attempts = history.attempts.iter().map(history_attempt).collect();
-        }
+        .map_err(|error| function_failure(operation, error))?;
+    match workflow_node(&rows, statement) {
+        Ok(NodeRead::Found(detail)) => Ok(Some(detail)),
+        Ok(NodeRead::Absent) => Ok(None),
+        Err(error) => Err(detail_row_failure(operation, error)),
     }
-    Ok(Some(WorkflowTaskDetail {
-        task_index: row.task_index,
-        node_id: row.node_id,
-        task_name: row.task_name,
-        node_status: row.status,
-        is_subworkflow: row.is_subworkflow,
-        node_error: node_error_from_result(row.task_index, row.result.as_deref())
-            .map_err(|error| MonitoringQueryError::history(operation, error))?,
-        leaf,
-        attempts,
-    }))
 }
 
+/// Every schedule state, soonest next run first, then by name, read by
+/// `horsies_monitoring_schedules` in one statement. At most the function's
+/// bound of schedules (10,000): a longer list is cut, and the cut is logged
+/// as a warning.
 pub async fn list_schedules(broker: &PostgresBroker) -> MonitoringResult<Vec<ScheduleStateInfo>> {
     let operation = "schedule state query";
-    sqlx::query_as(
-        "SELECT schedule_name, last_run_at, next_run_at, last_task_id,
-                run_count, updated_at
-         FROM horsies_schedule_state
-         ORDER BY next_run_at ASC NULLS LAST",
-    )
-    .fetch_all(broker.pool())
-    .await
-    .map_err(|error| MonitoringQueryError::database(operation, error))
-}
-
-#[cfg(test)]
-mod node_error_tests {
-    use super::*;
-    use crate::core::task::error::TaskError;
-    use crate::core::task::result::TaskResult;
-
-    fn stored(result: &TaskResult<serde_json::Value>) -> String {
-        serde_json::to_string(result).expect("encode a stored result")
-    }
-
-    #[test]
-    fn a_failed_node_shows_the_message_of_its_stored_error() {
-        let failed = stored(&TaskResult::Err(TaskError::builtin(
-            OutcomeCode::UpstreamSkipped,
-            "node blew up",
-        )));
-
-        assert_eq!(
-            node_error_from_result(0, Some(&failed)).expect("decodes"),
-            Some("node blew up".to_owned())
-        );
-    }
-
-    #[test]
-    fn no_result_a_value_and_a_blank_message_show_no_error() {
-        let value = stored(&TaskResult::Ok(serde_json::json!({"rows": 3})));
-        let blank = stored(&TaskResult::Err(TaskError::builtin(
-            OutcomeCode::UpstreamSkipped,
-            "  ",
-        )));
-
-        assert_eq!(node_error_from_result(0, None).expect("decodes"), None);
-        assert_eq!(
-            node_error_from_result(0, Some(&value)).expect("decodes"),
-            None
-        );
-        assert_eq!(
-            node_error_from_result(0, Some(&blank)).expect("decodes"),
-            None
-        );
-    }
-
-    #[test]
-    fn a_stored_result_that_does_not_decode_is_a_contract_violation() {
-        assert!(matches!(
-            node_error_from_result(4, Some("not json")),
-            Err(HistoryError::Contract(_))
-        ));
-    }
+    let statement = &MONITORING_SCHEDULES;
+    let rows = broker
+        .query_main(&statement.bind().finish())
+        .await
+        .map_err(|error| MonitoringQueryError::broker(operation, error))?;
+    let rows = rows
+        .iter()
+        .map(|row| schedule_row(row, statement))
+        .collect::<Result<Vec<ListRow<ScheduleStateInfo>>, _>>()
+        .map_err(|error| row_failure(operation, error))?;
+    let list = bounded_list_from_rows(rows)
+        .map_err(|shape| list_shape_failure(operation, statement, shape))?;
+    Ok(list_items(list, "schedule state", "schedules"))
 }
 
 #[cfg(test)]

@@ -372,7 +372,12 @@ async fn the_drain_deadline_kills_a_busy_child_and_its_task_takes_the_crash_path
     let report = pool.stop(Duration::from_secs(1)).await;
 
     assert!(started.elapsed() >= Duration::from_secs(1));
-    assert_eq!(report, PoolStopReport::KilledAtDrainDeadline);
+    assert_eq!(
+        report,
+        PoolStopReport::KilledAtDrainDeadline {
+            killed: vec![first.task_id]
+        }
+    );
     match answer_of(receiver).await {
         AttemptEnd::Crashed { reason } => {
             assert!(reason.as_str().contains("drain deadline"), "{reason}");
@@ -381,4 +386,35 @@ async fn the_drain_deadline_kills_a_busy_child_and_its_task_takes_the_crash_path
     }
     ended(pid.as_pid_t()).await;
     let _ = spawner.stop(SPAWNER_STOP_WAIT);
+}
+
+/// The report of a pool's stop names the tasks that the drain deadline
+/// killed. The deadline is the board's: when another pool passes it, the
+/// slots of this pool can end within their own drain timeout after their
+/// kills, and the report still names those kills.
+#[test]
+fn the_stop_report_names_the_kills_of_the_drain_deadline() {
+    use super::pool::SlotsEnded;
+
+    let killed = vec![Uuid::from_u128(1)];
+    assert_eq!(
+        PoolStopReport::of(SlotsEnded::InDrain, Vec::new()),
+        PoolStopReport::Drained
+    );
+    assert_eq!(
+        PoolStopReport::of(SlotsEnded::InDrain, killed.clone()),
+        PoolStopReport::KilledAtDrainDeadline {
+            killed: killed.clone()
+        }
+    );
+    assert_eq!(
+        PoolStopReport::of(SlotsEnded::AfterKills, killed.clone()),
+        PoolStopReport::KilledAtDrainDeadline {
+            killed: killed.clone()
+        }
+    );
+    assert_eq!(
+        PoolStopReport::of(SlotsEnded::Aborted, killed.clone()),
+        PoolStopReport::AbortedAfterDrain { killed }
+    );
 }

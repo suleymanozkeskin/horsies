@@ -1,12 +1,12 @@
 /// Typed error types for workflow start operations.
 ///
-/// Mirrors Python's `horsies/core/workflows/start_types.py`.
+/// Mirrors Python's `python/horsies/core/workflows/start_types.py`.
 use uuid::Uuid;
 
 /// Categorized workflow start failure codes.
 ///
 /// The members are Python's, in Python's order
-/// (`horsies/core/workflows/start_types.py`). `LOOP_RUNNER_FAILED`,
+/// (`python/horsies/core/workflows/start_types.py`). `LOOP_RUNNER_FAILED`,
 /// `EVENT_LOOP_LIMIT` and `ASYNC_CONTEXT` are produced by the Python client
 /// only.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]

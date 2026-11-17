@@ -1,7 +1,7 @@
 //! The success of a plain task through the finalize batcher, on the test
 //! database (Python `tests/unit/test_worker_helpers.py`,
 //! `TestFinalizeAfterSlotOutcome::test_finished_task_goes_to_persist`, and
-//! `horsies/core/worker/finalize.py:1386-1436`).
+//! `python/horsies/core/worker/finalize.py:1386-1436`).
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;

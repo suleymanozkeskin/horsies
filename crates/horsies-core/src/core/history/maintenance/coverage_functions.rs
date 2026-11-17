@@ -1,10 +1,10 @@
 //! Clients of the coverage functions of
-//! `horsies/core/baseline/sql/0008_history_maintenance_functions.sql`: the
+//! `crates/horsies-core/baseline/0008_history_maintenance_functions.sql`: the
 //! probe (`horsies_coverage_probe`), the class registration
 //! (`horsies_register_retention_classes`) and the leaf creation
 //! (`horsies_create_history_leaf`, `horsies_create_heartbeat_leaf`).
 //!
-//! Python: `horsies/core/history/maintenance/coverage.py`
+//! Python: `python/horsies/core/history/maintenance/coverage.py`
 //! (`_probe_complete_coverage`, `_coverage_probe_of`,
 //! `_register_required_classes`, `leaf_creation_of`).
 

@@ -6,7 +6,7 @@
 //! that names the Python name of a logger of the set (for example
 //! `horsies.db`) goes to that logger. Otherwise the routes map each target
 //! prefix to the logger of the same component in Python
-//! (`horsies.<component>`, `horsies/core/logging.py`). An event whose target
+//! (`horsies.<component>`, `python/horsies/core/logging.py`). An event whose target
 //! is neither is not forwarded: it comes from another crate.
 //!
 //! `horsies.sql` holds the statement log of the broker (`echo=True`): one
@@ -238,6 +238,46 @@ mod tests {
         assert_eq!(route("horsies.sql"), Some(LoggerName::Sql));
         assert_eq!(LoggerName::Sql.python_name(), "horsies.sql");
         assert_ne!(route("horsies.sql"), route("horsies.db"));
+    }
+
+    // The records of the switched lifecycle operations reach the logger
+    // that the Python caller of the same write used.
+
+    #[test]
+    fn the_stale_running_pass_logs_on_the_broker_logger() {
+        // Python `PostgresBroker.mark_stale_tasks_as_failed`.
+        assert_eq!(
+            route(horsies_core::log_targets::STALE_RUNNING_PASS),
+            Some(LoggerName::Broker)
+        );
+    }
+
+    #[test]
+    fn the_failed_attempt_writes_log_on_the_lifecycle_logger() {
+        // Python `horsies.core.worker.failed_attempt`.
+        assert_eq!(
+            route(horsies_core::log_targets::FAILED_ATTEMPT),
+            Some(LoggerName::Lifecycle)
+        );
+    }
+
+    #[test]
+    fn the_workflow_success_logs_on_the_lifecycle_logger() {
+        // Python `horsies.core.worker.workflow_success`.
+        assert_eq!(
+            route(horsies_core::log_targets::WORKFLOW_SUCCESS),
+            Some(LoggerName::Lifecycle)
+        );
+    }
+
+    #[test]
+    fn the_success_batch_outcomes_log_on_the_lifecycle_logger() {
+        // Python `horsies.core.lifecycle.persistence`; the batch logs each
+        // row through `log_terminalization_outcome`.
+        assert_eq!(
+            route(horsies_core::log_targets::TERMINALIZATION_OUTCOME),
+            Some(LoggerName::Lifecycle)
+        );
     }
 
     #[test]

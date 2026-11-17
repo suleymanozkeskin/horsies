@@ -6,6 +6,7 @@
 mod support;
 
 mod claim_filter;
+mod completion_branches;
 mod completion_edges;
 mod completion_path;
 mod dataflow;
@@ -19,6 +20,7 @@ mod pause_resume_cancel;
 mod promotion_rows;
 mod recovery_cases;
 mod recovery_limit_pass;
+mod start_and_handle_branches;
 mod start_rows;
 mod subworkflow_lifecycle;
 mod subworkflow_matrix;

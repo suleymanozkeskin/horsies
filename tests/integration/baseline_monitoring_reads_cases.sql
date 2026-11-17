@@ -15,7 +15,7 @@
 -- reports that COMMIT with the warning "there is no transaction in progress".
 --
 -- The expected answers of the read cases are those of the Python reads that the functions replace
--- (horsies/monitoring/queries.py) on the seed below. The seed section is the part between the lines "seed: begin"
+-- (python/horsies/monitoring/queries.py) on the seed below. The seed section is the part between the lines "seed: begin"
 -- and "seed: end"; its codes are built-in codes of the given category or codes outside the taxonomy, so the small
 -- taxonomy of these cases and the full one of the library classify them the same way.
 

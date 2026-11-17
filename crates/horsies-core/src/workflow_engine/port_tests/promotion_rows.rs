@@ -362,11 +362,9 @@ async fn a_pause_after_the_dependents_read_leaves_the_promoted_nodes_ready_with_
     .await;
 
     let _report = recover_stuck_workflows(
-        &db.pool,
+        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        0,
         RECOVERY_FAILURE_LIMIT,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
@@ -542,7 +540,6 @@ async fn complete_the_root(pool: &PgPool, workflow_id: Uuid) {
 /// task; its sibling is enqueued.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #909"]
 async fn a_dependent_whose_options_do_not_parse_fails_alone() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = start_with_a_corrupt_dependent(&db.pool, OnError::Fail).await;
@@ -570,7 +567,6 @@ async fn a_dependent_whose_options_do_not_parse_fails_alone() {
 /// time; a resume enqueues the sibling.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #909"]
 async fn a_dependent_whose_options_do_not_parse_pauses_and_its_sibling_stays_ready() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = start_with_a_corrupt_dependent(&db.pool, OnError::Pause).await;

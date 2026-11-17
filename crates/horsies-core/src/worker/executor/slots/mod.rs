@@ -53,6 +53,8 @@ mod placement_tests;
 #[cfg(test)]
 mod plain_success_tests;
 #[cfg(test)]
+mod report_tests;
+#[cfg(test)]
 pub(crate) mod scripted;
 #[cfg(test)]
 mod settle_tests;
@@ -84,13 +86,16 @@ pub use board::{
     SlotPhase, StartEnd,
 };
 pub use budgets::{
-    isolated_capacity, shared_capacity, BudgetCapacity, PoolService, SharedSlotService, SlotService,
+    isolated_capacity, shared_capacity, BudgetCapacity, FreeCapacity, PoolService,
+    SharedSlotService, SlotService,
 };
 pub use defects::{SlotDefect, SLOT_DEFECT_LIMIT};
 pub use dispatch::{
     AttemptEnd, Claimed, ClaimedTask, ExecutionClass, LoopKillCode, NotRunCause, RetryFacts,
     Settlement, TaskKind,
 };
+#[cfg(test)]
+pub(crate) use outcome::test_successes;
 pub use outcome::{OrphanSelfHeal, OutcomeWriter};
 pub use pool::{
     ExitNotSeen, IsolatedPool, IsolatedPoolConfig, MemoryLimit, PoolStopReport, Submitted,

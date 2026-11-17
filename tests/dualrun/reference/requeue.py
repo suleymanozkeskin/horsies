@@ -1,6 +1,6 @@
 """Stale CLAIMED requeue, before ``horsies_requeue_stale_claims``.
 
-``PostgresBroker.requeue_stale_claimed`` (``horsies/core/brokers/postgres.py``)
+``PostgresBroker.requeue_stale_claimed`` (``python/horsies/core/brokers/postgres.py``)
 sent ``REQUEUE_STALE_CLAIMED_SQL`` once per pass in a session transaction,
 with the threshold in seconds, and committed. The statement had no row bound.
 """

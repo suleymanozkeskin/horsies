@@ -16,6 +16,7 @@ use uuid::Uuid;
 use super::{decode_pong, PostgresBroker};
 use crate::broker::health::{WorkerPingRequest, WorkerPongPayload, WORKER_PING_CHANNEL};
 use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
+use crate::broker::SendKind;
 use crate::core::config::EnqueueRetention;
 
 /// The polls of [`wait_for_listener_statement`], 20 ms apart: at most 5 s.
@@ -165,6 +166,7 @@ async fn a_result_wait_dropped_while_it_waits_unlistens_its_channel() {
             None,
             EnqueueRetention::Forever,
             None,
+            SendKind::First,
         )
         .await
         .expect("enqueue a task that stays PENDING");

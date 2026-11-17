@@ -7,7 +7,7 @@ use uuid::Uuid;
 /// Heartbeats are written by workers while tasks are CLAIMED or RUNNING,
 /// and read by the recovery system to detect stale tasks (worker crashes).
 ///
-/// Python equivalent: `TaskHeartbeatModel` in `horsies/core/models/task_pg.py`.
+/// Python equivalent: `TaskHeartbeatModel` in `python/horsies/core/models/task_pg.py`.
 #[derive(Debug, Clone, FromRow)]
 pub struct HeartbeatRow {
     /// BIGINT since migration 0020 (`horsies_heartbeats.id`).
