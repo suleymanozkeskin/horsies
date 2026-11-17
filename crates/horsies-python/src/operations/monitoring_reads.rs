@@ -8,14 +8,20 @@
 //! sends one statement in autocommit and writes nothing; it does not install
 //! the schema, as Python's monitoring reads do not.
 
+use std::future::Future;
+use std::sync::Arc;
+
 use horsies_core::catalog::CodeEnum;
 use horsies_core::monitoring::{
-    get_task_detail, list_tasks, task_facets, ErrorCategory, HistoryWindow, MonitoringQueryError,
-    MonitoringQueryErrorCode, SortDirection, TaskDetailRead,
-    TaskFacetsQuery as CoreTaskFacetsQuery, TaskFilters, TaskListQuery as CoreTaskListQuery,
-    TaskSortField,
+    get_task_detail, get_workflow_node, get_workflow_run, list_schedules, list_tasks,
+    list_workflow_names, list_workflow_runs, task_breakdown, task_facets, task_stats,
+    ErrorCategory, HistoryWindow, MonitoringQueryError, MonitoringQueryErrorCode, SortDirection,
+    TaskBreakdownQuery as CoreTaskBreakdownQuery, TaskDetailRead,
+    TaskFacetsQuery as CoreTaskFacetsQuery, TaskFilters, TaskGroupBy,
+    TaskListQuery as CoreTaskListQuery, TaskSortField, TaskStatsQuery as CoreTaskStatsQuery,
+    WorkflowRunsQuery as CoreWorkflowRunsQuery,
 };
-use horsies_core::{BrokerError, TaskStatus};
+use horsies_core::{BrokerError, PostgresBroker, TaskStatus};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
@@ -204,6 +210,165 @@ impl TaskFacetsQuery {
     }
 }
 
+/// One frozen task stats read: the window and every filter but the status
+/// (the stats are the status selector). A value outside its rule raises
+/// `ValueError`, and a naive bound raises `TypeError`.
+#[pyclass(module = "horsies._core", frozen)]
+pub struct TaskStatsQuery {
+    query: CoreTaskStatsQuery,
+}
+
+impl TaskStatsQuery {
+    /// The core query.
+    pub fn query(&self) -> CoreTaskStatsQuery {
+        self.query.clone()
+    }
+}
+
+#[pymethods]
+impl TaskStatsQuery {
+    #[new]
+    #[pyo3(signature = (
+        *,
+        window_lower,
+        window_upper,
+        task_names,
+        queues,
+        workers,
+        error_codes,
+        error_categories,
+        retried_only,
+    ))]
+    fn new(
+        window_lower: &Bound<'_, PyAny>,
+        window_upper: &Bound<'_, PyAny>,
+        task_names: Vec<String>,
+        queues: Vec<String>,
+        workers: Vec<String>,
+        error_codes: Vec<String>,
+        error_categories: Vec<String>,
+        retried_only: bool,
+    ) -> PyResult<Self> {
+        let window = history_window(window_lower, window_upper)?;
+        let filters = TaskFilters {
+            statuses: Vec::new(),
+            task_names,
+            queues,
+            workers,
+            error_codes,
+            error_categories: error_categories_of(&error_categories)
+                .map_err(PyValueError::new_err)?,
+            retried_only,
+        };
+        Ok(Self {
+            query: CoreTaskStatsQuery::new(window).with_filters(filters),
+        })
+    }
+}
+
+/// One frozen task breakdown read: the window, the group column, the
+/// filters and the group limit. A value outside its rule raises
+/// `ValueError`, and a naive bound raises `TypeError`.
+#[pyclass(module = "horsies._core", frozen)]
+pub struct TaskBreakdownQuery {
+    query: CoreTaskBreakdownQuery,
+}
+
+impl TaskBreakdownQuery {
+    /// The core query.
+    pub fn query(&self) -> CoreTaskBreakdownQuery {
+        self.query.clone()
+    }
+}
+
+#[pymethods]
+impl TaskBreakdownQuery {
+    #[new]
+    #[pyo3(signature = (
+        *,
+        window_lower,
+        window_upper,
+        group_by,
+        statuses,
+        task_names,
+        queues,
+        workers,
+        error_codes,
+        error_categories,
+        retried_only,
+        limit,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        window_lower: &Bound<'_, PyAny>,
+        window_upper: &Bound<'_, PyAny>,
+        group_by: &str,
+        statuses: Vec<String>,
+        task_names: Vec<String>,
+        queues: Vec<String>,
+        workers: Vec<String>,
+        error_codes: Vec<String>,
+        error_categories: Vec<String>,
+        retried_only: bool,
+        limit: i64,
+    ) -> PyResult<Self> {
+        let window = history_window(window_lower, window_upper)?;
+        let group = group_column(group_by).map_err(PyValueError::new_err)?;
+        let filters = TaskFilters {
+            statuses: task_statuses(&statuses).map_err(PyValueError::new_err)?,
+            task_names,
+            queues,
+            workers,
+            error_codes,
+            error_categories: error_categories_of(&error_categories)
+                .map_err(PyValueError::new_err)?,
+            retried_only,
+        };
+        let query = CoreTaskBreakdownQuery::new(window, group)
+            .with_filters(filters)
+            .with_limit(limit)
+            .map_err(|refused| PyValueError::new_err(refused.reason))?;
+        Ok(Self { query })
+    }
+}
+
+/// One frozen workflow runs read: the exact name and status filters (`None`
+/// for none) and the limit. A limit outside 1 to 200 raises `ValueError`.
+#[pyclass(module = "horsies._core", frozen)]
+pub struct WorkflowRunsQuery {
+    query: CoreWorkflowRunsQuery,
+}
+
+impl WorkflowRunsQuery {
+    /// The core query.
+    pub fn query(&self) -> CoreWorkflowRunsQuery {
+        self.query.clone()
+    }
+}
+
+#[pymethods]
+impl WorkflowRunsQuery {
+    #[new]
+    #[pyo3(signature = (*, name, status, limit))]
+    fn new(name: Option<String>, status: Option<String>, limit: i64) -> PyResult<Self> {
+        let query = CoreWorkflowRunsQuery::new()
+            .with_name(name)
+            .with_status(status)
+            .with_limit(limit)
+            .map_err(|refused| PyValueError::new_err(refused.reason))?;
+        Ok(Self { query })
+    }
+}
+
+/// The group column of its wire value: `worker`, `task_name` or `queue`.
+/// Pure.
+fn group_column(value: &str) -> Result<TaskGroupBy, String> {
+    TaskGroupBy::ALL
+        .into_iter()
+        .find(|group| group.as_str() == value)
+        .ok_or_else(|| format!("group_by: {value:?} is not 'worker', 'task_name' or 'queue'"))
+}
+
 /// The history window of two aware bounds. A naive bound raises
 /// `TypeError`; bounds that are not increasing, or more than the maximum
 /// apart, raise `ValueError`.
@@ -289,6 +454,154 @@ pub fn model_json(model: &str, encoded: Result<String, serde_json::Error>) -> Mo
     }
 }
 
+/// The JSON text of a read's core model, or the error of the read.
+type EncodedRead = Result<Result<String, serde_json::Error>, MonitoringQueryError>;
+
+/// Connect the handle's broker, run `read` on it, and give the JSON text of
+/// the model `model`, or the failure of the connect or of the read.
+async fn json_read<F, Fut>(
+    connection: BrokerConnection,
+    operation: &'static str,
+    model: &'static str,
+    read: F,
+) -> ReadOutcome
+where
+    F: FnOnce(Arc<PostgresBroker>) -> Fut,
+    Fut: Future<Output = EncodedRead>,
+{
+    let broker = match connection.broker().await {
+        Ok(broker) => broker,
+        Err(error) => return ReadOutcome::Failed(connect_failed(operation, &error)),
+    };
+    match read(broker).await {
+        Ok(encoded) => ReadOutcome::Json(model_json(model, encoded)),
+        Err(error) => ReadOutcome::Failed(read_failed(error)),
+    }
+}
+
+/// The count of each task status: the JSON of `Vec<StatusCount>`.
+pub async fn task_stats_operation(
+    connection: BrokerConnection,
+    query: CoreTaskStatsQuery,
+) -> ReadOutcome {
+    json_read(
+        connection,
+        "task stats query",
+        "Vec<StatusCount>",
+        move |broker| async move {
+            task_stats(&broker, &query)
+                .await
+                .map(|counts| serde_json::to_string(&counts))
+        },
+    )
+    .await
+}
+
+/// The task counts per group: the JSON of `Breakdown`.
+pub async fn task_breakdown_operation(
+    connection: BrokerConnection,
+    query: CoreTaskBreakdownQuery,
+) -> ReadOutcome {
+    json_read(
+        connection,
+        "task breakdown query",
+        "Breakdown",
+        move |broker| async move {
+            task_breakdown(&broker, &query)
+                .await
+                .map(|breakdown| serde_json::to_string(&breakdown))
+        },
+    )
+    .await
+}
+
+/// The names of the root runs: the JSON of `Vec<String>`.
+pub async fn workflow_names_operation(connection: BrokerConnection) -> ReadOutcome {
+    json_read(
+        connection,
+        "workflow names query",
+        "Vec<String>",
+        |broker| async move {
+            list_workflow_names(&broker)
+                .await
+                .map(|names| serde_json::to_string(&names))
+        },
+    )
+    .await
+}
+
+/// The newest root runs: the JSON of `Vec<WorkflowRunSummary>`.
+pub async fn workflow_runs_operation(
+    connection: BrokerConnection,
+    query: CoreWorkflowRunsQuery,
+) -> ReadOutcome {
+    json_read(
+        connection,
+        "workflow runs query",
+        "Vec<WorkflowRunSummary>",
+        move |broker| async move {
+            list_workflow_runs(&broker, &query)
+                .await
+                .map(|runs| serde_json::to_string(&runs))
+        },
+    )
+    .await
+}
+
+/// One run with its nodes and edges: the JSON of
+/// `Option<WorkflowRunDetail>` (`null` when no run has the id).
+pub async fn workflow_run_operation(
+    connection: BrokerConnection,
+    workflow_id: Uuid,
+) -> ReadOutcome {
+    json_read(
+        connection,
+        "workflow run detail query",
+        "Option<WorkflowRunDetail>",
+        move |broker| async move {
+            get_workflow_run(&broker, workflow_id)
+                .await
+                .map(|run| serde_json::to_string(&run))
+        },
+    )
+    .await
+}
+
+/// One node with its task: the JSON of `Option<WorkflowTaskDetail>`
+/// (`null` when the run has no node at the index).
+pub async fn workflow_node_operation(
+    connection: BrokerConnection,
+    workflow_id: Uuid,
+    task_index: i32,
+) -> ReadOutcome {
+    json_read(
+        connection,
+        "workflow node detail query",
+        "Option<WorkflowTaskDetail>",
+        move |broker| async move {
+            get_workflow_node(&broker, workflow_id, task_index)
+                .await
+                .map(|node| serde_json::to_string(&node))
+        },
+    )
+    .await
+}
+
+/// Every schedule state: the JSON of `Vec<ScheduleStateInfo>`.
+pub async fn schedules_operation(connection: BrokerConnection) -> ReadOutcome {
+    json_read(
+        connection,
+        "schedule state query",
+        "Vec<ScheduleStateInfo>",
+        |broker| async move {
+            list_schedules(&broker)
+                .await
+                .map(|schedules| serde_json::to_string(&schedules))
+        },
+    )
+    .await
+}
+
 /// One page of the task list.
 pub async fn list_tasks_operation(
     connection: BrokerConnection,
@@ -364,6 +677,14 @@ mod tests {
             Ok(vec![ErrorCategory::Domain, ErrorCategory::Outcome])
         );
         assert!(error_categories_of(&["OTHER".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn every_group_column_has_its_wire_value() {
+        for group in TaskGroupBy::ALL {
+            assert_eq!(group_column(group.as_str()), Ok(group));
+        }
+        assert!(group_column("status").is_err());
     }
 
     #[test]

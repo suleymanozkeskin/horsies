@@ -188,6 +188,8 @@ mod tests {
             auto_retry_for: None,
             retry_policy: None,
             timeout_ms: None,
+            execution: horsies_core::Execution::Isolated,
+            cancel_grace_ms: None,
         })
     }
 

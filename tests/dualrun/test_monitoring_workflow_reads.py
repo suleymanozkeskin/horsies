@@ -1,14 +1,20 @@
 """Dual-run of the workflow and schedule switch: the client statements against the functions.
 
 Reference: ``tests/dualrun/monitoring_workflow_reference.py``. Candidate:
-``horsies.monitoring`` (one call of ``horsies_monitoring_workflow_names``,
+one call of ``horsies_monitoring_workflow_names``,
 ``horsies_monitoring_workflow_runs``, ``horsies_monitoring_workflow_run`` and
-``horsies_monitoring_schedules``). The seed has root runs of several names
-and statuses (three created at one time), a child run with nodes, nodes
-with dependencies (one on an index the run does not have), sub-workflow
-nodes with and without a child run, and schedules (three due at one
-time). Each read must give equal answers; a second seed puts each bounded
-list past its bound.
+``horsies_monitoring_schedules``, Python's bodies before the monitoring
+switch (``tests/dualrun/reference/monitoring_queries.py``). The seed has
+root runs of several names and statuses (three created at one time), a
+child run with nodes, nodes with dependencies (one on an index the run does
+not have), sub-workflow nodes with and without a child run, and schedules
+(three due at one time). Each read must give equal answers; a second seed
+puts each bounded list past its bound.
+
+The caller switch pair of the monitoring switch: on the same seeds, Python's
+reads against the production reads, which the core runs. The reports must
+be equal; an open run's ``wall_s`` and a RUNNING node's ``exec_s`` may be up
+to ``COUNTING_SPAN_TOLERANCE_S`` longer on the core, which reads second.
 """
 
 from __future__ import annotations
@@ -36,8 +42,10 @@ from tests.dualrun.monitoring_reads import (
     MakeDatabase,
     ReadPair,
     differing,
+    differing_reports,
     read_dual_run,
 )
+from tests.dualrun.reference import monitoring_queries as python_reads
 from tests.integration.monitoring_seeding import (
     LastRun,
     NodeRow,
@@ -163,64 +171,96 @@ def _pair(name: str, reference_read: _Read, candidate: _Read) -> ReadPair[object
     return ReadPair(name=name, reference=reference_read, candidate=candidate)
 
 
-def _names_pair() -> ReadPair[object]:
-    async def candidate(broker: PostgresBroker) -> object:
-        return await list_workflow_names(broker)
+def _three_way(
+    name: str, statements: _Read, python: _Read, core: _Read, *, on_core: bool,
+) -> ReadPair[object]:
+    """The SQL redesign pair (the client statements against Python's read on
+    the function), or with ``on_core`` the caller switch pair (Python's read
+    against the production read on the core)."""
+    match on_core:
+        case False:
+            return _pair(name, statements, python)
+        case True:
+            return _pair(name, python, core)
 
-    async def reference_read(broker: PostgresBroker) -> object:
+
+def _names_pair(*, on_core: bool = False) -> ReadPair[object]:
+    async def statements(broker: PostgresBroker) -> object:
         return await reference.list_workflow_names(broker)
 
-    return _pair('names', reference_read, candidate)
+    async def python(broker: PostgresBroker) -> object:
+        return await python_reads.list_workflow_names(broker)
+
+    async def core(broker: PostgresBroker) -> object:
+        return await list_workflow_names(broker)
+
+    return _three_way('names', statements, python, core, on_core=on_core)
 
 
-def _schedules_pair() -> ReadPair[object]:
-    async def candidate(broker: PostgresBroker) -> object:
-        return await list_schedules(broker)
-
-    async def reference_read(broker: PostgresBroker) -> object:
+def _schedules_pair(*, on_core: bool = False) -> ReadPair[object]:
+    async def statements(broker: PostgresBroker) -> object:
         return await reference.list_schedules(broker)
 
-    return _pair('schedules', reference_read, candidate)
+    async def python(broker: PostgresBroker) -> object:
+        return await python_reads.list_schedules(broker)
+
+    async def core(broker: PostgresBroker) -> object:
+        return await list_schedules(broker)
+
+    return _three_way('schedules', statements, python, core, on_core=on_core)
 
 
-def _runs_pair(name: str | None, status: str | None, limit: int) -> ReadPair[object]:
-    async def candidate(broker: PostgresBroker) -> object:
-        return await list_workflow_runs(
-            broker, name=name, status=status, limit=WorkflowRunsLimit(value=limit)
-        )
+def _runs_pair(
+    name: str | None, status: str | None, limit: int, *, on_core: bool = False,
+) -> ReadPair[object]:
+    runs_limit = WorkflowRunsLimit(value=limit)
 
-    async def reference_read(broker: PostgresBroker) -> object:
-        return await reference.list_workflow_runs(
-            broker, name=name, status=status, limit=WorkflowRunsLimit(value=limit)
-        )
+    async def statements(broker: PostgresBroker) -> object:
+        return await reference.list_workflow_runs(broker, name=name, status=status, limit=runs_limit)
 
-    return _pair(f'runs name={name} status={status} limit={limit}', reference_read, candidate)
+    async def python(broker: PostgresBroker) -> object:
+        return await python_reads.list_workflow_runs(broker, name=name, status=status, limit=runs_limit)
+
+    async def core(broker: PostgresBroker) -> object:
+        return await list_workflow_runs(broker, name=name, status=status, limit=runs_limit)
+
+    return _three_way(
+        f'runs name={name} status={status} limit={limit}', statements, python, core, on_core=on_core,
+    )
 
 
-def _run_pair(workflow_id: str) -> ReadPair[object]:
-    async def candidate(broker: PostgresBroker) -> object:
-        return await get_workflow_run(broker, workflow_id)
-
-    async def reference_read(broker: PostgresBroker) -> object:
+def _run_pair(workflow_id: str, *, on_core: bool = False) -> ReadPair[object]:
+    async def statements(broker: PostgresBroker) -> object:
         return await reference.get_workflow_run(broker, workflow_id)
 
-    return _pair(f'run {workflow_id}', reference_read, candidate)
+    async def python(broker: PostgresBroker) -> object:
+        return await python_reads.get_workflow_run(broker, workflow_id)
+
+    async def core(broker: PostgresBroker) -> object:
+        return await get_workflow_run(broker, workflow_id)
+
+    return _three_way(f'run {workflow_id}', statements, python, core, on_core=on_core)
 
 
-def test_the_functions_answer_what_the_client_statements_answered(
-    empty_database: MakeDatabase,
-) -> None:
-    pairs = [_names_pair(), _schedules_pair()]
+def _pairs(*, on_core: bool) -> list[ReadPair[object]]:
+    pairs = [_names_pair(on_core=on_core), _schedules_pair(on_core=on_core)]
     pairs += [
-        _runs_pair(name, status, limit)
+        _runs_pair(name, status, limit, on_core=on_core)
         for name in (None, 'alpha.flow', 'beta.flow', 'child.flow')
         for status in (None, 'RUNNING', 'FAILED', 'NOT_A_STATUS')
         for limit in (1, 2, 200)
     ]
     pairs += [
-        _run_pair(workflow_id)
+        _run_pair(workflow_id, on_core=on_core)
         for workflow_id in (_ROOT, _CHILD, _OTHER_ROOTS[0], str(uuid.uuid4()), 'not-a-run-id')
     ]
+    return pairs
+
+
+def test_the_functions_answer_what_the_client_statements_answered(
+    empty_database: MakeDatabase,
+) -> None:
+    pairs = _pairs(on_core=False)
 
     answers = read_dual_run(empty_database, _seed(), pairs)
 
@@ -274,3 +314,43 @@ def test_the_comparison_sees_a_candidate_that_reads_another_run(
     )
 
     assert differing(answers) == [pair.name]
+
+
+def test_the_core_answers_what_python_answered(empty_database: MakeDatabase) -> None:
+    """The caller switch: Python's workflow and schedule reads against the production reads on the core."""
+    pairs = _pairs(on_core=True)
+
+    answers = read_dual_run(empty_database, _seed(), pairs)
+
+    assert len(answers) == 2 + 48 + 5
+    assert [each.name for each in answers if not isinstance(each.candidate, Ok)] == []
+    assert differing_reports(answers) == {}
+
+
+def test_the_core_cuts_the_bounded_lists_at_the_rows_python_cut(empty_database: MakeDatabase) -> None:
+    answers = read_dual_run(
+        empty_database,
+        _seed(),
+        [_names_pair(on_core=True), _schedules_pair(on_core=True)],
+        seed_statements=_PAST_THE_BOUND,
+    )
+
+    assert differing_reports(answers) == {}
+    assert [_row_count(each.candidate) for each in answers] == [LIST_ROW_BOUND] * 2
+
+
+def test_the_core_comparison_sees_a_candidate_that_reads_another_run(
+    empty_database: MakeDatabase,
+) -> None:
+    pair = _run_pair(_ROOT, on_core=True)
+
+    async def wrong(broker: PostgresBroker) -> object:
+        return await get_workflow_run(broker, _CHILD)
+
+    answers = read_dual_run(
+        empty_database,
+        _seed(),
+        [ReadPair(name=pair.name, reference=pair.reference, candidate=wrong)],
+    )
+
+    assert list(differing_reports(answers)) == [pair.name]
