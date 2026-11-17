@@ -267,6 +267,51 @@ no_recovery = RecoveryConfig(
 
 Stale tasks then stay stuck until they are resolved by hand. See [Manual Recovery](/horsies/workers/heartbeats-recovery/#manual-recovery).
 
+## Retention Configuration
+
+How long records live, the retention classes and the partition settings are on [Retention Config](/horsies/configuration/retention-config/).
+
+```python
+from datetime import timedelta
+from horsies import AppConfig, RetentionConfig
+
+config = AppConfig(
+    broker=broker,
+    retention=RetentionConfig(
+        queue_retention={
+            'emails': timedelta(days=7),
+            'audit': None,
+        },
+        terminal_record_retention_hours=24 * 90,
+        retention_periods=(timedelta(days=365),),
+    ),
+)
+```
+
+### Retention per Queue
+
+`queue_retention` maps a queue name to a `timedelta` of whole days, or to `None` to keep the records of the queue forever.
+
+```python
+retention = RetentionConfig(
+    queue_retention={
+        'emails': timedelta(days=7),     # noisy, short-lived
+        'reports': timedelta(days=90),
+        'audit': None,                   # keep forever
+    },
+)
+```
+
+### Periods a Send Chooses
+
+List each finite period that a send asks for and no queue maps. The send is in [Send With a Listed Retention Period](/horsies/tasks/sending-tasks/#send-with-a-listed-retention-period).
+
+```python
+RetentionConfig(
+    retention_periods=(timedelta(days=365), timedelta(days=2)),
+)
+```
+
 ## Resilience Configuration
 
 Configure worker retry/backoff and NOTIFY fallback polling. The fields and their ranges are on [Resilience](/horsies/workers/worker-architecture/#resilience).
