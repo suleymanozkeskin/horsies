@@ -417,8 +417,9 @@ async fn a_pause_during_the_case_zero_step_applies_after_its_commit() {
     let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let retention = RetentionConfig::default();
 
-    // On the heap: the join and the timeout below move their futures, and in
-    // a debug build each move of the pass future inline takes stack space.
+    // On the heap. In a debug build, with the pass future inline in the join
+    // and the timeout below, the test needed 2.125 to 2.25 MiB of stack (the
+    // test thread has 2 MiB); boxed, it needs 1.75 to 1.875 MiB.
     let recovery = Box::pin(recover_stuck_workflows(
         &recovery_broker,
         &registry,
