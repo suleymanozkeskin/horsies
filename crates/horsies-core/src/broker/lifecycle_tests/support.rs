@@ -31,6 +31,7 @@ use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::archive::attempts::{
     decode_attempt_snapshot, encode_attempt_snapshot, AttemptRecord,
 };
+use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
 use crate::core::history::heartbeats::partitioning::{
     create_hourly_heartbeat_leaf, hourly_leaf_ref, CreateHourlyHeartbeatLeaf,
 };
@@ -504,18 +505,8 @@ pub(super) type AttemptSummary = (i32, String, Option<String>);
 
 /// The attempts that the history row archived, in attempt order.
 pub(super) async fn archived_attempts(pool: &PgPool, task_id: Uuid) -> Vec<AttemptSummary> {
-    let (version, codec, content_type, payload, digest): (i16, String, String, Vec<u8>, Vec<u8>) =
-        sqlx::query_as(
-            "SELECT attempt_archive_version, attempt_snapshot_codec,
-                    attempt_snapshot_content_type, attempt_snapshot, attempt_snapshot_digest
-             FROM horsies_task_history WHERE task_id = $1",
-        )
-        .bind(task_id)
-        .fetch_one(pool)
+    archived_attempt_records(pool, task_id)
         .await
-        .expect("read the archived attempt snapshot");
-    decode_attempt_snapshot(version, &codec, &content_type, &payload, &digest)
-        .expect("decode the archived attempt snapshot")
         .iter()
         .map(|record| {
             (
@@ -527,20 +518,27 @@ pub(super) async fn archived_attempts(pool: &PgPool, task_id: Uuid) -> Vec<Attem
         .collect()
 }
 
-/// The attempts that the history row archived, with every field.
+/// The attempts that the history row archived, with every field. The
+/// baseline stores no codec or content type: archive format version 1
+/// implies the json-utf8 codec and the application/json content type, as in
+/// the production read (`core/history/reads/detail.rs`).
 pub(super) async fn archived_attempt_records(pool: &PgPool, task_id: Uuid) -> Vec<AttemptRecord> {
-    let (version, codec, content_type, payload, digest): (i16, String, String, Vec<u8>, Vec<u8>) =
-        sqlx::query_as(
-            "SELECT attempt_archive_version, attempt_snapshot_codec,
-                    attempt_snapshot_content_type, attempt_snapshot, attempt_snapshot_digest
-             FROM horsies_task_history WHERE task_id = $1",
-        )
-        .bind(task_id)
-        .fetch_one(pool)
-        .await
-        .expect("read the archived attempt snapshot");
-    decode_attempt_snapshot(version, &codec, &content_type, &payload, &digest)
-        .expect("decode the archived attempt snapshot")
+    let (version, payload, digest): (i16, Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT attempt_archive_version, attempt_snapshot, attempt_snapshot_digest
+         FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read the archived attempt snapshot");
+    decode_attempt_snapshot(
+        version,
+        JSON_UTF8_CODEC,
+        JSON_CONTENT_TYPE,
+        &payload,
+        &digest,
+    )
+    .expect("decode the archived attempt snapshot")
 }
 
 /// The attempt rows still in the live attempt table.
@@ -1383,7 +1381,9 @@ pub(super) fn sha256_of(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Call the internal move of a live task directly, as the deferred guard
-/// of every deferring family sees it.
+/// of every deferring family sees it. The move takes the live row that its
+/// caller locked (`horsies_move_task_to_history(horsies_tasks, ...)`), read
+/// here FOR UPDATE as Python's `baseline_function_calls.sql` reads it.
 pub(super) async fn move_to_history(
     pool: &PgPool,
     task_id: Uuid,
@@ -1391,14 +1391,19 @@ pub(super) async fn move_to_history(
     kind: &str,
     result: Option<&str>,
 ) -> Result<u64, sqlx::Error> {
-    sqlx::query("SELECT horsies_move_task_to_history($1, $2, $3, NOW(), $4, NULL, NULL)")
-        .bind(task_id)
-        .bind(status)
-        .bind(kind)
-        .bind(result)
-        .execute(pool)
-        .await
-        .map(|done| done.rows_affected())
+    sqlx::query(
+        "SELECT horsies_move_task_to_history(
+             (SELECT t FROM horsies_tasks AS t WHERE t.id = $1 FOR UPDATE),
+             $2, $3, NOW(), $4, NULL, NULL
+         )",
+    )
+    .bind(task_id)
+    .bind(status)
+    .bind(kind)
+    .bind(result)
+    .execute(pool)
+    .await
+    .map(|done| done.rows_affected())
 }
 
 /// Assert that the database refused a statement with `sqlstate` and a

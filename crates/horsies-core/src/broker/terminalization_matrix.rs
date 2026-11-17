@@ -629,21 +629,20 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
     );
     assert_phase2_presence(&pool, &id, false).await;
 
-    let (version, codec, content_type, snapshot, digest): (i16, String, String, Vec<u8>, Vec<u8>) =
-        sqlx::query_as(
-            "SELECT attempt_archive_version, attempt_snapshot_codec,
-                attempt_snapshot_content_type, attempt_snapshot,
-                attempt_snapshot_digest
+    // The baseline stores no codec or content type: archive format version 1
+    // implies the json-utf8 codec and the application/json content type.
+    let (version, snapshot, digest): (i16, Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT attempt_archive_version, attempt_snapshot, attempt_snapshot_digest
          FROM horsies_task_history WHERE task_id = $1",
-        )
-        .bind(Uuid::parse_str(&id).unwrap())
-        .fetch_one(&pool)
-        .await
-        .expect("history attempt snapshot");
+    )
+    .bind(Uuid::parse_str(&id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .expect("history attempt snapshot");
     let attempts = crate::core::history::archive::attempts::decode_attempt_snapshot(
         version,
-        &codec,
-        &content_type,
+        crate::core::history::archive::versions::JSON_UTF8_CODEC,
+        crate::core::history::archive::versions::JSON_CONTENT_TYPE,
         &snapshot,
         &digest,
     )
@@ -1235,55 +1234,85 @@ async fn phase2_expectation_table_matches_every_installed_wire_projection() {
     expected_vocabulary.sort_unstable();
     assert_eq!(expected_vocabulary, vocabulary);
 
-    let move_definition: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-             'horsies_move_task_to_history(uuid,text,text,timestamptz,text,text,text)'
-             ::regprocedure
-         )",
+    // The single move (horsies_tasks overload) projects every single-row
+    // kind; the batch move projects every batch kind. The two batch-only
+    // kinds have no arm in the single move.
+    let single_move = function_definition(
+        &pool,
+        "horsies_move_task_to_history(horsies_tasks,text,text,timestamptz,text,text,text)",
     )
-    .fetch_one(&pool)
-    .await
-    .expect("shared move definition");
+    .await;
+    let batch_move = function_definition(
+        &pool,
+        "horsies_move_tasks_to_history(uuid[],text,text,timestamptz,text,text,text)",
+    )
+    .await;
     for (kind, deferred) in WIRE_PHASE2_EXPECTATIONS {
-        if matches!(kind, "EXPIRE_PENDING" | "CANCEL_ORPHAN_SWEEP") {
-            continue;
+        let single_arm = projection_arm(&single_move, kind);
+        let batch_arm = projection_arm(&batch_move, kind);
+        match kind {
+            "EXPIRE_PENDING" | "CANCEL_ORPHAN_SWEEP" => assert!(
+                single_arm.is_none(),
+                "{kind} is a batch-only kind; the single move has no arm for it"
+            ),
+            _ => assert!(single_arm.is_some(), "{kind} arm in the single move"),
         }
-        let marker = format!("WHEN '{kind}' THEN");
-        let start = move_definition
-            .find(&marker)
-            .expect("kind arm in shared move");
-        let tail = &move_definition[start + marker.len()..];
-        let end = tail
-            .find("WHEN '")
-            .or_else(|| tail.find("ELSE"))
-            .unwrap_or(tail.len());
-        let arm = &tail[..end];
+        assert!(
+            single_arm.is_some() || batch_arm.is_some(),
+            "{kind} arm in one of the moves"
+        );
         let assignment = if deferred {
             "v_requires_deferred_phase2 := TRUE"
         } else {
             "v_requires_deferred_phase2 := FALSE"
         };
-        assert!(
-            arm.contains(assignment),
-            "{kind} projection must set {assignment}"
-        );
+        for arm in [single_arm, batch_arm].into_iter().flatten() {
+            assert!(
+                arm.contains(assignment),
+                "{kind} projection must set {assignment}"
+            );
+        }
     }
 
-    for (function, deferred) in [
-        ("horsies_expire_pending_tasks(integer,text,text)", true),
-        ("horsies_cancel_orphaned_tasks(integer)", false),
+    // Each batch-only kind reaches the batch move from its sweep.
+    for (function, call) in [
+        (
+            "horsies_expire_pending_tasks(integer,text,text)",
+            "v_ids, 'EXPIRED', 'EXPIRE_PENDING', v_terminal_at",
+        ),
+        (
+            "horsies_cancel_orphaned_tasks(integer)",
+            "v_ids, 'CANCELLED', 'CANCEL_ORPHAN_SWEEP', v_terminal_at",
+        ),
     ] {
-        let definition: String = sqlx::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")
-            .bind(function)
-            .fetch_one(&pool)
-            .await
-            .expect("batch definition");
-        assert_eq!(
-            definition.contains("INSERT INTO horsies_workflow_phase2_pending"),
-            deferred,
-            "{function} phase2 projection"
+        let definition = function_definition(&pool, function).await;
+        assert!(
+            definition.contains("horsies_move_tasks_to_history(") && definition.contains(call),
+            "{function} moves its rows through the batch move with {call:?}"
         );
     }
+}
+
+/// The installed definition of `function` (a `regprocedure` text).
+async fn function_definition(pool: &PgPool, function: &str) -> String {
+    sqlx::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")
+        .bind(function)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|error| panic!("definition of {function}: {error}"))
+}
+
+/// The text of the `WHEN '<kind>' THEN` arm of a move's kind CASE, up to the
+/// next arm or the ELSE; `None` when the move has no arm for `kind`.
+fn projection_arm<'a>(definition: &'a str, kind: &str) -> Option<&'a str> {
+    let marker = format!("WHEN '{kind}' THEN");
+    let start = definition.find(&marker)?;
+    let tail = &definition[start + marker.len()..];
+    let end = tail
+        .find("WHEN '")
+        .or_else(|| tail.find("ELSE"))
+        .unwrap_or(tail.len());
+    Some(&tail[..end])
 }
 
 // ---------------------------------------------------------------------------
@@ -1912,8 +1941,10 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
             .contains("idx_horsies_tasks_orphan_recovery_scan"),
         "orphan audit must use the partial scan index: {plan}",
     );
+    // The baseline name of the unique task_id index (0002_indexes.sql).
     assert!(
-        plan.to_string().contains("idx_horsies_workflow_tasks_task"),
+        plan.to_string()
+            .contains("ix_horsies_workflow_tasks_task_id"),
         "orphan audit must use workflow-task index probes: {plan}",
     );
     assert!(
@@ -2851,8 +2882,24 @@ async fn assert_batch_snapshot_encoding(pool: &PgPool) {
                 seed_wf_task(pool, &workflow.to_string(), &id.to_string(), "ENQUEUED").await;
             }
             for attempt in 1..=index * 3 {
-                sqlx::query("INSERT INTO horsies_task_attempts(task_id, attempt, outcome, will_retry, started_at, finished_at, error_code, error_message, worker_id) VALUES ($1,$2,'FAILED',TRUE,NOW()-interval '2 minutes',NOW()-interval '1 minute','RETRY','retry once','w1')")
-                .bind(id).bind(attempt as i32).execute(pool).await.unwrap();
+                // Every column of the baseline attempt table: the worker
+                // identity is NOT NULL.
+                sqlx::query(
+                    "INSERT INTO horsies_task_attempts (
+                        task_id, attempt, outcome, will_retry, started_at, finished_at,
+                        error_code, error_message, failed_reason, worker_id,
+                        worker_hostname, worker_pid, worker_process_name
+                    ) VALUES (
+                        $1, $2, 'FAILED', TRUE, NOW() - interval '2 minutes', NOW() - interval '1 minute',
+                        'RETRY', 'retry once', NULL, 'w1',
+                        'matrix-host', 4242, 'matrix-process'
+                    )",
+                )
+                .bind(id)
+                .bind(attempt as i32)
+                .execute(pool)
+                .await
+                .unwrap();
             }
             let expected: Vec<u8> =
                 sqlx::query_scalar("SELECT test_encode_task_attempts_original($1)")
@@ -2967,20 +3014,26 @@ async fn assert_terminal_result_digests(pool: &PgPool) {
                 seed_wf_task(pool, &workflow.to_string(), &id.to_string(), "RUNNING").await;
             }
             let mut tx = pool.begin().await.unwrap();
-            sqlx::query("SELECT horsies_move_task_to_history($1,$2,$3,NOW(),$4,NULL,NULL)")
-                .bind(id)
-                .bind(match admin {
-                    true => "CANCELLED",
-                    false => "COMPLETED",
-                })
-                .bind(match admin {
-                    true => "CANCEL_ADMIN",
-                    false => "COMPLETE_LOCKED",
-                })
-                .bind(&payload)
-                .execute(tx.as_mut())
-                .await
-                .unwrap();
+            // The move takes the live row that its caller locked.
+            sqlx::query(
+                "SELECT horsies_move_task_to_history(
+                     (SELECT t FROM horsies_tasks AS t WHERE t.id = $1 FOR UPDATE),
+                     $2, $3, NOW(), $4, NULL, NULL
+                 )",
+            )
+            .bind(id)
+            .bind(match admin {
+                true => "CANCELLED",
+                false => "COMPLETED",
+            })
+            .bind(match admin {
+                true => "CANCEL_ADMIN",
+                false => "COMPLETE_LOCKED",
+            })
+            .bind(&payload)
+            .execute(tx.as_mut())
+            .await
+            .unwrap();
             let (result, digest): (Option<Vec<u8>>, Option<Vec<u8>>) = sqlx::query_as(
                 "SELECT result_payload, result_digest FROM horsies_task_history WHERE task_id=$1",
             )

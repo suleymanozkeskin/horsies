@@ -317,9 +317,11 @@ async fn a_failure_finalize_waits_for_a_monitoring_cancel_that_holds_its_locks()
         .await
         .is_ok();
     probe.rollback().await.expect("release the probe");
+    // The baseline argument list: no retry, the REFUSE rule (the child
+    // reported a result) and the capacity wake of a plain task.
     let applied: String = sqlx::query_scalar(
-        "SELECT outcome FROM horsies_finish_failed_attempt($1, $2, $3, NULL, NULL, NULL,
-                $4, 'BOOM', NULL, 'FAILED', 'boom', NULL)",
+        "SELECT outcome FROM horsies_finish_failed_attempt($1, $2, $3, 'NONE', NULL, NULL, NULL,
+                $4, 'BOOM', NULL, 'FAILED', 'boom', NULL, 'REFUSE', TRUE)",
     )
     .bind(task_id)
     .bind(WORKER)
