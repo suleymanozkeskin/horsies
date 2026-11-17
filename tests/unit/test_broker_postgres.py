@@ -23,6 +23,8 @@ from sqlalchemy.exc import OperationalError as SAOperationalError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies._core import (
+    BrokerFailure,
+    DatabasePingRecord,
     StaleClaimsBoundReached,
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
@@ -49,6 +51,7 @@ from horsies.core.models.health import (
     AllSlotsServing,
     ClassBudget,
     ClassBudgets,
+    DatabasePing,
     DownSlot,
     SlotsDown,
 )
@@ -1590,31 +1593,72 @@ def _setup_session_returning(
 
 @pytest.mark.unit
 class TestPingDatabase:
-    """ping_database_async: latency on success, typed error on failure."""
+    """ping_database_async maps the record of one core ping to its result."""
+
+    @staticmethod
+    def _handle(outcome: object) -> MagicMock:
+        """A core handle whose ping answers ``outcome``."""
+        handle = MagicMock()
+        handle.ping_database_async = AsyncMock(return_value=outcome)
+        return handle
 
     @pytest.mark.asyncio
-    async def test_returns_latency_on_success(self) -> None:
+    async def test_returns_the_latency_of_the_core_ping(self) -> None:
         broker = _make_broker()
-        _setup_session_returning(broker)
+        broker._core_handle = self._handle(MagicMock(spec=DatabasePingRecord, latency_ms=1.5))
 
         result = await broker.ping_database_async()
 
-        assert is_ok(result)
-        assert result.ok_value.latency_ms >= 0.0
+        assert result == Ok(DatabasePing(latency_ms=1.5))
+        broker._core_handle.ping_database_async.assert_awaited_once_with()
 
     @pytest.mark.asyncio
-    async def test_returns_db_ping_failed_on_error(self) -> None:
+    async def test_a_failed_ping_is_db_ping_failed_with_the_core_classification(self) -> None:
         broker = _make_broker()
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(side_effect=RuntimeError('connection refused'))
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
+        broker._core_handle = self._handle(
+            MagicMock(
+                spec=BrokerFailure,
+                code='DB_PING_FAILED',
+                message='database ping failed: connection refused',
+                retryable=True,
+            ),
+        )
 
         result = await broker.ping_database_async()
 
         assert is_err(result)
-        assert result.err_value.code == BrokerErrorCode.DB_PING_FAILED
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.DB_PING_FAILED
+        assert failed.retryable is True
+        assert failed.message == 'ping_database failed: database ping failed: connection refused'
+        assert isinstance(failed.exception, CoreOperationFailed)
+        assert failed.exception.subject == 'PostgresBroker.ping_database_async'
+
+    @pytest.mark.asyncio
+    async def test_a_core_that_cannot_run_the_ping_is_db_ping_failed(self) -> None:
+        broker = _make_broker()
+        error = TooManyPendingCalls('CoreHandle.ping_database_async', 65_536)
+        handle = MagicMock()
+        handle.ping_database_async = AsyncMock(side_effect=error)
+        broker._core_handle = handle
+
+        result = await broker.ping_database_async()
+
+        assert is_err(result)
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.DB_PING_FAILED
+        assert failed.retryable is True
+        assert failed.exception is error
+
+    @pytest.mark.asyncio
+    async def test_another_failure_code_is_a_defect(self) -> None:
+        broker = _make_broker()
+        broker._core_handle = self._handle(
+            MagicMock(spec=BrokerFailure, code='CLEANUP_FAILED', message='x', retryable=False),
+        )
+
+        with pytest.raises(AssertionError, match='CLEANUP_FAILED'):
+            await broker.ping_database_async()
 
 
 @pytest.mark.unit

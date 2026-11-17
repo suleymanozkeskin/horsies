@@ -222,7 +222,9 @@ class TestRealBrokerAtTheLimit:
     """Each entry point returns its own catalog's EVENT_LOOP_LIMIT."""
 
     def test_broker_call(self, at_limit: _AtLimit) -> None:
-        result = at_limit.run(at_limit.broker.ping_database_async())
+        # A broker method that still selects a SQLAlchemy resource set; the
+        # database ping runs on the core pool and has no loop limit.
+        result = at_limit.run(at_limit.broker.get_stale_tasks())
 
         assert is_err(result)
         assert result.err_value.code is BrokerErrorCode.EVENT_LOOP_LIMIT
