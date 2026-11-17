@@ -6,7 +6,8 @@ import argparse
 import logging
 import signal
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from datetime import timedelta
 from typing import Any, Final
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1763,13 +1764,48 @@ class TestWorkerCommandQueueException:
 # ---------------------------------------------------------------------------
 
 
+@contextmanager
+def _patched_brokers(
+    schema_brokers: list[MagicMock],
+    worker_brokers: list[MagicMock],
+) -> Generator[tuple[MagicMock, MagicMock, MagicMock], None, None]:
+    """Patch the brokers that ``run_worker`` builds: ``PostgresBroker``
+    returns ``schema_brokers`` (the schema step), ``WorkerProcessBroker``
+    returns ``worker_brokers`` (the worker process). ``set_panic_rule`` is
+    replaced, so the test process keeps its panic rule. Yields the two
+    broker classes and the panic rule setter."""
+    with (
+        patch(
+            'horsies.core.cli.PostgresBroker',
+            autospec=True,
+            side_effect=schema_brokers,
+        ) as schema_cls,
+        patch(
+            'horsies.core.cli.WorkerProcessBroker',
+            autospec=True,
+            side_effect=worker_brokers,
+        ) as worker_cls,
+        patch('horsies.core.cli.set_panic_rule') as panic_rule,
+    ):
+        yield schema_cls, worker_cls, panic_rule
+
+
+def _broker_configs(schema_cls: MagicMock, worker_cls: MagicMock) -> list[Any]:
+    """The configs of the brokers that ``run_worker`` built, in order."""
+    return [
+        call.args[0]
+        for call in [*schema_cls.call_args_list, *worker_cls.call_args_list]
+    ]
+
+
 async def _run_captured_worker(
     args: argparse.Namespace,
     brokers: list[MagicMock],
 ) -> None:
     """Run ``worker_command`` and then await the ``run_worker`` coroutine it built.
 
-    ``brokers`` are returned by successive ``PostgresBroker(...)`` calls.
+    The first of ``brokers`` is the schema broker (``PostgresBroker``); the
+    others are returned by successive ``WorkerProcessBroker(...)`` calls.
     """
     captured_coro: list[Any] = []
 
@@ -1778,11 +1814,7 @@ async def _run_captured_worker(
         raise KeyboardInterrupt
 
     with (
-        patch(
-            'horsies.core.cli.PostgresBroker',
-            autospec=True,
-            side_effect=brokers,
-        ),
+        _patched_brokers(brokers[:1], brokers[1:]),
         patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
     ):
         worker_command(args)
@@ -1940,18 +1972,16 @@ class TestRunWorkerCoroutine:
             raise KeyboardInterrupt
 
         with (
-            patch(
-                'horsies.core.cli.PostgresBroker',
-                autospec=True,
-                side_effect=[_make_mock_broker(), _make_mock_broker()],
-            ) as broker_cls,
+            _patched_brokers(
+                [_make_mock_broker()], [_make_mock_broker()],
+            ) as (schema_cls, worker_cls, _panic_rule),
             patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
         ):
             worker_command(_make_worker_namespace())
             assert len(captured_coro) == 1
             await captured_coro[0]
 
-        configs = [call.args[0] for call in broker_cls.call_args_list]
+        configs = _broker_configs(schema_cls, worker_cls)
         assert [config.pool_pre_ping for config in configs] == [False, False]
         assert app.config.broker.pool_pre_ping is True
 
@@ -2005,11 +2035,11 @@ class TestRunWorkerCoroutine:
             raise KeyboardInterrupt  # Break out of worker_command
 
         with (
-            patch(
-                'horsies.core.cli.PostgresBroker',
-                autospec=True,
-                side_effect=[schema_broker, broker],
-            ) as mock_broker_cls,
+            _patched_brokers([schema_broker], [broker]) as (
+                schema_cls,
+                worker_cls,
+                panic_rule,
+            ),
             patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
         ):
             worker_command(args)
@@ -2021,9 +2051,10 @@ class TestRunWorkerCoroutine:
         # Assert: the schema broker and the worker broker open the parent
         # pool of the profile, with no overflow, not the producer pool.
         assert [
-            (call.args[0].pool_size, call.args[0].max_overflow)
-            for call in mock_broker_cls.call_args_list
+            (config.pool_size, config.max_overflow)
+            for config in _broker_configs(schema_cls, worker_cls)
         ] == [(9, 0), (9, 0)]
+        panic_rule.assert_called_once_with('ABORT_PROCESS')
         schema_broker.ensure_schema_initialized.assert_awaited_once()
         schema_broker.close_async.assert_awaited_once()
         mock_worker_cls.assert_called_once()
@@ -2083,11 +2114,7 @@ class TestRunWorkerCoroutine:
             raise KeyboardInterrupt
 
         with (
-            patch(
-                'horsies.core.cli.PostgresBroker',
-                autospec=True,
-                side_effect=[schema_broker, broker],
-            ),
+            _patched_brokers([schema_broker], [broker]),
             patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
         ):
             worker_command(args)
@@ -2123,11 +2150,7 @@ class TestRunWorkerCoroutine:
             raise KeyboardInterrupt
 
         with (
-            patch(
-                'horsies.core.cli.PostgresBroker',
-                autospec=True,
-                side_effect=[schema_broker],
-            ),
+            _patched_brokers([schema_broker], []),
             patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
         ):
             worker_command(args)
@@ -2165,11 +2188,7 @@ class TestRunWorkerCoroutine:
             raise KeyboardInterrupt
 
         with (
-            patch(
-                'horsies.core.cli.PostgresBroker',
-                autospec=True,
-                side_effect=[schema_broker, broker],
-            ),
+            _patched_brokers([schema_broker], [broker]),
             patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
         ):
             worker_command(args)
@@ -2213,11 +2232,7 @@ class TestRunWorkerCoroutine:
             raise KeyboardInterrupt
 
         with (
-            patch(
-                'horsies.core.cli.PostgresBroker',
-                autospec=True,
-                side_effect=[schema_broker, broker],
-            ),
+            _patched_brokers([schema_broker], [broker]),
             patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
         ):
             worker_command(args)
