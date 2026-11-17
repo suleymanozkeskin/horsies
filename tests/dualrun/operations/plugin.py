@@ -12,7 +12,17 @@ and on the core. Without the option the fixture changes nothing.
 
 Before each run the session database goes back to its seed state
 (``tests/dualrun/seed_reset.py``), so that no run sees the rows, classes,
-leaves or readers of the run before it. The first run of the session installs
+leaves or readers of the run before it.
+
+A test that runs as a pair (reference, then core) is compared: each case
+reads its run start from the database clock and listens on the module's
+notification channels before its body. After a passing body, the Python
+case captures the committed state and its notifications
+(``capture_with_notifications``) when it called an operation of the table,
+and leaves a record (``tests/dualrun/pair_outcomes.py``). The core case
+captures the same way and compares; a difference fails it as
+``DualRunMismatch`` or ``ClockBoundaryStraddle``, and a missing or failed
+Python case fails it as ``ReferenceRunMissing``. The first run of the session installs
 the baseline, runs the seed sequence of the integration tests
 (``ensure_history_seedable``) and saves that state. ``--dual-run`` needs the
 session database: the PgBouncer lane (``HORSIES_PGBOUNCER_TEST=1``) has none
@@ -26,8 +36,9 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Iterator, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, assert_never, cast
 
@@ -63,8 +74,14 @@ from tests.dualrun.operations.table import (
     SwitchModule,
 )
 
+from tests.dualrun.catalog import QUEUE_CHANNEL_PREFIX, TASK_CHANNELS, WORKFLOW_CHANNELS
+
 if TYPE_CHECKING:
+    from tests.dualrun.capture import NotificationListener
+    from tests.dualrun.normalize import NormalizedSnapshot
+    from tests.dualrun.pair_outcomes import PairKey, ReferenceRecord
     from tests.dualrun.seed_reset import SeedState
+    from tests.dualrun.values import RunWindow
 
 DUAL_RUN_OPTION: Final = '--dual-run'
 DUAL_RUN_TESTS: Final = Path('tests') / 'integration'
@@ -99,6 +116,19 @@ REFERENCE_ONLY_TESTS: Final[Mapping[SwitchModule, tuple[ReferenceOnlyTest, ...]]
 }
 """The tests that run once, on the Python reference, in the dual-run of each module."""
 
+_BASE_NOTIFICATION_CHANNELS: Final = (
+    *TASK_CHANNELS,
+    *WORKFLOW_CHANNELS,
+    f'{QUEUE_CHANNEL_PREFIX}default',
+)
+"""The task and workflow channels, and the wake channel of the default queue."""
+
+NOTIFICATION_CHANNELS: Final[Mapping[SwitchModule, tuple[str, ...]]] = {
+    module: _BASE_NOTIFICATION_CHANNELS for module in SwitchModule
+}
+"""The channels that each case of a module's pair listens on. A module whose
+tests send to other queues adds their ``task_queue_<queue>`` channels here."""
+
 _COUNTS_KEY: Final = pytest.StashKey[dict[str, int]]()
 """Calls of the table's operations per test id (both runs together)."""
 
@@ -107,6 +137,12 @@ _OPERATION_COUNTS_KEY: Final = pytest.StashKey[dict[tuple[str, Implementation], 
 
 _SEED_KEY: Final = pytest.StashKey['SeedState']()
 """The seed state of the session database, saved at the first run."""
+
+_REFERENCES_KEY: Final = pytest.StashKey[dict['PairKey', 'ReferenceRecord']]()
+"""The record of each Python case whose core case has not run yet."""
+
+_PAIR_CASE_KEY: Final = pytest.StashKey['PairCase']()
+"""On a test item: the case of a pair, from its setup to its capture."""
 
 PGBOUNCER_LANE_VARIABLE: Final = 'HORSIES_PGBOUNCER_TEST'
 """Set to ``1`` in the PgBouncer lane, which has no session database (``tests/session_database.py``)."""
@@ -128,6 +164,18 @@ class DualRunCase:
 
 
 type ImplementationRun = SingleRun | DualRunCase
+
+
+@dataclass(frozen=True, slots=True)
+class PairCase:
+    """One case of a pair, between its setup and its capture."""
+
+    key: PairKey
+    implementation: Implementation
+    counts: CallCounts
+    url: str
+    start: datetime
+    listener: NotificationListener
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -319,8 +367,9 @@ def _saved_seed(config: pytest.Config, url: str) -> SeedState:
         connection.close()
 
 
-def _reset_session_database(config: pytest.Config) -> None:
-    """Bring the session database to its seed state before a run. Fails the test when the reset fails."""
+def _reset_session_database(config: pytest.Config) -> str:
+    """Bring the session database to its seed state before a run; its URL.
+    Fails the test when the reset fails."""
     from horsies.core.types.result import Err, Ok
     from tests.dualrun.seed_reset import reset_to_seed
     from tests.session_database import session_database_url
@@ -333,9 +382,182 @@ def _reset_session_database(config: pytest.Config) -> None:
             case Err(error):
                 pytest.fail(f'dual-run reset: the session database did not go back to its seed: {error}')
             case Ok():
+                return url
+    finally:
+        connection.close()
+
+
+def _base_node_id(node_id: str) -> str:
+    """A node id without its parameters."""
+    return node_id.split('[', 1)[0]
+
+
+def _pair_key(item: pytest.Item) -> PairKey:
+    """The key that the two cases of a pair share."""
+    from tests.dualrun.pair_outcomes import PairKey
+
+    assert isinstance(item, pytest.Function), f'a dual-run case is a test function: {item!r}'
+    indices = tuple(
+        sorted(
+            (name, index)
+            for name, index in item.callspec.indices.items()
+            if name != 'implementation'
+        )
+    )
+    return PairKey(base_node_id=_base_node_id(item.nodeid), parameter_indices=indices)
+
+
+def _open_pair_case(
+    item: pytest.Item,
+    module: SwitchModule,
+    implementation: Implementation,
+    counts: CallCounts,
+    url: str,
+) -> PairCase:
+    """Read the run start and open the listener of a pair's case. Fails the test when either fails."""
+    from horsies.core.types.result import Err, Ok
+    from horsies.core.utils.url import to_psycopg_url
+    from tests.dualrun.capture import open_listener, read_database_clock
+
+    connection = _session_connection(url)
+    try:
+        match read_database_clock(connection):
+            case Err(failed):
+                pytest.fail(f'dual-run capture: reading the run start failed: {failed}')
+            case Ok(start):
                 pass
     finally:
         connection.close()
+    match open_listener(to_psycopg_url(url), NOTIFICATION_CHANNELS[module]):
+        case Err(failed):
+            pytest.fail(f'dual-run capture: opening the notification listener failed: {failed}')
+        case Ok(listener):
+            pass
+    return PairCase(
+        key=_pair_key(item),
+        implementation=implementation,
+        counts=counts,
+        url=url,
+        start=start,
+        listener=listener,
+    )
+
+
+def _capture(case: PairCase) -> tuple[NormalizedSnapshot, RunWindow]:
+    """The snapshot and the run window of a case after its body. Fails the test on a capture error."""
+    from horsies.core.types.result import Err, Ok
+    from tests.dualrun.capture import (
+        capture_with_notifications,
+        collect_notifications,
+        read_database_clock,
+    )
+    from tests.dualrun.values import make_run_window
+
+    connection = _session_connection(case.url)
+    try:
+        match read_database_clock(connection):
+            case Err(failed):
+                pytest.fail(f'dual-run capture: reading the run end failed: {failed}')
+            case Ok(end):
+                pass
+        match make_run_window(case.start, end):
+            case Err(invalid):
+                pytest.fail(f'dual-run capture: {invalid}')
+            case Ok(window):
+                pass
+        match collect_notifications(case.listener, connection):
+            case Err(failed):
+                pytest.fail(f'dual-run capture: reading the notifications failed: {failed}')
+            case Ok(notifications):
+                pass
+        match capture_with_notifications(connection, notifications, window):
+            case Err(failed):
+                pytest.fail(f'dual-run capture: {failed}')
+            case Ok(snapshot):
+                return snapshot, window
+    finally:
+        connection.close()
+
+
+def _references(config: pytest.Config) -> dict[PairKey, ReferenceRecord]:
+    return config.stash.setdefault(_REFERENCES_KEY, {})
+
+
+def _after_reference_body(config: pytest.Config, case: PairCase) -> None:
+    """Leave the record of a passing Python case."""
+    from tests.dualrun.pair_outcomes import ReferenceCaptured, ReferenceNotInformative
+
+    match case.counts.total():
+        case 0:
+            _references(config)[case.key] = ReferenceNotInformative()
+        case _:
+            snapshot, window = _capture(case)
+            _references(config)[case.key] = ReferenceCaptured(snapshot=snapshot, window=window)
+
+
+def _after_core_body(config: pytest.Config, case: PairCase) -> None:
+    """Compare a passing core case with its Python case. Fails the test on a difference or a missing reference."""
+    from tests.dualrun.compare import render_diff
+    from tests.dualrun.pair_outcomes import (
+        ClockBoundaryStraddle,
+        CompareSnapshots,
+        DualRunMismatch,
+        NoCompare,
+        NoReference,
+        PairEqual,
+        ReferenceRunMissing,
+        core_step,
+        judge_pair,
+    )
+
+    match core_step(_references(config).pop(case.key, NoReference())):
+        case NoCompare():
+            return
+        case ReferenceRunMissing(found=found):
+            pytest.fail(f'ReferenceRunMissing: the Python case left {found}; nothing to compare')
+        case CompareSnapshots(reference=reference):
+            pass
+    snapshot, window = _capture(case)
+    match judge_pair(reference, snapshot, window):
+        case PairEqual():
+            return
+        case DualRunMismatch(diff=diff):
+            pytest.fail(f'DualRunMismatch:\n{render_diff(diff)}')
+        case ClockBoundaryStraddle(diff=diff, reference_window=left, candidate_window=right):
+            pytest.fail(
+                f'ClockBoundaryStraddle: a run window crossed an hour (reference {left}, '
+                f'core {right}); the snapshots differ:\n{render_diff(diff)}'
+            )
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
+    """After a passing body of a pair's case: capture, and compare in the core case.
+
+    The capture runs before the fixture teardown. A Python case that skips
+    or fails leaves that record for its core case.
+    """
+    case = item.stash.get(_PAIR_CASE_KEY, None)
+    if case is None:
+        return (yield)
+    from tests.dualrun.pair_outcomes import ReferenceFailed, ReferenceSkipped
+
+    try:
+        result = yield
+        match case.implementation:
+            case Implementation.PYTHON_REFERENCE:
+                _after_reference_body(item.config, case)
+            case Implementation.CORE:
+                _after_core_body(item.config, case)
+    except pytest.skip.Exception:
+        if case.implementation is Implementation.PYTHON_REFERENCE:
+            _references(item.config)[case.key] = ReferenceSkipped()
+        raise
+    except BaseException:
+        if case.implementation is Implementation.PYTHON_REFERENCE:
+            _references(item.config).setdefault(case.key, ReferenceFailed())
+        raise
+    return result
 
 
 @pytest.fixture(autouse=True)
@@ -352,10 +574,11 @@ def implementation(
         case _:
             yield SingleRun()
             return
-    _reset_session_database(request.config)
+    url = _reset_session_database(request.config)
+    item = _test_item(request)
+    counts = CallCounts()
     operations = tuple(resolve_operation(each) for each in OPERATION_TABLES[switched])
     _isolate_process_registries(monkeypatch)
-    counts = CallCounts()
     match implementation_run:
         case Implementation.PYTHON_REFERENCE:
             install_python_run(operations, counts, monkeypatch)
@@ -363,8 +586,18 @@ def implementation(
             install_core_run(operations, counts, monkeypatch)
         case _ as unreachable:
             assert_never(unreachable)
-    yield DualRunCase(module=switched, implementation=implementation_run, counts=counts)
-    _record_counts(request.config, _test_item(request).nodeid, implementation_run, counts)
+    pair = len(_implementations(switched, _base_node_id(item.nodeid))) == 2
+    if pair:
+        item.stash[_PAIR_CASE_KEY] = _open_pair_case(
+            item, switched, implementation_run, counts, url
+        )
+    try:
+        yield DualRunCase(module=switched, implementation=implementation_run, counts=counts)
+    finally:
+        if pair:
+            item.stash[_PAIR_CASE_KEY].listener.connection.close()
+            del item.stash[_PAIR_CASE_KEY]
+    _record_counts(request.config, item.nodeid, implementation_run, counts)
 
 
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
