@@ -11,8 +11,9 @@ use uuid::Uuid;
 
 use super::support::{
     args_from_inner, broker, claim_pass, code, err, error_of, finish_node, node, node_status,
-    node_task_input, ok, required, shared_pool, spec, start, task_node, workflow_status,
-    IsolatedDatabase, PORT_QUEUE,
+    node_task_input, ok, required, run_node_task, shared_pool, spec, start, task_node,
+    worker_phase_one, worker_phase_two, workflow_status, IsolatedDatabase, NodeReport,
+    RunningNodeTask, PORT_QUEUE,
 };
 use crate::core::workflow::node::JoinType;
 use crate::core::{AnyNode, OnError, TaskResult, WorkflowSpec, WorkflowSpecRegistry};
@@ -889,4 +890,88 @@ async fn a_failed_middle_node_skips_across_levels() {
 
     assert_status(&pool, workflow_id, 4, "SKIPPED").await;
     assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
+}
+
+/// The roots of the wide fan-in.
+const WIDE_FAN_IN_ROOTS: usize = 50;
+
+/// Every task row (live or history) of the task names `task_names`, with the
+/// index of the node of `workflow_id` that links it, if any.
+async fn task_rows_and_links(
+    pool: &PgPool,
+    workflow_id: Uuid,
+    task_names: &[&str],
+) -> Vec<(String, Option<i32>)> {
+    let names: Vec<String> = task_names.iter().map(|name| (*name).to_owned()).collect();
+    sqlx::query_as(
+        "SELECT r.task_name, n.task_index
+         FROM (
+             SELECT id AS task_id, task_name::text AS task_name
+             FROM horsies_tasks WHERE task_name = ANY($2)
+             UNION ALL
+             SELECT task_id, task_name::text
+             FROM horsies_task_history WHERE task_name = ANY($2)
+         ) r
+         LEFT JOIN horsies_workflow_tasks n
+             ON n.task_id = r.task_id AND n.workflow_id = $1",
+    )
+    .bind(workflow_id)
+    .bind(&names)
+    .fetch_all(pool)
+    .await
+    .expect("read the task rows and their links")
+}
+
+/// `tests/e2e/test_queue_starvation_repros.py::test_wide_fanin_join_does_not_create_orphaned_join_tasks`:
+/// 50 roots and one join node that waits for all of them. Every root
+/// finishes at once through the worker's finalize (phase 1, then phase 2,
+/// concurrently on one broker); then the join finishes. The workflow
+/// completes with exactly one task row for the join node, which the node
+/// links, and no task row that no node links.
+#[tokio::test]
+#[serial]
+async fn a_wide_fan_in_mints_one_join_task() {
+    const ROOT_TASK: &str = "wide_fan_in_root";
+    const JOIN_TASK: &str = "wide_fan_in_join";
+    let db = IsolatedDatabase::create().await;
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
+    let mut tasks: Vec<AnyNode> = (0..WIDE_FAN_IN_ROOTS)
+        .map(|index| task_node(index, ROOT_TASK))
+        .collect();
+    let mut join = task_node(WIDE_FAN_IN_ROOTS, JOIN_TASK);
+    join.dependencies = (0..WIDE_FAN_IN_ROOTS).collect();
+    tasks.push(join);
+    let workflow_id = start(&db.pool, &spec("wide_fan_in", tasks), &registry).await;
+    let join_index = i32::try_from(WIDE_FAN_IN_ROOTS).expect("the join index is an i32");
+    let mut roots: Vec<RunningNodeTask> = Vec::with_capacity(WIDE_FAN_IN_ROOTS);
+    for root_index in 0..join_index {
+        roots.push(run_node_task(&db.pool, workflow_id, root_index).await);
+    }
+    let broker = broker(&db.pool);
+    let (shared_broker, shared_registry) = (&broker, &registry);
+
+    futures::future::join_all(roots.iter().map(|root| async move {
+        let done = worker_phase_one(shared_broker, root, NodeReport::Success).await;
+        worker_phase_two(shared_broker, shared_registry, root, done).await;
+    }))
+    .await;
+    assert_status(&db.pool, workflow_id, join_index, "ENQUEUED").await;
+    let join_task = run_node_task(&db.pool, workflow_id, join_index).await;
+    let done = worker_phase_one(&broker, &join_task, NodeReport::Success).await;
+    worker_phase_two(&broker, &registry, &join_task, done).await;
+
+    assert_eq!(workflow_status(&db.pool, workflow_id).await, "COMPLETED");
+    let rows = task_rows_and_links(&db.pool, workflow_id, &[ROOT_TASK, JOIN_TASK]).await;
+    let join_rows: Vec<Option<i32>> = rows
+        .iter()
+        .filter(|(task_name, _)| task_name == JOIN_TASK)
+        .map(|(_, task_index)| *task_index)
+        .collect();
+    assert_eq!(join_rows, vec![Some(join_index)]);
+    assert_eq!(rows.len(), WIDE_FAN_IN_ROOTS + 1, "{rows:?}");
+    assert!(
+        rows.iter().all(|(_, task_index)| task_index.is_some()),
+        "a task row that no node links: {rows:?}"
+    );
+    db.drop().await;
 }

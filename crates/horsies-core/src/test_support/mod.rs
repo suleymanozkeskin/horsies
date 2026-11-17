@@ -1,14 +1,17 @@
 //! Test support of the library's tests: the test databases
-//! ([`database`]), the core handle on one of them, and the terminal writes
-//! of seeds ([`terminal_writes`]).
+//! ([`database`]), the core handle on one of them, the terminal writes of
+//! seeds ([`terminal_writes`]), and the capture of the `tracing` events of a
+//! test ([`log_capture`]).
 
 mod database;
+mod log_capture;
 pub(crate) mod terminal_writes;
 
 pub(crate) use database::{
     connect, database_name_prefix, database_of_this_test, is_generated_name, is_valid_prefix,
     server_url, with_database, TestDatabase, DATABASE_PREFIX_VARIABLE, DEFAULT_DATABASE_PREFIX,
 };
+pub(crate) use log_capture::{CapturedEvent, LogCapture};
 
 use std::sync::{Arc, Mutex, PoisonError};
 
