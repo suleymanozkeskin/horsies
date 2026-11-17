@@ -82,8 +82,7 @@ CLAIMED                          RUNNING
 
 The reaper periodically checks for stale tasks:
 
-<!-- check: skip partial -- uses names that the page does not define -->
-```python
+```text
 # Simplified logic
 for task in tasks.filter(status='CLAIMED'):
     last_hb = get_latest_heartbeat(task, role='claimer')
@@ -161,29 +160,7 @@ This runs before workflow finalization, so dependents are resolved in the same r
 
 ## Configuration
 
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
-```python
-from horsies.core.models.recovery import RecoveryConfig
-
-config = AppConfig(
-    broker=PostgresConfig(...),
-    recovery=RecoveryConfig(
-        # Claimer detection
-        auto_requeue_stale_claimed=True,
-        claimed_stale_threshold_ms=120_000,     # 2 minutes
-        claimer_heartbeat_interval_ms=30_000,   # 30 seconds
-
-        # Runner detection
-        auto_fail_stale_running=True,
-        running_stale_threshold_ms=300_000,     # 5 minutes
-        finalizing_stale_threshold_ms=300_000,  # 5 minutes
-        runner_heartbeat_interval_ms=30_000,    # 30 seconds
-
-        # Check frequency
-        check_interval_ms=30_000,               # 30 seconds
-    ),
-)
-```
+The `recovery` section of the app config sets the heartbeat intervals, the stale thresholds and the reaper interval. The fields, their defaults and their ranges are on [Recovery Config](/horsies/configuration/recovery-config/#fields). The API is on the client pages: [Recovery Configuration](/horsies/configuration/app-config/#recovery-configuration) (Python) and [AppConfig](/horsies/rust/configuration/app-config/#appconfig) (Rust).
 
 ## Timing Guidelines
 
@@ -194,23 +171,15 @@ config = AppConfig(
 - `finalizing_stale_threshold_ms >= 2 × runner_heartbeat_interval_ms`.
 - `claimed_stale_threshold_ms >= 2 × claimer_heartbeat_interval_ms`.
 
-A config that breaks a rule raises `ConfigurationError` with code `HRS-204`, which names the fields and the smallest valid value.
+A config that breaks a rule is refused with code `HRS-204`, which names the fields and the smallest valid value.
 
-<!-- check: skip elided -- shows a wrong form next to the right one -->
-```python
-# Valid
-RecoveryConfig(
-    runner_heartbeat_interval_ms=30_000,  # 30s
-    running_stale_threshold_ms=64_000,    # 64s = 2 x (30s + 2s)
-    finalizing_stale_threshold_ms=60_000, # 60s (2x)
-)
+For example, with `runner_heartbeat_interval_ms` at 30,000 and `auto_fail_stale_running` on:
 
-# Invalid - raises ConfigurationError (HRS-204)
-RecoveryConfig(
-    runner_heartbeat_interval_ms=30_000,  # 30s
-    running_stale_threshold_ms=60_000,    # half is 30s: no time for a heartbeat to land
-)
-```
+- `running_stale_threshold_ms` at 64,000 is valid: 2 × (30 s + 2 s).
+- `running_stale_threshold_ms` at 60,000 is refused: its half, 30 s, leaves no time for a heartbeat to land.
+- `finalizing_stale_threshold_ms` at 60,000 is valid: 2 × 30 s.
+
+The Python example is in [Threshold Rules](/horsies/configuration/app-config/#threshold-rules).
 
 ### For CPU-Heavy Tasks
 
@@ -218,16 +187,7 @@ A task that holds the GIL does not delay its runner heartbeats, because the work
 
 ### For Quick Tasks
 
-Fast tasks can use tighter detection:
-
-```python
-RecoveryConfig(
-    runner_heartbeat_interval_ms=10_000,   # 10 seconds
-    running_stale_threshold_ms=40_000,     # 40 seconds
-)
-```
-
-The worker stops when no heartbeat lands for 20 seconds, so a heartbeat may take up to 10 seconds to land.
+Fast tasks can use tighter detection: for example, `runner_heartbeat_interval_ms` at 10,000 (10 seconds) and `running_stale_threshold_ms` at 40,000 (40 seconds). The worker stops when no heartbeat lands for 20 seconds, so a heartbeat may take up to 10 seconds to land. The Python example is in [Quick Tasks](/horsies/configuration/app-config/#quick-tasks).
 
 ### Recovery Time After a Worker Stops
 
@@ -253,33 +213,13 @@ Heartbeats are stored in the `horsies_heartbeats` table:
 
 ## Manual Recovery
 
-Query stale tasks:
+Three calls do by hand what the reaper does, each with a threshold that the call takes:
 
-```python
-from horsies import Err, Ok
+- The stale read lists the RUNNING tasks whose latest runner heartbeat, or their start when they have none, is older than the threshold. It changes nothing.
+- The RUNNING pass recovers stale RUNNING tasks as [Stale RUNNING Recovery](#stale-running-recovery) states, and returns the number of tasks that it retried or failed.
+- The CLAIMED pass returns stale CLAIMED tasks to PENDING as [Stale CLAIMED → PENDING](#stale-claimed--pending) states, and returns the number of tasks that it requeued.
 
-broker = app.get_broker()
-
-# Find stale RUNNING tasks. get_stale_tasks() returns Ok(list of rows) or Err(BrokerOperationError)
-match await broker.get_stale_tasks(stale_threshold_minutes=5):
-    case Err(query_error):
-        print(f"Query failed: {query_error.message}")
-    case Ok(stale):
-        for task in stale:
-            print(f"Stale: {task['id']} on {task['worker_hostname']}")
-```
-
-Force recovery:
-
-```python
-# Manually fail stale RUNNING
-failed = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
-print(f"Failed {failed} stale tasks")
-
-# Manually requeue stale CLAIMED
-requeued = await broker.requeue_stale_claimed(stale_threshold_ms=120_000)
-print(f"Requeued {requeued} stale tasks")
-```
+The API is on the client pages: [Broker Methods](/horsies/monitoring/broker-methods/#methods) (Python: the three calls) and [Health Reads](/horsies/rust/monitoring/health-reads/) (Rust: the stale read).
 
 ## Disabling Recovery
 
@@ -328,13 +268,7 @@ With `auto_fail_stale_running` on, a worker that cannot write runner heartbeats 
 - The worker process is paused, for example by SIGSTOP or a frozen container, while its children run
 - C code in the worker process, such as a C extension call in a workflow's `build_with()`, holds the GIL for longer than `running_stale_threshold_ms` minus one heartbeat interval. Python code does not: it lets other threads run
 
-Increase thresholds:
-
-```python
-RecoveryConfig(
-    running_stale_threshold_ms=600_000,  # 10 minutes
-)
-```
+Raise `running_stale_threshold_ms`, for example to 600,000 (10 minutes).
 
 ### Worker Exits With a Runner Heartbeat Error
 
