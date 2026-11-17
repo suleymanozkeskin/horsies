@@ -743,8 +743,152 @@ fn an_args_from_text_that_does_not_parse_fails_the_node() {
     );
 }
 
-/// A step takes up to `MAX_WORKFLOW_NODES` child starts, those that its
-/// child starts owe included.
+/// The node error of a merge that fails the node; a merge that builds an
+/// input fails the test.
+fn merge_refusal(owed: &OwedChildStart) -> crate::core::TaskError {
+    match merged_child_input(&request_of(owed)).expect("a node failure, not a step error") {
+        NodeInput::NodeFails(error) => error,
+        NodeInput::Input(input) => panic!("the merge built the input {}", input.text),
+    }
+}
+
+/// The builder input of a merge; a merge that fails the node fails the test.
+fn merge_input(owed: &OwedChildStart) -> String {
+    match merged_child_input(&request_of(owed)).expect("the merge") {
+        NodeInput::Input(input) => input.text,
+        NodeInput::NodeFails(error) => panic!("the merge failed the node: {error:?}"),
+    }
+}
+
+/// A stored input that the strict read refuses, or `null`, fails the node
+/// with `WORKER_SERIALIZATION_ERROR`, `Corrupt kwargs JSON for subworkflow
+/// task <index>` (Python `_input_kwargs`, `core/workflows/child_build.py`),
+/// with the workflow id and the node in `data`; with `args_from` too, the
+/// input is refused first.
+#[test]
+fn a_stored_input_that_does_not_read_fails_the_node() {
+    let workflow_id = Uuid::new_v4();
+    for (input, args_from) in [
+        ("broken{json", None),
+        ("null", None),
+        (r#"{"a": 1, "a": 2}"#, None),
+        ("broken{json", Some(r#"{"x": "not_an_int"}"#)),
+    ] {
+        let mut corrupt = owed(workflow_id, 0, CHILD_KEY);
+        corrupt.node_input = input.to_owned();
+        corrupt.args_from = args_from.map(str::to_owned);
+
+        let error = merge_refusal(&corrupt);
+
+        assert_eq!(
+            error.error_code.to_string(),
+            "WORKER_SERIALIZATION_ERROR",
+            "{input}"
+        );
+        assert_eq!(
+            error.message.as_deref(),
+            Some("Corrupt kwargs JSON for subworkflow task 1"),
+            "{input}"
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1})),
+            "{input}"
+        );
+    }
+}
+
+/// An `args_from` member value that is not a JSON integer fails the node
+/// with `WORKER_SERIALIZATION_ERROR`, `args_from has non-int values for
+/// subworkflow task <index>` (Python `_args_from_map`); `null` as the whole
+/// text fails it with `Corrupt args_from JSON for subworkflow task <index>`.
+/// `true` is refused as a non-integer, where Python's `isinstance` takes it.
+#[test]
+fn an_args_from_value_that_is_not_an_index_fails_the_node() {
+    let workflow_id = Uuid::new_v4();
+    for (args_from, expected) in [
+        (
+            r#"{"x": "not_an_int"}"#,
+            "args_from has non-int values for subworkflow task 1",
+        ),
+        (
+            r#"{"x": 1.5}"#,
+            "args_from has non-int values for subworkflow task 1",
+        ),
+        (
+            r#"{"x": 1e2}"#,
+            "args_from has non-int values for subworkflow task 1",
+        ),
+        (
+            r#"{"x": null}"#,
+            "args_from has non-int values for subworkflow task 1",
+        ),
+        (
+            r#"{"x": 0, "y": "bad"}"#,
+            "args_from has non-int values for subworkflow task 1",
+        ),
+        (
+            r#"{"x": true}"#,
+            "args_from has non-int values for subworkflow task 1",
+        ),
+        ("null", "Corrupt args_from JSON for subworkflow task 1"),
+    ] {
+        let mut refused = owed(workflow_id, 0, CHILD_KEY);
+        refused.args_from = Some(args_from.to_owned());
+
+        let error = merge_refusal(&refused);
+
+        assert_eq!(
+            error.error_code.to_string(),
+            "WORKER_SERIALIZATION_ERROR",
+            "{args_from}"
+        );
+        assert_eq!(error.message.as_deref(), Some(expected), "{args_from}");
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1})),
+            "{args_from}"
+        );
+    }
+}
+
+/// Stored data that Python reads with no refusal: an empty input and an
+/// input that is not an object give no static members (the builder input is
+/// `{}`); an `args_from` that is empty or not an object gives no members; an
+/// index outside the `integer` range names no node, so its member is left
+/// out.
+#[test]
+fn stored_data_that_python_reads_as_no_members_builds_the_input() {
+    let source = ChildStartSource {
+        task_index: 0,
+        node_id: Some("source".to_owned()),
+        status: "COMPLETED".to_owned(),
+        task_name: "source_task".to_owned(),
+        definition_key: None,
+        result: Some(r#"{"__h_task_result__":true,"ok":7,"err":null}"#.to_owned()),
+    };
+    for (input, args_from) in [
+        ("", None),
+        ("[1, 2]", None),
+        (" \"text\" ", None),
+        ("7", Some("[]")),
+        ("{}", Some("false")),
+        ("{}", Some("")),
+        ("{}", Some(r#"{"x": 99999999999999999999999}"#)),
+        ("{}", Some(r#"{"x": 4294967296}"#)),
+    ] {
+        let mut readable = owed(Uuid::new_v4(), 0, CHILD_KEY);
+        readable.node_input = input.to_owned();
+        readable.args_from = args_from.map(str::to_owned);
+        readable.sources = vec![source.clone()];
+
+        let text = merge_input(&readable);
+
+        let members: serde_json::Value =
+            serde_json::from_str(&text).expect("the builder input parses");
+        assert_eq!(members, serde_json::json!({}), "{input} {args_from:?}");
+    }
+}
 #[test]
 fn a_step_takes_child_starts_up_to_the_node_bound() {
     let start = owed(Uuid::new_v4(), 0, CHILD_KEY);

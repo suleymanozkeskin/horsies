@@ -1,11 +1,27 @@
 import logging
 import os
 import sys
+import threading
 from datetime import datetime
+from typing import Final
+
+from horsies._core import refresh_log_levels
 
 # Library convention: NullHandler so logs are silent by default.
 # The application (or horsies CLI) configures handlers.
 logging.getLogger('horsies').addHandler(logging.NullHandler())
+
+STATEMENT_LOGGER_NAME: Final = 'horsies.sql'
+"""The logger of the core's statement log: with ``PostgresConfig.echo`` on,
+one INFO record per statement, the SQL text as the message and the
+statement name as the attribute ``statement``. Bound values are not
+logged."""
+
+STATEMENT_ECHO_FORMAT: Final = '%(asctime)s %(levelname)s %(name)s %(message)s'
+"""The format of the stdout handler that ``enable_statement_echo`` adds:
+the format of the handler that SQLAlchemy's ``echo=True`` adds."""
+
+_statement_echo_lock = threading.Lock()
 
 
 class ColoredFormatter(logging.Formatter):
@@ -114,6 +130,39 @@ def configure_logging(level: int = logging.INFO) -> None:
     handler.setFormatter(ColoredFormatter(use_color=_should_use_color(sys.stderr)))
     root.addHandler(handler)
     root.setLevel(level)
+
+
+def enable_statement_echo() -> None:
+    """Show the core's statement log in this process, as SQLAlchemy's
+    ``echo=True`` shows its statements.
+
+    The broker calls it when ``PostgresConfig.echo`` is on. Effects:
+
+    - The ``horsies.sql`` logger gets the level ``INFO``.
+    - When ``horsies.sql`` has no handler, it gets one
+      ``StreamHandler(sys.stdout)`` with ``STATEMENT_ECHO_FORMAT``. A second
+      call adds none, so the process has at most one such handler. A logger
+      that has a handler of the application gets none, as in SQLAlchemy.
+    - A core that runs reads the levels of the ``horsies`` loggers again
+      (``refresh_log_levels``), so its next statement is forwarded. A core
+      that has not started reads them when it starts.
+
+    It does not change ``propagate`` (a record also reaches the handlers of
+    ``horsies`` and of the root logger), does not remove a handler, and does
+    not change another logger. Its only failure is a defect: an exception of
+    ``logging`` itself.
+    """
+    logger = logging.getLogger(STATEMENT_LOGGER_NAME)
+    with _statement_echo_lock:
+        logger.setLevel(logging.INFO)
+        match logger.handlers:
+            case []:
+                handler = logging.StreamHandler(sys.stdout)
+                handler.setFormatter(logging.Formatter(STATEMENT_ECHO_FORMAT))
+                logger.addHandler(handler)
+            case _:
+                pass
+    refresh_log_levels()
 
 
 def get_logger(component_name: str) -> logging.Logger:

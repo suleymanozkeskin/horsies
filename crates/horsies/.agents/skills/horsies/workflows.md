@@ -486,13 +486,13 @@ is refused (`HRS-027`).
 | `HRS-013` | A quorum outside 1 to the node's dependencies, or `arg_from` on an `any` or quorum join |
 | `HRS-016` | A definition with an empty definition key |
 | `HRS-017` | A definition key or a workflow name that another registered definition has |
-| `HRS-019` | An input member that binds to no field, or a member name of the engine (`__h_...`, `__horsies_...`) |
+| `HRS-019` | A key of the input that binds to no parameter, or a member name of the engine (`__h_...`, `__horsies_...`) |
 | `HRS-020` | A missing parameter; at start, a sub-workflow node of an unregistered definition |
 | `HRS-021` | A parameter that both `set` and `arg_from` give |
 | `HRS-022` | Params given to a definition without params |
 | `HRS-025` | An output type that is not the declared or the handle's type |
 | `HRS-026` | An input that is not a JSON object |
-| `HRS-031` | A value that does not encode, does not read back, or has another type |
+| `HRS-031` | A value that does not encode, does not read back, or has another type; a key that binds to no field, or a field with no value, inside the value of a parameter |
 | `HRS-034` | A priority outside 1 to 100 |
 | `HRS-036`, `HRS-037` | A sub-workflow nesting that reaches the depth limit, or repeats at once |
 
