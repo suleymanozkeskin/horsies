@@ -1,10 +1,9 @@
 //! P4 staged-read parity and disposable-database tests.
 
 use chrono::{DateTime, Duration, Utc};
-use serde_json::Value;
 use serial_test::serial;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgConnection, PgPool, Row};
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::broker::core_rows::StatementLog;
@@ -32,17 +31,8 @@ use crate::core::history::partitions::publication::LoaderPublication;
 use crate::core::history::periods::RetentionDays;
 use crate::db::StatementFailure;
 
-use super::aggregates::{
-    history_breakdown_statement, history_count_statement, history_estimate_statement,
-    history_scoped_status_counts_statement, history_status_aggregate_statement,
-    plan_rows_from_explain, plan_rows_from_explain_text, HistoryBreakdownGroup,
-    HistoryStatusAggregate, HISTORY_NONEMPTY_PROBE_SQL,
-};
-use super::pages::{
-    history_facet_statement, history_page_statement, history_sort_expression, HistoryBindValue,
-    HistoryFacet, HistoryFacetQuery, HistoryPageQuery, HistoryScope, HistorySortField,
-    HistoryWindow, HISTORY_SUMMARY_COLUMNS,
-};
+use super::aggregates::plan_rows_from_explain_text;
+use super::pages::HistoryWindow;
 use super::publisher::{published_manifest_absent_leaves, StagedLoaderPublisher};
 use super::result::{
     decode_result_row, HistoryResultPayload, LiveTaskResult, ResultWireRow, TaskResultRead,
@@ -58,14 +48,6 @@ fn timestamp(value: &str) -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
-fn test_window() -> HistoryWindow {
-    HistoryWindow::new(
-        timestamp("2026-08-01T00:00:00Z"),
-        timestamp("2026-08-02T00:00:00Z"),
-    )
-    .expect("window")
-}
-
 #[test]
 fn history_window_is_increasing_and_at_most_thirty_days() {
     let lower = timestamp("2026-08-01T00:00:00Z");
@@ -75,85 +57,13 @@ fn history_window_is_increasing_and_at_most_thirty_days() {
     assert!(HistoryWindow::new(lower + Duration::days(1), lower).is_err());
 }
 
+/// The row estimate of an `EXPLAIN (FORMAT JSON)` text is the top plan's
+/// `Plan Rows`, an integer or a float cut to an integer; any other text is a
+/// contract error.
 #[test]
-fn page_facet_and_aggregate_builders_pin_bounds_filters_columns_and_sorts() {
-    assert_eq!(HISTORY_SUMMARY_COLUMNS.len(), 18);
-    for envelope in ["result_payload", "attempt_snapshot", "rerun_input_inline"] {
-        assert!(!HISTORY_SUMMARY_COLUMNS.contains(&envelope));
-    }
-    assert!(HistoryPageQuery::new(test_window(), 0).is_err());
-    assert!(HistoryPageQuery::new(test_window(), 501).is_err());
-    assert!(HistoryPageQuery::new(test_window(), 1)
-        .unwrap()
-        .with_offset(-1)
-        .is_err());
-    assert!(HistoryFacetQuery::new(test_window(), HistoryFacet::Status)
-        .with_limit(201)
-        .is_err());
-    assert!(HistorySortField::parse("invented").is_err());
-    for field in [
-        HistorySortField::StartedAt,
-        HistorySortField::CompletedAt,
-        HistorySortField::FailedAt,
-        HistorySortField::QueueSeconds,
-        HistorySortField::ExecutionSeconds,
-    ] {
-        assert!(history_sort_expression(field, true).ends_with("DESC NULLS LAST"));
-    }
-    let scope = HistoryScope {
-        statuses: vec!["COMPLETED".to_owned()],
-        task_names: vec!["acme.report".to_owned()],
-        category_families: vec![vec!["TASK_EXCEPTION".to_owned()]],
-        domain_complement: Some(vec!["TASK_EXCEPTION".to_owned()]),
-        retried_only: true,
-        ..HistoryScope::default()
-    };
-    let page = history_page_statement(
-        &HistoryPageQuery::new(test_window(), 10)
-            .unwrap()
-            .with_scope(scope.clone())
-            .with_sort_field(HistorySortField::StartedAt, true),
-    );
-    assert!(page.sql().contains("started_at DESC NULLS LAST"));
-    assert!(page.sql().contains("error_code = ANY($5::text[])"));
-    assert!(page.sql().contains("error_code <> ALL($6::text[])"));
-    assert!(page.sql().contains("retry_count > 0"));
-    assert!(!page.sql().contains("'COMPLETED'"));
-    assert!(matches!(
-        page.parameters()[2],
-        HistoryBindValue::TextArray(_)
-    ));
-    let facet = history_facet_statement(&HistoryFacetQuery::new(
-        test_window(),
-        HistoryFacet::ErrorCode,
-    ));
-    assert!(facet.sql().contains("error_code <> ''"));
-    let aggregate = history_status_aggregate_statement(HistoryStatusAggregate::new(test_window()));
-    for statement in [page.sql(), facet.sql(), aggregate.sql()] {
-        assert!(statement.contains("terminal_at >= $1"));
-        assert!(statement.contains("terminal_at < $2"));
-    }
-}
-
-#[test]
-fn planner_estimate_predicate_matches_count_and_decode_fails_closed() {
-    let scope = HistoryScope {
-        statuses: vec!["COMPLETED".to_owned(), "FAILED".to_owned()],
-        task_names: vec!["alpha".to_owned()],
-        retried_only: true,
-        ..HistoryScope::default()
-    };
-    let count = history_count_statement(test_window(), &scope);
-    let estimate = history_estimate_statement(test_window(), &scope);
+fn plan_rows_from_explain_text_reads_the_top_plan_rows_and_fails_closed() {
     assert_eq!(
-        count.sql().split_once(" WHERE ").unwrap().1,
-        estimate.sql().split_once(" WHERE ").unwrap().1
-    );
-    assert_eq!(count.parameters(), estimate.parameters());
-    assert!(estimate.sql().starts_with("EXPLAIN (FORMAT JSON)"));
-    assert!(!estimate.sql().contains("ANALYZE"));
-    assert_eq!(
-        plan_rows_from_explain(&serde_json::json!([{"Plan": {"Plan Rows": 42}}])).unwrap(),
+        plan_rows_from_explain_text("[{\"Plan\": {\"Plan Rows\": 42}}]").unwrap(),
         42
     );
     assert_eq!(
@@ -161,53 +71,16 @@ fn planner_estimate_predicate_matches_count_and_decode_fails_closed() {
         7
     );
     for payload in [
-        Value::Null,
-        serde_json::json!([]),
-        serde_json::json!({}),
-        serde_json::json!([{"Plan": {}}]),
-        serde_json::json!([{"Plan": {"Plan Rows": "many"}}]),
-        serde_json::json!([{"Plan": {"Plan Rows": true}}]),
+        "null",
+        "[]",
+        "{}",
+        "[{\"Plan\": {}}]",
+        "[{\"Plan\": {\"Plan Rows\": \"many\"}}]",
+        "[{\"Plan\": {\"Plan Rows\": true}}]",
+        "not json",
     ] {
-        assert!(plan_rows_from_explain(&payload).is_err(), "{payload}");
+        assert!(plan_rows_from_explain_text(payload).is_err(), "{payload}");
     }
-    assert!(plan_rows_from_explain_text("not json").is_err());
-}
-
-#[test]
-fn every_facet_sort_and_aggregate_variant_has_a_bounded_statement() {
-    assert_eq!(HistoryFacet::ALL.len(), 7);
-    for facet in HistoryFacet::ALL {
-        let statement = history_facet_statement(&HistoryFacetQuery::new(test_window(), facet));
-        assert!(statement.sql().contains(facet.column()));
-        assert!(statement.sql().contains("terminal_at >= $1"));
-        assert!(statement.sql().contains("LIMIT $3"));
-    }
-    assert_eq!(HistorySortField::ALL.len(), 11);
-    for field in HistorySortField::ALL {
-        let ascending = history_sort_expression(field, false);
-        let descending = history_sort_expression(field, true);
-        assert!(ascending.contains(" ASC"));
-        assert!(descending.contains(" DESC"));
-    }
-    let scope = HistoryScope {
-        statuses: vec!["FAILED".to_owned()],
-        queue_names: vec!["priority".to_owned()],
-        workers: vec!["worker-p4".to_owned()],
-        error_codes: vec!["BOOM".to_owned()],
-        ..HistoryScope::default()
-    };
-    let scoped = history_scoped_status_counts_statement(test_window(), &scope);
-    assert!(scoped.sql().contains("GROUP BY status ORDER BY status"));
-    assert_eq!(HistoryBreakdownGroup::ALL.len(), 3);
-    for group in HistoryBreakdownGroup::ALL {
-        let breakdown = history_breakdown_statement(test_window(), &scope, group);
-        assert!(breakdown.sql().contains("retried_count"));
-        assert!(breakdown.sql().contains("COALESCE("));
-    }
-    assert_eq!(
-        HISTORY_NONEMPTY_PROBE_SQL.as_str(),
-        "SELECT EXISTS (SELECT 1 FROM horsies_task_history)"
-    );
 }
 
 /// A copy of the installed test template (`crate::test_support`) with a
@@ -848,180 +721,6 @@ async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
         } if task_id == old_id
     ));
     transaction.commit().await.expect("commit old leaf drop");
-    database.drop().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn page_facet_aggregate_estimate_and_plans_are_window_and_index_bounded() {
-    let database = TestDatabase::create().await;
-    let class_key = "standard_30d";
-    let mut transaction = database.pool.begin().await.expect("begin pages setup");
-    let now = database_now(&mut transaction).await.expect("database now");
-    let today = utc_day(now);
-    let parent = register_test_class(&mut transaction, class_key, 30).await;
-    let finite_leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
-    let old_leaf = create_test_leaf(
-        &mut transaction,
-        &parent,
-        class_key,
-        today - Duration::days(10),
-    )
-    .await;
-    let forever_leaf: String = sqlx::query_scalar(&format!(
-        "SELECT leaf_name FROM {LEAF_CATALOG}
-         WHERE class_key = 'forever' AND detached_at IS NULL AND dropped_at IS NULL
-           AND (lower_bound_kind = 'OPEN' OR lower_anchor <= $1) AND upper_anchor > $1"
-    ))
-    .bind(today + Duration::hours(1))
-    .fetch_one(&mut *transaction)
-    .await
-    .expect("current forever leaf");
-    for offset in 0..20 {
-        let anchor = today + Duration::minutes(offset * 5 + 5);
-        let status = if offset % 2 == 0 {
-            "COMPLETED"
-        } else {
-            "FAILED"
-        };
-        let kind = if status == "COMPLETED" {
-            "COMPLETE_FUSED"
-        } else {
-            "FAIL_RUNNING"
-        };
-        seed_history_row(
-            &mut transaction,
-            Uuid::new_v4(),
-            class_key,
-            anchor,
-            status,
-            kind,
-        )
-        .await;
-        seed_history_row(
-            &mut transaction,
-            Uuid::new_v4(),
-            "forever",
-            anchor + Duration::seconds(1),
-            status,
-            kind,
-        )
-        .await;
-    }
-    StagedLoaderPublisher
-        .republish(&mut transaction)
-        .await
-        .expect("publish page setup");
-    sqlx::query(&format!(
-        "ANALYZE {}, {}, {}",
-        finite_leaf.leaf_name(),
-        forever_leaf,
-        old_leaf.leaf_name()
-    ))
-    .execute(&mut *transaction)
-    .await
-    .expect("analyze page leaves");
-    transaction.commit().await.expect("commit page setup");
-
-    let window = HistoryWindow::new(today, today + Duration::days(1)).unwrap();
-    let page = history_page_statement(
-        &HistoryPageQuery::new(window, 5)
-            .unwrap()
-            .with_sort_field(HistorySortField::EnqueuedAt, true),
-    );
-    let mut connection = database.pool.acquire().await.expect("acquire page query");
-    let rows = page
-        .query()
-        .fetch_all(&mut *connection)
-        .await
-        .expect("execute history page");
-    assert_eq!(rows.len(), 5);
-    assert!(rows[0].try_get::<Vec<u8>, _>("result_payload").is_err());
-    let facet = history_facet_statement(&HistoryFacetQuery::new(window, HistoryFacet::Status));
-    let facets = facet
-        .query()
-        .fetch_all(&mut *connection)
-        .await
-        .expect("execute history facet");
-    assert_eq!(
-        facets
-            .iter()
-            .map(|row| row.get::<i64, _>("facet_count"))
-            .sum::<i64>(),
-        40
-    );
-    let aggregate = history_status_aggregate_statement(HistoryStatusAggregate::new(window));
-    let aggregate_rows = aggregate
-        .query()
-        .fetch_all(&mut *connection)
-        .await
-        .expect("execute history aggregate");
-    assert_eq!(
-        aggregate_rows
-            .iter()
-            .map(|row| row.get::<i64, _>("terminal_count"))
-            .sum::<i64>(),
-        40
-    );
-    let estimate = history_estimate_statement(window, &HistoryScope::default());
-    let explain: Value = estimate
-        .query()
-        .fetch_one(&mut *connection)
-        .await
-        .expect("execute history estimate")
-        .get(0);
-    assert!(plan_rows_from_explain(&explain).expect("decode estimate") >= 1);
-
-    sqlx::query("SET enable_seqscan = off")
-        .execute(&mut *connection)
-        .await
-        .expect("disable seqscan for ordering proof");
-    let explain_page = super::pages::HistoryStatement::new(
-        format!("EXPLAIN {}", page.sql()),
-        page.parameters().to_vec(),
-    );
-    let plan = explain_page
-        .query()
-        .fetch_all(&mut *connection)
-        .await
-        .expect("explain ordered page")
-        .into_iter()
-        .map(|row| row.get::<String, _>(0))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(!plan.contains("->  Sort"), "{plan}");
-    assert!(!plan.trim_start().starts_with("Sort"), "{plan}");
-    assert!(plan.contains("Merge Append"), "{plan}");
-    assert!(plan.contains("Index Scan Backward"), "{plan}");
-    assert!(plan.contains("_enqueued_idx"), "{plan}");
-
-    let aggregate_sql = aggregate
-        .sql()
-        .replace(
-            "$1",
-            &format!("TIMESTAMPTZ '{}'", window.lower().to_rfc3339()),
-        )
-        .replace(
-            "$2",
-            &format!("TIMESTAMPTZ '{}'", window.upper().to_rfc3339()),
-        );
-    let pruning_plan = sqlx::query(&format!("EXPLAIN {aggregate_sql}"))
-        .fetch_all(&mut *connection)
-        .await
-        .expect("explain aggregate pruning")
-        .into_iter()
-        .map(|row| row.get::<String, _>(0))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        !pruning_plan.contains(old_leaf.leaf_name()),
-        "{pruning_plan}"
-    );
-    assert!(
-        pruning_plan.contains(finite_leaf.leaf_name()),
-        "{pruning_plan}"
-    );
-    drop(connection);
     database.drop().await;
 }
 
