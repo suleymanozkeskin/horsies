@@ -8,8 +8,10 @@ loop's held connection). Candidate: the two methods, which call
 driver (``_Driver``) runs them with a worker config and no slot pool.
 
 - The claim pass: ISOLATED rows of two queues, the second capped and holding
-  a RUNNING row of another worker, and a SHARED_ASYNC row that the driver
-  does not serve. The snapshots and the reports must be equal.
+  a RUNNING row of another worker, and a SHARED_ASYNC row. The driver runs
+  isolated children only, so its plan claims the SHARED_ASYNC row into its
+  ISOLATED budget (``ClaimPlan.route``). The snapshots and the reports must
+  be equal.
 - The start count: a capped queue with a RUNNING row of another worker and
   CLAIMED rows of the driver. With the claim generations of the started
   rows, both count the same. A started row whose claim generation differs
@@ -224,7 +226,10 @@ def test_the_core_claim_pass_takes_what_the_python_pass_took(
     assert run.diff.entries == (), render_diff(run.diff)
     claimed_names = [row.task_name for row in run.reference.report.claimed]
     assert claimed_names, 'the reference pass claimed nothing'
-    assert 'claim.a_shared' not in claimed_names
+    shared = [row for row in run.reference.report.claimed if row.task_name == 'claim.a_shared']
+    assert [row.execution for row in shared] == ['SHARED_ASYNC'], (
+        'a worker with isolated children only claims a shared row into its ISOLATED budget'
+    )
     assert 'claim.b_running' not in claimed_names
     assert run.candidate.report == run.reference.report
 

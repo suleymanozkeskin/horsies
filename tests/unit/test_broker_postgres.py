@@ -1163,6 +1163,18 @@ class TestEnqueueAsync:
 SEND_TASK_ID = UUID('0198c0de-0000-7000-8000-000000000017')
 
 
+def _stand_in_named_as(record_class: type) -> MagicMock:
+    """A stand-in for a core record whose type has the record's class name.
+
+    A native record has no Python constructor, and the facade names a record
+    by ``type(outcome).__name__``: a plain ``MagicMock(spec=...)`` is of type
+    ``MagicMock``. The stand-in is an instance of ``record_class`` for a
+    class pattern, as with ``spec``.
+    """
+    named = cast(type[MagicMock], type(record_class.__name__, (MagicMock,), {}))
+    return named(spec=record_class)
+
+
 @pytest.mark.unit
 class TestEnqueueThroughCore:
     """enqueue_async and enqueue build the core's request with the client
@@ -1353,7 +1365,7 @@ class TestEnqueueThroughCore:
     async def test_a_record_the_core_send_never_answers_is_a_defect(
         self, outcome_class: type,
     ) -> None:
-        broker = self._broker_answering(MagicMock(spec=outcome_class))
+        broker = self._broker_answering(_stand_in_named_as(outcome_class))
 
         with pytest.raises(AssertionError, match=outcome_class.__name__):
             await self._send(broker)
