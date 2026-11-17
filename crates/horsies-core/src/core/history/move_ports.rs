@@ -22,7 +22,8 @@ use crate::core::history::heartbeats::partitioning::{
 };
 use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
 use crate::core::history::periods::RetentionDays;
-use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
+use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
+use crate::test_support::terminal_writes::{self, StaleFailure};
 
 const PORT_WORKER: &str = "port-move-worker";
 const CLASS_KEY: &str = "standard_30d";
@@ -86,27 +87,29 @@ async fn seed_task(transaction: &mut Transaction<'_, Postgres>, task: &RunningTa
     task_id
 }
 
-fn complete(task_id: Uuid) -> TerminalizationCommand {
-    TerminalizationCommand::CompleteLockedTask {
+/// The claim generation that the seeded row holds.
+async fn claim_generation(
+    transaction: &mut Transaction<'_, Postgres>,
+    task_id: Uuid,
+) -> DateTime<Utc> {
+    sqlx::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(transaction.as_mut())
+        .await
+        .expect("read the claim generation")
+}
+
+/// The plain success of the worker (`horsies_complete_task_fused`) under the
+/// seeded claim.
+fn complete(task_id: Uuid, claimed_at: DateTime<Utc>) -> TerminalizationCommand {
+    TerminalizationCommand::CompleteTaskFused {
         task_id,
-        fence: PriorLockedRead {
+        fence: OwnedClaim {
             worker_id: PORT_WORKER.to_owned(),
+            claimed_at,
         },
         result_json: SUCCESS_RESULT.to_owned(),
     }
-}
-
-async fn applied(transaction: &mut Transaction<'_, Postgres>, command: &TerminalizationCommand) {
-    let outcomes = terminalize_in_tx(transaction, command)
-        .await
-        .expect("terminal write");
-    assert!(
-        matches!(
-            outcomes.as_slice(),
-            [TerminalizationOutcome::Applied { .. }]
-        ),
-        "{outcomes:?}"
-    );
 }
 
 /// Run `command` in a savepoint that the database refuses, roll the
@@ -181,10 +184,10 @@ async fn a_heartbeat_beyond_the_recency_bound_cannot_flip_the_verdict() {
     .execute(transaction.as_mut())
     .await
     .expect("write the old beat");
-    applied(
-        &mut transaction,
-        &TerminalizationCommand::FailStaleTask {
-            task_id,
+    let outcomes = terminal_writes::fail_stale_task(
+        transaction.as_mut(),
+        task_id,
+        &StaleFailure {
             stale_after_ms: 600_000,
             finalizing_stale_after_ms: 600_000,
             result_json: FAILURE_RESULT.to_owned(),
@@ -192,7 +195,15 @@ async fn a_heartbeat_beyond_the_recency_bound_cannot_flip_the_verdict() {
             failed_reason: "port stale runner".to_owned(),
         },
     )
-    .await;
+    .await
+    .expect("stale failure");
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [TerminalizationOutcome::Applied { .. }]
+        ),
+        "{outcomes:?}"
+    );
     transaction.rollback().await.expect("rollback");
 }
 
@@ -235,8 +246,9 @@ async fn a_move_with_no_history_leaf_keeps_the_task_and_its_reservation_live() {
     .await
     .expect("reserve the key");
     assert_eq!(claimed, ReservationClaim::Applied { task_id });
+    let claimed_at = claim_generation(&mut transaction, task_id).await;
     assert_eq!(
-        refused_sqlstate(&mut transaction, &complete(task_id)).await,
+        refused_sqlstate(&mut transaction, &complete(task_id, claimed_at)).await,
         "23514"
     );
     assert!(is_live(&mut transaction, task_id).await);

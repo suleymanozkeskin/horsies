@@ -11,14 +11,14 @@ use super::*;
 use crate::broker::core_rows::StatementLog;
 use crate::broker::history_reads::{read_task_result, ResultReaderSeen};
 use crate::broker::pools::unpinged_single_connection_core_pool;
-use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::reads::result::TaskResultRead;
-use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
+use crate::core::lifecycle::TerminalizationOutcome;
+use crate::test_support::terminal_writes;
 
 const PORT_WORKER: &str = "port-round-trip-worker";
 
-/// A plain task of `status`, claimed by `PORT_WORKER` when RUNNING. Every
-/// baseline column is named.
+/// A plain task of `status`, claimed by `PORT_WORKER` with the process facts
+/// of its start when RUNNING. Every baseline column is named.
 async fn seed_task(pool: &PgPool, task_id: Uuid, status: &str) {
     sqlx::query(
         "INSERT INTO horsies_tasks (
@@ -39,7 +39,9 @@ async fn seed_task(pool: &PgPool, task_id: Uuid, status: &str) {
              CASE WHEN $2 = 'RUNNING' THEN $3 END,
              NULL,
              CASE WHEN $2 = 'RUNNING' THEN NOW() END, NULL, NULL,
-             NULL, NULL, NULL,
+             CASE WHEN $2 = 'RUNNING' THEN 4242 END,
+             CASE WHEN $2 = 'RUNNING' THEN 'port-host' END,
+             CASE WHEN $2 = 'RUNNING' THEN 'port-process' END,
              0, 0, NULL, NULL, FALSE,
              NOW(), FALSE, NULL, NULL
          )",
@@ -91,18 +93,10 @@ async fn a_history_result_read_is_one_statement() {
     let database = published_database().await;
     let task_id = crate::core::history::identity::uuid7::mint_task_id().expect("mint a task id");
     seed_task(&database.pool, task_id, "RUNNING").await;
-    let outcomes = terminalize(
-        &database.pool,
-        &TerminalizationCommand::CompleteLockedTask {
-            task_id,
-            fence: PriorLockedRead {
-                worker_id: PORT_WORKER.to_owned(),
-            },
-            result_json: "{\"Ok\":true}".to_owned(),
-        },
-    )
-    .await
-    .expect("complete the task");
+    let outcomes =
+        terminal_writes::complete_plain_task(&database.pool, task_id, PORT_WORKER, "{\"Ok\":true}")
+            .await
+            .expect("complete the task");
     assert!(
         matches!(
             outcomes.as_slice(),
