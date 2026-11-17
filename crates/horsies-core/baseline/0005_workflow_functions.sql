@@ -351,10 +351,12 @@ $$;
 -- ENQUEUED with no task: the rows are built here (ids from horsies_uuidv7() in index order, the input of
 -- horsies_workflow_task_input) and inserted through horsies_insert_task_rows, the one column list of a new task row,
 -- with the values of a workflow task row: is_workflow_task TRUE, no command fingerprint (the "no fingerprint"
--- variant), no key digest, no lineage, retain_rerun_input FALSE, sent_at of the workflow, enqueued_at now(),
--- max_retries, execution and retention_class_key from the node row, and good_until cast from the good_until member of
--- the stored task options (NULL for no options, empty options, or a null or absent member). Then one link UPDATE of
--- the nodes. The insert trigger sends the wake of each queue.
+-- variant), no key digest, no lineage, retain_rerun_input FALSE, sent_at of the workflow, enqueued_at, created_at and
+-- updated_at p_row_time, max_retries, execution and retention_class_key from the node row, and good_until cast from
+-- the good_until member of the stored task options (NULL for no options, empty options, or a null or absent member).
+-- Then one link UPDATE of the nodes. The insert trigger sends the wake of each queue.
+-- p_row_time is the caller's: horsies_workflow_promote passes now(), the start of the transaction, as Python's
+-- workflow task insert in its multi-statement transaction. A NULL p_row_time with a row to mint raises 22023.
 -- Raises, and nothing commits:
 -- - a good_until that the timestamptz input cannot read (22007 or 22008), as the database refuses Python's text;
 -- - an outcome other than INSERTED (a conflict on a freshly minted id), a defect: unique_violation (23505), as the
@@ -366,7 +368,9 @@ $$;
 -- core/workflows/engine.py:2406-2461), INSERT_TASK_FOR_WORKFLOW_SQL at start (core/workflows/lifecycle.py:758); the
 -- task row's good_until is str() of the options member (core/workflows/engine.py:832-835).
 -- Locks: the new task rows and the linked node rows (the workflow row is held by the caller).
-CREATE FUNCTION horsies_workflow_node_tasks_insert(p_workflow_id uuid, p_task_indexes integer[]) RETURNS integer
+CREATE FUNCTION horsies_workflow_node_tasks_insert(
+    p_workflow_id uuid, p_task_indexes integer[], p_row_time timestamp with time zone
+) RETURNS integer
     LANGUAGE plpgsql
     SET plan_cache_mode TO 'force_generic_plan'
 AS $$
@@ -418,10 +422,11 @@ BEGIN
         CROSS JOIN LATERAL horsies_insert_task_rows(
             b.task_ids, b.task_names, b.queue_names, b.priorities, b.inputs, b.task_options, b.executions,
             b.retention_class_keys, array_fill(FALSE, ARRAY[b.row_count]), b.max_retries, b.good_untils,
-            array_fill(b.sent_at, ARRAY[b.row_count]), array_fill(now(), ARRAY[b.row_count]),
+            array_fill(b.sent_at, ARRAY[b.row_count]), array_fill(p_row_time, ARRAY[b.row_count]),
             array_fill(TRUE, ARRAY[b.row_count]), array_fill(NULL::smallint, ARRAY[b.row_count]),
             array_fill(NULL::bytea, ARRAY[b.row_count]), array_fill(NULL::bytea, ARRAY[b.row_count]),
-            array_fill(NULL::uuid, ARRAY[b.row_count]), array_fill(NULL::uuid, ARRAY[b.row_count]), 'NONE'
+            array_fill(NULL::uuid, ARRAY[b.row_count]), array_fill(NULL::uuid, ARRAY[b.row_count]), p_row_time,
+            'NONE'
         ) AS r
         WHERE b.row_count > 0
     ),
@@ -1207,8 +1212,9 @@ $$;
 --    makes no node terminal; each level makes at least one node terminal, so there are at most node count + 1.
 -- 3. A pause in step 2: every node that this call moved to ENQUEUED and that has no task and no child goes back to
 --    READY with started_at NULL; nothing is minted and no child start is owed (the pause gate).
--- 4. Otherwise: the task rows of the ENQUEUED task nodes (horsies_workflow_node_tasks_insert), and one CHILD_START
---    row (with its SOURCE rows) per ENQUEUED sub-workflow node.
+-- 4. Otherwise: the task rows of the ENQUEUED task nodes (horsies_workflow_node_tasks_insert, dated now(): the start
+--    of the transaction, as started_at in step 1 and Python's workflow task insert), and one CHILD_START row (with
+--    its SOURCE rows) per ENQUEUED sub-workflow node.
 -- Does nothing for a workflow that is not RUNNING.
 -- Precondition: the caller holds the workflow row FOR UPDATE.
 -- Lock order: workflow row (held), node rows of each level, new task rows.
@@ -1288,7 +1294,7 @@ BEGIN
         v_candidates := ARRAY[]::integer[];
     END LOOP;
 
-    PERFORM horsies_workflow_node_tasks_insert(p_workflow_id, v_enqueued);
+    PERFORM horsies_workflow_node_tasks_insert(p_workflow_id, v_enqueued, now());
     RETURN QUERY SELECT * FROM horsies_workflow_child_start_rows(p_workflow_id, v_enqueued);
 END;
 $$;
