@@ -157,6 +157,13 @@ impl CoreHandle {
         self.connection.clone()
     }
 
+    /// The registered child spec source, for a monitoring handler that
+    /// builds its own source at its first call; None when none is
+    /// registered.
+    pub fn registered_child_spec_source(&self) -> Option<RegisteredSource> {
+        self.child_spec_source.get().map(Arc::clone)
+    }
+
     /// The child spec source of one operation on `core`.
     ///
     /// Failure exits: `RuntimeError` when no source is registered (a defect

@@ -525,6 +525,10 @@ pub(crate) fn python_json_text(text: &str) -> String {
     written
 }
 
+/// The degraded frame, with the blank line that ends it: the listener cannot
+/// be trusted, and the stream ends after it (Python's `/api/events`).
+pub const DEGRADED_FRAME: &str = "data: {\"topic\": \"degraded\"}\n\n";
+
 /// The heartbeat frame: an SSE comment that `EventSource` ignores and that
 /// keeps an intermediary proxy from closing an idle stream (Python
 /// `_HEARTBEAT_FRAME`).
@@ -585,7 +589,7 @@ impl EventFrames {
             }
             Ok(Some(None)) => {
                 self.state = FramesState::Ended;
-                EventStreamItem::Frame(format!("data: {}\n\n", degraded_frame()))
+                EventStreamItem::Frame(DEGRADED_FRAME.to_owned())
             }
             Ok(None) => {
                 self.state = FramesState::Ended;
@@ -751,6 +755,11 @@ mod queue_tests {
         );
         assert_eq!(frames.next().await, EventStreamItem::Ended);
         assert_eq!(frames.next().await, EventStreamItem::Ended);
+    }
+
+    #[test]
+    fn the_degraded_frame_is_the_degraded_object_on_the_wire() {
+        assert_eq!(DEGRADED_FRAME, format!("data: {}\n\n", degraded_frame()));
     }
 
     /// A closed queue with nothing left ends the stream without a frame.

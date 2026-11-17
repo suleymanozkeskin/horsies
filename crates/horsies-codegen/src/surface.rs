@@ -1902,6 +1902,30 @@ const HANDLE_CLASSES: &[StubClass] = &[
     },
 ];
 
+const ACCESS_GRANT_PARAMETERS: &[StubParameter] = &[
+    keyword("view", "Literal['ALLOWED', 'REFUSED', 'NOT_ASKED']"),
+    keyword("act", "Literal['ALLOWED', 'REFUSED', 'NOT_ASKED']"),
+];
+
+const MONITORING_REQUEST_PARAMETERS: &[StubParameter] = &[
+    keyword("method", "str"),
+    keyword("path", "str"),
+    keyword("raw_query", "str | None"),
+    keyword("intent_header", "str | None"),
+    keyword("content_type", "str | None"),
+    keyword("body", "bytes"),
+    keyword("base_path", "str"),
+    keyword("grant", "AccessGrant"),
+];
+
+const MONITORING_HANDLER_PARAMETERS: &[StubParameter] = &[
+    positional("handle", "CoreHandle"),
+    keyword("actions_enabled", "bool"),
+    keyword("custom_css_url", "str | None"),
+    keyword("client_version", "str"),
+    keyword("heartbeat_ms", "int"),
+];
+
 /// The classes of the monitoring reads and the web handler.
 const MONITORING_CLASSES: &[StubClass] = &[
     StubClass {
@@ -2237,6 +2261,124 @@ const MONITORING_CLASSES: &[StubClass] = &[
             property("workers", "list[WorkerClassLoadRecord]"),
         ],
         methods: &[],
+    },
+    StubClass {
+        name: "RouteAccess",
+        doc: "The verdicts of the user's policy that a request needs, in order, and the form of its\nanswer.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("need", "Literal['PUBLIC', 'VIEW', 'VIEW_REPORT_ACT', 'VIEW_AND_ACT']"),
+            property("form", "Literal['ONE_RESPONSE', 'EVENT_STREAM']"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "AccessGrant",
+        doc: "The verdicts that the host's run of the user's policy gave for one request. Another text\nraises ValueError.",
+        constructor: Constructor::Parameters(ACCESS_GRANT_PARAMETERS),
+        properties: &[
+            property("view", "Literal['ALLOWED', 'REFUSED', 'NOT_ASKED']"),
+            property("act", "Literal['ALLOWED', 'REFUSED', 'NOT_ASKED']"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "MonitoringRequest",
+        doc: "One request as the host read it: the path inside the mount as it came on the wire, the\nquery text or None, the mount path (the ASGI root_path), at most max_request_body_bytes + 1\nbody bytes, and the verdicts. A method that is not an HTTP token raises ValueError.",
+        constructor: Constructor::Parameters(MONITORING_REQUEST_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "MonitoringResponse",
+        doc: "One response for the host to send: the status, the headers in order with lowercase\nnames, and the body.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("status", "int"),
+            property("headers", "list[tuple[str, str]]"),
+            property("body", "bytes"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "EventFrame",
+        doc: "One frame of an event stream, with the blank line that ends it.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("text", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "EventStreamEnded",
+        doc: "The event stream ended: after the degraded frame, after the handler closed its events, or\nafter close.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "EventStreamRefused",
+        doc: "No stream: the handler has no broker. The host writes frame, the degraded frame, and ends\nthe response.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("message", "str"),
+            property("frame", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "EventStream",
+        doc: "One web client's event stream, subscribed on the process listener.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[
+            StubFunction {
+                name: "next_async",
+                parameters: &[],
+                returns: TypeText::FutureOf("EventFrame | EventStreamEnded"),
+                doc: "The next frame. Reads only; a cancelled await drops the wait and loses no event.",
+            },
+            StubFunction {
+                name: "close",
+                parameters: &[],
+                returns: TypeText::Plain("None"),
+                doc: "End the stream: a pending and every later next_async answers EventStreamEnded. Starts\nnothing and waits for nothing.",
+            },
+        ],
+    },
+    StubClass {
+        name: "MonitoringHandler",
+        doc: "The monitoring web app of the broker of a CoreHandle, for the FastAPI mount of\ncreate_monitoring_app. Starts nothing: the first call builds it. A handle without a child\nspec source raises RuntimeError; heartbeat_ms outside 1 to 3,600,000 raises ValueError.",
+        constructor: Constructor::Parameters(MONITORING_HANDLER_PARAMETERS),
+        properties: &[
+            property("max_request_body_bytes", "int"),
+        ],
+        methods: &[
+            StubFunction {
+                name: "route_access",
+                parameters: &[positional("method", "str"), positional("path", "str")],
+                returns: TypeText::Plain("RouteAccess"),
+                doc: "The verdicts that a request needs and the form of its answer, from its method and its\npath inside the mount. Pure. A method that is not an HTTP token raises ValueError.",
+            },
+            StubFunction {
+                name: "handle_async",
+                parameters: &[positional("request", "MonitoringRequest")],
+                returns: TypeText::FutureOf("MonitoringResponse"),
+                doc: "Serve one request. A POST writes and runs to its end when the caller leaves; every other\nrequest reads, and a cancelled await drops it. A child build that raised KeyboardInterrupt\nor SystemExit raises it again.",
+            },
+            StubFunction {
+                name: "subscribe_events_async",
+                parameters: &[],
+                returns: TypeText::FutureOf("EventStream | EventStreamRefused"),
+                doc: "Subscribe one event stream, after an allowed view. A broker without a listener, or a\nstopped listener, gives a stream whose first frame is the degraded frame. Reads only.",
+            },
+            StubFunction {
+                name: "close_events_async",
+                parameters: &[],
+                returns: TypeText::FutureOf("None"),
+                doc: "End every event stream of the handler after the degraded frame. Runs to its end when the\ncaller leaves.",
+            },
+        ],
     },
 ];
 
