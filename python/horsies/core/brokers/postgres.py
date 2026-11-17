@@ -213,7 +213,7 @@ from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
-from horsies.core.logging import get_logger
+from horsies.core.logging import enable_statement_echo, get_logger
 
 # Ensure workflow tables are registered in SQLAlchemy metadata.
 _ = (_WorkflowModel, _WorkflowTaskModel)
@@ -1324,6 +1324,14 @@ class PostgresBroker:
         from horsies.core.workflows.child_spec_source import child_spec_source_of
 
         self._core_handle.register_child_spec_source(child_spec_source_of(self))
+
+        # The core handle logs each statement on horsies.sql when echo is on;
+        # show those records as SQLAlchemy's echo shows its own.
+        match config.echo:
+            case True:
+                enable_statement_echo()
+            case False:
+                pass
 
         # Each worker child builds its own broker, so this fires on every
         # recycle (max_tasks_per_child); keep it at DEBUG in child processes.
