@@ -105,7 +105,8 @@ For direct PostgreSQL connections, budget a worker roughly as:
 
 ```
 pool max_size (the pool of the worker process)
-  + 2 session/LISTEN connections
+  + pool max_size again, when session_database_url differs from database_url (the session pool)
+  + 1 listener connection
   + 1 runner heartbeat connection
   + isolated children * isolated.pool max_size
   + shared async children * shared_async.pool max_size
@@ -117,8 +118,9 @@ Each `max_size` is the resolved value: a `PoolSize`, or the size that
 `PoolSizeFromSeats()` derives from the seats; see
 [Connections](/horsies/workers/worker-profiles/#connections). With the defaults
 and a profile of 8 isolated children, the framework ceiling is about
-`5 + 2 + 1 + 8 * 1 = 16` direct connections, and `8 * 2 = 16` more when every
-child sends from one event loop.
+`5 + 1 + 1 + 8 * 1 = 15` direct connections, and `8 * 2 = 16` more when every
+child sends from one event loop. One listener connection carries every
+`LISTEN` of the worker process.
 Idle child processes keep no database connection by default because the
 `min_size` of each pool is 0; connections are opened lazily when task
 lifecycle work starts. An isolated child uses one connection at a time, for the
