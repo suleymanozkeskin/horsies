@@ -126,7 +126,7 @@ Returned by `handle.get()` for issues retrieving results:
 | ---- | ---- |
 | `TASK_CANCELLED` | Task was cancelled before completion |
 | `TASK_EXPIRED` | Task's `good_until` deadline passed before execution started |
-| `TASK_TIMEOUT` | Task exceeded its `timeout_ms` execution limit: the worker killed its child process, or, for a `SHARED_ASYNC` task on a shared async child, cancelled it and ended its work. `data` has `task_id` and `timeout_ms`; a `SHARED_ASYNC` task that its child ended also has `cancel_end` ([The Timeout](/horsies/workers/shared-async-tasks/#the-timeout)) |
+| `TASK_TIMEOUT` | Task exceeded its `timeout_ms` execution limit: the worker killed its child process, or, for a `SHARED_ASYNC` task on a shared async child, cancelled it and ended its work. `data` has `task_id` and `timeout_ms`; a `SHARED_ASYNC` task on a shared async child also has `cancel_end`: `RETURNED_AFTER_SIGNAL`, `DROPPED_AFTER_GRACE` or `KILLED_WITH_CHILD` ([The Timeout](/horsies/workers/shared-async-tasks/#the-timeout)) |
 | `WORKFLOW_PAUSED` | Workflow was paused |
 | `WORKFLOW_EXPIRED` | A paused workflow passed `paused_workflow_auto_cancel_after` and expired |
 | `WORKFLOW_FAILED` | Workflow failed |

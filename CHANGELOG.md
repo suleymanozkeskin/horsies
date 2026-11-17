@@ -176,13 +176,14 @@ written in Rust, on a new baseline schema.
   `timeout_seconds` still waits with no deadline.
 
 - **The `TASK_TIMEOUT` error of a `SHARED_ASYNC` task tells how the task
-  ended.** Its `data` gets the key `cancel_end`: `RETURNED_AFTER_SIGNAL`
-  when the task and its work ended within `cancel_grace_ms` after the
-  cancel at the deadline, `DROPPED_AFTER_GRACE` when the child sent the
-  second cancel. The Python worker and the core worker write the same key.
-  An isolated or `SHARED_THREAD` timeout, and a task whose child the
-  worker killed, have no `cancel_end`. The `data` keeps `task_id` and
-  `timeout_ms`.
+  ended.** When the task ran on a shared async child, its `data` gets the
+  key `cancel_end`: `RETURNED_AFTER_SIGNAL` when the task and its work
+  ended within `cancel_grace_ms` after the cancel at the deadline,
+  `DROPPED_AFTER_GRACE` when the child sent the second cancel, and
+  `KILLED_WITH_CHILD` when the task ended at a kill of its child by the
+  worker, before the child reported its end. The Python worker and the
+  core worker write the same key. An isolated or `SHARED_THREAD` timeout
+  has no `cancel_end`. The `data` keeps `task_id` and `timeout_ms`.
 
 - **`paused_workflow_auto_cancel_after` is at most 365,000 days.** A
   longer age is refused when the config is built: Python raises
