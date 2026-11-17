@@ -446,10 +446,15 @@ pub(crate) async fn build_child<'a>(
 /// static members and `args_from` are both refused fails for its
 /// `args_from`.
 ///
-/// Errors: the errors of the merge: [`WorkflowError::Validation`] for a
-/// stored input with a number that the merge would round;
-/// [`WorkflowError::Serialization`] for a value that does not encode.
-/// Pure.
+/// Each static member and each stored dependency result keeps its stored
+/// text ([`merge_args_from_sync`], [`child_build_input`]), so an integer
+/// outside the `i64` and `u64` range reaches the builder as stored, as
+/// Python reads it (`_input_kwargs`, `core/workflows/child_build.py`).
+///
+/// Errors: the errors of the merge: [`WorkflowError::Serialization`] for an
+/// `args_from` entry that does not encode. The merge takes a stored input
+/// that passed the strict read as an object, or `{}`, so its
+/// [`WorkflowError::Validation`] does not occur here. Pure.
 pub fn merged_child_input(request: &ChildSpecRequest) -> Result<NodeInput, WorkflowError> {
     let static_input = match child_static_input(&request.node_input) {
         Ok(ChildStaticInput::Members(text)) => text,
