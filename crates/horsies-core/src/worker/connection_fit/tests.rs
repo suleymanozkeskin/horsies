@@ -1,21 +1,41 @@
 //! The worker connection check. Python specification:
-//! `tests/integration/test_worker_connection_check.py` (the two live tests)
-//! and `horsies/core/worker/profile_fit.py` (the terms and the texts). The
+//! `tests/integration/test_worker_connection_check.py` (the two live tests),
+//! `tests/unit/test_worker_profile_fit.py` (`TestReadServerConnectionLimit`,
+//! `TestConnectionNeed`, `TestCheckLiveWorkerConnections`) and
+//! `horsies/core/worker/profile_fit.py` (the terms and the texts). The
 //! listener term is the core's one connection per process.
 
 use std::collections::BTreeMap;
+use std::num::{NonZeroU32, NonZeroUsize};
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
+use serde_json::json;
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use super::*;
 use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
 use crate::core::config::bounded::BoundedU32;
+use crate::core::config::child_sizing::{
+    parent_pool_connections, shared_async_pool_connections, shared_thread_pool_connections,
+    DEFAULT_TASK_SEND_POOL_CONNECTIONS, PARENT_POOL_CONNECTIONS_FLOOR,
+};
 use crate::core::config::worker_profile::{
     IsolatedChildren, ParentPool, PoolSizeSetting, SharedAsyncChildren, SharedPool,
     SharedThreadChildren, MAX_CHILD_POOL_CONNECTIONS,
 };
+use crate::worker::children::{
+    isolated_pool_config, shared_async_pool_config, shared_thread_pool_config, ChildLaunch,
+    PoolFacts,
+};
+use crate::worker::executor::placement::CpuPlacement;
+use crate::worker::executor::protocol::{
+    ChildConnection, ChildKind, ChildLogLevel, ChildProgram, DatabaseUrl,
+};
+use crate::worker::executor::slots::ExitNotSeen;
+use crate::worker::executor::supervisor::ChildCommand;
 
 /// Seats of the shared thread children of the live test (Python
 /// `THREAD_SEATS`).
@@ -609,4 +629,435 @@ async fn boot_with_an_unreadable_limit_is_one_warning() {
 fn a_name_is_quoted_as_python_s_repr() {
     assert_eq!(quoted_profile_name("default"), "'default'");
     assert_eq!(quoted_profile_name(r"a\b"), r"'a\\b'");
+}
+
+// --- the read of the server limit --------------------------------------------
+//
+// Python `tests/unit/test_worker_profile_fit.py::TestReadServerConnectionLimit`.
+
+/// `test_reads_max_and_both_reserved_settings`: the read returns the
+/// server's `max_connections`, and as reserved the sum of
+/// `superuser_reserved_connections` and `reserved_connections` (no such
+/// setting before PostgreSQL 16: 0). The settings are read here from
+/// `pg_settings`, not through the code under test.
+#[tokio::test]
+#[serial]
+async fn the_read_returns_max_connections_and_both_reserved_settings() {
+    let pool = migrated_pool().await;
+    let (max_connections, superuser_reserved, reserved): (i32, i32, i32) = sqlx::query_as(
+        "SELECT (SELECT setting::int FROM pg_settings WHERE name = 'max_connections'),
+                (SELECT setting::int FROM pg_settings
+                  WHERE name = 'superuser_reserved_connections'),
+                COALESCE((SELECT setting::int FROM pg_settings
+                           WHERE name = 'reserved_connections'), 0)",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read the settings of the test server");
+    let broker = PostgresBroker::from_pool(pool);
+
+    let read = read_server_connection_limit(&broker)
+        .await
+        .expect("the test server answers the read");
+
+    assert_eq!(
+        i64::from(read.max_connections()),
+        i64::from(max_connections)
+    );
+    assert_eq!(
+        i64::from(read.reserved()),
+        i64::from(superuser_reserved) + i64::from(reserved)
+    );
+}
+
+/// `test_database_error_is_unreadable`: the server refuses the session (its
+/// database does not exist), and the limit is unreadable with the server's
+/// error.
+#[tokio::test]
+#[serial]
+async fn a_server_error_makes_the_limit_unreadable() {
+    let url = migrated_database_url().await;
+    let missing = PgConnectOptions::from_str(&url)
+        .expect("the test database url parses")
+        .database(&format!(
+            "horsies_missing_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(10))
+        .connect_lazy_with(missing);
+    let broker = PostgresBroker::from_pool(pool);
+
+    let read = read_server_connection_limit(&broker).await;
+
+    match read {
+        Err(ConnectionLimitUnreadable::Database(sqlx::Error::Database(error))) => {
+            assert_eq!(error.code().as_deref(), Some("3D000"), "{error}");
+        }
+        other => panic!("expected the server's refusal, got {other:?}"),
+    }
+}
+
+/// `test_os_error_is_unreadable`: no connection can be made (nothing
+/// listens on the port), and the limit is unreadable with the driver's
+/// error.
+#[tokio::test]
+async fn a_connection_that_cannot_be_made_makes_the_limit_unreadable() {
+    let read = read_server_connection_limit(&unreachable_broker()).await;
+
+    assert!(
+        matches!(read, Err(ConnectionLimitUnreadable::Database(_))),
+        "{read:?}"
+    );
+}
+
+/// `test_no_answer_within_the_bound_is_unreadable`: a server that takes the
+/// connection and never answers. The clock is paused, so the bound of the
+/// read passes with no real wait; the acquire bound of the pool is longer,
+/// so the bound of the read is what ends it.
+#[tokio::test(start_paused = true)]
+async fn no_answer_within_the_bound_makes_the_limit_unreadable() {
+    let silent = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a local port");
+    let port = silent.local_addr().expect("the bound address").port();
+    // The accepted stream stays open in the output of this task until the
+    // handle is dropped; the task never writes to it.
+    let held = tokio::spawn(async move { silent.accept().await });
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(CONNECTION_LIMIT_READ_TIMEOUT * 6)
+        .connect_lazy(&format!("postgresql://postgres:none@127.0.0.1:{port}/none"))
+        .expect("a lazy pool of a silent server");
+    let broker = PostgresBroker::from_pool(pool);
+
+    let read = read_server_connection_limit(&broker).await;
+
+    held.abort();
+    match read {
+        Err(ConnectionLimitUnreadable::TimedOut { bound }) => {
+            assert_eq!(bound, CONNECTION_LIMIT_READ_TIMEOUT);
+        }
+        other => panic!("expected the read to time out, got {other:?}"),
+    }
+}
+
+// --- the terms of a profile ----------------------------------------------------
+//
+// Python `tests/unit/test_worker_profile_fit.py::TestConnectionNeed`, with the
+// core's one listener connection.
+
+fn parsed(document: serde_json::Value) -> WorkerProfile {
+    serde_json::from_value(document).expect("a valid test profile")
+}
+
+fn seats(count: u32) -> NonZeroU32 {
+    NonZeroU32::new(count).expect("test seats above 0")
+}
+
+/// The task-send pool that the init frame of the one child kind of
+/// `profile` gives each child of that kind.
+fn task_send_pool_of_the_init_frame(profile: &WorkerProfile) -> u64 {
+    let launch = ChildLaunch {
+        command: ChildCommand {
+            program: PathBuf::from("/bin/sh"),
+            args: Vec::new(),
+        },
+        program: ChildProgram::Rust,
+        log_level: ChildLogLevel::Info,
+        database_url: DatabaseUrl::new("postgresql://u:p@localhost/db".to_owned()),
+        connection: ChildConnection::default(),
+    };
+    let facts = PoolFacts {
+        worker_id: "worker-1".to_owned(),
+        pending_limit: NonZeroUsize::new(8).expect("a test pending limit above 0"),
+        exit_not_seen: ExitNotSeen::LeaveToRecovery,
+        placement: CpuPlacement::SharedCpus,
+    };
+    let kinds = [
+        isolated_pool_config(profile, &launch, &facts).map(|config| config.init.child_kind),
+        shared_async_pool_config(profile, &launch, &facts).map(|config| config.init.child_kind),
+        shared_thread_pool_config(profile, &launch, &facts).map(|config| config.init.child_kind),
+    ];
+    let sends: Vec<u64> = kinds
+        .into_iter()
+        .flatten()
+        .map(|kind| match kind {
+            ChildKind::Isolated(child) => child.task_send_pool.get(),
+            ChildKind::SharedAsync(child) => child.task_send_pool.get(),
+            ChildKind::SharedThread(child) => child.task_send_pool.get(),
+        })
+        .collect();
+    let [send] = sends.as_slice() else {
+        panic!("the profile has one kind of child: {sends:?}");
+    };
+    *send
+}
+
+/// `test_parent_pool_listener_heartbeat_and_child_pools`: 8 isolated
+/// children need the worker pool floor, the listener, the runner heartbeat
+/// and the pool of each child: 5 + 1 + 1 + 8 = 15.
+#[test]
+fn the_need_is_the_worker_pool_the_listener_the_heartbeat_and_each_child_pool() {
+    let need = worker_connection_need(&isolated_only(8), &direct());
+
+    assert_eq!(
+        need,
+        WorkerConnectionNeed {
+            parent_pool: PARENT_POOL_CONNECTIONS_FLOOR,
+            session_pool: SessionPoolTerm::SharedWithWorkerPool,
+            listener: LISTENER_CONNECTIONS_PER_WORKER,
+            runner_heartbeat: RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER,
+            child_pools: vec![ModePools {
+                mode: ChildMode::Isolated,
+                children: 8,
+                per_child: 1,
+                task_send_pool: DEFAULT_TASK_SEND_POOL_CONNECTIONS,
+            }],
+        }
+    );
+    assert_eq!(LISTENER_CONNECTIONS_PER_WORKER, 1);
+    assert_eq!(RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER, 1);
+    assert_eq!(need.total(), 15);
+}
+
+/// `test_task_sends_add_the_task_send_pool_of_each_kind`: each kind counts
+/// its own task-send pool in what task code that sends adds; the pool of the
+/// broker config plays no part.
+#[test]
+fn task_sends_add_the_task_send_pool_of_each_kind() {
+    let profile = parsed(json!({
+        "isolated": {"kind": "isolated_children", "count": 2,
+                     "task_send_pool": {"connections": 3}},
+        "shared_async": {"kind": "shared_async_children", "count": 8, "seats": 50,
+                         "task_send_pool": {"connections": 7}},
+        "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 4}
+    }));
+    let mut large_broker_pool = direct();
+    large_broker_pool.pool_size = 30;
+    large_broker_pool.max_overflow = 30;
+
+    let need = worker_connection_need(&profile, &direct());
+
+    let sends: Vec<u32> = need
+        .child_pools
+        .iter()
+        .map(|pools| pools.task_send_pool)
+        .collect();
+    assert_eq!(sends, vec![3, 7, 2]);
+    assert_eq!(need.task_sends(), 2 * 3 + 8 * 7 + 2);
+    assert_eq!(need.with_task_sends(), need.total() + 64);
+    assert_eq!(
+        need.task_sends_note(),
+        task_sends_note(
+            "2 isolated children x isolated.task_send_pool 3 \
+             + 8 shared async children x shared_async.task_send_pool 7 \
+             + 1 shared thread children x shared_thread.task_send_pool 2",
+            64,
+            need.total()
+        )
+    );
+    assert_eq!(worker_connection_need(&profile, &large_broker_pool), need);
+}
+
+/// `test_the_task_send_term_is_the_pool_of_the_broker_of_a_child`: the init
+/// frame gives each child the task-send pool of its kind, and task code in
+/// the child sends through a pool of exactly that size with no overflow
+/// ([`PostgresConfig::with_exact_pool`]), whatever pool the broker config
+/// names. The check counts that same size for the kind.
+#[test]
+fn the_task_send_term_is_the_pool_that_a_child_of_its_kind_opens() {
+    let mut broker = direct();
+    broker.pool_size = 30;
+    broker.max_overflow = 30;
+    let isolated = json!({
+        "isolated": {"kind": "isolated_children", "count": 1,
+                     "task_send_pool": {"connections": 4}}
+    });
+    let shared_async = json!({
+        "shared_async": {"kind": "shared_async_children", "count": 1, "seats": 10,
+                         "task_send_pool": {"connections": 6}}
+    });
+    let shared_thread = json!({
+        "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 10}
+    });
+    for profile in [isolated, shared_async, shared_thread].map(parsed) {
+        let need = worker_connection_need(&profile, &broker);
+        let [pools] = need.child_pools.as_slice() else {
+            panic!("the profile has one kind of child: {need:?}");
+        };
+        let sent = task_send_pool_of_the_init_frame(&profile);
+        let child_pool = NonZeroU32::new(pools.task_send_pool).expect("a task-send pool above 0");
+
+        let child_broker = broker.with_exact_pool(child_pool);
+
+        assert_eq!(sent, u64::from(pools.task_send_pool), "{:?}", pools.mode);
+        assert_eq!(
+            (child_broker.pool_size, child_broker.max_overflow),
+            (pools.task_send_pool, 0),
+            "{:?}",
+            pools.mode
+        );
+    }
+}
+
+/// `test_each_mode_counts_its_own_resolved_pool_max`: each child counts the
+/// resolved pool `max_size` of its mode, the shared pools from their seats,
+/// and the worker pool follows every seat.
+#[test]
+fn each_mode_counts_its_own_resolved_pool_max() {
+    let profile = parsed(json!({
+        "isolated": {"kind": "isolated_children", "count": 2},
+        "shared_async": {"kind": "shared_async_children", "count": 3, "seats": 200},
+        "shared_thread": {"kind": "shared_thread_children", "count": 4, "seats": 64}
+    }));
+    let async_pool = shared_async_pool_connections(seats(200)).get();
+    let thread_pool = shared_thread_pool_connections(seats(64)).get();
+    let send = DEFAULT_TASK_SEND_POOL_CONNECTIONS;
+
+    let need = worker_connection_need(&profile, &direct());
+
+    assert_eq!(
+        need.child_pools,
+        vec![
+            ModePools {
+                mode: ChildMode::Isolated,
+                children: 2,
+                per_child: 1,
+                task_send_pool: send,
+            },
+            ModePools {
+                mode: ChildMode::SharedAsync,
+                children: 3,
+                per_child: async_pool,
+                task_send_pool: send,
+            },
+            ModePools {
+                mode: ChildMode::SharedThread,
+                children: 4,
+                per_child: thread_pool,
+                task_send_pool: send,
+            },
+        ]
+    );
+    assert_eq!(
+        need.child_pools
+            .iter()
+            .map(|pools| pools.children)
+            .sum::<u32>(),
+        9
+    );
+    assert_eq!(
+        need.parent_pool,
+        parent_pool_connections(2 + 3 * 200 + 4 * 64).get()
+    );
+    assert_eq!(
+        need.total(),
+        u64::from(need.parent_pool)
+            + 1
+            + 1
+            + 2
+            + 3 * u64::from(async_pool)
+            + 4 * u64::from(thread_pool)
+    );
+}
+
+/// `test_a_set_pool_size_is_counted_as_set`: a pool `max_size` that the
+/// profile sets is the term of its mode, whatever the seats derive.
+#[test]
+fn a_set_child_pool_size_is_counted_as_set() {
+    let profile = parsed(json!({
+        "isolated": {"kind": "isolated_children", "count": 2,
+                     "pool": {"max_size": {"kind": "pool_size", "connections": 5}}},
+        "shared_async": {"kind": "shared_async_children", "count": 1, "seats": 200,
+                         "pool": {"max_size": {"kind": "pool_size", "connections": 7}}},
+        "shared_thread": {"kind": "shared_thread_children", "count": 3, "seats": 1,
+                          "pool": {"max_size": {"kind": "pool_size", "connections": 1}}}
+    }));
+
+    let need = worker_connection_need(&profile, &direct());
+
+    let per_child: Vec<(ChildMode, u32)> = need
+        .child_pools
+        .iter()
+        .map(|pools| (pools.mode, pools.per_child))
+        .collect();
+    assert_eq!(
+        per_child,
+        vec![
+            (ChildMode::Isolated, 5),
+            (ChildMode::SharedAsync, 7),
+            (ChildMode::SharedThread, 1),
+        ]
+    );
+    let parent_pool = u64::from(parent_pool_connections(2 + 200 + 3).get());
+    assert_eq!(need.total(), parent_pool + 1 + 1 + 2 * 5 + 7 + 3);
+}
+
+/// `test_the_parent_pool_derived_from_the_seats_is_counted`: one shared
+/// async child of 1000 seats derives a worker pool of 20, and the check
+/// counts all of it.
+#[test]
+fn the_worker_pool_derived_from_the_seats_is_counted() {
+    let profile = parsed(json!({
+        "shared_async": {"kind": "shared_async_children", "count": 1, "seats": 1000}
+    }));
+
+    let need = worker_connection_need(&profile, &direct());
+
+    assert_eq!(need.parent_pool, 20);
+    assert_eq!(
+        need.total(),
+        20 + 1 + 1 + u64::from(shared_async_pool_connections(seats(1000)).get())
+    );
+    assert!(
+        need.formula()
+            .starts_with("parent pool max_size 20 + listener 1"),
+        "{}",
+        need.formula()
+    );
+}
+
+/// `test_a_set_parent_pool_is_counted_as_set`: a worker pool that the
+/// profile sets is counted as set, not as the seats derive it.
+#[test]
+fn a_set_worker_pool_is_counted_as_set() {
+    let profile = parsed(json!({
+        "shared_async": {"kind": "shared_async_children", "count": 1, "seats": 1000},
+        "pool": {"max_size": {"kind": "pool_size", "connections": 40}}
+    }));
+
+    let need = worker_connection_need(&profile, &direct());
+
+    assert_eq!(need.parent_pool, 40);
+    assert_eq!(
+        need.total(),
+        40 + 1 + 1 + u64::from(shared_async_pool_connections(seats(1000)).get())
+    );
+}
+
+// --- the live check of every profile -------------------------------------------
+//
+// Python `tests/unit/test_worker_profile_fit.py::TestCheckLiveWorkerConnections`.
+
+/// `test_profiles_that_fit_have_no_error`: the check reads the limit of the
+/// test server, and a profile whose worker fits in the usable slots gives no
+/// error.
+#[tokio::test]
+#[serial]
+async fn profiles_that_fit_have_no_error() {
+    let usable = usable_slots_of_the_test_server().await;
+    let mut config = AppConfig::for_database_url(migrated_database_url().await);
+    config.worker_profiles = BTreeMap::from([("small".to_owned(), isolated_only(1))]);
+    let need = worker_connection_need(&isolated_only(1), &config.broker).total();
+    assert!(
+        need <= u64::from(usable),
+        "the test server has {usable} usable slots, fewer than the {need} of one small worker"
+    );
+    let broker = PostgresBroker::from_pool(migrated_pool().await);
+
+    let errors = check_worker_connections(&config, &broker).await;
+
+    assert!(errors.is_empty(), "{errors:?}");
 }
