@@ -1106,15 +1106,14 @@ impl Worker {
         }
     }
 
-    /// The reaper of this worker: the recovery steps and the cluster gate on
-    /// the runtime pool, partition maintenance on the session pool.
+    /// The reaper of this worker: the cluster gate, the recovery steps, the
+    /// retention cleanup and the fleet check on the worker profile pool,
+    /// partition maintenance on the session-work pool.
     fn spawn_reaper_loop(&self, health: ReaperHealth) -> tokio::task::JoinHandle<()> {
-        // The reaper's gate and pass run on the worker reserve, which the
-        // runtime pool's users cannot exhaust.
+        // The reaper's gate and pass check out as reserved work, which the
+        // batch users of the worker profile pool cannot exhaust.
         spawn_reaper(
             Arc::clone(&self.broker),
-            self.broker.reserve_pool().clone(),
-            self.broker.reserve_maintenance_pool().clone(),
             self.child_specs.clone(),
             self.app_config.recovery.clone(),
             self.app_config.retention.clone(),

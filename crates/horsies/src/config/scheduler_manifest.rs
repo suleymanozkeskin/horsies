@@ -296,8 +296,39 @@ mod tests {
         assert!(!send.retain_rerun_input);
     }
 
+    /// A task registered with no `TaskOptions` (`blocking_task_fn!` without
+    /// `with_task_options`) stores no options, as its plain send does.
     #[test]
     fn a_schedule_without_input_sends_an_empty_object_and_a_task_without_options_stores_none() {
+        let config = config();
+        let mut tasks = TaskRegistry::new();
+        register_task(
+            &mut tasks,
+            &config,
+            "cleanup".to_owned(),
+            RegisteredTask::Blocking {
+                task: Arc::new(EchoTask),
+                meta: TaskMeta::default(),
+            },
+            QueueSource::TaskOptions,
+        )
+        .unwrap();
+        let schedule = ScheduleConfig::new(vec![TaskSchedule::new(
+            "cleanup",
+            "cleanup",
+            every_minute(),
+        )]);
+        let manifest = scheduler_manifest(&config, &schedule, &tasks).unwrap();
+        let send = send_of(&manifest, 0);
+        assert_eq!(send.input_json, "{}");
+        assert_eq!(send.task_options, ScheduleTaskOptions::NoOptions);
+    }
+
+    /// A task with `TaskOptions` that set no retry policy, timeout or grace
+    /// stores Python's options text (`serialize_task_options` writes it for
+    /// every task), the text that its plain send stores.
+    #[test]
+    fn a_task_with_options_that_set_no_value_stores_python_s_options_text() {
         let config = config();
         let schedule = ScheduleConfig::new(vec![TaskSchedule::new(
             "cleanup",
@@ -305,9 +336,13 @@ mod tests {
             every_minute(),
         )]);
         let manifest = scheduler_manifest(&config, &schedule, &registry(&config, None)).unwrap();
-        let send = send_of(&manifest, 0);
-        assert_eq!(send.input_json, "{}");
-        assert_eq!(send.task_options, ScheduleTaskOptions::NoOptions);
+        assert_eq!(
+            send_of(&manifest, 0).task_options,
+            ScheduleTaskOptions::Encoded {
+                json: r#"{"retry_policy":null,"good_until":null,"timeout_ms":null,"execution":"ISOLATED","cancel_grace_ms":null}"#
+                    .to_owned()
+            }
+        );
     }
 
     #[test]
