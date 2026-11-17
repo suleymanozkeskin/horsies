@@ -259,7 +259,12 @@ pub async fn cancel_task_action(
 }
 
 pub async fn pause_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) -> ActionOutcome {
-    match crate::workflow_engine::lifecycle::pause_workflow(broker, workflow_id).await {
+    match Box::pin(crate::workflow_engine::lifecycle::pause_workflow(
+        broker,
+        workflow_id,
+    ))
+    .await
+    {
         Ok(true) => succeeded("paused", None, None),
         Ok(false) => match current_status(broker, workflow_id).await {
             Ok(status) => conflict(ActionConflictCode::StateConflict, Some(status.to_string())),
@@ -317,8 +322,12 @@ pub async fn resume_workflow_action(
     workflow_id: Uuid,
     children: &ResumeChildren,
 ) -> ActionOutcome {
-    match crate::workflow_engine::lifecycle::resume_with(broker, workflow_id, children.build())
-        .await
+    match Box::pin(crate::workflow_engine::lifecycle::resume_with(
+        broker,
+        workflow_id,
+        children.build(),
+    ))
+    .await
     {
         Ok(true) => succeeded("resumed", None, None),
         Ok(false) => match current_status(broker, workflow_id).await {
@@ -333,7 +342,12 @@ pub async fn resume_workflow_action(
 }
 
 pub async fn cancel_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) -> ActionOutcome {
-    match crate::workflow_engine::lifecycle::cancel_workflow(broker, workflow_id).await {
+    match Box::pin(crate::workflow_engine::lifecycle::cancel_workflow(
+        broker,
+        workflow_id,
+    ))
+    .await
+    {
         Ok(_) => match current_status(broker, workflow_id).await {
             Ok(WorkflowStatus::Cancelled) => succeeded("cancelled", None, None),
             Ok(status) => conflict(ActionConflictCode::StateConflict, Some(status.to_string())),

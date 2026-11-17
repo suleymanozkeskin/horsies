@@ -206,6 +206,74 @@ SELECT fixture_check(
         = 'INDEX_REPAIRED'
 );
 
+-- The rename guard of the repair. The repair read the damaged index under its canonical name and holds the leaf; a
+-- holder renames that index away and gives the name to an index of another table, uncommitted. The repair's rename
+-- waits on the index that the holder locked; after the holder commits, the name names the other table's index, so
+-- the rename takes that index. The guard refuses it before the drop: the call raises, and the other table's index
+-- keeps its name.
+SELECT * FROM dblink('a', $q$ SELECT fixture_create('standard_7d', 8) $q$) AS t(outcome text);
+SELECT dblink_exec('a', $q$
+    DO $do$ BEGIN
+        EXECUTE format('DROP INDEX %I', horsies_history_leaf_name('standard_7d', fixture_day(8)) || '_enqueued_idx');
+        EXECUTE format('CREATE INDEX %I ON %I (task_id)',
+                       horsies_history_leaf_name('standard_7d', fixture_day(8)) || '_enqueued_idx',
+                       horsies_history_leaf_name('standard_7d', fixture_day(8)));
+        CREATE TABLE fixture_foreign_index_target (x integer);
+    END $do$
+$q$);
+SELECT dblink_exec('holder', 'BEGIN');
+SELECT dblink_exec('holder', $q$
+    DO $do$ BEGIN
+        EXECUTE format('ALTER INDEX %I RENAME TO fixture_moved_enqueued_idx',
+                       horsies_history_leaf_name('standard_7d', fixture_day(8)) || '_enqueued_idx');
+        EXECUTE format('CREATE INDEX %I ON fixture_foreign_index_target (x)',
+                       horsies_history_leaf_name('standard_7d', fixture_day(8)) || '_enqueued_idx');
+    END $do$
+$q$);
+SELECT dblink_send_query('a', $q$
+    SELECT fixture_sqlstate(format('SELECT fixture_create(%L, 8)', 'standard_7d'))
+$q$);
+SELECT fixture_check(
+    'repair rename guard: the repair waits on the index that the holder renamed',
+    (SELECT waits FROM dblink('reader', format('SELECT fixture_wait_for_lock_wait(%s)',
+        current_setting('fixture.pid_a'))) AS t(waits boolean))
+    AND current_setting('fixture.pid_holder')::integer = ANY(pg_blocking_pids(current_setting('fixture.pid_a')::integer))
+);
+SELECT dblink_exec('holder', 'COMMIT');
+SELECT fixture_check(
+    'repair rename guard: the rename took the index of another table, and the guard raised',
+    (SELECT state FROM dblink_get_result('a') AS t(state text)) = 'P0001'
+);
+SELECT * FROM dblink_get_result('a') AS t(state text);
+SELECT fixture_check(
+    'repair rename guard: the index of the other table keeps its name, and the leaf keeps the moved index',
+    (SELECT kept FROM dblink('reader', $q$
+        SELECT EXISTS (
+                   SELECT 1 FROM pg_index AS x
+                   WHERE x.indexrelid = to_regclass(
+                             horsies_history_leaf_name('standard_7d', fixture_day(8)) || '_enqueued_idx')
+                     AND x.indrelid = 'fixture_foreign_index_target'::regclass
+               )
+           AND EXISTS (
+                   SELECT 1 FROM pg_index AS x
+                   WHERE x.indexrelid = to_regclass('fixture_moved_enqueued_idx')
+                     AND x.indrelid = to_regclass(horsies_history_leaf_name('standard_7d', fixture_day(8)))
+               )
+           AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname LIKE 'horsies\_index\_repair\_%')
+    $q$) AS t(kept boolean))
+);
+SELECT dblink_exec('a', $q$
+    DO $do$ BEGIN
+        DROP TABLE fixture_foreign_index_target;
+        DROP INDEX fixture_moved_enqueued_idx;
+    END $do$
+$q$);
+SELECT fixture_check(
+    'repair rename guard: once the name is free, INDEX_REPAIRED',
+    (SELECT outcome FROM dblink('a', $q$ SELECT fixture_create('standard_7d', 8) $q$) AS t(outcome text))
+        = 'INDEX_REPAIRED'
+);
+
 -- Two creators of one leaf: the second is BUSY while the first is open, then ALREADY_CONFORMANT.
 SELECT dblink_exec('a', 'BEGIN');
 SELECT fixture_check(

@@ -33,7 +33,7 @@ use uuid::Uuid;
 use super::dependency::OutputlessResults;
 use super::node::NodeKey;
 use super::registry::WorkflowRegistry;
-use crate::handle::limit_duration;
+use crate::handle::{limit_duration, read_stored_result};
 use crate::task::body::value_free_decode_text;
 use crate::{TaskError, TaskOutcome, UnknownUserCode, UserErrorCode};
 
@@ -69,6 +69,11 @@ pub enum WorkflowReadError {
     /// Nothing was read.
     #[error("{message}")]
     WaitInsideTask { message: String },
+    /// `ASYNC_CONTEXT`: a blocking read on a thread that runs a tokio
+    /// runtime; its wait would stall the runtime. Nothing was read; the
+    /// async form reads.
+    #[error("{message}")]
+    AsyncContext { message: String },
     /// `BROKER_ERROR`: the database or the connection failed, with the
     /// handle code; `retryable` is the classification of the cause.
     #[error("the read failed ({code}): {message}")]
@@ -90,6 +95,7 @@ impl WorkflowReadError {
                 OperationalErrorCode::ResultDeserializationError.into()
             }
             Self::WaitInsideTask { .. } => RetrievalCode::WaitInsideTask.into(),
+            Self::AsyncContext { .. } => RetrievalCode::AsyncContext.into(),
             Self::Database { .. } => OperationalErrorCode::BrokerError.into(),
         }
     }
@@ -103,11 +109,13 @@ impl WorkflowReadError {
                 workflow_id: error.workflow_id,
                 cause: error.message,
             },
+            HandleErrorCode::AsyncContext => Self::AsyncContext {
+                message: error.message,
+            },
             code @ (HandleErrorCode::DbOperationFailed
             | HandleErrorCode::ResumeRecoveryFailed
             | HandleErrorCode::LoopRunnerFailed
-            | HandleErrorCode::EventLoopLimit
-            | HandleErrorCode::AsyncContext) => Self::Database {
+            | HandleErrorCode::EventLoopLimit) => Self::Database {
                 code,
                 message: error.message,
                 retryable: error.retryable,
@@ -486,7 +494,8 @@ where
     }
 }
 
-/// The outcome of one stored result envelope, read with `V` and `E`. Pure.
+/// The outcome of one stored result envelope, read with `V` and `E`
+/// ([`read_stored_result`]: the value decodes from its own text). Pure.
 fn envelope_outcome<V, E>(
     workflow_id: Uuid,
     text: &str,
@@ -495,10 +504,10 @@ where
     V: DeserializeOwned,
     E: UserErrorCode,
 {
-    let stored = from_json_str::<TaskResult<V>>(text).map_err(|error| {
+    let stored = read_stored_result::<V>(text).map_err(|refused| {
         WorkflowReadError::StoredResultUnreadable {
             workflow_id,
-            cause: error.to_string(),
+            cause: refused.cause,
         }
     })?;
     match stored {

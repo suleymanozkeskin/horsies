@@ -74,8 +74,6 @@ async fn run_maintenance_pass(pool: &PgPool, retention: &RetentionConfig) -> Rea
     let mut orphan_state = OrphanSweepState::default();
     run_reaper_pass(
         &crate::broker::PostgresBroker::from_pool(pool.clone()),
-        pool,
-        pool,
         &crate::workflow_engine::child_spec::ChildSpecs::Registry(std::sync::Arc::new(
             WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         )),
@@ -259,7 +257,11 @@ async fn expired_worker_states_go_and_recent_ones_stay() {
     retention.worker_state_retention_hours = Some(RETENTION_HOURS);
     retention.terminal_record_retention_hours = None;
 
-    run_retention_cleanup(&database.pool, &retention).await;
+    run_retention_cleanup(
+        &crate::broker::PostgresBroker::from_pool(database.pool.clone()),
+        &retention,
+    )
+    .await;
 
     let left: Vec<String> =
         sqlx::query_scalar("SELECT worker_id FROM horsies_worker_states ORDER BY worker_id")
@@ -336,7 +338,11 @@ async fn expired_terminal_workflows_go_and_running_or_recent_ones_stay() {
     retention.worker_state_retention_hours = None;
     retention.terminal_record_retention_hours = Some(RETENTION_HOURS);
 
-    run_retention_cleanup(&database.pool, &retention).await;
+    run_retention_cleanup(
+        &crate::broker::PostgresBroker::from_pool(database.pool.clone()),
+        &retention,
+    )
+    .await;
 
     let mut workflows: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM horsies_workflows")
         .fetch_all(&database.pool)

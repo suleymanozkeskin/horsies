@@ -289,6 +289,9 @@ async fn handle_worker_ping(
 enum ClaimWake {
     Cancelled,
     CapacityReleased,
+    /// A child became ready to take a task after a boot: a recycled child,
+    /// a replacement after a loss, or a slot back from down (#1148).
+    ChildReady,
     DatabaseNotification,
     /// The listener reconnected: a notification may have been lost, so the
     /// loop claims at once.
@@ -357,15 +360,20 @@ impl ClaimWakes {
     }
 }
 
+/// The next wake of the claim loop: a stop, the end of an outcome write
+/// (`capacity_released`), a child ready after a boot (`board`), a queue
+/// notification, or the poll interval.
 async fn wait_for_claim_wake(
     cancel: &CancellationToken,
     capacity_released: &Notify,
+    board: &PoolBoard,
     claim_wakes: &ClaimWakes,
     poll_interval: Duration,
 ) -> ClaimWake {
     tokio::select! {
         _ = cancel.cancelled() => ClaimWake::Cancelled,
         _ = capacity_released.notified() => ClaimWake::CapacityReleased,
+        () = board.child_ready() => ClaimWake::ChildReady,
         event = claim_wakes.next() => ClaimWake::from_listener(event),
         _ = tokio::time::sleep(poll_interval) => ClaimWake::PollElapsed,
     }
@@ -1106,15 +1114,14 @@ impl Worker {
         }
     }
 
-    /// The reaper of this worker: the recovery steps and the cluster gate on
-    /// the runtime pool, partition maintenance on the session pool.
+    /// The reaper of this worker: the cluster gate, the recovery steps, the
+    /// retention cleanup and the fleet check on the worker profile pool,
+    /// partition maintenance on the session-work pool.
     fn spawn_reaper_loop(&self, health: ReaperHealth) -> tokio::task::JoinHandle<()> {
-        // The reaper's gate and pass run on the worker reserve, which the
-        // runtime pool's users cannot exhaust.
+        // The reaper's gate and pass check out as reserved work, which the
+        // batch users of the worker profile pool cannot exhaust.
         spawn_reaper(
             Arc::clone(&self.broker),
-            self.broker.reserve_pool().clone(),
-            self.broker.reserve_maintenance_pool().clone(),
             self.child_specs.clone(),
             self.app_config.recovery.clone(),
             self.app_config.retention.clone(),
@@ -1434,6 +1441,7 @@ impl Worker {
             match wait_for_claim_wake(
                 &self.cancel,
                 &self.capacity_released,
+                children.board(),
                 claim_wakes,
                 poll_interval,
             )
@@ -1449,7 +1457,10 @@ impl Worker {
                         .drain_pending(self.worker_config.coalesce_notifies)
                         .await;
                 }
-                ClaimWake::ListenerGap | ClaimWake::CapacityReleased | ClaimWake::PollElapsed => {}
+                ClaimWake::ListenerGap
+                | ClaimWake::CapacityReleased
+                | ClaimWake::ChildReady
+                | ClaimWake::PollElapsed => {}
             }
         }
     }
@@ -1917,6 +1928,16 @@ mod tests {
         }
     }
 
+    /// A board of one isolated slot whose child never reports ready: its
+    /// child-ready wake fires only when a test notes one.
+    fn quiet_board() -> PoolBoard {
+        PoolBoard::new(crate::worker::executor::slots::ChildLayout {
+            isolated: 1,
+            shared_async: 0,
+            shared_thread: 0,
+        })
+    }
+
     /// A worker on `broker` of one isolated child that boots, then exits at
     /// the next frame it reads.
     fn worker_of_one_idle_child(
@@ -2052,6 +2073,7 @@ mod tests {
             wait_for_claim_wake(
                 &worker.cancel,
                 &worker.capacity_released,
+                &quiet_board(),
                 &claim_wakes,
                 Duration::from_secs(60),
             ),
@@ -2090,7 +2112,14 @@ mod tests {
         let released = Arc::new(Notify::new());
         let cancel = CancellationToken::new();
         let claim_wakes = no_claim_wakes();
-        let wait = wait_for_claim_wake(&cancel, &released, &claim_wakes, Duration::from_secs(60));
+        let board = quiet_board();
+        let wait = wait_for_claim_wake(
+            &cancel,
+            &released,
+            &board,
+            &claim_wakes,
+            Duration::from_secs(60),
+        );
         tokio::pin!(wait);
         assert!(wait.as_mut().now_or_never().is_none());
         released.notify_one();
@@ -2109,18 +2138,84 @@ mod tests {
         released.notify_one();
         let cancel = CancellationToken::new();
         let claim_wakes = no_claim_wakes();
+        let board = quiet_board();
         let wake = tokio::time::timeout(
             Duration::from_secs(1),
-            wait_for_claim_wake(&cancel, &released, &claim_wakes, Duration::from_secs(60)),
+            wait_for_claim_wake(
+                &cancel,
+                &released,
+                &board,
+                &claim_wakes,
+                Duration::from_secs(60),
+            ),
         )
         .await
         .expect("release before waiting must not lose the wake");
         assert_eq!(wake, ClaimWake::CapacityReleased);
         assert!(
-            wait_for_claim_wake(&cancel, &released, &claim_wakes, Duration::from_secs(60),)
-                .now_or_never()
-                .is_none(),
+            wait_for_claim_wake(
+                &cancel,
+                &released,
+                &board,
+                &claim_wakes,
+                Duration::from_secs(60),
+            )
+            .now_or_never()
+            .is_none(),
             "an idle worker must not keep waking"
+        );
+    }
+
+    /// #1148: a child ready after a boot wakes the claim loop before its
+    /// poll deadline, once. Ready children noted while the loop ran a pass
+    /// wake the next wait once, not once each.
+    #[tokio::test]
+    async fn a_child_ready_after_a_boot_wakes_the_claim_wait_once() {
+        let released = Notify::new();
+        let cancel = CancellationToken::new();
+        let claim_wakes = no_claim_wakes();
+        let board = quiet_board();
+        let wait = wait_for_claim_wake(
+            &cancel,
+            &released,
+            &board,
+            &claim_wakes,
+            Duration::from_secs(60),
+        );
+        tokio::pin!(wait);
+        assert!(wait.as_mut().now_or_never().is_none());
+        board.note_child_ready();
+        let wake = tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .expect("a ready child must wake the claim loop before polling");
+        assert_eq!(wake, ClaimWake::ChildReady);
+
+        board.note_child_ready();
+        board.note_child_ready();
+        let wake = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_claim_wake(
+                &cancel,
+                &released,
+                &board,
+                &claim_wakes,
+                Duration::from_secs(60),
+            ),
+        )
+        .await
+        .expect("a ready child noted before the wait must not lose the wake");
+        assert_eq!(wake, ClaimWake::ChildReady);
+        assert!(
+            wait_for_claim_wake(
+                &cancel,
+                &released,
+                &board,
+                &claim_wakes,
+                Duration::from_secs(60),
+            )
+            .now_or_never()
+            .is_none(),
+            "two ready children noted during one pass wake one wait"
         );
     }
 
