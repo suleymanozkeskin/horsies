@@ -1,7 +1,6 @@
 //! Transport-free decisions for monitoring actions.
 
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::PostgresBroker;
@@ -154,8 +153,12 @@ fn status_failed(workflow_id: Uuid, error: WorkflowError) -> ActionOutcome {
     }
 }
 
-async fn current_status(pool: &PgPool, workflow_id: Uuid) -> Result<WorkflowStatus, ActionOutcome> {
-    crate::workflow_engine::query::get_workflow_status(pool, workflow_id)
+/// The current status of a workflow, read on the main core pool of `broker`.
+async fn current_status(
+    broker: &PostgresBroker,
+    workflow_id: Uuid,
+) -> Result<WorkflowStatus, ActionOutcome> {
+    crate::workflow_engine::query::get_workflow_status(broker, workflow_id)
         .await
         .map_err(|error| status_failed(workflow_id, error))
 }
@@ -178,7 +181,7 @@ pub async fn cancel_task_action(
 pub async fn pause_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) -> ActionOutcome {
     match crate::workflow_engine::lifecycle::pause_workflow(broker, workflow_id).await {
         Ok(true) => succeeded("paused", None, None),
-        Ok(false) => match current_status(broker.pool(), workflow_id).await {
+        Ok(false) => match current_status(broker, workflow_id).await {
             Ok(status) => conflict(ActionConflictCode::StateConflict, Some(status.to_string())),
             Err(outcome) => outcome,
         },
@@ -223,7 +226,7 @@ pub async fn resume_workflow_action(
     .await
     {
         Ok(true) => succeeded("resumed", None, None),
-        Ok(false) => match current_status(broker.pool(), workflow_id).await {
+        Ok(false) => match current_status(broker, workflow_id).await {
             Ok(status) => conflict(ActionConflictCode::StateConflict, Some(status.to_string())),
             Err(outcome) => outcome,
         },
@@ -233,7 +236,7 @@ pub async fn resume_workflow_action(
 
 pub async fn cancel_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) -> ActionOutcome {
     match crate::workflow_engine::lifecycle::cancel_workflow(broker, workflow_id).await {
-        Ok(_) => match current_status(broker.pool(), workflow_id).await {
+        Ok(_) => match current_status(broker, workflow_id).await {
             Ok(WorkflowStatus::Cancelled) => succeeded("cancelled", None, None),
             Ok(status) => conflict(ActionConflictCode::StateConflict, Some(status.to_string())),
             Err(outcome) => outcome,
