@@ -40,7 +40,7 @@ def stored_node_status(
 ) -> WorkflowTaskStatus:
     """Return the node status that the database row stores.
 
-    The CHECK ``horsies_workflow_tasks_status_check`` allows only the
+    The CHECK ``horsies_workflow_tasks_status_known`` allows only the
     ``WorkflowTaskStatus`` values, so another value means the CHECK is
     missing or broken. Raises ``AssertionError`` that names the workflow,
     the node and the stored value.
@@ -50,7 +50,7 @@ def stored_node_status(
         raise AssertionError(
             f'workflow {workflow_id} node {node_id} stores status {stored!r}, '
             'which is not a WorkflowTaskStatus member; the CHECK '
-            'horsies_workflow_tasks_status_check must forbid it'
+            'horsies_workflow_tasks_status_known must forbid it'
         )
     return status
 

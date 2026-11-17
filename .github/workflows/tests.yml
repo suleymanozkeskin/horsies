@@ -164,6 +164,57 @@ jobs:
           DB_PASSWORD: testpassword
         run: uv run --no-sync pytest tests/dualrun/ -m integration -v --tb=short
 
+  extension:
+    needs: [scope, python-wheel]
+    if: needs.scope.outputs.run_python == 'true'
+    # The tests of horsies._core itself, each case in a fresh interpreter
+    # (tests/extension/). Most cases connect: the session database of
+    # tests/session_database.py, with the schema that
+    # CoreHandle.install_schema installs. The uvloop cases need uvloop from
+    # the dev group.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: horsies
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Download the dev wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: horsies-dev-wheel
+          path: dist
+
+      # The project itself comes from the wheel; every later `uv run` has
+      # --no-sync, so uv does not replace it with a build of the source.
+      - name: Install dependencies and the dev wheel
+        run: |
+          uv sync --dev --no-install-project
+          uv pip install --no-deps dist/horsies-*.whl
+
+      - name: Run the extension module tests
+        env:
+          DB_PASSWORD: testpassword
+        run: uv run --no-sync pytest tests/extension/ -v --tb=short
+
   newest-pydantic:
     needs: [scope, python-wheel]
     if: needs.scope.outputs.run_python == 'true'

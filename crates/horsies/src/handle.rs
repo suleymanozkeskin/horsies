@@ -693,9 +693,11 @@ mod tests {
             task_id: task(),
             task_name: "charge".to_owned(),
             status: TaskStatus::Completed,
-            raw_result: StoredEnvelopeText::parse(text.to_owned())
-                .unwrap()
-                .expect("an envelope is an object"),
+            raw_result: Some(
+                StoredEnvelopeText::parse(text.to_owned())
+                    .unwrap()
+                    .expect("an envelope is an object"),
+            ),
         }
     }
 

@@ -2604,6 +2604,20 @@ mod tests {
     /// A worker of one isolated child on a broker whose pool reaches no
     /// server: any database work fails, so a test sees whether some ran.
     fn worker_of_one_child(command: crate::worker::executor::supervisor::ChildCommand) -> Worker {
+        worker_of_profile(
+            serde_json::json!({
+                "isolated": {"kind": "isolated_children", "count": 1}
+            }),
+            command,
+        )
+    }
+
+    /// A worker of the profile `profile` whose children run `command`, on a
+    /// broker that reaches no server.
+    fn worker_of_profile(
+        profile: serde_json::Value,
+        command: crate::worker::executor::supervisor::ChildCommand,
+    ) -> Worker {
         use crate::worker::executor::protocol::{
             ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
         };
@@ -2620,10 +2634,7 @@ mod tests {
             WorkerConfig::default(),
             SelectedProfile {
                 name: "default".to_owned(),
-                profile: serde_json::from_value(serde_json::json!({
-                    "isolated": {"kind": "isolated_children", "count": 1}
-                }))
-                .expect("a valid test profile"),
+                profile: serde_json::from_value(profile).expect("a valid test profile"),
             },
             ChildLaunch {
                 command,
@@ -2838,6 +2849,163 @@ mod tests {
             assert!(cancel.is_cancelled());
             assert_eq!(stops.take(), Some(expected));
         }
+    }
+
+    /// Python `test_worker_helpers.py::TestSlotFailureLoop::test_a_task_loop_failure_at_boot_names_its_cause`:
+    /// replacement children that cannot create their task loop stop the
+    /// worker with an error that names the cause and its detail.
+    #[tokio::test]
+    async fn a_task_loop_failure_at_boot_names_its_cause() {
+        use crate::worker::executor::slots::ChildLayout;
+        use crate::worker::executor::supervisor::{BootFailure, BootFailureCause};
+
+        let board = Arc::new(PoolBoard::new(ChildLayout {
+            isolated: 1,
+            shared_async: 0,
+            shared_thread: 0,
+        }));
+        let stops = ChildrenStopCell::default();
+        let cancel = CancellationToken::new();
+        let watch = tokio::spawn(watch_pool_failure(
+            Arc::clone(&board),
+            stops.clone(),
+            cancel.clone(),
+        ));
+        board.fail(PoolFailure::BootAttemptsExhausted {
+            attempts: 3,
+            last: BootFailure::new(
+                BootFailureCause::TaskLoopCreateFailed,
+                "OSError: [Errno 24] Too many open files",
+            ),
+        });
+        tokio::time::timeout(Duration::from_secs(5), watch)
+            .await
+            .expect("the watch ends at the failure")
+            .expect("the watch joins");
+
+        assert!(cancel.is_cancelled());
+        let stopped = Worker::stop_result(stopped_services(), stops, None)
+            .expect_err("a pool that cannot start a child stops the worker with an error");
+        assert!(matches!(stopped, WorkerError::PoolFailed(_)), "{stopped:?}");
+        assert!(!stopped.is_retryable());
+        assert!(
+            stopped.to_string().contains(
+                "the child could not create the event loop for async tasks: \
+                 OSError: [Errno 24] Too many open files"
+            ),
+            "{stopped}"
+        );
+    }
+
+    /// The start of a worker of one isolated child, or two, whose children
+    /// report `readings` as their RSS by boot order, with the memory limit
+    /// `limit_mb` (`None`: no limit) on the isolated children. A start that
+    /// passes is stopped before this returns.
+    async fn start_with_baselines(
+        limit_mb: Option<u32>,
+        readings: &[crate::worker::executor::protocol::RssReading],
+    ) -> Result<(), WorkerError> {
+        let dir = std::env::temp_dir().join(format!(
+            "horsies-baseline-start-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("create the test folder");
+        let above = match limit_mb {
+            Some(mb) => serde_json::json!({"kind": "memory_limit", "mb": mb}),
+            None => serde_json::json!({"kind": "no_memory_limit"}),
+        };
+        let worker = worker_of_profile(
+            serde_json::json!({
+                "isolated": {"kind": "isolated_children", "count": readings.len(),
+                             "recycle": {"above": above}}
+            }),
+            crate::worker::executor::slots::scripted::idle_children_reporting_rss(&dir, readings),
+        );
+        let started = tokio::time::timeout(Duration::from_secs(60), worker.start_pools())
+            .await
+            .expect("the start ends within the bound");
+        let ended = match started {
+            Ok(Some(running)) => {
+                running.stop_after_failed_start().await;
+                Ok(())
+            }
+            Ok(None) => panic!("the start ended with no stop request"),
+            Err(error) => Err(error),
+        };
+        std::fs::remove_dir_all(&dir).expect("remove the test folder");
+        ended
+    }
+
+    /// An RSS reading of `mb` MiB.
+    fn rss_mb(mb: f64) -> crate::worker::executor::protocol::RssReading {
+        crate::worker::executor::protocol::RssReading::Mb(
+            crate::worker::executor::protocol::RssMb::new(mb).expect("a finite RSS"),
+        )
+    }
+
+    /// Python `test_worker_helpers.py::TestMemoryBaselineGuard::test_no_threshold_skips_the_guard`,
+    /// the worker side: with no memory limit in the profile, a large
+    /// baseline starts.
+    #[tokio::test]
+    async fn the_start_with_no_memory_limit_skips_the_baseline_guard() {
+        let started = start_with_baselines(None, &[rss_mb(9_999.0)]).await;
+        assert!(started.is_ok(), "{started:?}");
+    }
+
+    /// Python `TestMemoryBaselineGuard::test_baseline_at_the_threshold_is_refused`,
+    /// the worker side: the largest baseline of the first children, at the
+    /// limit of the profile, refuses the start.
+    #[tokio::test]
+    async fn the_start_refuses_a_baseline_at_the_memory_limit() {
+        let started = start_with_baselines(Some(100), &[rss_mb(50.0), rss_mb(100.0)]).await;
+        match started {
+            Err(WorkerError::ChildrenStartFailed(ChildrenStartFailed::BaselineOverLimit(over))) => {
+                assert_eq!(
+                    over.class,
+                    crate::worker::executor::slots::ExecutionClass::Isolated
+                );
+                assert_eq!(over.baseline_mb, 100.0);
+                assert!(over.to_string().contains("100MB"), "{over}");
+            }
+            other => panic!("expected the baseline refusal, got {other:?}"),
+        }
+    }
+
+    /// Python `TestMemoryBaselineGuard::test_baseline_below_the_threshold_passes`,
+    /// the worker side.
+    #[tokio::test]
+    async fn the_start_takes_a_baseline_below_the_memory_limit() {
+        let started = start_with_baselines(Some(100), &[rss_mb(10.0)]).await;
+        assert!(started.is_ok(), "{started:?}");
+    }
+
+    /// Python `TestMemoryBaselineGuard::test_unreadable_rss_warns_and_passes`,
+    /// the worker side: a baseline that the child could not read skips the
+    /// guard with a warning, and the start passes.
+    #[tokio::test]
+    async fn the_start_with_an_unreadable_baseline_warns_and_passes() {
+        let capture = crate::test_support::LogCapture::new();
+        let guard = capture.set_default();
+        let started = start_with_baselines(
+            Some(100),
+            &[crate::worker::executor::protocol::RssReading::Unreadable],
+        )
+        .await;
+        drop(guard);
+
+        assert!(started.is_ok(), "{started:?}");
+        let warnings: Vec<String> = capture
+            .events()
+            .into_iter()
+            .filter(|event| event.level == tracing::Level::WARN)
+            .map(|event| event.message)
+            .collect();
+        assert!(
+            warnings
+                .iter()
+                .any(|message| message.contains("unreadable")),
+            "{warnings:?}"
+        );
     }
 
     fn stopped_services() -> ServicesStopped {
@@ -4946,6 +5114,108 @@ mod tests {
                 "lease {lease}s is not the default {default_seconds}s"
             );
         }
+        database.drop().await;
+    }
+
+    /// Python `test_worker_helpers.py::TestRunForever::test_retryable_error_backoff_and_retry`:
+    /// a claim pass that fails with an error that can clear is logged, the
+    /// loop backs off, and it claims again. The failure comes from the
+    /// database: a trigger refuses the first claim of a PENDING row with
+    /// SQLSTATE 40001 (`serialization_failure`, class 40: may clear); a
+    /// sequence counts the claims, since `nextval` is not rolled back with
+    /// the refused statement.
+    #[tokio::test]
+    #[serial]
+    async fn a_claim_error_that_can_clear_backs_off_and_the_loop_claims_again() {
+        let database = FreshDatabase::create().await;
+        database.record_family("RUST").await;
+        sqlx::raw_sql(
+            "CREATE SEQUENCE test_claim_tries;
+             CREATE FUNCTION test_refuse_first_claim() RETURNS trigger LANGUAGE plpgsql AS $body$
+             BEGIN
+                 IF nextval('test_claim_tries') = 1 THEN
+                     RAISE EXCEPTION 'a serialization failure for the test'
+                         USING ERRCODE = 'serialization_failure';
+                 END IF;
+                 RETURN NEW;
+             END
+             $body$;
+             CREATE TRIGGER test_refuse_first_claim BEFORE UPDATE ON horsies_tasks
+                 FOR EACH ROW WHEN (OLD.status = 'PENDING' AND NEW.status = 'CLAIMED')
+                 EXECUTE FUNCTION test_refuse_first_claim();",
+        )
+        .execute(&database.pool)
+        .await
+        .expect("install the claim refusal");
+        let worker_url = database_url_for(&database.config_url, database.database.name());
+        let broker =
+            PostgresBroker::connect_worker_with(&test_app_config(worker_url.clone()).broker)
+                .await
+                .expect("connect the broker of a worker");
+        let worker = worker_of_idle_children(
+            Arc::new(broker),
+            test_app_config(worker_url),
+            WorkerConfig::default(),
+            1,
+        );
+        let pending = insert_pending_task(&database.pool).await;
+        let capture = crate::test_support::LogCapture::new();
+        let guard = capture.set_default();
+        let cancel = worker.cancel_token();
+        let run = tokio::spawn(async move { worker.run().await });
+
+        let claim_tries = || {
+            let pool = database.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM test_claim_tries",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("read the claim count")
+            }
+        };
+        let tries = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let tries = claim_tries().await;
+                if tries >= 2 {
+                    break tries;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the loop claims again after the refused pass");
+        cancel.cancel();
+        let _stopped = tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("the worker stops after cancel")
+            .expect("run task join");
+        drop(guard);
+
+        let retry_lines: Vec<String> = capture
+            .events()
+            .into_iter()
+            .filter(|event| {
+                event.level == tracing::Level::WARN
+                    && event.message.starts_with("Worker loop error:")
+                    && event.message.contains("Retrying in")
+            })
+            .map(|event| event.message)
+            .collect();
+        assert_eq!(retry_lines.len(), 1, "{retry_lines:?}");
+        assert!(tries >= 2, "the claim was tried again: {tries}");
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+                .bind(pending)
+                .fetch_optional(&database.pool)
+                .await
+                .expect("read the task");
+        assert_ne!(
+            status.as_deref(),
+            Some("PENDING"),
+            "the claim after the backoff took the task"
+        );
         database.drop().await;
     }
 
