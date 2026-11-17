@@ -776,22 +776,32 @@ mod tests {
         assert_eq!(refused, ChildLaunchRefused::ArgumentNotUtf8 { index: 0 });
     }
 
+    /// The change of one case of the bound test below.
+    type ConfigChange = Box<dyn Fn(&mut AppConfig)>;
+
     /// Each value outside its manifest bound is refused with its path and
-    /// the bound, and the text never holds the value.
+    /// the bound of its field. The text is the path and the bound only, so
+    /// it never holds the value. A case whose value has a text of its own
+    /// also checks that text absent; `0` and a duration have none, as a
+    /// bound can hold the digit `0` (`claim_lease_ms` has the bound `1 to
+    /// 4294967295`, which is the value of `prefetch_buffer`).
     #[test]
     fn a_value_outside_its_manifest_bound_is_refused_with_its_path() {
-        let cases: Vec<(Box<dyn Fn(&mut AppConfig)>, &str)> = vec![
+        let cases: Vec<(ConfigChange, &str, Option<&str>)> = vec![
             (
                 Box::new(|config: &mut AppConfig| config.prefetch_buffer = u32::MAX),
                 "prefetch_buffer",
+                Some("4294967295"),
             ),
             (
                 Box::new(|config: &mut AppConfig| config.claim_lease_ms = Some(0)),
                 "claim_lease_ms",
+                None,
             ),
             (
                 Box::new(|config: &mut AppConfig| config.cluster_wide_cap = Some(u32::MAX)),
                 "cluster_wide_cap",
+                Some("4294967295"),
             ),
             (
                 Box::new(|config: &mut AppConfig| {
@@ -803,43 +813,56 @@ mod tests {
                     }]);
                 }),
                 "custom_queues[0].priority",
+                Some("4000000"),
             ),
             (
                 Box::new(|config: &mut AppConfig| {
                     config.recovery.check_interval_ms = 4_000_000_000_000
                 }),
                 "recovery.check_interval_ms",
+                Some("4000000000000"),
             ),
             (
                 Box::new(|config: &mut AppConfig| {
                     config.retention.retention_delete_batch_size = 4_000_000
                 }),
                 "retention.retention_delete_batch_size",
+                Some("4000000"),
             ),
             (
                 Box::new(|config: &mut AppConfig| {
                     config.retention.retention_periods = vec![chrono::Duration::hours(36)];
                 }),
                 "retention.retention_periods[0]",
+                None,
             ),
             (
                 Box::new(|config: &mut AppConfig| {
                     config.resilience.notify_poll_interval_ms = 4_000_000_000_000
                 }),
                 "resilience.notify_poll_interval_ms",
+                Some("4000000000000"),
             ),
             (
                 Box::new(|config: &mut AppConfig| config.payload.warn_bytes = Some(0)),
                 "payload.warn_bytes",
+                None,
             ),
         ];
-        for (change, path) in cases {
+        for (change, path, value_text) in cases {
             let mut config = config();
             change(&mut config);
             let refused = build(&config).unwrap_err();
             assert_eq!(refused.path, path);
             let text = refused.to_string();
-            for value in ["4294967295", "4000000000000", "4000000"] {
+            assert_eq!(
+                text,
+                format!(
+                    "{path}: outside {} to {}, the bound of its worker manifest field",
+                    refused.min, refused.max
+                )
+            );
+            if let Some(value) = value_text {
                 assert!(!text.contains(value), "{text}");
             }
         }
