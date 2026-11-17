@@ -86,6 +86,10 @@ class CoreHandle:
         """Ping the database."""
     def ping_database_async(self) -> asyncio.Future[DatabasePingRecord | BrokerFailure]:
         """The awaitable form of the method above."""
+    def check_connectivity(self) -> ConnectivityPassed | ConnectivityRefused:
+        """The connectivity step of the live check: SELECT 1 on the main URL, then on the session URL
+        when it differs, then the LISTEN probe in PgBouncer transaction mode. Reads only.
+        """
     def install_schema(self) -> SchemaInstalled | SchemaInstallNotRun | BrokerFailure:
         """Apply the embedded migrations and check the schema version, once per handle. Writes."""
     def install_schema_async(self) -> asyncio.Future[SchemaInstalled | SchemaInstallNotRun | BrokerFailure]:
@@ -487,6 +491,20 @@ class HandleClosed:
     """The close of a handle ended: its core pools are closed, or it never connected. The next
     operation on the handle opens new core pools.
     """
+
+
+@final
+class ConnectivityPassed:
+    """Every step of the connectivity check passed."""
+
+
+@final
+class ConnectivityRefused:
+    """The first step of the connectivity check that refused, and its cause. No later step ran."""
+    @property
+    def step(self) -> Literal['CONNECT', 'POOL_SETTINGS', 'MAIN_URL', 'SESSION_URL', 'LISTENER']: ...
+    @property
+    def message(self) -> str: ...
 
 
 @final
@@ -1684,6 +1702,115 @@ class ClassReportRecord:
     def streams(self) -> list[PendingStreamRecord]: ...
     @property
     def workers(self) -> list[WorkerClassLoadRecord]: ...
+
+
+@final
+class RouteAccess:
+    """The verdicts of the user's policy that a request needs, in order, and the form of its
+    answer.
+    """
+    @property
+    def need(self) -> Literal['PUBLIC', 'VIEW', 'VIEW_REPORT_ACT', 'VIEW_AND_ACT']: ...
+    @property
+    def form(self) -> Literal['ONE_RESPONSE', 'EVENT_STREAM']: ...
+
+
+@final
+class AccessGrant:
+    """The verdicts that the host's run of the user's policy gave for one request. Another text
+    raises ValueError.
+    """
+    def __init__(self, *, view: Literal['ALLOWED', 'REFUSED', 'NOT_ASKED'], act: Literal['ALLOWED', 'REFUSED', 'NOT_ASKED']) -> None: ...
+    @property
+    def view(self) -> Literal['ALLOWED', 'REFUSED', 'NOT_ASKED']: ...
+    @property
+    def act(self) -> Literal['ALLOWED', 'REFUSED', 'NOT_ASKED']: ...
+
+
+@final
+class MonitoringRequest:
+    """One request as the host read it: the path inside the mount as it came on the wire, the
+    query text or None, the mount path (the ASGI root_path), at most max_request_body_bytes + 1
+    body bytes, and the verdicts. A method that is not an HTTP token raises ValueError.
+    """
+    def __init__(self, *, method: str, path: str, raw_query: str | None, intent_header: str | None, content_type: str | None, body: bytes, base_path: str, grant: AccessGrant) -> None: ...
+
+
+@final
+class MonitoringResponse:
+    """One response for the host to send: the status, the headers in order with lowercase
+    names, and the body.
+    """
+    @property
+    def status(self) -> int: ...
+    @property
+    def headers(self) -> list[tuple[str, str]]: ...
+    @property
+    def body(self) -> bytes: ...
+
+
+@final
+class EventFrame:
+    """One frame of an event stream, with the blank line that ends it."""
+    @property
+    def text(self) -> str: ...
+
+
+@final
+class EventStreamEnded:
+    """The event stream ended: after the degraded frame, after the handler closed its events, or
+    after close.
+    """
+
+
+@final
+class EventStreamRefused:
+    """No stream: the handler has no broker. The host writes frame, the degraded frame, and ends
+    the response.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def frame(self) -> str: ...
+
+
+@final
+class EventStream:
+    """One web client's event stream, subscribed on the process listener."""
+    def next_async(self) -> asyncio.Future[EventFrame | EventStreamEnded]:
+        """The next frame. Reads only; a cancelled await drops the wait and loses no event."""
+    def close(self) -> None:
+        """End the stream: a pending and every later next_async answers EventStreamEnded. Starts
+        nothing and waits for nothing.
+        """
+
+
+@final
+class MonitoringHandler:
+    """The monitoring web app of the broker of a CoreHandle, for the FastAPI mount of
+    create_monitoring_app. Starts nothing: the first call builds it. A handle without a child
+    spec source raises RuntimeError; heartbeat_ms outside 1 to 3,600,000 raises ValueError.
+    """
+    def __init__(self, handle: CoreHandle, *, actions_enabled: bool, custom_css_url: str | None, client_version: str, heartbeat_ms: int) -> None: ...
+    @property
+    def max_request_body_bytes(self) -> int: ...
+    def route_access(self, method: str, path: str) -> RouteAccess:
+        """The verdicts that a request needs and the form of its answer, from its method and its
+        path inside the mount. Pure. A method that is not an HTTP token raises ValueError.
+        """
+    def handle_async(self, request: MonitoringRequest) -> asyncio.Future[MonitoringResponse]:
+        """Serve one request. A POST writes and runs to its end when the caller leaves; every other
+        request reads, and a cancelled await drops it. A child build that raised KeyboardInterrupt
+        or SystemExit raises it again.
+        """
+    def subscribe_events_async(self) -> asyncio.Future[EventStream | EventStreamRefused]:
+        """Subscribe one event stream, after an allowed view. A broker without a listener, or a
+        stopped listener, gives a stream whose first frame is the degraded frame. Reads only.
+        """
+    def close_events_async(self) -> asyncio.Future[None]:
+        """End every event stream of the handler after the degraded frame. Runs to its end when the
+        caller leaves.
+        """
 
 
 @final

@@ -194,6 +194,20 @@ written in Rust, on a new baseline schema.
   timestamp (4714-11-24 BC). 0.7.0 accepted any positive `timedelta`, and
   such an age failed every sweep with `timestamp out of range`.
 
+- **`check(live=True)` runs the core's connectivity check.** The check
+  builds a core handle of its own (observe-only, producer pools) and calls
+  `CoreHandle.check_connectivity`, the rule of the Python and Rust clients:
+  `SELECT 1` on `database_url`, then on `session_database_url` when it
+  differs from `database_url`, then, with `pgbouncer_transaction_mode`, a
+  LISTEN on the session URL that must receive a NOTIFY (sent through
+  `database_url`) within 2 s. It opens no SQLAlchemy engine and no psycopg
+  connection of its own. The first checkout of each URL runs the core's
+  statement-pooling check, so a statement-pooled URL is refused here too
+  (before: only at worker start). The refusals keep their codes and texts
+  (`HRS-203`, "broker connectivity check failed" with the cause, "broker
+  listener capability check failed"); the listener refusal adds the core's
+  cause as a second note.
+
 ### Fixed
 
 - **A stored retry policy that does not validate fails the task at claim.**
@@ -609,6 +623,34 @@ unless it starts with "Added".
   `WorkflowNodeInfo`, `cancel()` returns `HandleResult<()>`.
   `WorkflowFunction::handle` and `Horsies::workflow_handle` return the
   handle with no I/O.
+- **The monitoring functions take the app.** `horsies::monitoring::{
+  task_stats, task_facets, task_breakdown, list_tasks, get_task_detail,
+  list_workflow_names, list_workflow_runs, get_workflow_run,
+  get_workflow_node, list_schedules, cancel_task, cancel_task_action,
+  pause_workflow_action, resume_workflow_action, cancel_workflow_action}`
+  take `&Horsies` in place of a `PostgresBroker`, connect the app's handle,
+  and run the core's queries; none installs the schema. A failed connect is
+  `DB_OPERATION_FAILED` (503 for an action). `get_task_detail` returns
+  `TaskDetailRead`: `Found`, or `NotFound` with its `TaskAbsenceReason`.
+  `resume_workflow_action` builds the children that a resume owes from the
+  workflow definitions registered on the app. The query types take a
+  `HistoryWindow` from `resolve_monitoring_window`; the error catalogs are
+  Python's (`HISTORY_CONTRACT_VIOLATION`, `STORED_DATA_INVALID`).
+- **`web::create_monitoring_router` becomes `web::router(&app,
+  MonitoringConfig, policy)`** (feature `web`), an axum mount of the core's
+  monitoring handler: the core serves every route, the event frames and
+  the embedded UI, so the Python and Rust apps answer alike. The router
+  asks the policy only the verdicts that the route needs. `MonitoringConfig`
+  holds the UI settings and `Actions::{Enabled, Disabled}` (default
+  enabled). The handler is built at the first request; a broker that
+  cannot be built answers 503. `MonitoringAuthPolicy` is a trait of the
+  crate whose methods return `impl Future<Output = bool> + Send` (write them
+  as `async fn`); `MonitoringRequest`, `AllowAll`, `ViewOnly`,
+  `TrustedHeader`, `INTENT_HEADER` and `INTENT_VALUE` stay. The event,
+  schema and SPA types (`EventBroadcaster`, `EventCoalescer`, `TopicEvent`,
+  `SchemaProbe`, `SchemaState`, `MetaResponse`, ...) are no longer public.
+  The crate no longer embeds a UI build of its own (`webui-dist/`), and the
+  frozen UI source `rust/webui/` is removed.
 
 ## [0.7.0] - 2026-11-15
 

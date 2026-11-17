@@ -150,6 +150,13 @@ fn detail(status_code: u16, message: impl Into<String>) -> ActionOutcome {
     }
 }
 
+/// The answer of an action that did not run because its client could not
+/// connect its broker: 503 with the cause, as a failed statement is
+/// answered (Python `_handle_failed` for `DB_OPERATION_FAILED`). Pure.
+pub fn connect_failed_action(cause: &str) -> ActionOutcome {
+    detail(503, cause)
+}
+
 fn workflow_not_found(workflow_id: Uuid) -> ActionOutcome {
     detail(404, format!("Workflow {workflow_id} not found"))
 }
@@ -335,6 +342,18 @@ mod tests {
                 serde_json::Value::from(code.wire_value())
             );
         }
+    }
+
+    #[test]
+    fn a_connect_failure_is_503_with_its_cause() {
+        let outcome = connect_failed_action("workflow pause failed: connection refused");
+        assert_eq!(outcome.status_code(), 503);
+        assert_eq!(
+            outcome.into_body(),
+            ActionBody::Detail {
+                detail: "workflow pause failed: connection refused".to_owned()
+            }
+        );
     }
 
     #[test]
