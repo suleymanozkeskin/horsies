@@ -544,7 +544,10 @@ async fn a_frame_from_the_child_is_delivered() {
 async fn a_frame_written_before_the_exit_wins() {
     let spawner = Spawner::start().unwrap();
     let bytes = encode_child_frame(&ready_frame()).unwrap().to_bytes();
-    let script = format!(r#"head -c {} <&"$0" >&"$0"; exit 0"#, bytes.len());
+    let script = format!(
+        r#"dd bs=1 count={} <&"$0" 2>/dev/null >&"$0"; exit 0"#,
+        bytes.len()
+    );
     let mut child = channel(&spawner, &script).await;
     child.send_raw(&bytes).await.unwrap();
     assert_eq!(
@@ -619,7 +622,11 @@ async fn an_eof_with_a_live_child_kills_it_after_the_grace() {
 async fn retire_sends_the_stop_frame_and_waits_for_the_exit() {
     let spawner = Spawner::start().unwrap();
     // Reads the stop frame, then exits by itself.
-    let obeys = channel(&spawner, r#"head -c 27 <&"$0" >/dev/null; exit 0"#).await;
+    let obeys = channel(
+        &spawner,
+        r#"dd bs=1 count=27 <&"$0" >/dev/null 2>&1; exit 0"#,
+    )
+    .await;
     assert_eq!(obeys.retire().await, exited(0));
     stop(spawner);
 }
