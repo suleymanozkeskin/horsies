@@ -23,6 +23,7 @@
 //! - A `CoreHandle` is built once from a typed manifest (`handle`).
 
 mod bridge;
+mod child_handle;
 mod errors;
 mod handle;
 mod logging;
@@ -138,6 +139,7 @@ fn refresh_log_levels(py: Python<'_>) -> PyResult<()> {
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<handle::CoreHandle>()?;
+    module.add_class::<child_handle::CoreChildHandle>()?;
     module.add_class::<records::BrokerFailure>()?;
     module.add_class::<records::DatabasePingRecord>()?;
     module.add_class::<records::HandleClosed>()?;
@@ -186,6 +188,12 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::release::ReleasedRow>()?;
     module.add_class::<operations::release::NotHeldRow>()?;
     module.add_class::<operations::release::ReleaseFailed>()?;
+    module.add_class::<operations::result::RawResultRecordRecord>()?;
+    module.add_class::<operations::result::RawResultAbsent>()?;
+    module.add_class::<operations::start::AttemptStarted>()?;
+    module.add_class::<operations::start::AttemptMissed>()?;
+    module.add_class::<operations::start::DeadlineBeforeStart>()?;
+    module.add_class::<operations::start::StartFailed>()?;
     module.add_class::<operations::schema::SchemaInstalled>()?;
     module.add_class::<operations::schema::SchemaInstallNotRun>()?;
     module.add_class::<operations::schema::SchemaStatusRecord>()?;

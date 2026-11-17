@@ -10,7 +10,8 @@ database collation, then a live row before a history row, then the task id
 ascending, with NULL keys last in both directions. The client merge
 compared text keys in code-point order; this reference ranks them in the
 database collation with one more statement, so the reference and the
-function answer the same on any collation.
+function answer the same on any collation. A row carries its task id as
+``uuid.UUID``.
 
 The live and history filter builders also serve the aggregate reference
 (``monitoring_reference.py``) and the detail reference.
@@ -58,6 +59,7 @@ from horsies.core.models.task_pg import TaskModel
 from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
+from horsies.core.utils.db import uuid_column_value
 from horsies.monitoring.errors import MonitoringResult
 from horsies.monitoring.history_window import MonitoringWindow
 from horsies.monitoring.models import ErrorCategory, TaskListPage, TaskSummary
@@ -166,7 +168,7 @@ def _task_summary(task: TaskModel) -> TaskSummary:
     """Map a live task row to its list-view shape."""
     queue_s, exec_s = _task_spans(task)
     return TaskSummary(
-        id=task.id,
+        id=uuid_column_value(task.id, column='horsies_tasks.id'),
         task_name=task.task_name,
         queue_name=task.queue_name,
         status=task.status.value,
@@ -193,7 +195,7 @@ def _history_summary(row: Any) -> TaskSummary:
     completed_at = row.terminal_at if status == 'COMPLETED' else None
     failed_at = row.terminal_at if status != 'COMPLETED' else None
     return TaskSummary(
-        id=str(row.task_id),
+        id=uuid_column_value(row.task_id, column='task_id'),
         task_name=row.task_name,
         queue_name=row.queue_name,
         status=status,

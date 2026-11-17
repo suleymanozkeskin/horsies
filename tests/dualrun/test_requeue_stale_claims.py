@@ -1,27 +1,38 @@
-"""Dual-run of the stale CLAIMED requeue switch: the one-pass UPDATE against ``horsies_requeue_stale_claims``.
+"""Dual-runs of the stale CLAIMED requeue.
 
-Reference: ``tests/dualrun/reference/requeue.py``. Candidate:
-``PostgresBroker.requeue_stale_claimed``, which repeats the bounded function
-until a batch is short.
+Two pairs, with the same seeds:
 
-The two rules agree on every row but one kind: a fresh claim whose earlier
-claim generation left claimer beats older than the threshold. The old
-statement read only the latest beat and requeued it; the function also
-requires the claim itself to be older than the threshold, and keeps it.
-``test_a_fresh_claim_with_old_beats_is_kept`` pins that difference.
+1. The SQL redesign: the one-pass UPDATE against ``horsies_requeue_stale_claims``.
+   Reference: ``tests/dualrun/reference/requeue.py``. Candidate:
+   ``PostgresBroker.requeue_stale_claimed``, which runs the bounded function
+   in batches until one is short. The two rules agree on every row but one
+   kind: a fresh claim whose earlier claim generation left claimer beats
+   older than the threshold. The old statement read only the latest beat and
+   requeued it; the function also requires the claim itself to be older than
+   the threshold, and keeps it. ``test_a_fresh_claim_with_old_beats_is_kept``
+   pins that difference.
+2. The caller switch: the Python caller of the function against the core.
+   Reference: ``tests/dualrun/reference/requeue_caller.py``, the method's body
+   before the switch (the batches on the broker's SQLAlchemy engine).
+   Candidate: ``PostgresBroker.requeue_stale_claimed``, which runs the pass in
+   the core through the broker's ``CoreHandle``. The snapshots and the
+   results must be equal.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Final
 
 import psycopg
 import pytest
 
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerResult
 from horsies.core.types.result import Err, Ok, Result
 from tests.dualrun.capture import Connection
 from tests.dualrun.clients import open_broker
@@ -29,6 +40,7 @@ from tests.dualrun.compare import ColumnDifference, render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
 from tests.dualrun.reference import requeue as reference
+from tests.dualrun.reference import requeue_caller
 from tests.dualrun.seeds import (
     BeatRole,
     SeedCoverage,
@@ -194,3 +206,125 @@ def test_a_fresh_claim_with_old_beats_is_kept(empty_database: MakeDatabase) -> N
         ExactValue(text='PENDING'),
         ExactValue(text='CLAIMED'),
     )
+
+
+# ---- The caller switch: the Python caller against the core ----
+
+REFUSED_STALE_AFTER_MS: Final = -1
+"""A threshold that ``horsies_requeue_stale_claims`` and the core both refuse."""
+
+
+@dataclass(frozen=True, slots=True)
+class _PassRequeued:
+    """The pass ended; ``requeued`` rows went back to PENDING."""
+
+    requeued: int
+
+
+@dataclass(frozen=True, slots=True)
+class _PassFailed:
+    """The pass failed; the facts of the broker error that both callers share."""
+
+    code: BrokerErrorCode
+    retryable: bool
+    counted_prefix: bool
+    """The message starts with the count of the batches before the failure."""
+
+
+type _PassReport = _PassRequeued | _PassFailed
+
+_ZERO_REQUEUED_PREFIX: Final = 'requeue_stale_claimed failed after requeueing 0 task(s): '
+
+type _RequeueCall = Callable[[PostgresBroker, int], Awaitable[BrokerResult[int]]]
+
+
+def _report(result: BrokerResult[int]) -> _PassReport:
+    match result:
+        case Ok(requeued):
+            return _PassRequeued(requeued=requeued)
+        case Err(failed):
+            return _PassFailed(
+                code=failed.code,
+                retryable=failed.retryable,
+                counted_prefix=failed.message.startswith(_ZERO_REQUEUED_PREFIX),
+            )
+
+
+async def _caller_pass_async(
+    database: DualRunDatabase, call: _RequeueCall, stale_after_ms: int
+) -> _PassReport:
+    async with open_broker(database) as broker:
+        return _report(await call(broker, stale_after_ms))
+
+
+def _python_caller(stale_after_ms: int) -> OperationSide[None, _PassReport]:
+    def act(database: DualRunDatabase, _seed: None) -> _PassReport:
+        return asyncio.run(
+            _caller_pass_async(
+                database, requeue_caller.requeue_stale_claimed, stale_after_ms
+            )
+        )
+
+    return OperationSide(name='Python caller on SQLAlchemy', act=act)
+
+
+def _core_caller(stale_after_ms: int) -> OperationSide[None, _PassReport]:
+    async def call(broker: PostgresBroker, threshold_ms: int) -> BrokerResult[int]:
+        return await broker.requeue_stale_claimed(stale_threshold_ms=threshold_ms)
+
+    def act(database: DualRunDatabase, _seed: None) -> _PassReport:
+        return asyncio.run(_caller_pass_async(database, call, stale_after_ms))
+
+    return OperationSide(name='CoreHandle.requeue_stale_claimed_async', act=act)
+
+
+def _caller_pair(
+    empty_database: MakeDatabase,
+    seed: Callable[[Connection], None],
+    stale_after_ms: int,
+) -> OperationDualRun[_PassReport, _PassReport]:
+    match dual_run(
+        empty_database,
+        seed,
+        _python_caller(stale_after_ms),
+        _core_caller(stale_after_ms),
+        SeedCoverage.HISTORY_AND_BEATS,
+    ):
+        case Ok(run):
+            return run
+        case Err(failed):
+            pytest.fail(f'{failed.step}: {failed.cause}')
+
+
+def test_the_core_caller_requeues_what_the_python_caller_requeued(
+    empty_database: MakeDatabase,
+) -> None:
+    run = _caller_pair(empty_database, _seed_agreed_cases, STALE_AFTER_MS)
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    assert run.reference.report == _PassRequeued(requeued=4)
+    assert run.candidate.report == run.reference.report
+
+
+def test_the_core_caller_keeps_a_fresh_claim_with_old_beats(
+    empty_database: MakeDatabase,
+) -> None:
+    run = _caller_pair(empty_database, _seed_fresh_claim_old_beats, STALE_AFTER_MS)
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    assert run.reference.report == _PassRequeued(requeued=0)
+    assert run.candidate.report == run.reference.report
+
+
+def test_a_refused_threshold_fails_alike_and_writes_nothing(
+    empty_database: MakeDatabase,
+) -> None:
+    run = _caller_pair(empty_database, _seed_agreed_cases, REFUSED_STALE_AFTER_MS)
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    assert run.reference.report == _PassFailed(
+        code=BrokerErrorCode.CLEANUP_FAILED,
+        retryable=False,
+        counted_prefix=True,
+    )
+    assert run.candidate.report == run.reference.report

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, assert_never
+from uuid import UUID
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -194,19 +195,25 @@ def build_router(broker: PostgresBroker) -> APIRouter:
 
     @router.post('/tasks/{task_id}/cancel')
     async def cancel_task_route(
-        task_id: str, body: CancelTaskBody = CancelTaskBody()
+        task_id: UUID, body: CancelTaskBody = CancelTaskBody()
     ) -> JSONResponse:
-        """Cancel a task. RUNNING requires ``include_running``."""
+        """Cancel a task. RUNNING requires ``include_running``.
+
+        A path id that is not a UUID is refused with 422 before the route
+        runs; nothing is read.
+        """
         result = await cancel_task(
             broker, task_id, include_running=body.include_running
         )
         if is_err(result):
             return _respond(
-                'tasks.cancel', task_id, _task_action_failed(result.err_value)
+                'tasks.cancel',
+                str(task_id),
+                _task_action_failed(result.err_value),
             )
         return _respond(
             'tasks.cancel',
-            task_id,
+            str(task_id),
             _succeeded('cancelled', was_status=result.ok_value.was_status.value),
         )
 

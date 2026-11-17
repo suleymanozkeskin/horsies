@@ -3,6 +3,8 @@
 Stand-in processes carry ``horsies worker`` in their command line, as a real
 worker does. Only the one whose environment names this checkout as its owner
 may be killed; a worker of another checkout, or with no owner, must survive.
+A process whose command line or environment cannot be read is skipped, and
+the scan goes on with the next process.
 """
 
 from __future__ import annotations
@@ -10,8 +12,10 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 
+import psutil
 import pytest
 
 from tests.e2e.helpers.worker import (
@@ -82,6 +86,84 @@ def test_the_scan_names_only_this_checkouts_workers(
 
     assert own.pid in pids
     assert other_checkout.pid not in pids
+
+
+MACOS_UNREADABLE_ARGUMENTS = SystemError(
+    '<built-in function proc_cmdline> returned a result with an exception set',
+)
+"""What psutil raises on macOS for a process whose arguments it cannot read."""
+
+WORKER_COMMAND = ('python', 'horsies', 'worker')
+
+
+@dataclass(frozen=True, slots=True)
+class _ListedProcess:
+    """A process as ``psutil.process_iter`` lists it: each read returns its
+    value or raises its error."""
+
+    pid: int
+    command: tuple[str, ...] | Exception
+    environment: dict[str, str] | Exception
+
+    def cmdline(self) -> list[str]:
+        match self.command:
+            case Exception() as error:
+                raise error
+            case command:
+                return list(command)
+
+    def environ(self) -> dict[str, str]:
+        match self.environment:
+            case Exception() as error:
+                raise error
+            case environment:
+                return dict(environment)
+
+
+def _scan_only(
+    monkeypatch: pytest.MonkeyPatch,
+    listed: Sequence[_ListedProcess],
+) -> None:
+    def process_iter() -> Iterator[_ListedProcess]:
+        return iter(listed)
+
+    monkeypatch.setattr(psutil, 'process_iter', process_iter)
+
+
+def test_the_scan_skips_a_process_whose_command_line_raises_system_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    own_worker = _ListedProcess(
+        pid=101,
+        command=WORKER_COMMAND,
+        environment={WORKER_OWNER_ENV: REPO_ROOT},
+    )
+    unreadable = _ListedProcess(
+        pid=102,
+        command=MACOS_UNREADABLE_ARGUMENTS,
+        environment={WORKER_OWNER_ENV: REPO_ROOT},
+    )
+    _scan_only(monkeypatch, [unreadable, own_worker])
+
+    assert own_stale_worker_pids() == [own_worker.pid]
+
+
+def test_the_scan_skips_a_worker_whose_environment_raises_system_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    own_worker = _ListedProcess(
+        pid=101,
+        command=WORKER_COMMAND,
+        environment={WORKER_OWNER_ENV: REPO_ROOT},
+    )
+    unreadable = _ListedProcess(
+        pid=102,
+        command=WORKER_COMMAND,
+        environment=MACOS_UNREADABLE_ARGUMENTS,
+    )
+    _scan_only(monkeypatch, [unreadable, own_worker])
+
+    assert own_stale_worker_pids() == [own_worker.pid]
 
 
 def test_started_workers_carry_this_checkouts_marker() -> None:

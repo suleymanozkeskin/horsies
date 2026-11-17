@@ -84,7 +84,11 @@ from horsies.core.codec.typed import decode_task_error, validate_task_result_env
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
-from horsies.core.utils.db import autocommit_connection, is_retryable_connection_error
+from horsies.core.utils.db import (
+    autocommit_connection,
+    is_retryable_connection_error,
+    uuid_column_value,
+)
 from horsies.monitoring.history_window import MonitoringWindow
 from horsies.monitoring.errors import (
     MonitoringQueryDbOperationFailed,
@@ -418,6 +422,16 @@ def _column[T](row: RowMapping, name: str, kind: type[T]) -> T:
         f'column {name}: expected {kind.__name__}, got {value!r}'
     )
     return value
+
+
+def _uuid_column(row: RowMapping, name: str) -> uuid.UUID:
+    """The ``uuid.UUID`` of a uuid result column that the function declares non-NULL.
+
+    A NULL or a text that is not a UUID breaks the function's result
+    contract: the ``TypeError`` or ``ValueError`` crashes loud and names the
+    column.
+    """
+    return uuid_column_value(row[name], column=name)
 
 
 def _data_corrupted(exc: SQLAlchemyError) -> HistoryContractError | None:
@@ -784,7 +798,7 @@ def _list_total(row: RowMapping) -> int:
 
 def _live_list_row(row: RowMapping) -> TaskSummary:
     """A LIVE page row: no error code and no end time."""
-    task_id = _column(row, 'task_id', str)
+    task_id = _uuid_column(row, 'task_id')
     stored_status = _column(row, 'status', str)
     status = _STATUS_BY_VALUE.get(stored_status)
     assert status is not None, f'live task {task_id} has status {stored_status!r}'
@@ -823,7 +837,7 @@ def _history_list_row(row: RowMapping) -> TaskSummary:
     error_code = _optional_text(row, 'error_code')
     completed = status == TaskStatus.COMPLETED.value
     return TaskSummary(
-        id=_column(row, 'task_id', str),
+        id=_uuid_column(row, 'task_id'),
         task_name=_column(row, 'task_name', str),
         queue_name=_column(row, 'queue_name', str),
         status=status,
@@ -978,7 +992,7 @@ def _attempt_info(record: ArchiveAttemptRecord) -> TaskAttemptInfo:
 
 
 def _decoded_attempts(
-    task_id: str,
+    task_id: uuid.UUID,
     decoded: ArchiveDecodeResult[tuple[ArchiveAttemptRecord, ...]],
 ) -> list[TaskAttemptInfo]:
     """The attempts, oldest first.
@@ -1034,6 +1048,15 @@ def _optional_int(row: RowMapping, name: str) -> int | None:
             raise AssertionError(f'column {name}: expected an integer, got {value!r}')
 
 
+def _optional_uuid(row: RowMapping, name: str) -> uuid.UUID | None:
+    value: object = row[name]
+    match value:
+        case None:
+            return None
+        case _:
+            return uuid_column_value(value, column=name)
+
+
 def _live_found(row: RowMapping) -> _FoundTask:
     """A LIVE detail row: the live row and its attempts, encoded on read.
 
@@ -1042,7 +1065,7 @@ def _live_found(row: RowMapping) -> _FoundTask:
     Raises:
         HistoryContractError: the attempt bytes do not decode.
     """
-    task_id = _column(row, 'task_id', str)
+    task_id = _uuid_column(row, 'task_id')
     stored_status = _column(row, 'status', str)
     status = _STATUS_BY_VALUE.get(stored_status)
     assert status is not None, f'live task {task_id} has status {stored_status!r}'
@@ -1094,7 +1117,7 @@ def _history_found(row: RowMapping) -> _FoundTask:
         HistoryContractError: the stored status is not a task status, or
             the attempt snapshot does not decode or match its digest.
     """
-    task_id = _column(row, 'task_id', str)
+    task_id = _uuid_column(row, 'task_id')
     stored_status = _column(row, 'status', str)
     match _STATUS_BY_VALUE.get(stored_status):
         case TaskStatus() as status:
@@ -1165,7 +1188,7 @@ def _found_or_absent(row: RowMapping) -> _FoundTask | TaskAbsenceReason:
 
 async def get_task_detail(
     broker: PostgresBroker,
-    task_id: str,
+    task_id: uuid.UUID,
 ) -> MonitoringResult[TaskDetail | TaskDetailNotFound]:
     """A single task with its attempt history.
 
@@ -1187,11 +1210,6 @@ async def get_task_detail(
     One statement (``horsies_monitoring_task_detail``), so every part comes
     from one snapshot.
     """
-    if not _is_uuid_text(task_id):
-        return Ok(TaskDetailNotFound(
-            task_id=task_id, reason=TaskAbsenceReason.NOT_CLASSIFIED,
-        ))
-
     match await broker.select_resources():
         case Err(loop_limit):
             return _loop_limit_err('task detail query', loop_limit)
@@ -1199,7 +1217,9 @@ async def get_task_detail(
             pass
 
     try:
-        rows = await _call_function(resources, _TASK_DETAIL_SQL, {'task_id': task_id})
+        rows = await _call_function(
+            resources, _TASK_DETAIL_SQL, {'task_id': str(task_id)},
+        )
     except SQLAlchemyError as exc:
         return _function_err('task detail query', exc)
     match rows:
@@ -1636,7 +1656,7 @@ async def list_schedules(
                 schedule_name=_column(row, 'schedule_name', str),
                 last_run_at=_optional_time(row, 'last_run_at'),
                 next_run_at=_column(row, 'next_run_at', datetime),
-                last_task_id=_optional_text(row, 'last_task_id'),
+                last_task_id=_optional_uuid(row, 'last_task_id'),
                 run_count=_column(row, 'run_count', int),
                 updated_at=_column(row, 'updated_at', datetime),
             )

@@ -18,7 +18,7 @@ use super::spec_support::{
     SpecDatabase,
 };
 use crate::broker::PostgresBroker;
-use crate::core::history::reads::aggregates::plan_rows_from_explain;
+use crate::core::history::reads::aggregates::plan_rows_from_explain_text;
 use crate::core::lifecycle::{BatchSize, TerminalizationCommand, TerminalizationOutcome};
 use crate::monitoring::{
     get_task_detail, list_tasks, task_stats, MonitoringQueryError, MonitoringQueryErrorCode,
@@ -149,6 +149,38 @@ async fn the_list_sorts_by_enqueue_time_in_both_directions() {
 
     assert_eq!(names_of(&ascending), ["first", "second", "third"]);
     assert_eq!(names_of(&descending), ["third", "second", "first"]);
+    database.drop().await;
+}
+
+/// Every sort key of the list reads a live row and a history row in both
+/// directions: the function takes each key of `TaskSortField::ALL` with
+/// `ASC` and with `DESC`.
+#[tokio::test]
+#[serial]
+async fn every_sort_key_reads_both_sides_in_both_directions() {
+    let database = SpecDatabase::create().await;
+    seed_live(&database.pool, &LiveTask::running("live_task", "worker-1")).await;
+    seed_terminal(
+        &database.pool,
+        &LiveTask::pending("history_task"),
+        Ending::failed("BOOM"),
+    )
+    .await;
+    let broker = database.broker();
+
+    for field in TaskSortField::ALL {
+        for direction in SortDirection::ALL {
+            let listed = page(&broker, sorted(field, direction)).await;
+
+            let mut names = names_of(&listed);
+            names.sort_unstable();
+            assert_eq!(
+                names,
+                ["history_task", "live_task"],
+                "{field:?} {direction:?}"
+            );
+        }
+    }
     database.drop().await;
 }
 
@@ -292,7 +324,7 @@ async fn an_emptied_history_adds_nothing_to_the_unfiltered_total() {
 /// test drives the decode and the error that `list_tasks` builds from it.
 #[test]
 fn an_unreadable_estimate_is_a_contract_violation_that_is_not_retryable() {
-    let refused = plan_rows_from_explain(&serde_json::json!({"Plan": "not a plan"}))
+    let refused = plan_rows_from_explain_text(r#"{"Plan": "not a plan"}"#)
         .expect_err("an EXPLAIN payload without a plan list is refused");
 
     let error = MonitoringQueryError::history("task list estimate decode", refused);

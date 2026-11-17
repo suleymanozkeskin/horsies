@@ -376,6 +376,43 @@ class TestRequestValidation:
 
         assert response.status_code == 422
 
+    @pytest.mark.parametrize(
+        ('method', 'path'),
+        [
+            ('GET', '/api/tasks/not-a-uuid'),
+            ('POST', '/api/tasks/not-a-uuid/cancel'),
+        ],
+        ids=['detail', 'cancel'],
+    )
+    async def test_a_task_id_that_is_not_a_uuid_is_unprocessable(
+        self, method: str, path: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The route does not run: with an unreachable database it would
+        answer 503. The schema probe reports a match, so the action gate
+        lets the cancel through to its path check."""
+
+        class MatchingProbe(SchemaProbe):
+            def __init__(self, broker: object) -> None:
+                pass
+
+            async def status(self) -> SchemaStatus:
+                return SchemaStatus(
+                    state=SchemaState.MATCH,
+                    version=EXPECTED_SCHEMA_VERSION,
+                    expected_version=EXPECTED_SCHEMA_VERSION,
+                )
+
+        monkeypatch.setattr(web_app_module, 'SchemaProbe', MatchingProbe)
+        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+
+        async with client_for(app) as client:
+            response = await client.request(method, path, headers=ACT_HEADERS)
+
+        assert response.status_code == 422
+        [error] = response.json()['detail']
+        assert error['type'] == 'uuid_parsing'
+        assert error['loc'] == ['path', 'task_id']
+
     async def test_task_page_reach_past_five_hundred_is_rejected(self) -> None:
         app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
 

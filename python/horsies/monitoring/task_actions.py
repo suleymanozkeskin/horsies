@@ -60,14 +60,14 @@ if TYPE_CHECKING:
 class TaskActionNotFound:
     """No task has this id. Nothing changed.
 
-    The id is not a UUID, or neither the live table nor history holds the
-    task (retention can remove it).
+    Neither the live table nor history holds the task (retention can
+    remove it).
     """
 
     code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.TASK_NOT_FOUND
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
-    task_id: str
+    task_id: uuid.UUID
 
 
 @dataclass(slots=True, frozen=True)
@@ -82,7 +82,7 @@ class TaskActionNotCancellable:
     code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.TASK_NOT_CANCELLABLE
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
-    task_id: str
+    task_id: uuid.UUID
     current_status: TaskStatus
 
 
@@ -97,7 +97,7 @@ class TaskActionWorkflowTask:
     code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.TASK_IS_WORKFLOW_TASK
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
-    task_id: str
+    task_id: uuid.UUID
     current_status: TaskStatus
 
 
@@ -116,7 +116,7 @@ class TaskActionDbOperationFailed:
     code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.DB_OPERATION_FAILED
     message: str = field(repr=False)
     retryable: bool
-    task_id: str
+    task_id: uuid.UUID
     exception: BaseException = field(repr=False)
 
 
@@ -132,7 +132,7 @@ class TaskActionEventLoopLimit:
     code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.EVENT_LOOP_LIMIT
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
-    task_id: str
+    task_id: uuid.UUID
     loop_limit: EventLoopLimit
 
 
@@ -148,7 +148,7 @@ class TaskActionStoredDataInvalid:
     code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.STORED_DATA_INVALID
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
-    task_id: str
+    task_id: uuid.UUID
     exception: BaseException = field(repr=False)
 
 
@@ -167,7 +167,7 @@ type TaskActionError = (
 class TaskCancelled:
     """A task moved to CANCELLED by this call."""
 
-    task_id: str
+    task_id: uuid.UUID
     was_status: TaskStatus
 
 
@@ -178,7 +178,7 @@ CANCEL_TASK_SQL = text("""
     SELECT * FROM horsies_cancel_task(CAST(:task_id AS uuid), :include_running)
 """)
 
-def _not_found(task_id: str) -> Err[TaskActionNotFound]:
+def _not_found(task_id: uuid.UUID) -> Err[TaskActionNotFound]:
     """The row does not exist — retention may have removed it."""
     return Err(
         TaskActionNotFound(
@@ -189,7 +189,7 @@ def _not_found(task_id: str) -> Err[TaskActionNotFound]:
 
 
 def _workflow_bound(
-    task_id: str, current_status: TaskStatus,
+    task_id: uuid.UUID, current_status: TaskStatus,
 ) -> Err[TaskActionWorkflowTask]:
     """Workflow-bound rows are driven by the workflow primitives only."""
     return Err(
@@ -205,7 +205,7 @@ def _workflow_bound(
 
 
 def _not_cancellable(
-    task_id: str, current_status: TaskStatus,
+    task_id: uuid.UUID, current_status: TaskStatus,
 ) -> Err[TaskActionNotCancellable]:
     """The row exists but its status does not admit the cancel."""
     return Err(
@@ -221,7 +221,7 @@ def _not_cancellable(
 
 
 def _db_err(
-    action: str, task_id: str, exc: SQLAlchemyError,
+    action: str, task_id: uuid.UUID, exc: SQLAlchemyError,
 ) -> Err[TaskActionDbOperationFailed]:
     """Wrap a transaction failure, classifying transient errors."""
     return Err(
@@ -236,7 +236,7 @@ def _db_err(
 
 def _stored_data_err(
     action: str,
-    task_id: str,
+    task_id: uuid.UUID,
     exc: OutcomeDecodeError,
 ) -> Err[TaskActionStoredDataInvalid]:
     """Wrap stored data that does not parse. The transaction did not commit."""
@@ -250,7 +250,7 @@ def _stored_data_err(
 
 
 def _cancel_answer(
-    task_id: str,
+    task_id: uuid.UUID,
     outcome: TerminalizationOutcome,
 ) -> Result[
     TaskCancelled,
@@ -295,7 +295,7 @@ def _cancel_answer(
 
 async def cancel_task(
     broker: PostgresBroker,
-    task_id: str,
+    task_id: uuid.UUID,
     *,
     include_running: bool = False,
 ) -> Result[TaskCancelled, TaskActionError]:
@@ -315,16 +315,6 @@ async def cancel_task(
         RuntimeError: the cancel outcome contradicts the function (a lost
             claim, or no observed status). These are defects, not outcomes.
     """
-    # Identity columns are uuid; text that does not parse as one cannot
-    # name any task. Python also accepts forms that the Postgres uuid cast
-    # refuses (for example a ``urn:uuid:`` prefix), so every statement gets
-    # the canonical text.
-    try:
-        canonical_id = str(uuid.UUID(task_id))
-    except ValueError:
-        return _not_found(task_id)
-    task_id = canonical_id
-
     match await broker.select_resources():
         case Err(loop_limit):
             return Err(
@@ -343,7 +333,7 @@ async def cancel_task(
             rows = (
                 await connection.execute(
                     CANCEL_TASK_SQL,
-                    {'task_id': task_id, 'include_running': include_running},
+                    {'task_id': str(task_id), 'include_running': include_running},
                 )
             ).mappings().all()
             assert len(rows) == 1, (

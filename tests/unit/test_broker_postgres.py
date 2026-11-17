@@ -27,12 +27,13 @@ from horsies.core.brokers.stale_running import (
     STALE_RUNNING_SCAN_BATCH_SIZE,
     STALE_RUNNING_SCAN_SQL,
 )
-from horsies.core.brokers.postgres import (
-    REQUEUE_STALE_CLAIMS_BATCH_SIZE,
-    REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS,
-    REQUEUE_STALE_CLAIMS_SQL,
-    SyncSendRoute,
+from horsies._core import (
+    StaleClaimsBoundReached,
+    StaleClaimsDrained,
+    StaleClaimsRequeueFailed,
 )
+from horsies.core.brokers.core_failure import CoreOperationFailed
+from horsies.core.brokers.postgres import SIGNED_64_BIT_MAX, SyncSendRoute
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
@@ -2510,84 +2511,83 @@ class TestTerminateOrphanedWorkflowTasks:
 
 @pytest.mark.unit
 class TestRequeueStaleClaimed:
-    """Tests for requeue_stale_claimed: bounded batches of horsies_requeue_stale_claims."""
+    """requeue_stale_claimed maps the record of one core pass to its result."""
 
     @staticmethod
-    def _session(batches: list[int] | Exception) -> AsyncMock:
-        """A session whose autocommit connection returns one batch count per call."""
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.connection = AsyncMock(return_value=session)
-        match batches:
-            case Exception():
-                session.execute = AsyncMock(side_effect=batches)
-            case list():
-                session.execute = AsyncMock(
-                    side_effect=[
-                        MagicMock(scalar_one=MagicMock(return_value=count))
-                        for count in batches
-                    ],
-                )
-        return session
+    def _handle(outcome: object) -> MagicMock:
+        """A core handle whose requeue pass answers ``outcome``."""
+        handle = MagicMock()
+        handle.requeue_stale_claimed_async = AsyncMock(return_value=outcome)
+        return handle
 
     @pytest.mark.asyncio
-    async def test_a_short_batch_ends_the_pass(self) -> None:
+    async def test_a_drained_pass_returns_its_count(self) -> None:
         broker = _make_broker()
-        session = self._session([5])
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
+        broker._core_handle = self._handle(
+            MagicMock(spec=StaleClaimsDrained, requeued=5),
+        )
 
         result = await broker.requeue_stale_claimed(stale_threshold_ms=120_000)
 
         assert result == Ok(5)
-        session.execute.assert_awaited_once_with(
-            REQUEUE_STALE_CLAIMS_SQL,
-            {
-                'stale_after_ms': 120_000,
-                'batch_size': REQUEUE_STALE_CLAIMS_BATCH_SIZE,
-            },
-        )
-        session.commit.assert_not_awaited()
+        broker._core_handle.requeue_stale_claimed_async.assert_awaited_once_with(120_000)
 
     @pytest.mark.asyncio
-    async def test_full_batches_repeat_until_a_short_one(self) -> None:
-        broker = _make_broker()
-        full = REQUEUE_STALE_CLAIMS_BATCH_SIZE
-        session = self._session([full, full, 3])
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-
-        result = await broker.requeue_stale_claimed(stale_threshold_ms=60_000)
-
-        assert result == Ok(2 * full + 3)
-        assert session.execute.await_count == 3
-
-    @pytest.mark.asyncio
-    async def test_the_pass_stops_at_the_batch_cap_with_a_warning(
+    async def test_a_pass_at_the_batch_cap_returns_its_count_with_a_warning(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         broker = _make_broker()
-        full = REQUEUE_STALE_CLAIMS_BATCH_SIZE
-        session = self._session([full] * REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
+        broker._core_handle = self._handle(
+            MagicMock(spec=StaleClaimsBoundReached, requeued=100_000),
+        )
 
-        with caplog.at_level('WARNING'):
+        with caplog.at_level('WARNING', logger='horsies.broker'):
             result = await broker.requeue_stale_claimed()
 
-        assert result == Ok(full * REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS)
-        assert session.execute.await_count == REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS
+        assert result == Ok(100_000)
         assert 'reached the per-pass batch cap' in caplog.text
 
     @pytest.mark.asyncio
-    async def test_a_database_error_is_cleanup_failed(self) -> None:
+    async def test_a_failed_pass_is_cleanup_failed_with_the_rows_before_it(self) -> None:
         broker = _make_broker()
-        session = self._session(SAOperationalError('stmt', {}, Exception('lost')))
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
+        broker._core_handle = self._handle(
+            MagicMock(
+                spec=StaleClaimsRequeueFailed,
+                requeued_before=7,
+                message='requeue batch: connection lost',
+                retryable=True,
+            ),
+        )
 
         result = await broker.requeue_stale_claimed()
 
         assert is_err(result)
-        assert result.err_value.code is BrokerErrorCode.CLEANUP_FAILED
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.retryable is True
+        assert failed.message == (
+            'requeue_stale_claimed failed after requeueing 7 task(s): '
+            'requeue batch: connection lost'
+        )
+        assert isinstance(failed.exception, CoreOperationFailed)
+        assert failed.exception.subject == 'PostgresBroker.requeue_stale_claimed'
+
+    @pytest.mark.asyncio
+    async def test_a_threshold_past_64_bits_is_refused_before_the_core(self) -> None:
+        broker = _make_broker()
+        broker._core_handle = self._handle(MagicMock(spec=StaleClaimsDrained, requeued=0))
+
+        result = await broker.requeue_stale_claimed(
+            stale_threshold_ms=SIGNED_64_BIT_MAX + 1,
+        )
+
+        assert is_err(result)
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.retryable is False
+        assert isinstance(failed.exception, OverflowError)
+        broker._core_handle.requeue_stale_claimed_async.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
