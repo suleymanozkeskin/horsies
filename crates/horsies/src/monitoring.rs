@@ -21,7 +21,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use horsies_core::monitoring as core_monitoring;
-use horsies_core::{BrokerError, PostgresBroker};
+use horsies_core::{BrokerError, ChildSpecSource, PostgresBroker};
 use uuid::Uuid;
 
 use crate::Horsies;
@@ -213,13 +213,12 @@ pub async fn cancel_workflow_action(app: &Horsies, workflow_id: Uuid) -> ActionO
 }
 
 /// Where a resume of `app` builds each owed sub-workflow child: the
-/// workflow definitions registered on `app` as of now, with the app's
-/// retention config.
+/// workflow registry of `app`, with the definitions registered when the
+/// child builds.
 pub(crate) fn resume_children(app: &Horsies) -> core_monitoring::ResumeChildren {
-    core_monitoring::ResumeChildren::Registry {
-        registry: app.workflows().core_registry(),
-        retention: app.config().retention.clone(),
-    }
+    let registry = Arc::clone(app.workflows());
+    let source: Arc<dyn ChildSpecSource> = registry;
+    core_monitoring::ResumeChildren::Client(source)
 }
 
 /// The connected broker of `app`'s read handle, for the monitoring read
@@ -284,16 +283,37 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn a_resume_builds_children_from_the_app_s_definitions() {
+    /// A resume builds each owed child through the app's registry: a
+    /// definition key that the app has not registered fails the node with
+    /// `SUBWORKFLOW_LOAD_FAILED`.
+    #[tokio::test]
+    async fn a_resume_builds_children_from_the_app_s_definitions() {
         let app = app();
-        match resume_children(&app) {
-            core_monitoring::ResumeChildren::Registry { retention, .. } => {
-                assert_eq!(retention, app.config().retention);
+        let source = match resume_children(&app) {
+            core_monitoring::ResumeChildren::Client(source) => source,
+            core_monitoring::ResumeChildren::Registry { .. } => {
+                panic!("the Rust client builds through its child spec source")
             }
-            core_monitoring::ResumeChildren::Client(_) => {
-                panic!("the Rust client builds from its registry")
+        };
+        let request = horsies_core::ChildSpecRequest {
+            parent_workflow_id: Uuid::nil(),
+            parent_workflow_name: "parent".to_owned(),
+            task_index: 0,
+            child_depth: 1,
+            definition_key: Some("tests.absent.v1".to_owned()),
+            params: horsies_core::SubWorkflowParams::NotGiven,
+            node_input: "{}".to_owned(),
+            args_from: None,
+            sources: Vec::new(),
+        };
+        match source.child_spec(request).await {
+            Ok(horsies_core::ClientChildSpec::NodeFails { failure_result, .. }) => {
+                assert!(
+                    failure_result.contains("SUBWORKFLOW_LOAD_FAILED"),
+                    "{failure_result}"
+                );
             }
+            other => panic!("expected the node to fail its load, got {other:?}"),
         }
     }
 }

@@ -4,18 +4,20 @@
 //! without one), the output type against the handle's type, the spec
 //! checked against the app's registered definitions and converted to the
 //! core's spec data, the connect of the handle, then the core's start of
-//! the tree. With `AppConfig.resend_on_transient_err` the core runs a
-//! retryable failure of the start again, with the same workflow id, up to 3
+//! the tree, whose sub-workflow roots build from the app's registry. With
+//! `AppConfig.resend_on_transient_err` the core runs a retryable failure of
+//! the start again, with the same workflow id and start time, up to 3
 //! times. In a worker child the start goes through the child's producer
 //! handle, as a send does.
 
 use std::sync::Arc;
 
+use chrono::Utc;
 use horsies_core::core::workflow::validate_start_retry;
 use horsies_core::handle::CoreHandle;
 use horsies_core::{
-    child_producer, start_workflow_with_retry, ChildProducer, WorkflowStartError,
-    WorkflowStartErrorCode,
+    child_producer, ChildProducer, ClientStartError, ClientStartOutcome, WorkflowError,
+    WorkflowStartError, WorkflowStartErrorCode,
 };
 use uuid::Uuid;
 
@@ -125,22 +127,34 @@ impl WorkflowStarter {
                 error.is_retryable(),
             )
         })?;
-        let config = self.workflows.config();
-        let started = start_workflow_with_retry::<serde_json::Value>(
-            &broker,
-            client.spec(),
-            Some(workflow_id),
-            &self.workflows.core_registry(),
-            config.resend_on_transient_err,
-            &config.payload,
-            &config.retention,
-        )
-        .await?;
-        Ok(WorkflowHandle::new(
-            started.workflow_id(),
-            handle,
-            Arc::clone(&self.workflows),
-        ))
+        let started = broker
+            .start_client_workflow(
+                &client,
+                workflow_id,
+                Utc::now(),
+                self.workflows.config().resend_on_transient_err,
+                &*self.workflows,
+            )
+            .await;
+        match started {
+            Ok(ClientStartOutcome::Started | ClientStartOutcome::Exists) => Ok(
+                WorkflowHandle::new(workflow_id, handle, Arc::clone(&self.workflows)),
+            ),
+            Ok(ClientStartOutcome::IdTaken { existing_name }) => Err(refused(
+                WorkflowStartErrorCode::WorkflowIdConflict,
+                format!(
+                    "workflow_id '{workflow_id}' already exists for workflow name \
+                     '{existing_name}', cannot start workflow name '{}' with the same id",
+                    spec.name(),
+                ),
+                false,
+            )),
+            Err(error) => Err(refused(
+                start_error_code(&error, workflow_id),
+                error.to_string(),
+                error.is_retryable(),
+            )),
+        }
     }
 
     /// Start `spec` again after `error`, with its workflow id (Python
@@ -162,4 +176,31 @@ impl WorkflowStarter {
 /// A new workflow id.
 pub(crate) fn new_workflow_id() -> Uuid {
     Uuid::new_v4()
+}
+
+/// The start catalog code of the failed start of `workflow_id`: a spec or a
+/// child spec that the core refuses is `VALIDATION_FAILED`; the schema
+/// install, the database, the client family check and a child build that
+/// raised are `ENQUEUE_FAILED`. Pure.
+///
+/// Panics: an error that a start never gives (a defect).
+fn start_error_code(error: &ClientStartError, workflow_id: Uuid) -> WorkflowStartErrorCode {
+    match error {
+        ClientStartError::SchemaInstall(_) => WorkflowStartErrorCode::EnqueueFailed,
+        ClientStartError::Start(WorkflowError::Serialization(_) | WorkflowError::Validation(_)) => {
+            WorkflowStartErrorCode::ValidationFailed
+        }
+        ClientStartError::Start(
+            WorkflowError::Database(_)
+            | WorkflowError::Broker(_)
+            | WorkflowError::StepContract(_)
+            | WorkflowError::ChildSpecSource(_),
+        ) => WorkflowStartErrorCode::EnqueueFailed,
+        ClientStartError::Start(
+            WorkflowError::WorkflowNotFound { .. } | WorkflowError::InvalidStatus(_),
+        ) => panic!(
+            "the start of workflow {workflow_id} returned an error outside the start catalog: \
+             {error}"
+        ),
+    }
 }

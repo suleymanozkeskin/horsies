@@ -63,6 +63,42 @@ fn trusted() -> TrustedHeader {
     TrustedHeader::new("x-user", true).unwrap()
 }
 
+/// The postures of the three policies: `AllowAll` allows reads and actions;
+/// `ViewOnly` allows reads and refuses actions; `TrustedHeader` allows a
+/// request whose header has a value that is not blank, and its actions only
+/// when it allows actions.
+#[tokio::test]
+async fn the_three_policies_answer_their_postures() {
+    let (bare, _body) = request(Method::GET, "/api/meta").into_parts();
+    let facts = MonitoringRequest::of(&bare);
+    assert!(AllowAll.can_view(facts).await);
+    assert!(AllowAll.can_act(facts).await);
+    assert!(ViewOnly.can_view(facts).await);
+    assert!(!ViewOnly.can_act(facts).await);
+
+    let acting = TrustedHeader::new("X-Forwarded-User", true).unwrap();
+    assert!(!acting.can_view(facts).await);
+    let (blank, _body) = Request::builder()
+        .uri("/api/meta")
+        .header("x-forwarded-user", "  ")
+        .body(Body::empty())
+        .unwrap()
+        .into_parts();
+    assert!(!acting.can_view(MonitoringRequest::of(&blank)).await);
+    let (identified, _body) = Request::builder()
+        .uri("/api/meta")
+        .header("x-forwarded-user", " alex ")
+        .body(Body::empty())
+        .unwrap()
+        .into_parts();
+    let facts = MonitoringRequest::of(&identified);
+    assert!(acting.can_view(facts).await);
+    assert!(acting.can_act(facts).await);
+    let viewing = TrustedHeader::new("X-Forwarded-User", false).unwrap();
+    assert!(viewing.can_view(facts).await);
+    assert!(!viewing.can_act(facts).await);
+}
+
 /// The page and its assets are public: a policy that refuses every view
 /// does not stop them.
 #[tokio::test]

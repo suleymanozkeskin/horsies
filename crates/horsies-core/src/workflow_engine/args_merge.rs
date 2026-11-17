@@ -376,7 +376,7 @@ fn dep_parse_error(dep_idx: i32, error: &serde_json::Error) -> TaskError {
 /// The input of a child build: the node input after the `args_from` merge, with its members in the
 /// order in which Python checks them, and the `args_from` keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChildBuildInput {
+pub struct ChildBuildInput {
     /// The input text: the members of the stored input, then one member per `args_from` key in
     /// [`args_from_keys`](Self::args_from_keys) order, each `args_from` entry replaced by its `inner`
     /// result envelope. For a node with no `args_from`: the stored text, unchanged.
@@ -393,6 +393,11 @@ impl ChildBuildInput {
             text,
             args_from_keys: Vec::new(),
         }
+    }
+
+    /// The input text that the child's builder decodes.
+    pub fn text(&self) -> &str {
+        &self.text
     }
 }
 

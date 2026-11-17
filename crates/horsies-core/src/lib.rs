@@ -227,6 +227,17 @@ pub use crate::workflow_engine::child_spec::{
     ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ChildSpecs,
     ChildStartSource, ClientChildSpec, ClientSpec,
 };
+
+// The steps that a client's child spec source runs around its own builder:
+// the builder input of a request, and the node failures with Python's error
+// envelopes.
+pub use crate::workflow_engine::args_merge::ChildBuildInput;
+pub use crate::workflow_engine::start::ChildSpecError;
+pub use crate::workflow_engine::start_statement::{
+    build_failed_error, merged_child_input, node_failure_result, params_refused_error,
+    subworkflow_load_failed_error, NodeInput, RefusedMember,
+};
+
 pub use crate::workflow_engine::engine::{
     on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
 };

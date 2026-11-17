@@ -14,8 +14,8 @@ use horsies_core::core::config::worker_profile::ProfileRequest;
 use horsies_core::process_runtime::{spawn_on_process_runtime, ProcessRuntimeRefusal};
 use horsies_core::worker_manifest::WorkerManifest;
 use horsies_core::{
-    child_command, run_end_of, RunPhase, Worker, WorkerPlan, WorkerPlanRefused, WorkerRunEnd,
-    WorkerStop, WorkflowSpecRegistry,
+    child_command, run_end_of, ChildSpecs, RunPhase, Worker, WorkerPlan, WorkerPlanRefused,
+    WorkerRunEnd, WorkerStop,
 };
 
 pub use horsies_core::worker_manifest::WorkerLogLevel;
@@ -24,6 +24,7 @@ pub use horsies_core::{WorkerBootCause, WorkerFailCause};
 use crate::check::{CheckReport, CheckScope, WORKER_STARTUP};
 use crate::config::{rust_child_launch, worker_manifest};
 use crate::signals::stop_on_signals;
+use crate::workflow::WorkflowRegistry;
 use crate::{AppRole, Horsies, HorsiesError};
 
 /// How a worker starts: the profile of `AppConfig.worker_profiles` that it
@@ -137,7 +138,7 @@ impl Horsies {
             signal_stop.request_stop()
         }))
         .map_err(WorkerRunError::RuntimeUnavailable)?;
-        let run = spawn_on_process_runtime(run_plan(plan, self.workflows().core_registry(), stop));
+        let run = spawn_on_process_runtime(run_plan(plan, Arc::clone(self.workflows()), stop));
         let end = match run {
             Ok(run) => run.await,
             Err(refusal) => {
@@ -180,15 +181,15 @@ impl Horsies {
 }
 
 /// Build the worker of `plan` and run it to its end; the child workflows
-/// that its steps start build from `workflow_specs`, the app's registered
-/// definitions. A worker that does not build is a failed start; its error
-/// is logged with its cause.
+/// that its steps start build through `workflows`, the app's workflow
+/// registry. A worker that does not build is a failed start; its error is
+/// logged with its cause.
 async fn run_plan(
     plan: WorkerPlan,
-    workflow_specs: Arc<WorkflowSpecRegistry>,
+    workflows: Arc<WorkflowRegistry>,
     stop: WorkerStop,
 ) -> WorkerRunEnd {
-    match Worker::from_plan(plan, workflow_specs).await {
+    match Worker::from_plan(plan, ChildSpecs::Client(workflows)).await {
         Ok(worker) => worker.with_stop(&stop).run_to_end().await,
         Err(error) => {
             tracing::error!("the worker did not build: {error}");

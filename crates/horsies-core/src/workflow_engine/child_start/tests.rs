@@ -717,6 +717,32 @@ fn a_source_with_no_stored_result_is_named_by_its_node_id() {
     assert_eq!(error.data, Some(serde_json::json!({"dependency_index": 0})));
 }
 
+/// An `args_from` text that does not parse fails the node with
+/// `WORKER_SERIALIZATION_ERROR` and Python's text (`_args_from_map`,
+/// `core/workflows/child_build.py`), with the workflow id and the node in
+/// `data`; it is not an error of the step.
+#[test]
+fn an_args_from_text_that_does_not_parse_fails_the_node() {
+    let workflow_id = Uuid::new_v4();
+    let mut corrupt = owed(workflow_id, 0, CHILD_KEY);
+    corrupt.args_from = Some("{not json".to_owned());
+
+    let NodeInput::NodeFails(error) =
+        merged_child_input(&request_of(&corrupt)).expect("a node failure, not a step error")
+    else {
+        panic!("the merge took an args_from text that does not parse");
+    };
+    assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
+    assert_eq!(
+        error.message.as_deref(),
+        Some("Corrupt args_from JSON for subworkflow task 1")
+    );
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 1}))
+    );
+}
+
 /// A step takes up to `MAX_WORKFLOW_NODES` child starts, those that its
 /// child starts owe included.
 #[test]
