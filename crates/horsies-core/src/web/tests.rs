@@ -163,13 +163,16 @@ fn action_request(uri: &str) -> Request<Body> {
         .expect("action request")
 }
 
-/// The 400 body of a task path id that is not a UUID: Python's
-/// `PathIdNotUuid.detail` with pydantic's message.
-fn task_path_id_refusal(raw: &str) -> serde_json::Value {
-    let reason = Uuid::parse_str(raw).expect_err("the text is not a UUID");
+/// pydantic's message for the path id text `not-a-uuid` (pydantic 2.13.4:
+/// `TypeAdapter(UUID).validate_python('not-a-uuid')`).
+const NOT_A_UUID_MESSAGE: &str = "Input should be a valid UUID, invalid character: found `n` at 1";
+
+/// The 400 body of the path id `not-a-uuid` in the path parameter `field`:
+/// Python's `PathIdNotUuid.detail` with pydantic's message.
+fn not_a_uuid_refusal(field: &str) -> serde_json::Value {
     serde_json::json!({
         "code": "INVALID_INPUT",
-        "detail": format!("Path parameter task_id: Input should be a valid UUID, {reason}."),
+        "detail": format!("Path parameter {field}: {NOT_A_UUID_MESSAGE}."),
     })
 }
 
@@ -329,10 +332,7 @@ async fn task_action_body_defaults_when_absent_and_malformed_json_is_422() {
     // The absent body is accepted; the refusal is the path id's.
     let absent_response = router.clone().oneshot(absent).await.unwrap();
     assert_eq!(absent_response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        json(absent_response).await,
-        task_path_id_refusal("not-a-uuid")
-    );
+    assert_eq!(json(absent_response).await, not_a_uuid_refusal("task_id"));
 
     let task_id = Uuid::new_v4();
     let malformed = Request::builder()
@@ -1521,14 +1521,14 @@ async fn a_task_path_id_that_is_not_a_uuid_is_invalid_input() {
         .await
         .unwrap();
     assert_eq!(read.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json(read).await, task_path_id_refusal("not-a-uuid"));
+    assert_eq!(json(read).await, not_a_uuid_refusal("task_id"));
 
     let cancel = router
         .oneshot(action_request("/api/tasks/not-a-uuid/cancel"))
         .await
         .unwrap();
     assert_eq!(cancel.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json(cancel).await, task_path_id_refusal("not-a-uuid"));
+    assert_eq!(json(cancel).await, not_a_uuid_refusal("task_id"));
 }
 
 /// A workflow id text that is not a UUID names no run on the two read
@@ -1594,11 +1594,7 @@ async fn a_workflow_action_path_id_that_is_not_a_uuid_is_invalid_input() {
         status(SchemaState::Match, Some(crate::expected_schema_version())),
         true,
     );
-    let reason = uuid::Uuid::parse_str("not-a-uuid").expect_err("not a UUID");
-    let refusal = serde_json::json!({
-        "code": "INVALID_INPUT",
-        "detail": format!("Path parameter workflow_id: Input should be a valid UUID, {reason}."),
-    });
+    let refusal = not_a_uuid_refusal("workflow_id");
     for path in [
         "/api/workflows/not-a-uuid/pause",
         "/api/workflows/not-a-uuid/resume",
@@ -2206,7 +2202,7 @@ async fn the_handler_serves_the_routes_with_the_verdicts_of_the_grant() {
         )
         .await;
     assert_eq!(read.status, StatusCode::BAD_REQUEST);
-    assert_eq!(body_json(&read), task_path_id_refusal("not-a-uuid"));
+    assert_eq!(body_json(&read), not_a_uuid_refusal("task_id"));
 
     let meta = handler
         .handle(

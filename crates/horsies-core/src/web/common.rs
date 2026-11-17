@@ -11,6 +11,8 @@ use crate::monitoring::{
 };
 use crate::TaskStatus;
 
+use super::uuid_text::parse_uuid_text;
+
 #[derive(Debug, Serialize)]
 pub(crate) struct DetailBody {
     pub detail: String,
@@ -423,21 +425,15 @@ pub(crate) fn pagination_refused(
     }
 }
 
-/// pydantic's message for text that is not a UUID: `Input should be a valid
-/// UUID, ` and the parser's reason.
-fn uuid_parsing_message(error: &uuid::Error) -> String {
-    format!("Input should be a valid UUID, {error}")
-}
-
-/// Parse a task path id (Python `require_path_uuid`). Text that is not a
-/// UUID is refused with 400 `INVALID_INPUT` before any database call. The
-/// detail is `Path parameter <field>: <pydantic's message>.`, the detail of
-/// the Python web app.
+/// Parse a task path id (Python `require_path_uuid`), by pydantic's rule
+/// ([`parse_uuid_text`]). Text that is not a UUID is refused with 400
+/// `INVALID_INPUT` before any database call. The detail is
+/// `Path parameter <field>: Input should be a valid UUID, <reason>.`, the
+/// detail of the Python web app.
 pub(crate) fn parse_path_uuid(field: &'static str, raw: &str) -> Result<uuid::Uuid, ApiError> {
-    uuid::Uuid::parse_str(raw).map_err(|error| {
+    parse_uuid_text(raw).map_err(|refusal| {
         ApiError::InvalidInput(format!(
-            "Path parameter {field}: {}.",
-            uuid_parsing_message(&error)
+            "Path parameter {field}: Input should be a valid UUID, {refusal}."
         ))
     })
 }
