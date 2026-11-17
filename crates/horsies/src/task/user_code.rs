@@ -29,7 +29,7 @@ pub trait UserErrorCode:
     const CODES: &'static [&'static str];
 
     /// The stored code text of this code.
-    fn code(&self) -> &'static str;
+    fn code(&self) -> &str;
 
     /// The code whose stored text is `text`, or `None` when the type has
     /// no such code.
@@ -46,6 +46,23 @@ impl UserErrorCode for std::convert::Infallible {
 
     fn from_code(_text: &str) -> Option<Self> {
         None
+    }
+}
+
+/// Any user code, as checked text: the code type of a read that takes the
+/// codes of several tasks, such as a workflow result or a dependency result
+/// whose task has another code type (Python's `str` code). `CODES` is empty:
+/// the set is open, and `from_code` takes every text that `UserCode::parse`
+/// takes.
+impl UserErrorCode for UserCode {
+    const CODES: &'static [&'static str] = &[];
+
+    fn code(&self) -> &str {
+        self.as_str()
+    }
+
+    fn from_code(text: &str) -> Option<Self> {
+        UserCode::parse(text).ok()
     }
 }
 
@@ -281,6 +298,19 @@ mod tests {
             <std::convert::Infallible as UserErrorCode>::from_code("ANY"),
             None
         );
+    }
+
+    #[test]
+    fn user_code_reads_every_user_code_and_no_built_in_name() {
+        assert!(<UserCode as UserErrorCode>::CODES.is_empty());
+        let read = <UserCode as UserErrorCode>::from_code("RATE_LIMITED").unwrap();
+        assert_eq!(read.code(), "RATE_LIMITED");
+        assert_eq!(<UserCode as UserErrorCode>::from_code("TASK_TIMEOUT"), None);
+        assert_eq!(
+            <UserCode as UserErrorCode>::from_code("WORKFLOW_STOPPED"),
+            None
+        );
+        assert!(user_code_refusals::<UserCode>("charge").is_empty());
     }
 
     #[test]

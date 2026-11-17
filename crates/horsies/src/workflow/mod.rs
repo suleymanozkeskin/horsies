@@ -1,55 +1,29 @@
 //! Workflows: the typed DSL, workflow definitions, the conversion to the
 //! core's spec data, the start forms and the workflow handle.
+//!
+//! The DSL builds a spec as data, in the client: the nodes of registered
+//! tasks ([`TaskNode`], from `TaskFunction::node`), sub-workflow nodes
+//! ([`SubWorkflowNode`], from a definition), their links, and the output.
+//! `WorkflowSpecBuilder::build` checks the spec with Python's rules and
+//! codes before anything is written.
 
-use std::marker::PhantomData;
+mod context;
+mod definition;
+mod dependency;
+mod input;
+mod node;
+mod spec;
+mod sub_workflow;
 
-/// The typed token of one field of a workflow node's input type.
-///
-/// `#[derive(WorkflowInput)]` makes one per field of a named-field input
-/// struct, and `#[task]` makes one per parameter in the task's `params`
-/// module. It carries the input type and the field type; the node keeps
-/// only the field's JSON key.
-#[derive(Debug, PartialEq, Eq)]
-pub struct InputField<I, F> {
-    name: &'static str,
-    _types: PhantomData<fn() -> (I, F)>,
-}
+pub use context::{WorkflowContext, WorkflowContextError};
+pub use definition::{WorkflowDefConfig, WorkflowDefinition};
+pub use dependency::OutputlessResults;
+pub use node::{InputField, JoinType, NodeKey, NodeRef, TaskNode, TypedNodeRef};
+pub use spec::{SuccessCase, SuccessPolicy, WorkflowSpec, WorkflowSpecBuilder};
+pub use sub_workflow::{SubWorkflowNode, SubWorkflowParams};
 
-impl<I, F> InputField<I, F> {
-    /// The token of the field whose JSON key is `name`. The macro
-    /// expansions make it through `__private::input_field`.
-    pub(crate) const fn raw(name: &'static str) -> Self {
-        Self {
-            name,
-            _types: PhantomData,
-        }
-    }
-
-    /// The JSON key of the field in the node's input.
-    pub const fn name(&self) -> &'static str {
-        self.name
-    }
-}
-
-impl<I, F> Clone for InputField<I, F> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<I, F> Copy for InputField<I, F> {}
-
-#[cfg(test)]
-mod tests {
-    use super::InputField;
-
-    struct Input;
-
-    #[test]
-    fn a_token_gives_the_key_it_was_made_with_and_its_copy_gives_the_same() {
-        let token: InputField<Input, u32> = crate::__private::input_field("user_id");
-        let copy = token;
-        assert_eq!(token.name(), "user_id");
-        assert_eq!(copy.name(), "user_id");
-    }
-}
+/// The workflow types of the core: the error policy, the statuses, the
+/// summary of a child workflow and the workflow meta of a task.
+pub use horsies_core::{
+    OnError, SubWorkflowSummary, WorkflowMeta, WorkflowStatus, WorkflowTaskStatus,
+};
