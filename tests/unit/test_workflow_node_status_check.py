@@ -7,21 +7,20 @@ enum values. Both lists are read from code and must stay equal.
 from __future__ import annotations
 
 import re
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from horsies.core.brokers.resources import ListenerDisabled
-
+import horsies._core as core
 from horsies.core.models.workflow.enums import WorkflowTaskStatus
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.types.result import is_ok
 from tests.baseline_sql import baseline_sql
-from tests.broker_resources_support import attach_resources, fake_resources
 
 pytestmark = [pytest.mark.unit]
+
+WORKFLOW_ID = '0196f3a2-7c41-7d55-9e2b-4a1c3d5e6f70'
 
 _STATUS_IN_LIST = re.compile(r'status\s+(?:NOT\s+)?IN\s*\(([^)]*)\)')
 
@@ -44,40 +43,40 @@ class TestCheckMatchesEnum:
         assert _quoted_values(lists[0]) == expected
 
 
-def _node_row(status: str) -> SimpleNamespace:
-    return SimpleNamespace(
-        workflow_task_id='wt-1',
+def _record(record_class: type, **fields: object) -> MagicMock:
+    """A stand-in for a record of ``horsies._core``, which has no Python
+    constructor: a class pattern matches it, and its fields are attributes."""
+    record = MagicMock(spec=record_class)
+    for name, value in fields.items():
+        setattr(record, name, value)
+    return record
+
+
+def _node_row(status: str) -> MagicMock:
+    return _record(
+        core.StoredNodeRecord,
         node_id='node-9',
         task_index=0,
         task_name='task',
         status=status,
-        result=None,
+        result_json=None,
         started_at=None,
         completed_at=None,
         sub_workflow_id=None,
-        sub_workflow_summary=None,
+        sub_workflow_summary_json=None,
         is_subworkflow=False,
         sub_definition_key=None,
     )
 
 
-def _handle_with_rows(rows: list[SimpleNamespace]) -> WorkflowHandle[Any]:
-    node_result = MagicMock()
-    node_result.fetchall.return_value = rows
-    session = AsyncMock()
-    session.execute = AsyncMock(return_value=node_result)
-    context = AsyncMock()
-    context.__aenter__ = AsyncMock(return_value=session)
-    context.__aexit__ = AsyncMock(return_value=False)
+def _handle_with_rows(rows: list[MagicMock]) -> WorkflowHandle[Any]:
+    """A handle whose core read of the nodes (``workflow_nodes_async``)
+    answers ``rows``."""
     broker = MagicMock()
-    attach_resources(
-        broker,
-        fake_resources(
-            session_factory=MagicMock(return_value=context),
-            listener=ListenerDisabled(),
-        ),
+    broker._core_handle.workflow_nodes_async = AsyncMock(
+        return_value=_record(core.WorkflowNodesRead, nodes=rows),
     )
-    return WorkflowHandle(workflow_id='wf-1', broker=broker)
+    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
 
 
 class TestTasksAsync:
@@ -101,6 +100,6 @@ class TestTasksAsync:
             await handle.tasks_async()
 
         message = str(raised.value)
-        assert 'wf-1' in message
+        assert WORKFLOW_ID in message
         assert 'node-9' in message
         assert "'BOGUS'" in message
