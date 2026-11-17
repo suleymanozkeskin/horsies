@@ -25,7 +25,7 @@ from horsies.core.models.workflow import TaskNode
 from horsies.core.workflows.engine import try_make_ready_and_enqueue
 
 from .conftest import (
-    complete_task,
+    finish_task,
     make_failing_task,
     make_simple_task,
     make_workflow_spec,
@@ -93,8 +93,8 @@ class TestSkipSetsCompletedAt:
             broker,
         )
 
-        await complete_task(session, broker, handle.workflow_id, 0, _FAILED)
-        await complete_task(session, broker, handle.workflow_id, 1, _FAILED)
+        await finish_task(session, broker, handle.workflow_id, 0, _FAILED)
+        await finish_task(session, broker, handle.workflow_id, 1, _FAILED)
 
         status, completed_at = await _node(session, handle.workflow_id, 2)
         assert status == 'SKIPPED'
@@ -113,7 +113,7 @@ class TestSkipSetsCompletedAt:
             broker,
         )
 
-        await complete_task(session, broker, handle.workflow_id, 0, _FAILED)
+        await finish_task(session, broker, handle.workflow_id, 0, _FAILED)
 
         status, completed_at = await _node(session, handle.workflow_id, 1)
         assert status == 'SKIPPED'
