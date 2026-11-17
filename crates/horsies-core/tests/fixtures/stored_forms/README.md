@@ -27,6 +27,7 @@ encoder, and the Python tests check that it still does.
 | `task_input.json` | Task input (`input_json`) |
 | `result_envelope.json` | Result envelope (`{"__h_task_result__": true, "ok": ..., "err": ...}`) |
 | `error_data.json` | Library errors with `data`, as stored |
+| `task_options.json` | Task options text (`task_options` column) |
 
 ## Rows
 
@@ -204,6 +205,44 @@ order of the table, and the generic test pins the encoding of each vector.
 The Rust client writes none of these errors; its test reads each envelope
 through `outcome_of_record`.
 
+## Task options (`task_options.json`)
+
+`{"retry_policy": <policy or null>, "good_until": <instant or null>,
+"timeout_ms": <ms or null>, "execution": <class>, "cancel_grace_ms": <ms or
+null>}`, in this order; the policy holds `max_retries`, `intervals`,
+`backoff_strategy`, `jitter`, `max_delay_seconds` (only when set) and
+`auto_retry_for`, codes by name. Every task stores the text, nulls included.
+A vector's `kind` is `task` (the options of a task), `send` (a send with a
+deadline: Python writes the deadline in `good_until`) or `node` (a workflow
+node: the task's text with the node's deadline merged as `good_until`, in
+`isoformat()`). `options` holds the stored facts (a `SHARED_ASYNC` task's
+grace as resolved at definition).
+
+Encoders:
+
+- Python: `serialize_task_options` (`python/horsies/core/codec/task_options.py:27`);
+  a send's options with its deadline at
+  `python/horsies/core/task_decorator.py:2067-2087`; a node's merge at
+  `python/horsies/core/workflows/child_build.py:574` and
+  `python/horsies/core/workflows/engine.py:464`.
+- Core: `TaskOptions::stored_options_text`
+  (`crates/horsies-core/src/core/task/options.rs:294`);
+  `merge_good_until_into_options` for a node
+  (`crates/horsies-core/src/workflow_engine/mod.rs:117`).
+- Rust client: its send stores `stored_options_text`
+  (`crates/horsies/src/send/function.rs:322`), with the deadline only in the
+  row's `good_until` column; a node merges its deadline in
+  `task_options_text` (`crates/horsies/src/workflow/spec_data.rs:168`).
+
+Decoders:
+
+- Python: `stored_retry_policy` (`python/horsies/core/codec/task_options.py:85`),
+  `stored_max_retries` (`:112`), `stored_execution` (`:147`).
+- Core: `prepare_enqueue_facts` (`crates/horsies-core/src/core/history/enqueue.rs:101`,
+  the execution class), `stored_max_retries`
+  (`crates/horsies-core/src/worker/retry.rs:481`), `read_stored_options`
+  (`:222`, the timeout and the policy at dispatch).
+
 ## Findings
 
 Differences that the vectors found. A fixed one names its PR; an open one is a
@@ -216,6 +255,8 @@ Differences that the vectors found. A fixed one names its PR; an open one is a
 | SQL error key order | error data | `horsies_task_error_envelope` wrote `error_code`, `message`, `data`, `exception`; Python writes `exception`, `error_code`, `data`, `message` | fixed, #1623 |
 | instants in stored data | error data, task options | the stale-crash `started_at` and `detected_at` and a node's merged `good_until` used `to_rfc3339()` (`.500`); Python's `isoformat()` writes `.500000` | fixed, #1623 |
 | result read of a big integer | result envelope | the core's result read parsed the envelope into a `serde_json::Map`: `2**64` came back as `1.8446744073709552e+19`, which Python's and the Rust client's typed reads refuse | fixed, #1617 |
+| options of a default task | task options | the core's encoder wrote no text for an isolated task with no policy, timeout or grace; Python stores the text with nulls | fixed, #1629 |
+| `send-deadline-in-options` | task options | a send with a deadline: Python writes it in the options' `good_until`; the Rust client writes `null` there (the deadline is in the row's column) | open |
 | `no-parameter-input` | task input | a task with no parameters: Python stores `{}`, the Rust client stores `null` (its input is `()`) | open |
-| `datetime-milliseconds` | task input, result | chrono writes a fraction of whole milliseconds with 3 digits (`.500Z`); Python writes 6 (`.500000Z`). Microseconds and whole seconds agree | open |
+| `datetime-milliseconds` | task input, result, task options | chrono writes a fraction of whole milliseconds with 3 digits (`.500Z`); Python writes 6 (`.500000Z`). Microseconds and whole seconds agree. The Rust client's node deadline (`to_rfc3339`) too | open |
 | not expressible in Rust | task input, result | `big_int`, `decimal`, `bytes`, `int_enum`, a typed map in insertion order: the client depends on no type that writes Python's text | listed per row |
