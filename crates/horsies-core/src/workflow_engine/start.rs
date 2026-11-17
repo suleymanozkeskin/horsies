@@ -140,7 +140,7 @@ async fn start_workflow_attempt<T>(
         Err(error) => Err(refused(
             classify_workflow_error(&error, &spec.name, wf_id),
             error.to_string(),
-            is_retryable_workflow_error(&error),
+            error.is_retryable(),
         )),
     }
 }
@@ -387,10 +387,6 @@ fn classify_workflow_error(
             "start of workflow '{workflow_name}' ({workflow_id}) returned an error outside the start catalog: {error}"
         ),
     }
-}
-
-fn is_retryable_workflow_error(e: &WorkflowError) -> bool {
-    e.is_retryable()
 }
 
 /// Retry a failed workflow start using the broker.

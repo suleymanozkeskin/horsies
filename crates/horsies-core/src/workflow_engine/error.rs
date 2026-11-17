@@ -66,3 +66,6 @@ impl WorkflowError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
