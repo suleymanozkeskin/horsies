@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::core::config::worker_profile::{ParentCpu, ProfileRequest};
 use crate::core::task::Execution;
 use crate::manifest::{
@@ -195,6 +196,8 @@ pub const PRODUCER_MANIFEST: ManifestModule = ManifestModule {
         <SchemaMode as ManifestItem>::ITEM,
         <SessionDatabase as ManifestItem>::ITEM,
         <PoolRecycle as ManifestItem>::ITEM,
+        <TcpKeepalivesConfig as ManifestItem>::ITEM,
+        <TcpUserTimeoutConfig as ManifestItem>::ITEM,
         <DatabaseManifest as ManifestItem>::ITEM,
         <SendManifest as ManifestItem>::ITEM,
         <ProducerManifest as ManifestItem>::ITEM,
@@ -211,6 +214,8 @@ pub const WORKER_MANIFEST: ManifestModule = ManifestModule {
     types: &[
         <SessionDatabase as ManifestItem>::ITEM,
         <PoolRecycle as ManifestItem>::ITEM,
+        <TcpKeepalivesConfig as ManifestItem>::ITEM,
+        <TcpUserTimeoutConfig as ManifestItem>::ITEM,
         <WorkerDatabaseManifest as ManifestItem>::ITEM,
         <SendManifest as ManifestItem>::ITEM,
         <TaskLimit as ManifestItem>::ITEM,
@@ -578,6 +583,9 @@ mod tests {
             names,
             [
                 "WHOLE_SECONDS",
+                "KEEPALIVE_SECONDS",
+                "KEEPALIVE_PROBES",
+                "TCP_USER_TIMEOUT_MS",
                 "POOL_SIZE",
                 "POOL_CONNECTIONS",
                 "RESERVATION_WINDOW_MICROS",
@@ -597,6 +605,9 @@ mod tests {
             names,
             [
                 "WHOLE_SECONDS",
+                "KEEPALIVE_SECONDS",
+                "KEEPALIVE_PROBES",
+                "TCP_USER_TIMEOUT_MS",
                 "RESERVATION_WINDOW_MICROS",
                 "TASK_LIMIT",
                 "MEMORY_LIMIT_MB",

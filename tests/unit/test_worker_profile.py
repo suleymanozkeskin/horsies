@@ -79,7 +79,7 @@ def _app_config(
 ) -> AppConfig:
     return AppConfig(
         broker=PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
         ),
         worker_profiles=profiles,
         **overrides,

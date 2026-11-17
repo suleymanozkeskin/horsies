@@ -140,6 +140,18 @@ const ENQUEUE_REQUEST_PARAMETERS: &[StubParameter] = &[
 ];
 
 const ENQUEUE_PARAMETERS: &[StubParameter] = &[positional("request", "EnqueueRequest")];
+const RELEASE_CLAIMS_REQUEST_PARAMETERS: &[StubParameter] = &[
+    keyword("worker_id", "str"),
+    keyword("claims", "list[tuple[uuid.UUID, datetime.datetime]]"),
+    keyword("placement", "Literal['SAME_CLASS', 'ISOLATED']"),
+];
+const RELEASE_CLAIMS_PARAMETERS: &[StubParameter] =
+    &[positional("request", "ReleaseClaimsRequest")];
+const REQUEUE_STALE_CLAIMED_PARAMETERS: &[StubParameter] = &[positional("stale_after_ms", "int")];
+const CANCEL_TASK_PARAMETERS: &[StubParameter] = &[
+    positional("task_id", "uuid.UUID"),
+    keyword("include_running", "bool"),
+];
 const TASK_INFO_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("include_result", "bool"),
@@ -152,8 +164,25 @@ const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerFai
 const SEND_OUTCOME: &str = "Enqueued | SendSuppressed | SendValidationFailed | \
      SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | SendKeyConflict";
 const TASK_INFO_OUTCOME: &str = "TaskInfoRecord | TaskInfoNotFound | BrokerFailure";
+const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
+    "StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed";
+const RELEASE_CLAIMS_OUTCOME: &str = "ClaimsReleased | ReleaseFailed";
+const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
+     CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
 
-const CORE_HANDLE_METHODS: [StubFunction; 10] = [
+const CORE_HANDLE_METHODS: [StubFunction; 15] = [
+    StubFunction {
+        name: "close",
+        parameters: &[],
+        returns: TypeText::Plain("HandleClosed"),
+        doc: "Close the handle's core pools. Writes in flight end within the close bound; the ones that\ndo not are logged with their count. A handle that never connected starts nothing.",
+    },
+    StubFunction {
+        name: "close_async",
+        parameters: &[],
+        returns: TypeText::FutureOf("HandleClosed"),
+        doc: "The awaitable form of the method above.",
+    },
     StubFunction {
         name: "ping_database",
         parameters: &[],
@@ -201,6 +230,24 @@ const CORE_HANDLE_METHODS: [StubFunction; 10] = [
         parameters: ENQUEUE_PARAMETERS,
         returns: TypeText::FutureOf(SEND_OUTCOME),
         doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "requeue_stale_claimed_async",
+        parameters: REQUEUE_STALE_CLAIMED_PARAMETERS,
+        returns: TypeText::FutureOf(REQUEUE_STALE_CLAIMED_OUTCOME),
+        doc: "One stale CLAIMED requeue pass. Writes; each batch commits alone. A threshold that\ndoes not fit in 64 bits raises OverflowError.",
+    },
+    StubFunction {
+        name: "release_claims_async",
+        parameters: RELEASE_CLAIMS_PARAMETERS,
+        returns: TypeText::FutureOf(RELEASE_CLAIMS_OUTCOME),
+        doc: "Release the claims of one request. Writes, in one statement.",
+    },
+    StubFunction {
+        name: "cancel_task_async",
+        parameters: CANCEL_TASK_PARAMETERS,
+        returns: TypeText::FutureOf(CANCEL_TASK_OUTCOME),
+        doc: "Cancel one plain task; a RUNNING task only with include_running. Writes, in one\nstatement. An outcome that contradicts the function raises PanicException.",
     },
     StubFunction {
         name: "task_info",
@@ -269,7 +316,7 @@ const EXCEPTIONS: &[StubException] = &[
     },
 ];
 
-const ARGUMENT_CLASSES: [StubClass; 7] = [
+const ARGUMENT_CLASSES: [StubClass; 8] = [
     StubClass {
         name: "StartNow",
         doc: "Start the task as soon as a worker can claim it.",
@@ -319,9 +366,16 @@ const ARGUMENT_CLASSES: [StubClass; 7] = [
         properties: &[property("task_id", "uuid.UUID")],
         methods: &[],
     },
+    StubClass {
+        name: "ReleaseClaimsRequest",
+        doc: "One frozen release: the claims of one worker, at most 1000, each task once, each with\nthe claim generation of its dispatch. A naive datetime raises TypeError; more claims, a\nrepeated task id or another placement raises ValueError.",
+        constructor: Constructor::Parameters(RELEASE_CLAIMS_REQUEST_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
 ];
 
-const RECORD_CLASSES: [StubClass; 16] = [
+const RECORD_CLASSES: [StubClass; 30] = [
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -341,6 +395,13 @@ const RECORD_CLASSES: [StubClass; 16] = [
         doc: "The round trip of one database ping.",
         constructor: Constructor::NoConstructor,
         properties: &[property("latency_ms", "float")],
+        methods: &[],
+    },
+    StubClass {
+        name: "HandleClosed",
+        doc: "The close of a handle ended: its core pools are closed, or it never connected. The next\noperation on the handle opens new core pools.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
         methods: &[],
     },
     StubClass {
@@ -369,7 +430,10 @@ const RECORD_CLASSES: [StubClass; 16] = [
         doc: "The schema state of the database.",
         constructor: Constructor::NoConstructor,
         properties: &[
-            property("state", "Literal['MATCH', 'MISMATCH', 'ABSENT', 'UNKNOWN']"),
+            property(
+                "state",
+                "Literal['MATCH', 'MISMATCH', 'ABSENT', 'ZERO_X', 'UNKNOWN']",
+            ),
             property("version", "int | None"),
             property("expected_version", "int"),
         ],
@@ -499,6 +563,123 @@ const RECORD_CLASSES: [StubClass; 16] = [
         properties: &[property("task_id", "uuid.UUID")],
         methods: &[],
     },
+    StubClass {
+        name: "StaleClaimsDrained",
+        doc: "The requeue pass ended at a short batch: no eligible row was left. Every batch committed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("requeued", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "StaleClaimsBoundReached",
+        doc: "The requeue pass ran its bound of full batches and stopped; eligible rows can remain.\nEvery batch committed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("requeued", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "StaleClaimsRequeueFailed",
+        doc: "The requeue pass stopped at a failure. The batches before it committed requeued_before\nrows; the failed batch wrote nothing, or its outcome is unknown.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("requeued_before", "int"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ClaimsReleased",
+        doc: "The release statement ran: one row outcome per claim, in the request order.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("rows", "list[ReleasedRow | NotHeldRow]")],
+        methods: &[],
+    },
+    StubClass {
+        name: "ReleasedRow",
+        doc: "The row was CLAIMED by the worker at its claim generation and is PENDING again.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "NotHeldRow",
+        doc: "The row is absent, or not CLAIMED by the worker at this claim generation. It was not\ntouched.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "ReleaseFailed",
+        doc: "The release failed. The statement wrote nothing, or it committed and its reply was lost.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str"), property("retryable", "bool")],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskCancelledRecord",
+        doc: "The plain task moved to history as CANCELLED; was_status is the status it left.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            StubProperty {
+                name: "was_status",
+                annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
+            },
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "CancelRefusedWorkflowTask",
+        doc: "The task belongs to a workflow, live or finished. Nothing changed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            StubProperty {
+                name: "current_status",
+                annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
+            },
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "CancelRefusedStatus",
+        doc: "The task's status does not admit the cancel: a terminal status (an earlier cancel\nincluded), or RUNNING without the opt-in. Nothing changed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            StubProperty {
+                name: "current_status",
+                annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
+            },
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "CancelTaskAbsent",
+        doc: "Neither the live table nor history holds the task. Nothing changed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "CancelFailed",
+        doc: "The connect, the client family check or the statement failed. The statement wrote\nnothing, or it committed and its reply was lost.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "CancelStoredDataInvalid",
+        doc: "Stored task data does not parse. The cancel refused the task; nothing changed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID"), property("message", "str")],
+        methods: &[],
+    },
 ];
 
 const HANDLE_CLASSES: [StubClass; 1] = [StubClass {
@@ -509,8 +690,8 @@ const HANDLE_CLASSES: [StubClass; 1] = [StubClass {
     methods: &CORE_HANDLE_METHODS,
 }];
 
-const CLASSES: [StubClass; 24] = {
-    let mut classes = [HANDLE_CLASSES[0]; 24];
+const CLASSES: [StubClass; 39] = {
+    let mut classes = [HANDLE_CLASSES[0]; 39];
     let mut position = 0;
     while position < ARGUMENT_CLASSES.len() {
         classes[1 + position] = ARGUMENT_CLASSES[position];

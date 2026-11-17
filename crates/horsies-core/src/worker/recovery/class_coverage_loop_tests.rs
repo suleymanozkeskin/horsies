@@ -159,9 +159,14 @@ async fn a_started_reaper_logs_an_unserved_isolated_stream() {
     let capture = tracing::subscriber::set_default(captured.clone());
     let cancel = CancellationToken::new();
     let reaper = spawn_reaper(
+        Arc::new(crate::broker::PostgresBroker::from_pool(
+            database.pool.clone(),
+        )),
         database.pool.clone(),
         database.pool.clone(),
-        Arc::new(WorkflowSpecRegistry::new()),
+        Arc::new(WorkflowSpecRegistry::new(
+            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        )),
         RecoveryConfig {
             check_interval_ms: CHECK_INTERVAL_MS,
             ..RecoveryConfig::default()

@@ -121,7 +121,7 @@ from horsies.core.worker.runner_heartbeat import (
 from horsies.core.worker.shared_stop import RetryPlacement, TimedOutAtKill
 from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
 from horsies.core.worker.thread_slots import ThreadRunRequest
-from horsies.core.worker.finalize import _phase2_of_a_replay
+from horsies.core.worker.finalize import _NodeFinishOwed, _phase2_of_a_replay
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -221,12 +221,9 @@ class DispatchMixin:
         async def _finalize_workflow_phase(
             self,
             task_id: str,
-            tr: TaskResult[Any, TaskError],
-            *,
-            queue_name: str = 'default',
-            task_name: str,
+            owed: _NodeFinishOwed,
         ) -> Result[None, _FinalizeError]: ...
-        async def _load_persisted_task_result(
+        async def _load_persisted_terminal(
             self,
             task_id: str,
             *,
@@ -348,10 +345,7 @@ class DispatchMixin:
             case _AttemptUnclaimed():
                 return _RequeueOutcome.REQUEUED
             case _AttemptFinished():
-                return await self._settle_finished_attempt(
-                    written,
-                    TaskResult(err=task_error),
-                )
+                return await self._settle_finished_attempt(written)
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -413,7 +407,6 @@ class DispatchMixin:
     async def _settle_finished_attempt(
         self,
         written: _AttemptFinished,
-        task_result: TaskResult[None, TaskError],
     ) -> _RequeueOutcome:
         """Run what follows a failed-attempt finish, after its session closed.
 
@@ -425,12 +418,10 @@ class DispatchMixin:
         match written.outcome:
             case FailureApplied(task_id=task_id, after=after):
                 match after:
-                    case PhaseTwoOwed(task_name=task_name, queue_name=queue_name):
+                    case PhaseTwoOwed(queue_name=queue_name, step=step):
                         phase2_r = await self._finalize_workflow_phase(
                             task_id,
-                            task_result,
-                            queue_name=queue_name,
-                            task_name=task_name,
+                            _NodeFinishOwed(queue_name=queue_name, facts=step),
                         )
                         if is_err(phase2_r):
                             await self._handle_finalize_error(phase2_r.err_value)
@@ -457,19 +448,14 @@ class DispatchMixin:
         capacity wake in the statement that committed. Total: a failed load
         or phase 2 goes to the finalize retry handler.
         """
-        load_r = _phase2_of_a_replay(await self._load_persisted_task_result(task_id))
+        load_r = _phase2_of_a_replay(await self._load_persisted_terminal(task_id))
         if is_err(load_r):
             await self._handle_finalize_error(load_r.err_value)
             return
         persisted = load_r.ok_value
         if persisted is None:
             return
-        phase2_r = await self._finalize_workflow_phase(
-            task_id,
-            persisted.result,
-            queue_name=persisted.queue_name,
-            task_name=persisted.task_name,
-        )
+        phase2_r = await self._finalize_workflow_phase(task_id, persisted)
         if is_err(phase2_r):
             await self._handle_finalize_error(phase2_r.err_value)
 
@@ -485,8 +471,9 @@ class DispatchMixin:
         *,
         claim: DispatchClaim,
         execution: Execution,
-    ) -> None:
-        """Submit to the slot pool and spawn the finalizer.
+    ) -> asyncio.Future[Any]:
+        """Submit to the slot pool, spawn the finalizer, and return the
+        finalizer task.
 
         Never raises for a task: the pool answers every submit, and the
         finalizer handles that answer. ``execution`` is the class column of
@@ -511,7 +498,7 @@ class DispatchMixin:
 
         match dispatch_route(execution, self.cfg.claim_plan(), claim.task_options, timeout):
             case RunShared(work=work):
-                self._dispatch_shared(
+                return self._dispatch_shared(
                     slots,
                     work,
                     task_id,
@@ -522,9 +509,8 @@ class DispatchMixin:
                     is_workflow_task,
                     claim,
                 )
-                return
             case RunSharedThread(work=thread_work):
-                self._dispatch_shared_thread(
+                return self._dispatch_shared_thread(
                     slots,
                     ThreadRunRequest(
                         task_id=task_id,
@@ -538,7 +524,6 @@ class DispatchMixin:
                     ),
                     queue_name,
                 )
-                return
             case RunIsolated(timeout=isolated_timeout):
                 pass
             case _ as unreachable:
@@ -557,7 +542,7 @@ class DispatchMixin:
         )
 
         # When done, record the outcome
-        self._spawn_background(
+        return self._spawn_background(
             self._finalize_after(
                 handle,
                 task_id,
@@ -582,10 +567,10 @@ class DispatchMixin:
         queue_name: str,
         is_workflow_task: bool,
         claim: DispatchClaim,
-    ) -> None:
-        """Submit a ``SHARED_ASYNC`` row to the shared async children, and
-        spawn its finalizer. ``work`` is the task with its deadline, or the
-        refusal that fails it. Never raises for a task."""
+    ) -> asyncio.Future[Any]:
+        """Submit a ``SHARED_ASYNC`` row to the shared async children, spawn
+        its finalizer, and return the finalizer task. ``work`` is the task with
+        its deadline, or the refusal that fails it. Never raises for a task."""
         handle = slots.submit_shared(
             SharedRunRequest(
                 task_id=task_id,
@@ -598,7 +583,7 @@ class DispatchMixin:
                 work=work,
             ),
         )
-        self._spawn_background(
+        return self._spawn_background(
             self._finalize_shared_after(
                 handle,
                 task_id,
@@ -617,13 +602,14 @@ class DispatchMixin:
         slots: SlotPool,
         request: ThreadRunRequest,
         queue_name: str,
-    ) -> None:
-        """Submit a ``SHARED_THREAD`` row to the shared thread children, and
-        spawn its finalizer. ``request.work`` is the task with its deadline,
-        or the refusal that fails it. Never raises for a task."""
+    ) -> asyncio.Future[Any]:
+        """Submit a ``SHARED_THREAD`` row to the shared thread children, spawn
+        its finalizer, and return the finalizer task. ``request.work`` is the
+        task with its deadline, or the refusal that fails it. Never raises for
+        a task."""
         handle = slots.submit_shared(request)
         work: ThreadSeatWork = request.work
-        self._spawn_background(
+        return self._spawn_background(
             self._finalize_shared_after(
                 handle,
                 request.task_id,
@@ -1104,10 +1090,7 @@ class DispatchMixin:
                     timeout_ms,
                 )
             case _AttemptFinished():
-                _ = await self._settle_finished_attempt(
-                    written,
-                    TaskResult(err=task_error),
-                )
+                _ = await self._settle_finished_attempt(written)
             case _ as unreachable:
                 assert_never(unreachable)
         return _TimeoutSettled()

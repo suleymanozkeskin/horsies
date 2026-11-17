@@ -22,7 +22,7 @@ use super::{
 };
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
-use crate::worker::recovery::mark_stale_running_as_failed;
+use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 
 const WORKER_ID: &str = "beat-spec-worker-1";
 const OTHER_WORKER_ID: &str = "beat-spec-worker-2";

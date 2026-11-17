@@ -134,7 +134,7 @@ def _worker(
     processes: int = 1,
 ) -> Worker:
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
         processes=processes,

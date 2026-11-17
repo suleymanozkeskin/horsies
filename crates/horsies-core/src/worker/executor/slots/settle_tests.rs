@@ -299,7 +299,9 @@ fn writer_with_self_heal(pool: PgPool, orphan_self_heal: OrphanSelfHeal) -> Outc
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
         broker,
-        Arc::new(WorkflowSpecRegistry::default()),
+        Arc::new(WorkflowSpecRegistry::new(
+            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        )),
         WORKER_ID.to_owned(),
         PayloadPolicy::default(),
         RetentionConfig::default(),
@@ -576,6 +578,48 @@ async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
     remove_task(&pool, task_id).await;
 }
 
+/// Python `tests/integration/test_soft_cap_start_check.py::test_stop_returns_the_held_rows_to_their_queue`:
+/// at the stop, a row that waited for its queue cap goes back to the queue
+/// with the claim fence (`worker::worker::return_held_rows` settles each
+/// held row so).
+#[tokio::test]
+#[serial]
+async fn a_row_held_for_its_queue_cap_goes_back_to_the_queue_at_the_stop() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation) = seed(
+        &pool,
+        &queue,
+        ExecutionClass::Isolated,
+        Held::Claimed,
+        None,
+        0,
+    )
+    .await;
+    let held = claimed_row(
+        task_id,
+        &queue,
+        generation,
+        ExecutionClass::Isolated,
+        None,
+        0,
+    );
+
+    let settled = writer(pool.clone())
+        .settle(
+            &held,
+            AttemptEnd::NotDispatched(NotRunCause::HeldForQueueCap),
+        )
+        .await;
+
+    assert_eq!(settled, Settlement::Written);
+    let row = live_row(&pool, task_id).await.expect("the row stays live");
+    assert_eq!(row["status"], "PENDING");
+    assert_eq!(row["claimed_by_worker_id"], serde_json::Value::Null);
+    assert_eq!(row["execution"], "ISOLATED");
+    remove_task(&pool, task_id).await;
+}
+
 /// The number of attempt rows of a task.
 async fn attempt_count(pool: &PgPool, task_id: Uuid) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
@@ -689,7 +733,8 @@ async fn a_task_that_reached_no_child_leaves_a_row_of_another_claim_alone() {
 // ---------------------------------------------------------------------------
 
 /// A CLAIMED workflow task held by [`WORKER_ID`] with no workflow node
-/// linked to it. Returns the claimed task.
+/// linked to it. Returns the claimed task. A workflow task row has no
+/// command fingerprint (baseline `horsies_tasks_command_fingerprint_by_origin`).
 async fn seed_unlinked_workflow_task(pool: &PgPool, queue: &str) -> ClaimedTask {
     let (task_id, generation) = seed(
         pool,
@@ -700,11 +745,17 @@ async fn seed_unlinked_workflow_task(pool: &PgPool, queue: &str) -> ClaimedTask 
         0,
     )
     .await;
-    sqlx::query("UPDATE horsies_tasks SET is_workflow_task = TRUE WHERE id = $1")
-        .bind(task_id)
-        .execute(pool)
-        .await
-        .expect("mark the row a workflow task");
+    sqlx::query(
+        "UPDATE horsies_tasks
+         SET is_workflow_task = TRUE,
+             command_fingerprint = NULL,
+             command_fingerprint_version = NULL
+         WHERE id = $1",
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .expect("mark the row a workflow task");
     ClaimedTask {
         kind: TaskKind::WorkflowTask,
         ..claimed_row(

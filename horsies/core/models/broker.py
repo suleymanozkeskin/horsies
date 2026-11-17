@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from typing import Any, ClassVar, Final, cast
+from typing import Any, ClassVar, Final, assert_never, cast
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from horsies._catalog.manifest import (
@@ -11,6 +11,14 @@ from horsies._catalog.manifest import (
     WHOLE_SECONDS_MIN,
 )
 from horsies.core.defaults import DEFAULT_POOL_RECYCLE_S, DEFAULT_TCP_USER_TIMEOUT_MS
+from horsies.core.types.result import Err, Ok
+from horsies.core.utils.url import (
+    DatabaseUrlNamesDriver,
+    DatabaseUrlNotPostgres,
+    DatabaseUrlRefusal,
+    DatabaseUrlWithoutScheme,
+    check_database_url_scheme,
+)
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -289,34 +297,16 @@ class PostgresConfig(BaseModel):
 
     @field_validator('database_url')
     def validate_database_url(cls, v: SecretStr) -> SecretStr:
-        raw = v.get_secret_value()
-        if not raw.startswith('postgresql+psycopg://'):
-            raise ConfigurationError(
-                message='invalid database URL scheme',
-                code=ErrorCode.BROKER_INVALID_URL,
-                notes=[
-                    f"got: {raw.split('://')[0] if '://' in raw else raw[:20]}://...",
-                    'horsies only supports psycopg3 (async PostgreSQL driver)',
-                ],
-                help_text="use 'postgresql+psycopg://user:pass@host/db'",
-            )
+        """Accept only a ``postgresql://`` or ``postgres://`` URL."""
+        _raise_for_url_scheme('database_url', v.get_secret_value())
         return v
 
     @field_validator('session_database_url')
     def validate_session_database_url(cls, v: SecretStr | None) -> SecretStr | None:
+        """Accept only a ``postgresql://`` or ``postgres://`` URL, or None."""
         if v is None:
             return v
-        raw = v.get_secret_value()
-        if not raw.startswith('postgresql+psycopg://'):
-            raise ConfigurationError(
-                message='invalid session database URL scheme',
-                code=ErrorCode.BROKER_INVALID_URL,
-                notes=[
-                    f"got: {raw.split('://')[0] if '://' in raw else raw[:20]}://...",
-                    'session_database_url must use the psycopg3 PostgreSQL driver',
-                ],
-                help_text="use 'postgresql+psycopg://user:pass@host/db'",
-            )
+        _raise_for_url_scheme('session_database_url', v.get_secret_value())
         return v
 
     @model_validator(mode='after')
@@ -485,3 +475,55 @@ def _moved_parent_pool_field_error(name: str, note: str) -> ConfigurationError:
             'the profile'
         ),
     )
+
+
+def _raise_for_url_scheme(field_name: str, url: str) -> None:
+    """Raise ``ConfigurationError`` (``BROKER_INVALID_URL``) for a URL whose
+    scheme is not ``postgresql`` or ``postgres``."""
+    match check_database_url_scheme(url):
+        case Ok():
+            return
+        case Err(refusal):
+            raise _url_scheme_error(field_name, refusal)
+
+
+def _url_scheme_error(
+    field_name: str,
+    refusal: DatabaseUrlRefusal,
+) -> ConfigurationError:
+    """The refusal of a URL scheme. It names the scheme, never the rest of
+    the URL, and the fix."""
+    match refusal:
+        case DatabaseUrlNamesDriver(scheme=scheme):
+            return ConfigurationError(
+                message=f'invalid {field_name} scheme {scheme!r}',
+                code=ErrorCode.BROKER_INVALID_URL,
+                notes=[
+                    f'got: {scheme}://...',
+                    'the URL names a driver; horsies opens the database '
+                    'with psycopg 3 and takes no driver in the URL',
+                ],
+                help_text=(
+                    f"replace '{scheme}://' with 'postgresql://' "
+                    "(postgresql://user:pass@host/db)"
+                ),
+            )
+        case DatabaseUrlNotPostgres(scheme=scheme):
+            return ConfigurationError(
+                message=f'invalid {field_name} scheme {scheme!r}',
+                code=ErrorCode.BROKER_INVALID_URL,
+                notes=[
+                    f'got: {scheme}://...',
+                    'horsies accepts the schemes postgresql:// and postgres://',
+                ],
+                help_text="use 'postgresql://user:pass@host/db'",
+            )
+        case DatabaseUrlWithoutScheme():
+            return ConfigurationError(
+                message=f'invalid {field_name}: the URL has no scheme',
+                code=ErrorCode.BROKER_INVALID_URL,
+                notes=['horsies accepts the schemes postgresql:// and postgres://'],
+                help_text="use 'postgresql://user:pass@host/db'",
+            )
+        case _ as unreachable:
+            assert_never(unreachable)

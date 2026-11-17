@@ -756,7 +756,7 @@ from horsies.core.models.queues import QueueMode
 app = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/none'),
+        broker=PostgresConfig(database_url='postgresql://u:p@localhost/none'),
     ),
 )
 """

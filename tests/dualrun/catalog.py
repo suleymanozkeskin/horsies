@@ -90,6 +90,42 @@ _PROCESS_SAMPLE: Final = Ignored(
 JSON: Final = StoredJson(storage=JsonStorage.TEXT, format=Unversioned(), paths=())
 """A JSON text with no ids or clock values inside."""
 
+TASK_INPUT: Final = StoredJson(
+    storage=JsonStorage.TEXT,
+    format=Unversioned(),
+    paths=(
+        JsonPath(
+            steps=(Key(name='__h_workflow_meta__'), Key(name='workflow_id')),
+            rule=WORKFLOW_ID,
+        ),
+    ),
+)
+"""A task's input. The input of an engine-minted workflow task names its
+workflow in ``__h_workflow_meta__``."""
+
+WORKFLOW_ERROR: Final = StoredJson(
+    storage=JsonStorage.TEXT,
+    format=Unversioned(),
+    paths=(
+        JsonPath(steps=(Key(name='data'), Key(name='workflow_id')), rule=WORKFLOW_ID),
+    ),
+)
+"""A stored workflow error. The recovery limit error names its workflow in
+``data.workflow_id``."""
+
+NODE_RESULT: Final = StoredJson(
+    storage=JsonStorage.TEXT,
+    format=Unversioned(),
+    paths=(
+        JsonPath(
+            steps=(Key(name='err'), Key(name='data'), Key(name='workflow_id')),
+            rule=WORKFLOW_ID,
+        ),
+    ),
+)
+"""A stored node result. The recovery limit result names its workflow in
+``err.data.workflow_id``."""
+
 TASK_OPTIONS: Final = StoredJson(
     storage=JsonStorage.TEXT,
     format=Unversioned(),
@@ -272,7 +308,7 @@ _WORKFLOWS: Final = TableRules(
         ('output_task_index', EXACT),
         ('success_policy', JSON),
         ('result', JSON),
-        ('error', JSON),
+        ('error', WORKFLOW_ERROR),
         ('parent_workflow_id', WORKFLOW_ID),
         ('parent_task_index', EXACT),
         ('root_workflow_id', WORKFLOW_ID),
@@ -317,6 +353,7 @@ _WORKFLOW_TASKS: Final = TableRules(
         ('execution', EXACT),
         ('good_until', ORDER),
         ('retention_class_key', EXACT),
+        ('downstream_subworkflow', EXACT),
         ('status', EXACT),
         ('task_id', TASK_ID),
         ('is_subworkflow', EXACT),
@@ -325,7 +362,7 @@ _WORKFLOW_TASKS: Final = TableRules(
         ('sub_definition_key', EXACT),
         ('sub_workflow_params', EXACT),
         ('sub_workflow_summary', JSON),
-        ('result', JSON),
+        ('result', NODE_RESULT),
         ('error', JSON),
         ('created_at', RUN_CLOCK),
         ('started_at', RUN_CLOCK),
@@ -342,7 +379,7 @@ _TASKS: Final = TableRules(
         ('task_name', EXACT),
         ('queue_name', EXACT),
         ('priority', EXACT),
-        ('input', JSON),
+        ('input', TASK_INPUT),
         ('task_options', TASK_OPTIONS),
         ('execution', EXACT),
         ('retention_class_key', EXACT),

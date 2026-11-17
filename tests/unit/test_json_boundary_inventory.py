@@ -58,7 +58,6 @@ _FROZEN_DUMPS: Final = Counter(
         # The manifest of the core holds only text, integers and booleans.
         ('horsies/_catalog/manifest.py', 'dump_producer_manifest'): 1,
         ('horsies/_catalog/worker_manifest.py', 'dump_worker_manifest'): 1,
-        ('horsies/core/history/maintenance/coverage.py', '_expected_registrations'): 1,
         ('horsies/core/lifecycle/persistence.py', '_fused_batch_parameters'): 1,
         ('horsies/core/utils/fingerprint.py', 'enqueue_fingerprint'): 1,
         ('horsies/core/worker/claiming.py', 'ClaimMixin._claim_params'): 6,

@@ -13,7 +13,9 @@ use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::worker::children::ChildLaunch;
 use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
-use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
+use crate::worker::executor::protocol::{
+    ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
+};
 use crate::worker::executor::slots::scripted::idle_child_of_any_kind;
 
 /// The bound of the wait for the first snapshot, which the worker writes at
@@ -52,10 +54,14 @@ async fn a_live_worker_answers_a_ping_and_lists_its_state() {
         program: ChildProgram::Rust,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new(app_config.broker.database_url.clone()),
+        connection: ChildConnection::of_config(&app_config.broker)
+            .expect("the config of the test database validates"),
     };
     let worker = Worker::new(
         Arc::clone(&broker),
-        Arc::new(WorkflowSpecRegistry::new()),
+        Arc::new(WorkflowSpecRegistry::new(
+            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        )),
         app_config,
         WorkerConfig {
             queues: vec!["default".to_owned()],

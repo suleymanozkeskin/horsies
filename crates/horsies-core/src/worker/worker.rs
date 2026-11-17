@@ -5,7 +5,9 @@
 //! User code never runs in the worker process. The worker starts the
 //! children of its profile before any database work, then claims with the
 //! budgets of the children in service, submits each row to the pool of its
-//! kind, and settles each end with the outcome writer.
+//! kind, and settles each end with the outcome writer. In soft-cap mode a
+//! row of a capped queue waits in the parent until its queue's count leaves
+//! room (`queue_cap_hold`).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -49,8 +51,9 @@ use crate::worker::executor::placement::WorkerThreads;
 use crate::worker::executor::protocol::TaskInputText;
 use crate::worker::executor::slots::{
     describe_claim_plan, guard_new_kind_baselines, start_children, unserved_classes_line,
-    BaselineOverLimit, ChildrenStart, ChildrenStartFailed, Claimed, ClaimedTask, OrphanSelfHeal,
-    OutcomeWriter, PoolBoard, PoolFailure, PoolStopReport, RetryFacts, TaskKind,
+    AttemptEnd, BaselineOverLimit, ChildrenStart, ChildrenStartFailed, ClaimRoute, Claimed,
+    ClaimedTask, NotRunCause, OrphanSelfHeal, OutcomeWriter, PoolBoard, PoolFailure,
+    PoolStopReport, RetryFacts, TaskKind,
 };
 use crate::worker::executor::supervisor::{Spawner, SpawnerStopReport, CHILD_KILL_WAIT};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
@@ -58,6 +61,7 @@ use crate::worker::finalize_batch::stop::drain_then_close;
 use crate::worker::finalize_batch::{FinalizeBatcher, FlusherBound};
 use crate::worker::heartbeat::spawn_claimer_heartbeat;
 use crate::worker::profile_fit::{log_connection_fit_at_boot, log_memory_fit_at_boot};
+use crate::worker::queue_cap_hold::{admit_held_rows, QueueCapHold, StartCheckCaps, StartCount};
 use crate::worker::recovery::{new_reaper_health, spawn_reaper, ReaperHealth};
 use crate::worker::retry::read_stored_options;
 use crate::worker::runner_beats::{
@@ -545,6 +549,32 @@ fn claimed_of(row: ClaimedRow) -> Claimed {
     }
 }
 
+/// Return each row that waited for its queue cap to the queue, at the stop
+/// (Python `_return_held_rows`). Runs after the claim loop ended and the
+/// pools stopped. Each row is one release write of the outcome writer
+/// (`NotDispatched(HeldForQueueCap)`), spawned with the outcome writes, so
+/// the drain of the writes bounds it. A row the release cannot return goes
+/// back when its lease expires.
+fn return_held_rows(
+    hold: &mut QueueCapHold,
+    writer: &Arc<OutcomeWriter>,
+    writes: &mut JoinSet<()>,
+) {
+    for row in hold.drain() {
+        let task = claimed_of(row).task;
+        let writer = Arc::clone(writer);
+        writes.spawn(async move {
+            let settled = writer
+                .settle(
+                    &task,
+                    AttemptEnd::NotDispatched(NotRunCause::HeldForQueueCap),
+                )
+                .await;
+            tracing::debug!(task_id = %task.task_id, settlement = ?settled, "held row returned");
+        });
+    }
+}
+
 /// What the ping responder needs to answer a ping.
 #[derive(Clone)]
 struct PingResponder {
@@ -868,6 +898,7 @@ impl Worker {
         // The reaper's gate and pass run on the worker reserve, which the
         // runtime pool's users cannot exhaust.
         spawn_reaper(
+            Arc::clone(&self.broker),
             self.broker.reserve_pool().clone(),
             self.broker.reserve_maintenance_pool().clone(),
             Arc::clone(&self.workflow_registry),
@@ -1045,22 +1076,54 @@ impl Worker {
 
     /// One claim pass (Python `_claim_and_dispatch_all`): the claim with the
     /// budgets and routes of the slots now, the workflow filter, the row
-    /// class check, then each row to the pool of its kind.
+    /// class check, then each row to the pool of its kind. A row of a queue
+    /// that `hold` checks waits in `hold` with the budget of its route; then
+    /// the start check admits the held rows that their queue's count leaves
+    /// room for and that a free child of their budget takes now, also on a
+    /// pass that claimed nothing. A row of a class that the plan does not
+    /// serve is submitted at once: it reaches no child, and its claim goes
+    /// back to the queue (`NoChildOfItsKind`), as for an uncapped queue.
     ///
-    /// Errors: the error of the claim, the filter or the class return. The
-    /// rows the claim committed before a later step failed go back when
-    /// their lease expires.
+    /// Errors: the error of the claim, the filter, the class return or the
+    /// start check. The rows the claim committed before a later step failed
+    /// go back when their lease expires; the rows submitted before the start
+    /// check failed run, and the held rows stay held.
     async fn claim_and_dispatch(
         &self,
         steps: &BrokerClaimSteps,
         children: &WorkerChildren,
         writer: &Arc<OutcomeWriter>,
         writes: &mut JoinSet<()>,
+        hold: &mut QueueCapHold,
     ) -> Result<ClaimPassCounts, WorkerError> {
-        let request = self.claim_request(children.service().claim_classes());
+        let service = children.service();
+        let plan = service.plan();
+        let request = self.claim_request(service.claim_classes());
         let claimed = claim_for_dispatch(steps, &request, &self.registered).await?;
         for row in claimed.rows {
-            self.dispatch(children, writer, writes, claimed_of(row));
+            match (hold.holds(&row.queue_name), plan.route(row.execution)) {
+                (true, ClaimRoute::ServedBy(budget)) => hold.hold(row, budget),
+                (false, _) | (true, ClaimRoute::NotServed) => self.dispatch(
+                    children,
+                    writer,
+                    writes,
+                    claimed_of(row),
+                    StartCount::Unchecked,
+                ),
+            }
+        }
+        let admitted = admit_held_rows(&self.broker, &self.worker_id, hold, || {
+            children.free_capacity()
+        })
+        .await?;
+        for admitted in admitted {
+            self.dispatch(
+                children,
+                writer,
+                writes,
+                claimed_of(admitted.row),
+                StartCount::Admitted(admitted.started),
+            );
         }
         Ok(claimed.counts)
     }
@@ -1068,14 +1131,17 @@ impl Worker {
     /// Submit one claimed task to the pool of its kind, and spawn the write
     /// of its end (Python `_dispatch_one`, `_finalize_after`). When the write
     /// ends, the claim loop is woken: a slot or seat is free again (Python
-    /// `_capacity_released`). Never fails for a task: a task that reaches no
-    /// child ends `NotDispatched`, and its claim goes back to the queue.
+    /// `_capacity_released`). An admitted row of a capped queue counts in
+    /// its queue's start check until the write ends (`count`). Never fails
+    /// for a task: a task that reaches no child ends `NotDispatched`, and its
+    /// claim goes back to the queue.
     fn dispatch(
         &self,
         children: &WorkerChildren,
         writer: &Arc<OutcomeWriter>,
         writes: &mut JoinSet<()>,
         claimed: Claimed,
+        count: StartCount,
     ) {
         let task = claimed.task.clone();
         let submitted = children.submit(claimed);
@@ -1085,6 +1151,9 @@ impl Worker {
             let end = attempt_end(submitted).await;
             let settled = writer.settle(&task, end).await;
             tracing::debug!(task_id = %task.task_id, settlement = ?settled, "attempt end settled");
+            // The claim leaves the start check before the wake, so the pass
+            // that the wake runs counts without it.
+            drop(count);
             released.notify_one();
         });
     }
@@ -1098,6 +1167,7 @@ impl Worker {
         children: &WorkerChildren,
         writer: &Arc<OutcomeWriter>,
         writes: &mut JoinSet<()>,
+        hold: &mut QueueCapHold,
         claim_wakes: &ClaimWakes,
     ) -> Option<WorkerError> {
         let steps = BrokerClaimSteps::new(Arc::clone(&self.broker), self.worker_id.clone());
@@ -1111,7 +1181,7 @@ impl Worker {
             }
             reap_finished(writes);
             match self
-                .claim_and_dispatch(&steps, children, writer, writes)
+                .claim_and_dispatch(&steps, children, writer, writes, hold)
                 .await
             {
                 Ok(counts) => {
@@ -1263,8 +1333,14 @@ impl Worker {
         tracing::info!(worker_id = %self.worker_id, "worker ready");
 
         let mut writes: JoinSet<()> = JoinSet::new();
+        // Soft-cap mode: the claimed rows of each capped queue wait here
+        // until a claim pass finds room under the queue's cap.
+        let mut hold = QueueCapHold::new(StartCheckCaps::of_mode(
+            self.app_config.prefetch_buffer,
+            &self.worker_config.queue_max_concurrency,
+        ));
         let fatal_claim_error = self
-            .claim_loop(&children, &writer, &mut writes, &claim_wakes)
+            .claim_loop(&children, &writer, &mut writes, &mut hold, &claim_wakes)
             .await;
 
         // Stop the claim loop and every service loop on every exit path,
@@ -1273,6 +1349,9 @@ impl Worker {
         self.cancel.cancel();
         let drain = self.profile.profile.drain_timeout.get();
         RunningChildren::stop_pools(children, drain).await;
+        // Rows that waited for their queue cap never reached a child: return
+        // them to their queue, with the writes that the drain below bounds.
+        return_held_rows(&mut hold, &writer, &mut writes);
         // After the pools: every end is known, so the writes have database
         // work left only. A write that the drain cancels leaves its row in
         // the batcher, and the close still writes it.
@@ -1458,12 +1537,12 @@ impl Worker {
     /// Check the pools and the session URL, then subscribe the claim wakes of
     /// every queue and the ping channel on the broker's listener.
     ///
-    /// The checks run at every worker boot, with or without PgBouncer mode
-    /// (Python `validate_worker_database_paths`): the pool checks
-    /// ([`PostgresBroker::check_worker_session`]), then the session check
-    /// ([`PostgresBroker::check_session_delivery`]). A statement-pooled URL
-    /// or a URL that does not keep session state is refused, not retryable; a
-    /// database that cannot be reached is retryable.
+    /// The check runs at every worker boot, with or without PgBouncer mode
+    /// (Python `validate_worker_database_paths`): one session check on the
+    /// statement layer ([`PostgresBroker::check_worker_session`]). A
+    /// statement-pooled URL or a URL that does not keep session state is
+    /// refused, not retryable; a database that cannot be reached is
+    /// retryable.
     async fn try_connect_listener(&self) -> Result<WorkerSubscriptions, WorkerError> {
         let channels = self
             .worker_config
@@ -1473,10 +1552,6 @@ impl Worker {
             .collect::<Result<Vec<ChannelName>, WorkerError>>()?;
         self.broker
             .check_worker_session()
-            .await
-            .map_err(WorkerError::Broker)?;
-        self.broker
-            .check_session_delivery()
             .await
             .map_err(WorkerError::SessionCheck)?;
         let listener = self.broker.listener();
@@ -1628,17 +1703,32 @@ mod tests {
         app_config: AppConfig,
         worker_config: WorkerConfig,
     ) -> Worker {
-        use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
+        worker_of_idle_children(broker, app_config, worker_config, 1)
+    }
+
+    /// A worker on `broker` of `count` isolated children, each of which
+    /// boots, then exits at the next frame it reads.
+    fn worker_of_idle_children(
+        broker: Arc<PostgresBroker>,
+        app_config: AppConfig,
+        worker_config: WorkerConfig,
+        count: u32,
+    ) -> Worker {
+        use crate::worker::executor::protocol::{
+            ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
+        };
         let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
         Worker::new(
             broker,
-            Arc::new(WorkflowSpecRegistry::new()),
+            Arc::new(WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
             app_config,
             worker_config,
             SelectedProfile {
                 name: "default".to_owned(),
                 profile: serde_json::from_value(serde_json::json!({
-                    "isolated": {"kind": "isolated_children", "count": 1}
+                    "isolated": {"kind": "isolated_children", "count": count}
                 }))
                 .expect("a valid test profile"),
             },
@@ -1647,6 +1737,7 @@ mod tests {
                 program: ChildProgram::Rust,
                 log_level: ChildLogLevel::Info,
                 database_url,
+                connection: ChildConnection::default(),
             },
             RegisteredClasses::default(),
         )
@@ -1837,6 +1928,18 @@ mod tests {
         Arc::new(PostgresBroker::from_pool(test_pool().await))
     }
 
+    /// A broker on a loopback port where no server listens: every statement
+    /// of its core pools fails at the checkout with a refused connection,
+    /// which is retryable. A closed sqlx pool does not stop the phase-1
+    /// writes: they run on the core pools, and `PostgresBroker::close` leaves
+    /// those pools to reopen at the next statement.
+    fn unreachable_broker() -> PostgresBroker {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
+            .expect("a lazy pool opens no connection");
+        PostgresBroker::from_pool(pool)
+    }
+
     /// The claim generation of every row that `insert_claimed_task` seeds and
     /// of every dispatch row that `claimed_task_row` builds, so a test's
     /// dispatch fences on the generation its row carries.
@@ -1984,11 +2087,11 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
                 created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'finalize_test', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 0, 'node_0', 'finalize_test', 'null', 'default', 100, '{}', FALSE,
                 'all', 'ENQUEUED', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -2017,27 +2120,33 @@ mod tests {
         workflow_id
     }
 
+    /// The status, result and error code of a task. A live row holds no
+    /// result and no error code (baseline `horsies_tasks`,
+    /// `0001_tables.sql:59-139`): they are on the history row that the move
+    /// writes. The move deletes the live row in the same statement, so a task
+    /// is in exactly one of the two tables; two rows or none fail the test.
     async fn fetch_task_state(
         pool: &PgPool,
         task_id: &Uuid,
     ) -> (String, Option<String>, Option<String>) {
-        sqlx::query_as(
-            "SELECT status, result, error_code
-             FROM (
-                 SELECT status, result, error_code, 0 AS source
-                 FROM horsies_tasks WHERE id = $1
-                 UNION ALL
-                 SELECT status, convert_from(result_payload, 'UTF8') AS result,
-                        error_code, 1 AS source
-                 FROM horsies_task_history WHERE task_id = $1
-             ) AS task_state
-             ORDER BY source
-             LIMIT 1",
+        let states: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT status, NULL::text AS result, NULL::text AS error_code
+             FROM horsies_tasks WHERE id = $1
+             UNION ALL
+             SELECT status, convert_from(result_payload, 'UTF8') AS result, error_code
+             FROM horsies_task_history WHERE task_id = $1",
         )
         .bind(*task_id)
-        .fetch_one(pool)
+        .fetch_all(pool)
         .await
-        .unwrap()
+        .unwrap();
+        match <[_; 1]>::try_from(states) {
+            Ok([state]) => state,
+            Err(states) => panic!(
+                "task {task_id} must be in exactly one of horsies_tasks and \
+                 horsies_task_history: {states:?}"
+            ),
+        }
     }
 
     async fn fetch_attempt_state(
@@ -2194,7 +2303,9 @@ mod tests {
     /// A worker of one isolated child on a broker whose pool reaches no
     /// server: any database work fails, so a test sees whether some ran.
     fn worker_of_one_child(command: crate::worker::executor::supervisor::ChildCommand) -> Worker {
-        use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
+        use crate::worker::executor::protocol::{
+            ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
+        };
         let url = "postgresql://horsies@127.0.0.1:1/horsies";
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
@@ -2203,7 +2314,9 @@ mod tests {
             .expect("a lazy pool opens no connection");
         Worker::new(
             Arc::new(PostgresBroker::from_pool(pool)),
-            Arc::new(WorkflowSpecRegistry::new()),
+            Arc::new(WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
             AppConfig::for_database_url(url),
             WorkerConfig::default(),
             SelectedProfile {
@@ -2218,6 +2331,7 @@ mod tests {
                 program: ChildProgram::Rust,
                 log_level: ChildLogLevel::Info,
                 database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+                connection: ChildConnection::default(),
             },
             RegisteredClasses::default(),
         )
@@ -2225,16 +2339,22 @@ mod tests {
     }
 
     /// Python `test_shared_dispatch.py::TestCapacityAndConfig::test_a_worker_with_no_child_is_refused`.
-    #[test]
-    fn a_worker_with_no_child_is_refused() {
-        use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
+    /// A Tokio test: a lazy sqlx pool starts its reaper task at construction,
+    /// which needs a Tokio context.
+    #[tokio::test]
+    async fn a_worker_with_no_child_is_refused() {
+        use crate::worker::executor::protocol::{
+            ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
+        };
         let url = "postgresql://horsies@127.0.0.1:1/horsies";
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy(url)
             .expect("a lazy pool opens no connection");
         let refused = Worker::new(
             Arc::new(PostgresBroker::from_pool(pool)),
-            Arc::new(WorkflowSpecRegistry::new()),
+            Arc::new(WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
             AppConfig::for_database_url(url),
             WorkerConfig::default(),
             SelectedProfile {
@@ -2246,6 +2366,7 @@ mod tests {
                 program: ChildProgram::Rust,
                 log_level: ChildLogLevel::Info,
                 database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+                connection: ChildConnection::default(),
             },
             RegisteredClasses::default(),
         );
@@ -2433,8 +2554,9 @@ mod tests {
 
     /// Python `Worker.stop` and `test_runner_heartbeat.py::test_stop_ends_the_heartbeat_after_the_children`:
     /// the claim loop ends, then the pools stop with the drain timeout, then
-    /// the outcome writes drain and the batcher closes, then the runner
-    /// heartbeats stop, then the spawner thread.
+    /// the rows held for their queue cap go back to the queue (Python
+    /// `_return_held_rows`), then the outcome writes drain and the batcher
+    /// closes, then the runner heartbeats stop, then the spawner thread.
     #[test]
     fn the_stop_runs_in_python_order() {
         let source = include_str!("worker.rs");
@@ -2449,12 +2571,14 @@ mod tests {
         let claim_loop = at(".claim_loop(&children");
         let cancel = at("self.cancel.cancel();\n        let drain");
         let pools = at("RunningChildren::stop_pools(children, drain).await");
+        let held = at("return_held_rows(&mut hold, &writer, &mut writes);");
         let writes = at("drain_then_close(&mut writes, OUTCOME_WRITE_DRAIN, &batcher)");
         let beats = at("services.stop_runner_beats().await");
         let spawner = at("RunningChildren::stop_spawner(spawner).await");
         assert!(claim_loop < cancel);
         assert!(cancel < pools);
-        assert!(pools < writes);
+        assert!(pools < held);
+        assert!(held < writes);
         assert!(writes < beats);
         assert!(beats < spawner);
     }
@@ -2708,13 +2832,12 @@ mod tests {
         .await;
 
         if let Some(work) = phase2_work {
-            let registry = WorkflowSpecRegistry::new();
-            let policy = crate::core::config::payload::PayloadPolicy::default();
+            let registry =
+                WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
             run_phase2(
-                broker.pool(),
+                &broker,
                 &registry,
                 work,
-                &policy,
                 &crate::core::RetentionConfig::default(),
             )
             .await;
@@ -2798,7 +2921,7 @@ mod tests {
         let broker = test_broker().await;
         clean(&pool).await;
 
-        use crate::broker::terminalization::terminalize;
+        use crate::broker::terminalization::on_test_pool::terminalize;
         use crate::core::lifecycle::{
             PriorLockedRead, TerminalizationCommand, TerminalizationOutcome,
         };
@@ -2938,7 +3061,8 @@ mod tests {
         .await
         .unwrap();
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         crate::workflow_engine::engine::check_workflow_completion(
             &pool,
             workflow_id,
@@ -2991,6 +3115,182 @@ mod tests {
         );
     }
 
+    /// A node at index 1 of `workflow_id` that depends on node 0.
+    async fn add_dependent_node(pool: &PgPool, workflow_id: Uuid) {
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+                queue_name, priority, dependencies, allow_failed_deps, join_type, status,
+                is_subworkflow, created_at, max_retries, execution, retention_class_key
+            ) VALUES (
+                'NONE', $1, $2, 1, 'node_1', 'finalize_dependent', '{}', 'default', 100, '{0}',
+                FALSE, 'all', 'PENDING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
+            )",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workflow_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Makes `child_id` the child of a new RUNNING parent workflow, linked
+    /// from the parent's sub-workflow node at index 0. Returns the parent id.
+    async fn adopt_as_child_workflow(pool: &PgPool, child_id: Uuid) -> Uuid {
+        let parent_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at
+            ) VALUES (
+                $1, 'finalize_parent', 'RUNNING', 'fail', NULL,
+                'test.finalize.parent.v1', 0, $1,
+                NOW(), NOW(), NOW(), NOW()
+            )",
+        )
+        .bind(parent_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE horsies_workflows
+             SET parent_workflow_id = $1, parent_task_index = 0, depth = 1, root_workflow_id = $1
+             WHERE id = $2",
+        )
+        .bind(parent_id)
+        .bind(child_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+                queue_name, priority, dependencies, allow_failed_deps, join_type, status,
+                is_subworkflow, sub_workflow_id, sub_workflow_name, sub_definition_key,
+                sub_workflow_params, created_at, started_at
+            ) VALUES (
+                'NONE', $1, $2, 0, 'child_node', '__sub_workflow:finalize_wf', '{}', 'default',
+                100, '{}', FALSE, 'all', 'RUNNING', TRUE, $3, 'finalize_wf',
+                'test.finalize.v1', 'NOT_GIVEN', NOW(), NOW()
+            )",
+        )
+        .bind(Uuid::new_v4())
+        .bind(parent_id)
+        .bind(child_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        parent_id
+    }
+
+    /// Phase 1 of a node with a dependent and no sub-workflow node below it
+    /// names the one-statement form, and phase 2 promotes the dependent: the
+    /// dependent node is ENQUEUED with a minted PENDING task row.
+    #[tokio::test]
+    #[serial]
+    async fn phase_two_of_a_node_with_dependents_promotes_them_in_one_statement() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+        let task_id = Uuid::new_v4();
+        insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
+        let workflow_id = link_task_to_workflow(&pool, &task_id, None).await;
+        add_dependent_node(&pool, workflow_id).await;
+
+        let phase2_work = execute_and_finalize(
+            Arc::clone(&broker),
+            async_task_fn!(callback_success_task, ()),
+            claimed_workflow_task_row(&task_id, "default", None),
+            "worker-1".to_owned(),
+            "localhost".to_owned(),
+            RecoveryConfig::default(),
+            crate::core::config::payload::PayloadPolicy::default(),
+        )
+        .await
+        .expect("terminal success should produce phase 2 work");
+        assert_eq!(
+            phase2_work.phase_two,
+            crate::worker::execution::PhaseTwoForm::Step(
+                crate::core::lifecycle::PhaseTwoStep::DependentsWithoutSubworkflow
+            )
+        );
+
+        run_phase2(
+            &broker,
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            phase2_work,
+            &crate::core::RetentionConfig::default(),
+        )
+        .await;
+
+        let (dependent_status, dependent_task): (String, Option<Uuid>) = sqlx::query_as(
+            "SELECT status, task_id FROM horsies_workflow_tasks
+             WHERE workflow_id = $1 AND task_index = 1",
+        )
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(dependent_status, "ENQUEUED");
+        let minted_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+                .bind(dependent_task.expect("the promoted node links its task row"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(minted_status, "PENDING");
+        let (workflow_status, _) = fetch_workflow_state(&pool, &workflow_id).await;
+        assert_eq!(workflow_status, "RUNNING");
+    }
+
+    /// The phase 2 that ends a child workflow advances the parent node after
+    /// its commit (`horsies_workflow_child_finish`): the sub-workflow node is
+    /// COMPLETED and the parent workflow completes.
+    #[tokio::test]
+    #[serial]
+    async fn phase_two_that_ends_a_child_workflow_advances_the_parent_node() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+        let task_id = Uuid::new_v4();
+        insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
+        let child_id = link_task_to_workflow(&pool, &task_id, None).await;
+        let parent_id = adopt_as_child_workflow(&pool, child_id).await;
+
+        let phase2_work = execute_and_finalize(
+            Arc::clone(&broker),
+            async_task_fn!(callback_success_task, ()),
+            claimed_workflow_task_row(&task_id, "default", None),
+            "worker-1".to_owned(),
+            "localhost".to_owned(),
+            RecoveryConfig::default(),
+            crate::core::config::payload::PayloadPolicy::default(),
+        )
+        .await
+        .expect("terminal success should produce phase 2 work");
+        run_phase2(
+            &broker,
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            phase2_work,
+            &crate::core::RetentionConfig::default(),
+        )
+        .await;
+
+        let (child_status, _) = fetch_workflow_state(&pool, &child_id).await;
+        assert_eq!(child_status, "COMPLETED");
+        let parent_node_status: String = sqlx::query_scalar(
+            "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
+        )
+        .bind(parent_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(parent_node_status, "COMPLETED");
+        let (parent_status, _) = fetch_workflow_state(&pool, &parent_id).await;
+        assert_eq!(parent_status, "COMPLETED");
+    }
+
     #[tokio::test]
     #[serial]
     async fn finalize_phase1_commit_is_durable_before_phase2_runs() {
@@ -3027,13 +3327,12 @@ mod tests {
         assert_eq!(workflow_status, "RUNNING");
         assert_eq!(workflow_result, None);
 
-        let registry = WorkflowSpecRegistry::new();
-        let policy = crate::core::config::payload::PayloadPolicy::default();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         run_phase2(
-            broker.pool(),
+            &broker,
             &registry,
             phase2_work,
-            &policy,
             &crate::core::RetentionConfig::default(),
         )
         .await;
@@ -3074,16 +3373,21 @@ mod tests {
         .await
         .expect("terminal success should produce phase 2 work");
 
-        let failed_phase2_pool = test_pool().await;
-        failed_phase2_pool.close().await;
+        // A broker on a database that does not exist: every checkout fails
+        // with a server refusal (3D000), which is not retryable.
+        let missing_database = (*pool.connect_options())
+            .clone()
+            .database(&format!("horsies_missing_{}", Uuid::new_v4().simple()));
+        let failed_phase2_broker = PostgresBroker::from_pool(
+            sqlx::postgres::PgPoolOptions::new().connect_lazy_with(missing_database),
+        );
 
-        let registry = WorkflowSpecRegistry::new();
-        let policy = crate::core::config::payload::PayloadPolicy::default();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         run_phase2(
-            &failed_phase2_pool,
+            &failed_phase2_broker,
             &registry,
             phase2_work,
-            &policy,
             &crate::core::RetentionConfig::default(),
         )
         .await;
@@ -3163,11 +3467,19 @@ mod tests {
 
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
-        sqlx::query("UPDATE horsies_tasks SET is_workflow_task = TRUE WHERE id = $1")
-            .bind(task_id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        // A workflow task carries no command fingerprint
+        // (`horsies_tasks_command_fingerprint_by_origin`).
+        sqlx::query(
+            "UPDATE horsies_tasks
+             SET is_workflow_task = TRUE,
+                 command_fingerprint = NULL,
+                 command_fingerprint_version = NULL
+             WHERE id = $1",
+        )
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
         EXECUTION_COUNT.store(0, Ordering::SeqCst);
 
         let outcome = crate::worker::execution::confirm_ownership_and_set_running(
@@ -3497,11 +3809,10 @@ mod tests {
         .to_string();
         insert_running_task(&pool, &task_id, "default", 0, 3, Some(&task_options)).await;
 
-        let closed_broker = test_broker().await;
-        closed_broker.pool().close().await;
+        let unreachable = unreachable_broker();
 
         let Err(err) = persist_terminal_state(
-            &closed_broker,
+            &unreachable,
             task_id,
             TaskResult::Err(TaskError::new("RETRY_ME", "try again").unwrap()),
             &claimed_task_row(&task_id, "default", Some(task_options.clone())),
@@ -3518,7 +3829,7 @@ mod tests {
         )
         .await
         else {
-            panic!("a closed pool must fail the failed-attempt write");
+            panic!("an unreachable database must fail the failed-attempt write");
         };
 
         assert_eq!(err.stage, FinalizeStage::Phase1Persist);
@@ -3538,11 +3849,10 @@ mod tests {
         let task_id = Uuid::new_v4();
         insert_running_task(&pool, &task_id, "default", 0, 0, None).await;
 
-        let closed_broker = test_broker().await;
-        closed_broker.pool().close().await;
+        let unreachable = unreachable_broker();
 
         let Err(err) = persist_terminal_state(
-            &closed_broker,
+            &unreachable,
             task_id,
             TaskResult::Ok(br#""phase1-durable""#.to_vec()),
             &claimed_task_row(&task_id, "default", None),
@@ -3559,7 +3869,7 @@ mod tests {
         )
         .await
         else {
-            panic!("closed broker should exhaust phase 1 retries");
+            panic!("an unreachable database must fail the phase-1 write");
         };
 
         assert_eq!(err.stage, FinalizeStage::Phase1Persist);
@@ -3604,7 +3914,8 @@ mod tests {
     }
 
     /// Capacity signals go only to the per-queue channel; workers no longer
-    /// listen on task_new (parity with horsies PR #101 cafc9200).
+    /// listen on task_new (parity with horsies PR #101 cafc9200). The payload
+    /// is the constant `capacity` that the baseline functions also send.
     #[tokio::test]
     #[serial]
     async fn capacity_wake_emits_queue_specific_signal_only() {
@@ -3617,8 +3928,7 @@ mod tests {
         listener.listen("task_new").await.unwrap();
         listener.listen("task_queue_high-priority").await.unwrap();
 
-        let task_id = Uuid::new_v4();
-        send_phase2_wake(&pool, &capacity_wake("high-priority", task_id))
+        send_phase2_wake(&pool, &capacity_wake("high-priority"))
             .await
             .expect("send the capacity wake");
 
@@ -3628,10 +3938,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             (first.channel().to_owned(), first.payload().to_owned()),
-            (
-                "task_queue_high-priority".to_owned(),
-                format!("capacity:{task_id}"),
-            ),
+            ("task_queue_high-priority".to_owned(), "capacity".to_owned()),
         );
 
         // No second signal: task_new must not be emitted.
@@ -3649,50 +3956,40 @@ mod tests {
     async fn capacity_wake_on_a_closed_pool_is_an_error() {
         let pool = test_pool().await;
         pool.close().await;
-        let sent = send_phase2_wake(&pool, &capacity_wake("default", Uuid::new_v4())).await;
+        let sent = send_phase2_wake(&pool, &capacity_wake("default")).await;
         assert!(matches!(sent, Err(sqlx::Error::PoolClosed)), "{sent:?}");
     }
 
     /// A database of its own, migrated without the install's family record,
     /// for a worker start. Dropped with `FreshDatabase::drop`.
     struct FreshDatabase {
-        admin: sqlx::PgConnection,
         pool: PgPool,
-        name: String,
+        database: crate::test_support::TestDatabase,
         /// The shared test database URL, for the worker's config only: the
         /// worker reaches this database through `pool`.
         config_url: String,
     }
 
     impl FreshDatabase {
+        /// A copy of the installed test template (`crate::test_support`)
+        /// with its family row removed.
         async fn create() -> Self {
-            use sqlx::Connection;
-            use std::str::FromStr;
-
             let config_url = crate::broker::terminalization_matrix::migrated_database_url().await;
-            let base_options =
-                sqlx::postgres::PgConnectOptions::from_str(&config_url).expect("test database URL");
-            let mut admin =
-                sqlx::PgConnection::connect_with(&base_options.clone().database("postgres"))
-                    .await
-                    .expect("connect admin database");
-            let name = format!("core_worker_start_{}", Uuid::new_v4().simple());
-            sqlx::query(&format!("CREATE DATABASE \"{name}\""))
-                .execute(&mut admin)
-                .await
-                .expect("create start test database");
+            let database = crate::test_support::TestDatabase::create().await;
             let pool = sqlx::postgres::PgPoolOptions::new()
                 .max_connections(8)
-                .connect_with(base_options.database(&name))
+                .connect(database.url())
                 .await
                 .expect("connect start test database");
-            crate::broker::migrations::run_horsies_migrations(&pool)
+            // The template holds this client's family row; a start test
+            // records the family it needs itself.
+            sqlx::query("DELETE FROM horsies_client_family")
+                .execute(&pool)
                 .await
-                .expect("migrate start test database");
+                .expect("remove the family row of the install");
             Self {
-                admin,
                 pool,
-                name,
+                database,
                 config_url,
             }
         }
@@ -3708,12 +4005,9 @@ mod tests {
             .expect("record a client family");
         }
 
-        async fn drop(mut self) {
+        async fn drop(self) {
             self.pool.close().await;
-            sqlx::query(&format!("DROP DATABASE \"{}\" WITH (FORCE)", self.name))
-                .execute(&mut self.admin)
-                .await
-                .expect("drop start test database");
+            self.database.drop().await;
         }
     }
 
@@ -3762,6 +4056,7 @@ mod tests {
                 db_retry_max_attempts: 1,
                 notify_poll_interval_ms: 100,
             },
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         }
@@ -4081,12 +4376,20 @@ mod tests {
         .expect("install the lease log");
         // The worker writes its plain successes on the worker pool and
         // claims on the wakes of its listener: a broker of a worker.
-        let worker_url = database_url_for(&database.config_url, &database.name);
+        let worker_url = database_url_for(&database.config_url, database.database.name());
         let broker =
             PostgresBroker::connect_worker_with(&test_app_config(worker_url.clone()).broker)
                 .await
                 .expect("connect the broker of a worker");
-        let worker = start_test_worker(broker, worker_url);
+        // Two isolated children: the held claim counts in the isolated
+        // budget (`horsies_claim_in_flight`) and fills one slot; the claim
+        // of the pending task takes the other.
+        let worker = worker_of_idle_children(
+            Arc::new(broker),
+            test_app_config(worker_url),
+            WorkerConfig::default(),
+            2,
+        );
         let pending = insert_pending_task(&database.pool).await;
         let held = insert_task_claimed_by(&database.pool, worker.worker_id()).await;
         let cancel = worker.cancel_token();
@@ -4160,7 +4463,7 @@ mod tests {
         .execute(&database.pool)
         .await
         .expect("install the pool write log");
-        let database_url = database_url_for(&database.config_url, &database.name);
+        let database_url = database_url_for(&database.config_url, database.database.name());
         let broker = PostgresBroker::connect_with(&PostgresConfig {
             database_url: with_application_name(&database_url, "reaper_runtime"),
             session_database_url: Some(with_application_name(&database_url, "reaper_session")),
@@ -4234,3 +4537,6 @@ mod tests {
 
 #[cfg(test)]
 mod live_worker_tests;
+
+#[cfg(test)]
+mod start_tests;

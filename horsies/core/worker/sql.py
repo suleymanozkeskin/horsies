@@ -100,7 +100,7 @@ RETURNING t.id, t.task_name, t.input, t.queue_name, t.is_workflow_task, t.task_o
 # ---------- Worker SQL constants ----------
 
 # TIER 1: one server-side call performs lock acquisition + cap counts + the
-# windowed claim (see horsies_claim, schemas/migrations.py). The caller runs it
+# windowed claim (see horsies_claim in the baseline SQL). The caller runs it
 # in autocommit, so the advisory lock is held only for this one statement —
 # never across a client round trip. Replaces the per-pass lock loop + counts +
 # per-queue CLAIM_SQL loop.
@@ -232,7 +232,7 @@ COUNT_IN_FLIGHT_FOR_WORKER_SQL = text("""
 """)
 
 # The bounded lookup lives in horsies_find_non_runnable_workflow_tasks
-# (horsies/core/schemas/non_runnable_lookup.py).
+# (horsies/core/baseline/sql/0003_interim_functions.sql).
 GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL = text("""
     SELECT id, status
     FROM horsies_find_non_runnable_workflow_tasks(CAST(:ids AS uuid[]))
@@ -401,3 +401,22 @@ _RETENTION_PASS_TIME_BUDGET_S = 60.0
 
 
 _FINALIZER_DRAIN_TIMEOUT_S: float = 30.0
+
+# Soft-cap start check (worker/queue_cap_hold.py): for each capped queue in
+# :queues, its RUNNING rows on every worker plus the rows of :started_ids that
+# this worker started and that are still CLAIMED. One row per queue that has
+# any; a queue with no row has 0.
+COUNT_QUEUE_STARTS_SQL = text("""
+    SELECT t.queue_name,
+           COUNT(*) FILTER (WHERE t.status = 'RUNNING') AS running,
+           COUNT(*) FILTER (WHERE t.status = 'CLAIMED') AS started_not_running
+    FROM horsies_tasks t
+    WHERE t.queue_name = ANY(CAST(:queues AS VARCHAR[]))
+      AND (
+          t.status = 'RUNNING'
+          OR (t.status = 'CLAIMED'
+              AND t.claimed_by_worker_id = CAST(:wid AS VARCHAR)
+              AND t.id = ANY(CAST(:started_ids AS uuid[])))
+      )
+    GROUP BY t.queue_name
+""")

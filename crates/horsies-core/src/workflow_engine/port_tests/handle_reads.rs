@@ -56,7 +56,7 @@ async fn status_reads_running() {
     let workflow_id = start(
         &pool,
         &chain("status_running"),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -68,7 +68,7 @@ async fn status_reads_running() {
 #[serial]
 async fn status_reads_completed() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = start(&pool, &single("status_completed", OnError::Fail), &registry).await;
     let _task = finish_node(&pool, workflow_id, 0, &ok(serde_json::json!(10)), &registry).await;
 
@@ -80,7 +80,7 @@ async fn status_reads_completed() {
 #[serial]
 async fn status_reads_failed() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = start(&pool, &single("status_failed", OnError::Fail), &registry).await;
     let _task = finish_node(
         &pool,
@@ -99,7 +99,7 @@ async fn status_reads_failed() {
 #[serial]
 async fn status_reads_paused() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = start(&pool, &single("status_paused", OnError::Pause), &registry).await;
     let _task = finish_node(
         &pool,
@@ -133,7 +133,7 @@ async fn status_of_an_unknown_id_is_workflow_not_found() {
 /// A PAUSED workflow of one failed node, set back an hour so that a paused
 /// expiry with a short age selects it.
 async fn paused_an_hour_ago(pool: &PgPool, name: &str) -> Uuid {
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = start(pool, &single(name, OnError::Pause), &registry).await;
     let _task = finish_node(pool, workflow_id, 0, &err("FAIL", "pause"), &registry).await;
     assert_eq!(status(pool, workflow_id).await, WorkflowStatus::Paused);
@@ -194,7 +194,12 @@ async fn a_zero_age_expires_a_paused_workflow() {
 #[serial]
 async fn get_gives_wait_timeout_when_the_workflow_does_not_finish() {
     let pool = shared_pool().await;
-    let workflow_id = start(&pool, &chain("get_timeout"), &WorkflowSpecRegistry::new()).await;
+    let workflow_id = start(
+        &pool,
+        &chain("get_timeout"),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     let got = handle(&pool, workflow_id)
         .get(Some(Duration::from_millis(500)))
@@ -208,7 +213,12 @@ async fn get_gives_wait_timeout_when_the_workflow_does_not_finish() {
 #[serial]
 async fn get_after_cancel_gives_workflow_cancelled() {
     let pool = shared_pool().await;
-    let workflow_id = start(&pool, &chain("get_cancelled"), &WorkflowSpecRegistry::new()).await;
+    let workflow_id = start(
+        &pool,
+        &chain("get_cancelled"),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
     let workflow_handle = handle(&pool, workflow_id);
     workflow_handle.cancel().await.expect("cancel()");
 
@@ -219,7 +229,7 @@ async fn get_after_cancel_gives_workflow_cancelled() {
 
 /// A finished chain: A gave 10 and B gave 20.
 async fn finished_chain(pool: &PgPool, name: &str) -> Uuid {
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = start(pool, &chain(name), &registry).await;
     let _a = finish_node(pool, workflow_id, 0, &ok(serde_json::json!(10)), &registry).await;
     let _b = finish_node(pool, workflow_id, 1, &ok(serde_json::json!(20)), &registry).await;
@@ -267,7 +277,7 @@ async fn result_for_an_unfinished_node_gives_result_not_ready() {
     let workflow_id = start(
         &pool,
         &single("result_for_not_ready", OnError::Fail),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -283,7 +293,12 @@ async fn result_for_an_unfinished_node_gives_result_not_ready() {
 #[serial]
 async fn results_is_empty_before_any_node_finishes() {
     let pool = shared_pool().await;
-    let workflow_id = start(&pool, &chain("results_empty"), &WorkflowSpecRegistry::new()).await;
+    let workflow_id = start(
+        &pool,
+        &chain("results_empty"),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     let results = handle(&pool, workflow_id)
         .results()
@@ -298,7 +313,12 @@ async fn results_is_empty_before_any_node_finishes() {
 #[serial]
 async fn tasks_gives_one_entry_per_node_with_its_task_name() {
     let pool = shared_pool().await;
-    let workflow_id = start(&pool, &chain("tasks_info"), &WorkflowSpecRegistry::new()).await;
+    let workflow_id = start(
+        &pool,
+        &chain("tasks_info"),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     let tasks = handle(&pool, workflow_id).tasks().await.expect("tasks()");
 
@@ -323,7 +343,7 @@ async fn tasks_is_ordered_by_node_index() {
                 join,
             ],
         ),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -338,7 +358,12 @@ async fn tasks_is_ordered_by_node_index() {
 #[serial]
 async fn tasks_gives_enqueued_for_a_root_and_pending_for_a_dependent() {
     let pool = shared_pool().await;
-    let workflow_id = start(&pool, &chain("tasks_status"), &WorkflowSpecRegistry::new()).await;
+    let workflow_id = start(
+        &pool,
+        &chain("tasks_status"),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await;
 
     let tasks = handle(&pool, workflow_id).tasks().await.expect("tasks()");
 
@@ -353,7 +378,7 @@ async fn tasks_gives_enqueued_for_a_root_and_pending_for_a_dependent() {
 #[serial]
 async fn tasks_gives_the_result_and_times_of_a_finished_node() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = start(&pool, &single("tasks_fields", OnError::Fail), &registry).await;
     let _task = finish_node(&pool, workflow_id, 0, &ok(serde_json::json!(42)), &registry).await;
 
@@ -376,7 +401,7 @@ async fn a_task_node_has_no_child_and_no_summary() {
     let workflow_id = start(
         &pool,
         &single("subwf_regular", OnError::Fail),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -509,7 +534,7 @@ async fn a_summary_with_an_unknown_status_makes_tasks_return_stored_data_invalid
 #[serial]
 async fn a_failed_output_node_makes_get_give_its_error() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let mut workflow_spec = chain("output_failed");
     workflow_spec.output_index = Some(1);
     let workflow_id = start(&pool, &workflow_spec, &registry).await;
@@ -533,7 +558,7 @@ async fn a_failed_output_node_makes_get_give_its_error() {
 #[serial]
 async fn results_keys_two_nodes_of_one_task_by_node_id() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = start(
         &pool,
         &spec(
@@ -570,18 +595,18 @@ async fn results_keys_two_nodes_of_one_task_by_node_id() {
     assert_eq!(ok_value(&results["node_1"]), &serde_json::json!(200));
 }
 
-/// `TestUnknownStoredWorkflowStatus` (`test_status_returns_stored_data_invalid`,
-/// `test_cancel_returns_stored_data_invalid_and_changes_nothing`,
-/// `test_get_folds_it_into_broker_error`): the baseline CHECK
-/// `horsies_workflows_status_known` refuses a status outside the catalog, so
-/// no handle call can read one. The guarantee moved into the schema.
+/// `TestUnknownStoredWorkflowStatus.test_the_database_refuses_an_unknown_status`:
+/// the baseline CHECK `horsies_workflows_status_known` refuses a status
+/// outside the catalog, so no handle call can read one. The guarantee moved
+/// into the schema. The value fits `status varchar(9)`, as Python's `BOGUS`,
+/// so the CHECK and not the length limit refuses it.
 #[tokio::test]
 #[serial]
 async fn the_database_refuses_an_unknown_workflow_status() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
 
-    let refused = sqlx::query("UPDATE horsies_workflows SET status = 'NOT_A_STATUS' WHERE id = $1")
+    let refused = sqlx::query("UPDATE horsies_workflows SET status = 'BOGUS' WHERE id = $1")
         .bind(workflow_id)
         .execute(&pool)
         .await
@@ -657,7 +682,7 @@ async fn a_lost_database_makes_results_give_db_operation_failed() {
 #[ignore = "waits on #850"]
 async fn get_polls_when_the_listener_cannot_connect() {
     let mut db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let mut workflow_spec = single("listen_fallback", OnError::Fail);
     workflow_spec.output_index = Some(0);
     let workflow_id = start(&db.pool, &workflow_spec, &registry).await;

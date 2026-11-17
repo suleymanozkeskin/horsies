@@ -16,7 +16,8 @@ use super::support::*;
 use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryRequest,
 };
-use crate::broker::terminalization::{terminalize, terminalize_in_tx};
+use crate::broker::terminalization::on_test_pool::terminalize;
+use crate::broker::terminalization::terminalize_in_tx;
 use crate::core::lifecycle::outcomes::{ObservedClaim, ObservedWorkflowLink};
 use crate::core::lifecycle::{
     AttemptWriteRefusal, BatchSize, CallerHoldsRowLock, FailedAttemptOutcome, GuardEvidence,
@@ -43,8 +44,6 @@ fn fused_completion(task_id: Uuid) -> TerminalizationCommand {
         task_id,
         fence: owned_claim(),
         result_json: r#"{"ok": 2}"#.to_owned(),
-        notify_channel: "task_queue_default".to_owned(),
-        notify_payload: format!("capacity:{task_id}"),
     }
 }
 

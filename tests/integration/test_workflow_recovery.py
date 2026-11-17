@@ -23,10 +23,10 @@ from horsies.core.models.workflow import (
     OnError,
 )
 from horsies.core.workflows.engine import (
-    on_workflow_task_complete,
     _queue_parent_propagation,  # pyright: ignore[reportPrivateUsage]
     pop_pending_parent_propagations,
 )
+from horsies.core.workflows.node_finish import CapacityWake, finish_node
 from horsies.core.workflows.recovery import (
     GLOBAL_SCAN_ROW_CAP,
     recover_stuck_workflows,
@@ -39,10 +39,16 @@ from horsies.core.workflows.recovery_limit import (
     RecoveryCase,
 )
 
-from .conftest import make_simple_task, make_failing_task, make_workflow_spec, start_ok
+from .conftest import (
+    make_args_receiver_task,
+    make_failing_task,
+    make_simple_task,
+    make_workflow_spec,
+    start_ok,
+)
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
 from tests.integration.history_seeding import force_terminal
-from tests.integration.conftest import task_name_for
+from tests.integration.conftest import finish_phase_one
 from tests.broker_resources_support import current_resources
 
 
@@ -78,8 +84,8 @@ def _strict_result_json(result: TaskResult[Any, TaskError]) -> str:
 
     Tests in this file seed terminal task rows directly (simulating crash /
     recovery states); they must match what production writes so the engine's
-    strict envelope decode at ``on_workflow_task_complete`` / recovery
-    finalization accepts the payload. ``ok_type=Any`` is sufficient — these
+    strict envelope decode of the node finish / recovery finalization
+    accepts the payload. ``ok_type=Any`` is sufficient — these
     tests substring-check the serialized output and don't pin the ok-payload
     type-narrowing on read.
     """
@@ -740,7 +746,7 @@ class TestWorkflowRecovery:
                 ),
         )
 
-        # Set workflow_tasks to RUNNING (simulating crash before on_workflow_task_complete)
+        # Set workflow_tasks to RUNNING (simulating a crash before phase 2)
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
@@ -1161,6 +1167,69 @@ class TestWorkflowRecovery:
         assert row[0] == 'ENQUEUED'
         assert row[1] is not None
 
+    async def test_recover_pending_dep_without_stored_result_injects_the_error(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """Case 0: a COMPLETED dependency with no stored result gives its
+        args_from consumer RESULT_DESERIALIZATION_ERROR naming the node. The
+        key used to be left out of the consumer's input."""
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'recover_pend_nores_a')
+        task_b = make_args_receiver_task(app, 'recover_pend_nores_b')
+
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(
+            fn=task_b, waits_for=[node_a], args_from={'input_result': node_a},
+        )
+        spec = make_workflow_spec(
+            broker=broker, name='recover_pend_nores', tasks=[node_a, node_b],
+        )
+
+        handle = await start_ok(spec, broker)
+
+        await session.execute(
+            text("""
+                UPDATE horsies_workflow_tasks
+                SET status = 'COMPLETED', result = NULL
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        await session.commit()
+
+        recovered = await recover_stuck_workflows(session, broker)
+        await session.commit()
+
+        assert recovered == 1
+        row = (
+            await session.execute(
+                text("""
+                    SELECT t.input FROM horsies_workflow_tasks wt
+                    JOIN horsies_tasks t ON t.id = wt.task_id
+                    WHERE wt.workflow_id = :wf_id AND wt.task_index = 1
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).fetchone()
+        assert row is not None
+        stored_input = loads_json(row[0]).unwrap()
+        assert isinstance(stored_input, dict)
+        envelope = stored_input['input_result']
+        assert isinstance(envelope, dict)
+        assert envelope['source_task_name'] == 'recover_pend_nores_a'
+        injected = decode_task_result(envelope['inner'], Any)
+        assert injected.is_err()
+        assert injected.err is not None
+        assert injected.err.error_code == (
+            OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        )
+        assert injected.err.message == (
+            f'Dependency node {node_a.node_id} (index 0, task recover_pend_nores_a) '
+            'is COMPLETED with no stored result'
+        )
+        assert injected.err.data == {'dependency_index': 0}
+
     async def test_recover_pending_deps_failed_skip(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
@@ -1425,20 +1494,15 @@ class TestWorkflowRecovery:
         child_id = wt_result.fetchone()[0]
         assert child_id is not None
 
-        # Get child's task_id and complete it normally
-        child_task_result = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :child_id AND task_index = 0
-            """),
-            {'child_id': child_id},
-        )
-        child_task_id = child_task_result.fetchone()[0]
-        assert child_task_id is not None
-
-        await on_workflow_task_complete(
-            session, child_task_id, TaskResult(ok=42), broker,
-            task_name=await task_name_for(session, child_task_id),
+        # Complete the child's task: phase 1, then phase 2 without the
+        # parent advance that it owes (as if the worker stopped before it).
+        done = await finish_phase_one(session, broker, child_id, 0, TaskResult(ok=42))
+        _ = await finish_node(
+            current_resources(broker).session_factory,
+            broker,
+            done.task_id,
+            done.facts,
+            CapacityWake.SEND,
         )
         await session.commit()
 

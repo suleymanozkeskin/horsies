@@ -7,7 +7,7 @@
 use serial_test::serial;
 
 use super::support::*;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{BatchSize, TerminalizationCommand};
 
 /// Python `test_a_batch_move_sends_one_status_event_per_task`.

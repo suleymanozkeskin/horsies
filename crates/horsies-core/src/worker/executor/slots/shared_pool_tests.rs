@@ -8,15 +8,16 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use uuid::Uuid;
 
+use super::scripted::{drop_bytes, ScriptCount};
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
-    encode_child_frame, encode_parent_frame, AsyncSeats, BlockedWhere, CancelGraceMs, ChildFrame,
-    ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, DispatchNumber,
-    ExecutorThreads, InitFrame, LeftoverName, LoopBlockedFrame, LoopCulprit, ParentFrame,
-    PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ResultEnvelopeText, RssReading, RunEnd,
-    RunRef, RunStuckFrame, SeatEnd, SharedAsyncChild, SharedResultFrame, SharedRunFrame,
+    encode_child_frame, encode_parent_frame, AsyncSeats, BlockedWhere, CancelGraceMs,
+    ChildConnection, ChildFrame, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl,
+    DispatchNumber, ExecutorThreads, InitFrame, LeftoverName, LoopBlockedFrame, LoopCulprit,
+    ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ResultEnvelopeText, RssReading,
+    RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedAsyncChild, SharedResultFrame, SharedRunFrame,
     SharedThreadChild, SharedWork, StuckWork, TaskInputText, TaskSendPool, TaskTimeoutMs,
     ThreadSeats,
 };
@@ -146,6 +147,7 @@ fn init_frame(kind: SharedChildKindOfTest) -> InitFrame {
         program: ChildProgram::Rust,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+        connection: ChildConnection::default(),
         process_name: "horsies-test-shared".to_owned(),
         child_kind,
     }
@@ -210,7 +212,6 @@ fn scripted_child(kind: SharedChildKindOfTest, frames: &[ChildFrame], after: &st
         task_id: task.task_id,
         task_name: task.task_name.clone(),
         worker_id: "worker-1".to_owned(),
-        task_kind: task.kind,
         claimed_at: task.claimed_at,
         work: work_of(kind),
         input: TaskInputText::new("{}".to_owned()),
@@ -218,10 +219,10 @@ fn scripted_child(kind: SharedChildKindOfTest, frames: &[ChildFrame], after: &st
     .unwrap()
     .to_bytes();
     let script = format!(
-        r#"head -c {init} <&"$0" >/dev/null; printf '{ready}' >&"$0"; head -c {run} <&"$0" >/dev/null; printf '{frames}' >&"$0"; {after}"#,
-        init = init.len(),
+        r#"{init}printf '{ready}' >&"$0"; {run}printf '{frames}' >&"$0"; {after}"#,
+        init = drop_bytes(ScriptCount::Known(init.len())),
         ready = printf_bytes(&ready),
-        run = run.len(),
+        run = drop_bytes(ScriptCount::Known(run.len())),
         frames = child_frames(frames),
     );
     ChildCommand {
@@ -233,7 +234,7 @@ fn scripted_child(kind: SharedChildKindOfTest, frames: &[ChildFrame], after: &st
 /// After the frames: take the stop frame and exit.
 fn exit_at_stop() -> String {
     let stop = encode_parent_frame(&ParentFrame::Stop).unwrap().to_bytes();
-    format!(r#"head -c {} <&"$0" >/dev/null; exit 0"#, stop.len())
+    format!("{}exit 0", drop_bytes(ScriptCount::Known(stop.len())))
 }
 
 async fn run_one(
@@ -425,4 +426,49 @@ fn a_killed_child_loss_reads_as_a_kill_by_the_worker() {
         pid: ProcessId::new(5).unwrap(),
     };
     assert!(lost.to_string().contains("killed by the worker"));
+}
+
+/// The free seats of a shared pool, for the soft-cap start check (Python
+/// `test_queue_cap_hold.py::TestFreeChildren`): every seat of an open child
+/// is free; a submitted task takes one at once; a stopping pool has none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_free_seats_of_an_open_child_less_the_submitted_tasks() {
+    let kind = SharedChildKindOfTest::Async;
+    let spawner = Spawner::start().unwrap();
+    let board = Arc::new(PoolBoard::new(layout(0, 1, 0)));
+    let pool = SharedPool::start(
+        SharedPoolConfig {
+            command: scripted_child(kind, &[], "exec sleep 60"),
+            init: init_frame(kind),
+            worker_id: "worker-1".to_owned(),
+            pending_limit: NonZeroUsize::new(4).unwrap(),
+            tasks_per_seat: TaskLimit::Off,
+            memory_per_child: MemoryLimit::Off,
+            exit_not_seen: ExitNotSeen::LeaveToRecovery,
+            child_cpus: ChildCpus::Inherited,
+            kill_wait: CHILD_KILL_WAIT,
+        },
+        Arc::clone(&board),
+        spawner.handle(),
+        LiveDispatches::default(),
+    );
+    super::scripted::until(
+        "the child opens its 2 seats",
+        Duration::from_secs(30),
+        || pool.free_seats() == 2,
+    )
+    .await;
+
+    let submitted = pool.submit(
+        &claimed(ExecutionClass::SharedAsync),
+        TaskInputText::new("{}".to_owned()),
+        work_of(kind),
+    );
+    assert!(matches!(submitted, Submitted::Queued(_)));
+    assert_eq!(pool.free_seats(), 1, "the submitted task holds one seat");
+
+    board.begin_stop();
+    assert_eq!(pool.free_seats(), 0, "a stopping pool has no free seat");
+    let _ = pool.stop(Duration::from_secs(1)).await;
+    let _ = spawner.stop(Duration::from_secs(10));
 }

@@ -35,6 +35,7 @@ fn launch() -> ChildLaunch {
         }),
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u:p@localhost/db".to_owned()),
+        connection: ChildConnection::default(),
     }
 }
 
@@ -232,6 +233,7 @@ fn the_pool_config_carries_what_a_child_needs() {
     assert_eq!(isolated.init.program, launch.program);
     assert_eq!(isolated.init.log_level, ChildLogLevel::Info);
     assert_eq!(isolated.init.database_url, launch.database_url);
+    assert_eq!(isolated.init.connection, launch.connection);
     assert_eq!(isolated.init.process_name, CHILD_PROCESS_NAME);
     assert_eq!(isolated.worker_id, "worker-1");
     assert_eq!(isolated.pending_limit.get(), 32);

@@ -582,7 +582,7 @@ def _make_mock_app() -> MagicMock:
 
     app.config = MagicMock()
     app.config.broker = PostgresConfig(
-        database_url='postgresql+psycopg://user:pass@localhost/db',
+        database_url='postgresql://user:pass@localhost/db',
     )
     app.config.queue_mode = queue_mode
     app.config.custom_queues = None
@@ -3049,9 +3049,9 @@ class TestBootConnectionFit:
     async def test_a_transaction_pooler_reads_nothing(self) -> None:
         app = _make_mock_app()
         app.config.broker = PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://user:pass@localhost:6432/db'),
+            database_url=SecretStr('postgresql://user:pass@localhost:6432/db'),
             session_database_url=SecretStr(
-                'postgresql+psycopg://user:pass@localhost:5432/db',
+                'postgresql://user:pass@localhost:5432/db',
             ),
             pgbouncer_transaction_mode=True,
         )
@@ -3079,7 +3079,7 @@ class TestCheckCommandReportsEveryProfile:
             'from horsies import (AppConfig, ClaimLimits, Horsies, IsolatedChildren,\n'
             '    PostgresConfig, TaskLimit, WorkerProfile)\n'
             'app = Horsies(AppConfig(\n'
-            "    broker=PostgresConfig(database_url='postgresql+psycopg://u:p@h/db'),\n"
+            "    broker=PostgresConfig(database_url='postgresql://u:p@h/db'),\n"
             '    worker_profiles={\n'
             "        'empty': WorkerProfile(),\n"
             "        'greedy': WorkerProfile(\n"
@@ -3113,7 +3113,7 @@ SMALL_PARENT_POOL_APP: Final = (
     'from horsies import (AppConfig, Horsies, IsolatedChildren, ParentPool,\n'
     '    PoolSize, PostgresConfig, WorkerProfile)\n'
     'app = Horsies(AppConfig(\n'
-    "    broker=PostgresConfig(database_url='postgresql+psycopg://u:p@h/db'),\n"
+    "    broker=PostgresConfig(database_url='postgresql://u:p@h/db'),\n"
     '    worker_profiles={\n'
     "        'small': WorkerProfile(\n"
     '            isolated=IsolatedChildren(count=1),\n'

@@ -27,7 +27,10 @@ pub use config::{
     SchedulePattern, TaskSchedule, Weekday, WeeklySchedule, WorkerResilienceConfig,
 };
 pub use error::{ErrorCategory, ErrorCode, HorsiesError, ValidationReport};
-pub use registry::{RegisteredWorkflowSpec, SpecBuilderFn, TaskRegistry, WorkflowSpecRegistry};
+pub use registry::{
+    BuilderHookName, RegisteredWorkflowSpec, SpecBuildError, SpecBuilderFn, TaskRegistry,
+    WorkflowSpecRegistry,
+};
 pub use task::{
     AsyncTaskFn, BackoffStrategy, BlockingTaskFn, BuiltInTaskCode, ContractCode, ExceptionRecord,
     Execution, ExecutionClass, OperationalErrorCode, OutcomeCode, RegisteredTask, RetrievalCode,

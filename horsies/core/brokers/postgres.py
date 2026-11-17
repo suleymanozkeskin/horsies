@@ -1,10 +1,11 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
 import asyncio, hashlib, contextlib, os, random, threading, time, uuid
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Final, Optional, TYPE_CHECKING, assert_never, cast
+from uuid import UUID
 from datetime import datetime, timedelta, timezone
 import psycopg
 from sqlalchemy.ext.asyncio import (
@@ -15,7 +16,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, RowMapping
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from pydantic import ValidationError
 from horsies.core.brokers.listener import PostgresListener
@@ -135,7 +136,10 @@ from horsies.core.models.health import (
     parse_class_capacity,
     parse_slot_health,
 )
-from horsies.core.history.identity.fingerprint import EnqueueCommandV1
+from horsies.core.history.identity.fingerprint import (
+    COMMAND_FINGERPRINT_VERSION,
+    EnqueueCommandV1,
+)
 from horsies.core.history.periods import RetentionClassKey
 from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
@@ -166,6 +170,7 @@ from horsies.core.utils.db import (
     is_retryable_connection_error,
     SessionSettings,
     register_identity_text_reads,
+    uuid_column_value,
     register_idle_ping,
     register_session_settings,
 )
@@ -181,7 +186,7 @@ from horsies.core.utils.loop_runner import (
     in_running_event_loop,
 )
 from horsies.core.utils.task_loop_registry import is_task_loop
-from horsies.core.utils.url import to_psycopg_url
+from horsies.core.utils.url import sqlalchemy_url, to_psycopg_url
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 if TYPE_CHECKING:
@@ -232,6 +237,83 @@ def _enqueue_failed(message: str, exc: BaseException) -> Err[BrokerEnqueueFailed
 
 _DRIVER_ERRORS: Final = (SQLAlchemyError, psycopg.Error, OSError)
 """What a statement can raise when the database or the network fails."""
+
+
+@dataclass(frozen=True, slots=True)
+class SendCommand:
+    """The stored values of one send command, checked. Only the database can refuse it now.
+
+    The version-1 fingerprint leaves the task id and ``sent_at`` out, so one
+    value serves every row of the command: each slot of a schedule fire.
+    ``stored_input`` is the ``input`` text the row stores; ``execution`` and
+    ``max_retries`` are read from ``task_options``.
+    """
+
+    task_name: str
+    queue_name: str
+    priority: int
+    stored_input: str
+    task_options: str | None
+    execution: Execution
+    max_retries: int
+    retention_class_key: str
+    retain_rerun_input: bool
+    fingerprint_version: int
+    fingerprint: bytes
+
+
+def _send_command(
+    *,
+    task_name: str,
+    queue_name: str,
+    priority: int,
+    kwargs_json: str | None,
+    good_until: datetime | None,
+    enqueue_delay_seconds: int | None,
+    task_options: str | None,
+    retention_class_key: str,
+    retain_rerun_input: bool,
+) -> Result[SendCommand, BrokerInvalidInput | BrokerInvalidTaskOptions]:
+    """Check the input and the options of one send and build its command. Pure.
+
+    Refusals, in this order: the kwargs text (``INVALID_INPUT``), the
+    options text (``INVALID_TASK_OPTIONS``), a value the fingerprint
+    refuses (``INVALID_INPUT``).
+    """
+    input_r = _parse_enqueue_input(task_name, kwargs_json)
+    if is_err(input_r):
+        return input_r
+    stored_input = input_r.ok_value
+    options_r = _parse_enqueue_task_options(task_name, task_options)
+    if is_err(options_r):
+        return options_r
+    parsed_options = options_r.ok_value
+    fingerprint_r = _command_fingerprint(
+        task_name=task_name,
+        queue_name=queue_name,
+        priority=priority,
+        stored_input=stored_input,
+        good_until=good_until,
+        enqueue_delay_seconds=enqueue_delay_seconds,
+        task_options=task_options,
+        retention_class_key=retention_class_key,
+        retain_rerun_input=retain_rerun_input,
+    )
+    if is_err(fingerprint_r):
+        return fingerprint_r
+    return Ok(SendCommand(
+        task_name=task_name,
+        queue_name=queue_name,
+        priority=priority,
+        stored_input=stored_input,
+        task_options=task_options,
+        execution=parsed_options.execution,
+        max_retries=parsed_options.max_retries,
+        retention_class_key=retention_class_key,
+        retain_rerun_input=retain_rerun_input,
+        fingerprint_version=COMMAND_FINGERPRINT_VERSION,
+        fingerprint=fingerprint_r.ok_value,
+    ))
 
 
 @dataclass(frozen=True, slots=True)
@@ -566,7 +648,7 @@ def _async_context_err(
 
 
 def _wait_inside_task_err(
-    operation: str, task_id: str,
+    operation: str, task_id: UUID,
 ) -> Err[BrokerWaitInsideTask]:
     """Build the broker error for a result wait in a process that runs task bodies.
 
@@ -630,15 +712,34 @@ async def _acquire_session_advisory_lock(
 # ---- Monitoring queries ----
 
 TASK_LIST_ROW_BOUND: Final = 10_000
-"""The most rows that ``get_stale_tasks`` and ``get_expired_tasks`` return."""
+"""The most rows that ``get_stale_tasks`` and ``get_expired_tasks`` return: the
+row bound of ``horsies_list_stale_tasks`` and ``horsies_list_expired_tasks``."""
 
 MAX_STALE_THRESHOLD_MINUTES: Final = 525_600
 """The largest ``stale_threshold_minutes`` of ``get_stale_tasks``: one year
 of 365 days."""
 
-_TASK_LIST_READ_LIMIT: Final = TASK_LIST_ROW_BOUND + 1
-"""The ``LIMIT`` of a task list read. One row more than the bound tells a
-truncated list from a complete one."""
+# (dict key, result column) of each list row, in the order of the dict: the
+# keys of the client statements that the list functions replaced.
+_STALE_TASK_KEYS: Final = (
+    ('id', 'task_id'),
+    ('worker_hostname', 'worker_hostname'),
+    ('worker_pid', 'worker_pid'),
+    ('worker_process_name', 'worker_process_name'),
+    ('last_heartbeat', 'last_heartbeat'),
+    ('started_at', 'started_at'),
+    ('task_name', 'task_name'),
+)
+_EXPIRED_TASK_KEYS: Final = (
+    ('id', 'task_id'),
+    ('task_name', 'task_name'),
+    ('queue_name', 'queue_name'),
+    ('priority', 'priority'),
+    ('sent_at', 'sent_at'),
+    ('enqueued_at', 'enqueued_at'),
+    ('good_until', 'good_until'),
+    ('expired_for', 'expired_for'),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -658,11 +759,44 @@ class _TruncatedTaskList:
 type _BoundedTaskList = _CompleteTaskList | _TruncatedTaskList
 
 
-def _bounded_task_list(rows: list[dict[str, Any]]) -> _BoundedTaskList:
-    """Cut a read of at most ``_TASK_LIST_READ_LIMIT`` rows to the bound. Pure."""
-    if len(rows) > TASK_LIST_ROW_BOUND:
-        return _TruncatedTaskList(rows=rows[:TASK_LIST_ROW_BOUND])
-    return _CompleteTaskList(rows=rows)
+def _task_list_dict(
+    item: RowMapping, keys: tuple[tuple[str, str], ...],
+) -> dict[str, Any]:
+    """One TASK row of a list function as the dict of the public API. Pure.
+
+    The ``id`` value is the ``uuid.UUID`` of the public API.
+    """
+    entry: dict[str, Any] = {key: item[column] for key, column in keys}
+    entry['id'] = uuid_column_value(entry['id'], column='task_id')
+    return entry
+
+
+def _function_task_list(
+    rows: Sequence[RowMapping],
+    keys: tuple[tuple[str, str], ...],
+) -> _BoundedTaskList:
+    """The TASK rows of a list function as dicts, and whether it cut the list. Pure.
+
+    ``keys`` maps each dict key to its result column, in dict order. The
+    last row is the LIST_END row: ``TRUNCATED`` means the function cut the
+    list at ``TASK_LIST_ROW_BOUND`` rows.
+    """
+    match rows:
+        case [*items, end]:
+            pass
+        case _:
+            raise AssertionError('the list function answered no LIST_END row')
+    assert end['row_kind'] == 'LIST_END', end['row_kind']
+    assert end['row_bound'] == TASK_LIST_ROW_BOUND, end['row_bound']
+    assert all(item['row_kind'] == 'TASK' for item in items), 'a row before LIST_END is not a TASK row'
+    dicts = [_task_list_dict(item, keys) for item in items]
+    match end['list_state']:
+        case 'COMPLETE':
+            return _CompleteTaskList(rows=dicts)
+        case 'TRUNCATED':
+            return _TruncatedTaskList(rows=dicts)
+        case other:
+            raise AssertionError(f'list state {other!r} is not COMPLETE or TRUNCATED')
 
 
 def _stale_threshold_minutes(value: object) -> Result[int, BrokerInvalidInput]:
@@ -692,28 +826,11 @@ def _stale_threshold_minutes(value: object) -> Result[int, BrokerInvalidInput]:
     ))
 
 
-GET_STALE_TASKS_SQL = text("""
-    SELECT
-        t.id,
-        t.worker_hostname,
-        t.worker_pid,
-        t.worker_process_name,
-        hb.last_heartbeat,
-        t.started_at,
-        t.task_name
-    FROM horsies_tasks t
-    LEFT JOIN LATERAL (
-        SELECT sent_at AS last_heartbeat
-        FROM horsies_heartbeats h
-        WHERE h.task_id = t.id AND h.role = 'runner'
-        ORDER BY sent_at DESC
-        LIMIT 1
-    ) hb ON TRUE
-    WHERE t.status = 'RUNNING'
-      AND t.started_at IS NOT NULL
-      AND COALESCE(hb.last_heartbeat, t.started_at) < NOW() - CAST(:stale_threshold || ' minutes' AS INTERVAL)
-    ORDER BY hb.last_heartbeat NULLS FIRST, t.id
-    LIMIT :row_limit
+LIST_STALE_TASKS_SQL = text("""
+    SELECT row_kind, task_id, worker_hostname, worker_pid, worker_process_name,
+           last_heartbeat, started_at, task_name, list_state, row_bound
+    FROM horsies_list_stale_tasks(CAST(:threshold_minutes AS integer))
+    ORDER BY row_position NULLS LAST
 """)
 
 # Latest snapshot per worker (includes idle workers). The retired
@@ -792,21 +909,11 @@ GET_WORKER_STATE_HISTORY_SQL = text(f"""
     LIMIT :limit
 """)
 
-GET_EXPIRED_TASKS_SQL = text("""
-    SELECT
-        id,
-        task_name,
-        queue_name,
-        priority,
-        sent_at,
-        enqueued_at,
-        good_until,
-        NOW() - good_until as expired_for
-    FROM horsies_tasks
-    WHERE status = 'PENDING'
-      AND good_until <= NOW()
-    ORDER BY good_until ASC, id
-    LIMIT :row_limit
+LIST_EXPIRED_TASKS_SQL = text("""
+    SELECT row_kind, task_id, task_name, queue_name, priority, sent_at, enqueued_at,
+           good_until, expired_for, list_state, row_bound
+    FROM horsies_list_expired_tasks()
+    ORDER BY row_position NULLS LAST
 """)
 
 # ---- Cleanup queries ----
@@ -977,7 +1084,7 @@ class PostgresBroker:
         listener connect on first use.
         """
         engine = create_async_engine(
-            self.config.database_url.get_secret_value(),
+            sqlalchemy_url(self.config.database_url.get_secret_value()),
             **self._runtime_engine_config(),
         )
         register_identity_text_reads(engine)
@@ -992,7 +1099,7 @@ class PostgresBroker:
             session_async_engine = engine
         else:
             session_async_engine = create_async_engine(
-                session_url, **self._session_engine_config()
+                sqlalchemy_url(session_url), **self._session_engine_config()
             )
             # The session URL must keep session state (LISTEN, session
             # advisory locks), so it keeps session settings too.
@@ -1295,7 +1402,8 @@ class PostgresBroker:
         engine_cfg['pool_size'] = 1
         engine_cfg['max_overflow'] = 0
         engine = create_async_engine(
-            self.config.database_url.get_secret_value(), **engine_cfg,
+            sqlalchemy_url(self.config.database_url.get_secret_value()),
+            **engine_cfg,
         )
         register_identity_text_reads(engine)
         register_session_settings(engine, self._runtime_session_settings())
@@ -1622,7 +1730,7 @@ class PostgresBroker:
     @staticmethod
     def _prepare_enqueue(
         *,
-        task_id: str,
+        task_id: UUID,
         task_name: str,
         queue_name: str,
         priority: int,
@@ -1657,28 +1765,20 @@ class PostgresBroker:
         args_r = _check_enqueue_args(task_name, args_json)
         if is_err(args_r):
             return args_r
-        input_r = _parse_enqueue_input(task_name, kwargs_json)
-        if is_err(input_r):
-            return input_r
-        stored_input = input_r.ok_value
-        options_r = _parse_enqueue_task_options(task_name, task_options)
-        if is_err(options_r):
-            return options_r
-        parsed_options = options_r.ok_value
-
-        fingerprint_r = _command_fingerprint(
+        command_r = _send_command(
             task_name=task_name,
             queue_name=queue_name,
             priority=priority,
-            stored_input=stored_input,
+            kwargs_json=kwargs_json,
             good_until=good_until,
             enqueue_delay_seconds=enqueue_delay_seconds,
             task_options=task_options,
             retention_class_key=retention_class_key,
             retain_rerun_input=retain_rerun_input,
         )
-        if is_err(fingerprint_r):
-            return fingerprint_r
+        if is_err(command_r):
+            return command_r
+        command = command_r.ok_value
 
         key_r = _enqueue_key(task_name, idempotency_key, key_window)
         if is_err(key_r):
@@ -1689,26 +1789,56 @@ class PostgresBroker:
                 task_name=task_name,
                 queue_name=queue_name,
                 priority=priority,
-                stored_input=stored_input,
+                stored_input=command.stored_input,
                 task_options=task_options,
-                execution=parsed_options.execution,
+                execution=command.execution,
                 retention_class_key=retention_class_key,
                 retain_rerun_input=retain_rerun_input,
-                max_retries=parsed_options.max_retries,
+                max_retries=command.max_retries,
                 good_until=good_until,
                 sent_at=sent_at,
                 start=_enqueue_start(enqueued_at, enqueue_delay_seconds),
-                command_fingerprint=fingerprint_r.ok_value,
+                command_fingerprint=command.fingerprint,
                 key=key_r.ok_value,
             ),
         ))
+
+    def prepare_send_command(
+        self,
+        *,
+        task_name: str,
+        queue_name: str,
+        priority: int,
+        kwargs_json: str | None,
+        task_options: str | None,
+        retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
+    ) -> Result[SendCommand, BrokerInvalidInput | BrokerInvalidTaskOptions]:
+        """The stored values of an unkeyed send with no deadline and no delay, without a write.
+
+        The values are those ``enqueue_async`` writes for the same arguments:
+        the retention class resolves as there (an explicit None is
+        ``forever``), and the rerun-input posture is the broker's default.
+        Touches no database; the refusals are those of ``enqueue_async``
+        before its write.
+        """
+        return _send_command(
+            task_name=task_name,
+            queue_name=queue_name,
+            priority=priority,
+            kwargs_json=kwargs_json,
+            good_until=None,
+            enqueue_delay_seconds=None,
+            task_options=task_options,
+            retention_class_key=resolve_retention_class_key(retention_class_key),
+            retain_rerun_input=self.config.retain_rerun_input_default,
+        )
 
     async def enqueue_async(
         self,
         task_name: str,
         queue_name: str = 'default',
         *,
-        task_id: str,
+        task_id: UUID,
         enqueue_sha: str,
         send_kind: SendKind,
         args_json: str | None = None,
@@ -1722,7 +1852,7 @@ class PostgresBroker:
         retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
-    ) -> Result[str, BrokerEnqueueError]:
+    ) -> Result[UUID, BrokerEnqueueError]:
         """Write one PENDING task row, or answer the send that wrote it.
 
         One ``horsies_enqueue_task`` statement in autocommit. The row stores
@@ -1805,7 +1935,7 @@ class PostgresBroker:
 
     def _build_raw_result_record(
         self,
-        task_id: str,
+        task_id: UUID,
         task_name: str,
         status: TaskStatus,
         result_json: 'str | None',
@@ -1846,7 +1976,7 @@ class PostgresBroker:
     async def _history_result_record(
         self,
         session: AsyncSession,
-        task_id: str,
+        task_id: UUID,
     ) -> 'BrokerResult[RawResultRecord | None] | object':
         """Resolve a result from the task-history side.
 
@@ -1890,7 +2020,7 @@ class PostgresBroker:
 
     def _history_raw_result_record(
         self,
-        task_id: str,
+        task_id: UUID,
         task_name: str,
         status: TaskStatus,
         payload: bytes | None,
@@ -1938,7 +2068,7 @@ class PostgresBroker:
     async def _probe_result_row(
         self,
         session: AsyncSession,
-        task_id: str,
+        task_id: UUID,
         *,
         non_terminal_snapshot: bool = False,
     ) -> 'BrokerResult[RawResultRecord | None] | object':
@@ -1982,7 +2112,7 @@ class PostgresBroker:
                 self._staged_result_reader_published = False
             raise
         match read:
-            case LiveTaskResult(task_name=task_name, result=result):
+            case LiveTaskResult(task_name=task_name):
                 status = TaskStatus(read.status)
                 match status:
                     case (
@@ -1990,8 +2120,9 @@ class PostgresBroker:
                         | TaskStatus.FAILED
                         | TaskStatus.EXPIRED
                     ):
+                        # A live row stores no result.
                         return self._build_raw_result_record(
-                            task_id, task_name, status, result,
+                            task_id, task_name, status, None,
                         )
                     case _ if (
                         status is TaskStatus.CANCELLED or non_terminal_snapshot
@@ -2025,7 +2156,7 @@ class PostgresBroker:
     async def _probe_live_result_row(
         self,
         session: AsyncSession,
-        task_id: str,
+        task_id: UUID,
         *,
         non_terminal_snapshot: bool = False,
     ) -> 'BrokerResult[RawResultRecord | None] | object':
@@ -2044,7 +2175,7 @@ class PostgresBroker:
         returned as a payload-less record instead of the sentinel.
         """
         probe = await session.execute(
-            GET_TASK_STATUS_NAME_SQL, {'id': task_id},
+            GET_TASK_STATUS_NAME_SQL, {'id': str(task_id)},
         )
         probe_row = probe.fetchone()
         if probe_row is None:
@@ -2061,7 +2192,7 @@ class PostgresBroker:
 
     async def get_raw_result_record_async(
         self,
-        task_id: str,
+        task_id: UUID,
         timeout_ms: Optional[int] = None,
     ) -> BrokerResult[RawResultRecord | None]:
         """Raw broker fetch of a task's stored result envelope.
@@ -2126,7 +2257,7 @@ class PostgresBroker:
             subscription: tuple[PostgresListener, asyncio.Queue[Any]] | None = None
             match resources.listener:
                 case ListenerEnabled(listener=listener):
-                    listen_r = await listener.listen_payload('task_done', task_id)
+                    listen_r = await listener.listen_payload('task_done', str(task_id))
                     match listen_r:
                         case Ok(queue):
                             q = queue
@@ -2178,7 +2309,7 @@ class PostgresBroker:
                             async def _wait_for_task() -> None:
                                 while True:
                                     note = await q.get()
-                                    if note.payload == task_id:
+                                    if note.payload == str(task_id):
                                         return
 
                             await asyncio.wait_for(
@@ -2220,7 +2351,7 @@ class PostgresBroker:
 
     def get_raw_result_record(
         self,
-        task_id: str,
+        task_id: UUID,
         timeout_ms: Optional[int] = None,
     ) -> BrokerResult[RawResultRecord | None]:
         """Synchronous wrapper around ``get_raw_result_record_async``.
@@ -2249,11 +2380,11 @@ class PostgresBroker:
             )
 
     async def _unsubscribe_task_done_safely(
-        self, listener: PostgresListener, task_id: str, q: asyncio.Queue[Any],
+        self, listener: PostgresListener, task_id: UUID, q: asyncio.Queue[Any],
     ) -> None:
         """Ensure task_done unsubscribe completes even under repeated cancellation."""
         unsubscribe_task = asyncio.create_task(
-            listener.unsubscribe_payload('task_done', task_id, q)
+            listener.unsubscribe_payload('task_done', str(task_id), q)
         )
         cancelled_during_cleanup = False
         while not unsubscribe_task.done():
@@ -2305,9 +2436,9 @@ class PostgresBroker:
         # when called from any thread except the loop-runner thread itself.
         # stop() joins the runner thread (up to 2 s), so it runs on a worker
         # thread and this loop keeps running during the join.
-        loop_thread = self._loop_runner._thread
+        loop_thread = self._loop_runner._thread  # pyright: ignore[reportPrivateUsage]
         if (
-            self._loop_runner._started
+            self._loop_runner._started  # pyright: ignore[reportPrivateUsage]
             and loop_thread is not None
             and threading.current_thread() is not loop_thread
         ):
@@ -2353,33 +2484,29 @@ class PostgresBroker:
                 pass
         try:
             async with resources.session_factory() as session:
-                result = await session.execute(
-                    GET_STALE_TASKS_SQL,
-                    {
-                        'stale_threshold': threshold,
-                        'row_limit': _TASK_LIST_READ_LIMIT,
-                    },
+                connection = await autocommit_connection(session)
+                result = await connection.execute(
+                    LIST_STALE_TASKS_SQL, {'threshold_minutes': threshold},
                 )
-                columns = result.keys()
-                rows = [dict(zip(columns, row)) for row in result.fetchall()]
+                rows = result.mappings().all()
         except Exception as exc:
             return _operation_failed(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
                 f'get_stale_tasks failed: {exc}',
                 exc,
             )
-        return Ok(self._rows_within_bound('get_stale_tasks', rows))
+        return Ok(self._rows_within_bound(
+            'get_stale_tasks', _function_task_list(rows, _STALE_TASK_KEYS),
+        ))
 
     def _rows_within_bound(
         self,
         operation: str,
-        rows: list[dict[str, Any]],
+        bounded: _BoundedTaskList,
     ) -> list[dict[str, Any]]:
-        """The rows of a task list read, cut to ``TASK_LIST_ROW_BOUND``.
-
-        A cut list logs a warning that names ``operation`` and the bound.
-        """
-        match _bounded_task_list(rows):
+        """The rows of a task list read; a cut list logs a warning that names
+        ``operation`` and the bound."""
+        match bounded:
             case _CompleteTaskList(rows=complete):
                 return complete
             case _TruncatedTaskList(rows=first_rows):
@@ -2824,19 +2951,18 @@ class PostgresBroker:
                 pass
         try:
             async with resources.session_factory() as session:
-                result = await session.execute(
-                    GET_EXPIRED_TASKS_SQL,
-                    {'row_limit': _TASK_LIST_READ_LIMIT},
-                )
-                columns = result.keys()
-                rows = [dict(zip(columns, row)) for row in result.fetchall()]
+                connection = await autocommit_connection(session)
+                result = await connection.execute(LIST_EXPIRED_TASKS_SQL)
+                rows = result.mappings().all()
         except Exception as exc:
             return _operation_failed(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
                 f'get_expired_tasks failed: {exc}',
                 exc,
             )
-        return Ok(self._rows_within_bound('get_expired_tasks', rows))
+        return Ok(self._rows_within_bound(
+            'get_expired_tasks', _function_task_list(rows, _EXPIRED_TASK_KEYS),
+        ))
 
     async def mark_stale_tasks_as_failed(
         self,
@@ -3170,19 +3296,20 @@ class PostgresBroker:
 
     # ----------------- Sync API Facades -----------------
 
-    def send_route(self, idempotency_key: Optional[str]) -> SyncSendRoute:
+    def send_route(self) -> SyncSendRoute:
         """Where a sync ``enqueue`` writes its row. Pure.
 
-        ``CALLER_THREAD`` for an unkeyed send of a process that runs no task
-        bodies, once this broker's schema is initialized. A send with an
-        idempotency key, and a send before the schema setup (which the first
-        send may run), stay on the loop runner.
+        ``CALLER_THREAD`` for a send of a process that runs no task bodies,
+        once this broker's schema is initialized, with or without an
+        idempotency key: both are one ``horsies_enqueue_task`` statement in
+        autocommit. A send before the schema setup (which the first send may
+        run) stays on the loop runner.
         Task code in a worker child sends through the child's
         ``task_send_pool``, which the worker profile counts exactly, so it
         stays on the loop runner too.
         """
-        match (process_role(), idempotency_key, self._initialized):
-            case (ProcessRole.RUNS_NO_TASK_BODIES, None, True):
+        match (process_role(), self._initialized):
+            case (ProcessRole.RUNS_NO_TASK_BODIES, True):
                 return SyncSendRoute.CALLER_THREAD
             case _:
                 return SyncSendRoute.LOOP_RUNNER
@@ -3201,7 +3328,7 @@ class PostgresBroker:
                 case _ as unreachable:
                     assert_never(unreachable)
             engine = create_engine(
-                self.config.database_url.get_secret_value(),
+                sqlalchemy_url(self.config.database_url.get_secret_value()),
                 **self._runtime_engine_config(),
                 isolation_level='AUTOCOMMIT',
             )
@@ -3230,7 +3357,7 @@ class PostgresBroker:
         task_name: str,
         queue_name: str,
         *,
-        task_id: str,
+        task_id: UUID,
         send_kind: SendKind,
         args_json: str | None,
         kwargs_json: str | None,
@@ -3242,9 +3369,11 @@ class PostgresBroker:
         task_options: Optional[str],
         retention_class_key: RetentionClassKey | None,
         retain_rerun_input: Optional[bool],
-    ) -> Result[str, BrokerEnqueueError | BrokerSyncCallError]:
-        """The unkeyed path of ``enqueue_async``, on the calling thread: the
-        same row, the same statement and the same error classification."""
+        idempotency_key: Optional[str],
+    ) -> Result[UUID, BrokerEnqueueError | BrokerSyncCallError]:
+        """``enqueue_async`` on the calling thread: the same row (with the
+        key of a keyed send), the same statement and the same error
+        classification."""
         resolved_retention_class_key = resolve_retention_class_key(
             retention_class_key
         )
@@ -3264,13 +3393,12 @@ class PostgresBroker:
             task_options=task_options,
             retention_class_key=resolved_retention_class_key,
             retain_rerun_input=retain_rerun_input,
-            idempotency_key=None,
+            idempotency_key=idempotency_key,
             key_window=self.idempotency_reservation_window,
         )
         if is_err(prepared_r):
             return prepared_r
         prepared = prepared_r.ok_value
-        assert isinstance(prepared.row.key, Unkeyed), 'an unkeyed send has no key'
         try:
             outcome = self._enqueue_task_on_caller_thread(prepared.row, send_kind)
         except _DRIVER_ERRORS as exc:
@@ -3285,7 +3413,7 @@ class PostgresBroker:
         task_name: str,
         queue_name: str = 'default',
         *,
-        task_id: str,
+        task_id: UUID,
         enqueue_sha: str,
         send_kind: SendKind,
         args_json: str | None = None,
@@ -3299,7 +3427,7 @@ class PostgresBroker:
         idempotency_key: Optional[str] = None,
         retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
-    ) -> Result[str, BrokerEnqueueError | BrokerSyncCallError]:
+    ) -> Result[UUID, BrokerEnqueueError | BrokerSyncCallError]:
         """Synchronous task submission, with the outcomes of ``enqueue_async``.
 
         ``send_route`` decides where the row is written: on the calling
@@ -3311,7 +3439,7 @@ class PostgresBroker:
             return _async_context_err(
                 'PostgresBroker.enqueue()', 'broker.enqueue_async(...)',
             )
-        match self.send_route(idempotency_key):
+        match self.send_route():
             case SyncSendRoute.CALLER_THREAD:
                 return self._enqueue_on_caller_thread(
                     task_name,
@@ -3328,6 +3456,7 @@ class PostgresBroker:
                     task_options=task_options,
                     retention_class_key=retention_class_key,
                     retain_rerun_input=retain_rerun_input,
+                    idempotency_key=idempotency_key,
                 )
             case SyncSendRoute.LOOP_RUNNER:
                 pass
@@ -3359,7 +3488,7 @@ class PostgresBroker:
     async def _history_task_info(
         self,
         session: 'AsyncSession',
-        task_id: str,
+        task_id: UUID,
         *,
         include_result: bool,
         include_failed_reason: bool,
@@ -3371,14 +3500,8 @@ class PostgresBroker:
         failed_at otherwise; claim state is structurally absent on a
         history record, while the claim's timestamp survives as
         provenance. Attempts decode from the record's snapshot — their
-        only home after the move.
+        only home after the move — and are listed newest first.
         """
-        from horsies.core.history.identity.uuid7 import UUID
-
-        try:
-            UUID(task_id)
-        except ValueError:
-            return Ok(None)
         from horsies.core.history.reads.detail import (
             HistoryTaskDetail,
             read_task_detail,
@@ -3446,6 +3569,8 @@ class PostgresBroker:
 
         attempts: list[TaskAttemptInfo] | None = None
         if include_attempts:
+            # The snapshot holds the attempts oldest first; TaskInfo lists
+            # them newest first, as the live read does (ORDER BY attempt DESC).
             attempts = [
                 TaskAttemptInfo(
                     task_id=task_id,
@@ -3462,7 +3587,7 @@ class PostgresBroker:
                     worker_pid=record.worker_pid,
                     worker_process_name=record.worker_process_name,
                 )
-                for record in detail.attempts
+                for record in reversed(detail.attempts)
             ]
 
         return Ok(
@@ -3499,7 +3624,7 @@ class PostgresBroker:
 
     async def get_task_info_async(
         self,
-        task_id: str,
+        task_id: UUID,
         *,
         include_result: bool = False,
         include_failed_reason: bool = False,
@@ -3520,7 +3645,6 @@ class PostgresBroker:
 
             async with resources.session_factory() as session:
                 base_columns = [
-                    'id',
                     'task_name',
                     'status',
                     'queue_name',
@@ -3554,7 +3678,7 @@ class PostgresBroker:
                     WHERE id = :id
                 """
                 )
-                result = await session.execute(query, {'id': task_id})
+                result = await session.execute(query, {'id': str(task_id)})
                 row = result.fetchone()
                 if row is None:
                     # Terminalization moves finished rows to history, so
@@ -3573,8 +3697,6 @@ class PostgresBroker:
                 failed_reason = None
 
                 idx = 0
-                task_id_value = row[idx]
-                idx += 1
                 task_name = row[idx]
                 idx += 1
                 status = TaskStatus(row[idx])
@@ -3655,11 +3777,11 @@ class PostgresBroker:
                 if include_attempts:
                     att_result = await session.execute(
                         SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL,
-                        {'task_id': task_id},
+                        {'task_id': str(task_id)},
                     )
                     attempts = [
                         TaskAttemptInfo(
-                            task_id=att_row[0],
+                            task_id=task_id,
                             attempt=att_row[1],
                             outcome=TaskAttemptOutcome(att_row[2]),
                             will_retry=att_row[3],
@@ -3678,7 +3800,7 @@ class PostgresBroker:
 
                 return Ok(
                     TaskInfo(
-                        task_id=task_id_value,
+                        task_id=task_id,
                         task_name=task_name,
                         status=status,
                         queue_name=queue_name,
@@ -3713,7 +3835,7 @@ class PostgresBroker:
 
     def get_task_info(
         self,
-        task_id: str,
+        task_id: UUID,
         *,
         include_result: bool = False,
         include_failed_reason: bool = False,

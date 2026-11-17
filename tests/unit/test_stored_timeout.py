@@ -18,6 +18,7 @@ from horsies.core.worker.stored_timeout import (
     OptionsUnreadable,
     TaskTimeout,
     TimeoutValueInvalid,
+    read_claimed_options,
     read_stored_timeout,
 )
 
@@ -96,3 +97,53 @@ class TestTimeoutValueInvalid:
 
         assert isinstance(result, TimeoutValueInvalid)
         assert '0000' not in result.reason
+
+
+_POLICY: dict[str, object] = {
+    'max_retries': 2,
+    'intervals': [5, 10],
+    'backoff_strategy': 'fixed',
+    'jitter': False,
+    'auto_retry_for': ['E'],
+}
+
+
+def _claimed(policy: object, timeout_ms: object = 1_000) -> str:
+    return json.dumps({'retry_policy': policy, 'timeout_ms': timeout_ms})
+
+
+class TestClaimedOptions:
+    """The claim refuses a stored retry policy that does not validate, so the
+    task fails before it runs; then it reads the timeout."""
+
+    @pytest.mark.parametrize('policy', [None, _POLICY], ids=['no-policy', 'valid-policy'])
+    def test_a_usable_policy_gives_the_timeout(self, policy: object) -> None:
+        assert read_claimed_options(_claimed(policy)) == TaskTimeout(ms=1_000)
+
+    def test_no_options_have_no_timeout(self) -> None:
+        assert read_claimed_options(None) == NoTimeout()
+
+    @pytest.mark.parametrize(
+        'policy',
+        [
+            'not a dict',
+            {**_POLICY, 'intervals': []},
+            {**_POLICY, 'backoff_strategy': 'quadratic'},
+            {**_POLICY, 'max_retries': 3},
+        ],
+        ids=['not-an-object', 'empty-intervals', 'unknown-backoff', 'length-mismatch'],
+    )
+    def test_a_policy_that_does_not_validate_is_refused(self, policy: object) -> None:
+        """Before, the retry of such a task used default intervals or backoff."""
+        match read_claimed_options(_claimed(policy)):
+            case OptionsUnreadable(reason=reason):
+                assert reason.startswith('stored retry_policy does not validate: ')
+            case other:
+                raise AssertionError(f'expected OptionsUnreadable, got {other!r}')
+
+    def test_the_policy_is_refused_before_the_timeout(self) -> None:
+        refused = read_claimed_options(_claimed({**_POLICY, 'intervals': []}, timeout_ms=-1))
+        assert isinstance(refused, OptionsUnreadable)
+
+    def test_options_that_do_not_parse_keep_the_timeout_reason(self) -> None:
+        assert read_claimed_options('{bad') == read_stored_timeout('{bad')

@@ -4,10 +4,12 @@
 -- tables only when the statement runs, so each function is called on a path that runs its statements that name
 -- columns. Each call checks its outcome.
 
--- The published provenance reader is rendered at run time; this stand-in answers "not found".
-CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid, p_include_live boolean DEFAULT TRUE)
-RETURNS horsies_task_provenance LANGUAGE sql AS $$
-    SELECT ROW(FALSE, NULL, NULL, NULL, NULL, NULL)::horsies_task_provenance
+-- The published provenance reader is rendered by horsies_publish_history_readers; this stand-in answers "not found"
+-- (no row).
+CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
+RETURNS TABLE (task_id uuid, status text, terminal_at timestamptz, terminalization_kind text, is_workflow_task boolean)
+LANGUAGE sql AS $$
+    SELECT NULL::uuid, NULL::text, NULL::timestamptz, NULL::text, NULL::boolean WHERE FALSE
 $$;
 
 CREATE FUNCTION fixture_task(
@@ -54,13 +56,13 @@ RETURNS void LANGUAGE sql AS $$
     INSERT INTO horsies_workflow_tasks (
         id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
         workflow_ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
-        good_until, retention_class_key, status, task_id, is_subworkflow, sub_workflow_id, sub_workflow_name,
-        sub_definition_key, sub_workflow_params, sub_workflow_summary, result, error, created_at, started_at,
-        completed_at
+        good_until, retention_class_key, downstream_subworkflow, status, task_id, is_subworkflow, sub_workflow_id,
+        sub_workflow_name, sub_definition_key, sub_workflow_params, sub_workflow_summary, result, error,
+        created_at, started_at, completed_at
     ) VALUES (
         p_id, p_workflow, p_index, 'node_' || p_index, 'fixture.task', '{"x":1}', 'default', 100, '{}', NULL,
         NULL, FALSE, 'all', NULL, NULL, 1, 'ISOLATED',
-        NULL, 'forever', p_status, p_task, FALSE, NULL, NULL,
+        NULL, 'forever', 'NONE', p_status, p_task, FALSE, NULL, NULL,
         NULL, NULL, NULL, NULL, NULL, now(), NULL,
         NULL
     )
@@ -224,8 +226,10 @@ SELECT fixture_node(
     '00000000-0000-7000-8000-0000000000b2', '00000000-0000-7000-8000-0000000000a1', 1, 'RUNNING',
     '00000000-0000-7000-8000-00000000000b'
 );
+-- The single move (0006) takes the live row that its caller locked.
 SELECT horsies_move_task_to_history(
-    '00000000-0000-7000-8000-00000000000b'::uuid, 'COMPLETED', 'COMPLETE_LOCKED', now(), '{"ok":1}', NULL, NULL
+    (SELECT t FROM horsies_tasks AS t WHERE t.id = '00000000-0000-7000-8000-00000000000b' FOR UPDATE),
+    'COMPLETED', 'COMPLETE_LOCKED', now(), '{"ok":1}', NULL, NULL
 );
 SELECT expect_value(
     'phase2_consume history',
@@ -338,7 +342,7 @@ SELECT count(*) FROM horsies_cancel_orphaned_tasks(10);
 SELECT expect_value(
     'terminalization_miss',
     (SELECT outcome FROM horsies_terminalization_miss(
-        '00000000-0000-7000-8000-0000000000ff', ARRAY['FAIL_RUNNING'], 'NONE', NULL, NULL)),
+        '00000000-0000-7000-8000-0000000000ff', 'FAIL_RUNNING', 'NONE', NULL, NULL)),
     'TASK_ABSENT'
 );
 SELECT expect_value(

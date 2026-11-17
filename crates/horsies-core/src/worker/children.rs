@@ -10,6 +10,8 @@
 //!   to the pool of its kind.
 //! - [`WorkerChildren::service`]: the capacity in service of each budget, for
 //!   the claim; [`WorkerChildren::down_slots`] for the worker snapshot.
+//! - [`WorkerChildren::free_capacity`]: the children or seats of each budget
+//!   that take a task at once, for the soft-cap start check.
 //! - [`WorkerChildren::stop`]: every pool stops with the drain timeout.
 //!
 //! The pools never run user code in the worker process: every task runs in a
@@ -29,15 +31,15 @@ use crate::core::config::worker_profile::{
 };
 use crate::worker::executor::placement::{plan_own_core, CpuPlacement, PlacementRefused};
 use crate::worker::executor::protocol::{
-    AsyncSeats, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, ExecutorThreads,
-    InitFrame, IsolatedChild, PoolMaxSize, PoolMinSize, SharedAsyncChild, SharedThreadChild,
-    TaskSendPool, ThreadSeats,
+    AsyncSeats, ChildConnection, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl,
+    ExecutorThreads, InitFrame, IsolatedChild, PoolMaxSize, PoolMinSize, SharedAsyncChild,
+    SharedThreadChild, TaskSendPool, ThreadSeats,
 };
 use crate::worker::executor::slots::{
     dispatch_route, AttemptEnd, BaselineLimits, ChildLayout, Claimed, DispatchRoute, DownState,
-    ExecutionClass, ExitNotSeen, IsolatedPool, IsolatedPoolConfig, MemoryLimit, NotRunCause,
-    PoolBoard, PoolService, PoolStopReport, SharedPool, SharedPoolConfig, SharedSlotService,
-    SlotPhase, Submitted, TaskLimit,
+    ExecutionClass, ExitNotSeen, FreeCapacity, IsolatedPool, IsolatedPoolConfig, MemoryLimit,
+    NotRunCause, PoolBoard, PoolService, PoolStopReport, SharedPool, SharedPoolConfig,
+    SharedSlotService, SlotPhase, Submitted, TaskLimit,
 };
 use crate::worker::executor::supervisor::{ChildCommand, SpawnerHandle, CHILD_KILL_WAIT};
 use crate::worker::runner_beats::{LiveDispatches, StaleRunningRecovery};
@@ -46,7 +48,8 @@ use crate::worker::runner_beats::{LiveDispatches, StaleRunningRecovery};
 pub const CHILD_PROCESS_NAME: &str = "horsies-child";
 
 /// What every child of the worker runs, from the host: the program to
-/// start, what it loads, its log level and its database URL.
+/// start, what it loads, its log level, its database URL and the connection
+/// settings of the app's config.
 #[derive(Debug, Clone)]
 pub struct ChildLaunch {
     /// The program of each child. The spawner appends the socket descriptor
@@ -57,6 +60,10 @@ pub struct ChildLaunch {
     pub log_level: ChildLogLevel,
     /// The URL that a child connects with.
     pub database_url: DatabaseUrl,
+    /// The settings of each connection of a child
+    /// ([`ChildConnection::of_config`] of the app's broker config; Python
+    /// `WorkerConfig.child_connect_kwargs`).
+    pub connection: ChildConnection,
 }
 
 /// The most tasks that may wait for a slot or a seat in one pool: twice the
@@ -192,6 +199,7 @@ fn init_frame(launch: &ChildLaunch, child_kind: ChildKind) -> InitFrame {
         program: launch.program.clone(),
         log_level: launch.log_level,
         database_url: launch.database_url.clone(),
+        connection: launch.connection.clone(),
         process_name: CHILD_PROCESS_NAME.to_owned(),
         child_kind,
     }
@@ -446,6 +454,22 @@ impl WorkerChildren {
     /// Every slot that is down, with its board index, for the snapshot.
     pub fn down_slots(&self) -> Vec<(usize, DownState)> {
         self.view.down_slots()
+    }
+
+    /// The children or seats of each budget that take a task at once (Python
+    /// `Worker._free_children`): the isolated children that wait for a task
+    /// and the free seats of the open shared children, less the tasks that
+    /// wait for one. A kind with no pool has 0. Each pool is read under its
+    /// own lock.
+    pub fn free_capacity(&self) -> FreeCapacity {
+        FreeCapacity {
+            isolated: self.isolated.as_ref().map_or(0, IsolatedPool::free_slots),
+            shared_async: self.shared_async.as_ref().map_or(0, SharedPool::free_seats),
+            shared_thread: self
+                .shared_thread
+                .as_ref()
+                .map_or(0, SharedPool::free_seats),
+        }
     }
 
     /// Route one claimed row (Python `_dispatch_one`) and submit it to the

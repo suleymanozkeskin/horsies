@@ -13,7 +13,7 @@ from horsies import Horsies, AppConfig, PostgresConfig, QueueMode
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
 app = Horsies(config)
 ```
@@ -121,8 +121,8 @@ serialization pass.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `payload.warn_bytes` | `int \| None` | 1 MiB | Warn when a serialized payload exceeds this size; rate-limited to once per task name and payload kind per process. `None` disables |
-| `payload.reject_bytes` | `int \| None` | `None` | Reject an enqueue whose serialized kwargs exceed this size before anything is written. A schedule over this size fails scheduler start and `horsies check`. Results are never rejected — completed work is never destroyed over size. `None` (default) disables |
+| `payload.warn_bytes` | `int \| None` | 1 MiB | Warn when a serialized payload exceeds this size in bytes of its UTF-8 text (a non-ASCII character counts 2 to 4 bytes); rate-limited to once per task name and payload kind per process. `None` disables |
+| `payload.reject_bytes` | `int \| None` | `None` | Reject an enqueue whose serialized kwargs exceed this size in bytes of their UTF-8 text before anything is written. A schedule over this size fails scheduler start and `horsies check`. Results are never rejected — completed work is never destroyed over size. `None` (default) disables |
 
 Coverage by boundary:
 
@@ -227,7 +227,7 @@ See [Scheduler Overview](../../scheduling/scheduler-overview) for details.
 - CUSTOM mode requires non-empty `custom_queues`
 - DEFAULT mode must not have `custom_queues`
 - Queue names must be unique
-- Each queue name must be non-empty, must have no leading or trailing whitespace, and must be at most 100 characters (`ConfigurationError` `HRS-200`)
+- Each queue name must be non-empty, must have no leading or trailing whitespace, and must be at most 52 bytes of UTF-8 text (`ConfigurationError` `HRS-200`). A queue's NOTIFY channel is `task_queue_<name>`, and PostgreSQL refuses a channel name over 63 bytes
 - `cluster_wide_cap` must be positive if set
 - `prefetch_buffer` must be non-negative
 - `claim_lease_ms` is required when `prefetch_buffer > 0`
@@ -324,7 +324,7 @@ Output:
 AppConfig:
   queue_mode: DEFAULT
   broker:
-    database_url: postgresql+psycopg://user:***@localhost/db
+    database_url: postgresql://user:***@localhost/db
     pool_size: 5
     max_overflow: 10
   recovery:

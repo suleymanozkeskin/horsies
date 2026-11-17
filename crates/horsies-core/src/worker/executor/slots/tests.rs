@@ -12,16 +12,17 @@ use super::outcome::{
     worker_failure_write, WriteStage,
 };
 use super::pool::Answer;
+use super::scripted::{drop_bytes, exit_at_stop, ScriptCount};
 use super::*;
 use crate::broker::attempt_writes::{AttemptFailureKind, RetryPlacement, RetryRequest};
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
-    encode_child_frame, encode_parent_frame, CancelGraceMs, ChildFrame, ChildKind, ChildLogLevel,
-    ChildPool, ChildProgram, DatabaseUrl, InitFrame, IsolatedChild, IsolatedWork, NoLeftWork,
-    ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ResultEnvelopeText, ResultFrame,
-    RssReading, RunEnd, RunFrame, SharedWork, StoredOptionsRefusal, TaskInputText, TaskSendPool,
-    TaskTimeoutMs,
+    encode_child_frame, encode_parent_frame, CancelGraceMs, ChildConnection, ChildFrame, ChildKind,
+    ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, InitFrame, IsolatedChild, IsolatedWork,
+    NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ResultEnvelopeText,
+    ResultFrame, RssReading, RunEnd, RunFrame, SharedWork, StoredOptionsRefusal, TaskInputText,
+    TaskSendPool, TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::{ChildCommand, Spawner, CHILD_KILL_WAIT};
 use crate::worker::retry::{read_stored_options, StoredOptions};
@@ -48,6 +49,9 @@ fn task(execution: ExecutionClass, stored: &str) -> ClaimedTask {
         options: options(stored),
     }
 }
+
+mod deadline_tests;
+mod settle_tests;
 
 const RETRY_ON_TIMEOUT: &str = r#"{"timeout_ms": 1000, "retry_policy": {"max_retries": 2,
     "intervals": [5, 5], "backoff_strategy": "fixed", "jitter": false,
@@ -589,6 +593,7 @@ fn init_frame() -> InitFrame {
         program: ChildProgram::Rust,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+        connection: ChildConnection::default(),
         process_name: "horsies-test-child".to_owned(),
         child_kind: ChildKind::Isolated(IsolatedChild {
             pool: ChildPool {
@@ -611,7 +616,6 @@ fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
         task_id: claimed.task_id,
         task_name: claimed.task_name.clone(),
         worker_id: "worker-1".to_owned(),
-        task_kind: claimed.kind,
         claimed_at: claimed.claimed_at,
         work: IsolatedWork::Run,
         input: TaskInputText::new("{}".to_owned()),
@@ -633,10 +637,10 @@ fn scripted_child(claimed: &ClaimedTask, after_run: &str) -> ChildCommand {
     .unwrap()
     .to_bytes();
     let script = format!(
-        r#"head -c {init} <&"$0" >/dev/null; printf '{ready}' >&"$0"; head -c {run} <&"$0" >/dev/null; {after_run}"#,
-        init = init.len(),
+        r#"{init}printf '{ready}' >&"$0"; {run}{after_run}"#,
+        init = drop_bytes(ScriptCount::Known(init.len())),
         ready = printf_bytes(&ready),
-        run = run_frame_bytes(claimed).len(),
+        run = drop_bytes(ScriptCount::Known(run_frame_bytes(claimed).len())),
     );
     ChildCommand {
         program: "/bin/sh".into(),
@@ -704,8 +708,9 @@ async fn an_isolated_slot_reports_the_result_of_its_child() {
     .unwrap()
     .to_bytes();
     let after_run = format!(
-        r#"printf '{}' >&"$0"; head -c 27 <&"$0" >/dev/null; exit 0"#,
-        printf_bytes(&result)
+        r#"printf '{}' >&"$0"; {}"#,
+        printf_bytes(&result),
+        exit_at_stop(),
     );
     assert_eq!(
         run_through_pool(&after_run, IsolatedDeadline::NoDeadline).await,
@@ -735,4 +740,55 @@ async fn a_child_that_dies_with_a_task_takes_the_crash_path() {
         }
         other => panic!("expected the crash path, got {other:?}"),
     }
+}
+
+/// The free slots of an isolated pool, for the soft-cap start check (Python
+/// `test_queue_cap_hold.py::TestFreeChildren`): a ready child that waits for
+/// a task is one free slot; a submitted task takes it at once, before the
+/// slot takes the task from the queue; a stopping pool has none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_child_is_a_free_slot_until_a_task_takes_it() {
+    let claimed = task(ExecutionClass::Isolated, "{}");
+    let spawner = Spawner::start().unwrap();
+    let board = std::sync::Arc::new(PoolBoard::new(ChildLayout {
+        isolated: 1,
+        shared_async: 0,
+        shared_thread: 0,
+    }));
+    let live = LiveDispatches::default();
+    let pool = IsolatedPool::start(
+        pool_config(scripted_child(&claimed, "exec sleep 60")),
+        std::sync::Arc::clone(&board),
+        spawner.handle(),
+        live.clone(),
+    );
+    super::scripted::until(
+        "the child waits for a task",
+        Duration::from_secs(30),
+        || pool.free_slots() == 1,
+    )
+    .await;
+
+    let submitted = pool.submit(
+        &claimed,
+        TaskInputText::new("{}".to_owned()),
+        IsolatedWork::Run,
+        IsolatedDeadline::NoDeadline,
+    );
+    assert!(matches!(submitted, Submitted::Queued(_)));
+    assert_eq!(
+        pool.free_slots(),
+        0,
+        "the submitted task holds the idle slot"
+    );
+    super::scripted::until("the child holds the task", Duration::from_secs(30), || {
+        live.held_task_ids() == vec![claimed.task_id]
+    })
+    .await;
+    assert_eq!(pool.free_slots(), 0, "the busy child is no free slot");
+
+    board.begin_stop();
+    assert_eq!(pool.free_slots(), 0, "a stopping pool has no free slot");
+    let _ = pool.stop(Duration::from_secs(1)).await;
+    let _ = spawner.stop(Duration::from_secs(10));
 }

@@ -24,6 +24,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Final, assert_never
+from uuid import UUID
 
 import psycopg
 import pytest
@@ -75,16 +76,16 @@ class _Send:
 @dataclass(frozen=True, slots=True)
 class _Seed:
     sends: tuple[_Send, ...]
-    names_by_id: Mapping[str, str]
+    names_by_id: Mapping[UUID, str]
     """The case name that first used each task id."""
-    repeats_of_finished: tuple[str, ...]
+    repeats_of_finished: tuple[UUID, ...]
     """The ids of the finished tasks that a ``REPEAT`` send targets."""
 
 
 def _send(
     case: str,
     task_name: str,
-    task_id: str,
+    task_id: UUID,
     sent_at: datetime,
     kind: SendKind,
     *,
@@ -125,7 +126,7 @@ def _database_now(connection: Connection) -> datetime:
             raise AssertionError(f'now() returned {other!r}')
 
 
-def _cancel(connection: Connection, task_id: str) -> None:
+def _cancel(connection: Connection, task_id: UUID) -> None:
     match connection.execute(
         'SELECT outcome FROM horsies_cancel_task(%s::uuid, FALSE)', (task_id,)
     ).fetchall():
@@ -193,7 +194,7 @@ def _seed(connection: Connection) -> _Seed:
         TaskSeed(task_name='enqueue.workflow', status=SeedStatus.PENDING),
         WorkflowLink(workflow_status='RUNNING', node_status='ENQUEUED'),
     )
-    workflow_id = str(workflow.task_id)
+    workflow_id = workflow.task_id
 
     live, keyed = ids['enqueue.live'], ids['enqueue.keyed']
     sends = (
@@ -236,7 +237,7 @@ def _seed(connection: Connection) -> _Seed:
 _LIVE_ROWS_SQL: Final = 'SELECT count(*) FROM horsies_tasks WHERE id = %s::uuid'
 
 
-def _live_rows(connection: Connection, task_id: str) -> int:
+def _live_rows(connection: Connection, task_id: UUID) -> int:
     match connection.execute(_LIVE_ROWS_SQL, (task_id,)).fetchone():
         case (int() as count,):
             return count
@@ -274,7 +275,7 @@ def _reference_sends(database: DualRunDatabase, seed: _Seed) -> dict[str, str]:
         return report
 
 
-def _candidate_label(result: Result[str, BrokerEnqueueError], seed: _Seed) -> str:
+def _candidate_label(result: Result[UUID, BrokerEnqueueError], seed: _Seed) -> str:
     match result:
         case Ok(task_id):
             return f'ok {seed.names_by_id[task_id]}'

@@ -1,28 +1,32 @@
 """Authoritative transition matrix for the sixteen terminal writers.
 
-T01-T16 are every statement in the runtime package that can move a
-`horsies_tasks` row to a terminal status. This module declares what each one
-does; tests execute the declaration rather than reading it.
+T01-T16 are the sixteen terminal writer contracts of the runtime. Each one is
+implemented by a baseline SQL function that moves the `horsies_tasks` row to
+history (`tests/unit/test_lifecycle_matrix.py` names the function of each
+row). This module declares what each one does; tests execute the declaration
+rather than reading it. `module` and `statement` name the original writer of
+the contract; the characterization tests use them as test ids.
 
 Two test layers consume it:
 
-- static checks assert the declared guards and shape against the statement
-  text, so a writer whose SQL changes without its row changing fails here;
+- static checks assert the declared guards and shape against the body of the
+  baseline function, so a writer whose SQL changes without its row changing
+  fails here;
 - characterization tests parametrize over the rows, so every writer is pinned
-  in both directions before the terminalization consolidation refactors it.
+  in both directions.
 
-Scope of a row: what the *statement* does. Behavior contributed by its caller —
-attempt insertion issued separately in the same transaction, queue-capacity
-wakes, workflow phase 2 — is named where it exists but is characterized at the
-operation level, not asserted from the statement text.
+Scope of a row: what the *function* does. Behavior contributed by its caller —
+attempt insertion issued separately in the same transaction, workflow
+phase 2 — is named where it exists but is characterized at the operation
+level, not asserted from the function text.
 
-Notification: `task_done` and `horsies_task_status` are emitted by triggers on
-any terminal status change (`schemas/triggers.py`), so every writer gets both
-without asking. `EmitsNotify.FUSED_CAPACITY_WAKE` marks the one statement that
-additionally emits a NOTIFY itself.
+Notification: a move deletes the live row, so no status trigger fires; the
+move sends `task_done` and `horsies_task_status` for every row it moves, and
+every writer gets both without asking. `EmitsNotify.FUSED_CAPACITY_WAKE`
+marks the one function that also sends the capacity wake its caller passes.
 
-Source of truth for the guards is the statement text; this matrix was derived
-from it and the static checks keep the two aligned.
+Source of truth for the guards is the function text; the static checks keep
+this matrix and the baseline functions aligned.
 """
 
 from __future__ import annotations
@@ -91,13 +95,19 @@ class Shape(Enum):
     SINGLE = 'SINGLE'
     SET_WISE = 'SET_WISE'
     SET_WISE_SKIP_LOCKED = 'SET_WISE_SKIP_LOCKED'
-    FUSED_CTE = 'FUSED_CTE'
+    """Set-wise, and the discovery skips rows another transaction holds."""
+
+    FUSED = 'FUSED'
+    """One function locks the row, upserts its attempt, moves it to history
+    and sends the capacity wake."""
 
 
 class EmitsNotify(Enum):
-    """NOTIFY emitted by the statement itself, beyond the triggers."""
+    """NOTIFY sent by the function beyond the status events of the move."""
 
-    TRIGGERS_ONLY = 'TRIGGERS_ONLY'
+    MOVE_EVENTS_ONLY = 'MOVE_EVENTS_ONLY'
+    """Only `task_done` and `horsies_task_status`, for each moved row."""
+
     FUSED_CAPACITY_WAKE = 'FUSED_CAPACITY_WAKE'
 
 
@@ -145,7 +155,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=False,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='CancelFromMonitoring',
@@ -161,7 +171,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=False,
         shape=Shape.SET_WISE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write='horsies_workflow_tasks -> READY',
         operation='AbandonForWorkflowPause',
@@ -177,7 +187,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=False,
         shape=Shape.SET_WISE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write='horsies_workflow_tasks -> SKIPPED',
         operation='CancelForWorkflow',
@@ -193,7 +203,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.CALLER_INSERTS,
         writes_result=True,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='FailRunning',
@@ -209,7 +219,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.CALLER_INSERTS,
         writes_result=True,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='FailRunning',
@@ -225,7 +235,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.CALLER_INSERTS,
         writes_result=True,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='CompleteRunning',
@@ -240,7 +250,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         guards=(),
         attempt=Attempt.FUSED_UPSERT,
         writes_result=True,
-        shape=Shape.FUSED_CTE,
+        shape=Shape.FUSED,
         emits_notify=EmitsNotify.FUSED_CAPACITY_WAKE,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
@@ -257,7 +267,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=False,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='CancelOrphan',
@@ -272,8 +282,8 @@ MATRIX: tuple[TerminalWriter, ...] = (
         guards=(Guard.WORKFLOW_STATUS, Guard.WORKFLOW_LINK_STATE),
         attempt=Attempt.NONE,
         writes_result=False,
-        shape=Shape.SET_WISE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        shape=Shape.SET_WISE_SKIP_LOCKED,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write='horsies_workflow_tasks -> READY',
         operation='AbandonForWorkflowPause',
@@ -289,7 +299,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=False,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.SYNC_PSYCOPG,
         coupled_write='horsies_workflow_tasks -> READY',
         operation='AbandonForWorkflowPause',
@@ -305,7 +315,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=False,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.SYNC_PSYCOPG,
         coupled_write='horsies_workflow_tasks -> SKIPPED',
         operation='CancelForWorkflow',
@@ -321,7 +331,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=True,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.SYNC_PSYCOPG,
         coupled_write=None,
         operation='ExpireClaimed',
@@ -337,7 +347,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.CALLER_INSERTS,
         writes_result=True,
         shape=Shape.SINGLE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='FailStaleRunning',
@@ -353,7 +363,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=True,
         shape=Shape.SET_WISE_SKIP_LOCKED,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='ExpirePendingBatch',
@@ -369,7 +379,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         attempt=Attempt.NONE,
         writes_result=False,
         shape=Shape.SET_WISE_SKIP_LOCKED,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write=None,
         operation='CancelOrphanBatch',
@@ -384,8 +394,8 @@ MATRIX: tuple[TerminalWriter, ...] = (
         guards=(Guard.WORKFLOW_STATUS, Guard.WORKFLOW_LINK_STATE),
         attempt=Attempt.NONE,
         writes_result=False,
-        shape=Shape.SET_WISE,
-        emits_notify=EmitsNotify.TRIGGERS_ONLY,
+        shape=Shape.SET_WISE_SKIP_LOCKED,
+        emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,
         driver=Driver.ASYNC_SQLALCHEMY,
         coupled_write='horsies_workflow_tasks -> SKIPPED',
         operation='CancelForWorkflow',

@@ -9,19 +9,15 @@
 -- Fixtures
 ------------------------------------------------------------------------------------------------------------------------
 
--- The published provenance reader is rendered at run time. This stand-in reads the history parent.
-CREATE OR REPLACE FUNCTION horsies_task_provenance_staged(p_task_id uuid, p_include_live boolean DEFAULT TRUE)
-RETURNS horsies_task_provenance LANGUAGE sql STABLE AS $$
-    SELECT COALESCE(
-        (
-            SELECT ROW(TRUE, 'HISTORY', h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text)
-                ::horsies_task_provenance
-            FROM horsies_task_history h
-            WHERE h.task_id = p_task_id
-            LIMIT 1
-        ),
-        ROW(FALSE, NULL, NULL, NULL, NULL, NULL)::horsies_task_provenance
-    )
+-- The published provenance reader is rendered by horsies_publish_history_readers. This stand-in reads the
+-- history parent: one row when history holds the id, no row otherwise.
+CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
+RETURNS TABLE (task_id uuid, status text, terminal_at timestamptz, terminalization_kind text, is_workflow_task boolean)
+LANGUAGE sql STABLE AS $$
+    SELECT h.task_id, h.status::text, h.terminal_at, h.terminalization_kind::text, h.is_workflow_task
+    FROM horsies_task_history h
+    WHERE h.task_id = p_task_id
+    LIMIT 1
 $$;
 
 -- One heartbeat leaf around NOW(), with the probe index of the run-time leaves.
@@ -96,12 +92,12 @@ $$;
 CREATE FUNCTION lc_node(
     p_id uuid, p_workflow uuid, p_index integer, p_status text, p_task uuid, p_dependencies integer[] DEFAULT '{}'
 ) RETURNS void LANGUAGE sql AS $$
-    INSERT INTO horsies_workflow_tasks (
+    INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
         id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
         workflow_ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
         good_until, retention_class_key, status, task_id, is_subworkflow, sub_workflow_id, sub_workflow_name,
         sub_definition_key, sub_workflow_summary, result, error, created_at, started_at, completed_at
-    ) VALUES (
+    ) VALUES ('NONE',
         p_id, p_workflow, p_index, 'node_' || p_index, 'lc.task', '{"x":1}', 'q_lc', 100, p_dependencies, NULL,
         NULL, FALSE, 'all', NULL, NULL, 1, 'ISOLATED',
         NULL, 'forever', p_status, p_task, FALSE, NULL, NULL,
@@ -373,7 +369,8 @@ SELECT lc_expect(
 SELECT lc_task('00000000-0000-7000-8000-000000000b21', 'PENDING');
 UPDATE horsies_tasks SET command_fingerprint = sha256('b21'::bytea) WHERE id = '00000000-0000-7000-8000-000000000b21';
 SELECT horsies_move_task_to_history(
-    '00000000-0000-7000-8000-000000000b21'::uuid, 'CANCELLED', 'CANCEL_ADMIN', now(), NULL, 'TASK_CANCELLED', 'r');
+    (SELECT t FROM horsies_tasks AS t WHERE t.id = '00000000-0000-7000-8000-000000000b21' FOR UPDATE),
+    'CANCELLED', 'CANCEL_ADMIN', now(), NULL, 'TASK_CANCELLED', 'r');
 SELECT lc_expect(
     'enqueue: a repeat of a finished task with the same command',
     lc_send('00000000-0000-7000-8000-000000000b21', 'b21', now(), 'REPEAT'), 'SAME_COMMAND'
@@ -1444,53 +1441,51 @@ SELECT lc_expect(
     'APPLIED'
 );
 
--- The miss classifier takes the caller's fence as a closed kind.
+-- The miss classifier (0008) takes the caller's kind and its fence as a closed kind.
 SELECT lc_task('00000000-0000-7000-8000-000000007002', 'CLAIMED');
 SELECT lc_expect(
     'miss (#697): OWNER held by the same worker at another generation is a conflict, not a lost claim',
     (SELECT outcome FROM horsies_terminalization_miss(
-        '00000000-0000-7000-8000-000000007002', ARRAY['EXPIRE_CLAIMED', 'EXPIRE_PENDING']::text[], 'OWNER', 'w1',
-        NULL)),
+        '00000000-0000-7000-8000-000000007002', 'EXPIRE_CLAIMED', 'OWNER', 'w1', NULL)),
     'SOURCE_STATE_CONFLICT'
 );
 SELECT lc_expect(
     'miss (#697): OWNER of another worker is a lost claim',
     (SELECT outcome FROM horsies_terminalization_miss(
-        '00000000-0000-7000-8000-000000007002', ARRAY['EXPIRE_CLAIMED', 'EXPIRE_PENDING']::text[], 'OWNER', 'w2',
-        NULL)),
+        '00000000-0000-7000-8000-000000007002', 'EXPIRE_CLAIMED', 'OWNER', 'w2', NULL)),
     'LOST_CLAIM'
 );
 SELECT lc_expect(
     'miss (#697): OWNER_AND_GENERATION of another generation is a lost claim',
     (SELECT outcome FROM horsies_terminalization_miss(
-        '00000000-0000-7000-8000-000000007002', ARRAY['FAIL_RUNNING']::text[], 'OWNER_AND_GENERATION', 'w1',
+        '00000000-0000-7000-8000-000000007002', 'FAIL_RUNNING', 'OWNER_AND_GENERATION', 'w1',
         now() - interval '9 seconds')),
     'LOST_CLAIM'
 );
 SELECT lc_expect(
     'miss (#697): OWNER_AND_GENERATION that holds is a conflict',
     (SELECT outcome FROM horsies_terminalization_miss(
-        '00000000-0000-7000-8000-000000007002', ARRAY['FAIL_RUNNING']::text[], 'OWNER_AND_GENERATION', 'w1',
+        '00000000-0000-7000-8000-000000007002', 'FAIL_RUNNING', 'OWNER_AND_GENERATION', 'w1',
         now() - interval '1 second')),
     'SOURCE_STATE_CONFLICT'
 );
 SELECT lc_expect(
     'miss (#697): NONE on a live row is a conflict',
     (SELECT outcome FROM horsies_terminalization_miss(
-        '00000000-0000-7000-8000-000000007002', ARRAY['CANCEL_ADMIN']::text[], 'NONE', NULL, NULL)),
+        '00000000-0000-7000-8000-000000007002', 'CANCEL_ADMIN', 'NONE', NULL, NULL)),
     'SOURCE_STATE_CONFLICT'
 );
 SELECT lc_expect_sqlstate('miss (#697): an unknown fence kind', $q$SELECT * FROM horsies_terminalization_miss(
-    gen_random_uuid(), ARRAY['FAIL_RUNNING']::text[], 'WORKER', 'w1', NULL)$q$, '22023');
+    gen_random_uuid(), 'FAIL_RUNNING', 'WORKER', 'w1', NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('miss (#697): a NULL fence kind', $q$SELECT * FROM horsies_terminalization_miss(
-    gen_random_uuid(), ARRAY['FAIL_RUNNING']::text[], NULL, NULL, NULL)$q$, '22023');
+    gen_random_uuid(), 'FAIL_RUNNING', NULL, NULL, NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('miss (#697): NONE with a worker', $q$SELECT * FROM horsies_terminalization_miss(
-    gen_random_uuid(), ARRAY['FAIL_RUNNING']::text[], 'NONE', 'w1', NULL)$q$, '22023');
+    gen_random_uuid(), 'FAIL_RUNNING', 'NONE', 'w1', NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('miss (#697): OWNER with a generation', $q$SELECT * FROM horsies_terminalization_miss(
-    gen_random_uuid(), ARRAY['FAIL_RUNNING']::text[], 'OWNER', 'w1', now())$q$, '22023');
+    gen_random_uuid(), 'FAIL_RUNNING', 'OWNER', 'w1', now())$q$, '22023');
 SELECT lc_expect_sqlstate('miss (#697): OWNER_AND_GENERATION without a generation', $q$
     SELECT * FROM horsies_terminalization_miss(
-        gen_random_uuid(), ARRAY['FAIL_RUNNING']::text[], 'OWNER_AND_GENERATION', 'w1', NULL)$q$, '22023');
+        gen_random_uuid(), 'FAIL_RUNNING', 'OWNER_AND_GENERATION', 'w1', NULL)$q$, '22023');
 
 -- The owner-only expiry before start: a miss on a claim the worker still holds is a conflict.
 SELECT lc_task('00000000-0000-7000-8000-000000007003', 'CLAIMED');

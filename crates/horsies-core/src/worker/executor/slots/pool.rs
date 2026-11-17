@@ -125,6 +125,16 @@ pub(super) struct QueuedRun {
     pub(super) answer: Answer,
 }
 
+/// The tasks that wait for a slot, and the slot tasks that wait for a task,
+/// under one lock: a slot that takes a task leaves the idle count in the
+/// same step, so the free slots read under the lock are exact.
+struct SlotQueue {
+    runs: VecDeque<QueuedRun>,
+    /// The slot tasks that wait in `isolated::next_run`: their child is
+    /// ready and holds no task.
+    idle: usize,
+}
+
 /// The tasks whose children the drain deadline killed, in the order of the
 /// kills (Python `StopReport.killed_task_ids`). The slot tasks of one pool
 /// note them; the stop of the pool takes them. Each slot notes at most the
@@ -153,7 +163,7 @@ pub(super) struct PoolShared {
     pub(super) spawner: SpawnerHandle,
     pub(super) live: LiveDispatches,
     pub(super) board: Arc<PoolBoard>,
-    queue: Mutex<VecDeque<QueuedRun>>,
+    queue: Mutex<SlotQueue>,
     pub(super) queued: Notify,
     pub(super) drain_kills: DrainKills,
 }
@@ -165,14 +175,75 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl PoolShared {
-    pub(super) fn pop(&self) -> Option<QueuedRun> {
-        lock(&self.queue).pop_front()
+    /// A slot task whose child is ready and holds no task starts to wait
+    /// for one: it counts as an idle slot until it takes a task or the guard
+    /// drops.
+    pub(super) fn idle_slot(&self) -> IdleSlot<'_> {
+        lock(&self.queue).idle += 1;
+        IdleSlot {
+            shared: self,
+            counted: IdleCount::Counted,
+        }
+    }
+
+    /// The slots that take a task at once: the idle slots less the tasks
+    /// that wait for a slot. 0 once the pools stop or failed.
+    fn free_slots(&self) -> u32 {
+        let queue = lock(&self.queue);
+        match self.board.not_serving() {
+            true => 0,
+            false => {
+                let free = queue.idle.saturating_sub(queue.runs.len());
+                u32::try_from(free).unwrap_or(u32::MAX)
+            }
+        }
     }
 
     fn answer_waiting(&self, cause: NotRunCause) {
-        let waiting: Vec<QueuedRun> = lock(&self.queue).drain(..).collect();
+        let waiting: Vec<QueuedRun> = lock(&self.queue).runs.drain(..).collect();
         for run in waiting {
             run.answer.send(AttemptEnd::NotDispatched(cause));
+        }
+    }
+}
+
+/// Whether an idle slot is still in the idle count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleCount {
+    Counted,
+    Left,
+}
+
+/// One slot task in the idle count of its pool (Python: a slot in `Idle`).
+/// It leaves the count when it takes a task, in the step that takes it, or
+/// when it drops.
+pub(super) struct IdleSlot<'a> {
+    shared: &'a PoolShared,
+    counted: IdleCount,
+}
+
+impl IdleSlot<'_> {
+    /// Take the next waiting task. A slot that takes one leaves the idle
+    /// count under the same lock.
+    pub(super) fn take(&mut self) -> Option<QueuedRun> {
+        let mut queue = lock(&self.shared.queue);
+        let run = queue.runs.pop_front()?;
+        match self.counted {
+            IdleCount::Counted => {
+                queue.idle -= 1;
+                self.counted = IdleCount::Left;
+            }
+            // A slot that took a task returns it from `next_run` at once.
+            IdleCount::Left => panic!("an isolated slot took a second task while it waited"),
+        }
+        Some(run)
+    }
+}
+
+impl Drop for IdleSlot<'_> {
+    fn drop(&mut self) {
+        if self.counted == IdleCount::Counted {
+            lock(&self.shared.queue).idle -= 1;
         }
     }
 }
@@ -291,7 +362,10 @@ impl IsolatedPool {
             spawner,
             live,
             board,
-            queue: Mutex::new(VecDeque::new()),
+            queue: Mutex::new(SlotQueue {
+                runs: VecDeque::new(),
+                idle: 0,
+            }),
             queued: Notify::new(),
             drain_kills: DrainKills::default(),
         });
@@ -320,15 +394,14 @@ impl IsolatedPool {
             if let Some(cause) = not_run_cause(self.shared.board.health()) {
                 return Submitted::NotDispatched(cause);
             }
-            if queue.len() >= self.shared.config.pending_limit.get() {
+            if queue.runs.len() >= self.shared.config.pending_limit.get() {
                 return Submitted::NotDispatched(NotRunCause::QueueFull);
             }
-            queue.push_back(QueuedRun {
+            queue.runs.push_back(QueuedRun {
                 frame: RunFrame {
                     task_id: task.task_id,
                     task_name: task.task_name.clone(),
                     worker_id: self.shared.config.worker_id.clone(),
-                    task_kind: task.kind,
                     claimed_at: task.claimed_at,
                     work,
                     input,
@@ -339,6 +412,13 @@ impl IsolatedPool {
         }
         self.shared.queued.notify_one();
         Submitted::Queued(receiver)
+    }
+
+    /// The isolated slots that take a task at once: the slots whose child
+    /// is ready and waits for a task, less the tasks that wait for a slot.
+    /// 0 once the pools stop or failed (Python `SlotPool.free_slots`).
+    pub fn free_slots(&self) -> u32 {
+        self.shared.free_slots()
     }
 
     /// The service state of each isolated slot, for the claim budget.

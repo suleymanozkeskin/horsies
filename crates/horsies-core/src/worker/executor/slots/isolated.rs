@@ -285,16 +285,18 @@ fn recycle_reason(shared: &PoolShared, tasks_done: u64, rss: RssReading) -> Opti
     }
 }
 
-/// Wait for work. `None`: this child must not take any.
+/// Wait for work. `None`: this child must not take any. While it waits,
+/// the slot counts as idle in the free slots of its pool.
 async fn next_run(shared: &PoolShared, channel: &ChildChannel) -> Option<QueuedRun> {
     let mut exit = channel.exit_watch();
+    let mut idle = shared.idle_slot();
     loop {
         let cannot_serve =
             shared.board.not_serving() || channel.has_exited() || channel.channel_closed();
         if cannot_serve {
             return None;
         }
-        if let Some(run) = shared.pop() {
+        if let Some(run) = idle.take() {
             return Some(run);
         }
         tokio::select! {

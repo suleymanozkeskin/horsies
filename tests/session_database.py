@@ -54,7 +54,7 @@ def base_database_url() -> str:
         if value:
             return value
     password = os.environ.get('DB_PASSWORD', '')
-    return f'postgresql+psycopg://postgres:{password}@localhost:5432/horsies'
+    return f'postgresql://postgres:{password}@localhost:5432/horsies'
 
 
 def database_name_prefix() -> str:

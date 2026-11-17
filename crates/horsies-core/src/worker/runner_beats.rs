@@ -834,7 +834,12 @@ fn log_kill(to_kill: &ChildToKill, outcome: KillOutcome) {
             tasks = ?to_kill.task_ids,
             "killed a child that held tasks",
         ),
-        KillOutcome::AlreadyReaped => {}
+        KillOutcome::SentToReapedSession => tracing::error!(
+            pid,
+            tasks = ?to_kill.task_ids,
+            "killed the processes left in the session of a reaped child that held tasks",
+        ),
+        KillOutcome::SessionGone | KillOutcome::PidReused => {}
         KillOutcome::NotPermitted
         | KillOutcome::Failed { .. }
         | KillOutcome::QueueFull
@@ -893,6 +898,9 @@ fn watch_and_log(late_after: Duration, coverage: &SharedCoverage, stop: &Receive
         }
     }
 }
+
+#[cfg(test)]
+mod fail_closed_tests;
 
 #[cfg(test)]
 mod tests {
