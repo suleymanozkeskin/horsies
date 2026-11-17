@@ -26,8 +26,8 @@ use crate::core::{
 };
 use crate::db::{BoundStatement, CheckoutClass, ParameterBinder, ParameterType, TypedStatement};
 use crate::workflow_engine::args_merge::{
-    child_build_input, merge_args_from_sync, ArgsFromMerge, ChildBuildInput, DepResult,
-    MergedNodeKind,
+    child_build_input, child_static_input, merge_args_from_sync, read_args_from, ArgsFromMerge,
+    ArgsFromRead, ChildBuildInput, ChildStaticInput, DepResult, MergedNodeKind,
 };
 use crate::workflow_engine::child_spec::{
     ChildSpecRequest, ChildSpecSource, ClientChildSpec, ClientSpec, NodeFailure, QueueClasses,
@@ -463,13 +463,13 @@ pub(crate) async fn build_child<'a>(
 ///
 /// No registration under the key, an `args_from` key that names a member of
 /// the static input, an input member that the builder's decode refuses
-/// ([`params_refused_error`]), and a builder that fails are
-/// [`ChildBuildOutcome::NodeFails`].
+/// ([`params_refused_error`]), a builder that fails, and the refusals of
+/// [`merged_child_input`] are [`ChildBuildOutcome::NodeFails`].
 ///
-/// Errors: [`WorkflowError::Serialization`] for an `args_from` text that does
-/// not parse or a value that does not encode; [`WorkflowError::Validation`]
-/// for a stored input that the `args_from` merge refuses. Does no I/O; it
-/// runs the registered builder.
+/// Errors: [`WorkflowError::Serialization`] for a value that does not
+/// encode; [`WorkflowError::Validation`] for a stored input with a number
+/// that the `args_from` merge would round. Does no I/O; it runs the
+/// registered builder.
 fn registry_child<'a>(
     request: &ChildSpecRequest,
     registry: &WorkflowSpecRegistry,
@@ -524,51 +524,82 @@ fn registry_child<'a>(
 
 /// The input of the builder of a child: the node input with its
 /// `args_from` members merged after its static members, each replaced by
-/// its `inner` envelope ([`child_build_input`]). With no `args_from` the
-/// input is the stored input. A client's child spec source decodes it with
+/// its `inner` envelope ([`child_build_input`]). With no `args_from` members
+/// the input is the stored input, or `{}` for a stored input with no static
+/// members ([`child_static_input`]: an empty text, or a value that is not an
+/// object, as Python reads it). A client's child spec source decodes it with
 /// its builder's params type.
 ///
-/// The node fails ([`NodeInput::NodeFails`]):
-/// - an `args_from` text that does not parse: `WORKER_SERIALIZATION_ERROR`,
-///   `Corrupt args_from JSON for subworkflow task <index>`, with the
-///   workflow id and the node in `data` (Python `_args_from_map`,
-///   `core/workflows/child_build.py`);
-/// - an `args_from` key that names a static member (Python
-///   `core/workflows/engine.py:1111-1123`);
+/// The node fails ([`NodeInput::NodeFails`]), in Python's order
+/// (`core/workflows/child_build.py`, `_input_kwargs` and `_args_from_map`),
+/// with `WORKER_SERIALIZATION_ERROR` and the workflow id and the node in
+/// `data` unless named otherwise:
+/// - a stored input that the strict read refuses, or `null`:
+///   `Corrupt kwargs JSON for subworkflow task <index>`;
+/// - an `args_from` text that the strict read refuses, or `null`:
+///   `Corrupt args_from JSON for subworkflow task <index>`;
+/// - an `args_from` value that is not a JSON integer
+///   ([`read_args_from`]): `args_from has non-int values for subworkflow
+///   task <index>`;
+/// - an `args_from` key that names a static member: `WORKFLOW_ENQUEUE_FAILED`
+///   (Python `core/workflows/engine.py:1111-1123`);
 /// - a merged input from which the builder input cannot be made
 ///   ([`ChildSpecError::of_stored_input`], `WORKFLOW_ENQUEUE_FAILED`).
 ///
+/// Python decodes the static members against the builder before it reads
+/// `args_from`; here the builder decodes after this merge, so a node whose
+/// static members and `args_from` are both refused fails for its
+/// `args_from`.
+///
 /// Errors: the errors of the merge: [`WorkflowError::Validation`] for a
-/// stored input that is not an object while `args_from` has keys;
+/// stored input with a number that the merge would round;
 /// [`WorkflowError::Serialization`] for a value that does not encode.
 /// Pure.
 pub fn merged_child_input(request: &ChildSpecRequest) -> Result<NodeInput, WorkflowError> {
-    let args_from = match request
-        .args_from
-        .as_deref()
-        .map(serde_json::from_str::<serde_json::Value>)
-        .transpose()
-    {
-        Ok(args_from) => args_from,
-        Err(error) => {
+    let static_input = match child_static_input(&request.node_input) {
+        Ok(ChildStaticInput::Members(text)) => text,
+        Ok(ChildStaticInput::NoMembers) => NO_STATIC_MEMBERS,
+        Err(corrupt) => {
             tracing::warn!(
                 workflow_id = %request.parent_workflow_id,
                 task_index = request.task_index,
-                "JSON parse failed (subworkflow args_from): {error}",
+                "JSON parse failed (subworkflow kwargs): {}",
+                corrupt.cause,
             );
-            return Ok(NodeInput::NodeFails(TaskError {
-                data: Some(serde_json::json!({
-                    "workflow_id": request.parent_workflow_id.to_string(),
-                    "task_index": request.task_index,
-                })),
-                ..TaskError::builtin(
-                    OperationalErrorCode::WorkerSerializationError,
-                    format!(
-                        "Corrupt args_from JSON for subworkflow task {}",
-                        request.task_index
-                    ),
-                )
-            }));
+            return Ok(NodeInput::NodeFails(child_input_error(
+                request,
+                format!(
+                    "Corrupt kwargs JSON for subworkflow task {}",
+                    request.task_index
+                ),
+            )));
+        }
+    };
+    let args_from = match read_args_from(request.args_from.as_deref()) {
+        ArgsFromRead::NoMembers => None,
+        ArgsFromRead::Indexes(map) => Some(serde_json::Value::Object(map)),
+        ArgsFromRead::Corrupt { cause } => {
+            tracing::warn!(
+                workflow_id = %request.parent_workflow_id,
+                task_index = request.task_index,
+                "JSON parse failed (subworkflow args_from): {cause}",
+            );
+            return Ok(NodeInput::NodeFails(child_input_error(
+                request,
+                format!(
+                    "Corrupt args_from JSON for subworkflow task {}",
+                    request.task_index
+                ),
+            )));
+        }
+        ArgsFromRead::NotIndexes => {
+            return Ok(NodeInput::NodeFails(child_input_error(
+                request,
+                format!(
+                    "args_from has non-int values for subworkflow task {}",
+                    request.task_index
+                ),
+            )));
         }
     };
     let dependency_results: std::collections::HashMap<i32, DepResult> = request
@@ -588,7 +619,7 @@ pub fn merged_child_input(request: &ChildSpecRequest) -> Result<NodeInput, Workf
         })
         .collect();
     Ok(
-        match merge_args_from_sync(&request.node_input, &args_from, &dependency_results)? {
+        match merge_args_from_sync(static_input, &args_from, &dependency_results)? {
             ArgsFromMerge::Merged(input) => match child_build_input(input, args_from.as_ref()) {
                 Ok(input) => NodeInput::Input(input),
                 Err(refused) => NodeInput::NodeFails(build_failed_error(
@@ -607,6 +638,24 @@ pub fn merged_child_input(request: &ChildSpecRequest) -> Result<NodeInput, Workf
             }
         },
     )
+}
+
+/// The builder input of a stored node input with no static members (Python
+/// reads it as `{}`).
+const NO_STATIC_MEMBERS: &str = "{}";
+
+/// The error of the sub-workflow node of `request` whose stored input or
+/// `args_from` Python refuses: `WORKER_SERIALIZATION_ERROR` with `message`,
+/// and the workflow id and the node in `data` (Python `node_error`,
+/// `core/workflows/child_build.py`). Pure.
+fn child_input_error(request: &ChildSpecRequest, message: String) -> TaskError {
+    TaskError {
+        data: Some(serde_json::json!({
+            "workflow_id": request.parent_workflow_id.to_string(),
+            "task_index": request.task_index,
+        })),
+        ..TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
+    }
 }
 
 /// The input that the builder of a child takes ([`merged_child_input`]).
