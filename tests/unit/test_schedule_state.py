@@ -2,18 +2,39 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from typing import Final
+from unittest.mock import AsyncMock, MagicMock
 
+import psycopg.errors
 import pytest
+from sqlalchemy.exc import DBAPIError, OperationalError
 
-from horsies.core.models.task_pg import ScheduleStateModel
+from horsies.core.brokers.postgres import SendCommand
+from horsies.core.models.tasks import Execution
 from horsies.core.scheduler.state import (
+    DUE_SCHEDULES_SQL,
+    FIRE_SCHEDULE_SQL,
+    HEAL_MISSING_STATES_SQL,
+    START_STATES_SQL,
+    STORE_START_STATES_SQL,
+    DueSchedule,
+    DueScheduleRead,
+    FiredSlot,
+    ScheduleAdvanced,
+    ScheduleFire,
+    ScheduleFireOutcomeUnknown,
+    ScheduleFireRefused,
     ScheduleStateManager,
-    UPDATE_SCHEDULE_AFTER_RUN_SQL,
-    UPDATE_SCHEDULE_NEXT_RUN_SQL,
-    UPDATE_SCHEDULE_NEXT_RUN_WITH_HASH_SQL,
+    ScheduleStateMissing,
+    ScheduleStateMoved,
+    ScheduleStateWrite,
+    SlotOutcome,
+    StartStateRead,
+    StoredConfigHash,
 )
+from horsies.core.types.result import Err, Ok
 
 
 # =============================================================================
@@ -21,28 +42,11 @@ from horsies.core.scheduler.state import (
 # =============================================================================
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 # A 32-byte value: the length that the config_hash column holds.
 CONFIG_HASH = bytes(range(32))
 OTHER_CONFIG_HASH = bytes(range(32, 64))
 # The text form of a uuid: the type of the last_task_id column.
 TASK_ID = '0b0e7e64-6d2c-5a8f-9b1e-3c4d5e6f7a8b'
-
-
-def _make_state(name: str = 'sched-1') -> ScheduleStateModel:
-    """Build a minimal ScheduleStateModel for assertions."""
-    return ScheduleStateModel(
-        schedule_name=name,
-        last_run_at=None,
-        next_run_at=_utc_now(),
-        last_task_id=None,
-        run_count=0,
-        config_hash=CONFIG_HASH,
-        updated_at=_utc_now(),
-    )
 
 
 def _make_manager() -> tuple[ScheduleStateManager, AsyncMock]:
@@ -64,324 +68,340 @@ def _make_manager() -> tuple[ScheduleStateManager, AsyncMock]:
     return manager, mock_session
 
 
-# =============================================================================
-# get_state
-# =============================================================================
+def _rows_result(rows: list[SimpleNamespace]) -> MagicMock:
+    result = MagicMock()
+    result.all.return_value = rows
+    return result
 
 
-@pytest.mark.unit
-class TestGetState:
-    """Tests for ScheduleStateManager.get_state."""
+def _names_result(names: list[str]) -> MagicMock:
+    result = MagicMock()
+    result.scalars.return_value = iter(names)
+    return result
 
-    @pytest.mark.asyncio
-    async def test_returns_model_when_found(self) -> None:
-        """Returns ScheduleStateModel when record exists."""
-        manager, session = _make_manager()
-        expected = _make_state('my-schedule')
-        session.get = AsyncMock(return_value=expected)
 
-        result = await manager.get_state('my-schedule')
-
-        assert result is expected
-        session.get.assert_awaited_once_with(ScheduleStateModel, 'my-schedule')
-
-    @pytest.mark.asyncio
-    async def test_returns_none_when_not_found(self) -> None:
-        """Returns None when no record exists."""
-        manager, session = _make_manager()
-        session.get = AsyncMock(return_value=None)
-
-        result = await manager.get_state('nonexistent')
-
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_uses_provided_session_without_factory(self) -> None:
-        """When session is provided, no new session is opened."""
-        manager, session = _make_manager()
-        session.get = AsyncMock(return_value=None)
-
-        result = await manager.get_state('sched-1', session=session)
-
-        assert result is None
-        session.get.assert_awaited_once_with(ScheduleStateModel, 'sched-1')
-        manager.session_factory.assert_not_called()
+DATABASE_NOW = datetime(2026, 11, 16, 12, 0, 0, tzinfo=timezone.utc)
 
 
 # =============================================================================
-# get_due_states
+# read_due_schedules
 # =============================================================================
 
 
 @pytest.mark.unit
-class TestGetDueStates:
-    """Tests for ScheduleStateManager.get_due_states."""
+class TestReadDueSchedules:
+    """Tests for ScheduleStateManager.read_due_schedules."""
 
     @pytest.mark.asyncio
-    async def test_empty_schedule_names_returns_empty_list(self) -> None:
-        """Guard clause: empty schedule_names returns [] without DB call."""
+    async def test_returns_the_database_time_and_the_due_rows(self) -> None:
+        manager, session = _make_manager()
+        earlier = DATABASE_NOW - timedelta(seconds=2)
+        session.execute = AsyncMock(
+            return_value=_rows_result(
+                [
+                    SimpleNamespace(database_now=DATABASE_NOW, schedule_name='a', next_run_at=earlier),
+                    SimpleNamespace(database_now=DATABASE_NOW, schedule_name='b', next_run_at=DATABASE_NOW),
+                ],
+            ),
+        )
+
+        result = await manager.read_due_schedules(['a', 'b', 'c'])
+
+        assert result == DueScheduleRead(
+            database_now=DATABASE_NOW,
+            due=(DueSchedule('a', earlier), DueSchedule('b', DATABASE_NOW)),
+        )
+        statement, params = session.execute.await_args.args
+        assert statement is DUE_SCHEDULES_SQL
+        assert params == {'schedule_names': ['a', 'b', 'c']}
+
+    @pytest.mark.asyncio
+    async def test_nothing_due_still_returns_the_database_time(self) -> None:
+        """The one-row join answers one row with no name when nothing is due."""
+        manager, session = _make_manager()
+        session.execute = AsyncMock(
+            return_value=_rows_result(
+                [SimpleNamespace(database_now=DATABASE_NOW, schedule_name=None, next_run_at=None)],
+            ),
+        )
+
+        result = await manager.read_due_schedules(['a'])
+
+        assert result == DueScheduleRead(database_now=DATABASE_NOW, due=())
+
+    @pytest.mark.asyncio
+    async def test_a_partial_row_is_a_defect(self) -> None:
+        manager, session = _make_manager()
+        session.execute = AsyncMock(
+            return_value=_rows_result(
+                [SimpleNamespace(database_now=DATABASE_NOW, schedule_name='a', next_run_at=None)],
+            ),
+        )
+
+        with pytest.raises(AssertionError, match='partial row'):
+            await manager.read_due_schedules(['a'])
+
+    def test_the_statement_reads_the_database_clock(self) -> None:
+        """Due means next_run_at at or before statement_timestamp(); no
+        client time is a parameter."""
+        sql = str(DUE_SCHEDULES_SQL)
+        assert 's.next_run_at <= statement_timestamp()' in sql
+        assert 'statement_timestamp() AS database_now' in sql
+        assert ':schedule_names' in sql
+        assert DUE_SCHEDULES_SQL.compile().params.keys() == {'schedule_names'}
+
+
+# =============================================================================
+# read_start_states / store_start_states / heal_missing_states
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestStartStates:
+    """Tests for the start read and the start write."""
+
+    @pytest.mark.asyncio
+    async def test_start_read_returns_the_database_time_and_every_digest(self) -> None:
+        manager, session = _make_manager()
+        session.execute = AsyncMock(
+            return_value=_rows_result(
+                [
+                    SimpleNamespace(database_now=DATABASE_NOW, schedule_name='a', config_hash=CONFIG_HASH),
+                    SimpleNamespace(database_now=DATABASE_NOW, schedule_name='b', config_hash=OTHER_CONFIG_HASH),
+                ],
+            ),
+        )
+
+        result = await manager.read_start_states()
+
+        assert result == StartStateRead(
+            database_now=DATABASE_NOW,
+            rows=(StoredConfigHash('a', CONFIG_HASH), StoredConfigHash('b', OTHER_CONFIG_HASH)),
+        )
+        assert session.execute.await_args.args[0] is START_STATES_SQL
+
+    @pytest.mark.asyncio
+    async def test_start_read_of_an_empty_table_returns_the_database_time(self) -> None:
+        manager, session = _make_manager()
+        session.execute = AsyncMock(
+            return_value=_rows_result(
+                [SimpleNamespace(database_now=DATABASE_NOW, schedule_name=None, config_hash=None)],
+            ),
+        )
+
+        result = await manager.read_start_states()
+
+        assert result == StartStateRead(database_now=DATABASE_NOW, rows=())
+
+    @pytest.mark.asyncio
+    async def test_start_write_sends_one_statement_and_commits(self) -> None:
+        manager, session = _make_manager()
+        session.execute = AsyncMock(return_value=_names_result(['a']))
+        writes = [
+            ScheduleStateWrite('a', DATABASE_NOW, CONFIG_HASH),
+            ScheduleStateWrite('b', DATABASE_NOW, OTHER_CONFIG_HASH),
+        ]
+
+        written = await manager.store_start_states(writes)
+
+        assert written == ('a',)
+        statement, params = session.execute.await_args.args
+        assert statement is STORE_START_STATES_SQL
+        assert params == {
+            'schedule_names': ['a', 'b'],
+            'next_runs': [DATABASE_NOW, DATABASE_NOW],
+            'config_hashes': [CONFIG_HASH, OTHER_CONFIG_HASH],
+        }
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_writes_send_no_statement(self) -> None:
         manager, session = _make_manager()
 
-        result = await manager.get_due_states([], _utc_now())
-
-        assert result == []
-        # No DB interaction should occur
+        assert await manager.store_start_states([]) == ()
+        assert await manager.heal_missing_states([]) == ()
         session.execute.assert_not_awaited()
 
-    @pytest.mark.asyncio
-    async def test_returns_matching_due_states(self) -> None:
-        """Returns list of due states from query result."""
-        manager, session = _make_manager()
-        states = [_make_state('a'), _make_state('b')]
-
-        mock_result = MagicMock()
-        mock_result.scalars.return_value = states
-        session.execute = AsyncMock(return_value=mock_result)
-
-        result = await manager.get_due_states(['a', 'b'], _utc_now())
-
-        assert result == states
-        session.execute.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_returns_empty_when_nothing_due(self) -> None:
-        """Returns empty list when no states are due."""
-        manager, session = _make_manager()
-
-        mock_result = MagicMock()
-        mock_result.scalars.return_value = []
-        session.execute = AsyncMock(return_value=mock_result)
-
-        result = await manager.get_due_states(['a'], _utc_now())
-
-        assert result == []
-
-    @pytest.mark.asyncio
-    async def test_query_selects_rows_whose_next_run_is_at_or_before_now(self) -> None:
-        """A row is due when next_run_at <= now. next_run_at is NOT NULL, so
-        the read has no NULL arm."""
-        manager, session = _make_manager()
-        mock_result = MagicMock()
-        mock_result.scalars.return_value = []
-        session.execute = AsyncMock(return_value=mock_result)
-
-        await manager.get_due_states(['a'], _utc_now())
-
-        stmt = session.execute.await_args.args[0]
-        compiled = str(stmt)
-        assert 'horsies_schedule_state.next_run_at <= :next_run_at_1' in compiled
-        assert 'IS NULL' not in compiled
-
-
-# =============================================================================
-# get_existing_names
-# =============================================================================
+    def test_a_changed_row_keeps_its_run_record(self) -> None:
+        sql = str(STORE_START_STATES_SQL)
+        update = sql.split('DO UPDATE', 1)[1]
+        for kept in ('run_count', 'last_run_at', 'last_task_id'):
+            assert kept not in update
+        assert 'WHERE horsies_schedule_state.config_hash <> EXCLUDED.config_hash' in update
+        assert 'statement_timestamp()' in sql
 
 
 @pytest.mark.unit
-class TestGetExistingNames:
-    """Tests for ScheduleStateManager.get_existing_names."""
+class TestHealMissingStates:
+    """Tests for ScheduleStateManager.heal_missing_states."""
 
     @pytest.mark.asyncio
-    async def test_empty_input_returns_empty_set_without_db_call(self) -> None:
-        """Guard clause: empty names returns set() without DB call."""
+    async def test_returns_the_created_names_and_commits(self) -> None:
         manager, session = _make_manager()
+        session.execute = AsyncMock(return_value=_names_result(['b']))
 
-        result = await manager.get_existing_names([])
+        healed = await manager.heal_missing_states(
+            [ScheduleStateWrite('a', DATABASE_NOW, CONFIG_HASH), ScheduleStateWrite('b', DATABASE_NOW, CONFIG_HASH)],
+        )
 
-        assert result == set()
-        session.execute.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_returns_existing_subset(self) -> None:
-        """Returns only the names that have rows."""
-        manager, session = _make_manager()
-        mock_result = MagicMock()
-        mock_result.scalars.return_value = iter(['a', 'c'])
-        session.execute = AsyncMock(return_value=mock_result)
-
-        result = await manager.get_existing_names(['a', 'b', 'c'])
-
-        assert result == {'a', 'c'}
-
-
-# =============================================================================
-# initialize_state
-# =============================================================================
-
-
-@pytest.mark.unit
-class TestInitializeState:
-    """Tests for ScheduleStateManager.initialize_state."""
-
-    @pytest.mark.asyncio
-    async def test_creates_new_state_when_not_exists(self) -> None:
-        """Creates new state, commits, refreshes when schedule not found."""
-        manager, session = _make_manager()
-        session.get = AsyncMock(return_value=None)
-        next_run = _utc_now()
-
-        result = await manager.initialize_state('new-sched', next_run, config_hash=CONFIG_HASH)
-
-        assert result.schedule_name == 'new-sched'
-        assert result.config_hash == CONFIG_HASH
-        session.add.assert_called_once()
-        session.commit.assert_awaited_once()
-        session.refresh.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_returns_existing_on_race_condition(self) -> None:
-        """Returns existing state when record already initialized (race guard)."""
-        manager, session = _make_manager()
-        existing = _make_state('existing')
-        session.get = AsyncMock(return_value=existing)
-
-        result = await manager.initialize_state('existing', _utc_now(), CONFIG_HASH)
-
-        assert result is existing
-        session.add.assert_not_called()
-        session.commit.assert_not_awaited()
-
-
-# =============================================================================
-# update_after_run
-# =============================================================================
-
-
-@pytest.mark.unit
-class TestUpdateAfterRun:
-    """Tests for ScheduleStateManager.update_after_run."""
-
-    @pytest.mark.asyncio
-    async def test_successful_update(self) -> None:
-        """Rows updated > 0: commits and logs debug."""
-        manager, session = _make_manager()
-        mock_result = MagicMock()
-        mock_result.rowcount = 1
-        session.execute = AsyncMock(return_value=mock_result)
-        now = _utc_now()
-        next_run = _utc_now()
-
-        await manager.update_after_run('sched-1', TASK_ID, now, next_run)
-
-        session.execute.assert_awaited_once()
-        session.commit.assert_awaited_once()
-        # Verify the SQL statement used
-        call_args = session.execute.call_args
-        assert call_args[0][0] is UPDATE_SCHEDULE_AFTER_RUN_SQL
-
-    @pytest.mark.asyncio
-    async def test_no_rows_updated_logs_warning(self) -> None:
-        """Rows updated == 0: logs warning (schedule not found)."""
-        manager, session = _make_manager()
-        mock_result = MagicMock()
-        mock_result.rowcount = 0
-        session.execute = AsyncMock(return_value=mock_result)
-
-        with patch('horsies.core.scheduler.state.logger') as mock_logger:
-            await manager.update_after_run('missing', TASK_ID, _utc_now(), _utc_now())
-
-            mock_logger.warning.assert_called_once()
-            assert 'missing' in mock_logger.warning.call_args[0][0]
-
-
-# =============================================================================
-# update_next_run
-# =============================================================================
-
-
-@pytest.mark.unit
-class TestUpdateNextRun:
-    """Tests for ScheduleStateManager.update_next_run."""
-
-    @pytest.mark.asyncio
-    async def test_without_config_hash(self) -> None:
-        """Without config_hash uses UPDATE_SCHEDULE_NEXT_RUN_SQL."""
-        manager, session = _make_manager()
-        mock_result = MagicMock()
-        mock_result.rowcount = 1
-        session.execute = AsyncMock(return_value=mock_result)
-
-        await manager.update_next_run('sched-1', _utc_now())
-
-        call_args = session.execute.call_args
-        assert call_args[0][0] is UPDATE_SCHEDULE_NEXT_RUN_SQL
+        assert healed == ('b',)
+        assert session.execute.await_args.args[0] is HEAL_MISSING_STATES_SQL
         session.commit.assert_awaited_once()
 
-    @pytest.mark.asyncio
-    async def test_with_config_hash(self) -> None:
-        """With config_hash uses UPDATE_SCHEDULE_NEXT_RUN_WITH_HASH_SQL."""
-        manager, session = _make_manager()
-        mock_result = MagicMock()
-        mock_result.rowcount = 1
-        session.execute = AsyncMock(return_value=mock_result)
-
-        await manager.update_next_run('sched-1', _utc_now(), config_hash=OTHER_CONFIG_HASH)
-
-        call_args = session.execute.call_args
-        assert call_args[0][0] is UPDATE_SCHEDULE_NEXT_RUN_WITH_HASH_SQL
-        params = call_args[0][1]
-        assert params['config_hash'] == OTHER_CONFIG_HASH
-
-    @pytest.mark.asyncio
-    async def test_no_rows_updated_logs_warning(self) -> None:
-        """rowcount == 0 logs a warning for both branches."""
-        manager, session = _make_manager()
-        mock_result = MagicMock()
-        mock_result.rowcount = 0
-        session.execute = AsyncMock(return_value=mock_result)
-
-        with patch('horsies.core.scheduler.state.logger') as mock_logger:
-            await manager.update_next_run('missing', _utc_now())
-
-            mock_logger.warning.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_no_rows_updated_with_hash_logs_warning(self) -> None:
-        """rowcount == 0 with config_hash also logs warning."""
-        manager, session = _make_manager()
-        mock_result = MagicMock()
-        mock_result.rowcount = 0
-        session.execute = AsyncMock(return_value=mock_result)
-
-        with patch('horsies.core.scheduler.state.logger') as mock_logger:
-            await manager.update_next_run('missing', _utc_now(), config_hash=CONFIG_HASH)
-
-            mock_logger.warning.assert_called_once()
+    def test_an_existing_row_is_not_written(self) -> None:
+        sql = str(HEAL_MISSING_STATES_SQL)
+        assert 'ON CONFLICT (schedule_name) DO NOTHING' in sql
+        assert 'DO UPDATE' not in sql
+        assert 'statement_timestamp()' in sql
 
 
 # =============================================================================
-# get_all_states
+# fire_schedule
 # =============================================================================
+
+SLOT_1: Final = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+SLOT_2: Final = SLOT_1 + timedelta(minutes=1)
+COMMAND: Final = SendCommand(
+    task_name='tasks.report',
+    queue_name='default',
+    priority=100,
+    stored_input='{"value":1}',
+    task_options=None,
+    execution=Execution.ISOLATED,
+    max_retries=0,
+    retention_class_key='standard_30d',
+    retain_rerun_input=False,
+    fingerprint_version=1,
+    fingerprint=bytes(32),
+)
+FIRE: Final = ScheduleFire(
+    schedule_name='sched-1',
+    expected_next_run_at=SLOT_1,
+    next_run_at=SLOT_2 + timedelta(minutes=1),
+    slot_ats=(SLOT_1, SLOT_2),
+    command=COMMAND,
+)
+
+
+def _fire_manager(answer: list[dict[str, object]] | BaseException) -> tuple[ScheduleStateManager, MagicMock]:
+    """A manager whose fire statement answers ``answer`` on the autocommit connection."""
+    manager, session = _make_manager()
+    connection = MagicMock()
+    match answer:
+        case BaseException():
+            connection.execute = AsyncMock(side_effect=answer)
+        case rows:
+            result = MagicMock()
+            result.mappings.return_value.all.return_value = rows
+            connection.execute = AsyncMock(return_value=result)
+    session.connection = AsyncMock(return_value=connection)
+    return manager, connection
+
+
+def _row(kind: str, slot_at: datetime | None = None, task_id: str | None = None, outcome: str | None = None) -> dict[str, object]:
+    return {'row_kind': kind, 'slot_at': slot_at, 'task_id': task_id, 'slot_outcome': outcome}
 
 
 @pytest.mark.unit
-class TestGetAllStates:
-    """Tests for ScheduleStateManager.get_all_states."""
+class TestFireSchedule:
+    """ScheduleStateManager.fire_schedule: one statement, one typed outcome."""
 
     @pytest.mark.asyncio
-    async def test_returns_orm_loaded_models(self) -> None:
-        """Returns the ORM-selected models as a list."""
-        manager, session = _make_manager()
-        states = [_make_state('sched-a'), _make_state('sched-b')]
-        mock_result = MagicMock()
-        mock_result.scalars.return_value = iter(states)
-        session.execute = AsyncMock(return_value=mock_result)
+    async def test_one_autocommit_statement_carries_the_slots_and_the_command(self) -> None:
+        manager, connection = _fire_manager([_row('STATE_MOVED')])
 
-        result = await manager.get_all_states()
+        await manager.fire_schedule(FIRE)
 
-        assert result == states
-        stmt = session.execute.await_args.args[0]
-        assert 'ORDER BY horsies_schedule_state.schedule_name' in str(stmt)
+        connection.execute.assert_awaited_once()
+        statement, parameters = connection.execute.await_args.args
+        assert statement is FIRE_SCHEDULE_SQL
+        assert parameters == {
+            'schedule_name': 'sched-1',
+            'expected_next_run_at': SLOT_1,
+            'next_run_at': SLOT_2 + timedelta(minutes=1),
+            'slot_ats': [SLOT_1, SLOT_2],
+            'task_name': 'tasks.report',
+            'queue_name': 'default',
+            'priority': 100,
+            'input': '{"value":1}',
+            'task_options': None,
+            'execution': 'ISOLATED',
+            'max_retries': 0,
+            'retention_class_key': 'standard_30d',
+            'retain_rerun_input': False,
+            'fingerprint_version': 1,
+            'fingerprint': bytes(32),
+        }
 
     @pytest.mark.asyncio
-    async def test_returns_empty_list_when_no_states(self) -> None:
-        """Returns empty list when no schedule states exist."""
-        manager, session = _make_manager()
-        mock_result = MagicMock()
-        mock_result.scalars.return_value = iter([])
-        session.execute = AsyncMock(return_value=mock_result)
+    async def test_an_advanced_fire_answers_each_slot_with_its_outcome(self) -> None:
+        manager, _ = _fire_manager(
+            [
+                _row('ADVANCED'),
+                _row('SLOT', SLOT_1, TASK_ID, 'INSERTED'),
+                _row('SLOT', SLOT_2, TASK_ID, 'PAYLOAD_MISMATCH'),
+            ],
+        )
 
-        result = await manager.get_all_states()
+        assert await manager.fire_schedule(FIRE) == Ok(
+            ScheduleAdvanced(
+                slots=(
+                    FiredSlot(SLOT_1, TASK_ID, SlotOutcome.INSERTED),
+                    FiredSlot(SLOT_2, TASK_ID, SlotOutcome.PAYLOAD_MISMATCH),
+                ),
+            ),
+        )
 
-        assert result == []
+    @pytest.mark.asyncio
+    async def test_a_missing_row_answers_state_missing(self) -> None:
+        manager, _ = _fire_manager([_row('STATE_MISSING')])
+
+        assert await manager.fire_schedule(FIRE) == Ok(ScheduleStateMissing())
+
+    @pytest.mark.asyncio
+    async def test_a_moved_row_answers_state_moved(self) -> None:
+        manager, _ = _fire_manager([_row('STATE_MOVED')])
+
+        assert await manager.fire_schedule(FIRE) == Ok(ScheduleStateMoved())
+
+    @pytest.mark.asyncio
+    async def test_a_connection_failure_is_an_unknown_outcome(self) -> None:
+        cause = OperationalError('SELECT', {}, Exception('connection lost'))
+        manager, _ = _fire_manager(cause)
+
+        assert await manager.fire_schedule(FIRE) == Err(
+            ScheduleFireOutcomeUnknown(schedule_name='sched-1', cause=cause),
+        )
+
+    @pytest.mark.asyncio
+    async def test_another_database_error_is_a_refusal(self) -> None:
+        cause = DBAPIError('SELECT', {}, psycopg.errors.CheckViolation('check'))
+        manager, _ = _fire_manager(cause)
+
+        assert await manager.fire_schedule(FIRE) == Err(
+            ScheduleFireRefused(schedule_name='sched-1', cause=cause),
+        )
+
+    @pytest.mark.parametrize(
+        'driver_error',
+        [psycopg.errors.InvalidParameterValue('slots'), psycopg.errors.NullValueNotAllowed('null')],
+        ids=['22023', '22004'],
+    )
+    @pytest.mark.asyncio
+    async def test_a_broken_precondition_is_a_defect_that_raises(
+        self, driver_error: psycopg.Error,
+    ) -> None:
+        cause = DBAPIError('SELECT', {}, driver_error)
+        manager, _ = _fire_manager(cause)
+
+        with pytest.raises(DBAPIError) as raised:
+            await manager.fire_schedule(FIRE)
+
+        assert raised.value is cause
+
+    @pytest.mark.asyncio
+    async def test_slots_that_differ_from_the_arguments_break_the_contract(self) -> None:
+        manager, _ = _fire_manager([_row('ADVANCED'), _row('SLOT', SLOT_1, TASK_ID, 'INSERTED')])
+
+        with pytest.raises(AssertionError, match='answered slots'):
+            await manager.fire_schedule(FIRE)

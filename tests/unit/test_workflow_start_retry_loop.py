@@ -14,6 +14,7 @@ import psycopg
 import pytest
 
 from tests.broker_resources_support import attach_resources, fake_resources
+from tests.workflow_start_support import outcome_row, start_session
 
 from horsies.core.types.result import Ok, Err, is_ok, is_err
 from horsies.core.workflows.lifecycle import (
@@ -141,12 +142,7 @@ class TestRetryOnTransientErrors:
         broker = _make_broker()
 
         # First two calls raise, third succeeds
-        mock_session = AsyncMock()
-        mock_session.info = {}
-        insert_result = MagicMock()
-        insert_result.scalar_one_or_none.return_value = WORKFLOW_ID
-        mock_session.execute = AsyncMock(return_value=insert_result)
-        mock_session.commit = AsyncMock()
+        mock_session, _, _ = start_session([outcome_row('STARTED')])
 
         session_ctx = AsyncMock()
         call_count = 0
@@ -187,16 +183,7 @@ class TestRetryOnTransientErrors:
             exception=ConnectionError('Schema init timeout'),
         )
 
-        mock_session = AsyncMock()
-        mock_session.info = {}
-        insert_result = MagicMock()
-        insert_result.scalar_one_or_none.return_value = WORKFLOW_ID
-        mock_session.execute = AsyncMock(return_value=insert_result)
-        mock_session.commit = AsyncMock()
-
-        session_ctx = AsyncMock()
-        session_ctx.__aenter__ = AsyncMock(return_value=mock_session)
-        session_ctx.__aexit__ = AsyncMock(return_value=False)
+        _, session_ctx, _ = start_session([outcome_row('STARTED')])
         attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)))
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[Err(schema_err), Err(schema_err), Ok(True)],

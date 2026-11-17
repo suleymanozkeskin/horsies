@@ -20,8 +20,8 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 
-RUNTIME_URL = SecretStr('postgresql+psycopg://u:p@pooler:6432/db')
-SESSION_URL = SecretStr('postgresql+psycopg://u:p@direct:5432/db')
+RUNTIME_URL = SecretStr('postgresql://u:p@pooler:6432/db')
+SESSION_URL = SecretStr('postgresql://u:p@direct:5432/db')
 
 
 @pytest.mark.unit

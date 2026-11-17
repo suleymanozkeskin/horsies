@@ -63,6 +63,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from fnmatch import fnmatch
+from uuid import UUID
 from horsies.core.utils.imports import import_by_path
 from horsies.core.utils.loop_runner import (
     LoopRunnerError,
@@ -1345,7 +1346,7 @@ class Horsies:
         from horsies.core.brokers.session_capability import (
             probe_session_capability,
         )
-        from horsies.core.utils.url import to_psycopg_url
+        from horsies.core.utils.url import sqlalchemy_url, to_psycopg_url
 
         HEALTH_CHECK_SQL = text("""SELECT 1""")
         LISTENER_PROBE_TIMEOUT_SECONDS = 2.0
@@ -1362,7 +1363,9 @@ class Horsies:
                 engine_cfg = dict(base_engine_cfg)
                 if connect_args:
                     engine_cfg['connect_args'] = connect_args
-                health_engine = create_async_engine(database_url, **engine_cfg)
+                health_engine = create_async_engine(
+                    sqlalchemy_url(database_url), **engine_cfg
+                )
                 health_session_factory = async_sessionmaker(
                     health_engine, expire_on_commit=False
                 )
@@ -1438,13 +1441,16 @@ class Horsies:
 
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+        from horsies.core.utils.url import sqlalchemy_url
+
         async def _read_limit() -> (
             ServerConnectionLimit | ServerConnectionLimitUnreadable
         ):
             engine_cfg = dict(broker_config.sqlalchemy_engine_kwargs())
             engine_cfg['connect_args'] = broker_config.pooled_connect_args
             engine = create_async_engine(
-                broker_config.database_url.get_secret_value(), **engine_cfg
+                sqlalchemy_url(broker_config.database_url.get_secret_value()),
+                **engine_cfg,
             )
             try:
                 return await read_server_connection_limit(
@@ -1531,7 +1537,7 @@ class Horsies:
 
     async def get_raw_result_async(
         self,
-        task_id: str,
+        task_id: UUID,
         timeout_ms: int | None = None,
     ) -> 'BrokerResult[dict[str, Any] | None]':
         """Fetch the raw stored result envelope without typed decode.
@@ -1563,7 +1569,7 @@ class Horsies:
 
     def get_raw_result(
         self,
-        task_id: str,
+        task_id: UUID,
         timeout_ms: int | None = None,
     ) -> 'BrokerResult[dict[str, Any] | None]':
         """Synchronous version of ``get_raw_result_async``.
@@ -1589,7 +1595,7 @@ class Horsies:
 
     async def get_result_async(
         self,
-        task_id: str,
+        task_id: UUID,
         timeout_ms: int | None = None,
     ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
         """Fetch and typed-decode a task's stored result.
@@ -1641,7 +1647,7 @@ class Horsies:
                 err=TaskError(
                     error_code=RetrievalCode.TASK_NOT_FOUND,
                     message=f'Task {task_id} not found',
-                    data={'task_id': task_id},
+                    data={'task_id': str(task_id)},
                 ),
             ))
         if record.status == TaskStatus.CANCELLED:
@@ -1649,7 +1655,7 @@ class Horsies:
                 err=TaskError(
                     error_code=OutcomeCode.TASK_CANCELLED,
                     message=f'Task {task_id} was cancelled before completion',
-                    data={'task_id': task_id},
+                    data={'task_id': str(task_id)},
                 ),
             ))
         if record.raw_result is None:
@@ -1671,7 +1677,7 @@ class Horsies:
                             f'result payload'
                         ),
                         data={
-                            'task_id': task_id,
+                            'task_id': str(task_id),
                             'status': record.status.value,
                         },
                     ),
@@ -1684,7 +1690,7 @@ class Horsies:
                         f'is {record.status.value}'
                     ),
                     data={
-                        'task_id': task_id,
+                        'task_id': str(task_id),
                         'timeout_ms': timeout_ms,
                         'status': record.status.value,
                     },
@@ -1738,7 +1744,7 @@ class Horsies:
 
     def get_result(
         self,
-        task_id: str,
+        task_id: UUID,
         timeout_ms: int | None = None,
     ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
         """Synchronous version of ``get_result_async``.
@@ -1762,7 +1768,7 @@ class Horsies:
 
     async def get_task_info_async(
         self,
-        task_id: str,
+        task_id: UUID,
         *,
         include_result: bool = False,
         include_failed_reason: bool = False,
@@ -1855,7 +1861,7 @@ class Horsies:
 
     def get_task_info(
         self,
-        task_id: str,
+        task_id: UUID,
         *,
         include_result: bool = False,
         include_failed_reason: bool = False,
@@ -1900,7 +1906,7 @@ class Horsies:
         ))
 
     def _wait_inside_task_ok(
-        self, label: str, task_id: str,
+        self, label: str, task_id: UUID,
     ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
         """Refuse a result wait in a process that runs task bodies. Nothing ran."""
         from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
@@ -1910,11 +1916,11 @@ class Horsies:
             err=TaskError(
                 error_code=RetrievalCode.WAIT_INSIDE_TASK,
                 message=wait_inside_task_message(f'app.{label}() for task {task_id}'),
-                data={'task_id': task_id},
+                data={'task_id': str(task_id)},
             ),
         ))
 
-    def _wait_inside_task_err(self, label: str, task_id: str) -> 'BrokerResult[Any]':
+    def _wait_inside_task_err(self, label: str, task_id: UUID) -> 'BrokerResult[Any]':
         """Refuse a raw result wait in a process that runs task bodies. Nothing ran."""
         from horsies.core.brokers.result_types import BrokerWaitInsideTask
         from horsies.core.types.result import Err

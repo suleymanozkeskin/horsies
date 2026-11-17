@@ -262,8 +262,9 @@ def _payload_size_error(
     *,
     kwargs_json: str,
 ) -> ConfigurationError | None:
-    """Refuse kwargs longer than ``payload.reject_bytes``; the limit is exclusive."""
-    match check_payload_size(app.config.payload, encoded_len=len(kwargs_json)):
+    """Refuse kwargs whose UTF-8 text is longer than ``payload.reject_bytes``;
+    the limit is exclusive."""
+    match check_payload_size(app.config.payload, payload_text=kwargs_json):
         case PayloadWithinLimit():
             return None
         case PayloadOverLimit(size_bytes=size_bytes, limit_bytes=limit_bytes):

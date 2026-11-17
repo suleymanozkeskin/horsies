@@ -14,7 +14,7 @@ use super::identity::fingerprint::{
 };
 use super::identity::keys::{IdempotencyKeyError, ScopedIdempotencyKey};
 use super::rerun::input_envelope::validate_integer_domain;
-use crate::core::codec::{check_json_text, StrictJsonError};
+use crate::core::codec::{check_json_text, JsonReadError, StrictJsonError};
 use crate::core::task::execution::{stored_execution, Execution, InvalidExecution};
 
 /// Facts of a task row that a send, a schedule slot or a rerun writes.
@@ -184,17 +184,19 @@ pub(crate) fn parse_optional_object(
     let Some(value) = value else {
         return Ok(None);
     };
-    check_json_text(value).map_err(|source| EnqueuePreparationError::StrictJson {
-        field: "task_options",
-        source,
-    })?;
     // The options are parsed to read the execution class, so an integer that
-    // the parse would round is refused.
-    let parsed: Value =
-        serde_json::from_str(value).map_err(|source| EnqueuePreparationError::Json {
+    // the parse would round is refused. The core's strict reader gives the
+    // decode 300 levels of room (Python `core/codec/json_value.py:54-75`).
+    let parsed: Value = crate::core::codec::from_json_str(value).map_err(|error| match error {
+        JsonReadError::Refused(source) => EnqueuePreparationError::StrictJson {
             field: "task_options",
             source,
-        })?;
+        },
+        JsonReadError::Decode(source) => EnqueuePreparationError::Json {
+            field: "task_options",
+            source,
+        },
+    })?;
     validate_integer_domain(value).map_err(|detail| EnqueuePreparationError::NumberDomain {
         field: "task_options",
         detail,

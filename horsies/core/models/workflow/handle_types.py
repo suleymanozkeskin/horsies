@@ -92,8 +92,7 @@ class HandleStoredDataInvalid:
     """A stored value of the workflow does not parse. Nothing changed.
 
     The value is a workflow status that is not a ``WorkflowStatus``
-    (``status``, ``cancel``), or a subworkflow summary that is not valid
-    (``tasks``). ``exception`` is the parse error. The same call returns this
+    (``status``), or a subworkflow summary that is not valid (``tasks``). ``exception`` is the parse error. The same call returns this
     error until the stored value changes.
     """
 

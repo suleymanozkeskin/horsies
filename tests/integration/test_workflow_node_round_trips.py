@@ -1,4 +1,4 @@
-# pyright: reportPrivateUsage=false
+# pyright: reportPrivateUsage=false, reportUnusedFunction=false
 """Round trips of a workflow node's finalize, counted at the wire.
 
 Phase 1 and phase 2 are counted apart: ``_persist_task_terminal_state``,
@@ -36,6 +36,7 @@ from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import OnError, TaskNode
 from horsies.core.types.result import Ok, is_ok
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.worker import Worker
 from horsies.core.workflows.lifecycle import start_workflow_async
 from tests.integration.autocommit_support import (
@@ -69,10 +70,7 @@ PRE_PING = pytest.mark.parametrize(
 
 # The statements of each phase, in order, by the start of their SQL text.
 SUCCESS_PHASE1: Final = ('SELECT * FROM horsies_finish_workflow_success(',)
-FAILURE_PHASE1: Final = (
-    'SELECT CAST(status AS text) AS status, retry_count',
-    'SELECT * FROM horsies_finish_failed_attempt(',
-)
+FAILURE_PHASE1: Final = ('SELECT * FROM horsies_finish_failed_attempt(',)
 NODE_WRITE: Final = 'WITH woken AS ( SELECT pg_notify('
 """The node write, which sends the capacity wake of the task's queue."""
 DEPENDENTS: Final = 'SELECT d.task_index, d.dependencies'
@@ -87,7 +85,7 @@ PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
         NODE_WRITE,
         DEPENDENTS,
         PROMOTION,
-        'SELECT task_index, task_name, status, result',
+        'SELECT task_index, task_name, node_id, status, result',
         'WITH inserted AS ( INSERT INTO horsies_tasks',
         COMPLETION_CHECK,
         'COMMIT',
@@ -97,7 +95,7 @@ PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
         NODE_WRITE,
         DEPENDENTS,
         PROMOTION,
-        'SELECT task_index, task_name, status, result',
+        'SELECT task_index, task_name, node_id, status, result',
         'WITH inserted AS ( INSERT INTO horsies_tasks',
         COMPLETION_CHECK,
         'COMMIT',
@@ -198,7 +196,9 @@ async def _run_node_a(
                 UPDATE horsies_tasks t
                 SET status = 'RUNNING',
                     claimed_by_worker_id = :worker, claimed_at = :claimed_at,
-                    started_at = NOW()
+                    claim_expires_at = NULL, started_at = NOW(),
+                    worker_pid = 4242, worker_hostname = 'host-1',
+                    worker_process_name = 'child-1'
                 FROM horsies_workflow_tasks wt
                 WHERE wt.workflow_id = :wf AND wt.task_index = 0
                   AND t.id = wt.task_id
@@ -236,7 +236,9 @@ async def _finalize_once(
         task_name=task_name,
         queue_name=queue_name,
         is_workflow_task=True,
-        claimed_at=claimed_at,
+        claim=DispatchClaim(
+            claimed_at=claimed_at, retry_count=0, max_retries=0, task_options=None,
+        ),
     )
     phase1 = proxy.stop_recording()
     assert is_ok(phase1_r), phase1_r
@@ -335,7 +337,7 @@ async def test_phase_one_of_a_success_is_one_statement(
 
 @PRE_PING
 @pytest.mark.parametrize('shape', ['chain', 'single'])
-async def test_phase_one_of_a_failure_is_one_read_and_one_statement(
+async def test_phase_one_of_a_failure_is_one_statement(
     proxy: RoundTripProxy,
     db_url: str,
     app: Horsies,

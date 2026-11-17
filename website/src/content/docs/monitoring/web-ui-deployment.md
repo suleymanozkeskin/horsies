@@ -112,7 +112,7 @@ horsies web myapp.tasks:app
 ```
 
 ```bash
-horsies web --database-url "postgresql+psycopg://user:pass@localhost:5432/mydb"
+horsies web --database-url "postgresql://user:pass@localhost:5432/mydb"
 ```
 
 The first form imports the application module and gets the full feature set. It

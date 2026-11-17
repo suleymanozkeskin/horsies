@@ -18,6 +18,7 @@ from tests.integration.isolated_database import (
     isolated_database_prefix,
     isolated_test_database,
 )
+from horsies.core.utils.url import sqlalchemy_url
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -25,7 +26,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 async def _database_exists(name: str) -> bool:
     admin = create_async_engine(
-        make_url(DB_URL).set(database='postgres'),
+        make_url(sqlalchemy_url(DB_URL)).set(database='postgres'),
         isolation_level='AUTOCOMMIT',
     )
     try:
@@ -41,7 +42,7 @@ async def _database_exists(name: str) -> bool:
 async def test_isolated_setup_removes_an_inactive_generated_database() -> None:
     stale_name = f'{isolated_database_prefix()}{uuid.uuid4().hex}'
     admin = create_async_engine(
-        make_url(DB_URL).set(database='postgres'),
+        make_url(sqlalchemy_url(DB_URL)).set(database='postgres'),
         isolation_level='AUTOCOMMIT',
     )
     try:
@@ -68,7 +69,7 @@ async def test_owned_isolated_drop_forces_a_remaining_session() -> None:
     try:
         async with isolated_test_database(DB_URL) as url:
             owned_name = str(make_url(url).database)
-            lingering_engine = create_async_engine(url)
+            lingering_engine = create_async_engine(sqlalchemy_url(url))
             lingering_connection = await lingering_engine.connect()
             assert (await lingering_connection.execute(text('SELECT 1'))).scalar_one() == 1
 

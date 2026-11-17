@@ -7,9 +7,12 @@
 //!   batch user holds a connection between batches.
 //! - The idle ping: a connection that waited in the pool for longer than
 //!   [`IdlePing::AfterIdle`] since its check-in is pinged before it is handed
-//!   out. deadpool records the last checkout, not the check-in, so the
-//!   checkout guard ([`PooledConnection`]) writes the check-in time into the
-//!   pooled connection when it is dropped, and the manager's recycle reads it.
+//!   out; [`IdlePing::EveryCheckout`] pings every pooled connection. deadpool
+//!   records the last checkout, not the check-in, so the checkout guard
+//!   ([`PooledConnection`]) writes the check-in time into the pooled
+//!   connection when it is dropped, and the manager's recycle reads it.
+//! - A pool can keep connections open ([`KeptOpen`]): a task opens them when
+//!   the pool is built and opens new ones when the count falls below it.
 //! - Every pool refuses PgBouncer statement pooling at its first checkout
 //!   (`pooling_check`), the session pool included.
 //! - A connection that a failure discarded runs nothing more; a dropped open
@@ -26,7 +29,7 @@ use std::time::Duration;
 
 use deadpool::managed::{
     BuildError, Manager, Metrics, Object, Pool, PoolConfig, PoolError, QueueMode, RecycleError,
-    RecycleResult, TimeoutType, Timeouts,
+    RecycleResult, TimeoutType, Timeouts, WeakPool,
 };
 use deadpool::Runtime;
 use deadpool_postgres::ClientWrapper;
@@ -66,6 +69,10 @@ pub const DEFAULT_IDLE_PING_AFTER: Duration = Duration::from_secs(1);
 /// The bound of one idle ping. A ping that does not answer in time discards
 /// the connection.
 pub const IDLE_PING_BOUND: Duration = Duration::from_secs(5);
+
+/// How often the task of a pool that keeps connections open compares the
+/// open count with [`KeptOpen`].
+pub const KEPT_OPEN_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The session setting of every connection that keeps its session (direct
 /// and PgBouncer session pooling). The core's statements are short;
@@ -120,11 +127,24 @@ pub enum Reserve {
     KeepFree(NonZeroU32),
 }
 
-/// A pool size and its reserve. Only [`PoolSizing::new`] builds it.
+/// Connections a pool keeps open whether or not a checkout asked for them
+/// (psycopg's `min_size`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeptOpen {
+    /// A connection opens at a checkout only.
+    NoConnections,
+    /// The pool opens this many connections when it is built, and opens a
+    /// new one when the count falls below it.
+    Connections(NonZeroU32),
+}
+
+/// A pool size, its reserve, and the connections it keeps open. Only
+/// [`PoolSizing::new`] and [`PoolSizing::keeping_open`] build it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PoolSizing {
     size: NonZeroU32,
     reserve: Reserve,
+    kept_open: KeptOpen,
 }
 
 /// A pool size that cannot work.
@@ -138,11 +158,14 @@ pub enum PoolSizingError {
         "a reserve of {reserve} connections leaves no connection for batches in a pool of {size}"
     )]
     ReserveNotBelowSize { size: u32, reserve: u32 },
+    #[error("a pool of {size} connections cannot keep {kept} connections open")]
+    KeptOpenAboveSize { size: u32, kept: u32 },
 }
 
 impl PoolSizing {
     /// Checks that the size is 1 to [`POSTGRES_MAX_BACKENDS`] and that the
-    /// reserve leaves at least one connection for batches.
+    /// reserve leaves at least one connection for batches. The pool keeps no
+    /// connection open ([`KeptOpen::NoConnections`]).
     pub fn new(size: u32, reserve: Reserve) -> Result<PoolSizing, PoolSizingError> {
         let Some(size) = NonZeroU32::new(size) else {
             return Err(PoolSizingError::SizeZero);
@@ -153,14 +176,46 @@ impl PoolSizing {
                 limit: POSTGRES_MAX_BACKENDS,
             });
         }
+        let kept_open = KeptOpen::NoConnections;
         match reserve {
-            Reserve::NoReserve => Ok(PoolSizing { size, reserve }),
-            Reserve::KeepFree(kept) if kept.get() < size.get() => Ok(PoolSizing { size, reserve }),
+            Reserve::NoReserve => Ok(PoolSizing {
+                size,
+                reserve,
+                kept_open,
+            }),
+            Reserve::KeepFree(kept) if kept.get() < size.get() => Ok(PoolSizing {
+                size,
+                reserve,
+                kept_open,
+            }),
             Reserve::KeepFree(kept) => Err(PoolSizingError::ReserveNotBelowSize {
                 size: size.get(),
                 reserve: kept.get(),
             }),
         }
+    }
+
+    /// This sizing with `kept_open` connections kept open.
+    ///
+    /// Errors: [`PoolSizingError::KeptOpenAboveSize`] when `kept_open` is
+    /// above the size (psycopg refuses a `min_size` above `max_size`).
+    pub fn keeping_open(self, kept_open: KeptOpen) -> Result<PoolSizing, PoolSizingError> {
+        match kept_open {
+            KeptOpen::Connections(kept) if kept.get() > self.size.get() => {
+                Err(PoolSizingError::KeptOpenAboveSize {
+                    size: self.size.get(),
+                    kept: kept.get(),
+                })
+            }
+            KeptOpen::NoConnections | KeptOpen::Connections(_) => {
+                Ok(PoolSizing { kept_open, ..self })
+            }
+        }
+    }
+
+    /// The connections the pool keeps open.
+    pub fn kept_open(&self) -> KeptOpen {
+        self.kept_open
     }
 
     pub fn size(&self) -> u32 {
@@ -187,6 +242,10 @@ pub enum IdlePing {
     Off,
     /// Ping a connection that waited longer than this since its check-in.
     AfterIdle(Duration),
+    /// Ping every pooled connection before it is handed out (psycopg's
+    /// `ConnectionPool.check_connection` as a pool's `check`). A connection
+    /// that the checkout opens is not pinged: it connected just before.
+    EveryCheckout,
 }
 
 /// When a pool replaces a connection by age (SQLAlchemy's `pool_recycle`).
@@ -236,6 +295,36 @@ pub(crate) struct CoreConnection {
     state: ConnectionState,
 }
 
+/// What a checkout does with a pooled connection before it hands it out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandOut {
+    /// Hand it out as it is.
+    AsIs,
+    /// Ping it first; a failed ping replaces it.
+    AfterPing,
+    /// Replace it: it was discarded after its last use.
+    Replace,
+}
+
+/// The step of a pooled connection in `state` under `idle_ping`, at `now`.
+/// Pure.
+fn hand_out(idle_ping: IdlePing, state: ConnectionState, now: Instant) -> HandOut {
+    match (idle_ping, state) {
+        (_, ConnectionState::Discarded) => HandOut::Replace,
+        (IdlePing::Off, ConnectionState::New | ConnectionState::ReturnedAt(_))
+        | (IdlePing::AfterIdle(_), ConnectionState::New) => HandOut::AsIs,
+        (IdlePing::AfterIdle(limit), ConnectionState::ReturnedAt(returned_at))
+            if now.saturating_duration_since(returned_at) <= limit =>
+        {
+            HandOut::AsIs
+        }
+        (IdlePing::AfterIdle(_), ConnectionState::ReturnedAt(_))
+        | (IdlePing::EveryCheckout, ConnectionState::New | ConnectionState::ReturnedAt(_)) => {
+            HandOut::AfterPing
+        }
+    }
+}
+
 /// Creates and recycles connections for one pool.
 pub(crate) struct CoreManager {
     plan: Arc<ConnectPlan>,
@@ -277,32 +366,24 @@ impl Manager for CoreManager {
                 ));
             }
         }
-        match (self.idle_ping, connection.state) {
-            (_, ConnectionState::Discarded) => Err(RecycleError::message(
+        match hand_out(self.idle_ping, connection.state, Instant::now()) {
+            HandOut::Replace => Err(RecycleError::message(
                 "the connection was discarded after its last use",
             )),
-            (IdlePing::Off, ConnectionState::New | ConnectionState::ReturnedAt(_))
-            | (IdlePing::AfterIdle(_), ConnectionState::New) => Ok(()),
-            (IdlePing::AfterIdle(limit), ConnectionState::ReturnedAt(returned_at))
-                if returned_at.elapsed() <= limit =>
-            {
-                Ok(())
-            }
-            (IdlePing::AfterIdle(_), ConnectionState::ReturnedAt(_)) => {
-                match connection.client.batch_execute(PING_SQL).await {
-                    Ok(()) => Ok(()),
-                    Err(error) => {
-                        tracing::debug!(
-                            target: LOG_TARGET,
-                            %error,
-                            "an idle pooled connection failed its ping; it is replaced",
-                        );
-                        Err(RecycleError::message(format!(
-                            "the idle ping failed: {error}"
-                        )))
-                    }
+            HandOut::AsIs => Ok(()),
+            HandOut::AfterPing => match connection.client.batch_execute(PING_SQL).await {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    tracing::debug!(
+                        target: LOG_TARGET,
+                        %error,
+                        "a pooled connection failed its ping; it is replaced",
+                    );
+                    Err(RecycleError::message(format!(
+                        "the ping before checkout failed: {error}"
+                    )))
                 }
-            }
+            },
         }
     }
 }
@@ -340,6 +421,62 @@ async fn set_up_session(
             })
         }
     }
+}
+
+/// Keeps `kept` connections open in `pool` (psycopg's pool maintenance of
+/// `min_size`): opens the missing ones at once, then checks the open count
+/// each [`KEPT_OPEN_CHECK_INTERVAL`]. Ends when the pool is closed or
+/// dropped. A connection that fails to open is logged and tried again at the
+/// next check.
+async fn keep_open(
+    pool: WeakPool<CoreManager>,
+    kept: NonZeroU32,
+    timeouts: Timeouts,
+    role: PoolRole,
+) {
+    loop {
+        let Some(strong) = pool.upgrade() else {
+            return;
+        };
+        if strong.is_closed() {
+            return;
+        }
+        match open_missing(&strong, kept, &timeouts).await {
+            Ok(()) => {}
+            Err(PoolError::Closed) => return,
+            Err(error) => {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    role = %role,
+                    error = %error,
+                    "a connection the pool keeps open did not open; it is tried again",
+                );
+            }
+        }
+        drop(strong);
+        tokio::time::sleep(KEPT_OPEN_CHECK_INTERVAL).await;
+    }
+}
+
+/// Opens connections until `pool` holds `kept` of them. A new connection
+/// opens only when no pooled one is free, so the held free ones are taken
+/// first; every connection taken here goes back to the pool at the end. At
+/// most `kept` checkouts.
+///
+/// Errors: the first [`PoolError`] of a checkout; the connections taken so
+/// far go back to the pool.
+async fn open_missing(
+    pool: &Pool<CoreManager>,
+    kept: NonZeroU32,
+    timeouts: &Timeouts,
+) -> Result<(), PoolError<ConnectError>> {
+    let kept = usize::try_from(kept.get()).unwrap_or(usize::MAX);
+    let mut held: Vec<Object<CoreManager>> = Vec::with_capacity(kept);
+    while pool.status().size < kept && held.len() < kept {
+        held.push(pool.timeout_get(timeouts).await?);
+    }
+    drop(held);
+    Ok(())
 }
 
 /// Drives one pooled connection until it closes.
@@ -385,7 +522,10 @@ pub struct CorePool {
 }
 
 impl CorePool {
-    /// Builds a pool. Does no I/O: connections open at checkout.
+    /// Builds a pool. Does no I/O: connections open at checkout. A plan that
+    /// keeps connections open ([`KeptOpen::Connections`]) also starts the
+    /// task that opens them (`keep_open`), on the current tokio runtime: it
+    /// must be built inside one.
     pub fn new(plan: PoolPlan, connect: Arc<ConnectPlan>) -> CorePool {
         let manager = CoreManager {
             plan: Arc::clone(&connect),
@@ -416,6 +556,17 @@ impl CorePool {
                 )),
             },
         };
+        match plan.sizing.kept_open() {
+            KeptOpen::NoConnections => {}
+            KeptOpen::Connections(kept) => {
+                let _keeper = tokio::spawn(keep_open(
+                    pool.weak(),
+                    kept,
+                    checkout_timeouts(plan.checkout_wait),
+                    plan.role,
+                ));
+            }
+        }
         CorePool {
             pool,
             plan,
@@ -427,6 +578,17 @@ impl CorePool {
 
     pub fn role(&self) -> PoolRole {
         self.plan.role
+    }
+
+    /// The size of the pool and its reserve.
+    pub fn sizing(&self) -> PoolSizing {
+        self.plan.sizing
+    }
+
+    /// The connection plan that each new connection of the pool opens with.
+    #[cfg(test)]
+    pub(crate) fn connect_plan(&self) -> &ConnectPlan {
+        &self.connect
     }
 
     /// Checks out a connection.
@@ -947,6 +1109,97 @@ mod tests {
             }),
         );
         assert!(PoolSizing::new(POSTGRES_MAX_BACKENDS, Reserve::NoReserve).is_ok());
+    }
+
+    #[test]
+    fn a_pool_keeps_open_at_most_its_size() {
+        let sizing = PoolSizing::new(3, Reserve::NoReserve).expect("valid sizing");
+        assert_eq!(sizing.kept_open(), KeptOpen::NoConnections);
+        let three = KeptOpen::Connections(NonZeroU32::new(3).expect("non-zero"));
+        assert_eq!(
+            sizing.keeping_open(three).map(|kept| kept.kept_open()),
+            Ok(three)
+        );
+        assert_eq!(
+            sizing.keeping_open(KeptOpen::Connections(NonZeroU32::new(4).expect("non-zero"))),
+            Err(PoolSizingError::KeptOpenAboveSize { size: 3, kept: 4 }),
+        );
+        assert_eq!(sizing.keeping_open(KeptOpen::NoConnections), Ok(sizing));
+    }
+
+    #[test]
+    fn every_checkout_pings_each_pooled_connection() {
+        let returned_at = Instant::now();
+        let at_once = returned_at;
+        assert_eq!(
+            hand_out(IdlePing::EveryCheckout, ConnectionState::New, at_once),
+            HandOut::AfterPing
+        );
+        assert_eq!(
+            hand_out(
+                IdlePing::EveryCheckout,
+                ConnectionState::ReturnedAt(returned_at),
+                at_once
+            ),
+            HandOut::AfterPing
+        );
+        assert_eq!(
+            hand_out(IdlePing::EveryCheckout, ConnectionState::Discarded, at_once),
+            HandOut::Replace
+        );
+    }
+
+    #[test]
+    fn the_idle_ping_pings_only_after_the_idle_limit() {
+        let returned_at = Instant::now();
+        let limit = DEFAULT_IDLE_PING_AFTER;
+        let ping = IdlePing::AfterIdle(limit);
+        assert_eq!(
+            hand_out(
+                ping,
+                ConnectionState::ReturnedAt(returned_at),
+                returned_at + limit
+            ),
+            HandOut::AsIs
+        );
+        assert_eq!(
+            hand_out(
+                ping,
+                ConnectionState::ReturnedAt(returned_at),
+                returned_at + limit + Duration::from_millis(1)
+            ),
+            HandOut::AfterPing
+        );
+        assert_eq!(
+            hand_out(ping, ConnectionState::New, returned_at),
+            HandOut::AsIs
+        );
+        assert_eq!(
+            hand_out(ping, ConnectionState::Discarded, returned_at),
+            HandOut::Replace
+        );
+    }
+
+    #[test]
+    fn no_ping_hands_out_every_kept_connection() {
+        let returned_at = Instant::now();
+        let later = returned_at + Duration::from_secs(3600);
+        assert_eq!(
+            hand_out(
+                IdlePing::Off,
+                ConnectionState::ReturnedAt(returned_at),
+                later
+            ),
+            HandOut::AsIs
+        );
+        assert_eq!(
+            hand_out(IdlePing::Off, ConnectionState::New, later),
+            HandOut::AsIs
+        );
+        assert_eq!(
+            hand_out(IdlePing::Off, ConnectionState::Discarded, later),
+            HandOut::Replace
+        );
     }
 
     #[tokio::test]

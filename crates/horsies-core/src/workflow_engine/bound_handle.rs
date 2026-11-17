@@ -227,7 +227,9 @@ mod tests {
             Arc::new(PostgresBroker::from_pool(
                 sqlx::PgPool::connect_lazy("postgresql://localhost/test").expect("lazy pool"),
             )),
-            Arc::new(WorkflowSpecRegistry::new()),
+            Arc::new(WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
             PayloadPolicy::default(),
             RetentionConfig::default(),
         );
@@ -257,7 +259,9 @@ mod tests {
             Arc::new(PostgresBroker::from_pool(
                 sqlx::PgPool::connect_lazy("postgresql://localhost/test").expect("lazy pool"),
             )),
-            Arc::new(WorkflowSpecRegistry::new()),
+            Arc::new(WorkflowSpecRegistry::new(
+                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            )),
             PayloadPolicy::default(),
             RetentionConfig::default(),
         );
@@ -301,7 +305,9 @@ mod shared_listener_tests {
             &crate::broker::terminalization_matrix::migrated_database_url().await,
         ));
         let pool = broker.pool().clone();
-        let registry = Arc::new(WorkflowSpecRegistry::new());
+        let registry = Arc::new(WorkflowSpecRegistry::new(
+            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        ));
         let wf_id = Uuid::new_v4();
 
         // A RUNNING workflow that never completes (a RUNNING, non-terminal node).

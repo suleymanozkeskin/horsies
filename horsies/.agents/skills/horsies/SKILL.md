@@ -48,7 +48,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
 
 app = Horsies(config=AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
 ))
 
 @app.task("add_numbers")
