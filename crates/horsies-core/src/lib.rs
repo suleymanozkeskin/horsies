@@ -104,6 +104,11 @@ pub use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement,
     RetryRequest,
 };
+pub use crate::broker::child_writes::{
+    WriteDeadline, CANCELLED_WRITE_END, CHILD_REFUSAL_WRITES_BOUND, CHILD_STATEMENT_BOUND,
+    CHILD_WRITE_CHECKOUT_WAIT, FINALIZING_MARKER_BOUND, FINALIZING_MARKER_END,
+    PRE_START_CONFIRM_ATTEMPTS, START_ATTEMPT_BOUND, START_ATTEMPT_END,
+};
 pub use crate::broker::claims::{
     ClaimClasses, ClaimPass, ClaimPassRequest, ClaimTake, ClaimedRow, QueueStartCheck, QueueStarts,
     ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement, StartAttempt,

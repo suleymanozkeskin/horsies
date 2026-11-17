@@ -20,6 +20,7 @@
 use chrono::{DateTime, Utc};
 use horsies_core::{
     BrokerError, OrphanAuditPage, PendingExpiryFailed as PassFailed, PendingExpiryPass, TaskRowEnd,
+    WriteDeadline,
 };
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
@@ -265,12 +266,14 @@ fn task_row_end_record(task_id: Uuid, end: Result<TaskRowEnd, BrokerError>) -> T
 }
 
 /// Expire one claimed row of `worker_id` whose deadline passed before its
-/// start. Writes, in one statement; a caller that leaves early does not stop
+/// start, within `deadline`, the rest of the start attempt whose miss path
+/// it is. Writes, in one statement; a caller that leaves early does not stop
 /// it, and sees its outcome as unknown.
 pub async fn expire_owned_claim_operation(
     connection: BrokerConnection,
     task_id: Uuid,
     worker_id: String,
+    deadline: WriteDeadline,
 ) -> TaskRowEndRecord {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
@@ -278,7 +281,9 @@ pub async fn expire_owned_claim_operation(
     };
     task_row_end_record(
         task_id,
-        broker.expire_owned_claim(task_id, &worker_id).await,
+        broker
+            .expire_owned_claim(task_id, &worker_id, deadline)
+            .await,
     )
 }
 

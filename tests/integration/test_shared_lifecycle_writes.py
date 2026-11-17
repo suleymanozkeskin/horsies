@@ -30,12 +30,12 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import OutcomeCode
 from horsies.core.worker import shared_lifecycle
 from horsies.core.worker.child_pool import _initialize_worker_pool, open_shared_async_pool
-from horsies.core.worker.child_runner import _PRE_START_CONFIRM_ATTEMPTS
 from horsies.core.worker.shared_lifecycle import (
     confirm_until_not_resumed,
     mark_task_finalizing,
 )
 from tests.broker_resources_support import listener_of
+from tests.fixtures.child_core import wait_for_start_statements_to_end
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.test_pause_abandon_after_resume import (
     WORKER_ID as PAUSE_WORKER_ID,
@@ -165,40 +165,20 @@ async def test_the_running_update_writes_the_first_beat_and_the_marker_follows(
     assert marked.finalizing_by_worker_id == WORKER_ID
 
 
-LOCK_RELEASE_WAIT_S = 10.0
-"""The longest wait of a test for the writes that waited on a row lock to
-end once the lock is gone."""
-
-
-async def _status_once_written(session: AsyncSession, task_id: str) -> str:
-    """The status of the row once it left CLAIMED, read every 50 ms for at
-    most ``LOCK_RELEASE_WAIT_S``."""
-    ends_by = time.monotonic() + LOCK_RELEASE_WAIT_S
-    while True:
-        row = await _row(session, task_id)
-        await session.commit()
-        if row.status != 'CLAIMED' or time.monotonic() >= ends_by:
-            return str(row.status)
-        await asyncio.sleep(0.05)
-
-
 @pytest.mark.asyncio(loop_scope='function')
 async def test_a_running_update_that_waits_on_a_row_lock_ends_at_its_bound(
     session: AsyncSession,
     shared_pool: AsyncConnectionPool[AsyncConnection[Any]],  # noqa: ARG001
     clean_workflow_tables: None,  # noqa: ARG001
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Another session holds the row lock. The wait of each attempt of the
-    RUNNING transition ends at its bound: the run stops before user code
-    with OWNERSHIP_UNCONFIRMED, and the row stays CLAIMED with no beat while
-    the lock is held.
-
-    The bound ends the wait, not the write: the start that the core sent
-    runs to its end once the lock is gone, and sets the row RUNNING with its
-    first beat. The statement bound of the start, which stops such a write,
-    is the core's (#1240)."""
-    monkeypatch.setattr(shared_lifecycle, 'RUNNING_ATTEMPT_TIMEOUT_S', 0.5)
+    """Another session holds the row lock. The core sends the cancel request
+    of the start at its statement bound (``RUNNING_STATEMENTS_TIMEOUT_S``):
+    the run stops before user code with OWNERSHIP_UNCONFIRMED, before the
+    wait of the seat (``RUNNING_ATTEMPT_TIMEOUT_S``) ends. The cancelled
+    start does not commit once the lock is gone: the row stays CLAIMED with
+    no beat."""
+    statements_s = shared_lifecycle.RUNNING_STATEMENTS_TIMEOUT_S
+    cancel_end_s = shared_lifecycle.CANCELLED_WRITE_END_S
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
     await session.execute(
@@ -216,22 +196,17 @@ async def test_a_running_update_that_waits_on_a_row_lock_ends_at_its_bound(
                 claimed_at,
                 orphan_self_heal=True,
             ),
-            timeout=10.0,
+            timeout=shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S + cancel_end_s,
         )
         elapsed_s = time.monotonic() - started
-        held_row = await _row(session, task_id)
-        held_beats = await _runner_beats(session, task_id)
     finally:
         await session.rollback()
 
     assert result == (False, '', 'OWNERSHIP_UNCONFIRMED')
-    assert elapsed_s < _PRE_START_CONFIRM_ATTEMPTS * (
-        0.5 + shared_lifecycle.CANCELLED_WRITE_END_S
-    )
-    assert held_row.status == 'CLAIMED'
-    assert held_beats == []
-    assert await _status_once_written(session, task_id) == 'RUNNING'
-    assert await _runner_beats(session, task_id) == [f'{WORKER_ID}:{os.getpid()}']
+    assert statements_s <= elapsed_s < statements_s + cancel_end_s
+    assert await wait_for_start_statements_to_end(session) == 0
+    assert (await _row(session, task_id)).status == 'CLAIMED'
+    assert await _runner_beats(session, task_id) == []
 
 
 @pytest.mark.asyncio(loop_scope='function')

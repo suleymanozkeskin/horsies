@@ -27,16 +27,19 @@
 //!   classification of `horsies_terminalization_miss`.
 //!
 //! The caller is the child of a worker: the core child host and the Python
-//! child (`CoreChildHandle.stop_workflow_task_before_start`).
+//! child (`CoreChildHandle.stop_workflow_task_before_start`). The stop is
+//! the miss path of a start attempt, so it runs within the deadline of that
+//! attempt ([`crate::broker::child_writes`]).
 
 use uuid::Uuid;
 
+use crate::broker::child_writes::{query_within, WriteDeadline};
 use crate::broker::core_rows::{column, one_row, StatementLog};
 use crate::broker::error::BrokerError;
 use crate::broker::expiry_and_orphans::prestart_expiry_result;
 use crate::broker::postgres::PostgresBroker;
 use crate::core::lifecycle::OwnedClaim;
-use crate::db::{CheckoutClass, CorePool, ParameterType, StatementBound, TypedStatement};
+use crate::db::{CorePool, ParameterType, TypedStatement};
 
 /// `horsies_workflow_task_stop_before_start`. Parameters in order: the task,
 /// the worker, the claim generation, the stored result of an expiry, the
@@ -207,22 +210,26 @@ fn decode_stop(outcome: &str, move_outcome: Option<&str>) -> Result<StopBeforeSt
 }
 
 /// Stop the claimed workflow task `task_id` of `fence` on `pool`: one
-/// `horsies_workflow_task_stop_before_start` statement in autocommit,
-/// checked out as reserved work, with the core's stored `TASK_EXPIRED` error
-/// for an expiry (the task and worker ids as `data`).
+/// `horsies_workflow_task_stop_before_start` statement in autocommit, as a
+/// child write within `deadline`, the deadline of the start attempt whose
+/// miss path it is ([`crate::broker::child_writes::query_within`]), with the
+/// core's stored `TASK_EXPIRED` error for an expiry (the task and worker ids
+/// as `data`).
 ///
 /// Errors: [`BrokerError::Serialization`] for the stored error (nothing
-/// sent); [`BrokerError::Statement`] (nothing written, or `OutcomeUnknown`:
-/// the same stop sent again reports a committed move as `AlreadyApplied`,
-/// or the row as not held); [`BrokerError::RowDecode`] and
-/// [`BrokerError::TerminalizationContract`] for a row outside the
-/// function's contract.
+/// sent); [`BrokerError::Statement`] (nothing sent: a failed checkout, or
+/// `deadline` passed first; nothing written: refused, a cancel at the bound
+/// included; or `OutcomeUnknown`: the same stop sent again reports a
+/// committed move as `AlreadyApplied`, or the row as not held);
+/// [`BrokerError::RowDecode`] and [`BrokerError::TerminalizationContract`]
+/// for a row outside the function's contract.
 pub(crate) async fn stop_before_start(
     pool: &CorePool,
     log: StatementLog,
     task_id: Uuid,
     fence: &OwnedClaim,
     orphan_self_heal: OrphanSelfHeal,
+    deadline: WriteDeadline,
 ) -> Result<StopBeforeStart, BrokerError> {
     let expiry_result = prestart_expiry_result(task_id, &fence.worker_id)?;
     let self_heal = orphan_self_heal.as_argument();
@@ -236,13 +243,7 @@ pub(crate) async fn stop_before_start(
         .value(&self_heal)
         .finish();
     log.log(statement);
-    let rows = pool
-        .query(
-            CheckoutClass::Reserved,
-            &bound,
-            StatementBound::ConnectionTimeouts,
-        )
-        .await?;
+    let rows = query_within(pool, &bound, deadline).await?;
     let row = one_row(rows, statement)?;
     let outcome = column::<String>(&row, statement, "outcome")?;
     let move_outcome = column::<Option<String>>(&row, statement, "move_outcome")?;
@@ -257,14 +258,17 @@ impl PostgresBroker {
     /// Stop a claimed workflow task whose start missed
     /// (`horsies_workflow_task_stop_before_start`): one statement in
     /// autocommit on the main core pool, checked out as reserved work, fenced
-    /// to `fence` (this worker, the claim generation of the start). The
-    /// function judges the task again under its own locks; see the module
-    /// documentation for the steps and [`StopBeforeStart`] for the outcomes.
+    /// to `fence` (this worker, the claim generation of the start), within
+    /// `deadline`, the rest of the start attempt whose miss path it is
+    /// ([`WriteDeadline::rest_of_start_attempt`]). The function judges the
+    /// task again under its own locks; see the module documentation for the
+    /// steps and [`StopBeforeStart`] for the outcomes.
     ///
     /// Errors: [`BrokerError::PoolSettings`] and the client family check's
     /// errors (nothing sent); [`BrokerError::Serialization`] (nothing sent);
-    /// [`BrokerError::Statement`] (nothing written, or `OutcomeUnknown`);
-    /// [`BrokerError::RowDecode`] and
+    /// [`BrokerError::Statement`] (nothing sent when `deadline` passed
+    /// first; nothing written, a cancel at the bound included; or
+    /// `OutcomeUnknown`); [`BrokerError::RowDecode`] and
     /// [`BrokerError::TerminalizationContract`] for a row outside the
     /// function's contract.
     pub async fn stop_workflow_task_before_start(
@@ -272,6 +276,7 @@ impl PostgresBroker {
         task_id: Uuid,
         fence: &OwnedClaim,
         orphan_self_heal: OrphanSelfHeal,
+        deadline: WriteDeadline,
     ) -> Result<StopBeforeStart, BrokerError> {
         self.ensure_client_family_for_write().await?;
         let (open, _write) = self.core_pools_for_write()?;
@@ -281,6 +286,7 @@ impl PostgresBroker {
             task_id,
             fence,
             orphan_self_heal,
+            deadline,
         )
         .await
     }

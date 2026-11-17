@@ -276,12 +276,14 @@ const MARK_FINALIZING_PARAMETERS: &[StubParameter] = &[
 const EXPIRE_OWNED_CLAIM_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("worker_id", "str"),
+    keyword("attempt_elapsed_ms", "int"),
 ];
 const STOP_BEFORE_START_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("worker_id", "str"),
     keyword("claimed_at", "datetime.datetime"),
     keyword("orphan_self_heal", "bool"),
+    keyword("attempt_elapsed_ms", "int"),
 ];
 
 const TASK_LIST_QUERY_PARAMETERS: &[StubParameter] = &[
@@ -506,7 +508,7 @@ const CORE_CHILD_HANDLE_METHODS: &[StubFunction] = &[
         name: "start_attempt",
         parameters: START_ATTEMPT_PARAMETERS,
         returns: TypeText::Plain(START_ATTEMPT_OUTCOME),
-        doc: "Start one claimed task. Writes, in one statement. deadline_in_ms is the time left before\nthe deadline of the run, or None: when it has passed by the time the pool gives the\nconnection, no statement runs. A naive claimed_at raises TypeError.",
+        doc: "Start one claimed task. Writes, in one statement. deadline_in_ms is the time left before\nthe deadline of the run, or None: when it has passed by the time the pool gives the\nconnection, no statement runs. The call begins a start attempt of 40 s: a statement past\nits time gets a cancel request and does not commit later. A naive claimed_at raises\nTypeError.",
     },
     StubFunction {
         name: "start_attempt_async",
@@ -518,7 +520,7 @@ const CORE_CHILD_HANDLE_METHODS: &[StubFunction] = &[
         name: "expire_owned_claim",
         parameters: EXPIRE_OWNED_CLAIM_PARAMETERS,
         returns: TypeText::Plain(TASK_ROW_END_OUTCOME),
-        doc: "Expire one claimed row of this worker whose deadline passed before its start. Writes,\nin one statement.",
+        doc: "Expire one claimed row of this worker whose deadline passed before its start. Writes,\nin one statement, by the end of the start attempt that began attempt_elapsed_ms ago.",
     },
     StubFunction {
         name: "expire_owned_claim_async",
@@ -530,7 +532,7 @@ const CORE_CHILD_HANDLE_METHODS: &[StubFunction] = &[
         name: "stop_workflow_task_before_start",
         parameters: STOP_BEFORE_START_PARAMETERS,
         returns: TypeText::Plain(STOP_BEFORE_START_OUTCOME),
-        doc: "Stop one claimed workflow task whose start missed. Writes, in one statement, which judges\nthe task again under its locks; with orphan_self_heal it cancels a task that no node\nlinks live. A naive claimed_at raises TypeError.",
+        doc: "Stop one claimed workflow task whose start missed. Writes, in one statement, which judges\nthe task again under its locks; with orphan_self_heal it cancels a task that no node\nlinks live. It ends by the end of the start attempt that began attempt_elapsed_ms ago.\nA naive claimed_at raises TypeError.",
     },
     StubFunction {
         name: "stop_workflow_task_before_start_async",
@@ -542,7 +544,7 @@ const CORE_CHILD_HANDLE_METHODS: &[StubFunction] = &[
         name: "mark_finalizing",
         parameters: MARK_FINALIZING_PARAMETERS,
         returns: TypeText::Plain(MARK_FINALIZING_OUTCOME),
-        doc: "Write the finalizing marker of a run whose body ended. Writes, in one statement, with\nthe pool's bounds. A naive claimed_at raises TypeError.",
+        doc: "Write the finalizing marker of a run whose body ended. Writes, in one statement, within\n10 s: a marker cancelled at the bound is not written later. A naive claimed_at raises\nTypeError.",
     },
     StubFunction {
         name: "mark_finalizing_async",

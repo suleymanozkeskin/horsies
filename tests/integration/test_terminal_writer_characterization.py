@@ -36,6 +36,7 @@ occurrence and confirm the anchor matched the writer under test.
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -404,6 +405,7 @@ def _child_miss_path(task_id: str, reason: StartMissReason, dispatched: datetime
         reason,
         dispatched,
         orphan_self_heal=False,
+        attempt_began=time.monotonic(),
     )
 
 

@@ -2,6 +2,7 @@
 
 pub mod attempt_writes;
 pub mod bound_handle;
+pub mod child_writes;
 pub mod claims;
 pub mod class_budgets;
 pub mod class_coverage;

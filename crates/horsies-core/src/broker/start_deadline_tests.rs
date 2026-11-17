@@ -76,6 +76,7 @@ async fn a_claim_past_its_deadline_does_not_start() {
             worker_process_name: "worker".to_owned(),
             beat_sender_id: WORKER.to_owned(),
         },
+        crate::broker::child_writes::WriteDeadline::start_attempt(),
     )
     .await
     .expect("the start write runs");

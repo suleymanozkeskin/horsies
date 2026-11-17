@@ -38,6 +38,7 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
+from horsies.core.worker import shared_lifecycle
 from horsies.core.worker.child_pool import _get_worker_pool, _initialize_worker_pool
 from horsies.core.worker.child_protocol import (
     ChildFrame,
@@ -52,12 +53,18 @@ from horsies.core.worker.child_protocol import (
     WireResult,
 )
 from horsies.core.models.worker_profile import ResolvedPool
+from horsies.core.worker.child_runner import StartAllowed
 from horsies.core.worker.current import set_current_app
+from horsies.core.worker.shared_child import StoppedBeforeRunning
 from horsies.core.worker.stored_timeout import TimeoutValueInvalid
 from horsies.core.worker.thread_child import ThreadRunTable, ThreadSeats
-from horsies.core.worker.thread_runner import PostgresThreadSeats
+from horsies.core.worker.thread_runner import PostgresThreadSeats, run_thread_seat_task
 from tests.broker_resources_support import listener_of
-from tests.fixtures.child_core import TEST_CHILD_POOL, child_core_handle_for
+from tests.fixtures.child_core import (
+    TEST_CHILD_POOL,
+    child_core_handle_for,
+    wait_for_start_statements_to_end,
+)
 from tests.integration.conftest import compute_test_command_fingerprint
 
 pytestmark = [pytest.mark.integration]
@@ -69,6 +76,18 @@ BODY_S = 0.5
 JOIN_S = 60.0
 LOCK_HELD_S = 0.5
 """How long a test holds a row lock before it reads what the seat did."""
+STATEMENTS_S = shared_lifecycle.RUNNING_STATEMENTS_TIMEOUT_S
+"""The time after which the core sends the cancel request of a start."""
+CANCEL_END_S = shared_lifecycle.CANCELLED_WRITE_END_S
+"""The longest end of a start after its cancel request."""
+ATTEMPT_END_S = shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S + CANCEL_END_S
+"""The longest time of one start attempt in the core."""
+REFUSAL = SeatRefusal(
+    refusal=TimeoutValueInvalid(
+        reason='stored timeout_ms is absent for execution SHARED_THREAD',
+    ),
+)
+"""The work of a run whose stored timeout the worker cannot use."""
 
 
 async def _seed_claimed_task(session: AsyncSession, *, claimed_at: datetime) -> str:
@@ -292,48 +311,83 @@ async def test_a_refusal_sets_the_row_running_and_fails_before_resolve(
     assert row.finalizing_at is not None
 
 
+async def _lock_row(session: AsyncSession, task_id: str) -> None:
+    """Take the row lock of ``task_id`` in the open transaction of
+    ``session``; it holds until the transaction ends."""
+    await session.execute(
+        text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
+        {'id': task_id},
+    )
+
+
 @pytest.mark.asyncio(loop_scope='function')
-async def test_a_refusal_whose_update_waits_on_a_row_lock_ends_once_the_lock_is_gone(
+async def test_a_refusal_whose_update_waits_on_a_row_lock_ends_at_its_bound(
     session: AsyncSession,
     thread_app: Horsies,  # noqa: ARG001
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """Another session holds the row lock. The RUNNING update of a refusal
-    goes through the core handle of the child: while the lock is held, the
-    seat reports nothing, and the row stays CLAIMED with no beat. Once the
-    lock is gone, the update applies and the refusal fails the task. The
-    statement bound of the start, which would end the update while the lock
-    is held, is the core's (#1240)."""
+    goes through the core handle of the child, which sends its cancel
+    request at the statement bound: while the lock is held, the seat ends
+    the run with OWNERSHIP_UNCONFIRMED within the bound of the attempt. The
+    cancelled update does not commit once the lock is gone: the row stays
+    CLAIMED with no beat."""
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
-    refusal = SeatRefusal(
-        refusal=TimeoutValueInvalid(
-            reason='stored timeout_ms is absent for execution SHARED_THREAD',
-        ),
-    )
-    await session.execute(
-        text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
-        {'id': task_id},
-    )
-    run = asyncio.ensure_future(
-        asyncio.to_thread(_run_on_seats, [_frame(task_id, claimed_at, refusal)]),
-    )
+    await _lock_row(session, task_id)
+    started = time.monotonic()
+
     try:
-        await asyncio.sleep(LOCK_HELD_S)
-        assert not run.done()
-        held_row = await _row(session, task_id)
-        held_beats = await _runner_beats(session, task_id)
+        [wire] = await asyncio.wait_for(
+            asyncio.to_thread(_run_on_seats, [_frame(task_id, claimed_at, REFUSAL)]),
+            ATTEMPT_END_S,
+        )
+        elapsed_s = time.monotonic() - started
     finally:
         await session.rollback()
-    [wire] = await asyncio.wait_for(run, JOIN_S)
 
-    assert held_row.status == 'CLAIMED'
-    assert held_beats == []
-    ok, payload, _reason = wire
-    assert ok is True
-    error = _task_result(payload).unwrap_err()
-    assert error.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
-    assert (await _row(session, task_id)).status == 'RUNNING'
+    assert wire == (False, '', 'OWNERSHIP_UNCONFIRMED')
+    assert STATEMENTS_S <= elapsed_s < STATEMENTS_S + CANCEL_END_S
+    assert await wait_for_start_statements_to_end(session) == 0
+    assert (await _row(session, task_id)).status == 'CLAIMED'
+    assert await _runner_beats(session, task_id) == []
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_the_running_update_of_a_refusal_ends_at_the_bound_of_the_core(
+    session: AsyncSession,
+    thread_app: Horsies,  # noqa: ARG001
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The seat program of a refusal sends no statement bound of its own: the
+    bound of its RUNNING update is the core's. Another session holds the
+    row lock; the update ends at the statement bound of the core with
+    OWNERSHIP_UNCONFIRMED, and it does not commit once the lock is gone."""
+    claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
+    frame = _frame(task_id, claimed_at, REFUSAL)
+    await _lock_row(session, task_id)
+    started = time.monotonic()
+
+    try:
+        returned = await asyncio.wait_for(
+            asyncio.to_thread(
+                run_thread_seat_task,
+                frame,
+                REFUSAL,
+                lambda: StartAllowed(),
+            ),
+            ATTEMPT_END_S,
+        )
+        elapsed_s = time.monotonic() - started
+    finally:
+        await session.rollback()
+
+    assert returned == StoppedBeforeRunning((False, '', 'OWNERSHIP_UNCONFIRMED'))
+    assert STATEMENTS_S <= elapsed_s < STATEMENTS_S + CANCEL_END_S
+    assert await wait_for_start_statements_to_end(session) == 0
+    assert (await _row(session, task_id)).status == 'CLAIMED'
+    assert await _runner_beats(session, task_id) == []
 
 
 @pytest.mark.asyncio(loop_scope='function')

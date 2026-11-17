@@ -152,6 +152,7 @@ async fn stop_dispatched(pool: &sqlx::PgPool, task_id: Uuid, dispatched: DateTim
             claimed_at: dispatched,
         },
         OrphanSelfHeal::Off,
+        crate::broker::child_writes::WriteDeadline::start_attempt(),
     )
     .await
     .expect("stop before start");

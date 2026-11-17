@@ -1492,20 +1492,24 @@ impl PostgresBroker {
     /// fences on worker ownership but deliberately not on the claim
     /// generation: once the deadline has passed, expiry is the correct
     /// outcome for whichever generation holds the row. One statement on the
-    /// main core pool, checked out as reserved work. An end and a replay of
-    /// the expiry both mean the task is expired, as Python's
+    /// main core pool, checked out as reserved work, within `deadline`, the
+    /// deadline of the start attempt whose miss path it is
+    /// ([`crate::broker::child_writes`]). An end and a replay of the expiry
+    /// both mean the task is expired, as Python's
     /// `_expire_claimed_task_before_start` (`core/worker/child_runner.py`)
     /// reads them; any other outcome is logged with its evidence at the
     /// adapter boundary. The stored error is Python's: `TASK_EXPIRED` with
     /// its message and the task and worker ids as `data`.
     ///
-    /// Errors: [`BrokerError::Statement`], or
-    /// [`BrokerError::TerminalizationContract`] for a row outside the wire
-    /// contract.
+    /// Errors: [`BrokerError::Statement`] (nothing sent when `deadline`
+    /// passed first; nothing written, a cancel at the bound included; or
+    /// `OutcomeUnknown`), or [`BrokerError::TerminalizationContract`] for a
+    /// row outside the wire contract.
     pub async fn expire_claimed_task_before_start(
         &self,
         task_id: Uuid,
         worker_id: &str,
+        deadline: crate::broker::child_writes::WriteDeadline,
     ) -> Result<PrestartExpiry, BrokerError> {
         let (open, _write) = self.core_pools_for_write()?;
         let end = crate::broker::expiry_and_orphans::expire_owned_claim(
@@ -1513,6 +1517,7 @@ impl PostgresBroker {
             self.statement_log,
             task_id,
             worker_id,
+            deadline,
         )
         .await?;
         Ok(match end {
@@ -3977,7 +3982,11 @@ mod prestart_expiry_tests {
         seed_claimed(&pool, &id, "w1").await;
 
         let not_due = broker
-            .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
+            .expire_claimed_task_before_start(
+                Uuid::parse_str(&id).unwrap(),
+                "w1",
+                crate::broker::child_writes::WriteDeadline::start_attempt(),
+            )
             .await
             .expect("expire");
         assert_eq!(
@@ -3993,7 +4002,11 @@ mod prestart_expiry_tests {
         .await
         .expect("age good_until");
         let expired = broker
-            .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
+            .expire_claimed_task_before_start(
+                Uuid::parse_str(&id).unwrap(),
+                "w1",
+                crate::broker::child_writes::WriteDeadline::start_attempt(),
+            )
             .await
             .expect("expire");
         assert_eq!(
@@ -4003,7 +4016,11 @@ mod prestart_expiry_tests {
         );
         // Python counts a replay as expired too.
         let replayed = broker
-            .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
+            .expire_claimed_task_before_start(
+                Uuid::parse_str(&id).unwrap(),
+                "w1",
+                crate::broker::child_writes::WriteDeadline::start_attempt(),
+            )
             .await
             .expect("expire replay");
         assert_eq!(replayed, PrestartExpiry::Expired);
@@ -4544,7 +4561,11 @@ mod terminal_at_stamp_tests {
         let before = database_now(&pool).await;
 
         let expired = broker
-            .expire_claimed_task_before_start(Uuid::parse_str(&id).unwrap(), "w1")
+            .expire_claimed_task_before_start(
+                Uuid::parse_str(&id).unwrap(),
+                "w1",
+                crate::broker::child_writes::WriteDeadline::start_attempt(),
+            )
             .await
             .expect("expire");
         assert_eq!(expired, PrestartExpiry::Expired);

@@ -60,6 +60,7 @@ from horsies.core.worker.child_runner import (
     _debug_imports_log,
     _run_task_entry,
     _serialization_error_response,
+    attempt_elapsed_ms,
 )
 from horsies.core.worker.run_return import SetRunning, StoppedBeforeRunning
 from tests.fixtures.run_return import wire_of
@@ -132,6 +133,22 @@ def _record(record_class: type, **fields: object) -> MagicMock:
     for name, value in fields.items():
         setattr(record, name, value)
     return record
+
+
+# The most time that a miss path of these tests may report as spent in its
+# start attempt: the fakes answer at once.
+_MOST_ELAPSED_MS = 5_000
+
+
+def _attempt_elapsed_ms(arguments: dict[str, object]) -> dict[str, object]:
+    """The arguments of a miss path call without its ``attempt_elapsed_ms``,
+    after a check that it is the whole milliseconds of a start attempt that
+    began right before the call."""
+    rest = dict(arguments)
+    elapsed = rest.pop('attempt_elapsed_ms')
+    assert isinstance(elapsed, int)
+    assert 0 <= elapsed <= _MOST_ELAPSED_MS
+    return rest
 
 
 def _ended_row(kind: str) -> MagicMock:
@@ -875,7 +892,7 @@ class TestStopBeforeStart:
         name, task_id, arguments = handle.calls[1]
         assert name == 'stop_workflow_task_before_start'
         assert task_id == uuid.UUID(TASK_ID)
-        assert arguments == {
+        assert _attempt_elapsed_ms(arguments) == {
             'worker_id': 'worker-7',
             'claimed_at': generation,
             'orphan_self_heal': True,
@@ -2033,7 +2050,7 @@ class TestExpireClaimedBeforeStart:
         name, task_id, arguments = handle.calls[1]
         assert name == 'expire_owned_claim'
         assert task_id == uuid.UUID(TASK_ID)
-        assert arguments == {'worker_id': 'worker-A'}
+        assert _attempt_elapsed_ms(arguments) == {'worker_id': 'worker-A'}
 
     @pytest.mark.parametrize(
         'refusal',
@@ -2069,6 +2086,27 @@ class TestExpireClaimedBeforeStart:
 
 
 @pytest.mark.unit
+class TestAttemptElapsedMs:
+    """``attempt_elapsed_ms``: the time since a start attempt began, which
+    the miss path sends to the core."""
+
+    def test_the_time_since_the_attempt_began_is_rounded_up_to_a_millisecond(
+        self,
+    ) -> None:
+        with patch(
+            'horsies.core.worker.child_runner.time.monotonic',
+            return_value=10.0004,
+        ):
+            assert attempt_elapsed_ms(10.0) == 1
+
+    def test_a_clock_reading_before_the_attempt_began_is_no_time(self) -> None:
+        with patch(
+            'horsies.core.worker.child_runner.time.monotonic',
+            return_value=9.0,
+        ):
+            assert attempt_elapsed_ms(10.0) == 0
+
+
 class TestStartAttempt:
     def test_a_started_row_runs_the_task_after_one_call(self) -> None:
         handle = _FakeChildHandle(
