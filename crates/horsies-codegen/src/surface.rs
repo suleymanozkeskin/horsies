@@ -218,6 +218,11 @@ const CANCEL_TASK_PARAMETERS: &[StubParameter] = &[
     keyword("include_running", "bool"),
 ];
 const WORKFLOW_ID_PARAMETERS: &[StubParameter] = &[positional("workflow_id", "uuid.UUID")];
+const DELETE_EXPIRED_WORKFLOWS_PARAMETERS: &[StubParameter] = &[
+    positional("older_than_hours", "int"),
+    positional("batch_size", "int"),
+    positional("budget_ms", "int"),
+];
 const RAW_RESULT_RECORD_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("timeout_ms", "int | None"),
@@ -382,7 +387,7 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
     },
 ];
 
-const CORE_HANDLE_METHODS: [StubFunction; 29] = [
+const CORE_HANDLE_METHODS: [StubFunction; 30] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -532,6 +537,12 @@ const CORE_HANDLE_METHODS: [StubFunction; 29] = [
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(CANCEL_WORKFLOW_OUTCOME),
         doc: "Cancel one workflow tree. Writes, in one statement. A row outside the function's contract\nraises PanicException.",
+    },
+    StubFunction {
+        name: "delete_expired_workflows_async",
+        parameters: DELETE_EXPIRED_WORKFLOWS_PARAMETERS,
+        returns: TypeText::FutureOf("WorkflowsDeleted | WorkflowDeleteFailed"),
+        doc: "One workflow retention pass of the reaper, in batches until one deletes nothing or the\nbudget has passed. Writes; each batch commits alone. A negative value raises\nOverflowError.",
     },
     StubFunction {
         name: "task_info",
@@ -1522,7 +1533,7 @@ const MONITORING_CLASSES: [StubClass; 2] = [
     },
 ];
 
-const WORKFLOW_CLASSES: [StubClass; 6] = [
+const WORKFLOW_CLASSES: [StubClass; 8] = [
     StubClass {
         name: "WorkflowPaused",
         doc: "The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed\ntasks of the paused tree are abandoned.",
@@ -1565,6 +1576,24 @@ const WORKFLOW_CLASSES: [StubClass; 6] = [
         properties: &[
             property("workflow_id", "uuid.UUID"),
             property("code", "Literal['DB_OPERATION_FAILED', 'STORED_DATA_INVALID']"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowsDeleted",
+        doc: "The workflow retention pass ended: a batch deleted no workflow, or the budget passed\nafter a batch.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("deleted", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowDeleteFailed",
+        doc: "The workflow retention pass failed. deleted_before counts the workflows of the batches\nthat committed first; a batch whose reply was lost may have committed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("deleted_before", "int"),
             property("message", "str"),
             property("retryable", "bool"),
         ],

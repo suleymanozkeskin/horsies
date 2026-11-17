@@ -49,6 +49,7 @@ use crate::operations::success::{
 };
 use crate::operations::task_info::{task_info_operation, TaskInfoParts};
 use crate::operations::workflow_lifecycle::{cancel_workflow_operation, pause_workflow_operation};
+use crate::operations::workflow_retention::delete_expired_workflows_operation;
 use crate::process_core::{core_for_call, Core};
 use crate::records::{BrokerFailure, DatabasePingRecord, HandleClosed, Outcome};
 
@@ -655,6 +656,35 @@ impl CoreHandle {
             "CoreHandle.cancel_workflow_async",
             CallKind::Write,
             cancel_workflow_operation(self.connection(), workflow_id),
+        )
+    }
+
+    /// One workflow retention pass of the reaper: batches of at most
+    /// `batch_size` rows (counted by nodes) of terminal workflows older than
+    /// `older_than_hours` with no live backing task, with their node rows,
+    /// until a batch deletes none or `budget_ms` has passed after a batch:
+    /// `WorkflowsDeleted` or `WorkflowDeleteFailed`. Writes; each batch commits
+    /// alone. Awaitable only: its caller, the reaper, runs on the worker's
+    /// event loop. A negative value raises `OverflowError`.
+    fn delete_expired_workflows_async<'py>(
+        &self,
+        py: Python<'py>,
+        older_than_hours: u32,
+        batch_size: u32,
+        budget_ms: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.delete_expired_workflows_async",
+            CallKind::Write,
+            delete_expired_workflows_operation(
+                self.connection(),
+                older_than_hours,
+                batch_size,
+                budget_ms,
+            ),
         )
     }
 

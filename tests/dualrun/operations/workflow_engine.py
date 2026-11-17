@@ -27,4 +27,11 @@ WORKFLOW_ENGINE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         mode=PoolMode(),
         core_methods=('cancel_workflow_async',),
     ),
+    DualRunOperation(
+        name='workflow retention delete',
+        production_path='horsies.core.worker.reaper:ReaperMixin._delete_expired_workflows',
+        reference_path='tests.dualrun.reference.workflow_retention_caller:delete_expired_workflows',
+        mode=PoolMode(),
+        core_methods=('delete_expired_workflows_async',),
+    ),
 )
