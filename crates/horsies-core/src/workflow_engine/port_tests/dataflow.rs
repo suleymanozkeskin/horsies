@@ -13,9 +13,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    args_from_inner, broker, child_of, claim_pass, code, ctx_result, err, error_of, finish_node,
-    handle, node, node_status, node_task_input, ok, shared_pool, spec, start, sub_workflow_node,
-    task_node, workflow_status, IsolatedDatabase, PORT_QUEUE,
+    args_from_inner, child_of, claim_once, claim_pass, code, ctx_result, err, error_of,
+    finish_node, handle, node, node_status, node_task_input, ok, shared_pool, spec, start,
+    sub_workflow_node, task_node, workflow_status, IsolatedDatabase, PORT_QUEUE,
 };
 use crate::core::registry::workflow::RegisteredWorkflowDefinition;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
@@ -687,10 +687,7 @@ async fn a_workflow_task_past_its_deadline_is_not_claimed() {
     let task_id = node(&db.pool, workflow_id, 0).await.task_id;
     tokio::time::sleep(Duration::from_millis(600)).await;
 
-    let claimed = broker(&db.pool)
-        .claim_batch(&claim_pass(PORT_QUEUE))
-        .await
-        .expect("claim pass");
+    let claimed = claim_once(&db.pool, &claim_pass(PORT_QUEUE, 10)).await;
 
     assert!(claimed.is_empty(), "the expired task was claimed");
     let live: Option<(String, Option<chrono::DateTime<chrono::Utc>>)> =
