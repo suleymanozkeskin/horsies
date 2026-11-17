@@ -239,6 +239,7 @@ export default defineConfig({
 							items: [
 								{ label: 'Health Reads', slug: 'monitoring/health-reads' },
 								{ label: 'Broker Methods', slug: 'monitoring/broker-methods' },
+								{ label: 'Web UI Mount', slug: 'monitoring/web-ui-mount' },
 							],
 						},
 						{

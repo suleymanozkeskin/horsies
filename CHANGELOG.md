@@ -473,9 +473,10 @@ unless it starts with "Added".
   runtime `run` refuses to start, because it blocks its thread.
 - **Added: `Horsies::on_child_start(hook)`.** An async hook that each worker
   child runs once on its runtime, after its pool connected and before its
-  first task; the hooks of a child run in registration order, at most
-  10 s together. A hook that fails, panics or runs longer ends the child
-  with exit code 173 and stops the worker with `CHILD_HOOK_FAILED`.
+  first task; the hooks of a child run in registration order, each for at
+  most 10 s, as each Python hook. A hook that fails, panics or runs longer
+  ends the child with exit code 173 and stops the worker with
+  `CHILD_HOOK_FAILED`; the logged cause names the hook.
 - **`WorkerConfig`, `run_worker_with`, `Worker` and `WorkerError` are
   removed.** `Horsies::run_worker(WorkerStart::profile(name))` runs a named
   profile of `AppConfig.worker_profiles` until `SIGTERM` or `SIGINT`, and
@@ -525,6 +526,15 @@ unless it starts with "Added".
   `TaskResult<T>` is removed. A task whose one parameter is a
   `TaskOutcome` or a `WorkflowContext` gets an `Input` struct, so a node
   binds the parameter by name.
+- **A single task parameter that is not a struct is stored under its
+  name.** The task attribute wraps it in the generated `Input` struct, as
+  Python stores each keyword argument: `fn double(x: i64)` stores the input
+  `{"x": 2}` for a plain send and as a workflow node (before: `2`), and
+  `register` returns `TaskFunction<double::Input, i64, E>` with
+  `double::params::x()`. The attribute reads the type's name: a primitive,
+  a string, a sequence, a set, a map, an `Option`, a tuple, an array, a
+  JSON value, a UUID, a date or time is wrapped, read through `Box`, `Arc`
+  and `Rc`. A single struct parameter, and `()`, stay the input itself.
 - **A node's input is one JSON object.** `TaskNode::args_json` and
   `kwargs_json` are replaced by `input_json(text)`, which returns a
   `Result`; `set_input` of a value that does not encode as an object is

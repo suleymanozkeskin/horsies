@@ -798,7 +798,8 @@ Each entry: Title -- summary -> URL
 - Health Reads -- the Python health methods: ping_database_async, ping_workers_async, list_worker_states_async, get_class_coverage_async, get_class_report_async, result types -> /horsies/monitoring/health-reads/
 - Broker Methods -- async inspection APIs -> /horsies/monitoring/broker-methods/
 - Web UI Overview -- browser dashboard in the horsies[web] extra -> /horsies/monitoring/web-ui-overview/
-- Web UI Deployment & Authentication -- mounted and standalone modes, identity, connection and schema contracts -> /horsies/monitoring/web-ui-deployment/
+- Web UI Deployment & Authentication -- mounted and standalone modes, authorization policies, bind rules, identity, connection and schema contracts -> /horsies/monitoring/web-ui-deployment/
+- Web UI Mount -- the Python mount: create_monitoring_app, MonitoringAuthPolicy, AllowAll, ViewOnly, TrustedHeader, MonitoringUIConfig, static assets -> /horsies/monitoring/web-ui-mount/
 - Action Semantics -- what task cancel, task rerun, and workflow pause, resume, and cancel do -> /horsies/monitoring/action-semantics/
 
 ### Operations
@@ -811,7 +812,7 @@ Each entry: Title -- summary -> URL
 - PgBouncer Troubleshooting -- transaction pooling issues with horsies and Syce, and the PgBouncer pool size for workers -> /horsies/troubleshooting/pgbouncer/
 
 ### Scheduling
-- Scheduler Overview -- how scheduler enqueues -> /horsies/scheduling/scheduler-overview/
+- Scheduler Overview -- how the scheduler enqueues: state rows, one fire per statement, database clock, slot task ids, configuration changes, catch-up, validation, task options -> /horsies/scheduling/scheduler-overview/
 - Schedule Patterns -- Interval, Daily, Weekly, etc. -> /horsies/scheduling/schedule-patterns/
 - Schedule Config -- ScheduleConfig model -> /horsies/scheduling/schedule-config/
 
@@ -870,7 +871,7 @@ WorkflowMeta, workflow_meta, metadata injection -> /horsies/concepts/workflows/w
 WorkflowDefinition, class-based workflow, build, build_with -> /horsies/concepts/workflows/subworkflows/
 ExceptionMapper, exception_mapper, error code mapping -> /horsies/tasks/error-handling/
 good_until, task expiry, deadline, with_options, TaskSendOptions -> /horsies/tasks/sending-tasks/
-schedule, delay, TaskFunction.schedule, resend_on_transient_err -> /horsies/tasks/sending-tasks/
+schedule, delay, TaskFunction.schedule, resend_on_transient_err, idempotency_reservation_window -> /horsies/tasks/sending-tasks/
 worker, child process, claim, execute -> /horsies/workers/worker-architecture/
 concurrency, max_concurrency, cluster_wide_cap, prefetch -> /horsies/workers/concurrency/
 heartbeat, crash, stale, worker recovery -> /horsies/workers/heartbeats-recovery/
@@ -903,7 +904,8 @@ on_child_process_start, child-process hook, per-child setup -> /horsies/workers/
 liveness, worker ping, class coverage, slot health, snapshot fields -> /horsies/monitoring/worker-health/
 ping_database, ping_workers, WorkerPong, WorkerStateSnapshot, ClassCoverage, ClassReport -> /horsies/monitoring/health-reads/
 web UI, horsies[web], dashboard, horsies web -> /horsies/monitoring/web-ui-overview/
-create_monitoring_app, trusted-header, authentication, mounted mode, standalone mode -> /horsies/monitoring/web-ui-deployment/
+trusted-header, authentication, mounted mode, standalone mode, schema state -> /horsies/monitoring/web-ui-deployment/
+create_monitoring_app, MonitoringAuthPolicy, MonitoringUIConfig, FastAPI mount -> /horsies/monitoring/web-ui-mount/
 cancel task, rerun task, pause workflow, resume workflow, cancel workflow, actions -> /horsies/monitoring/action-semantics/
 autovacuum, vacuum, high-churn tables -> /horsies/operations/autovacuum-tuning/
 atomic enqueue, send after commit, transaction, topology, separate database, idempotency_key, idempotency window, IDEMPOTENCY_KEY_CONFLICT, resend_on_transient_err -> /horsies/operations/atomic-enqueue-and-topology/
