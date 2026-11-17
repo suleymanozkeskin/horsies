@@ -333,6 +333,8 @@ fn test_chain() -> Vec<EmbeddedMigration> {
             script: SqlScript::new("test_migration", "SELECT 1"),
             family_row: FamilyRow::NotWritten,
             readers: ReaderPublication::NotPublished,
+            exact_indexes: &[],
+            retired_indexes: &[],
             checksum: [u8::try_from(version - 999).expect("a small test version"); CHECKSUM_BYTES],
         })
         .into()
@@ -1610,5 +1612,381 @@ async fn a_failed_reader_publication_rolls_back_migration_1000() {
     assert!(!relation_exists(&database, MIGRATIONS_TABLE).await);
     assert!(!relation_exists(&database, "horsies_client_family").await);
     assert!(!relation_exists(&database, "horsies_task_lookup_manifest").await);
+    database.drop().await;
+}
+
+// ---- Index steps ----
+
+/// The exact index of the index-step tests.
+static STEP_EXACT: [ExactIndex; 1] = [exact_index!(
+    "horsies_test_step_idx",
+    "horsies_tasks",
+    "(queue_name, priority)"
+)];
+
+/// The key of [`STEP_EXACT`], as `pg_get_indexdef` writes it.
+const STEP_EXACT_KEY: &str = "(queue_name, priority)";
+
+/// The retired index of the index-step tests.
+static STEP_RETIRED: [RetiredIndex; 1] =
+    [retired_index!("horsies_test_retired_idx", "horsies_tasks")];
+
+/// A chain of migration 1000 (installed by the test, never applied from
+/// here) and migration 1001 with `script`, [`STEP_EXACT`] and
+/// [`STEP_RETIRED`].
+fn step_chain(script: SqlScript) -> Vec<EmbeddedMigration> {
+    vec![
+        EmbeddedMigration {
+            version: BASELINE_MIGRATION_VERSION,
+            description: "baseline",
+            script: SqlScript::new("test_baseline", "SELECT 1"),
+            family_row: FamilyRow::NotWritten,
+            readers: ReaderPublication::NotPublished,
+            exact_indexes: &[],
+            retired_indexes: &[],
+            checksum: [0; CHECKSUM_BYTES],
+        },
+        EmbeddedMigration {
+            version: 1001,
+            description: "index steps",
+            script,
+            family_row: FamilyRow::NotWritten,
+            readers: ReaderPublication::NotPublished,
+            exact_indexes: &STEP_EXACT,
+            retired_indexes: &STEP_RETIRED,
+            checksum: [1; CHECKSUM_BYTES],
+        },
+    ]
+}
+
+/// The script of migration 1001 that commits.
+const STEP_SCRIPT: SqlScript = SqlScript::new("test_index_steps", "SELECT 1");
+
+/// The script of migration 1001 that fails: its transaction rolls back.
+const FAILING_STEP_SCRIPT: SqlScript = SqlScript::new(
+    "test_index_steps_failing",
+    "SELECT horsies_test_no_such_function()",
+);
+
+impl MigrationTestDatabase {
+    /// Installs migration 1000 alone, then applies `chain` from index 1 on
+    /// ([`apply_chain`]) on one session-work connection of a new core
+    /// handle.
+    async fn apply_after_baseline(
+        &self,
+        chain: &[EmbeddedMigration],
+    ) -> Result<(), SchemaInstallError> {
+        let handle = core_handle(self.database.url());
+        let open = handle
+            .pools()
+            .expect("the statement layer accepts the test URL");
+        let mut connection = open
+            .pools()
+            .session_work()
+            .checkout(CheckoutClass::Batch)
+            .await
+            .expect("check out a connection");
+        let applied = apply_chain(
+            &mut connection,
+            chain,
+            1,
+            ClientFamily::Rust,
+            StatementLog::Off,
+        )
+        .await;
+        drop(connection);
+        drop(open);
+        let _closed = handle.close().await;
+        applied
+    }
+
+    /// The oid of the relation `name`, or `None` when no relation has it.
+    async fn relation_oid(&self, name: &str) -> Option<u32> {
+        self.client()
+            .query_one(
+                "SELECT to_regclass($1)::oid FROM (SELECT 1) AS one",
+                &[&name],
+            )
+            .await
+            .expect("read the catalog")
+            .get(0)
+    }
+
+    /// The definition and the validity of the index `name`, or `None` when
+    /// no index has the name.
+    async fn index_form(&self, name: &str) -> Option<(String, bool)> {
+        self.client()
+            .query_opt(
+                "SELECT pg_get_indexdef(i.indexrelid), i.indisvalid FROM pg_index AS i \
+                 WHERE i.indexrelid = to_regclass($1)",
+                &[&name],
+            )
+            .await
+            .expect("read the index")
+            .map(|row| (row.get(0), row.get(1)))
+    }
+}
+
+/// Every declared index name of the chain and of these tests is an unquoted
+/// identifier whose build and claim names stay inside the identifier limit.
+#[test]
+fn every_declared_index_name_leaves_room_for_its_build_and_claim_names() {
+    let exact = embedded_migrations()
+        .iter()
+        .flat_map(|migration| migration.exact_indexes.iter())
+        .chain(STEP_EXACT.iter());
+    for index in exact {
+        assert!(
+            index.name.len() <= MAX_STEP_INDEX_NAME_BYTES,
+            "{}",
+            index.name
+        );
+        for name in [index.name, index.table, index.build_name, index.claim_name] {
+            assert!(crate::db::SqlIdentifier::parse(name).is_ok(), "{name}");
+        }
+    }
+    let retired = embedded_migrations()
+        .iter()
+        .flat_map(|migration| migration.retired_indexes.iter())
+        .chain(STEP_RETIRED.iter());
+    for index in retired {
+        assert!(
+            index.name.len() <= MAX_STEP_INDEX_NAME_BYTES,
+            "{}",
+            index.name
+        );
+        for name in [index.name, index.table, index.claim_name] {
+            assert!(crate::db::SqlIdentifier::parse(name).is_ok(), "{name}");
+        }
+    }
+}
+
+/// Python `TestExactIndexInstall::test_an_upgrade_keeps_each_exact_index_whose_shape_matches`:
+/// an index whose name and form match the declaration is kept, not rebuilt.
+#[tokio::test]
+#[serial]
+async fn an_index_step_keeps_an_exact_index_whose_form_matches() {
+    let database = MigrationTestDatabase::create().await;
+    database.install_baseline_only(ClientFamily::Rust).await;
+    database
+        .execute("CREATE INDEX horsies_test_step_idx ON horsies_tasks (queue_name, priority)")
+        .await;
+    let before = database.relation_oid("horsies_test_step_idx").await;
+    assert!(before.is_some());
+
+    database
+        .apply_after_baseline(&step_chain(STEP_SCRIPT))
+        .await
+        .expect("apply migration 1001");
+
+    assert_eq!(database.relation_oid("horsies_test_step_idx").await, before);
+    assert_eq!(
+        bookkeeping_rows(&database)
+            .await
+            .iter()
+            .map(|row| row.0)
+            .collect::<Vec<i64>>(),
+        vec![1000, 1001]
+    );
+    database.drop().await;
+}
+
+/// Python `TestExactIndexInstall::test_an_upgrade_drops_a_build_that_an_earlier_upgrade_left`:
+/// an invalid index under the name (an interrupted concurrent build) is
+/// built again, and the build and claim indexes that an interrupted
+/// replacement left are dropped.
+#[tokio::test]
+#[serial]
+async fn an_index_step_builds_an_invalid_index_again_and_drops_the_leftovers() {
+    let database = MigrationTestDatabase::create().await;
+    database.install_baseline_only(ClientFamily::Rust).await;
+    database
+        .execute(
+            "CREATE INDEX horsies_test_step_idx ON horsies_tasks (queue_name, priority); \
+             UPDATE pg_index SET indisvalid = FALSE \
+             WHERE indexrelid = 'horsies_test_step_idx'::regclass; \
+             CREATE INDEX horsies_test_step_idx_build ON horsies_tasks (queue_name); \
+             CREATE INDEX horsies_test_step_idx_claim ON horsies_tasks (priority);",
+        )
+        .await;
+    let invalid = database.relation_oid("horsies_test_step_idx").await;
+    assert_eq!(
+        database
+            .index_form("horsies_test_step_idx")
+            .await
+            .map(|form| form.1),
+        Some(false)
+    );
+
+    database
+        .apply_after_baseline(&step_chain(STEP_SCRIPT))
+        .await
+        .expect("apply migration 1001");
+
+    let (definition, valid) = database
+        .index_form("horsies_test_step_idx")
+        .await
+        .expect("the exact index exists");
+    assert!(valid);
+    assert!(definition.contains(STEP_EXACT_KEY), "{definition}");
+    assert_ne!(
+        database.relation_oid("horsies_test_step_idx").await,
+        invalid
+    );
+    assert_eq!(
+        database.relation_oid("horsies_test_step_idx_build").await,
+        None
+    );
+    assert_eq!(
+        database.relation_oid("horsies_test_step_idx_claim").await,
+        None
+    );
+    database.drop().await;
+}
+
+/// Python `TestExactIndexInstall::test_a_replaced_index_keeps_its_name_while_the_old_one_drops`:
+/// an index of the name with another form is replaced; each concurrent drop
+/// of the step finds an index of the declared form under the name. An event
+/// trigger records the form under the name at each `DROP INDEX`, through
+/// dblink, so the recording writes nothing in the transaction of the drop
+/// (`DROP INDEX CONCURRENTLY` must be its first action).
+#[tokio::test]
+#[serial]
+async fn a_replaced_index_keeps_its_name_while_the_old_one_drops() {
+    let database = MigrationTestDatabase::create().await;
+    database.install_baseline_only(ClientFamily::Rust).await;
+    database
+        .execute(
+            "CREATE INDEX horsies_test_step_idx ON horsies_tasks (queue_name); \
+             CREATE EXTENSION IF NOT EXISTS dblink; \
+             CREATE TABLE horsies_test_seen_at_drop (definition text NOT NULL);",
+        )
+        .await;
+    let before = database.relation_oid("horsies_test_step_idx").await;
+    let recorder = format!(
+        "CREATE FUNCTION horsies_test_record_drop() RETURNS event_trigger \
+         LANGUAGE plpgsql AS $$ \
+         BEGIN \
+             PERFORM dblink_exec({url}, format( \
+                 'INSERT INTO horsies_test_seen_at_drop VALUES (%L)', \
+                 coalesce(pg_get_indexdef(to_regclass('horsies_test_step_idx')), '<absent>'))); \
+         END $$; \
+         CREATE EVENT TRIGGER horsies_test_record_drop ON ddl_command_start \
+         WHEN TAG IN ('DROP INDEX') EXECUTE FUNCTION horsies_test_record_drop();",
+        url = sql_literal(database.database.url()),
+    );
+    database.execute(&recorder).await;
+
+    database
+        .apply_after_baseline(&step_chain(STEP_SCRIPT))
+        .await
+        .expect("apply migration 1001");
+
+    let seen: Vec<String> = database
+        .client()
+        .query("SELECT definition FROM horsies_test_seen_at_drop", &[])
+        .await
+        .expect("read the recorded forms")
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert!(!seen.is_empty(), "the step dropped no index");
+    for definition in &seen {
+        assert!(definition.contains(STEP_EXACT_KEY), "{seen:?}");
+    }
+    let after = database.relation_oid("horsies_test_step_idx").await;
+    assert!(after.is_some());
+    assert_ne!(after, before);
+    assert_eq!(
+        database.relation_oid("horsies_test_step_idx_build").await,
+        None
+    );
+    assert_eq!(
+        database.relation_oid("horsies_test_step_idx_claim").await,
+        None
+    );
+    database.drop().await;
+}
+
+/// `text` as an SQL string literal.
+fn sql_literal(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
+/// Python `TestRetiredClaimIndexes::test_a_failed_activation_keeps_the_retired_claim_indexes`:
+/// a migration whose transaction fails keeps the indexes that it retires,
+/// and no bookkeeping row is written; the next apply drops them after its
+/// row commits.
+#[tokio::test]
+#[serial]
+async fn a_failed_migration_keeps_the_indexes_that_it_retires() {
+    let database = MigrationTestDatabase::create().await;
+    database.install_baseline_only(ClientFamily::Rust).await;
+    database
+        .execute("CREATE INDEX horsies_test_retired_idx ON horsies_tasks (enqueued_at)")
+        .await;
+
+    let failed = database
+        .apply_after_baseline(&step_chain(FAILING_STEP_SCRIPT))
+        .await;
+
+    assert!(
+        matches!(failed, Err(SchemaInstallError::Statement(_))),
+        "{failed:?}"
+    );
+    assert!(database
+        .relation_oid("horsies_test_retired_idx")
+        .await
+        .is_some());
+    assert_eq!(bookkeeping_rows(&database).await.len(), 1);
+
+    database
+        .apply_after_baseline(&step_chain(STEP_SCRIPT))
+        .await
+        .expect("apply migration 1001");
+
+    assert_eq!(
+        database.relation_oid("horsies_test_retired_idx").await,
+        None
+    );
+    assert_eq!(
+        database
+            .relation_oid("horsies_test_retired_idx_claim")
+            .await,
+        None
+    );
+    assert_eq!(bookkeeping_rows(&database).await.len(), 2);
+    database.drop().await;
+}
+
+/// A relation other than an index of the table holds the name of an exact
+/// index: the migration is refused, and nothing of it is written.
+#[tokio::test]
+#[serial]
+async fn an_index_name_held_by_another_relation_refuses_the_migration() {
+    let database = MigrationTestDatabase::create().await;
+    database.install_baseline_only(ClientFamily::Rust).await;
+    database
+        .execute("CREATE TABLE horsies_test_step_idx (id integer)")
+        .await;
+
+    let refused = database
+        .apply_after_baseline(&step_chain(STEP_SCRIPT))
+        .await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(SchemaInstallError::Refused(
+                SchemaRefusal::IndexNameHeldElsewhere {
+                    version: 1001,
+                    index: "horsies_test_step_idx",
+                    table: "horsies_tasks",
+                }
+            ))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(bookkeeping_rows(&database).await.len(), 1);
     database.drop().await;
 }

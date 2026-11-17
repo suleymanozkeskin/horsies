@@ -14,7 +14,6 @@ use super::*;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::db::{PoolSizing, Reserve, WORKER_RESERVED_CONNECTIONS};
 use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
@@ -34,9 +33,7 @@ fn writer(broker: Arc<PostgresBroker>) -> OutcomeWriter {
     );
     OutcomeWriter::new(
         broker,
-        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        )),
+        crate::test_support::child_specs::no_child_specs(),
         WORKER.to_owned(),
         PayloadPolicy::default(),
         RetentionConfig::default(),

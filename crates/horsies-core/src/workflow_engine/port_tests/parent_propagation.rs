@@ -19,10 +19,10 @@ use super::support::{
     ParentLink, WorkflowSeed,
 };
 use crate::broker::PostgresBroker;
-use crate::core::config::retention::RetentionConfig;
-use crate::core::{TaskResult, WorkflowSpecRegistry};
+use crate::core::TaskResult;
+use crate::test_support::child_specs::TestChildSpecs;
 use crate::worker::execution::{run_phase2, Phase2Work, PhaseTwoForm};
-use crate::workflow_engine::recovery::recover_stuck_workflows;
+use crate::workflow_engine::recovery::recover_stuck_workflows_observed_with;
 use crate::workflow_engine::steps::ChildBuild;
 
 /// The definition key that the parent nodes name (the tests resolve no child).
@@ -78,12 +78,7 @@ async fn a_completed_child_advances_and_completes_its_parent() {
     let pool = shared_pool().await;
     let (parent, child) = seed_parent_of_a_completed_child(&pool).await;
 
-    advance_parent_of(
-        &pool,
-        child,
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-    )
-    .await;
+    advance_parent_of(&pool, child, &TestChildSpecs::empty()).await;
 
     assert_eq!(statuses(&pool, parent).await, completed_twice());
     let parent_node = node(&pool, parent, 0).await;
@@ -129,11 +124,10 @@ async fn recovery_contains_a_failing_parent_advance_and_completes_the_next_paren
     )
     .await;
 
-    let report = recover_stuck_workflows(
+    let report = recover_stuck_workflows_observed_with(
         &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
-        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        ChildBuild::Client(&TestChildSpecs::empty()),
         RECOVERY_FAILURE_LIMIT,
-        &RetentionConfig::default(),
     )
     .await
     .expect("the recovery pass returns its report");
@@ -206,12 +200,7 @@ async fn a_transient_failure_of_the_parent_advance_is_retried_and_completes_the_
 
     run_phase2(
         &PostgresBroker::from_pool(db.pool.clone()),
-        ChildBuild::Registry {
-            registry: &WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            ),
-            retention: &RetentionConfig::default(),
-        },
+        ChildBuild::Client(&TestChildSpecs::empty()),
         Phase2Work {
             task_id: child_task,
             queue_name: "default".to_owned(),

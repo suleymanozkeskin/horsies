@@ -28,7 +28,6 @@ use super::{
 use crate::broker::PostgresBroker;
 use crate::core::config::worker_profile::SelectedProfile;
 use crate::core::config::{AppConfig, WorkerResilienceConfig};
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::db::{ChannelName, PayloadFilter};
 use crate::worker::children::ChildLaunch;
 use crate::worker::claim_pass::RegisteredClasses;
@@ -79,11 +78,9 @@ fn worker_of(
     let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
     let connection = ChildConnection::of_config(&app_config.broker)
         .expect("the config of the test database validates");
-    Worker::new(
+    Worker::of_child_specs(
         broker,
-        Arc::new(WorkflowSpecRegistry::new(
-            crate::core::registry::BuilderHookName::SPEC_BUILDER,
-        )),
+        crate::test_support::child_specs::no_child_specs(),
         app_config,
         worker_config,
         SelectedProfile {

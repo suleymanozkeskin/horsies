@@ -9,16 +9,15 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    advance_parent_of, child_of, code, err, execute, finish_node, node, node_status, ok,
-    registry_of, shared_pool, spec, start, stored_result, stored_result_error, sub_workflow_node,
-    task_node, try_finish_task, workflow, workflow_status, IsolatedDatabase,
+    advance_parent_of, child_of, child_specs_of, code, err, execute, finish_node, node,
+    node_status, ok, shared_pool, spec, start, stored_result, stored_result_error,
+    sub_workflow_node, task_node, try_finish_task, workflow, workflow_status, IsolatedDatabase,
 };
-use crate::core::registry::workflow::RegisteredWorkflowDefinition;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::{
-    AnyNode, HorsiesError, SpecBuildError, SubWorkflowSummary, TaskError, TaskResult, WorkflowSpec,
-    WorkflowSpecRegistry, WorkflowStatus,
+    AnyNode, HorsiesError, SubWorkflowSummary, TaskError, TaskResult, WorkflowSpec, WorkflowStatus,
 };
+use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
 use crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH;
 
 /// A child with one task node that is its output (Python `StartChildWorkflow`).
@@ -48,8 +47,8 @@ fn summary_child() -> WorkflowSpec {
     child
 }
 
-fn registry() -> WorkflowSpecRegistry {
-    registry_of(&[start_child(), importable_child(), summary_child()])
+fn subworkflow_children() -> TestChildSpecs {
+    child_specs_of(&[start_child(), importable_child(), summary_child()])
 }
 
 fn after(mut node: AnyNode, dependencies: &[usize]) -> AnyNode {
@@ -80,10 +79,10 @@ async fn complete_child(
     parent_id: Uuid,
     task_index: i32,
     outcome: &TaskResult<serde_json::Value>,
-    registry: &WorkflowSpecRegistry,
+    child_specs: &TestChildSpecs,
 ) -> Uuid {
     let child_id = child_of(pool, parent_id, task_index).await;
-    let _task = finish_node(pool, child_id, 0, outcome, registry).await;
+    let _task = finish_node(pool, child_id, 0, outcome, child_specs).await;
     child_id
 }
 
@@ -103,7 +102,7 @@ async fn children_of(pool: &PgPool, parent_id: Uuid) -> i64 {
 #[serial]
 async fn a_dependency_completion_starts_the_child_and_links_it() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = subworkflow_children();
     let mut parent = spec(
         "parent_workflow_start",
         vec![
@@ -112,9 +111,9 @@ async fn a_dependency_completion_starts_the_child_and_links_it() {
         ],
     );
     parent.output_index = Some(1);
-    let parent_id = start(&pool, &parent, &registry).await;
+    let parent_id = start(&pool, &parent, &child_specs).await;
 
-    let _a = finish_node(&pool, parent_id, 0, &ok(serde_json::json!(4)), &registry).await;
+    let _a = finish_node(&pool, parent_id, 0, &ok(serde_json::json!(4)), &child_specs).await;
 
     let sub = node(&pool, parent_id, 1).await;
     assert_eq!(sub.status, "RUNNING");
@@ -142,14 +141,14 @@ async fn a_dependency_completion_starts_the_child_and_links_it() {
 #[serial]
 async fn a_replayed_child_completion_does_not_rewrite_a_terminal_parent_node() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = subworkflow_children();
     for child_status in ["COMPLETED", "FAILED"] {
         let mut parent = spec(
             "parent_terminal_replay_guard",
             vec![sub_workflow_node(0, &start_child())],
         );
         parent.output_index = Some(0);
-        let parent_id = start(&pool, &parent, &registry).await;
+        let parent_id = start(&pool, &parent, &child_specs).await;
         let child_id = child_of(&pool, parent_id, 0).await;
         let preserved = serde_json::to_string(&ok(serde_json::json!(11))).expect("encode");
         sqlx::query(
@@ -193,7 +192,7 @@ async fn a_replayed_child_completion_does_not_rewrite_a_terminal_parent_node() {
         .await
         .expect("end the child");
 
-        advance_parent_of(&pool, child_id, &registry).await;
+        advance_parent_of(&pool, child_id, &child_specs).await;
 
         let replayed = node(&pool, parent_id, 0).await;
         assert_eq!(replayed.status, "COMPLETED", "{child_status}");
@@ -216,14 +215,11 @@ async fn a_replayed_child_completion_does_not_rewrite_a_terminal_parent_node() {
     }
 }
 
-/// A definition that holds itself, one level deeper, as its only root node
-/// (Python `RootNestingWorkflow`). Its params are `{"level": n}`.
-fn root_nesting(key: &'static str) -> RegisteredWorkflowDefinition {
-    RegisteredWorkflowDefinition {
-        name: "root_nesting_workflow".to_owned(),
-        definition_key: key.to_owned(),
-        declared_children: Vec::new(),
-        spec_builder: Arc::new(move |input| {
+/// A build that holds its definition `key`, one level deeper, as its only
+/// root node (Python `RootNestingWorkflow`). Its params are `{"level": n}`.
+fn root_nesting(key: &'static str) -> TestChildBuild {
+    Arc::new(
+        move |input: &str| -> Result<WorkflowSpec, TestBuildRefused> {
             let level = nesting_level(input)?;
             let mut nesting = spec(
                 "root_nesting_workflow",
@@ -237,18 +233,15 @@ fn root_nesting(key: &'static str) -> RegisteredWorkflowDefinition {
             nesting.definition_key = Some(key.to_owned());
             nesting.output_index = Some(0);
             Ok(nesting)
-        }),
-    }
+        },
+    )
 }
 
 /// Nests through root nodes to the depth limit; there, a task runs first and
 /// the deeper child waits for it (Python `DependentNestingWorkflow`).
-fn dependent_nesting(key: &'static str) -> RegisteredWorkflowDefinition {
-    RegisteredWorkflowDefinition {
-        name: "dependent_nesting_workflow".to_owned(),
-        definition_key: key.to_owned(),
-        declared_children: Vec::new(),
-        spec_builder: Arc::new(move |input| {
+fn dependent_nesting(key: &'static str) -> TestChildBuild {
+    Arc::new(
+        move |input: &str| -> Result<WorkflowSpec, TestBuildRefused> {
             let level = nesting_level(input)?;
             let deeper = serde_json::json!({"level": level + 1});
             let mut nesting = match level < i64::from(MAX_SUBWORKFLOW_DEPTH) {
@@ -277,16 +270,16 @@ fn dependent_nesting(key: &'static str) -> RegisteredWorkflowDefinition {
             };
             nesting.definition_key = Some(key.to_owned());
             Ok(nesting)
-        }),
-    }
+        },
+    )
 }
 
-fn nesting_level(input: &str) -> Result<i64, SpecBuildError> {
+fn nesting_level(input: &str) -> Result<i64, TestBuildRefused> {
     serde_json::from_str::<serde_json::Value>(input)
         .ok()
         .and_then(|params| params.get("level").and_then(serde_json::Value::as_i64))
         .ok_or_else(|| {
-            SpecBuildError::Failed(HorsiesError::new(format!(
+            TestBuildRefused::Failed(HorsiesError::new(format!(
                 "nesting params without a level: {input}"
             )))
         })
@@ -324,11 +317,7 @@ async fn failed_node_code(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> 
 async fn a_root_nesting_stops_at_the_depth_limit() {
     let db = IsolatedDatabase::create().await;
     let key = "tests.port.root_nesting.v1";
-    let mut registry =
-        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    registry
-        .register_definition(root_nesting(key))
-        .expect("register the nesting definition");
+    let child_specs = TestChildSpecs::empty().with_build(key, root_nesting(key));
     let mut parent = spec(
         "root_nesting_parent",
         vec![dynamic_node(
@@ -342,7 +331,7 @@ async fn a_root_nesting_stops_at_the_depth_limit() {
     // The start builds the whole nesting in one statement: the depth-32
     // workflow fails its root node, and the start advances each parent node
     // up to the root workflow before it commits (`horsies_workflow_start_advance`).
-    let root_id = start(&db.pool, &parent, &registry).await;
+    let root_id = start(&db.pool, &parent, &child_specs).await;
 
     let deepest = workflows_at_depth(&db.pool, MAX_SUBWORKFLOW_DEPTH).await;
     assert_eq!(deepest.len(), 1);
@@ -364,11 +353,7 @@ async fn a_root_nesting_stops_at_the_depth_limit() {
 async fn a_dependent_nesting_stops_at_the_depth_limit() {
     let db = IsolatedDatabase::create().await;
     let key = "tests.port.dependent_nesting.v1";
-    let mut registry =
-        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    registry
-        .register_definition(dependent_nesting(key))
-        .expect("register the nesting definition");
+    let child_specs = TestChildSpecs::empty().with_build(key, dependent_nesting(key));
     let mut parent = spec(
         "dependent_nesting_parent",
         vec![dynamic_node(
@@ -379,7 +364,7 @@ async fn a_dependent_nesting_stops_at_the_depth_limit() {
         )],
     );
     parent.output_index = Some(0);
-    let _root = start(&db.pool, &parent, &registry).await;
+    let _root = start(&db.pool, &parent, &child_specs).await;
 
     let deepest = workflows_at_depth(&db.pool, MAX_SUBWORKFLOW_DEPTH).await;
     assert_eq!(deepest.len(), 1);
@@ -388,7 +373,7 @@ async fn a_dependent_nesting_stops_at_the_depth_limit() {
         deepest[0],
         0,
         &ok(serde_json::json!(2)),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -412,27 +397,17 @@ async fn a_dependent_nesting_stops_at_the_depth_limit() {
 async fn a_child_node_that_cannot_be_prepared_fails_the_parent_node_and_keeps_no_child() {
     let db = IsolatedDatabase::create().await;
     let key = "tests.port.later_node_prep_failure_child_workflow.v1";
-    let mut registry =
-        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    registry
-        .register_definition(RegisteredWorkflowDefinition {
-            name: "later_node_prep_failure_child_workflow".to_owned(),
-            definition_key: key.to_owned(),
-            declared_children: Vec::new(),
-            spec_builder: Arc::new(move |_input| {
-                let mut later = after(task_node(1, "partial_child_later_task"), &[0]);
-                later.queue = None;
-                later.priority = None;
-                let mut child = spec(
-                    "later_node_prep_failure_child_workflow",
-                    vec![task_node(0, "partial_child_first_task"), later],
-                );
-                child.definition_key = Some(key.to_owned());
-                child.output_index = Some(1);
-                Ok(child)
-            }),
-        })
-        .expect("register the child");
+    // The client refuses the child it built: its later node has no resolved
+    // queue, so the client cannot prepare it.
+    let child_specs = TestChildSpecs::empty().with_build(
+        key,
+        Arc::new(|_input: &str| -> Result<WorkflowSpec, TestBuildRefused> {
+            Err(TestBuildRefused::Failed(HorsiesError::new(
+                "workflow 'later_node_prep_failure_child_workflow' node 'node_1' \
+                 (task 'partial_child_later_task') has no resolved queue",
+            )))
+        }),
+    );
     let mut parent = spec(
         "parent_partial_child_prepare_failure",
         vec![
@@ -449,9 +424,16 @@ async fn a_child_node_that_cannot_be_prepared_fails_the_parent_node_and_keeps_no
         ],
     );
     parent.output_index = Some(1);
-    let parent_id = start(&db.pool, &parent, &registry).await;
+    let parent_id = start(&db.pool, &parent, &child_specs).await;
 
-    let _a = finish_node(&db.pool, parent_id, 0, &ok(serde_json::json!(1)), &registry).await;
+    let _a = finish_node(
+        &db.pool,
+        parent_id,
+        0,
+        &ok(serde_json::json!(1)),
+        &child_specs,
+    )
+    .await;
 
     let sub = node(&db.pool, parent_id, 1).await;
     assert_eq!(sub.status, "FAILED");
@@ -494,7 +476,7 @@ async fn a_failure_while_the_child_start_writes_a_nested_node_rolls_the_step_bac
     );
     child.definition_key = Some(child_key.to_owned());
     child.output_index = Some(1);
-    let registry = registry_of(&[grandchild, child.clone()]);
+    let child_specs = child_specs_of(&[grandchild, child.clone()]);
     let mut parent = spec(
         "parent_nested_sub_prepare_failure",
         vec![
@@ -503,7 +485,7 @@ async fn a_failure_while_the_child_start_writes_a_nested_node_rolls_the_step_bac
         ],
     );
     parent.output_index = Some(1);
-    let parent_id = start(&db.pool, &parent, &registry).await;
+    let parent_id = start(&db.pool, &parent, &child_specs).await;
     let upstream_task = node(&db.pool, parent_id, 0)
         .await
         .task_id
@@ -529,7 +511,7 @@ async fn a_failure_while_the_child_start_writes_a_nested_node_rolls_the_step_bac
         &db.pool,
         upstream_task,
         &ok(serde_json::json!(1)),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -548,7 +530,7 @@ async fn a_failure_while_the_child_start_writes_a_nested_node_rolls_the_step_bac
 #[serial]
 async fn one_failed_child_of_two_skips_a_join_all_dependent() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = subworkflow_children();
     let mut parent = spec(
         "parent_parallel_one_fails",
         vec![
@@ -558,17 +540,17 @@ async fn one_failed_child_of_two_skips_a_join_all_dependent() {
         ],
     );
     parent.output_index = Some(2);
-    let parent_id = start(&pool, &parent, &registry).await;
+    let parent_id = start(&pool, &parent, &child_specs).await;
 
     let _c1 = complete_child(
         &pool,
         parent_id,
         0,
         &err("C1_FAIL", "child 1 failed"),
-        &registry,
+        &child_specs,
     )
     .await;
-    let _c2 = complete_child(&pool, parent_id, 1, &ok(serde_json::json!(5)), &registry).await;
+    let _c2 = complete_child(&pool, parent_id, 1, &ok(serde_json::json!(5)), &child_specs).await;
 
     assert_eq!(node_status(&pool, parent_id, 2).await, "SKIPPED");
 }
@@ -580,7 +562,7 @@ async fn one_failed_child_of_two_skips_a_join_all_dependent() {
 #[serial]
 async fn two_failed_children_keep_the_first_error_on_the_parent() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = subworkflow_children();
     let parent = spec(
         "parent_parallel_failures_first_error",
         vec![
@@ -589,14 +571,14 @@ async fn two_failed_children_keep_the_first_error_on_the_parent() {
             task_node(2, "parallel_fail_blocker"),
         ],
     );
-    let parent_id = start(&pool, &parent, &registry).await;
+    let parent_id = start(&pool, &parent, &child_specs).await;
 
     let child1 = complete_child(
         &pool,
         parent_id,
         0,
         &err("C1_FAIL", "child 1 failed"),
-        &registry,
+        &child_specs,
     )
     .await;
     let child2 = complete_child(
@@ -604,7 +586,7 @@ async fn two_failed_children_keep_the_first_error_on_the_parent() {
         parent_id,
         1,
         &err("C2_FAIL", "child 2 failed"),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -621,7 +603,7 @@ async fn two_failed_children_keep_the_first_error_on_the_parent() {
 #[serial]
 async fn a_join_any_child_starts_on_the_first_completed_dependency() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = subworkflow_children();
     let mut sub = after(sub_workflow_node(2, &start_child()), &[0, 1]);
     sub.join = JoinType::Any;
     let mut parent = spec(
@@ -629,9 +611,16 @@ async fn a_join_any_child_starts_on_the_first_completed_dependency() {
         vec![task_node(0, "join_any_a"), task_node(1, "join_any_b"), sub],
     );
     parent.output_index = Some(2);
-    let parent_id = start(&pool, &parent, &registry).await;
+    let parent_id = start(&pool, &parent, &child_specs).await;
 
-    let _a = finish_node(&pool, parent_id, 0, &ok(serde_json::json!(10)), &registry).await;
+    let _a = finish_node(
+        &pool,
+        parent_id,
+        0,
+        &ok(serde_json::json!(10)),
+        &child_specs,
+    )
+    .await;
 
     let started = node(&pool, parent_id, 2).await;
     assert_eq!(started.status, "RUNNING");
@@ -643,7 +632,7 @@ async fn a_join_any_child_starts_on_the_first_completed_dependency() {
 #[serial]
 async fn a_child_output_completes_its_node_and_enqueues_the_dependent() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = subworkflow_children();
     let mut parent = spec(
         "parent_mid_chain",
         vec![
@@ -653,10 +642,17 @@ async fn a_child_output_completes_its_node_and_enqueues_the_dependent() {
         ],
     );
     parent.output_index = Some(2);
-    let parent_id = start(&pool, &parent, &registry).await;
+    let parent_id = start(&pool, &parent, &child_specs).await;
 
-    let _a = finish_node(&pool, parent_id, 0, &ok(serde_json::json!(6)), &registry).await;
-    let _child = complete_child(&pool, parent_id, 1, &ok(serde_json::json!(50)), &registry).await;
+    let _a = finish_node(&pool, parent_id, 0, &ok(serde_json::json!(6)), &child_specs).await;
+    let _child = complete_child(
+        &pool,
+        parent_id,
+        1,
+        &ok(serde_json::json!(50)),
+        &child_specs,
+    )
+    .await;
 
     assert_eq!(node_status(&pool, parent_id, 2).await, "ENQUEUED");
     let sub = node(&pool, parent_id, 1).await;
@@ -672,7 +668,7 @@ async fn a_child_output_completes_its_node_and_enqueues_the_dependent() {
 #[serial]
 async fn a_failed_child_summary_holds_its_counts_and_error_summary() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = subworkflow_children();
     let mut post = after(task_node(1, "summary_fail_post"), &[0]);
     post.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
     post.allow_failed_deps = true;
@@ -682,7 +678,7 @@ async fn a_failed_child_summary_holds_its_counts_and_error_summary() {
             "parent_summary_failed",
             vec![sub_workflow_node(0, &summary_child()), post],
         ),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -691,7 +687,7 @@ async fn a_failed_child_summary_holds_its_counts_and_error_summary() {
         parent_id,
         0,
         &err("CHILD_ERR", "Something went wrong"),
-        &registry,
+        &child_specs,
     )
     .await;
 
@@ -717,16 +713,12 @@ async fn a_failed_child_summary_holds_its_counts_and_error_summary() {
 async fn a_child_node_with_two_args_from_keys_starts() {
     let pool = shared_pool().await;
     let key = "tests.port.multi_param_child.v1";
-    let mut registry =
-        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
-    registry
-        .register_definition(RegisteredWorkflowDefinition {
-            name: "multi_param_child_workflow".to_owned(),
-            definition_key: key.to_owned(),
-            declared_children: Vec::new(),
-            spec_builder: Arc::new(move |input| {
+    let child_specs = TestChildSpecs::empty().with_build(
+        key,
+        Arc::new(
+            move |input: &str| -> Result<WorkflowSpec, TestBuildRefused> {
                 let params: serde_json::Value = serde_json::from_str(input).map_err(|error| {
-                    SpecBuildError::Failed(HorsiesError::new(format!(
+                    TestBuildRefused::Failed(HorsiesError::new(format!(
                         "params do not decode: {error}"
                     )))
                 })?;
@@ -740,13 +732,13 @@ async fn a_child_node_with_two_args_from_keys_starts() {
                         child.output_index = Some(0);
                         Ok(child)
                     }
-                    _ => Err(SpecBuildError::Failed(HorsiesError::new(format!(
+                    _ => Err(TestBuildRefused::Failed(HorsiesError::new(format!(
                         "params miss first or second: {input}"
                     )))),
                 }
-            }),
-        })
-        .expect("register the child");
+            },
+        ),
+    );
     let mut sub = after(
         dynamic_node(2, "multi_param_child_workflow", key, serde_json::json!({})),
         &[0, 1],
@@ -762,10 +754,24 @@ async fn a_child_node_with_two_args_from_keys_starts() {
         ],
     );
     parent.output_index = Some(2);
-    let parent_id = start(&pool, &parent, &registry).await;
+    let parent_id = start(&pool, &parent, &child_specs).await;
 
-    let _a = finish_node(&pool, parent_id, 0, &ok(serde_json::json!(10)), &registry).await;
-    let _b = finish_node(&pool, parent_id, 1, &ok(serde_json::json!(20)), &registry).await;
+    let _a = finish_node(
+        &pool,
+        parent_id,
+        0,
+        &ok(serde_json::json!(10)),
+        &child_specs,
+    )
+    .await;
+    let _b = finish_node(
+        &pool,
+        parent_id,
+        1,
+        &ok(serde_json::json!(20)),
+        &child_specs,
+    )
+    .await;
 
     let started = node(&pool, parent_id, 2).await;
     assert_eq!(started.status, "RUNNING");

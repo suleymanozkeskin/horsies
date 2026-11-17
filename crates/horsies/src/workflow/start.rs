@@ -204,3 +204,49 @@ fn start_error_code(error: &ClientStartError, workflow_id: Uuid) -> WorkflowStar
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use horsies_core::{BrokerError, ChildSpecUnavailable};
+
+    use super::*;
+
+    /// A failed start takes the code of its class: a spec that the core
+    /// refuses, or a value of it that does not encode, is
+    /// `VALIDATION_FAILED`; the schema install, a broker failure and a child
+    /// build that raised are `ENQUEUE_FAILED`.
+    #[test]
+    fn a_failed_start_takes_the_code_of_its_class() {
+        let not_json = serde_json::from_str::<u8>("not json").expect_err("the text is not JSON");
+        let cases = [
+            (
+                ClientStartError::SchemaInstall(BrokerError::ListenerClosed),
+                WorkflowStartErrorCode::EnqueueFailed,
+            ),
+            (
+                ClientStartError::Start(WorkflowError::Validation("no queue".to_owned())),
+                WorkflowStartErrorCode::ValidationFailed,
+            ),
+            (
+                ClientStartError::Start(WorkflowError::Serialization(not_json)),
+                WorkflowStartErrorCode::ValidationFailed,
+            ),
+            (
+                ClientStartError::Start(WorkflowError::Broker(BrokerError::ListenerClosed)),
+                WorkflowStartErrorCode::EnqueueFailed,
+            ),
+            (
+                ClientStartError::Start(WorkflowError::ChildSpecSource(
+                    ChildSpecUnavailable::Raised {
+                        subject: "build of the child of parent:1".to_owned(),
+                        cause: "refused".to_owned(),
+                    },
+                )),
+                WorkflowStartErrorCode::EnqueueFailed,
+            ),
+        ];
+        for (error, code) in cases {
+            assert_eq!(start_error_code(&error, Uuid::nil()), code, "{error}");
+        }
+    }
+}

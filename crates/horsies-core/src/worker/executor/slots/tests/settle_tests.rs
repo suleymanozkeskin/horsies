@@ -23,7 +23,6 @@ use super::*;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::worker::execution::{phase_retry_delay, run_phase2, Phase2Work, PhaseTwoForm};
 use crate::worker::executor::protocol::FailureDetail;
 use crate::workflow_engine::steps::ChildBuild;
@@ -35,9 +34,7 @@ fn writer(broker: Arc<PostgresBroker>) -> OutcomeWriter {
     let successes = crate::worker::executor::slots::outcome::test_successes(&broker, WORKER);
     OutcomeWriter::new(
         broker,
-        crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
-            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        )),
+        crate::test_support::child_specs::no_child_specs(),
         WORKER.to_owned(),
         PayloadPolicy::default(),
         RetentionConfig::default(),
@@ -551,12 +548,7 @@ async fn a_phase_two_that_cannot_reach_the_database_is_tried_five_more_times() {
     let started = std::time::Instant::now();
     run_phase2(
         &broker,
-        ChildBuild::Registry {
-            registry: &WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
-            ),
-            retention: &RetentionConfig::default(),
-        },
+        ChildBuild::Client(&crate::test_support::child_specs::TestChildSpecs::empty()),
         Phase2Work {
             task_id: Uuid::new_v4(),
             queue_name: "default".to_owned(),

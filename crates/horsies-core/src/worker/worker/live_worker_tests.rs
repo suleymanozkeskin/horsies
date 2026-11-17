@@ -9,7 +9,6 @@ use super::Worker;
 use crate::broker::PostgresBroker;
 use crate::core::config::worker_profile::SelectedProfile;
 use crate::core::config::AppConfig;
-use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::worker::children::ChildLaunch;
 use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
@@ -58,11 +57,9 @@ async fn a_live_worker_answers_a_ping_and_lists_its_state() {
         connection: ChildConnection::of_config(&app_config.broker)
             .expect("the config of the test database validates"),
     };
-    let worker = Worker::new(
+    let worker = Worker::of_child_specs(
         Arc::clone(&broker),
-        Arc::new(WorkflowSpecRegistry::new(
-            crate::core::registry::BuilderHookName::SPEC_BUILDER,
-        )),
+        crate::test_support::child_specs::no_child_specs(),
         app_config,
         WorkerConfig {
             queues: vec!["default".to_owned()],

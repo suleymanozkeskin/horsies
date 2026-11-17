@@ -17,15 +17,14 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    advance_parent_of, args_from_inner, child_of, code, ctx_result, err, error_of, finish_node,
-    handle, node, node_status, node_task_input, ok, registry_of, required, seed_node,
+    advance_parent_of, args_from_inner, child_of, child_specs_of, code, ctx_result, err, error_of,
+    finish_node, handle, node, node_status, node_task_input, ok, required, seed_node,
     seed_workflow, shared_pool, spec, start, sub_workflow_node, task_node, workflow,
     workflow_error_code, workflow_status, IsolatedDatabase, NodeSeed, ParentLink, WorkflowSeed,
 };
 use crate::core::workflow::node::JoinType;
-use crate::core::{
-    OnError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowSpecRegistry, WorkflowStatus,
-};
+use crate::core::{OnError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowStatus};
+use crate::test_support::child_specs::TestChildSpecs;
 
 /// The code of the failure that the driver gives a child node.
 const FAILED_CODE: &str = "DELIBERATE_FAIL";
@@ -110,19 +109,25 @@ impl Child {
     }
 
     /// Finishes the child's tasks the way the worker does.
-    async fn run(self, pool: &PgPool, child_id: Uuid, registry: &WorkflowSpecRegistry) {
+    async fn run(self, pool: &PgPool, child_id: Uuid, child_specs: &TestChildSpecs) {
         let (failing, passing) = match self {
             Self::SkippedOutput => (0, 2),
             Self::FailedOutput => (0, 1),
         };
-        let _gate = finish_node(pool, child_id, failing, &failed(), registry).await;
-        let _fallback =
-            finish_node(pool, child_id, passing, &ok(serde_json::json!(7)), registry).await;
+        let _gate = finish_node(pool, child_id, failing, &failed(), child_specs).await;
+        let _fallback = finish_node(
+            pool,
+            child_id,
+            passing,
+            &ok(serde_json::json!(7)),
+            child_specs,
+        )
+        .await;
     }
 }
 
-fn registry() -> WorkflowSpecRegistry {
-    registry_of(&[
+fn output_children() -> TestChildSpecs {
+    child_specs_of(&[
         skipped_output_child(),
         failed_output_child(),
         mid_over_skipped_child(),
@@ -132,7 +137,10 @@ fn registry() -> WorkflowSpecRegistry {
 
 async fn get_code(pool: &PgPool, workflow_id: Uuid) -> Option<String> {
     code(error_of(
-        &handle(pool, workflow_id).get(Some(GET_WAIT)).await,
+        &handle(pool, workflow_id)
+            .get(Some(GET_WAIT))
+            .await
+            .expect("the result read"),
     ))
 }
 
@@ -141,16 +149,19 @@ async fn get_code(pool: &PgPool, workflow_id: Uuid) -> Option<String> {
 #[serial]
 async fn a_skipped_output_gives_the_named_outcome() {
     let pool = shared_pool().await;
-    let registry = registry();
-    let workflow_id = start(&pool, &skipped_output_child(), &registry).await;
+    let child_specs = output_children();
+    let workflow_id = start(&pool, &skipped_output_child(), &child_specs).await;
 
     Child::SkippedOutput
-        .run(&pool, workflow_id, &registry)
+        .run(&pool, workflow_id, &child_specs)
         .await;
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
     assert_eq!(node_status(&pool, workflow_id, 1).await, "SKIPPED");
-    let got = handle(&pool, workflow_id).get(Some(GET_WAIT)).await;
+    let got = handle(&pool, workflow_id)
+        .get(Some(GET_WAIT))
+        .await
+        .expect("the result read");
     let error = error_of(&got);
     assert_eq!(code(error).as_deref(), Some("WORKFLOW_OUTPUT_SKIPPED"));
     assert_eq!(
@@ -169,10 +180,12 @@ async fn a_skipped_output_gives_the_named_outcome() {
 #[serial]
 async fn a_failed_output_outside_the_required_set_keeps_its_error() {
     let pool = shared_pool().await;
-    let registry = registry();
-    let workflow_id = start(&pool, &failed_output_child(), &registry).await;
+    let child_specs = output_children();
+    let workflow_id = start(&pool, &failed_output_child(), &child_specs).await;
 
-    Child::FailedOutput.run(&pool, workflow_id, &registry).await;
+    Child::FailedOutput
+        .run(&pool, workflow_id, &child_specs)
+        .await;
 
     let row = workflow(&pool, workflow_id).await;
     let output = node(&pool, workflow_id, 0).await;
@@ -191,7 +204,7 @@ async fn a_failed_output_outside_the_required_set_keeps_its_error() {
 #[serial]
 async fn an_err_output_fails_the_node_and_skips_a_default_dependent() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = output_children();
     for child in [Child::SkippedOutput, Child::FailedOutput] {
         let mut dependent = task_node(1, "output_skipped_consume");
         dependent.dependencies = vec![0];
@@ -201,10 +214,10 @@ async fn an_err_output_fails_the_node_and_skips_a_default_dependent() {
             vec![sub_workflow_node(0, &child.spec()), dependent],
         );
         parent.output_index = Some(1);
-        let workflow_id = start(&pool, &parent, &registry).await;
+        let workflow_id = start(&pool, &parent, &child_specs).await;
 
         child
-            .run(&pool, child_of(&pool, workflow_id, 0).await, &registry)
+            .run(&pool, child_of(&pool, workflow_id, 0).await, &child_specs)
             .await;
 
         let sub = node(&pool, workflow_id, 0).await;
@@ -232,6 +245,7 @@ async fn an_err_output_fails_the_node_and_skips_a_default_dependent() {
                 &workflow_handle
                     .result_for::<serde_json::Value>("node_0")
                     .await
+                    .expect("the node result read")
             ))
             .as_deref(),
             expected
@@ -253,7 +267,7 @@ async fn an_err_output_fails_the_node_and_skips_a_default_dependent() {
 async fn an_allow_failed_deps_dependent_receives_the_err() {
     let db = IsolatedDatabase::create().await;
     let pool = db.pool.clone();
-    let registry = registry();
+    let child_specs = output_children();
     for child in [Child::SkippedOutput, Child::FailedOutput] {
         let mut dependent = task_node(1, "output_skipped_recover");
         dependent.dependencies = vec![0];
@@ -264,10 +278,10 @@ async fn an_allow_failed_deps_dependent_receives_the_err() {
             vec![sub_workflow_node(0, &child.spec()), dependent],
         );
         parent.output_index = Some(1);
-        let workflow_id = start(&pool, &parent, &registry).await;
+        let workflow_id = start(&pool, &parent, &child_specs).await;
 
         child
-            .run(&pool, child_of(&pool, workflow_id, 0).await, &registry)
+            .run(&pool, child_of(&pool, workflow_id, 0).await, &child_specs)
             .await;
 
         assert_eq!(node_status(&pool, workflow_id, 1).await, "ENQUEUED");
@@ -287,7 +301,7 @@ async fn an_allow_failed_deps_dependent_receives_the_err() {
 async fn the_workflow_context_holds_the_named_outcome() {
     let db = IsolatedDatabase::create().await;
     let pool = db.pool.clone();
-    let registry = registry();
+    let child_specs = output_children();
     let mut dependent = task_node(1, "output_skipped_ctx_consume");
     dependent.dependencies = vec![0];
     dependent.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
@@ -297,10 +311,10 @@ async fn the_workflow_context_holds_the_named_outcome() {
         vec![sub_workflow_node(0, &skipped_output_child()), dependent],
     );
     parent.output_index = Some(1);
-    let workflow_id = start(&pool, &parent, &registry).await;
+    let workflow_id = start(&pool, &parent, &child_specs).await;
 
     Child::SkippedOutput
-        .run(&pool, child_of(&pool, workflow_id, 0).await, &registry)
+        .run(&pool, child_of(&pool, workflow_id, 0).await, &child_specs)
         .await;
 
     let input = node_task_input(&pool, workflow_id, 1).await;
@@ -316,7 +330,7 @@ async fn the_workflow_context_holds_the_named_outcome() {
 #[serial]
 async fn join_any_does_not_count_the_failed_node() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = output_children();
     let mut dependent = task_node(2, "output_skipped_after_any");
     dependent.dependencies = vec![0, 1];
     dependent.join = JoinType::Any;
@@ -329,11 +343,11 @@ async fn join_any_does_not_count_the_failed_node() {
         ],
     );
     parent.output_index = Some(2);
-    let workflow_id = start(&pool, &parent, &registry).await;
+    let workflow_id = start(&pool, &parent, &child_specs).await;
 
-    let _sibling = finish_node(&pool, workflow_id, 0, &failed(), &registry).await;
+    let _sibling = finish_node(&pool, workflow_id, 0, &failed(), &child_specs).await;
     Child::SkippedOutput
-        .run(&pool, child_of(&pool, workflow_id, 1).await, &registry)
+        .run(&pool, child_of(&pool, workflow_id, 1).await, &child_specs)
         .await;
 
     assert_eq!(node_status(&pool, workflow_id, 2).await, "SKIPPED");
@@ -344,7 +358,7 @@ async fn join_any_does_not_count_the_failed_node() {
 #[serial]
 async fn join_quorum_does_not_count_the_failed_node() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = output_children();
     let mut dependent = task_node(2, "output_skipped_after_quorum");
     dependent.dependencies = vec![0, 1];
     dependent.join = JoinType::Quorum;
@@ -358,11 +372,18 @@ async fn join_quorum_does_not_count_the_failed_node() {
         ],
     );
     parent.output_index = Some(2);
-    let workflow_id = start(&pool, &parent, &registry).await;
+    let workflow_id = start(&pool, &parent, &child_specs).await;
 
-    let _other = finish_node(&pool, workflow_id, 0, &ok(serde_json::json!(7)), &registry).await;
+    let _other = finish_node(
+        &pool,
+        workflow_id,
+        0,
+        &ok(serde_json::json!(7)),
+        &child_specs,
+    )
+    .await;
     Child::SkippedOutput
-        .run(&pool, child_of(&pool, workflow_id, 1).await, &registry)
+        .run(&pool, child_of(&pool, workflow_id, 1).await, &child_specs)
         .await;
 
     assert_eq!(node_status(&pool, workflow_id, 2).await, "SKIPPED");
@@ -373,20 +394,25 @@ async fn join_quorum_does_not_count_the_failed_node() {
 #[serial]
 async fn a_parent_success_case_is_not_met_and_get_names_the_cause() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = output_children();
     let mut parent = spec(
         "output_skipped_policy_parent",
         vec![sub_workflow_node(0, &skipped_output_child())],
     );
     parent.output_index = Some(0);
     parent.success_policy = Some(required(&[&[0]]));
-    let workflow_id = start(&pool, &parent, &registry).await;
+    let workflow_id = start(&pool, &parent, &child_specs).await;
     let child_id = child_of(&pool, workflow_id, 0).await;
 
-    Child::SkippedOutput.run(&pool, child_id, &registry).await;
+    Child::SkippedOutput
+        .run(&pool, child_id, &child_specs)
+        .await;
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
-    let got = handle(&pool, workflow_id).get(Some(GET_WAIT)).await;
+    let got = handle(&pool, workflow_id)
+        .get(Some(GET_WAIT))
+        .await
+        .expect("the result read");
     let error = error_of(&got);
     assert_eq!(code(error).as_deref(), Some("WORKFLOW_OUTPUT_SKIPPED"));
     assert_eq!(
@@ -401,7 +427,7 @@ async fn a_parent_success_case_is_not_met_and_get_names_the_cause() {
 #[serial]
 async fn a_policy_parent_with_the_node_in_no_case_keeps_its_error() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = output_children();
     let mut parent = spec(
         "output_skipped_no_case_parent",
         vec![
@@ -411,20 +437,31 @@ async fn a_policy_parent_with_the_node_in_no_case_keeps_its_error() {
     );
     parent.output_index = Some(1);
     parent.success_policy = Some(required(&[&[1]]));
-    let workflow_id = start(&pool, &parent, &registry).await;
+    let workflow_id = start(&pool, &parent, &child_specs).await;
 
     Child::SkippedOutput
-        .run(&pool, child_of(&pool, workflow_id, 0).await, &registry)
+        .run(&pool, child_of(&pool, workflow_id, 0).await, &child_specs)
         .await;
     assert_eq!(workflow_status(&pool, workflow_id).await, "RUNNING");
-    let _spare = finish_node(&pool, workflow_id, 1, &ok(serde_json::json!(7)), &registry).await;
+    let _spare = finish_node(
+        &pool,
+        workflow_id,
+        1,
+        &ok(serde_json::json!(7)),
+        &child_specs,
+    )
+    .await;
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
     assert_eq!(
         workflow_error_code(&pool, workflow_id).await.as_deref(),
         Some("WORKFLOW_OUTPUT_SKIPPED")
     );
-    match handle(&pool, workflow_id).get(Some(GET_WAIT)).await {
+    match handle(&pool, workflow_id)
+        .get(Some(GET_WAIT))
+        .await
+        .expect("the result read")
+    {
         TaskResult::Ok(value) => assert_eq!(value, serde_json::json!(7)),
         TaskResult::Err(error) => panic!("get() of a COMPLETED workflow: {error:?}"),
     }
@@ -435,7 +472,7 @@ async fn a_policy_parent_with_the_node_in_no_case_keeps_its_error() {
 #[serial]
 async fn a_pause_policy_pauses_the_parent_and_resume_finishes_it() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = output_children();
     let mut dependent = task_node(1, "output_skipped_after_pause");
     dependent.dependencies = vec![0];
     let mut parent = spec(
@@ -444,16 +481,19 @@ async fn a_pause_policy_pauses_the_parent_and_resume_finishes_it() {
     );
     parent.output_index = Some(1);
     parent.on_error = OnError::Pause;
-    let workflow_id = start(&pool, &parent, &registry).await;
+    let workflow_id = start(&pool, &parent, &child_specs).await;
 
     Child::SkippedOutput
-        .run(&pool, child_of(&pool, workflow_id, 0).await, &registry)
+        .run(&pool, child_of(&pool, workflow_id, 0).await, &child_specs)
         .await;
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "PAUSED");
     assert_eq!(node_status(&pool, workflow_id, 1).await, "PENDING");
 
-    let resumed = handle(&pool, workflow_id).resume().await.expect("resume()");
+    let resumed = handle(&pool, workflow_id)
+        .resume(&TestChildSpecs::empty())
+        .await
+        .expect("resume()");
     assert!(resumed);
 
     assert_eq!(node_status(&pool, workflow_id, 1).await, "SKIPPED");
@@ -469,17 +509,19 @@ async fn a_pause_policy_pauses_the_parent_and_resume_finishes_it() {
 #[serial]
 async fn two_levels_with_the_default_policy_give_subworkflow_failed() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = output_children();
     let mut grand = spec(
         "output_skipped_grand",
         vec![sub_workflow_node(0, &mid_over_skipped_child())],
     );
     grand.output_index = Some(0);
-    let workflow_id = start(&pool, &grand, &registry).await;
+    let workflow_id = start(&pool, &grand, &child_specs).await;
     let mid_id = child_of(&pool, workflow_id, 0).await;
     let child_id = child_of(&pool, mid_id, 0).await;
 
-    Child::SkippedOutput.run(&pool, child_id, &registry).await;
+    Child::SkippedOutput
+        .run(&pool, child_id, &child_specs)
+        .await;
 
     assert_eq!(node_status(&pool, mid_id, 0).await, "FAILED");
     assert_eq!(workflow_status(&pool, mid_id).await, "FAILED");
@@ -496,24 +538,29 @@ async fn two_levels_with_the_default_policy_give_subworkflow_failed() {
 #[serial]
 async fn two_levels_with_a_mid_case_keep_the_named_outcome() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = output_children();
     let mut grand = spec(
         "output_skipped_grand_with_case",
         vec![sub_workflow_node(0, &mid_over_skipped_child_with_case())],
     );
     grand.output_index = Some(0);
-    let workflow_id = start(&pool, &grand, &registry).await;
+    let workflow_id = start(&pool, &grand, &child_specs).await;
     let mid_id = child_of(&pool, workflow_id, 0).await;
     let child_id = child_of(&pool, mid_id, 0).await;
 
-    let _spare = finish_node(&pool, mid_id, 1, &ok(serde_json::json!(7)), &registry).await;
-    Child::SkippedOutput.run(&pool, child_id, &registry).await;
+    let _spare = finish_node(&pool, mid_id, 1, &ok(serde_json::json!(7)), &child_specs).await;
+    Child::SkippedOutput
+        .run(&pool, child_id, &child_specs)
+        .await;
 
     assert_eq!(node_status(&pool, mid_id, 0).await, "FAILED");
     assert_eq!(workflow_status(&pool, mid_id).await, "COMPLETED");
     assert_eq!(node_status(&pool, workflow_id, 0).await, "FAILED");
     assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
-    let got = handle(&pool, workflow_id).get(Some(GET_WAIT)).await;
+    let got = handle(&pool, workflow_id)
+        .get(Some(GET_WAIT))
+        .await
+        .expect("the result read");
     let error = error_of(&got);
     assert_eq!(code(error).as_deref(), Some("WORKFLOW_OUTPUT_SKIPPED"));
     assert_eq!(
@@ -539,7 +586,7 @@ fn outputless_entry(
 #[serial]
 async fn an_outputless_parent_entry_holds_the_named_outcome() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = output_children();
     let mut parent = spec(
         "output_skipped_outputless_parent",
         vec![
@@ -548,14 +595,24 @@ async fn an_outputless_parent_entry_holds_the_named_outcome() {
         ],
     );
     parent.success_policy = Some(required(&[&[1]]));
-    let workflow_id = start(&pool, &parent, &registry).await;
+    let workflow_id = start(&pool, &parent, &child_specs).await;
 
-    let _spare = finish_node(&pool, workflow_id, 1, &ok(serde_json::json!(7)), &registry).await;
+    let _spare = finish_node(
+        &pool,
+        workflow_id,
+        1,
+        &ok(serde_json::json!(7)),
+        &child_specs,
+    )
+    .await;
     Child::SkippedOutput
-        .run(&pool, child_of(&pool, workflow_id, 0).await, &registry)
+        .run(&pool, child_of(&pool, workflow_id, 0).await, &child_specs)
         .await;
 
-    let got = handle(&pool, workflow_id).get(Some(GET_WAIT)).await;
+    let got = handle(&pool, workflow_id)
+        .get(Some(GET_WAIT))
+        .await
+        .expect("the result read");
     assert_eq!(
         code(error_of(&outputless_entry(&got, "node_0"))).as_deref(),
         Some("WORKFLOW_OUTPUT_SKIPPED")
@@ -601,7 +658,7 @@ async fn seed_parent_of_a_completed_child(
 async fn child_result_text_that_does_not_parse_fails_the_node() {
     let db = IsolatedDatabase::create().await;
     let pool = db.pool.clone();
-    let registry = registry();
+    let child_specs = output_children();
     for stored in [
         Some("null"),
         Some("not{json"),
@@ -618,7 +675,7 @@ async fn child_result_text_that_does_not_parse_fails_the_node() {
         dependent.task_name = "output_skipped_stored_data_recover".to_owned();
         seed_node(&pool, &dependent).await;
 
-        advance_parent_of(&pool, child_id, &registry).await;
+        advance_parent_of(&pool, child_id, &child_specs).await;
 
         let sub = node(&pool, parent_id, 0).await;
         assert_eq!(sub.status, "FAILED", "{stored:?}");
@@ -638,6 +695,7 @@ async fn child_result_text_that_does_not_parse_fails_the_node() {
                 &handle(&pool, parent_id)
                     .result_for::<serde_json::Value>("node_0")
                     .await
+                    .expect("the node result read")
             ))
             .as_deref(),
             Some("RESULT_DESERIALIZATION_ERROR")
@@ -651,21 +709,24 @@ async fn child_result_text_that_does_not_parse_fails_the_node() {
 #[serial]
 async fn a_required_unreadable_node_reports_the_cause_at_get() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = output_children();
     for stored in [Some("null"), Some("not{json"), None] {
         let parent = WorkflowSeed::running()
             .output(0)
             .policy(serde_json::to_value(required(&[&[0]])).expect("encode the policy"));
         let (parent_id, child_id) = seed_parent_of_a_completed_child(&pool, parent, stored).await;
 
-        advance_parent_of(&pool, child_id, &registry).await;
+        advance_parent_of(&pool, child_id, &child_specs).await;
 
         assert_eq!(
             workflow_status(&pool, parent_id).await,
             "FAILED",
             "{stored:?}"
         );
-        let got = handle(&pool, parent_id).get(Some(GET_WAIT)).await;
+        let got = handle(&pool, parent_id)
+            .get(Some(GET_WAIT))
+            .await
+            .expect("the result read");
         let error = error_of(&got);
         assert_eq!(code(error).as_deref(), Some("RESULT_DESERIALIZATION_ERROR"));
         assert_eq!(
@@ -680,18 +741,21 @@ async fn a_required_unreadable_node_reports_the_cause_at_get() {
 #[serial]
 async fn an_outputless_skipped_terminal_holds_the_named_outcome() {
     let pool = shared_pool().await;
-    let registry = registry();
+    let child_specs = output_children();
     let mut outputless = skipped_output_child();
     outputless.name = "output_skipped_outputless".to_owned();
     outputless.definition_key = Some("tests.port.output_skipped_outputless.v1".to_owned());
     outputless.output_index = None;
-    let workflow_id = start(&pool, &outputless, &registry).await;
+    let workflow_id = start(&pool, &outputless, &child_specs).await;
 
     Child::SkippedOutput
-        .run(&pool, workflow_id, &registry)
+        .run(&pool, workflow_id, &child_specs)
         .await;
 
-    let got = handle(&pool, workflow_id).get(Some(GET_WAIT)).await;
+    let got = handle(&pool, workflow_id)
+        .get(Some(GET_WAIT))
+        .await
+        .expect("the result read");
     assert_eq!(
         code(error_of(&outputless_entry(&got, "node_1"))).as_deref(),
         Some("WORKFLOW_OUTPUT_SKIPPED")

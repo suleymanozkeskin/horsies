@@ -836,34 +836,28 @@ async fn resume_resumes_the_paused_tree_and_answers_the_other_outcomes() {
     seed_running_subworkflow_node(&pool, root, child).await;
     seed_claimed_node(&pool, child, claimed_task).await;
     assert!(pause_workflow(&broker, root).await.expect("pause"));
-    let registry = crate::core::WorkflowSpecRegistry::new(
-        crate::core::registry::BuilderHookName::SPEC_BUILDER,
-    );
-    let payload = crate::core::config::payload::PayloadPolicy::default();
-    let retention = crate::core::config::retention::RetentionConfig::default();
+    let children = crate::test_support::child_specs::TestChildSpecs::empty();
 
-    assert!(crate::workflow_engine::lifecycle::resume_workflow(
-        &broker, root, &registry, &payload, &retention
-    )
-    .await
-    .expect("resume"));
+    assert!(
+        crate::workflow_engine::lifecycle::resume_client_workflow(&broker, root, &children)
+            .await
+            .expect("resume")
+    );
     assert_eq!(workflow_status(&pool, root).await, "RUNNING");
     assert_eq!(workflow_status(&pool, child).await, "RUNNING");
     let (node_status, new_task) = root_node(&pool, child).await;
     assert_eq!(node_status, "ENQUEUED");
     assert_ne!(new_task, Some(claimed_task), "a new task row is minted");
 
-    assert!(!crate::workflow_engine::lifecycle::resume_workflow(
-        &broker, root, &registry, &payload, &retention
-    )
-    .await
-    .expect("resume of RUNNING"));
-    let missing = crate::workflow_engine::lifecycle::resume_workflow(
+    assert!(
+        !crate::workflow_engine::lifecycle::resume_client_workflow(&broker, root, &children)
+            .await
+            .expect("resume of RUNNING")
+    );
+    let missing = crate::workflow_engine::lifecycle::resume_client_workflow(
         &broker,
         Uuid::new_v4(),
-        &registry,
-        &payload,
-        &retention,
+        &children,
     )
     .await
     .expect_err("resume of a missing workflow");
