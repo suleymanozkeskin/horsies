@@ -28,7 +28,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::dispatch::{AttemptEnd, LoopKillCode};
+use super::dispatch::{AttemptEnd, CancelEnd, LoopKillCode, TimeoutCancel};
 use super::pool::{MemoryLimit, TaskLimit};
 use super::shared_stop::{
     culprit_retry, verdict_at_kill, ChildKill, DeadlineState, KillVerdict, KilledRunVerdict,
@@ -337,7 +337,8 @@ impl<P> SeatRuns<P> {
 
     /// End the run of a result frame, and give its end (Python `_end_run`).
     /// A timeout end is valid only for a run with a deadline whose body did
-    /// not return first.
+    /// not return first. The timeout of an async run records how it ended
+    /// after its cancel signal.
     pub fn end_run(
         &mut self,
         frame: SharedResultFrame,
@@ -354,20 +355,17 @@ impl<P> SeatRuns<P> {
             | (SeatEnd::TimedOut, _, RunWork::Refusal) => {
                 return Err(out_of_turn(frame.run, OutOfTurn::NoSuchStep))
             }
-            (
-                SeatEnd::TimedOut,
-                report,
-                RunWork::AsyncTask { timeout, .. } | RunWork::ThreadTask { timeout },
-            ) => AttemptEnd::TimedOut {
+            (SeatEnd::TimedOut, report, RunWork::AsyncTask { timeout, .. }) => {
+                AttemptEnd::TimedOut {
+                    timeout,
+                    retry: retry_after_timeout(report),
+                    cancel: TimeoutCancel::Ended(cancel_end_of(report)),
+                }
+            }
+            (SeatEnd::TimedOut, report, RunWork::ThreadTask { timeout }) => AttemptEnd::TimedOut {
                 timeout,
-                retry: match report {
-                    RunStopReport::StuckReported => RetryPlacement::Isolated,
-                    RunStopReport::NotReported
-                    | RunStopReport::DeadlineReported
-                    | RunStopReport::SecondCancelReported
-                    | RunStopReport::LeftoverCancelReported { .. }
-                    | RunStopReport::LeftoverStuckReported { .. } => RetryPlacement::SameClass,
-                },
+                retry: retry_after_timeout(report),
+                cancel: TimeoutCancel::NoSignal,
             },
         };
         let seat = self
@@ -646,13 +644,54 @@ pub fn deadline_state<P>(seat: &SeatRun<P>, closer: CloseCulprit, now: Instant) 
     }
 }
 
-/// The `TASK_TIMEOUT` end of a run with a deadline. A refusal has none, and
-/// the report rules never give it one: a defect, which crashes loud.
+/// Where the retry of a run that its child ended as a timeout runs: an
+/// isolated child for a run reported stuck, else its class. Pure.
+fn retry_after_timeout(report: &RunStopReport) -> RetryPlacement {
+    match report {
+        RunStopReport::StuckReported => RetryPlacement::Isolated,
+        RunStopReport::NotReported
+        | RunStopReport::DeadlineReported
+        | RunStopReport::SecondCancelReported
+        | RunStopReport::LeftoverCancelReported { .. }
+        | RunStopReport::LeftoverStuckReported { .. } => RetryPlacement::SameClass,
+    }
+}
+
+/// How an async run that its child ended as a timeout ended: within the
+/// grace after the cancel signal, or dropped after the grace. The child sends
+/// `second_cancel` only when the run is alive after the grace, so the report
+/// names it. A run that returned before its deadline never ends as a
+/// timeout ([`SeatRuns::end_run`] refuses it first): a defect. Pure.
+fn cancel_end_of(report: &RunStopReport) -> CancelEnd {
+    match report {
+        RunStopReport::NotReported | RunStopReport::DeadlineReported => {
+            CancelEnd::ReturnedAfterSignal
+        }
+        RunStopReport::SecondCancelReported | RunStopReport::StuckReported => {
+            CancelEnd::DroppedAfterGrace
+        }
+        RunStopReport::LeftoverCancelReported { .. }
+        | RunStopReport::LeftoverStuckReported { .. } => {
+            unreachable!("a run that returned before its deadline has no cancel end ({report:?})")
+        }
+    }
+}
+
+/// The `TASK_TIMEOUT` end of a run with a deadline whose child the worker
+/// killed. A refusal has none, and the report rules never give it one: a
+/// defect, which crashes loud.
 fn timed_out(work: RunWork, run: RunRef, retry: RetryPlacement) -> AttemptEnd {
     match work {
-        RunWork::AsyncTask { timeout, .. } | RunWork::ThreadTask { timeout } => {
-            AttemptEnd::TimedOut { timeout, retry }
-        }
+        RunWork::AsyncTask { timeout, .. } => AttemptEnd::TimedOut {
+            timeout,
+            retry,
+            cancel: TimeoutCancel::EndedByKill,
+        },
+        RunWork::ThreadTask { timeout } => AttemptEnd::TimedOut {
+            timeout,
+            retry,
+            cancel: TimeoutCancel::NoSignal,
+        },
         RunWork::Refusal => unreachable!(
             "the refused task {} ended at a deadline it does not have",
             run.task_id

@@ -51,10 +51,16 @@ fn a_timed_out_run_that_was_not_stuck_retries_in_its_class() {
         dispatch: DispatchNumber::new(1).unwrap(),
         task_id: Uuid::from_u128(1),
     };
-    for report in [
-        RunStopReport::NotReported,
-        RunStopReport::DeadlineReported,
-        RunStopReport::SecondCancelReported,
+    for (report, cancel_end) in [
+        (RunStopReport::NotReported, CancelEnd::ReturnedAfterSignal),
+        (
+            RunStopReport::DeadlineReported,
+            CancelEnd::ReturnedAfterSignal,
+        ),
+        (
+            RunStopReport::SecondCancelReported,
+            CancelEnd::DroppedAfterGrace,
+        ),
     ] {
         let mut runs = SeatRuns::new(NonZeroUsize::MIN);
         runs.add(SeatRun {
@@ -75,7 +81,8 @@ fn a_timed_out_run_that_was_not_stuck_retries_in_its_class() {
             end,
             AttemptEnd::TimedOut {
                 timeout,
-                retry: RetryPlacement::SameClass
+                retry: RetryPlacement::SameClass,
+                cancel: TimeoutCancel::Ended(cancel_end),
             },
             "{report:?}"
         );

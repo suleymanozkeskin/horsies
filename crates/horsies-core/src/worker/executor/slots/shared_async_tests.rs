@@ -109,10 +109,11 @@ fn crash_reason(end: AttemptEnd) -> String {
     }
 }
 
-fn timed_out(retry: RetryPlacement) -> AttemptEnd {
+fn timed_out(retry: RetryPlacement, cancel: TimeoutCancel) -> AttemptEnd {
     AttemptEnd::TimedOut {
         timeout: super::scripted::timeout_ms(SHORT_MS),
         retry,
+        cancel,
     }
 }
 
@@ -502,7 +503,10 @@ async fn a_run_that_timed_out_in_its_child_ends_at_its_timeout_beside_a_neighbou
 
     assert_eq!(
         answer_of(late_answer).await,
-        timed_out(RetryPlacement::SameClass)
+        timed_out(
+            RetryPlacement::SameClass,
+            TimeoutCancel::Ended(CancelEnd::ReturnedAfterSignal)
+        )
     );
     assert_eq!(answer_of(neighbour_answer).await, reported(2));
     assert_eq!(tickets(&dir), 1);
@@ -561,7 +565,7 @@ async fn the_backstop_kills_a_frozen_async_child_and_its_neighbour_takes_the_cra
 
     assert_eq!(
         answer_of(frozen_answer).await,
-        timed_out(RetryPlacement::SameClass)
+        timed_out(RetryPlacement::SameClass, TimeoutCancel::EndedByKill)
     );
     assert!(started.elapsed() >= Duration::from_secs(11));
     let _ = crash_reason(answer_of(neighbour_answer).await);
@@ -618,7 +622,7 @@ async fn a_child_that_reported_a_run_stuck_survives_the_backstops_and_the_drain_
     );
     assert_eq!(
         answer_of(stuck_answer).await,
-        timed_out(RetryPlacement::Isolated)
+        timed_out(RetryPlacement::Isolated, TimeoutCancel::EndedByKill)
     );
     let _ = crash_reason(answer_of(neighbour_answer).await);
     let _ = spawner.stop(SPAWNER_STOP_WAIT);
@@ -650,7 +654,7 @@ async fn the_backstop_kills_a_child_that_reported_only_the_deadline() {
 
     assert_eq!(
         answer_of(frozen_answer).await,
-        timed_out(RetryPlacement::SameClass)
+        timed_out(RetryPlacement::SameClass, TimeoutCancel::EndedByKill)
     );
     let _ = crash_reason(answer_of(neighbour_answer).await);
     stop_shared(pool, spawner).await;
@@ -742,7 +746,7 @@ async fn a_stuck_run_waits_for_its_neighbour_then_the_child_is_killed() {
     assert_eq!(answer_of(neighbour_answer).await, reported(1));
     assert_eq!(
         answer_of(stuck_answer).await,
-        timed_out(RetryPlacement::Isolated)
+        timed_out(RetryPlacement::Isolated, TimeoutCancel::EndedByKill)
     );
     ended(first_child.as_pid_t()).await;
     assert_eq!(
@@ -782,7 +786,13 @@ async fn a_run_that_needed_the_second_cancel_closes_its_child() {
 
     let answer = answer_of(submit_shared(&pool, &first, short_work())).await;
 
-    assert_eq!(answer, timed_out(RetryPlacement::SameClass));
+    assert_eq!(
+        answer,
+        timed_out(
+            RetryPlacement::SameClass,
+            TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace)
+        )
+    );
     assert_eq!(
         answer_of(submit_shared(&pool, &next, long_work())).await,
         reported(2)
@@ -819,7 +829,10 @@ async fn a_run_stuck_alone_is_killed_at_once_and_retries_isolated() {
 
     let answer = answer_of(submit_shared(&pool, &first, short_work())).await;
 
-    assert_eq!(answer, timed_out(RetryPlacement::Isolated));
+    assert_eq!(
+        answer,
+        timed_out(RetryPlacement::Isolated, TimeoutCancel::EndedByKill)
+    );
     ended(pid.as_pid_t()).await;
     stop_shared(pool, spawner).await;
 }
