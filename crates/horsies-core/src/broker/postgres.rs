@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::core::history::archive::results::decode_result_envelope;
 use crate::core::history::enqueue::prepare_enqueue_facts;
 use crate::core::history::identity::keys::{
-    validate_reservation_window, IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
+    reservation_window_micros, IDEMPOTENCY_WINDOW_DEFAULT_HOURS, IDEMPOTENCY_WINDOW_DEFAULT_MICROS,
 };
 use crate::core::history::reads::detail::{HistoryTaskDetail, TaskDetailResult};
 use crate::core::history::reads::result::{
@@ -780,7 +780,7 @@ pub struct PostgresBroker {
     session_pool: PgPool,
     pgbouncer_transaction_mode: bool,
     retain_rerun_input_default: bool,
-    idempotency_reservation_window_seconds: i64,
+    idempotency_reservation_window_micros: i64,
     listener: ProcessListener,
     schema_initialized: tokio::sync::OnceCell<()>,
     schema_initialization_mode: SchemaInitializationMode,
@@ -856,10 +856,7 @@ impl PostgresBroker {
             pool,
             pgbouncer_transaction_mode: false,
             retain_rerun_input_default: false,
-            idempotency_reservation_window_seconds: chrono::Duration::hours(
-                IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
-            )
-            .num_seconds(),
+            idempotency_reservation_window_micros: IDEMPOTENCY_WINDOW_DEFAULT_MICROS,
             listener,
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
@@ -885,10 +882,10 @@ impl PostgresBroker {
         retain_rerun_input_default: bool,
         window: Option<chrono::Duration>,
     ) -> Result<Self, BrokerError> {
-        let seconds = idempotency_reservation_window_seconds(window)?;
+        let micros = idempotency_reservation_window_micros(window)?;
         let mut broker = Self::from_pool(pool);
         broker.retain_rerun_input_default = retain_rerun_input_default;
-        broker.idempotency_reservation_window_seconds = seconds;
+        broker.idempotency_reservation_window_micros = micros;
         Ok(broker)
     }
 
@@ -1002,10 +999,7 @@ impl PostgresBroker {
             session_pool,
             pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
             retain_rerun_input_default: config.retain_rerun_input_default,
-            idempotency_reservation_window_seconds: chrono::Duration::hours(
-                IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
-            )
-            .num_seconds(),
+            idempotency_reservation_window_micros: IDEMPOTENCY_WINDOW_DEFAULT_MICROS,
             listener: ProcessListener::on_session_url(
                 config.effective_session_database_url(),
                 config.socket_settings(),
@@ -1023,9 +1017,9 @@ impl PostgresBroker {
         config: &PostgresConfig,
         window: Option<chrono::Duration>,
     ) -> Result<Self, BrokerError> {
-        let seconds = idempotency_reservation_window_seconds(window)?;
+        let micros = idempotency_reservation_window_micros(window)?;
         let mut broker = Self::connect_with(config).await?;
-        broker.idempotency_reservation_window_seconds = seconds;
+        broker.idempotency_reservation_window_micros = micros;
         Ok(broker)
     }
 
@@ -1037,11 +1031,11 @@ impl PostgresBroker {
         schema_initialization_mode: SchemaInitializationMode,
         window: chrono::Duration,
     ) -> Result<Self, BrokerError> {
-        let seconds = idempotency_reservation_window_seconds(Some(window))?;
+        let micros = idempotency_reservation_window_micros(Some(window))?;
         let mut broker =
             Self::connect_with_schema_initialization_mode(config, schema_initialization_mode)
                 .await?;
-        broker.idempotency_reservation_window_seconds = seconds;
+        broker.idempotency_reservation_window_micros = micros;
         Ok(broker)
     }
 
@@ -1423,7 +1417,7 @@ impl PostgresBroker {
         .map_err(|error| BrokerError::EnqueueContract(error.to_string()))?;
         let key = EnqueueKey::of(
             facts.idempotency_key_digest,
-            self.idempotency_reservation_window_seconds,
+            self.idempotency_reservation_window_micros,
         );
         self.ensure_client_family_for_write().await?;
         let (open, _write) = self.core.pools_for_write()?;
@@ -1431,7 +1425,7 @@ impl PostgresBroker {
         let execution = facts.execution.as_str();
         let fingerprint: &[u8] = facts.command_fingerprint.as_slice();
         let (start_kind, start_at, start_delay_seconds) = start.columns();
-        let (key_kind, key_scope_version, key_window_seconds) = key.columns();
+        let (key_kind, key_scope_version, key_window_micros) = key.columns();
         let key_digest = key.digest();
         let send_kind_text = send_kind.as_sql();
         let statement = &ENQUEUE_TASK;
@@ -1457,7 +1451,7 @@ impl PostgresBroker {
             .value(&key_kind)
             .value(&key_digest)
             .value(&key_scope_version)
-            .value(&key_window_seconds)
+            .value(&key_window_micros)
             .value(&send_kind_text)
             .finish();
         self.log_statement(statement);
@@ -2713,14 +2707,19 @@ impl PostgresBroker {
     }
 }
 
-fn idempotency_reservation_window_seconds(
+/// The keyed-send reservation window in microseconds, the unit of the
+/// `interval` that the key claim stores. `None` selects the 24-hour default.
+///
+/// Errors: [`BrokerError::InvalidIdempotencyReservationWindow`] for a window
+/// that is not positive, is over 30 days, or is not a whole number of
+/// microseconds.
+fn idempotency_reservation_window_micros(
     window: Option<chrono::Duration>,
 ) -> Result<i64, BrokerError> {
     let window =
         window.unwrap_or_else(|| chrono::Duration::hours(IDEMPOTENCY_WINDOW_DEFAULT_HOURS));
-    validate_reservation_window(window)
-        .map_err(|error| BrokerError::InvalidIdempotencyReservationWindow(error.to_string()))?;
-    Ok(window.num_seconds())
+    reservation_window_micros(window)
+        .map_err(|error| BrokerError::InvalidIdempotencyReservationWindow(error.to_string()))
 }
 
 /// The rerun error of a client-family check that did not pass.
@@ -3311,22 +3310,36 @@ mod tests {
     #[test]
     fn idempotency_reservation_window_defaults_and_bounds_are_exact() {
         assert_eq!(
-            idempotency_reservation_window_seconds(None).unwrap(),
-            86_400
+            idempotency_reservation_window_micros(None).unwrap(),
+            86_400_000_000
         );
         assert_eq!(
-            idempotency_reservation_window_seconds(Some(chrono::Duration::days(30))).unwrap(),
-            2_592_000,
+            idempotency_reservation_window_micros(Some(chrono::Duration::days(30))).unwrap(),
+            2_592_000_000_000,
         );
-        for invalid in [chrono::Duration::zero(), chrono::Duration::seconds(-1)] {
+        assert_eq!(
+            idempotency_reservation_window_micros(Some(chrono::Duration::milliseconds(1_500)))
+                .unwrap(),
+            1_500_000,
+        );
+        assert_eq!(
+            idempotency_reservation_window_micros(Some(chrono::Duration::milliseconds(500)))
+                .unwrap(),
+            500_000,
+        );
+        for invalid in [
+            chrono::Duration::zero(),
+            chrono::Duration::seconds(-1),
+            chrono::Duration::nanoseconds(1_500),
+        ] {
             assert!(matches!(
-                idempotency_reservation_window_seconds(Some(invalid)),
+                idempotency_reservation_window_micros(Some(invalid)),
                 Err(BrokerError::InvalidIdempotencyReservationWindow(_)),
             ));
         }
         assert!(matches!(
-            idempotency_reservation_window_seconds(Some(
-                chrono::Duration::days(30) + chrono::Duration::seconds(1),
+            idempotency_reservation_window_micros(Some(
+                chrono::Duration::days(30) + chrono::Duration::microseconds(1),
             )),
             Err(BrokerError::InvalidIdempotencyReservationWindow(_)),
         ));

@@ -701,7 +701,7 @@ async fn move_terminalizes_the_key_reservation_at_the_history_anchor() {
         &mut connection,
         &key_digest,
         1,
-        3600,
+        3_600_000_000,
         1,
         &[7_u8; 32],
         task_uuid,

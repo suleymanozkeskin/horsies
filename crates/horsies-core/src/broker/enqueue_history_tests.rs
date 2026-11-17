@@ -388,6 +388,57 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
     );
 }
 
+/// The broker binds its reservation window exact to the microsecond: a
+/// window of 1.5 s is stored as 1.5 s, and a window of 0.5 s is admitted and
+/// stored as 0.5 s (whole seconds stored 1 s and 0 s, and the key claim
+/// refused the 0 s window).
+#[tokio::test]
+#[serial]
+async fn a_keyed_send_stores_its_window_exact_to_the_microsecond() {
+    let pool = migrated_pool().await;
+    clear_enqueue_state(&pool).await;
+    for (window, key) in [
+        (Duration::milliseconds(1_500), "window-1500ms"),
+        (Duration::milliseconds(500), "window-500ms"),
+    ] {
+        let broker = PostgresBroker::from_pool_with_idempotency_reservation_window(
+            pool.clone(),
+            Some(window),
+        )
+        .expect("a window from 1 microsecond to 30 days");
+        let task_id = crate::core::history::identity::uuid7::mint_task_id().unwrap();
+        let sent = broker
+            .enqueue(
+                "p6_window",
+                "[1]",
+                "default",
+                50,
+                Some(Utc::now()),
+                None,
+                None,
+                None,
+                Some(task_id),
+                None,
+                Some(key),
+                EnqueueRetention::Default,
+                Some(false),
+                SendKind::First,
+            )
+            .await
+            .expect("the keyed send is admitted");
+        assert_eq!(sent, task_id, "{key}");
+        let stored_micros: i64 = sqlx::query_scalar(
+            "SELECT (EXTRACT(EPOCH FROM reservation_window) * 1000000)::bigint
+             FROM horsies_key_reservations WHERE task_id = $1::uuid",
+        )
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(Some(stored_micros), window.num_microseconds(), "{key}");
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
@@ -464,7 +515,7 @@ async fn an_enqueue_outcome_outside_the_contract_panics_with_the_outcome_and_the
              p_start_kind text, p_start_at timestamp with time zone, p_start_delay_s integer,
              p_fingerprint_version smallint, p_fingerprint bytea, p_lineage_kind text,
              p_rerun_of_task_id uuid, p_rerun_root_task_id uuid, p_key_kind text,
-             p_key_digest bytea, p_key_scope_version smallint, p_key_window_s integer,
+             p_key_digest bytea, p_key_scope_version smallint, p_key_window interval,
              p_send_kind text
          ) RETURNS TABLE(outcome text, task_id uuid)
          LANGUAGE sql AS $$ SELECT 'SOMETHING_ELSE'::text, p_task_id $$;",
