@@ -102,7 +102,7 @@ from horsies.core.models.workflow_pg import (
     WorkflowModel as _WorkflowModel,
     WorkflowTaskModel as _WorkflowTaskModel,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
+from horsies.core.types.core_failure import CoreOperationFailed, core_error_retryable
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.status import (
     TASK_TERMINAL_STATES,
@@ -3248,9 +3248,13 @@ class PostgresBroker:
         - a threshold below 0 or above 2,147,483,647 ms: nothing ran; not
           retryable.
 
+        - the core of this process cannot run the pass (``CoreError``: it
+          stopped, did not start, or has too many calls in flight); the
+          ``exception`` is that error, and ``retryable`` follows
+          ``core_error_retryable``.
+
         A cancel of the caller does not stop the pass: the core runs it to
-        its end. A ``CoreError`` (the core of this process stopped or did
-        not start) propagates.
+        its end.
         """
         if not SIGNED_64_BIT_MIN <= stale_threshold_ms <= SIGNED_64_BIT_MAX:
             refusal = (
@@ -3267,7 +3271,20 @@ class PostgresBroker:
                     exception=OverflowError(refusal),
                 ),
             )
-        match await self._core_handle.requeue_stale_claimed_async(stale_threshold_ms):
+        try:
+            outcome = await self._core_handle.requeue_stale_claimed_async(
+                stale_threshold_ms,
+            )
+        except CoreError as exc:
+            return Err(
+                BrokerOperationFailed(
+                    code=BrokerErrorCode.CLEANUP_FAILED,
+                    message=f'requeue_stale_claimed failed: {exc}',
+                    retryable=core_error_retryable(exc),
+                    exception=exc,
+                ),
+            )
+        match outcome:
             case StaleClaimsDrained(requeued=requeued):
                 return Ok(requeued)
             case StaleClaimsBoundReached(requeued=requeued):
