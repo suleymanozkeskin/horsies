@@ -31,7 +31,7 @@ use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::merge_good_until_into_options;
 use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, node_task_facts, require_subworkflow_node_keys,
-    stored_queue_and_priority, ChildSpecError, ChildSpecFailure,
+    stored_queue_and_priority, stored_workflow_ctx_from, ChildSpecError, ChildSpecFailure,
 };
 use crate::workflow_engine::steps::{
     run_alone, run_in_transaction, step_row_select, step_rows, ChildBuild, OwedParentAdvances,
@@ -610,9 +610,8 @@ impl StartArguments {
             true => None,
             false => Some(serde_json::to_string(&node.args_from)?),
         };
-        let workflow_ctx_from = node
-            .workflow_ctx_from
-            .as_ref()
+        // NULL for no list and for an empty list: the node takes no context.
+        let workflow_ctx_from = stored_workflow_ctx_from(node)
             .map(serde_json::to_string)
             .transpose()?;
         self.node_workflow_ids.push(workflow_id);

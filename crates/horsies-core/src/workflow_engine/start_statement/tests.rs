@@ -128,6 +128,33 @@ fn a_task_chain_gives_one_workflow_row_and_one_row_per_node() {
         .all(Option::is_some));
 }
 
+/// A node defined with an empty `workflow_ctx_from` takes no context: its row stores NULL, as for
+/// no list (Python `_graph_columns`, `horsies/core/workflows/child_build.py:479-485`). The task
+/// input of the baseline mint adds the context member for any stored array
+/// (`horsies_workflow_task_input`).
+#[test]
+fn an_empty_context_list_is_stored_as_null() {
+    let workflow_id = Uuid::new_v4();
+    let mut empty = task_node(1, vec![0]);
+    empty.workflow_ctx_from = Some(Vec::new());
+    let mut named = task_node(2, vec![0]);
+    named.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
+    let spec = spec_of("ctx_lists", vec![task_node(0, vec![]), empty, named]);
+
+    let arguments = start_arguments(
+        &spec,
+        workflow_id,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        &RetentionConfig::default(),
+    )
+    .expect("arguments");
+
+    assert_eq!(
+        arguments.node_workflow_ctx_from,
+        vec![None, None, Some(r#"["node_0"]"#.to_owned())]
+    );
+}
+
 #[test]
 fn a_subworkflow_root_gets_a_prebuilt_child_after_its_parent() {
     let workflow_id = Uuid::new_v4();

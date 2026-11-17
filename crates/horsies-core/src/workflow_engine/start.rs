@@ -11,7 +11,9 @@ use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::{prepare_workflow_task_facts, WorkflowTaskFacts};
+use crate::core::workflow::meta::WorkflowMeta;
 use crate::core::workflow::node::SubWorkflowParams;
+use crate::core::workflow::WORKFLOW_META_KWARG;
 use crate::core::{
     AnyNode, ErrorCategory, HorsiesError, OnError, OperationalErrorCode, SpecBuildError, TaskError,
     WorkflowSpec, WorkflowSpecRegistry, WorkflowStartError, WorkflowStartErrorCode,
@@ -19,6 +21,7 @@ use crate::core::{
 };
 
 use crate::db::CheckoutClass;
+use crate::workflow_engine::args_merge::input_object;
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::start_statement::{start_arguments, start_tree, StartOutcome};
@@ -602,6 +605,41 @@ pub(crate) fn stored_queue_and_priority(node: &AnyNode) -> Result<(&str, i32), W
     }
 }
 
+/// The `workflow_ctx_from` that a node row stores: the node ids of the node's context sources, or
+/// `None` (SQL NULL) when the node takes no context.
+///
+/// A node defined with an empty list takes no context, and its row stores NULL, as for no list
+/// (Python `_graph_columns`, `horsies/core/workflows/child_build.py:479-485`). The task input of
+/// the baseline mint adds the context member for any stored array, an empty one included
+/// (`horsies_workflow_task_input`). Pure.
+pub(crate) fn stored_workflow_ctx_from(node: &AnyNode) -> Option<&[String]> {
+    match node.workflow_ctx_from.as_deref() {
+        None | Some([]) => None,
+        Some(node_ids) => Some(node_ids),
+    }
+}
+
+/// The task input of the root task node `task_index` (`task_name`) of the workflow `workflow_id`
+/// that the child start of the engine code mints: the node's input with the workflow meta member
+/// ([`WORKFLOW_META_KWARG`]: the workflow id, the node index and the task name). Python writes the
+/// member into the input of every task it mints for a node
+/// (`horsies/core/workflows/engine.py:946-950`, `:1447-1453` for a child root), and so does the
+/// baseline mint (`horsies_workflow_task_input`). The worker removes it before the input decode.
+///
+/// Errors: the refusals of [`input_object`]: an input that does not read, that is not a JSON
+/// object, or that holds a number that the re-encode would round. Pure.
+pub(crate) fn input_with_workflow_meta(
+    input: &str,
+    workflow_id: Uuid,
+    task_index: i32,
+    task_name: &str,
+) -> Result<String, WorkflowError> {
+    let mut object = input_object(input)?;
+    let meta = WorkflowMeta::new(workflow_id, task_index, task_name.to_owned());
+    object.insert(WORKFLOW_META_KWARG.to_owned(), serde_json::to_value(meta)?);
+    Ok(serde_json::to_string(&object)?)
+}
+
 /// Resolve the claimable priority for a task node about to be persisted.
 ///
 /// A real task node must already have a resolved priority by insert time —
@@ -726,10 +764,7 @@ fn insert_workflow_tasks<'a>(
             // their horsies_tasks rows are bulk-inserted. Skipping the per-row CAS
             // is sound: the node rows are created in this same uncommitted tx, so no
             // concurrent transaction can observe or race them.
-            let has_ctx_from = task
-                .workflow_ctx_from
-                .as_ref()
-                .is_some_and(|v| !v.is_empty());
+            let has_ctx_from = stored_workflow_ctx_from(task).is_some();
             let fast_path =
                 is_root && !task.is_subworkflow && task.args_from.is_empty() && !has_ctx_from;
             let task_id = if fast_path {
@@ -803,7 +838,7 @@ fn insert_workflow_tasks<'a>(
                 .push_bind(p.priority)
                 .push_bind(deps)
                 .push_bind(p.args_from_json.clone())
-                .push_bind(p.node.workflow_ctx_from.clone())
+                .push_bind(stored_workflow_ctx_from(p.node).map(|node_ids| node_ids.to_vec()))
                 .push_bind(p.node.allow_failed_deps)
                 .push_bind(p.join_str.clone())
                 .push_bind(p.node.min_success)
@@ -846,6 +881,22 @@ fn insert_workflow_tasks<'a>(
         // ── Phase 3: bulk-insert fast-path roots' horsies_tasks rows ──
         // Engine-minted rows carry no fingerprint, key or retained input.
         if prepared.iter().any(|p| p.fast_path) {
+            // The task input of each fast root: its node input with the workflow meta member
+            // (Python `horsies/core/workflows/engine.py:1447-1453`). The node row keeps the
+            // node input.
+            let fast_roots = prepared
+                .iter()
+                .filter(|p| p.fast_path)
+                .map(|p| {
+                    input_with_workflow_meta(
+                        &p.node.input_json,
+                        workflow_id,
+                        p.node.index as i32,
+                        &p.node.task_name,
+                    )
+                    .map(|task_input| (p, task_input))
+                })
+                .collect::<Result<Vec<_>, WorkflowError>>()?;
             let mut tq: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
                 "INSERT INTO horsies_tasks (\
                  id, task_name, queue_name, priority, input, task_options, execution, \
@@ -855,7 +906,7 @@ fn insert_workflow_tasks<'a>(
                  is_workflow_task, updated_at, \
                  retain_rerun_input, rerun_of_task_id, rerun_root_task_id) ",
             );
-            tq.push_values(prepared.iter().filter(|p| p.fast_path), |mut b, p| {
+            tq.push_values(fast_roots.iter(), |mut b, (p, task_input)| {
                 let task_id = p
                     .task_id
                     .clone()
@@ -869,7 +920,7 @@ fn insert_workflow_tasks<'a>(
                     .push_bind(p.node.task_name.clone())
                     .push_bind(p.queue.clone())
                     .push_bind(p.priority)
-                    .push_bind(p.node.input_json.clone())
+                    .push_bind(task_input.clone())
                     .push_bind(p.merged_task_options.clone())
                     .push_bind(task_facts.facts.execution.as_str())
                     .push_bind(task_facts.facts.retention_class_key.clone())
@@ -907,6 +958,7 @@ fn insert_workflow_tasks<'a>(
             } else {
                 let task_id = enqueue_root_task(
                     &mut **tx,
+                    workflow_id,
                     p.node,
                     &p.queue,
                     p.priority,
@@ -935,11 +987,13 @@ fn insert_workflow_tasks<'a>(
     }) // end Box::pin
 }
 
-/// Create a horsies_tasks row for a root workflow task.
+/// Create a horsies_tasks row for a root workflow task of the workflow `workflow_id`.
 /// Returns the task_id. `workflow_sent_at` is the start call time of the node's workflow, which the row
-/// stores as its `sent_at`.
+/// stores as its `sent_at`. The row's input is the node input with the workflow meta member
+/// ([`input_with_workflow_meta`]).
 async fn enqueue_root_task(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    workflow_id: Uuid,
     node: &AnyNode,
     queue: &str,
     priority: i32,
@@ -951,13 +1005,19 @@ async fn enqueue_root_task(
         WorkflowError::Validation(format!("task identity mint failed: {error}"))
     })?;
     let task_facts = node_task_facts(node, queue, merged_task_options, retention)?;
+    let task_input = input_with_workflow_meta(
+        &node.input_json,
+        workflow_id,
+        node.index as i32,
+        &node.task_name,
+    )?;
 
     sqlx::query(ENQUEUE_ROOT_TASK_SQL)
         .bind(task_id)
         .bind(&node.task_name)
         .bind(queue)
         .bind(priority)
-        .bind(node.input_json.as_str())
+        .bind(task_input.as_str())
         .bind(merged_task_options)
         .bind(task_facts.facts.execution.as_str())
         .bind(&task_facts.facts.retention_class_key)
@@ -1460,6 +1520,51 @@ mod tests {
             "expected fail-closed unresolved-queue error, got: {:?}",
             err
         );
+    }
+
+    /// A node defined with no list or with an empty list takes no context, and its row stores NULL
+    /// (Python `_graph_columns`, `horsies/core/workflows/child_build.py:479-485`).
+    #[test]
+    fn an_empty_context_list_is_no_context() {
+        let mut node = node_with(false, Some(10));
+        assert_eq!(stored_workflow_ctx_from(&node), None);
+        node.workflow_ctx_from = Some(Vec::new());
+        assert_eq!(stored_workflow_ctx_from(&node), None);
+        node.workflow_ctx_from = Some(vec!["a".to_owned(), "b".to_owned()]);
+        assert_eq!(
+            stored_workflow_ctx_from(&node),
+            Some(["a".to_owned(), "b".to_owned()].as_slice())
+        );
+    }
+
+    /// The task input of a root carries the workflow meta member next to the node's own members
+    /// (Python `horsies/core/workflows/engine.py:1447-1453`). An input that is not a JSON object
+    /// takes no member and is refused.
+    #[test]
+    fn a_root_task_input_carries_the_workflow_meta() {
+        let workflow_id = Uuid::new_v4();
+        let input =
+            input_with_workflow_meta(r#"{"value": 1}"#, workflow_id, 3, "meta_task").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(parsed["value"], serde_json::json!(1));
+        assert_eq!(
+            parsed[WORKFLOW_META_KWARG],
+            serde_json::json!({
+                "workflow_id": workflow_id.to_string(),
+                "task_index": 3,
+                "task_name": "meta_task",
+            })
+        );
+        assert_eq!(parsed.as_object().map(|object| object.len()), Some(2));
+        for refused in ["null", "[1]", "\"text\""] {
+            assert!(
+                matches!(
+                    input_with_workflow_meta(refused, workflow_id, 0, "meta_task"),
+                    Err(WorkflowError::Validation(_))
+                ),
+                "{refused}"
+            );
+        }
     }
 
     /// A node of the given kind at `index` with the given dependencies.
@@ -2302,6 +2407,7 @@ mod tests {
         .expect("start workflow with fast-path root");
         let slow_id = enqueue_root_task(
             &pool,
+            workflow_id,
             &root,
             "bulk",
             17,
@@ -2367,6 +2473,7 @@ mod tests {
         .expect("start workflow with a fast-path root");
         let slow_id = enqueue_root_task(
             &pool,
+            workflow_id,
             &root,
             "default",
             17,
@@ -2404,6 +2511,93 @@ mod tests {
             .execute(&pool)
             .await
             .ok();
+    }
+
+    /// The child start of the engine code (recovery case 1.5, the engine promotion of a
+    /// sub-workflow node) writes the workflow meta into the input of each root task of the child,
+    /// on the fast path (bulk insert) and on the slow path (a root that names a context source), as
+    /// Python does (`horsies/core/workflows/engine.py:1447-1453`) and as the baseline mint does
+    /// (`horsies_workflow_task_input`). The node rows keep the node input, and a node defined with
+    /// an empty context list stores NULL. The test's transaction rolls back.
+    #[tokio::test]
+    #[serial]
+    async fn the_engine_child_start_writes_the_workflow_meta_into_each_root_task() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let parent_id = Uuid::new_v4();
+        let mut transaction = pool.begin().await.unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                 id, name, status, on_error, definition_key, depth,
+                 root_workflow_id, sent_at, created_at, started_at, updated_at
+             ) VALUES ($1, 'engine_child_meta_parent', 'RUNNING', 'fail',
+                       'tests.engine_child_meta.parent.v1', 0, $1, NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(parent_id)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        let mut fast = node_with(false, Some(17));
+        fast.task_name = "engine_child_meta_fast".to_owned();
+        fast.node_id = Some("fast".to_owned());
+        fast.input_json = r#"{"value": 1}"#.to_owned();
+        fast.workflow_ctx_from = Some(Vec::new());
+        let mut slow = node_with(false, Some(17));
+        slow.task_name = "engine_child_meta_slow".to_owned();
+        slow.node_id = Some("slow".to_owned());
+        slow.index = 1;
+        // A root that names a context source takes the per-row slow path.
+        slow.workflow_ctx_from = Some(vec!["fast".to_owned()]);
+        let child = keyed_spec(Some("tests.engine_child_meta.child.v1"), vec![fast, slow]);
+
+        let child_id = start_child_workflow_in_tx(
+            &mut transaction,
+            &child,
+            parent_id,
+            0,
+            1,
+            parent_id,
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("the child starts");
+
+        let rows: Vec<(i32, String, String, Option<Vec<String>>, String)> = sqlx::query_as(
+            "SELECT wt.task_index, wt.task_name, wt.input, wt.workflow_ctx_from::text[], t.input
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = $1
+             ORDER BY wt.task_index",
+        )
+        .bind(child_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        for (task_index, task_name, node_input, _, task_input) in &rows {
+            let task_input: serde_json::Value = serde_json::from_str(task_input).unwrap();
+            assert_eq!(
+                task_input[WORKFLOW_META_KWARG],
+                serde_json::json!({
+                    "workflow_id": child_id.to_string(),
+                    "task_index": task_index,
+                    "task_name": task_name,
+                }),
+                "{task_name}"
+            );
+            let node_input: serde_json::Value = serde_json::from_str(node_input).unwrap();
+            assert!(
+                node_input.get(WORKFLOW_META_KWARG).is_none(),
+                "{task_name}: {node_input}"
+            );
+        }
+        let (_, _, _, fast_context, fast_task_input) = &rows[0];
+        assert_eq!(*fast_context, None);
+        let fast_task_input: serde_json::Value = serde_json::from_str(fast_task_input).unwrap();
+        assert_eq!(fast_task_input["value"], serde_json::json!(1));
+        assert_eq!(rows[1].3, Some(vec!["fast".to_owned()]));
+
+        transaction.rollback().await.unwrap();
     }
 
     #[test]
