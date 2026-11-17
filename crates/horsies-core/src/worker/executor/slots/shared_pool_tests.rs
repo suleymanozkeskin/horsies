@@ -212,7 +212,6 @@ fn scripted_child(kind: SharedChildKindOfTest, frames: &[ChildFrame], after: &st
         task_id: task.task_id,
         task_name: task.task_name.clone(),
         worker_id: "worker-1".to_owned(),
-        task_kind: task.kind,
         claimed_at: task.claimed_at,
         work: work_of(kind),
         input: TaskInputText::new("{}".to_owned()),
