@@ -452,7 +452,7 @@ enum TerminalWait {
 }
 
 /// Wait until the workflow row is COMPLETED, FAILED, CANCELLED, EXPIRED or PAUSED, or until
-/// `timeout` (none: no limit), with the pattern of `PostgresBroker::get_result`:
+/// `timeout` (none: no limit), with the pattern of `PostgresBroker::get_raw_result_record`:
 /// 1. read the row; a terminal or absent row returns at once;
 /// 2. subscribe a wake for the workflow id on `workflow_done` on the broker's listener;
 /// 3. read again (race guard);

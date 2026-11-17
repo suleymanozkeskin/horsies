@@ -8,15 +8,6 @@ use crate::core::{Execution, ExecutionClass, TaskInfo, TaskStatus};
 use crate::broker::error::BrokerError;
 use crate::broker::result_types::StoredEnvelopeText;
 
-/// Columns fetched for result retrieval.
-#[derive(Debug, FromRow)]
-pub struct TaskResultRow {
-    pub id: Uuid,
-    pub status: String,
-    pub result: Option<String>,
-    pub failed_reason: Option<String>,
-}
-
 /// Columns fetched for task info.
 #[derive(Debug, FromRow)]
 pub struct TaskInfoRow {
