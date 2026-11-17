@@ -432,7 +432,9 @@ fn checkout_policy(
 ```
 
 - The workflow succeeds when one case has every required node COMPLETED.
-  The optional nodes may fail.
+- `optional` is declarative: it records which nodes may fail, and it has
+  no runtime effect. A node that no case requires does not change the
+  result, with or without `optional`.
 - `OnError::Fail` (default): a failed node fails the workflow after the DAG
   resolves. `OnError::Pause`: a failed node pauses the workflow;
   `handle.resume()` continues it.
