@@ -420,7 +420,11 @@ async fn run_one(
         Err(SendFailure::Encode(error)) => {
             // Nothing reached the child: the frame failed in the slot's
             // own path, which is a defect (Python `_serve_slot`).
-            tracing::error!(task_id = %task_id, error = %error, "the run frame could not be encoded");
+            tracing::error!(
+                task_id = %task_id,
+                error = %error,
+                "the run frame could not be encoded: {error}",
+            );
             drop(held);
             let lost = defect_kill(channel).await;
             answer.send(end_of_loss(shared, channel, lost).await);

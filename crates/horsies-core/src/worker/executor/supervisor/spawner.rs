@@ -277,7 +277,10 @@ impl Waker {
                         io::ErrorKind::Interrupted => continue,
                         io::ErrorKind::WouldBlock => return,
                         _ => {
-                            tracing::error!(error = %error, "the spawner waker could not be written");
+                            tracing::error!(
+                                error = %error,
+                                "the spawner waker could not be written: {error}",
+                            );
                             return;
                         }
                     }
@@ -541,7 +544,10 @@ impl SpawnerLoop {
                     }
                 }
                 Err(error) => {
-                    tracing::error!(error = %error, "the spawner exit watch failed; polling every child");
+                    tracing::error!(
+                        error = %error,
+                        "the spawner exit watch failed: {error}; polling every child",
+                    );
                     std::thread::sleep(POLLED_EXIT_INTERVAL);
                     self.reap_every_child();
                 }
@@ -615,7 +621,7 @@ impl SpawnerLoop {
             tracing::warn!(
                 pid = pid.get(),
                 error = %error,
-                "no exit notification for this child; its exit is polled"
+                "no exit notification for this child: {error}; its exit is polled"
             );
         }
         Ok(SpawnedChild {

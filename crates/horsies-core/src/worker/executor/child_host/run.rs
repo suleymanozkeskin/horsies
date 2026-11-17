@@ -321,7 +321,7 @@ async fn release_after_start_error(
                             task_id = %facts.task_id,
                             send,
                             error = %error,
-                            "the release after a failed start failed; sending it again",
+                            "the release after a failed start failed: {error}; sending it again",
                         );
                         tokio::time::sleep(delay).await;
                     }
@@ -331,7 +331,7 @@ async fn release_after_start_error(
                             send,
                             error = %error,
                             "the release after a failed start failed and the start attempt has \
-                             no time left; the worker releases the claim",
+                             no time left: {error}; the worker releases the claim",
                         );
                         return;
                     }
@@ -341,7 +341,8 @@ async fn release_after_start_error(
                 tracing::error!(
                     task_id = %facts.task_id,
                     error = %error,
-                    "the release after a failed start failed; the worker releases the claim",
+                    "the release after a failed start failed: {error}; the worker releases the \
+                     claim",
                 );
                 return;
             }
@@ -369,7 +370,12 @@ pub(super) async fn mark_finalizing(context: &HostContext, facts: &RunFacts) {
             tracing::debug!(task_id = %facts.task_id, "finalizing marker skipped: the claim changed");
         }
         Err(error) => {
-            tracing::warn!(task_id = %facts.task_id, error = %error, "the finalizing marker write failed");
+            tracing::warn!(
+                task_id = %facts.task_id,
+                error = %error,
+                "Failed to mark task {} finalizing: {error}",
+                facts.task_id,
+            );
         }
     }
 }

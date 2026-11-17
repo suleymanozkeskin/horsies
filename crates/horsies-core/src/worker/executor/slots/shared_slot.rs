@@ -439,7 +439,11 @@ async fn send_run(pool: &SharedPoolShared, generation: &mut Generation, queued: 
         Err(SendFailure::Encode(error)) => {
             // Nothing reached the child: the frame failed in the slot's own
             // path, which is a defect (Python `_serve_slot`).
-            tracing::error!(task_id = %run.task_id, error = %error, "a shared run frame could not be encoded");
+            tracing::error!(
+                task_id = %run.task_id,
+                error = %error,
+                "a shared run frame could not be encoded: {error}",
+            );
             generation.defect = Some(SlotDefect::frame_not_encoded(&error));
             send_kill(generation, KillReason::SlotDefect).await;
         }
@@ -485,7 +489,7 @@ async fn on_wait(pool: &SharedPoolShared, generation: &mut Generation, wait: Fra
                 tracing::error!(
                     pid = generation.channel.pid().get(),
                     error = %bad,
-                    "a shared child sent a frame out of turn; killing it",
+                    "a shared child sent a frame out of turn: {bad}; killing it",
                 );
                 Flow::Lost(generation.channel.discard_violating_child().await)
             }
