@@ -103,6 +103,29 @@ TASK_INPUT: Final = StoredJson(
 """A task's input. The input of an engine-minted workflow task names its
 workflow in ``__h_workflow_meta__``."""
 
+WORKFLOW_ERROR: Final = StoredJson(
+    storage=JsonStorage.TEXT,
+    format=Unversioned(),
+    paths=(
+        JsonPath(steps=(Key(name='data'), Key(name='workflow_id')), rule=WORKFLOW_ID),
+    ),
+)
+"""A stored workflow error. The recovery limit error names its workflow in
+``data.workflow_id``."""
+
+NODE_RESULT: Final = StoredJson(
+    storage=JsonStorage.TEXT,
+    format=Unversioned(),
+    paths=(
+        JsonPath(
+            steps=(Key(name='err'), Key(name='data'), Key(name='workflow_id')),
+            rule=WORKFLOW_ID,
+        ),
+    ),
+)
+"""A stored node result. The recovery limit result names its workflow in
+``err.data.workflow_id``."""
+
 TASK_OPTIONS: Final = StoredJson(
     storage=JsonStorage.TEXT,
     format=Unversioned(),
@@ -285,7 +308,7 @@ _WORKFLOWS: Final = TableRules(
         ('output_task_index', EXACT),
         ('success_policy', JSON),
         ('result', JSON),
-        ('error', JSON),
+        ('error', WORKFLOW_ERROR),
         ('parent_workflow_id', WORKFLOW_ID),
         ('parent_task_index', EXACT),
         ('root_workflow_id', WORKFLOW_ID),
@@ -339,7 +362,7 @@ _WORKFLOW_TASKS: Final = TableRules(
         ('sub_definition_key', EXACT),
         ('sub_workflow_params', EXACT),
         ('sub_workflow_summary', JSON),
-        ('result', JSON),
+        ('result', NODE_RESULT),
         ('error', JSON),
         ('created_at', RUN_CLOCK),
         ('started_at', RUN_CLOCK),

@@ -31,7 +31,9 @@ _QUEUE: Final = 'default'
 _PRIORITY: Final = 50
 _MAX_RETRIES: Final = 0
 _EXECUTION: Final = 'ISOLATED'
-_RETENTION: Final = 'forever'
+_RETENTION: Final = 'standard_30d'
+"""The class that a default app config resolves for the default queue, as a
+start writes it: a promotion copies the node's class onto the task row."""
 _HOST: Final = 'dualrun-host'
 _PID: Final = 4242
 _PROCESS: Final = 'dualrun-worker-process'
@@ -53,12 +55,18 @@ class OnError(Enum):
 
 @dataclass(frozen=True, slots=True)
 class NodeSeed:
-    """One node. ``name`` is the task name, or the child workflow name of a sub-workflow node."""
+    """One node. ``name`` is the task name, or the child workflow name of a sub-workflow node.
+
+    ``definition_key`` is the key that loads the child of a sub-workflow node;
+    ``None`` on a task node, and on a sub-workflow node whose child no test
+    builds.
+    """
 
     index: int
     name: str
     kind: NodeKind
     dependencies: tuple[int, ...]
+    definition_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,10 +102,16 @@ def task_node(index: int, name: str, *dependencies: int) -> NodeSeed:
     return NodeSeed(index=index, name=name, kind=NodeKind.TASK, dependencies=dependencies)
 
 
-def subworkflow_node(index: int, child_name: str, *dependencies: int) -> NodeSeed:
+def subworkflow_node(
+    index: int, child_name: str, *dependencies: int, definition_key: str | None = None,
+) -> NodeSeed:
     """A sub-workflow node whose child workflow is named ``child_name``."""
     return NodeSeed(
-        index=index, name=child_name, kind=NodeKind.SUBWORKFLOW, dependencies=dependencies,
+        index=index,
+        name=child_name,
+        kind=NodeKind.SUBWORKFLOW,
+        dependencies=dependencies,
+        definition_key=definition_key,
     )
 
 
@@ -174,7 +188,7 @@ def start_parameters(workflows: Sequence[WorkflowSeed]) -> dict[str, object]:
         'node_retention_class_keys': [_RETENTION if _is_task(node) else None for _, node in nodes],
         'node_is_subworkflow': [not _is_task(node) for _, node in nodes],
         'node_sub_workflow_names': [None if _is_task(node) else node.name for _, node in nodes],
-        'node_sub_definition_keys': [None for _ in nodes],
+        'node_sub_definition_keys': [node.definition_key for _, node in nodes],
         'node_sub_workflow_params': [None if _is_task(node) else 'NOT_GIVEN' for _, node in nodes],
         'failed_workflow_ids': [],
         'failed_task_indexes': [],
@@ -224,6 +238,51 @@ _PAUSE_WORKFLOW_SQL: Final[LiteralString] = """
 """
 
 
+_FINISH_SUCCESS_SQL: Final[LiteralString] = """
+    SELECT outcome FROM horsies_finish_workflow_success(
+        %(task)s, %(worker)s,
+        (SELECT claimed_at FROM horsies_tasks WHERE id = %(task)s), %(result)s
+    )
+"""
+
+_NODE_FINISH_SQL: Final[LiteralString] = """
+    SELECT row_kind, disposition FROM horsies_workflow_node_finish(%(task)s, FALSE, 'READ')
+"""
+
+_PAUSE_TREE_SQL: Final[LiteralString] = """
+    SELECT outcome FROM horsies_workflow_pause(%(wf)s)
+"""
+
+
+def finish_node_task(
+    connection: Connection,
+    workflow_id: uuid.UUID,
+    index: int,
+    worker_id: str,
+    result_json: str,
+) -> uuid.UUID:
+    """Finish the RUNNING task of node ``index`` with ``result_json``: the
+    success of phase 1, then phase 2 with no wake. The node must owe no
+    child start (its workflow is PAUSED, or no sub-workflow node is below it)."""
+    task_id = node_task_id(connection, workflow_id, index)
+    finished = connection.execute(
+        _FINISH_SUCCESS_SQL, {'task': task_id, 'worker': worker_id, 'result': result_json},
+    ).fetchone()
+    assert finished is not None and finished[0] == 'APPLIED', (
+        f'the success of node {index} of {workflow_id} returned {finished}'
+    )
+    rows = connection.execute(_NODE_FINISH_SQL, {'task': task_id}).fetchall()
+    kinds = sorted((str(row[0]), str(row[1])) for row in rows)
+    assert kinds == [('OUTCOME', 'APPLIED')], f'the phase 2 of node {index} returned {kinds}'
+    return task_id
+
+
+def pause_tree(connection: Connection, workflow_id: uuid.UUID) -> None:
+    """Pause a RUNNING workflow and its RUNNING descendants, as the pause does."""
+    paused = connection.execute(_PAUSE_TREE_SQL, {'wf': workflow_id}).fetchone()
+    assert paused is not None and paused[0] == 'PAUSED', f'the pause returned {paused}'
+
+
 def node_task_id(connection: Connection, workflow_id: uuid.UUID, index: int) -> uuid.UUID:
     """The task of node ``index`` of ``workflow_id``; the node must have one."""
     record = connection.execute(_NODE_TASK_SQL, {'wf': workflow_id, 'idx': index}).fetchone()
@@ -270,6 +329,38 @@ def pause_workflow_row(connection: Connection, workflow_id: uuid.UUID) -> None:
     """Set one RUNNING workflow row PAUSED; its descendants and tasks stay."""
     cursor = connection.execute(_PAUSE_WORKFLOW_SQL, {'wf': workflow_id})
     assert cursor.rowcount == 1, f'workflow {workflow_id} is not RUNNING'
+
+
+_PENDING_SQL: Final[LiteralString] = """
+    INSERT INTO horsies_workflow_phase2_pending (
+        task_id, workflow_id, workflow_node_row_id, terminalization_kind, recovery_source,
+        history_class, history_anchor, history_schema_version, result_digest,
+        quarantine_task_id, created_at, attempt_count, last_attempt_at, last_failure_class
+    )
+    SELECT n.task_id, n.workflow_id, n.id, 'COMPLETE_LOCKED', 'HISTORY',
+           'forever', now(), 1, sha256(convert_to('seed result', 'UTF8')),
+           NULL, now() - interval '1 minute', %(attempts)s,
+           CASE WHEN %(attempts)s = 0 THEN NULL ELSE now() END,
+           CASE WHEN %(attempts)s = 0 THEN NULL ELSE 'RAISED' END
+    FROM horsies_workflow_tasks n
+    WHERE n.workflow_id = %(wf)s AND n.task_index = %(idx)s AND n.task_id IS NOT NULL
+"""
+
+
+def insert_phase2_pending(
+    connection: Connection, workflow_id: uuid.UUID, index: int, attempts: int,
+) -> uuid.UUID:
+    """A phase-2 record of the task of node ``index``, with ``attempts`` raised passes.
+
+    The record points at a history row that the seed does not write; the
+    quarantine of the record then reports that the source is absent.
+    """
+    task_id = node_task_id(connection, workflow_id, index)
+    cursor = connection.execute(
+        _PENDING_SQL, {'wf': workflow_id, 'idx': index, 'attempts': attempts},
+    )
+    assert cursor.rowcount == 1, f'node {index} of {workflow_id} has no task'
+    return task_id
 
 
 def cover_history(database: DualRunDatabase) -> None:

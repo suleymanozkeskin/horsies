@@ -1003,6 +1003,8 @@ async def enqueue_subworkflow_task(
     all_dep_task_names: dict[int, str] | None = None,
     parent_depth: int = 0,
     root_workflow_id: str | None = None,
+    *,
+    child_sent_at: datetime | None = None,
 ) -> str | None:
     """
     Start a child workflow for a SubWorkflowNode.
@@ -1031,6 +1033,12 @@ async def enqueue_subworkflow_task(
         all_dep_results: Results from ALL completed dependencies (by index)
         parent_depth: Nesting depth of the parent workflow
         root_workflow_id: Root workflow ID (for efficient queries)
+        child_sent_at: The ``sent_at`` of the child workflow and of the task
+            rows of its roots: the call time of the start that writes the
+            child. A workflow start passes its own call time for the child of
+            a sub-workflow root, and a child start passes its call time down
+            to the children of its own sub-workflow roots. ``None``: the call
+            time of this child start.
 
     Returns:
         child_workflow_id if started, None if already started or not ready.
@@ -1277,7 +1285,8 @@ async def enqueue_subworkflow_task(
             ]
 
     child_output_index = child_spec.output.index if child_spec.output else None
-    child_sent_at = datetime.now(timezone.utc)
+    if child_sent_at is None:
+        child_sent_at = datetime.now(timezone.utc)
 
     # Bulk insert params for ALL child nodes (one executemany), fast-root
     # task rows (one executemany), and slow roots (per-node path). Same
@@ -1547,6 +1556,7 @@ async def enqueue_subworkflow_task(
                     {},
                     parent_depth + 1,
                     root_workflow_id,
+                    child_sent_at=child_sent_at,
                 )
             else:
                 await enqueue_workflow_task(
@@ -2769,8 +2779,6 @@ async def get_dependency_results(
             source metadata so args_from decode resolves SubWorkflowNode
             OkT by the unique definition_key, not the ambiguous name)
     """
-    from horsies.core.models.tasks import TaskError, TaskResult
-
     if not dependency_indices:
         return ({}, {}, {})
 
@@ -2788,45 +2796,71 @@ async def get_dependency_results(
     definition_keys_by_index: dict[int, str | None] = {}
     for row in result.fetchall():
         task_index = row.task_index
-        task_name = row.task_name
-        node_id = row.node_id
-        status = row.status
-        stored_result = row.result
-        sub_definition_key = row.sub_definition_key
-        task_names_by_index[task_index] = task_name
-        definition_keys_by_index[task_index] = sub_definition_key
-
-        if status == WorkflowTaskStatus.SKIPPED.value:
-            # Inject sentinel TaskResult for SKIPPED dependencies
-            results[task_index] = TaskResult(
-                err=TaskError(
-                    error_code=OutcomeCode.UPSTREAM_SKIPPED,
-                    message='Upstream dependency was SKIPPED',
-                    data={'dependency_index': task_index},
-                )
-            )
-        elif stored_result:
-            decoded_tr = _decode_stored_task_result(
-                stored_result,
-                app=app,
-                task_name=task_name,
-                context={
-                    'workflow_id': workflow_id,
-                    'task_index': task_index,
-                    'status': status,
-                },
-                sub_definition_key=sub_definition_key,
-            )
-            results[task_index] = decoded_tr
-        else:
-            results[task_index] = _missing_result_entry(
-                task_index=task_index,
-                node_id=node_id,
-                task_name=task_name,
-                status=status,
-            )
+        task_names_by_index[task_index] = row.task_name
+        definition_keys_by_index[task_index] = row.sub_definition_key
+        results[task_index] = terminal_dependency_result(
+            app,
+            workflow_id=workflow_id,
+            task_index=task_index,
+            node_id=row.node_id,
+            status=row.status,
+            stored_result=row.result,
+            task_name=row.task_name,
+            sub_definition_key=row.sub_definition_key,
+        )
 
     return (results, task_names_by_index, definition_keys_by_index)
+
+
+def terminal_dependency_result(
+    app: 'Horsies | None',
+    *,
+    workflow_id: str,
+    task_index: int,
+    node_id: str | None,
+    status: str,
+    stored_result: str | None,
+    task_name: str,
+    sub_definition_key: str | None,
+) -> 'TaskResult[Any, TaskError]':
+    """The result that a terminal dependency gives a node that it promotes.
+
+    - SKIPPED: an ``UPSTREAM_SKIPPED`` error naming the dependency index.
+    - COMPLETED or FAILED with a stored result: the result decoded with the
+      source's ok type (``_decode_stored_task_result``).
+    - COMPLETED or FAILED with no stored result: ``RESULT_DESERIALIZATION_ERROR``
+      naming the node (``_missing_result_entry``).
+
+    Does no I/O.
+    """
+    from horsies.core.models.tasks import TaskError, TaskResult
+
+    if status == WorkflowTaskStatus.SKIPPED.value:
+        return TaskResult(
+            err=TaskError(
+                error_code=OutcomeCode.UPSTREAM_SKIPPED,
+                message='Upstream dependency was SKIPPED',
+                data={'dependency_index': task_index},
+            )
+        )
+    if not stored_result:
+        return _missing_result_entry(
+            task_index=task_index,
+            node_id=node_id,
+            task_name=task_name,
+            status=status,
+        )
+    return _decode_stored_task_result(
+        stored_result,
+        app=app,
+        task_name=task_name,
+        context={
+            'workflow_id': workflow_id,
+            'task_index': task_index,
+            'status': status,
+        },
+        sub_definition_key=sub_definition_key,
+    )
 
 
 
@@ -4087,4 +4121,3 @@ pause_workflow_sync = _lifecycle.pause_workflow_sync
 resume_workflow = _lifecycle.resume_workflow
 resume_workflow_sync = _lifecycle.resume_workflow_sync
 cascade_pause_to_children = _lifecycle.cascade_pause_to_children
-cascade_resume_to_children = _lifecycle.cascade_resume_to_children

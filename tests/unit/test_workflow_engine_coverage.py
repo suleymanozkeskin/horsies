@@ -56,7 +56,6 @@ from horsies.core.workflows.sql import (
     GET_TASK_RESULTS_BY_INDEXES_SQL,
     GET_WORKFLOW_DAG_EDGES_SQL,
     GET_WORKFLOW_COMPLETION_STATUS_SQL,
-    GET_WORKFLOW_NAME_SQL,
     GET_WORKFLOW_ON_ERROR_SQL,
     GET_WORKFLOW_STATUS_SQL,
     LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
@@ -468,8 +467,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -499,8 +496,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -531,8 +526,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -565,8 +558,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -596,8 +587,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -630,8 +619,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -696,8 +683,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -783,8 +768,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -849,8 +832,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -928,8 +909,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -1073,8 +1052,6 @@ class TestEnqueueSubworkflowTask:
             captured.append(params)
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -1123,8 +1100,6 @@ class TestEnqueueSubworkflowTask:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is ENQUEUE_SUBWORKFLOW_TASK_SQL:
                 return _one_result(row)
-            if stmt is GET_WORKFLOW_NAME_SQL:
-                return _one_result(SimpleNamespace(name='test_wf'))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
