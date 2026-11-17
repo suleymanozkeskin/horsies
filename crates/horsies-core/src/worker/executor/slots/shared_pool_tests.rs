@@ -427,3 +427,48 @@ fn a_killed_child_loss_reads_as_a_kill_by_the_worker() {
     };
     assert!(lost.to_string().contains("killed by the worker"));
 }
+
+/// The free seats of a shared pool, for the soft-cap start check (Python
+/// `test_queue_cap_hold.py::TestFreeChildren`): every seat of an open child
+/// is free; a submitted task takes one at once; a stopping pool has none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_free_seats_of_an_open_child_less_the_submitted_tasks() {
+    let kind = SharedChildKindOfTest::Async;
+    let spawner = Spawner::start().unwrap();
+    let board = Arc::new(PoolBoard::new(layout(0, 1, 0)));
+    let pool = SharedPool::start(
+        SharedPoolConfig {
+            command: scripted_child(kind, &[], "exec sleep 60"),
+            init: init_frame(kind),
+            worker_id: "worker-1".to_owned(),
+            pending_limit: NonZeroUsize::new(4).unwrap(),
+            tasks_per_seat: TaskLimit::Off,
+            memory_per_child: MemoryLimit::Off,
+            exit_not_seen: ExitNotSeen::LeaveToRecovery,
+            child_cpus: ChildCpus::Inherited,
+            kill_wait: CHILD_KILL_WAIT,
+        },
+        Arc::clone(&board),
+        spawner.handle(),
+        LiveDispatches::default(),
+    );
+    super::scripted::until(
+        "the child opens its 2 seats",
+        Duration::from_secs(30),
+        || pool.free_seats() == 2,
+    )
+    .await;
+
+    let submitted = pool.submit(
+        &claimed(ExecutionClass::SharedAsync),
+        TaskInputText::new("{}".to_owned()),
+        work_of(kind),
+    );
+    assert!(matches!(submitted, Submitted::Queued(_)));
+    assert_eq!(pool.free_seats(), 1, "the submitted task holds one seat");
+
+    board.begin_stop();
+    assert_eq!(pool.free_seats(), 0, "a stopping pool has no free seat");
+    let _ = pool.stop(Duration::from_secs(1)).await;
+    let _ = spawner.stop(Duration::from_secs(10));
+}

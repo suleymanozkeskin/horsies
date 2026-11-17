@@ -19,7 +19,7 @@ use crate::core::registry::workflow::RegisteredWorkflowDefinition;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::{
     AnyNode, HorsiesError, SpecBuildError, SubWorkflowSummary, TaskError, TaskResult, WorkflowSpec,
-    WorkflowSpecRegistry,
+    WorkflowSpecRegistry, WorkflowStatus,
 };
 use crate::workflow_engine::engine::on_subworkflow_complete;
 use crate::workflow_engine::recovery::recover_stuck_workflows;
@@ -731,7 +731,7 @@ async fn a_failed_child_summary_holds_its_counts_and_error_summary() {
             .expect("the node stores the child summary"),
     )
     .expect("the summary decodes");
-    assert_eq!(summary.status, "FAILED");
+    assert_eq!(summary.status, WorkflowStatus::Failed);
     assert!(summary.failed_tasks >= 1);
     assert!(summary.total_tasks >= 1);
     assert!(summary.error_summary.is_some_and(|text| !text.is_empty()));

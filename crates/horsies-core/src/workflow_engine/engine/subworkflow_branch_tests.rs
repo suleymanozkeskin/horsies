@@ -541,3 +541,90 @@ async fn an_empty_context_list_reads_nothing() {
     assert!(context.results_by_id.is_empty());
     assert!(context.summaries_by_id.is_empty());
 }
+
+/// The definition key of the grandchild that the child of the policy test
+/// starts from its sub-workflow nodes.
+const GRANDCHILD_KEY: &str = "tests.promotion_branch.grandchild.v1";
+
+/// A sub-workflow node `child_sub_<index>` of the grandchild.
+fn grandchild_node(index: usize) -> crate::core::AnyNode {
+    crate::core::AnyNode {
+        task_name: "promotion_branch_grandchild".to_owned(),
+        queue: None,
+        priority: None,
+        index,
+        node_id: Some(format!("child_sub_{index}")),
+        is_subworkflow: true,
+        sub_definition_key: Some(GRANDCHILD_KEY.to_owned()),
+        ..child_task_node(None, None)
+    }
+}
+
+/// A registry that resolves [`CHILD_KEY`] to a child of two sub-workflow
+/// nodes whose policy requires node 0 and lists node 1 as optional, and
+/// [`GRANDCHILD_KEY`] to a child of one task node.
+fn policy_child_registry() -> WorkflowSpecRegistry {
+    let mut registry = empty_registry();
+    for spec in [
+        crate::core::WorkflowSpec {
+            name: "promotion_branch_grandchild".to_owned(),
+            definition_key: Some(GRANDCHILD_KEY.to_owned()),
+            tasks: vec![child_task_node(None, None)],
+            on_error: crate::core::OnError::Fail,
+            output_index: None,
+            success_policy: None,
+        },
+        crate::core::WorkflowSpec {
+            name: "promotion_branch_child".to_owned(),
+            definition_key: Some(CHILD_KEY.to_owned()),
+            tasks: vec![grandchild_node(0), grandchild_node(1)],
+            on_error: crate::core::OnError::Fail,
+            output_index: None,
+            success_policy: Some(SuccessPolicy {
+                cases: vec![crate::core::SuccessCase {
+                    required_indices: vec![0],
+                }],
+                optional_indices: Some(vec![1]),
+            }),
+        },
+    ] {
+        registry
+            .register(crate::core::registry::workflow::RegisteredWorkflowSpec {
+                spec,
+                spec_builder: None,
+            })
+            .unwrap_or_else(|error| panic!("register the spec: {error}"));
+    }
+    registry
+}
+
+/// `TestChildStartSerialization::test_child_start_stores_the_index_of_a_subworkflow_node`
+/// (`test_success_policy_subworkflow_node.py`): the engine child start stores
+/// the child's success policy, whose case and optional list name
+/// sub-workflow nodes.
+#[tokio::test]
+#[serial]
+async fn the_engine_child_start_stores_a_policy_that_names_sub_workflow_nodes() {
+    let pool = shared_pool().await;
+    let workflow_id = seed_sub_workflow_dependent(&pool).await;
+
+    let promoted = recover(&pool, workflow_id, 1, &policy_child_registry()).await;
+
+    let stored: Option<Option<serde_json::Value>> = sqlx::query_scalar(
+        "SELECT success_policy FROM horsies_workflows WHERE parent_workflow_id = $1",
+    )
+    .bind(workflow_id)
+    .fetch_optional(&pool)
+    .await
+    .expect("read the policy of the child");
+    remove_tree(&pool, workflow_id).await;
+    assert!(matches!(promoted, Ok(true)), "{promoted:?}");
+    let stored = stored
+        .expect("the child is started")
+        .expect("the child stores its policy");
+    assert_eq!(
+        stored["cases"],
+        serde_json::json!([{"required_indices": [0]}])
+    );
+    assert_eq!(stored["optional_indices"], serde_json::json!([1]));
+}

@@ -11,9 +11,8 @@ use uuid::Uuid;
 use crate::core::history::archive::results::decode_result_envelope;
 use crate::core::history::enqueue::prepare_enqueue_facts;
 use crate::core::history::identity::keys::{
-    validate_reservation_window, IDEMPOTENCY_SCOPE_VERSION, IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
+    validate_reservation_window, IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
 };
-use crate::core::history::identity::reservations::ReservationClaim;
 use crate::core::history::reads::detail::{HistoryTaskDetail, TaskDetailResult};
 use crate::core::history::reads::result::{
     HistoryResultPayload, HistoryTaskResult, TaskResultRead,
@@ -27,9 +26,13 @@ use crate::core::{
 };
 
 use crate::broker::core_rows::{
-    checkout_batch, column, execute_in, expired_list_row, listed_worker_state_row, one_row,
-    query_in, query_on, read_rows, roll_back, scalar, stale_list_row, stored_worker_state,
-    task_attempt_row, task_info_row, task_result_row, RowDecodeError, StatementLog,
+    column, expired_list_row, listed_worker_state_row, one_row, read_rows, scalar, stale_list_row,
+    stored_worker_state, task_attempt_row, task_info_row, task_result_row, RowDecodeError,
+    StatementLog,
+};
+use crate::broker::enqueue_task::{
+    decode_enqueue_outcome, enqueue_result, EnqueueKey, EnqueueStart, EnqueueTaskOutcome, SendKind,
+    ENQUEUE_TASK,
 };
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::health::{
@@ -38,7 +41,6 @@ use crate::broker::health::{
     WORKER_PING_CHANNEL,
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result};
-use crate::broker::key_reservation::{claim_key_reservation, KeyClaim};
 use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
 };
@@ -70,8 +72,7 @@ use crate::broker::pools::{
 };
 use crate::db::{
     BoundStatement, CheckoutClass, IsolationLevel, NotSentCause, ParameterType, Row,
-    StatementBound, StatementFailure, Transaction as CoreTransaction, TypedStatement,
-    WORKER_RESERVED_CONNECTIONS,
+    StatementBound, StatementFailure, TypedStatement, WORKER_RESERVED_CONNECTIONS,
 };
 
 /// Refuse a sent task input that breaks the rules of a user value (Python `.send()` refuses it as
@@ -136,83 +137,6 @@ fn test_uuid(value: &str) -> Uuid {
 // ---------------------------------------------------------------------------
 // SQL constants
 // ---------------------------------------------------------------------------
-
-// Every NOT NULL column is named: the baseline schema has no column defaults.
-// A first-run send has no rerun lineage and is not a workflow task.
-const ENQUEUE_SQL: &str = "\
-INSERT INTO horsies_tasks (
-    id, task_name, queue_name, priority, input, task_options, execution,
-    retention_class_key, sent_at, created_at,
-    command_fingerprint_version, command_fingerprint, idempotency_key_digest,
-    status, enqueued_at, retry_count, max_retries, good_until,
-    is_workflow_task, updated_at,
-    retain_rerun_input, rerun_of_task_id, rerun_root_task_id
-)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), $10, $11, $12, 'PENDING',
-        CASE WHEN $13::timestamptz IS NOT NULL THEN $13
-             WHEN $14::bigint IS NOT NULL
-             THEN NOW() + make_interval(secs => $14::double precision)
-             ELSE NOW() END,
-        0, $15, $16, FALSE, NOW(), $17, NULL, NULL)
-ON CONFLICT (id) DO NOTHING
-RETURNING id";
-
-// The exact-id resend check reads what the send compares: the command
-// fingerprint and the stored send call time.
-const READ_SEND_IDENTITY_SQL: &str = "\
-SELECT command_fingerprint_version, command_fingerprint, sent_at
-FROM horsies_tasks WHERE id = $1";
-
-const READ_SEND_IDENTITY_FOR_KEY_SQL: &str = "\
-SELECT command_fingerprint_version, command_fingerprint, sent_at, idempotency_key_digest
-FROM horsies_tasks WHERE id = $1 FOR UPDATE";
-
-/// The enqueue insert. Parameters in order: id, task name, queue name,
-/// priority, input, task options, execution, retention class key, sent at,
-/// fingerprint version, fingerprint, key digest, enqueued at, delay
-/// seconds, max retries, good until, retain rerun input.
-static ENQUEUE: TypedStatement = TypedStatement::new(
-    "enqueue",
-    ENQUEUE_SQL,
-    &[
-        ParameterType::Uuid,
-        ParameterType::Text,
-        ParameterType::Text,
-        ParameterType::Int4,
-        ParameterType::Text,
-        ParameterType::Text,
-        ParameterType::Text,
-        ParameterType::Text,
-        ParameterType::Timestamptz,
-        ParameterType::Int2,
-        ParameterType::Bytea,
-        ParameterType::Bytea,
-        ParameterType::Timestamptz,
-        ParameterType::Int8,
-        ParameterType::Int4,
-        ParameterType::Timestamptz,
-        ParameterType::Bool,
-    ],
-);
-
-static READ_SEND_IDENTITY: TypedStatement = TypedStatement::new(
-    "read_send_identity",
-    READ_SEND_IDENTITY_SQL,
-    &[ParameterType::Uuid],
-);
-
-static READ_SEND_IDENTITY_FOR_KEY: TypedStatement = TypedStatement::new(
-    "read_send_identity_for_key",
-    READ_SEND_IDENTITY_FOR_KEY_SQL,
-    &[ParameterType::Uuid],
-);
-
-/// Binds a key digest (`$1`) to a task (`$2`) that has none.
-static BIND_IDEMPOTENCY_KEY: TypedStatement = TypedStatement::new(
-    "bind_idempotency_key",
-    "UPDATE horsies_tasks SET idempotency_key_digest = $1 WHERE id = $2",
-    &[ParameterType::Bytea, ParameterType::Uuid],
-);
 
 // One server-side call performs advisory-lock acquisition + cap counts + the
 // windowed claim (see horsies_claim, migrations/0027_claim_function_v12.sql;
@@ -1447,14 +1371,33 @@ impl PostgresBroker {
     // Task lifecycle operations
     // -----------------------------------------------------------------------
 
-    /// Enqueue a new task. Returns the task ID (UUIDv7 at the public send funnel).
+    /// Enqueue a new task: one `horsies_enqueue_task` statement in
+    /// autocommit on the main core pool, checked out as batch work, after
+    /// the client family check (Python `PostgresBroker.enqueue_async`).
+    /// Returns the id of the task that holds the send: the sent id (minted
+    /// here when `predetermined_task_id` is `None`), or the task that holds
+    /// the idempotency key with the same command.
     ///
     /// `input` is the encoded task input as one JSON value; it is stored as
     /// written. The input follows the rules of a user value
-    /// (`check_sent_input`); a refusal is `EnqueueContract`, which the send maps
-    /// to `VALIDATION_FAILED`. Uses ON CONFLICT DO NOTHING; a taken task id is
-    /// compared by the version-1 command fingerprint and the stored `sent_at`
-    /// (the exact-id resend check).
+    /// (`check_sent_input`); a refusal is `EnqueueContract`, which the send
+    /// maps to `VALIDATION_FAILED`. A task id that is taken answers by the
+    /// stored version-1 command fingerprint and `sent_at` (the exact-id
+    /// resend check). `send_kind` is [`SendKind::Repeat`] for a send retry:
+    /// a task that finished then answers from history and does not run
+    /// again; [`SendKind::First`] does not read history.
+    ///
+    /// Errors: `EnqueueContract` (refused before any statement: both
+    /// `enqueued_at` and `enqueue_delay_seconds`, a future `sent_at` with
+    /// neither, an input or options that the rules refuse);
+    /// `IdempotencyKeyConflict`, `PayloadMismatch` and
+    /// `EnqueueConflictUnverifiable` (nothing written, no reservation left);
+    /// the client family check's errors; `PoolSettings`; `Statement` (nothing
+    /// written, or `OutcomeUnknown`: a resend of the same send with
+    /// [`SendKind::Repeat`] answers with the task id); `RowDecode`.
+    ///
+    /// Panics: when the function returns other than one row, or an outcome
+    /// it does not define (Python raises `AssertionError`).
     #[allow(clippy::too_many_arguments)]
     pub async fn enqueue(
         &self,
@@ -1471,15 +1414,11 @@ impl PostgresBroker {
         idempotency_key: Option<&str>,
         retention: EnqueueRetention,
         retain_rerun_input: Option<bool>,
+        send_kind: SendKind,
     ) -> Result<Uuid, BrokerError> {
-        if enqueued_at.is_some() && enqueue_delay_seconds.is_some() {
-            return Err(BrokerError::EnqueueContract(
-                "cannot specify both enqueued_at and enqueue_delay_seconds".to_owned(),
-            ));
-        }
+        let start = EnqueueStart::of(enqueued_at, enqueue_delay_seconds)?;
         if sent_at.is_some_and(|value| value > Utc::now() + chrono::Duration::seconds(5))
-            && enqueued_at.is_none()
-            && enqueue_delay_seconds.is_none()
+            && matches!(start, EnqueueStart::Now)
         {
             return Err(BrokerError::EnqueueContract(
                 "sent_at is in the future without enqueued_at or enqueue_delay_seconds; sent_at is a call-site timestamp".to_owned(),
@@ -1509,193 +1448,83 @@ impl PostgresBroker {
             idempotency_key,
         )
         .map_err(|error| BrokerError::EnqueueContract(error.to_string()))?;
+        let key = EnqueueKey::of(
+            facts.idempotency_key_digest,
+            self.idempotency_reservation_window_seconds,
+        );
         self.ensure_client_family_for_write().await?;
-        let sent = SendIdentity {
-            fingerprint_version: Some(facts.command_fingerprint_version),
-            fingerprint: Some(facts.command_fingerprint.to_vec()),
-            sent_at: effective_sent_at,
-        };
         let (open, _write) = self.core.pools_for_write()?;
-        let mut connection = checkout_batch(open.main(), &ENQUEUE).await?;
-        let mut transaction = connection.begin(IsolationLevel::ServerDefault).await?;
-        if let Some(key_digest) = facts.idempotency_key_digest {
-            let claim = claim_key_reservation(
-                &mut transaction,
-                self.statement_log,
-                &KeyClaim {
-                    key_digest: &key_digest,
-                    key_scope_version: IDEMPOTENCY_SCOPE_VERSION,
-                    reservation_window_seconds: self.idempotency_reservation_window_seconds,
-                    fingerprint_version: facts.command_fingerprint_version,
-                    fingerprint: &facts.command_fingerprint,
-                    task_id,
-                },
-            )
-            .await?;
-            match claim {
-                ReservationClaim::Applied { .. } => {}
-                ReservationClaim::Replay { task_id } => {
-                    roll_back(transaction).await?;
-                    return Ok(task_id);
-                }
-                ReservationClaim::Conflict { task_id, .. } => {
-                    roll_back(transaction).await?;
-                    return Err(BrokerError::IdempotencyKeyConflict {
-                        task_name: task_name.to_owned(),
-                        task_id,
-                    });
-                }
-            }
-        }
 
         let execution = facts.execution.as_str();
         let fingerprint: &[u8] = facts.command_fingerprint.as_slice();
-        let bound_key_digest: Option<&[u8]> = facts
-            .idempotency_key_digest
-            .as_ref()
-            .map(<[u8; 32]>::as_slice);
-        let inserted = query_in(
-            &mut transaction,
-            self.statement_log,
-            &ENQUEUE
-                .bind()
-                .value(&task_id)
-                .value(&task_name)
-                .value(&queue_name)
-                .value(&priority)
-                .value(&input)
-                .value(&task_options)
-                .value(&execution)
-                .value(&facts.retention_class_key)
-                .value(&effective_sent_at)
-                .value(&facts.command_fingerprint_version)
-                .value(&fingerprint)
-                .value(&bound_key_digest)
-                .value(&enqueued_at)
-                .value(&enqueue_delay_seconds)
-                .value(&max_retries)
-                .value(&good_until)
-                .value(&facts.retain_rerun_input)
-                .finish(),
-        )
-        .await?;
-
-        if !inserted.is_empty() {
-            transaction.commit().await?;
-            tracing::debug!(task_id = %task_id, task_name, queue = queue_name, "task enqueued");
-            return Ok(task_id);
-        }
-
-        if let Some(key_digest) = facts.idempotency_key_digest {
-            return self
-                .bind_key_after_task_id_conflict(
-                    transaction,
-                    task_id,
-                    task_name,
-                    &sent,
-                    &key_digest,
-                )
-                .await;
-        }
-
-        roll_back(transaction).await?;
-
-        // Conflict: task_id already exists. Compare the fingerprint and sent_at.
-        tracing::debug!(task_id = %task_id, task_name, "enqueue conflict — comparing the send identity");
-
-        let stored_rows = query_on(
-            &mut connection,
-            self.statement_log,
-            &READ_SEND_IDENTITY.bind().value(&task_id).finish(),
-        )
-        .await?;
-        let stored = match stored_rows.first() {
-            Some(row) => Some(SendIdentity {
-                fingerprint_version: column(
-                    row,
-                    &READ_SEND_IDENTITY,
-                    "command_fingerprint_version",
-                )?,
-                fingerprint: column(row, &READ_SEND_IDENTITY, "command_fingerprint")?,
-                sent_at: column(row, &READ_SEND_IDENTITY, "sent_at")?,
-            }),
-            None => None,
-        };
-
-        let outcome = classify_enqueue_conflict(stored, &sent, task_id, task_name);
-        if matches!(
-            outcome,
-            Err(BrokerError::EnqueueConflictUnverifiable { .. })
-        ) {
-            tracing::warn!(
-                task_id = %task_id,
-                task_name,
-                "enqueue conflict but row disappeared before verification — cannot verify payload identity",
-            );
-        }
-        outcome
-    }
-
-    /// The keyed enqueue whose task id already exists: in the same
-    /// transaction, lock the row, compare its send identity, and bind the key
-    /// when the row has none.
-    async fn bind_key_after_task_id_conflict(
-        &self,
-        mut transaction: CoreTransaction<'_>,
-        task_id: Uuid,
-        task_name: &str,
-        sent: &SendIdentity,
-        key_digest: &[u8; 32],
-    ) -> Result<Uuid, BrokerError> {
-        let statement: &TypedStatement = &READ_SEND_IDENTITY_FOR_KEY;
-        let existing = query_in(
-            &mut transaction,
-            self.statement_log,
-            &statement.bind().value(&task_id).finish(),
-        )
-        .await?;
-        let Some(row) = existing.first() else {
-            roll_back(transaction).await?;
-            return Err(BrokerError::EnqueueConflictUnverifiable {
-                task_id,
-                task_name: task_name.to_owned(),
-            });
-        };
-        let stored = SendIdentity {
-            fingerprint_version: column(row, statement, "command_fingerprint_version")?,
-            fingerprint: column(row, statement, "command_fingerprint")?,
-            sent_at: column(row, statement, "sent_at")?,
-        };
-        let bound_digest: Option<Vec<u8>> = column(row, statement, "idempotency_key_digest")?;
-        if &stored != sent {
-            roll_back(transaction).await?;
-            return Err(BrokerError::PayloadMismatch { task_id });
-        }
-        // The task id is bound to another key: the same command with a changed
-        // key is a payload mismatch, not a key conflict that names the task
-        // itself (Python `horsies/core/brokers/postgres.py:2838-2848`).
-        if bound_digest
-            .as_deref()
-            .is_some_and(|digest| digest != key_digest.as_slice())
-        {
-            roll_back(transaction).await?;
-            return Err(BrokerError::PayloadMismatch { task_id });
-        }
-        if bound_digest.is_none() {
-            let key: &[u8] = key_digest.as_slice();
-            let _bound = execute_in(
-                &mut transaction,
-                self.statement_log,
-                &BIND_IDEMPOTENCY_KEY
-                    .bind()
-                    .value(&key)
-                    .value(&task_id)
-                    .finish(),
+        let (start_kind, start_at, start_delay_seconds) = start.columns();
+        let (key_kind, key_scope_version, key_window_seconds) = key.columns();
+        let key_digest = key.digest();
+        let send_kind_text = send_kind.as_sql();
+        let statement = &ENQUEUE_TASK;
+        let bound = statement
+            .bind()
+            .value(&task_id)
+            .value(&task_name)
+            .value(&queue_name)
+            .value(&priority)
+            .value(&input)
+            .value(&task_options)
+            .value(&execution)
+            .value(&facts.retention_class_key)
+            .value(&facts.retain_rerun_input)
+            .value(&max_retries)
+            .value(&good_until)
+            .value(&effective_sent_at)
+            .value(&start_kind)
+            .value(&start_at)
+            .value(&start_delay_seconds)
+            .value(&facts.command_fingerprint_version)
+            .value(&fingerprint)
+            .value(&key_kind)
+            .value(&key_digest)
+            .value(&key_scope_version)
+            .value(&key_window_seconds)
+            .value(&send_kind_text)
+            .finish();
+        self.log_statement(statement);
+        let rows = open
+            .main()
+            .query(
+                CheckoutClass::Batch,
+                &bound,
+                StatementBound::ConnectionTimeouts,
             )
             .await?;
+        let [row] = rows.as_slice() else {
+            panic!(
+                "horsies_enqueue_task returned {} rows for task {task_id}; it returns one",
+                rows.len()
+            );
+        };
+        let outcome_text: String = column(row, statement, "outcome")?;
+        let answering_task_id: Uuid = column(row, statement, "task_id")?;
+        let outcome = match decode_enqueue_outcome(&outcome_text, answering_task_id) {
+            Ok(outcome) => outcome,
+            Err(contract) => panic!("{contract} for task {task_id}"),
+        };
+        match outcome {
+            EnqueueTaskOutcome::Inserted => {
+                tracing::debug!(task_id = %task_id, task_name, queue = queue_name, "task enqueued");
+            }
+            EnqueueTaskOutcome::ConflictUnverifiable => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    task_name,
+                    "enqueue conflict but row disappeared before verification — cannot verify payload identity",
+                );
+            }
+            EnqueueTaskOutcome::SameCommand
+            | EnqueueTaskOutcome::KeyReplay { .. }
+            | EnqueueTaskOutcome::KeyConflict { .. }
+            | EnqueueTaskOutcome::PayloadMismatch => {}
         }
-        transaction.commit().await?;
-        Ok(task_id)
+        enqueue_result(outcome, task_id, task_name)
     }
 
     /// Run one collapsed claim pass via `horsies_claim` (parity with horsies
@@ -4054,99 +3883,6 @@ mod tests {
         assert_sync::<Arc<PostgresBroker>>();
     }
 
-    // Enqueue-conflict classification (parity with horsies PR #48).
-
-    fn send_identity(fingerprint: u8, sent_at: DateTime<Utc>) -> SendIdentity {
-        SendIdentity {
-            fingerprint_version: Some(1),
-            fingerprint: Some(vec![fingerprint; 32]),
-            sent_at,
-        }
-    }
-
-    #[test]
-    fn enqueue_conflict_matching_identity_is_idempotent_ok() {
-        let task_id = Uuid::new_v4();
-        let sent_at = Utc::now();
-        let out = classify_enqueue_conflict(
-            Some(send_identity(1, sent_at)),
-            &send_identity(1, sent_at),
-            task_id,
-            "my_task",
-        );
-        assert_eq!(out.unwrap(), task_id);
-    }
-
-    #[test]
-    fn enqueue_conflict_differing_fingerprint_is_payload_mismatch() {
-        let task_id = Uuid::new_v4();
-        let sent_at = Utc::now();
-        let out = classify_enqueue_conflict(
-            Some(send_identity(2, sent_at)),
-            &send_identity(1, sent_at),
-            task_id,
-            "my_task",
-        );
-        assert!(matches!(
-            out,
-            Err(BrokerError::PayloadMismatch { task_id: actual }) if actual == task_id
-        ));
-    }
-
-    #[test]
-    fn enqueue_conflict_differing_sent_at_is_payload_mismatch() {
-        let task_id = Uuid::new_v4();
-        let sent_at = Utc::now();
-        let out = classify_enqueue_conflict(
-            Some(send_identity(1, sent_at - chrono::Duration::seconds(1))),
-            &send_identity(1, sent_at),
-            task_id,
-            "my_task",
-        );
-        assert!(matches!(
-            out,
-            Err(BrokerError::PayloadMismatch { task_id: actual }) if actual == task_id
-        ));
-    }
-
-    #[test]
-    fn enqueue_conflict_with_an_engine_minted_row_is_payload_mismatch() {
-        let task_id = Uuid::new_v4();
-        let sent_at = Utc::now();
-        let minted = SendIdentity {
-            fingerprint_version: None,
-            fingerprint: None,
-            sent_at,
-        };
-        let out =
-            classify_enqueue_conflict(Some(minted), &send_identity(1, sent_at), task_id, "my_task");
-        assert!(matches!(
-            out,
-            Err(BrokerError::PayloadMismatch { task_id: actual }) if actual == task_id
-        ));
-    }
-
-    #[test]
-    fn enqueue_conflict_missing_row_is_non_retryable_unverifiable() {
-        // Row disappeared before verification: must NOT be treated as idempotent Ok.
-        let out = classify_enqueue_conflict(
-            None,
-            &send_identity(1, Utc::now()),
-            Uuid::new_v4(),
-            "my_task",
-        );
-        match out {
-            Err(err @ BrokerError::EnqueueConflictUnverifiable { .. }) => {
-                assert!(!err.is_retryable(), "must be non-retryable");
-                assert!(
-                    err.to_string().contains("cannot verify payload identity"),
-                    "message should explain the unverifiable conflict, got: {err}",
-                );
-            }
-            other => panic!("expected EnqueueConflictUnverifiable, got: {other:?}"),
-        }
-    }
-
     #[test]
     fn sent_at_is_cut_to_whole_microseconds() {
         let sent_at = DateTime::parse_from_rfc3339("2026-11-16T12:00:00.123456789Z")
@@ -4158,17 +3894,6 @@ mod tests {
     }
 }
 
-/// What the exact-id resend check compares: the version-1 command fingerprint
-/// and the send call time. A resend of one send call carries both unchanged; a
-/// different send with the same task id differs in at least one. A row that
-/// the workflow engine minted has no fingerprint, so a send never matches it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SendIdentity {
-    fingerprint_version: Option<i16>,
-    fingerprint: Option<Vec<u8>>,
-    sent_at: DateTime<Utc>,
-}
-
 /// `sent_at` at the precision that PostgreSQL stores (whole microseconds), so
 /// the stored value equals the value that a resend of the same call carries.
 fn sent_at_at_stored_precision(sent_at: DateTime<Utc>) -> Result<DateTime<Utc>, BrokerError> {
@@ -4178,30 +3903,6 @@ fn sent_at_at_stored_precision(sent_at: DateTime<Utc>) -> Result<DateTime<Utc>, 
         .ok_or_else(|| {
             BrokerError::EnqueueContract(format!("sent_at {sent_at} has no whole-microsecond form"))
         })
-}
-
-/// Classify the outcome of an `INSERT ... ON CONFLICT DO NOTHING` enqueue
-/// conflict by comparing the stored send identity against the sent one.
-///
-/// - `None` (row gone before verification): cannot prove payload identity, so
-///   fail non-retryably rather than assume the original send succeeded
-///   (parity with horsies PR #48).
-/// - equal identity: idempotent success.
-/// - other identity: same task_id, different command or send call.
-fn classify_enqueue_conflict(
-    stored: Option<SendIdentity>,
-    sent: &SendIdentity,
-    task_id: Uuid,
-    task_name: &str,
-) -> Result<Uuid, BrokerError> {
-    match stored {
-        None => Err(BrokerError::EnqueueConflictUnverifiable {
-            task_id,
-            task_name: task_name.to_owned(),
-        }),
-        Some(existing) if &existing == sent => Ok(task_id),
-        Some(_) => Err(BrokerError::PayloadMismatch { task_id }),
-    }
 }
 
 #[cfg(test)]

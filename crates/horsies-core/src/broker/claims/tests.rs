@@ -151,6 +151,47 @@ fn rows_the_claim_never_returns_are_a_defect() {
     }
 }
 
+/// Python `test_claim_plan.py::TestRowClass::test_the_stored_class_parses`:
+/// the stored `execution` of a claimed row reads as its class, for each of
+/// the three values.
+#[test]
+fn the_stored_class_of_a_claimed_row_parses() {
+    for (stored, class) in [
+        ("ISOLATED", Execution::Isolated),
+        ("SHARED_ASYNC", Execution::SharedAsync),
+        ("SHARED_THREAD", Execution::SharedThread),
+    ] {
+        let pass = decode_claim_pass(vec![ClaimWireRow {
+            execution: Some(stored.to_owned()),
+            ..claimed_wire(1)
+        }])
+        .expect("a claimed row of a stored class reads");
+
+        assert_eq!(pass.claimed.len(), 1, "{stored}");
+        assert_eq!(pass.claimed[0].execution, class, "{stored}");
+    }
+}
+
+/// Python `test_claim_plan.py::TestRowClass::test_a_value_outside_the_enum_is_a_defect`:
+/// a claimed row whose `execution` is not an `Execution` value breaks the
+/// row contract of the claim, and the refusal names the task and the value.
+#[test]
+fn a_claimed_row_of_a_class_outside_the_enum_is_refused_with_its_task() {
+    let refused = decode_claim_pass(vec![ClaimWireRow {
+        execution: Some("SHARED_GPU".to_owned()),
+        ..claimed_wire(1)
+    }])
+    .expect_err("a class outside the enum breaks the row contract");
+
+    assert!(
+        refused.contains(&format!(
+            "claimed task {} has execution \"SHARED_GPU\"",
+            task(1)
+        )),
+        "{refused}"
+    );
+}
+
 // --- claim pass arguments -----------------------------------------------------
 
 #[test]
@@ -359,6 +400,55 @@ fn release_rows_that_break_the_contract_fail_closed() {
     for (name, rows) in cases {
         assert!(
             decode_release(&input, rows).is_err(),
+            "{name} must fail closed"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Start check (Python `tests/unit/test_queue_cap_hold.py::TestReadQueueStarts`)
+// ---------------------------------------------------------------------------
+
+fn queues(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
+}
+
+/// Python `test_count_is_running_plus_started_not_running`.
+#[test]
+fn the_count_of_a_queue_is_running_plus_started_not_running() {
+    let starts = decode_queue_starts(
+        &queues(&["a", "b"]),
+        vec![("a".to_owned(), 2, 1), ("b".to_owned(), 0, 3)],
+    )
+    .expect("a valid count");
+    assert_eq!(starts.of("a"), 3);
+    assert_eq!(starts.of("b"), 3);
+}
+
+/// Python `test_no_row_is_no_count`.
+#[test]
+fn a_queue_with_no_row_counts_0() {
+    let starts = decode_queue_starts(&queues(&["a"]), Vec::new()).expect("a valid count");
+    assert_eq!(starts, QueueStarts::default());
+    assert_eq!(starts.of("a"), 0);
+}
+
+/// Python `test_a_queue_counted_twice_is_a_defect`, and the other rows
+/// the statement never returns.
+#[test]
+fn count_rows_that_break_the_contract_fail_closed() {
+    let cases: Vec<(&str, Vec<(String, i64, i64)>)> = vec![
+        (
+            "queue_counted_twice",
+            vec![("a".to_owned(), 1, 0), ("a".to_owned(), 1, 0)],
+        ),
+        ("queue_not_named", vec![("c".to_owned(), 1, 0)]),
+        ("negative_running", vec![("a".to_owned(), -1, 0)]),
+        ("negative_started", vec![("a".to_owned(), 0, -1)]),
+    ];
+    for (name, rows) in cases {
+        assert!(
+            decode_queue_starts(&queues(&["a", "b"]), rows).is_err(),
             "{name} must fail closed"
         );
     }

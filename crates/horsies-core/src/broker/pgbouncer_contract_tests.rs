@@ -26,7 +26,7 @@ use serial_test::serial;
 use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
-use crate::broker::{BrokerError, PostgresBroker};
+use crate::broker::{BrokerError, PostgresBroker, SendKind};
 use crate::core::config::{EnqueueRetention, PostgresConfig};
 use crate::core::history::identity::uuid7::mint_task_id;
 use crate::core::task::send_types::{send_error_from_enqueue, TaskSendErrorCode, TaskSendPayload};
@@ -186,6 +186,7 @@ async fn enqueue_probe(
             None,
             payload.retention,
             None,
+            SendKind::First,
         )
         .await
 }

@@ -21,8 +21,8 @@ use super::board::{PoolBoard, PoolHealth, SlotPhase};
 use super::budgets::SharedSlotService;
 use super::dispatch::{AttemptEnd, ClaimedTask, ExecutionClass, NotRunCause};
 use super::pool::{
-    not_run_cause, stop_slots, Answer, ExitNotSeen, MemoryLimit, PoolStopReport, Submitted,
-    TaskLimit,
+    not_run_cause, stop_slots, Answer, DrainKills, ExitNotSeen, MemoryLimit, PoolStopReport,
+    Submitted, TaskLimit,
 };
 use super::seat_runs::{place_on_shared_child, OpenChildLoad, Placement, SharedChildKind};
 use super::shared_slot::run_shared_slot;
@@ -138,6 +138,18 @@ impl Placer {
         }
     }
 
+    /// The seats that take a task at once: the free seats of the open
+    /// children, less the tasks that wait for a seat.
+    fn free_seats(&self, seats: NonZeroUsize) -> usize {
+        let open_free: usize = self
+            .loads
+            .iter()
+            .filter(|load| load.accepting == Accepting::Open)
+            .map(|load| seats.get().saturating_sub(load.runs))
+            .sum();
+        open_free.saturating_sub(self.queue.len())
+    }
+
     fn next_dispatch(&mut self) -> DispatchNumber {
         self.last_dispatch = self.last_dispatch.saturating_add(1);
         DispatchNumber::new(self.last_dispatch).expect("run numbers start at 1")
@@ -160,6 +172,7 @@ pub(super) struct SharedPoolShared {
     placer: Mutex<Placer>,
     /// One per slot of this pool: placement picked the slot.
     pub(super) wakes: Vec<Notify>,
+    pub(super) drain_kills: DrainKills,
 }
 
 fn lock(placer: &Mutex<Placer>) -> MutexGuard<'_, Placer> {
@@ -291,6 +304,7 @@ impl SharedPool {
                 last_dispatch: 0,
             }),
             wakes: (0..count).map(|_| Notify::new()).collect(),
+            drain_kills: DrainKills::default(),
         });
         let mut slots = JoinSet::new();
         for local in 0..count {
@@ -342,6 +356,18 @@ impl SharedPool {
         Submitted::Queued(receiver)
     }
 
+    /// The seats that take a task at once: the free seats of the open
+    /// children, less the tasks that wait for a seat. 0 once the pools stop
+    /// or failed (Python `SlotPool.free_shared_async_seats`,
+    /// `free_shared_thread_seats`).
+    pub fn free_seats(&self) -> u32 {
+        let placer = lock(&self.shared.placer);
+        match self.shared.board.not_serving() {
+            true => 0,
+            false => u32::try_from(placer.free_seats(self.shared.seats)).unwrap_or(u32::MAX),
+        }
+    }
+
     /// The service of each slot with its seats, for the claim budget.
     pub fn service(&self) -> Vec<SharedSlotService> {
         self.slot_states()
@@ -365,10 +391,17 @@ impl SharedPool {
     /// Stop: waiting tasks get `NotDispatched(PoolStopping)`; each open
     /// child closes, drains and gets the stop frame; at `drain_timeout` the
     /// children that still run tasks are killed, and each run gets its
-    /// verdict; the slots get 30 s more, then are aborted.
+    /// verdict; the slots get 30 s more, then are aborted. The report names
+    /// the tasks of the children that the deadline killed.
     pub async fn stop(mut self, drain_timeout: Duration) -> PoolStopReport {
         self.shared.board.begin_stop();
         self.shared.answer_waiting(NotRunCause::PoolStopping);
-        stop_slots(&mut self.slots, &self.shared.board, drain_timeout).await
+        stop_slots(
+            &mut self.slots,
+            &self.shared.board,
+            &self.shared.drain_kills,
+            drain_timeout,
+        )
+        .await
     }
 }

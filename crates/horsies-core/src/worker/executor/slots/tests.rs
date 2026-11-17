@@ -741,3 +741,54 @@ async fn a_child_that_dies_with_a_task_takes_the_crash_path() {
         other => panic!("expected the crash path, got {other:?}"),
     }
 }
+
+/// The free slots of an isolated pool, for the soft-cap start check (Python
+/// `test_queue_cap_hold.py::TestFreeChildren`): a ready child that waits for
+/// a task is one free slot; a submitted task takes it at once, before the
+/// slot takes the task from the queue; a stopping pool has none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_child_is_a_free_slot_until_a_task_takes_it() {
+    let claimed = task(ExecutionClass::Isolated, "{}");
+    let spawner = Spawner::start().unwrap();
+    let board = std::sync::Arc::new(PoolBoard::new(ChildLayout {
+        isolated: 1,
+        shared_async: 0,
+        shared_thread: 0,
+    }));
+    let live = LiveDispatches::default();
+    let pool = IsolatedPool::start(
+        pool_config(scripted_child(&claimed, "exec sleep 60")),
+        std::sync::Arc::clone(&board),
+        spawner.handle(),
+        live.clone(),
+    );
+    super::scripted::until(
+        "the child waits for a task",
+        Duration::from_secs(30),
+        || pool.free_slots() == 1,
+    )
+    .await;
+
+    let submitted = pool.submit(
+        &claimed,
+        TaskInputText::new("{}".to_owned()),
+        IsolatedWork::Run,
+        IsolatedDeadline::NoDeadline,
+    );
+    assert!(matches!(submitted, Submitted::Queued(_)));
+    assert_eq!(
+        pool.free_slots(),
+        0,
+        "the submitted task holds the idle slot"
+    );
+    super::scripted::until("the child holds the task", Duration::from_secs(30), || {
+        live.held_task_ids() == vec![claimed.task_id]
+    })
+    .await;
+    assert_eq!(pool.free_slots(), 0, "the busy child is no free slot");
+
+    board.begin_stop();
+    assert_eq!(pool.free_slots(), 0, "a stopping pool has no free slot");
+    let _ = pool.stop(Duration::from_secs(1)).await;
+    let _ = spawner.stop(Duration::from_secs(10));
+}

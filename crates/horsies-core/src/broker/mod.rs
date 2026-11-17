@@ -14,10 +14,10 @@ pub mod core_rows;
 pub(crate) mod enqueue_history_tests;
 #[cfg(test)]
 mod enqueue_identity_ports;
+pub(crate) mod enqueue_task;
 pub mod error;
 pub mod health;
 pub(crate) mod history_reads;
-pub(crate) mod key_reservation;
 mod lifecycle_operations;
 #[cfg(test)]
 pub(crate) mod lifecycle_tests;
@@ -32,6 +32,8 @@ mod pgbouncer_contract_tests;
 pub mod pools;
 pub mod postgres;
 pub mod process_listener;
+#[cfg(test)]
+mod result_envelope_tests;
 pub mod result_types;
 pub mod row;
 #[cfg(test)]
@@ -59,6 +61,7 @@ pub use class_coverage::{
 };
 pub use class_coverage_reads::{LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT};
 pub use core_rows::RowDecodeError;
+pub use enqueue_task::SendKind;
 pub use error::{is_retryable_sqlx_error, is_retryable_statement_failure, BrokerError};
 pub use health::{
     DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,

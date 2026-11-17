@@ -9,7 +9,8 @@ use crate::core::history::enqueue::{prepare_workflow_task_facts, WorkflowTaskFac
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::{
     JoinType, OperationalErrorCode, OutcomeCode, SubWorkflowFailure, SubWorkflowSummary,
-    SuccessPolicy, TaskError, TaskErrorKind, TaskResult, WorkflowSpecRegistry, WorkflowTaskStatus,
+    SuccessPolicy, TaskError, TaskErrorKind, TaskResult, WorkflowSpecRegistry, WorkflowStatus,
+    WorkflowTaskStatus,
 };
 
 use crate::workflow_engine::args_merge::child_build_input;
@@ -185,7 +186,7 @@ WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND w.status = 'RUNNING'";
 
 /// Every dependency row, with its task name and definition key for the `args_from` wrap; a dependency that is
-/// not terminal is classified by its status (`args_merge::dependency_result`).
+/// not terminal gets no `args_from` member (`args_merge::dependency_result`).
 const GET_DEP_RESULTS_SQL: &str = "\
 SELECT task_index, node_id, task_name, sub_definition_key, status, result
 FROM horsies_workflow_tasks
@@ -2183,8 +2184,16 @@ fn terminal_child_outcome(
 ) -> Result<(SubWorkflowSummary, ParentNodeOutcome), serde_json::Error> {
     let child_output = parse_child_output(child_result_json, facts.output_task_index.is_some());
     let counts = ChildTaskCounts::from_rows(counts);
+    // The callers refuse a status that is not terminal before this call
+    // (`is_terminal_workflow_status`), so an unknown status here is a defect.
+    let status = WorkflowStatus::try_from(child_status).unwrap_or_else(|unknown| {
+        panic!(
+            "terminal_child_outcome: child workflow {child_workflow_id} has the status {unknown:?}, \
+             which the caller's terminal check refuses"
+        )
+    });
     let summary = SubWorkflowSummary {
-        status: child_status.to_owned(),
+        status,
         output: match &child_output {
             ChildOutput::Value { value, .. } => Some(value.clone()),
             ChildOutput::Error { .. }
