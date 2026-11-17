@@ -760,13 +760,13 @@ mod catalog_tests {
         ),
         (
             "horsies_move_task_to_history",
-            "p_task_id uuid, p_terminal_status text, p_terminalization_kind text, p_terminal_at timestamp with time zone, p_result text, p_error_code text, p_failed_reason text",
+            "p_task horsies_tasks, p_terminal_status text, p_terminalization_kind text, p_terminal_at timestamp with time zone, p_result text, p_error_code text, p_failed_reason text",
             "void",
             "plpgsql",
         ),
         (
             "horsies_terminalization_miss",
-            "p_task_id uuid, p_equivalent_kinds text[], p_fence_kind text, p_worker_id text, p_claimed_at timestamp with time zone",
+            "p_task_id uuid, p_kind text, p_fence_kind text, p_worker_id text, p_claimed_at timestamp with time zone",
             "SETOF horsies_terminalization_outcome",
             "plpgsql",
         ),
@@ -953,11 +953,12 @@ mod catalog_tests {
         .expect("fused def");
         // The generation half of the fence is pinned by behaviour
         // (`fused_stale_generation_is_lost_claim`), not by its text: its
-        // NULL arm goes (#697).
+        // NULL arm goes (#697). A miss passes the writer's own kind and fence
+        // kind; the miss classifier owns the equivalence classes.
         for fragment in [
             "'COMPLETE_FUSED'",
             "v_ctx.claimed_by_worker_id = p_worker_id",
-            "ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[]",
+            "p_task_id, 'COMPLETE_FUSED', 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at",
             "pg_notify('task_queue_' || v_ctx.queue_name, 'capacity')",
         ] {
             assert!(
@@ -968,14 +969,14 @@ mod catalog_tests {
 
         let miss: String = sqlx::query_scalar(
             "SELECT pg_get_functiondef(
-                'horsies_terminalization_miss(uuid, text[], text, text, timestamptz)'::regprocedure
+                'horsies_terminalization_miss(uuid, text, text, text, timestamptz)'::regprocedure
              )",
         )
         .fetch_one(&pool)
         .await
         .expect("miss def");
         for fragment in [
-            "terminalization_kind = ANY(p_equivalent_kinds)",
+            "horsies_terminalization_family(v_provenance.terminalization_kind) IS NOT DISTINCT FROM v_family",
             "'ALREADY_APPLIED'",
             "'FOREIGN_TERMINALIZATION'",
             "'TASK_ABSENT'",

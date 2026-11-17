@@ -4,7 +4,8 @@
 //! The success goes through the worker's client (`finish_workflow_success`,
 //! called by `support::write_workflow_success`), one statement on a core pool
 //! on the test database, as phase 1 calls it. The refused calls run the
-//! function directly with a NULL claim generation, as the Python test does.
+//! function directly with the row's own claim generation, as the Python test
+//! does, so the fence holds and the function's own refusal answers.
 //!
 //! Rows that a core test already checks in full are not repeated (test map:
 //! COVERED): the NULL generation, the replay, the lost claim, the CLAIMED
@@ -25,9 +26,11 @@ const QUEUE: &str = "lifecycle_workflow_success";
 const CHANNEL: &str = "task_queue_lifecycle_workflow_success";
 const OK_RESULT: &str = r#"{"__h_task_result__":true,"ok":7,"err":null}"#;
 
-/// The SQL of a direct call with a NULL claim generation (Python's
+/// The SQL of a direct call with the row's own claim generation (Python's
 /// `_DIRECT_SQL`).
-const DIRECT_SQL: &str = "SELECT * FROM horsies_finish_workflow_success($1, $2, NULL, $3)";
+const DIRECT_SQL: &str = "SELECT * FROM horsies_finish_workflow_success(
+    $1, $2, (SELECT claimed_at FROM horsies_tasks WHERE id = $1), $3
+)";
 
 /// A RUNNING row of `WORKER` with `retry_count`, `max_retries = 3`, in
 /// [`QUEUE`]. A workflow task gets a RUNNING node of a RUNNING workflow.
