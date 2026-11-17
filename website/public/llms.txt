@@ -778,7 +778,8 @@ Each entry: Title -- summary -> URL
 ### Configuration
 - Queue Modes -- DEFAULT vs CUSTOM, priorities -> /horsies/concepts/queue-modes/
 - AppConfig -- root application config -> /horsies/configuration/app-config/
-- Broker Config -- PostgresConfig connection -> /horsies/configuration/broker-config/
+- Broker Config -- the broker fields with defaults and ranges, URL format, PgBouncer transaction pooling, JIT, pool sizing, schema initialization -> /horsies/configuration/broker-config/
+- Broker Connections -- PostgresConfig in Python: examples, field types, refusals, psycopg and libpq, event loops, sync calls in async code (ASYNC_CONTEXT), the connection ceiling -> /horsies/configuration/broker-connections/
 - Remote PostgreSQL -- remote or managed PostgreSQL, connection budget, pooled multi-worker setups, health-check tuning -> /horsies/configuration/remote-postgres/
 - Recovery Config -- stale task detection -> /horsies/configuration/recovery-config/
 - Retention Config -- record lifetime, retention classes, per-queue retention, partition upkeep -> /horsies/configuration/retention-config/
@@ -845,7 +846,8 @@ keyword(s) -> page URL
 
 install, pip, setup, first task -> /horsies/quick-start/getting-started/
 Horsies, AppConfig, PostgresConfig, database_url, broker -> /horsies/configuration/app-config/
-PostgresConfig, pool_size, max_overflow, connection -> /horsies/configuration/broker-config/
+pool_size, max_overflow, session_database_url, pgbouncer_transaction_mode, keepalives -> /horsies/configuration/broker-config/
+PostgresConfig, psycopg, libpq, event loop, EVENT_LOOP_LIMIT, ASYNC_CONTEXT, connection ceiling -> /horsies/configuration/broker-connections/
 RecoveryConfig, stale, requeue, crash recovery -> /horsies/configuration/recovery-config/
 @app.task, decorator, task definition, define task -> /horsies/tasks/defining-tasks/
 send, send_async, enqueue, dispatch, produce, TaskSendResult, TaskSendError, retry_send -> /horsies/tasks/sending-tasks/
