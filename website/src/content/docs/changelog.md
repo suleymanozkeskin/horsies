@@ -134,6 +134,12 @@ written in Rust, on a new baseline schema.
   `can_view` then `can_act` for `/api/meta` and each action.
   `monitoring_app.state.events.close()` ends the open event streams.
 
+- **The web UI is compiled into `horsies._core`.** The core embeds the
+  committed build of `webui/` (`crates/horsies-core/webui-dist`); the wheel
+  no longer carries `horsies/web/static/`, and a build from a clone serves
+  the page with no frontend step. `bun run build` in `webui/` writes the
+  committed build.
+
 - **The web event stream uses the process listener of the broker.** It
   opens no connection of its own. After the listener reconnects, each stream
   gets one event with no ids per topic; 0.7 went on with a silent gap. A
@@ -683,6 +689,23 @@ unless it starts with "Added".
   `SchemaProbe`, `SchemaState`, `MetaResponse`, ...) are no longer public.
   The crate no longer embeds a UI build of its own (`webui-dist/`), and the
   frozen UI source `rust/webui/` is removed.
+- **`rerun_task(broker, ...)` becomes `app.rerun_task(command, policy)`**,
+  which runs in a transaction of the app's handle and returns
+  `Result<RerunOutcome, AppRerunError>` (`Connect`, `Rerun(RerunError)`).
+  `RerunOutcome` is Python's catalog: `Enqueued`, `SourceLive`,
+  `SourceAbsent { reason }` (a `TaskAbsenceReason` in place of
+  `predates_retained_floor: Option<bool>`), `SourceCorrupt`, `NotEligible`,
+  `InputUnavailable`, `InputCorrupt`, `KeyConflict`, `KeyReplay`.
+- **Added: `rerun::rerun_task_in(&mut transaction, &command, &policy,
+  sent_at)`**, the rerun in a transaction that the caller owns (Python
+  `rerun_task(connection, ...)`): the core builds each statement and
+  decides the outcome, the caller's driver runs the statements, and the
+  rerun commits or rolls back with the caller's own writes. Nothing commits
+  inside. `transaction` is any `CallerTransaction`; the adapters are
+  `rerun::TokioPostgresCaller` (feature `tokio-postgres`) and
+  `rerun::SqlxCaller` (feature `sqlx`). Errors are `CallerRerunError<E>`:
+  `Driver(E)`, `ClassNotRegistered { key }`, `ClientFamilyMismatch
+  { stored }`, `CallerKeyRefused`, `IdMintRefused`, `Row`.
 
 ## 0.7.0 — 2026-11-15
 

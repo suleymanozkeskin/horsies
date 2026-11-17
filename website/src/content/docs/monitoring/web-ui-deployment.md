@@ -234,9 +234,7 @@ schema.** It reports `ABSENT` and stops. Start a horsies app or worker instead.
 
 ## Static assets
 
-When the built SPA assets are missing, for example in a source checkout,
-`/api/*` continues to work and `GET /` returns 503 with a detail that names the
-build command. The Python path and message are in
+The SPA and its assets are compiled into `horsies._core`; see
 [Static Assets](/horsies/monitoring/web-ui-mount/#static-assets).
 
 Static assets are served without the auth dependency; they carry no data. Every

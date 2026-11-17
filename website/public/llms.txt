@@ -780,7 +780,7 @@ Each entry: Title -- summary -> URL
 - Queue Modes -- DEFAULT vs CUSTOM, priorities -> /horsies/concepts/queue-modes/
 - AppConfig -- root application config -> /horsies/configuration/app-config/
 - Broker Config -- the broker fields with defaults and ranges, URL format, PgBouncer transaction pooling, JIT, pool sizing, schema initialization -> /horsies/configuration/broker-config/
-- Broker Connections -- PostgresConfig in Python: examples, field types, refusals, psycopg and libpq, event loops, sync calls in async code (ASYNC_CONTEXT), the connection ceiling -> /horsies/configuration/broker-connections/
+- Broker Connections -- PostgresConfig in Python: examples (transaction pooling, connection checks at checkout, keepalives), field types, refusals, psycopg and libpq, event loops, sync calls in async code (ASYNC_CONTEXT), the connection ceiling -> /horsies/configuration/broker-connections/
 - Remote PostgreSQL -- remote or managed PostgreSQL, connection budget, pooled multi-worker setups, health-check tuning -> /horsies/configuration/remote-postgres/
 - Recovery Config -- stale task detection -> /horsies/configuration/recovery-config/
 - Retention Config -- record lifetime, retention classes, per-queue retention, partition upkeep -> /horsies/configuration/retention-config/
@@ -788,7 +788,7 @@ Each entry: Title -- summary -> URL
 ### Workers
 - Worker Architecture -- worker-owned child processes -> /horsies/workers/worker-architecture/
 - Choosing an Execution Mode -- ISOLATED, SHARED_ASYNC or SHARED_THREAD by the work of a task, measured conditions and results, timeouts and crashes per mode, author rules, profile examples -> /horsies/workers/execution-modes/
-- Worker Profiles -- named worker settings in AppConfig, --profile, check and boot validation -> /horsies/workers/worker-profiles/
+- Worker Profiles -- named worker settings in AppConfig, --profile, an app with a profile for each mode, check and boot validation -> /horsies/workers/worker-profiles/
 - Shared Async Tasks -- SHARED_ASYNC tasks as coroutines on seats of a shared async child, the timeout sequence, a return that leaves work alive, the blocked loop, author rules -> /horsies/workers/shared-async-tasks/
 - Shared Thread Tasks -- SHARED_THREAD tasks on seat threads of a shared thread child, when threads help, the timeout and the kill, pool sizing -> /horsies/workers/shared-thread-tasks/
 - Concurrency -- worker/queue/cluster limits -> /horsies/workers/concurrency/
@@ -860,8 +860,10 @@ TaskHandle, get, get_async, timeout, result -> /horsies/tasks/retrieving-results
 retry, backoff, exponential, fixed, jitter, max_delay_seconds, auto_retry_for -> /horsies/tasks/retry-policy/
 RetryPolicy, RetryPolicy.fixed, RetryPolicy.exponential, exception_mapper -> /horsies/tasks/defining-tasks/#configure-retries
 PENDING, CLAIMED, RUNNING, COMPLETED, FAILED, task status -> /horsies/concepts/task-lifecycle/
+TaskStatus, is_terminal, TASK_TERMINAL_STATES -> /horsies/tasks/retrieving-results/#terminal-statuses
 TaskResult, Result pattern, error as value -> /horsies/concepts/result-handling/
-QueueMode, DEFAULT, CUSTOM, priority, CustomQueueConfig -> /horsies/concepts/queue-modes/
+DEFAULT, CUSTOM, priority, queue mode, max_concurrency per queue -> /horsies/concepts/queue-modes/
+QueueMode, CustomQueueConfig, queue_name, HRS-103 -> /horsies/configuration/app-config/#queue-mode-configuration
 WorkflowSpec, DAG, TaskNode, waits_for, args_from -> /horsies/concepts/workflows/workflow-semantics/
 WorkflowHandle, WorkflowTaskInfo, WorkflowStatus -> /horsies/concepts/workflows/workflow-api/
 SubWorkflowNode, WorkflowDefinition, build_with, child workflow -> /horsies/concepts/workflows/subworkflows/

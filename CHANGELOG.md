@@ -129,6 +129,12 @@ written in Rust, on a new baseline schema.
   `can_view` then `can_act` for `/api/meta` and each action.
   `monitoring_app.state.events.close()` ends the open event streams.
 
+- **The web UI is compiled into `horsies._core`.** The core embeds the
+  committed build of `webui/` (`crates/horsies-core/webui-dist`); the wheel
+  no longer carries `horsies/web/static/`, and a build from a clone serves
+  the page with no frontend step. `bun run build` in `webui/` writes the
+  committed build.
+
 - **The web event stream uses the process listener of the broker.** It
   opens no connection of its own. After the listener reconnects, each stream
   gets one event with no ids per topic; 0.7 went on with a silent gap. A

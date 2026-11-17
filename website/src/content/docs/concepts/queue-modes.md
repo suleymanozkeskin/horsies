@@ -10,32 +10,18 @@ tags: [concepts, queues, mode, configuration]
 
 Horsies supports two queue modes: DEFAULT for simple single-queue setups, and CUSTOM for multiple named queues with priorities and concurrency limits.
 
+The API is on the client pages: [Queue Mode Configuration](/horsies/configuration/app-config/#queue-mode-configuration) (Python) and [Queues](/horsies/rust/configuration/app-config/#queues) (Rust).
+
 ## DEFAULT Mode
 
 The simplest configuration - all tasks go to a single "default" queue.
-
-```python
-from pydantic import SecretStr
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
-from horsies import QueueMode
-
-config = AppConfig(
-    queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
-)
-app = Horsies(config)
-
-@app.task("my_task")  # Goes to "default" queue
-def my_task() -> TaskResult[str, TaskError]:
-    return TaskResult(ok="done")
-```
 
 Characteristics:
 
 - Single queue named "default"
 - All tasks processed in order ( priority=100 --> means lowest )
 - No per-queue concurrency limits
-- Cannot specify `queue_name` in task decorator
+- A task cannot name a queue
 - FIFO applies
 
 ## CUSTOM Mode
@@ -43,32 +29,7 @@ Characteristics:
 Multiple named queues with individual priorities and concurrency limits.
 Queues limits are supported within the same deployed device, no need for deploying a separate device for each queue.
 
-```python
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, QueueMode, CustomQueueConfig
-
-config = AppConfig(
-    queue_mode=QueueMode.CUSTOM,
-    custom_queues=[
-        CustomQueueConfig(name="critical", priority=1, max_concurrency=10),
-        CustomQueueConfig(name="normal", priority=50, max_concurrency=5),
-        CustomQueueConfig(name="low", priority=100, max_concurrency=2),
-    ],
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
-)
-app = Horsies(config)
-
-@app.task("urgent_alert", queue_name="critical")
-def urgent_alert() -> TaskResult[str, TaskError]:
-    return TaskResult(ok="alerted")
-
-@app.task("process_order", queue_name="normal")
-def process_order() -> TaskResult[str, TaskError]:
-    return TaskResult(ok="processed")
-
-@app.task("ship_item", queue_name="low")
-def ship_to_address() -> TaskResult[str, TaskError]:
-    return TaskResult(ok="shipped")
-```
+Each task names its queue. For example, three queues: `critical` (priority 1, at most 10 running), `normal` (priority 50, at most 5) and `low` (priority 100, at most 2), with one task on each. The Python example is in [CUSTOM Mode](/horsies/configuration/app-config/#custom-mode).
 
 ## CustomQueueConfig
 
@@ -120,42 +81,15 @@ Queue configuration is validated at multiple points:
 
 **At app creation**: Queue names must be unique, custom_queues required in CUSTOM mode
 
-**At task definition**: `queue_name` must match a configured queue (CUSTOM mode) or be omitted (DEFAULT mode)
+**At task definition**: the queue of a task must match a configured queue (CUSTOM mode) or be omitted (DEFAULT mode)
 
 **At task send time**: Queue name re-validated against current configuration
 
-```python
-# This raises ConfigurationError (HRS-103) at definition time:
-@app.task("bad_task", queue_name="nonexistent")
-def bad_task() -> TaskResult[str, TaskError]:
-    ...
-```
-
-```text
-error[HRS-103]: invalid queue_name 'nonexistent'
-  --> /app/tasks.py:12
-   |
-12 | @app.task("bad_task", queue_name="nonexistent")
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   = note: valid queues: ['critical', 'normal', 'low']
-
-   = help:
-        use one of the configured queue names
-```
+An unknown queue name is refused with `HRS-103`, and the error lists the configured queues. The Python example and its error text are in [Unknown Queue Names](/horsies/configuration/app-config/#unknown-queue-names).
 
 ## Cluster-Wide Cap
 
-In addition to per-queue concurrency, you can limit total RUNNING tasks across all queues:
-
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
-```python
-config = AppConfig(
-    queue_mode=QueueMode.CUSTOM,
-    custom_queues=[...],
-    cluster_wide_cap=50,  # Max 50 tasks running across entire cluster
-    broker=PostgresConfig(...),
-)
-```
+In addition to per-queue concurrency, `cluster_wide_cap` limits the total RUNNING tasks across all queues, for example to 50. The Python example is in [Cluster-Wide Concurrency](/horsies/configuration/app-config/#cluster-wide-concurrency).
 
 This is useful when:
 
