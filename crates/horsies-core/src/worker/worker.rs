@@ -72,6 +72,7 @@ use crate::worker::runner_beats::{
     LiveDispatches, RunnerBeatWatch, StaleRunningRecovery,
 };
 use crate::worker::worker_state::ClaimColumns;
+use crate::workflow_engine::child_spec::ChildSpecs;
 
 /// How long the stop waits for the outcome writes in flight after the pools
 /// stopped (Python `_FINALIZER_DRAIN_TIMEOUT_S`). The children have ended,
@@ -767,7 +768,10 @@ impl WorkerStop {
 /// in a child process of the executor, and writes how each attempt ended.
 pub struct Worker {
     broker: Arc<PostgresBroker>,
-    workflow_registry: Arc<WorkflowSpecRegistry>,
+    /// Where the workflow steps of the worker get the spec of a
+    /// sub-workflow child: the parent advances of phase 2, workflow recovery
+    /// and phase-2 recovery.
+    child_specs: ChildSpecs,
     app_config: AppConfig,
     worker_config: WorkerConfig,
     /// The profile the worker runs: its children, claim limits, drain
@@ -794,12 +798,41 @@ impl Worker {
     /// `launch` names what every child runs; `registered` the class of each
     /// task of the app.
     ///
+    /// The sub-workflow children of the worker's workflow steps are built
+    /// from the registered definitions of `workflow_registry`.
+    ///
     /// Errors: [`WorkerError::Config`] for a worker config that does not
     /// validate, or a profile that starts no child (AppConfig validation
     /// refuses such a profile; Python `execution_settings`).
     pub fn new(
         broker: Arc<PostgresBroker>,
         workflow_registry: Arc<WorkflowSpecRegistry>,
+        app_config: AppConfig,
+        worker_config: WorkerConfig,
+        profile: SelectedProfile,
+        launch: ChildLaunch,
+        registered: RegisteredClasses,
+    ) -> Result<Self, WorkerError> {
+        Self::of_child_specs(
+            broker,
+            ChildSpecs::Registry(workflow_registry),
+            app_config,
+            worker_config,
+            profile,
+            launch,
+            registered,
+        )
+    }
+
+    /// [`Worker::new`] with the sub-workflow children of the worker's
+    /// workflow steps built by `child_specs`: the registered definitions of
+    /// the Rust client, or the child spec source of a client that builds
+    /// each child in its own language.
+    ///
+    /// Errors: as [`Worker::new`].
+    pub(crate) fn of_child_specs(
+        broker: Arc<PostgresBroker>,
+        child_specs: ChildSpecs,
         app_config: AppConfig,
         worker_config: WorkerConfig,
         profile: SelectedProfile,
@@ -822,7 +855,7 @@ impl Worker {
         Ok(Self {
             capacity_released: Arc::new(Notify::new()),
             broker,
-            workflow_registry,
+            child_specs,
             app_config,
             worker_config,
             profile,
@@ -1068,7 +1101,7 @@ impl Worker {
             Arc::clone(&self.broker),
             self.broker.reserve_pool().clone(),
             self.broker.reserve_maintenance_pool().clone(),
-            Arc::clone(&self.workflow_registry),
+            self.child_specs.clone(),
             self.app_config.recovery.clone(),
             self.app_config.retention.clone(),
             health,
@@ -1470,7 +1503,7 @@ impl Worker {
 
         let writer = Arc::new(OutcomeWriter::new(
             Arc::clone(&self.broker),
-            Arc::clone(&self.workflow_registry),
+            self.child_specs.clone(),
             self.worker_id.clone(),
             self.app_config.payload.clone(),
             self.app_config.retention.clone(),
@@ -1856,6 +1889,7 @@ mod tests {
     use crate::core::registry::WorkflowSpecRegistry;
     use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskMeta};
     use crate::core::task::{OperationalErrorCode, TaskError, TaskErrorCode, TaskResult, UserCode};
+    use crate::workflow_engine::steps::ChildBuild;
     use chrono::Utc;
     use futures::FutureExt;
     use serial_test::serial;
@@ -3242,8 +3276,8 @@ mod tests {
         let end = run_in_process(broker, task_fn, &claimed).await;
         let writer = OutcomeWriter::new(
             Arc::clone(broker),
-            Arc::new(WorkflowSpecRegistry::new(
-                crate::core::registry::BuilderHookName::SPEC_BUILDER,
+            crate::workflow_engine::child_spec::ChildSpecs::Registry(Arc::new(
+                WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             )),
             "worker-1".to_owned(),
             crate::core::config::payload::PayloadPolicy::default(),
@@ -3609,9 +3643,13 @@ mod tests {
 
         run_phase2(
             &broker,
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            ChildBuild::Registry {
+                registry: &WorkflowSpecRegistry::new(
+                    crate::core::registry::BuilderHookName::SPEC_BUILDER,
+                ),
+                retention: &crate::core::RetentionConfig::default(),
+            },
             phase2_work,
-            &crate::core::RetentionConfig::default(),
         )
         .await;
 
@@ -3653,9 +3691,13 @@ mod tests {
             run_phase_one(&broker, async_task_fn!(callback_success_task, ()), task_id).await;
         run_phase2(
             &broker,
-            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            ChildBuild::Registry {
+                registry: &WorkflowSpecRegistry::new(
+                    crate::core::registry::BuilderHookName::SPEC_BUILDER,
+                ),
+                retention: &crate::core::RetentionConfig::default(),
+            },
             phase2_work,
-            &crate::core::RetentionConfig::default(),
         )
         .await;
 
@@ -3704,9 +3746,11 @@ mod tests {
             WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         run_phase2(
             &broker,
-            &registry,
+            ChildBuild::Registry {
+                registry: &registry,
+                retention: &crate::core::RetentionConfig::default(),
+            },
             phase2_work,
-            &crate::core::RetentionConfig::default(),
         )
         .await;
 
@@ -3750,9 +3794,11 @@ mod tests {
             WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         run_phase2(
             &failed_phase2_broker,
-            &registry,
+            ChildBuild::Registry {
+                registry: &registry,
+                retention: &crate::core::RetentionConfig::default(),
+            },
             phase2_work,
-            &crate::core::RetentionConfig::default(),
         )
         .await;
 

@@ -1125,13 +1125,15 @@ pub(super) async fn worker_phase_two(
 ) {
     let owed = finalize_workflow_phase(
         broker,
-        registry,
+        ChildBuild::Registry {
+            registry,
+            retention: &RetentionConfig::default(),
+        },
         task.task_id,
         &task.queue_name,
         true,
         done.capacity_notified,
         done.phase_two,
-        &RetentionConfig::default(),
     )
     .await
     .unwrap_or_else(|error| panic!("phase 2 of task {}: {error}", task.task_id));
