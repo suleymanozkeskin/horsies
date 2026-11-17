@@ -29,7 +29,7 @@ import hashlib
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Final, cast
 
@@ -38,7 +38,17 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.sql.elements import TextClause
 
 from horsies.core.brokers.postgres import _EXPIRE_BATCH_SIZE
+from horsies.core.brokers.stale_running import (
+    FINISH_STALE_ATTEMPT_SQL,
+    StaleCandidate,
+    StaleThresholds,
+    crash_result_json,
+    crash_retry_request,
+    finish_stale_parameters,
+)
 from horsies.core.codec.error_payload import serialize_error_payload
+from horsies.core.codec.json_io import dumps_json
+from horsies.core.codec.typed import encode_task_result
 from horsies.core.lifecycle.commands import (
     CompleteTaskFused,
     ExpireOwnedClaim,
@@ -46,7 +56,21 @@ from horsies.core.lifecycle.commands import (
     TerminalizationCommand,
 )
 from horsies.core.lifecycle.fences import OwnedClaim, WorkerOwned
-from horsies.core.lifecycle.outcomes import Applied, decode_outcome_row
+from horsies.core.lifecycle.outcomes import (
+    Applied,
+    CapacityWoken,
+    FailureApplied,
+    NothingOwed,
+    PhaseTwoOwed,
+    PhaseTwoStep,
+    RetryNotRequested,
+    StaleFailureApplied,
+    SuccessApplied,
+    decode_failed_attempt_row,
+    decode_outcome_row,
+    decode_stale_attempt_row,
+    decode_workflow_success_row,
+)
 from horsies.core.lifecycle.persistence import (
     FUSED_BATCH_MAX_ROWS,
     FusedCompletionBatch,
@@ -61,6 +85,13 @@ from horsies.core.models.tasks import (
     OutcomeCode,
     TaskError,
     TaskResult,
+)
+from horsies.core.workflows.node_finish import NODE_FINISH_FUNCTION
+from horsies.core.workflows.steps import (
+    NODE_FINISH_FUNCTION_SQL,
+    NodeFinishDisposition,
+    decode_step_rows,
+    require_no_child_starts,
 )
 from tests.perf.statistics import Budget
 
@@ -163,6 +194,62 @@ _INSERT_CLAIMED_EXPIRED_SQL = text(f"""
     {_SEEDED_IDS}
 """)
 
+# A one-node RUNNING workflow per seeded workflow task: the workflow row and
+# its node, which links the task of the same index. The node needs no
+# dependents and no sub-workflow (downstream_subworkflow NONE); the workflow's
+# output is node 0, so phase 2 completes the workflow.
+_INSERT_WORKFLOWS_SQL = text("""
+    INSERT INTO horsies_workflows (
+        id, name, definition_key, status, on_error, output_task_index,
+        success_policy, result, error, parent_workflow_id, parent_task_index,
+        root_workflow_id, depth, sent_at, created_at, started_at,
+        completed_at, updated_at
+    )
+    SELECT
+        w.id, 'perf.workflow', NULL, 'RUNNING', 'fail', 0,
+        NULL, NULL, NULL, NULL, NULL,
+        w.id, 0, NOW(), NOW(), NOW(),
+        NULL, NOW()
+    FROM generate_series(1, CAST(:count AS integer)) AS g,
+        LATERAL (
+            SELECT CAST(:workflow_id_prefix || lpad(to_hex(g), 10, '0') AS uuid) AS id
+        ) AS w
+""")
+
+_INSERT_WORKFLOW_NODES_SQL = text("""
+    INSERT INTO horsies_workflow_tasks (
+        id, workflow_id, task_index, node_id, task_name, input, queue_name,
+        priority, dependencies, args_from, workflow_ctx_from,
+        allow_failed_deps, join_type, min_success, task_options, max_retries,
+        execution, good_until, retention_class_key, downstream_subworkflow,
+        status, task_id, is_subworkflow, sub_workflow_id, sub_workflow_name,
+        sub_definition_key, sub_workflow_params, sub_workflow_summary,
+        result, error, created_at, started_at, completed_at
+    )
+    SELECT
+        r.node_id, r.workflow_id, 0, 'node_0', 'perf.task', '{}', 'default',
+        100, '{}', NULL, NULL,
+        FALSE, 'all', NULL, NULL, 0,
+        'ISOLATED', NULL, 'forever', 'NONE',
+        'RUNNING', r.task_id, FALSE, NULL, NULL,
+        NULL, NULL, NULL,
+        NULL, NULL, NOW(), NOW(), NULL
+    FROM generate_series(1, CAST(:count AS integer)) AS g,
+        LATERAL (
+            SELECT
+                CAST(:node_id_prefix || lpad(to_hex(g), 10, '0') AS uuid) AS node_id,
+                CAST(:workflow_id_prefix || lpad(to_hex(g), 10, '0') AS uuid) AS workflow_id,
+                CAST(:id_prefix || lpad(to_hex(g), 10, '0') AS uuid) AS task_id
+        ) AS r
+""")
+
+# The delete of a workflow row cascades to its node rows and their phase-2
+# records (ON DELETE CASCADE).
+_DELETE_WORKFLOWS_SQL = text("""
+    DELETE FROM horsies_workflows
+    WHERE id BETWEEN CAST(:lower AS uuid) AND CAST(:upper AS uuid)
+""")
+
 # A seeded task ends either live or, after a terminal write, in history. The
 # terminal writes delete the task's attempt rows with the live row, and no
 # scenario writes a retry, so no attempt row outlives a measured operation.
@@ -189,6 +276,8 @@ class RowKind(Enum):
     """The table a seeded id is the primary key of."""
 
     TASK = 'task'
+    WORKFLOW = 'workflow'
+    WORKFLOW_NODE = 'workflow-node'
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,9 +331,12 @@ class SeedIds:
 
 @dataclass(frozen=True, slots=True)
 class SeedRows:
-    """The rows that one role of one scenario seeds."""
+    """The rows that one role of one scenario seeds. Row g of each kind
+    belongs together: workflow g holds node g, which links task g."""
 
     tasks: SeedIds
+    workflows: SeedIds
+    nodes: SeedIds
 
 
 def seed_ids(scenario_name: str, role: Role, kind: RowKind) -> SeedIds:
@@ -265,7 +357,11 @@ def seed_ids(scenario_name: str, role: Role, kind: RowKind) -> SeedIds:
 
 def seed_rows(scenario_name: str, role: Role) -> SeedRows:
     """The rows of one role in one scenario. Pure."""
-    return SeedRows(tasks=seed_ids(scenario_name, role, RowKind.TASK))
+    return SeedRows(
+        tasks=seed_ids(scenario_name, role, RowKind.TASK),
+        workflows=seed_ids(scenario_name, role, RowKind.WORKFLOW),
+        nodes=seed_ids(scenario_name, role, RowKind.WORKFLOW_NODE),
+    )
 
 
 type Seed = Callable[[Connection, SeedRows, int], None]
@@ -443,6 +539,35 @@ def seed_terminal_ballast(
         connection.commit()
 
 
+def seed_workflow_success_tasks(
+    connection: Connection,
+    rows: SeedRows,
+    count: int,
+) -> None:
+    """One-node RUNNING workflows whose only task is RUNNING."""
+    seed_running_tasks(connection, rows, count, is_workflow_task=True)
+    connection.execute(
+        _INSERT_WORKFLOWS_SQL,
+        {'workflow_id_prefix': rows.workflows.prefix, 'count': count},
+    )
+    connection.execute(
+        _INSERT_WORKFLOW_NODES_SQL,
+        {
+            **_seed_parameters(rows.tasks, count),
+            'workflow_id_prefix': rows.workflows.prefix,
+            'node_id_prefix': rows.nodes.prefix,
+        },
+    )
+    connection.commit()
+
+
+def delete_workflow_seeded(connection: Connection, rows: SeedRows) -> None:
+    """Delete the workflow rows of ``rows`` with their nodes, then its task rows."""
+    connection.execute(_DELETE_WORKFLOWS_SQL, rows.workflows.bounds())
+    connection.commit()
+    delete_seeded(connection, rows)
+
+
 def delete_seeded(connection: Connection, rows: SeedRows) -> None:
     """Delete the task rows of ``rows``, live and in history."""
     connection.execute(_DELETE_LIVE_TASKS_SQL, rows.tasks.bounds())
@@ -613,6 +738,212 @@ def _run_pending_expiry(
     return run
 
 
+# The call texts of the two writers that only the core sends, as
+# crates/horsies-core/src/broker/attempt_writes.rs holds them: the function,
+# its arguments in order, and the type the core binds each parameter as
+# (uuid, text, timestamptz, int4, float8). The core passes the wake argument
+# of the failed attempt as the constant TRUE. The function body is the
+# measured work.
+_FINISH_FAILED_ATTEMPT_SQL = text("""
+    SELECT * FROM horsies_finish_failed_attempt(
+        CAST(:task_id AS uuid), CAST(:worker_id AS text),
+        CAST(:claimed_at AS timestamptz), CAST(:retry_kind AS text),
+        CAST(:expected_retry_count AS integer),
+        CAST(:retry_delay_s AS double precision),
+        CAST(:retry_placement AS text), CAST(:result AS text),
+        CAST(:error_code AS text), CAST(:failed_reason AS text),
+        CAST(:attempt_outcome AS text), CAST(:attempt_message AS text),
+        CAST(:attempt_reason AS text), CAST(:claimed_row_rule AS text), TRUE
+    )
+""")
+
+_FINISH_WORKFLOW_SUCCESS_SQL = text("""
+    SELECT * FROM horsies_finish_workflow_success(
+        CAST(:task_id AS uuid), CAST(:worker_id AS text),
+        CAST(:claimed_at AS timestamptz), CAST(:result AS text)
+    )
+""")
+
+_FAILURE_ERROR_CODE = 'PERF_FAILURE'
+_FAILURE_MESSAGE = 'terminal application failure measurement'
+_FAILURE_RESULT = serialize_error_payload(
+    TaskResult(
+        err=TaskError(
+            error_code=_FAILURE_ERROR_CODE,
+            message=_FAILURE_MESSAGE,
+        )
+    )
+)
+
+
+def _failed_attempt_applied(rows: Sequence[Mapping[str, Any]]) -> int:
+    operation = 'failed attempt operation'
+    match decode_failed_attempt_row(_one_row(rows, operation)):
+        case FailureApplied(retry=RetryNotRequested(), after=CapacityWoken()):
+            return 1
+        case other:
+            raise RuntimeError(
+                f'{operation} returned {other!r} for a seeded eligible task'
+            )
+
+
+def _failed_attempt_invocation(task_id: str) -> Invocation:
+    """A task error with no retry, as the worker's failure path sends it.
+
+    The child reported a result, so the claimed-row rule is REFUSE. The
+    attempt row is FAILED with the error's message; the task keeps the
+    error code and no failed reason.
+    """
+    return Invocation(
+        statement=_FINISH_FAILED_ATTEMPT_SQL,
+        parameters={
+            'task_id': task_id,
+            'worker_id': WORKER_ID,
+            'claimed_at': CLAIMED_AT,
+            'retry_kind': 'NONE',
+            'expected_retry_count': None,
+            'retry_delay_s': None,
+            'retry_placement': None,
+            'result': _FAILURE_RESULT,
+            'error_code': _FAILURE_ERROR_CODE,
+            'failed_reason': None,
+            'attempt_outcome': 'FAILED',
+            'attempt_message': _FAILURE_MESSAGE,
+            'attempt_reason': None,
+            'claimed_row_rule': 'REFUSE',
+        },
+        operation='failed attempt operation',
+        check=_failed_attempt_applied,
+    )
+
+
+_STALE_THRESHOLDS = StaleThresholds(
+    stale_after_ms=5_000,
+    finalizing_stale_after_ms=5_000,
+)
+
+
+def _stale_candidate(task_id: str) -> StaleCandidate:
+    """The scan row of a seeded stale task. Its time facts are fixed, so the
+    crash result has one size in every operation."""
+    return StaleCandidate(
+        task_id=task_id,
+        retry_count=0,
+        max_retries=0,
+        task_options=None,
+        good_until=None,
+        claimed_by_worker_id=WORKER_ID,
+        worker_pid=WORKER_PID,
+        worker_hostname=WORKER_HOSTNAME,
+        worker_process_name=WORKER_PROCESS_NAME,
+        started_at=CLAIMED_AT,
+        db_now=CLAIMED_AT + timedelta(seconds=30),
+    )
+
+
+# The crash result names no task, so the result of the first baseline row
+# serves every row, and its serialization stays out of the measured time.
+_STALE_RESULT = crash_result_json(
+    _stale_candidate(
+        seed_ids('stale-attempt-terminal', Role.BASELINE, RowKind.TASK).id_at(1)
+    ),
+    _STALE_THRESHOLDS,
+).unwrap()
+
+
+def _stale_attempt_applied(rows: Sequence[Mapping[str, Any]]) -> int:
+    operation = 'stale attempt operation'
+    match decode_stale_attempt_row(_one_row(rows, operation)):
+        case StaleFailureApplied(retry=RetryNotRequested(), after=NothingOwed()):
+            return 1
+        case other:
+            raise RuntimeError(
+                f'{operation} returned {other!r} for a seeded stale task'
+            )
+
+
+def _stale_attempt_invocation(task_id: str) -> Invocation:
+    """The stale recovery of one candidate, with the parameters the reaper
+    builds: the crash retry its policy asks for (none: max_retries 0)."""
+    candidate = _stale_candidate(task_id)
+    return Invocation(
+        statement=FINISH_STALE_ATTEMPT_SQL,
+        parameters=finish_stale_parameters(
+            candidate,
+            _STALE_THRESHOLDS,
+            crash_retry_request(candidate),
+            _STALE_RESULT,
+        ),
+        operation='stale attempt operation',
+        check=_stale_attempt_applied,
+    )
+
+
+_WORKFLOW_RESULT: TaskResult[int, Any] = TaskResult(ok=1)
+_WORKFLOW_RESULT_JSON = dumps_json(encode_task_result(_WORKFLOW_RESULT, int)).unwrap()
+
+
+def _workflow_success_applied(rows: Sequence[Mapping[str, Any]]) -> int:
+    operation = 'workflow success operation'
+    match decode_workflow_success_row(_one_row(rows, operation)):
+        case SuccessApplied(phase_two=PhaseTwoOwed(step=PhaseTwoStep.NO_DEPENDENTS)):
+            return 1
+        case other:
+            raise RuntimeError(
+                f'{operation} returned {other!r} for a seeded workflow task'
+            )
+
+
+def _workflow_success_invocation(task_id: str) -> Invocation:
+    """Phase 1 of a workflow task's success: the attempt row, the move and
+    the phase-2 record."""
+    return Invocation(
+        statement=_FINISH_WORKFLOW_SUCCESS_SQL,
+        parameters={
+            'task_id': task_id,
+            'worker_id': WORKER_ID,
+            'claimed_at': CLAIMED_AT,
+            'result': _WORKFLOW_RESULT_JSON,
+        },
+        operation='workflow success operation',
+        check=_workflow_success_applied,
+    )
+
+
+def _run_workflow_success(connection: Connection, task_id: str) -> int:
+    """Phase 1 and phase 2 of a one-node workflow's success, each its own
+    write transaction.
+
+    Phase 2 is ``horsies_workflow_node_finish(task, TRUE, 'READ')``: the node
+    write from the phase-2 record, the capacity wake and the completion check,
+    which completes the workflow.
+    """
+    transitioned = _execute_invocation(
+        connection,
+        _workflow_success_invocation(task_id),
+    )
+    connection.commit()
+    rows = connection.execute(
+        NODE_FINISH_FUNCTION_SQL,
+        {'task_id': task_id, 'wake': True, 'dependents': 'READ'},
+    ).fetchall()
+    outcome = require_no_child_starts(
+        decode_step_rows(rows, NODE_FINISH_FUNCTION, NodeFinishDisposition),
+        NODE_FINISH_FUNCTION,
+    )
+    if (
+        outcome.disposition is not NodeFinishDisposition.APPLIED
+        or outcome.workflow_status != 'COMPLETED'
+    ):
+        connection.rollback()
+        raise RuntimeError(
+            f'workflow node finish returned {outcome.disposition.value} with '
+            f'workflow status {outcome.workflow_status!r} for a seeded workflow'
+        )
+    connection.commit()
+    return transitioned
+
+
 # The batch bound is imported rather than restated: a round number here would
 # measure a batch the system never sends, and a copied one would keep measuring
 # the old batch after the runtime changed its mind.
@@ -664,6 +995,59 @@ SCENARIOS: tuple[Scenario, ...] = (
         baseline_invocation=_owned_expiry_invocation,
         candidate_invocation=None,
         exact_client_statements_per_operation=1,
+    ),
+    SingleRowScenario(
+        name='failed-attempt-terminal',
+        description=(
+            'terminal failure of a task error with no retry: attempt row, move '
+            'and capacity wake in one statement'
+        ),
+        p50_budget=SINGLE_ROW_P50,
+        p99_budget=SINGLE_ROW_P99,
+        payload_bytes=len(_FAILURE_RESULT.encode('utf-8')),
+        seed=seed_running_tasks,
+        cleanup=delete_seeded,
+        baseline=_run_terminal_invocation(_failed_attempt_invocation),
+        candidate=None,
+        baseline_invocation=_failed_attempt_invocation,
+        candidate_invocation=None,
+        exact_client_statements_per_operation=1,
+    ),
+    SingleRowScenario(
+        name='stale-attempt-terminal',
+        description=(
+            'stale RUNNING recovery with no retry: staleness judged under the '
+            'row lock, attempt row and move in one statement'
+        ),
+        p50_budget=SINGLE_ROW_P50,
+        p99_budget=SINGLE_ROW_P99,
+        payload_bytes=len(_STALE_RESULT.encode('utf-8')),
+        seed=seed_running_tasks,
+        cleanup=delete_seeded,
+        baseline=_run_terminal_invocation(_stale_attempt_invocation),
+        candidate=None,
+        baseline_invocation=_stale_attempt_invocation,
+        candidate_invocation=None,
+        exact_client_statements_per_operation=1,
+    ),
+    SingleRowScenario(
+        name='workflow-success-phase2',
+        description=(
+            'one-node workflow success: phase 1 (attempt row, move, phase-2 '
+            'record), then phase 2 (node write, capacity wake, workflow '
+            'completion)'
+        ),
+        p50_budget=SINGLE_ROW_P50,
+        p99_budget=Budget(fraction=0.15, floor_ms=2.0),
+        payload_bytes=len(_WORKFLOW_RESULT_JSON.encode('utf-8')),
+        seed=seed_workflow_success_tasks,
+        cleanup=delete_workflow_seeded,
+        baseline=_run_workflow_success,
+        candidate=None,
+        baseline_invocation=_workflow_success_invocation,
+        candidate_invocation=None,
+        exact_client_statements_per_operation=2,
+        exact_write_transactions_per_operation=2,
     ),
     BatchScenario(
         name='pending-expiry-batch',

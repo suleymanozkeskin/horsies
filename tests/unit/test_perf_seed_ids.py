@@ -78,6 +78,14 @@ class TestIdRange:
 
 
 class TestSeedRows:
-    def test_seed_rows_names_the_task_range_of_its_role(self) -> None:
-        rows = seed_rows('owned-claim-expiry', Role.BALLAST)
-        assert rows.tasks == seed_ids('owned-claim-expiry', Role.BALLAST, RowKind.TASK)
+    def test_seed_rows_names_one_range_per_kind_of_its_role(self) -> None:
+        rows = seed_rows('workflow-success-phase2', Role.BALLAST)
+        assert rows.tasks == seed_ids(
+            'workflow-success-phase2', Role.BALLAST, RowKind.TASK
+        )
+        assert rows.workflows == seed_ids(
+            'workflow-success-phase2', Role.BALLAST, RowKind.WORKFLOW
+        )
+        assert rows.nodes == seed_ids(
+            'workflow-success-phase2', Role.BALLAST, RowKind.WORKFLOW_NODE
+        )
