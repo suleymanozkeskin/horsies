@@ -610,7 +610,7 @@ const ARGUMENT_CLASSES: [StubClass; 11] = [
     },
 ];
 
-const RECORD_CLASSES: [StubClass; 67] = [
+const RECORD_CLASSES: [StubClass; 68] = [
     StubClass {
         name: "BrokerFailure",
         doc: "An expected failure of a broker operation.",
@@ -1325,8 +1325,8 @@ const HANDLE_CLASSES: [StubClass; 3] = [
     },
 ];
 
-const CLASSES: [StubClass; 81] = {
-    let mut classes = [HANDLE_CLASSES[0]; 81];
+const CLASSES: [StubClass; 82] = {
+    let mut classes = [HANDLE_CLASSES[0]; 82];
     let mut handle_position = 0;
     while handle_position < HANDLE_CLASSES.len() {
         classes[handle_position] = HANDLE_CLASSES[handle_position];
