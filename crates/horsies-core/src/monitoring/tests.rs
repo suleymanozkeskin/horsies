@@ -275,6 +275,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
         exec_s: None,
         worker_hostname: None,
         good_until: None,
+        execution: None,
     };
     let summary = TaskSummary {
         id: task_id,
@@ -368,6 +369,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "exec_s",
                 "worker_hostname",
                 "good_until",
+                "execution",
             ],
         ),
         (

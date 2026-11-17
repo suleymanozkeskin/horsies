@@ -34,7 +34,7 @@ from horsies.monitoring.models import (
     WorkflowRunSummary,
 )
 from horsies.monitoring.pages import WorkflowRunsLimit
-from horsies.monitoring.queries import (
+from tests.dualrun.reference.monitoring_queries import (
     LIST_ROW_BOUND,
     _db_err,
     _is_uuid_text,

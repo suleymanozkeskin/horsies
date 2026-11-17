@@ -8,7 +8,8 @@
 //! the type comes from the core catalog itself.
 
 use horsies_core::catalog::{CodeCatalog, CodeEnum};
-use horsies_core::{BrokerErrorCode, TaskAttemptOutcome, TaskStatus};
+use horsies_core::monitoring::MonitoringQueryErrorCode;
+use horsies_core::{BrokerErrorCode, TaskAbsenceReason, TaskAttemptOutcome, TaskStatus};
 
 /// The type text of an annotation.
 #[derive(Clone, Copy, Debug)]
@@ -226,6 +227,11 @@ const CANCEL_TASK_PARAMETERS: &[StubParameter] = &[
     keyword("include_running", "bool"),
 ];
 const WORKFLOW_ID_PARAMETERS: &[StubParameter] = &[positional("workflow_id", "uuid.UUID")];
+const DELETE_EXPIRED_WORKFLOWS_PARAMETERS: &[StubParameter] = &[
+    positional("older_than_hours", "int"),
+    positional("batch_size", "int"),
+    positional("budget_ms", "int"),
+];
 const RAW_RESULT_RECORD_PARAMETERS: &[StubParameter] = &[
     positional("task_id", "uuid.UUID"),
     keyword("timeout_ms", "int | None"),
@@ -264,6 +270,33 @@ const CANCEL_OWNED_ORPHAN_PARAMETERS: &[StubParameter] = &[
     keyword("worker_id", "str"),
     keyword("claimed_at", "datetime.datetime"),
 ];
+
+const TASK_LIST_QUERY_PARAMETERS: &[StubParameter] = &[
+    keyword("window_lower", "datetime.datetime"),
+    keyword("window_upper", "datetime.datetime"),
+    keyword("statuses", "list[str]"),
+    keyword("task_names", "list[str]"),
+    keyword("queues", "list[str]"),
+    keyword("workers", "list[str]"),
+    keyword("error_codes", "list[str]"),
+    keyword("error_categories", "list[str]"),
+    keyword("retried_only", "bool"),
+    keyword("sort_by", "str"),
+    keyword("sort_dir", "str"),
+    keyword("offset", "int"),
+    keyword("limit", "int"),
+];
+const TASK_FACETS_QUERY_PARAMETERS: &[StubParameter] = &[
+    keyword("window_lower", "datetime.datetime"),
+    keyword("window_upper", "datetime.datetime"),
+    keyword("statuses", "list[str]"),
+    keyword("error_categories", "list[str]"),
+    keyword("retried_only", "bool"),
+];
+const MONITORING_LIST_TASKS_PARAMETERS: &[StubParameter] = &[positional("query", "TaskListQuery")];
+const MONITORING_TASK_DETAIL_PARAMETERS: &[StubParameter] = &[positional("task_id", "uuid.UUID")];
+const MONITORING_TASK_FACETS_PARAMETERS: &[StubParameter] =
+    &[positional("query", "TaskFacetsQuery")];
 
 const RESOLVE_MONITORING_WINDOW_PARAMETERS: &[StubParameter] = &[
     keyword("since", "datetime.datetime | None"),
@@ -392,7 +425,7 @@ const CORE_CHILD_HANDLE_METHODS: [StubFunction; 6] = [
     },
 ];
 
-const CORE_HANDLE_METHODS: [StubFunction; 30] = [
+const CORE_HANDLE_METHODS: [StubFunction; 31] = [
     StubFunction {
         name: "close",
         parameters: &[],
@@ -550,6 +583,12 @@ const CORE_HANDLE_METHODS: [StubFunction; 30] = [
         doc: "Cancel one workflow tree. Writes, in one statement. A row outside the function's contract\nraises PanicException.",
     },
     StubFunction {
+        name: "delete_expired_workflows_async",
+        parameters: DELETE_EXPIRED_WORKFLOWS_PARAMETERS,
+        returns: TypeText::FutureOf("WorkflowsDeleted | WorkflowDeleteFailed"),
+        doc: "One workflow retention pass of the reaper, in batches until one deletes nothing or the\nbudget has passed. Writes; each batch commits alone. A negative value raises\nOverflowError.",
+    },
+    StubFunction {
         name: "task_info",
         parameters: TASK_INFO_PARAMETERS,
         returns: TypeText::Plain(TASK_INFO_OUTCOME),
@@ -574,6 +613,51 @@ const CORE_HANDLE_METHODS: [StubFunction; 30] = [
         doc: "The awaitable form of the method above. A cancelled await drops the wait.",
     },
 ];
+
+const MONITORING_READ_OUTCOME: &str = "MonitoringJson | MonitoringFailed";
+const MONITORING_DETAIL_OUTCOME: &str = "MonitoringJson | TaskDetailAbsent | MonitoringFailed";
+
+/// The monitoring methods of `CoreHandle`.
+const MONITORING_HANDLE_METHODS: [StubFunction; 3] = [
+    StubFunction {
+        name: "monitoring_list_tasks_async",
+        parameters: MONITORING_LIST_TASKS_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "One page of the task list: the JSON text of the core's TaskListPage. Reads only, in one\nstatement. A cancelled await drops the read.",
+    },
+    StubFunction {
+        name: "monitoring_task_detail_async",
+        parameters: MONITORING_TASK_DETAIL_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_DETAIL_OUTCOME),
+        doc: "One task with its attempts: the JSON text of the core's TaskDetail, or the reason it is\nabsent. Reads only, in one statement. A cancelled await drops the read.",
+    },
+    StubFunction {
+        name: "monitoring_task_facets_async",
+        parameters: MONITORING_TASK_FACETS_PARAMETERS,
+        returns: TypeText::FutureOf(MONITORING_READ_OUTCOME),
+        doc: "The facets of one scope: the JSON text of the core's Facets. Reads only, in one\nstatement. A cancelled await drops the read.",
+    },
+];
+
+const HANDLE_METHOD_COUNT: usize = CORE_HANDLE_METHODS.len() + MONITORING_HANDLE_METHODS.len();
+
+/// Every method of `CoreHandle`: the client operations, then the monitoring
+/// reads.
+const HANDLE_METHODS: [StubFunction; HANDLE_METHOD_COUNT] = {
+    let mut methods = [CORE_HANDLE_METHODS[0]; HANDLE_METHOD_COUNT];
+    let mut position = 0;
+    while position < CORE_HANDLE_METHODS.len() {
+        methods[position] = CORE_HANDLE_METHODS[position];
+        position += 1;
+    }
+    let mut monitoring_position = 0;
+    while monitoring_position < MONITORING_HANDLE_METHODS.len() {
+        methods[CORE_HANDLE_METHODS.len() + monitoring_position] =
+            MONITORING_HANDLE_METHODS[monitoring_position];
+        monitoring_position += 1;
+    }
+    methods
+};
 
 const EXCEPTIONS: &[StubException] = &[
     StubException {
@@ -1499,7 +1583,7 @@ const HANDLE_CLASSES: [StubClass; 3] = [
     doc: "The core handle of one producer manifest and the pool profile of its process: PRODUCER,\nor WORKER (the main core pool keeps 2 connections free from batch checkouts for the\nper-task writes). Building it starts nothing.",
     constructor: Constructor::Parameters(CORE_HANDLE_PARAMETERS),
     properties: &[property("manifest_version", "int")],
-    methods: &CORE_HANDLE_METHODS,
+    methods: &HANDLE_METHODS,
 },
     StubClass {
         name: "CoreChildHandle",
@@ -1518,7 +1602,7 @@ const HANDLE_CLASSES: [StubClass; 3] = [
 ];
 
 /// The classes of the monitoring reads and the web handler.
-const MONITORING_CLASSES: [StubClass; 2] = [
+const MONITORING_CLASSES: [StubClass; 7] = [
     StubClass {
         name: "MonitoringWindowRecord",
         doc: "The window of one monitoring request: UTC bounds, increasing, at most the core's maximum\napart.",
@@ -1536,9 +1620,57 @@ const MONITORING_CLASSES: [StubClass; 2] = [
         properties: &[property("reason", "str")],
         methods: &[],
     },
+    StubClass {
+        name: "TaskListQuery",
+        doc: "One frozen task list read: the window, the filters, the sort and the page. A value\noutside its rule raises ValueError; a naive bound raises TypeError.",
+        constructor: Constructor::Parameters(TASK_LIST_QUERY_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskFacetsQuery",
+        doc: "One frozen task facets read: the window, the statuses, the error categories that narrow\nthe code list, and the retried filter. A value outside its rule raises ValueError; a naive\nbound raises TypeError.",
+        constructor: Constructor::Parameters(TASK_FACETS_QUERY_PARAMETERS),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "MonitoringJson",
+        doc: "The JSON text of the core model of one monitoring read.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("json", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "MonitoringFailed",
+        doc: "An expected failure of a monitoring read. Nothing changed: a read writes nothing.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            StubProperty {
+                name: "code",
+                annotation: TypeText::WireValuesOf(<MonitoringQueryErrorCode as CodeEnum>::CATALOG),
+            },
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskDetailAbsent",
+        doc: "Neither the live table nor the history holds the task.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            StubProperty {
+                name: "reason",
+                annotation: TypeText::WireValuesOf(<TaskAbsenceReason as CodeEnum>::CATALOG),
+            },
+        ],
+        methods: &[],
+    },
 ];
 
-const WORKFLOW_CLASSES: [StubClass; 6] = [
+const WORKFLOW_CLASSES: [StubClass; 8] = [
     StubClass {
         name: "WorkflowPaused",
         doc: "The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed\ntasks of the paused tree are abandoned.",
@@ -1581,6 +1713,24 @@ const WORKFLOW_CLASSES: [StubClass; 6] = [
         properties: &[
             property("workflow_id", "uuid.UUID"),
             property("code", "Literal['DB_OPERATION_FAILED', 'STORED_DATA_INVALID']"),
+            property("message", "str"),
+            property("retryable", "bool"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowsDeleted",
+        doc: "The workflow retention pass ended: a batch deleted no workflow, or the budget passed\nafter a batch.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("deleted", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkflowDeleteFailed",
+        doc: "The workflow retention pass failed. deleted_before counts the workflows of the batches\nthat committed first; a batch whose reply was lost may have committed.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("deleted_before", "int"),
             property("message", "str"),
             property("retryable", "bool"),
         ],

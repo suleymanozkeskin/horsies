@@ -6,6 +6,12 @@ Both detail reads send one statement in autocommit, so every part comes
 from one snapshot; the function raises ``data_corrupted`` when the history
 reader finds live a task that the live read missed, and that is a contract
 violation. The web route answers 404 for each reason.
+
+Since the monitoring switch the production read runs in the core; the detail
+cases test Python's body before the switch, the dual-run reference
+(``tests/dualrun/reference/monitoring_queries.py``), which specifies the
+answers that the dual-run pairs hold the core to. The production facade is
+tested on a mocked core handle in ``tests/unit/test_monitoring_reads_in_core.py``.
 """
 
 from __future__ import annotations
@@ -22,9 +28,10 @@ from horsies.core.history.errors import HistoryContractError
 from horsies.core.utils.db import AUTOCOMMIT_EXECUTION_OPTIONS
 from horsies.monitoring.errors import MonitoringQueryHistoryContractViolation
 from horsies.monitoring.models import TaskAbsenceReason, TaskDetailNotFound
-from horsies.monitoring.queries import get_task_detail, get_workflow_node
+from horsies.monitoring.queries import get_workflow_node
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.web.routes import tasks as tasks_routes
+from tests.dualrun.reference.monitoring_queries import get_task_detail
 from tests.monitoring_function_support import (
     absent_row,
     data_corrupted,

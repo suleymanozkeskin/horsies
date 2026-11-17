@@ -38,6 +38,10 @@ use crate::operations::expiry_and_orphans::{
 use crate::operations::failed_attempt::{
     finish_ended_attempt_operation, finish_failed_attempt_operation, FinishFailedAttemptRequest,
 };
+use crate::operations::monitoring_reads::{
+    list_tasks_operation, task_detail_operation, task_facets_operation, TaskFacetsQuery,
+    TaskListQuery,
+};
 use crate::operations::queue_starts::{count_queue_starts_operation, QueueStartsRequest};
 use crate::operations::release::{release_claims_operation, ReleaseClaimsRequest};
 use crate::operations::result::{raw_result_record_operation, result_wait_bound};
@@ -50,6 +54,7 @@ use crate::operations::success::{
 };
 use crate::operations::task_info::{task_info_operation, TaskInfoParts};
 use crate::operations::workflow_lifecycle::{cancel_workflow_operation, pause_workflow_operation};
+use crate::operations::workflow_retention::delete_expired_workflows_operation;
 use crate::process_core::{core_for_call, Core};
 use crate::records::{BrokerFailure, DatabasePingRecord, HandleClosed, Outcome};
 
@@ -681,6 +686,35 @@ impl CoreHandle {
         )
     }
 
+    /// One workflow retention pass of the reaper: batches of at most
+    /// `batch_size` rows (counted by nodes) of terminal workflows older than
+    /// `older_than_hours` with no live backing task, with their node rows,
+    /// until a batch deletes none or `budget_ms` has passed after a batch:
+    /// `WorkflowsDeleted` or `WorkflowDeleteFailed`. Writes; each batch commits
+    /// alone. Awaitable only: its caller, the reaper, runs on the worker's
+    /// event loop. A negative value raises `OverflowError`.
+    fn delete_expired_workflows_async<'py>(
+        &self,
+        py: Python<'py>,
+        older_than_hours: u32,
+        batch_size: u32,
+        budget_ms: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.delete_expired_workflows_async",
+            CallKind::Write,
+            delete_expired_workflows_operation(
+                self.connection(),
+                older_than_hours,
+                batch_size,
+                budget_ms,
+            ),
+        )
+    }
+
     /// The info of one task: `TaskInfoRecord`, `TaskInfoNotFound`, or
     /// `BrokerFailure` with `TASK_INFO_QUERY_FAILED` or
     /// `INVALID_JSON_PAYLOAD`. Installs the schema once per handle first;
@@ -778,6 +812,66 @@ impl CoreHandle {
             "CoreHandle.raw_result_record_async",
             CallKind::Read,
             raw_result_record_operation(self.connection(), task_id, timeout_ms),
+        )
+    }
+
+    /// One page of the task list (`horsies_monitoring_task_list`):
+    /// `MonitoringJson` of the core's `TaskListPage`, or `MonitoringFailed`.
+    /// Reads only, in one statement. Awaitable only: its caller,
+    /// `horsies.monitoring.list_tasks`, is a coroutine. A cancelled await
+    /// drops the read.
+    fn monitoring_list_tasks_async<'py>(
+        &self,
+        py: Python<'py>,
+        query: &Bound<'_, TaskListQuery>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_list_tasks_async",
+            CallKind::Read,
+            list_tasks_operation(self.connection(), query.get().query()),
+        )
+    }
+
+    /// One task with its attempts (`horsies_monitoring_task_detail`):
+    /// `MonitoringJson` of the core's `TaskDetail`, `TaskDetailAbsent`, or
+    /// `MonitoringFailed`. Reads only, in one statement. Awaitable only: its
+    /// caller, `horsies.monitoring.get_task_detail`, is a coroutine. A
+    /// cancelled await drops the read.
+    fn monitoring_task_detail_async<'py>(
+        &self,
+        py: Python<'py>,
+        task_id: Uuid,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_task_detail_async",
+            CallKind::Read,
+            task_detail_operation(self.connection(), task_id),
+        )
+    }
+
+    /// The facets of one scope (`horsies_monitoring_task_facets`):
+    /// `MonitoringJson` of the core's `Facets`, or `MonitoringFailed`. Reads
+    /// only, in one statement. Awaitable only: its caller,
+    /// `horsies.monitoring.task_facets`, is a coroutine. A cancelled await
+    /// drops the read.
+    fn monitoring_task_facets_async<'py>(
+        &self,
+        py: Python<'py>,
+        query: &Bound<'_, TaskFacetsQuery>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.monitoring_task_facets_async",
+            CallKind::Read,
+            task_facets_operation(self.connection(), query.get().query()),
         )
     }
 }

@@ -13,8 +13,10 @@
 // this crate they resolve through this name.
 extern crate self as horsies;
 
+mod app;
 mod config;
 mod error;
+mod registry;
 
 // The `pub` items of these modules form the crate root API. Each of them
 // keeps its submodules private, so a submodule name never reaches the root.
@@ -43,8 +45,10 @@ pub mod web;
 #[doc(hidden)]
 pub mod tools;
 
+pub use crate::app::{AppRole, Horsies, SchemaMode, StateNotProvided, SUPPRESS_SENDS_ENV};
 pub use crate::config::*;
 pub use crate::error::*;
+pub use horsies_core::handle::CoreHandle;
 
 pub use crate::check::*;
 pub use crate::child::*;

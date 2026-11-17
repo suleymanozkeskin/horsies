@@ -51,6 +51,7 @@ from horsies.core.worker.claiming import (
     read_claim_rows,
 )
 from horsies.core.utils.db import PooledStatements
+import horsies._core as core
 from horsies._core import ClaimsReleased, NotHeldRow, ReleasedRow, ReleaseFailed, TooManyPendingCalls
 from horsies.core.worker.worker import (
     Worker,
@@ -889,11 +890,18 @@ class TestReaperRetentionPass:
 
         async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
             executed.append(stmt)
-            if stmt is DELETE_EXPIRED_WORKFLOWS_SQL:
-                worker._stop.set()
             return MagicMock(rowcount=0)
 
         session.execute = AsyncMock(side_effect=_execute)
+
+        workflows_deleted = MagicMock(spec=core.WorkflowsDeleted)
+        workflows_deleted.deleted = 0
+
+        async def _delete_workflows(*args: Any) -> Any:
+            worker._stop.set()
+            return workflows_deleted
+
+        delete_workflows = AsyncMock(side_effect=_delete_workflows)
 
         created_brokers: list[Any] = []
 
@@ -907,6 +915,8 @@ class TestReaperRetentionPass:
                     fake_resources(session_factory=MagicMock(return_value=session)),
                 )
                 self.close_async = AsyncMock(return_value=Ok(None))
+                self._core_handle = MagicMock()
+                self._core_handle.delete_expired_workflows_async = delete_workflows
                 created_brokers.append(self)
 
         recover_mock = AsyncMock(return_value=_empty_workflow_recovery_report())
@@ -924,7 +934,15 @@ class TestReaperRetentionPass:
         assert any(
             stmt is DELETE_EXPIRED_WORKER_STATES_SQL for stmt in executed
         )
-        assert any(
+        # The workflow delete runs in the core: retention hours, batch size
+        # and the time left of the pass budget.
+        assert delete_workflows.await_args is not None
+        hours, batch, budget_ms = delete_workflows.await_args.args
+        assert (hours, batch) == (
+            48, worker.cfg.retention_config.retention_delete_batch_size,
+        )
+        assert 0 <= budget_ms <= 60_000
+        assert not any(
             stmt is DELETE_EXPIRED_WORKFLOWS_SQL for stmt in executed
         )
         # The foreign key removes a recovery failure count with its

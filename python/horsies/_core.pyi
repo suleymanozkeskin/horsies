@@ -155,6 +155,11 @@ class CoreHandle:
         """Cancel one workflow tree. Writes, in one statement. A row outside the function's contract
         raises PanicException.
         """
+    def delete_expired_workflows_async(self, older_than_hours: int, batch_size: int, budget_ms: int) -> asyncio.Future[WorkflowsDeleted | WorkflowDeleteFailed]:
+        """One workflow retention pass of the reaper, in batches until one deletes nothing or the
+        budget has passed. Writes; each batch commits alone. A negative value raises
+        OverflowError.
+        """
     def task_info(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> TaskInfoRecord | TaskInfoNotFound | BrokerFailure:
         """The info of one task. Installs the schema once per handle first; then reads only."""
     def task_info_async(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> asyncio.Future[TaskInfoRecord | TaskInfoNotFound | BrokerFailure]:
@@ -166,6 +171,18 @@ class CoreHandle:
         """
     def raw_result_record_async(self, task_id: uuid.UUID, *, timeout_ms: int | None) -> asyncio.Future[RawResultRecordRecord | RawResultAbsent | BrokerFailure]:
         """The awaitable form of the method above. A cancelled await drops the wait."""
+    def monitoring_list_tasks_async(self, query: TaskListQuery) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+        """One page of the task list: the JSON text of the core's TaskListPage. Reads only, in one
+        statement. A cancelled await drops the read.
+        """
+    def monitoring_task_detail_async(self, task_id: uuid.UUID) -> asyncio.Future[MonitoringJson | TaskDetailAbsent | MonitoringFailed]:
+        """One task with its attempts: the JSON text of the core's TaskDetail, or the reason it is
+        absent. Reads only, in one statement. A cancelled await drops the read.
+        """
+    def monitoring_task_facets_async(self, query: TaskFacetsQuery) -> asyncio.Future[MonitoringJson | MonitoringFailed]:
+        """The facets of one scope: the JSON text of the core's Facets. Reads only, in one
+        statement. A cancelled await drops the read.
+        """
 
 
 @final
@@ -1210,6 +1227,50 @@ class WindowRefusedRecord:
 
 
 @final
+class TaskListQuery:
+    """One frozen task list read: the window, the filters, the sort and the page. A value
+    outside its rule raises ValueError; a naive bound raises TypeError.
+    """
+    def __init__(self, *, window_lower: datetime.datetime, window_upper: datetime.datetime, statuses: list[str], task_names: list[str], queues: list[str], workers: list[str], error_codes: list[str], error_categories: list[str], retried_only: bool, sort_by: str, sort_dir: str, offset: int, limit: int) -> None: ...
+
+
+@final
+class TaskFacetsQuery:
+    """One frozen task facets read: the window, the statuses, the error categories that narrow
+    the code list, and the retried filter. A value outside its rule raises ValueError; a naive
+    bound raises TypeError.
+    """
+    def __init__(self, *, window_lower: datetime.datetime, window_upper: datetime.datetime, statuses: list[str], error_categories: list[str], retried_only: bool) -> None: ...
+
+
+@final
+class MonitoringJson:
+    """The JSON text of the core model of one monitoring read."""
+    @property
+    def json(self) -> str: ...
+
+
+@final
+class MonitoringFailed:
+    """An expected failure of a monitoring read. Nothing changed: a read writes nothing."""
+    @property
+    def code(self) -> Literal['DB_OPERATION_FAILED', 'EVENT_LOOP_LIMIT', 'HISTORY_CONTRACT_VIOLATION']: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class TaskDetailAbsent:
+    """Neither the live table nor the history holds the task."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def reason(self) -> Literal['PREDATES_RETAINED_HISTORY', 'WITHIN_RETAINED_HISTORY', 'NOT_CLASSIFIED']: ...
+
+
+@final
 class WorkflowPaused:
     """The workflow was RUNNING; it and its RUNNING descendants are PAUSED, and the claimed
     tasks of the paused tree are abandoned.
@@ -1256,6 +1317,28 @@ class HandleFailed:
     def workflow_id(self) -> uuid.UUID: ...
     @property
     def code(self) -> Literal['DB_OPERATION_FAILED', 'STORED_DATA_INVALID']: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class WorkflowsDeleted:
+    """The workflow retention pass ended: a batch deleted no workflow, or the budget passed
+    after a batch.
+    """
+    @property
+    def deleted(self) -> int: ...
+
+
+@final
+class WorkflowDeleteFailed:
+    """The workflow retention pass failed. deleted_before counts the workflows of the batches
+    that committed first; a batch whose reply was lost may have committed.
+    """
+    @property
+    def deleted_before(self) -> int: ...
     @property
     def message(self) -> str: ...
     @property
