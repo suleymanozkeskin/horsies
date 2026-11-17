@@ -23,13 +23,12 @@ from horsies.core.models.workflow import (
     WorkflowMeta,
     WorkflowValidationError,
 )
-from horsies.core.workflows.engine import on_workflow_task_complete
 from horsies.core.worker.current import set_current_app
 from horsies.core.worker.worker import _run_task_entry, _initialize_worker_pool
 from horsies.core.worker.task_loop import TaskLoop
 
 from .conftest import make_simple_task, make_no_ctx_task, make_workflow_spec, start_ok
-from tests.integration.conftest import task_name_for
+from tests.integration.conftest import finish_task
 from tests.broker_resources_support import listener_of
 from tests.fixtures.run_return import wire_of
 
@@ -88,30 +87,6 @@ class TestWorkflowCtx:
         await session.commit()
         assert isinstance(claimed_at, datetime)
         return claimed_at
-
-    async def _complete_task(
-        self,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        workflow_id: str,
-        task_index: int,
-        result: TaskResult[Any, TaskError],
-    ) -> None:
-        """Helper to simulate task completion."""
-        res = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = :idx
-            """),
-            {'wf_id': workflow_id, 'idx': task_index},
-        )
-        row = res.fetchone()
-        if row and row[0]:
-            await on_workflow_task_complete(
-            session, row[0], result, broker,
-            task_name=await task_name_for(session, row[0]),
-        )
-            await session.commit()
 
     async def _get_task_kwargs(
         self,
@@ -220,7 +195,7 @@ class TestWorkflowCtx:
         handle = await start_ok(spec, broker)
 
         # Complete A
-        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
@@ -261,7 +236,7 @@ class TestWorkflowCtx:
         )
 
         handle = await start_ok(spec, broker)
-        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
         assert '__h_workflow_ctx__' not in kwargs
@@ -292,7 +267,7 @@ class TestWorkflowCtx:
             broker=broker, name='meta_only', tasks=[node_a, node_b]
         )
         handle = await start_ok(spec, broker)
-        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
         meta_raw = kwargs.get('__h_workflow_meta__')
@@ -333,8 +308,8 @@ class TestWorkflowCtx:
         )
 
         handle = await start_ok(spec, broker)
-        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
-        await self._complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=20))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=20))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 2)
         ctx = self._build_ctx_from_kwargs(kwargs)
@@ -382,7 +357,7 @@ class TestWorkflowCtx:
         handle = await start_ok(spec, broker)
 
         # Complete A as FAILED -> B becomes SKIPPED -> C becomes READY
-        await self._complete_task(
+        await finish_task(
             session,
             broker,
             handle.workflow_id,
@@ -437,7 +412,7 @@ class TestWorkflowCtx:
         handle = await start_ok(spec, broker)
 
         # Complete A as FAILED -> B should be ENQUEUED (allow_failed_deps)
-        await self._complete_task(
+        await finish_task(
             session,
             broker,
             handle.workflow_id,
@@ -508,7 +483,7 @@ class TestWorkflowCtx:
         handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
-        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         task_row_result = await session.execute(
             text("""
@@ -579,7 +554,7 @@ class TestWorkflowCtx:
         handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
-        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         task_row_result = await session.execute(
             text("""
@@ -653,7 +628,7 @@ class TestWorkflowCtx:
         )
         handle = await start_ok(spec, broker)
 
-        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         task_row_result = await session.execute(
             text("""
@@ -751,7 +726,7 @@ class TestWorkflowCtx:
             broker=broker, name='key_err', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
@@ -790,7 +765,7 @@ class TestWorkflowCtx:
             broker=broker, name='has_res', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=42))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=42))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
@@ -822,7 +797,7 @@ class TestWorkflowCtx:
             broker=broker, name='has_res_false', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=1))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=1))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
@@ -862,7 +837,7 @@ class TestWorkflowCtx:
             broker=broker, name='nodekey', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=77))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=77))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
@@ -899,7 +874,7 @@ class TestWorkflowCtx:
             broker=broker, name='empty_ctx', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
 
         kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
         assert '__h_workflow_ctx__' not in kwargs
@@ -931,7 +906,7 @@ class TestWorkflowCtx:
             broker=broker, name='skip_ctx', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await self._complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=5))
+        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=5))
 
         # Fetch task B's row and manually inject __h_workflow_ctx__ into kwargs
         task_row_result = await session.execute(
