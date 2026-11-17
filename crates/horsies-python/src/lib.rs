@@ -136,6 +136,12 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::arguments::RetentionDefault>()?;
     module.add_class::<operations::arguments::RetentionForever>()?;
     module.add_class::<operations::arguments::RetentionPeriod>()?;
+    module.add_class::<operations::cancel::TaskCancelledRecord>()?;
+    module.add_class::<operations::cancel::CancelRefusedWorkflowTask>()?;
+    module.add_class::<operations::cancel::CancelRefusedStatus>()?;
+    module.add_class::<operations::cancel::CancelTaskAbsent>()?;
+    module.add_class::<operations::cancel::CancelFailed>()?;
+    module.add_class::<operations::cancel::CancelStoredDataInvalid>()?;
     module.add_class::<operations::enqueue::EnqueueRequest>()?;
     module.add_class::<operations::enqueue::Enqueued>()?;
     module.add_class::<operations::enqueue::SendSuppressed>()?;
