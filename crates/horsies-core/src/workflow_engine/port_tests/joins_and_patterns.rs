@@ -583,7 +583,6 @@ async fn a_recovery_branch_runs_after_a_failure_and_the_workflow_still_fails() {
 /// `TestComposedPatterns.test_join_any_with_args_from_partial_terminal`
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #892"]
 async fn join_any_leaves_out_an_args_from_dependency_that_did_not_finish() {
     let pool = shared_pool().await;
     let mut sink = joined(3, &[1, 2], JoinType::Any, None);

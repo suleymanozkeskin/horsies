@@ -467,7 +467,6 @@ async fn plain_roots_start_enqueued_with_linked_pending_tasks_and_a_dependent_wa
 /// The meta half of `test_fast_roots_enqueued_linked_and_dependent_pending`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #886"]
 async fn start_writes_the_workflow_meta_into_each_root_task() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -657,7 +656,6 @@ async fn assert_paused_before_plain_roots_got_tasks(
 /// the child of the sub-workflow root has no definition under its key.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #887"]
 async fn a_root_child_that_cannot_load_pauses_the_workflow_before_plain_roots_get_tasks() {
     let db = IsolatedDatabase::create().await;
     let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
@@ -688,7 +686,6 @@ async fn a_root_child_that_cannot_load_pauses_the_workflow_before_plain_roots_ge
 /// builder fails, and the parent hears it before its plain roots get tasks.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #887"]
 async fn a_child_that_fails_in_its_start_pauses_the_parent_before_plain_roots_get_tasks() {
     let db = IsolatedDatabase::create().await;
     let grandchild_key = "tests.port.pause_prop_grandchild.v1";
@@ -771,7 +768,6 @@ async fn a_child_start_enqueues_its_root_and_leaves_its_chain_pending() {
 /// The meta half of `test_child_rows_equivalent_to_per_node_path`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #886"]
 async fn a_child_start_writes_the_child_meta_into_its_root_task() {
     let pool = shared_pool().await;
     let child = child_chain("bulk_child_meta_wf", 2, None);
@@ -822,7 +818,6 @@ async fn child_root_options_that_do_not_parse_fail_the_start_and_leave_no_row() 
 /// `TestBulkChildStart.test_pause_policy_slow_root_failure_reverts_fast_siblings`
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #887"]
 async fn a_child_root_that_cannot_build_pauses_the_child_before_its_plain_roots_get_tasks() {
     let db = IsolatedDatabase::create().await;
     let broken_key = "tests.port.broken_build.v1";
@@ -859,7 +854,6 @@ async fn a_child_root_that_cannot_build_pauses_the_child_before_its_plain_roots_
 /// `TestBulkChildStart.test_nested_parent_propagation_pause_reverts_child_fast_siblings`
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #887"]
 async fn a_grandchild_failure_pauses_the_child_before_its_plain_roots_get_tasks() {
     let db = IsolatedDatabase::create().await;
     let broken_key = "tests.port.nested_broken_build.v1";
@@ -961,11 +955,9 @@ async fn recovery_enqueues_a_ready_node_with_its_input() {
     .await;
 
     let report = recover_stuck_workflows(
-        &db.pool,
+        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
-        0,
         3,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await

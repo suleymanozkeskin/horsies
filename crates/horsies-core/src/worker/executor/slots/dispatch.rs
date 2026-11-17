@@ -70,6 +70,9 @@ pub enum NotRunCause {
     NoChildOfItsKind,
     /// The runner heartbeats failed closed: no beat would cover the task.
     RunnerBeatsFailedClosed,
+    /// The worker stopped while the row waited for its queue cap (soft-cap
+    /// mode; `worker::queue_cap_hold`).
+    HeldForQueueCap,
 }
 
 impl fmt::Display for NotRunCause {
@@ -80,6 +83,7 @@ impl fmt::Display for NotRunCause {
             Self::QueueFull => "too many tasks wait for a slot",
             Self::NoChildOfItsKind => "this worker runs no child of the task's kind",
             Self::RunnerBeatsFailedClosed => "the runner heartbeats of the worker failed closed",
+            Self::HeldForQueueCap => "the worker stopped while the row waited for its queue cap",
         };
         f.write_str(text)
     }

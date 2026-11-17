@@ -1102,13 +1102,13 @@ impl WireProxy {
     }
 
     /// Start a new count of round trips.
-    pub(super) fn reset_round_trips(&self) {
+    pub(crate) fn reset_round_trips(&self) {
         self.round_trips.store(0, Ordering::SeqCst);
     }
 
     /// Round trips since the last reset: requests of a client that the
     /// server answered or still has to answer.
-    pub(super) fn round_trips(&self) -> u32 {
+    pub(crate) fn round_trips(&self) -> u32 {
         self.round_trips.load(Ordering::SeqCst)
     }
 }
@@ -1219,24 +1219,6 @@ pub(super) fn workflow_task_claimed_at(claimed_at: DateTime<Utc>) -> TaskSeed {
             claimed_at,
         },
         ..TaskSeed::claimed()
-    }
-}
-
-/// The parameters of one claim pass of `WORKER` over `queue`, with no cap.
-pub(super) fn claim_pass(queue: &str) -> crate::broker::postgres::ClaimPassParams {
-    crate::broker::postgres::ClaimPassParams {
-        worker_id: WORKER.to_owned(),
-        queues: vec![queue.to_owned()],
-        queue_priority: std::iter::once((queue.to_owned(), 100)).collect(),
-        queue_max_concurrency: std::collections::HashMap::new(),
-        hard_cap_mode: true,
-        processes: 10,
-        prefetch_buffer: 0,
-        max_claim_per_worker: 0,
-        max_claim_batch: 0,
-        cluster_wide_cap: None,
-        claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("positive lease"),
-        lock_keys: Vec::new(),
     }
 }
 

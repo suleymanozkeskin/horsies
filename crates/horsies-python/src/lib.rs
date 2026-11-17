@@ -9,6 +9,8 @@
 //!   released and checks signals every 100 ms; an async call returns an
 //!   asyncio future that the loop's completion queue sets (`bridge`). No
 //!   runtime thread takes the GIL.
+//! - A Python callback of the core runs on the process's one callback
+//!   thread, started at the first callback (`bridge::callback_thread`).
 //! - A panic in an operation raises `PanicException` (a `BaseException`); a
 //!   panic in a core background task stops the core in this process, or
 //!   aborts a worker process (`set_panic_rule`).
@@ -136,6 +138,22 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::arguments::RetentionDefault>()?;
     module.add_class::<operations::arguments::RetentionForever>()?;
     module.add_class::<operations::arguments::RetentionPeriod>()?;
+    module.add_class::<operations::cancel::TaskCancelledRecord>()?;
+    module.add_class::<operations::cancel::CancelRefusedWorkflowTask>()?;
+    module.add_class::<operations::cancel::CancelRefusedStatus>()?;
+    module.add_class::<operations::cancel::CancelTaskAbsent>()?;
+    module.add_class::<operations::cancel::CancelFailed>()?;
+    module.add_class::<operations::cancel::CancelStoredDataInvalid>()?;
+    module.add_class::<operations::attempt_records::AttemptAlreadyApplied>()?;
+    module.add_class::<operations::attempt_records::AttemptLostClaim>()?;
+    module.add_class::<operations::attempt_records::AttemptSourceStateConflict>()?;
+    module.add_class::<operations::attempt_records::AttemptTaskAbsent>()?;
+    module.add_class::<operations::attempt_records::AttemptWriteFailed>()?;
+    module.add_class::<operations::attempt_records::PhaseTwoOwedRecord>()?;
+    module.add_class::<operations::claim::ClaimPassRequest>()?;
+    module.add_class::<operations::claim::ClaimedRowRecord>()?;
+    module.add_class::<operations::claim::ClaimPassRecord>()?;
+    module.add_class::<operations::claim::ClaimPassFailed>()?;
     module.add_class::<operations::enqueue::EnqueueRequest>()?;
     module.add_class::<operations::enqueue::Enqueued>()?;
     module.add_class::<operations::enqueue::SendSuppressed>()?;
@@ -144,6 +162,18 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::enqueue::SendPayloadMismatch>()?;
     module.add_class::<operations::enqueue::SendPayloadTooLarge>()?;
     module.add_class::<operations::enqueue::SendKeyConflict>()?;
+    module.add_class::<operations::failed_attempt::NoRetry>()?;
+    module.add_class::<operations::failed_attempt::RetryAfter>()?;
+    module.add_class::<operations::failed_attempt::FinishFailedAttemptRequest>()?;
+    module.add_class::<operations::failed_attempt::RetryNotRequested>()?;
+    module.add_class::<operations::failed_attempt::RetryPastDeadline>()?;
+    module.add_class::<operations::failed_attempt::CapacityWoken>()?;
+    module.add_class::<operations::failed_attempt::AttemptFailureApplied>()?;
+    module.add_class::<operations::failed_attempt::AttemptRetryScheduled>()?;
+    module.add_class::<operations::failed_attempt::AttemptClaimReleased>()?;
+    module.add_class::<operations::queue_starts::QueueStartsRequest>()?;
+    module.add_class::<operations::queue_starts::QueueStartsRecord>()?;
+    module.add_class::<operations::queue_starts::QueueStartsFailed>()?;
     module.add_class::<operations::release::ReleaseClaimsRequest>()?;
     module.add_class::<operations::release::ClaimsReleased>()?;
     module.add_class::<operations::release::ReleasedRow>()?;
@@ -155,6 +185,15 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::stale_claims::StaleClaimsDrained>()?;
     module.add_class::<operations::stale_claims::StaleClaimsBoundReached>()?;
     module.add_class::<operations::stale_claims::StaleClaimsRequeueFailed>()?;
+    module.add_class::<operations::stale_running::StaleRunningRecovered>()?;
+    module.add_class::<operations::stale_running::StaleRunningScanFull>()?;
+    module.add_class::<operations::stale_running::StaleRunningScanFailed>()?;
+    module.add_class::<operations::success::SuccessBatchRequest>()?;
+    module.add_class::<operations::success::SuccessApplied>()?;
+    module.add_class::<operations::success::SuccessesWritten>()?;
+    module.add_class::<operations::success::BatchRolledBack>()?;
+    module.add_class::<operations::success::BatchCommitUnknown>()?;
+    module.add_class::<operations::success::WorkflowSuccessApplied>()?;
     module.add_class::<operations::task_info::TaskInfoRecord>()?;
     module.add_class::<operations::task_info::TaskAttemptRecord>()?;
     module.add_class::<operations::task_info::TaskInfoNotFound>()?;

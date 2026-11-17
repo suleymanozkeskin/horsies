@@ -15,7 +15,6 @@ use uuid::Uuid;
 
 use super::{new_reaper_health, spawn_reaper};
 use crate::broker::monitoring_test_database::MonitoringTestDatabase;
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
@@ -171,7 +170,6 @@ async fn a_started_reaper_logs_an_unserved_isolated_stream() {
             check_interval_ms: CHECK_INTERVAL_MS,
             ..RecoveryConfig::default()
         },
-        PayloadPolicy::default(),
         retention,
         new_reaper_health(),
         cancel.clone(),

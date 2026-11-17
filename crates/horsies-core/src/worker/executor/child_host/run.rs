@@ -26,7 +26,7 @@ use crate::worker::execution::{
 };
 use crate::worker::executor::protocol::{
     FailureDetail, ResultEnvelopeText, RunEnd, StopReason, StoredOptionsRefusal, TaskInputText,
-    TaskKind, MAX_BODY_BYTES,
+    MAX_BODY_BYTES,
 };
 
 /// What every run of one child shares.
@@ -44,7 +44,6 @@ pub(super) struct RunFacts {
     pub(super) task_id: Uuid,
     pub(super) task_name: String,
     pub(super) worker_id: String,
-    pub(super) task_kind: TaskKind,
     pub(super) claimed_at: DateTime<Utc>,
 }
 
@@ -282,7 +281,7 @@ async fn release_after_start_error(context: &HostContext, facts: &RunFacts) {
 /// is logged: the parent's write is fenced on its own.
 pub(super) async fn mark_finalizing(context: &HostContext, facts: &RunFacts) {
     match mark_task_finalizing(
-        context.broker.pool(),
+        &context.broker,
         facts.task_id,
         &facts.worker_id,
         facts.claimed_at,

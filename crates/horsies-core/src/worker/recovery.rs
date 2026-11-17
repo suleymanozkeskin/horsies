@@ -10,11 +10,10 @@ use crate::broker::core_rows::StatementLog;
 use crate::broker::stale_recovery::{
     finish_stale_attempt, requeue_stale_claimed_pass, scan_stale_running, wake_retried_queue,
     FinishStaleAttempt, RecoveryBatch, StaleCandidate, StaleClaimsRequeuePass, StaleRetry,
-    StaleRunningThresholds, ThresholdMs, ThresholdOutOfRange,
-    STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
+    StaleRunningPass, StaleRunningThresholds, ThresholdMs, ThresholdOutOfRange,
+    STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS, STALE_RUNNING_SCAN_BATCH,
 };
 use crate::broker::PostgresBroker;
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::identity::reservations::{
@@ -29,6 +28,7 @@ use crate::core::lifecycle::StaleAttemptOutcome;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
 use crate::db::CorePool;
+use crate::log_targets::STALE_RUNNING_PASS;
 
 use crate::worker::class_coverage_log::{check_class_coverage, ClassCoverageLog};
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
@@ -253,7 +253,6 @@ mod p7_maintenance_tests {
             &pool,
             &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &recovery,
-            &PayloadPolicy::default(),
             &retention,
             &health,
             &mut next_retention_cleanup,
@@ -353,7 +352,6 @@ mod p7_maintenance_tests {
             &pool,
             &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &recovery,
-            &PayloadPolicy::default(),
             &retention,
             &health,
             &mut next_retention_cleanup,
@@ -416,7 +414,6 @@ mod p7_maintenance_tests {
             &pool,
             &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &recovery,
-            &PayloadPolicy::default(),
             &retention,
             &health,
             &mut next_retention_cleanup,
@@ -610,7 +607,6 @@ mod p7_maintenance_tests {
             &pool,
             &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &recovery,
-            &PayloadPolicy::default(),
             &retention,
             &health,
             &mut next_retention_cleanup,
@@ -814,14 +810,6 @@ purged_nodes AS (
 DELETE FROM horsies_workflows
 WHERE id IN (SELECT id FROM budgeted)";
 
-/// Max stale-RUNNING candidates a single reaper pass processes. Each candidate
-/// is one statement under the cluster-wide reaper gate, so this bounds how
-/// long one pass holds the gate; successive passes drain any larger backlog.
-const STALE_RUNNING_SCAN_BATCH: RecoveryBatch = match RecoveryBatch::new(1_000) {
-    Some(batch) => batch,
-    None => panic!("1000 rows is a recovery batch"),
-};
-
 /// Wall-clock budget for one retention pass across both retained-row statements. A
 /// backlog that does not drain within the budget resumes on the next pass;
 /// every statement still runs at least one batch per pass so a deep backlog
@@ -858,7 +846,6 @@ pub fn spawn_reaper(
     maintenance_pool: PgPool,
     registry: Arc<WorkflowSpecRegistry>,
     config: RecoveryConfig,
-    payload: PayloadPolicy,
     retention: RetentionConfig,
     health: ReaperHealth,
     cancel: CancellationToken,
@@ -900,7 +887,6 @@ pub fn spawn_reaper(
                         &maintenance_pool,
                         &registry,
                         &config,
-                        &payload,
                         &retention,
                         &health,
                         &mut next_retention_cleanup,
@@ -917,7 +903,6 @@ pub fn spawn_reaper(
                         &maintenance_pool,
                         &registry,
                         &config,
-                        &payload,
                         &retention,
                         &health,
                         &mut next_retention_cleanup,
@@ -1023,7 +1008,6 @@ async fn run_reaper_pass(
     maintenance_pool: &PgPool,
     registry: &WorkflowSpecRegistry,
     config: &RecoveryConfig,
-    payload: &PayloadPolicy,
     retention: &RetentionConfig,
     health: &ReaperHealth,
     next_retention_cleanup: &mut tokio::time::Instant,
@@ -1176,11 +1160,9 @@ async fn run_reaper_pass(
     // Exact outbox recovery. Each candidate owns its transaction; retaining
     // dispositions remain visible and count toward bounded quarantine.
     let workflow_recovery = crate::workflow_engine::recovery::recover_stuck_workflows_observed(
-        runtime_pool,
+        broker,
         registry,
-        config.crashed_worker_recovery_grace_ms,
         config.workflow_recovery_failure_limit,
-        payload,
         retention,
     )
     .await;
@@ -1342,7 +1324,8 @@ async fn run_reaper_pass(
 /// Each statement runs alone on `pool`, checked out as reserved work, and
 /// commits alone, so the candidates before a failure stay recovered. A
 /// candidate whose statement fails is logged, and the pass goes on with the
-/// next candidate. Returns the number of candidates retried or failed.
+/// next candidate. Returns the number of candidates retried or failed, and
+/// logs Python's warning when the scan read a full batch.
 ///
 /// Errors: the scan's [`crate::broker::BrokerError::Statement`] or
 /// [`crate::broker::BrokerError::RowDecode`]; nothing was written.
@@ -1352,6 +1335,31 @@ pub async fn mark_stale_running_as_failed(
     thresholds: StaleRunningThresholds,
     batch: RecoveryBatch,
 ) -> Result<u64, crate::broker::BrokerError> {
+    let pass = stale_running_pass(pool, log, thresholds, batch).await?;
+    match pass {
+        StaleRunningPass::Complete { .. } => {}
+        StaleRunningPass::ScanFull { scan_batch, .. } => tracing::warn!(
+            target: STALE_RUNNING_PASS,
+            scan_batch,
+            "mark_stale_tasks_as_failed read a full scan batch of {scan_batch} candidates; the \
+             rest is recovered next pass",
+        ),
+    }
+    Ok(pass.recovered())
+}
+
+/// One stale RUNNING pass, as [`mark_stale_running_as_failed`] describes,
+/// with whether the scan read a full batch. Logs each candidate's outcome
+/// and failure; the caller reports the end of the pass.
+///
+/// Errors: the scan's [`crate::broker::BrokerError::Statement`] or
+/// [`crate::broker::BrokerError::RowDecode`]; nothing was written.
+pub(crate) async fn stale_running_pass(
+    pool: &CorePool,
+    log: StatementLog,
+    thresholds: StaleRunningThresholds,
+    batch: RecoveryBatch,
+) -> Result<StaleRunningPass, crate::broker::BrokerError> {
     let candidates = scan_stale_running(pool, log, thresholds, batch).await?;
     let mut recovered: u64 = 0;
     for candidate in &candidates {
@@ -1361,6 +1369,7 @@ pub async fn mark_stale_running_as_failed(
                 // Python skips the task when its crash result does not
                 // serialize (`core/brokers/postgres.py:3351-3358`).
                 tracing::error!(
+                    target: STALE_RUNNING_PASS,
                     task_id = %candidate.task_id,
                     %error,
                     "failed to serialize the crash result of a stale RUNNING task",
@@ -1375,6 +1384,7 @@ pub async fn mark_stale_running_as_failed(
             },
             Err(error) => {
                 tracing::error!(
+                    target: STALE_RUNNING_PASS,
                     task_id = %candidate.task_id,
                     %error,
                     "failed to recover a stale RUNNING task",
@@ -1382,7 +1392,21 @@ pub async fn mark_stale_running_as_failed(
             }
         }
     }
-    Ok(recovered)
+    Ok(stale_running_end(candidates.len(), batch, recovered))
+}
+
+/// The end of a stale RUNNING pass whose scan read `scanned` candidates of
+/// at most `batch`. Pure.
+fn stale_running_end(scanned: usize, batch: RecoveryBatch, recovered: u64) -> StaleRunningPass {
+    let scan_batch = batch.get().unsigned_abs();
+    let full = usize::try_from(scan_batch).is_ok_and(|bound| scanned >= bound);
+    match full {
+        true => StaleRunningPass::ScanFull {
+            recovered,
+            scan_batch,
+        },
+        false => StaleRunningPass::Complete { recovered },
+    }
 }
 
 /// Whether one stale candidate was retried or failed.
@@ -1469,6 +1493,7 @@ async fn after_stale_attempt(
     match outcome {
         StaleAttemptOutcome::FailureApplied { retry, after, .. } => {
             tracing::info!(
+                target: STALE_RUNNING_PASS,
                 task_id = %command.task_id,
                 ?retry,
                 ?after,
@@ -1483,6 +1508,7 @@ async fn after_stale_attempt(
             ..
         } => {
             tracing::info!(
+                target: STALE_RUNNING_PASS,
                 task_id = %command.task_id,
                 retry_count,
                 %next_retry_at,
@@ -1490,6 +1516,7 @@ async fn after_stale_attempt(
             );
             if let Err(error) = wake_retried_queue(pool, log, &queue_name, command.task_id).await {
                 tracing::warn!(
+                    target: STALE_RUNNING_PASS,
                     task_id = %command.task_id,
                     queue = %queue_name,
                     %error,
@@ -1500,6 +1527,7 @@ async fn after_stale_attempt(
         }
         StaleAttemptOutcome::Refused(refusal) => {
             tracing::warn!(
+                target: STALE_RUNNING_PASS,
                 task_id = %command.task_id,
                 outcome = refusal.as_str(),
                 ?refusal,
@@ -1714,10 +1742,18 @@ fn elapsed_millis(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Cancel orphaned workflow tasks in bounded batches.
+/// Cancel orphaned workflow tasks in bounded batches (Python
+/// `audit_orphaned_workflow_tasks`, `core/brokers/postgres.py:3228-3287`).
 ///
-/// One call examines one cursor page. The terminalization adapter returns one
-/// APPLIED outcome per orphan candidate. Any other outcome is a contract breach.
+/// One call examines one cursor page, in one transaction with the page's
+/// cursor update. The terminalization adapter returns one APPLIED outcome per
+/// orphan candidate.
+///
+/// Errors: [`crate::broker::BrokerError::Database`];
+/// [`crate::broker::BrokerError::TerminalizationContract`] for a row outside
+/// the wire contract, an outcome other than `APPLIED`, or cursor counts that
+/// do not match the outcomes. The transaction is not committed on any error:
+/// it rolls back when it drops, the cursor update included.
 async fn terminate_orphaned_workflow_tasks(
     pool: &PgPool,
     started: std::time::Instant,
@@ -1732,6 +1768,7 @@ async fn terminate_orphaned_workflow_tasks(
         .map_err(crate::broker::BrokerError::Database)?;
     let cancelled =
         crate::broker::terminalization::terminalize_in_tx(&mut transaction, &command).await?;
+    refuse_unapplied("horsies_cancel_orphaned_tasks", &cancelled)?;
     let stats: OrphanTaskScanStats = sqlx::query_as(
         "SELECT last_scan_rows AS rows_selected,
                 last_candidate_rows AS candidates_returned
@@ -1773,14 +1810,15 @@ async fn terminate_orphaned_workflow_tasks(
 }
 
 /// Expire unclaimed PENDING tasks whose `good_until` has passed (Python
-/// `expire_pending_tasks`, `core/brokers/postgres.py:3425-3503`).
+/// `expire_pending_tasks`, `core/brokers/postgres.py:3097-3175`).
 ///
 /// Runs `horsies_expire_pending_tasks` in bounded batches (earliest
 /// deadlines first, SKIP LOCKED) so a mass expiry is spread across several
-/// committed statements instead of one transaction that row-locks every
+/// committed transactions instead of one transaction that row-locks every
 /// match and flushes two trigger NOTIFYs per row in a single commit (which
-/// can overflow listener queues). Each batch is one statement alone on
-/// `pool`, checked out as reserved work, and commits alone. At most
+/// can overflow listener queues). Each batch is one transaction of its own
+/// on `pool` (`BEGIN`, the batch statement, `COMMIT`), checked out as
+/// reserved work, and commits only when every outcome is `APPLIED`. At most
 /// [`EXPIRE_MAX_BATCHES_PER_PASS`] batches run; the rest waits for the next
 /// pass. No attempt rows are written (the task was never executed). Returns
 /// the number of expired tasks.
@@ -1788,8 +1826,9 @@ async fn terminate_orphaned_workflow_tasks(
 /// Errors: [`crate::broker::BrokerError::Statement`];
 /// [`crate::broker::BrokerError::TerminalizationContract`] for a row outside
 /// the wire contract or an outcome other than `APPLIED` (a discovery batch
-/// reports transitioned rows only). The batches before the failed one, and
-/// the failed batch when its statement returned, stay committed.
+/// reports transitioned rows only). The batches before the failed one stay
+/// committed. The failed batch commits nothing, except after a `COMMIT`
+/// whose reply was lost (`OutcomeUnknown`).
 pub async fn expire_pending_tasks(
     pool: &crate::db::CorePool,
     log: StatementLog,
@@ -1811,8 +1850,13 @@ pub async fn expire_pending_tasks(
 
     let mut total: u64 = 0;
     for _ in 0..EXPIRE_MAX_BATCHES_PER_PASS {
-        let expired = crate::broker::terminalization::terminalize(pool, log, &command).await?;
-        let affected = transitioned_count(&expired)?;
+        let affected = crate::broker::terminalization::terminalize_and_commit_if(
+            pool,
+            log,
+            &command,
+            transitioned_count,
+        )
+        .await?;
         total += affected;
         if affected < full_batch {
             return Ok(total);
@@ -1828,10 +1872,25 @@ pub async fn expire_pending_tasks(
 
 /// The number of rows a pending expiry batch moved. The batch reports only
 /// the rows it moved (Python `expire_pending_tasks`), so any outcome other
-/// than `APPLIED` breaks the wire contract.
+/// than `APPLIED` breaks the wire contract ([`refuse_unapplied`]).
 fn transitioned_count(
     outcomes: &[crate::core::lifecycle::TerminalizationOutcome],
 ) -> Result<u64, crate::broker::BrokerError> {
+    refuse_unapplied("horsies_expire_pending_tasks", outcomes)?;
+    Ok(outcomes.len() as u64)
+}
+
+/// Refuse the outcomes of a discovery batch of `operation` unless each one
+/// is `APPLIED`. A discovery batch reports one row per row it moved (Python
+/// `expire_pending_tasks` and `audit_orphaned_workflow_tasks`,
+/// `core/brokers/postgres.py:3142-3158` and `:3244-3260`). Pure.
+///
+/// Errors: [`crate::broker::BrokerError::TerminalizationContract`] naming
+/// `operation`, the task and the first outcome other than `APPLIED`.
+fn refuse_unapplied(
+    operation: &str,
+    outcomes: &[crate::core::lifecycle::TerminalizationOutcome],
+) -> Result<(), crate::broker::BrokerError> {
     for outcome in outcomes {
         match outcome {
             crate::core::lifecycle::TerminalizationOutcome::Applied { .. } => {}
@@ -1841,15 +1900,15 @@ fn transitioned_count(
             | crate::core::lifecycle::TerminalizationOutcome::TaskAbsent { .. } => {
                 return Err(crate::broker::BrokerError::TerminalizationContract(
                     format!(
-                        "horsies_expire_pending_tasks: task {} reported {outcome:?}; \
-                     a discovery batch reports moved rows only",
+                        "{operation}: task {} reported {outcome:?}; \
+                         a discovery batch reports moved rows only",
                         outcome.task_id(),
                     ),
                 ));
             }
         }
     }
-    Ok(outcomes.len() as u64)
+    Ok(())
 }
 
 /// Requeue stale CLAIMED tasks back to PENDING (Python
@@ -2086,7 +2145,6 @@ mod tests {
                 broker.reserve_maintenance_pool(),
                 &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
                 &recovery,
-                &PayloadPolicy::default(),
                 &RetentionConfig::default(),
                 &health,
                 &mut next_retention_cleanup,
@@ -2890,3 +2948,42 @@ mod retention_ports;
 
 #[cfg(test)]
 mod reaper_pass_ports;
+
+#[cfg(test)]
+mod stale_running_end_tests {
+    use super::{stale_running_end, RecoveryBatch, StaleRunningPass};
+
+    fn batch(rows: i32) -> RecoveryBatch {
+        RecoveryBatch::new(rows).expect("a recovery batch")
+    }
+
+    /// Python `mark_stale_tasks_as_failed`: a scan that read its whole batch
+    /// warns that the rest is recovered next pass; a shorter scan does not.
+    #[test]
+    fn a_scan_of_a_whole_batch_is_full_and_a_shorter_one_is_complete() {
+        assert_eq!(
+            stale_running_end(1_000, batch(1_000), 7),
+            StaleRunningPass::ScanFull {
+                recovered: 7,
+                scan_batch: 1_000
+            }
+        );
+        assert_eq!(
+            stale_running_end(999, batch(1_000), 7),
+            StaleRunningPass::Complete { recovered: 7 }
+        );
+        assert_eq!(
+            stale_running_end(0, batch(1), 0),
+            StaleRunningPass::Complete { recovered: 0 }
+        );
+        assert_eq!(StaleRunningPass::Complete { recovered: 3 }.recovered(), 3);
+        assert_eq!(
+            StaleRunningPass::ScanFull {
+                recovered: 4,
+                scan_batch: 1
+            }
+            .recovered(),
+            4
+        );
+    }
+}

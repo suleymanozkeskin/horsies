@@ -86,12 +86,43 @@ impl ThresholdMs {
 
 /// The thresholds of one stale RUNNING pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct StaleRunningThresholds {
+pub struct StaleRunningThresholds {
     /// A row is stale when its latest runner beat (its start when it has
     /// none) is older than this.
-    pub(crate) stale_after: ThresholdMs,
+    pub stale_after: ThresholdMs,
     /// A row whose finalizing marker is newer than this is not stale.
-    pub(crate) finalizing_stale_after: ThresholdMs,
+    pub finalizing_stale_after: ThresholdMs,
+}
+
+/// Candidates that one stale RUNNING pass reads at most (Python
+/// `STALE_RUNNING_SCAN_BATCH_SIZE`). Each candidate is one statement, so
+/// this bounds the length of one pass; a larger backlog drains over
+/// successive passes.
+pub(crate) const STALE_RUNNING_SCAN_BATCH: RecoveryBatch = match RecoveryBatch::new(1_000) {
+    Some(batch) => batch,
+    None => panic!("1000 rows is a recovery batch"),
+};
+
+/// How a stale RUNNING pass ended. `recovered` counts the candidates whose
+/// retry or failure committed; a refused candidate and a candidate whose
+/// statement failed are not counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaleRunningPass {
+    /// The scan read fewer candidates than its batch: every stale row that
+    /// it saw was judged.
+    Complete { recovered: u64 },
+    /// The scan read a full batch of `scan_batch` candidates; stale rows can
+    /// remain for the next pass (Python warns then).
+    ScanFull { recovered: u64, scan_batch: u32 },
+}
+
+impl StaleRunningPass {
+    /// The candidates whose retry or failure committed.
+    pub const fn recovered(self) -> u64 {
+        match self {
+            Self::Complete { recovered } | Self::ScanFull { recovered, .. } => recovered,
+        }
+    }
 }
 
 /// `horsies_stale_running_scan`. Parameters in order: stale threshold,

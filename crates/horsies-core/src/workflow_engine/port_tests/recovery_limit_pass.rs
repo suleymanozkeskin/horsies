@@ -26,7 +26,6 @@ use super::support::{
     WorkflowSeed, POISON_TASK_OPTIONS, WORKER,
 };
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
 use crate::core::registry::workflow::RegisteredWorkflowSpec;
@@ -59,11 +58,9 @@ const BAD_GOOD_UNTIL: &str = r#"{"good_until":"not-a-date"}"#;
 
 async fn pass(pool: &PgPool, registry: &WorkflowSpecRegistry) -> RecoveryReport {
     recover_stuck_workflows(
-        pool,
+        &crate::broker::PostgresBroker::from_pool(pool.clone()),
         registry,
-        0,
         LIMIT,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
@@ -547,11 +544,9 @@ async fn the_resume_pass_logs_and_does_not_count() {
     let workflow_id = seed_poison_ready(&db.pool, WorkflowSeed::running()).await;
 
     let report = recover_stuck_workflow_tree(
-        &db.pool,
+        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
         &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         workflow_id,
-        0,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
@@ -671,7 +666,6 @@ async fn the_limit_bounds_case_1_5() {
 /// parent node is still RUNNING at the limit and the limit fails it.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #818"]
 async fn the_limit_bounds_case_1_6_and_fails_the_parent_workflow() {
     let db = IsolatedDatabase::create().await;
     let parent = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -898,7 +892,6 @@ async fn a_child_at_the_limit_fails_the_parent_node() {
 /// every pass with no count.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #818"]
 async fn a_parent_advance_raise_keeps_the_child_and_counts_on_the_parent() {
     let db = IsolatedDatabase::create().await;
     let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
@@ -1057,10 +1050,21 @@ async fn the_limit_write_refuses_a_workflow_that_is_not_running() {
     for status in ["PAUSED", "CANCELLED"] {
         let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running().status(status)).await;
         seed_node(&db.pool, &NodeSeed::task(workflow_id, 0, "READY")).await;
-        // A limit of 1: the first counted failure reaches it.
+        // A stored count of 2 and a limit of 3 (the lowest limit): this failure reaches it.
+        sqlx::query(
+            "INSERT INTO horsies_workflow_recovery_failures (
+                 workflow_id, failed_passes, last_pass_id, first_failed_at,
+                 last_failed_at, last_case, last_task_index, last_error_type
+             ) VALUES ($1, 2, $2, NOW(), NOW(), 'ready_not_enqueued', 0, 'Validation')",
+        )
+        .bind(workflow_id)
+        .bind(Uuid::new_v4())
+        .execute(&db.pool)
+        .await
+        .expect("seed a count of 2");
         let record = record_candidate_failure(
-            &db.pool,
-            RecoveryFailurePolicy::Count(CountFailures::new_pass(1)),
+            &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
+            RecoveryFailurePolicy::Count(CountFailures::new_pass(3)),
             workflow_id,
             RecoveryCase::ReadyNotEnqueued { task_index: 0 },
             &CandidateFailure::Error(WorkflowError::Validation("refused".to_owned())),
@@ -1079,7 +1083,6 @@ async fn the_limit_write_refuses_a_workflow_that_is_not_running() {
 /// `test_a_raised_row_is_counted_and_fails_the_workflow_at_the_bound`
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #819"]
 async fn a_raised_phase2_row_is_counted_and_fails_the_workflow_at_the_bound() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = start_a_then_b(&db.pool).await;
@@ -1136,7 +1139,6 @@ async fn a_transient_phase2_raise_stays_uncounted() {
 /// write again.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #819"]
 async fn a_failed_phase2_limit_write_keeps_the_row_under_the_bound() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = start_a_then_b(&db.pool).await;
