@@ -25,6 +25,7 @@ pub mod log_targets;
 pub mod manifest;
 pub mod manifest_schema;
 pub mod monitoring;
+pub mod process_runtime;
 pub mod scheduler_manifest;
 #[cfg(test)]
 pub(crate) mod test_support;

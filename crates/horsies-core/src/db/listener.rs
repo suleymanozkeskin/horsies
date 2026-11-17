@@ -29,7 +29,8 @@ use tokio::time::Instant;
 use tokio_postgres::{AsyncMessage, Client};
 
 use super::connect::{open_connection, ConnectPlan, DriverConnection};
-use super::failure::{ConnectError, Transience};
+use super::failure::{ConnectError, ConnectFailure, Transience};
+use crate::process_runtime::spawn_on_process_runtime;
 
 /// PostgreSQL's identifier limit (NAMEDATALEN - 1).
 pub const MAX_CHANNEL_NAME_BYTES: usize = 63;
@@ -596,8 +597,13 @@ pub struct Listener {
 }
 
 impl Listener {
-    /// Starts the listener task. The connection opens at the first
-    /// subscription. Must be called inside a tokio runtime.
+    /// Starts the listener task on the runtime of the process
+    /// ([`crate::process_runtime`]), so its connection serves every runtime
+    /// of the process. The connection opens at the first subscription.
+    ///
+    /// When the process runtime cannot be used, the task starts on the
+    /// caller's runtime (which must exist) and fails every subscription with
+    /// [`SubscribeError::StartFailed`] and the refusal as its cause.
     pub fn start(plan: Arc<ConnectPlan>) -> Listener {
         let shared = Arc::new(Shared {
             registry: Mutex::new(Registry {
@@ -611,7 +617,22 @@ impl Listener {
         let subscribe_bound = RECONNECT_BACKOFF_LIMIT
             .saturating_add(plan.attempt_bound())
             .saturating_add(LISTENER_STATEMENT_BOUND.saturating_mul(2));
-        let task = tokio::spawn(run_listener(Arc::clone(&shared), plan));
+        let masked_url = plan.masked_url().clone();
+        let task = match spawn_on_process_runtime(run_listener(Arc::clone(&shared), plan)) {
+            Ok(task) => task,
+            Err(refusal) => {
+                tracing::error!(
+                    target: LOG_TARGET,
+                    %refusal,
+                    "the listener cannot run: the process runtime cannot be used",
+                );
+                let cause = Arc::new(ListenerStartFailure::Connect(ConnectError {
+                    masked_url,
+                    cause: ConnectFailure::RuntimeUnavailable(refusal),
+                }));
+                tokio::spawn(refuse_subscriptions(Arc::clone(&shared), cause))
+            }
+        };
         Listener {
             owner: Arc::new(ListenerOwner {
                 shared,
@@ -842,6 +863,26 @@ enum Link {
 /// The listener task. Runs until the listener closes; each turn handles one
 /// change: a subscription change, a connect attempt, a lost connection or a
 /// probe.
+/// The listener task when the process runtime cannot be used: it fails
+/// each waiting subscription with `cause`, until the close.
+async fn refuse_subscriptions(shared: Arc<Shared>, cause: Arc<ListenerStartFailure>) {
+    loop {
+        match shared.snapshot().lifecycle {
+            Lifecycle::Closing => {
+                shared.stop_all();
+                return;
+            }
+            Lifecycle::Running => {}
+        }
+        shared.fail_waiting(&SubscribeError::StartFailed {
+            cause: Arc::clone(&cause),
+        });
+        // A subscription and the close each wake the task; a wake before
+        // this wait is kept as a permit.
+        shared.task_wake.notified().await;
+    }
+}
+
 async fn run_listener(shared: Arc<Shared>, plan: Arc<ConnectPlan>) {
     let mut link = Link::Down(DownState {
         retry_at: Instant::now(),

@@ -595,6 +595,51 @@ async fn a_connection_killed_while_idle_is_replaced_at_checkout() {
     database.remove().await;
 }
 
+/// #1403: a pooled connection is opened and driven on the runtime of the
+/// process, so it still serves after the runtime of the caller that opened
+/// it ended: the second runtime gets the same backend.
+#[test]
+fn a_pooled_connection_outlives_the_runtime_that_opened_it() {
+    let setup = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("the setup runtime starts");
+    let database = setup.block_on(TestDatabase::create());
+    let pool = database.pool(
+        PoolRole::Main,
+        1,
+        Reserve::NoReserve,
+        StatementProtocol::PreparedPerConnection,
+    );
+    let first = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the first caller runtime starts");
+    let opened_by = first.block_on(async {
+        let mut connection = pool
+            .checkout(CheckoutClass::Reserved)
+            .await
+            .expect("checkout");
+        backend_pid(&mut connection).await
+    });
+    drop(first);
+    let second = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the second caller runtime starts");
+    let served_by = second.block_on(async {
+        let mut connection = pool
+            .checkout(CheckoutClass::Reserved)
+            .await
+            .expect("the connection still serves");
+        backend_pid(&mut connection).await
+    });
+    assert_eq!(served_by, opened_by);
+    pool.close();
+    setup.block_on(database.remove());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_closed_pool_refuses_checkouts_permanently() {
     let database = TestDatabase::create().await;
