@@ -22,6 +22,10 @@ mod run_work;
 mod seats;
 
 #[cfg(test)]
+pub(crate) mod in_process;
+#[cfg(test)]
+mod start_node_tests;
+#[cfg(test)]
 mod start_tests;
 #[cfg(test)]
 mod tests;
