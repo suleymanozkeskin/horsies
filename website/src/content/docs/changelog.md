@@ -13,7 +13,172 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+Draft notes of 0.8.0. The Python client and the Rust client run on one core,
+written in Rust, on a new baseline schema.
+
 ### Changed
+
+- **0.8.0 starts on a new database.** The core installs a new baseline
+  schema (migration 1000). It refuses a database of horsies 0.x with the
+  cause and changes nothing in it: a Python 0.x schema
+  (`horsies_schema_version` with no `horsies_migrations`) is `ZeroXPython`,
+  and a `horsies-rust` 0.1.0-alpha database (migrations up to 65) is
+  `ForeignMigrations`. Drain the 0.7 fleet, then start 0.8.0 on a new
+  database. Key reservations, schedule state, task history and tasks in
+  flight do not move. A 0.7 process that connects to a 0.8.0 database stops
+  with "database schema is newer than this build supports". The web schema
+  gate names a 0.x database with the new state `SchemaState.ZERO_X`;
+  `SchemaState.CUTOVER_REQUIRED` is removed.
+
+- **Sends and the broker reads run on the core of the process.** The task
+  sends, `PostgresBroker.enqueue` and `enqueue_async`, `get_task_info`,
+  `get_raw_result_record` (and `TaskHandle.get()`), `ping_database_async`,
+  `ping_workers_async` and `ensure_schema_initialized` use one set of core
+  pools per broker, for every thread and event loop. They return no
+  `EVENT_LOOP_LIMIT`, and the sync `send()`, `enqueue()`, `get_task_info()`
+  and `get_raw_result_record()` return no `LOOP_RUNNER_FAILED`; the error
+  types keep both variants. When the core cannot run a call, the call
+  returns its failure code with the core error as `exception`:
+  `TooManyPendingCalls` (65,536 calls in flight on one event loop) and
+  `CoreCallTimedOut` (a sync call over 30 minutes) are retryable;
+  `CoreStopped`, `CoreStartFailed` and `ForkedAfterCoreStart` are not. Only
+  a workflow start and a workflow resume keep a resource set per event loop.
+  The sync send pool is gone.
+
+- **A process forked without exec after the core started cannot call
+  horsies.** Its next core call raises `ForkedAfterCoreStart`. Start child
+  processes that call horsies with the `spawn` or `forkserver` start method.
+
+- **Every task id of the public API is a `uuid.UUID`.** This covers
+  `TaskHandle.task_id`; the task ids of the send errors and of
+  `BrokerIdempotencyKeyConflict`; the `task_id` of `Horsies.get_result`,
+  `get_raw_result`, `get_task_info` and of the broker reads;
+  `PostgresBroker.enqueue` (its `task_id` and its result);
+  `RawResultRecord`, `TaskInfo` and `TaskAttemptInfo`; the `id` of each row
+  of `get_stale_tasks` and `get_expired_tasks`; `RerunTask.source_task_id`
+  and the rerun outcomes; `mint_task_id()`; and in `horsies.monitoring`,
+  `get_task_detail`, `cancel_task` and the task ids of their models. Text
+  becomes a task id only at the web API path. Workflow ids keep their text
+  type.
+
+- **One `input_json` holds the task input.** `TaskSendPayload.input_json`
+  (the keyword arguments as one JSON object, or `None` for none) replaces
+  `args_json`, `kwargs_json` and `enqueue_sha`. `PostgresBroker.enqueue` and
+  `enqueue_async` take `input_json` in their place and require `sent_at` and
+  `send_kind`. The row stores the text as sent, `{}` for none; an input that
+  is not a JSON object or null is `INVALID_INPUT`.
+  `horsies.core.utils.fingerprint.enqueue_fingerprint` is removed.
+
+- **A database URL takes the scheme `postgresql://` or `postgres://`.**
+  `postgresql+psycopg://`, the one scheme 0.7 accepted, and every other
+  scheme that names a driver are refused with `HRS-203` and a help text that
+  names the fix; so are other schemes and a URL without a scheme.
+
+- **The core reads only the connection settings that it supports.** These
+  are the URL and its supported query parameters (`host`, `port`, `user`,
+  `password`, `dbname`, `application_name`, `options`, `connect_timeout`,
+  `sslmode`, `sslrootcert`, `sslcert`, `sslkey`, `sslnegotiation`,
+  `channel_binding`, `target_session_attrs`, `load_balance_hosts`), the TLS
+  files that the URL names, `PGPASSWORD` and `~/.pgpass`. Another libpq
+  parameter, an unknown parameter, a parameter given twice, and a libpq
+  environment variable that libpq would apply are refused by name. The
+  keepalive parameters and `tcp_user_timeout` are refused in the URL: set
+  them in `PostgresConfig`. A pool behind PgBouncer statement pooling is
+  refused at its first checkout, not retryable.
+
+- **A `PostgresConfig` pool or TCP value outside its range is refused.**
+  `pool_size` is 1 to 10,000, `max_overflow` 0 to 10,000, `pool_timeout` 0
+  to 4,294,967,295 s, `pool_recycle` -1 or 0 to 4,294,967,295 s, else
+  `HRS-213`; `pool_size=0` and `max_overflow=-1` (no limit in SQLAlchemy)
+  are refused with a help text. While `tcp_keepalives` is on,
+  `tcp_keepalives_idle` and `tcp_keepalives_interval` are 1 to 32,767 s and
+  `tcp_keepalives_count` 1 to 127; `tcp_user_timeout_ms` is 0 or 1 to
+  2,147,483,647 ms; else `HRS-215`.
+
+- **A queue name is at most 52 bytes of UTF-8 text.** `CustomQueueConfig`
+  refuses a longer name, and a name with no UTF-8 text, with `HRS-200`. 0.7
+  allowed 100 characters, and every send to a queue with a name of 53 to 100
+  bytes failed: the channel `task_queue_<name>` passed PostgreSQL's 63-byte
+  limit.
+
+- **A schedule time of day has no time zone and no microseconds.**
+  `DailySchedule`, `WeeklySchedule` and `MonthlySchedule` refuse a `time`
+  with `tzinfo` or with microseconds with `HRS-205`. The zone of a schedule
+  comes only from its `timezone` field.
+
+- **`get_stale_tasks` and `get_expired_tasks` return at most 10,000 rows.**
+  When more rows match, the read returns the first 10,000 and logs a
+  warning; rows with equal sort keys are ordered by id. A
+  `stale_threshold_minutes` that is not an `int` from 0 to 525,600 is
+  `INVALID_INPUT` before any statement; 0.7 ran the read with any value.
+
+- **A JSON object that repeats a key is refused.** `loads_json` and
+  `loads_json_bytes` refuse it at any depth; at enqueue it is
+  `INVALID_INPUT` and nothing is written. 0.7 kept the last value.
+
+- **The web task routes answer a task id that is not a UUID with 400
+  `INVALID_INPUT`.** `GET /api/tasks/{task_id}` and `POST
+  /api/tasks/{task_id}/cancel` answer `{"code": "INVALID_INPUT", "detail":
+  "Path parameter task_id: ..."}` before any read; 0.7 answered 404.
+
+- **The queue of each web event stream holds at most 256 items.** On
+  overflow the stream drops its queued events and sends one refresh event
+  per topic (`tasks`, `workflows`, `workers`). A client that keeps up sees
+  no change.
+
+- **The pool of the worker process can be as small as 3 connections.**
+  `ParentPool(max_size=PoolSize(connections=N))` accepts N of 3 and 4
+  (`PARENT_POOL_MIN_CONNECTIONS` is 3, was 5): the flushers of the batched
+  success write take connections of the core pool. No valid config becomes
+  invalid.
+
+- **Soft-cap mode admits a row of a capped queue only while a child of its
+  route is free.** An admitted row goes to a child at once, so the window in
+  which another worker does not count it is one start. Uncapped queues and
+  hard-cap mode are unchanged.
+
+- **A claim whose start is not confirmed is released at once.** When a child
+  ends with `OWNERSHIP_UNCONFIRMED`, the worker releases the claim with a
+  fenced release; 0.7 waited for the claim lease.
+
+- **Schedule slot task ids have the UUIDv7 layout.** The id of a slot
+  carries the slot time in its first 48 bits and a hash of the schedule name
+  and the slot instant; 0.7 used a UUIDv5. The history duplicate guard
+  probes only the history leaves after the slot time.
+
+- **The scheduler takes its time from the database clock.** The due read,
+  the start and the heal of the schedule state compute with the database
+  time, not the clock of the scheduler host.
+
+- **The monitoring window counts elapsed time.** `resolve_monitoring_window`
+  and every read that takes `since` and `until` convert each bound to a UTC
+  instant first, so the 24-hour default and the 30-day maximum are
+  durations. Before, two bounds with one `ZoneInfo` tzinfo were subtracted
+  as wall-clock times: across a daylight saving change, a lone
+  `until = 2026-11-01 12:00 America/New_York` gave a window of 25 hours,
+  and `since = 2026-10-10 12:00`, `until = 2026-11-09 11:30` in that zone
+  passed the 30-day check with 30 days and 30 minutes of history. That pair
+  is now refused. Bounds with a fixed offset, and every web request, give
+  the same windows as before.
+
+- **A workflow node index that the node index column cannot hold names no
+  node.** `horsies.monitoring.get_workflow_node` answers `Ok(None)` for an
+  index outside the 32-bit range, with no read; it answered
+  `MonitoringQueryDbOperationFailed`. The web route
+  `GET /api/workflows/{workflow_id}/tasks/{task_index}` answers 404 for such
+  an index; it answered 503.
+
+- **The web workflow actions refuse a workflow id that is not a UUID with
+  400 `INVALID_INPUT`.** `POST /api/workflows/{workflow_id}/pause`,
+  `/resume` and `/cancel` answer `{"code": "INVALID_INPUT", "detail":
+  "Path parameter workflow_id: ..."}` before any statement, as the task
+  cancel route does; they answered 503 with the driver's text. A
+  `urn:uuid:` or braced id is read as its UUID.
+
+- **`ping_workers` refuses a `timeout_seconds` of NaN.** It answers
+  `INVALID_INPUT` (`timeout_seconds must be positive, got nan`) before any
+  I/O; it sent the ping and returned at once with no reply. An infinite
+  `timeout_seconds` still waits with no deadline.
 
 - **The `TASK_TIMEOUT` error of a `SHARED_ASYNC` task tells how the task
   ended.** Its `data` gets the key `cancel_end`: `RETURNED_AFTER_SIGNAL`
@@ -32,6 +197,317 @@ there is no migration contract between pre-1.0 versions.
   the age. A longer age can put that instant before PostgreSQL's lowest
   timestamp (4714-11-24 BC). 0.7.0 accepted any positive `timedelta`, and
   such an age failed every sweep with `timestamp out of range`.
+
+### Fixed
+
+- **A stored retry policy that does not validate fails the task at claim.**
+  The task fails with `WORKER_SERIALIZATION_ERROR`, its body does not run,
+  and it does not retry. 0.7 ran the task and retried it with default
+  intervals.
+
+- **A stored success policy that does not parse fails the completion step.**
+  The step rolls back, and the workflow recovery limit fails the workflow
+  with `WORKFLOW_RECOVERY_LIMIT_REACHED`. 0.7 read some such values as no
+  policy.
+
+- **A workflow dependency with no stored result gives
+  `RESULT_DESERIALIZATION_ERROR`.** A COMPLETED or FAILED dependency whose
+  stored result is empty gives the dependent's `args_from` and
+  `workflow_ctx_from` an error result that names the node. 0.7 gave no
+  entry, and the task failed on a missing field.
+
+- **`WORKFLOW_STOPPED` is a reserved code.** `TaskError` refuses it, and a
+  stored error with it fails the task with `WORKER_SERIALIZATION_ERROR`. In
+  0.7 a task that returned it stayed RUNNING.
+
+- **`payload.warn_bytes` and `payload.reject_bytes` count bytes of the UTF-8
+  text.** 0.7 counted characters, so a payload of multi-byte characters
+  passed a limit that its stored text exceeded.
+
+- **`TaskInfo.attempts` is newest first also for a task read from history.**
+  0.7 listed the attempts of a finished task oldest first.
+
+### Removed
+
+- **The not-recorded worker snapshot states.** `SlotHealthNotRecorded`,
+  `ClassCapacityNotRecorded`, `ClassesNotRecorded`,
+  `horsies.monitoring.ClassesNotRecordedInfo`, the `not_recorded` fields of
+  `ClassCoverage`, `ClassReport` and `ClassReportInfo`, the `not_recorded`
+  key of `GET /api/workers/classes`, and the `not_recorded` value of
+  `slot_health` (`GET /api/workers`). On the baseline schema every snapshot
+  records these facts.
+
+### Rust client (crate `horsies`)
+
+The crate `horsies` is rebuilt on `horsies-core`, the engine that the
+Python client runs on. Each entry is a breaking change of the crate's API,
+unless it starts with "Added".
+
+- **The client runs on `horsies-core`.** The crate has no engine of its
+  own: no sqlx broker, no worker, no workflow engine, no monitoring queries
+  and no migrations. A database that `0.1.0-alpha` installed (migrations 1
+  to 65) is refused with `SchemaRefusal::ForeignMigrations`, and nothing in
+  it is changed. Drain it, then start 0.8.0 on a new database.
+- **The engine types are no longer public.** `PostgresBroker`, `Broker`,
+  `pub mod core`, `compute_enqueue_sha`, `run_horsies_migrations`,
+  `MIGRATIONS_TABLE`, `SchemaInitializationMode`, `expected_schema_version`,
+  `resolve_node_task_options`, the row types (`ClaimedTaskRow`,
+  `HeartbeatRow`, `TaskAttemptRow`, `TaskInfoRow`, `TaskResultRow`,
+  `TaskRunningContextRow`, `WorkerStateRow`, `WorkflowRow`,
+  `WorkflowTaskRow`, `RawResultRecord`) and the listener types
+  (`NotifyListener`, `SharedNotifyListener`) are removed.
+- **The workflow engine functions are removed.** `on_workflow_task_complete`,
+  `on_subworkflow_complete`, `recover_stuck_workflows`, `WorkflowError`, and
+  `cancel_workflow`, `pause_workflow`, `resume_workflow` and
+  `get_workflow_result`, which took a `PgPool`, are removed. The core runs
+  them.
+- **The `arbitrary-precision` feature is removed.** The core stores the input
+  text as the client wrote it, and the command fingerprint hashes that text.
+- **Added: the features `cli`, `tokio-postgres` and `sqlx`.** `cli` is on by
+  default: it builds the CLI runner and the `horsies` binary. clap,
+  tracing-subscriber, toml, owo-colors and tempfile are built only with
+  `cli`. sqlx is built only with `sqlx`.
+- **The crate declares `rust-version = "1.91"`.**
+- **`Horsies::new` does no I/O, and the app owns no broker.** The app
+  builds the core's producer manifest from `AppConfig` and a core handle
+  (`CoreHandle`, client family `RUST`) that connects at the first
+  operation. `with_broker`, `bind_broker`, `broker_if_initialized`,
+  `get_broker`, `from_core`, `into_core` and `into_parts` are removed.
+  Added: `Horsies::with_handle(config, Arc<CoreHandle>)` shares one handle
+  between apps.
+- **`new_observe_only` is replaced by a schema mode.**
+  `Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)` never runs
+  schema DDL; `SchemaMode::AssumeInitialized` also uses no listener.
+  `Horsies::new` is `SchemaMode::MigrateAndValidate`.
+- **A pool size outside the core's bounds is refused.** `Horsies::new`
+  refuses `broker.pool_size` outside 1 to 10,000 and `broker.max_overflow`
+  above 10,000, with the field name.
+- **A worker profile with a preload is refused.** A Rust worker starts each
+  child with `exec` of its own binary, so `Horsies::new` refuses a profile
+  whose `preload` is `Library` (the default) or `App`, with the path
+  `worker_profiles.<name>.preload`. Set `preload: ChildPreload::NoPreload`.
+- **`role` and `set_role` use `AppRole`** (`Producer`, `Worker`,
+  `Scheduler`) in place of a string.
+- **Added: send suppression on the app.** `suppress_sends(bool)` and
+  `are_sends_suppressed()`; `HORSIES_SUPPRESS_SENDS=1` in the environment
+  suppresses the sends of the process, as in Python.
+- **The queue rules of a task registration are Python's.** In `Default`
+  queue mode a task that names a queue is refused, `default` included
+  (`HRS-200`). In `Custom` mode a task that names no queue is refused
+  (`HRS-200`), and an unknown queue is refused with `HRS-103`.
+  `validate_queue` refuses with `HRS-103` and the valid names.
+- **`registry()`, `workflow_registry()`, `resolve_enqueue` and
+  `ResolvedEnqueue` are no longer public.**
+- **`AppError` and `AppResult` are removed.** No function returns them.
+  `HorsiesError` stays the refusal of the config, of a registration and of
+  `provide`; every other fallible function returns its own closed error
+  type. Code that matched on `AppError` matches on the error type of the
+  call.
+- **`TaskError` becomes `TaskError<E>`.** Its code is
+  `TaskErrorCode<E>`: `Library(BuiltInTaskCode)` for a code of the
+  library's catalog, `User(E)` for a code of the task's own enum `E`. A body
+  builds one with `TaskError::user(code, message)`, or with
+  `TaskError::library(code, message)` for a library code. The fields are
+  private: read them with `code()`, `message()`, `data()`, `exception()` and
+  `sub_workflow()`. `TaskError::new`, `TaskError::builtin`, `From<&str>`,
+  `From<String>` and `cause` are removed. A read of a stored error whose
+  user code `E` does not name answers `UnknownUserCode`.
+- **`TaskError::with_data(value)` never fails.** A value that cannot be
+  stored (a non-finite float, a map key that is not a string, a key that
+  only the engine writes, data deeper than the error bound) is replaced with
+  `{"data_refused": "<cause>"}`, the cause that Python stores, and the code
+  and the message are kept. The replacement is logged at ERROR with the
+  code. Before, a non-finite float became `null` with no notice.
+- **Added: `#[derive(horsies::UserErrorCode)]`.** On an enum of unit
+  variants, each variant's code is its name in UPPER_SNAKE_CASE
+  (`RateLimited` is `RATE_LIMITED`). A code with the name of a built-in code
+  or of a reserved code (`WORKFLOW_STOPPED`), a variant with fields, and two
+  variants with one code are compile errors. `std::convert::Infallible` is
+  the code type of a task with no codes of its own.
+- **The built-in codes have Python's names and members.**
+  `UNHANDLED_ERROR` is `UNHANDLED_EXCEPTION`; `TASK_ERROR` is
+  `TASK_EXCEPTION`. `ARGUMENT_TYPE_MISMATCH`, `WORKFLOW_STOPPED` and
+  `SEND_SUPPRESSED` are no longer task codes. Added:
+  `WORKFLOW_RECOVERY_LIMIT_REACHED`, `SUBWORKFLOW_DEPTH_LIMIT_REACHED`,
+  `TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`,
+  `WORKFLOW_START_INCOMPLETE`, `NO_TYPE_AVAILABLE`, `EVENT_LOOP_LIMIT`,
+  `ASYNC_CONTEXT`, `INVALID_INPUT`, `WAIT_INSIDE_TASK` and
+  `WORKFLOW_OUTPUT_SKIPPED`. `ExceptionRecord` and `SubWorkflowFailure`
+  (the failed child workflow as top-level fields) replace
+  `SubWorkflowError`.
+- **An input that does not decode, and a returned value that does not
+  read back, are `WORKER_SERIALIZATION_ERROR`.** The worker child decodes
+  the input with the task's input type. It encodes the returned value,
+  decodes the text with the task's output type, encodes that value again,
+  and stores the result only when the two texts are equal. The stored error
+  names the type, the field path and the kind of the failure; a part of the
+  message that comes from the input is written as `<input>`. Before, these
+  were `ARGUMENT_TYPE_MISMATCH` and `RETURN_TYPE_MISMATCH`, with the value
+  in `data.actual_value`.
+- **`async_task_fn!` and `blocking_task_fn!` take a function that returns
+  `Result<T, TaskError<E>>`.** `async_task_fn_kwargs!` and
+  `blocking_task_fn_kwargs!` are removed: an object input is one input
+  value, so `async_task_fn!` covers it. The registered task records the
+  module of the call site, the `module` of the exception record of a panic.
+- **`TaskRuntime::state::<T>()` returns `Result<Arc<T>, StateNotProvided>`**
+  in place of a `TaskError` with the free code `STATE_NOT_PROVIDED`.
+- **Added: `TaskRuntime::cancelled()`, `TaskRuntime::is_cancelled()` and
+  `TaskRuntime::spawn(name, future)`.** The cancel signal fires when a
+  `SHARED_ASYNC` run reaches its `timeout_ms`; the body and its work then
+  have `cancel_grace_ms` to end. Work started with `spawn` belongs to the
+  run: the child waits for it when the body returns, cancels it after the
+  grace, and reports work that does not stop. `spawn` returns
+  `RunSpawnRefused` outside the async body of a run.
+- **A task declares its execution class.** `#[horsies::task]` and
+  `#[horsies::blocking_task]` take `execution = isolated | shared_async |
+  shared_thread`; the default is `isolated`. An `async fn` runs `isolated`
+  or `shared_async`, a `fn` runs `isolated` or `shared_thread`; another
+  class is a compile error. A shared class without `timeout_ms` is a
+  compile error. The class is stored with the task's options of every send.
+- **Added: `cancel_grace_ms` on a `shared_async` task**, from 100 to 10,000
+  ms, default 1,000: the time from the cancel signal at the deadline to the
+  drop of the body. On another class it is a compile error.
+- **`auto_retry_for` is checked at compile time.** A built-in name
+  (`TASK_TIMEOUT`, `WORKER_CRASHED`, ...) is stored as the built-in code;
+  any other entry must be a code of the task's code type `E`, else the
+  task does not compile. Before, every entry was stored as a user code, so
+  a built-in name never matched. `retry_policy` and `auto_retry_for` go
+  together, with at least one code, as in Python: one without the other is
+  a compile error (before, codes without a policy were dropped).
+- **A task function returns `Result<T, TaskError<E>>`.** `TaskError`
+  without its code type is a compile error; a task with no codes of its own
+  uses `TaskError<std::convert::Infallible>`. `register` refuses a code
+  type whose `CODES` holds a built-in or reserved name (`HRS-212`), which
+  only a hand-written `UserErrorCode` impl can have.
+- **The module that `#[horsies::task]` generates changes.** `register`
+  returns `TaskFunction<A, T, E>`; `send`, `schedule` and `with_options`
+  return `Result<TaskHandle<T, E>, TaskSendError>`; `schedule` takes
+  `WholeSeconds`; `handle(&runtime)` returns
+  `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>`. The generated
+  `Input` struct derives serde through `horsies`, so it needs no `serde`
+  name in the user's crate.
+- **Field tokens use the key that serde reads.** In `params::<name>()` and
+  `#[derive(WorkflowInput)]` a raw identifier `r#type` is the key `type`
+  (before: `r#type`). `#[derive(WorkflowInput)]` makes no token for a
+  `#[serde(skip)]` or `#[serde(skip_deserializing)]` field, and refuses a
+  `#[serde(flatten)]` field at compile time.
+- **`TaskFunction<A, T, E>` sends with Python's rules.** `send`,
+  `schedule`, `send_with_options`, `schedule_with_options` and
+  `with_options` return `Result<TaskHandle<T, E>, TaskSendError>`. A send
+  encodes its input, decodes the text with `A`, encodes it again and
+  refuses the send with `VALIDATION_FAILED` when the two texts differ,
+  before any statement. An input over `payload.reject_bytes` is
+  `PAYLOAD_TOO_LARGE`. In a worker child a send goes through the child's
+  own producer pool.
+- **`TaskSendError` is the closed catalog of Python's send codes:**
+  `SendSuppressed`, `AsyncContext { task_id, payload }` (a blocking send on
+  a thread that runs a tokio runtime; nothing was written),
+  `ValidationFailed`, `EnqueueFailed { retryable }` (the row may or may not
+  exist), `PayloadMismatch`, `IdempotencyKeyConflict { owner_task_id }` and
+  `PayloadTooLarge { size_bytes, limit_bytes }`, each with only the facts of
+  its state. `retry_send` and `retry_schedule` accept only `AsyncContext`,
+  `EnqueueFailed` and `IdempotencyKeyConflict`, send the same task id and
+  payload, and refuse the error of another task or of the other method.
+- **A resend is a repeat.** With `resend_on_transient_err`, a retryable
+  `ENQUEUE_FAILED` is sent again up to 3 times after 200, 400 and 800 ms,
+  as `SendKind::Repeat`: a send whose commit reply was lost answers with
+  its task id, and a task that already finished does not run again.
+- **`TaskSendPayload` holds one `input_json`.** `args_json`, `kwargs_json`
+  and `enqueue_sha` are removed; a `null` input stays `null`. The payload
+  holds the retention of the send.
+- **Send retention is a period, `Forever`, or the queue's.**
+  `TaskSendOptions::retention` takes `SendRetention::FromQueueOrDefault`,
+  `Forever` or `Period(RetentionDays)`; a period that this deployment does
+  not register is refused with the allowed periods. `retention_class` is
+  removed.
+- **`schedule` takes `WholeSeconds`** in place of a `Duration`, whose
+  sub-second part was dropped.
+- **`TaskHandle::get` takes a `WaitLimit` and returns
+  `Result<TaskOutcome<T, E>, ReadError>`.** `TaskResult<T>` is removed. The
+  outer error is the read failing: `WaitTimedOut`, `TaskNotFound { reason }`
+  (`TaskAbsenceReason`: `PredatesRetainedHistory` for a task that retention
+  can have removed, `WithinRetainedHistory` for an id that no retained
+  history held, `NotClassified` for an id that is not a UUIDv7),
+  `ResultNotAvailable`, `StoredResultUnreadable`, `UnknownUserCode` (a
+  stored user code that `E` does not name), `WaitInsideTask` and
+  `Database`, each with Python's code from `ReadError::code`. The inner
+  value is `Succeeded(T)` or `Failed(TaskError<E>)`; a cancelled task is
+  `Failed` with `TASK_CANCELLED`. `WaitLimit::parse` refuses a limit above
+  about 49.7 days before any read. The handle keeps an outcome and the
+  failures of the stored data, as Python; a timeout, an absent task and a
+  database failure are read again.
+- **A result wait in a worker child is refused** with `WaitInsideTask` and
+  sends no statement, as in Python.
+- **Reads by task id are on the app:** `get_result::<T, E>`,
+  `get_raw_result` (the stored envelope as JSON text with the status),
+  `get_task_info` with `TaskInfoParts`, and `task_handle_of` for a handle of
+  a task sent elsewhere. Task info lists attempts newest first.
+- **The health reads are on the app**, as in Python: `ping_database`,
+  `ping_workers` (with `PingTarget`), `list_worker_states`,
+  `get_worker_state`, `get_worker_state_history` (with
+  `WorkerHistoryLimit`), `get_stale_tasks`, `get_expired_tasks`, and,
+  added, `get_class_coverage` and `get_class_report`. A failure is
+  `BrokerOperationError` with Python's broker code.
+- **The stale and expired task lists are bounded.** Each returns
+  `BoundedTaskList::Complete(rows)`, or `Truncated` at 10,000 rows. The
+  stale threshold is `StaleMinutes`, whole minutes from 0 to 525,600.
+- **`TaskRuntime::task_handle` returns `TaskFunctionNotFound`**
+  (`NotRegistered`, `OtherTypes`) in place of a `TaskError`.
+- **The CLI types and `fetch_docs` are no longer public.** `Cli`, `Command`,
+  `LogLevel`, `execute_web`, `WebArgs`, `WebAuthMode`,
+  `WebCliError`, `execute_cutover`, `CutoverArgs`, `CutoverCliError`,
+  `CutoverCommand`, `execute_transcode`, `TranscodeArgs`,
+  `TranscodeCliError` and `TranscodeCommand` are removed from the library.
+- **The workflow DSL is the client's, and it builds a spec as data.**
+  `WorkflowSpecBuilder`, `WorkflowSpec`, `TaskNode`, `SubWorkflowNode`,
+  `NodeKey`, `NodeRef`, `TypedNodeRef`, `InputField`, `JoinType`,
+  `SuccessPolicy`, `SuccessCase`, `WorkflowDefinition`, `WorkflowDefConfig`
+  and `WorkflowContext` are types of the crate, not of the core. A reference
+  names a node of the builder that returned it: `TypedNodeRef::new` is not
+  public, `NodeRef::index` is a method, and `build` refuses a reference of
+  another builder (`HRS-006`, `HRS-011`, `HRS-012`). `SuccessPolicy` and
+  `SuccessCase` take node references in place of indexes.
+- **A dependency's result is received as `TaskOutcome<S, E>`.** `arg_from`
+  takes a field of type `TaskOutcome<S, E>` and a `TypedNodeRef<S>`; `E`
+  reads the dependency's user codes, and `UserCode` reads any.
+  `TaskResult<T>` is removed. A task whose one parameter is a
+  `TaskOutcome` or a `WorkflowContext` gets an `Input` struct, so a node
+  binds the parameter by name.
+- **A node's input is one JSON object.** `TaskNode::args_json` and
+  `kwargs_json` are replaced by `input_json(text)`, which returns a
+  `Result`; `set_input` of a value that does not encode as an object is
+  refused (`HRS-026`). `TaskFunction::node()` gives a node with the task's
+  queue and options and the input `{}`; `TaskNode::raw` and
+  `TaskNode::task_options` are no longer public. A task with no parameters
+  reads the input `{}` as well as `null`.
+- **`set` and `set_input` encode a value and read it back, as a send
+  does.** A value that does not encode or read back, a non-finite float
+  included, is refused with `HRS-031`; before, `set` stored NaN as `null`.
+- **`WorkflowSpecBuilder::build` decodes each node's input with the input
+  type of its task or child workflow**, with each `args_from` member as a
+  result and the workflow context when the task takes it: a member that
+  binds to no field is `HRS-019`, a missing field `HRS-020`, a value of
+  another type `HRS-031`. It also refuses an `any` or quorum join with an
+  `args_from` member whose field has no default (`HRS-013`), a priority
+  outside 1 to 100 (`HRS-034`), and `workflow_ctx_from` on a task without
+  `workflow_ctx` (`HRS-010`).
+- **`JoinType::Quorum` holds `min_success`;** `join_quorum` takes a `u32`.
+- **The output type of a workflow is checked.** `WorkflowDefinition::build`
+  refuses a definition whose `Output` is not its output node's type
+  (`HRS-025`). A workflow with no output node has `Output =
+  OutputlessResults`, the outcome of each node by node id.
+- **`SubWorkflowNode` gives params with `SubWorkflowParams::{NotGiven,
+  Given(P)}`.** Make one with `SubWorkflowNode::of::<D>(params)` or
+  `D::node(params)`; `set` and `arg_from` give params too. A node that gives
+  none stores the input `{}`, as Python. `SubWorkflowNode::new`, `typed`,
+  `from_definition`, `input_json`, `good_until` and `workflow_ctx_from` are
+  removed. `WorkflowDefinition::Params` is `Serialize + DeserializeOwned`.
+- **`WorkflowContext::result_for::<T, E>` returns `Result<TaskOutcome<T,
+  E>, WorkflowContextError>`** (`NotInContext`, `Unreadable`,
+  `UnknownUserCode`); `summary_for` returns `&SubWorkflowSummary`, and
+  `output_for` the child's output read as `T`.
+- **`UserErrorCode::code` returns `&str`.** Added: `UserCode` implements
+  `UserErrorCode`, with every user code as checked text.
 
 ## 0.7.0 — 2026-11-15
 
