@@ -363,10 +363,12 @@ async def test_transient_failure_retries_via_parent_stage_and_completes(
 ) -> None:
     """The bounded-retry invariant: first propagation attempt fails with a
     transient connection error; the parent_propagation stage schedules the
-    retry, which re-enters the chain and completes the parent."""
-    from psycopg import OperationalError
+    retry, which re-enters the chain and completes the parent.
 
-    from horsies.core.workflows import steps as steps_mod
+    The advance runs in the core (``advance_workflow_parents_async``). A
+    trigger on the parent node's change to COMPLETED raises a retryable
+    SQLSTATE (57P01) on its first firing only: a sequence counts the
+    firings, and a sequence is not rolled back with the failed level."""
     from horsies.core.worker import finalize as finalize_mod
 
     parent_id = await _insert_workflow(session, status='RUNNING')
@@ -380,18 +382,33 @@ async def test_transient_failure_retries_via_parent_stage_and_completes(
     await _insert_subworkflow_node(
         session, workflow_id=parent_id, task_index=0, sub_workflow_id=child_id,
     )
+    await session.execute(text('CREATE SEQUENCE it_parent_advance_firings'))
+    await session.execute(
+        text("""
+            CREATE FUNCTION it_fail_the_first_advance() RETURNS trigger
+            LANGUAGE plpgsql AS $body$
+            BEGIN
+                IF nextval('it_parent_advance_firings') = 1 THEN
+                    RAISE EXCEPTION 'connection dropped' USING ERRCODE = '57P01';
+                END IF;
+                RETURN NEW;
+            END
+            $body$
+        """),
+    )
+    await session.execute(
+        text(f"""
+            CREATE TRIGGER it_fail_the_first_advance
+            BEFORE UPDATE ON horsies_workflow_tasks
+            FOR EACH ROW
+            WHEN (
+                NEW.workflow_id = '{parent_id}'::uuid
+                AND NEW.status = 'COMPLETED' AND OLD.status IS DISTINCT FROM 'COMPLETED'
+            )
+            EXECUTE FUNCTION it_fail_the_first_advance()
+        """),
+    )
     await session.commit()
-
-    real_advance = steps_mod.advance_parent
-    calls = {'n': 0}
-
-    async def _flaky(*args: Any, **kwargs: Any) -> tuple[str, ...]:
-        calls['n'] += 1
-        if calls['n'] == 1:
-            raise OperationalError('connection dropped')
-        return await real_advance(*args, **kwargs)
-
-    monkeypatch.setattr(steps_mod, 'advance_parent', _flaky)
     # Shrink the backoff so the retry fires fast. Patch the FINALIZE module's
     # binding — the constant is imported at module load, so patching runtime
     # would be a no-op (import-time binding).
@@ -414,9 +431,19 @@ async def test_transient_failure_retries_via_parent_stage_and_completes(
             await asyncio.sleep(0.05)
         assert node_status == 'COMPLETED'
         assert wf_status == 'COMPLETED'
-        assert calls['n'] == 2
+        firings = (
+            await session.execute(text('SELECT last_value FROM it_parent_advance_firings'))
+        ).scalar_one()
+        await session.commit()
+        assert firings == 2
     finally:
         await worker.stop(force=True)
+        await session.execute(
+            text('DROP TRIGGER it_fail_the_first_advance ON horsies_workflow_tasks'),
+        )
+        await session.execute(text('DROP FUNCTION it_fail_the_first_advance()'))
+        await session.execute(text('DROP SEQUENCE it_parent_advance_firings'))
+        await session.commit()
         await _cleanup(session, [child_id, parent_id])
 
 

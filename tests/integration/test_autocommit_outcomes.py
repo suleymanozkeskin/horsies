@@ -403,26 +403,38 @@ async def test_a_dead_connection_of_the_engine_does_not_reach_the_core_completio
 
 
 async def test_a_dead_connection_fails_phase_two_as_retryable(
-    direct: ProxiedWorker,
-    session: AsyncSession,
+    proxy: RoundTripProxy,
+    db_url: str,
+    broker: PostgresBroker,  # noqa: ARG001
 ) -> None:
-    """Phase 2 of a workflow task opens its transaction on the dead pooled
-    connection (the transaction form of a replay): a retryable phase-2
-    error, whose retry runs phase 2 again."""
-    await _one_pooled_connection(direct)
-    await _kill_the_pooled_backend(direct.worker, session)
+    """Phase 2 of a workflow task runs in the core, on the worker's core
+    pool. A connection lost while its statement is in flight (the proxy
+    drops the reply and closes the connection) fails phase 2 as retryable,
+    whose retry runs phase 2 again. The core pool replaces a connection that
+    its driver already saw closed at checkout, so a backend killed between
+    two calls is not this case (the core's
+    ``a_dead_connection_fails_phase_two_as_retryable`` takes the same
+    route)."""
+    opened = await open_proxied_worker(proxied_url(db_url, proxy))
+    try:
+        await warm_core_handle(opened)
+        proxy.drop_next_execute_reply()
 
-    result = await direct.worker._finalize_workflow_phase(
-        str(uuid.uuid4()),
-        _NodeFinishOwed(queue_name=QUEUE, facts=FactsUnknown()),
-    )
+        result = await opened.worker._finalize_workflow_phase(
+            str(uuid.uuid4()),
+            _NodeFinishOwed(queue_name=QUEUE, facts=FactsUnknown()),
+        )
+
+        assert proxy.reply_was_dropped(REPLY_DROP_WAIT_S)
+    finally:
+        await opened.close()
 
     match result:
         case Err(error):
             assert error.stage is FinalizeStage.PHASE2
             assert error.retryable is True
         case Ok():
-            raise AssertionError('the wake succeeded on a dead connection')
+            raise AssertionError('phase 2 succeeded on a connection that was lost')
 
 
 async def test_a_dead_connection_fails_the_claim_pass_as_retryable(
