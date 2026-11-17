@@ -1,18 +1,21 @@
 """Read queries backing the monitoring UI.
 
-Every query takes the broker, selects its resources once, opens one
-session, and returns a ``MonitoringResult``. The error side has three
-states:
+Every query takes the broker and returns a ``MonitoringResult``.
+``list_tasks``, ``get_task_detail`` and ``task_facets`` run in the core, on
+the broker's core handle (``horsies._core``): the core sends the statement,
+and the query validates the JSON text of the core's model into the response
+model. The other queries select their resources once and open one session.
+The error side has three states:
 
 * ``MonitoringQueryEventLoopLimit``: the broker already holds resource sets
-  for its limit of open event loops and the query runs on a new one.
-  Nothing runs.
+  for its limit of open event loops and a session query runs on a new one.
+  Nothing runs. A query in the core does not give it.
 * ``MonitoringQueryDbOperationFailed``: a ``SQLAlchemyError`` at the
-  session boundary.
-* ``MonitoringQueryHistoryContractViolation``: a ``HistoryContractError``
-  from the history reads of ``task_stats``, ``list_tasks``,
-  ``get_task_detail`` and ``get_workflow_node``: stored history data that
-  does not decode.
+  session boundary, a database failure that the core reports, or a core
+  boundary error (``CoreError``) of the call.
+* ``MonitoringQueryHistoryContractViolation``: stored history data that
+  does not decode, in ``task_stats``, ``list_tasks``, ``get_task_detail``
+  and ``get_workflow_node``.
 
 Nothing else is caught. A row that does not exist is ``Ok(None)``, not an
 error. ``get_task_detail`` names it: ``Ok(TaskDetailNotFound)`` with the
@@ -55,6 +58,14 @@ from sqlalchemy import (
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
+from horsies._core import (
+    CoreError,
+    MonitoringFailed,
+    MonitoringJson,
+    TaskDetailAbsent,
+    TaskFacetsQuery as CoreTaskFacetsQuery,
+    TaskListQuery as CoreTaskListQuery,
+)
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.resources import BrokerResources, EventLoopLimit
 from horsies.core.models.tasks import (
@@ -75,13 +86,11 @@ from horsies.core.history.archive.versions import (
 )
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.logging import get_logger
-from horsies.core.history.reads.aggregates import (
-    plan_rows_from_explain,
-)
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.typed import decode_task_error, validate_task_result_envelope
 from horsies.core.codec.validation_errors import ValueValidationError
+from horsies.core.types.core_failure import CoreOperationFailed, core_error_retryable
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.db import (
@@ -104,8 +113,6 @@ from horsies.monitoring.models import (
     BreakdownUnclaimedGroup,
     BreakdownValueGroup,
     ErrorCategory,
-    ErrorFacet,
-    FacetValue,
     Facets,
     GroupRow,
     LeafTaskInfo,
@@ -116,7 +123,6 @@ from horsies.monitoring.models import (
     TaskDetail,
     TaskDetailNotFound,
     TaskListPage,
-    TaskSummary,
     WorkflowEdge,
     WorkflowNodeInfo,
     WorkflowRunDetail,
@@ -171,11 +177,6 @@ _STATUS_BY_VALUE: dict[str, TaskStatus] = {status.value: status for status in Ta
 _QUEUEING_STATUSES: frozenset[TaskStatus] = frozenset(
     {TaskStatus.PENDING, TaskStatus.CLAIMED}
 )
-
-# The error codes offered in the dropdown after the category selection. The
-# facet function bounds each category to the same count. Not
-# client-controllable.
-_ERROR_FACET_CAP = 30
 
 # Built from horsies' own error-code enums so the mapping never drifts from
 # the library. Any non-null code absent here is user-defined -> DOMAIN.
@@ -239,12 +240,6 @@ def categorize_error_code(code: str | None) -> ErrorCategory | None:
     if normalized is None:
         return None
     return _CODE_TO_CATEGORY.get(normalized, ErrorCategory.DOMAIN)
-
-
-def _category_value(code: str | None) -> str | None:
-    """Taxonomy family of an error code as a wire string."""
-    category = categorize_error_code(code)
-    return category.value if category is not None else None
 
 
 def _is_uuid_text(value: str) -> bool:
@@ -380,17 +375,6 @@ _TASK_BREAKDOWN_SQL = text("""
     )
     ORDER BY row_position
 """)
-
-# Rows come ordered by facet, then rank (the function's order).
-_TASK_FACETS_SQL = text("""
-    SELECT facet, facet_value, facet_count, category, category_total
-    FROM horsies_monitoring_task_facets(
-        CAST(:window_lower AS timestamptz), CAST(:window_upper AS timestamptz),
-        CAST(:statuses AS text[]), CAST(:retried_only AS boolean),
-        CAST(:builtin_codes AS text[]), CAST(:builtin_categories AS text[])
-    )
-""")
-
 
 async def _call_function(
     resources: BrokerResources,
@@ -562,6 +546,54 @@ def _breakdown(group_by: TaskGroupBy, rows: Sequence[RowMapping]) -> Breakdown:
 
 
 # --------------------------------------------------------------------------- #
+# Reads on the core
+# --------------------------------------------------------------------------- #
+def _core_read_failed(
+    subject: str, failed: MonitoringFailed,
+) -> Err[MonitoringQueryDbOperationFailed | MonitoringQueryHistoryContractViolation]:
+    """The error of a read failure that the core reports. Pure.
+
+    The core's message names the read and the cause, as Python's did
+    (``'<read> failed: <cause>'``). ``EVENT_LOOP_LIMIT`` is a code of the
+    Python client only: a core answer with it is a defect.
+    """
+    match failed.code:
+        case 'DB_OPERATION_FAILED':
+            return Err(
+                MonitoringQueryDbOperationFailed(
+                    message=failed.message,
+                    retryable=failed.retryable,
+                    exception=CoreOperationFailed(subject, failed.message, failed.retryable),
+                )
+            )
+        case 'HISTORY_CONTRACT_VIOLATION':
+            return Err(
+                MonitoringQueryHistoryContractViolation(
+                    message=failed.message,
+                    exception=HistoryContractError(failed.message),
+                )
+            )
+        case 'EVENT_LOOP_LIMIT':
+            raise AssertionError(
+                f'{subject}: the core answered EVENT_LOOP_LIMIT, a code of the Python '
+                f'client only: {failed.message}'
+            )
+
+
+def _core_call_failed(operation: str, exc: CoreError) -> Err[MonitoringQueryDbOperationFailed]:
+    """A core boundary error of a read call (the core stopped, did not start,
+    the process is a fork, or the loop has too many calls in flight): no
+    statement ran, or the read was dropped. Nothing changed."""
+    return Err(
+        MonitoringQueryDbOperationFailed(
+            message=f'{operation} failed: {exc}',
+            retryable=core_error_retryable(exc),
+            exception=exc,
+        )
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Task queries
 # --------------------------------------------------------------------------- #
 async def task_stats(
@@ -633,62 +665,29 @@ async def task_facets(
     taxonomy strip offers as its own options, and a control that hid the
     families you have not picked could not express a second selection.
 
-    One statement (``horsies_monitoring_task_facets``): the values and their
-    counts, ranked after the two sides sum, with ties in the database
-    collation.
+    One statement (``horsies_monitoring_task_facets``) that the core runs on
+    the broker's core handle: the values and their counts, ranked after the
+    two sides sum, with ties in the database collation.
+    ``MonitoringQueryEventLoopLimit`` is not an answer of this read: it uses
+    no SQLAlchemy resource set.
     """
-    parameters = _scope_parameters(
-        window,
-        statuses=statuses,
-        task_names=[],
-        queues=[],
-        workers=[],
-        error_codes=[],
-        error_categories=[],
+    query = CoreTaskFacetsQuery(
+        window_lower=window.lower,
+        window_upper=window.upper,
+        statuses=[status.value for status in statuses],
+        error_categories=[category.value for category in error_categories],
         retried_only=retried_only,
     )
-    match await broker.select_resources():
-        case Err(loop_limit):
-            return _loop_limit_err('task facets query', loop_limit)
-        case Ok(resources):
-            pass
-
+    operation = 'task facets query'
     try:
-        rows = await _call_function(resources, _TASK_FACETS_SQL, parameters)
-    except SQLAlchemyError as exc:
-        return _db_err('task facets query', exc)
-
-    ranked: dict[str, list[FacetValue]] = {
-        'worker': [],
-        'task_name': [],
-        'queue_name': [],
-    }
-    selected = {category.value for category in error_categories}
-    category_totals: dict[str, int] = {}
-    error_facets: list[ErrorFacet] = []
-    for row in rows:
-        facet = _column(row, 'facet', str)
-        value = _column(row, 'facet_value', str)
-        count = _column(row, 'facet_count', int)
-        if facet != 'error_code':
-            ranked[facet].append(FacetValue(value=value, count=count))
-            continue
-        category = _column(row, 'category', str)
-        category_totals[category] = _column(row, 'category_total', int)
-        if (not selected or category in selected) and len(error_facets) < _ERROR_FACET_CAP:
-            error_facets.append(
-                ErrorFacet(value=value, count=count, category=category),
-            )
-
-    return Ok(
-        Facets(
-            workers=ranked['worker'],
-            task_names=ranked['task_name'],
-            queues=ranked['queue_name'],
-            error_codes=error_facets,
-            error_category_totals=category_totals,
-        )
-    )
+        outcome = await broker._core_handle.monitoring_task_facets_async(query)  # pyright: ignore[reportPrivateUsage]
+    except CoreError as exc:
+        return _core_call_failed(operation, exc)
+    match outcome:
+        case MonitoringJson(json=text):
+            return Ok(Facets.model_validate_json(text))
+        case MonitoringFailed():
+            return _core_read_failed('horsies.monitoring.task_facets', outcome)
 
 
 async def task_breakdown(
@@ -742,134 +741,6 @@ async def task_breakdown(
     return Ok(_breakdown(group_by, rows))
 
 
-# Rows come ordered by row_position: the TOTALS row (0), then the page rows.
-_TASK_LIST_SQL = text("""
-    SELECT row_kind, row_position, total_kind, live_total, history_total,
-           history_estimate_plan, location, task_id, task_name, queue_name,
-           priority, status, retry_count, max_retries, is_workflow_task,
-           error_code, worker_id, worker_hostname, enqueued_at, started_at,
-           terminal_at
-    FROM horsies_monitoring_task_list(
-        CAST(:window_lower AS timestamptz), CAST(:window_upper AS timestamptz),
-        CAST(:statuses AS text[]), CAST(:task_names AS text[]),
-        CAST(:queue_names AS text[]), CAST(:worker_ids AS text[]),
-        CAST(:error_codes AS text[]), CAST(:error_categories AS text[]),
-        CAST(:retried_only AS boolean),
-        CAST(:builtin_codes AS text[]), CAST(:builtin_categories AS text[]),
-        CAST(:sort_key AS text), CAST(:sort_direction AS text),
-        CAST(:page_offset AS integer), CAST(:page_limit AS integer)
-    )
-    ORDER BY row_position
-""")
-
-
-def _sort_direction(sort_dir: SortDirection) -> str:
-    """The sort direction as ``horsies_monitoring_task_list`` takes it."""
-    match sort_dir:
-        case 'asc':
-            return 'ASC'
-        case 'desc':
-            return 'DESC'
-
-
-def _list_total(row: RowMapping) -> int:
-    """The total of the TOTALS row.
-
-    ``EXACT``: the two counts. ``ESTIMATE_HISTORY_EMPTY``: the live
-    estimate (the history table has no row). ``ESTIMATE_HISTORY_PLAN``: the
-    live estimate plus the planner's row estimate of the history window.
-
-    Raises:
-        HistoryContractError: the EXPLAIN text of the history estimate does
-            not carry a top plan row estimate.
-    """
-    assert _column(row, 'row_kind', str) == 'TOTALS', row['row_kind']
-    live_total = _column(row, 'live_total', int)
-    match _column(row, 'total_kind', str):
-        case 'EXACT' | 'ESTIMATE_HISTORY_EMPTY':
-            return live_total + _column(row, 'history_total', int)
-        case 'ESTIMATE_HISTORY_PLAN':
-            return live_total + plan_rows_from_explain(
-                _column(row, 'history_estimate_plan', str),
-            )
-        case other:
-            raise AssertionError(f'task list total kind {other!r} is not known')
-
-
-def _live_list_row(row: RowMapping) -> TaskSummary:
-    """A LIVE page row: no error code and no end time."""
-    task_id = _uuid_column(row, 'task_id')
-    stored_status = _column(row, 'status', str)
-    status = _STATUS_BY_VALUE.get(stored_status)
-    assert status is not None, f'live task {task_id} has status {stored_status!r}'
-    enqueued_at = _column(row, 'enqueued_at', datetime)
-    started_at = _optional_time(row, 'started_at')
-    queue_s, exec_s = _live_spans(status, enqueued_at, started_at)
-    return TaskSummary(
-        id=task_id,
-        task_name=_column(row, 'task_name', str),
-        queue_name=_column(row, 'queue_name', str),
-        status=status.value,
-        priority=_column(row, 'priority', int),
-        retry_count=_column(row, 'retry_count', int),
-        max_retries=_column(row, 'max_retries', int),
-        is_workflow_task=_column(row, 'is_workflow_task', bool),
-        error_code=None,
-        error_category=None,
-        worker_hostname=_optional_text(row, 'worker_hostname'),
-        worker_id=_optional_text(row, 'worker_id'),
-        enqueued_at=enqueued_at,
-        started_at=started_at,
-        completed_at=None,
-        failed_at=None,
-        queue_s=queue_s,
-        exec_s=exec_s,
-    )
-
-
-def _history_list_row(row: RowMapping) -> TaskSummary:
-    """A HISTORY page row: the stored status text, and the terminal time as
-    ``completed_at`` for COMPLETED, else as ``failed_at``."""
-    status = _column(row, 'status', str)
-    terminal_at = _column(row, 'terminal_at', datetime)
-    enqueued_at = _column(row, 'enqueued_at', datetime)
-    started_at = _optional_time(row, 'started_at')
-    error_code = _optional_text(row, 'error_code')
-    completed = status == TaskStatus.COMPLETED.value
-    return TaskSummary(
-        id=_uuid_column(row, 'task_id'),
-        task_name=_column(row, 'task_name', str),
-        queue_name=_column(row, 'queue_name', str),
-        status=status,
-        priority=_column(row, 'priority', int),
-        retry_count=_column(row, 'retry_count', int),
-        max_retries=_column(row, 'max_retries', int),
-        is_workflow_task=_column(row, 'is_workflow_task', bool),
-        error_code=nz(error_code),
-        error_category=_category_value(error_code),
-        worker_hostname=_optional_text(row, 'worker_hostname'),
-        worker_id=_optional_text(row, 'worker_id'),
-        enqueued_at=enqueued_at,
-        started_at=started_at,
-        completed_at=terminal_at if completed else None,
-        failed_at=None if completed else terminal_at,
-        queue_s=span_s(enqueued_at, started_at or terminal_at, live=False),
-        exec_s=span_s(started_at, terminal_at, live=False),
-    )
-
-
-def _list_row(row: RowMapping) -> TaskSummary:
-    """One TASK row of ``horsies_monitoring_task_list``, by its location."""
-    assert _column(row, 'row_kind', str) == 'TASK', row['row_kind']
-    match _column(row, 'location', str):
-        case 'LIVE':
-            return _live_list_row(row)
-        case 'HISTORY':
-            return _history_list_row(row)
-        case other:
-            raise AssertionError(f'task list location {other!r} is not LIVE or HISTORY')
-
-
 async def list_tasks(
     broker: PostgresBroker,
     *,
@@ -902,47 +773,40 @@ async def list_tasks(
         - ``Ok(TaskListPage)``: the page rows and the total.
         - ``Err(MonitoringQueryHistoryContractViolation)``: the EXPLAIN text
           of the unfiltered history estimate does not decode.
-        - ``Err(MonitoringQueryDbOperationFailed)``: the statement failed.
-        - ``Err(MonitoringQueryEventLoopLimit)``: nothing ran.
+        - ``Err(MonitoringQueryDbOperationFailed)``: the statement failed, or
+          the core could not run it.
 
-    One statement (``horsies_monitoring_task_list``), so the page and the
-    total read one snapshot: a task that moves to history during the read is
-    on the page once or not at all.
+    One statement (``horsies_monitoring_task_list``) that the core runs on
+    the broker's core handle, so the page and the total read one snapshot: a
+    task that moves to history during the read is on the page once or not at
+    all. ``MonitoringQueryEventLoopLimit`` is not an answer of this read: it
+    uses no SQLAlchemy resource set.
     """
-    parameters = _scope_parameters(
-        window,
-        statuses=statuses,
-        task_names=task_names,
-        queues=queues,
-        workers=workers,
-        error_codes=error_codes,
-        error_categories=error_categories,
+    query = CoreTaskListQuery(
+        window_lower=window.lower,
+        window_upper=window.upper,
+        statuses=[status.value for status in statuses],
+        task_names=list(task_names),
+        queues=list(queues),
+        workers=list(workers),
+        error_codes=list(error_codes),
+        error_categories=[category.value for category in error_categories],
         retried_only=retried_only,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        offset=page.offset,
+        limit=page.limit,
     )
-    parameters['sort_key'] = sort_by
-    parameters['sort_direction'] = _sort_direction(sort_dir)
-    parameters['page_offset'] = page.offset
-    parameters['page_limit'] = page.limit
-    match await broker.select_resources():
-        case Err(loop_limit):
-            return _loop_limit_err('task list query', loop_limit)
-        case Ok(resources):
-            pass
-
+    operation = 'task list query'
     try:
-        rows = await _call_function(resources, _TASK_LIST_SQL, parameters)
-    except SQLAlchemyError as exc:
-        return _db_err('task list query', exc)
-    match rows:
-        case [totals_row, *task_rows]:
-            pass
-        case _:
-            raise AssertionError('the task list function answered no TOTALS row')
-    try:
-        total = _list_total(totals_row)
-    except HistoryContractError as exc:
-        return _contract_err('task list estimate decode', exc)
-    return Ok(TaskListPage(rows=[_list_row(row) for row in task_rows], total=total))
+        outcome = await broker._core_handle.monitoring_list_tasks_async(query)  # pyright: ignore[reportPrivateUsage]
+    except CoreError as exc:
+        return _core_call_failed(operation, exc)
+    match outcome:
+        case MonitoringJson(json=text):
+            return Ok(TaskListPage.model_validate_json(text))
+        case MonitoringFailed():
+            return _core_read_failed('horsies.monitoring.list_tasks', outcome)
 
 
 # The detail columns that the task detail and the workflow node functions
@@ -954,12 +818,6 @@ _DETAIL_COLUMNS: Final = (
     'attempt_snapshot, attempt_snapshot_digest, workflow_id, workflow_task_index, '
     'absence_reason'
 )
-
-_TASK_DETAIL_SQL = text(
-    f'SELECT {_DETAIL_COLUMNS} '
-    'FROM horsies_monitoring_task_detail(CAST(:task_id AS uuid), FALSE, TRUE)'
-)
-
 
 @dataclass(frozen=True, slots=True)
 class _FoundTask:
@@ -1206,48 +1064,26 @@ async def get_task_detail(
         - ``Err(MonitoringQueryHistoryContractViolation)``: the history row
           or the attempts do not decode, or the history reader reports the
           task live in the snapshot where the live read found no row.
+        - ``Err(MonitoringQueryDbOperationFailed)``: the statement failed, or
+          the core could not run it.
 
-    One statement (``horsies_monitoring_task_detail``), so every part comes
-    from one snapshot.
+    One statement (``horsies_monitoring_task_detail``) that the core runs on
+    the broker's core handle, so every part comes from one snapshot.
+    ``MonitoringQueryEventLoopLimit`` is not an answer of this read: it uses
+    no SQLAlchemy resource set.
     """
-    match await broker.select_resources():
-        case Err(loop_limit):
-            return _loop_limit_err('task detail query', loop_limit)
-        case Ok(resources):
-            pass
-
+    operation = 'task detail query'
     try:
-        rows = await _call_function(
-            resources, _TASK_DETAIL_SQL, {'task_id': str(task_id)},
-        )
-    except SQLAlchemyError as exc:
-        return _function_err('task detail query', exc)
-    match rows:
-        case [row]:
-            pass
-        case _:
-            raise AssertionError(f'the detail function answered {len(rows)} rows')
-    try:
-        found = _found_or_absent(row)
-    except HistoryContractError as exc:
-        return _contract_err('task detail history read', exc)
-    match found:
-        case TaskAbsenceReason() as reason:
-            return Ok(TaskDetailNotFound(task_id=task_id, reason=reason))
-        case _FoundTask():
-            return Ok(
-                TaskDetail(
-                    leaf=found.leaf,
-                    task_name=found.task_name,
-                    queue_name=found.queue_name,
-                    priority=found.priority,
-                    is_workflow_task=found.is_workflow_task,
-                    error_category=_category_value(found.error_code),
-                    attempts=found.attempts,
-                    workflow_id=found.workflow_id,
-                    workflow_task_index=found.workflow_task_index,
-                )
-            )
+        outcome = await broker._core_handle.monitoring_task_detail_async(task_id)  # pyright: ignore[reportPrivateUsage]
+    except CoreError as exc:
+        return _core_call_failed(operation, exc)
+    match outcome:
+        case MonitoringJson(json=text):
+            return Ok(TaskDetail.model_validate_json(text))
+        case TaskDetailAbsent(task_id=absent_id, reason=reason):
+            return Ok(TaskDetailNotFound(task_id=absent_id, reason=TaskAbsenceReason(reason)))
+        case MonitoringFailed():
+            return _core_read_failed('horsies.monitoring.get_task_detail', outcome)
 
 
 # --------------------------------------------------------------------------- #

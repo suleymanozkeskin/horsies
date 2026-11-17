@@ -21,6 +21,9 @@ pub use actions::{
 };
 
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
+/// The window that the list and aggregate queries take; the monitoring
+/// window resolver builds it.
+pub use crate::core::history::reads::pages::HistoryWindow;
 pub use errors::{
     MonitoringQueryError, MonitoringQueryErrorCode, MonitoringQueryErrorSource, MonitoringResult,
 };
