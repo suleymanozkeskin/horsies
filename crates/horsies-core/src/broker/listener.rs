@@ -1,24 +1,45 @@
 //! The task queue NOTIFY. Every LISTEN goes through the broker's listener
 //! (`process_listener`).
 
-use sqlx::postgres::PgPool;
+use uuid::Uuid;
 
-use crate::broker::error::BrokerError;
+use crate::broker::core_rows::StatementLog;
+use crate::db::{
+    CheckoutClass, CorePool, ParameterType, StatementBound, StatementFailure, TypedStatement,
+};
 
-/// Send a task UUID as a text payload to its queue notification channel.
+/// The wake of a task queue: `$1` the channel `task_queue_<queue>`, `$2` the
+/// task id as text.
+static NOTIFY_TASK_QUEUE: TypedStatement = TypedStatement::new(
+    "notify_task_queue",
+    "SELECT pg_notify($1, $2)",
+    &[ParameterType::Text, ParameterType::Text],
+);
+
+/// Send a task UUID as a text payload to its queue notification channel:
+/// one statement in autocommit on `pool`, a per-task write
+/// ([`CheckoutClass::Reserved`]). Writes nothing else.
+///
+/// Errors: the failed statement; nothing was sent, or the outcome is
+/// unknown.
 pub(crate) async fn notify_task_queue(
-    pool: &PgPool,
+    pool: &CorePool,
+    statement_log: StatementLog,
     queue_name: &str,
-    task_id: uuid::Uuid,
-) -> Result<(), BrokerError> {
+    task_id: Uuid,
+) -> Result<(), StatementFailure> {
     let channel = format!("task_queue_{queue_name}");
     let payload = task_id.to_string();
-    sqlx::query("SELECT pg_notify($1, $2)")
-        .bind(channel)
-        .bind(payload)
-        .execute(pool)
-        .await
-        .map_err(BrokerError::Database)?;
+    let statement = &NOTIFY_TASK_QUEUE;
+    let bound = statement.bind().value(&channel).value(&payload).finish();
+    statement_log.log(statement);
+    let _notified = pool
+        .execute(
+            CheckoutClass::Reserved,
+            &bound,
+            StatementBound::ConnectionTimeouts,
+        )
+        .await?;
     Ok(())
 }
 
@@ -30,17 +51,19 @@ mod tests {
     use uuid::Uuid;
 
     use super::notify_task_queue;
+    use crate::broker::core_rows::StatementLog;
 
     #[tokio::test]
     async fn task_queue_notification_sends_uuid_as_text() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let core_pool = crate::broker::pools::core_pool_for_test_pool(&pool);
         let queue_name = format!("notify_{}", Uuid::new_v4().simple());
         let channel = format!("task_queue_{queue_name}");
         let task_id = Uuid::new_v4();
         let mut listener = PgListener::connect_with(&pool).await.unwrap();
         listener.listen(&channel).await.unwrap();
 
-        notify_task_queue(&pool, &queue_name, task_id)
+        notify_task_queue(&core_pool, StatementLog::Off, &queue_name, task_id)
             .await
             .unwrap();
 

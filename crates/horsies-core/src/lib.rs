@@ -20,6 +20,7 @@ pub mod catalog;
 #[doc(hidden)]
 pub mod core;
 pub mod db;
+pub mod log_targets;
 pub mod manifest;
 pub mod manifest_schema;
 pub mod monitoring;
