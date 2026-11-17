@@ -53,6 +53,10 @@ from horsies.core.worker.child_runner import (
     _stored_timeout_refusal_response,
     _task_exception_response,
 )
+from horsies.core.worker.shared_lifecycle import (
+    CANCELLED_WRITE_END_S,
+    RUNNING_ATTEMPT_TIMEOUT_S,
+)
 
 logger = get_logger('worker')
 
@@ -102,21 +106,24 @@ def _thread_call_result(
 
 
 REFUSAL_STATEMENTS_TIMEOUT_S: Final = 10.0
-"""The longest time that the statements of one write of a refusal on a
-shared thread child take once the write holds its connection: each attempt
-of the RUNNING transition, and the finalizing marker. The finalizing marker
-takes it as its statement bound; the RUNNING transition runs through the
-core handle of the child, with the bounds of its pool."""
+"""The longest time that the statement of the finalizing marker of a
+refusal on a shared thread child takes once the marker holds its
+connection. The RUNNING transition runs through the core handle of the
+child, with the bound of one start attempt in the core
+(``shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S``)."""
 
-THREAD_REFUSAL_WRITES_BOUND_S: Final = (_PRE_START_CONFIRM_ATTEMPTS + 1) * (
+THREAD_REFUSAL_WRITES_BOUND_S: Final = _PRE_START_CONFIRM_ATTEMPTS * (
+    RUNNING_ATTEMPT_TIMEOUT_S + CANCELLED_WRITE_END_S
+) + (
     CHILD_POOL_CONNECTION_WAIT_S
     + REFUSAL_STATEMENTS_TIMEOUT_S
     + CANCEL_REQUEST_TIMEOUT_S
 )
 """The longest time that the writes of a refusal take on a shared thread
-child: each attempt of the RUNNING transition and the finalizing marker,
-each with the wait for a pooled connection, its statements, and the cancel
-request of a statement past its bound. The refusal backstop of the parent
+child: each attempt of the RUNNING transition, with the end of a statement
+that the core cancelled at its bound, and the finalizing marker, with the
+wait for a pooled connection, its statement, and the cancel request of a
+statement past its bound. The refusal backstop of the parent
 (``slots.SHARED_REFUSAL_BACKSTOP_S``) comes after it."""
 
 

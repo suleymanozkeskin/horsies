@@ -3,15 +3,15 @@
 //! (`PostgresBroker::stop_workflow_task_before_start`).
 //!
 //! A Python child sends it after `start_attempt` missed for a workflow
-//! reason, with the orphan self-heal of the run. The function judges the
-//! task again under its own locks. The outcome is `StoppedBeforeStart` (the
+//! reason, with the orphan self-heal of the run, within the rest of that
+//! start attempt. The function judges the task again under its own locks. The outcome is `StoppedBeforeStart` (the
 //! step that ran and the outcome of its move), `ResumedBeforeStart` (a
 //! resume came first: the caller runs the start once more), or
 //! `StopBeforeStartFailed`.
 
 use chrono::{DateTime, Utc};
 use horsies_core::core::lifecycle::OwnedClaim;
-use horsies_core::{BrokerError, OrphanSelfHeal, StopBeforeStart};
+use horsies_core::{BrokerError, OrphanSelfHeal, StopBeforeStart, WriteDeadline};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -111,14 +111,15 @@ fn stop_record(task_id: Uuid, stop: Result<StopBeforeStart, BrokerError>) -> Sto
     }
 }
 
-/// Stop one claimed workflow task whose start missed. Writes, in one
-/// statement; a caller that leaves early does not stop it, and sees its
-/// outcome as unknown.
+/// Stop one claimed workflow task whose start missed, within `deadline`,
+/// the rest of that start attempt. Writes, in one statement; a caller that
+/// leaves early does not stop it, and sees its outcome as unknown.
 pub async fn stop_before_start_operation(
     connection: BrokerConnection,
     task_id: Uuid,
     fence: OwnedClaim,
     orphan_self_heal: OrphanSelfHeal,
+    deadline: WriteDeadline,
 ) -> StopRecord {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
@@ -127,7 +128,7 @@ pub async fn stop_before_start_operation(
     stop_record(
         task_id,
         broker
-            .stop_workflow_task_before_start(task_id, &fence, orphan_self_heal)
+            .stop_workflow_task_before_start(task_id, &fence, orphan_self_heal, deadline)
             .await,
     )
 }

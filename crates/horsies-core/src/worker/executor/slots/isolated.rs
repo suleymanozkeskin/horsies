@@ -49,8 +49,11 @@ use crate::worker::runner_beats::{DispatchRunner, HeldChild, HeldDispatch, Regis
 
 /// After a body returned with work left on its loop, the child reports how
 /// that work ended within this time, or it is killed: 1 s of grace, 0.3 s
-/// of cancel rounds, the 15 s bound of the finalizing marker, and 10 s of
-/// margin (Python `ISOLATED_LEFTOVER_BACKSTOP_S`).
+/// of cancel rounds, the 15 s bound of the finalizing marker of a Python
+/// child, and 10 s of margin (Python `ISOLATED_LEFTOVER_BACKSTOP_S`). The
+/// marker of a core child ends within
+/// [`crate::broker::child_writes::FINALIZING_MARKER_END`] (20 s), which the
+/// margin covers.
 pub const ISOLATED_LEFTOVER_BACKSTOP: Duration = Duration::from_millis(26_300);
 
 /// What the slot does after one task.

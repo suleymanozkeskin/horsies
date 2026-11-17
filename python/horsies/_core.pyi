@@ -329,26 +329,30 @@ class CoreChildHandle:
     def start_attempt(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, worker_pid: int, worker_hostname: str, deadline_in_ms: int | None) -> AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed:
         """Start one claimed task. Writes, in one statement. deadline_in_ms is the time left before
         the deadline of the run, or None: when it has passed by the time the pool gives the
-        connection, no statement runs. A naive claimed_at raises TypeError.
+        connection, no statement runs. The call begins a start attempt of 40 s: a statement past
+        its time gets a cancel request and does not commit later. A naive claimed_at raises
+        TypeError.
         """
     def start_attempt_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, worker_pid: int, worker_hostname: str, deadline_in_ms: int | None) -> asyncio.Future[AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed]:
         """The awaitable form of the method above."""
-    def expire_owned_claim(self, task_id: uuid.UUID, *, worker_id: str) -> TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed:
+    def expire_owned_claim(self, task_id: uuid.UUID, *, worker_id: str, attempt_elapsed_ms: int) -> TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed:
         """Expire one claimed row of this worker whose deadline passed before its start. Writes,
-        in one statement.
+        in one statement, by the end of the start attempt that began attempt_elapsed_ms ago.
         """
-    def expire_owned_claim_async(self, task_id: uuid.UUID, *, worker_id: str) -> asyncio.Future[TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed]:
+    def expire_owned_claim_async(self, task_id: uuid.UUID, *, worker_id: str, attempt_elapsed_ms: int) -> asyncio.Future[TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed]:
         """The awaitable form of the method above."""
-    def stop_workflow_task_before_start(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, orphan_self_heal: bool) -> StoppedBeforeStart | ResumedBeforeStart | StopBeforeStartFailed:
+    def stop_workflow_task_before_start(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, orphan_self_heal: bool, attempt_elapsed_ms: int) -> StoppedBeforeStart | ResumedBeforeStart | StopBeforeStartFailed:
         """Stop one claimed workflow task whose start missed. Writes, in one statement, which judges
         the task again under its locks; with orphan_self_heal it cancels a task that no node
-        links live. A naive claimed_at raises TypeError.
+        links live. It ends by the end of the start attempt that began attempt_elapsed_ms ago.
+        A naive claimed_at raises TypeError.
         """
-    def stop_workflow_task_before_start_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, orphan_self_heal: bool) -> asyncio.Future[StoppedBeforeStart | ResumedBeforeStart | StopBeforeStartFailed]:
+    def stop_workflow_task_before_start_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime, orphan_self_heal: bool, attempt_elapsed_ms: int) -> asyncio.Future[StoppedBeforeStart | ResumedBeforeStart | StopBeforeStartFailed]:
         """The awaitable form of the method above."""
     def mark_finalizing(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime) -> FinalizingMarked | FinalizingNotHeld | MarkFinalizingFailed:
-        """Write the finalizing marker of a run whose body ended. Writes, in one statement, with
-        the pool's bounds. A naive claimed_at raises TypeError.
+        """Write the finalizing marker of a run whose body ended. Writes, in one statement, within
+        10 s: a marker cancelled at the bound is not written later. A naive claimed_at raises
+        TypeError.
         """
     def mark_finalizing_async(self, task_id: uuid.UUID, *, worker_id: str, claimed_at: datetime.datetime) -> asyncio.Future[FinalizingMarked | FinalizingNotHeld | MarkFinalizingFailed]:
         """The awaitable form of the method above."""
