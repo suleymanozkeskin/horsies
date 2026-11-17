@@ -21,6 +21,7 @@ from typing import Final, assert_never
 import pytest
 
 from tests.dualrun.operations.lifecycle import LIFECYCLE_OPERATIONS
+from tests.dualrun.operations.monitoring_and_web import MONITORING_AND_WEB_OPERATIONS
 from tests.dualrun.operations.rebinding import (
     CallCounts,
     install_core_run,
@@ -39,6 +40,7 @@ DUAL_RUN_TESTS: Final = Path('tests') / 'integration'
 
 OPERATION_TABLES: Final[Mapping[SwitchModule, tuple[DualRunOperation, ...]]] = {
     SwitchModule.LIFECYCLE: LIFECYCLE_OPERATIONS,
+    SwitchModule.MONITORING_AND_WEB: MONITORING_AND_WEB_OPERATIONS,
 }
 
 _COUNTS_KEY: Final = pytest.StashKey[dict[str, int]]()
