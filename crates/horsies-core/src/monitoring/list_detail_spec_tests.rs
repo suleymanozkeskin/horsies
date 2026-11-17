@@ -80,7 +80,6 @@ async fn seed_finished(database: &SpecDatabase, task_name: &str) {
 /// Python `TestListTasks::test_sort_direction`, both directions.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn the_list_sorts_by_enqueue_time_in_both_directions() {
     let database = SpecDatabase::create().await;
     for (task_name, enqueued_seconds_ago) in [("first", 30), ("second", 20), ("third", 10)] {
@@ -111,7 +110,6 @@ async fn the_list_sorts_by_enqueue_time_in_both_directions() {
 /// sorts after a finished row.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn a_running_row_sorts_as_null_on_the_execution_span() {
     let database = SpecDatabase::create().await;
     let mut running = LiveTask::running("running_now", "worker-1");
@@ -134,7 +132,6 @@ async fn a_running_row_sorts_as_null_on_the_execution_span() {
 /// history row on `completed_at` in both directions.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn a_live_row_sorts_after_a_finished_row_on_the_end_time_in_both_directions() {
     let database = SpecDatabase::create().await;
     seed_live(&database.pool, &LiveTask::pending("never_ran")).await;
@@ -152,7 +149,6 @@ async fn a_live_row_sorts_after_a_finished_row_on_the_end_time_in_both_direction
 /// Python `TestListTasks::test_rows_carry_derived_error_category_and_worker_id`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn a_list_row_carries_its_category_worker_and_host() {
     let database = SpecDatabase::create().await;
     let mut task = LiveTask::pending("alpha_task").with_worker(Some("worker-7"));
@@ -171,7 +167,6 @@ async fn a_list_row_carries_its_category_worker_and_host() {
 /// Python `TestListTasks::test_empty_error_code_is_reported_as_absent`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn an_empty_stored_code_reads_as_no_code_and_no_category() {
     let database = SpecDatabase::create().await;
     seed_terminal(
@@ -195,7 +190,6 @@ async fn an_empty_stored_code_reads_as_no_code_and_no_category() {
 /// resets it depends on the server version.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn an_unsampled_live_table_gives_an_exact_total() {
     let database = SpecDatabase::create().await;
     sqlx::query("UPDATE pg_class SET reltuples = -1 WHERE oid = 'horsies_tasks'::regclass")
@@ -217,7 +211,6 @@ async fn an_unsampled_live_table_gives_an_exact_total() {
 /// statistics sampled before the TRUNCATE.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn an_emptied_history_adds_nothing_to_the_unfiltered_total() {
     let database = SpecDatabase::create().await;
     for ending in [Ending::Completed, Ending::Completed, Ending::failed("BOOM")] {
@@ -274,7 +267,6 @@ fn an_unreadable_estimate_is_a_contract_violation_that_is_not_retryable() {
 /// names the stored value; it is not read as absence.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn an_unknown_stored_status_in_history_is_a_contract_violation() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");
@@ -297,7 +289,6 @@ async fn an_unknown_stored_status_in_history_is_a_contract_violation() {
 /// Python `TestGetTaskDetail::test_standalone_task_has_no_workflow_linkage`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn a_standalone_task_has_no_workflow_link() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");
@@ -314,7 +305,6 @@ async fn a_standalone_task_has_no_workflow_link() {
 /// the link matches on the task id, not on membership in some workflow.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn a_node_of_another_task_does_not_link_this_task() {
     let database = SpecDatabase::create().await;
     let run = RunSeed::running("alpha_flow");
@@ -340,7 +330,6 @@ async fn a_node_of_another_task_does_not_link_this_task() {
 /// Python `TestGetTaskDetail::test_reports_good_until_and_workflow_membership`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn the_detail_reports_the_deadline_and_the_workflow_membership() {
     let database = SpecDatabase::create().await;
     let deadline = Utc::now() + Duration::hours(2);
@@ -365,7 +354,6 @@ async fn the_detail_reports_the_deadline_and_the_workflow_membership() {
 /// absent.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn empty_and_blank_attempt_texts_read_as_absent() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");
@@ -400,7 +388,6 @@ async fn empty_and_blank_attempt_texts_read_as_absent() {
 /// Python `TestTaskDurations::test_claimed_task_queue_time_counts_up`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn a_claimed_task_counts_its_queue_time_up() {
     let database = SpecDatabase::create().await;
     let mut task = LiveTask::claimed("alpha_task", "worker-1");
@@ -418,7 +405,6 @@ async fn a_claimed_task_counts_its_queue_time_up() {
 /// Python `TestTaskDurations::test_completed_task_reports_both_closed_spans`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn a_completed_task_reports_both_closed_spans() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");
@@ -436,7 +422,6 @@ async fn a_completed_task_reports_both_closed_spans() {
 /// started has no execution span.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn a_task_cancelled_before_it_started_reports_a_closed_queue_span() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");
@@ -452,7 +437,6 @@ async fn a_task_cancelled_before_it_started_reports_a_closed_queue_span() {
 /// Python `TestTaskDurations::test_expired_before_start_reports_the_closed_queue_span`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn a_task_expired_before_it_started_reports_a_closed_queue_span() {
     let database = SpecDatabase::create().await;
     let mut task = LiveTask::pending("alpha_task");
@@ -483,7 +467,6 @@ async fn a_task_expired_before_it_started_reports_a_closed_queue_span() {
 /// Python `TestTaskDurations::test_detail_leaf_uses_the_same_spans_as_the_list_row`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #842"]
 async fn the_detail_leaf_and_the_list_row_report_the_same_spans() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");
