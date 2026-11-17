@@ -212,10 +212,18 @@ async fn seed_two_classes(pool: &PgPool) -> (Uuid, Uuid) {
     let now = database_now(&mut transaction).await.expect("database now");
     let yesterday = utc_day(now - Duration::days(1));
     let mut rows = Vec::new();
-    for (class_key, days) in [("standard_30d", 30), ("standard_7d", 7)] {
+    for (sequence, (class_key, days)) in [("standard_30d", 30), ("standard_7d", 7)]
+        .into_iter()
+        .enumerate()
+    {
         let parent = register_test_class(&mut transaction, class_key, days).await;
         create_test_leaf(&mut transaction, &parent, class_key, yesterday).await;
-        let task_id = v7_with_birth(yesterday + Duration::hours(1));
+        // Each class row has its own id: the same birth, another value in
+        // the low bits. With one id, a body that probes one class finds
+        // that class's copy of the other row.
+        let task_id = Uuid::from_u128(
+            v7_with_birth(yesterday + Duration::hours(1)).as_u128() + sequence as u128,
+        );
         seed_history_row(
             &mut transaction,
             task_id,

@@ -713,7 +713,11 @@ async fn fused_completion_rejects_workflow_task_without_losing_phase2() {
 
     let refused = server_refusal(terminalize(&pool, &fused(task_id)).await);
 
-    assert_server_refusal(&refused, "22023", "cannot terminalize a workflow task");
+    assert_server_refusal(
+        &refused,
+        "22023",
+        &format!("operation COMPLETE_FUSED cannot terminalize workflow task {task_id}"),
+    );
     assert_eq!(live_row(&pool, task_id).await, before);
     assert!(!phase2_pending(&pool, task_id).await);
     assert_eq!(
