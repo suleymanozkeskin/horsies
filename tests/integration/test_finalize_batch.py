@@ -873,43 +873,93 @@ async def test_rows_that_a_stop_left_unsent_stay_running(
     blocker: psycopg.AsyncConnection[Any],
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """A close that times out cancels the flushers: the rows of the waiting
-    statement and the rows still queued do not commit."""
+    """A close that times out cancels the flushers. Its report names the rows
+    that a write had received and the rows that no write received. The core
+    runs a received write to its end, so each received row is RUNNING or
+    committed; each row that no write received stays RUNNING."""
     worker = direct.worker
-    in_flight = await _running_tasks(session, 2)
-    queued = await _running_tasks(session, 2)
-    held = sorted(task_id for task_id, _ in in_flight)[-1]
-    await _hold_task_lock(blocker, held)
-    first = asyncio.create_task(
-        _finalize_together(worker, [(i, at) for i, at in in_flight]),
-    )
+    first_batch = await _running_tasks(session, 2)
+    second_batch = await _running_tasks(session, 2)
+    unsent = await _running_tasks(session, 2)
+    await _hold_task_lock(blocker, sorted(task_id for task_id, _ in first_batch)[-1])
+    first = asyncio.create_task(_finalize_together(worker, first_batch))
     _ = await _batch_backend_waiting(session)
-    # The second flusher waits for a pool connection or writes; hold its
-    # rows too, so neither flusher can end before the close timeout.
-    for task_id, _ in queued:
+    # The second steady flusher hands its rows to the write too; hold them,
+    # so neither write can end before the close timeout.
+    for task_id, _ in second_batch:
         await _hold_task_lock(blocker, task_id)
-    second = asyncio.create_task(
-        _finalize_together(worker, [(i, at) for i, at in queued]),
-    )
-    for _ in range(10):
-        await asyncio.sleep(0)
+    second = asyncio.create_task(_finalize_together(worker, second_batch))
+    await _handed_to_the_write(worker, _ids(first_batch) | _ids(second_batch))
+    # Both steady flushers write, and less than a full batch waits: no
+    # flusher takes these rows.
+    third = asyncio.create_task(_finalize_together(worker, unsent))
+    await _queued(worker, _ids(unsent))
 
     report = await worker._finalize_batcher.close(0.2)
-    _ = await asyncio.gather(first, second, return_exceptions=True)
+    _ = await asyncio.gather(first, second, third, return_exceptions=True)
     _ = await blocker.execute('SELECT pg_advisory_unlock_all()')
 
-    match report:
-        case FlushersCancelled(rows_in_flight=rows_in_flight, rows_unsent=unsent):
-            assert rows_in_flight + unsent == 4
-        case _:
-            raise AssertionError(report)
-    task_ids = [task_id for task_id, _ in [*in_flight, *queued]]
+    assert report == FlushersCancelled(
+        in_flight_task_ids=frozenset(_ids(first_batch) | _ids(second_batch)),
+        unsent_task_ids=frozenset(_ids(unsent)),
+    )
+    await _batch_statements_ended(session)
+    task_ids = sorted(_ids(first_batch) | _ids(second_batch) | _ids(unsent))
+    live = await _live_statuses(session, task_ids)
+    history = await _history(session, task_ids)
+    for task_id in _ids(unsent):
+        assert (live.get(task_id), history.get(task_id)) == ('RUNNING', None)
+    for task_id in _ids(first_batch) | _ids(second_batch):
+        assert (live.get(task_id), history.get(task_id)) in {
+            ('RUNNING', None),
+            (None, ('COMPLETED', None)),
+        }
+
+
+def _ids(rows: Case) -> set[str]:
+    return {task_id for task_id, _ in rows}
+
+
+async def _handed_to_the_write(worker: Worker, task_ids: set[str]) -> None:
+    """Wait until the flushers have handed every row of ``task_ids`` to the
+    write."""
+    batcher = worker._finalize_batcher
     for _ in range(WAIT_POLLS):
-        if len(await _live_statuses(session, task_ids)) == 4:
-            break
+        handed = {
+            task_id for batch in batcher._in_flight.values() for task_id in batch
+        }
+        if task_ids <= handed:
+            return
         await asyncio.sleep(WAIT_POLL_S)
-    assert await _live_statuses(session, task_ids) == dict.fromkeys(task_ids, 'RUNNING')
-    assert await _history(session, task_ids) == {}
+    raise AssertionError(f'the flushers did not take the rows {sorted(task_ids)}')
+
+
+async def _queued(worker: Worker, task_ids: set[str]) -> None:
+    """Wait until every row of ``task_ids`` waits in the batch queue."""
+    batcher = worker._finalize_batcher
+    for _ in range(WAIT_POLLS):
+        if task_ids <= {row.command.task_id for row in batcher._queue}:
+            return
+        await asyncio.sleep(WAIT_POLL_S)
+    raise AssertionError(f'the rows {sorted(task_ids)} never waited in the queue')
+
+
+async def _batch_statements_ended(session: AsyncSession) -> None:
+    """Wait until no backend runs the batch statement."""
+    for _ in range(WAIT_POLLS):
+        running = await session.scalar(
+            text("""
+                SELECT count(*) FROM pg_stat_activity
+                WHERE query LIKE '%horsies_complete_tasks_fused(%'
+                  AND state = 'active'
+                  AND pid <> pg_backend_pid()
+            """)
+        )
+        await session.commit()
+        if running == 0:
+            return
+        await asyncio.sleep(WAIT_POLL_S)
+    raise AssertionError('a batch statement still runs')
 
 
 # ---------------------------------------------------------------------------

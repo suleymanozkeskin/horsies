@@ -1259,15 +1259,17 @@ class Worker(
         match await self._finalize_batcher.close(FINALIZE_BATCH_CLOSE_TIMEOUT_S):
             case FlushersDrained():
                 return
-            case FlushersCancelled(rows_in_flight=in_flight, rows_unsent=unsent):
+            case FlushersCancelled(
+                in_flight_task_ids=in_flight, unsent_task_ids=unsent
+            ):
                 logger.warning(
                     'Worker stop cancelled the finalize batch writes after '
                     '%.0fs: %s rows in a cancelled statement (commit unknown), '
                     '%s rows not sent. Stale RUNNING recovery fails each row '
                     'that did not commit.',
                     FINALIZE_BATCH_CLOSE_TIMEOUT_S,
-                    in_flight,
-                    unsent,
+                    len(in_flight),
+                    len(unsent),
                 )
 
     def _preload_modules_main(self) -> None:

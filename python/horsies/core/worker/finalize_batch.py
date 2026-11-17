@@ -95,13 +95,15 @@ class FlushersDrained:
 class FlushersCancelled:
     """``close`` cancelled the flushers at its timeout.
 
-    ``rows_in_flight`` were in a statement that the cancel ended: their commit
-    is unknown. ``rows_unsent`` were never sent: they stay RUNNING, and stale
-    RUNNING recovery fails them.
+    ``in_flight_task_ids``: the rows that a flusher had handed to the write.
+    The core runs a write that it received to its end, so the commit of each
+    of these rows is unknown: it may commit after the close.
+    ``unsent_task_ids``: the rows that no write received. They stay RUNNING,
+    and stale RUNNING recovery fails them.
     """
 
-    rows_in_flight: int
-    rows_unsent: int
+    in_flight_task_ids: frozenset[str]
+    unsent_task_ids: frozenset[str]
 
 
 type CloseReport = FlushersDrained | FlushersCancelled
@@ -162,7 +164,9 @@ class FinalizeBatcher:
         # sees a flusher that already ended. The set is for ``close``.
         self._running: dict[FlusherRole, int] = dict.fromkeys(FlusherRole, 0)
         self._flushers: set[asyncio.Task[None]] = set()
-        self._rows_in_flight = 0
+        # The task ids of the batch that each flusher handed to the write,
+        # for ``close``. A flusher writes one batch at a time.
+        self._in_flight: dict[asyncio.Task[None], tuple[str, ...]] = {}
         self._state = BatcherState.OPEN
 
     @property
@@ -241,13 +245,15 @@ class FinalizeBatcher:
         every one of them; the queue holds at most ``max_queued_rows``. The
         count of ``role`` goes down in the last synchronous step.
         """
+        flusher = asyncio.current_task()
+        assert flusher is not None, 'a flusher runs as a task'
         try:
             while rows := self._take_batch(role):
-                self._rows_in_flight += len(rows)
+                self._in_flight[flusher] = tuple(row.command.task_id for row in rows)
                 try:
                     await self._write_and_answer(rows)
                 finally:
-                    self._rows_in_flight -= len(rows)
+                    del self._in_flight[flusher]
         finally:
             self._running[role] -= 1
 
@@ -363,9 +369,10 @@ class FinalizeBatcher:
         """Refuse new rows, and wait up to ``timeout_s`` for the flushers.
 
         A flusher writes every row that is queued at the close. Past the
-        timeout the flushers are cancelled, and the rows not yet answered
-        stay with the database: committed, or RUNNING for stale recovery.
-        Idempotent. Never raises.
+        timeout the flushers are cancelled. The report names the rows that a
+        write had received (their commit is unknown: the core runs that
+        write to its end) and the rows that no write received (they stay
+        RUNNING for stale recovery). Idempotent. Never raises.
         """
         self._state = BatcherState.CLOSED
         flushers = tuple(self._flushers)
@@ -374,16 +381,18 @@ class FinalizeBatcher:
         _, pending = await asyncio.wait(flushers, timeout=max(0.0, timeout_s))
         if not pending:
             return FlushersDrained()
-        rows_in_flight = self._rows_in_flight
+        in_flight = frozenset(
+            task_id for task_ids in self._in_flight.values() for task_id in task_ids
+        )
         for flusher in pending:
             _ = flusher.cancel()
         _ = await asyncio.gather(*pending, return_exceptions=True)
-        rows_unsent = len(self._queue)
+        unsent = frozenset(row.command.task_id for row in self._queue)
         while self._queue:
             _ = self._queue.popleft().answer.cancel()
         return FlushersCancelled(
-            rows_in_flight=rows_in_flight,
-            rows_unsent=rows_unsent,
+            in_flight_task_ids=in_flight,
+            unsent_task_ids=unsent,
         )
 
 
