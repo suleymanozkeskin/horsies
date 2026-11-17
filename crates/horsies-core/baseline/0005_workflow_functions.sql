@@ -1720,7 +1720,8 @@ $$;
 --   child.
 -- - FAILED, CANCELLED or EXPIRED child: FAILED, SUBWORKFLOW_FAILED with sub_workflow_id and sub_workflow_summary.
 -- The summary: status, output (the ok value of a value envelope, else null), the node counts, error_summary (the
--- message of a stored error object, the first 200 characters of a stored error that is not JSON, else null).
+-- message of a stored error object, the first 200 characters of a stored error that is not JSON or is the JSON null,
+-- else null).
 -- failure_error: the error that the failure policy of the parent records for a FAILED node, as the bare error object
 -- text. For a FAILED, CANCELLED or EXPIRED child it is SUBWORKFLOW_FAILED with the message "Subworkflow <id> failed"
 -- and the same sub_workflow_id and summary (Python: the error of _ParentNodeFailed); for a FAILED node of a COMPLETED
@@ -1754,7 +1755,7 @@ BEGIN
     v_error := horsies_workflow_json_or_null(v_child.error);
     v_error_summary := CASE
         WHEN v_child.error IS NULL OR v_child.error = '' THEN NULL
-        WHEN v_error IS NULL THEN left(v_child.error, 200)
+        WHEN v_error IS NULL OR json_typeof(v_error) = 'null' THEN left(v_child.error, 200)
         WHEN json_typeof(v_error) = 'object' AND json_typeof(v_error -> 'message') = 'string'
             THEN v_error ->> 'message'
         ELSE NULL
