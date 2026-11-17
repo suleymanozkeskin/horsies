@@ -3,7 +3,8 @@
 
 The worker reads the timeout, the retry policy, the execution class and the
 cancel grace from the stored ``task_options`` of the row. These tests fire
-slots through ``Scheduler._check_schedule`` against a state manager double
+slots through ``Scheduler._check_schedule`` of the Python loop (the dual-run
+reference, ``tests/dualrun/reference/scheduler_loop_caller.py``) against a state manager double
 that records the fire, with tasks that a real app registers and a real
 broker that builds the send command (it opens no connection), so the
 options text is the one the task decorator encodes.
@@ -33,7 +34,7 @@ from horsies.core.models.schedule import (
     TaskSchedule,
 )
 from horsies.core.models.tasks import Execution, RetryPolicy, TaskError, TaskResult
-from horsies.core.scheduler.service import Scheduler
+from tests.dualrun.reference.scheduler_loop_caller import Scheduler
 from horsies.core.scheduler.state import (
     DueSchedule,
     FiredSlot,

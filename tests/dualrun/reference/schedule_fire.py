@@ -1,7 +1,7 @@
 # pyright: reportPrivateUsage=false
 """The schedule fire, before ``horsies_fire_schedule``.
 
-``Scheduler._check_schedule`` (``python/horsies/core/scheduler/service.py``) ran,
+``Scheduler._check_schedule`` (now ``tests/dualrun/reference/scheduler_loop_caller.py``) ran,
 per due schedule, on a private one-connection engine: BEGIN, the advisory
 lock of the schedule name, the read of the state row. A missing row was
 created in that transaction; a row that was no longer due ended it. Then
@@ -34,7 +34,7 @@ from horsies.core.models.retention import resolve_queue_retention_class
 from horsies.core.models.schedule import TaskSchedule
 from horsies.core.models.task_pg import ScheduleStateModel
 from horsies.core.scheduler.calculator import calculate_next_run, should_run_now
-from horsies.core.scheduler.service import Scheduler
+from tests.dualrun.reference.scheduler_loop_caller import Scheduler
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
 
