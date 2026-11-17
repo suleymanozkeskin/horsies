@@ -150,6 +150,12 @@ written in Rust, on a new baseline schema.
   `stale` and `uptime_s` of `GET /api/workers` are measured to the time of
   the database read; 0.7 measured them to the clock of the web host.
 
+- **Monitoring and web times are in UTC.** The times of the
+  `horsies.monitoring` reads and of the web API answers are UTC (`Z` in
+  JSON), whatever the `TimeZone` of the database server or role is. 0.7
+  wrote them in the zone of the database session, so their offset followed
+  that setting; the instants are the same.
+
 - **A web request body over 1 MiB is refused with 413.** The task cancel
   route, the one route that reads a body, takes `{"include_running": bool}`.
 

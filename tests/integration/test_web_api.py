@@ -1327,10 +1327,16 @@ class TestSchemaMismatch:
 
     @pytest_asyncio.fixture(autouse=True)
     async def a_later_version_is_recorded(
-        self, session: AsyncSession
+        self,
+        session: AsyncSession,
+        broker: PostgresBroker,  # noqa: ARG002 - installs the schema first
     ) -> AsyncGenerator[None, None]:
         """Record a successful migration past the version this build expects,
-        as a newer build would; removed after the test."""
+        as a newer build would; removed after the test.
+
+        The install runs before the record (``broker``): the install refuses
+        a database that records a version later than its build.
+        """
         await session.execute(
             text(
                 'INSERT INTO horsies_migrations (version, description, installed_on, '
