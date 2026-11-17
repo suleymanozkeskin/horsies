@@ -82,7 +82,8 @@ pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};
 pub use partition_maintenance::{CoveragePassError, PrunePassError};
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
-    PostgresBroker, PrestartExpiry, SchemaInitializationMode, WorkflowStop, WorkflowStopBeforeStart,
+    ConnectivityRefusal, ListenProbeFailure, PostgresBroker, PrestartExpiry,
+    SchemaInitializationMode, WorkflowStop, WorkflowStopBeforeStart,
 };
 pub use process_listener::{
     CheckInterruption, ListenError, ListenerPlanError, SessionCheckFailure,

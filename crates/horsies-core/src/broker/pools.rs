@@ -288,6 +288,11 @@ impl CoreHandle {
         CoreHandle::open_with_environment(config, profile, environment)
     }
 
+    /// The config that the pools are built from.
+    pub(crate) fn config(&self) -> &PostgresConfig {
+        &self.config
+    }
+
     /// The open pools, for a read. An `Idle` handle builds its pools first
     /// (no connection; the TLS files and `~/.pgpass` are read again).
     ///

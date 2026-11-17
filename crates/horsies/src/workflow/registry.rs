@@ -17,6 +17,7 @@
 
 use std::any::TypeId;
 use std::collections::BTreeMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use horsies_core::core::registry::RegisteredWorkflowDefinition;
@@ -99,7 +100,8 @@ impl Definition {
         let build: ParamsBuild =
             Arc::new(|text: &str| -> Result<WorkflowSpec, ParamsBuildRefused> {
                 let params = decode_params::<D::Params>(text)?;
-                let spec = D::build_with(params).map_err(ParamsBuildRefused::Failed)?;
+                let spec =
+                    run_user_build(|| D::build_with(params)).map_err(ParamsBuildRefused::Failed)?;
                 spec.check_output_type::<D::Output>()
                     .map_err(ParamsBuildRefused::Failed)?;
                 Ok(spec)
@@ -263,15 +265,24 @@ impl WorkflowRegistry {
             })
             .collect::<Vec<WorkflowSpec>>();
         for case in &registered.check_cases {
-            match (case.build)() {
-                Ok(spec) => self.check_root(&registered, &spec, &mut findings),
-                Err(refused) => findings.push(
+            match std::panic::catch_unwind(AssertUnwindSafe(|| (case.build)())) {
+                Ok(Ok(spec)) => self.check_root(&registered, &spec, &mut findings),
+                Ok(Err(refused)) => findings.push(
                     HorsiesError::new(format!(
                         "workflow builder '{}' refused a check case",
                         case.builder_name
                     ))
                     .with_code(ErrorCode::WorkflowCheckCaseInvalid)
                     .with_note(refused.to_string()),
+                ),
+                Err(panic) => findings.push(
+                    HorsiesError::new(format!(
+                        "workflow builder '{}' panicked on a check case",
+                        case.builder_name
+                    ))
+                    .with_code(ErrorCode::WorkflowCheckBuilderException)
+                    .with_note(panic_text(panic.as_ref()))
+                    .with_help("workflow builders must return a spec or a HorsiesError"),
                 ),
             }
         }
@@ -418,6 +429,35 @@ impl WorkflowRegistry {
         self.registered
             .write()
             .expect("the workflow registry lock is never held across a panic")
+    }
+}
+
+/// Run `build`, user code that builds a spec, with a panic caught at this
+/// boundary: a panic is a refusal of the build with the panic text, as
+/// Python records a raised exception of `build_with`. The core then stores
+/// `WORKFLOW_ENQUEUE_FAILED` on the node, and the step goes on.
+fn run_user_build(
+    build: impl FnOnce() -> Result<WorkflowSpec, HorsiesError>,
+) -> Result<WorkflowSpec, HorsiesError> {
+    match std::panic::catch_unwind(AssertUnwindSafe(build)) {
+        Ok(built) => built,
+        Err(panic) => Err(HorsiesError::new(format!(
+            "build_with panicked: {}",
+            panic_text(panic.as_ref())
+        ))),
+    }
+}
+
+/// The text of a panic payload: the message of `panic!` with a literal or
+/// a format string; other payloads name no text.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    match (
+        payload.downcast_ref::<&'static str>(),
+        payload.downcast_ref::<String>(),
+    ) {
+        (Some(text), _) => (*text).to_owned(),
+        (None, Some(text)) => text.clone(),
+        (None, None) => "a panic payload that is not text".to_owned(),
     }
 }
 

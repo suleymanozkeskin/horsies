@@ -94,6 +94,11 @@ pub(super) async fn shared_pool() -> PgPool {
 /// Connections of one test pool.
 const TEST_POOL_CONNECTIONS: u32 = 5;
 
+/// How long [`IsolatedDatabase::drop`] waits for its pool to close. The
+/// close waits for every checked-out connection, so a connection that a
+/// test never gives back would stop the whole `#[serial]` run.
+const POOL_CLOSE_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// History leaves the coverage pass creates ahead, in days and in hours.
 const COVERAGE_HISTORY_DAYS: u32 = 2;
 const COVERAGE_HEARTBEAT_HOURS: u32 = 2;
@@ -164,8 +169,26 @@ impl IsolatedDatabase {
     }
 
     /// Closes the pool and drops the database.
+    ///
+    /// # Panics
+    ///
+    /// When the pool does not close within [`POOL_CLOSE_BOUND`]: a
+    /// connection of the pool is still checked out (a listener or a
+    /// connection that the test still holds), and the close waits for it.
     pub(super) async fn drop(self) {
-        self.pool.close().await;
+        let size = self.pool.size();
+        let idle = self.pool.num_idle();
+        if tokio::time::timeout(POOL_CLOSE_BOUND, self.pool.close())
+            .await
+            .is_err()
+        {
+            panic!(
+                "the pool of test database {} did not close within {POOL_CLOSE_BOUND:?}: \
+                 {size} connections open and {idle} idle at the close, so a connection is \
+                 still checked out; drop each listener and held connection first",
+                self.database.name()
+            );
+        }
         self.database.drop().await;
     }
 }

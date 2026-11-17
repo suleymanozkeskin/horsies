@@ -4853,6 +4853,9 @@ mod tests {
         use crate::core::history::names::LEAF_CATALOG;
 
         let database = FreshDatabase::create().await;
+        // The worker start records the family; the coverage pass writes
+        // only into a database of the client's own family.
+        database.record_family("RUST").await;
         sqlx::raw_sql(&format!(
             "CREATE TABLE test_pool_writes (relation_name text NOT NULL, application_name text NOT NULL);
              CREATE FUNCTION test_record_pool_write() RETURNS trigger LANGUAGE plpgsql AS $body$

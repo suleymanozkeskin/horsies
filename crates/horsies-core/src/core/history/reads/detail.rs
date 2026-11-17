@@ -190,7 +190,8 @@ pub async fn read_task_detail(
 fn history_status(task_id: Uuid, value: &str) -> Result<TaskStatus, HistoryError> {
     value.parse::<TaskStatus>().map_err(|_| {
         HistoryError::contract(format!(
-            "history row {task_id} has status {value:?}, which is not a task status"
+            "history row {task_id} has status {}, which is not a task status",
+            crate::core::python_text::python_repr(value)
         ))
     })
 }

@@ -249,6 +249,8 @@ async fn promoted_nodes_and_their_tasks_carry_the_transaction_time_and_each_inse
     expected.push((queue_channel, "new".to_owned()));
     expected.sort();
     assert_eq!(received, expected);
+    // The listener holds a connection of the pool that `db.drop` closes.
+    drop(listener);
     db.drop().await;
 }
 

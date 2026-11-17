@@ -1,168 +1,79 @@
 ---
 title: Worker & Database Health
 section: shared
-summary: Active liveness probes for Postgres and workers, plus typed worker-state snapshots.
-related: [broker-methods, ../workers/heartbeats-recovery]
-tags: [monitoring, health, liveness, worker, api]
+summary: What the health reads answer - the database ping, the worker ping, worker state snapshots, and the execution class coverage and report - and what each result means.
+related: [health-reads, ../rust/monitoring/health-reads, ../workers/heartbeats-recovery]
+tags: [monitoring, health, liveness, worker]
 ---
 
-The health API answers three operational questions: is Postgres reachable, which workers are responsive right now, and what is each worker doing. All methods exist on the `Horsies` app (async and sync) and return `BrokerResult[T]` — `Ok(value)` on success, `Err(BrokerOperationError)` with a `retryable` flag on failure.
+The health reads answer three operational questions: is Postgres reachable, which workers are responsive right now, and what is each worker doing.
+
+The API is on the client pages: [Health Reads](/horsies/monitoring/health-reads/) (Python) and [Health Reads](/horsies/rust/monitoring/health-reads/) (Rust).
 
 ## Mental model
 
-- `ping_database()` — "Can this app reach Postgres right now?"
-- `ping_workers()` — "Which workers can respond right now?"
-- `list_worker_states()` — "What did workers last report about themselves?"
-- Comparing `list_worker_states()` with `ping_workers()` tells you which known workers are currently non-responsive ( e.g. reported recently, but did not answer a ping )
-- `get_class_coverage()` — "Does a live worker serve every class that has pending tasks?"
-- `get_class_report()` — "How long do pending tasks of each class wait, and how much capacity is free?"
+| Read | Answers |
+|------|---------|
+| Database ping | Can this app reach Postgres right now? |
+| Worker ping | Which workers can respond right now? |
+| Worker states | What did the workers last report about themselves? |
+| Class coverage | Does a live worker serve every class that has pending tasks? |
+| Class report | How long do the pending tasks of each class wait, and how much capacity is free? |
 
-`ping_*` are active, right-now probes. `list_worker_states` is the last self-reported snapshot, not a live check.
-
-```python
-from pydantic import SecretStr
-from horsies import Horsies, AppConfig, PostgresConfig, is_ok, is_err
-
-app = Horsies(AppConfig(
-    broker=PostgresConfig(
-        database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb"),
-    ),
-))
-```
+The two pings are active probes at the time of the call. A worker state is the last snapshot that the worker reported, not a live check. A worker that the worker state read lists and the worker ping does not return is known but did not answer.
 
 ## Why and When
 
-Use `ping_database` and `ping_workers` for active, right-now liveness — a Kubernetes readiness gate, a `/health` endpoint, or pre-dispatch checks. Use the worker-state reads for load and configuration introspection (dashboards, capacity decisions).
+Use the database ping and the worker ping for active liveness at the time of the call: a Kubernetes readiness gate, a `/health` endpoint, or a check before a dispatch. Use the worker state reads for load and configuration introspection: dashboards and capacity decisions.
 
 ## Is Postgres alive?
 
-`ping_database_async` runs `SELECT 1` through the live broker pool, so success also confirms a pooled connection could be checked out. It reports round-trip latency.
-
-```python
-result = await app.ping_database_async()
-if is_ok(result):
-    print(f"Postgres reachable in {result.ok_value.latency_ms:.1f} ms")
-else:
-    print(f"Unreachable: {result.err_value.code}")  # DB_PING_FAILED
-```
+The database ping runs `SELECT 1` through the live broker pool, so success also confirms that a pooled connection could be checked out. It reports the round-trip latency. A failure has the code `DB_PING_FAILED`.
 
 ## Which workers are alive?
 
-`ping_workers_async` broadcasts a ping and collects replies. A reply proves the worker's event loop is responsive **and** that the worker can reach Postgres (the reply travels through the worker's own connection). Pass `target_worker_id` to probe one worker; it returns as soon as that worker replies.
+The worker ping sends a ping to the workers and collects the replies. A reply proves that the worker's event loop is responsive **and** that the worker can reach Postgres: the reply travels through the worker's own connection. A ping can target one worker.
 
-```python
-result = await app.ping_workers_async(timeout_seconds=2.0)
-if is_ok(result):
-    for pong in result.ok_value:
-        print(f"{pong.worker_id} on {pong.hostname}:{pong.pid} — {pong.round_trip_ms:.1f} ms")
-```
+The ping stops at the first of these conditions:
 
-**Stop conditions:**
-
-- `min_responses=N` — return as soon as `N` distinct workers reply. Use `min_responses=1` for a fast fail-open liveness gate: a healthy fleet answers in milliseconds, and only a degraded fleet pays the full `timeout_seconds`. This removes the latency floor for a high-frequency `/health` probe.
-- `target_worker_id` — return on the first reply from that worker.
-- neither — wait the full `timeout_seconds` and enumerate every responder (the live count is not known in advance).
-
-```python
-# Fast liveness gate: returns on the first pong (~ms when healthy).
-result = await app.ping_workers_async(min_responses=1, timeout_seconds=2.0)
-healthy = is_ok(result) and len(result.ok_value) >= 1
-```
+- **A minimum number of replies:** it returns as soon as that many distinct workers replied. One reply is a fast liveness gate: a healthy fleet answers in milliseconds, and only a degraded fleet waits for the full timeout. This removes the latency floor of a high-frequency `/health` probe.
+- **A target worker:** it returns on the first reply of that worker.
+- **The timeout:** with no target and no minimum, it waits the full timeout and lists every worker that replied. The number of live workers is not known in advance.
 
 ## What is each worker doing?
 
-`list_worker_states_async` returns the latest snapshot per worker, **including idle workers**. Each `WorkerStateSnapshot` carries identity, queue/concurrency configuration, current `tasks_running`/`tasks_claimed`, and psutil memory/CPU.
-
-```python
-result = await app.list_worker_states_async()
-if is_ok(result):
-    for snap in result.ok_value:
-        print(f"{snap.worker_id}: {snap.tasks_running} running, {snap.tasks_claimed} claimed")
-```
+The worker state read returns the latest snapshot of each worker, **including idle workers**. A snapshot holds the identity of the worker, its queue and concurrency configuration, its current running and claimed task counts, and its memory and CPU (psutil). The history read returns the snapshots of one worker, newest first.
 
 ### Which slots are down?
 
-`WorkerStateSnapshot.slot_health` says whether any slot of the worker was down when it wrote the snapshot. A slot is down when its last child start failed for a cause that can clear, such as `EMFILE`. It takes no task, and the worker starts a new child for it after a growing wait. See [Child Start Failures](/horsies/workers/worker-architecture/#child-start-failures).
+`slot_health` says whether any slot of the worker was down when it wrote the snapshot. A slot is down when its last child start failed for a cause that can clear, such as `EMFILE`. It takes no task, and the worker starts a new child for it after a growing wait. See [Child Start Failures](/horsies/workers/worker-architecture/#child-start-failures).
 
 | `slot_health` | Meaning |
 | ------------- | ------- |
-| `AllSlotsServing()` | No slot was down |
-| `SlotsDown(slots)` | The worker is degraded. `slots` holds one `DownSlot` per slot that was down, in slot order |
+| All slots serving | No slot was down |
+| Slots down | The worker is degraded. It holds one entry per slot that was down, in slot order |
 
-```python
-from horsies import AllSlotsServing, SlotsDown, is_ok
-
-result = await app.list_worker_states_async()
-if is_ok(result):
-    for snap in result.ok_value:
-        match snap.slot_health:
-            case SlotsDown(slots=down):
-                for slot in down:
-                    print(f"{snap.worker_id} slot {slot.slot}: {slot.cause} since {slot.down_since}")
-            case AllSlotsServing():
-                pass
-```
-
-`DownSlot` fields: `slot` (index), `cause` (`ResourceShortage(errno_name)` or `ThreadStartRefused()`), `detail` (error text of the last failed start, at most 2400 characters), `down_since` (aware `datetime`), `failed_boots` (failed starts since the slot went down, at least 1).
+A down slot has its slot index, its cause (a resource shortage with its errno name, or a refused thread start), the error text of its last failed start (at most 2400 characters), the time it went down, and the number of failed starts since then (at least 1).
 
 ### Which classes does a worker serve?
 
-`WorkerStateSnapshot.class_capacity` holds the claim budget of each execution class that the worker runs children for. A budget's `capacity` counts its children (`ISOLATED`) or seats (a shared class) in service, and `serves` lists the classes whose rows it claims. A class that no budget serves is not claimed by the worker. See [Budgets per Execution Class](/horsies/workers/concurrency/#budgets-per-execution-class).
-
-| `class_capacity` | Meaning |
-| ---------------- | ------- |
-| `ClassBudgets(budgets)` | One `ClassBudget(budget, capacity, serves)` per budget, in `Execution` order. Empty when the worker serves no class |
-
-```python
-from horsies import ClassBudgets, is_ok
-
-result = await app.list_worker_states_async()
-if is_ok(result):
-    for snap in result.ok_value:
-        match snap.class_capacity:
-            case ClassBudgets(budgets=budgets):
-                for budget in budgets:
-                    served = ", ".join(member.value for member in budget.serves)
-                    print(f"{snap.worker_id} {budget.budget.value}: {budget.capacity} in service, serves {served}")
-```
-
-`get_worker_state_async(worker_id)` returns one worker's latest snapshot (or `None`). `get_worker_state_history_async(worker_id, limit=...)` returns the snapshot timeseries newest-first; `limit=None` returns all retained rows.
-
-```python
-history = await app.get_worker_state_history_async("worker-uuid", limit=20)
-if is_ok(history):
-    for snap in history.ok_value:
-        print(f"{snap.snapshot_at}: cpu={snap.cpu_percent}% mem={snap.memory_usage_mb}MB")
-```
+`class_capacity` holds the claim budget of each execution class that the worker runs children for. A budget's capacity counts its children (`ISOLATED`) or seats (a shared class) in service, and the budget lists the classes whose rows it claims. A class that no budget serves is not claimed by the worker. See [Budgets per Execution Class](/horsies/workers/concurrency/#budgets-per-execution-class).
 
 ## Does a live worker serve every pending class?
 
-A pending stream is the `PENDING` rows of one queue and one execution class. A worker is live while its latest snapshot is at most `WORKER_STATE_LIVE_WINDOW_S` (120) seconds old. `RecoveryConfig.worker_state_snapshot_interval_ms` is at most half of that window (60,000 ms), so a running worker stays live when a snapshot write is late by up to half the window. A live worker serves a stream when the queue is one of its `queues` and one of its budgets serves the class. `get_class_coverage_async` gives each pending stream one state:
+A pending stream is the `PENDING` rows of one queue and one execution class. A worker is live while its latest snapshot is at most `WORKER_STATE_LIVE_WINDOW_S` (120) seconds old. `RecoveryConfig.worker_state_snapshot_interval_ms` is at most half of that window (60,000 ms), so a running worker stays live when a snapshot write is late by up to half the window. A live worker serves a stream when the queue is one of its `queues` and one of its budgets serves the class.
 
-| `state` | Meaning |
-| ------- | ------- |
-| `StreamServed(workers, capacity)` | Live workers serve the stream. `capacity` sums the capacity in service of the budget that serves the class on each of them |
-| `StreamWithoutCapacity(workers)` | Live workers serve the stream, and every child or seat of their serving budgets was down at their snapshot |
-| `StreamUnserved()` | No live worker serves the stream. Its rows wait until a worker that serves the class runs on the queue |
+The class coverage read gives each pending stream one state:
 
-```python
-from horsies import StreamServed, StreamUnserved, StreamWithoutCapacity, is_ok
+| State | Meaning |
+| ----- | ------- |
+| Served | Live workers serve the stream. The read counts the workers, and sums the capacity in service of the budget that serves the class on each of them |
+| Without capacity | Live workers serve the stream, and every child or seat of their serving budgets was down at their snapshot. The read counts the workers |
+| Unserved | No live worker serves the stream. Its rows wait until a worker that serves the class runs on the queue |
 
-result = await app.get_class_coverage_async()
-if is_ok(result):
-    for stream in result.ok_value.streams:
-        match stream.state:
-            case StreamUnserved():
-                print(f"{stream.queue_name}/{stream.execution.value}: no live worker serves it")
-            case StreamWithoutCapacity(workers=workers):
-                print(f"{stream.queue_name}/{stream.execution.value}: {workers} worker(s), no child in service")
-            case StreamServed():
-                pass
-```
+The read also returns its time (database time) and the number of live workers. The streams are ordered by queue name, then by execution class order. A delayed send and a retry that waits for its interval are `PENDING` too, so they count before they are due.
 
-A delayed send and a retry that waits for its interval are `PENDING` too, so they count before they are due.
-
-A snapshot whose `class_capacity` is unreadable fails the read with `MONITORING_QUERY_FAILED` and names the worker.
+The read fails with `MONITORING_QUERY_FAILED` on a database error. It fails with `retryable=False` when the `class_capacity` of a live snapshot is unreadable or missing (the message names the worker), and when it reaches a bound: 20,000 snapshot rows inside the live window, or 3,000 pending streams.
 
 ### The worker logs it
 
@@ -176,122 +87,47 @@ Each worker logs one stream at most once per 5 minutes (`CLASS_COVERAGE_LOG_INTE
 
 ### What to do
 
-- **Unserved `ISOLATED`**: start a worker with isolated children (`WorkerProfile(isolated=IsolatedChildren(...))`) that serves the queue. A row of a shared class goes back to the queue as `ISOLATED` when its task, as the worker registered it, has another class; such rows need isolated children too.
+- **Unserved `ISOLATED`**: start a worker with isolated children that serves the queue. A row of a shared class goes back to the queue as `ISOLATED` when its task, as the worker registered it, has another class; such rows need isolated children too.
 - **Unserved shared class**: start a worker with children of that class, or with isolated children, that serves the queue.
-- **Without capacity**: the serving workers' slots are down. Read their `slot_health` (above) for the cause. Each slot boots again after a growing wait.
+- **Without capacity**: the slots of the serving workers are down. Read their `slot_health` ([Which slots are down?](#which-slots-are-down)) for the cause. Each slot boots again after a growing wait.
 
 ## How long do pending tasks wait, and what capacity is free?
 
-`get_class_report_async` returns the pending streams with the wait of their oldest due row and their coverage, and the budget load of each live worker.
+The class report returns the pending streams with the wait of their oldest due row and their coverage state, and the budget load of each live worker.
 
-- `PendingStream.wait` is `OldestWaiting(enqueued_at, wait)` when at least one row is due, or `NoneDue(next_due_at)` when every row is due later. A row is due when its `enqueued_at` (its send time, or the time its retry became due) is at or before the read.
-- `ClassReport.workers` holds the live workers, by worker id. `GET /api/workers/classes` returns the report.
-- `WorkerClassLoad.budgets` holds one `BudgetLoad` per budget: `capacity` and `serves` from the worker's latest snapshot, `in_flight` (the worker's `RUNNING` rows and `CLAIMED` rows with a live lease of the classes it serves, counted at the read, as the claim counts them) and `free` (`capacity - in_flight`, at least 0; a prefetch buffer can hold more rows than the capacity).
+- The wait of a stream is the oldest waiting row when at least one row is due: its due time and how long it has waited. When every row is due later, the wait is the next due time. A row is due when its `enqueued_at` (its send time, or the time its retry became due) is at or before the read.
+- The live workers are ordered by worker id. `GET /api/workers/classes` returns the report.
+- Each budget of a worker has its capacity and the classes it serves, from the worker's latest snapshot; its rows in flight (the worker's `RUNNING` rows and `CLAIMED` rows with a live lease of the classes it serves, counted at the read, as the claim counts them); and its free capacity (capacity minus rows in flight, at least 0; a prefetch buffer can hold more rows than the capacity).
 
-```python
-from horsies import OldestWaiting, NoneDue, is_ok
-
-result = await app.get_class_report_async()
-if is_ok(result):
-    report = result.ok_value
-    for stream in report.streams:
-        match stream.wait:
-            case OldestWaiting(wait=wait):
-                print(f"{stream.queue_name}/{stream.execution.value}: oldest waits {wait}")
-            case NoneDue(next_due_at=due):
-                print(f"{stream.queue_name}/{stream.execution.value}: next due {due}")
-    for worker in report.workers:
-        for budget in worker.budgets:
-            print(f"{worker.worker_id} {budget.budget.value}: {budget.free}/{budget.capacity} free")
-```
+The report fails as the coverage read does. It also fails when a live worker holds rows of a class that its recorded budgets do not serve, and when more than 10,000 (queue, class, priority) groups have `PENDING` rows.
 
 Both reads use the claim index. The coverage read takes one index probe per pending (queue, class); the report takes one per (queue, class, priority), so its cost grows with the priorities in use, not with the backlog. With 98,000 pending rows over 5 queues, 3 classes and 100 priorities on PostgreSQL 17, the coverage read used 32 buffers and the stream heads of the report 2,379 buffers (6.5 ms).
 
-## Liveness pattern: known fleet vs responsive now
+## Snapshot Fields
 
-Combine the two surfaces to find workers that exist but stopped responding. A worker present in `list_worker_states` but absent from `ping_workers` is non-responsive.
-
-```python
-states = await app.list_worker_states_async()
-pongs = await app.ping_workers_async(timeout_seconds=2.0)
-if is_ok(states) and is_ok(pongs):
-    known = {s.worker_id for s in states.ok_value}
-    responsive = {p.worker_id for p in pongs.ok_value}
-    suspect = known - responsive
-    if suspect:
-        print(f"Non-responsive workers: {suspect}")
-```
-
-## API Reference
-
-Each method has a sync variant with the same name minus the `_async` suffix (it runs the async version in a background loop).
-
-### `ping_database_async() -> BrokerResult[DatabasePing]`
-
-`SELECT 1` through the live pool. **Returns:** `Ok(DatabasePing)` with `latency_ms: float`; `Err` with code `DB_PING_FAILED` on failure.
-
-### `ping_workers_async(*, target_worker_id: str | None = None, timeout_seconds: float = 2.0, min_responses: int | None = None) -> BrokerResult[list[WorkerPong]]`
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `target_worker_id` | `str \| None` | `None` | `None` broadcasts to all workers; a value probes one worker and returns on its reply |
-| `timeout_seconds` | `float` | `2.0` | Collection window; must be positive |
-| `min_responses` | `int \| None` | `None` | Return as soon as this many distinct workers reply. `None` waits the full window. Must be `>= 1` when set |
-
-**Returns:** `Ok(list[WorkerPong])` — one entry per responding (distinct) worker, possibly empty. Each `WorkerPong` has `worker_id`, `hostname`, `pid`, `round_trip_ms`. `Err` with code `INVALID_INPUT` on non-positive `timeout_seconds` or `min_responses < 1`; `Err` with code `WORKER_PING_FAILED` on reply-channel failure.
-
-### `list_worker_states_async() -> BrokerResult[list[WorkerStateSnapshot]]`
-
-Latest snapshot per worker, including idle workers. **Returns:** `Ok(list[WorkerStateSnapshot])`; `Err` with code `MONITORING_QUERY_FAILED` on failure, also when a stored `slots_down` or `class_capacity` value does not have the shape that the worker writes. The message names the worker.
-
-### `get_worker_state_async(worker_id: str) -> BrokerResult[WorkerStateSnapshot | None]`
-
-Latest snapshot for one worker. **Returns:** `Ok(WorkerStateSnapshot)`, `Ok(None)` if unknown, or `Err(MONITORING_QUERY_FAILED)`.
-
-### `get_worker_state_history_async(worker_id: str, *, limit: int | None = None) -> BrokerResult[list[WorkerStateSnapshot]]`
-
-Snapshot timeseries for one worker, newest first.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `worker_id` | `str` | — | Worker instance id |
-| `limit` | `int \| None` | `None` | Max rows; `None` returns all retained rows. Must be positive when set |
-
-**Returns:** `Ok(list[WorkerStateSnapshot])`; `Err(INVALID_INPUT)` on non-positive `limit`; `Err(MONITORING_QUERY_FAILED)` on query failure.
-
-### `get_class_coverage_async() -> BrokerResult[ClassCoverage]`
-
-The fleet check. **Returns:** `Ok(ClassCoverage)` with `checked_at` (database time), `live_workers` (the workers whose latest snapshot was live) and `streams`: one `StreamCoverage(queue_name, execution, state)` per (queue, class) with `PENDING` rows, ordered by queue name, then by `Execution` order. `Err(MONITORING_QUERY_FAILED)` on a database error, and with `retryable=False` when a live snapshot's `class_capacity` is unreadable or missing (the message names the worker), or when a read reaches its bound: 20,000 snapshot rows inside the live window, or 3,000 pending streams.
-
-### `get_class_report_async() -> BrokerResult[ClassReport]`
-
-**Returns:** `Ok(ClassReport)` with `checked_at`, `streams` (one `PendingStream(queue_name, execution, wait, state)` per pending stream, ordered as above) and `workers` (one `WorkerClassLoad(worker_id, snapshot_at, budgets)` per live worker, by worker id). `Err(MONITORING_QUERY_FAILED)` as for `get_class_coverage_async`, also when a live worker holds rows of a class that its recorded budgets do not serve, or when more than 10,000 (queue, class, priority) groups have `PENDING` rows.
-
-### `WorkerStateSnapshot` fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `worker_id` | `str` | Worker instance id |
-| `snapshot_at` | `datetime` | When the snapshot was taken |
-| `hostname` | `str` | Worker host |
-| `pid` | `int` | Worker process id |
-| `processes` | `int` | Child process count: the number of children of the worker profile |
-| `max_claim_batch` | `int` | Claim batch size |
-| `max_claim_per_worker` | `int` | Per-worker claim cap |
-| `cluster_wide_cap` | `int \| None` | Cluster-wide concurrency cap, if set |
-| `queues` | `list[str]` | Queues this worker serves |
-| `queue_priorities` | `dict[str, int]` | Per-queue priorities (CUSTOM mode); empty when none is set |
-| `queue_max_concurrency` | `dict[str, int]` | Per-queue concurrency (CUSTOM mode); empty when none is set |
-| `recovery_config` | `dict[str, Any]` | Recovery configuration snapshot, plus the embedded health payloads below; empty when none is set |
-| `tasks_running` | `int` | RUNNING tasks at snapshot time |
-| `tasks_claimed` | `int` | CLAIMED tasks at snapshot time |
-| `memory_usage_mb` | `float \| None` | Parent worker process resident memory (psutil) |
-| `memory_percent` | `float \| None` | Memory percent (psutil) |
-| `cpu_percent` | `float \| None` | CPU percent (psutil) |
-| `children_memory_mb` | `float \| None` | Summed resident memory of the worker's child processes |
-| `worker_started_at` | `datetime` | Worker process start time |
-| `slot_health` | `SlotHealth` | `AllSlotsServing()` or `SlotsDown(slots)` |
-| `class_capacity` | `ClassCapacity` | `ClassBudgets(budgets)` |
+| Field | Meaning |
+|-------|---------|
+| `worker_id` | Worker instance id |
+| `snapshot_at` | When the snapshot was taken |
+| `hostname` | Worker host |
+| `pid` | Worker process id |
+| `processes` | Child process count: the number of children of the worker profile |
+| `max_claim_batch` | Claim batch size |
+| `max_claim_per_worker` | Per-worker claim cap |
+| `cluster_wide_cap` | Cluster-wide concurrency cap, if set |
+| `queues` | Queues this worker serves |
+| `queue_priorities` | Per-queue priorities (CUSTOM mode); empty when none is set |
+| `queue_max_concurrency` | Per-queue concurrency (CUSTOM mode); empty when none is set |
+| `recovery_config` | Recovery configuration snapshot, plus the embedded health payloads below; empty when none is set |
+| `tasks_running` | RUNNING tasks at snapshot time |
+| `tasks_claimed` | CLAIMED tasks at snapshot time |
+| `memory_usage_mb` | Parent worker process resident memory (psutil) |
+| `memory_percent` | Memory percent (psutil) |
+| `cpu_percent` | CPU percent (psutil) |
+| `children_memory_mb` | Summed resident memory of the worker's child processes |
+| `worker_started_at` | Worker process start time |
+| `slot_health` | See [Which slots are down?](#which-slots-are-down) |
+| `class_capacity` | See [Which classes does a worker serve?](#which-classes-does-a-worker-serve) |
 
 ### Embedded health payloads
 

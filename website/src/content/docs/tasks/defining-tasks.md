@@ -407,6 +407,23 @@ def render_thumbnail(*, image_id: str) -> TaskResult[str, TaskError]:
     ...
 ```
 
+A `SHARED_THREAD` task runs next to itself and to the other thread tasks of its child. Guard module state with a lock:
+
+```python
+import threading
+
+_seen: set[str] = set()
+_seen_lock = threading.Lock()
+
+
+@app.task('mark_seen', execution=Execution.SHARED_THREAD, timeout_ms=10_000)
+def mark_seen(*, key: str) -> TaskResult[bool, TaskError]:
+    with _seen_lock:
+        first = key not in _seen
+        _seen.add(key)
+    return TaskResult(ok=first)
+```
+
 A `SHARED_ASYNC` task runs on a seat of a shared async child when the worker profile has `shared_async=SharedAsyncChildren(...)`, and in an isolated child otherwise. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/). A `SHARED_THREAD` task runs on a seat thread of a shared thread child when the profile has `shared_thread=SharedThreadChildren(...)`, and in an isolated child otherwise. See [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/).
 
 `cancel_grace_ms` is the time that a `SHARED_ASYNC` task gets to stop after its cancel. After it, the child cancels the task a second time. A thread cannot be cancelled, so only `SHARED_ASYNC` takes it. The value is from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000). A `SHARED_ASYNC` task that sets none gets `DEFAULT_CANCEL_GRACE_MS` (1,000). The stored options of the task hold the value in effect when the task is sent, so a later change of the default does not change a queued task.
@@ -451,6 +468,25 @@ def bad_task():
 @app.task("good_task")
 def good_task() -> TaskResult[dict[str, JsonValue], TaskError]:
     return TaskResult(ok={"status": "done"})
+```
+
+**Don't block the event loop in a `SHARED_ASYNC` task.** A blocking call stops every task of the child for that time.
+
+```python
+import time
+
+# Wrong: stops every task of the child for 2 seconds
+@app.task('wait_wrong', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
+async def wait_wrong() -> TaskResult[None, TaskError]:
+    time.sleep(2)
+    return TaskResult(ok=None)
+
+
+# Correct
+@app.task('wait_right', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
+async def wait_right() -> TaskResult[None, TaskError]:
+    await asyncio.sleep(2)
+    return TaskResult(ok=None)
 ```
 
 **Don't reuse task names.**
