@@ -27,6 +27,7 @@ pre-arms generations kept passing.
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -437,6 +438,7 @@ def _stop_dispatched(task_id: str, wf_status: str, dispatched: datetime) -> None
         reasons[wf_status],
         dispatched,
         orphan_self_heal=False,
+        attempt_began=time.monotonic(),
     )
 
 

@@ -613,10 +613,23 @@ fn a_late_exit_after_the_first_backstop_is_a_timeout_or_a_crash() {
 fn the_backstops_keep_their_times() {
     assert_eq!(SHARED_BACKSTOP_MARGIN, Duration::from_secs(10));
     assert_eq!(SHARED_STUCK_BACKSTOP, Duration::from_millis(10_300));
-    assert_eq!(SHARED_REFUSAL_BACKSTOP, Duration::from_secs(145));
+    assert_eq!(SHARED_REFUSAL_BACKSTOP, Duration::from_secs(130));
     assert_eq!(first_backstop(async_work()), Duration::from_millis(11_500));
     assert_eq!(first_backstop(thread_work()), Duration::from_secs(11));
-    assert_eq!(first_backstop(RunWork::Refusal), Duration::from_secs(145));
+    assert_eq!(first_backstop(RunWork::Refusal), Duration::from_secs(130));
+}
+
+/// Python `TestRefusalBound::test_the_refusal_backstop_comes_after_the_writes_and_a_block_report`:
+/// the refusal backstop is the bound of the writes of a refusal in the
+/// child, each start attempt and the finalizing marker with the end of a
+/// cancelled statement, and the margin.
+#[test]
+fn the_refusal_backstop_comes_after_the_refusal_writes() {
+    let writes = crate::broker::child_writes::START_ATTEMPT_END
+        * crate::broker::child_writes::PRE_START_CONFIRM_ATTEMPTS
+        + crate::broker::child_writes::FINALIZING_MARKER_END;
+    assert_eq!(SHARED_REFUSAL_BACKSTOP, writes + SHARED_BACKSTOP_MARGIN);
+    assert!(SHARED_REFUSAL_BACKSTOP > writes);
 }
 
 #[test]

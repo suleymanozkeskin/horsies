@@ -74,7 +74,7 @@ pub use pool::{
 pub use pooling_check::STATEMENT_POOLING_CHECK_BOUND;
 pub use statement::{
     BoundStatement, ParameterBinder, ParameterType, SqlScript, StatementBound, StatementProtocol,
-    TypedStatement, CANCEL_GRACE,
+    TypedStatement, CANCEL_GRACE, CANCEL_REQUEST_BOUND,
 };
 pub use tls::{
     plan_tls, probe_default_tls_files, AttemptOrder, ClientFile, ClientIdentity, DefaultFile,

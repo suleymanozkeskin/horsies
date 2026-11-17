@@ -24,6 +24,7 @@ use crate::broker::attempt_writes::{
     finish_failed_attempt, finish_unreported_attempt, finish_workflow_success, AttemptFailure,
     AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement, RetryRequest,
 };
+use crate::broker::child_writes::{query_within, WriteDeadline};
 use crate::broker::core_rows::{column, one_row, scalar, StatementLog};
 use crate::broker::error::is_retryable_sqlx_error;
 use crate::broker::listener::notify_task_queue;
@@ -1032,10 +1033,17 @@ static MARK_FINALIZING: TypedStatement = TypedStatement::new(
 /// `broker`, a per-task write ([`CheckoutClass::Reserved`]): its row lock
 /// ends with it. A close of the broker waits for it.
 ///
+/// The marker is a child write within
+/// [`crate::broker::child_writes::FINALIZING_MARKER_BOUND`] (Python
+/// `FINALIZING_MARKER_TIMEOUT_S`): the wait for the connection and the
+/// statement end by it, and a statement past it gets a cancel request, so a
+/// marker that waits on a row lock is not written after the bound.
+///
 /// Errors: [`crate::broker::BrokerError::PoolSettings`] when a closed
 /// handle cannot open its pools again; [`crate::broker::BrokerError::Statement`]
-/// for a failed statement (nothing was written, or the outcome is unknown);
-/// [`crate::broker::BrokerError::RowDecode`] and
+/// for a failed statement (nothing was sent when the bound passed first;
+/// nothing was written, a cancel at the bound included; or the outcome is
+/// unknown); [`crate::broker::BrokerError::RowDecode`] and
 /// [`crate::broker::BrokerError::ClaimContract`] for a row outside the
 /// function's contract.
 pub(crate) async fn mark_task_finalizing(
@@ -1053,14 +1061,7 @@ pub(crate) async fn mark_task_finalizing(
         .value(&claimed_at)
         .finish();
     broker.statement_log().log(statement);
-    let rows = open
-        .main()
-        .query(
-            CheckoutClass::Reserved,
-            &bound,
-            StatementBound::ConnectionTimeouts,
-        )
-        .await?;
+    let rows = query_within(open.main(), &bound, WriteDeadline::finalizing_marker()).await?;
     let [row] = rows.as_slice() else {
         return Err(crate::broker::BrokerError::ClaimContract(format!(
             "horsies_mark_finalizing returned {} rows for task {task_id}; it returns one",

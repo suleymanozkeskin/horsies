@@ -16,6 +16,10 @@ use uuid::Uuid;
 use super::host::{ChildApp, ChildLogSetup, ChildStartHook};
 use super::link::FrameWriter;
 use super::run::{mark_finalizing, start_attempt, HostContext, RunFacts, Started};
+use crate::broker::child_writes::{
+    WriteDeadline, CHILD_STATEMENT_BOUND, FINALIZING_MARKER_BOUND, FINALIZING_MARKER_END,
+    START_ATTEMPT_END,
+};
 use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
 use crate::broker::{OrphanSelfHeal, PostgresBroker, PrestartExpiry};
 use crate::core::config::PostgresConfig;
@@ -35,15 +39,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// each checkout fails at once, and the release after a failed start is
 /// sent three times with waits of 0.5 s and 1 s.
 const UNREACHABLE_BOUND: Duration = Duration::from_secs(30);
-/// Python's bound of one start attempt: the pool wait (30 s), the statements
-/// (10 s) and the end of a cancelled write (10 s)
-/// (`python/horsies/core/worker/shared_lifecycle.py`, `RUNNING_ATTEMPT_TIMEOUT_S`
-/// and `CANCELLED_WRITE_END_S`).
-const START_ATTEMPT_BOUND: Duration = Duration::from_secs(50);
-/// Python's bound of the finalizing marker (10 s) and the end of its
-/// cancelled write (10 s) (`FINALIZING_MARKER_TIMEOUT_S`,
-/// `CANCELLED_WRITE_END_S`).
-const FINALIZING_MARKER_BOUND: Duration = Duration::from_secs(20);
 /// The abandon of a claimed task whose workflow is paused.
 const ABANDON_FUNCTION: &str = "horsies_abandon_owned_node";
 /// The expiry of an owned claim whose deadline passed.
@@ -625,11 +620,11 @@ async fn the_expiry_before_the_start_records_task_expired_and_a_replay_reads_as_
     let broker = PostgresBroker::from_pool(pool.clone());
 
     let applied = broker
-        .expire_claimed_task_before_start(task_id, WORKER_ID)
+        .expire_claimed_task_before_start(task_id, WORKER_ID, WriteDeadline::start_attempt())
         .await
         .expect("the expiry");
     let replayed = broker
-        .expire_claimed_task_before_start(task_id, WORKER_ID)
+        .expire_claimed_task_before_start(task_id, WORKER_ID, WriteDeadline::start_attempt())
         .await
         .expect("the replay of the expiry");
 
@@ -677,7 +672,7 @@ async fn a_refused_or_absent_expiry_is_not_an_expiry() {
         (Uuid::new_v4(), "an absent task"),
     ] {
         let expiry = broker
-            .expire_claimed_task_before_start(task_id, WORKER_ID)
+            .expire_claimed_task_before_start(task_id, WORKER_ID, WriteDeadline::start_attempt())
             .await
             .expect(case);
         assert_eq!(expiry, PrestartExpiry::NotExpired, "{case}");
@@ -693,12 +688,13 @@ async fn a_refused_or_absent_expiry_is_not_an_expiry() {
 }
 
 /// Python `TestSetRunning::test_a_transition_that_hangs_ends_at_its_bound`
-/// and `TestRefusalBound::*`: a start that waits on a row lock ends
-/// `OWNERSHIP_UNCONFIRMED` at the bound of one attempt, and its write does
-/// not commit after the lock ends.
+/// and `TestRefusalBound::*`: a start that waits on a row lock gets its
+/// cancel request at the statement bound and ends `OWNERSHIP_UNCONFIRMED`
+/// within the bound of one attempt (the release after the failed start
+/// waits on the same lock, in the time left of the attempt), and its write
+/// does not commit after the lock ends.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1240"]
 async fn a_start_that_waits_on_a_row_lock_ends_at_its_bound() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
@@ -706,16 +702,19 @@ async fn a_start_that_waits_on_a_row_lock_ends_at_its_bound() {
     let run = facts(task_id, generation);
     let mut lock_holder = pool.begin().await.expect("begin the lock holder");
     lock_the_row(&mut lock_holder, task_id).await;
+    let began = std::time::Instant::now();
 
-    let started = tokio::time::timeout(START_ATTEMPT_BOUND, start_attempt(&context, &run))
+    let started = tokio::time::timeout(START_ATTEMPT_END, start_attempt(&context, &run))
         .await
         .expect("the start ends at its bound while the row lock is held");
+    let elapsed = began.elapsed();
     lock_holder.rollback().await.expect("end the row lock");
 
     assert!(matches!(
         started,
         Started::Stopped(StopReason::OwnershipUnconfirmed)
     ));
+    assert!(elapsed >= CHILD_STATEMENT_BOUND, "{elapsed:?}");
     let (status, _finalizing_at) = row_after_lock_waiters(&pool, task_id).await;
     assert_ne!(status, "RUNNING");
     remove_task(&pool, task_id).await;
@@ -726,7 +725,6 @@ async fn a_start_that_waits_on_a_row_lock_ends_at_its_bound() {
 /// written after the lock ends.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1240"]
 async fn a_marker_that_waits_on_a_row_lock_ends_at_its_bound() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
@@ -738,11 +736,14 @@ async fn a_marker_that_waits_on_a_row_lock_ends_at_its_bound() {
     ));
     let mut lock_holder = pool.begin().await.expect("begin the lock holder");
     lock_the_row(&mut lock_holder, task_id).await;
+    let began = std::time::Instant::now();
 
-    tokio::time::timeout(FINALIZING_MARKER_BOUND, mark_finalizing(&context, &run))
+    tokio::time::timeout(FINALIZING_MARKER_END, mark_finalizing(&context, &run))
         .await
         .expect("the marker ends at its bound while the row lock is held");
+    let elapsed = began.elapsed();
     lock_holder.rollback().await.expect("end the row lock");
+    assert!(elapsed >= FINALIZING_MARKER_BOUND, "{elapsed:?}");
 
     let (status, finalizing_at) = row_after_lock_waiters(&pool, task_id).await;
     assert_eq!(status, "RUNNING");

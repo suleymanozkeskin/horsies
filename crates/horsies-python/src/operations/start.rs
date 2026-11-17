@@ -8,12 +8,21 @@
 //! `start_check`. The outcome is `AttemptStarted`, `AttemptMissed` (the
 //! path after the miss stays with the caller), `DeadlineBeforeStart`, or
 //! `StartFailed`.
+//!
+//! The call begins a start attempt, with the bounds of
+//! `horsies_core::broker::child_writes` (`START_ATTEMPT_BOUND`): the
+//! checkout and the statement end by the deadline of the attempt, and a
+//! statement past its time gets a cancel request. The miss path calls send
+//! the time since the attempt began (`attempt_elapsed_ms`), and end by the
+//! same deadline ([`miss_path_deadline`]).
 
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use horsies_core::core::lifecycle::OwnedClaim;
-use horsies_core::{BrokerError, StartAttempt, StartOutcome, StartWindow, WindowedStart};
+use horsies_core::{
+    BrokerError, StartAttempt, StartOutcome, StartWindow, WindowedStart, WriteDeadline,
+};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -100,6 +109,13 @@ pub fn start_window(deadline_in_ms: Option<u64>) -> StartWindow {
     }
 }
 
+/// The deadline of the miss path of a start attempt that began
+/// `attempt_elapsed_ms` before the call, as the Python caller measured it:
+/// the rest of the attempt's bound. Reads the monotonic clock once.
+pub fn miss_path_deadline(attempt_elapsed_ms: u64) -> WriteDeadline {
+    WriteDeadline::rest_of_start_attempt(Duration::from_millis(attempt_elapsed_ms))
+}
+
 /// The start command of one call. Pure.
 pub fn start_command(
     task_id: Uuid,
@@ -147,12 +163,14 @@ fn start_record(task_id: Uuid, start: Result<WindowedStart, BrokerError>) -> Sta
     }
 }
 
-/// Start one claimed task. Writes, in one statement; a caller that leaves
-/// early does not stop it, and the row may then be RUNNING.
+/// Start one claimed task within `deadline`, the deadline of the start
+/// attempt that the call begins. Writes, in one statement; a caller that
+/// leaves early does not stop it, and the row may then be RUNNING.
 pub async fn start_attempt_operation(
     connection: BrokerConnection,
     command: StartAttempt,
     window: StartWindow,
+    deadline: WriteDeadline,
 ) -> StartRecord {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
@@ -160,7 +178,7 @@ pub async fn start_attempt_operation(
     };
     start_record(
         command.task_id,
-        broker.start_attempt(&command, window).await,
+        broker.start_attempt(&command, window, deadline).await,
     )
 }
 
@@ -211,6 +229,22 @@ mod tests {
         };
         assert!(failed.message.contains("0 rows"), "{}", failed.message);
         assert!(!failed.retryable);
+    }
+
+    #[test]
+    fn the_miss_path_ends_with_the_attempt_that_it_belongs_to() {
+        let left = miss_path_deadline(25_000)
+            .left()
+            .expect("15 s of the attempt are left");
+        assert!(left <= Duration::from_secs(15), "{left:?}");
+        assert_eq!(
+            miss_path_deadline(
+                u64::try_from(horsies_core::START_ATTEMPT_BOUND.as_millis()).expect("40 000 ms")
+            )
+            .left(),
+            None
+        );
+        assert_eq!(miss_path_deadline(u64::MAX).left(), None);
     }
 
     #[test]

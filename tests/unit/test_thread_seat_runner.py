@@ -307,22 +307,6 @@ class TestTheMarkerOfAThreadSeat:
             statements=StatementsBound(thread_runner.REFUSAL_STATEMENTS_TIMEOUT_S),
         )
 
-    def test_the_running_update_of_a_refusal_goes_through_the_core(
-        self,
-        steps: _Steps,
-    ) -> None:
-        """The RUNNING update of a refusal runs through the core handle of the
-        child, with the bounds of its pool: the wait for a connection and the
-        connection timeouts. The child sends no statement bound of its own;
-        the named statement bound of the start is the core's (#1240)."""
-        frame = dataclasses.replace(_frame('thread_double'), work=REFUSAL)
-
-        _ = thread_runner.run_thread_seat_task(frame, REFUSAL, lambda: StartAllowed())
-
-        assert steps.confirm.call_args is not None
-        assert 'statements' not in steps.confirm.call_args.kwargs
-        assert steps.confirm.call_args.kwargs['orphan_self_heal'] is True
-
 
 class _SlowHandle:
     """A core handle of the child whose start gets its pooled connection

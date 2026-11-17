@@ -344,6 +344,7 @@ async fn coupled_node_failure_rolls_back_history_and_live_delete() {
             claimed_at: generation(),
         },
         OrphanSelfHeal::Off,
+        crate::broker::child_writes::WriteDeadline::start_attempt(),
     )
     .await
     .expect("stop before start");

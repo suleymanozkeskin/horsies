@@ -49,6 +49,7 @@
 use uuid::Uuid;
 
 use crate::broker::attempt_writes::{self, FinishFailedAttempt, FinishWorkflowSuccess};
+use crate::broker::child_writes::WriteDeadline;
 use crate::broker::claims::{
     claim_pass, count_queue_starts, release_claims, start_attempt_within, ClaimPass,
     ClaimPassRequest, QueueStartCheck, QueueStarts, ReleaseClaims, ReleaseOutcome, StartAttempt,
@@ -365,11 +366,19 @@ impl PostgresBroker {
     /// task, the node, or nothing on a miss. When `window` has closed by the
     /// time the pool gives the connection, no statement runs and the row
     /// stays CLAIMED ([`WindowedStart::WindowClosed`]). The path after a miss
-    /// (the expiry, the workflow stop) is the caller's.
+    /// (the expiry, the workflow stop) is the caller's, within the rest of
+    /// the same start attempt.
+    ///
+    /// The start is a child write within `deadline`, the deadline of its
+    /// start attempt ([`WriteDeadline::start_attempt`],
+    /// [`crate::broker::child_writes`]): the checkout waits at most 30 s, and
+    /// the statement gets a cancel request after 10 s or at the deadline.
+    /// A start cancelled at its bound does not commit later.
     ///
     /// Errors: [`BrokerError::PoolSettings`] and the client family check's
     /// errors (nothing sent); [`BrokerError::Statement`] (nothing sent for a
-    /// failed checkout; nothing written, or `OutcomeUnknown`: the row may be
+    /// failed checkout or a deadline that passed first; nothing written,
+    /// a cancel at the bound included; or `OutcomeUnknown`: the row may be
     /// RUNNING, and the same start sent again misses with `NotHeld`);
     /// [`BrokerError::RowDecode`] and [`BrokerError::ClaimContract`] for a
     /// row outside the function's contract.
@@ -377,10 +386,11 @@ impl PostgresBroker {
         &self,
         command: &StartAttempt,
         window: StartWindow,
+        deadline: WriteDeadline,
     ) -> Result<WindowedStart, BrokerError> {
         self.ensure_client_family_for_write().await?;
         let (open, _write) = self.core_pools_for_write()?;
-        start_attempt_within(open.main(), self.statement_log(), command, window).await
+        start_attempt_within(open.main(), self.statement_log(), command, window, deadline).await
     }
 
     /// Write the finalizing marker of a run whose body ended in a worker's
@@ -391,12 +401,15 @@ impl PostgresBroker {
     /// this claim generation) it stamps `finalizing_at` and
     /// `finalizing_by_worker_id` ([`FinalizingMark::Marked`]); otherwise it
     /// writes nothing ([`FinalizingMark::NotHeld`]). The wait for the
-    /// connection and the statement have the pool's bounds.
+    /// connection and the statement end within
+    /// [`crate::broker::child_writes::FINALIZING_MARKER_BOUND`]; a marker
+    /// cancelled at the bound is not written later.
     ///
     /// Errors: [`BrokerError::PoolSettings`] and the client family check's
-    /// errors (nothing sent); [`BrokerError::Statement`] (nothing written, or
-    /// `OutcomeUnknown`: the marker may be written, and the same call sent
-    /// again writes it again); [`BrokerError::RowDecode`] and
+    /// errors (nothing sent); [`BrokerError::Statement`] (nothing sent when
+    /// the bound passed first; nothing written, a cancel at the bound
+    /// included; or `OutcomeUnknown`: the marker may be written, and the same
+    /// call sent again writes it again); [`BrokerError::RowDecode`] and
     /// [`BrokerError::ClaimContract`] for a row outside the function's
     /// contract.
     pub async fn mark_finalizing(
@@ -508,25 +521,36 @@ impl PostgresBroker {
     /// Expire one CLAIMED task of `worker_id` whose deadline passed before its
     /// start (the child miss path of Python, `_expire_claimed_task_before_start`):
     /// `horsies_expire_owned_claim`, one statement in autocommit on the main
-    /// core pool, checked out as reserved work. The row moves to history as
+    /// core pool, checked out as reserved work, within `deadline`, the rest
+    /// of the start attempt whose miss path it is
+    /// ([`WriteDeadline::rest_of_start_attempt`]). The row moves to history as
     /// EXPIRED (`EXPIRE_CLAIMED`) with Python's stored error
     /// ([`TaskRowEnd::Ended`]); a row whose deadline has not passed, or that
     /// this worker does not hold, is refused with no write.
     ///
     /// Errors: [`BrokerError::PoolSettings`] and the client family check's
     /// errors (nothing sent); [`BrokerError::Serialization`] (nothing sent);
-    /// [`BrokerError::Statement`] (nothing written, or `OutcomeUnknown`: the
-    /// same call sent again reports a committed expiry as `AlreadyApplied`);
-    /// [`BrokerError::TerminalizationContract`] for a row outside the wire
-    /// contract.
+    /// [`BrokerError::Statement`] (nothing sent when `deadline` passed
+    /// first; nothing written, a cancel at the bound included; or
+    /// `OutcomeUnknown`: the same call sent again reports a committed expiry
+    /// as `AlreadyApplied`); [`BrokerError::TerminalizationContract`] for a
+    /// row outside the wire contract.
     pub async fn expire_owned_claim(
         &self,
         task_id: Uuid,
         worker_id: &str,
+        deadline: WriteDeadline,
     ) -> Result<TaskRowEnd, BrokerError> {
         self.ensure_client_family_for_write().await?;
         let (open, _write) = self.core_pools_for_write()?;
-        expire_owned_claim(open.main(), self.statement_log(), task_id, worker_id).await
+        expire_owned_claim(
+            open.main(),
+            self.statement_log(),
+            task_id,
+            worker_id,
+            deadline,
+        )
+        .await
     }
 
     /// Cancel one CLAIMED workflow task that `fence` holds and that no

@@ -12,9 +12,10 @@ use super::host::ChildApp;
 use super::link::FrameWriter;
 use super::panic::{catch_body_panic, panic_error};
 use super::role::as_blocking_body;
+use crate::broker::child_writes::{WriteDeadline, PRE_START_CONFIRM_ATTEMPTS};
 use crate::broker::claims::{
-    release_claims, start_attempt as start_statement, ReleaseBatch, ReleaseClaims, ReleaseOutcome,
-    ReleasePlacement, StartAttempt, StartMiss, StartOutcome,
+    release_claims_within, start_attempt as start_statement, ReleaseBatch, ReleaseClaims,
+    ReleaseOutcome, ReleasePlacement, StartAttempt, StartMiss, StartOutcome,
 };
 use crate::broker::workflow_stop_before_start::stop_before_start;
 use crate::broker::{BrokerError, OrphanSelfHeal, PostgresBroker, PrestartExpiry, StopBeforeStart};
@@ -57,10 +58,6 @@ pub(super) enum Started {
     Stopped(StopReason),
 }
 
-/// Starts of one task while its workflow was resumed between a missed start
-/// and the abandon of its row (Python `_PRE_START_CONFIRM_ATTEMPTS`).
-const PRE_START_CONFIRM_ATTEMPTS: u32 = 2;
-
 /// Sends of the release of a claim after a database error of the start, the
 /// first included.
 const START_RELEASE_SENDS: u32 = 3;
@@ -82,8 +79,15 @@ enum MissedStart {
 /// [`PRE_START_CONFIRM_ATTEMPTS`] times; then the claim is left to its lease
 /// (`OWNERSHIP_UNCONFIRMED`).
 ///
-/// A database error of the start or of its miss path releases the claim at
-/// once with the fenced release, and the run ends `OWNERSHIP_UNCONFIRMED`.
+/// Each attempt has its deadline ([`WriteDeadline::start_attempt`], Python
+/// `RUNNING_ATTEMPT_TIMEOUT_S`): the start, its miss path and the release
+/// below end by it, and a statement past it gets a cancel request, so the
+/// start does not commit after the bound. One attempt takes at most
+/// [`crate::broker::child_writes::START_ATTEMPT_END`].
+///
+/// A database error of the start or of its miss path, a cancel at the bound
+/// included, releases the claim with the fenced release in the time left of
+/// the attempt, and the run ends `OWNERSHIP_UNCONFIRMED`.
 pub(super) async fn start_attempt(context: &HostContext, facts: &RunFacts) -> Started {
     let command = StartAttempt::of_process(
         facts.task_id,
@@ -95,15 +99,24 @@ pub(super) async fn start_attempt(context: &HostContext, facts: &RunFacts) -> St
         context.app.hostname.clone(),
     );
     for _ in 0..PRE_START_CONFIRM_ATTEMPTS {
+        let deadline = WriteDeadline::start_attempt();
         let outcome = match context.broker.core_pools_for_write() {
             Ok((open, _write)) => {
-                start_statement(open.main(), context.broker.statement_log(), &command).await
+                start_statement(
+                    open.main(),
+                    context.broker.statement_log(),
+                    &command,
+                    deadline,
+                )
+                .await
             }
             Err(error) => Err(error),
         };
         let missed = match outcome {
             Ok(StartOutcome::Started { .. }) => return Started::Running,
-            Ok(StartOutcome::Missed(miss)) => after_missed_start(context, facts, miss).await,
+            Ok(StartOutcome::Missed(miss)) => {
+                after_missed_start(context, facts, miss, deadline).await
+            }
             Err(error) => Err(error),
         };
         match missed {
@@ -115,7 +128,7 @@ pub(super) async fn start_attempt(context: &HostContext, facts: &RunFacts) -> St
                     "Failed to transition task {} to RUNNING: {error}",
                     facts.task_id,
                 );
-                release_after_start_error(context, facts).await;
+                release_after_start_error(context, facts, deadline).await;
                 return Started::Stopped(StopReason::OwnershipUnconfirmed);
             }
         }
@@ -138,17 +151,22 @@ pub(super) async fn start_attempt(context: &HostContext, facts: &RunFacts) -> St
 /// | `NotHeld`, `LeaseExpired` | none | `ClaimLost` |
 /// | `WorkflowPaused`, `WorkflowCancelled`, `NodeNotLinked` | `horsies_workflow_task_stop_before_start` with the orphan self-heal of the run, one statement that judges the task again: the abandon and node reset, the cancel and node skip, or the orphan cancel | `WorkflowStopped`; a new start after a resume; `TaskExpired`, `OrphanCancelled`, `NodeNotLinked` or `ClaimLost` by what it found |
 ///
-/// Errors: the [`BrokerError`] of a write of the path.
+/// Each write of the path ends by `deadline`, the deadline of the start
+/// attempt.
+///
+/// Errors: the [`BrokerError`] of a write of the path; a write whose
+/// deadline passed first sends nothing.
 async fn after_missed_start(
     context: &HostContext,
     facts: &RunFacts,
     miss: StartMiss,
+    deadline: WriteDeadline,
 ) -> Result<MissedStart, BrokerError> {
     match miss {
         StartMiss::DeadlinePassed => {
             match context
                 .broker
-                .expire_claimed_task_before_start(facts.task_id, &facts.worker_id)
+                .expire_claimed_task_before_start(facts.task_id, &facts.worker_id, deadline)
                 .await?
             {
                 PrestartExpiry::Expired => {
@@ -164,7 +182,7 @@ async fn after_missed_start(
         }
         StartMiss::NotHeld | StartMiss::LeaseExpired => Ok(claim_lost(facts)),
         StartMiss::WorkflowPaused | StartMiss::WorkflowCancelled | StartMiss::NodeNotLinked => {
-            stop_for_workflow(context, facts, miss).await
+            stop_for_workflow(context, facts, miss, deadline).await
         }
     }
 }
@@ -184,14 +202,15 @@ fn claim_lost(facts: &RunFacts) -> MissedStart {
 /// Stop a workflow task whose start missed for a workflow reason (its
 /// workflow stopped, or no node links it): one
 /// `horsies_workflow_task_stop_before_start` statement on the main core
-/// pool, as the start, which judges the task again under its own locks. With
-/// the orphan self-heal of the run on, a task that no node links live is
-/// cancelled in the same statement (`OrphanCancelled`); with it off the task
-/// ends `NodeNotLinked` and its row stays CLAIMED.
+/// pool, as the start, within `deadline`, which judges the task again under
+/// its own locks. With the orphan self-heal of the run on, a task that no
+/// node links live is cancelled in the same statement (`OrphanCancelled`);
+/// with it off the task ends `NodeNotLinked` and its row stays CLAIMED.
 async fn stop_for_workflow(
     context: &HostContext,
     facts: &RunFacts,
     miss: StartMiss,
+    deadline: WriteDeadline,
 ) -> Result<MissedStart, BrokerError> {
     tracing::info!(
         task_id = %facts.task_id,
@@ -210,6 +229,7 @@ async fn stop_for_workflow(
         facts.task_id,
         &fence,
         facts.orphan_self_heal,
+        deadline,
     )
     .await?;
     match stop {
@@ -249,9 +269,18 @@ fn node_not_linked(facts: &RunFacts) -> MissedStart {
 /// with the fenced release in its class (owner rule "Database error at the
 /// start"). A row the start set RUNNING before its reply was lost answers
 /// `NotHeld` and is left to stale recovery. An error that may clear sends the
-/// release again, at most [`START_RELEASE_SENDS`] sends in all; a release
-/// that fails leaves the row to its claim lease.
-async fn release_after_start_error(context: &HostContext, facts: &RunFacts) {
+/// release again, at most [`START_RELEASE_SENDS`] sends in all.
+///
+/// Every send ends by `deadline`, the deadline of the start attempt, and
+/// no send or wait starts past it. A release that fails, or that has no
+/// time left, leaves the claim to the worker: its outcome writer releases
+/// the claim of an `OWNERSHIP_UNCONFIRMED` stop, and the claim lease
+/// returns the row otherwise.
+async fn release_after_start_error(
+    context: &HostContext,
+    facts: &RunFacts,
+    deadline: WriteDeadline,
+) {
     let batch = match ReleaseBatch::new(&[(facts.task_id, facts.claimed_at)]) {
         Ok(batch) => batch,
         Err(refused) => unreachable!("one claim is a valid release batch: {refused}"),
@@ -264,7 +293,13 @@ async fn release_after_start_error(context: &HostContext, facts: &RunFacts) {
     for send in 1..=START_RELEASE_SENDS {
         let sent = match context.broker.core_pools_for_write() {
             Ok((open, _write)) => {
-                release_claims(open.main(), context.broker.statement_log(), &command).await
+                release_claims_within(
+                    open.main(),
+                    context.broker.statement_log(),
+                    &command,
+                    deadline,
+                )
+                .await
             }
             Err(error) => Err(error),
         };
@@ -279,20 +314,34 @@ async fn release_after_start_error(context: &HostContext, facts: &RunFacts) {
                 return;
             }
             Err(error) if error.is_retryable() && send < START_RELEASE_SENDS => {
-                tracing::warn!(
-                    task_id = %facts.task_id,
-                    send,
-                    error = %error,
-                    "the release after a failed start failed; sending it again",
-                );
-                tokio::time::sleep(std::time::Duration::from_secs_f64(phase_retry_delay(send)))
-                    .await;
+                let delay = std::time::Duration::from_secs_f64(phase_retry_delay(send));
+                match deadline.left() {
+                    Some(left) if left > delay => {
+                        tracing::warn!(
+                            task_id = %facts.task_id,
+                            send,
+                            error = %error,
+                            "the release after a failed start failed; sending it again",
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+                    Some(_) | None => {
+                        tracing::error!(
+                            task_id = %facts.task_id,
+                            send,
+                            error = %error,
+                            "the release after a failed start failed and the start attempt has \
+                             no time left; the worker releases the claim",
+                        );
+                        return;
+                    }
+                }
             }
             Err(error) => {
                 tracing::error!(
                     task_id = %facts.task_id,
                     error = %error,
-                    "the release after a failed start failed; the claim lease returns the row",
+                    "the release after a failed start failed; the worker releases the claim",
                 );
                 return;
             }
@@ -300,8 +349,12 @@ async fn release_after_start_error(context: &HostContext, facts: &RunFacts) {
     }
 }
 
-/// The finalizing marker of a run that set its row RUNNING. A failed write
-/// is logged: the parent's write is fenced on its own.
+/// The finalizing marker of a run that set its row RUNNING, within
+/// [`crate::broker::child_writes::FINALIZING_MARKER_BOUND`] (Python
+/// `FINALIZING_MARKER_TIMEOUT_S`): past it the marker is cancelled and not
+/// written later, and the call ends within
+/// [`crate::broker::child_writes::FINALIZING_MARKER_END`]. A failed write is
+/// logged: the parent's write is fenced on its own.
 pub(super) async fn mark_finalizing(context: &HostContext, facts: &RunFacts) {
     match mark_task_finalizing(
         &context.broker,
