@@ -31,6 +31,7 @@ use crate::worker::executor::protocol::{
     ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
 };
 use crate::worker::executor::slots::scripted::idle_child_of_any_kind;
+use crate::worker::executor::slots::{ChildLayout, PoolBoard};
 
 /// The longest wait for an event a test expects.
 const WAIT: Duration = Duration::from_secs(30);
@@ -84,6 +85,16 @@ fn no_claim_wakes() -> ClaimWakes {
     ClaimWakes {
         subscriptions: Vec::new(),
     }
+}
+
+/// A board of one isolated slot whose child never reports ready: its
+/// child-ready wake never fires.
+fn quiet_board() -> PoolBoard {
+    PoolBoard::new(ChildLayout {
+        isolated: 1,
+        shared_async: 0,
+        shared_thread: 0,
+    })
 }
 
 /// A broker on a port where no server listens: each statement fails after
@@ -215,6 +226,7 @@ async fn a_stop_ends_the_claim_wait() {
         wait_for_claim_wake(
             &cancel,
             &Notify::new(),
+            &quiet_board(),
             &claim_wakes,
             Duration::from_secs(3_600),
         ),
@@ -232,6 +244,7 @@ async fn the_claim_wait_ends_at_the_poll_interval() {
     let wake = wait_for_claim_wake(
         &CancellationToken::new(),
         &Notify::new(),
+        &quiet_board(),
         &claim_wakes,
         Duration::from_millis(50),
     )
