@@ -27,7 +27,6 @@ from horsies.core.brokers.result_types import (
 )
 from horsies.core.history.identity.uuid7 import mint_task_id, uuid7_birth_at
 from horsies.core.types.result import is_err, is_ok
-from horsies.core.utils.fingerprint import enqueue_fingerprint
 from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -36,7 +35,6 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 @dataclass(frozen=True, slots=True)
 class Send:
     task_id: str
-    enqueue_sha: str
     kwargs_json: str | None
     sent_at: datetime
 
@@ -45,17 +43,6 @@ def make_send(kwargs_json: str | None = '{"x":1}') -> Send:
     sent_at = datetime.now(timezone.utc)
     return Send(
         task_id=mint_task_id(),
-        enqueue_sha=enqueue_fingerprint(
-            task_name='cutover.enqueue',
-            queue_name='default',
-            priority=100,
-            args_json=None,
-            kwargs_json=kwargs_json,
-            sent_at=sent_at,
-            good_until=None,
-            enqueue_delay_seconds=None,
-            task_options=None,
-        ),
         kwargs_json=kwargs_json,
         sent_at=sent_at,
     )
@@ -66,8 +53,7 @@ async def enqueue(broker: PostgresBroker, send: Send) -> BrokerResult[str]:
         'cutover.enqueue',
         task_id=send.task_id,
         send_kind=SendKind.FIRST,
-        enqueue_sha=send.enqueue_sha,
-        kwargs_json=send.kwargs_json,
+        input_json=send.kwargs_json,
         sent_at=send.sent_at,
     )
 
@@ -143,17 +129,6 @@ class TestConvertedStatement:
             task_id=send.task_id,
             kwargs_json='{"x":2}',
             sent_at=send.sent_at,
-            enqueue_sha=enqueue_fingerprint(
-                task_name='cutover.enqueue',
-                queue_name='default',
-                priority=100,
-                args_json=None,
-                kwargs_json='{"x":2}',
-                sent_at=send.sent_at,
-                good_until=None,
-                enqueue_delay_seconds=None,
-                task_options=None,
-            ),
         )
         conflicted = await enqueue(broker, tampered)
         assert is_err(conflicted)
@@ -167,8 +142,7 @@ async def enqueue_keyed(
         'cutover.enqueue',
         task_id=send.task_id,
         send_kind=SendKind.FIRST,
-        enqueue_sha=send.enqueue_sha,
-        kwargs_json=send.kwargs_json,
+        input_json=send.kwargs_json,
         sent_at=send.sent_at,
         idempotency_key=key,
     )
@@ -212,7 +186,6 @@ class TestKeyedEnqueue:
         assert is_ok(committed)
         resend = Send(
             task_id=mint_task_id(),
-            enqueue_sha=first.enqueue_sha,
             kwargs_json=first.kwargs_json,
             sent_at=first.sent_at,
         )
@@ -261,7 +234,6 @@ class TestKeyedEnqueue:
 
         fresh = Send(
             task_id=mint_task_id(),
-            enqueue_sha=existing.enqueue_sha,
             kwargs_json=existing.kwargs_json,
             sent_at=existing.sent_at,
         )
@@ -319,7 +291,6 @@ class TestKeyedEnqueue:
         key = f'fingerprint-key-{uuid4()}'
         tampered = Send(
             task_id=existing.task_id,
-            enqueue_sha=existing.enqueue_sha,
             kwargs_json='{"x":2}',
             sent_at=existing.sent_at,
         )

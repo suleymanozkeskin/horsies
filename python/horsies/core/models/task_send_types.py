@@ -35,16 +35,16 @@ class TaskSendPayload:
     task_name: str
     queue_name: str
     priority: int
-    args_json: str | None
-    kwargs_json: str | None
+    # The task input as JSON text: the keyword arguments as one object, or
+    # None for a send with none (stored as ``{}``).
+    input_json: str | None
     sent_at: datetime
     good_until: datetime | None
     enqueue_delay_seconds: int | None
     task_options: str | None
-    enqueue_sha: str  # SHA-256 hex digest
-    # The caller's idempotency key, distinct from task identity and from
-    # enqueue_sha. Riding the payload keeps the uncertain-commit resend
-    # keyed: a replayed send claims with the same key it first sent.
+    # The caller's idempotency key, distinct from task identity. Riding the
+    # payload keeps the uncertain-commit resend keyed: a replayed send
+    # claims with the same key it first sent.
     idempotency_key: str | None = None
     # The retention class snapshotted at enqueue. ``None`` means forever,
     # so the field defaults to the immutable 30-day class rather than to

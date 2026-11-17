@@ -5,7 +5,9 @@ transaction: the task advisory lock (``LOCK_TASK_SQL``), the row lock read
 of ``is_workflow_task``, then ``horsies_cancel_locked_task`` with the
 permitted source statuses, and committed only an applied cancel. A row
 absent from the live table ended the transaction with read-only history
-reads, which write nothing and are not repeated here.
+reads, which write nothing and are not repeated here. The baseline no longer
+defines ``horsies_cancel_locked_task``: ``interim_terminal_writes.py``
+installs its record on the reference database.
 """
 
 from __future__ import annotations

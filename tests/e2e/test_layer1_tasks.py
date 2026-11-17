@@ -618,7 +618,6 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
         task_name='e2e_low',
         queue_name='low',
         task_id=uuid4(),
-        enqueue_sha='test-sha',
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
         priority=100,
@@ -630,7 +629,6 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
         task_name='e2e_high',
         queue_name='high',
         task_id=uuid4(),
-        enqueue_sha='test-sha',
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
         priority=1,
@@ -686,10 +684,9 @@ async def test_task_expires_before_claim(broker: PostgresBroker) -> None:
     task_id = (await asyncio.to_thread(
         broker.enqueue,
         task_name='e2e_simple',
-        kwargs_json='{"x": 5}',
+        input_json='{"x": 5}',
         queue_name='default',
         task_id=uuid4(),
-        enqueue_sha='test-sha',
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
         good_until=expiry,
@@ -726,10 +723,9 @@ async def test_task_completes_before_expiry(
     task_id = (await asyncio.to_thread(
         broker.enqueue,
         task_name='e2e_simple',
-        kwargs_json='{"x": 5}',
+        input_json='{"x": 5}',
         queue_name='default',
         task_id=uuid4(),
-        enqueue_sha='test-sha',
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
         good_until=expiry,
@@ -757,10 +753,9 @@ async def test_good_until_already_past(broker: PostgresBroker) -> None:
     task_id = (await asyncio.to_thread(
         broker.enqueue,
         task_name='e2e_simple',
-        kwargs_json='{"x": 5}',
+        input_json='{"x": 5}',
         queue_name='default',
         task_id=uuid4(),
-        enqueue_sha='test-sha',
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
         good_until=past,
@@ -802,7 +797,6 @@ async def test_retry_blocked_by_good_until_expiry(
         task_name='e2e_retry_exhausted',
         queue_name='default',
         task_id=uuid4(),
-        enqueue_sha='test-sha',
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
         good_until=good_until,
@@ -852,7 +846,6 @@ async def test_retry_succeeds_within_good_until(
             task_name='e2e_retry_success',
             queue_name='default',
             task_id=uuid4(),
-            enqueue_sha='test-sha',
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             good_until=good_until,
@@ -893,7 +886,6 @@ def test_worker_resolution_error(broker: PostgresBroker, app: Horsies) -> None:
         queue_name='default',
         task_id=uuid4(),
         send_kind=SendKind.FIRST,
-        enqueue_sha='test-sha',
         sent_at=datetime.now(timezone.utc),
     ).unwrap()
 
@@ -938,11 +930,10 @@ def test_wait_timeout(broker: PostgresBroker, app: Horsies) -> None:
     # Submit task but DON'T start worker
     task_id = broker.enqueue(
         task_name='e2e_simple',
-        kwargs_json='{"x": 5}',
+        input_json='{"x": 5}',
         queue_name='default',
         task_id=uuid4(),
         send_kind=SendKind.FIRST,
-        enqueue_sha='test-sha',
         sent_at=datetime.now(timezone.utc),
     ).unwrap()
 
@@ -1079,10 +1070,9 @@ async def test_task_cancelled(broker: PostgresBroker, app: Horsies) -> None:
     task_id = (await asyncio.to_thread(
         broker.enqueue,
         task_name='e2e_simple',
-        kwargs_json='{"x": 5}',
+        input_json='{"x": 5}',
         queue_name='default',
         task_id=uuid4(),
-        enqueue_sha='test-sha',
         send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
     )).unwrap()

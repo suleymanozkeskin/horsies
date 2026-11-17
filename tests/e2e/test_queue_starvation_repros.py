@@ -149,10 +149,9 @@ async def test_lower_priority_queue_backfills_when_high_queue_is_capped(
                 task_name='e2e_custom_slow',
                 queue_name='high',
                 task_id=uuid4(),
-                enqueue_sha=f'high-{idx}',
                 send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
-                kwargs_json=json.dumps({'duration_ms': 3000}),
+                input_json=json.dumps({'duration_ms': 3000}),
             )).unwrap()
             for idx in range(10)
         ]
@@ -167,10 +166,9 @@ async def test_lower_priority_queue_backfills_when_high_queue_is_capped(
                 task_name='e2e_custom_slow',
                 queue_name='normal',
                 task_id=uuid4(),
-                enqueue_sha=f'normal-{idx}',
                 send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
-                kwargs_json=json.dumps({'duration_ms': 1000}),
+                input_json=json.dumps({'duration_ms': 1000}),
             )).unwrap()
             for idx in range(2)
         ]

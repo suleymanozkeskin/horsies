@@ -40,19 +40,19 @@ pytestmark = [pytest.mark.unit]
 
 
 FUNCTION_OF_WRITER: Final[dict[str, str]] = {
-    'T01': 'horsies_cancel_locked_task',
+    'T01': 'horsies_cancel_task',
     'T02': 'horsies_abandon_owned_nodes',
     'T03': 'horsies_cancel_owned_nodes',
-    'T04': 'horsies_fail_locked_task',
-    'T05': 'horsies_fail_locked_task',
-    'T06': 'horsies_complete_locked_task',
+    'T04': 'horsies_finish_failed_attempt',
+    'T05': 'horsies_finish_failed_attempt',
+    'T06': 'horsies_finish_workflow_success',
     'T07': 'horsies_complete_task_fused',
     'T08': 'horsies_cancel_owned_orphan',
     'T09': 'horsies_abandon_nodes_of_paused_workflows',
     'T10': 'horsies_abandon_owned_node',
     'T11': 'horsies_cancel_owned_node',
     'T12': 'horsies_expire_owned_claim',
-    'T13': 'horsies_fail_stale_task',
+    'T13': 'horsies_finish_stale_attempt',
     'T14': 'horsies_expire_pending_tasks',
     'T15': 'horsies_cancel_orphaned_tasks',
     'T16': 'horsies_cancel_nodes_of_cancelled_workflow',
@@ -77,7 +77,7 @@ _GENERATION_FENCE_RE: Final = re.compile(r'claimed_at = p_claimed_at\b')
 _PAIRWISE_GENERATION_FENCE: Final = '= input.expected_claimed_at'
 _DEADLINE_GUARD_RE: Final = re.compile(r'good_until\s*<=')
 _FINALIZING_STALE_GUARD_RE: Final = re.compile(r'finalizing_at\s*<')
-_HEARTBEAT_STALE_GUARD: Final = 'secs => p_stale_after_ms::double precision'
+_HEARTBEAT_STALE_GUARD: Final = 'secs => p_stale_after_ms / 1000.0'
 _WORKFLOW_STATUS_GUARD_RE: Final = re.compile(r'\bw\.status\s*(?:=|IN\b)')
 _RUNNABLE_LINK: Final = "wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')"
 _LINK_ABSENT_RE: Final = re.compile(
@@ -185,7 +185,7 @@ class TestDeclaredGuardsMatchTheStatements:
     def test_fence_markers(self, row: TerminalWriter) -> None:
         sql = _predicate(row.writer_id)
         match row.fence:
-            case Fence.NONE | Fence.CALLER_ROW_LOCK:
+            case Fence.NONE:
                 assert _WORKER_FENCE_RE.search(sql) is None, row.writer_id
             case Fence.WORKER:
                 assert _WORKER_FENCE_RE.search(sql) is not None, row.writer_id
@@ -195,6 +195,7 @@ class TestDeclaredGuardsMatchTheStatements:
             case Fence.PRIOR_LOCKED_SELECT:
                 assert _WORKER_FENCE_RE.search(sql) is not None, row.writer_id
                 assert 'FOR UPDATE' in sql, row.writer_id
+                assert _GENERATION_FENCE_RE.search(sql) is not None, row.writer_id
             case Fence.WORKER_AND_GENERATION:
                 assert _WORKER_FENCE_RE.search(sql) is not None, row.writer_id
                 assert _GENERATION_FENCE_RE.search(sql) is not None, row.writer_id
@@ -248,8 +249,9 @@ class TestDeclaredGuardsMatchTheStatements:
 
     @pytest.mark.parametrize('row', MATRIX, ids=_ids(list(MATRIX)))
     def test_statement_level_notify(self, row: TerminalWriter) -> None:
-        """Only the fused path sends the capacity wake; every move sends its
-        status events, from the move or from the batch itself."""
+        """Only the fused path and the failed attempt send the capacity wake;
+        every move sends its status events, from the move or from the batch
+        itself."""
         sql = _normalised(row.writer_id)
         expected = row.emits_notify is EmitsNotify.FUSED_CAPACITY_WAKE
         assert (_CAPACITY_WAKE in sql) is expected, row.writer_id

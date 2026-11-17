@@ -2606,13 +2606,11 @@ def _make_enqueue_failed_error(
         task_name=task_name,
         queue_name='default',
         priority=100,
-        args_json='[1]',
-        kwargs_json=None,
+        input_json='{"x":1}',
         sent_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
         good_until=None,
         enqueue_delay_seconds=enqueue_delay_seconds,
         task_options=None,
-        enqueue_sha='abc123',
     )
     return TaskSendEnqueueFailed(
         task_id=task_id,
@@ -2628,7 +2626,7 @@ class TestRetrySend:
     """Tests for retry_send / retry_send_async / retry_schedule."""
 
     def test_retry_send_reuses_task_id_and_payload(self) -> None:
-        """retry_send passes the same task_id, enqueue_sha, and args_json to broker."""
+        """retry_send passes the same task_id and input to the broker."""
         def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
@@ -2644,9 +2642,7 @@ class TestRetrySend:
         assert is_ok(result)
         call_kwargs = broker.enqueue.call_args.kwargs
         assert call_kwargs['task_id'] == 'retry-id-1'
-        assert call_kwargs['enqueue_sha'] == 'abc123'
-        assert call_kwargs['args_json'] == '[1]'
-        assert call_kwargs['kwargs_json'] is None
+        assert call_kwargs['input_json'] == '{"x":1}'
         assert call_kwargs['send_kind'] is SendKind.REPEAT
 
     @pytest.mark.asyncio
@@ -2667,7 +2663,7 @@ class TestRetrySend:
         assert is_ok(result)
         call_kwargs = broker.enqueue_async.call_args.kwargs
         assert call_kwargs['task_id'] == 'retry-id-1'
-        assert call_kwargs['enqueue_sha'] == 'abc123'
+        assert call_kwargs['input_json'] == '{"x":1}'
         assert call_kwargs['send_kind'] is SendKind.REPEAT
 
     def test_retry_send_cross_task_returns_validation_error(self) -> None:

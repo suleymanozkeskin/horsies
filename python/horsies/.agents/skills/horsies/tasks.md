@@ -503,10 +503,10 @@ Validation failure text never contains the refused value: each failure is `<loc>
 @dataclass(slots=True, frozen=True)
 class TaskSendPayload:
     task_name: str, queue_name: str, priority: int
-    args_json: str | None, kwargs_json: str | None
+    input_json: str | None  # the keyword arguments as one JSON object; None for none
     sent_at: datetime, good_until: datetime | None
     enqueue_delay_seconds: int | None, task_options: str | None
-    enqueue_sha: str  # SHA-256 hex digest of the payload; the broker compares the command fingerprint and sent_at
+    idempotency_key: str | None, retention_class_key: RetentionClassKey | None
 ```
 
 Pre-serialized at send time. Never construct manually — created by the library internally.

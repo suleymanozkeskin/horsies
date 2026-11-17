@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from horsies.core.history.terminalization.move import (
-    FAILED_ATTEMPT_OUTCOME_TYPE,
     FINISH_FAILED_ATTEMPT_FUNCTION,
     LOCK_RUNNING_TASK_FUNCTION,
 )
@@ -54,20 +53,21 @@ from horsies.core.lifecycle.classify import (
     WorkerLevelFailure,
 )
 from horsies.core.worker.shared_stop import RetryPlacement
-from tests.baseline_sql import baseline_function, baseline_sql, baseline_type
+from tests.baseline_sql import (
+    baseline_function,
+    baseline_returned_columns,
+    baseline_sql,
+    baseline_type,
+)
 
 pytestmark = [pytest.mark.unit]
 
 OUTCOME_TYPE_DDL = baseline_type('horsies_terminalization_outcome')
-FAILED_ATTEMPT_OUTCOME_TYPE_DDL = baseline_type(FAILED_ATTEMPT_OUTCOME_TYPE)
 
 
-def failed_attempt_fragments() -> list[str]:
-    """The baseline type and function of the failed attempt."""
-    return [
-        FAILED_ATTEMPT_OUTCOME_TYPE_DDL,
-        baseline_function(FINISH_FAILED_ATTEMPT_FUNCTION),
-    ]
+def failed_attempt_function() -> str:
+    """The baseline function of the failed attempt."""
+    return baseline_function(FINISH_FAILED_ATTEMPT_FUNCTION)
 
 TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e01'
 NOW = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
@@ -440,44 +440,46 @@ _COLUMN = re.compile(r'^\s+(\w+) (\w[\w ]*?),?$', re.M)
 
 class TestProgram:
     def test_the_first_ten_columns_are_the_shared_outcome_row(self) -> None:
-        shared = _COLUMN.findall(OUTCOME_TYPE_DDL)
-        failed = _COLUMN.findall(FAILED_ATTEMPT_OUTCOME_TYPE_DDL)
+        """By name: the decoders read the columns by name."""
+        shared = [column for column, _ in _COLUMN.findall(OUTCOME_TYPE_DDL)]
+        failed = [
+            column
+            for column, _ in baseline_returned_columns(FINISH_FAILED_ATTEMPT_FUNCTION)
+        ]
 
         assert len(shared) == 10
         assert failed[:10] == shared
 
     def test_the_arguments_are_checked_before_any_lock(self) -> None:
-        body = failed_attempt_fragments()[1]
+        body = failed_attempt_function()
 
         assert body.index('invalid_parameter_value') < body.index(
             'pg_advisory_xact_lock',
         )
 
     def test_the_advisory_lock_comes_before_the_row_lock(self) -> None:
-        body = failed_attempt_fragments()[1]
+        body = failed_attempt_function()
 
         assert body.index('pg_advisory_xact_lock') < body.index('FROM horsies_tasks')
         assert body.index('FROM horsies_tasks') < body.index('FOR UPDATE')
 
     def test_the_attempt_row_comes_before_the_move(self) -> None:
-        body = failed_attempt_fragments()[1]
+        body = failed_attempt_function()
 
         assert body.index('INSERT INTO horsies_task_attempts') < body.index(
             'horsies_move_task_to_history',
         )
 
     def test_the_wake_is_sent_only_after_the_move_of_a_plain_task(self) -> None:
-        body = failed_attempt_fragments()[1]
+        body = failed_attempt_function()
 
         move = body.index('horsies_move_task_to_history(')
         assert body.index('pg_notify') > move
         assert 'IF NOT v_ctx.is_workflow_task AND p_wake THEN' in body[move:]
 
-    def test_installation_has_the_type_before_the_function(self) -> None:
+    def test_installation_has_the_function_and_not_the_retired_read(self) -> None:
         sql = baseline_sql()
-        type_at = sql.index(f'CREATE TYPE {FAILED_ATTEMPT_OUTCOME_TYPE}')
-        function_at = sql.index(f'CREATE FUNCTION {FINISH_FAILED_ATTEMPT_FUNCTION}')
 
-        assert type_at < function_at
+        assert f'CREATE FUNCTION {FINISH_FAILED_ATTEMPT_FUNCTION}(' in sql
         assert f'CREATE FUNCTION {LOCK_RUNNING_TASK_FUNCTION}' not in sql
 

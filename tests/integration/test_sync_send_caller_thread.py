@@ -10,7 +10,6 @@ still runs, and the threads of the sync engine's checkouts.
 
 from __future__ import annotations
 
-import hashlib
 import threading
 import time
 import uuid
@@ -247,14 +246,11 @@ def test_a_taken_task_id_is_answered_on_the_calling_thread(
     the loop runner."""
     task_id = mint_task_id()
     sent_at = datetime.now(timezone.utc)
-    sha = hashlib.sha256(b'first payload').hexdigest()
-    other_sha = hashlib.sha256(b'other payload').hexdigest()
     first = echo_app.broker.enqueue(
         TASK_NAME,
         task_id=task_id,
         send_kind=SendKind.FIRST,
-        enqueue_sha=sha,
-        kwargs_json='{"value": 4}',
+        input_json='{"value": 4}',
         sent_at=sent_at,
     )
     assert _task_id_of(first) == task_id
@@ -264,16 +260,14 @@ def test_a_taken_task_id_is_answered_on_the_calling_thread(
         TASK_NAME,
         task_id=task_id,
         send_kind=SendKind.FIRST,
-        enqueue_sha=sha,
-        kwargs_json='{"value": 4}',
+        input_json='{"value": 4}',
         sent_at=sent_at,
     )
     other = echo_app.broker.enqueue(
         TASK_NAME,
         task_id=task_id,
         send_kind=SendKind.FIRST,
-        enqueue_sha=other_sha,
-        kwargs_json='{"value": 5}',
+        input_json='{"value": 5}',
         sent_at=sent_at,
     )
 

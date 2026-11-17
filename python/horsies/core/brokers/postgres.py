@@ -283,7 +283,7 @@ def _send_command(
     task_name: str,
     queue_name: str,
     priority: int,
-    kwargs_json: str | None,
+    input_json: str | None,
     good_until: datetime | None,
     enqueue_delay_seconds: int | None,
     task_options: str | None,
@@ -292,11 +292,11 @@ def _send_command(
 ) -> Result[SendCommand, BrokerInvalidInput | BrokerInvalidTaskOptions]:
     """Check the input and the options of one send and build its command. Pure.
 
-    Refusals, in this order: the kwargs text (``INVALID_INPUT``), the
+    Refusals, in this order: the input text (``INVALID_INPUT``), the
     options text (``INVALID_TASK_OPTIONS``), a value the fingerprint
     refuses (``INVALID_INPUT``).
     """
-    input_r = _parse_enqueue_input(task_name, kwargs_json)
+    input_r = _parse_enqueue_input(task_name, input_json)
     if is_err(input_r):
         return input_r
     stored_input = input_r.ok_value
@@ -495,56 +495,31 @@ def _parse_enqueue_json(
     return loaded
 
 
-def _check_enqueue_args(
-    task_name: str, args_json: str | None,
-) -> Result[None, BrokerInvalidInput]:
-    """Refuse args text that no worker can run.
-
-    The worker takes only a null or an empty array, so anything else is
-    refused here and not at run time. The text names no input value.
-    """
-    if args_json is None:
-        return Ok(None)
-    parsed = _parse_enqueue_json('args', task_name, args_json)
-    if is_err(parsed):
-        return parsed
-    match parsed.ok_value:
-        case None | []:
-            return Ok(None)
-        case other:
-            return Err(BrokerInvalidInput(
-                message=(
-                    f'args JSON for {task_name} must be null or an empty array, '
-                    f'got {type(other).__name__}; positional args are not supported'
-                ),
-                exception=NoCause(),
-            ))
-
-
 EMPTY_TASK_INPUT: Final = '{}'
 """The ``input`` of a send with no keyword arguments."""
 
 
 def _parse_enqueue_input(
-    task_name: str, kwargs_json: str | None,
+    task_name: str, input_json: str | None,
 ) -> Result[str, BrokerInvalidInput]:
-    """Check the kwargs text and give the ``input`` text that the row stores.
+    """Check the input text and give the ``input`` text that the row stores.
 
-    An object is stored exactly as sent, because the command fingerprint
-    covers its bytes. Absent kwargs and JSON null store ``EMPTY_TASK_INPUT``:
-    a Python send stores its keyword arguments as one JSON object. Anything
-    else is refused; the refusal text names the JSON type, not the value.
+    A Python send's input is its keyword arguments as one JSON object. An
+    object is stored exactly as sent, because the command fingerprint
+    covers its bytes. No input and JSON null store ``EMPTY_TASK_INPUT``.
+    Anything else is refused; the refusal text names the JSON type, not the
+    value.
     """
-    if kwargs_json is None:
+    if input_json is None:
         return Ok(EMPTY_TASK_INPUT)
-    parsed = _parse_enqueue_json('kwargs', task_name, kwargs_json)
+    parsed = _parse_enqueue_json('kwargs', task_name, input_json)
     if is_err(parsed):
         return parsed
     match parsed.ok_value:
         case None:
             return Ok(EMPTY_TASK_INPUT)
         case dict():
-            return Ok(kwargs_json)
+            return Ok(input_json)
         case other:
             return Err(BrokerInvalidInput(
                 message=(
@@ -1872,8 +1847,7 @@ class PostgresBroker:
         task_name: str,
         queue_name: str,
         priority: int,
-        args_json: str | None,
-        kwargs_json: str | None,
+        input_json: str | None,
         sent_at: datetime,
         enqueued_at: Optional[datetime],
         enqueue_delay_seconds: Optional[int],
@@ -1900,14 +1874,11 @@ class PostgresBroker:
         )
         if is_err(timing_r):
             return timing_r
-        args_r = _check_enqueue_args(task_name, args_json)
-        if is_err(args_r):
-            return args_r
         command_r = _send_command(
             task_name=task_name,
             queue_name=queue_name,
             priority=priority,
-            kwargs_json=kwargs_json,
+            input_json=input_json,
             good_until=good_until,
             enqueue_delay_seconds=enqueue_delay_seconds,
             task_options=task_options,
@@ -1964,7 +1935,7 @@ class PostgresBroker:
             task_name=task_name,
             queue_name=queue_name,
             priority=priority,
-            kwargs_json=kwargs_json,
+            input_json=kwargs_json,
             good_until=None,
             enqueue_delay_seconds=None,
             task_options=task_options,
@@ -1978,10 +1949,8 @@ class PostgresBroker:
         queue_name: str = 'default',
         *,
         task_id: UUID,
-        enqueue_sha: str,
         send_kind: SendKind,
-        args_json: str | None = None,
-        kwargs_json: str | None = None,
+        input_json: str | None = None,
         priority: int = 100,
         sent_at: datetime,
         enqueued_at: Optional[datetime] = None,
@@ -1995,14 +1964,13 @@ class PostgresBroker:
         """Write one PENDING task row, or answer the send that wrote it.
 
         One ``horsies_enqueue_task`` statement in autocommit. The row stores
-        ``kwargs_json`` as its ``input`` (``{}`` when there are none), the
+        ``input_json`` as its ``input`` (``{}`` for none or JSON null), the
         version-1 command fingerprint of the send and ``sent_at``, the call
         time of the send. A send that repeats a task id is the same send only
         when the stored fingerprint and ``sent_at`` are equal; a resend
         passes the ``sent_at`` of the first send. ``send_kind`` is
         ``SendKind.REPEAT`` for a send retry: a task that finished then
-        answers with its id and does not run again. ``enqueue_sha`` is not
-        stored and not compared.
+        answers with its id and does not run again.
         """
         match await self.select_resources():
             case Err(loop_limit):
@@ -2024,8 +1992,7 @@ class PostgresBroker:
             task_name=task_name,
             queue_name=queue_name,
             priority=priority,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
+            input_json=input_json,
             sent_at=sent_at,
             enqueued_at=enqueued_at,
             enqueue_delay_seconds=enqueue_delay_seconds,
@@ -3499,8 +3466,7 @@ class PostgresBroker:
         *,
         task_id: UUID,
         send_kind: SendKind,
-        args_json: str | None,
-        kwargs_json: str | None,
+        input_json: str | None,
         priority: int,
         sent_at: datetime,
         enqueued_at: Optional[datetime],
@@ -3524,8 +3490,7 @@ class PostgresBroker:
             task_name=task_name,
             queue_name=queue_name,
             priority=priority,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
+            input_json=input_json,
             sent_at=sent_at,
             enqueued_at=enqueued_at,
             enqueue_delay_seconds=enqueue_delay_seconds,
@@ -3554,10 +3519,8 @@ class PostgresBroker:
         queue_name: str = 'default',
         *,
         task_id: UUID,
-        enqueue_sha: str,
         send_kind: SendKind,
-        args_json: str | None = None,
-        kwargs_json: str | None = None,
+        input_json: str | None = None,
         priority: int = 100,
         sent_at: datetime,
         enqueued_at: Optional[datetime] = None,
@@ -3586,8 +3549,7 @@ class PostgresBroker:
                     queue_name,
                     task_id=task_id,
                     send_kind=send_kind,
-                    args_json=args_json,
-                    kwargs_json=kwargs_json,
+                    input_json=input_json,
                     priority=priority,
                     sent_at=sent_at,
                     enqueued_at=enqueued_at,
@@ -3606,10 +3568,8 @@ class PostgresBroker:
                 task_name,
                 queue_name,
                 task_id=task_id,
-                enqueue_sha=enqueue_sha,
                 send_kind=send_kind,
-                args_json=args_json,
-                kwargs_json=kwargs_json,
+                input_json=input_json,
                 priority=priority,
                 sent_at=sent_at,
                 enqueued_at=enqueued_at,

@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Final
 
 import psycopg
 import pytest
@@ -26,6 +26,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.sql.elements import TextClause
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
@@ -36,24 +37,18 @@ from horsies.core.lifecycle.commands import (
     AbandonNodesOfPausedWorkflows,
     AbandonOwnedNode,
     AbandonOwnedNodes,
-    CancelLockedTask,
     CancelNodesOfCancelledWorkflow,
     CancelOrphanedTasks,
     CancelOwnedNode,
     CancelOwnedNodes,
     CancelOwnedOrphan,
-    CompleteLockedTask,
     CompleteTaskFused,
     ExpireOwnedClaim,
     ExpirePendingTasks,
-    FailLockedTask,
-    FailStaleTask,
 )
 from horsies.core.lifecycle.fences import (
-    CallerHoldsRowLock,
     OwnedClaim,
     OwnedClaimBatch,
-    PriorLockedRead,
     WorkerOwned,
 )
 from horsies.core.lifecycle.operations import TerminalizationKind
@@ -68,6 +63,7 @@ from horsies.core.lifecycle.outcomes import (
     ObservedWorkflowLink,
     SourceStateConflict,
     TaskAbsent,
+    TerminalizationOutcome,
     decode_outcome_row,
 )
 from horsies.core.lifecycle.persistence import (
@@ -278,12 +274,84 @@ async def _force_terminal(
     await session.commit()
 
 
-def _locked(task_id: str) -> CompleteLockedTask:
-    return CompleteLockedTask(
-        task_id=task_id,
-        fence=PriorLockedRead(worker_id=WORKER),
-        result_json='{"ok": 1}',
+_OUTCOME_COLUMNS: Final = (
+    'task_id, ordinality, outcome, terminal_at, terminalization_kind, '
+    'observed_status, observed_worker_id, observed_claimed_at, guard_kind, '
+    'observed_guard'
+)
+"""The ten outcome columns that the writers of 0004_lifecycle_functions.sql
+return first; ``decode_outcome_row`` takes exactly these."""
+
+_WORKFLOW_SUCCESS_SQL: Final = text(f"""
+    SELECT {_OUTCOME_COLUMNS} FROM horsies_finish_workflow_success(
+        CAST(:task_id AS uuid), :worker_id, CAST(:claimed_at AS TIMESTAMPTZ),
+        :result
     )
+""")
+
+_FAILED_ATTEMPT_SQL: Final = text(f"""
+    SELECT {_OUTCOME_COLUMNS} FROM horsies_finish_failed_attempt(
+        CAST(:task_id AS uuid), :worker_id, CAST(:claimed_at AS TIMESTAMPTZ),
+        'NONE', NULL, NULL, NULL, :result, :error_code, :failed_reason,
+        'FAILED', NULL, :failed_reason, 'REFUSE', TRUE
+    )
+""")
+
+_STALE_ATTEMPT_SQL: Final = text(f"""
+    SELECT {_OUTCOME_COLUMNS} FROM horsies_finish_stale_attempt(
+        CAST(:task_id AS uuid), CAST(:stale_after_ms AS INTEGER),
+        CAST(:finalizing_stale_after_ms AS INTEGER), 'NONE', NULL, NULL,
+        :result, :error_code, :failed_reason, :failed_reason, :failed_reason
+    )
+""")
+
+_CANCEL_TASK_SQL: Final = text(f"""
+    SELECT {_OUTCOME_COLUMNS} FROM horsies_cancel_task(
+        CAST(:task_id AS uuid), CAST(:include_running AS BOOLEAN)
+    )
+""")
+
+
+async def _outcome_of(
+    session: AsyncSession,
+    statement: TextClause,
+    parameters: dict[str, object],
+) -> TerminalizationOutcome:
+    """Run one writer on the session's connection and decode its one row."""
+    rows = (
+        await (await session.connection()).execute(statement, parameters)
+    ).mappings().all()
+    assert len(rows) == 1, rows
+    return decode_outcome_row({str(key): value for key, value in rows[0].items()})
+
+
+async def _locked(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    claimed_at: datetime = GENERATION,
+) -> TerminalizationOutcome:
+    """The writer of COMPLETE_LOCKED: phase 1 of a workflow task's success
+    (``horsies_finish_workflow_success``) under ``WORKER`` at ``claimed_at``.
+    A miss is classified before the function asks whether the task is a
+    workflow task."""
+    return await _outcome_of(
+        session,
+        _WORKFLOW_SUCCESS_SQL,
+        {
+            'task_id': task_id,
+            'worker_id': WORKER,
+            'claimed_at': claimed_at,
+            'result': '{"ok": 1}',
+        },
+    )
+
+
+async def _workflow_task(session: AsyncSession) -> str:
+    """A RUNNING workflow task of ``WORKER`` with its RUNNING node."""
+    task_id = await _seed(session, is_workflow_task=True)
+    _ = await _link_workflow_task(session, task_id, node_status='RUNNING')
+    return task_id
 
 
 def _fused(task_id: str, claimed_at: datetime = GENERATION) -> CompleteTaskFused:
@@ -334,8 +402,8 @@ class TestAppliedTransitions:
         self,
         session: AsyncSession,
     ) -> None:
-        task_id = await _seed(session)
-        outcome = await apply_async(await session.connection(), _locked(task_id))
+        task_id = await _workflow_task(session)
+        outcome = await _locked(session, task_id)
         await session.commit()
 
         assert isinstance(outcome, Applied)
@@ -347,8 +415,8 @@ class TestAppliedTransitions:
         session: AsyncSession,
     ) -> None:
         """Not decoration: the pre-transition image is what the guard saw."""
-        task_id = await _seed(session)
-        outcome = await apply_async(await session.connection(), _locked(task_id))
+        task_id = await _workflow_task(session)
+        outcome = await _locked(session, task_id)
         await session.commit()
 
         assert isinstance(outcome, Applied)
@@ -379,8 +447,8 @@ class TestAppliedTransitions:
         self,
         session: AsyncSession,
     ) -> None:
-        task_id = await _seed(session)
-        await apply_async(await session.connection(), _locked(task_id))
+        task_id = await _workflow_task(session)
+        await _locked(session, task_id)
         await session.commit()
 
         row = (
@@ -397,29 +465,9 @@ class TestAppliedTransitions:
         assert row.terminalization_kind == 'COMPLETE_LOCKED'
         assert row.result == '{"ok": 1}'
 
-    @pytest.mark.parametrize(
-        ('command', 'expected_attempts'),
-        [
-            pytest.param(
-                _locked,
-                [(1, 'FAILED', 'attempt one crashed')],
-                id='locked',
-            ),
-            pytest.param(
-                _fused,
-                [
-                    (1, 'FAILED', 'attempt one crashed'),
-                    (2, 'COMPLETED', None),
-                ],
-                id='fused',
-            ),
-        ],
-    )
-    async def test_completion_clears_an_earlier_attempts_failure_summary(
+    async def test_completion_clears_an_earlier_attempts_failure_summary_fused(
         self,
         session: AsyncSession,
-        command: Callable[[str], CompleteLockedTask | CompleteTaskFused],
-        expected_attempts: list[tuple[int, str, str | None]],
     ) -> None:
         """Attempt one failed and requeued; attempt two completes.
 
@@ -427,34 +475,63 @@ class TestAppliedTransitions:
         final disposition — the failed_reason the automatic requeue left on
         the row is cleared beside COMPLETED — and attempt one's history row
         keeps its reason untouched. The fused operation records the
-        completion as attempt two after attempt one's failure; the locked
-        operation writes no attempt row of its own, so history stays exactly
-        the failed attempt.
+        completion as attempt two after attempt one's failure.
         """
         task_id = await _seed(session)
         await _requeued_after_failed_attempt(
             session, task_id, failed_reason='attempt one crashed',
         )
 
-        outcome = await apply_async(await session.connection(), command(task_id))
+        outcome = await apply_async(await session.connection(), _fused(task_id))
         await session.commit()
         assert isinstance(outcome, Applied)
 
-        row = (
-            await session.execute(
-                text("""
-                    SELECT status, error_code, failed_reason
-                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
-                """),
-                {'id': task_id},
-            )
-        ).one()
-        assert row.status == 'COMPLETED'
-        assert row.error_code is None
-        assert row.failed_reason is None
+        await _assert_completed_after_attempt_one(session, task_id)
 
-        attempts = await read_attempt_history(session, task_id)
-        assert attempts == expected_attempts
+    async def test_completion_clears_an_earlier_attempts_failure_summary_locked(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """The same invariant for the writer of COMPLETE_LOCKED, phase 1 of a
+        workflow task's success: it records the completion as attempt two
+        too."""
+        task_id = await _workflow_task(session)
+        await _requeued_after_failed_attempt(
+            session, task_id, failed_reason='attempt one crashed',
+        )
+
+        outcome = await _locked(session, task_id)
+        await session.commit()
+        assert isinstance(outcome, Applied)
+        assert outcome.kind is TerminalizationKind.COMPLETE_LOCKED
+
+        await _assert_completed_after_attempt_one(session, task_id)
+
+
+async def _assert_completed_after_attempt_one(
+    session: AsyncSession,
+    task_id: str,
+) -> None:
+    """The terminal row is COMPLETED with no failure summary; attempt one
+    keeps its reason and the completion is attempt two."""
+    row = (
+        await session.execute(
+            text("""
+                SELECT status, error_code, failed_reason
+                FROM itest_task_rows WHERE id = CAST(:id AS uuid)
+            """),
+            {'id': task_id},
+        )
+    ).one()
+    assert row.status == 'COMPLETED'
+    assert row.error_code is None
+    assert row.failed_reason is None
+
+    attempts = await read_attempt_history(session, task_id)
+    assert attempts == [
+        (1, 'FAILED', 'attempt one crashed'),
+        (2, 'COMPLETED', None),
+    ]
 
 
 class TestAlreadyApplied:
@@ -462,11 +539,11 @@ class TestAlreadyApplied:
         self,
         session: AsyncSession,
     ) -> None:
-        task_id = await _seed(session)
-        await apply_async(await session.connection(), _locked(task_id))
+        task_id = await _workflow_task(session)
+        await _locked(session, task_id)
         await session.commit()
 
-        replay = await apply_async(await session.connection(), _locked(task_id))
+        replay = await _locked(session, task_id)
         await session.commit()
         assert isinstance(replay, AlreadyApplied)
         assert replay.kind is TerminalizationKind.COMPLETE_LOCKED
@@ -480,7 +557,7 @@ class TestAlreadyApplied:
         await apply_async(await session.connection(), _fused(task_id))
         await session.commit()
 
-        replay = await apply_async(await session.connection(), _locked(task_id))
+        replay = await _locked(session, task_id)
         await session.commit()
         assert isinstance(replay, AlreadyApplied)
         assert replay.kind is TerminalizationKind.COMPLETE_FUSED
@@ -499,7 +576,7 @@ class TestAlreadyApplied:
             session, task_id, status='CANCELLED', kind='CANCEL_ADMIN',
         )
 
-        outcome = await apply_async(await session.connection(), _locked(task_id))
+        outcome = await _locked(session, task_id)
         await session.commit()
         assert isinstance(outcome, SourceStateConflict)
         evidence = outcome.evidence
@@ -515,7 +592,7 @@ class TestRefusals:
         session: AsyncSession,
     ) -> None:
         task_id = await _seed(session, worker_id='someone-else')
-        outcome = await apply_async(await session.connection(), _locked(task_id))
+        outcome = await _locked(session, task_id)
         await session.commit()
 
         assert isinstance(outcome, LostClaim)
@@ -563,7 +640,7 @@ class TestRefusals:
         )
         await session.commit()
 
-        outcome = await apply_async(await session.connection(), _locked(task_id))
+        outcome = await _locked(session, task_id)
         await session.commit()
         assert isinstance(outcome, LostClaim)
         assert outcome.observed.status is TaskStatus.PENDING
@@ -574,7 +651,7 @@ class TestRefusals:
     ) -> None:
         """Owned by this worker at this generation, but not yet running."""
         task_id = await _seed(session, status='CLAIMED')
-        outcome = await apply_async(await session.connection(), _locked(task_id))
+        outcome = await _locked(session, task_id)
         await session.commit()
 
         assert isinstance(outcome, SourceStateConflict)
@@ -588,7 +665,7 @@ class TestRefusals:
         session: AsyncSession,
     ) -> None:
         """Absence is an outcome, not an empty result."""
-        outcome = await apply_async(await session.connection(), _locked(str(uuid.uuid4())))
+        outcome = await _locked(session, str(uuid.uuid4()))
         await session.commit()
         assert isinstance(outcome, TaskAbsent)
 
@@ -599,24 +676,48 @@ STALE_AFTER_SECONDS = STALE_AFTER_MS // 1000
 FINALIZING_STALE_AFTER_SECONDS = FINALIZING_STALE_AFTER_MS // 1000
 
 
-def _fail_locked(task_id: str, failed_reason: str | None = None) -> FailLockedTask:
-    return FailLockedTask(
-        task_id=task_id,
-        fence=PriorLockedRead(worker_id=WORKER),
-        result_json='{"err": 1}',
-        error_code='TASK_EXCEPTION',
-        failed_reason=failed_reason,
+async def _fail_locked(
+    session: AsyncSession,
+    task_id: str,
+    failed_reason: str | None = None,
+) -> TerminalizationOutcome:
+    """The writer of FAIL_RUNNING: a failed attempt with no retry
+    (``horsies_finish_failed_attempt``) under ``WORKER`` at ``GENERATION``.
+    The attempt row records ``failed_reason`` too."""
+    return await _outcome_of(
+        session,
+        _FAILED_ATTEMPT_SQL,
+        {
+            'task_id': task_id,
+            'worker_id': WORKER,
+            'claimed_at': GENERATION,
+            'result': '{"err": 1}',
+            'error_code': 'TASK_EXCEPTION',
+            'failed_reason': failed_reason,
+        },
     )
 
 
-def _fail_stale(task_id: str) -> FailStaleTask:
-    return FailStaleTask(
-        task_id=task_id,
-        stale_after_ms=STALE_AFTER_MS,
-        finalizing_stale_after_ms=FINALIZING_STALE_AFTER_MS,
-        result_json='{"err": 2}',
-        error_code='WORKER_CRASHED',
-        failed_reason='Worker crashed',
+async def _fail_stale(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    stale_after_ms: int = STALE_AFTER_MS,
+    finalizing_stale_after_ms: int = FINALIZING_STALE_AFTER_MS,
+) -> TerminalizationOutcome:
+    """The writer of FAIL_STALE: the stale RUNNING recovery with no retry
+    (``horsies_finish_stale_attempt``)."""
+    return await _outcome_of(
+        session,
+        _STALE_ATTEMPT_SQL,
+        {
+            'task_id': task_id,
+            'stale_after_ms': stale_after_ms,
+            'finalizing_stale_after_ms': finalizing_stale_after_ms,
+            'result': '{"err": 2}',
+            'error_code': 'WORKER_CRASHED',
+            'failed_reason': 'Worker crashed',
+        },
     )
 
 
@@ -673,14 +774,14 @@ async def _heartbeat(
 
 
 class TestFailLocked:
+    """The writer of FAIL_RUNNING, ``horsies_finish_failed_attempt``."""
+
     async def test_applies_and_stamps_its_kind(
         self,
         session: AsyncSession,
     ) -> None:
         task_id = await _seed(session)
-        outcome = await apply_async(
-            await session.connection(), _fail_locked(task_id, 'worker failure'),
-        )
+        outcome = await _fail_locked(session, task_id, 'worker failure')
         await session.commit()
 
         assert isinstance(outcome, Applied)
@@ -716,9 +817,7 @@ class TestFailLocked:
             session, task_id, failed_reason='attempt one crashed',
         )
 
-        outcome = await apply_async(
-            await session.connection(), _fail_locked(task_id, None),
-        )
+        outcome = await _fail_locked(session, task_id, None)
         await session.commit()
         assert isinstance(outcome, Applied)
 
@@ -733,6 +832,7 @@ class TestFailLocked:
         attempts = await read_attempt_history(session, task_id)
         assert attempts == [
             (1, 'FAILED', 'attempt one crashed'),
+            (2, 'FAILED', None),
         ]
 
     async def test_a_supplied_reason_overwrites(
@@ -741,9 +841,7 @@ class TestFailLocked:
     ) -> None:
         task_id = await _seed(session)
 
-        await apply_async(
-            await session.connection(), _fail_locked(task_id, 'attempt two crashed'),
-        )
+        await _fail_locked(session, task_id, 'attempt two crashed')
         await session.commit()
 
         reason = (
@@ -759,10 +857,10 @@ class TestFailLocked:
         session: AsyncSession,
     ) -> None:
         task_id = await _seed(session)
-        await apply_async(await session.connection(), _fail_locked(task_id))
+        await _fail_locked(session, task_id)
         await session.commit()
 
-        replay = await apply_async(await session.connection(), _fail_locked(task_id))
+        replay = await _fail_locked(session, task_id)
         await session.commit()
         assert isinstance(replay, AlreadyApplied)
         assert replay.kind is TerminalizationKind.FAIL_RUNNING
@@ -779,7 +877,7 @@ class TestFailLocked:
         task_id = await _seed(session)
         await _force_terminal(session, task_id, status='FAILED', kind='FAIL_STALE')
 
-        outcome = await apply_async(await session.connection(), _fail_locked(task_id))
+        outcome = await _fail_locked(session, task_id)
         await session.commit()
         assert isinstance(outcome, SourceStateConflict)
         assert isinstance(outcome.evidence, ObservedForeignTerminalization)
@@ -790,7 +888,7 @@ class TestFailLocked:
         session: AsyncSession,
     ) -> None:
         task_id = await _seed(session, worker_id='someone-else')
-        outcome = await apply_async(await session.connection(), _fail_locked(task_id))
+        outcome = await _fail_locked(session, task_id)
         await session.commit()
 
         assert isinstance(outcome, LostClaim)
@@ -801,7 +899,7 @@ class TestFailLocked:
         session: AsyncSession,
     ) -> None:
         task_id = await _seed(session, status='CLAIMED')
-        outcome = await apply_async(await session.connection(), _fail_locked(task_id))
+        outcome = await _fail_locked(session, task_id)
         await session.commit()
 
         assert isinstance(outcome, SourceStateConflict)
@@ -814,14 +912,14 @@ class TestFailLocked:
         self,
         session: AsyncSession,
     ) -> None:
-        outcome = await apply_async(
-            await session.connection(), _fail_locked(str(uuid.uuid4())),
-        )
+        outcome = await _fail_locked(session, str(uuid.uuid4()))
         await session.commit()
         assert isinstance(outcome, TaskAbsent)
 
 
 class TestFailStale:
+    """The writer of FAIL_STALE, ``horsies_finish_stale_attempt``."""
+
     async def test_a_silent_runner_is_failed(
         self,
         session: AsyncSession,
@@ -830,7 +928,7 @@ class TestFailStale:
         task_id = await _seed(session)
         await _age(session, task_id, started_seconds_ago=STALE_AFTER_SECONDS * 2)
 
-        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        outcome = await _fail_stale(session, task_id)
         await session.commit()
 
         assert isinstance(outcome, Applied)
@@ -845,7 +943,7 @@ class TestFailStale:
         await _age(session, task_id, started_seconds_ago=STALE_AFTER_SECONDS * 4)
         await _heartbeat(session, task_id, seconds_ago=STALE_AFTER_SECONDS * 2)
 
-        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        outcome = await _fail_stale(session, task_id)
         await session.commit()
         assert isinstance(outcome, Applied)
 
@@ -858,7 +956,7 @@ class TestFailStale:
         await _age(session, task_id, started_seconds_ago=STALE_AFTER_SECONDS * 2)
         await _heartbeat(session, task_id, seconds_ago=1)
 
-        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        outcome = await _fail_stale(session, task_id)
         await session.commit()
 
         assert isinstance(outcome, SourceStateConflict)
@@ -903,16 +1001,11 @@ class TestFailStale:
             {'id': task_id},
         )
 
-        outcome = await apply_async(
-            await session.connection(),
-            FailStaleTask(
-                task_id=task_id,
-                stale_after_ms=1_500,
-                finalizing_stale_after_ms=2_750,
-                result_json='{"err": 2}',
-                error_code='WORKER_CRASHED',
-                failed_reason='Worker crashed',
-            ),
+        outcome = await _fail_stale(
+            session,
+            task_id,
+            stale_after_ms=1_500,
+            finalizing_stale_after_ms=2_750,
         )
         await session.commit()
 
@@ -935,7 +1028,7 @@ class TestFailStale:
         await _age(session, task_id, started_seconds_ago=STALE_AFTER_SECONDS * 2)
         await _heartbeat(session, task_id, seconds_ago=1, role='claimer')
 
-        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        outcome = await _fail_stale(session, task_id)
         await session.commit()
         assert isinstance(outcome, Applied)
 
@@ -951,7 +1044,7 @@ class TestFailStale:
         task_id = await _seed(session)
         await _age(session, task_id, started_seconds_ago=None)
 
-        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        outcome = await _fail_stale(session, task_id)
         await session.commit()
 
         assert isinstance(outcome, SourceStateConflict)
@@ -980,7 +1073,7 @@ class TestFailStale:
             finalizing_seconds_ago=1,
         )
 
-        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        outcome = await _fail_stale(session, task_id)
         await session.commit()
         assert isinstance(outcome, SourceStateConflict)
         evidence = outcome.evidence
@@ -1007,7 +1100,7 @@ class TestFailStale:
             finalizing_seconds_ago=FINALIZING_STALE_AFTER_SECONDS * 2,
         )
 
-        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        outcome = await _fail_stale(session, task_id)
         await session.commit()
         assert isinstance(outcome, Applied)
 
@@ -1017,10 +1110,10 @@ class TestFailStale:
     ) -> None:
         task_id = await _seed(session)
         await _age(session, task_id, started_seconds_ago=STALE_AFTER_SECONDS * 2)
-        await apply_async(await session.connection(), _fail_stale(task_id))
+        await _fail_stale(session, task_id)
         await session.commit()
 
-        replay = await apply_async(await session.connection(), _fail_stale(task_id))
+        replay = await _fail_stale(session, task_id)
         await session.commit()
         assert isinstance(replay, AlreadyApplied)
         assert replay.kind is TerminalizationKind.FAIL_STALE
@@ -1032,7 +1125,7 @@ class TestFailStale:
         task_id = await _seed(session)
         await _force_terminal(session, task_id, status='FAILED', kind='FAIL_RUNNING')
 
-        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        outcome = await _fail_stale(session, task_id)
         await session.commit()
         assert isinstance(outcome, SourceStateConflict)
         assert isinstance(outcome.evidence, ObservedForeignTerminalization)
@@ -1044,7 +1137,7 @@ class TestFailStale:
     ) -> None:
         """Not RUNNING, so no staleness was judged and no evidence is claimed."""
         task_id = await _seed(session, status='CLAIMED')
-        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        outcome = await _fail_stale(session, task_id)
         await session.commit()
 
         assert isinstance(outcome, SourceStateConflict)
@@ -1057,9 +1150,7 @@ class TestFailStale:
         self,
         session: AsyncSession,
     ) -> None:
-        outcome = await apply_async(
-            await session.connection(), _fail_stale(str(uuid.uuid4())),
-        )
+        outcome = await _fail_stale(session, str(uuid.uuid4()))
         await session.commit()
         assert isinstance(outcome, TaskAbsent)
 
@@ -1546,16 +1637,18 @@ class TestExpirePendingTasks:
         assert {o.task_id for o in outcomes} == {free}
 
 
-def _cancel_locked(
+async def _cancel_task(
+    session: AsyncSession,
     task_id: str,
-    *permitted: TaskStatus,
-) -> CancelLockedTask:
-    return CancelLockedTask(
-        task_id=task_id,
-        fence=CallerHoldsRowLock(),
-        permitted_source_statuses=(
-            permitted or (TaskStatus.PENDING, TaskStatus.CLAIMED)
-        ),
+    *,
+    include_running: bool = False,
+) -> TerminalizationOutcome:
+    """The writer of CANCEL_ADMIN: the administrative cancel of a plain task
+    (``horsies_cancel_task``); a RUNNING row only with ``include_running``."""
+    return await _outcome_of(
+        session,
+        _CANCEL_TASK_SQL,
+        {'task_id': task_id, 'include_running': include_running},
     )
 
 
@@ -1629,17 +1722,16 @@ async def _link_workflow_task(
     return workflow_id
 
 
-class TestCancelLockedTask:
+class TestCancelTask:
+    """The writer of CANCEL_ADMIN, ``horsies_cancel_task``."""
+
     async def test_applies_with_the_operator_owned_literals_and_pre_image(
         self,
         session: AsyncSession,
     ) -> None:
         task_id = await _seed(session, status='CLAIMED')
 
-        outcome = await apply_async(
-            await session.connection(),
-            _cancel_locked(task_id),
-        )
+        outcome = await _cancel_task(session, task_id)
         await session.commit()
 
         assert isinstance(outcome, Applied)
@@ -1677,24 +1769,13 @@ class TestCancelLockedTask:
         session: AsyncSession,
     ) -> None:
         refused_id = await _seed(session)
-        refused = await apply_async(
-            await session.connection(),
-            _cancel_locked(refused_id),
-        )
+        refused = await _cancel_task(session, refused_id)
         await session.commit()
         assert isinstance(refused, SourceStateConflict)
         assert refused.observed.status is TaskStatus.RUNNING
 
         allowed_id = await _seed(session)
-        allowed = await apply_async(
-            await session.connection(),
-            _cancel_locked(
-                allowed_id,
-                TaskStatus.PENDING,
-                TaskStatus.CLAIMED,
-                TaskStatus.RUNNING,
-            ),
-        )
+        allowed = await _cancel_task(session, allowed_id, include_running=True)
         await session.commit()
         assert isinstance(allowed, Applied)
         assert allowed.observed.status is TaskStatus.RUNNING
@@ -1709,10 +1790,7 @@ class TestCancelLockedTask:
             is_workflow_task=True,
         )
 
-        outcome = await apply_async(
-            await session.connection(),
-            _cancel_locked(task_id),
-        )
+        outcome = await _cancel_task(session, task_id)
         await session.commit()
 
         assert isinstance(outcome, SourceStateConflict)
@@ -1729,16 +1807,15 @@ class TestCancelLockedTask:
         session: AsyncSession,
     ) -> None:
         task_id = await _seed(session, status='CLAIMED')
-        command = _cancel_locked(task_id)
-        await apply_async(await session.connection(), command)
+        await _cancel_task(session, task_id)
         await session.commit()
 
-        replay = await apply_async(await session.connection(), command)
+        replay = await _cancel_task(session, task_id)
         await session.commit()
         assert isinstance(replay, AlreadyApplied)
         assert replay.kind is TerminalizationKind.CANCEL_ADMIN
 
-    async def test_a_terminal_status_in_the_array_cannot_overwrite_another_kind(
+    async def test_a_finished_task_of_another_kind_is_never_overwritten(
         self,
         session: AsyncSession,
     ) -> None:
@@ -1750,10 +1827,7 @@ class TestCancelLockedTask:
             kind='CANCEL_ORPHAN',
         )
 
-        outcome = await apply_async(
-            await session.connection(),
-            _cancel_locked(task_id, TaskStatus.CANCELLED),
-        )
+        outcome = await _cancel_task(session, task_id, include_running=True)
         await session.commit()
         assert isinstance(outcome, SourceStateConflict)
         assert isinstance(outcome.evidence, ObservedForeignTerminalization)
@@ -1763,10 +1837,7 @@ class TestCancelLockedTask:
         self,
         session: AsyncSession,
     ) -> None:
-        outcome = await apply_async(
-            await session.connection(),
-            _cancel_locked(str(uuid.uuid4())),
-        )
+        outcome = await _cancel_task(session, str(uuid.uuid4()))
         await session.commit()
         assert isinstance(outcome, TaskAbsent)
 

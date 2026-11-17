@@ -85,7 +85,6 @@ from horsies.core.utils.loop_runner import (
     in_running_event_loop,
 )
 from horsies.core.history.identity.uuid7 import mint_task_id
-from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 from horsies.core.types.error_detail import NoCause
@@ -2119,10 +2118,8 @@ def create_task_wrapper(
                 task_name,
                 payload.queue_name,
                 task_id=task_id,
-                enqueue_sha=payload.enqueue_sha,
                 send_kind=_send_kind_of_attempt(first_kind, attempt),
-                args_json=payload.args_json,
-                kwargs_json=payload.kwargs_json,
+                input_json=payload.input_json,
                 priority=payload.priority,
                 good_until=payload.good_until,
                 sent_at=payload.sent_at,
@@ -2177,10 +2174,8 @@ def create_task_wrapper(
                 task_name,
                 payload.queue_name,
                 task_id=task_id,
-                enqueue_sha=payload.enqueue_sha,
                 send_kind=_send_kind_of_attempt(first_kind, attempt),
-                args_json=payload.args_json,
-                kwargs_json=payload.kwargs_json,
+                input_json=payload.input_json,
                 priority=payload.priority,
                 good_until=payload.good_until,
                 sent_at=payload.sent_at,
@@ -2246,10 +2241,8 @@ def create_task_wrapper(
                 task_name,
                 payload.queue_name,
                 task_id=task_id,
-                enqueue_sha=payload.enqueue_sha,
                 send_kind=_send_kind_of_attempt(first_kind, attempt),
-                args_json=payload.args_json,
-                kwargs_json=payload.kwargs_json,
+                input_json=payload.input_json,
                 priority=payload.priority,
                 good_until=payload.good_until,
                 sent_at=payload.sent_at,
@@ -2306,10 +2299,8 @@ def create_task_wrapper(
                 task_name,
                 payload.queue_name,
                 task_id=task_id,
-                enqueue_sha=payload.enqueue_sha,
                 send_kind=_send_kind_of_attempt(first_kind, attempt),
-                args_json=payload.args_json,
-                kwargs_json=payload.kwargs_json,
+                input_json=payload.input_json,
                 priority=payload.priority,
                 good_until=payload.good_until,
                 sent_at=payload.sent_at,
@@ -2387,8 +2378,6 @@ def create_task_wrapper(
                 ),
                 exception=NoCause(),
             ))
-        args_json: str | None = None
-
         missing = missing_required_kwargs(fn, kwargs_dict)
         if missing.workflow_only:
             return Err(TaskSendValidationFailed(
@@ -2463,29 +2452,15 @@ def create_task_wrapper(
                 case _ as unreachable:
                     assert_never(unreachable)
 
-        sha = enqueue_fingerprint(
-            task_name=task_name,
-            queue_name=validated_queue_name,
-            priority=priority,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
-            sent_at=sent_at,
-            good_until=good_until,
-            enqueue_delay_seconds=enqueue_delay_seconds,
-            task_options=task_options_json,
-        )
-
         payload = TaskSendPayload(
             task_name=task_name,
             queue_name=validated_queue_name,
             priority=priority,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
+            input_json=kwargs_json,
             sent_at=sent_at,
             good_until=good_until,
             enqueue_delay_seconds=enqueue_delay_seconds,
             task_options=task_options_json,
-            enqueue_sha=sha,
         )
         return Ok((task_id, payload))
 
