@@ -26,7 +26,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
-from horsies.core.brokers.postgres import PostgresBroker
+from horsies._core import set_panic_rule
+from horsies.core.brokers.postgres import PostgresBroker, WorkerProcessBroker
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.brokers.result_types import BrokerOperationError, broker_error_cause
 from horsies.core.types.error_detail import NoCause
@@ -934,7 +935,11 @@ def worker_command(args: argparse.Namespace) -> None:
                 finally:
                     await _close_broker(schema_broker, logger)
 
-                broker = PostgresBroker(worker_postgres_config)
+                # A panic in a core background task aborts the worker
+                # process, and its supervisor restarts it. Set before the
+                # first core call of the process: the worker broker's.
+                set_panic_rule('ABORT_PROCESS')
+                broker = WorkerProcessBroker(worker_postgres_config)
                 broker.app = app
                 # A fresh broker on this loop: reaching the loop limit is a programmer error.
                 match await broker.select_resources():

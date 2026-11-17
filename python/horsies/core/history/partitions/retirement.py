@@ -7,7 +7,9 @@ sends one statement per function and parses its row:
   their attachment, in one read;
 - ``horsies_begin_leaf_detach(p_leaf_name)``: the inspection, the session
   leaf lock (for ``DETACHABLE`` and ``DETACH_INTERRUPTED`` only) and the
-  inspection again under the lock;
+  inspection again under the lock; for a ``DETACHED`` leaf, the catalog
+  record of its detach and, when the published manifest names it, the
+  reader publication;
 - ``horsies_record_leaf_detached(p_leaf_name)``: the catalog record of a
   detach, and whether the published reader manifest still names the leaf;
 - ``horsies_drop_detached_leaf(p_leaf_name)``: the drop, inside the
@@ -328,6 +330,9 @@ _LOCKED_OUTCOMES: Final = frozenset({'DETACHABLE', 'DETACH_INTERRUPTED'})
 
 async def begin_leaf_detach(connection: AsyncConnection, leaf: LeafRef) -> BeginDetach:
     """Inspect `leaf` and take its session lock when it is ready to detach or finalize.
+
+    A ``DETACHED`` leaf gets its detach recorded, and the readers published
+    when the manifest names it, in the same statement.
 
     One statement: ``horsies_begin_leaf_detach``. A database error raises;
     the function releases a lock it took before the error propagates. A

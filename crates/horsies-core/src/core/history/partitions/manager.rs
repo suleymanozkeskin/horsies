@@ -876,8 +876,12 @@ pub async fn verify_static_forever_leaf(
 /// statement timeout and a 2 s lock timeout; `horsies_record_leaf_detached`
 /// records it and, when the published manifest names the leaf, the readers
 /// are published in the same transaction. Any state other than `DETACHABLE`
-/// is returned as its inspection and nothing is detached;
-/// `LeafInspection::Detached` means an earlier call detached the leaf.
+/// is returned as its inspection and nothing is detached.
+/// `LeafInspection::Detached` means the leaf has no parent (an earlier call,
+/// or a detach out of band): `horsies_begin_leaf_detach` then records the
+/// detach and, when the published manifest names the leaf, publishes the
+/// readers in its own statement, so the drop that follows is not refused for
+/// the manifest.
 ///
 /// `pool` must preserve PostgreSQL session affinity. PgBouncer transaction
 /// pooling does not preserve the session advisory lock used by this function.

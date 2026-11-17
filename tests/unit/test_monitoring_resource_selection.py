@@ -38,7 +38,7 @@ async def test_query_maps_loop_limit_to_monitoring_loop_limit() -> None:
 async def test_cancel_maps_loop_limit_to_task_action_loop_limit() -> None:
     broker = MagicMock()
     loop_limit = attach_loop_limit(broker)
-    task_id = str(uuid.uuid4())
+    task_id = uuid.uuid4()
 
     result = await cancel_task(broker, task_id)
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Literal, assert_never
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 
@@ -264,8 +265,12 @@ def build_router(
         return result.ok_value
 
     @router.get('/{task_id}')
-    async def read_task(task_id: str) -> TaskDetail:
-        """One task with its full attempt history."""
+    async def read_task(task_id: UUID) -> TaskDetail:
+        """One task with its full attempt history.
+
+        A path id that is not a UUID is refused with 422 before the route
+        runs; nothing is read.
+        """
         result = await get_task_detail(broker, task_id)
         if is_err(result):
             raise query_failed('Task detail', result.err_value)

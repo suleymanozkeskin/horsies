@@ -4,10 +4,27 @@ import asyncio, hashlib, contextlib, os, random, threading, time, uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Final, Optional, TYPE_CHECKING, assert_never, cast
+from typing import (
+    Any,
+    ClassVar,
+    Final,
+    Literal,
+    Optional,
+    TYPE_CHECKING,
+    assert_never,
+    cast,
+)
 from uuid import UUID
 from datetime import datetime, timedelta, timezone
 import psycopg
+from horsies._catalog.manifest import dump_producer_manifest
+from horsies._core import (
+    CoreError,
+    CoreHandle,
+    StaleClaimsBoundReached,
+    StaleClaimsDrained,
+    StaleClaimsRequeueFailed,
+)
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
@@ -77,6 +94,8 @@ from horsies.core.brokers.result_types import (
     BrokerWaitInsideTask,
     RawResultRecord,
 )
+from horsies.core.brokers.core_failure import CoreOperationFailed
+from horsies.core.manifest import schema_mode_of, to_producer_manifest
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import OrphanTaskAuditReport
 from horsies.core.errors import ConfigurationError, ErrorCode
@@ -954,7 +973,10 @@ _STILL_WAITING = object()
 # The function requeues a CLAIMED row with no claimer beat newer than the
 # threshold that was claimed longer ago than the threshold, skips a workflow
 # task with no runnable node and rows another transaction holds, and returns
-# the number of rows it requeued.
+# the number of rows it requeued. The core runs the pass with the same batch
+# size and bound (`requeue_stale_claimed`); the statement and the two bounds
+# stay here for the Python reference of the dual-run
+# (tests/dualrun/reference/requeue_caller.py).
 REQUEUE_STALE_CLAIMS_SQL = text("""
     SELECT horsies_requeue_stale_claims(
         CAST(:stale_after_ms AS INTEGER), CAST(:batch_size AS INTEGER)
@@ -964,6 +986,16 @@ REQUEUE_STALE_CLAIMS_SQL = text("""
 REQUEUE_STALE_CLAIMS_BATCH_SIZE: Final = 500
 REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS: Final = 200
 """Backstop against an unbounded pass; the remainder is requeued next pass."""
+
+SIGNED_64_BIT_MIN: Final = -(2**63)
+SIGNED_64_BIT_MAX: Final = 2**63 - 1
+"""The range of an integer argument of a core operation. A value outside it
+raises ``OverflowError`` at the call, so a facade refuses it first."""
+
+type CorePoolProfile = Literal['PRODUCER', 'WORKER']
+"""The pool profile of a broker's core handle. ``PRODUCER``: no reserve.
+``WORKER``: the worker process; batch checkouts leave connections of the main
+core pool free for the per-task writes."""
 
 class SyncSendRoute(Enum):
     """Where a sync ``enqueue`` writes its row."""
@@ -1021,6 +1053,9 @@ class PostgresBroker:
       - Operational monitoring (stale tasks, worker stats)
     """
 
+    _CORE_POOL_PROFILE: ClassVar[CorePoolProfile] = 'PRODUCER'
+    """The pool profile of the broker's core handle."""
+
     def __init__(
         self,
         config: PostgresConfig,
@@ -1071,6 +1106,23 @@ class PostgresBroker:
         # each result probe checks again.
         self._staged_result_reader_published = False
         self._loop_runner = LoopRunner()  # for sync facades
+        # The operations that run in the core use the pools of this handle.
+        # It is built from the same config as the engines, so its pools have
+        # their shape. Building it starts nothing: the first core operation
+        # connects, and close_async closes its pools.
+        self._core_handle = CoreHandle(
+            dump_producer_manifest(
+                to_producer_manifest(
+                    config,
+                    schema=schema_mode_of(
+                        run_schema_migrations=run_schema_migrations,
+                        assume_initialized=assume_initialized,
+                    ),
+                    idempotency_reservation_window=self.idempotency_reservation_window,
+                ),
+            ),
+            pool_profile=self._CORE_POOL_PROFILE,
+        )
 
         # Each worker child builds its own broker, so this fires on every
         # recycle (max_tasks_per_child); keep it at DEBUG in child processes.
@@ -2391,13 +2443,16 @@ class PostgresBroker:
             raise asyncio.CancelledError
 
     async def close_async(self) -> BrokerResult[None]:
-        """Close every resource set, then stop the sync runner if it was started.
+        """Close every resource set and the core handle's pools, then stop
+        the sync runner if it was started.
 
         Each set closes on its own event loop: the running loop's set
         directly, the set of a closed loop by release, and the set of
         another open loop by a hand-off bounded by ``CLOSE_HANDOFF_TIMEOUT``.
-        The broker stays usable: a later async call builds a new set for
-        its loop.
+        The core handle's writes in flight end within the core's close
+        bound; a handle that never connected closes without starting the
+        core. The broker stays usable: a later async call builds a new set
+        for its loop, and a later core operation opens new core pools.
         """
         current_loop = asyncio.get_running_loop()
         with self._loop_sets_lock:
@@ -2422,6 +2477,13 @@ class PostgresBroker:
                 pass
             case _ as unreachable:
                 assert_never(unreachable)
+        try:
+            _ = await self._core_handle.close_async()
+        except CoreError as exc:
+            # The core of this process cannot run the close: it stopped,
+            # failed to start, or this process is a fork of the one that
+            # started it.
+            errors.append(exc)
         # If sync APIs started the LoopRunner, close_async should also tear it down
         # when called from any thread except the loop-runner thread itself.
         # stop() joins the runner thread (up to 2 s), so it runs on a worker
@@ -3168,52 +3230,73 @@ class PostgresBroker:
         self,
         stale_threshold_ms: int = 120_000,
     ) -> BrokerResult[int]:
-        """Requeue CLAIMED rows whose worker stopped beating, in bounded batches.
+        """Requeue CLAIMED rows whose worker stopped beating: one core pass.
 
-        Each batch is one ``horsies_requeue_stale_claims`` statement in
-        autocommit: a row with no claimer beat newer than the threshold, and
+        The core sends ``horsies_requeue_stale_claims`` in batches of
+        ``REQUEUE_STALE_CLAIMS_BATCH_SIZE``, each one statement that commits
+        alone: a row with no claimer beat newer than the threshold, and
         claimed longer ago than the threshold, goes back to PENDING (a
         workflow task with no runnable node stays). Batches repeat until one
         is short, at most ``REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS``
         times; past that the remainder waits for the next pass and a warning
-        is logged. Returns the number of rows requeued. A failure reports
-        ``CLEANUP_FAILED``; the batches before it committed.
+        is logged. Returns the number of rows requeued.
+
+        Failures, each ``CLEANUP_FAILED``:
+        - a database failure: the batches before it committed, and the
+          message counts their rows; ``retryable`` is the core's
+          classification of the cause;
+        - a threshold below 0 or above 2,147,483,647 ms: nothing ran; not
+          retryable.
+
+        A cancel of the caller does not stop the pass: the core runs it to
+        its end. A ``CoreError`` (the core of this process stopped or did
+        not start) propagates.
         """
-        match await self.select_resources():
-            case Err(loop_limit):
-                return _loop_limit_err('requeue_stale_claimed', loop_limit)
-            case Ok(resources):
-                pass
-        total_requeued = 0
-        try:
-            async with resources.session_factory() as session:
-                connection = await autocommit_connection(session)
-                for _ in range(REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS):
-                    requeued = (
-                        await connection.execute(
-                            REQUEUE_STALE_CLAIMS_SQL,
-                            {
-                                'stale_after_ms': stale_threshold_ms,
-                                'batch_size': REQUEUE_STALE_CLAIMS_BATCH_SIZE,
-                            },
-                        )
-                    ).scalar_one()
-                    total_requeued += requeued
-                    if requeued < REQUEUE_STALE_CLAIMS_BATCH_SIZE:
-                        return Ok(total_requeued)
-        except Exception as exc:
-            return _operation_failed(
-                BrokerErrorCode.CLEANUP_FAILED,
-                f'requeue_stale_claimed failed after requeueing '
-                f'{total_requeued} task(s): {exc}',
-                exc,
+        if not SIGNED_64_BIT_MIN <= stale_threshold_ms <= SIGNED_64_BIT_MAX:
+            refusal = (
+                f'the stale threshold {stale_threshold_ms} ms is not a 64-bit integer'
             )
-        self.logger.warning(
-            'requeue_stale_claimed reached the per-pass batch cap after '
-            'requeueing %s task(s); the remainder is requeued next pass',
-            total_requeued,
-        )
-        return Ok(total_requeued)
+            return Err(
+                BrokerOperationFailed(
+                    code=BrokerErrorCode.CLEANUP_FAILED,
+                    message=(
+                        f'requeue_stale_claimed failed after requeueing 0 task(s): '
+                        f'{refusal}'
+                    ),
+                    retryable=False,
+                    exception=OverflowError(refusal),
+                ),
+            )
+        match await self._core_handle.requeue_stale_claimed_async(stale_threshold_ms):
+            case StaleClaimsDrained(requeued=requeued):
+                return Ok(requeued)
+            case StaleClaimsBoundReached(requeued=requeued):
+                self.logger.warning(
+                    'requeue_stale_claimed reached the per-pass batch cap after '
+                    'requeueing %s task(s); the remainder is requeued next pass',
+                    requeued,
+                )
+                return Ok(requeued)
+            case StaleClaimsRequeueFailed(
+                requeued_before=requeued_before,
+                message=message,
+                retryable=retryable,
+            ):
+                return Err(
+                    BrokerOperationFailed(
+                        code=BrokerErrorCode.CLEANUP_FAILED,
+                        message=(
+                            f'requeue_stale_claimed failed after requeueing '
+                            f'{requeued_before} task(s): {message}'
+                        ),
+                        retryable=retryable,
+                        exception=CoreOperationFailed(
+                            'PostgresBroker.requeue_stale_claimed', message,
+                        ),
+                    ),
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def audit_orphaned_workflow_tasks(
         self,
@@ -3866,3 +3949,15 @@ class PostgresBroker:
             return _loop_runner_err('PostgresBroker.close()', exc)
         finally:
             self._loop_runner.stop()
+
+
+class WorkerProcessBroker(PostgresBroker):
+    """The broker of a worker process, built from
+    ``PostgresConfig.worker_process_config``.
+
+    Its core handle connects with the ``WORKER`` pool profile: the batch
+    checkouts of the worker process leave connections of the main core pool
+    free for its per-task writes. Everything else is ``PostgresBroker``.
+    """
+
+    _CORE_POOL_PROFILE: ClassVar[CorePoolProfile] = 'WORKER'

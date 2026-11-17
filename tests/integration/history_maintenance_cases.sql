@@ -985,3 +985,57 @@ SELECT fixture_check(
     (SELECT array_agg(p.oid::regprocedure::text) FROM pg_proc AS p WHERE p.proname = 'horsies_terminalization_miss')
         = ARRAY['horsies_terminalization_miss(uuid,text,text,text,timestamp with time zone)']
 );
+
+------------------------------------------------------------------------------------------------------------------------
+-- A leaf detached out of band, through retention
+------------------------------------------------------------------------------------------------------------------------
+
+-- An expired standard_7d leaf that horsies_create_history_leaf created and published, then detached outside
+-- maintenance: the catalog records no detach, and the published manifest names the leaf.
+SELECT set_config(
+    'fixture.out_of_band', horsies_history_leaf_name('standard_7d', fixture_today() - interval '10 days'), true
+);
+SELECT fixture_check(
+    'out-of-band detach: the expired leaf is CREATED and published',
+    fixture_create('standard_7d', fixture_today() - interval '10 days') = 'CREATED'
+);
+DO $$
+BEGIN
+    EXECUTE format('ALTER TABLE horsies_task_history_standard_7d DETACH PARTITION %I',
+                   current_setting('fixture.out_of_band'));
+END
+$$;
+SELECT fixture_check(
+    'out-of-band detach: the candidate is DETACHED with no record, and the manifest and the readers name it',
+    (SELECT c.attachment = 'DETACHED' AND NOT c.detach_recorded
+     FROM horsies_prune_candidates(100) AS c WHERE c.leaf_name = current_setting('fixture.out_of_band'))
+    AND EXISTS (SELECT 1 FROM horsies_task_lookup_manifest WHERE leaf_name = current_setting('fixture.out_of_band'))
+    AND fixture_reader_names('horsies_task_history_duplicate_staged(uuid)', current_setting('fixture.out_of_band'))
+);
+-- The next pruning pass reaches the leaf through horsies_begin_leaf_detach.
+CREATE TEMP TABLE out_of_band_begin AS
+    SELECT * FROM horsies_begin_leaf_detach(current_setting('fixture.out_of_band'));
+SELECT fixture_check(
+    'out-of-band detach: the next pass begins with DETACHED and records the detach',
+    (SELECT b.outcome = 'DETACHED' FROM out_of_band_begin AS b)
+    AND (SELECT detached_at IS NOT NULL AND dropped_at IS NULL FROM horsies_task_history_leaf_catalog
+         WHERE leaf_name = current_setting('fixture.out_of_band'))
+    AND (SELECT c.detach_recorded
+         FROM horsies_prune_candidates(100) AS c WHERE c.leaf_name = current_setting('fixture.out_of_band'))
+);
+SELECT fixture_check(
+    'out-of-band detach: the publication of the same call leaves the leaf out of the manifest and the readers',
+    NOT EXISTS (SELECT 1 FROM horsies_task_lookup_manifest WHERE leaf_name = current_setting('fixture.out_of_band'))
+    AND NOT fixture_reader_names('horsies_task_history_duplicate_staged(uuid)',
+                                 current_setting('fixture.out_of_band'))
+    AND horsies_history_readers_current()
+);
+CREATE TEMP TABLE out_of_band_drop AS
+    SELECT * FROM horsies_drop_detached_leaf(current_setting('fixture.out_of_band'));
+SELECT fixture_check(
+    'out-of-band detach: the drop is DROPPED, the relation is gone, and the catalog keeps both times',
+    (SELECT d.outcome = 'DROPPED' FROM out_of_band_drop AS d)
+    AND to_regclass(current_setting('fixture.out_of_band')) IS NULL
+    AND (SELECT detached_at IS NOT NULL AND dropped_at IS NOT NULL FROM horsies_task_history_leaf_catalog
+         WHERE leaf_name = current_setting('fixture.out_of_band'))
+);

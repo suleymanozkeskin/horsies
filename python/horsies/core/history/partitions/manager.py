@@ -781,6 +781,11 @@ async def detach_expired_leaf(
     '''Concurrently detach one leaf classified `LeafDetachable`.
 
     Any other classification is returned unchanged and nothing is detached.
+    `LeafDetached` means the leaf has no parent (an earlier call, or a
+    detach out of band): ``horsies_begin_leaf_detach`` then records the
+    detach and, when the published manifest names the leaf, publishes the
+    readers in its own statement, so the drop that follows is not refused
+    for the manifest.
     A pending locator on the leaf keeps it `LeafPendingBlocked` until phase
     2 or phase-2 recovery deletes or repoints the locator.
 
