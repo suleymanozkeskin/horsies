@@ -636,6 +636,21 @@ unless it starts with "Added".
   workflow definitions registered on the app. The query types take a
   `HistoryWindow` from `resolve_monitoring_window`; the error catalogs are
   Python's (`HISTORY_CONTRACT_VIOLATION`, `STORED_DATA_INVALID`).
+- **`web::create_monitoring_router` becomes `web::router(&app,
+  MonitoringConfig, policy)`** (feature `web`), an axum mount of the core's
+  monitoring handler: the core serves every route, the event frames and
+  the embedded UI, so the Python and Rust apps answer alike. The router
+  asks the policy only the verdicts that the route needs. `MonitoringConfig`
+  holds the UI settings and `Actions::{Enabled, Disabled}` (default
+  enabled). The handler is built at the first request; a broker that
+  cannot be built answers 503. `MonitoringAuthPolicy` is a trait of the
+  crate whose methods return `impl Future<Output = bool> + Send` (write them
+  as `async fn`); `MonitoringRequest`, `AllowAll`, `ViewOnly`,
+  `TrustedHeader`, `INTENT_HEADER` and `INTENT_VALUE` stay. The event,
+  schema and SPA types (`EventBroadcaster`, `EventCoalescer`, `TopicEvent`,
+  `SchemaProbe`, `SchemaState`, `MetaResponse`, ...) are no longer public.
+  The crate no longer embeds a UI build of its own (`webui-dist/`), and the
+  frozen UI source `rust/webui/` is removed.
 
 ## [0.7.0] - 2026-11-15
 
