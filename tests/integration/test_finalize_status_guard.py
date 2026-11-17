@@ -853,21 +853,19 @@ async def test_finalizing_marker_rejects_stale_claim_generation(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_the_finalizing_marker_has_no_null_fence(
+async def test_the_finalizing_marker_refuses_a_null_claim_generation(
     session: AsyncSession,
     broker: 'PostgresBroker',
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """The marker compares the claim time with no NULL branch: a NULL claim
-    time matches no row, so nothing can turn off the generation half."""
+    """``horsies_mark_finalizing`` requires the claim time: a NULL claim time
+    is refused with 22023 before any lock, so nothing can turn off the
+    generation half of the fence."""
     task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
     await session.commit()  # the marker runs on its own connection
 
     with psycopg.connect(listener_of(broker).database_url, autocommit=True) as conn:
-        marked = conn.execute(
-            MARK_FINALIZING_SQL,
-            (OWNER_WORKER_ID, None, task_id, OWNER_WORKER_ID),
-        ).rowcount
+        with pytest.raises(psycopg.errors.InvalidParameterValue):
+            conn.execute(MARK_FINALIZING_SQL, (task_id, OWNER_WORKER_ID, None))
 
-    assert marked == 0
     assert await _get_finalizing_worker(session, task_id) is None

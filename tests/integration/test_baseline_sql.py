@@ -99,6 +99,7 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_finish_stale_attempt',
         'horsies_finish_workflow_success',
         'horsies_insert_task_rows',
+        'horsies_mark_finalizing',
         'horsies_node_has_dependents',
         'horsies_node_downstream_subworkflow',
         'horsies_release_claims',

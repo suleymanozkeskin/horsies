@@ -1,12 +1,12 @@
-"""Plan of the child statement that writes one task row, the finalizing
-marker, under the statistics that a burst of sends leaves. (The start is one
-``horsies_start_attempt`` call; the plans inside the function are recorded
+"""Plan of the row read inside ``horsies_mark_finalizing``, the finalizing
+marker of a child, under the statistics that a burst of sends leaves. (The
+start is one ``horsies_start_attempt`` call; the plans inside it are recorded
 with the function.)
 
-The rows are inserted PENDING and analyzed, then claimed or started with no
-new ANALYZE: the statistics say that no row is CLAIMED or RUNNING. A prepared
-statement of a child runs a generic plan after its first executions. The only
-condition of these statements on an indexed column of ``horsies_tasks`` is the
+The rows are inserted PENDING and analyzed, then started with no new ANALYZE:
+the statistics say that no row is RUNNING. PL/pgSQL runs the statements of a
+function with a generic plan after their first executions. The only condition
+of the marker's statements on an indexed column of ``horsies_tasks`` is the
 id, so the plan reads ``horsies_tasks`` through its primary key alone.
 """
 
@@ -20,7 +20,6 @@ from typing import Any, Final
 import psycopg
 import pytest
 import pytest_asyncio
-from psycopg import sql
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -102,39 +101,39 @@ async def _rows_with_drain_start_statistics(session: AsyncSession, status: str) 
     return str(task_id)
 
 
-async def _generic_plan(
+async def _nested_generic_plans(
     connection: psycopg.AsyncConnection[Any],
     statement: str,
     params: tuple[object, ...],
 ) -> str:
-    """The generic plan of ``statement`` as psycopg prepares it for ``params``.
+    """The plans of the statements inside the function that ``statement``
+    calls, as generic plans, from ``auto_explain`` notices.
 
-    The statement runs once, prepared by psycopg as a child runs it, in a
-    transaction that rolls back. Its plan is then read with EXPLAIN EXECUTE
-    under ``force_generic_plan``, with the values as literals of the
-    parameter types that psycopg's preparation gave.
+    The statement runs once in a transaction that rolls back, with
+    ``plan_cache_mode = force_generic_plan``: PL/pgSQL plans each statement
+    of the function with its parameters unknown, as after its first
+    executions.
     """
-    async with connection.transaction(force_rollback=True):
-        _ = await connection.execute('SET LOCAL plan_cache_mode = force_generic_plan')
-        _ = await connection.execute(statement, params, prepare=True)  # pyright: ignore[reportArgumentType]
-        cursor = await connection.execute(
-            'SELECT name, CAST(parameter_types AS text[]) '
-            'FROM pg_prepared_statements WHERE NOT from_sql',
-        )
-        prepared = await cursor.fetchall()
-        assert len(prepared) == 1, prepared
-        name, types = prepared[0]
-        arguments = sql.SQL(', ').join(
-            sql.SQL('{}::{}').format(sql.Literal(param), sql.SQL(str(type_name)))  # pyright: ignore[reportArgumentType]
-            for param, type_name in zip(params, types, strict=True)
-        )
-        cursor = await connection.execute(
-            sql.SQL('EXPLAIN (COSTS OFF) EXECUTE {}({})').format(
-                sql.Identifier(str(name)),
-                arguments,
-            ),
-        )
-        return '\n'.join(str(row[0]) for row in await cursor.fetchall())
+    notices: list[str] = []
+
+    def _collect(diagnostic: psycopg.errors.Diagnostic) -> None:
+        notices.append(str(diagnostic.message_primary or ''))
+
+    connection.add_notice_handler(_collect)
+    try:
+        async with connection.transaction(force_rollback=True):
+            _ = await connection.execute("LOAD 'auto_explain'")
+            for setting in (
+                'auto_explain.log_min_duration = 0',
+                'auto_explain.log_nested_statements = on',
+                "auto_explain.log_level = 'notice'",
+                'plan_cache_mode = force_generic_plan',
+            ):
+                _ = await connection.execute(f'SET LOCAL {setting}')
+            _ = await connection.execute(statement, params)  # pyright: ignore[reportArgumentType]
+    finally:
+        connection.remove_notice_handler(_collect)
+    return '\n'.join(notices)
 
 
 async def _task_indexes_in(connection: psycopg.AsyncConnection[Any], plan: str) -> set[str]:
@@ -152,10 +151,11 @@ async def test_the_finalizing_marker_reads_its_row_through_the_primary_key(
 ) -> None:
     task_id = await _rows_with_drain_start_statistics(session, 'RUNNING')
 
-    plan = await _generic_plan(
+    plans = await _nested_generic_plans(
         probe,
         MARK_FINALIZING_SQL,
         mark_finalizing_params(task_id, WORKER_ID, CLAIMED_AT),
     )
 
-    assert await _task_indexes_in(probe, plan) == {PRIMARY_KEY}, plan
+    assert 'horsies_tasks t' in plans, plans
+    assert await _task_indexes_in(probe, plans) == {PRIMARY_KEY}, plans

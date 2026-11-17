@@ -16,8 +16,8 @@ from horsies.core.baseline.migration import (
 )
 
 PINNED_CHECKSUM_HEX = (
-    '75ab6f02b7b12db28aa42bb44ef18c850784747492669707'
-    '8139ea9bf39c8faeb964d28802492ee30e283a26b167825a'
+    'd77188fbf84bb20ffc0f335917a8a7b4da22dfe3340a0590'
+    'e9e709ea8e4b08766e654e742da9e69750455aa781a86063'
 )
 """SHA-384 of the migration text. An edit of a baseline SQL file changes it;
 the edit then shows in this file's diff as well."""

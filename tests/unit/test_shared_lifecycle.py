@@ -11,6 +11,7 @@ own statements are covered by the integration tests.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -447,7 +448,7 @@ class TestMissedStart:
 
 class TestFinalizingMarker:
     def test_the_marker_is_fenced_on_the_claim_generation(self) -> None:
-        cursor = _Cursor([])
+        cursor = _Cursor([('MARKED',)])
         conn = _Conn(cursor)
 
         asyncio.run(
@@ -467,6 +468,35 @@ class TestFinalizingMarker:
         ]
         # One statement on an autocommit connection: no transaction to end.
         assert (conn.commits, conn.rollbacks) == (0, 0)
+
+    def test_a_marker_that_finds_another_claim_is_logged_and_does_not_raise(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.DEBUG, logger='horsies.worker')
+
+        asyncio.run(
+            shared_lifecycle.mark_task_finalizing(
+                _pool(_Pool(_Conn(_Cursor([('NOT_HELD',)])))),
+                'task-1',
+                'worker-1',
+                CLAIMED_AT,
+            ),
+        )
+
+        assert 'Finalizing marker for task task-1 skipped: the claim changed' in caplog.text
+        assert 'Failed to mark task task-1 finalizing' not in caplog.text
+
+    def test_a_marker_row_outside_the_contract_raises(self) -> None:
+        with pytest.raises(AssertionError, match='horsies_mark_finalizing returned'):
+            asyncio.run(
+                shared_lifecycle.mark_task_finalizing(
+                    _pool(_Pool(_Conn(_Cursor([None])))),
+                    'task-1',
+                    'worker-1',
+                    CLAIMED_AT,
+                ),
+            )
 
     def test_a_failed_marker_is_logged_and_does_not_raise(
         self,

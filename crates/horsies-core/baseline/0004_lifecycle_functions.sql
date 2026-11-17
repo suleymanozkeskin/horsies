@@ -925,6 +925,65 @@ BEGIN
 END
 $$;
 
+-- horsies_mark_finalizing: the finalizing marker of a run whose body ended, written by the child before the parent
+-- finalizes the attempt.
+--
+-- Guarantee:
+-- - The row gets finalizing_at = NOW(), finalizing_by_worker_id = p_worker_id and updated_at = NOW() only when it is
+--   RUNNING under p_worker_id at the claim generation p_claimed_at. The generation comparison has no NULL arm.
+-- - A stale attempt cannot refresh the marker of a later claim of the same task: the fence is read on the locked
+--   row, so a claim that changed while this call waited for the lock is NOT_HELD.
+-- - The marker sends no status event (the status does not change) and moves nothing.
+--
+-- Arguments: every argument is required (22023): the task, the worker, the claim generation.
+-- Locks: the task row (FOR NO KEY UPDATE, read by id alone so only the primary key serves it). No task advisory lock:
+-- nothing moves.
+-- Returns one row: outcome MARKED, or NOT_HELD (absent, not RUNNING, or another owner or claim generation; nothing
+-- is written).
+-- Python: MARK_FINALIZING_SQL (core/worker/child_runner.py:787-806), _mark_task_finalizing (:1257-1299),
+-- mark_task_finalizing (core/worker/shared_lifecycle.py:470-500).
+CREATE FUNCTION horsies_mark_finalizing(
+    p_task_id uuid,
+    p_worker_id text,
+    p_claimed_at timestamp with time zone
+) RETURNS TABLE(outcome text)
+    LANGUAGE plpgsql
+    AS $$
+#variable_conflict use_column
+DECLARE
+    v_held boolean;
+BEGIN
+    IF num_nulls(p_task_id, p_worker_id, p_claimed_at) <> 0 THEN
+        RAISE EXCEPTION 'horsies_mark_finalizing: every argument is required'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    SELECT (
+        t.status = 'RUNNING'
+        AND t.claimed_by_worker_id = p_worker_id
+        AND t.claimed_at = p_claimed_at
+    ) IS TRUE
+    INTO v_held
+    FROM horsies_tasks t
+    WHERE t.id = p_task_id
+    FOR NO KEY UPDATE;
+
+    -- An absent row leaves v_held NULL.
+    IF v_held IS NOT TRUE THEN
+        RETURN QUERY SELECT 'NOT_HELD'::text;
+        RETURN;
+    END IF;
+
+    UPDATE horsies_tasks t
+    SET finalizing_at = NOW(),
+        finalizing_by_worker_id = p_worker_id,
+        updated_at = NOW()
+    WHERE t.id = p_task_id;
+
+    RETURN QUERY SELECT 'MARKED'::text;
+END
+$$;
+
 ------------------------------------------------------------------------------------------------------------------------
 -- Attempt finish: success
 ------------------------------------------------------------------------------------------------------------------------
