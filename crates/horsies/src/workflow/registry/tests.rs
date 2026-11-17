@@ -386,3 +386,58 @@ fn the_decision_stops_at_the_depth_limit() {
         NestingDecision::WalkChild(walked) if walked.len() == 2
     ));
 }
+
+/// A definition with params whose build_with panics.
+struct Panicking;
+
+impl WorkflowDefinition for Panicking {
+    type Output = OutputlessResults;
+    type Params = Level;
+
+    fn name() -> &'static str {
+        "panicking"
+    }
+
+    fn definition_key() -> &'static str {
+        "tests.panicking.v1"
+    }
+
+    fn build_with(params: Level) -> Result<WorkflowSpec, HorsiesError> {
+        panic!("no spec for level {}", params.n)
+    }
+}
+
+/// A panic of build_with is a refusal of the build: the core stores
+/// WORKFLOW_ENQUEUE_FAILED on the node, as for a raised Python exception.
+#[test]
+fn a_builder_panic_is_a_failed_build() {
+    let registry = registry();
+    registry
+        .register(Definition::with_params::<Panicking>())
+        .unwrap();
+    let core = registry.core_registry();
+    let panicking = core
+        .get_definition_by_definition_key("tests.panicking.v1")
+        .unwrap();
+    match (panicking.spec_builder)(r#"{"n": 4}"#) {
+        Err(SpecBuildError::Failed(error)) => {
+            assert!(error.message.contains("no spec for level 4"), "{error}");
+        }
+        other => panic!("expected a failed build, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_check_case_that_panics_is_reported() {
+    let registry = registry();
+    registry.add_check_cases(vec![CheckCase {
+        builder_name: "panicking".to_owned(),
+        build: Arc::new(|| -> Result<WorkflowSpec, HorsiesError> {
+            panic!("the case cannot be built")
+        }),
+    }]);
+    assert_eq!(
+        codes(&registry.check_findings()),
+        vec![Some(ErrorCode::WorkflowCheckBuilderException)]
+    );
+}
