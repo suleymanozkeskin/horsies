@@ -584,6 +584,12 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         doc: "The connectivity step of the live check: SELECT 1 on the main URL, then on the session URL\nwhen it differs, then the LISTEN probe in PgBouncer transaction mode. Reads only.",
     },
     StubFunction {
+        name: "check_worker_connections",
+        parameters: &[positional("profiles_json", "str")],
+        returns: TypeText::Plain("list[WorkerConnectionError]"),
+        doc: "The worker connection step of the live check: each profile against the server connection\nlimit. No profile, or PgBouncer transaction mode, connects nothing. Reads only.",
+    },
+    StubFunction {
         name: "install_schema",
         parameters: &[],
         returns: TypeText::Plain(INSTALL_OUTCOME),
@@ -1152,6 +1158,18 @@ const RECORD_CLASSES: &[StubClass] = &[
                 "Literal['CONNECT', 'POOL_SETTINGS', 'MAIN_URL', 'SESSION_URL', 'LISTENER']",
             ),
             property("message", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "WorkerConnectionError",
+        doc: "One refusal of the worker connection check: the core's error as data.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("message", "str"),
+            property("code", "str | None"),
+            property("notes", "list[str]"),
+            property("help_text", "str | None"),
         ],
         methods: &[],
     },
@@ -3152,7 +3170,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "RunFrame",
         doc: "Run one task in an isolated child. The parent holds the deadline.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID"), property("task_name", "str"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("work", "Literal['RUN'] | StoredOptionsRefused"), property("input", "str")],
+        properties: &[property("task_id", "uuid.UUID"), property("task_name", "str"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "Literal['RUN'] | StoredOptionsRefused"), property("input", "str")],
         methods: &[],
     },
     StubClass {
@@ -3173,7 +3191,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "SharedRunFrame",
         doc: "Run one task on a free seat of a shared child.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("dispatch", "int"), property("task_id", "uuid.UUID"), property("task_name", "str"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("work", "AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused"), property("input", "str")],
+        properties: &[property("dispatch", "int"), property("task_id", "uuid.UUID"), property("task_name", "str"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused"), property("input", "str")],
         methods: &[],
     },
     StubClass {

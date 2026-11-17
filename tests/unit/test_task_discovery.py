@@ -480,7 +480,8 @@ class _Refused:
 
 class _CheckHandle:
     """A core handle of the live check: keeps its manifest and profile,
-    answers ``answer`` (or raises it), and counts its closes."""
+    answers ``answer`` (or raises it) to the connectivity step and no
+    refusal to the worker connection step, and counts its closes."""
 
     built: list[_CheckHandle] = []
     answer: object = _Passed()
@@ -497,6 +498,10 @@ class _CheckHandle:
                 raise raised
             case answer:
                 return answer
+
+    def check_worker_connections(self, profiles_json: str) -> list[object]:
+        _ = profiles_json
+        return []
 
     def close(self) -> None:
         self.closes += 1

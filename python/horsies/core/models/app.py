@@ -1,6 +1,12 @@
 # app/core/models/app.py
 from typing import List, Optional
 from pydantic import BaseModel, model_validator, Field, ConfigDict
+from horsies._catalog.worker_manifest import (
+    CLAIM_COUNT_MAX,
+    MILLISECONDS_MAX,
+    QUEUE_CONCURRENCY_MAX,
+    TASK_LIMIT_MAX,
+)
 from horsies.core.models.queues import QueueMode, CustomQueueConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.payload import PayloadPolicy
@@ -29,6 +35,69 @@ from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS, MAX_CLAIM_RENEW_AGE_MS
 from horsies.core.utils.url import mask_database_url
 import logging
 import os
+
+
+def above_worker_bound(
+    path: str,
+    value: int,
+    maximum: int,
+    code: ErrorCode,
+) -> ConfigurationError:
+    """The refusal of a config value above the bound that a worker takes
+    (the bound of its field in the worker manifest,
+    `horsies._catalog.worker_manifest`). `path` names the field as the user
+    writes it in `AppConfig`; `code` is the code of the field's own checks.
+    Pure."""
+    return ConfigurationError(
+        message=f'{path} is above the bound that a worker takes',
+        code=code,
+        notes=[f'got {path}={value}', f'the bound of {path} is {maximum}'],
+        help_text=f'set {path} to {maximum} or less',
+    )
+
+
+def worker_bound_errors(
+    *,
+    prefetch_buffer: int,
+    claim_lease_ms: int | None,
+    max_claim_renew_age_ms: int,
+    cluster_wide_cap: int | None,
+    custom_queues: list[CustomQueueConfig],
+) -> list[ConfigurationError]:
+    """The refusals of the claim values above their worker manifest bounds,
+    in field order: `prefetch_buffer`, `claim_lease_ms` and
+    `max_claim_renew_age_ms` (`CONFIG_INVALID_PREFETCH`), `cluster_wide_cap`
+    (`CONFIG_INVALID_CLUSTER_CAP`), then each queue's `max_concurrency`
+    (`CONFIG_INVALID_QUEUE_MODE`). The core's claim takes each count as a
+    PostgreSQL `integer` and each time as an unsigned 32-bit number of
+    milliseconds, so a larger value never reaches a worker. A `None` value
+    has no bound. Pure."""
+    prefetch = ErrorCode.CONFIG_INVALID_PREFETCH
+    checks: list[tuple[str, int | None, int, ErrorCode]] = [
+        ('prefetch_buffer', prefetch_buffer, CLAIM_COUNT_MAX, prefetch),
+        ('claim_lease_ms', claim_lease_ms, MILLISECONDS_MAX, prefetch),
+        ('max_claim_renew_age_ms', max_claim_renew_age_ms, MILLISECONDS_MAX, prefetch),
+        (
+            'cluster_wide_cap',
+            cluster_wide_cap,
+            TASK_LIMIT_MAX,
+            ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
+        ),
+    ]
+    checks.extend(
+        (
+            f'custom_queues[{position}].max_concurrency',
+            queue.max_concurrency,
+            QUEUE_CONCURRENCY_MAX,
+            ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+        )
+        for position, queue in enumerate(custom_queues)
+    )
+    return [
+        above_worker_bound(path, value, maximum, code)
+        for path, value, maximum, code in checks
+        if value is not None and value > maximum
+    ]
 
 
 class AppConfig(BaseModel):
@@ -211,6 +280,17 @@ class AppConfig(BaseModel):
                     help_text=f'set max_claim_renew_age_ms >= {effective_lease_ms}',
                 )
             )
+
+        # A claim value above the bound that a worker takes is refused here,
+        # where it enters, not at the start of a worker.
+        for bound_error in worker_bound_errors(
+            prefetch_buffer=self.prefetch_buffer,
+            claim_lease_ms=self.claim_lease_ms,
+            max_claim_renew_age_ms=self.max_claim_renew_age_ms,
+            cluster_wide_cap=self.cluster_wide_cap,
+            custom_queues=self.custom_queues or [],
+        ):
+            report.add(bound_error)
 
         # Validate prefetch_buffer vs cluster_wide_cap conflict
         if self.cluster_wide_cap is not None and self.prefetch_buffer > 0:

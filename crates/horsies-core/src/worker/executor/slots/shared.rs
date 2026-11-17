@@ -26,6 +26,7 @@ use super::pool::{
 };
 use super::seat_runs::{place_on_shared_child, OpenChildLoad, Placement, SharedChildKind};
 use super::shared_slot::run_shared_slot;
+use crate::broker::OrphanSelfHeal;
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     ChildKind, DispatchNumber, InitFrame, SharedRunFrame, SharedWork, TaskInputText,
@@ -44,6 +45,9 @@ pub struct SharedPoolConfig {
     /// thread, with the seats of each child.
     pub init: InitFrame,
     pub worker_id: String,
+    /// The orphan self-heal that each run frame carries (the app's
+    /// `auto_terminate_orphaned_workflow_tasks`).
+    pub orphan_self_heal: OrphanSelfHeal,
     /// Tasks that wait for a seat, at most.
     pub pending_limit: NonZeroUsize,
     /// A child closes when the tasks that ended on it reach this many per
@@ -343,6 +347,7 @@ impl SharedPool {
                     task_name: task.task_name.clone(),
                     worker_id: self.shared.config.worker_id.clone(),
                     claimed_at: task.claimed_at,
+                    orphan_self_heal: self.shared.config.orphan_self_heal,
                     work,
                     input,
                 },

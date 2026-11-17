@@ -100,7 +100,6 @@ fn writer_with_payload(pool: &PgPool, payload: PayloadPolicy) -> OutcomeWriter {
         payload,
         RetentionConfig::default(),
         successes,
-        OrphanSelfHeal::Off,
     )
 }
 

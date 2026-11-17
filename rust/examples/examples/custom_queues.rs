@@ -1,166 +1,83 @@
-//! Custom queue example: send tasks to multiple priority queues.
+//! Custom queues: each queue has a priority (1 is claimed first) and an
+//! optional cap on its running tasks. A task names its queue.
 //!
-//! This is a **sender only** — it enqueues tasks and collects results.
-//! A worker must be running separately to execute the tasks.
-//!
-//! Run with:
-//!   # Terminal 1: start the worker
-//!   cargo run --example worker_custom -p horsies-worker
-//!
-//!   # Terminal 2: run this sender
-//!   cargo run --example custom_queues -p horsies-worker
+//! ```text
+//! cargo run -p horsies-examples --example custom_queues -- worker --profile default
+//! cargo run -p horsies-examples --example custom_queues -- demo
+//! ```
 
-use horsies_examples::common;
-
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::convert::Infallible;
+use std::process::ExitCode;
 use std::time::Duration;
 
-use horsies::{Horsies, ResolvedEnqueue};
+use horsies::{
+    task, AppConfig, CustomQueueConfig, Horsies, HorsiesError, QueueMode, TaskError, TaskOutcome,
+    WaitLimit,
+};
+use horsies_examples::{
+    app_refused, database_url, isolated_profile, main_of, DemoResult, DEFAULT_PROFILE,
+};
 
-use common::custom_mode::{HIGH, LOW, NORMAL};
-use common::tasks::custom_queues::Computed;
+#[task("send_alert", queue = "critical")]
+async fn send_alert(message: String) -> Result<String, TaskError<Infallible>> {
+    Ok(format!("alert sent: {message}"))
+}
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
+#[task("rebuild_index", queue = "bulk")]
+async fn rebuild_index(shard: u32) -> Result<u32, TaskError<Infallible>> {
+    Ok(shard)
+}
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db_url = common::db_url();
-    let config = common::custom_mode::app_config(&db_url);
-
-    println!("=== Custom Queues Example (sender) ===\n");
-    println!("NOTE: Ensure worker_custom is running in another terminal.\n");
-    println!("{}", config.format_for_logging());
-
-    // Register tasks (needed for resolve_enqueue).
+fn build_app() -> Result<Horsies, HorsiesError> {
+    let config = AppConfig {
+        queue_mode: QueueMode::Custom,
+        custom_queues: Some(vec![
+            CustomQueueConfig {
+                name: "critical".to_owned(),
+                priority: 1,
+                max_concurrency: None,
+            },
+            CustomQueueConfig {
+                name: "bulk".to_owned(),
+                priority: 50,
+                max_concurrency: Some(1),
+            },
+        ]),
+        worker_profiles: BTreeMap::from([(DEFAULT_PROFILE.to_owned(), isolated_profile())]),
+        ..AppConfig::for_database_url(database_url())
+    };
     let mut app = Horsies::new(config)?;
-    common::tasks::custom_queues::register(&mut app)?;
+    let _send_alert = send_alert::register(&mut app)?;
+    let _rebuild_index = rebuild_index::register(&mut app)?;
+    Ok(app)
+}
 
-    println!("  Registered: high_compute   -> queue \"{}\"", HIGH);
-    println!("  Registered: normal_compute -> queue \"{}\"", NORMAL);
-    println!("  Registered: low_compute    -> queue \"{}\"", LOW);
-
-    // Resolve enqueue parameters BEFORE dropping the app.
-    let resolved_high = app.resolve_enqueue("high_compute", Some(HIGH), None)?;
-    let resolved_normal = app.resolve_enqueue("normal_compute", Some(NORMAL), None)?;
-    let resolved_low = app.resolve_enqueue("low_compute", Some(LOW), None)?;
-
-    println!(
-        "\n  high_compute   -> queue={}, priority={}",
-        resolved_high.queue_name, resolved_high.priority
-    );
-    println!(
-        "  normal_compute -> queue={}, priority={}",
-        resolved_normal.queue_name, resolved_normal.priority
-    );
-    println!(
-        "  low_compute    -> queue={}, priority={}",
-        resolved_low.queue_name, resolved_low.priority
-    );
-
-    let broker = common::connect_broker(&db_url).await;
-
-    println!("\n=== Broker connected ===\n");
-
-    // Send tasks to each queue and collect results.
-    println!("=== Sending 9 tasks (3 per queue) ===\n");
-
-    let inputs: Vec<(f64, f64)> = vec![(1.0, 2.0), (10.0, 20.0), (100.0, 200.0)];
-
-    async fn send_tasks(
-        broker: &Arc<horsies::PostgresBroker>,
-        resolved: &ResolvedEnqueue,
-        inputs: &[(f64, f64)],
-    ) -> Result<Vec<horsies::TaskHandle<Computed>>, Box<dyn std::error::Error>> {
-        let mut handles = Vec::new();
-        for &(a, b) in inputs {
-            let kwargs = serde_json::to_string(&serde_json::json!({"a": a, "b": b}))?;
-            let handle = broker
-                .send_task::<Computed>(resolved, None, Some(&kwargs), None)
-                .await?;
-            println!(
-                "  Sent task {} to queue \"{}\" with a={}, b={}",
-                handle.task_id(),
-                resolved.queue_name,
-                a,
-                b,
-            );
-            handles.push(handle);
-        }
-        Ok(handles)
+async fn demo(_app: Horsies) -> DemoResult {
+    let limit = WaitLimit::parse(Some(Duration::from_secs(60)))?;
+    let mut shards = Vec::new();
+    for shard in 0..4 {
+        shards.push(rebuild_index::send(shard).await?);
     }
+    // Sent last, claimed first: `critical` has the higher priority.
+    let alert = send_alert::send("disk almost full".to_owned()).await?;
 
-    let high_handles = send_tasks(&broker, &resolved_high, &inputs).await?;
-    let normal_handles = send_tasks(&broker, &resolved_normal, &inputs).await?;
-    let low_handles = send_tasks(&broker, &resolved_low, &inputs).await?;
-
-    println!("\n=== Waiting for results ===\n");
-
-    let timeout = Some(Duration::from_secs(30));
-    let mut high_count = 0u32;
-    let mut normal_count = 0u32;
-    let mut low_count = 0u32;
-
-    for handle in &high_handles {
-        let result = handle.get(timeout).await;
-        if result.is_ok() {
-            let computed = result.unwrap();
-            println!(
-                "  [HIGH]   task={} value={:.1} queue={}",
-                handle.task_id(),
-                computed.value,
-                computed.queue,
-            );
-            high_count += 1;
-        } else {
-            println!("  [HIGH]   task={} FAILED: {:?}", handle.task_id(), result);
+    match alert.get(limit).await? {
+        TaskOutcome::Succeeded(text) => println!("{text}"),
+        TaskOutcome::Failed(error) => println!("send_alert failed: {error}"),
+    }
+    for shard in shards {
+        match shard.get(limit).await? {
+            TaskOutcome::Succeeded(done) => println!("rebuilt shard {done}"),
+            TaskOutcome::Failed(error) => println!("rebuild_index failed: {error}"),
         }
     }
-
-    for handle in &normal_handles {
-        let result = handle.get(timeout).await;
-        if result.is_ok() {
-            let computed = result.unwrap();
-            println!(
-                "  [NORMAL] task={} value={:.1} queue={}",
-                handle.task_id(),
-                computed.value,
-                computed.queue,
-            );
-            normal_count += 1;
-        } else {
-            println!("  [NORMAL] task={} FAILED: {:?}", handle.task_id(), result);
-        }
-    }
-
-    for handle in &low_handles {
-        let result = handle.get(timeout).await;
-        if result.is_ok() {
-            let computed = result.unwrap();
-            println!(
-                "  [LOW]    task={} value={:.1} queue={}",
-                handle.task_id(),
-                computed.value,
-                computed.queue,
-            );
-            low_count += 1;
-        } else {
-            println!("  [LOW]    task={} FAILED: {:?}", handle.task_id(), result);
-        }
-    }
-
-    // Print summary.
-    println!("\n=== Summary ===\n");
-    println!("  High-priority tasks completed:   {}/3", high_count);
-    println!("  Normal-priority tasks completed: {}/3", normal_count);
-    println!("  Low-priority tasks completed:    {}/3", low_count);
-    println!(
-        "  Total completed:                 {}/9",
-        high_count + normal_count + low_count
-    );
-
-    println!("\n=== Done! ===");
-
     Ok(())
+}
+
+fn main() -> ExitCode {
+    match build_app() {
+        Ok(app) => main_of(app, demo),
+        Err(error) => app_refused(&error),
+    }
 }

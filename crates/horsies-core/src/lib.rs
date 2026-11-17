@@ -28,6 +28,8 @@ pub mod monitoring;
 pub mod process_runtime;
 pub mod scheduler_manifest;
 #[cfg(test)]
+mod stored_form_vectors;
+#[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(feature = "web")]
 pub mod web;
@@ -75,10 +77,10 @@ pub use crate::broker::{
     expected_schema_version, BrokerError, BrokerErrorCode, BrokerOperationError, BrokerResult,
     CheckInterruption, ConnectivityRefusal, DatabasePing, ExpiredTaskRow, HeartbeatRow,
     ListenError, ListenProbeFailure, ListenerPlanError, PostgresBroker, RawResultRead,
-    RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow, TaskAttemptRow,
-    TaskHandle, TaskInfoRead, TaskInfoRow, TaskResultRow, WorkerPingRequest, WorkerPong,
-    WorkerPongPayload, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE,
-    WORKER_PING_CHANNEL,
+    RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow,
+    StoredEnvelopeRefused, StoredEnvelopeText, TaskAttemptRow, TaskHandle, TaskInfoRead,
+    TaskInfoRow, TaskResultRow, WorkerPingRequest, WorkerPong, WorkerPongPayload,
+    WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 // The bounded limit of a result wait; a client checks it before the read.
@@ -146,8 +148,12 @@ pub use crate::worker::executor::child_host::{
 pub use crate::worker::executor::protocol as frame_protocol;
 
 // worker re-exports
-// The worker connection check of a client's live check (`check --live`).
-pub use crate::worker::connection_fit::check_worker_connections;
+// The worker connection check of a client's live check (`check --live`):
+// on a connected broker (the Rust client), and on a lazy handle (the Python
+// bridge).
+pub use crate::worker::connection_fit::{
+    check_handle_worker_connections, check_worker_connections,
+};
 pub use crate::worker::from_manifest::{WorkerPlan, WorkerPlanRefused};
 pub use crate::worker::run_end::{
     run_end_of, RunPhase, WorkerBootCause, WorkerFailCause, WorkerRunEnd,

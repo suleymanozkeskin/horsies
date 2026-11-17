@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use crate::core::codec::from_json_bytes;
+use crate::core::codec::{check_json_bytes, from_json_bytes};
 
 use super::versions::{
     archive_digest, corrupt, validate_envelope_contract, verify_payload_digest, ArchiveDecodeError,
@@ -56,6 +56,28 @@ pub fn decode_result_envelope(
     validate_envelope_contract(ArchiveDomain::Result, version, codec, content_type)?;
     verify_payload_digest(ArchiveDomain::Result, payload, digest)?;
     from_json_bytes::<Value>(payload).map_err(|_| corrupt(ArchiveDomain::Result, "JSONDecodeError"))
+}
+
+/// The text of one stored result payload, checked as
+/// [`decode_result_envelope`] checks it, without building a value. Pure.
+///
+/// A `serde_json::Value` holds an integer outside the `i64` and `u64` range
+/// as an `f64`; the text keeps every digit, so a reader decodes the value
+/// that Python stored.
+///
+/// Errors: as [`decode_result_envelope`].
+pub fn decode_result_envelope_text(
+    version: i16,
+    codec: &str,
+    content_type: &str,
+    payload: &[u8],
+    digest: &[u8],
+) -> Result<String, ArchiveDecodeError> {
+    validate_envelope_contract(ArchiveDomain::Result, version, codec, content_type)?;
+    verify_payload_digest(ArchiveDomain::Result, payload, digest)?;
+    check_json_bytes(payload).map_err(|_| corrupt(ArchiveDomain::Result, "JSONDecodeError"))?;
+    String::from_utf8(payload.to_vec())
+        .map_err(|_| corrupt(ArchiveDomain::Result, "JSONDecodeError"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

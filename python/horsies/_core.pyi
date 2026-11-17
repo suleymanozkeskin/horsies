@@ -90,6 +90,10 @@ class CoreHandle:
         """The connectivity step of the live check: SELECT 1 on the main URL, then on the session URL
         when it differs, then the LISTEN probe in PgBouncer transaction mode. Reads only.
         """
+    def check_worker_connections(self, profiles_json: str) -> list[WorkerConnectionError]:
+        """The worker connection step of the live check: each profile against the server connection
+        limit. No profile, or PgBouncer transaction mode, connects nothing. Reads only.
+        """
     def install_schema(self) -> SchemaInstalled | SchemaInstallNotRun | BrokerFailure:
         """Apply the embedded migrations and check the schema version, once per handle. Writes."""
     def install_schema_async(self) -> asyncio.Future[SchemaInstalled | SchemaInstallNotRun | BrokerFailure]:
@@ -508,6 +512,19 @@ class ConnectivityRefused:
     def step(self) -> Literal['CONNECT', 'POOL_SETTINGS', 'MAIN_URL', 'SESSION_URL', 'LISTENER']: ...
     @property
     def message(self) -> str: ...
+
+
+@final
+class WorkerConnectionError:
+    """One refusal of the worker connection check: the core's error as data."""
+    @property
+    def message(self) -> str: ...
+    @property
+    def code(self) -> str | None: ...
+    @property
+    def notes(self) -> list[str]: ...
+    @property
+    def help_text(self) -> str | None: ...
 
 
 @final
@@ -2713,6 +2730,8 @@ class RunFrame:
     @property
     def claimed_at(self) -> datetime.datetime: ...
     @property
+    def orphan_self_heal(self) -> bool: ...
+    @property
     def work(self) -> Literal['RUN'] | StoredOptionsRefused: ...
     @property
     def input(self) -> str: ...
@@ -2747,6 +2766,8 @@ class SharedRunFrame:
     def worker_id(self) -> str: ...
     @property
     def claimed_at(self) -> datetime.datetime: ...
+    @property
+    def orphan_self_heal(self) -> bool: ...
     @property
     def work(self) -> AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused: ...
     @property
