@@ -41,7 +41,7 @@ REBOUND_PACKAGES: Final = ('horsies', 'tests')
 CORE_HANDLE_MODULE: Final = 'horsies._core'
 """The module of ``CoreHandle``."""
 
-HANDLE_TAKING_CLASSES: Final = ('CoreScheduler',)
+HANDLE_TAKING_CLASSES: Final = ('CoreScheduler', 'MonitoringHandler')
 """The classes of ``horsies._core`` whose constructor takes a ``CoreHandle``.
 A native constructor refuses the Python wrapper of the Python run, so in
 that run it gets the native handle that the wrapper holds. Native code calls
@@ -239,18 +239,23 @@ def install_python_run(
         return TripwireCoreHandle(core_handle_class(*args, **kwargs), tripped)
 
     _ = rebind(core_handle_class, build_tripwire_handle, monkeypatch)
-    for class_name in HANDLE_TAKING_CLASSES:
-        native_class: object = getattr(core_module, class_name)
-        assert callable(native_class), f'horsies._core.{class_name} is a class'
-        _ = rebind(native_class, given_the_native_handle(native_class), monkeypatch)
+    tripped_functions: set[str] = set()
     for resolved in operations:
         for function_name in resolved.operation.core_functions:
+            tripped_functions.add(function_name)
             core_function: object = getattr(core_module, function_name)
             _ = rebind(
                 core_function,
                 tripwire(resolved.operation.name, Implementation.PYTHON_REFERENCE),
                 monkeypatch,
             )
+    # A class that this module's table trips keeps its tripwire.
+    for class_name in HANDLE_TAKING_CLASSES:
+        if class_name in tripped_functions:
+            continue
+        native_class: object = getattr(core_module, class_name)
+        assert callable(native_class), f'horsies._core.{class_name} is a class'
+        _ = rebind(native_class, given_the_native_handle(native_class), monkeypatch)
 
 
 def install_core_run(

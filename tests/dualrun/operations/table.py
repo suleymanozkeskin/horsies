@@ -74,6 +74,18 @@ class DualRunOperation:
     core_functions: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class CoreOnlyTest:
+    """An integration test that asserts a fact of the core's path of a
+    switched operation (a statement of the core, a direct call of a core
+    function, a core exception class), so the reference cannot pass it. In
+    the module's dual-run it runs once, on the core. ``node_id`` is the
+    pytest id without parameters."""
+
+    node_id: str
+    reason: str
+
+
 class TripwireHit(BaseException):
     """A run called the implementation of the other run: the rebinding missed
     a call path.
