@@ -160,6 +160,10 @@ class CoreHandle:
         budget has passed. Writes; each batch commits alone. A negative value raises
         OverflowError.
         """
+    def expire_paused_workflows_async(self, older_than_us: int, batch_size: int) -> asyncio.Future[PausedExpired | PausedExpiryFailed]:
+        """Expire the PAUSED workflows older than older_than_us microseconds, at most batch_size,
+        oldest first. Writes; each candidate commits alone.
+        """
     def task_info(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> TaskInfoRecord | TaskInfoNotFound | BrokerFailure:
         """The info of one task. Installs the schema once per handle first; then reads only."""
     def task_info_async(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> asyncio.Future[TaskInfoRecord | TaskInfoNotFound | BrokerFailure]:
@@ -1339,6 +1343,24 @@ class WorkflowDeleteFailed:
     """
     @property
     def deleted_before(self) -> int: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class PausedExpired:
+    """The paused expiry call ended; expired counts the workflows it expired."""
+    @property
+    def expired(self) -> int: ...
+
+
+@final
+class PausedExpiryFailed:
+    """The paused expiry call failed. The candidates before a failed one are expired; a
+    statement whose reply was lost may have committed.
+    """
     @property
     def message(self) -> str: ...
     @property
