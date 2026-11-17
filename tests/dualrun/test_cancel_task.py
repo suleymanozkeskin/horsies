@@ -1,19 +1,30 @@
-"""Dual-run of the monitoring cancel switch: the locked-row cancel against ``horsies_cancel_task``.
+"""Dual-runs of the monitoring cancel.
 
-Reference: ``tests/dualrun/reference/cancel.py``. Candidate:
-``horsies.monitoring.task_actions.cancel_task``. The seed holds one task
-per case, live and finished; both sides must cancel the same rows, and the
-candidate's answer must be the answer the old diagnosis gave.
+Two pairs, with the same seed (one task per case, live and finished):
+
+1. The SQL redesign: the locked-row cancel against ``horsies_cancel_task``.
+   Reference: ``tests/dualrun/reference/cancel.py``. Candidate:
+   ``horsies.monitoring.task_actions.cancel_task``. Both sides must cancel
+   the same rows, and the candidate's answer must be the answer the old
+   diagnosis gave.
+2. The caller switch: the Python caller of the function against the core.
+   Reference: ``tests/dualrun/reference/cancel_caller.py``, the function's
+   body before the switch (one statement on the broker's SQLAlchemy engine,
+   decoded in Python). Candidate: ``cancel_task`` as shipped, which calls
+   ``CoreHandle.cancel_task_async``. The snapshots and the answers must be
+   equal.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Final, LiteralString
+
+from horsies.core.brokers.postgres import PostgresBroker
 
 import psycopg
 import pytest
@@ -21,6 +32,7 @@ import pytest
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
 from horsies.monitoring.task_actions import (
+    TaskActionError,
     TaskActionNotCancellable,
     TaskActionNotFound,
     TaskActionWorkflowTask,
@@ -33,6 +45,7 @@ from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
 from tests.dualrun.reference import cancel as reference
+from tests.dualrun.reference import cancel_caller
 from tests.dualrun.seeds import (
     SeedCoverage,
     SeedStatus,
@@ -241,4 +254,77 @@ def test_cancel_writes_and_answers_what_the_locked_row_cancel_did(
         'cancelled_before': ('not cancellable', TaskStatus.CANCELLED),
         'workflow_failed': ('workflow task', TaskStatus.FAILED),
         'absent': ('not found', None),
+    }
+
+
+# ---- The caller switch: the Python caller against the core ----
+
+type _CancelCall = Callable[
+    [PostgresBroker, uuid.UUID, bool],
+    Awaitable[Result[TaskCancelled, TaskActionError]],
+]
+
+
+async def _cancel_each_async(
+    database: DualRunDatabase, cases: tuple[_Case, ...], call: _CancelCall
+) -> dict[str, Result[TaskCancelled, TaskActionError]]:
+    async with open_broker(database) as broker:
+        return {
+            case.name: await call(broker, uuid.UUID(case.task_id), case.include_running)
+            for case in cases
+        }
+
+
+async def _python_caller(
+    broker: PostgresBroker, task_id: uuid.UUID, include_running: bool
+) -> Result[TaskCancelled, TaskActionError]:
+    return await cancel_caller.cancel_task(broker, task_id, include_running=include_running)
+
+
+async def _core_caller(
+    broker: PostgresBroker, task_id: uuid.UUID, include_running: bool
+) -> Result[TaskCancelled, TaskActionError]:
+    return await cancel_task(broker, task_id, include_running=include_running)
+
+
+def _caller_side(
+    name: str, call: _CancelCall
+) -> OperationSide[tuple[_Case, ...], dict[str, Result[TaskCancelled, TaskActionError]]]:
+    def act(
+        database: DualRunDatabase, cases: tuple[_Case, ...]
+    ) -> dict[str, Result[TaskCancelled, TaskActionError]]:
+        return asyncio.run(_cancel_each_async(database, cases, call))
+
+    return OperationSide(name=name, act=act)
+
+
+def test_the_core_cancel_writes_and_answers_what_the_python_caller_did(
+    empty_database: MakeDatabase,
+) -> None:
+    match dual_run(
+        empty_database,
+        _seed,
+        _caller_side('Python caller on SQLAlchemy', _python_caller),
+        _caller_side('CoreHandle.cancel_task_async', _core_caller),
+        SeedCoverage.HISTORY_AND_BEATS,
+    ):
+        case Ok(run):
+            pass
+        case Err(failed):
+            pytest.fail(f'{failed.step}: {failed.cause}')
+
+    assert run.diff.entries == (), render_diff(run.diff)
+    assert run.candidate.report == run.reference.report
+    assert {
+        name: answer.is_ok() for name, answer in run.reference.report.items()
+    } == {
+        'pending': True,
+        'claimed': True,
+        'running_refused': False,
+        'running_included': True,
+        'workflow_live': False,
+        'completed': False,
+        'cancelled_before': False,
+        'workflow_failed': False,
+        'absent': False,
     }

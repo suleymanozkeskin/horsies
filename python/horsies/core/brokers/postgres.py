@@ -24,9 +24,11 @@ from horsies._core import (
     StaleClaimsBoundReached,
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
+    StaleRunningRecovered,
+    StaleRunningScanFailed,
+    StaleRunningScanFull,
 )
 from sqlalchemy.ext.asyncio import (
-    AsyncConnection,
     AsyncEngine,
     AsyncSession,
     create_async_engine,
@@ -102,7 +104,7 @@ from horsies.core.models.workflow_pg import (
     WorkflowModel as _WorkflowModel,
     WorkflowTaskModel as _WorkflowTaskModel,
 )
-from horsies.core.types.core_failure import CoreOperationFailed
+from horsies.core.types.core_failure import CoreOperationFailed, core_error_retryable
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.status import (
     TASK_TERMINAL_STATES,
@@ -126,20 +128,10 @@ from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     Applied,
     LostClaim,
-    RetryScheduled,
     SourceStateConflict,
-    StaleFailureApplied,
     TaskAbsent,
 )
 from horsies.core.lifecycle.persistence import apply_batch_async
-from horsies.core.brokers.stale_running import (
-    STALE_RUNNING_SCAN_BATCH_SIZE,
-    StaleCandidate,
-    StaleThresholds,
-    crash_result_json,
-    finish_stale_attempt,
-    scan_stale_running,
-)
 from horsies.core.models.class_coverage import (
     ClassCoverage,
     ClassReadRefused,
@@ -3022,129 +3014,77 @@ class PostgresBroker:
         finalizing_stale_threshold_ms: int = 300_000,
     ) -> BrokerResult[int]:
         """Recover RUNNING tasks whose runner stopped beating: a crash retry
-        when the task's policy allows it, else the failure.
+        when the task's policy allows it, else the failure. One core pass.
 
-        One ``horsies_stale_running_scan`` reads at most
-        ``STALE_RUNNING_SCAN_BATCH_SIZE`` candidates without a lock; a full
-        batch leaves the rest to the next pass. Each candidate is then one
-        ``horsies_finish_stale_attempt`` statement in autocommit, which
-        judges staleness again under the task advisory lock and the row
-        lock and writes the attempt with the retry or the move. A scheduled
-        retry also wakes its queue (best effort). Returns the number of tasks
-        retried or failed; a refused candidate is not counted, and a
-        candidate whose statement failed is logged and skipped. A failed
-        scan reports ``CLEANUP_FAILED``.
+        The core reads at most one scan batch of candidates with
+        ``horsies_stale_running_scan``, without a lock; a full batch leaves
+        the rest to the next pass and a warning is logged. Each candidate is
+        then one ``horsies_finish_stale_attempt`` statement that commits
+        alone: it judges staleness again under the task advisory lock and the
+        row lock and writes the attempt with the retry or the move, with the
+        crash result that the core builds. A scheduled retry also wakes its
+        queue (best effort). Returns the number of tasks retried or failed; a
+        refused candidate is not counted, and a candidate whose statement
+        failed is logged on ``horsies.broker`` and skipped.
+
+        Failures, each ``CLEANUP_FAILED``; nothing was written:
+        - the scan, the connect or the client family check failed;
+          ``retryable`` is the core's classification of the cause;
+        - a threshold below 0 or above 2,147,483,647 ms; not retryable;
+        - the core of this process cannot run the pass (``CoreError``);
+          ``retryable`` follows ``core_error_retryable``.
+
+        A cancel of the caller does not stop the pass: the core runs it to
+        its end.
         """
-        match await self.select_resources():
-            case Err(loop_limit):
-                return _loop_limit_err('mark_stale_tasks_as_failed', loop_limit)
-            case Ok(resources):
-                pass
-        thresholds = StaleThresholds(
-            stale_after_ms=stale_threshold_ms,
-            finalizing_stale_after_ms=finalizing_stale_threshold_ms,
-        )
+        thresholds = (stale_threshold_ms, finalizing_stale_threshold_ms)
+        for threshold_ms in thresholds:
+            if not SIGNED_64_BIT_MIN <= threshold_ms <= SIGNED_64_BIT_MAX:
+                refusal = f'the stale threshold {threshold_ms} ms is not a 64-bit integer'
+                return Err(
+                    BrokerOperationFailed(
+                        code=BrokerErrorCode.CLEANUP_FAILED,
+                        message=f'mark_stale_tasks_as_failed failed: {refusal}',
+                        retryable=False,
+                        exception=OverflowError(refusal),
+                    ),
+                )
         try:
-            async with resources.session_factory() as session:
-                candidates = await scan_stale_running(
-                    await autocommit_connection(session),
-                    thresholds,
-                    STALE_RUNNING_SCAN_BATCH_SIZE,
-                )
-        except Exception as exc:
-            return _operation_failed(
-                BrokerErrorCode.CLEANUP_FAILED,
-                f'mark_stale_tasks_as_failed failed: {exc}',
-                exc,
+            outcome = await self._core_handle.mark_stale_running_async(
+                stale_threshold_ms, finalizing_stale_threshold_ms,
             )
-        if len(candidates) == STALE_RUNNING_SCAN_BATCH_SIZE:
-            self.logger.warning(
-                'mark_stale_tasks_as_failed read a full scan batch of %s '
-                'candidates; the rest is recovered next pass',
-                STALE_RUNNING_SCAN_BATCH_SIZE,
+        except CoreError as exc:
+            return Err(
+                BrokerOperationFailed(
+                    code=BrokerErrorCode.CLEANUP_FAILED,
+                    message=f'mark_stale_tasks_as_failed failed: {exc}',
+                    retryable=core_error_retryable(exc),
+                    exception=exc,
+                ),
             )
-        processed = 0
-        for candidate in candidates:
-            try:
-                recovered = await self._finish_stale_candidate(
-                    resources, candidate, thresholds,
+        match outcome:
+            case StaleRunningRecovered(recovered=recovered):
+                return Ok(recovered)
+            case StaleRunningScanFull(recovered=recovered, scan_batch=scan_batch):
+                self.logger.warning(
+                    'mark_stale_tasks_as_failed read a full scan batch of %s '
+                    'candidates; the rest is recovered next pass',
+                    scan_batch,
                 )
-            except Exception as task_exc:
-                self.logger.error(
-                    'Reaper failed to process stale task %s: %s',
-                    candidate.task_id,
-                    task_exc,
+                return Ok(recovered)
+            case StaleRunningScanFailed(message=message, retryable=retryable):
+                return Err(
+                    BrokerOperationFailed(
+                        code=BrokerErrorCode.CLEANUP_FAILED,
+                        message=f'mark_stale_tasks_as_failed failed: {message}',
+                        retryable=retryable,
+                        exception=CoreOperationFailed(
+                            'PostgresBroker.mark_stale_tasks_as_failed', message, retryable,
+                        ),
+                    ),
                 )
-                continue
-            if recovered:
-                processed += 1
-        return Ok(processed)
-
-    async def _finish_stale_candidate(
-        self,
-        resources: BrokerResources,
-        candidate: StaleCandidate,
-        thresholds: StaleThresholds,
-    ) -> bool:
-        """Recover one candidate. True when its retry or its failure committed.
-
-        Raises what the database raises; the statement wrote nothing, or
-        committed and its reply was lost.
-        """
-        match crash_result_json(candidate, thresholds):
-            case Err(serialization_error):
-                self.logger.error(
-                    'Failed to serialize crash result for task %s: %s',
-                    candidate.task_id,
-                    serialization_error,
-                )
-                return False
-            case Ok(result_json):
-                pass
-        async with resources.session_factory() as session:
-            connection = await autocommit_connection(session)
-            outcome = await finish_stale_attempt(
-                connection, candidate, thresholds, result_json,
-            )
-            match outcome:
-                case RetryScheduled(
-                    retry_count=retry_count,
-                    next_retry_at=next_retry_at,
-                    queue_name=queue_name,
-                ):
-                    self.logger.info(
-                        'Reaper scheduled retry #%d for stale task %s at %s',
-                        retry_count,
-                        candidate.task_id,
-                        next_retry_at,
-                    )
-                    await self._wake_stale_retry(connection, candidate.task_id, queue_name)
-                    return True
-                case StaleFailureApplied():
-                    return True
-                case AlreadyApplied() | LostClaim() | SourceStateConflict() | TaskAbsent():
-                    self.logger.debug(
-                        'Reaper left stale candidate %s: %r', candidate.task_id, outcome,
-                    )
-                    return False
-                case _ as unreachable:
-                    assert_never(unreachable)
-
-    async def _wake_stale_retry(
-        self,
-        connection: AsyncConnection,
-        task_id: str,
-        queue_name: str,
-    ) -> None:
-        """Wake the queue of a scheduled crash retry. Best effort: a failure is
-        logged at debug level, and the claim poll finds the retry when due."""
-        try:
-            await connection.execute(
-                text('SELECT pg_notify(:ch, :p)'),
-                {'ch': f'task_queue_{queue_name}', 'p': f'retry:{task_id}'},
-            )
-        except _DRIVER_ERRORS as exc:
-            self.logger.debug('Wake of stale retry %s failed: %s', task_id, exc)
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def expire_pending_tasks(self) -> BrokerResult[int]:
         """Transition PENDING tasks whose good_until deadline has passed to EXPIRED.
@@ -3248,9 +3188,13 @@ class PostgresBroker:
         - a threshold below 0 or above 2,147,483,647 ms: nothing ran; not
           retryable.
 
+        - the core of this process cannot run the pass (``CoreError``: it
+          stopped, did not start, or has too many calls in flight); the
+          ``exception`` is that error, and ``retryable`` follows
+          ``core_error_retryable``.
+
         A cancel of the caller does not stop the pass: the core runs it to
-        its end. A ``CoreError`` (the core of this process stopped or did
-        not start) propagates.
+        its end.
         """
         if not SIGNED_64_BIT_MIN <= stale_threshold_ms <= SIGNED_64_BIT_MAX:
             refusal = (
@@ -3267,7 +3211,20 @@ class PostgresBroker:
                     exception=OverflowError(refusal),
                 ),
             )
-        match await self._core_handle.requeue_stale_claimed_async(stale_threshold_ms):
+        try:
+            outcome = await self._core_handle.requeue_stale_claimed_async(
+                stale_threshold_ms,
+            )
+        except CoreError as exc:
+            return Err(
+                BrokerOperationFailed(
+                    code=BrokerErrorCode.CLEANUP_FAILED,
+                    message=f'requeue_stale_claimed failed: {exc}',
+                    retryable=core_error_retryable(exc),
+                    exception=exc,
+                ),
+            )
+        match outcome:
             case StaleClaimsDrained(requeued=requeued):
                 return Ok(requeued)
             case StaleClaimsBoundReached(requeued=requeued):
