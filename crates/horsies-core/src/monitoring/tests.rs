@@ -13,11 +13,8 @@ use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::history::partitions::publication::LoaderPublication;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
-use crate::core::lifecycle::{
-    CallerHoldsRowLock, PriorLockedRead, TerminalizationCommand, TerminalizationOutcome,
-    WorkerOwned,
-};
-use crate::TaskStatus;
+use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome, WorkerOwned};
+use crate::test_support::terminal_writes::{self, TerminalFailure};
 
 use super::*;
 
@@ -803,13 +800,16 @@ impl TaskSeed {
     }
 }
 
+/// Insert one live row. A RUNNING row carries the process facts that its
+/// start writes, the facts of the attempt rows of [`seed_attempt`].
 async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
     sqlx::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
             started_at, claimed_at, claimed_by_worker_id, is_workflow_task, retry_count,
             max_retries, command_fingerprint_version, command_fingerprint, retention_class_key,
-            retain_rerun_input, created_at, updated_at, execution, claim_expires_at
+            retain_rerun_input, created_at, updated_at, execution, claim_expires_at,
+            worker_pid, worker_hostname, worker_process_name
         ) VALUES (
             $1, $2, $3, 100, 'null', $4, NOW(), NOW() - make_interval(secs => $5),
             CASE WHEN $6::bigint IS NULL THEN NULL
@@ -818,7 +818,10 @@ async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
             CASE WHEN $8 THEN NULL ELSE 1 END,
             CASE WHEN $8 THEN NULL ELSE decode(repeat('0a', 32), 'hex') END, 'forever', FALSE,
             NOW(), NOW(), 'ISOLATED',
-            CASE WHEN $4 = 'CLAIMED' THEN NOW() + interval '1 hour' END
+            CASE WHEN $4 = 'CLAIMED' THEN NOW() + interval '1 hour' END,
+            CASE WHEN $4 = 'RUNNING' THEN 4242 END,
+            CASE WHEN $4 = 'RUNNING' THEN 'w2-host' END,
+            CASE WHEN $4 = 'RUNNING' THEN 'w2-process' END
         )",
     )
     .bind(seed.id)
@@ -857,37 +860,24 @@ async fn seed_attempt(pool: &PgPool, task_id: Uuid, attempt: i32, code: &str) {
     .expect("seed W2 attempt");
 }
 
+/// The success of a RUNNING plain task of `w2-worker`.
 async fn complete_task(pool: &PgPool, task_id: Uuid) {
-    let outcome = terminalize(
-        pool,
-        &TerminalizationCommand::CompleteLockedTask {
-            task_id,
-            fence: PriorLockedRead {
-                worker_id: "w2-worker".to_owned(),
-            },
-            result_json: "{\"Ok\":true}".to_owned(),
-        },
-    )
-    .await
-    .expect("complete W2 task");
+    let outcome = terminal_writes::complete_plain_task(pool, task_id, "w2-worker", "{\"Ok\":true}")
+        .await
+        .expect("complete W2 task");
     assert!(matches!(
         outcome.as_slice(),
         [TerminalizationOutcome::Applied { .. }]
     ));
 }
 
+/// The terminal failure of a RUNNING task of `w2-worker`, plain or workflow.
 async fn fail_task(pool: &PgPool, task_id: Uuid, code: &str) {
-    let outcome = terminalize(
+    let outcome = terminal_writes::fail_running_task(
         pool,
-        &TerminalizationCommand::FailLockedTask {
-            task_id,
-            fence: PriorLockedRead {
-                worker_id: "w2-worker".to_owned(),
-            },
-            result_json: "{\"Err\":{}}".to_owned(),
-            error_code: Some(code.to_owned()),
-            failed_reason: Some("W2 failure".to_owned()),
-        },
+        task_id,
+        "w2-worker",
+        &TerminalFailure::of_task("{\"Err\":{}}", Some(code), Some("W2 failure")),
     )
     .await
     .expect("fail W2 task");
@@ -974,16 +964,9 @@ async fn live_and_history_aggregates_merge_before_caps() {
 
     let cancelled = scope.pending("cancelled_status");
     seed_task(&pool, &cancelled).await;
-    let cancelled_outcome = terminalize(
-        &pool,
-        &TerminalizationCommand::CancelLockedTask {
-            task_id: cancelled.id,
-            fence: CallerHoldsRowLock,
-            permitted_source_statuses: vec![TaskStatus::Pending],
-        },
-    )
-    .await
-    .expect("cancel W2 task");
+    let cancelled_outcome = terminal_writes::cancel_live_task(&pool, cancelled.id, false)
+        .await
+        .expect("cancel W2 task");
     assert!(matches!(
         cancelled_outcome.as_slice(),
         [TerminalizationOutcome::Applied { .. }]
@@ -1492,9 +1475,12 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
     let broker = PostgresBroker::from_pool(pool.clone());
     let workflow_id = Uuid::new_v4();
     seed_workflow(&pool, workflow_id, &scope.workflow("detail"), "RUNNING").await;
+    // The second run: attempt 1 failed and was retried, and the failure of
+    // this run writes attempt 2.
     let mut task = scope.running("detail_task");
     task.workflow_task = true;
     task.error_code = Some("TASK_EXCEPTION".to_owned());
+    task.retry_count = 1;
     seed_task(&pool, &task).await;
     seed_attempt(&pool, task.id, 1, "TASK_EXCEPTION").await;
     seed_attempt(&pool, task.id, 2, "TASK_EXCEPTION").await;
