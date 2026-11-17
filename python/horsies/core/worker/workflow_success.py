@@ -11,20 +11,36 @@ enqueued.
 The statement runs alone in autocommit (``run_in_autocommit``): one round
 trip, plus the pool pre-ping when the engine has it on. Phase 2 stays a
 separate transaction, so a phase-2 error never undoes phase 1.
+
+The worker sends the statement through the core
+(``finish_workflow_success_in_core``, ``CoreHandle.finish_workflow_success_async``),
+and the core's record becomes the same outcome types.
+``finish_workflow_success`` stays for the dual-run reference of the worker's
+caller.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import assert_never
+from typing import Final, assert_never
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import horsies._core as core
 from horsies.core.history.terminalization.move import (
     FINISH_WORKFLOW_SUCCESS_FUNCTION,
+)
+from horsies.core.lifecycle.core_records import (
+    already_applied_of,
+    lost_claim_of,
+    observed_of,
+    phase_two_owed_of,
+    source_state_conflict_of,
+    task_absent_of,
 )
 from horsies.core.lifecycle.commands import CompleteLockedTask
 from horsies.core.lifecycle.fences import OwnedClaim
@@ -38,6 +54,7 @@ from horsies.core.lifecycle.outcomes import (
     decode_workflow_success_row,
 )
 from horsies.core.logging import get_logger
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.utils.db import SingleStatement, run_in_autocommit
 
 logger = get_logger('lifecycle')
@@ -149,3 +166,76 @@ def _log_outcome(
         outcome,
         command.fence,
     )
+
+
+WORKFLOW_SUCCESS_SUBJECT: Final = 'finish_workflow_success'
+"""The subject of a ``CoreOperationFailed`` of a workflow success."""
+
+
+def _workflow_success_outcome_of(
+    record: core.WorkflowSuccessApplied
+    | core.AttemptAlreadyApplied
+    | core.AttemptLostClaim
+    | core.AttemptSourceStateConflict
+    | core.AttemptTaskAbsent
+    | core.AttemptWriteFailed,
+) -> WorkflowSuccessOutcome:
+    """The outcome of a workflow success record. Pure.
+
+    Raises:
+        CoreOperationFailed: an ``AttemptWriteFailed`` record: the statement
+            wrote nothing, or it committed and its reply was lost.
+        OutcomeDecodeError: a text of the record outside the Python catalogs.
+    """
+    match record:
+        case core.WorkflowSuccessApplied():
+            return SuccessApplied(
+                task_id=str(record.task_id),
+                terminal_at=record.terminal_at,
+                observed=observed_of(
+                    record.observed_status,
+                    record.observed_worker_id,
+                    record.observed_claimed_at,
+                ),
+                phase_two=phase_two_owed_of(record.phase_two),
+            )
+        case core.AttemptAlreadyApplied():
+            return already_applied_of(record)
+        case core.AttemptLostClaim():
+            return lost_claim_of(record)
+        case core.AttemptSourceStateConflict():
+            return source_state_conflict_of(record)
+        case core.AttemptTaskAbsent():
+            return task_absent_of(record)
+        case core.AttemptWriteFailed(message=message, retryable=retryable):
+            raise CoreOperationFailed(WORKFLOW_SUCCESS_SUBJECT, message, retryable)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+async def finish_workflow_success_in_core(
+    handle: core.CoreHandle,
+    command: FinishWorkflowSuccess,
+) -> WorkflowSuccessOutcome:
+    """``finish_workflow_success`` through the core: one statement that
+    commits alone, the same outcomes and the same log.
+
+    A task id that is not a UUID is a defect of the claim that gave it:
+    ``ValueError``.
+
+    Raises:
+        CoreOperationFailed: the statement failed (``retryable`` is the
+            core's classification). A lost reply is an unknown outcome: a
+            second call classifies a committed success as ``AlreadyApplied``.
+        CoreError: the core of this process cannot run the call.
+        OutcomeDecodeError: a record outside the Python catalogs.
+    """
+    record = await handle.finish_workflow_success_async(
+        uuid.UUID(command.task_id),
+        worker_id=command.fence.worker_id,
+        claimed_at=command.fence.claimed_at,
+        result_json=command.result_json,
+    )
+    outcome = _workflow_success_outcome_of(record)
+    _log_outcome(command, outcome)
+    return outcome

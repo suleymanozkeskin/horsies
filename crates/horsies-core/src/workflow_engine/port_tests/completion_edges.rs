@@ -332,12 +332,11 @@ async fn the_error_summary_of_a_failed_child_follows_python() {
     }
 }
 
-/// The stored child error `null` is JSON that is not an object: Python's
-/// reader gives `None` for it and takes the first 200 characters of the text,
-/// `"null"`. The baseline reads it as a JSON null and gives no summary.
+/// The stored child error `null` is the JSON null: Python's reader gives
+/// `None` for it and takes the first 200 characters of the text, `"null"`
+/// (`horsies_workflow_child_node_result` reads it the same way).
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1311"]
 async fn a_child_error_stored_as_json_null_is_summarized_as_its_text() {
     let pool = shared_pool().await;
     let mut child = WorkflowSeed::running().status("FAILED");

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -99,7 +99,10 @@ class TestParameters:
         ('key', 'expected'),
         [
             (Unkeyed(), ('UNKEYED', None, None, None)),
-            (Keyed(digest=_DIGEST, scope_version=1, window_s=86_400), ('KEYED', _DIGEST, 1, 86_400)),
+            (
+                Keyed(digest=_DIGEST, scope_version=1, window=timedelta(seconds=1.5)),
+                ('KEYED', _DIGEST, 1, 1_500_000),
+            ),
         ],
         ids=['unkeyed', 'keyed'],
     )
@@ -112,7 +115,7 @@ class TestParameters:
             params['key_kind'],
             params['key_digest'],
             params['key_scope_version'],
-            params['key_window_s'],
+            params['key_window_us'],
         ) == expected
 
     @pytest.mark.parametrize('send_kind', [SendKind.FIRST, SendKind.REPEAT])

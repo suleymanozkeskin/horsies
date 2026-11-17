@@ -369,8 +369,8 @@ async fn catch_up_permanent_failure_skips_doomed_slot() {
 /// command: the start refuses it before any statement (Python
 /// `prepare_schedules`, `CONFIG_INVALID_SCHEDULE`). Before, the refusal
 /// came at each fire and skipped the slot.
-#[test]
-fn an_input_over_the_reject_bound_refuses_the_start() {
+#[tokio::test]
+async fn an_input_over_the_reject_bound_refuses_the_start() {
     let lazy = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgresql://horsies@127.0.0.1:1/unreachable")
         .expect("lazy pool");
@@ -397,8 +397,8 @@ fn an_input_over_the_reject_bound_refuses_the_start() {
 
 /// Options that the broker refuses give no send command: the start refuses
 /// the schedule (Python `_build_commands`, `CONFIG_INVALID_SCHEDULE`).
-#[test]
-fn options_that_the_broker_refuses_refuse_the_start() {
+#[tokio::test]
+async fn options_that_the_broker_refuses_refuse_the_start() {
     let lazy = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgresql://horsies@127.0.0.1:1/unreachable")
         .expect("lazy pool");

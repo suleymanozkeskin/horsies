@@ -242,7 +242,8 @@ $$;
 -- - p_start_kind NOW | AT (p_start_at) | AFTER_DELAY (p_start_delay_s, whole seconds >= 0): enqueued_at is NOW(),
 --   the given time, or NOW() plus the delay. A slot of another kind must be NULL.
 -- - p_lineage_kind FIRST_RUN | RERUN (p_rerun_of_task_id and p_rerun_root_task_id).
--- - p_key_kind UNKEYED | KEYED (p_key_digest, p_key_scope_version, p_key_window_s in whole seconds).
+-- - p_key_kind UNKEYED | KEYED (p_key_digest, p_key_scope_version, p_key_window: the reservation window, exact to the
+--   microsecond, more than 0 and at most 30 days; the key claim refuses another window with 22023).
 -- p_send_kind FIRST | REPEAT. The fingerprint version and the 32-byte fingerprint are required: a plain send always
 -- carries one. Column shapes (queue name length, retention class key, priority and retry ranges, execution class)
 -- are the table's CHECKs.
@@ -280,7 +281,7 @@ CREATE FUNCTION horsies_enqueue_task(
     p_key_kind text,
     p_key_digest bytea,
     p_key_scope_version smallint,
-    p_key_window_s integer,
+    p_key_window interval,
     p_send_kind text
 ) RETURNS TABLE(outcome text, task_id uuid)
     LANGUAGE plpgsql
@@ -346,13 +347,13 @@ BEGIN
     END CASE;
     CASE p_key_kind
         WHEN 'UNKEYED' THEN
-            IF num_nulls(p_key_digest, p_key_scope_version, p_key_window_s) <> 3 THEN
+            IF num_nulls(p_key_digest, p_key_scope_version, p_key_window) <> 3 THEN
                 RAISE EXCEPTION 'horsies_enqueue_task: an unkeyed send has no key values'
                     USING ERRCODE = 'invalid_parameter_value';
             END IF;
             v_keyed := FALSE;
         WHEN 'KEYED' THEN
-            IF num_nulls(p_key_digest, p_key_scope_version, p_key_window_s) <> 0 THEN
+            IF num_nulls(p_key_digest, p_key_scope_version, p_key_window) <> 0 THEN
                 RAISE EXCEPTION 'horsies_enqueue_task: a keyed send names its digest, scope version and window'
                     USING ERRCODE = 'invalid_parameter_value';
             END IF;
@@ -370,7 +371,7 @@ BEGIN
     IF v_keyed THEN
         SELECT * INTO STRICT v_claim
         FROM horsies_key_reservation_claim(
-            p_key_digest, p_key_scope_version, make_interval(secs => p_key_window_s),
+            p_key_digest, p_key_scope_version, p_key_window,
             p_fingerprint_version, p_fingerprint, p_task_id
         );
         CASE v_claim.outcome
@@ -921,6 +922,65 @@ BEGIN
     END IF;
 
     RETURN QUERY SELECT 'STARTED'::text, NULL::text, NOW();
+END
+$$;
+
+-- horsies_mark_finalizing: the finalizing marker of a run whose body ended, written by the child before the parent
+-- finalizes the attempt.
+--
+-- Guarantee:
+-- - The row gets finalizing_at = NOW(), finalizing_by_worker_id = p_worker_id and updated_at = NOW() only when it is
+--   RUNNING under p_worker_id at the claim generation p_claimed_at. The generation comparison has no NULL arm.
+-- - A stale attempt cannot refresh the marker of a later claim of the same task: the fence is read on the locked
+--   row, so a claim that changed while this call waited for the lock is NOT_HELD.
+-- - The marker sends no status event (the status does not change) and moves nothing.
+--
+-- Arguments: every argument is required (22023): the task, the worker, the claim generation.
+-- Locks: the task row (FOR NO KEY UPDATE, read by id alone so only the primary key serves it). No task advisory lock:
+-- nothing moves.
+-- Returns one row: outcome MARKED, or NOT_HELD (absent, not RUNNING, or another owner or claim generation; nothing
+-- is written).
+-- Python: MARK_FINALIZING_SQL (core/worker/child_runner.py:787-806), _mark_task_finalizing (:1257-1299),
+-- mark_task_finalizing (core/worker/shared_lifecycle.py:470-500).
+CREATE FUNCTION horsies_mark_finalizing(
+    p_task_id uuid,
+    p_worker_id text,
+    p_claimed_at timestamp with time zone
+) RETURNS TABLE(outcome text)
+    LANGUAGE plpgsql
+    AS $$
+#variable_conflict use_column
+DECLARE
+    v_held boolean;
+BEGIN
+    IF num_nulls(p_task_id, p_worker_id, p_claimed_at) <> 0 THEN
+        RAISE EXCEPTION 'horsies_mark_finalizing: every argument is required'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    SELECT (
+        t.status = 'RUNNING'
+        AND t.claimed_by_worker_id = p_worker_id
+        AND t.claimed_at = p_claimed_at
+    ) IS TRUE
+    INTO v_held
+    FROM horsies_tasks t
+    WHERE t.id = p_task_id
+    FOR NO KEY UPDATE;
+
+    -- An absent row leaves v_held NULL.
+    IF v_held IS NOT TRUE THEN
+        RETURN QUERY SELECT 'NOT_HELD'::text;
+        RETURN;
+    END IF;
+
+    UPDATE horsies_tasks t
+    SET finalizing_at = NOW(),
+        finalizing_by_worker_id = p_worker_id,
+        updated_at = NOW()
+    WHERE t.id = p_task_id;
+
+    RETURN QUERY SELECT 'MARKED'::text;
 END
 $$;
 

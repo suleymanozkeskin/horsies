@@ -15,6 +15,32 @@ connection failure without one) replace it when the core reports them.
 
 from __future__ import annotations
 
+from horsies._core import (
+    CoreCallTimedOut,
+    CoreError,
+    CoreStartFailed,
+    CoreStopped,
+    ForkedAfterCoreStart,
+    TooManyPendingCalls,
+)
+
+
+def core_error_retryable(exc: CoreError) -> bool:
+    """Whether the condition of a core boundary error may clear in this process. Pure.
+
+    - ``TooManyPendingCalls``: yes, the calls in flight end.
+    - ``CoreCallTimedOut``: yes, a later call can end within its bound.
+    - ``CoreStopped``, ``CoreStartFailed``, ``ForkedAfterCoreStart``: no, the
+      state stays for the life of the process.
+    """
+    match exc:
+        case TooManyPendingCalls() | CoreCallTimedOut():
+            return True
+        case CoreStopped() | CoreStartFailed() | ForkedAfterCoreStart():
+            return False
+        case _:
+            return False
+
 
 class CoreOperationFailed(Exception):
     """A core operation reported a failure record.

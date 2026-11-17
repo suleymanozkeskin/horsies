@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any, AsyncGenerator, Generator
 import pytest
 import pytest_asyncio
+from pydantic import SecretStr
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, AsyncEngine
@@ -42,8 +43,10 @@ from horsies.core.models.workflow import (
     SuccessPolicy,
     SuccessCase,
 )
-from horsies.core.brokers.postgres import PostgresBroker
+from horsies._core import CoreHandle
+from horsies.core.brokers.postgres import PostgresBroker, WorkerProcessBroker
 from horsies.core.worker.child_pool import _cleanup_worker_pool
+from horsies.core.worker.worker import Worker
 from horsies.core.workflows.engine import start_workflow_async
 from horsies.core.types.result import is_err
 from horsies.core.utils.url import sqlalchemy_url
@@ -113,6 +116,32 @@ def app(app_config: AppConfig, broker: PostgresBroker) -> Horsies:
     horsies_app._broker = broker
     broker.app = horsies_app
     return horsies_app
+
+
+@pytest.fixture(autouse=True)
+def worker_core_handle(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Give a ``Worker`` built without a broker the core handle of a worker
+    broker on the suite database; a worker built with a broker keeps its own.
+
+    A running worker always has its broker (``run_forever`` refuses to start
+    without one), and production raises for a worker without one. Tests
+    that drive the worker's methods build it without a broker, and the
+    operations that run in the core need a handle. The handle's pools close
+    at teardown.
+    """
+    handle_broker = WorkerProcessBroker(PostgresConfig(database_url=SecretStr(DB_URL)))
+    handle = handle_broker._core_handle  # pyright: ignore[reportPrivateUsage]
+
+    def core_handle(worker: Worker) -> CoreHandle:
+        match worker.broker:
+            case None:
+                return handle
+            case broker:
+                return broker._core_handle  # pyright: ignore[reportPrivateUsage]
+
+    monkeypatch.setattr(Worker, 'core_handle', property(core_handle))
+    yield
+    _ = handle.close()
 
 
 @pytest.fixture(scope='session', autouse=True)

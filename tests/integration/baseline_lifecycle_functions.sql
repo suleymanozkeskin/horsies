@@ -128,13 +128,23 @@ RETURNS text LANGUAGE sql AS $$
     )
 $$;
 
--- One keyed first send; returns 'outcome:task_id'.
+-- One keyed first send with a reservation window of one hour; returns 'outcome:task_id'.
 CREATE FUNCTION lc_send_keyed(p_id uuid, p_fingerprint_seed text, p_key_seed text, p_sent_at timestamptz)
 RETURNS text LANGUAGE sql AS $$
     SELECT outcome || ':' || task_id FROM horsies_enqueue_task(
         p_id, 'lc.task', 'q_lc', 100, '{"x":1}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL,
         p_sent_at, 'NOW', NULL, NULL, 1::smallint, sha256(p_fingerprint_seed::bytea),
-        'FIRST_RUN', NULL, NULL, 'KEYED', sha256(p_key_seed::bytea), 1::smallint, 3600, 'FIRST'
+        'FIRST_RUN', NULL, NULL, 'KEYED', sha256(p_key_seed::bytea), 1::smallint, interval '1 hour', 'FIRST'
+    )
+$$;
+
+-- One keyed first send with the given reservation window; returns 'outcome:task_id'.
+CREATE FUNCTION lc_send_keyed_window(p_id uuid, p_key_seed text, p_window interval)
+RETURNS text LANGUAGE sql AS $$
+    SELECT outcome || ':' || task_id FROM horsies_enqueue_task(
+        p_id, 'lc.task', 'q_lc', 100, '{"x":1}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL,
+        now(), 'NOW', NULL, NULL, 1::smallint, sha256(p_id::text::bytea),
+        'FIRST_RUN', NULL, NULL, 'KEYED', sha256(p_key_seed::bytea), 1::smallint, p_window, 'FIRST'
     )
 $$;
 
@@ -376,6 +386,37 @@ SELECT lc_expect(
      WHERE idempotency_key_digest IN (sha256('key-14b'::bytea), sha256('key-b01'::bytea))),
     '0'
 );
+-- The window is stored exact to the microsecond, also under one second.
+SELECT lc_expect(
+    'enqueue: a keyed send with a window of 1.5 s',
+    lc_send_keyed_window('00000000-0000-7000-8000-000000000b15', 'key-1500ms', interval '1.5 seconds'),
+    'INSERTED:00000000-0000-7000-8000-000000000b15'
+);
+SELECT lc_expect(
+    'enqueue: a window of 1.5 s is stored as 1.5 s',
+    (SELECT (r.reservation_window = interval '1.5 seconds')::text FROM horsies_key_reservations r
+     WHERE r.idempotency_key_digest = sha256('key-1500ms'::bytea)),
+    'true'
+);
+SELECT lc_expect(
+    'enqueue: a keyed send with a window of 0.5 s is admitted',
+    lc_send_keyed_window('00000000-0000-7000-8000-000000000b16', 'key-500ms', interval '0.5 seconds'),
+    'INSERTED:00000000-0000-7000-8000-000000000b16'
+);
+SELECT lc_expect(
+    'enqueue: a window of 0.5 s is stored as 0.5 s, and its reservation turns TERMINAL',
+    (SELECT (r.reservation_window = interval '0.5 seconds')::text FROM horsies_key_reservations r
+     WHERE r.idempotency_key_digest = sha256('key-500ms'::bytea))
+    || ':' || horsies_key_reservation_terminalize(
+        sha256('key-500ms'::bytea), '00000000-0000-7000-8000-000000000b16', now())::text,
+    'true:true'
+);
+SELECT lc_expect(
+    'enqueue: the TERMINAL reservation of a 0.5 s window expires 0.5 s after the terminal time',
+    (SELECT (r.expires_at - now() = interval '0.5 seconds')::text FROM horsies_key_reservations r
+     WHERE r.idempotency_key_digest = sha256('key-500ms'::bytea)),
+    'true'
+);
 
 -- A repeat of a send whose task already moved to history.
 SELECT lc_task('00000000-0000-7000-8000-000000000b21', 'PENDING');
@@ -460,7 +501,11 @@ SELECT lc_expect_sqlstate('enqueue: a NULL input', $q$SELECT * FROM horsies_enqu
 SELECT lc_expect_sqlstate('enqueue: a window over 30 days (key claim)', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'NOW', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'KEYED', sha256('k31'::bytea),
-    1::smallint, 2592001, 'FIRST')$q$, '22023');
+    1::smallint, interval '720:00:00.000001', 'FIRST')$q$, '22023');
+SELECT lc_expect_sqlstate('enqueue: a window with a day field (key claim)', $q$SELECT * FROM horsies_enqueue_task(
+    gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
+    'NOW', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'KEYED', sha256('kday'::bytea),
+    1::smallint, interval '1 day', 'FIRST')$q$, '22023');
 -- A column shape that the table refuses: the queue name over 52 bytes (CHECK, 23514).
 SELECT lc_expect_sqlstate('enqueue: a queue name over 52 bytes', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', repeat('q', 53), 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
@@ -750,6 +795,66 @@ SELECT lc_expect(
         '00000000-0000-7000-8000-000000000d16', 'w1', now() - interval '1 second', 42, 'h', 'p', 's')),
     'MISSED|NODE_NOT_LINKED'
 );
+
+------------------------------------------------------------------------------------------------------------------------
+-- horsies_mark_finalizing
+------------------------------------------------------------------------------------------------------------------------
+
+SELECT lc_task('00000000-0000-7000-8000-000000008001', 'RUNNING');
+SELECT lc_expect(
+    'marker: a held RUNNING row is marked',
+    (SELECT outcome FROM horsies_mark_finalizing(
+        '00000000-0000-7000-8000-000000008001', 'w1', now() - interval '1 second')),
+    'MARKED'
+);
+SELECT lc_expect(
+    'marker: the row carries the marker and stays RUNNING under its claim',
+    (SELECT concat_ws('|', status, finalizing_at = now(), finalizing_by_worker_id, updated_at = now(),
+        claimed_by_worker_id, claimed_at = now() - interval '1 second')
+     FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000008001'),
+    'RUNNING|t|w1|t|w1|t'
+);
+SELECT lc_task('00000000-0000-7000-8000-000000008002', 'RUNNING');
+UPDATE horsies_tasks SET updated_at = now() - interval '1 minute'
+WHERE id = '00000000-0000-7000-8000-000000008002';
+SELECT lc_expect(
+    'marker: another claim generation is not held',
+    (SELECT outcome FROM horsies_mark_finalizing(
+        '00000000-0000-7000-8000-000000008002', 'w1', now() - interval '2 seconds')),
+    'NOT_HELD'
+);
+SELECT lc_expect(
+    'marker: another worker does not hold it',
+    (SELECT outcome FROM horsies_mark_finalizing(
+        '00000000-0000-7000-8000-000000008002', 'w2', now() - interval '1 second')),
+    'NOT_HELD'
+);
+SELECT lc_expect(
+    'marker: a miss writes nothing',
+    (SELECT concat_ws('|', finalizing_at IS NULL, finalizing_by_worker_id IS NULL,
+        updated_at = now() - interval '1 minute')
+     FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000008002'),
+    't|t|t'
+);
+SELECT lc_task('00000000-0000-7000-8000-000000008003', 'CLAIMED');
+SELECT lc_expect(
+    'marker: a CLAIMED row is not held',
+    (SELECT outcome FROM horsies_mark_finalizing(
+        '00000000-0000-7000-8000-000000008003', 'w1', now() - interval '1 second')),
+    'NOT_HELD'
+);
+SELECT lc_expect(
+    'marker: an absent task is not held',
+    (SELECT outcome FROM horsies_mark_finalizing(
+        '00000000-0000-7000-8000-0000000080ff', 'w1', now() - interval '1 second')),
+    'NOT_HELD'
+);
+SELECT lc_expect_sqlstate('marker: a NULL claim generation', $q$SELECT * FROM horsies_mark_finalizing(
+    '00000000-0000-7000-8000-000000008002', 'w1', NULL)$q$, '22023');
+SELECT lc_expect_sqlstate('marker: a NULL worker', $q$SELECT * FROM horsies_mark_finalizing(
+    '00000000-0000-7000-8000-000000008002', NULL, now() - interval '1 second')$q$, '22023');
+SELECT lc_expect_sqlstate('marker: a NULL task', $q$SELECT * FROM horsies_mark_finalizing(
+    NULL, 'w1', now() - interval '1 second')$q$, '22023');
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Success: horsies_complete_task_fused, horsies_complete_tasks_fused, horsies_finish_workflow_success

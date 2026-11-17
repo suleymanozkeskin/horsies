@@ -277,9 +277,14 @@ async fn a_fire_repeated_after_its_commit_writes_nothing_once_the_task_left_the_
 }
 
 /// Terminate the backend that waits for the state row lock that
-/// `transaction` holds.
+/// `transaction` holds. Each poll first drops the activity snapshot: inside
+/// one transaction, `pg_stat_activity` keeps the rows of its first read.
 async fn terminate_the_waiting_fire(transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>) {
     for _ in 0..100 {
+        let _cleared = sqlx::query("SELECT pg_stat_clear_snapshot()")
+            .execute(&mut **transaction)
+            .await
+            .expect("drop the activity snapshot");
         let terminated: Vec<bool> = sqlx::query_scalar(
             "SELECT pg_terminate_backend(a.pid)
              FROM pg_stat_activity AS a

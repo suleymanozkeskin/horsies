@@ -183,13 +183,19 @@ export function TaskBreakdown({
         </TableHeader>
         <TableBody>
           {breakdown.groups.map(row => {
+            const key = groupKey(row.group);
+            const label = groupLabel(row.group);
             const value = groupDrillValue(row.group);
-            return (
+            // Only a group with a drill value gets a click handler; the prop
+            // is left out, not set to undefined (exactOptionalPropertyTypes).
+            return value === undefined ? (
+              <Row key={key} label={label} counts={row} />
+            ) : (
               <Row
-                key={groupKey(row.group)}
-                label={groupLabel(row.group)}
+                key={key}
+                label={label}
                 counts={row}
-                onClick={value === undefined ? undefined : () => onDrill(value)}
+                onClick={() => onDrill(value)}
               />
             );
           })}

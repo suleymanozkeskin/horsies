@@ -22,18 +22,17 @@ import pytest
 from sqlalchemy.exc import OperationalError as SAOperationalError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 from horsies.core.brokers.enqueue_task import SendKind
-from horsies.core.brokers.stale_running import (
-    FINISH_STALE_ATTEMPT_SQL,
-    STALE_RUNNING_SCAN_BATCH_SIZE,
-    STALE_RUNNING_SCAN_SQL,
-)
 from horsies._core import (
     StaleClaimsBoundReached,
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
+    StaleRunningRecovered,
+    StaleRunningScanFailed,
+    StaleRunningScanFull,
+    TooManyPendingCalls,
 )
 from horsies.core.types.core_failure import CoreOperationFailed
-from horsies.core.brokers.postgres import SIGNED_64_BIT_MAX, SyncSendRoute
+from horsies.core.brokers.postgres import SIGNED_64_BIT_MAX, SIGNED_64_BIT_MIN, SyncSendRoute
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
@@ -1281,8 +1280,8 @@ class TestEnqueueOutcomes:
         assert params['key_kind'] == 'KEYED'
         assert params['key_digest'] == ScopedIdempotencyKey(task_name='my_task', key='key').digest
         assert params['key_scope_version'] == IDEMPOTENCY_SCOPE_VERSION
-        assert params['key_window_s'] == int(
-            broker.idempotency_reservation_window.total_seconds()
+        assert params['key_window_us'] == (
+            broker.idempotency_reservation_window // timedelta(microseconds=1)
         )
 
 
@@ -1990,219 +1989,38 @@ class TestPingWorkers:
 # ---------------------------------------------------------------------------
 
 
-_STALE_STARTED_AT = datetime(2025, 1, 1, tzinfo=timezone.utc)
-_STALE_DB_NOW = datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc)
-_CRASH_RETRY_OPTIONS = (
-    '{"retry_policy": {"max_retries": 2, "intervals": [60, 60], '
-    '"backoff_strategy": "fixed", "jitter": false, '
-    '"auto_retry_for": ["WORKER_CRASHED"]}}'
-)
-
-
-def _scan_row(task_id: str, **fields: Any) -> dict[str, Any]:
-    """One row of horsies_stale_running_scan."""
-    return {
-        'task_id': task_id,
-        'retry_count': 0,
-        'max_retries': 0,
-        'task_options': None,
-        'good_until': None,
-        'claimed_by_worker_id': 'worker-1',
-        'worker_pid': 1234,
-        'worker_hostname': 'host-1',
-        'worker_process_name': 'proc-1',
-        'started_at': _STALE_STARTED_AT,
-        'db_now': _STALE_DB_NOW,
-        **fields,
-    }
-
-
-def _stale_finish_row(task_id: str, outcome: str, **fields: Any) -> dict[str, Any]:
-    """One row of horsies_finish_stale_attempt; ``fields`` set its columns."""
-    return {
-        'task_id': task_id,
-        'ordinality': None,
-        'outcome': outcome,
-        'terminal_at': None,
-        'terminalization_kind': None,
-        'observed_status': 'RUNNING',
-        'observed_worker_id': 'worker-1',
-        'observed_claimed_at': None,
-        'guard_kind': None,
-        'observed_guard': None,
-        'retry_disposition': None,
-        'retry_count': None,
-        'next_retry_at': None,
-        'good_until': None,
-        'is_workflow_task': None,
-        'queue_name': None,
-        'task_name': None,
-        'node_has_dependents': None,
-        'downstream_subworkflow': None,
-        **fields,
-    }
-
-
-def _stale_applied_row(task_id: str) -> dict[str, Any]:
-    return _stale_finish_row(
-        task_id,
-        'APPLIED',
-        terminal_at=_STALE_DB_NOW,
-        terminalization_kind='FAIL_STALE',
-        retry_disposition='NOT_REQUESTED',
-        is_workflow_task=False,
-        queue_name='default',
-        task_name='t',
-    )
-
-
-def _rows_result(rows: list[dict[str, Any]]) -> MagicMock:
-    result = MagicMock()
-    result.mappings.return_value.all.return_value = rows
-    return result
-
-
-def _stale_session(*results: MagicMock | Exception) -> AsyncMock:
-    """A session whose autocommit connection answers each statement in turn."""
-    session = AsyncMock()
-    session.__aenter__ = AsyncMock(return_value=session)
-    session.__aexit__ = AsyncMock(return_value=None)
-    session.connection = AsyncMock(return_value=session)
-    session.execute = AsyncMock(side_effect=list(results))
-    return session
-
-
 @pytest.mark.unit
 class TestMarkStaleTasksAsFailed:
-    """mark_stale_tasks_as_failed: one scan, then one finish statement per candidate."""
+    """mark_stale_tasks_as_failed maps the record of one core pass to its result."""
+
+    @staticmethod
+    def _handle(answer: object) -> MagicMock:
+        """A core handle whose stale RUNNING pass answers ``answer``: a
+        record, or an exception that the call raises."""
+        handle = MagicMock()
+        match answer:
+            case BaseException():
+                handle.mark_stale_running_async = AsyncMock(side_effect=answer)
+            case _:
+                handle.mark_stale_running_async = AsyncMock(return_value=answer)
+        return handle
 
     @pytest.mark.asyncio
-    async def test_the_scan_takes_the_thresholds_in_ms_and_the_batch_size(self) -> None:
+    async def test_a_pass_returns_the_recovered_count(self) -> None:
         broker = _make_broker()
-        scan = _stale_session(_rows_result([]))
-        _set_resources(broker, session_factory=MagicMock(return_value=scan))
+        broker._core_handle = self._handle(
+            MagicMock(spec=StaleRunningRecovered, recovered=3),
+        )
 
         result = await broker.mark_stale_tasks_as_failed(
-            stale_threshold_ms=1_500,
-            finalizing_stale_threshold_ms=2_750,
+            stale_threshold_ms=300_000,
+            finalizing_stale_threshold_ms=60_000,
         )
 
-        assert result == Ok(0)
-        scan.execute.assert_awaited_once_with(
-            STALE_RUNNING_SCAN_SQL,
-            {
-                'stale_after_ms': 1_500,
-                'finalizing_stale_after_ms': 2_750,
-                'batch_size': STALE_RUNNING_SCAN_BATCH_SIZE,
-            },
+        assert result == Ok(3)
+        broker._core_handle.mark_stale_running_async.assert_awaited_once_with(
+            300_000, 60_000,
         )
-        scan.commit.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_a_candidate_without_a_crash_retry_fails_in_one_statement(self) -> None:
-        broker = _make_broker()
-        scan = _stale_session(_rows_result([_scan_row('task-1')]))
-        finish = _stale_session(_rows_result([_stale_applied_row('task-1')]))
-        _set_resources(broker, session_factory=MagicMock(side_effect=[scan, finish]))
-
-        result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
-
-        assert result == Ok(1)
-        statement, parameters = finish.execute.await_args.args
-        assert statement is FINISH_STALE_ATTEMPT_SQL
-        reason = 'Worker process crashed (no runner heartbeat for 300000ms = 300.0s)'
-        assert parameters['retry_kind'] == 'NONE'
-        assert parameters['expected_retry_count'] is None
-        assert parameters['error_code'] == 'WORKER_CRASHED'
-        assert parameters['failed_reason'] == reason
-        assert parameters['attempt_message'] == reason
-        assert '"WORKER_CRASHED"' in parameters['result']
-        assert '"detected_at":"2025-01-01T00:10:00+00:00"' in parameters['result']
-        finish.commit.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_a_crash_retry_carries_the_scanned_count_and_wakes_its_queue(self) -> None:
-        broker = _make_broker()
-        scan = _stale_session(
-            _rows_result(
-                [_scan_row('task-1', max_retries=2, task_options=_CRASH_RETRY_OPTIONS)],
-            ),
-        )
-        scheduled = _stale_finish_row(
-            'task-1',
-            'RETRY_SCHEDULED',
-            retry_count=1,
-            next_retry_at=_STALE_DB_NOW,
-            queue_name='q1',
-        )
-        finish = _stale_session(_rows_result([scheduled]), MagicMock())
-        _set_resources(broker, session_factory=MagicMock(side_effect=[scan, finish]))
-
-        result = await broker.mark_stale_tasks_as_failed()
-
-        assert result == Ok(1)
-        (finish_call, wake_call) = finish.execute.await_args_list
-        assert finish_call.args[1]['retry_kind'] == 'RETRY'
-        assert finish_call.args[1]['expected_retry_count'] == 0
-        assert finish_call.args[1]['retry_delay_s'] == 60.0
-        assert wake_call.args[1] == {'ch': 'task_queue_q1', 'p': 'retry:task-1'}
-
-    @pytest.mark.parametrize(
-        ('guard', 'payload'),
-        [
-            (
-                'STALENESS',
-                {
-                    'last_heartbeat_at': None,
-                    'started_at': '2025-01-01T00:00:00+00:00',
-                    'finalizing_at': None,
-                    'stale_after_ms': 300000,
-                    'finalizing_stale_after_ms': 300000,
-                    'evaluated_at': '2025-01-01T00:10:00+00:00',
-                },
-            ),
-            ('RETRY_COUNT', {'expected_retry_count': 0, 'retry_count': 1}),
-        ],
-        ids=['fresh-again', 'retry-count-changed'],
-    )
-    @pytest.mark.asyncio
-    async def test_a_refused_candidate_is_not_counted(
-        self, guard: str, payload: dict[str, Any],
-    ) -> None:
-        broker = _make_broker()
-        scan = _stale_session(_rows_result([_scan_row('task-1')]))
-        refused = _stale_finish_row(
-            'task-1', 'SOURCE_STATE_CONFLICT', guard_kind=guard, observed_guard=payload,
-        )
-        finish = _stale_session(_rows_result([refused]))
-        _set_resources(broker, session_factory=MagicMock(side_effect=[scan, finish]))
-
-        result = await broker.mark_stale_tasks_as_failed()
-
-        assert result == Ok(0)
-
-    @pytest.mark.asyncio
-    async def test_a_failed_candidate_is_skipped_and_the_next_one_counts(self) -> None:
-        broker = _make_broker()
-        scan = _stale_session(_rows_result([_scan_row('task-1'), _scan_row('task-2')]))
-        broken = _stale_session(SAOperationalError('stmt', {}, Exception('lost')))
-        finish = _stale_session(_rows_result([_stale_applied_row('task-2')]))
-        _set_resources(broker, session_factory=MagicMock(side_effect=[scan, broken, finish]))
-
-        result = await broker.mark_stale_tasks_as_failed()
-
-        assert result == Ok(1)
-
-    @pytest.mark.asyncio
-    async def test_a_failed_scan_is_cleanup_failed(self) -> None:
-        broker = _make_broker()
-        scan = _stale_session(SAOperationalError('stmt', {}, Exception('lost')))
-        _set_resources(broker, session_factory=MagicMock(return_value=scan))
-
-        result = await broker.mark_stale_tasks_as_failed()
-
-        assert is_err(result)
-        assert result.err_value.code is BrokerErrorCode.CLEANUP_FAILED
 
     @pytest.mark.asyncio
     async def test_a_full_scan_batch_warns_that_the_rest_waits(
@@ -2210,23 +2028,73 @@ class TestMarkStaleTasksAsFailed:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         broker = _make_broker()
-        rows = [_scan_row(f'task-{index}') for index in range(STALE_RUNNING_SCAN_BATCH_SIZE)]
-        refused = [
-            _stale_session(_rows_result([_stale_finish_row(row['task_id'], 'TASK_ABSENT', observed_status=None, observed_worker_id=None)]))
-            for row in rows
-        ]
-        scan = _stale_session(_rows_result(rows))
-        _set_resources(broker, session_factory=MagicMock(side_effect=[scan, *refused]))
+        broker._core_handle = self._handle(
+            MagicMock(spec=StaleRunningScanFull, recovered=7, scan_batch=1000),
+        )
 
-        with caplog.at_level('WARNING'):
+        with caplog.at_level('WARNING', logger='horsies.broker'):
             result = await broker.mark_stale_tasks_as_failed()
 
-        assert result == Ok(0)
-        assert 'read a full scan batch' in caplog.text
+        assert result == Ok(7)
+        assert 'read a full scan batch of 1000 candidates' in caplog.text
 
-# ---------------------------------------------------------------------------
-# TestExpirePendingTasks
-# ---------------------------------------------------------------------------
+    @pytest.mark.asyncio
+    async def test_a_failed_scan_is_cleanup_failed(self) -> None:
+        broker = _make_broker()
+        broker._core_handle = self._handle(
+            MagicMock(
+                spec=StaleRunningScanFailed,
+                message='stale scan: connection lost',
+                retryable=True,
+            ),
+        )
+
+        result = await broker.mark_stale_tasks_as_failed()
+
+        assert is_err(result)
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.retryable is True
+        assert failed.message == 'mark_stale_tasks_as_failed failed: stale scan: connection lost'
+        assert isinstance(failed.exception, CoreOperationFailed)
+
+    @pytest.mark.asyncio
+    async def test_a_core_that_cannot_run_the_pass_is_cleanup_failed(self) -> None:
+        broker = _make_broker()
+        error = TooManyPendingCalls('CoreHandle.mark_stale_running_async', 65_536)
+        broker._core_handle = self._handle(error)
+
+        result = await broker.mark_stale_tasks_as_failed()
+
+        assert is_err(result)
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.retryable is True
+        assert failed.exception is error
+
+    @pytest.mark.parametrize(
+        ('stale_ms', 'finalizing_ms'),
+        [(SIGNED_64_BIT_MAX + 1, 60_000), (60_000, SIGNED_64_BIT_MIN - 1)],
+        ids=['stale', 'finalizing'],
+    )
+    @pytest.mark.asyncio
+    async def test_a_threshold_past_64_bits_is_refused_before_the_core(
+        self, stale_ms: int, finalizing_ms: int,
+    ) -> None:
+        broker = _make_broker()
+        broker._core_handle = self._handle(MagicMock(spec=StaleRunningRecovered, recovered=0))
+
+        result = await broker.mark_stale_tasks_as_failed(
+            stale_threshold_ms=stale_ms,
+            finalizing_stale_threshold_ms=finalizing_ms,
+        )
+
+        assert is_err(result)
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.retryable is False
+        assert isinstance(failed.exception, OverflowError)
+        broker._core_handle.mark_stale_running_async.assert_not_awaited()
 
 
 @pytest.mark.unit
@@ -2574,6 +2442,22 @@ class TestRequeueStaleClaimed:
         )
         assert isinstance(failed.exception, CoreOperationFailed)
         assert failed.exception.subject == 'PostgresBroker.requeue_stale_claimed'
+
+    @pytest.mark.asyncio
+    async def test_a_core_that_cannot_run_the_pass_is_cleanup_failed(self) -> None:
+        broker = _make_broker()
+        error = TooManyPendingCalls('CoreHandle.requeue_stale_claimed_async', 65_536)
+        handle = MagicMock()
+        handle.requeue_stale_claimed_async = AsyncMock(side_effect=error)
+        broker._core_handle = handle
+
+        result = await broker.requeue_stale_claimed()
+
+        assert is_err(result)
+        failed = result.err_value
+        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.retryable is True
+        assert failed.exception is error
 
     @pytest.mark.asyncio
     async def test_a_threshold_past_64_bits_is_refused_before_the_core(self) -> None:

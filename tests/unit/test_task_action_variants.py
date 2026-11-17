@@ -3,22 +3,32 @@
 ``TaskActionError`` is a union with one frozen variant per
 ``TaskActionErrorCode`` member. A variant's repr hides the message and the
 cause. Every variant carries ``task_id``. The cancel tests run on a mocked
-autocommit connection: the one ``horsies_cancel_task`` row is the seam, and
-the real outcome decoder reads it.
+core handle: the record of ``cancel_task_async`` is the seam. The records
+that contradict the function (a lost claim, no observed status) are refused
+by the core with a panic; its own tests cover them.
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
 from typing import Any, get_args
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy.exc import OperationalError
 
+from horsies._core import (
+    CancelFailed,
+    CancelRefusedStatus,
+    CancelRefusedWorkflowTask,
+    CancelStoredDataInvalid,
+    CancelTaskAbsent,
+    CoreStopped,
+    TaskCancelledRecord,
+    TooManyPendingCalls,
+)
 from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.result import Ok, Result, is_err
 from horsies.core.types.status import TaskStatus
 from horsies.monitoring.task_actions import (
@@ -37,14 +47,12 @@ from horsies.web.routes.actions import (
     _succeeded,  # pyright: ignore[reportPrivateUsage]
     _task_action_failed,  # pyright: ignore[reportPrivateUsage]
 )
-from tests.broker_resources_support import attach_resources, fake_resources
 
 pytestmark = [pytest.mark.unit]
 
 MESSAGE_MARKER = 'message-marker-7d2e'
 CAUSE_MARKER = 'cause-marker-7d2e'
 TASK_ID = uuid.UUID('3f9c1a2b-4d5e-4f60-8a71-b2c3d4e5f607')
-NOW = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
 LOOP_LIMIT = EventLoopLimit(
     limit=5,
     held_thread_names=('MainThread',),
@@ -133,94 +141,63 @@ class TestVariantCatalog:
                 assert error.retryable is False
 
 
-def _row(
-    outcome: str,
-    *,
-    status: str | None = None,
-    guard: str | None = None,
-    kind: str | None = None,
-) -> dict[str, Any]:
-    """One row of ``horsies_cancel_task`` as the driver returns it."""
-    return {
-        'task_id': TASK_ID,
-        'ordinality': None,
-        'outcome': outcome,
-        'terminal_at': NOW if kind is not None else None,
-        'terminalization_kind': kind,
-        'observed_status': status,
-        'observed_worker_id': None,
-        'observed_claimed_at': None,
-        'guard_kind': guard,
-        'observed_guard': None,
-    }
-
-
-def _broker_with_rows(
-    rows: list[dict[str, Any]] | BaseException,
-) -> tuple[MagicMock, AsyncMock, AsyncMock]:
-    """A broker whose session's autocommit connection answers the cancel with ``rows``."""
-    connection = AsyncMock()
-    match rows:
+def _broker_answering(answer: object) -> tuple[MagicMock, AsyncMock]:
+    """A broker whose core handle answers the cancel with ``answer``: a
+    record, or an exception that the call raises."""
+    handle = MagicMock()
+    match answer:
         case BaseException():
-            connection.execute = AsyncMock(side_effect=rows)
-        case list():
-            result = MagicMock()
-            result.mappings.return_value.all.return_value = rows
-            connection.execute = AsyncMock(return_value=result)
-    session = AsyncMock()
-    session.commit = AsyncMock()
-    session.connection = AsyncMock(return_value=connection)
-    session_ctx = AsyncMock()
-    session_ctx.__aenter__ = AsyncMock(return_value=session)
-    session_ctx.__aexit__ = AsyncMock(return_value=False)
+            handle.cancel_task_async = AsyncMock(side_effect=answer)
+        case _:
+            handle.cancel_task_async = AsyncMock(return_value=answer)
     broker = MagicMock()
-    attach_resources(
-        broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)),
-    )
-    return broker, session, connection
+    broker._core_handle = handle
+    return broker, handle.cancel_task_async
 
 
 async def _cancel(
-    rows: list[dict[str, Any]] | BaseException,
+    answer: object,
     *,
     include_running: bool = True,
-) -> tuple[Result[TaskCancelled, TaskActionError], AsyncMock, AsyncMock]:
-    broker, session, connection = _broker_with_rows(rows)
+) -> tuple[Result[TaskCancelled, TaskActionError], AsyncMock]:
+    broker, call = _broker_answering(answer)
     result = await cancel_task(broker, TASK_ID, include_running=include_running)
-    return result, session, connection
+    return result, call
+
+
+def _record(record_class: type, **fields: object) -> MagicMock:
+    """A stand-in for a core record: an instance of ``record_class`` for a
+    class pattern, with ``task_id`` and ``fields``."""
+    record = MagicMock(spec=record_class)
+    record.task_id = TASK_ID
+    for name, value in fields.items():
+        setattr(record, name, value)
+    return record
 
 
 class TestCancelOutcome:
-    """One ``horsies_cancel_task`` row decides the answer."""
+    """The record of ``cancel_task_async`` decides the answer."""
 
     @pytest.mark.asyncio
-    async def test_an_applied_cancel_reports_the_observed_status(self) -> None:
-        result, session, connection = await _cancel(
-            [_row('APPLIED', status='RUNNING', kind='CANCEL_ADMIN')],
-        )
+    async def test_an_applied_cancel_reports_the_status_it_left(self) -> None:
+        result, call = await _cancel(_record(TaskCancelledRecord, was_status='RUNNING'))
 
         assert result == Ok(TaskCancelled(task_id=TASK_ID, was_status=TaskStatus.RUNNING))
-        assert connection.execute.await_args is not None
-        assert connection.execute.await_args.args[1] == {
-            'task_id': str(TASK_ID),
-            'include_running': True,
-        }
-        session.commit.assert_not_awaited()
+        call.assert_awaited_once_with(TASK_ID, include_running=True)
 
     @pytest.mark.asyncio
-    async def test_the_running_choice_reaches_the_statement(self) -> None:
-        _, _, connection = await _cancel(
-            [_row('SOURCE_STATE_CONFLICT', status='RUNNING')],
+    async def test_the_running_choice_reaches_the_core(self) -> None:
+        _, call = await _cancel(
+            _record(CancelRefusedStatus, current_status='RUNNING'),
             include_running=False,
         )
 
-        assert connection.execute.await_args is not None
-        assert connection.execute.await_args.args[1]['include_running'] is False
+        call.assert_awaited_once_with(TASK_ID, include_running=False)
 
     @pytest.mark.asyncio
     async def test_a_live_status_outside_the_choice_is_not_cancellable(self) -> None:
-        result, _, _ = await _cancel(
-            [_row('SOURCE_STATE_CONFLICT', status='RUNNING')],
+        result, _ = await _cancel(
+            _record(CancelRefusedStatus, current_status='RUNNING'),
             include_running=False,
         )
 
@@ -231,47 +208,22 @@ class TestCancelOutcome:
             current_status=TaskStatus.RUNNING,
         )
 
+    @pytest.mark.parametrize('status', ['COMPLETED', 'CANCELLED'])
     @pytest.mark.asyncio
-    async def test_a_finished_plain_task_is_not_cancellable_with_its_status(self) -> None:
-        result, _, _ = await _cancel(
-            [
-                _row(
-                    'SOURCE_STATE_CONFLICT',
-                    status='COMPLETED',
-                    guard='FOREIGN_TERMINALIZATION',
-                    kind='COMPLETE_FUSED',
-                ),
-            ],
-        )
-
-        assert is_err(result)
-        error = result.err_value
-        assert isinstance(error, TaskActionNotCancellable)
-        assert error.current_status is TaskStatus.COMPLETED
-
-    @pytest.mark.asyncio
-    async def test_an_earlier_cancel_is_not_cancellable(self) -> None:
-        result, _, _ = await _cancel(
-            [_row('ALREADY_APPLIED', status='CANCELLED', kind='CANCEL_ADMIN')],
-        )
-
-        assert is_err(result)
-        error = result.err_value
-        assert isinstance(error, TaskActionNotCancellable)
-        assert error.current_status is TaskStatus.CANCELLED
-
-    @pytest.mark.parametrize(
-        ('status', 'kind'),
-        [('PENDING', None), ('FAILED', 'FAIL_RUNNING')],
-        ids=['live', 'finished'],
-    )
-    @pytest.mark.asyncio
-    async def test_a_workflow_task_carries_its_status(
-        self, status: str, kind: str | None,
+    async def test_a_finished_plain_task_is_not_cancellable_with_its_status(
+        self, status: str,
     ) -> None:
-        result, _, _ = await _cancel(
-            [_row('SOURCE_STATE_CONFLICT', status=status, guard='WORKFLOW_TASK', kind=kind)],
-        )
+        result, _ = await _cancel(_record(CancelRefusedStatus, current_status=status))
+
+        assert is_err(result)
+        error = result.err_value
+        assert isinstance(error, TaskActionNotCancellable)
+        assert error.current_status is TaskStatus(status)
+
+    @pytest.mark.parametrize('status', ['PENDING', 'FAILED'], ids=['live', 'finished'])
+    @pytest.mark.asyncio
+    async def test_a_workflow_task_carries_its_status(self, status: str) -> None:
+        result, _ = await _cancel(_record(CancelRefusedWorkflowTask, current_status=status))
 
         assert is_err(result)
         error = result.err_value
@@ -280,7 +232,7 @@ class TestCancelOutcome:
 
     @pytest.mark.asyncio
     async def test_an_absent_task_is_not_found(self) -> None:
-        result, _, _ = await _cancel([_row('TASK_ABSENT')])
+        result, _ = await _cancel(_record(CancelTaskAbsent))
 
         assert is_err(result)
         assert result.err_value == TaskActionNotFound(
@@ -288,9 +240,9 @@ class TestCancelOutcome:
         )
 
     @pytest.mark.asyncio
-    async def test_a_row_that_does_not_decode_is_stored_data_invalid(self) -> None:
-        result, _, _ = await _cancel(
-            [_row('SOURCE_STATE_CONFLICT', status=CAUSE_MARKER, guard='FOREIGN_TERMINALIZATION')],
+    async def test_stored_data_that_does_not_parse_is_stored_data_invalid(self) -> None:
+        result, _ = await _cancel(
+            _record(CancelStoredDataInvalid, message=f'history status {CAUSE_MARKER}'),
         )
 
         assert is_err(result)
@@ -300,48 +252,42 @@ class TestCancelOutcome:
         assert error.task_id == TASK_ID
         assert CAUSE_MARKER in error.message
 
+
+class TestCancelFailures:
     @pytest.mark.asyncio
-    async def test_an_outcome_without_an_observed_status_is_a_defect(self) -> None:
-        with pytest.raises(RuntimeError, match='no observed status'):
-            await _cancel([_row('APPLIED', kind='CANCEL_ADMIN')])
-
-    @pytest.mark.asyncio
-    async def test_a_lost_claim_is_a_defect(self) -> None:
-        with pytest.raises(RuntimeError, match='no claim fence'):
-            await _cancel([_row('LOST_CLAIM', status='CLAIMED')])
-
-    @pytest.mark.asyncio
-    async def test_a_row_count_other_than_one_is_a_defect(self) -> None:
-        with pytest.raises(AssertionError, match='returned 0 rows'):
-            await _cancel([])
-
-
-class TestCancelBoundaries:
-    @pytest.mark.asyncio
-    async def test_the_cancel_statement_gets_the_canonical_text_of_the_id(self) -> None:
-        broker, _, connection = _broker_with_rows([_row('TASK_ABSENT')])
-
-        result = await cancel_task(broker, TASK_ID)
-
-        assert is_err(result)
-        assert result.err_value.task_id == TASK_ID
-        assert connection.execute.await_args is not None
-        assert connection.execute.await_args.args[1]['task_id'] == str(TASK_ID)
-
-    @pytest.mark.asyncio
-    async def test_a_database_failure_keeps_the_cause(self) -> None:
-        cause = OperationalError('SELECT 1', {}, Exception('connection lost'))
-        broker, _, _ = _broker_with_rows(cause)
-        task_id = uuid.uuid4()
-
-        result = await cancel_task(broker, task_id)
+    async def test_a_failure_record_keeps_its_message_and_classification(self) -> None:
+        result, _ = await _cancel(
+            _record(CancelFailed, message=f'cancel: {CAUSE_MARKER}', retryable=True),
+        )
 
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, TaskActionDbOperationFailed)
-        assert error.exception is cause
         assert error.retryable is True
-        assert error.task_id == task_id
+        assert error.task_id == TASK_ID
+        assert CAUSE_MARKER in error.message
+        assert isinstance(error.exception, CoreOperationFailed)
+        assert error.exception.message == f'cancel: {CAUSE_MARKER}'
+
+    @pytest.mark.parametrize(
+        ('error', 'retryable'),
+        [
+            (TooManyPendingCalls('CoreHandle.cancel_task_async', 65_536), True),
+            (CoreStopped('core task', 'panic'), False),
+        ],
+        ids=['too-many-calls', 'core-stopped'],
+    )
+    @pytest.mark.asyncio
+    async def test_a_core_that_cannot_run_the_cancel_is_a_database_failure(
+        self, error: Exception, retryable: bool,
+    ) -> None:
+        result, _ = await _cancel(error)
+
+        assert is_err(result)
+        failed = result.err_value
+        assert isinstance(failed, TaskActionDbOperationFailed)
+        assert failed.exception is error
+        assert failed.retryable is retryable
 
 
 def _web_cases() -> list[tuple[TaskActionError, int, dict[str, Any]]]:

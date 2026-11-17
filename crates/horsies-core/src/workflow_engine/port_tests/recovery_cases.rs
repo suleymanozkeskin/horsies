@@ -163,8 +163,11 @@ async fn recovery_decides_by_the_success_policy() {
     db.drop().await;
 }
 
-/// `test_recover_pending_deps_failed_skip` (case 0): the skip and then the
-/// completion of the workflow are two recoveries.
+/// `test_recover_pending_deps_failed_skip` (case 0): the node is skipped and
+/// the workflow fails. One step does both: `horsies_workflow_node_reevaluate`
+/// runs the completion check (`horsies_workflow_try_complete`) in the
+/// transaction of the skip, so the pass counts one case-0 recovery and case
+/// 2/3 finds no workflow left.
 #[tokio::test]
 #[serial]
 async fn a_pending_node_after_a_failed_dependency_is_skipped_and_the_workflow_fails() {
@@ -187,7 +190,8 @@ async fn a_pending_node_after_a_failed_dependency_is_skipped_and_the_workflow_fa
     )
     .await;
 
-    assert_eq!(report.total(), 2, "{report:?}");
+    assert_eq!(report.case0_pending_reevaluated, 1, "{report:?}");
+    assert_eq!(report.total(), 1, "{report:?}");
     assert_eq!(node_status(&db.pool, workflow_id, 1).await, "SKIPPED");
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "FAILED");
     db.drop().await;

@@ -25,7 +25,7 @@ use crate::broker::attempt_writes::{
     finish_failed_attempt, finish_unreported_attempt, finish_workflow_success, AttemptFailure,
     AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement, RetryRequest,
 };
-use crate::broker::core_rows::{one_row, scalar, StatementLog};
+use crate::broker::core_rows::{column, one_row, scalar, StatementLog};
 use crate::broker::error::is_retryable_sqlx_error;
 use crate::broker::listener::notify_task_queue;
 use crate::broker::terminalization::terminalize;
@@ -792,8 +792,6 @@ fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> boo
         crate::workflow_engine::WorkflowError::Broker(be) => be.is_retryable(),
         crate::workflow_engine::WorkflowError::Serialization(_)
         | crate::workflow_engine::WorkflowError::WorkflowNotFound { .. }
-        | crate::workflow_engine::WorkflowError::WorkflowTimeout { .. }
-        | crate::workflow_engine::WorkflowError::WorkflowError(_)
         | crate::workflow_engine::WorkflowError::InvalidStatus(_)
         | crate::workflow_engine::WorkflowError::Validation(_)
         | crate::workflow_engine::WorkflowError::StepContract(_) => false,
@@ -1089,30 +1087,24 @@ pub(crate) enum FinalizingMark {
     NotHeld,
 }
 
-/// The finalizing marker, as Python's `MARK_FINALIZING_SQL`
-/// (`core/worker/child_runner.py`). The row is read by id alone in a
-/// MATERIALIZED CTE that locks it, so only the primary key serves the read;
-/// the fence (RUNNING, this worker, this claim generation) is one boolean
-/// checked on the locked row. The generation comparison has no NULL arm.
-const MARK_FINALIZING_SQL: &str = "\
-WITH target AS MATERIALIZED (
-    SELECT id,
-           (
-               status = 'RUNNING'
-               AND claimed_by_worker_id = $2
-               AND claimed_at = $3
-           ) IS TRUE AS fenced
-    FROM horsies_tasks
-    WHERE id = $1
-    FOR NO KEY UPDATE
-)
-UPDATE horsies_tasks t
-SET finalizing_at = NOW(),
-    finalizing_by_worker_id = $2,
-    updated_at = NOW()
-FROM target
-WHERE t.id = target.id
-  AND target.fenced";
+impl FinalizingMark {
+    /// The mark of an outcome text of `horsies_mark_finalizing`, or `None`
+    /// for a text outside its contract. Pure.
+    fn from_outcome(outcome: &str) -> Option<Self> {
+        match outcome {
+            "MARKED" => Some(Self::Marked),
+            "NOT_HELD" => Some(Self::NotHeld),
+            _ => None,
+        }
+    }
+}
+
+/// The finalizing marker: `horsies_mark_finalizing`, as Python's
+/// `MARK_FINALIZING_SQL` (`core/worker/child_runner.py`). The function reads
+/// the row by id alone and locks it, so only the primary key serves the read;
+/// the fence (RUNNING, this worker, this claim generation) is checked on the
+/// locked row, with no NULL arm (a NULL argument is refused with 22023).
+const MARK_FINALIZING_SQL: &str = "SELECT outcome FROM horsies_mark_finalizing($1, $2, $3)";
 
 /// [`MARK_FINALIZING_SQL`] with its parameter types: task id, worker id,
 /// claim generation.
@@ -1133,7 +1125,10 @@ static MARK_FINALIZING: TypedStatement = TypedStatement::new(
 ///
 /// Errors: [`crate::broker::BrokerError::PoolSettings`] when a closed
 /// handle cannot open its pools again; [`crate::broker::BrokerError::Statement`]
-/// for a failed statement (nothing was written, or the outcome is unknown).
+/// for a failed statement (nothing was written, or the outcome is unknown);
+/// [`crate::broker::BrokerError::RowDecode`] and
+/// [`crate::broker::BrokerError::ClaimContract`] for a row outside the
+/// function's contract.
 pub(crate) async fn mark_task_finalizing(
     broker: &PostgresBroker,
     task_id: Uuid,
@@ -1149,22 +1144,26 @@ pub(crate) async fn mark_task_finalizing(
         .value(&claimed_at)
         .finish();
     broker.statement_log().log(statement);
-    let changed = open
+    let rows = open
         .main()
-        .execute(
+        .query(
             CheckoutClass::Reserved,
             &bound,
             StatementBound::ConnectionTimeouts,
         )
         .await?;
-    match changed {
-        0 => Ok(FinalizingMark::NotHeld),
-        1 => Ok(FinalizingMark::Marked),
-        changed => unreachable!(
-            "finalizing marker of task {task_id} changed {changed} rows; \
-             the statement reads one row by its primary key"
-        ),
-    }
+    let [row] = rows.as_slice() else {
+        return Err(crate::broker::BrokerError::ClaimContract(format!(
+            "horsies_mark_finalizing returned {} rows for task {task_id}; it returns one",
+            rows.len()
+        )));
+    };
+    let outcome: String = column(row, statement, "outcome")?;
+    FinalizingMark::from_outcome(&outcome).ok_or_else(|| {
+        crate::broker::BrokerError::ClaimContract(format!(
+            "horsies_mark_finalizing returned the outcome {outcome:?} for task {task_id}"
+        ))
+    })
 }
 
 /// Run Phase 2 finalize: the node finish of a workflow task (or the capacity

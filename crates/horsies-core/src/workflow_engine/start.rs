@@ -384,10 +384,7 @@ fn classify_workflow_error(
         WorkflowError::Database(_) | WorkflowError::Broker(_) | WorkflowError::StepContract(_) => {
             WorkflowStartErrorCode::EnqueueFailed
         }
-        WorkflowError::WorkflowNotFound { .. }
-        | WorkflowError::WorkflowTimeout { .. }
-        | WorkflowError::WorkflowError(_)
-        | WorkflowError::InvalidStatus(_) => panic!(
+        WorkflowError::WorkflowNotFound { .. } | WorkflowError::InvalidStatus(_) => panic!(
             "start of workflow '{workflow_name}' ({workflow_id}) returned an error outside the start catalog: {error}"
         ),
     }

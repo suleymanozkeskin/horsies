@@ -126,51 +126,88 @@ async fn finalizing_handoff_commits_for_current_claim_and_blocks_stale_recovery(
     remove(&pool, id).await;
 }
 
-/// Python `test_finalize_status_guard.py::test_the_finalizing_marker_has_no_null_fence`:
-/// the marker compares the claim time with no NULL branch, so a NULL claim
-/// time matches no row and nothing can turn off the generation half.
+/// Python `test_finalize_status_guard.py::test_the_finalizing_marker_refuses_a_null_claim_generation`:
+/// `horsies_mark_finalizing` requires the claim time, so a NULL claim time
+/// is refused with 22023 and nothing can turn off the generation half.
 #[tokio::test]
 #[serial]
-async fn the_finalizing_marker_has_no_null_fence() {
+async fn the_finalizing_marker_refuses_a_null_claim_generation() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let (id, _) = seed(&pool).await;
     let before = snapshot(&pool, id).await;
-    let changed = sqlx::query(MARK_FINALIZING_SQL)
+    let refused = sqlx::query(MARK_FINALIZING_SQL)
         .bind(id)
         .bind("current-worker")
         .bind(None::<DateTime<Utc>>)
-        .execute(&pool)
+        .fetch_all(&pool)
         .await
-        .unwrap()
-        .rows_affected();
-    assert_eq!(changed, 0, "a NULL generation must match no row");
+        .expect_err("a NULL claim generation is refused");
+    let sqlx::Error::Database(database_error) = refused else {
+        panic!("a NULL claim generation is a database refusal: {refused:?}");
+    };
+    assert_eq!(database_error.code().as_deref(), Some("22023"));
     assert_eq!(snapshot(&pool, id).await, before);
     remove(&pool, id).await;
 }
 
+/// The installed marker, as `regprocedure` text.
+const MARKER_FUNCTION: &str = "horsies_mark_finalizing(uuid,text,timestamp with time zone)";
+/// First and last words of the marker's row read in its body.
+const ROW_READ_START: &str = "SELECT (";
+const ROW_READ_END: &str = "FOR NO KEY UPDATE";
+/// The plpgsql target of the row read, which plain SQL does not take.
+const ROW_READ_TARGET: &str = "INTO v_held";
+
+/// The row read of the installed marker: the statement from
+/// [`ROW_READ_START`] to [`ROW_READ_END`], without its plpgsql target, with
+/// the arguments as literals.
+fn marker_row_read(definition: &str, id: Uuid, generation: DateTime<Utc>) -> String {
+    let start = definition
+        .find(ROW_READ_START)
+        .expect("the marker reads its task row");
+    let length = definition[start..]
+        .find(ROW_READ_END)
+        .expect("the marker locks its task row")
+        + ROW_READ_END.len();
+    let statement = &definition[start..start + length];
+    assert!(
+        statement.contains(ROW_READ_TARGET),
+        "the row read of the marker has no {ROW_READ_TARGET:?}: {statement}"
+    );
+    statement
+        .replace(ROW_READ_TARGET, "")
+        .replace("p_task_id", &format!("'{id}'::uuid"))
+        .replace("p_worker_id", "'current-worker'")
+        .replace(
+            "p_claimed_at",
+            &format!("'{}'::timestamptz", generation.to_rfc3339()),
+        )
+}
+
 /// The marker reads its row through the primary key whatever the
 /// statistics say, as Python's
-/// `test_task_row_plans.py::test_the_finalizing_marker_reads_its_row_through_the_primary_key`.
+/// `test_task_row_plans.py::test_the_finalizing_marker_reads_its_row_through_the_primary_key`:
+/// the row read of the installed `horsies_mark_finalizing`.
 #[tokio::test]
 #[serial]
 async fn the_finalizing_marker_reads_its_row_through_the_primary_key() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let (id, generation) = seed(&pool).await;
+    let definition: String = sqlx::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")
+        .bind(MARKER_FUNCTION)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let statement = marker_row_read(&definition, id, generation);
     let mut transaction = pool.begin().await.unwrap();
     sqlx::query("SET LOCAL enable_seqscan = off")
         .execute(transaction.as_mut())
         .await
         .unwrap();
-    let plan: serde_json::Value = sqlx::query_scalar(&format!(
-        "EXPLAIN (FORMAT JSON) {}",
-        MARK_FINALIZING_SQL
-            .replace("$1", &format!("'{id}'::uuid"))
-            .replace("$2", "'current-worker'")
-            .replace("$3", &format!("'{}'::timestamptz", generation.to_rfc3339()))
-    ))
-    .fetch_one(transaction.as_mut())
-    .await
-    .unwrap();
+    let plan: serde_json::Value = sqlx::query_scalar(&format!("EXPLAIN (FORMAT JSON) {statement}"))
+        .fetch_one(transaction.as_mut())
+        .await
+        .unwrap();
     transaction.rollback().await.unwrap();
     let plan_text = plan.to_string();
     assert!(
