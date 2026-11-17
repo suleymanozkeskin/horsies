@@ -126,7 +126,7 @@ async fn send_isolated_result(context: &HostContext, task_id: uuid::Uuid, end: R
 }
 
 /// One run of an isolated child and its report (Python `_report_run`).
-async fn run_isolated(context: &HostContext, run: RunFrame) {
+pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
     let RunFrame {
         task_id,
         task_name,
