@@ -541,7 +541,9 @@ unless it starts with "Added".
   `Failed` with `TASK_CANCELLED`. `WaitLimit::parse` refuses a limit above
   about 49.7 days before any read. The handle keeps an outcome and the
   failures of the stored data, as Python; a timeout, an absent task and a
-  database failure are read again.
+  database failure are read again. The value decodes from its stored text,
+  here and in `WorkflowHandle::get` and `result_for`, so an integer outside
+  the `i64` and `u64` range reads as `u128` or `i128`, as in Python.
 - **A result wait in a worker child is refused** with `WaitInsideTask` and
   sends no statement, as in Python.
 - **Reads by task id are on the app:** `get_result::<T, E>`,
