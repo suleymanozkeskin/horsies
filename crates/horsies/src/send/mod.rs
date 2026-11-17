@@ -11,7 +11,7 @@ pub use function::{TaskFunction, TaskFunctionSendOptions};
 pub use options::{SendRetention, TaskSendOptions};
 
 pub(crate) use catalog::TaskFunctions;
-pub(crate) use function::{RetryOf, SendStart};
+pub(crate) use function::{send_options_text, RetryOf, SendStart};
 
 /// A whole number of seconds: the delay of `schedule`.
 pub use horsies_core::manifest::WholeSeconds;

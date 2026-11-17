@@ -223,7 +223,8 @@ null>}`, in this order; the policy holds `max_retries`, `intervals`,
 `backoff_strategy`, `jitter`, `max_delay_seconds` (only when set) and
 `auto_retry_for`, codes by name. Every task stores the text, nulls included.
 A vector's `kind` is `task` (the options of a task), `send` (a send with a
-deadline: Python writes the deadline in `good_until`) or `node` (a workflow
+deadline: the task's text with the deadline in `good_until`, in
+`isoformat()`) or `node` (a workflow
 node: the task's text with the node's deadline merged as `good_until`, in
 `isoformat()`). `options` holds the stored facts (a `SHARED_ASYNC` task's
 grace as resolved at definition).
@@ -236,12 +237,13 @@ Encoders:
   `python/horsies/core/workflows/child_build.py:574` and
   `python/horsies/core/workflows/engine.py:464`.
 - Core: `TaskOptions::stored_options_text`
-  (`crates/horsies-core/src/core/task/options.rs:294`);
-  `merge_good_until_into_options` for a node
-  (`crates/horsies-core/src/workflow_engine/mod.rs:117`).
-- Rust client: its send stores `stored_options_text`
-  (`crates/horsies/src/send/function.rs:322`), with the deadline only in the
-  row's `good_until` column; a node merges its deadline in
+  (`crates/horsies-core/src/core/task/options.rs`); a send with a deadline,
+  `TaskOptions::stored_send_options_text`; `merge_good_until_into_options`
+  for a node (`crates/horsies-core/src/workflow_engine/mod.rs`).
+- Rust client: its send stores `send_options_text`
+  (`crates/horsies/src/send/function.rs`), the core's text with the
+  deadline in `good_until`, and the deadline also in the row's `good_until`
+  column; a node merges its deadline in
   `task_options_text` (`crates/horsies/src/workflow/spec_data.rs`), written
   with the core's `python_isoformat_utc`.
 
@@ -291,7 +293,7 @@ Differences that the vectors found. A fixed one names its PR; an open one is a
 | instants in stored data | error data, task options | the stale-crash `started_at` and `detected_at` and a node's merged `good_until` used `to_rfc3339()` (`.500`); Python's `isoformat()` writes `.500000` | fixed, #1623 |
 | result read of a big integer | result envelope | the core's result read parsed the envelope into a `serde_json::Map`: `2**64` came back as `1.8446744073709552e+19`, which Python's and the Rust client's typed reads refuse | fixed, #1617 |
 | options of a default task | task options | the core's encoder wrote no text for an isolated task with no policy, timeout or grace; Python stores the text with nulls | fixed, #1629 |
-| `send-deadline-in-options` | task options | a send with a deadline: Python writes it in the options' `good_until`; the Rust client writes `null` there (the deadline is in the row's column) | open |
+| `send-deadline-in-options` | task options | a send with a deadline: Python writes it in the options' `good_until`; the Rust client wrote `null` there (the deadline was only in the row's column) | fixed: the client's send writes `TaskOptions::stored_send_options_text` |
 | `spec-data-queue-class-order` | workflow spec data | `queue_classes`: Python writes the queues in the order of the nodes; the Rust client writes them sorted (`BTreeMap`). The core reads both | open |
 | `spec-data-non-ascii-escapes` | workflow spec data | Python's `dump_workflow_spec_data` keeps `json.dumps`' default `ensure_ascii=True` and writes `\u00dc` for `Ü`; every other Python stored-form encoder (`dumps_json`) and the Rust client write the character. The core reads both. Not pinned by a vector | open |
 | `no-parameter-input` | task input | a task with no parameters: Python stores `{}`, the Rust client stored `null` (its input is `()`) | fixed, the client's send stores `{}` |
