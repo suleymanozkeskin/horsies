@@ -84,7 +84,6 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_move_task_to_history',
         'horsies_phase2_consume',
         'horsies_phase2_quarantine_one',
-        'horsies_task_history_duplicate_staged',
         'horsies_task_history_leaf_lock_key',
         'horsies_terminalization_miss',
         'horsies_uuid7_birth',

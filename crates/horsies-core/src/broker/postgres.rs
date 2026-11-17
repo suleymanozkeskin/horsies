@@ -40,7 +40,7 @@ use crate::broker::health::{
     ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
     WORKER_PING_CHANNEL,
 };
-use crate::broker::history_reads::{read_history_detail, read_task_result};
+use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
 };
@@ -798,6 +798,9 @@ pub struct PostgresBroker {
     client_family: ClientFamily,
     /// Set once the family check before the first write passed.
     client_family_admitted: tokio::sync::OnceCell<()>,
+    /// Whether this broker saw the staged result function published. The
+    /// result read keeps it ([`read_task_result`]).
+    result_reader: ResultReaderSeen,
 }
 
 impl PostgresBroker {
@@ -873,6 +876,7 @@ impl PostgresBroker {
             schema_initialization_mode,
             client_family: ClientFamily::Rust,
             client_family_admitted: tokio::sync::OnceCell::new(),
+            result_reader: ResultReaderSeen::default(),
         }
     }
 
@@ -1022,6 +1026,7 @@ impl PostgresBroker {
             schema_initialization_mode,
             client_family: ClientFamily::Rust,
             client_family_admitted: tokio::sync::OnceCell::new(),
+            result_reader: ResultReaderSeen::default(),
         })
     }
 
@@ -1038,17 +1043,20 @@ impl PostgresBroker {
     }
 
     /// Connect with the schema behaviour and the keyed-enqueue reservation
-    /// window of a client manifest. The window is checked before any
-    /// database connection is attempted.
+    /// window of a client manifest, with the pools of `profile`: a producer,
+    /// a worker process (the main URL pool keeps
+    /// [`WORKER_RESERVED_CONNECTIONS`] free from batch checkouts), or a
+    /// worker's child. The window is checked before any database connection
+    /// is attempted.
     pub async fn connect_with_policies(
         config: &PostgresConfig,
         schema_initialization_mode: SchemaInitializationMode,
         window: chrono::Duration,
+        profile: PoolProfile,
     ) -> Result<Self, BrokerError> {
         let seconds = idempotency_reservation_window_seconds(Some(window))?;
         let mut broker =
-            Self::connect_with_schema_initialization_mode(config, schema_initialization_mode)
-                .await?;
+            Self::connect_with_profile(config, schema_initialization_mode, profile).await?;
         broker.idempotency_reservation_window_seconds = seconds;
         Ok(broker)
     }
@@ -2589,14 +2597,23 @@ impl PostgresBroker {
 
     /// One statement through the staged result function. While that function
     /// is not published (an upgraded schema before its next coverage pass),
-    /// falls back to the live read plus the staged detail read.
+    /// falls back to the live read plus the staged detail read. A function
+    /// dropped out of band after this broker saw it fails one call with the
+    /// `42883` refusal that names it; the next call falls back (Python's
+    /// rule, [`read_task_result`]).
     ///
     /// An absence from the result reader is confirmed by the detail reader: a
     /// result reader rendered before a leaf existed does not probe that leaf,
     /// and only the detail reader's absence is final.
     async fn fetch_result_row(&self, task_id: Uuid) -> Result<ResultRowProbe, BrokerError> {
         let open = self.core.pools()?;
-        let read = read_task_result(open.main(), self.statement_log, task_id).await?;
+        let read = read_task_result(
+            open.main(),
+            self.statement_log,
+            &self.result_reader,
+            task_id,
+        )
+        .await?;
         match read {
             TaskResultRead::Live(live) => Ok(ResultRowProbe::Row(TaskResultRow {
                 id: task_id,

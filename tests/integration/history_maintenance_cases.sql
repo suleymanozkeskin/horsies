@@ -227,8 +227,8 @@ SELECT fixture_check(
          FROM horsies_task_lookup_manifest) = ARRAY['horsies_task_history_forever_open:0:OPEN']
 );
 SELECT fixture_check(
-    'publication: the stamp is horsies:manifest:1:<sha256 of the manifest>, on all four readers',
-    (SELECT manifest_stamp ~ '^horsies:manifest:1:[0-9a-f]{64}$' FROM publication_first)
+    'publication: the stamp is horsies:manifest:2:<sha256 of the manifest>, on all four readers',
+    (SELECT manifest_stamp ~ '^horsies:manifest:2:[0-9a-f]{64}$' FROM publication_first)
     AND (SELECT bool_and(obj_description(to_regprocedure(s.signature), 'pg_proc')
                          = (SELECT manifest_stamp FROM publication_first))
          FROM horsies_history_reader_signatures() AS s)
@@ -245,11 +245,13 @@ SELECT fixture_check(
     AND fixture_reader_versions() = current_setting('fixture.versions_first')
 );
 SELECT fixture_check(
-    'publication: the provenance reader has one argument and plain columns with is_workflow_task',
+    'publication: the provenance reader has one argument and plain columns with is_workflow_task, the fingerprint '
+    'and sent_at',
     pg_get_function_identity_arguments(to_regprocedure('horsies_task_provenance_staged(uuid)')) = 'p_task_id uuid'
     AND pg_get_function_result(to_regprocedure('horsies_task_provenance_staged(uuid)'))
         = 'TABLE(task_id uuid, status text, terminal_at timestamp with time zone, terminalization_kind text, '
-          'is_workflow_task boolean)'
+          'is_workflow_task boolean, command_fingerprint_version smallint, command_fingerprint bytea, '
+          'sent_at timestamp with time zone)'
     AND (SELECT count(*) FROM pg_proc AS p WHERE p.proname = 'horsies_task_provenance_staged') = 1
     AND to_regprocedure('horsies_task_lookup_staged(uuid)') IS NULL
 );
@@ -850,6 +852,16 @@ SELECT fixture_check(
      FROM horsies_task_provenance_staged((SELECT id FROM ids WHERE name = 'moved'))) = 'FAILED:FAIL_RUNNING:false:true'
     AND (SELECT status || ':' || terminalization_kind || ':' || is_workflow_task::text
          FROM horsies_task_provenance_staged((SELECT id FROM ids WHERE name = 'workflow'))) = 'CANCELLED:CANCEL_ORPHAN:true'
+);
+SELECT fixture_check(
+    'provenance: the fingerprint version, fingerprint and sent_at of the history row, from the same probe',
+    (SELECT (p.command_fingerprint_version, p.command_fingerprint, p.sent_at)
+            IS NOT DISTINCT FROM (h.command_fingerprint_version, h.command_fingerprint, h.sent_at)
+            AND p.command_fingerprint IS NOT NULL
+     FROM horsies_task_provenance_staged((SELECT id FROM ids WHERE name = 'moved')) AS p
+     JOIN horsies_task_history AS h ON h.task_id = p.task_id)
+    AND (SELECT p.command_fingerprint IS NULL AND p.command_fingerprint_version IS NULL AND p.sent_at IS NOT NULL
+         FROM horsies_task_provenance_staged((SELECT id FROM ids WHERE name = 'workflow')) AS p)
 );
 SELECT fixture_check(
     'provenance: no live probe; a live id and an unknown id have no row',
