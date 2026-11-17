@@ -44,7 +44,7 @@ const WAIT: Duration = Duration::from_secs(10);
 /// The start of the watchdog's line for late beats with recovery off.
 const LATE_BEATS_LINE: &str = "runner heartbeats are late; the worker runs on";
 /// The start of the writer's line for a failed write.
-const FAILED_WRITE_LINE: &str = "runner heartbeat write failed";
+const FAILED_WRITE_LINE: &str = "Runner heartbeat write failed (attempt ";
 /// The beat interval of the tests.
 const INTERVAL: Duration = Duration::from_millis(50);
 /// A fail-closed window that passes within a test.
@@ -543,7 +543,7 @@ async fn with_recovery_off_failing_writes_never_stop_the_worker() {
     assert!(
         failed[0]
             .message
-            .ends_with("no reaper fails a RUNNING row, so the worker runs on"),
+            .contains("; no reaper fails a RUNNING row, so the worker runs on): "),
         "{}",
         failed[0].message
     );

@@ -541,7 +541,8 @@ impl<W: SuccessBatchWrite> Shared<W> {
                 tracing::warn!(
                     rows = rows.len(),
                     %error,
-                    "the finalize batch was refused; writing each row alone",
+                    "Finalize batch of {} rows refused ({error}); writing each row alone",
+                    rows.len(),
                 );
                 for queued in rows {
                     let answer = self.write_alone(queued).await;
@@ -552,7 +553,7 @@ impl<W: SuccessBatchWrite> Shared<W> {
                 tracing::error!(
                     rows = rows.len(),
                     %error,
-                    "the finalize batch write failed; every row of it gets the error",
+                    "the finalize batch write failed: {error}; every row of it gets the error",
                 );
                 for queued in rows {
                     self.answer(queued.key, Err(RowNotWritten::WriteFailed(error.clone())));

@@ -113,7 +113,7 @@ pub fn spawn_claimer_heartbeat(
                     error = %e,
                     consecutive_failures = consecutive_failures + 1,
                     max = MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
-                    "claimer heartbeat and lease renewal failed",
+                    "Claimer heartbeat error: {e}",
                 );
             }
 

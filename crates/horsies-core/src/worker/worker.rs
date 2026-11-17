@@ -246,7 +246,7 @@ async fn handle_worker_ping(
     {
         Ok(request) => request,
         Err(e) => {
-            tracing::warn!(error = %e, "discarding invalid ping payload");
+            tracing::warn!(error = %e, "Discarding invalid ping payload: {e}");
             return Ok(());
         }
     };
@@ -543,7 +543,10 @@ impl RunningChildren {
                 "the spawner thread did not reap every child within {:.0}s",
                 SPAWNER_STOP_WAIT.as_secs_f64()
             ),
-            Err(error) => tracing::error!(error = %error, "stopping the spawner thread failed"),
+            Err(error) => tracing::error!(
+                error = %error,
+                "stopping the spawner thread failed: {error}",
+            ),
         }
     }
 
@@ -701,7 +704,7 @@ fn spawn_ping_responder(
                         )
                         .await
                         {
-                            tracing::error!(error = %error, "ping responder error");
+                            tracing::error!(error = %error, "Ping responder error: {error}");
                         }
                     });
                 }
@@ -920,7 +923,11 @@ impl Worker {
                         cancel.cancel();
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "failed to register SIGTERM handler, graceful shutdown via SIGTERM unavailable");
+                        tracing::warn!(
+                            error = %e,
+                            "failed to register SIGTERM handler: {e}; graceful shutdown via \
+                             SIGTERM unavailable",
+                        );
                     }
                 }
             });
@@ -1079,7 +1086,8 @@ impl Worker {
                 tracing::error!(
                     %error,
                     attempts = backoff.attempts(),
-                    "worker start failed and its retries are exhausted",
+                    "Worker start failed after {} attempts: {error}",
+                    backoff.attempts(),
                 );
                 return Err(error);
             }
@@ -1088,7 +1096,8 @@ impl Worker {
                 %error,
                 attempt = backoff.attempts(),
                 delay_s = format!("{:.1}", delay),
-                "worker start failed; retrying",
+                "Worker start failed: {error}. Retrying in {delay:.1}s (attempt {})",
+                backoff.attempts(),
             );
             tokio::select! {
                 _ = self.cancel.cancelled() => return Ok(StartOutcome::StopRequested),
@@ -1403,7 +1412,8 @@ impl Worker {
                         error = %error,
                         attempt = claim_backoff.attempts(),
                         delay_s = format!("{:.2}", delay),
-                        "retryable claim error, backing off",
+                        "Worker loop error: {error}. Retrying in {delay:.1}s (attempt {})",
+                        claim_backoff.attempts(),
                     );
                     tokio::select! {
                         _ = self.cancel.cancelled() => return None,
@@ -1416,7 +1426,7 @@ impl Worker {
                         error = %error,
                         attempts = claim_backoff.attempts(),
                         retryable = error.is_retryable(),
-                        "claim error with no retry left; shutting down",
+                        "claim error with no retry left: {error}; shutting down",
                     );
                     return Some(error);
                 }
@@ -1804,14 +1814,14 @@ impl Worker {
                 Ok(listener) => return Ok(listener),
                 Err(e) => {
                     if !e.is_retryable() {
-                        tracing::error!(error = %e, "non-retryable listener connection error");
+                        tracing::error!(error = %e, "non-retryable listener connection error: {e}");
                         return Err(e);
                     }
                     if !backoff.can_retry() {
                         tracing::error!(
                             error = %e,
                             attempts = backoff.attempts(),
-                            "listener connection retries exhausted",
+                            "listener connection retries exhausted: {e}",
                         );
                         return Err(e);
                     }
@@ -1820,7 +1830,7 @@ impl Worker {
                         error = %e,
                         attempt = backoff.attempts(),
                         delay_s = format!("{:.2}", delay),
-                        "listener connection failed, retrying",
+                        "listener connection failed: {e}; retrying",
                     );
                     tokio::select! {
                         _ = self.cancel.cancelled() => {
