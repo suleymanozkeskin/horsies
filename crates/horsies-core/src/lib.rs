@@ -73,11 +73,12 @@ pub use crate::core::{AppConfig, HorsiesError};
 // broker re-exports
 pub use crate::broker::{
     expected_schema_version, BrokerError, BrokerErrorCode, BrokerOperationError, BrokerResult,
-    CheckInterruption, DatabasePing, ExpiredTaskRow, HeartbeatRow, ListenError, ListenerPlanError,
-    PostgresBroker, RawResultRead, RawResultRecord, SchemaInitializationMode, SessionCheckFailure,
-    StaleTaskRow, TaskAttemptRow, TaskHandle, TaskInfoRead, TaskInfoRow, TaskResultRow,
-    WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WorkflowRow,
-    WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    CheckInterruption, ConnectivityRefusal, DatabasePing, ExpiredTaskRow, HeartbeatRow,
+    ListenError, ListenProbeFailure, ListenerPlanError, PostgresBroker, RawResultRead,
+    RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow, TaskAttemptRow,
+    TaskHandle, TaskInfoRead, TaskInfoRow, TaskResultRow, WorkerPingRequest, WorkerPong,
+    WorkerPongPayload, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE,
+    WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 // The bounded limit of a result wait; a client checks it before the read.
