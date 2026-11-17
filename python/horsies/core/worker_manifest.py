@@ -9,12 +9,13 @@ the child launch. It does not pick the profile: the core checks the profile
 set and picks the requested profile, so each client sends the set and the
 `--profile` value as they are.
 
-Pydantic refuses every user error first. The manifest bounds a few values
-that the config does not bound above (`prefetch_buffer`, the claim lease,
+AppConfig validation refuses every user error first, the values above a
+bound of the worker manifest included (`prefetch_buffer`, the claim lease,
 the claim renew age, `cluster_wide_cap`, a queue's `max_concurrency`, the
-payload thresholds): a value above its manifest bound is a
-`ValueAboveManifestBound`, the only failure of `to_worker_manifest`. Any
-other refusal by the core is a defect of this module.
+payload thresholds; `horsies.core.models.app.worker_bound_errors`,
+`PayloadPolicy`). `to_worker_manifest` has no failure: a value above its
+manifest bound is a defect and fails an assertion that names the path, the
+value and the bound. Any refusal by the core is a defect of this module.
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ import dataclasses
 import json
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from datetime import timedelta
 from typing import Final, assert_never
 
@@ -64,7 +64,7 @@ from horsies.core.models.worker_profile import (
     TaskLimit,
     WorkerProfile,
 )
-from horsies.core.types.result import Err, Ok, Result
+from horsies.core.types.result import Err, Ok
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.cpu_placement import ParentCpu
 
@@ -79,21 +79,6 @@ _ONE_MILLISECOND: Final = timedelta(milliseconds=1)
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 
 
-@dataclass(frozen=True, slots=True)
-class ValueAboveManifestBound:
-    """A config value that Pydantic accepted and that is above the bound of
-    its manifest field.
-
-    `path` names the field as the user writes it in `AppConfig`, for example
-    `custom_queues[0].max_concurrency`. The claim function of the core takes
-    each count as a Postgres `integer`, so a larger count never claims.
-    """
-
-    path: str
-    value: int
-    maximum: int
-
-
 def to_worker_manifest(
     config: AppConfig,
     *,
@@ -101,55 +86,38 @@ def to_worker_manifest(
     tasks: Mapping[str, Execution],
     child_launch: wire.ChildLaunchManifest,
     idempotency_reservation_window: timedelta,
-) -> Result[wire.WorkerManifest, ValueAboveManifestBound]:
+) -> wire.WorkerManifest:
     """The worker manifest of `config`.
 
     Pure: no I/O. `profile` is the `--profile` value (`None` when the option
     was not passed); `tasks` is the execution class of each registered task
     by name; `child_launch` comes from `python_child_launch`; the window is
-    one that `validate_reservation_window` accepted.
-
-    Errors: `ValueAboveManifestBound` for the first value above its
-    manifest bound: the claim values (`worker_claim_manifest`), then the
-    payload thresholds (`payload_manifest`).
+    one that `validate_reservation_window` accepted. `config` passed
+    AppConfig validation, which keeps every value within its manifest bound;
+    a value above it fails an assertion (`worker_claim_manifest`,
+    `payload_manifest`).
     """
-    match worker_claim_manifest(config):
-        case Ok(claim):
-            pass
-        case Err(above):
-            return Err(above)
-        case _ as unreachable:
-            assert_never(unreachable)
-    match payload_manifest(config.payload):
-        case Ok(payload):
-            pass
-        case Err(above):
-            return Err(above)
-        case _ as unreachable:
-            assert_never(unreachable)
-    return Ok(
-        wire.WorkerManifest(
-            manifest_version=wire.MANIFEST_VERSION,
-            database=worker_database_manifest(config.broker),
-            send=wire.SendManifest(
-                retain_rerun_input_default=config.broker.retain_rerun_input_default,
-                idempotency_reservation_window=reservation_window_micros(
-                    idempotency_reservation_window,
-                ),
+    return wire.WorkerManifest(
+        manifest_version=wire.MANIFEST_VERSION,
+        database=worker_database_manifest(config.broker),
+        send=wire.SendManifest(
+            retain_rerun_input_default=config.broker.retain_rerun_input_default,
+            idempotency_reservation_window=reservation_window_micros(
+                idempotency_reservation_window,
             ),
-            profiles={
-                name: worker_profile_manifest(worker_profile)
-                for name, worker_profile in config.worker_profiles.items()
-            },
-            profile=profile_request(profile),
-            claim=claim,
-            recovery=recovery_manifest(config.recovery),
-            retention=retention_manifest(config.retention),
-            resilience=resilience_manifest(config.resilience),
-            payload=payload,
-            tasks={name: execution_of(execution) for name, execution in tasks.items()},
-            child_launch=child_launch,
         ),
+        profiles={
+            name: worker_profile_manifest(worker_profile)
+            for name, worker_profile in config.worker_profiles.items()
+        },
+        profile=profile_request(profile),
+        claim=worker_claim_manifest(config),
+        recovery=recovery_manifest(config.recovery),
+        retention=retention_manifest(config.retention),
+        resilience=resilience_manifest(config.resilience),
+        payload=payload_manifest(config.payload),
+        tasks={name: execution_of(execution) for name, execution in tasks.items()},
+        child_launch=child_launch,
     )
 
 
@@ -301,29 +269,16 @@ def resilience_manifest(config: WorkerResilienceConfig) -> wire.ResilienceManife
     )
 
 
-def payload_manifest(
-    config: PayloadPolicy,
-) -> Result[wire.PayloadManifest, ValueAboveManifestBound]:
+def payload_manifest(config: PayloadPolicy) -> wire.PayloadManifest:
     """The payload section of `config`; a `None` threshold is no limit. Pure.
 
-    Errors: `ValueAboveManifestBound` for the first threshold above
-    `PAYLOAD_BYTES_MAX`, `warn_bytes` before `reject_bytes`.
+    `PayloadPolicy` validation keeps each threshold at or below
+    `PAYLOAD_BYTES_MAX`; a larger one fails an assertion (`_at_most`).
     """
-    match _payload_limit('payload.warn_bytes', config.warn_bytes):
-        case Ok(warn_bytes):
-            pass
-        case Err(above):
-            return Err(above)
-        case _ as unreachable:
-            assert_never(unreachable)
-    match _payload_limit('payload.reject_bytes', config.reject_bytes):
-        case Ok(reject_bytes):
-            pass
-        case Err(above):
-            return Err(above)
-        case _ as unreachable:
-            assert_never(unreachable)
-    return Ok(wire.PayloadManifest(warn_bytes=warn_bytes, reject_bytes=reject_bytes))
+    return wire.PayloadManifest(
+        warn_bytes=_payload_limit('payload.warn_bytes', config.warn_bytes),
+        reject_bytes=_payload_limit('payload.reject_bytes', config.reject_bytes),
+    )
 
 
 def worker_database_manifest(config: PostgresConfig) -> wire.WorkerDatabaseManifest:
@@ -397,65 +352,26 @@ def drain_timeout_ms(drain_timeout: timedelta) -> int:
     return milliseconds
 
 
-def worker_claim_manifest(
-    config: AppConfig,
-) -> Result[wire.WorkerClaimManifest, ValueAboveManifestBound]:
+def worker_claim_manifest(config: AppConfig) -> wire.WorkerClaimManifest:
     """The queue and claim settings of `config`. Pure.
 
-    Errors: `ValueAboveManifestBound` for the first value above its manifest
-    bound, in this order: `prefetch_buffer`, `claim_lease_ms`,
-    `max_claim_renew_age_ms`, `cluster_wide_cap`, then each queue's
-    `max_concurrency`. AppConfig validation keeps the renew age at or above
-    the lease, so a lease above its bound comes with a renew age above it.
+    AppConfig validation keeps `prefetch_buffer`, `claim_lease_ms`,
+    `max_claim_renew_age_ms`, `cluster_wide_cap` and each queue's
+    `max_concurrency` at or below their manifest bounds
+    (`worker_bound_errors`); a larger value fails an assertion (`_at_most`).
     """
-    match _at_most('prefetch_buffer', config.prefetch_buffer, wire.CLAIM_COUNT_MAX):
-        case Ok():
-            pass
-        case Err(above):
-            return Err(above)
-        case _ as unreachable:
-            assert_never(unreachable)
-    match _claim_lease(config.claim_lease_ms):
-        case Ok(claim_lease):
-            pass
-        case Err(above):
-            return Err(above)
-        case _ as unreachable:
-            assert_never(unreachable)
-    renew_age = _at_most(
-        'max_claim_renew_age_ms',
-        config.max_claim_renew_age_ms,
-        wire.MILLISECONDS_MAX,
-    )
-    match renew_age:
-        case Ok():
-            pass
-        case Err(above):
-            return Err(above)
-        case _ as unreachable:
-            assert_never(unreachable)
-    match _cluster_wide_cap(config.cluster_wide_cap):
-        case Ok(cluster_wide_cap):
-            pass
-        case Err(above):
-            return Err(above)
-        case _ as unreachable:
-            assert_never(unreachable)
-    match _queues(config.queue_mode, config.custom_queues):
-        case Ok(queues):
-            pass
-        case Err(above):
-            return Err(above)
-        case _ as unreachable:
-            assert_never(unreachable)
-    return Ok(
-        wire.WorkerClaimManifest(
-            queues=queues,
-            prefetch_buffer=config.prefetch_buffer,
-            claim_lease=claim_lease,
-            max_claim_renew_age_ms=config.max_claim_renew_age_ms,
-            cluster_wide_cap=cluster_wide_cap,
+    return wire.WorkerClaimManifest(
+        queues=_queues(config.queue_mode, config.custom_queues),
+        prefetch_buffer=_at_most(
+            'prefetch_buffer', config.prefetch_buffer, wire.CLAIM_COUNT_MAX,
         ),
+        claim_lease=_claim_lease(config.claim_lease_ms),
+        max_claim_renew_age_ms=_at_most(
+            'max_claim_renew_age_ms',
+            config.max_claim_renew_age_ms,
+            wire.MILLISECONDS_MAX,
+        ),
+        cluster_wide_cap=_cluster_wide_cap(config.cluster_wide_cap),
     )
 
 
@@ -493,55 +409,45 @@ def log_level_of(level: str) -> wire.WorkerLogLevel:
             raise AssertionError(f'--loglevel admits five levels, not {other!r}')
 
 
-def _at_most(
-    path: str, value: int, maximum: int
-) -> Result[int, ValueAboveManifestBound]:
-    match value <= maximum:
-        case True:
-            return Ok(value)
-        case False:
-            return Err(ValueAboveManifestBound(path=path, value=value, maximum=maximum))
+def _at_most(path: str, value: int, maximum: int) -> int:
+    """`value`, which validation keeps at or below `maximum`, the bound of
+    its manifest field. A larger value is a defect of that validation: it
+    fails an assertion that names `path` (as the user writes it in
+    `AppConfig`), the value and the bound. Pure."""
+    assert value <= maximum, (
+        f'{path} = {value} is above the bound that a worker takes ({maximum}); '
+        'config validation refuses such a value'
+    )
+    return value
 
 
-def _claim_lease(
-    claim_lease_ms: int | None,
-) -> Result[wire.ClaimLease, ValueAboveManifestBound]:
+def _claim_lease(claim_lease_ms: int | None) -> wire.ClaimLease:
     match claim_lease_ms:
         case None:
-            return Ok(wire.ClaimLeaseWorkerDefault())
+            return wire.ClaimLeaseWorkerDefault()
         case milliseconds:
-            match _at_most('claim_lease_ms', milliseconds, wire.MILLISECONDS_MAX):
-                case Ok(ms):
-                    return Ok(wire.ClaimLeaseMilliseconds(ms=ms))
-                case Err() as above:
-                    return above
-                case _ as unreachable:
-                    assert_never(unreachable)
+            return wire.ClaimLeaseMilliseconds(
+                ms=_at_most('claim_lease_ms', milliseconds, wire.MILLISECONDS_MAX),
+            )
 
 
-def _cluster_wide_cap(
-    cluster_wide_cap: int | None,
-) -> Result[wire.ClusterWideCap, ValueAboveManifestBound]:
+def _cluster_wide_cap(cluster_wide_cap: int | None) -> wire.ClusterWideCap:
     match cluster_wide_cap:
         case None:
-            return Ok(wire.ClusterWideCapNoLimit())
+            return wire.ClusterWideCapNoLimit()
         case cap:
-            match _at_most('cluster_wide_cap', cap, wire.TASK_LIMIT_MAX):
-                case Ok(tasks):
-                    return Ok(wire.ClusterWideCapTasks(tasks=tasks))
-                case Err() as above:
-                    return above
-                case _ as unreachable:
-                    assert_never(unreachable)
+            return wire.ClusterWideCapTasks(
+                tasks=_at_most('cluster_wide_cap', cap, wire.TASK_LIMIT_MAX),
+            )
 
 
 def _queues(
     queue_mode: QueueMode,
     custom_queues: Sequence[CustomQueueConfig] | None,
-) -> Result[wire.Queues, ValueAboveManifestBound]:
+) -> wire.Queues:
     match queue_mode:
         case QueueMode.DEFAULT:
-            return Ok(wire.QueuesDefault())
+            return wire.QueuesDefault()
         case QueueMode.CUSTOM:
             pass
         case _ as unreachable:
@@ -549,40 +455,33 @@ def _queues(
     assert (
         custom_queues is not None
     ), 'AppConfig validation requires custom_queues in CUSTOM mode'
-    manifests: list[wire.CustomQueueManifest] = []
-    for position, queue in enumerate(custom_queues):
-        match _queue_concurrency(position, queue.max_concurrency):
-            case Ok(max_concurrency):
-                manifests.append(
-                    wire.CustomQueueManifest(
-                        name=queue.name,
-                        priority=queue.priority,
-                        max_concurrency=max_concurrency,
-                    ),
-                )
-            case Err() as above:
-                return above
-            case _ as unreachable:
-                assert_never(unreachable)
-    return Ok(wire.QueuesCustom(queues=tuple(manifests)))
+    return wire.QueuesCustom(
+        queues=tuple(
+            wire.CustomQueueManifest(
+                name=queue.name,
+                priority=queue.priority,
+                max_concurrency=_queue_concurrency(position, queue.max_concurrency),
+            )
+            for position, queue in enumerate(custom_queues)
+        ),
+    )
 
 
 def _queue_concurrency(
     position: int,
     max_concurrency: int | None,
-) -> Result[wire.QueueConcurrency, ValueAboveManifestBound]:
+) -> wire.QueueConcurrency:
     match max_concurrency:
         case None:
-            return Ok(wire.QueueConcurrencyNoLimit())
+            return wire.QueueConcurrencyNoLimit()
         case limit:
-            path = f'custom_queues[{position}].max_concurrency'
-            match _at_most(path, limit, wire.QUEUE_CONCURRENCY_MAX):
-                case Ok(tasks):
-                    return Ok(wire.QueueConcurrencyTasks(tasks=tasks))
-                case Err() as above:
-                    return above
-                case _ as unreachable:
-                    assert_never(unreachable)
+            return wire.QueueConcurrencyTasks(
+                tasks=_at_most(
+                    f'custom_queues[{position}].max_concurrency',
+                    limit,
+                    wire.QUEUE_CONCURRENCY_MAX,
+                ),
+            )
 
 
 def _paused_expiry(age: timedelta | None) -> wire.PausedWorkflowExpiry:
@@ -656,21 +555,14 @@ def _retry_attempt_limit(attempts: int) -> wire.RetryAttemptLimit:
             return wire.RetryAttemptLimitAttempts(attempts=limit)
 
 
-def _payload_limit(
-    path: str,
-    threshold: int | None,
-) -> Result[wire.PayloadLimit, ValueAboveManifestBound]:
+def _payload_limit(path: str, threshold: int | None) -> wire.PayloadLimit:
     match threshold:
         case None:
-            return Ok(wire.PayloadLimitNoLimit())
+            return wire.PayloadLimitNoLimit()
         case limit:
-            match _at_most(path, limit, wire.PAYLOAD_BYTES_MAX):
-                case Ok(within):
-                    return Ok(wire.PayloadLimitBytes(bytes=within))
-                case Err() as above:
-                    return above
-                case _ as unreachable:
-                    assert_never(unreachable)
+            return wire.PayloadLimitBytes(
+                bytes=_at_most(path, limit, wire.PAYLOAD_BYTES_MAX),
+            )
 
 
 def _session_database(config: PostgresConfig) -> wire.SessionDatabase:
