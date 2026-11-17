@@ -2,7 +2,7 @@
 title: Broker Monitoring Methods
 section: python
 summary: Async methods on PostgresBroker for inspecting task and worker health.
-related: [syce-overview, ../workers/heartbeats-recovery]
+related: [web-ui-overview, ../workers/heartbeats-recovery]
 tags: [monitoring, broker, api]
 ---
 
