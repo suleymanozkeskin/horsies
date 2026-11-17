@@ -9,6 +9,8 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
+use crate::broker::core_rows::StatementLog;
+use crate::broker::error::BrokerError;
 use crate::core::history::archive::attempts::{
     encode_attempt_snapshot, AttemptRecord, StoredAttemptSnapshot,
 };
@@ -30,6 +32,7 @@ use crate::core::history::partitions::manager::{
 };
 use crate::core::history::partitions::publication::LoaderPublication;
 use crate::core::history::periods::RetentionDays;
+use crate::db::StatementFailure;
 
 use super::aggregates::{
     history_breakdown_statement, history_count_statement, history_estimate_statement,
@@ -50,8 +53,7 @@ use super::pages::{
 };
 use super::publisher::{published_manifest_absent_leaves, StagedLoaderPublisher};
 use super::result::{
-    decode_result_row, read_task_result, staged_result_published, HistoryResultPayload,
-    LiveTaskResult, ResultWireRow, TaskResultRead,
+    decode_result_row, HistoryResultPayload, LiveTaskResult, ResultWireRow, TaskResultRead,
 };
 use super::{detail::read_task_detail, detail::TaskAbsenceReason, detail::TaskDetailResult};
 
@@ -1648,6 +1650,26 @@ fn result_wire_decode_is_typed_and_fail_closed() {
     }
 }
 
+/// Reads one task's result with the broker's statement-layer reader
+/// (`broker::history_reads::read_task_result`) on a core handle of the test
+/// database, then closes the handle. Each call opens new connections, so no
+/// statement prepared before a reader change is reused.
+async fn core_result_read(
+    database: &TestDatabase,
+    task_id: Uuid,
+) -> Result<TaskResultRead, BrokerError> {
+    let handle = crate::test_support::core_handle(database.database.url());
+    let open = handle
+        .pools()
+        .expect("the statement layer accepts the test URL");
+    let read =
+        crate::broker::history_reads::read_task_result(open.main(), StatementLog::Off, task_id)
+            .await;
+    drop(open);
+    let _closed = handle.close().await;
+    read
+}
+
 #[tokio::test]
 #[serial]
 async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
@@ -1691,14 +1713,12 @@ async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
         .await
         .expect("commit stale reader setup");
 
-    let mut connection = database.pool.acquire().await.expect("acquire result read");
     assert_eq!(
-        read_task_result(&mut connection, completed_id)
+        core_result_read(&database, completed_id)
             .await
             .expect("stale result read"),
         TaskResultRead::Absent
     );
-    drop(connection);
     let broker = PostgresBroker::from_pool(database.pool.clone());
     let confirmed = broker
         .get_result::<i32>(completed_id, None)
@@ -1754,7 +1774,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
 
     let mut connection = database.pool.acquire().await.expect("acquire result reads");
     assert_eq!(
-        read_task_result(&mut connection, live_id)
+        core_result_read(&database, live_id)
             .await
             .expect("read live result"),
         TaskResultRead::Live(LiveTaskResult {
@@ -1764,7 +1784,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
             failed_reason: None,
         })
     );
-    let TaskResultRead::History(failed) = read_task_result(&mut connection, failed_id)
+    let TaskResultRead::History(failed) = core_result_read(&database, failed_id)
         .await
         .expect("read history result")
     else {
@@ -1785,7 +1805,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
     );
     for absent_id in [v7_with_birth(today + Duration::hours(5)), Uuid::new_v4()] {
         assert_eq!(
-            read_task_result(&mut connection, absent_id)
+            core_result_read(&database, absent_id)
                 .await
                 .expect("read absent result"),
             TaskResultRead::Absent
@@ -1804,7 +1824,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         .await
         .expect("drop only staged result function");
     assert_eq!(
-        read_task_result(&mut connection, failed_id)
+        core_result_read(&database, failed_id)
             .await
             .expect("read with unpublished result function"),
         TaskResultRead::NotPublished
@@ -1823,9 +1843,12 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         .republish(&mut connection)
         .await
         .expect("republish staged readers");
-    assert!(staged_result_published(&mut connection)
-        .await
-        .expect("result publication probe"));
+    assert!(matches!(
+        core_result_read(&database, failed_id)
+            .await
+            .expect("read with the republished result function"),
+        TaskResultRead::History(_)
+    ));
 
     sqlx::query(
         "CREATE OR REPLACE FUNCTION horsies_task_result_staged(p_task_id uuid)
@@ -1839,9 +1862,9 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
     .await
     .expect("plant result function with an undefined inner call");
     assert!(matches!(
-        read_task_result(&mut connection, failed_id).await,
-        Err(HistoryError::Database(sqlx::Error::Database(ref error)))
-            if error.code().as_deref() == Some("42883")
+        core_result_read(&database, failed_id).await,
+        Err(BrokerError::Statement(StatementFailure::StatementRefused { ref cause, .. }))
+            if cause.server_error().code().code() == "42883"
     ));
     drop(connection);
     database.drop().await;
