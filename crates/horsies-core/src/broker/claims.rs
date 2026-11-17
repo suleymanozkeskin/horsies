@@ -34,7 +34,10 @@ use crate::broker::core_rows::{column, StatementLog};
 use crate::broker::error::BrokerError;
 use crate::core::lifecycle::OwnedClaim;
 use crate::core::task::Execution;
-use crate::db::{CheckoutClass, CorePool, ParameterType, Row, StatementBound, TypedStatement};
+use crate::db::{
+    CheckoutClass, CheckoutFailure, CorePool, NotSentCause, ParameterType, PooledConnection, Row,
+    StatementBound, StatementFailure, TypedStatement,
+};
 
 /// The most rows one release statement takes (the bound of
 /// `horsies_release_claims`).
@@ -481,6 +484,28 @@ pub struct StartAttempt {
     pub beat_sender_id: String,
 }
 
+impl StartAttempt {
+    /// The start of `task_id` under `fence` by the process `worker_pid` on
+    /// `worker_hostname`: the process name is `worker-<pid>` and the beat
+    /// sender `<worker_id>:<pid>` (Python `start_attempt_params`). Pure.
+    pub fn of_process(
+        task_id: Uuid,
+        fence: OwnedClaim,
+        worker_pid: i32,
+        worker_hostname: String,
+    ) -> StartAttempt {
+        let beat_sender_id = format!("{}:{worker_pid}", fence.worker_id);
+        StartAttempt {
+            task_id,
+            fence,
+            worker_pid,
+            worker_hostname,
+            worker_process_name: format!("worker-{worker_pid}"),
+            beat_sender_id,
+        }
+    }
+}
+
 /// Why a start wrote nothing: the first reason that holds, in the
 /// function's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -501,6 +526,18 @@ pub enum StartMiss {
 }
 
 impl StartMiss {
+    /// The function's `miss_reason` text of this miss.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            StartMiss::DeadlinePassed => "DEADLINE_PASSED",
+            StartMiss::NotHeld => "NOT_HELD",
+            StartMiss::LeaseExpired => "LEASE_EXPIRED",
+            StartMiss::WorkflowPaused => "WORKFLOW_PAUSED",
+            StartMiss::WorkflowCancelled => "WORKFLOW_CANCELLED",
+            StartMiss::NodeNotLinked => "NODE_NOT_LINKED",
+        }
+    }
+
     fn from_wire(value: &str) -> Option<StartMiss> {
         match value {
             "DEADLINE_PASSED" => Some(StartMiss::DeadlinePassed),
@@ -524,6 +561,28 @@ pub enum StartOutcome {
     Missed(StartMiss),
 }
 
+/// Until when a start may send its statement, judged after the pool gave
+/// the connection (Python's `start_check`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartWindow {
+    /// The start sends its statement whenever the pool gives the connection.
+    Open,
+    /// The start sends no statement once this instant has passed: the
+    /// deadline of the run fired while the start waited for a connection.
+    Until(std::time::Instant),
+}
+
+/// What a start with a [`StartWindow`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowedStart {
+    /// The statement ran.
+    Ran(StartOutcome),
+    /// The window closed while the start waited for a connection: no
+    /// statement ran, so the row stays CLAIMED (Python
+    /// `DeadlineBeforeStart`).
+    WindowClosed,
+}
+
 /// Start one claimed task: `horsies_start_attempt` on `pool`, as a per-task
 /// write. Writes the RUNNING row, the first runner beat and the node write
 /// in one statement, or nothing on a miss. Does not expire the row or stop
@@ -539,6 +598,54 @@ pub(crate) async fn start_attempt(
     log: StatementLog,
     command: &StartAttempt,
 ) -> Result<StartOutcome, BrokerError> {
+    let mut connection = pool
+        .checkout(CheckoutClass::Reserved)
+        .await
+        .map_err(start_not_sent)?;
+    start_on(&mut connection, log, command).await
+}
+
+/// [`start_attempt`] with a window: after the pool gave the connection, a
+/// closed window ends the start with no statement
+/// ([`WindowedStart::WindowClosed`]).
+///
+/// Errors: as [`start_attempt`]; a failed checkout is
+/// [`BrokerError::Statement`] with nothing sent.
+pub(crate) async fn start_attempt_within(
+    pool: &CorePool,
+    log: StatementLog,
+    command: &StartAttempt,
+    window: StartWindow,
+) -> Result<WindowedStart, BrokerError> {
+    let mut connection = pool
+        .checkout(CheckoutClass::Reserved)
+        .await
+        .map_err(start_not_sent)?;
+    match window {
+        StartWindow::Until(deadline) if std::time::Instant::now() >= deadline => {
+            Ok(WindowedStart::WindowClosed)
+        }
+        StartWindow::Until(_) | StartWindow::Open => start_on(&mut connection, log, command)
+            .await
+            .map(WindowedStart::Ran),
+    }
+}
+
+/// The failure of a start whose checkout failed: nothing was sent.
+fn start_not_sent(cause: CheckoutFailure) -> BrokerError {
+    BrokerError::Statement(StatementFailure::NotSent {
+        statement: START_ATTEMPT.name(),
+        cause: NotSentCause::Checkout(cause),
+    })
+}
+
+/// Run `horsies_start_attempt` on a checked-out connection and decode its
+/// row. Errors: as [`start_attempt`].
+async fn start_on(
+    connection: &mut PooledConnection,
+    log: StatementLog,
+    command: &StartAttempt,
+) -> Result<StartOutcome, BrokerError> {
     let statement = &START_ATTEMPT;
     let bound = statement
         .bind()
@@ -551,12 +658,8 @@ pub(crate) async fn start_attempt(
         .value(&command.beat_sender_id)
         .finish();
     log.log(statement);
-    let rows = pool
-        .query(
-            CheckoutClass::Reserved,
-            &bound,
-            StatementBound::ConnectionTimeouts,
-        )
+    let rows = connection
+        .query(&bound, StatementBound::ConnectionTimeouts)
         .await?;
     let [row] = rows.as_slice() else {
         return Err(BrokerError::ClaimContract(format!(

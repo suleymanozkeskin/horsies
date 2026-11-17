@@ -372,6 +372,40 @@ fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
     );
 }
 
+/// `TestEnqueueSubworkflowTask::test_a_child_past_the_depth_limit_fails_the_node_and_loads_nothing`,
+/// `test_a_child_at_the_depth_limit_goes_on_to_load_its_definition`: the
+/// depth check comes before the child definition is resolved. A child past
+/// the limit fails with `SUBWORKFLOW_DEPTH_LIMIT_REACHED` although no child
+/// is registered under its key; a child that reaches the limit exactly goes
+/// on to resolve its definition, and the unregistered key fails it with
+/// `SUBWORKFLOW_LOAD_FAILED`.
+#[test]
+fn the_depth_limit_is_checked_before_the_child_definition_is_resolved() {
+    let workflow_id = Uuid::new_v4();
+    let registry = registry_with_child();
+    let retention = RetentionConfig::default();
+    let build = ChildBuild {
+        registry: &registry,
+        retention: &retention,
+    };
+    let missing_key = "tests.child_start.missing.v1";
+    let depth_limit = crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH;
+
+    let past = failure_error(
+        child_start_kind(&owed(workflow_id, depth_limit, missing_key), build).expect("host build"),
+    );
+    let at_limit = failure_error(
+        child_start_kind(&owed(workflow_id, depth_limit - 1, missing_key), build)
+            .expect("host build"),
+    );
+
+    assert_eq!(
+        past.error_code.to_string(),
+        "SUBWORKFLOW_DEPTH_LIMIT_REACHED"
+    );
+    assert_eq!(at_limit.error_code.to_string(), "SUBWORKFLOW_LOAD_FAILED");
+}
+
 /// An `args_from` key that the static input also sets fails the node with
 /// Python's conflict error.
 #[test]

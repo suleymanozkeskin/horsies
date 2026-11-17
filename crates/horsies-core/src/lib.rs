@@ -88,8 +88,8 @@ pub use crate::broker::attempt_writes::{
 };
 pub use crate::broker::claims::{
     ClaimClasses, ClaimPass, ClaimPassRequest, ClaimTake, ClaimedRow, QueueStartCheck, QueueStarts,
-    ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement, UnheldBudget,
-    MAX_RELEASED_CLAIMS,
+    ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement, StartAttempt,
+    StartMiss, StartOutcome, StartWindow, UnheldBudget, WindowedStart, MAX_RELEASED_CLAIMS,
 };
 pub use crate::broker::stale_recovery::{
     StaleClaimsRequeueFailed, StaleClaimsRequeuePass, StaleRunningPass, StaleRunningThresholds,
@@ -145,8 +145,7 @@ pub use crate::core::history::rerun::{
 };
 pub use crate::workflow_engine::bound_handle::WorkflowHandle;
 pub use crate::workflow_engine::engine::{
-    on_subworkflow_complete, on_workflow_task_complete, WorkflowTaskCompletion,
-    WorkflowTaskCompletionError,
+    on_workflow_task_complete, WorkflowTaskCompletion, WorkflowTaskCompletionError,
 };
 pub use crate::workflow_engine::error::WorkflowError;
 pub use crate::workflow_engine::info::WorkflowTaskInfo;

@@ -18,10 +18,13 @@ use crate::core::{
 use crate::db::{PayloadFilter, WakeEvent, WakeSubscription};
 
 use crate::core::task::result::TASK_RESULT_ENVELOPE_KEY;
-use crate::workflow_engine::engine::OUTPUTLESS_TERMINALS_KEY;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::info::WorkflowTaskInfo;
 use crate::workflow_engine::lifecycle::handle_operation_error;
+
+/// The marker key of the result of a workflow with no output node (Python `__h_outputless_terminals__`,
+/// `core/workflows/engine.py:3973-3983`; the baseline writes it in `horsies_workflow_outputless_result`).
+const OUTPUTLESS_TERMINALS_KEY: &str = "__h_outputless_terminals__";
 
 // ---------------------------------------------------------------------------
 // SQL constants

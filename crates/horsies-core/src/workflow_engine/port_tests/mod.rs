@@ -17,6 +17,7 @@ mod node_finalize;
 mod output_skipped;
 mod parent_propagation;
 mod pause_resume_cancel;
+mod promotion_branches;
 mod promotion_rows;
 mod recovery_cases;
 mod recovery_limit_pass;

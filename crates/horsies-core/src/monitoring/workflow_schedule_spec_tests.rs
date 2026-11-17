@@ -626,3 +626,142 @@ async fn the_task_list_page_reads_the_live_enqueue_index_in_both_directions() {
     drop(client);
     database.drop().await;
 }
+
+/// Creates the `standard_30d` leaf of the UTC day `days_back` days before
+/// today, or finds it when it exists, and returns its name.
+async fn standard_leaf(pool: &PgPool, days_back: i32) -> String {
+    sqlx::query_scalar(
+        "SELECT leaf_name FROM horsies_create_history_leaf(
+             'standard_30d', date_trunc('day', now(), 'UTC') - make_interval(days => $1)
+         )
+         WHERE outcome IN ('CREATED', 'ALREADY_CONFORMANT')",
+    )
+    .bind(days_back)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|error| panic!("create the leaf {days_back} days back: {error}"))
+}
+
+/// 600 history rows, half in the current `standard_30d` leaf and half in
+/// the forever leaf, each with its own enqueue time, then sampled. The rows
+/// pass the page reach (50), so the planner reads the leaves in index order
+/// and stops at the reach instead of sorting every row. The live rows are
+/// inserted RUNNING and moved in one statement through
+/// `horsies_move_task_to_history`, which takes the locked live row.
+async fn seed_history_population(pool: &PgPool) {
+    sqlx::query(
+        "INSERT INTO horsies_tasks (
+            id, task_name, queue_name, priority, input, task_options, execution,
+            retention_class_key, sent_at, created_at,
+            command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+            status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+            started_at, finalizing_at, finalizing_by_worker_id,
+            worker_pid, worker_hostname, worker_process_name,
+            retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+            updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+        )
+        SELECT gen_random_uuid(), 'history_task_' || g, 'default', 100, '{}', NULL,
+               'ISOLATED', CASE WHEN g % 2 = 0 THEN 'forever' ELSE 'standard_30d' END,
+               NOW(), NOW(),
+               1, sha256(convert_to(gen_random_uuid()::text, 'UTF8')), NULL,
+               'RUNNING', NOW() - make_interval(secs => 600 + g), NOW(), 'spec-worker', NULL,
+               NOW() - make_interval(secs => 30), NULL, NULL,
+               NULL, NULL, NULL,
+               0, 3, NULL, NULL, FALSE,
+               NOW(), FALSE, NULL, NULL
+        FROM generate_series(1, 600) AS g",
+    )
+    .execute(pool)
+    .await
+    .expect("seed the running rows of the history plan test");
+    let moved: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (
+             SELECT horsies_move_task_to_history(
+                 t, 'COMPLETED', 'COMPLETE_FUSED', now(), '{\"ok\": true}', NULL, NULL
+             )
+             FROM (SELECT * FROM horsies_tasks FOR UPDATE) AS t
+         ) AS moved",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("move the seeded rows to history");
+    assert_eq!(moved, 600);
+    sqlx::query("ANALYZE horsies_task_history")
+        .execute(pool)
+        .await
+        .expect("sample the history");
+}
+
+/// In both directions of the default sort, the page statement inside
+/// `horsies_monitoring_task_list` reads the history leaves of the window
+/// through their `enqueued_at` index (backward for `DESC`), merged in that
+/// order (Merge Append). The task id tie-break is an incremental sort on
+/// that order (presorted key `h.enqueued_at`). A leaf outside the window is
+/// pruned: the plan does not name it. The current `standard_30d` leaf and
+/// the forever leaf are in the window; the leaf of ten days back is not.
+#[tokio::test]
+#[serial]
+async fn the_task_list_page_reads_the_history_leaves_on_the_enqueue_index_and_prunes_the_rest() {
+    let database = SpecDatabase::create().await;
+    let current_leaf = standard_leaf(&database.pool, 0).await;
+    let old_leaf = standard_leaf(&database.pool, 10).await;
+    seed_history_population(&database.pool).await;
+    let (client, notices) = connect_collecting_notices(database.url()).await;
+
+    for (direction, scan) in [
+        ("DESC", "Index Scan Backward using "),
+        ("ASC", "Index Scan using "),
+    ] {
+        client.batch_execute("BEGIN").await.expect("begin");
+        client
+            .batch_execute(NESTED_PLAN_SETTINGS)
+            .await
+            .expect("send the nested plans as notices");
+        let rows = client
+            .query(DEFAULT_SORT_LIST, &[&direction])
+            .await
+            .unwrap_or_else(|error| panic!("{direction}: read the task list: {error}"));
+        client.batch_execute("ROLLBACK").await.expect("rollback");
+        let plans =
+            std::mem::take(&mut *notices.lock().unwrap_or_else(PoisonError::into_inner)).join("\n");
+
+        assert!(!rows.is_empty(), "{direction}: the list has no TOTALS row");
+        let page_plan = plans
+            .split("duration:")
+            .find(|plan| plan.contains("WITH live AS"))
+            .unwrap_or_else(|| panic!("{direction}: no plan of the page statement: {plans}"));
+        let history_scans: Vec<&str> = page_plan
+            .lines()
+            .filter(|line| line.contains(" on horsies_task_history_"))
+            .collect();
+        assert!(
+            history_scans
+                .iter()
+                .any(|line| line.contains(&format!(" on {current_leaf} "))),
+            "{direction}: {page_plan}"
+        );
+        assert!(
+            history_scans
+                .iter()
+                .any(|line| line.contains(" on horsies_task_history_forever_open ")),
+            "{direction}: {page_plan}"
+        );
+        assert!(
+            history_scans
+                .iter()
+                .all(|line| line.contains(scan) && line.contains("_enqueued_idx on ")),
+            "{direction}: {page_plan}"
+        );
+        assert!(
+            page_plan.contains("Merge Append"),
+            "{direction}: {page_plan}"
+        );
+        assert!(
+            page_plan.contains("Presorted Key: h.enqueued_at"),
+            "{direction}: {page_plan}"
+        );
+        assert!(!page_plan.contains(&old_leaf), "{direction}: {page_plan}");
+    }
+    drop(client);
+    database.drop().await;
+}
