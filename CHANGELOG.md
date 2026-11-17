@@ -746,6 +746,18 @@ unless it starts with "Added".
   vectors of `crates/horsies-core/tests/fixtures/stored_forms/` pin it:
   - Task input: a send of a task with no parameters, and a schedule
     without input, store `{}` (no keyword arguments), not `null`.
+  - Task options of a workflow node: the deadline `good_until` is written
+    as Python's `isoformat()`, with 6 fraction digits when the microsecond
+    is not 0 (`…12.500000+00:00`, not `…12.500+00:00`).
+  - Task input and result: a date-time of type `StoredDateTime` (below) is
+    written with Python's fraction (`…12.500000Z`). A plain chrono
+    `DateTime` or `NaiveDateTime` keeps chrono's serde form (`…12.500Z`);
+    both clients read either text to the same value.
+- **Added: `StoredDateTime<T>`**, a chrono date-time
+  (`DateTime<Tz>` or `NaiveDateTime`) that a task input or result stores in
+  Python's text: no fraction for a whole second, 6 digits for a whole
+  microsecond, 9 digits below the microsecond; the offset `Z` when it is 0.
+  It reads any RFC 3339 fraction.
 
 ## [0.7.0] - 2026-11-15
 
