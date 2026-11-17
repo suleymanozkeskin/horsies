@@ -517,9 +517,11 @@ mod tests {
         }
     }
 
-    /// The child build input holds the static members first and the `args_from` members after
-    /// them, in `jsonb` key order; it holds the members of the merged input, each `args_from`
-    /// entry replaced by its `inner` envelope.
+    /// The child build input holds the static members first, in their stored order, and the
+    /// `args_from` members after them, in `jsonb` key order; it holds the members of the merged
+    /// input, each `args_from` entry replaced by its `inner` envelope. Python builds the kwargs of
+    /// `build_with` in the same order: the decoded node input, then the `args_from` map as it reads
+    /// it from its `jsonb` column (`python/horsies/core/workflows/child_build.py`, `_input_kwargs`).
     #[test]
     fn a_child_build_input_holds_its_static_members_first() {
         let mut deps = HashMap::new();
@@ -544,8 +546,8 @@ mod tests {
                 .find(&format!("\"{member}\":"))
                 .unwrap_or_else(|| panic!("member {member} in {}", input.text))
         };
-        assert!(position("c") < position("z"), "{}", input.text);
-        assert!(position("z") < position("a"), "{}", input.text);
+        assert!(position("z") < position("c"), "{}", input.text);
+        assert!(position("c") < position("a"), "{}", input.text);
         assert!(position("a") < position("bb"), "{}", input.text);
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&input.text).unwrap(),

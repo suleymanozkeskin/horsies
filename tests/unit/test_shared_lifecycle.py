@@ -389,6 +389,17 @@ class TestRefusalBound:
             + slots.SHARED_BACKSTOP_MARGIN_S
         )
 
+    def test_the_derived_times_are_the_times_of_the_core(self) -> None:
+        """Each time is a sum of named bounds, and the core derives the same
+        time from its own bounds (``the_bounds_keep_their_times``,
+        ``the_backstops_keep_their_times``,
+        ``the_leftover_backstop_keeps_its_time``)."""
+        assert shared_lifecycle.CANCELLED_WRITE_END_S == 10.0
+        assert slots.SHARED_BACKSTOP_MARGIN_S == 10.0
+        assert thread_runner.THREAD_REFUSAL_WRITES_BOUND_S == 145.0
+        assert slots.SHARED_REFUSAL_BACKSTOP_S == 155.0
+        assert slots.ISOLATED_LEFTOVER_BACKSTOP_S == pytest.approx(26.3)
+
 
 class TestMissedStart:
     def test_a_passed_deadline_expires_the_claim(self) -> None:
