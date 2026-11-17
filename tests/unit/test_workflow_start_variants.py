@@ -3,6 +3,10 @@
 ``WorkflowStartError`` is a union with one frozen variant per
 ``WorkflowStartErrorCode`` member. A variant's repr hides the message and
 the cause. Every variant carries ``workflow_name`` and ``workflow_id``.
+
+The id-conflict site is tested on the Python start caller before the core
+switch (``tests/dualrun/reference/workflow_start_caller.py``);
+``test_workflow_start_through_core.py`` tests the core's answer.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ import pytest
 
 from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.types.result import Ok, is_err
-from horsies.core.workflows.lifecycle import start_workflow_async
+from tests.dualrun.reference.workflow_start_caller import start_workflow_async
 from horsies.core.workflows.start_types import (
     WorkflowStartAsyncContext,
     WorkflowStartBrokerNotConfigured,

@@ -790,6 +790,14 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_token_gives_the_key_it_was_made_with_and_its_copy_gives_the_same() {
+        let token: InputField<ChargeInput, u32> = crate::__private::input_field("user_id");
+        let copy = token;
+        assert_eq!(token.name(), "user_id");
+        assert_eq!(copy.name(), "user_id");
+    }
+
+    #[test]
     fn builders_have_distinct_identities() {
         assert_ne!(BuilderId::next(), BuilderId::next());
     }

@@ -4,10 +4,14 @@ pause_workflow / resume_workflow return ``HandleResult[bool]``. A database
 error is a ``HandleOperationError`` variant; any other exception propagates.
 The pause is one ``horsies_workflow_pause`` statement that the core runs;
 its record decides the result.
-Resume runs its recovery pass in a second transaction after the commit, so a
-database error there is ``HandleResumeRecoveryFailed``. The sync wrappers
-return a ``LoopRunnerError`` as ``HandleLoopRunnerFailed`` and let other
-exceptions propagate.
+The resume runs in the core too (``CoreHandle.resume_workflow_async``): its
+record decides the result. The tests of the resume transaction, the parent
+advance and the recovery pass after the commit drive the Python caller
+before the switch (``tests/dualrun/reference/workflow_resume_caller.py``),
+the reference side of the resume's dual-run: a database error after the
+commit is ``HandleResumeRecoveryFailed``. The sync wrappers return a
+``LoopRunnerError`` as ``HandleLoopRunnerFailed`` and let other exceptions
+propagate.
 """
 
 from __future__ import annotations
@@ -259,6 +263,118 @@ class TestPauseWorkflowResult:
 
 
 # ===========================================================================
+# resume_workflow through the core
+# ===========================================================================
+
+
+def _resume_broker(answer: object = None, *, raises: BaseException | None = None) -> MagicMock:
+    """A broker whose core handle answers the resume with ``answer``, or raises."""
+    broker = MagicMock()
+    match raises:
+        case None:
+            broker._core_handle.resume_workflow_async = AsyncMock(return_value=answer)
+        case _:
+            broker._core_handle.resume_workflow_async = AsyncMock(side_effect=raises)
+    return broker
+
+
+@pytest.mark.unit
+class TestResumeThroughCore:
+    """resume_workflow returns HandleResult[bool] from the core's record."""
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_resumed_returns_ok_true_with_the_id_as_a_uuid(self) -> None:
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        broker = _resume_broker(_record(core.WorkflowResumed))
+        result = await resume_workflow(broker, PAUSE_WORKFLOW_ID)
+
+        assert is_ok(result)
+        assert result.ok_value is True
+        broker._core_handle.resume_workflow_async.assert_awaited_once_with(
+            uuid.UUID(PAUSE_WORKFLOW_ID),
+        )
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_not_paused_returns_ok_false(self) -> None:
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        broker = _resume_broker(_record(core.WorkflowNotPaused))
+        result = await resume_workflow(broker, PAUSE_WORKFLOW_ID)
+
+        assert is_ok(result)
+        assert result.ok_value is False
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_absent_returns_workflow_not_found(self) -> None:
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        broker = _resume_broker(_record(core.WorkflowAbsent))
+        result = await resume_workflow(broker, PAUSE_WORKFLOW_ID)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, HandleWorkflowNotFound)
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_recovery_failed_after_the_commit_returns_its_error(self) -> None:
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        broker = _resume_broker(_record(
+            core.WorkflowResumeRecoveryFailed,
+            message='the recovery pass for its tree failed',
+        ))
+        result = await resume_workflow(broker, PAUSE_WORKFLOW_ID)
+
+        assert is_err(result)
+        err = result.err_value
+        assert isinstance(err, HandleResumeRecoveryFailed)
+        assert err.retryable is False
+        assert isinstance(err.exception, CoreOperationFailed)
+        assert err.exception.subject == 'resume_workflow'
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_a_failure_record_returns_db_operation_failed(self) -> None:
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        broker = _resume_broker(_record(
+            core.HandleFailed,
+            code='DB_OPERATION_FAILED',
+            message='child build did not run',
+            retryable=True,
+        ))
+        result = await resume_workflow(broker, PAUSE_WORKFLOW_ID)
+
+        assert is_err(result)
+        err = result.err_value
+        assert isinstance(err, HandleDbOperationFailed)
+        assert err.retryable is True
+        assert err.message.startswith('Resume failed for workflow')
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_an_id_that_is_not_a_uuid_makes_no_core_call(self) -> None:
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        broker = _resume_broker(_record(core.WorkflowResumed))
+        result = await resume_workflow(broker, 'wf-1')
+
+        assert is_err(result)
+        assert isinstance(result.err_value, HandleDbOperationFailed)
+        assert result.err_value.retryable is False
+        broker._core_handle.resume_workflow_async.assert_not_awaited()
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_a_core_boundary_error_returns_db_operation_failed(self) -> None:
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        broker = _resume_broker(raises=core.TooManyPendingCalls('too many calls'))
+        result = await resume_workflow(broker, PAUSE_WORKFLOW_ID)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, HandleDbOperationFailed)
+        assert result.err_value.retryable is True
+
+
+# ===========================================================================
 # resume_workflow async
 # ===========================================================================
 
@@ -300,7 +416,7 @@ class TestResumeWorkflowResult:
     @pytest.mark.asyncio(loop_scope='function')
     async def test_resume_wrong_state_returns_ok_false(self) -> None:
         """NOT_PAUSED -> Ok(False); no recovery pass."""
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from tests.dualrun.reference.workflow_resume_caller import resume_workflow
 
         broker, _, _ = _resume_sessions('NOT_PAUSED')
         recover = AsyncMock(return_value=None)
@@ -314,7 +430,7 @@ class TestResumeWorkflowResult:
     @pytest.mark.asyncio(loop_scope='function')
     async def test_resume_not_found_returns_err(self) -> None:
         """NOT_FOUND -> Err(WORKFLOW_NOT_FOUND)."""
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from tests.dualrun.reference.workflow_resume_caller import resume_workflow
 
         broker, _, _ = _resume_sessions('NOT_FOUND')
         result = await resume_workflow(broker, WORKFLOW_ID)
@@ -328,7 +444,7 @@ class TestResumeWorkflowResult:
     @pytest.mark.asyncio(loop_scope='function')
     async def test_resume_db_failure_returns_db_operation_failed(self) -> None:
         """SQLAlchemy error -> Err(HandleDbOperationFailed) with the cause."""
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from tests.dualrun.reference.workflow_resume_caller import resume_workflow
 
         db_exc = _db_error()
         broker = _mock_broker(side_effect=db_exc)
@@ -344,7 +460,7 @@ class TestResumeWorkflowResult:
     @pytest.mark.asyncio(loop_scope='function')
     async def test_an_outcome_outside_the_contract_raises(self) -> None:
         from horsies.core.lifecycle.outcomes import OutcomeDecodeError
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from tests.dualrun.reference.workflow_resume_caller import resume_workflow
 
         broker, resume_session, _ = _resume_sessions('RESUMED_TWICE')
         with pytest.raises(OutcomeDecodeError, match='RESUMED_TWICE'):
@@ -364,7 +480,7 @@ class TestResumeCommitSplit:
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_resume_runs_the_recovery_pass_after_the_commit(self) -> None:
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from tests.dualrun.reference.workflow_resume_caller import resume_workflow
 
         broker, resume_session, session_factory = _resume_sessions()
         recover = AsyncMock(return_value=None)
@@ -379,7 +495,7 @@ class TestResumeCommitSplit:
     @pytest.mark.asyncio(loop_scope='function')
     async def test_recovery_db_error_returns_resume_recovery_failed(self) -> None:
         """The resume committed; only the second transaction failed."""
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from tests.dualrun.reference.workflow_resume_caller import resume_workflow
 
         db_exc = _db_error()
         broker, resume_session, _ = _resume_sessions()
@@ -397,7 +513,7 @@ class TestResumeCommitSplit:
     @pytest.mark.asyncio(loop_scope='function')
     async def test_a_failed_parent_advance_returns_resume_recovery_failed(self) -> None:
         """The resume committed and ended a child; the advance of its parent failed."""
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from tests.dualrun.reference.workflow_resume_caller import resume_workflow
         from horsies.core.workflows.steps import ParentAdvanceFailure
 
         db_exc = _db_error()
@@ -409,7 +525,7 @@ class TestResumeCommitSplit:
         with (
             _recovery_stubbed(recover),
             patch(
-                'horsies.core.workflows.lifecycle.advance_parents',
+                'tests.dualrun.reference.workflow_resume_caller.advance_parents',
                 new=AsyncMock(return_value=failure),
             ),
         ):
@@ -425,7 +541,7 @@ class TestResumeCommitSplit:
     @pytest.mark.asyncio(loop_scope='function')
     async def test_commit_db_error_returns_db_operation_failed(self) -> None:
         """A failed resume commit is not a recovery failure; no recovery pass runs."""
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from tests.dualrun.reference.workflow_resume_caller import resume_workflow
 
         db_exc = _db_error()
         broker, resume_session, _ = _resume_sessions()
@@ -449,7 +565,7 @@ class TestResumeCommitSplit:
     async def test_defect_in_the_resume_body_propagates(
         self, defect: Exception,
     ) -> None:
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from tests.dualrun.reference.workflow_resume_caller import resume_workflow
 
         broker, resume_session, _ = _resume_sessions()
         recover = AsyncMock(return_value=None)
@@ -469,7 +585,7 @@ class TestResumeCommitSplit:
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_defect_in_the_recovery_pass_propagates(self) -> None:
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from tests.dualrun.reference.workflow_resume_caller import resume_workflow
 
         defect = RuntimeError('logic bug')
         broker, resume_session, _ = _resume_sessions()

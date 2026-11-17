@@ -1,8 +1,11 @@
-"""Unit tests for the built-in retry loop in start_workflow_async.
+"""Unit tests for the retry loop of the Python start caller.
 
 Tests that transient errors trigger automatic retries with exponential
 backoff when resend_on_transient_err=True, and that non-retryable errors
-exit immediately.
+exit immediately. The production start runs its retry in the core
+(``PostgresBroker::start_client_workflow``); these tests drive the Python
+caller before that switch (``tests/dualrun/reference/workflow_start_caller.py``),
+the reference side of the start's dual-run.
 """
 
 from __future__ import annotations
@@ -17,11 +20,11 @@ from tests.broker_resources_support import attach_resources, fake_resources
 from tests.workflow_start_support import outcome_row, start_session
 
 from horsies.core.types.result import Ok, Err, is_ok, is_err
-from horsies.core.workflows.lifecycle import (
+from tests.dualrun.reference.workflow_start_caller import (
     start_workflow_async,
-    _START_RETRY_COUNT,
-    _START_RETRY_INITIAL_MS,
-    _START_RETRY_MAX_MS,
+    START_RETRY_COUNT,
+    START_RETRY_INITIAL_MS,
+    START_RETRY_MAX_MS,
 )
 from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.workflows.start_types import (
@@ -157,8 +160,8 @@ class TestRetryOnTransientErrors:
         session_ctx.__aenter__ = session_enter
         session_ctx.__aexit__ = AsyncMock(return_value=False)
         attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)))
-        with patch('horsies.core.workflows.lifecycle.is_retryable_connection_error', return_value=True):
-            with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+        with patch('tests.dualrun.reference.workflow_start_caller.is_retryable_connection_error', return_value=True):
+            with patch('tests.dualrun.reference.workflow_start_caller.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
                 result = await start_workflow_async(
                     spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
                 )
@@ -189,7 +192,7 @@ class TestRetryOnTransientErrors:
             side_effect=[Err(schema_err), Err(schema_err), Ok(True)],
         )
 
-        with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+        with patch('tests.dualrun.reference.workflow_start_caller.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
             result = await start_workflow_async(
                 spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
             )
@@ -210,8 +213,8 @@ class TestRetryOnTransientErrors:
             side_effect=psycopg.OperationalError('connection refused'),
         )
         attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)))
-        with patch('horsies.core.workflows.lifecycle.is_retryable_connection_error', return_value=True):
-            with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+        with patch('tests.dualrun.reference.workflow_start_caller.is_retryable_connection_error', return_value=True):
+            with patch('tests.dualrun.reference.workflow_start_caller.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
                 result = await start_workflow_async(
                     spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
                 )
@@ -220,7 +223,7 @@ class TestRetryOnTransientErrors:
         assert result.err_value.code == WorkflowStartErrorCode.ENQUEUE_FAILED
         assert result.err_value.retryable is True
         # 1 initial + 3 retries = 4 total, so 3 sleeps
-        assert mock_sleep.call_count == _START_RETRY_COUNT
+        assert mock_sleep.call_count == START_RETRY_COUNT
 
 
 # =============================================================================
@@ -243,8 +246,8 @@ class TestNonRetryableErrorsNoRetry:
             side_effect=psycopg.OperationalError('auth failed'),
         )
         attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)))
-        with patch('horsies.core.workflows.lifecycle.is_retryable_connection_error', return_value=False):
-            with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+        with patch('tests.dualrun.reference.workflow_start_caller.is_retryable_connection_error', return_value=False):
+            with patch('tests.dualrun.reference.workflow_start_caller.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
                 result = await start_workflow_async(
                     spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
                 )
@@ -261,7 +264,7 @@ class TestNonRetryableErrorsNoRetry:
         spec = _make_spec()
         broker = _make_broker(schema_ok=False, schema_retryable=False)
 
-        with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+        with patch('tests.dualrun.reference.workflow_start_caller.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
             result = await start_workflow_async(
                 spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
             )
@@ -398,7 +401,7 @@ class TestTransactionCatch:
         spec.tasks = [bad_task]
 
         from horsies.core.models.workflow import SubWorkflowNode
-        with patch('horsies.core.workflows.lifecycle.isinstance', side_effect=lambda obj, cls: isinstance.__wrapped__(obj, cls) if hasattr(isinstance, '__wrapped__') else False):
+        with patch('tests.dualrun.reference.workflow_start_caller.isinstance', side_effect=lambda obj, cls: isinstance.__wrapped__(obj, cls) if hasattr(isinstance, '__wrapped__') else False):
             pass
 
         # SubWorkflowNode check: our bad_task is not a SubWorkflowNode, so
@@ -406,7 +409,7 @@ class TestTransactionCatch:
         # We need to make isinstance(bad_task, SubWorkflowNode) return False
         broker = _make_broker()
 
-        with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+        with patch('tests.dualrun.reference.workflow_start_caller.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
             result = await start_workflow_async(
                 spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
             )
@@ -437,16 +440,16 @@ class TestBackoffValues:
             side_effect=psycopg.OperationalError('timeout'),
         )
         attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)))
-        with patch('horsies.core.workflows.lifecycle.is_retryable_connection_error', return_value=True):
-            with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+        with patch('tests.dualrun.reference.workflow_start_caller.is_retryable_connection_error', return_value=True):
+            with patch('tests.dualrun.reference.workflow_start_caller.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
                 await start_workflow_async(
                     spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
                 )
 
         sleep_args = [call.args[0] for call in mock_sleep.call_args_list]
         expected = [
-            min(_START_RETRY_INITIAL_MS * (2 ** i), _START_RETRY_MAX_MS) / 1000.0
-            for i in range(_START_RETRY_COUNT)
+            min(START_RETRY_INITIAL_MS * (2 ** i), START_RETRY_MAX_MS) / 1000.0
+            for i in range(START_RETRY_COUNT)
         ]
         assert sleep_args == expected
 
