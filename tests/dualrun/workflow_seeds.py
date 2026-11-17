@@ -90,6 +90,21 @@ type Parent = TopLevel | ChildOf
 
 
 @dataclass(frozen=True, slots=True)
+class NoOutput:
+    """The workflow names no output node: its result is outputless."""
+
+
+@dataclass(frozen=True, slots=True)
+class OutputNode:
+    """The result of node ``index`` is the result of the workflow."""
+
+    index: int
+
+
+type Output = NoOutput | OutputNode
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowSeed:
     """One workflow row and its nodes."""
 
@@ -98,6 +113,7 @@ class WorkflowSeed:
     on_error: OnError
     parent: Parent
     nodes: tuple[NodeSeed, ...]
+    output: Output = NoOutput()
 
 
 def task_node(index: int, name: str, *dependencies: int) -> NodeSeed:
@@ -159,6 +175,14 @@ def _parent_columns(parent: Parent) -> tuple[uuid.UUID | None, int | None, int]:
             return parent_id, index, depth
 
 
+def _output_task_index(output: Output) -> int | None:
+    match output:
+        case NoOutput():
+            return None
+        case OutputNode(index=index):
+            return index
+
+
 def _is_task(node: NodeSeed) -> bool:
     match node.kind:
         case NodeKind.TASK:
@@ -188,7 +212,7 @@ def start_parameters(workflows: Sequence[WorkflowSeed]) -> dict[str, object]:
         'names': [workflow.name for workflow in workflows],
         'definition_keys': [None for _ in workflows],
         'on_errors': [workflow.on_error.value for workflow in workflows],
-        'output_task_indexes': [None for _ in workflows],
+        'output_task_indexes': [_output_task_index(workflow.output) for workflow in workflows],
         'success_policies': [None for _ in workflows],
         'parent_workflow_ids': [parent for parent, _, _ in parents],
         'parent_task_indexes': [index for _, index, _ in parents],
