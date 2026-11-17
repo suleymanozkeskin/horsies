@@ -33,6 +33,7 @@ from tests.integration.test_task_history_schema_emission import (
     MakeDatabase,
     make_database,
 )
+from horsies.core.utils.url import sqlalchemy_url
 
 __all__ = ['make_database']
 
@@ -84,7 +85,7 @@ class TestTaskDetailFromHistory:
         )
         try:
             await broker.ensure_schema_initialized()
-            engine = create_async_engine(url)
+            engine = create_async_engine(sqlalchemy_url(url))
             workflow_id = str(uuid.uuid4())
             try:
                 async with AsyncSession(engine) as session:
@@ -110,13 +111,13 @@ class TestTaskDetailFromHistory:
                     _ = await session.execute(
                         text(
                             'INSERT INTO horsies_workflow_tasks '
-                            '(id, workflow_id, task_id, task_index, '
+                            '(downstream_subworkflow, id, workflow_id, task_id, task_index, '
                             'task_name, input, queue_name, priority, '
                             'dependencies, allow_failed_deps, join_type, '
                             'status, is_subworkflow, created_at, '
                             'max_retries, execution, retention_class_key) '
                             'VALUES '
-                            "(:n, :w, :t, 0, 'legacy.task', '{}', 'default', "
+                            "('NONE', :n, :w, :t, 0, 'legacy.task', '{}', 'default', "
                             "50, '{}', FALSE, 'all', 'COMPLETED', FALSE, "
                             "statement_timestamp(), 0, 'ISOLATED', "
                             "'standard_30d')"

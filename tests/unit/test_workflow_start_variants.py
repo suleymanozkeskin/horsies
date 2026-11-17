@@ -28,6 +28,7 @@ from horsies.core.workflows.start_types import (
     WorkflowStartValidationFailed,
 )
 from tests.broker_resources_support import attach_resources, fake_resources
+from tests.workflow_start_support import outcome_row, start_session
 
 pytestmark = [pytest.mark.unit]
 
@@ -135,20 +136,9 @@ def _make_spec(name: str = 'conflict-wf') -> Any:
 
 
 def _session_with_existing_row(existing_name: str) -> tuple[Any, Any]:
-    """A session whose workflow INSERT conflicts with a row named ``existing_name``."""
-    insert_result = MagicMock()
-    insert_result.scalar_one_or_none.return_value = None
-    name_row = MagicMock()
-    name_row.name = existing_name
-    name_result = MagicMock()
-    name_result.fetchone.return_value = name_row
-    session = AsyncMock()
-    session.info = {}
-    session.execute = AsyncMock(side_effect=[insert_result, name_result])
-    session.commit = AsyncMock()
-    session_ctx = AsyncMock()
-    session_ctx.__aenter__ = AsyncMock(return_value=session)
-    session_ctx.__aexit__ = AsyncMock(return_value=False)
+    """A session whose start statement finds a workflow named ``existing_name``
+    on the id (``EXISTS``; nothing written)."""
+    session, session_ctx, _ = start_session([outcome_row('EXISTS', existing_name)])
     return session, session_ctx
 
 

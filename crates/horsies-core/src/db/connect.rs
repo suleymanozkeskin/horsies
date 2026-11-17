@@ -207,6 +207,16 @@ impl ConnectPlan {
     pub(crate) fn tls(&self) -> &MakeRustlsConnect {
         &self.tls
     }
+
+    /// The driver configuration of the first attempt.
+    #[cfg(test)]
+    pub(crate) fn first_attempt(&self) -> &Config {
+        match &self.attempts {
+            ConnectAttempts::Single(config)
+            | ConnectAttempts::PlainThenTls { plain: config, .. }
+            | ConnectAttempts::TlsThenPlain { tls: config, .. } => config,
+        }
+    }
 }
 
 /// Opens one connection.
@@ -448,11 +458,7 @@ mod tests {
 
     /// The configuration of the first attempt.
     fn single_config(plan: &ConnectPlan) -> &Config {
-        match &plan.attempts {
-            ConnectAttempts::Single(config)
-            | ConnectAttempts::PlainThenTls { plain: config, .. }
-            | ConnectAttempts::TlsThenPlain { tls: config, .. } => config,
-        }
+        plan.first_attempt()
     }
 
     #[test]

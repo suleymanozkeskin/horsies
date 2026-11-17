@@ -1,9 +1,16 @@
 //! Post-terminal rerun as a fresh, lineage-bearing enqueue.
 
+use std::sync::LazyLock;
+
 use chrono::{DateTime, Duration, Utc};
-use sqlx::PgConnection;
 use uuid::Uuid;
 
+use crate::broker::core_rows::{
+    column, execute_in, one_row, query_in, RowDecodeError, StatementLog,
+};
+use crate::broker::pools::PoolSettingsError;
+use crate::core::history::archive::attempts::decode_attempt_snapshot;
+use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
 use crate::core::history::ddl::classes::DEFAULT_RETENTION_CLASS_KEY;
 use crate::core::history::enqueue::{prepare_enqueue_facts_with_lineage, EnqueuePreparationError};
 use crate::core::history::errors::HistoryError;
@@ -11,14 +18,17 @@ use crate::core::history::identity::fingerprint::FingerprintError;
 use crate::core::history::identity::keys::{
     validate_reservation_window, IdempotencyKeyError, IDEMPOTENCY_SCOPE_VERSION,
 };
-use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
+use crate::core::history::identity::reservations::{
+    decode_reservation_row, key_reservation_claim_sql, ReservationClaim,
+};
 use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
-use crate::core::history::names::{LIVE_TASKS, RETENTION_CLASSES};
-use crate::core::history::reads::detail::{read_task_detail, TaskAbsenceReason, TaskDetailResult};
+use crate::core::history::names::LIVE_TASKS;
+use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::history::rerun::input_envelope::{
     decode_framed_rerun_input, InputEnvelopeDecodeError,
 };
 use crate::core::types::status::TaskStatus;
+use crate::db::{ParameterType, Row, StatementFailure, Transaction, TypedStatement};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RerunTask {
@@ -152,10 +162,21 @@ pub enum RerunOutcome {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RerunError {
+    /// A statement of the rerun failed with one of the statement layer's
+    /// three outcomes. Nothing committed, except after `OutcomeUnknown` at
+    /// `COMMIT`: the rerun may have committed, and the same keyed rerun sent
+    /// again answers `KeyReplay` for it. Retryable when the cause may clear
+    /// ([`StatementFailure::transience`]).
     #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
-    #[error("history read failed: {0}")]
-    History(#[from] HistoryError),
+    Statement(#[from] StatementFailure),
+    /// A row of the source read or the key claim does not have the shape its
+    /// reader requires. Nothing committed. Not retryable.
+    #[error("{0}")]
+    RowDecode(#[from] RowDecodeError),
+    /// A closed broker could not open its pools again. Nothing was read or
+    /// written. Not retryable.
+    #[error("connection settings refused: {0}")]
+    PoolSettings(#[from] PoolSettingsError),
     #[error("unknown retention class {0:?}: register the class before rerunning into it")]
     UnknownRetentionClass(String),
     #[error("invalid rerun policy: {0}")]
@@ -180,67 +201,214 @@ pub enum RerunError {
         stored: crate::broker::client_family::RecordedFamily,
         own: crate::broker::client_family::ClientFamily,
     },
+    /// The client-family check before the rerun could not read the family
+    /// row. Nothing was read or written. Retryable when
+    /// [`FamilyCheckFailure::transience`] is `Transient`: the check keeps no
+    /// answer after a failure, so a retry reads the row again.
+    ///
+    /// [`FamilyCheckFailure::transience`]: crate::broker::client_family::FamilyCheckFailure::transience
+    #[error("rerun refused: {0}")]
+    FamilyCheckFailed(crate::broker::client_family::FamilyCheckFailure),
 }
 
-pub async fn rerun_task_in_tx(
-    connection: &mut PgConnection,
+/// `horsies_rerun_source_read` (`0006_history_functions.sql`): the class
+/// check, the detail read and the absence read in one statement. `$1` is
+/// the source task id, `$2` the retention class key of the new task. The
+/// detail reader keeps ACCESS SHARE on the source leaf until the
+/// transaction ends.
+static RERUN_SOURCE_READ: TypedStatement = TypedStatement::new(
+    "rerun_source_read",
+    "SELECT class_registered, location, absence_reason, task_id, task_name, queue_name, \
+            priority, max_retries, status, is_workflow_task, rerun_root_task_id, \
+            attempt_archive_version, attempt_snapshot, attempt_snapshot_digest, \
+            rerun_input_disposition, rerun_input_version, rerun_input_digest, \
+            rerun_input_inline \
+     FROM horsies_rerun_source_read($1, $2)",
+    &[ParameterType::Uuid, ParameterType::Text],
+);
+
+/// The first statement of a rerun, which names a checkout that failed
+/// before it.
+pub(crate) fn rerun_first_statement() -> &'static TypedStatement {
+    &RERUN_SOURCE_READ
+}
+
+/// The new PENDING row of a rerun. Every NOT NULL column is named: the
+/// baseline schema has no column defaults. The row carries the source's
+/// exact input and options texts and stores no envelope: the move builds it
+/// from `input` and `task_options`.
+static INSERT_RERUN_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "INSERT INTO {LIVE_TASKS} (
+             id, task_name, queue_name, priority, input, task_options, execution,
+             retention_class_key, sent_at, created_at,
+             command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+             status, enqueued_at, retry_count, max_retries, good_until,
+             is_workflow_task, updated_at,
+             retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+         ) VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, statement_timestamp(), $10, $11, $12,
+             'PENDING', statement_timestamp(), 0, $13, $14, FALSE, statement_timestamp(),
+             $15, $16, $17
+         )"
+    )
+});
+
+static INSERT_RERUN: LazyLock<TypedStatement> = LazyLock::new(|| {
+    TypedStatement::new(
+        "insert_rerun",
+        INSERT_RERUN_SQL.as_str(),
+        &[
+            ParameterType::Uuid,
+            ParameterType::Text,
+            ParameterType::Text,
+            ParameterType::Int4,
+            ParameterType::Text,
+            ParameterType::Text,
+            ParameterType::Text,
+            ParameterType::Text,
+            ParameterType::Timestamptz,
+            ParameterType::Int2,
+            ParameterType::Bytea,
+            ParameterType::Bytea,
+            ParameterType::Int4,
+            ParameterType::Timestamptz,
+            ParameterType::Bool,
+            ParameterType::Uuid,
+            ParameterType::Uuid,
+        ],
+    )
+});
+
+static KEY_RESERVATION_CLAIM_SQL: LazyLock<String> = LazyLock::new(key_reservation_claim_sql);
+
+/// `horsies_key_reservation_claim`, with the SQL text of
+/// [`key_reservation_claim_sql`]. Parameters in order: key digest, key scope
+/// version, window in seconds, fingerprint version, fingerprint, task id.
+static KEY_RESERVATION_CLAIM: LazyLock<TypedStatement> = LazyLock::new(|| {
+    TypedStatement::new(
+        "key_reservation_claim",
+        KEY_RESERVATION_CLAIM_SQL.as_str(),
+        &[
+            ParameterType::Bytea,
+            ParameterType::Int2,
+            ParameterType::Int8,
+            ParameterType::Int2,
+            ParameterType::Bytea,
+            ParameterType::Uuid,
+        ],
+    )
+});
+
+/// The key of a keyed rerun, claimed for the new task.
+struct RerunKeyClaim<'a> {
+    key_digest: &'a [u8],
+    /// The reservation window in whole seconds, as Python's rerun
+    /// (`int(policy.reservation_window.total_seconds())`).
+    window_seconds: i64,
+    fingerprint_version: i16,
+    fingerprint: &'a [u8],
+    task_id: Uuid,
+}
+
+/// The facts of a history source that the rerun decides on and copies
+/// (Python `RerunSource`). The stored status is a [`TaskStatus`] and the
+/// attempt snapshot decoded; a source that fails either is corrupt.
+struct RerunSource {
+    task_id: Uuid,
+    task_name: String,
+    queue_name: String,
+    priority: i32,
+    max_retries: i32,
+    status: TaskStatus,
+    is_workflow_task: bool,
+    rerun_root_task_id: Option<Uuid>,
+    rerun_input_disposition: String,
+    rerun_input_version: Option<i16>,
+    rerun_input_digest: Option<Vec<u8>>,
+    rerun_input_inline: Option<Vec<u8>>,
+}
+
+/// The answer of the source read (Python `RerunSourceRead`).
+enum SourceRead {
+    /// The new task's retention class has no class row.
+    ClassUnregistered,
+    Live,
+    Absent(TaskAbsenceReason),
+    /// A location, absence reason or status outside its set, or an attempt
+    /// snapshot that does not decode. The detail names it.
+    Corrupt(String),
+    History(RerunSource),
+}
+
+/// Run one rerun inside the caller's transaction (Python `rerun_task`,
+/// `core/history/rerun/operations.py:346`).
+///
+/// Statements: the source read (`horsies_rerun_source_read`); for a source
+/// with an inline input and a caller key, the key reservation claim; the
+/// insert of the new PENDING row. Each outcome but `Enqueued` writes
+/// nothing. The caller's commit or rollback decides whether the claim and
+/// the row stay.
+///
+/// Errors: [`RerunError::UnknownRetentionClass`] before any write;
+/// [`RerunError::Statement`] (a missing history reader is refused with
+/// `42883`); [`RerunError::RowDecode`]; [`RerunError::EnqueuePreparation`],
+/// [`RerunError::Identity`]. After an error the caller's transaction may
+/// hold the claim; the caller does not commit it.
+pub(crate) async fn rerun_task_in_transaction(
+    transaction: &mut Transaction<'_>,
+    log: StatementLog,
     command: &RerunTask,
     policy: &RerunEnqueuePolicy,
 ) -> Result<RerunOutcome, RerunError> {
-    let registered_sql =
-        format!("SELECT EXISTS (SELECT 1 FROM {RETENTION_CLASSES} WHERE class_key = $1)");
-    let registered: bool = sqlx::query_scalar(&registered_sql)
-        .bind(policy.retention_class_key())
-        .fetch_one(&mut *connection)
-        .await?;
-    if !registered {
-        return Err(RerunError::UnknownRetentionClass(
-            policy.retention_class_key.clone(),
-        ));
-    }
-
-    let detail = match read_task_detail(connection, command.source_task_id).await {
-        Ok(TaskDetailResult::Live { task_id }) => return Ok(RerunOutcome::SourceLive { task_id }),
-        Ok(TaskDetailResult::Absent { task_id, reason }) => {
-            return Ok(RerunOutcome::SourceAbsent { task_id, reason });
+    let source = match read_rerun_source(transaction, log, command.source_task_id, policy).await? {
+        SourceRead::ClassUnregistered => {
+            return Err(RerunError::UnknownRetentionClass(
+                policy.retention_class_key.clone(),
+            ));
         }
-        Ok(TaskDetailResult::History(detail)) => detail,
-        Err(error @ (HistoryError::Contract(_) | HistoryError::ArchiveDecode(_))) => {
-            return Ok(RerunOutcome::SourceCorrupt {
+        SourceRead::Live => {
+            return Ok(RerunOutcome::SourceLive {
                 task_id: command.source_task_id,
-                detail: error.to_string(),
             });
         }
-        Err(
-            error @ (HistoryError::Database(_)
-            | HistoryError::LeafLockNotHeld
-            | HistoryError::LeafLockBusy { .. }
-            | HistoryError::HistoryParentAbsent(_)),
-        ) => return Err(error.into()),
+        SourceRead::Absent(reason) => {
+            return Ok(RerunOutcome::SourceAbsent {
+                task_id: command.source_task_id,
+                reason,
+            });
+        }
+        SourceRead::Corrupt(detail) => {
+            return Ok(RerunOutcome::SourceCorrupt {
+                task_id: command.source_task_id,
+                detail,
+            });
+        }
+        SourceRead::History(source) => source,
     };
 
-    if detail.is_workflow_task {
+    if source.is_workflow_task {
         return Ok(RerunOutcome::NotEligible {
             task_id: command.source_task_id,
             reason: NotEligibleReason::WorkflowTask,
         });
     }
-    if detail.status == TaskStatus::Completed {
+    if source.status == TaskStatus::Completed {
         return Ok(RerunOutcome::NotEligible {
             task_id: command.source_task_id,
             reason: NotEligibleReason::CompletedSource,
         });
     }
-    if detail.rerun_input_disposition != "INLINE" {
+    if source.rerun_input_disposition != "INLINE" {
         return Ok(RerunOutcome::InputUnavailable {
             task_id: command.source_task_id,
-            disposition: detail.rerun_input_disposition,
+            disposition: source.rerun_input_disposition,
         });
     }
     let (Some(version), Some(payload), Some(digest)) = (
-        detail.rerun_input_version,
-        detail.rerun_input_inline.as_deref(),
-        detail.rerun_input_digest.as_deref(),
+        source.rerun_input_version,
+        source.rerun_input_inline.as_deref(),
+        source.rerun_input_digest.as_deref(),
     ) else {
         return Ok(RerunOutcome::InputCorrupt {
             task_id: command.source_task_id,
@@ -264,13 +432,13 @@ pub async fn rerun_task_in_tx(
     };
 
     let new_task_id = mint_task_id()?;
-    let root_task_id = detail.rerun_root_task_id.unwrap_or(detail.task_id);
+    let root_task_id = source.rerun_root_task_id.unwrap_or(source.task_id);
     // The rerun runs with the execution class of the stored request; a stored
     // class that does not parse is corrupt input.
     let facts = match prepare_enqueue_facts_with_lineage(
-        &detail.task_name,
-        &detail.queue_name,
-        detail.priority,
+        &source.task_name,
+        &source.queue_name,
+        source.priority,
         &framed.input,
         command.deadline,
         None,
@@ -278,7 +446,7 @@ pub async fn rerun_task_in_tx(
         Some(policy.retention_class_key()),
         policy.retain_rerun_input,
         command.caller_key(),
-        Some(detail.task_id),
+        Some(source.task_id),
         Some(root_task_id),
     ) {
         Ok(facts) => facts,
@@ -292,17 +460,14 @@ pub async fn rerun_task_in_tx(
     };
 
     if let Some(key_digest) = facts.idempotency_key_digest.as_ref() {
-        match claim_key_reservation(
-            connection,
-            key_digest,
-            IDEMPOTENCY_SCOPE_VERSION,
-            policy.reservation_window.num_seconds(),
-            facts.command_fingerprint_version,
-            &facts.command_fingerprint,
-            new_task_id,
-        )
-        .await?
-        {
+        let claim = RerunKeyClaim {
+            key_digest: key_digest.as_slice(),
+            window_seconds: policy.reservation_window.num_seconds(),
+            fingerprint_version: facts.command_fingerprint_version,
+            fingerprint: facts.command_fingerprint.as_slice(),
+            task_id: new_task_id,
+        };
+        match claim_rerun_key(transaction, log, &claim).await? {
             ReservationClaim::Replay { task_id } => {
                 return Ok(RerunOutcome::KeyReplay {
                     existing_task_id: task_id,
@@ -319,51 +484,192 @@ pub async fn rerun_task_in_tx(
     }
 
     let sent_at = Utc::now();
-    // Every NOT NULL column is named: the baseline schema has no column
-    // defaults. The rerun carries the source's exact input and options texts.
-    let insert_sql = format!(
-        "INSERT INTO {LIVE_TASKS} (
-             id, task_name, queue_name, priority, input, task_options, execution,
-             retention_class_key, sent_at, created_at,
-             command_fingerprint_version, command_fingerprint, idempotency_key_digest,
-             status, enqueued_at, retry_count, max_retries, good_until,
-             is_workflow_task, updated_at,
-             retain_rerun_input, rerun_of_task_id, rerun_root_task_id
-         ) VALUES (
-             $1, $2, $3, $4, $5, $6, $7, $8, $9, statement_timestamp(), $10, $11, $12,
-             'PENDING', statement_timestamp(), 0, $13, $14, FALSE, statement_timestamp(),
-             $15, $16, $17
-         )"
-    );
-    sqlx::query(&insert_sql)
-        .bind(new_task_id)
-        .bind(&detail.task_name)
-        .bind(&detail.queue_name)
-        .bind(detail.priority)
-        .bind(&framed.input)
-        .bind(framed.options.as_deref())
-        .bind(facts.execution.as_str())
-        .bind(&facts.retention_class_key)
-        .bind(sent_at)
-        .bind(facts.command_fingerprint_version)
-        .bind(facts.command_fingerprint.as_slice())
-        .bind(
-            facts
-                .idempotency_key_digest
-                .as_ref()
-                .map(<[u8; 32]>::as_slice),
-        )
-        .bind(detail.max_retries)
-        .bind(command.deadline)
-        .bind(facts.retain_rerun_input)
-        .bind(detail.task_id)
-        .bind(root_task_id)
-        .execute(&mut *connection)
-        .await?;
+    let execution = facts.execution.as_str();
+    let key_digest = facts
+        .idempotency_key_digest
+        .as_ref()
+        .map(<[u8; 32]>::as_slice);
+    let fingerprint = facts.command_fingerprint.as_slice();
+    let statement: &TypedStatement = &INSERT_RERUN;
+    let _inserted = execute_in(
+        transaction,
+        log,
+        &statement
+            .bind()
+            .value(&new_task_id)
+            .value(&source.task_name)
+            .value(&source.queue_name)
+            .value(&source.priority)
+            .value(&framed.input)
+            .value(&framed.options)
+            .value(&execution)
+            .value(&facts.retention_class_key)
+            .value(&sent_at)
+            .value(&facts.command_fingerprint_version)
+            .value(&fingerprint)
+            .value(&key_digest)
+            .value(&source.max_retries)
+            .value(&command.deadline)
+            .value(&facts.retain_rerun_input)
+            .value(&source.task_id)
+            .value(&root_task_id)
+            .finish(),
+    )
+    .await?;
 
     Ok(RerunOutcome::Enqueued {
         new_task_id,
-        source_task_id: detail.task_id,
+        source_task_id: source.task_id,
         rerun_root_task_id: root_task_id,
     })
+}
+
+/// Read the source of a rerun and the class of the new task: one statement
+/// in the caller's transaction (Python `read_rerun_source`). Writes nothing.
+///
+/// Errors: [`RerunError::Statement`]; [`RerunError::RowDecode`] for a row
+/// that is not one row of the function's columns.
+async fn read_rerun_source(
+    transaction: &mut Transaction<'_>,
+    log: StatementLog,
+    source_task_id: Uuid,
+    policy: &RerunEnqueuePolicy,
+) -> Result<SourceRead, RerunError> {
+    let statement = &RERUN_SOURCE_READ;
+    let class_key = policy.retention_class_key();
+    let rows = query_in(
+        transaction,
+        log,
+        &statement
+            .bind()
+            .value(&source_task_id)
+            .value(&class_key)
+            .finish(),
+    )
+    .await?;
+    let row = one_row(rows, statement)?;
+    let class_registered: bool = column(&row, statement, "class_registered")?;
+    if !class_registered {
+        return Ok(SourceRead::ClassUnregistered);
+    }
+    let location: String = column(&row, statement, "location")?;
+    match location.as_str() {
+        "LIVE" => Ok(SourceRead::Live),
+        "ABSENT" => {
+            let reason: Option<String> = column(&row, statement, "absence_reason")?;
+            Ok(absence_of(source_task_id, reason.as_deref()))
+        }
+        "HISTORY" => history_source(&row, statement),
+        other => Ok(SourceRead::Corrupt(
+            HistoryError::contract(format!("staged detail returned unknown location {other:?}"))
+                .to_string(),
+        )),
+    }
+}
+
+/// The absence of a source, or the corruption of its reason. Pure.
+fn absence_of(source_task_id: Uuid, reason: Option<&str>) -> SourceRead {
+    let parsed = match reason {
+        Some(reason) => TaskAbsenceReason::parse(reason),
+        None => Err(HistoryError::contract(format!(
+            "the absence read of {source_task_id} returned no reason"
+        ))),
+    };
+    match parsed {
+        Ok(reason) => SourceRead::Absent(reason),
+        Err(error) => SourceRead::Corrupt(error.to_string()),
+    }
+}
+
+/// The history source of one read row, or the corruption it carries: the
+/// stored status is read as a [`TaskStatus`], then the attempt snapshot is
+/// decoded (digest first), in Python's order.
+///
+/// Errors: [`RerunError::RowDecode`] for a column of a history row that is
+/// `NULL` or of another type.
+fn history_source(row: &Row, statement: &TypedStatement) -> Result<SourceRead, RerunError> {
+    let task_id: Uuid = column(row, statement, "task_id")?;
+    let status: String = column(row, statement, "status")?;
+    let Ok(status) = status.parse::<TaskStatus>() else {
+        return Ok(SourceRead::Corrupt(
+            HistoryError::contract(format!(
+                "history row {task_id} has status {status:?}, which is not a task status"
+            ))
+            .to_string(),
+        ));
+    };
+    let attempt_archive_version: i16 = column(row, statement, "attempt_archive_version")?;
+    let attempt_snapshot: Vec<u8> = column(row, statement, "attempt_snapshot")?;
+    let attempt_snapshot_digest: Vec<u8> = column(row, statement, "attempt_snapshot_digest")?;
+    if let Err(error) = decode_attempt_snapshot(
+        attempt_archive_version,
+        JSON_UTF8_CODEC,
+        JSON_CONTENT_TYPE,
+        &attempt_snapshot,
+        &attempt_snapshot_digest,
+    ) {
+        return Ok(SourceRead::Corrupt(HistoryError::from(error).to_string()));
+    }
+    Ok(SourceRead::History(RerunSource {
+        task_id,
+        task_name: column(row, statement, "task_name")?,
+        queue_name: column(row, statement, "queue_name")?,
+        priority: column(row, statement, "priority")?,
+        max_retries: column(row, statement, "max_retries")?,
+        status,
+        is_workflow_task: column(row, statement, "is_workflow_task")?,
+        rerun_root_task_id: column(row, statement, "rerun_root_task_id")?,
+        rerun_input_disposition: column(row, statement, "rerun_input_disposition")?,
+        rerun_input_version: column(row, statement, "rerun_input_version")?,
+        rerun_input_digest: column(row, statement, "rerun_input_digest")?,
+        rerun_input_inline: column(row, statement, "rerun_input_inline")?,
+    }))
+}
+
+/// Claim the reservation of a rerun's key in the caller's transaction (Python
+/// `claim_key_reservation`). Writes the reservation row when the outcome is
+/// `Applied`; the caller's commit or rollback decides whether it stays.
+///
+/// Errors: [`RerunError::Statement`]; [`RerunError::RowDecode`] for a row
+/// that is not one row of the function's columns.
+///
+/// Panics when the outcome row breaks the claim contract (an unknown
+/// outcome, no task id, or an observed fingerprint version that does not fit
+/// the outcome): that is a defect of `horsies_key_reservation_claim`, not a
+/// refusal of the rerun. The panic names the statement and the row (the
+/// rule of #1231).
+async fn claim_rerun_key(
+    transaction: &mut Transaction<'_>,
+    log: StatementLog,
+    claim: &RerunKeyClaim<'_>,
+) -> Result<ReservationClaim, RerunError> {
+    let statement: &TypedStatement = &KEY_RESERVATION_CLAIM;
+    let rows = query_in(
+        transaction,
+        log,
+        &statement
+            .bind()
+            .value(&claim.key_digest)
+            .value(&IDEMPOTENCY_SCOPE_VERSION)
+            .value(&claim.window_seconds)
+            .value(&claim.fingerprint_version)
+            .value(&claim.fingerprint)
+            .value(&claim.task_id)
+            .finish(),
+    )
+    .await?;
+    let row = one_row(rows, statement)?;
+    let outcome: Option<String> = column(&row, statement, "outcome")?;
+    let task_id: Option<Uuid> = column(&row, statement, "task_id")?;
+    let observed_fingerprint_version: Option<i16> =
+        column(&row, statement, "observed_fingerprint_version")?;
+    match decode_reservation_row(outcome.as_deref(), task_id, observed_fingerprint_version) {
+        Ok(claimed) => Ok(claimed),
+        Err(error) => panic!(
+            "statement `{}` returned a row outside the claim contract \
+             (outcome {outcome:?}, task_id {task_id:?}, \
+             observed_fingerprint_version {observed_fingerprint_version:?}): {error}",
+            statement.name(),
+        ),
+    }
 }

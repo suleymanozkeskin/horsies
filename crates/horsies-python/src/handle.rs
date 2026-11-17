@@ -14,18 +14,32 @@ use horsies_core::{
     BrokerError, BrokerErrorCode, ClientFamily, PostgresBroker, SchemaInitializationMode,
 };
 use pyo3::prelude::*;
+use pyo3::IntoPyObjectExt;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use crate::bridge::blocking::call_blocking;
-use crate::bridge::completion_queue::call_async;
+use crate::bridge::completion_queue::{call_async, done_future};
 use crate::bridge::CallKind;
 use crate::errors::{refusal_error, ManifestRefused};
+use crate::operations::cancel::cancel_task_operation;
+use crate::operations::claim::{claim_pass_operation, ClaimPassRequest};
 use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
+use crate::operations::failed_attempt::{
+    finish_ended_attempt_operation, finish_failed_attempt_operation, FinishFailedAttemptRequest,
+};
+use crate::operations::queue_starts::{count_queue_starts_operation, QueueStartsRequest};
+use crate::operations::release::{release_claims_operation, ReleaseClaimsRequest};
 use crate::operations::schema::{install_operation, schema_status_operation};
+use crate::operations::stale_claims::requeue_stale_claimed_operation;
+use crate::operations::stale_running::mark_stale_running_operation;
+use crate::operations::success::{
+    complete_successes_operation, finish_workflow_success_operation, workflow_success_command,
+    SuccessBatchRequest,
+};
 use crate::operations::task_info::{task_info_operation, TaskInfoParts};
 use crate::process_core::{core_for_call, Core};
-use crate::records::{BrokerFailure, DatabasePingRecord, Outcome};
+use crate::records::{BrokerFailure, DatabasePingRecord, HandleClosed, Outcome};
 
 /// The manifest of a handle and its broker, connected at first use.
 #[derive(Clone)]
@@ -44,10 +58,39 @@ impl BrokerConnection {
             .map(Arc::clone)
     }
 
+    /// The connected broker, with the schema installed once per handle
+    /// first ([`PostgresBroker::ensure_schema_initialized`]: nothing in an
+    /// `OBSERVE_ONLY` or `ASSUME_INITIALIZED` handle), as Python's broker
+    /// installs at its first enqueue or read. A failure of the connect or
+    /// of the install is returned and not kept, so the next call runs it
+    /// again.
+    pub async fn initialized_broker(&self) -> Result<Arc<PostgresBroker>, BrokerError> {
+        let broker = self.broker().await?;
+        broker.ensure_schema_initialized().await?;
+        Ok(broker)
+    }
+
     /// The schema mode of the handle's manifest.
     pub fn schema_mode(&self) -> SchemaMode {
         self.manifest.schema
     }
+
+    /// Whether a connect succeeded on this handle. Starts nothing and waits
+    /// for nothing: a connect still in flight is `NeverConnected`.
+    fn connect_state(&self) -> ConnectState {
+        match self.broker.get() {
+            Some(broker) => ConnectState::Connected(Arc::clone(broker)),
+            None => ConnectState::NeverConnected,
+        }
+    }
+}
+
+/// Whether a handle holds a connected broker.
+enum ConnectState {
+    /// No connect succeeded: the handle holds no pool, and the core of the
+    /// process may not have started.
+    NeverConnected,
+    Connected(Arc<PostgresBroker>),
 }
 
 async fn connect(manifest: &ProducerManifest) -> Result<Arc<PostgresBroker>, BrokerError> {
@@ -102,6 +145,44 @@ impl CoreHandle {
     #[getter]
     fn manifest_version(&self) -> u32 {
         self.connection.manifest.manifest_version.get()
+    }
+
+    /// Close the handle's core pools: `HandleClosed`. No new operation takes
+    /// the closed pools; writes in flight run to their end within the close
+    /// bound, and the ones that do not are logged with their count. A handle
+    /// that never connected returns at once and starts nothing (a preload
+    /// process must not start the core). The next operation on the handle
+    /// opens new core pools. Runs on to its end when the caller leaves.
+    fn close(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let broker = match self.connection.connect_state() {
+            ConnectState::NeverConnected => return HandleClosed {}.into_py_any(py),
+            ConnectState::Connected(broker) => broker,
+        };
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.close",
+            CallKind::Write,
+            close_operation(broker),
+        )
+    }
+
+    /// The awaitable form of `close`. A handle that never connected returns
+    /// a future that is already done, and starts nothing.
+    fn close_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let broker = match self.connection.connect_state() {
+            ConnectState::NeverConnected => return done_future(py, HandleClosed {}),
+            ConnectState::Connected(broker) => broker,
+        };
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.close_async",
+            CallKind::Write,
+            close_operation(broker),
+        )
     }
 
     /// Ping the database: `DatabasePingRecord` or `BrokerFailure` with
@@ -208,8 +289,229 @@ impl CoreHandle {
         )
     }
 
+    /// One stale CLAIMED requeue pass with the threshold `stale_after_ms`:
+    /// `StaleClaimsDrained`, `StaleClaimsBoundReached`, or
+    /// `StaleClaimsRequeueFailed`. Writes; each batch commits alone.
+    /// Awaitable only: its caller, `PostgresBroker.requeue_stale_claimed`,
+    /// runs on an event loop. A threshold that does not fit in 64 bits
+    /// raises `OverflowError`.
+    fn requeue_stale_claimed_async<'py>(
+        &self,
+        py: Python<'py>,
+        stale_after_ms: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.requeue_stale_claimed_async",
+            CallKind::Write,
+            requeue_stale_claimed_operation(self.connection(), stale_after_ms),
+        )
+    }
+
+    /// One stale RUNNING recovery pass with the thresholds `stale_after_ms`
+    /// and `finalizing_stale_after_ms`: `StaleRunningRecovered`,
+    /// `StaleRunningScanFull`, or `StaleRunningScanFailed`. Writes; each
+    /// candidate's statement commits alone, and a candidate whose statement
+    /// fails is logged and skipped. Awaitable only: its caller,
+    /// `PostgresBroker.mark_stale_tasks_as_failed`, runs on an event loop. A
+    /// threshold that does not fit in 64 bits raises `OverflowError`.
+    fn mark_stale_running_async<'py>(
+        &self,
+        py: Python<'py>,
+        stale_after_ms: i64,
+        finalizing_stale_after_ms: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.mark_stale_running_async",
+            CallKind::Write,
+            mark_stale_running_operation(
+                self.connection(),
+                stale_after_ms,
+                finalizing_stale_after_ms,
+            ),
+        )
+    }
+
+    /// Write the failed attempt of a child that reported a result
+    /// (`horsies_finish_failed_attempt`, claimed-row rule `REFUSE`):
+    /// `AttemptFailureApplied`, `AttemptRetryScheduled`, `AttemptAlreadyApplied`,
+    /// `AttemptLostClaim`, `AttemptSourceStateConflict`, `AttemptTaskAbsent`,
+    /// or `AttemptWriteFailed`. Writes, in one statement. Awaitable only: its
+    /// caller, the worker's finalize, runs on the worker's event loop.
+    fn finish_failed_attempt_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, FinishFailedAttemptRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.finish_failed_attempt_async",
+            CallKind::Write,
+            finish_failed_attempt_operation(self.connection(), request.get().command()),
+        )
+    }
+
+    /// Write the end of an attempt whose child ended without a result
+    /// (claimed-row rule `RELEASE`): `AttemptClaimReleased` for a row that
+    /// this claim still held CLAIMED, else the outcomes of
+    /// `finish_failed_attempt_async`. Writes, in one statement. Awaitable
+    /// only: its caller, the worker's dispatch, runs on the worker's event
+    /// loop.
+    fn finish_ended_attempt_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, FinishFailedAttemptRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.finish_ended_attempt_async",
+            CallKind::Write,
+            finish_ended_attempt_operation(self.connection(), request.get().command()),
+        )
+    }
+
+    /// Write the plain successes of one request in one statement
+    /// (`horsies_complete_tasks_fused`): `SuccessesWritten` with one row
+    /// record per success in the request order, `BatchRolledBack`, or
+    /// `BatchCommitUnknown`. Writes. Awaitable only: its caller, the
+    /// worker's finalize batcher, runs on the worker's event loop. Rows
+    /// outside the function's contract raise `PanicException`.
+    fn complete_successes_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, SuccessBatchRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (worker_id, batch) = request.get().parts();
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.complete_successes_async",
+            CallKind::Write,
+            complete_successes_operation(self.connection(), worker_id, batch),
+        )
+    }
+
+    /// Write phase 1 of a workflow task's success
+    /// (`horsies_finish_workflow_success`): `WorkflowSuccessApplied` with the
+    /// phase 2 owed, a refusal (`AttemptAlreadyApplied`, `AttemptLostClaim`,
+    /// `AttemptSourceStateConflict`, `AttemptTaskAbsent`), or
+    /// `AttemptWriteFailed`. Writes, in one statement. Awaitable only: its
+    /// caller, the worker's finalize, runs on the worker's event loop. A
+    /// naive `claimed_at` raises `TypeError`.
+    #[pyo3(signature = (task_id, *, worker_id, claimed_at, result_json))]
+    fn finish_workflow_success_async<'py>(
+        &self,
+        py: Python<'py>,
+        task_id: Uuid,
+        worker_id: String,
+        claimed_at: &Bound<'_, PyAny>,
+        result_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let command = workflow_success_command(task_id, worker_id, claimed_at, result_json)?;
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.finish_workflow_success_async",
+            CallKind::Write,
+            finish_workflow_success_operation(self.connection(), command),
+        )
+    }
+
+    /// One claim pass (`horsies_claim`): `ClaimPassRecord` with the claimed
+    /// rows in dispatch order, or `ClaimPassFailed`. Writes, in one
+    /// statement; the dispatch stays with the caller. Awaitable only: its
+    /// caller, the worker's claim loop, runs on the worker's event loop.
+    fn claim_pass_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, ClaimPassRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.claim_pass_async",
+            CallKind::Write,
+            claim_pass_operation(self.connection(), request.get().request()),
+        )
+    }
+
+    /// Count the capped queues of one soft-cap start check: `QueueStartsRecord`
+    /// or `QueueStartsFailed`. Reads only, in one statement; a check with no
+    /// queue sends nothing. Awaitable only: its caller, the worker's claim
+    /// loop, runs on the worker's event loop.
+    fn count_queue_starts_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, QueueStartsRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.count_queue_starts_async",
+            CallKind::Read,
+            count_queue_starts_operation(self.connection(), request.get().check()),
+        )
+    }
+
+    /// Release the claims of one request: `ClaimsReleased` or
+    /// `ReleaseFailed`. Writes, in one statement. Awaitable only: its
+    /// callers run on the worker's event loop.
+    fn release_claims_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'_, ReleaseClaimsRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.release_claims_async",
+            CallKind::Write,
+            release_claims_operation(self.connection(), request.get().command()),
+        )
+    }
+
+    /// Cancel one plain task (`horsies_cancel_task`): `TaskCancelledRecord`,
+    /// `CancelRefusedWorkflowTask`, `CancelRefusedStatus`, `CancelTaskAbsent`,
+    /// `CancelFailed`, or `CancelStoredDataInvalid`. A RUNNING task is
+    /// cancelled only with `include_running`. Writes, in one statement.
+    /// Awaitable only: its caller, `horsies.monitoring.task_actions.cancel_task`,
+    /// is a coroutine. An outcome that contradicts the function raises
+    /// `PanicException`.
+    #[pyo3(signature = (task_id, *, include_running))]
+    fn cancel_task_async<'py>(
+        &self,
+        py: Python<'py>,
+        task_id: Uuid,
+        include_running: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.cancel_task_async",
+            CallKind::Write,
+            cancel_task_operation(self.connection(), task_id, include_running),
+        )
+    }
+
     /// The info of one task: `TaskInfoRecord`, `TaskInfoNotFound`, or
-    /// `BrokerFailure` with `TASK_INFO_QUERY_FAILED`. Reads only.
+    /// `BrokerFailure` with `TASK_INFO_QUERY_FAILED` or
+    /// `INVALID_JSON_PAYLOAD`. Installs the schema once per handle first;
+    /// then reads only.
     #[pyo3(signature = (task_id, *, include_result, include_failed_reason, include_attempts))]
     fn task_info(
         &self,
@@ -265,6 +567,14 @@ pub fn checked_core(py: Python<'_>) -> PyResult<&'static Core> {
     core_for_call(py).map_err(refusal_error)
 }
 
+/// Close the pools of a connected handle's broker. Writes in the sense of
+/// [`CallKind::Write`]: a caller that leaves does not stop the close. The
+/// broker logs the writes that did not end within the close bound.
+async fn close_operation(broker: Arc<PostgresBroker>) -> HandleClosed {
+    broker.close().await;
+    HandleClosed {}
+}
+
 fn ping_database_operation(
     connection: BrokerConnection,
 ) -> impl Future<Output = Outcome<DatabasePingRecord>> + Send + 'static {
@@ -284,5 +594,57 @@ fn ping_database_operation(
             }),
             Err(error) => Outcome::Failed(BrokerFailure::from(error)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MANIFEST: &str = r#"{
+        "manifest_version": 1,
+        "database": {
+            "database_url": "postgresql://user:secret@127.0.0.1:1/none",
+            "session_database": {"kind": "SAME_AS_DATABASE_URL"},
+            "pgbouncer_transaction_mode": false,
+            "pool_pre_ping": true,
+            "pool_size": 5,
+            "max_overflow": 0,
+            "pool_timeout": 30,
+            "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
+            "echo": false,
+            "tcp_keepalives": {
+                "kind": "ON",
+                "idle_seconds": 30,
+                "interval_seconds": 10,
+                "probes": 3
+            },
+            "tcp_user_timeout": {"kind": "AFTER", "milliseconds": 30000}
+        },
+        "schema": "MIGRATE_AND_VALIDATE",
+        "send": {
+            "retain_rerun_input_default": false,
+            "idempotency_reservation_window": 86400000000
+        }
+    }"#;
+
+    #[test]
+    fn a_handle_that_never_connected_closes_without_a_core_call() {
+        let handle = CoreHandle::new(MANIFEST).expect("the manifest is complete");
+        assert!(matches!(
+            handle.connection.connect_state(),
+            ConnectState::NeverConnected
+        ));
+        Python::initialize();
+        Python::attach(|py| {
+            let closed = handle
+                .close(py)
+                .expect("the close of a handle that never connected does not fail");
+            assert!(closed.bind(py).is_instance_of::<HandleClosed>());
+        });
+        assert!(matches!(
+            handle.connection.connect_state(),
+            ConnectState::NeverConnected
+        ));
     }
 }

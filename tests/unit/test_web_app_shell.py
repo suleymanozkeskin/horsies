@@ -49,7 +49,7 @@ pytestmark = [pytest.mark.unit]
 asyncio_tests = pytest.mark.asyncio(loop_scope='function')
 
 # Nothing listens here, so any route that reaches the database fails fast.
-UNREACHABLE_URL = 'postgresql+psycopg://postgres:none@127.0.0.1:1/none'
+UNREACHABLE_URL = 'postgresql://postgres:none@127.0.0.1:1/none'
 
 ACT_HEADERS = {INTENT_HEADER: INTENT_VALUE}
 

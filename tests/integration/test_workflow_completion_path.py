@@ -1,10 +1,10 @@
 """Integration tests: completion-path statement budget and equivalence.
 
-Pins the merged locate+lock+CAS completion shape (COMPLETE_WORKFLOW_TASK_SQL)
-and its behavioral equivalence with the old per-statement path: per-completion
-statement count stays flat, the terminal CAS stays idempotent, on_error
-fail/pause semantics survive, and a paused workflow still stores the result
-without propagating.
+Pins the phase 2 of a workflow task (``horsies_workflow_node_finish``) and
+its behaviour: phase 2 of a node with no sub-workflow node below it is one
+statement, a second phase 2 of a node writes nothing, on_error fail/pause
+semantics hold, and a paused workflow still stores the result without
+propagating.
 """
 
 from __future__ import annotations
@@ -24,8 +24,10 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import OnError, TaskNode
 from horsies.core.types.result import is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
+from horsies.core.workflows.node_finish import CapacityWake, FactsUnknown, finish_node
+from horsies.core.workflows.steps import NodeFinishDisposition
 
-from tests.integration.conftest import complete_task
+from tests.integration.conftest import finish_phase_one, finish_phase_two, finish_task
 from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration]
@@ -76,9 +78,33 @@ async def _workflow_row(session: AsyncSession, workflow_id: str) -> Any:
     ).one()
 
 
+async def _phase_two_statements(
+    session: AsyncSession,
+    broker: PostgresBroker,
+    workflow_id: str,
+    task_index: int,
+    result: TaskResult[Any, TaskError],
+) -> int:
+    """Phase 1 of the node's task, then phase 2; the statements that phase 2
+    sent on the broker's engine."""
+    done = await finish_phase_one(session, broker, workflow_id, task_index, result)
+    counts = {'n': 0}
+
+    def _count(conn: Any, cursor: Any, stmt: Any, params: Any, ctx: Any, many: Any) -> None:
+        counts['n'] += 1
+
+    sync_engine = current_resources(broker).engine.sync_engine
+    event.listen(sync_engine, 'before_cursor_execute', _count)
+    try:
+        await finish_phase_two(broker, done)
+    finally:
+        event.remove(sync_engine, 'before_cursor_execute', _count)
+    return counts['n']
+
+
 @pytest.mark.asyncio(loop_scope='function')
 class TestCompletionStatementBudget:
-    """Round-trip pins for the merged completion statement."""
+    """Statement pins for phase 2 of a node with no sub-workflow node below it."""
 
     async def test_success_completion_statement_count(
         self,
@@ -89,35 +115,21 @@ class TestCompletionStatementBudget:
     ) -> None:
         """Regression for the per-statement completion path: success with
         one still-pending dependent was 10 statements (each one RTT under
-        the workflow lock); the merged path is 5."""
+        the workflow lock), then 5 with the merged node write; phase 2 is
+        one statement now, with dependents and without."""
         spec = _chain_spec(app)
         start_r = await start_workflow_async(spec, broker)
         assert not is_err(start_r), start_r
         wf_id = start_r.ok_value.workflow_id
 
-        counts = {'n': 0}
+        # B waits only on A, so phase 2 of A promotes B.
+        promote_stmts = await _phase_two_statements(session, broker, wf_id, 0, TaskResult(ok=1))
+        # B has no dependents; its phase 2 completes the workflow.
+        finalize_stmts = await _phase_two_statements(session, broker, wf_id, 1, TaskResult(ok=2))
+        await session.commit()
 
-        def _count(conn: Any, cursor: Any, stmt: Any, params: Any, ctx: Any, many: Any) -> None:
-            counts['n'] += 1
-
-        event.listen(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
-        try:
-            # A has no still-pending dependent gate here: B waits only on A,
-            # so this completion PROMOTES B (the 7-statement promote branch).
-            await complete_task(session, broker, wf_id, 0, TaskResult(ok=1))
-            promote_stmts = counts['n']
-            counts['n'] = 0
-            # B's completion has zero dependents and finalizes the workflow.
-            await complete_task(session, broker, wf_id, 1, TaskResult(ok=2))
-            finalize_stmts = counts['n']
-        finally:
-            event.remove(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
-            await session.commit()
-
-        # complete_task adds 2 lookups of its own (task_id + task_name).
-        # Old shape: promote ≈ 15+2, finalize ≈ 8+2 + terminal resolution.
-        assert promote_stmts <= 13, f'promotion completion ran {promote_stmts} statements'
-        assert finalize_stmts <= 13, f'finalizing completion ran {finalize_stmts} statements'
+        assert promote_stmts == 1, f'promotion completion ran {promote_stmts} statements'
+        assert finalize_stmts == 1, f'finalizing completion ran {finalize_stmts} statements'
 
     async def test_failed_completion_statement_count(
         self,
@@ -127,32 +139,22 @@ class TestCompletionStatementBudget:
         session: AsyncSession,
     ) -> None:
         """on_error=FAIL failure path: was 14 statements (third lock +
-        on_error read on top of the success 10); merged path drops both."""
+        on_error read on top of the success 10), then up to 18 with B's skip
+        and the completion; phase 2 is one statement now."""
         spec = _chain_spec(app)
         start_r = await start_workflow_async(spec, broker)
         assert not is_err(start_r), start_r
         wf_id = start_r.ok_value.workflow_id
 
-        counts = {'n': 0}
-
-        def _count(conn: Any, cursor: Any, stmt: Any, params: Any, ctx: Any, many: Any) -> None:
-            counts['n'] += 1
-
         failed: TaskResult[int, TaskError] = TaskResult(
             err=TaskError(error_code='BENCH_FAIL', message='forced'),
         )
-        event.listen(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
-        try:
-            await complete_task(session, broker, wf_id, 0, failed)
-            stmts = counts['n']
-        finally:
-            event.remove(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
-            await session.commit()
+        # The failure policy, B's skip and the completion (B is SKIPPED, so
+        # the workflow is FAILED) run inside the one call.
+        stmts = await _phase_two_statements(session, broker, wf_id, 0, failed)
+        await session.commit()
 
-        # Includes the failure handler's two writes plus B's skip cascade
-        # and the final completion resolution (B is SKIPPED -> workflow
-        # FAILED in the same call). The old path was 7 statements heavier.
-        assert stmts <= 18, f'failed completion ran {stmts} statements'
+        assert stmts == 1, f'failed completion ran {stmts} statements'
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -171,13 +173,14 @@ class TestCompletionEquivalence:
         assert not is_err(start_r), start_r
         wf_id = start_r.ok_value.workflow_id
 
-        await complete_task(session, broker, wf_id, 0, TaskResult(ok=1))
+        await finish_task(session, broker, wf_id, 0, TaskResult(ok=1))
         await session.commit()
         first = await _node_row(session, wf_id, 0)
         assert first.status == 'COMPLETED'
 
-        # Second completion with a different payload must not win the CAS.
-        await complete_task(session, broker, wf_id, 0, TaskResult(ok=999))
+        # A second phase 2 of the node (its task is in history now, so it
+        # replays in the transaction form) writes nothing.
+        await finish_task(session, broker, wf_id, 0, TaskResult(ok=999))
         await session.commit()
         second = await _node_row(session, wf_id, 0)
         assert second.status == 'COMPLETED'
@@ -198,7 +201,7 @@ class TestCompletionEquivalence:
         failed: TaskResult[int, TaskError] = TaskResult(
             err=TaskError(error_code='BENCH_FAIL', message='forced'),
         )
-        await complete_task(session, broker, wf_id, 0, failed)
+        await finish_task(session, broker, wf_id, 0, failed)
         await session.commit()
 
         wf = await _workflow_row(session, wf_id)
@@ -222,7 +225,7 @@ class TestCompletionEquivalence:
         failed: TaskResult[int, TaskError] = TaskResult(
             err=TaskError(error_code='BENCH_FAIL', message='forced'),
         )
-        await complete_task(session, broker, wf_id, 0, failed)
+        await finish_task(session, broker, wf_id, 0, failed)
         await session.commit()
 
         wf = await _workflow_row(session, wf_id)
@@ -250,7 +253,7 @@ class TestCompletionEquivalence:
         )
         await session.commit()
 
-        await complete_task(session, broker, wf_id, 0, TaskResult(ok=1))
+        await finish_task(session, broker, wf_id, 0, TaskResult(ok=1))
         await session.commit()
 
         root = await _node_row(session, wf_id, 0)
@@ -266,10 +269,16 @@ class TestCompletionEquivalence:
         broker: PostgresBroker,
         session: AsyncSession,
     ) -> None:
-        from horsies.core.workflows.engine import on_workflow_task_complete
-
-        await on_workflow_task_complete(
-            session, str(uuid.uuid4()), TaskResult(ok=1), broker,
-            task_name='completion_unknown',
+        """A task that no node links and that has no phase-2 record: the
+        step writes nothing and names no workflow."""
+        committed = await finish_node(
+            current_resources(broker).session_factory,
+            broker,
+            str(uuid.uuid4()),
+            FactsUnknown(),
+            CapacityWake.SEND,
         )
-        await session.rollback()  # nothing to commit; must not raise
+
+        assert committed.outcome.disposition is NodeFinishDisposition.PENDING_ABSENT
+        assert committed.outcome.workflow_status is None
+        assert committed.parent_advances == ()

@@ -26,7 +26,7 @@ use serial_test::serial;
 use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
-use crate::broker::{BrokerError, PostgresBroker};
+use crate::broker::{BrokerError, PostgresBroker, SendKind};
 use crate::core::config::{EnqueueRetention, PostgresConfig};
 use crate::core::history::identity::uuid7::mint_task_id;
 use crate::core::task::send_types::{send_error_from_enqueue, TaskSendErrorCode, TaskSendPayload};
@@ -186,6 +186,7 @@ async fn enqueue_probe(
             None,
             payload.retention,
             None,
+            SendKind::First,
         )
         .await
 }
@@ -219,7 +220,7 @@ async fn a_transaction_pool_with_a_direct_session_installs_checks_locks_and_enqu
     broker.migrate().await.expect("install the schema");
     broker.health_check().await.expect("the health check");
     broker
-        .check_session_delivery()
+        .check_worker_session()
         .await
         .expect("the session URL delivers a NOTIFY");
 
@@ -282,7 +283,7 @@ async fn a_transaction_pool_with_a_direct_session_installs_checks_locks_and_enqu
 /// the refusal is not retryable.
 #[tokio::test]
 #[serial]
-#[ignore = "needs the PgBouncer fixture of tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1; waits on #676"]
+#[ignore = "needs the PgBouncer fixture of tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
 async fn a_session_url_on_the_transaction_pool_fails_the_worker_session_check() {
     let urls = PgbouncerUrls::create("bad_session").await;
     let session_url = with_query_parameter(
@@ -297,7 +298,7 @@ async fn a_session_url_on_the_transaction_pool_fails_the_worker_session_check() 
     .expect("connect the broker");
 
     let refused = broker
-        .check_session_delivery()
+        .check_worker_session()
         .await
         .expect_err("the transaction pool keeps no session");
 
@@ -325,7 +326,7 @@ async fn a_session_pooled_url_installs_enqueues_and_delivers_a_notify() {
         .await
         .expect("an enqueue through the session pool");
     broker
-        .check_session_delivery()
+        .check_worker_session()
         .await
         .expect("the session pool delivers a NOTIFY");
 
@@ -349,7 +350,7 @@ async fn a_session_pooled_url_installs_enqueues_and_delivers_a_notify() {
 /// decisions": a statement-pooled URL answers `retryable = false`).
 #[tokio::test]
 #[serial]
-#[ignore = "needs the PgBouncer fixture of tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1; waits on #676"]
+#[ignore = "needs the PgBouncer fixture of tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
 async fn a_statement_pooled_runtime_url_fails_the_send_as_not_retryable() {
     let urls = PgbouncerUrls::create("statement").await;
     let broker = PostgresBroker::connect_with(&sized(PostgresConfig::from_pgbouncer_urls(

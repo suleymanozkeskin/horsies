@@ -8,8 +8,14 @@ use crate::core::task::result::TaskResult;
 use crate::core::workflow::node::NodeKey;
 use crate::core::workflow::summary::SubWorkflowSummary;
 
-/// Reserved kwarg key used to transport workflow context from the engine.
-pub const WORKFLOW_CTX_KWARG: &str = "__horsies_workflow_ctx__";
+/// Reserved kwarg key used to transport workflow context from the engine (Python `_ENGINE_KEY_WORKFLOW_CTX`,
+/// `core/workflows/engine.py:141`).
+pub const WORKFLOW_CTX_KWARG: &str = "__h_workflow_ctx__";
+
+/// Reserved kwarg key of the workflow metadata that Python's engine injects into every node
+/// (`_ENGINE_KEY_WORKFLOW_META`, `core/workflows/engine.py:142`). The worker removes it before the task
+/// input is decoded, as Python's child does (`core/worker/child_runner.py:1641-1642`).
+pub const WORKFLOW_META_KWARG: &str = "__h_workflow_meta__";
 
 /// Context passed to workflow tasks that need access to upstream results.
 ///
@@ -159,6 +165,7 @@ impl WorkflowContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::workflow::status::WorkflowStatus;
 
     fn make_ctx() -> WorkflowContext {
         let mut results = HashMap::new();
@@ -258,7 +265,7 @@ mod tests {
         summaries.insert(
             "sub-node".to_owned(),
             SubWorkflowSummary {
-                status: "COMPLETED".to_owned(),
+                status: WorkflowStatus::Completed,
                 output: Some(serde_json::json!(42)),
                 total_tasks: 3,
                 completed_tasks: 3,
@@ -305,7 +312,7 @@ mod tests {
         summaries.insert(
             "sub_wf:0".to_owned(),
             SubWorkflowSummary {
-                status: "COMPLETED".to_owned(),
+                status: WorkflowStatus::Completed,
                 output: None,
                 total_tasks: 2,
                 completed_tasks: 2,
@@ -328,7 +335,7 @@ mod tests {
         let ctx = make_ctx_with_summary();
         let key: NodeKey<()> = NodeKey::new("sub_wf:0".to_owned());
         let summary = ctx.summary_for(&key).unwrap();
-        assert_eq!(summary.status, "COMPLETED");
+        assert_eq!(summary.status, WorkflowStatus::Completed);
     }
 
     #[test]
@@ -371,7 +378,7 @@ mod tests {
         summaries.insert(
             "sub_wf:0".to_owned(),
             SubWorkflowSummary {
-                status: "COMPLETED".to_owned(),
+                status: WorkflowStatus::Completed,
                 output: Some(serde_json::json!({"total": 7, "label": "done"})),
                 total_tasks: 2,
                 completed_tasks: 2,

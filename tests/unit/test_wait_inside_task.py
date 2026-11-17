@@ -41,7 +41,7 @@ from horsies.core.worker import child_runner
 
 pytestmark = [pytest.mark.unit]
 
-UNREACHABLE_URL = 'postgresql+psycopg://u:p@127.0.0.1:1/db'
+UNREACHABLE_URL = 'postgresql://u:p@127.0.0.1:1/db'
 WORKFLOW_ID = '0b6f2f0e-6c1d-4f7a-9a52-3d2b1c0e9f81'
 TASK_ID = '0b6f2f0e-6c1d-7f7a-9a52-3d2b1c0e9f82'
 REFUSED_TIMEOUT_MS = -1

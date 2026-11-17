@@ -67,13 +67,11 @@ from horsies.core.workflows.engine import (
     _parse_child_output,  # pyright: ignore[reportPrivateUsage]
     get_workflow_failure_error,
 )
-from horsies.core.workflows.phase2_recovery import (
-    _recovered_failure_result,  # pyright: ignore[reportPrivateUsage]
-)
 from horsies.core.workflows.sql import (
     GET_FIRST_FAILED_REQUIRED_TASK_SQL,
     GET_FIRST_FAILED_TASK_RESULT_SQL,
 )
+from tests.dispatch_claim_support import claim_at
 
 pytestmark = [pytest.mark.unit]
 
@@ -151,7 +149,7 @@ def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
             broker=PostgresConfig(
-                database_url=SecretStr('postgresql+psycopg://u:p@localhost/db'),
+                database_url=SecretStr('postgresql://u:p@localhost/db'),
             ),
         ),
     )
@@ -162,7 +160,7 @@ def _make_worker() -> Worker:
         session_factory=MagicMock(),
         listener=MagicMock(),
         cfg=WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
         ),
@@ -238,23 +236,6 @@ class TestStoredTextThatDoesNotParse:
 
         assert session.execute.await_args.args[0] is GET_FIRST_FAILED_REQUIRED_TASK_SQL
         _assert_stored_workflow_error(stored_error, cause)
-
-    @_NOT_AN_ENVELOPE
-    def test_phase2_recovery_gives_the_stored_data_error(
-        self, stored: str, cause: str,
-    ) -> None:
-        result = _recovered_failure_result('FAILED', stored)
-        _assert_stored_data_error(result, cause)
-        assert result.unwrap_err().data == {'task_status': 'FAILED'}
-
-    @_NOT_AN_ENVELOPE
-    def test_the_recovered_error_encodes_for_the_failure_handler(
-        self, stored: str, cause: str,
-    ) -> None:
-        result = _recovered_failure_result('FAILED', stored)
-        encoded = encode_task_error(result.unwrap_err())
-        assert isinstance(encoded, dict)
-        assert cause in str(encoded['message'])
 
     @_NOT_AN_ENVELOPE
     def test_a_child_output_stays_unreadable(self, stored: str, cause: str) -> None:
@@ -465,14 +446,6 @@ class TestErrorWithNoMessage:
         assert decoded.message is None
 
     @_NO_MESSAGE
-    def test_phase2_recovery_returns_the_error(
-        self, err_slot: dict[str, Json],
-    ) -> None:
-        _assert_code_without_message(
-            _recovered_failure_result('FAILED', _stored(err_slot)),
-        )
-
-    @_NO_MESSAGE
     def test_a_child_output_is_an_error(self, err_slot: dict[str, Json]) -> None:
         match _parse_child_output(_stored(err_slot)):
             case _ChildOutputError(error=error):
@@ -480,31 +453,6 @@ class TestErrorWithNoMessage:
                 assert error.message is None
             case parsed:
                 pytest.fail(f'unexpected variant: {parsed!r}')
-
-    @_NO_MESSAGE
-    @pytest.mark.asyncio
-    async def test_phase2_replay_loads_the_error(
-        self, err_slot: dict[str, Json],
-    ) -> None:
-        worker = _make_worker()
-        with patch.object(
-            worker,
-            '_read_persisted_task_row',
-            AsyncMock(
-                return_value=SimpleNamespace(
-                    status='FAILED',
-                    task_name='t',
-                    queue_name='default',
-                    is_workflow_task=True,
-                    result=_stored(err_slot),
-                ),
-            ),
-        ):
-            outcome = await worker._read_persisted_task_result(  # pyright: ignore[reportPrivateUsage]
-                'task-1', MagicMock(),
-            )
-
-        _assert_code_without_message(outcome.unwrap().result)
 
 
 class TestDecodeTaskError:
@@ -825,34 +773,6 @@ class TestRecoveryReaders:
     """The readers of a recovery path: a stored value must not raise out."""
 
     @_REFUSED
-    def test_phase2_recovery_gives_the_stored_data_error(
-        self, err_slot: dict[str, Json], cause: str,
-    ) -> None:
-        result = _recovered_failure_result('FAILED', _stored(err_slot))
-        _assert_stored_data_error(result, cause)
-        assert result.unwrap_err().data == {'task_status': 'FAILED'}
-
-    @_REFUSED
-    def test_the_recovered_error_encodes_for_the_failure_handler(
-        self, err_slot: dict[str, Json], cause: str,
-    ) -> None:
-        result = _recovered_failure_result('FAILED', _stored(err_slot))
-        encoded = encode_task_error(result.unwrap_err())
-        assert isinstance(encoded, dict)
-        assert cause in str(encoded['message'])
-
-    def test_phase2_recovery_escapes_a_lone_surrogate_in_the_cause(self) -> None:
-        """An encode refusal in the failure handler repeats on each pass."""
-        refusal = ValueValidationError(f'bad {chr(0xd800)}')
-        with patch(
-            'horsies.core.workflows.phase2_recovery.decode_task_error',
-            side_effect=refusal,
-        ):
-            result = _recovered_failure_result('FAILED', _stored(_DECLARED))
-
-        encode_task_error(result.unwrap_err())
-
-    @_REFUSED
     @pytest.mark.asyncio
     async def test_finalize_records_a_refused_result_as_undecodable(
         self, err_slot: dict[str, Json], cause: str,
@@ -874,7 +794,7 @@ class TestRecoveryReaders:
                 task_name='t',
                 queue_name='default',
                 is_workflow_task=False,
-                claimed_at=CLAIMED_AT,
+                claim=claim_at(CLAIMED_AT),
             )
 
         assert outcome == Ok(None)
@@ -884,29 +804,29 @@ class TestRecoveryReaders:
             case _:
                 pytest.fail(f'unexpected reports: {reports!r}')
 
-    @_REFUSED
-    @pytest.mark.asyncio
-    async def test_phase2_replay_ends_without_a_retry(
-        self, err_slot: dict[str, Json], cause: str,
-    ) -> None:
-        worker = _make_worker()
-        with patch.object(
-            worker,
-            '_read_persisted_task_row',
-            AsyncMock(
-                return_value=SimpleNamespace(
-                    status='FAILED',
-                    task_name='t',
-                    queue_name='default',
-                    is_workflow_task=True,
-                    result=_stored(err_slot),
-                ),
-            ),
-        ):
-            outcome = await worker._read_persisted_task_result(  # pyright: ignore[reportPrivateUsage]
-                'task-1', MagicMock(),
-            )
 
-        assert is_err(outcome)
-        assert outcome.err_value.retryable is False
-        assert cause in outcome.err_value.message
+class TestStoredWorkflowStoppedCode:
+    """``WORKFLOW_STOPPED`` is a reserved name and no task code: a stored err
+    slot with it does not decode, so a finalize fails the task instead of
+    reading the error as a stop and leaving the row RUNNING."""
+
+    _STORED = (
+        '{"__h_task_result__":true,"ok":null,'
+        '"err":{"exception":null,"error_code":"WORKFLOW_STOPPED",'
+        '"data":null,"message":"stop"}}'
+    )
+
+    def test_the_err_slot_does_not_decode(self) -> None:
+        err_slot: Json = {
+            'exception': None,
+            'error_code': 'WORKFLOW_STOPPED',
+            'data': None,
+            'message': 'stop',
+        }
+        with pytest.raises(ValueValidationError, match='reserved error code name'):
+            decode_task_error(err_slot)
+
+    def test_a_reader_gives_the_stored_data_error(self) -> None:
+        result = _decode_err_only(self._STORED)
+        assert result is not None
+        _assert_stored_data_error(result, 'reserved error code name')

@@ -16,13 +16,14 @@ use uuid::Uuid;
 
 use super::support::{
     broker, execute, finish_phase1, history_row, node, ok, poison_success_policy, seed_node,
-    seed_node_task, seed_workflow, shared_pool, spec, start, task_node, workflow_status,
-    IsolatedDatabase, LiveStatus, NodeSeed, Notifications, WorkflowSeed, WORKER,
+    seed_node_task, seed_workflow, shared_pool, spec, start, start_claimed_task, task_node,
+    workflow_status, IsolatedDatabase, LiveStatus, NodeSeed, Notifications, WorkflowSeed, WORKER,
 };
 use crate::broker::attempt_writes::{finish_workflow_success, FinishWorkflowSuccess};
+use crate::broker::claims::{StartMiss, StartOutcome};
 use crate::broker::core_rows::StatementLog;
 use crate::broker::lifecycle_tests::support::{
-    database_options, unpinged_single_connection_pool, wait_until_idle, WireProxy,
+    database_options, unpinged_single_connection_pool, WireProxy,
 };
 use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
@@ -31,8 +32,8 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{AttemptWriteRefusal, OwnedClaim, WorkflowSuccessOutcome};
 use crate::core::{TaskResult, WorkflowSpecRegistry};
 use crate::worker::execution::{
-    confirm_ownership_and_set_running, finalize_workflow_phase, persist_terminal_state,
-    FinalizeError, FinalizeOutcome, FinalizeStage, OwnershipOutcome,
+    finalize_workflow_phase, persist_terminal_state, FinalizeError, FinalizeOutcome, FinalizeStage,
+    PhaseTwoForm,
 };
 use crate::worker::retry::read_stored_options;
 use crate::workflow_engine::lifecycle::cancel_workflow;
@@ -77,7 +78,7 @@ async fn start_chain(pool: &PgPool, name: &str) -> Uuid {
     start(
         pool,
         &spec(name, vec![task_node(0, &format!("{name}_task")), dependent]),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await
 }
@@ -147,20 +148,28 @@ fn ok_json() -> String {
 }
 
 /// The worker's finalize of node A's success under claim generation
-/// `claimed_at`, on `pool` (Python's `_finalize`). Returns the outcome of
-/// phase 1, or the error of the phase that failed.
+/// `claimed_at`, on a broker of `pool` (Python's `_finalize`). Returns the
+/// outcome of phase 1, or the error of the phase that failed.
 async fn finalize(
     pool: &PgPool,
     node_a: &RunningNode,
     claimed_at: DateTime<Utc>,
 ) -> Result<FinalizeOutcome, FinalizeError> {
-    let broker = PostgresBroker::from_pool(pool.clone());
+    finalize_on(&PostgresBroker::from_pool(pool.clone()), node_a, claimed_at).await
+}
+
+/// [`finalize`] on `broker`: phase 1 and phase 2 run on its core pools.
+async fn finalize_on(
+    broker: &PostgresBroker,
+    node_a: &RunningNode,
+    claimed_at: DateTime<Utc>,
+) -> Result<FinalizeOutcome, FinalizeError> {
     let claimed = ClaimedTaskRow {
         claimed_at,
         ..node_a.claimed.clone()
     };
     let outcome = persist_terminal_state(
-        &broker,
+        broker,
         claimed.id,
         TaskResult::Ok(ok_bytes()),
         &claimed,
@@ -172,21 +181,21 @@ async fn finalize(
     .await?;
     let owed = match &outcome {
         FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
-        } => Some((*is_success, *capacity_notified)),
+            phase_two: form,
+            ..
+        } => Some((*capacity_notified, *form)),
         FinalizeOutcome::Retried | FinalizeOutcome::Finalized | FinalizeOutcome::Refused => None,
     };
-    if let Some((is_success, capacity_notified)) = owed {
+    if let Some((capacity_notified, form)) = owed {
         finalize_workflow_phase(
-            pool,
-            &WorkflowSpecRegistry::new(),
+            broker,
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             claimed.id,
-            is_success,
             &claimed.queue_name,
             claimed.is_workflow_task,
             capacity_notified,
-            &PayloadPolicy::default(),
+            form,
             &RetentionConfig::default(),
         )
         .await?;
@@ -198,10 +207,10 @@ async fn finalize(
 fn describe(result: &Result<FinalizeOutcome, FinalizeError>) -> String {
     match result {
         Ok(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
+            phase_two,
         }) => format!(
-            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified} }}"
+            "Terminal {{ capacity_notified: {capacity_notified}, phase_two: {phase_two:?} }}"
         ),
         Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
         Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),
@@ -210,15 +219,10 @@ fn describe(result: &Result<FinalizeOutcome, FinalizeError>) -> String {
     }
 }
 
-/// Whether phase 1 applied the success and phase 2 ran.
+/// Whether phase 1 applied a terminal write that owes phase 2, and phase 2
+/// ran. The outcome carries no status: the callers drive a success.
 fn is_a_finalized_success(result: &Result<FinalizeOutcome, FinalizeError>) -> bool {
-    matches!(
-        result,
-        Ok(FinalizeOutcome::Terminal {
-            is_success: true,
-            ..
-        })
-    )
+    matches!(result, Ok(FinalizeOutcome::Terminal { .. }))
 }
 
 /// (task_index, status, linked to a task) of each node (Python's `_nodes`).
@@ -311,6 +315,14 @@ async fn a_replay_of_a_committed_success_runs_phase_two() {
 /// the success commits and its reply never reaches the worker. Phase 1 is a
 /// retryable error; its retry, the same statement on a new connection, is
 /// `AlreadyApplied` and runs phase 2.
+///
+/// The proxy drops the reply to the next request of any connection. A broker
+/// opens its own core pool from the URL of its sqlx pool, so the first
+/// finalize runs on the broker whose main core pool the warm-up used: its one
+/// connection is open and the success statement is prepared on it, and the
+/// success write is the next request, with one reply (Python's
+/// `_one_pooled_connection`). The warm-up returns the connection to the pool
+/// at once, so the finalize takes it within the idle ping limit.
 #[tokio::test]
 #[serial]
 async fn a_lost_reply_is_retried_and_the_replay_runs_phase_two() {
@@ -318,22 +330,27 @@ async fn a_lost_reply_is_retried_and_the_replay_runs_phase_two() {
     let upstream = database_options(&pool);
     let proxy = WireProxy::start(&upstream).await;
     let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-    // Prepare the success statement on the proxied connection, so the write
-    // is one request with one reply.
-    let warm_up = finish_workflow_success(
-        &core_pool_for_test_pool(&proxied),
-        StatementLog::Off,
-        &FinishWorkflowSuccess {
-            task_id: Uuid::new_v4(),
-            fence: OwnedClaim {
-                worker_id: WORKER.to_owned(),
-                claimed_at: Utc::now(),
+    let node_a = run_node_a(&pool, start_chain(&pool, "finalize_lost_reply").await).await;
+    let proxied_broker = PostgresBroker::from_pool(proxied.clone());
+    let warm_up = {
+        let (open, _write) = proxied_broker
+            .core_pools_for_write()
+            .expect("the core pools of the proxied broker");
+        finish_workflow_success(
+            open.main(),
+            proxied_broker.statement_log(),
+            &FinishWorkflowSuccess {
+                task_id: Uuid::new_v4(),
+                fence: OwnedClaim {
+                    worker_id: WORKER.to_owned(),
+                    claimed_at: Utc::now(),
+                },
+                result_json: ok_json(),
             },
-            result_json: ok_json(),
-        },
-    )
-    .await
-    .expect("warm up");
+        )
+        .await
+        .expect("warm up")
+    };
     assert!(
         matches!(
             warm_up,
@@ -341,11 +358,9 @@ async fn a_lost_reply_is_retried_and_the_replay_runs_phase_two() {
         ),
         "{warm_up:?}"
     );
-    wait_until_idle(&proxied).await;
-    let node_a = run_node_a(&pool, start_chain(&pool, "finalize_lost_reply").await).await;
 
     proxy.drop_next_reply();
-    let first = finalize(&proxied, &node_a, node_a.claimed_at()).await;
+    let first = finalize_on(&proxied_broker, &node_a, node_a.claimed_at()).await;
 
     assert!(proxy.reply_was_dropped(), "the proxy relayed the reply");
     match &first {
@@ -389,7 +404,6 @@ enum WorkflowEnd {
 /// the end left it.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #998"]
 async fn a_node_of_an_ended_workflow_completes_and_enqueues_nothing() {
     let pool = shared_pool().await;
     for end in [WorkflowEnd::Cancelled, WorkflowEnd::Failed] {
@@ -491,65 +505,23 @@ async fn live_status(pool: &PgPool, task_id: Uuid) -> Option<String> {
         .expect("read the live task status")
 }
 
-/// The start check of the worker for a claimed workflow task.
-async fn start_check(
-    pool: &PgPool,
-    task_id: Uuid,
-    claimed_at: DateTime<Utc>,
-    orphan_self_heal: bool,
-) -> OwnershipOutcome {
-    confirm_ownership_and_set_running(
-        &broker(pool),
-        task_id,
-        WORKER,
-        WORKER_PID,
-        WORKER_HOSTNAME,
-        true,
-        claimed_at,
-        orphan_self_heal,
-    )
-    .await
-}
-
 /// `test_workflow_node_handoff.py::test_a_failed_workflow_check_keeps_no_beat`:
-/// a claimed task whose node is already terminal fails the start check, and
-/// no runner beat is written. With orphan self-heal on (the default), the
-/// check cancels the task as an orphan; Python cancels it in the finalize of
-/// the failed check.
+/// a claimed task whose node is already terminal fails the start check of the
+/// child host (`NODE_NOT_LINKED`): the start writes nothing, so the task stays
+/// CLAIMED by its claim and has no runner beat.
+///
+/// What follows the miss is the outcome writer's: with orphan self-heal on it
+/// cancels the owned orphan (`worker/executor/slots/settle_tests.rs::a_task_whose_node_is_not_linked_is_cancelled_when_the_self_heal_is_on`),
+/// with it off the row stays CLAIMED (`::a_task_whose_node_is_not_linked_stays_claimed_when_the_self_heal_is_off`).
 #[tokio::test]
 #[serial]
-async fn a_failed_workflow_check_writes_no_runner_beat() {
+async fn a_failed_workflow_check_keeps_the_claim_and_writes_no_runner_beat() {
     let db = IsolatedDatabase::create().await;
     let (_workflow_id, task_id, claimed_at) = seed_claimed_task_of_a_completed_node(&db.pool).await;
 
-    let outcome = start_check(&db.pool, task_id, claimed_at, true).await;
+    let outcome = start_claimed_task(&db.pool, task_id, claimed_at).await;
 
-    assert!(matches!(outcome, OwnershipOutcome::Aborted));
-    assert_eq!(runner_beats(&db.pool, task_id).await, 0);
-    assert_eq!(live_status(&db.pool, task_id).await, None);
-    assert_eq!(
-        history_row(&db.pool, task_id)
-            .await
-            .map(|(status, _kind)| status)
-            .as_deref(),
-        Some("CANCELLED")
-    );
-    db.drop().await;
-}
-
-/// `test_workflow_node_handoff.py::test_a_failed_workflow_check_keeps_no_beat`,
-/// with orphan self-heal off: the failed check leaves the task CLAIMED, as
-/// Python's check does, and writes no runner beat.
-#[tokio::test]
-#[serial]
-#[ignore = "waits on #921"]
-async fn a_failed_workflow_check_with_self_heal_off_keeps_the_claim_and_writes_no_beat() {
-    let db = IsolatedDatabase::create().await;
-    let (_workflow_id, task_id, claimed_at) = seed_claimed_task_of_a_completed_node(&db.pool).await;
-
-    let outcome = start_check(&db.pool, task_id, claimed_at, false).await;
-
-    assert!(matches!(outcome, OwnershipOutcome::Aborted));
+    assert_eq!(outcome, StartOutcome::Missed(StartMiss::NodeNotLinked));
     assert_eq!(
         live_status(&db.pool, task_id).await.as_deref(),
         Some("CLAIMED")
@@ -586,24 +558,27 @@ async fn seed_owed_phase_two(
 }
 
 /// Phase 2 of a success of `task_id`, with its capacity wake on `queue_name`.
+/// The phase-1 outcome is not at hand, so the step reads the dependents in a
+/// transaction (`PhaseTwoForm::NotKnown`).
 async fn phase_two(
     pool: &PgPool,
     task_id: Uuid,
     queue_name: &str,
     is_workflow_task: bool,
 ) -> Result<(), FinalizeError> {
+    let broker = PostgresBroker::from_pool(pool.clone());
     finalize_workflow_phase(
-        pool,
-        &WorkflowSpecRegistry::new(),
+        &broker,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         task_id,
-        true,
         queue_name,
         is_workflow_task,
         false,
-        &PayloadPolicy::default(),
+        PhaseTwoForm::NotKnown,
         &RetentionConfig::default(),
     )
     .await
+    .map(|_parent_advances| ())
 }
 
 fn assert_a_phase_two_error(result: &Result<(), FinalizeError>) -> &FinalizeError {
@@ -640,7 +615,6 @@ async fn a_failure_in_the_advancement_is_a_phase_two_error_that_is_not_retryable
 /// connection error) is a phase-2 error that is not retryable.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1002"]
 async fn a_database_error_in_the_advancement_that_is_not_a_connection_error_is_not_retryable() {
     let db = IsolatedDatabase::create().await;
     let (_workflow_id, task_id) = seed_owed_phase_two(&db.pool, None).await;
@@ -679,7 +653,11 @@ enum WakeCase {
 
 /// `test_worker_finalize_workflow_phase.py::test_phase_two_wakes_the_queue_of_the_task_once`
 /// (`node`, `no_node`): phase 2 sends one capacity wake on the channel of
-/// the task's queue, whether or not the task has a node.
+/// the task's queue, whether or not the task has a node. As in Python, the
+/// node and its task are on the queue that phase 2 is given: the node finish
+/// wakes the queue of the node row (`horsies_workflow_node_apply`). The wake
+/// is channel `task_queue_<queue>` with payload `capacity`, as every baseline
+/// write sends it; no receiver reads the payload on a queue channel.
 #[tokio::test]
 #[serial]
 async fn phase_two_wakes_the_queue_of_the_task_once() {
@@ -687,10 +665,14 @@ async fn phase_two_wakes_the_queue_of_the_task_once() {
     for case in [WakeCase::Node, WakeCase::NoNode] {
         let (task_id, is_workflow_task) = match case {
             WakeCase::Node => {
+                let mut wake_node = task_node(0, "finalize_wake_task");
+                wake_node.queue = Some(WAKE_QUEUE.to_owned());
                 let workflow_id = start(
                     &pool,
-                    &spec("finalize_wake", vec![task_node(0, "finalize_wake_task")]),
-                    &WorkflowSpecRegistry::new(),
+                    &spec("finalize_wake", vec![wake_node]),
+                    &WorkflowSpecRegistry::new(
+                        crate::core::registry::BuilderHookName::SPEC_BUILDER,
+                    ),
                 )
                 .await;
                 let task_id = node(&pool, workflow_id, 0)
@@ -709,8 +691,8 @@ async fn phase_two_wakes_the_queue_of_the_task_once() {
         assert!(result.is_ok(), "{case:?}: {result:?}");
         assert_eq!(
             listener.received().await,
-            vec![(WAKE_CHANNEL.to_owned(), format!("capacity:{task_id}"))],
-            "{case:?}"
+            vec![(WAKE_CHANNEL.to_owned(), "capacity".to_owned())],
+            "{case:?}: task {task_id}"
         );
     }
 }
@@ -738,7 +720,6 @@ async fn a_phase_two_that_fails_sends_no_wake() {
 /// server refuses is a phase-2 error, and the node write does not commit.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #722"]
 async fn a_wake_that_the_server_refuses_is_a_phase_two_error() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = seed_owed_phase_two(&db.pool, None).await;

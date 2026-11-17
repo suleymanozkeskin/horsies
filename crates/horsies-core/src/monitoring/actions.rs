@@ -114,7 +114,7 @@ fn task_action_failed(error: TaskActionError) -> ActionOutcome {
         // Python answers it with 503 too; the core never produces it.
         TaskActionErrorCode::EventLoopLimit => detail(503, error.message),
         // The request was valid, and a repeat gives the same answer until the
-        // stored row changes (Python `horsies/web/routes/actions.py:110-130`).
+        // stored row changes (Python `python/horsies/web/routes/actions.py:110-130`).
         TaskActionErrorCode::StoredDataInvalid => detail(500, error.message),
     }
 }
@@ -150,7 +150,8 @@ fn status_failed(workflow_id: Uuid, error: WorkflowError) -> ActionOutcome {
         | WorkflowError::WorkflowTimeout { .. }
         | WorkflowError::WorkflowError(_)
         | WorkflowError::InvalidStatus(_)
-        | WorkflowError::Validation(_) => detail(503, error.to_string()),
+        | WorkflowError::Validation(_)
+        | WorkflowError::StepContract(_) => detail(503, error.to_string()),
     }
 }
 
@@ -187,7 +188,7 @@ pub async fn pause_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) -
 }
 
 /// The answer of a failed resume, from the error alone, as Python's resume
-/// route (`horsies/web/routes/actions.py:234-258`): `RESUME_RECOVERY_FAILED`
+/// route (`python/horsies/web/routes/actions.py:234-258`): `RESUME_RECOVERY_FAILED`
 /// means the resume committed and only its recovery pass failed, so the
 /// workflow was resumed and the answer says so with a warning. Every other
 /// error is answered as for the other workflow actions. No second status read

@@ -51,6 +51,7 @@ from tests.dualrun.values import (
     RunWindowInvalid,
     make_run_window,
 )
+from horsies.core.utils.url import sqlalchemy_url
 
 FUNCTION_CALLS_SQL: Final = (
     Path(__file__).parent.parent / 'integration' / 'baseline_function_calls.sql'
@@ -117,7 +118,8 @@ def _fresh_ids(connection: Connection, count: int) -> list[str]:
     return [str(record[0]) for record in records]
 
 
-def _read_start(connection: Connection) -> Result[datetime, SelfCheckStepFailed]:
+def read_run_start(connection: Connection) -> Result[datetime, SelfCheckStepFailed]:
+    """The database clock at the start of a run, before any write of the run."""
     match read_database_clock(connection):
         case Err(failed):
             return _failed('read the run start', failed)
@@ -125,9 +127,10 @@ def _read_start(connection: Connection) -> Result[datetime, SelfCheckStepFailed]
             return Ok(now)
 
 
-def _capture(
+def capture_run(
     connection: Connection, start: datetime
 ) -> Result[SelfCheckRun, SelfCheckStepFailed]:
+    """The snapshot of the database, with the run window from ``start`` to the clock now."""
     match read_database_clock(connection):
         case Err(failed):
             return _failed('read the run end', failed)
@@ -150,7 +153,7 @@ def run_function_calls(
 ) -> Result[SelfCheckRun, SelfCheckStepFailed]:
     """Install, run the function-call script with new ids, commit, capture."""
     with psycopg.connect(database.url, autocommit=True) as connection:
-        match _read_start(connection):
+        match read_run_start(connection):
             case Err(failed):
                 return Err(failed)
             case Ok(start):
@@ -173,7 +176,7 @@ def run_function_calls(
                 )
         except psycopg.Error as exc:
             return _failed('run the function-call script', exc)
-        return _capture(connection, start)
+        return capture_run(connection, start)
 
 
 # ---- Seeded history ----
@@ -239,9 +242,7 @@ async def _seed(url: str) -> None:
     """The production coverage pass: class registration, leaves, heartbeat leaves, staged readers."""
     from tests.integration.history_seeding import ensure_history_seedable
 
-    engine = create_async_engine(
-        url.replace('postgresql://', 'postgresql+psycopg://', 1)
-    )
+    engine = create_async_engine(sqlalchemy_url(url))
     try:
         async with engine.begin() as connection:
             await ensure_history_seedable(connection)
@@ -292,7 +293,7 @@ def run_seeded_history(
 ) -> Result[SelfCheckRun, SelfCheckStepFailed]:
     """Install, run the production coverage pass, move a task into a daily leaf, detach a leaf, capture."""
     with psycopg.connect(database.url, autocommit=True) as connection:
-        match _read_start(connection):
+        match read_run_start(connection):
             case Err(failed):
                 return Err(failed)
             case Ok(start):
@@ -312,4 +313,4 @@ def run_seeded_history(
                 _seeded_writes(connection)
         except psycopg.Error as exc:
             return _failed('write the seeded history', exc)
-        return _capture(connection, start)
+        return capture_run(connection, start)

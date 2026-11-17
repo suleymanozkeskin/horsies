@@ -1,6 +1,6 @@
 //! Typed result models for the worker/database health API.
 //!
-//! Mirrors Python's `horsies/core/models/health.py`. These carry no behaviour,
+//! Mirrors Python's `python/horsies/core/models/health.py`. These carry no behaviour,
 //! only observed data returned to callers from the broker's health methods,
 //! and the reading of a stored worker state row into a snapshot.
 
@@ -65,7 +65,7 @@ pub struct WorkerPong {
 
 /// One `horsies_worker_states` row — a worker's state at a point in time.
 ///
-/// Mirrors Python's `WorkerStateSnapshot` (`horsies/core/models/health.py:399-433`).
+/// Mirrors Python's `WorkerStateSnapshot` (`python/horsies/core/models/health.py:399-433`).
 /// Returned as the latest snapshot per worker (cluster-wide listing) or as a
 /// timeseries (single-worker history). The worker state reads build it from
 /// the stored row; a stored value of another shape fails the read.
@@ -131,6 +131,26 @@ pub(crate) struct StoredWorkerState {
     pub(crate) class_capacity: Value,
 }
 
+/// A row of the worker list statement: a stored worker state and
+/// `read_at`, the `statement_timestamp()` of that statement. Every row of
+/// one list read has the same `read_at`.
+#[derive(Debug, Clone, FromRow)]
+pub(crate) struct ListedWorkerStateRow {
+    #[sqlx(flatten)]
+    pub(crate) stored: StoredWorkerState,
+    pub(crate) read_at: DateTime<Utc>,
+}
+
+/// A worker's latest snapshot and the database clock of the list statement
+/// that read it. The web worker list measures the snapshot age, the
+/// staleness and the uptime from `read_at`, so the web host clock does not
+/// enter them.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ListedWorkerState {
+    pub(crate) snapshot: WorkerStateSnapshot,
+    pub(crate) read_at: DateTime<Utc>,
+}
+
 /// A JSON column of a worker state row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerStateColumn {
@@ -155,7 +175,7 @@ impl WorkerStateColumn {
 
 /// A stored worker state row whose JSON column does not have the shape that
 /// the worker writes. The message names the worker, the snapshot, the column
-/// and the cause, as Python's (`horsies/core/brokers/postgres.py:2971-2986`).
+/// and the cause, as Python's (`python/horsies/core/brokers/postgres.py:2971-2986`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "worker {worker_id} snapshot at {snapshot_at}: {} is unreadable: {reason}",
@@ -170,7 +190,7 @@ pub(crate) struct WorkerStateUnreadable {
 
 impl StoredWorkerState {
     /// The snapshot of this row (Python `_row_to_worker_snapshot`,
-    /// `horsies/core/brokers/postgres.py:2961-3009`).
+    /// `python/horsies/core/brokers/postgres.py:2961-3009`).
     ///
     /// `slots_down` and `class_capacity` are read first, in Python's order.
     /// The three map columns must be JSON objects; the queue maps hold whole
@@ -249,7 +269,7 @@ fn json_object(value: &Value) -> Result<Map<String, Value>, String> {
 /// does not read fails the read: `MONITORING_QUERY_FAILED`, not retryable,
 /// since the same rows give the same answer (Python: the `ValueError` of
 /// `_row_to_worker_snapshot` in the read's `try`,
-/// `horsies/core/brokers/postgres.py:3011-3100`). Nothing changed.
+/// `python/horsies/core/brokers/postgres.py:3011-3100`). Nothing changed.
 pub(crate) fn read_worker_snapshots(
     operation: &str,
     rows: Vec<StoredWorkerState>,
@@ -273,13 +293,29 @@ pub(crate) fn read_worker_snapshot(
         })
 }
 
+/// The listed states of the worker list rows, for the read `operation`.
+/// Each keeps the `read_at` of its row. The first row that does not read
+/// fails the read, as in [`read_worker_snapshots`].
+pub(crate) fn read_listed_worker_states(
+    operation: &str,
+    rows: Vec<ListedWorkerStateRow>,
+) -> BrokerResult<Vec<ListedWorkerState>> {
+    rows.into_iter()
+        .map(|row| {
+            let read_at = row.read_at;
+            read_worker_snapshot(operation, row.stored)
+                .map(|snapshot| ListedWorkerState { snapshot, read_at })
+        })
+        .collect()
+}
+
 /// The exclusive bound of a stored count: it stays in the range of a
 /// PostgreSQL bigint (Python `_COUNT_LIMIT = 2**63`,
-/// `horsies/core/models/health.py:134`).
+/// `python/horsies/core/models/health.py:134`).
 pub(crate) const STORED_COUNT_LIMIT: u64 = 1 << 63;
 
 /// A stored JSON whole number inside `valid` (Python `_whole_in`,
-/// `horsies/core/models/health.py:214-226`). A bool is not a whole number;
+/// `python/horsies/core/models/health.py:214-226`). A bool is not a whole number;
 /// any other value outside `valid` is out of range. The error is the reason,
 /// naming `name` and the stored value.
 pub(crate) fn stored_whole_number(
@@ -469,5 +505,39 @@ mod tests {
         assert!(failed
             .message
             .starts_with("list_worker_states failed: worker w1 snapshot at "));
+    }
+
+    /// Each listed state keeps the `read_at` of its row; an unreadable row
+    /// fails the list read as it fails the other worker state reads.
+    #[test]
+    fn listed_states_keep_the_read_time_of_their_rows() {
+        let read_at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 11, 16, 12, 0, 30).unwrap();
+
+        let listed = read_listed_worker_states(
+            "list_worker_states",
+            vec![ListedWorkerStateRow {
+                stored: stored_row(),
+                read_at,
+            }],
+        )
+        .expect("a readable row");
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].read_at, read_at);
+        assert_eq!(listed[0].snapshot.worker_id, "w1");
+
+        let mut unreadable = stored_row();
+        unreadable.slots_down = serde_json::json!("down");
+        let failed = read_listed_worker_states(
+            "list_worker_states",
+            vec![ListedWorkerStateRow {
+                stored: unreadable,
+                read_at,
+            }],
+        )
+        .expect_err("an unreadable row");
+
+        assert_eq!(failed.code, BrokerErrorCode::MonitoringQueryFailed);
+        assert!(!failed.retryable);
     }
 }

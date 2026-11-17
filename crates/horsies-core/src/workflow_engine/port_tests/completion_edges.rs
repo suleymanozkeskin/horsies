@@ -9,19 +9,19 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    node, ok, required, seed_node, seed_workflow, shared_pool, stored_result, workflow,
-    IsolatedDatabase, NodeSeed, ParentLink, WorkflowSeed,
+    node, ok, required, seed_node, seed_workflow, shared_pool, workflow, IsolatedDatabase,
+    NodeSeed, ParentLink, WorkflowSeed,
 };
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::{SubWorkflowSummary, TaskResult, WorkflowSpecRegistry};
+use crate::core::{SubWorkflowSummary, WorkflowSpecRegistry, WorkflowStatus};
 use crate::workflow_engine::engine::{check_workflow_completion, on_subworkflow_complete};
 
 async fn complete(pool: &PgPool, workflow_id: Uuid) {
     check_workflow_completion(
         pool,
         workflow_id,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
@@ -114,7 +114,7 @@ async fn a_failed_child_gives_its_parent_a_summary_without_output() {
 
     assert_eq!(workflow(&pool, child_id).await.status, "FAILED");
     let summary = parent_summary(&pool, parent_id).await;
-    assert_eq!(summary.status, "FAILED");
+    assert_eq!(summary.status, WorkflowStatus::Failed);
     assert_eq!(summary.output, None);
 }
 
@@ -144,7 +144,7 @@ async fn child_summary_counts_follow_the_child_node_statuses() {
             child_id,
             "FAILED",
             None,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -172,7 +172,9 @@ async fn child_summary_counts_follow_the_child_node_statuses() {
 
 /// `test_terminal_two_step_handles_zero_task_workflow`: a workflow with no
 /// node has an empty terminal set, and its completion reads no row and fails
-/// on nothing.
+/// on nothing. It has no output node, so it stores Python's outputless result
+/// with three empty maps (`python/horsies/core/workflows/engine.py:3935-3983`; the
+/// baseline `horsies_workflow_outputless_result`).
 #[tokio::test]
 #[serial]
 async fn a_workflow_with_no_node_completes_with_an_empty_terminal_set() {
@@ -183,8 +185,18 @@ async fn a_workflow_with_no_node_completes_with_an_empty_terminal_set() {
 
     let row = workflow(&pool, workflow_id).await;
     assert_eq!(row.status, "COMPLETED");
-    let result = stored_result(&row.result.expect("a COMPLETED workflow stores its result"));
-    assert!(matches!(result, TaskResult::Ok(_)), "{result:?}");
+    let stored = row.result.expect("a COMPLETED workflow stores its result");
+    let result: serde_json::Value =
+        serde_json::from_str(&stored).expect("the stored result is JSON");
+    assert_eq!(
+        result,
+        serde_json::json!({
+            "__h_task_result__": true,
+            "__h_outputless_terminals__": true,
+            "ok": {"results_by_id": {}, "task_name_by_id": {}, "definition_key_by_id": {}},
+            "err": null,
+        })
+    );
 }
 
 /// `test_child_info_counts_zero_for_taskless_workflow`: a child with no node
@@ -203,7 +215,7 @@ async fn a_child_with_no_node_reports_a_total_of_zero() {
         child_id,
         "FAILED",
         None,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )

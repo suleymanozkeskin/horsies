@@ -4,19 +4,17 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
-use crate::core::history::names::TASK_DETAIL_FUNCTION;
 use crate::core::lifecycle::{
     PriorLockedRead, TerminalizationCommand, TerminalizationOutcome, WorkerOwned,
 };
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::{TaskStatus, WorkflowStatus};
 
-use super::task_actions::cancel_task_in_tx;
 use super::*;
 
 #[derive(Clone)]
@@ -67,6 +65,9 @@ async fn clean_w3(pool: &PgPool) {
     }
 }
 
+/// Insert one live row. Only a CLAIMED row holds a claim lease
+/// (`horsies_tasks_status_live`; Python
+/// `tests/integration/monitoring_seeding.py:268-274`).
 async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
     sqlx::query(
         "INSERT INTO horsies_tasks (
@@ -78,7 +79,7 @@ async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
             $1, $2, 'default', 100, 'null', $3, NOW(), NOW() - INTERVAL '60 seconds',
             CASE WHEN $3 = 'RUNNING' THEN NOW() - INTERVAL '30 seconds' END,
             CASE WHEN $4::text IS NOT NULL THEN NOW() - INTERVAL '40 seconds' END, $4,
-            CASE WHEN $4::text IS NOT NULL THEN NOW() + INTERVAL '1 minute' END, $5, 0, 3,
+            CASE WHEN $3 = 'CLAIMED' THEN NOW() + INTERVAL '1 minute' END, $5, 0, 3,
             CASE WHEN $5 THEN NULL ELSE 1 END,
             CASE WHEN $5 THEN NULL ELSE decode(repeat('0c', 32), 'hex') END, 'forever', FALSE,
             NOW(), NOW(), 'ISOLATED'
@@ -199,11 +200,11 @@ async fn workflow_status(pool: &PgPool, workflow_id: Uuid) -> String {
 async fn seed_workflow_task_link(pool: &PgPool, workflow_id: Uuid, task_id: Uuid, status: &str) {
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-            id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+            downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
             dependencies, allow_failed_deps, join_type, status, task_id, is_subworkflow,
             created_at, started_at, max_retries, execution, retention_class_key
         ) VALUES (
-            $1, $2, 0, 'w3-node', 'w3_node_task', 'null', 'default', 100, ARRAY[]::integer[],
+            'NONE', $1, $2, 0, 'w3-node', 'w3_node_task', 'null', 'default', 100, ARRAY[]::integer[],
             FALSE, 'all', $3, $4, FALSE, NOW(),
             CASE WHEN $3 = 'RUNNING' THEN NOW() - INTERVAL '30 seconds' END, 0, 'ISOLATED',
             'standard_30d'
@@ -451,31 +452,6 @@ async fn task_cancel_live_miss_and_workflow_diagnoses_are_exact() {
 }
 
 #[tokio::test]
-#[serial]
-async fn unpublished_staged_detail_reports_a_live_miss_as_not_found() {
-    let pool = migrated_pool().await;
-    clean_w3(&pool).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
-    let task = TaskSeed::running();
-    seed_task(&pool, &task).await;
-    complete_task(&pool, task.id).await;
-
-    let mut transaction = pool.begin().await.expect("W3 DDL transaction");
-    sqlx::query(&format!("DROP FUNCTION {TASK_DETAIL_FUNCTION}(uuid)"))
-        .execute(transaction.as_mut())
-        .await
-        .expect("hide staged detail in W3 transaction");
-    let result = cancel_task_in_tx(&mut transaction, task.id, false).await;
-    let error = result.expect_err("unpublished history must be absent");
-    assert_eq!(error.code, TaskActionErrorCode::TaskNotFound);
-    transaction.rollback().await.expect("restore staged detail");
-
-    let restored = cancel_task_action(&broker, task.id, false).await;
-    assert_eq!(restored.status_code(), 409);
-    clean_w3(&pool).await;
-}
-
-#[tokio::test]
 async fn task_and_workflow_database_failures_are_service_unavailable() {
     let pool = PgPoolOptions::new()
         .acquire_timeout(std::time::Duration::from_millis(250))
@@ -498,7 +474,7 @@ async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
     let broker = PostgresBroker::from_pool(pool.clone());
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let payload = PayloadPolicy::default();
     let retention = RetentionConfig::default();
 
@@ -595,11 +571,12 @@ const LOCK_WAIT_POLLS: usize = 250;
 const LOCK_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Python `test_task_lock_order.py` (a monitoring cancel against a
-/// finalize): the cancel takes the task advisory lock before the row lock,
-/// the order of every move function. While another transaction holds the
-/// advisory lock, the cancel waits for it and holds no row lock, so the
-/// holder can still lock the row. With the row lock first, the holder's
-/// `FOR UPDATE NOWAIT` fails with 55P03 and a finalize deadlocks (40P01).
+/// finalize): the cancel (`horsies_cancel_task`) takes the task advisory
+/// lock before the row lock, the order of every move function. While
+/// another transaction holds the advisory lock, the cancel waits for it and
+/// holds no row lock, so the holder can still lock the row. With the row
+/// lock first, the holder's `FOR UPDATE NOWAIT` fails with 55P03 and a
+/// finalize deadlocks (40P01).
 #[tokio::test]
 #[serial]
 async fn task_cancel_takes_the_advisory_lock_before_the_row_lock() {
@@ -625,7 +602,7 @@ async fn task_cancel_takes_the_advisory_lock_before_the_row_lock() {
         let waiting: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_stat_activity
              WHERE wait_event_type = 'Lock' AND wait_event = 'advisory'
-               AND query LIKE '%pg_advisory_xact_lock(hashtextextended($1::text, $2))%'",
+               AND query LIKE '%horsies_cancel_task(%'",
         )
         .fetch_one(&pool)
         .await

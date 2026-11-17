@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{Duration, Timelike, Utc};
 use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::{PgConnection, PgPool};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
@@ -13,7 +13,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::broker::migrations::run_horsies_migrations;
 use crate::core::history::commands::{
     open_end_anchor, CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf,
     EnsureLeafCoverage, InspectHistoryLeaf, LeafBounds, LeafRef,
@@ -48,17 +47,27 @@ use crate::core::history::reads::publisher::StagedLoaderPublisher;
 
 use super::catalog::{
     capture_partition_bound_utc, database_now, read_leaf_catalog_row, read_leaf_physical_state,
-    read_manifest_leaf_rows, LeafCatalogRow, LeafIndexKind, LeafLowerBound,
-    LeafPartitionBoundExpectation,
+    LeafCatalogRow, LeafIndexKind, LeafLowerBound, LeafPartitionBoundExpectation,
 };
 use super::manager::{
     create_daily_leaf, detach_expired_leaf, drop_detached_leaf, ensure_leaf_coverage, inspect_leaf,
-    verify_static_forever_leaf, DetachExpiredLeafOutcome, LeafBlockerQuarantine, NoQuarantine,
-    QuarantineRefusalVerdict, QuarantineRefused, QuarantineResult, TaskQuarantineRefusal,
-    STATIC_FOREVER_LEAF_BOUND,
+    verify_static_forever_leaf, DetachExpiredLeafOutcome, STATIC_FOREVER_LEAF_BOUND,
 };
 use super::publication::{LoaderPublication, LoaderRepublished, UnpublishedLoader};
 
+mod lifecycle_ports;
+
+/// The attached history leaves whose relation is gone, in name order
+/// (`horsies_history_absent_leaves()`, 0008).
+async fn absent_history_leaves(
+    connection: &mut PgConnection,
+) -> Result<Vec<String>, crate::core::history::errors::HistoryError> {
+    Ok(sqlx::query_scalar("SELECT horsies_history_absent_leaves()")
+        .fetch_one(connection)
+        .await?)
+}
+
+/// A publisher that renders nothing and reports the absent history leaves.
 #[derive(Debug, Default)]
 struct CatalogPublisher;
 
@@ -67,9 +76,8 @@ impl LoaderPublication for CatalogPublisher {
         &self,
         connection: &mut PgConnection,
     ) -> Result<LoaderRepublished, crate::core::history::errors::HistoryError> {
-        let selection = read_manifest_leaf_rows(connection).await?;
         Ok(LoaderRepublished {
-            absent_leaves: selection.absent_relations,
+            absent_leaves: absent_history_leaves(connection).await?,
         })
     }
 
@@ -85,39 +93,8 @@ impl LoaderPublication for CatalogPublisher {
         &self,
         connection: &mut PgConnection,
     ) -> Result<bool, crate::core::history::errors::HistoryError> {
-        Ok(!read_manifest_leaf_rows(connection)
-            .await?
-            .absent_relations
-            .is_empty())
+        Ok(!absent_history_leaves(connection).await?.is_empty())
     }
-}
-
-#[derive(Debug, Default)]
-struct ReferencingPublisher;
-
-impl LoaderPublication for ReferencingPublisher {
-    async fn republish(
-        &self,
-        _connection: &mut PgConnection,
-    ) -> Result<LoaderRepublished, crate::core::history::errors::HistoryError> {
-        Ok(LoaderRepublished {
-            absent_leaves: Vec::new(),
-        })
-    }
-
-    async fn references_leaf(
-        &self,
-        _connection: &mut PgConnection,
-        _leaf_name: &str,
-    ) -> Result<bool, crate::core::history::errors::HistoryError> {
-        Ok(true)
-    }
-}
-
-#[derive(Debug, Default)]
-struct FailFirstRepublish {
-    calls: AtomicUsize,
-    reference_calls: AtomicUsize,
 }
 
 #[derive(Debug, Default)]
@@ -159,37 +136,6 @@ impl LoaderPublication for BlockingPublisher {
     }
 }
 
-impl LoaderPublication for FailFirstRepublish {
-    async fn needs_republication(
-        &self,
-        _connection: &mut PgConnection,
-    ) -> Result<bool, crate::core::history::errors::HistoryError> {
-        Ok(true)
-    }
-
-    async fn republish(
-        &self,
-        _connection: &mut PgConnection,
-    ) -> Result<LoaderRepublished, crate::core::history::errors::HistoryError> {
-        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            return Err(crate::core::history::errors::HistoryError::contract(
-                "injected first-leaf publication failure",
-            ));
-        }
-        Ok(LoaderRepublished {
-            absent_leaves: Vec::new(),
-        })
-    }
-
-    async fn references_leaf(
-        &self,
-        _connection: &mut PgConnection,
-        _leaf_name: &str,
-    ) -> Result<bool, crate::core::history::errors::HistoryError> {
-        Ok(self.reference_calls.fetch_add(1, Ordering::SeqCst) == 0)
-    }
-}
-
 impl LoaderPublication for FailFirstStagedPublisher {
     async fn republish(
         &self,
@@ -221,34 +167,11 @@ impl LoaderPublication for FailFirstStagedPublisher {
     }
 }
 
-#[derive(Debug, Clone)]
-struct RefusingQuarantine {
-    task_id: Uuid,
-}
-
-impl LeafBlockerQuarantine for RefusingQuarantine {
-    async fn quarantine(
-        &self,
-        _connection: &mut PgConnection,
-        leaf: &LeafRef,
-        _horizon: Duration,
-    ) -> Result<QuarantineResult, crate::core::history::errors::HistoryError> {
-        Ok(QuarantineResult::Refused(QuarantineRefused {
-            leaf_name: leaf.leaf_name().to_owned(),
-            repointed: 0,
-            refusals: vec![TaskQuarantineRefusal {
-                task_id: self.task_id,
-                verdict: QuarantineRefusalVerdict::SourceAbsent,
-                detail: Some("history row absent at locator".to_owned()),
-            }],
-        }))
-    }
-}
-
+/// A copy of the installed test template (`crate::test_support`) with a
+/// sqlx pool for the history functions that still take a sqlx connection.
 struct TestDatabase {
     pool: PgPool,
-    database_name: String,
-    admin_options: PgConnectOptions,
+    database: crate::test_support::TestDatabase,
 }
 
 impl TestDatabase {
@@ -257,74 +180,30 @@ impl TestDatabase {
     }
 
     async fn create_with_connections(max_connections: u32) -> Self {
-        let base = database_url();
-        let base_options = PgConnectOptions::from_str(&base).expect("invalid test database URL");
-        let admin_options = base_options.clone().database("postgres");
-        let database_name = format!("core_p3_{}", Uuid::new_v4().simple());
-        let mut admin = PgConnection::connect_with(&admin_options)
-            .await
-            .expect("connect to postgres admin database");
-        sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
-            .execute(&mut admin)
-            .await
-            .expect("create P3 test database");
+        let database = crate::test_support::TestDatabase::create().await;
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
-            .connect_with(base_options.database(&database_name))
+            .connect(database.url())
             .await
             .expect("connect to P3 test database");
-        run_horsies_migrations(&pool)
-            .await
-            .expect("migrate P3 test database");
-        Self {
-            pool,
-            database_name,
-            admin_options,
-        }
+        Self { pool, database }
+    }
+
+    fn url(&self) -> &str {
+        self.database.url()
     }
 
     async fn drop(self) {
         self.pool.close().await;
-        let mut admin = PgConnection::connect_with(&self.admin_options)
-            .await
-            .expect("connect for P3 database cleanup");
-        sqlx::query(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-             WHERE datname = $1 AND pid <> pg_backend_pid()",
-        )
-        .bind(&self.database_name)
-        .execute(&mut admin)
-        .await
-        .expect("terminate P3 test database sessions");
-        sqlx::query(&format!(
-            "DROP DATABASE IF EXISTS \"{}\"",
-            self.database_name
-        ))
-        .execute(&mut admin)
-        .await
-        .expect("drop P3 test database");
+        self.database.drop().await;
     }
 }
 
 mod pruning_ports;
 
-fn database_url() -> String {
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        return url;
-    }
-    // CARGO_MANIFEST_DIR is <workspace>/crates/horsies.
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root");
-    let contents = std::fs::read_to_string(root.join(".env")).expect("read workspace .env");
-    let password = contents
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .find_map(|(key, value)| (key.trim() == "DB_PASSWORD").then(|| value.trim()))
-        .expect("DB_PASSWORD in workspace .env");
-    format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
-}
+mod read_round_trips;
+
+mod retirement_ports;
 
 #[derive(Clone)]
 struct StatementPause {
@@ -630,9 +509,8 @@ async fn proxied_pool(
     delay_ms: usize,
     max_connections: u32,
 ) -> (SqlStatementProxy, PgPool) {
-    let backend = PgConnectOptions::from_str(&database_url())
+    let backend = PgConnectOptions::from_str(database.url())
         .expect("invalid test database URL")
-        .database(&database.database_name)
         .ssl_mode(PgSslMode::Disable);
     let proxy = SqlStatementProxy::start(&backend, delay_ms).await;
     let pool = PgPoolOptions::new()
@@ -659,9 +537,8 @@ async fn pausing_proxied_pool(
     database: &TestDatabase,
     pattern: &str,
 ) -> (SqlStatementProxy, PgPool, StatementPause) {
-    let backend = PgConnectOptions::from_str(&database_url())
+    let backend = PgConnectOptions::from_str(database.url())
         .expect("invalid test database URL")
-        .database(&database.database_name)
         .ssl_mode(PgSslMode::Disable);
     let pause = StatementPause::new(Arc::<str>::from(pattern));
     let proxy = SqlStatementProxy::start_with_pause(&backend, 0, Some(pause.clone())).await;
@@ -737,6 +614,25 @@ fn leaf_ref(parent: &str, class_key: &str, lower: chrono::DateTime<Utc>) -> Leaf
         LeafBounds::new(lower, lower + Duration::days(1)).expect("daily bounds"),
     )
     .expect("daily leaf ref")
+}
+
+/// An open transaction that holds the catalog row of `leaf_name` with
+/// `FOR UPDATE`. While it is held, `horsies_record_leaf_detached` of the leaf
+/// waits for the row and fails at the 2 s DDL lock timeout of the detach
+/// session (`55P03`): the leaf's sweep fails after its detach statement ran.
+async fn hold_catalog_row(
+    pool: &PgPool,
+    leaf_name: &str,
+) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut holder = pool.begin().await.expect("begin catalog row holder");
+    sqlx::query(&format!(
+        "SELECT 1 FROM {LEAF_CATALOG} WHERE leaf_name = $1 FOR UPDATE"
+    ))
+    .bind(leaf_name)
+    .execute(&mut *holder)
+    .await
+    .expect("hold the catalog row");
+    holder
 }
 
 async fn create_leaf(pool: &PgPool, leaf: &LeafRef) -> LeafCreation {
@@ -1045,9 +941,8 @@ async fn a_second_detach_reports_the_leaf_detached_by_the_first() {
         create_leaf(&database.pool, &leaf).await,
         LeafCreation::Created { .. }
     ));
-    let command =
-        DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach command");
-    let first = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader, &NoQuarantine)
+    let command = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(5_000)).expect("detach command");
+    let first = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader)
         .await
         .expect("first detach");
     assert_eq!(
@@ -1056,7 +951,7 @@ async fn a_second_detach_reports_the_leaf_detached_by_the_first() {
             leaf_name: leaf.leaf_name().to_owned(),
         }
     );
-    let second = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader, &NoQuarantine)
+    let second = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader)
         .await
         .expect("second detach");
     assert!(matches!(
@@ -1098,11 +993,10 @@ async fn detach_returns_busy_without_waiting_for_a_leaf_session_lock() {
         .execute(&mut *holder)
         .await
         .expect("hold detach leaf lock");
-    let command =
-        DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach command");
+    let command = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(5_000)).expect("detach command");
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        detach_expired_leaf(&database.pool, &command, &UnpublishedLoader, &NoQuarantine),
+        detach_expired_leaf(&database.pool, &command, &UnpublishedLoader),
     )
     .await
     .expect("busy detach must not wait")
@@ -1131,7 +1025,7 @@ async fn detach_returns_busy_without_waiting_for_a_leaf_session_lock() {
     .expect("hold detach parent lock");
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        detach_expired_leaf(&database.pool, &command, &UnpublishedLoader, &NoQuarantine),
+        detach_expired_leaf(&database.pool, &command, &UnpublishedLoader),
     )
     .await
     .expect("parent-busy detach must be bounded")
@@ -1169,18 +1063,24 @@ async fn cancelled_detach_closes_its_connection_and_releases_the_session_lock() 
         create_leaf(&database.pool, &leaf).await,
         LeafCreation::Created { .. }
     ));
+    // The published manifest names the leaf, so the detach record publishes
+    // the readers while the session holds the leaf lock.
+    let mut publication = database.pool.acquire().await.expect("acquire publication");
+    StagedLoaderPublisher
+        .republish(&mut publication)
+        .await
+        .expect("publish the readers over the leaf");
+    drop(publication);
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let publisher = BlockingPublisher {
         entered: Arc::clone(&entered),
         release,
     };
-    let command =
-        DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach command");
+    let command = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(5_000)).expect("detach command");
     let pool = database.pool.clone();
-    let detach = tokio::spawn(async move {
-        detach_expired_leaf(&pool, &command, &publisher, &NoQuarantine).await
-    });
+    let detach =
+        tokio::spawn(async move { detach_expired_leaf(&pool, &command, &publisher).await });
     tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
         .await
         .expect("detach reached publication while holding the lock");
@@ -1290,7 +1190,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
             matches!(outcome, CoverageOutcome::Ensured(_)),
             "{outcome:?}"
         );
-        assert_eq!(proxy.statement_count(), 3);
+        assert_eq!(proxy.statement_count(), 1);
         assert!(!proxy.sql().iter().any(|statement| {
             statement.starts_with("BEGIN") || statement.contains("pg_try_advisory_xact_lock")
         }));
@@ -1329,7 +1229,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
             matches!(outcome, CoverageOutcome::Ensured(_)),
             "{outcome:?}"
         );
-        assert_eq!(proxy.statement_count(), 3);
+        assert_eq!(proxy.statement_count(), 1);
         pool.close().await;
         proxy.stop().await;
     }
@@ -1345,8 +1245,8 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         matches!(outcome, CoverageOutcome::Ensured(_)),
         "{outcome:?}"
     );
-    assert_eq!(proxy.statement_count(), 3);
-    assert!(elapsed >= std::time::Duration::from_millis((delay_ms * 3) as u64));
+    assert_eq!(proxy.statement_count(), 1);
+    assert!(elapsed >= std::time::Duration::from_millis(delay_ms as u64));
     // The exact statement count bounds RTT cost. CI load cannot give a stable
     // wall-clock upper bound.
     pool.close().await;
@@ -1363,59 +1263,44 @@ async fn failed_post_commit_publication_is_retried_by_the_next_healthy_pass() {
             .await
             .expect("create and publish initial coverage");
     assert!(matches!(setup, CoverageOutcome::Ensured(_)));
+    // A created leaf is published by its own creation, so the readers go
+    // stale through the manifest (Python `test_failed_final_publication_is_retried`).
+    sqlx::query(&format!(
+        "UPDATE {TASK_LOOKUP_MANIFEST} SET probe_position = probe_position + 100"
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("move every manifest position");
 
     let publisher = FailFirstStagedPublisher::default();
-    let error = ensure_partition_coverage_in_pool(&database.pool, 3, 3, &[], &publisher)
+    let error = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &publisher)
         .await
         .expect_err("inject final publication failure");
     assert!(error
         .to_string()
         .contains("injected post-commit publication failure"));
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 1);
-
-    let unpublished: i64 = sqlx::query_scalar(&format!(
-        "SELECT count(*)
-         FROM {LEAF_CATALOG} AS catalog
-         WHERE catalog.detached_at IS NULL
-           AND catalog.dropped_at IS NULL
-           AND catalog.class_key <> $1
-           AND to_regclass(catalog.leaf_name) IS NOT NULL
-           AND NOT EXISTS (
-               SELECT 1 FROM {TASK_LOOKUP_MANIFEST} AS manifest
-               WHERE manifest.leaf_name = catalog.leaf_name
-           )"
-    ))
-    .bind(HEARTBEAT_CLASS_KEY)
-    .fetch_one(&database.pool)
-    .await
-    .expect("count committed unpublished leaves");
-    assert!(unpublished > 0);
-
-    let retry = ensure_partition_coverage_in_pool(&database.pool, 3, 3, &[], &publisher)
+    let mut connection = database.pool.acquire().await.expect("acquire publisher");
+    assert!(StagedLoaderPublisher
+        .needs_republication(&mut connection)
         .await
-        .expect("retry publication on a healthy coverage pass");
+        .expect("freshness check after the failed publication"));
+    drop(connection);
+
+    let retry = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &publisher)
+        .await
+        .expect("retry publication on the next pass");
     let CoverageOutcome::Ensured(retry) = retry else {
-        panic!("the next healthy pass must publish the committed leaves");
+        panic!("the next pass must publish the stale readers");
     };
     assert!(retry.republished);
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
-    let unpublished: i64 = sqlx::query_scalar(&format!(
-        "SELECT count(*)
-         FROM {LEAF_CATALOG} AS catalog
-         WHERE catalog.detached_at IS NULL
-           AND catalog.dropped_at IS NULL
-           AND catalog.class_key <> $1
-           AND to_regclass(catalog.leaf_name) IS NOT NULL
-           AND NOT EXISTS (
-               SELECT 1 FROM {TASK_LOOKUP_MANIFEST} AS manifest
-               WHERE manifest.leaf_name = catalog.leaf_name
-           )"
-    ))
-    .bind(HEARTBEAT_CLASS_KEY)
-    .fetch_one(&database.pool)
-    .await
-    .expect("verify all attached leaves are published");
-    assert_eq!(unpublished, 0);
+    let mut connection = database.pool.acquire().await.expect("acquire publisher");
+    assert!(!StagedLoaderPublisher
+        .needs_republication(&mut connection)
+        .await
+        .expect("freshness check after the retry"));
+    drop(connection);
     database.drop().await;
 }
 
@@ -1484,6 +1369,10 @@ async fn current_heartbeat_with_a_wrong_physical_range_refuses_startup() {
         panic!("a wrong current-heartbeat range must refuse startup");
     };
     assert!(!failure.heartbeat_covered_now);
+    assert!(
+        failure.refusal.contains("PHYSICAL_NONCONFORMANT"),
+        "{failure:?}"
+    );
     database.drop().await;
 }
 
@@ -1822,20 +1711,22 @@ async fn pool_coverage_repairs_only_the_damaged_leaf_in_one_mutation_transaction
         2,
         "one gate transaction and one leaf mutation transaction are required"
     );
+    // The leaf lock and the index repair run inside the one creation call.
     assert_eq!(
         sql.iter()
-            .filter(|statement| {
-                statement.contains("pg_try_advisory_xact_lock(horsies_task_history_leaf_lock_key")
-            })
+            .filter(|statement| statement.contains("horsies_create_history_leaf("))
             .count(),
         1
     );
-    assert_eq!(
-        sql.iter()
-            .filter(|statement| statement.contains(&format!("CREATE INDEX {damaged_index}")))
-            .count(),
-        1
-    );
+    assert!(!sql
+        .iter()
+        .any(|statement| statement.contains("horsies_create_heartbeat_leaf(")));
+    let repaired: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(&damaged_index)
+        .fetch_one(&database.pool)
+        .await
+        .expect("read repaired index");
+    assert!(repaired);
     pool.close().await;
     proxy.stop().await;
     database.drop().await;
@@ -2015,10 +1906,10 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
     .expect("insert blocker workflow");
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, task_name, input, queue_name, priority,
+             downstream_subworkflow, id, workflow_id, task_index, task_name, input, queue_name, priority,
              dependencies, allow_failed_deps, join_type, max_retries, execution,
              retention_class_key, status, is_subworkflow, created_at
-         ) VALUES ($1, $2, 0, 'p3 blocker node', '{}', 'default', 100,
+         ) VALUES ('NONE', $1, $2, 0, 'p3 blocker node', '{}', 'default', 100,
                    '{}', FALSE, 'all', 0, 'ISOLATED',
                    $3, 'RUNNING', FALSE, NOW())",
     )
@@ -2049,36 +1940,8 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
     .await
     .expect("insert pending blocker");
     transaction.commit().await.expect("commit blocker");
-    let quarantine_detach =
-        DetachExpiredHistoryLeaf::new(leaf.clone(), Some(Duration::hours(1)), Some(5_000))
-            .expect("quarantine detach command");
-    let quarantine_refusal = detach_expired_leaf(
-        &database.pool,
-        &quarantine_detach,
-        &UnpublishedLoader,
-        &RefusingQuarantine {
-            task_id: pending_task_id,
-        },
-    )
-    .await
-    .expect("typed quarantine refusal");
-    match quarantine_refusal {
-        DetachExpiredLeafOutcome::QuarantineRefused(refusal) => {
-            assert_eq!(refusal.leaf_name, leaf.leaf_name());
-            assert_eq!(refusal.repointed, 0);
-            assert_eq!(refusal.refusals.len(), 1);
-            assert_eq!(refusal.refusals[0].task_id, pending_task_id);
-            assert_eq!(
-                refusal.refusals[0].verdict,
-                QuarantineRefusalVerdict::SourceAbsent
-            );
-            assert!(refusal.refusals[0].detail.is_some());
-        }
-        other => panic!("expected task-level quarantine refusal, got {other:?}"),
-    }
-    let detach =
-        DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach command");
-    let blocked = detach_expired_leaf(&database.pool, &detach, &UnpublishedLoader, &NoQuarantine)
+    let detach = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(5_000)).expect("detach command");
+    let blocked = detach_expired_leaf(&database.pool, &detach, &UnpublishedLoader)
         .await
         .expect("blocked detach");
     assert!(matches!(
@@ -2100,7 +1963,7 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
         .execute(&database.pool)
         .await
         .expect("set prior lock timeout");
-    let detached = detach_expired_leaf(&database.pool, &detach, &UnpublishedLoader, &NoQuarantine)
+    let detached = detach_expired_leaf(&database.pool, &detach, &UnpublishedLoader)
         .await
         .expect("detach expired leaf");
     assert!(matches!(
@@ -2121,7 +1984,6 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
     let dropped = drop_detached_leaf(
         &mut transaction,
         &DropDetachedHistoryLeaf::new(leaf.clone()),
-        &UnpublishedLoader,
     )
     .await
     .expect("drop detached leaf");
@@ -2139,25 +2001,27 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
         create_leaf(&database.pool, &referenced_leaf).await,
         LeafCreation::Created { .. }
     ));
-    let referenced_detach =
-        DetachExpiredHistoryLeaf::new(referenced_leaf.clone(), None, Some(5_000))
-            .expect("referenced detach command");
-    assert!(matches!(
-        detach_expired_leaf(
-            &database.pool,
-            &referenced_detach,
-            &UnpublishedLoader,
-            &NoQuarantine,
-        )
+    // The published manifest names the leaf. The detach record says so and
+    // calls the publisher, which publishes nothing here, so the manifest
+    // still names the detached leaf and its drop is refused.
+    let mut publication = database.pool.acquire().await.expect("acquire publication");
+    StagedLoaderPublisher
+        .republish(&mut publication)
         .await
-        .expect("detach referenced leaf"),
+        .expect("publish the readers over the referenced leaf");
+    drop(publication);
+    let referenced_detach = DetachExpiredHistoryLeaf::new(referenced_leaf.clone(), Some(5_000))
+        .expect("referenced detach command");
+    assert!(matches!(
+        detach_expired_leaf(&database.pool, &referenced_detach, &UnpublishedLoader)
+            .await
+            .expect("detach referenced leaf"),
         DetachExpiredLeafOutcome::Detached { .. }
     ));
     let mut transaction = database.pool.begin().await.expect("begin refused drop");
     let refused = drop_detached_leaf(
         &mut transaction,
         &DropDetachedHistoryLeaf::new(referenced_leaf.clone()),
-        &ReferencingPublisher,
     )
     .await
     .expect("loader-reference drop refusal");
@@ -2218,23 +2082,18 @@ async fn dropping_a_leaf_deletes_the_clock_exceptions_of_its_rows() {
         .await
         .expect("seed clock exception");
     }
-    let detach =
-        DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach command");
+    let detach = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(5_000)).expect("detach command");
     assert!(matches!(
-        detach_expired_leaf(&database.pool, &detach, &UnpublishedLoader, &NoQuarantine)
+        detach_expired_leaf(&database.pool, &detach, &UnpublishedLoader)
             .await
             .expect("detach expired leaf"),
         DetachExpiredLeafOutcome::Detached { .. }
     ));
     let mut transaction = database.pool.begin().await.expect("begin drop");
     assert!(matches!(
-        drop_detached_leaf(
-            &mut transaction,
-            &DropDetachedHistoryLeaf::new(leaf),
-            &UnpublishedLoader,
-        )
-        .await
-        .expect("drop detached leaf"),
+        drop_detached_leaf(&mut transaction, &DropDetachedHistoryLeaf::new(leaf),)
+            .await
+            .expect("drop detached leaf"),
         LeafDrop::Dropped { .. }
     ));
     transaction.commit().await.expect("commit drop");
@@ -2253,7 +2112,7 @@ async fn dropping_a_leaf_deletes_the_clock_exceptions_of_its_rows() {
 #[tokio::test]
 #[serial]
 async fn heartbeat_sweep_reports_one_leaf_error_and_sweeps_the_next_leaf() {
-    let database = TestDatabase::create().await;
+    let database = TestDatabase::create_with_connections(3).await;
     let mut transaction = database.pool.begin().await.expect("begin heartbeat setup");
     let _registration = register_heartbeat_class(&mut transaction, hours(2))
         .await
@@ -2279,19 +2138,20 @@ async fn heartbeat_sweep_reports_one_leaf_error_and_sweeps_the_next_leaf() {
     }
     transaction.commit().await.expect("commit heartbeat setup");
 
-    let publisher = FailFirstRepublish::default();
+    let holder = hold_catalog_row(&database.pool, older.leaf_name()).await;
     let LeafSweep {
         swept,
         errors,
         reach,
         ..
-    } = sweep_expired_heartbeat_leaves(&database.pool, &publisher, 64)
+    } = sweep_expired_heartbeat_leaves(&database.pool, &UnpublishedLoader, 64)
         .await
         .expect("discover expired heartbeats");
+    holder.rollback().await.expect("release the catalog row");
     assert_eq!(reach, PruneReach::WithinBounds);
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(errors[0].starts_with(older.leaf_name()));
-    assert!(errors[0].contains("injected first-leaf publication failure"));
+    assert!(errors[0].contains("lock timeout"), "{errors:?}");
     assert_eq!(swept.len(), 1);
     assert_eq!(swept[0].leaf_name, newer.leaf_name());
     assert!(matches!(
@@ -2461,21 +2321,33 @@ async fn manifest_excludes_absent_probes_and_keeps_the_complete_attached_set() {
         .execute(&mut *transaction)
         .await
         .expect("drop heartbeat leaf out of band");
-    let selection = read_manifest_leaf_rows(&mut transaction)
-        .await
-        .expect("read manifest leaves");
-    assert!(selection
-        .attached
-        .iter()
-        .any(|row| row.leaf_name == gone.leaf_name()));
+    // The catalog keeps both history leaves attached; the reader manifest
+    // leaves out the one whose relation is gone, and the absent list names
+    // it. The heartbeat leaf is in neither.
+    let attached: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT leaf_name FROM {LEAF_CATALOG}
+         WHERE detached_at IS NULL AND dropped_at IS NULL
+         ORDER BY leaf_name"
+    ))
+    .fetch_all(&mut *transaction)
+    .await
+    .expect("read attached catalog leaves");
+    assert!(attached.iter().any(|name| name == gone.leaf_name()));
+    assert!(attached.iter().any(|name| name == kept.leaf_name()));
+    let manifest: Vec<String> =
+        sqlx::query_scalar("SELECT leaf_name FROM horsies_history_reader_manifest()")
+            .fetch_all(&mut *transaction)
+            .await
+            .expect("read the reader manifest");
+    assert!(manifest.iter().any(|name| name == kept.leaf_name()));
+    assert!(!manifest.iter().any(|name| name == gone.leaf_name()));
+    assert!(!manifest.iter().any(|name| name == heartbeat.leaf_name()));
     assert_eq!(
-        selection.absent_relations,
+        absent_history_leaves(&mut transaction)
+            .await
+            .expect("read absent history leaves"),
         vec![gone.leaf_name().to_owned()]
     );
-    assert!(selection
-        .attached
-        .iter()
-        .any(|row| row.leaf_name == kept.leaf_name()));
     let coverage = ensure_partition_coverage(&mut transaction, 2, 2, &[], &CatalogPublisher)
         .await
         .expect("self-correcting coverage pass");
@@ -2566,11 +2438,10 @@ async fn pruning_finalizes_a_timeout_interrupted_detach_before_sweeping_it() {
         .await
         .expect("establish old snapshot on leaf");
     let command =
-        DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(100)).expect("short detach command");
-    let timed_out =
-        detach_expired_leaf(&database.pool, &command, &UnpublishedLoader, &NoQuarantine)
-            .await
-            .expect_err("old snapshot must interrupt concurrent detach at the timeout");
+        DetachExpiredHistoryLeaf::new(leaf.clone(), Some(100)).expect("short detach command");
+    let timed_out = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader)
+        .await
+        .expect_err("old snapshot must interrupt concurrent detach at the timeout");
     assert!(timed_out.to_string().contains("statement timeout"));
 
     let mut inspector = database
@@ -2701,7 +2572,7 @@ async fn a_refused_leaf_does_not_count_toward_the_leaf_bound() {
 #[tokio::test]
 #[serial]
 async fn pruning_contains_one_leaf_error_and_one_drop_refusal_then_keeps_going() {
-    let database = TestDatabase::create().await;
+    let database = TestDatabase::create_with_connections(4).await;
     let class_key = "standard_1d";
     let parent = register_class(&database.pool, class_key, 1).await;
     let mut clock = database
@@ -2711,25 +2582,40 @@ async fn pruning_contains_one_leaf_error_and_one_drop_refusal_then_keeps_going()
         .expect("acquire pruning clock");
     let now = database_now(&mut clock).await.expect("database now");
     drop(clock);
-    let base = (now - Duration::days(8))
-        .with_hour(0)
-        .and_then(|value| value.with_minute(0))
-        .and_then(|value| value.with_second(0))
-        .and_then(|value| value.with_nanosecond(0))
-        .expect("truncate prune base day");
-    for offset in 0..3 {
-        let leaf = leaf_ref(&parent, class_key, base + Duration::days(offset));
+    let base = utc_day_start(now - Duration::days(8));
+    let leaves: Vec<LeafRef> = (0..3)
+        .map(|offset| leaf_ref(&parent, class_key, base + Duration::days(offset)))
+        .collect();
+    // Only the middle leaf is in the published manifest. The pass publisher
+    // publishes nothing, so the manifest still names it after its detach and
+    // its drop is refused.
+    assert!(matches!(
+        create_leaf(&database.pool, &leaves[1]).await,
+        LeafCreation::Created { .. }
+    ));
+    let mut publication = database.pool.acquire().await.expect("acquire publication");
+    StagedLoaderPublisher
+        .republish(&mut publication)
+        .await
+        .expect("publish the readers over the middle leaf");
+    drop(publication);
+    for leaf in [&leaves[0], &leaves[2]] {
         assert!(matches!(
-            create_leaf(&database.pool, &leaf).await,
+            create_leaf(&database.pool, leaf).await,
             LeafCreation::Created { .. }
         ));
     }
-    let publisher = FailFirstRepublish::default();
-    let pass = prune_expired_partitions(&database.pool, &publisher).await;
+    // The detach record of the oldest leaf fails at the lock timeout.
+    let holder = hold_catalog_row(&database.pool, leaves[0].leaf_name()).await;
+    let pass = prune_expired_partitions(&database.pool, &UnpublishedLoader).await;
+    holder.rollback().await.expect("release the catalog row");
+
     assert_eq!(pass.history_swept.len(), 2);
-    assert_eq!(pass.errors.len(), 1);
-    assert!(pass.errors[0].contains("injected first-leaf publication failure"));
-    assert_eq!(pass.refusals.len(), 1);
+    assert_eq!(pass.errors.len(), 1, "{:?}", pass.errors);
+    assert!(pass.errors[0].starts_with(leaves[0].leaf_name()));
+    assert!(pass.errors[0].contains("lock timeout"), "{:?}", pass.errors);
+    assert_eq!(pass.refusals.len(), 1, "{:?}", pass.refusals);
+    assert!(pass.refusals[0].starts_with(leaves[1].leaf_name()));
     assert!(pass.refusals[0].contains("RefusedLoaderReferences"));
     assert_eq!(pass.detached_count(), 2);
     assert_eq!(pass.dropped_count(), 1);
@@ -2765,83 +2651,6 @@ impl LoaderPublication for CountingStagedPublisher {
     ) -> Result<bool, crate::core::history::errors::HistoryError> {
         StagedLoaderPublisher.needs_republication(connection).await
     }
-}
-
-#[tokio::test]
-#[serial]
-async fn connection_coverage_publishes_once_per_changed_class_and_at_completion() {
-    let database = TestDatabase::create().await;
-    let mut tx = database.pool.begin().await.unwrap();
-    let publisher = CountingStagedPublisher::default();
-    let result = ensure_partition_coverage(&mut tx, 3, 2, &[], &publisher)
-        .await
-        .unwrap();
-    let CoverageOutcome::Ensured(report) = result else {
-        panic!("{result:?}");
-    };
-    // Four standard daily leaves. The first migration creates the static
-    // forever leaf; coverage only verifies it.
-    assert_eq!(report.created_history_leaves, 4);
-    assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
-    assert!(!StagedLoaderPublisher
-        .needs_republication(tx.as_mut())
-        .await
-        .unwrap());
-    let again = ensure_partition_coverage(&mut tx, 3, 2, &[], &publisher)
-        .await
-        .unwrap();
-    let CoverageOutcome::Ensured(report) = again else {
-        panic!("{again:?}");
-    };
-    assert_eq!(report.created_history_leaves, 0);
-    assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
-    tx.commit().await.unwrap();
-    database.drop().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn connection_coverage_rolls_back_a_failed_class_and_preserves_other_classes() {
-    let database = TestDatabase::create().await;
-    // Classes are served in key order: forever (verified, nothing created),
-    // standard_30d (its publication is the first one and fails), standard_7d.
-    register_class(&database.pool, "standard_7d", 7).await;
-    let mut tx = database.pool.begin().await.unwrap();
-    let publisher = FailFirstStagedPublisher::default();
-    let result = ensure_partition_coverage(&mut tx, 3, 2, &[], &publisher)
-        .await
-        .unwrap();
-    let CoverageOutcome::Failed(failed) = result else {
-        panic!("{result:?}");
-    };
-    assert_eq!(failed.stage, "ensure_leaf_coverage");
-    assert_eq!(failed.class_key.as_deref(), Some("standard_30d"));
-    assert!(failed.heartbeat_covered_now);
-    assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);
-    let classes: Vec<(String, i64)> = sqlx::query_as("SELECT class_key, count(*) FROM horsies_task_history_leaf_catalog WHERE dropped_at IS NULL AND class_key <> 'heartbeats' GROUP BY class_key ORDER BY class_key")
-        .fetch_all(tx.as_mut()).await.unwrap();
-    assert!(
-        !classes.iter().any(|(class, _)| class == "standard_30d"),
-        "the failed class must retain only its pre-existing leaves: {classes:?}",
-    );
-    assert!(classes
-        .iter()
-        .any(|(class, count)| class == "standard_7d" && *count == 4));
-    assert!(classes
-        .iter()
-        .any(|(class, count)| class == "forever" && *count == 1));
-    assert!(!StagedLoaderPublisher
-        .needs_republication(tx.as_mut())
-        .await
-        .unwrap());
-    tx.commit().await.unwrap();
-    let mut repair = database.pool.begin().await.unwrap();
-    let result = ensure_partition_coverage(&mut repair, 3, 2, &[], &StagedLoaderPublisher)
-        .await
-        .unwrap();
-    assert!(matches!(result, CoverageOutcome::Ensured(_)), "{result:?}");
-    repair.commit().await.unwrap();
-    database.drop().await;
 }
 
 #[tokio::test]
@@ -2891,7 +2700,7 @@ async fn detach_publishes_changed_history_only_and_finalization_repairs_stale_re
             publisher.republish(&mut connection).await.unwrap();
             publisher.calls.store(0, Ordering::SeqCst);
             drop(connection);
-            let command = DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(100)).unwrap();
+            let command = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(100)).unwrap();
             match interrupted {
                 true => {
                     let mut blocker = database.pool.acquire().await.unwrap();
@@ -2903,10 +2712,9 @@ async fn detach_publishes_changed_history_only_and_finalization_repairs_stale_re
                         .execute(&mut *blocker)
                         .await
                         .unwrap();
-                    let error =
-                        detach_expired_leaf(&database.pool, &command, &publisher, &NoQuarantine)
-                            .await
-                            .unwrap_err();
+                    let error = detach_expired_leaf(&database.pool, &command, &publisher)
+                        .await
+                        .unwrap_err();
                     assert!(error.to_string().contains("statement timeout"));
                     sqlx::query("ROLLBACK")
                         .execute(&mut *blocker)
@@ -2915,10 +2723,9 @@ async fn detach_publishes_changed_history_only_and_finalization_repairs_stale_re
                     drop(blocker);
                 }
                 false => {
-                    let result =
-                        detach_expired_leaf(&database.pool, &command, &publisher, &NoQuarantine)
-                            .await
-                            .unwrap();
+                    let result = detach_expired_leaf(&database.pool, &command, &publisher)
+                        .await
+                        .unwrap();
                     assert!(matches!(result, DetachExpiredLeafOutcome::Detached { .. }));
                 }
             }
@@ -2985,8 +2792,8 @@ async fn finalization_retries_publication_after_detach_committed() {
         .unwrap();
     drop(connection);
     let failing = FailFirstStagedPublisher::default();
-    let command = DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).unwrap();
-    let error = detach_expired_leaf(&database.pool, &command, &failing, &NoQuarantine)
+    let command = DetachExpiredHistoryLeaf::new(leaf.clone(), Some(5_000)).unwrap();
+    let error = detach_expired_leaf(&database.pool, &command, &failing)
         .await
         .unwrap_err();
     assert!(error
@@ -3266,3 +3073,5 @@ async fn guard_probe_set_is_standard_horizon_plus_the_static_forever_leaf() {
     tx.rollback().await.unwrap();
     database.drop().await;
 }
+
+mod coverage_ports;

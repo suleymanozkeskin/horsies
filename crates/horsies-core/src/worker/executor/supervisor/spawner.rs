@@ -8,8 +8,12 @@
 //!   handler, and no wait call on any other thread. It waits on its request
 //!   waker and on every child at once ([`super::exit_watch`]) and reaps a
 //!   child with `waitpid` of that pid when its exit is reported.
-//! - Every kill goes through it, so a pid is signalled only while its child
-//!   is not reaped and cannot belong to another process.
+//! - Every kill goes through it. The kill of a child is `killpg` of its
+//!   pid, which is also the id of its session, before or after the reap
+//!   (Python `ChildProcess.kill_group`). While one process of that session
+//!   lives, the OS gives its id to no new process, so the signal reaches
+//!   only that session. After the reap, the signal is refused when a live
+//!   child of this spawner holds the pid.
 //! - It publishes each child's [`ExitState`] on a `watch` channel that the
 //!   core runtime reads.
 
@@ -48,14 +52,26 @@ const WAKE_WRITE_ATTEMPTS: u32 = 3;
 const WAKE_DRAIN_BYTES: usize = 64;
 const WAKE_DRAIN_READS: u32 = 16;
 
-/// The id of one spawned child. Ids are never reused, so a kill or a wait
-/// that names an id cannot reach the next child of the same slot.
+/// The id of one spawned child: a serial number that is never reused, and
+/// the pid of the child, which is also the id of its session. A kill or a
+/// wait that names an id cannot reach the next child of the same slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ChildId(u64);
+pub struct ChildId {
+    serial: u64,
+    pid: ProcessId,
+}
 
 impl ChildId {
     pub fn get(self) -> u64 {
-        self.0
+        self.serial
+    }
+
+    /// The id of a reaped child whose pid `pid` now belongs to another
+    /// process. Serials start at 1, so serial 0 names no child that the
+    /// spawner started.
+    #[cfg(test)]
+    pub(super) fn reaped_child_with_pid(pid: ProcessId) -> Self {
+        Self { serial: 0, pid }
     }
 }
 
@@ -110,11 +126,19 @@ pub enum SpawnError {
 /// What a kill request did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KillOutcome {
-    /// `SIGKILL` went to the child's session, or to its pid when it has no
-    /// session of its own yet.
+    /// The child is not reaped. `SIGKILL` went to its session, or to its
+    /// pid when it has no session of its own yet.
     Sent,
-    /// The child is reaped; nothing was signalled.
-    AlreadyReaped,
+    /// The child is reaped. `SIGKILL` went to the processes left in its
+    /// session.
+    SentToReapedSession,
+    /// The child is reaped and no process is left in its session (`ESRCH`).
+    SessionGone,
+    /// The child is reaped and a live child of this spawner holds its pid;
+    /// nothing was signalled. The OS does not reuse a pid while a process
+    /// of the session with that id lives, so no process is left in the
+    /// session of the reaped child.
+    PidReused,
     /// The OS refused the signal (`EPERM`).
     NotPermitted,
     /// The signal failed with this errno.
@@ -293,18 +317,36 @@ impl SpawnerHandle {
     }
 
     /// Send `SIGKILL` to the session of `child`, so the subprocesses of its
-    /// task end with it, except one that left the session itself.
+    /// task end with it, except one that left the session itself. After the
+    /// reap of `child`, the processes left in its session get the signal.
     pub async fn kill_session(&self, child: ChildId) -> KillOutcome {
+        match self.request_kill(child) {
+            Ok(answer) => answer.await.unwrap_or(KillOutcome::SpawnerStopped),
+            Err(refused) => refused,
+        }
+    }
+
+    /// Queue the kill of `child`'s session without waiting for it, for a
+    /// thread outside the core runtime (the runner heartbeat watchdog). The
+    /// spawner thread sends the answer on the receiver; a closed receiver
+    /// means the spawner thread ended.
+    ///
+    /// `Err(KillOutcome::QueueFull)`: [`MAX_QUEUED_REQUESTS`] requests wait
+    /// already, and nothing was queued.
+    pub fn request_kill(
+        &self,
+        child: ChildId,
+    ) -> Result<oneshot::Receiver<KillOutcome>, KillOutcome> {
         let (reply, answer) = oneshot::channel();
         {
             let mut queue = self.shared.lock();
             match queue.requests.len() >= MAX_QUEUED_REQUESTS {
-                true => return KillOutcome::QueueFull,
+                true => return Err(KillOutcome::QueueFull),
                 false => queue.requests.push_back(Request::Kill { child, reply }),
             }
         }
         self.shared.waker.wake();
-        answer.await.unwrap_or(KillOutcome::SpawnerStopped)
+        Ok(answer)
     }
 }
 
@@ -374,9 +416,8 @@ impl Spawner {
     }
 }
 
-/// One child the spawner has not reaped.
+/// One child the spawner has not reaped. Its pid is in its [`ChildId`].
 struct LiveChild {
-    pid: ProcessId,
     watch: ChildWatch,
     exit: watch::Sender<ExitState>,
 }
@@ -441,8 +482,8 @@ impl SpawnerLoop {
             };
             let wake = self.watch.wait(
                 self.children
-                    .values()
-                    .map(|child| (child.pid, &child.watch)),
+                    .iter()
+                    .map(|(id, child)| (id.pid, &child.watch)),
                 timeout,
             );
             match wake {
@@ -500,13 +541,15 @@ impl SpawnerLoop {
                 "no exit notification for this child; its exit is polled"
             );
         }
-        let id = ChildId(self.next_id);
+        let id = ChildId {
+            serial: self.next_id,
+            pid,
+        };
         self.next_id += 1;
         let (exit_tx, exit_rx) = watch::channel(ExitState::Running);
         self.children.insert(
             id,
             LiveChild {
-                pid,
                 watch,
                 exit: exit_tx,
             },
@@ -520,10 +563,14 @@ impl SpawnerLoop {
         })
     }
 
-    fn kill(&mut self, id: ChildId) -> KillOutcome {
-        match self.children.get(&id) {
-            Some(child) => kill_session(child.pid),
-            None => KillOutcome::AlreadyReaped,
+    /// `SIGKILL` to the session of child `id`, by the live child that holds
+    /// its pid: the child itself (not reaped), another child (the pid was
+    /// reused; refused), or none (reaped).
+    fn kill(&self, id: ChildId) -> KillOutcome {
+        match self.by_pid.get(&id.pid) {
+            Some(holder) if *holder == id => kill_session(id.pid),
+            Some(_) => KillOutcome::PidReused,
+            None => kill_reaped_session(id.pid),
         }
     }
 
@@ -560,9 +607,9 @@ impl SpawnerLoop {
     fn reap_polled(&mut self) {
         let polled: Vec<ProcessId> = self
             .children
-            .values()
-            .filter(|child| matches!(child.watch, ChildWatch::Polled))
-            .map(|child| child.pid)
+            .iter()
+            .filter(|(_, child)| matches!(child.watch, ChildWatch::Polled))
+            .map(|(id, _)| id.pid)
             .collect();
         for pid in polled {
             self.reap(pid, ExitReport::ByPoll);
@@ -571,7 +618,7 @@ impl SpawnerLoop {
 
     /// After a failure of the exit watch: try every child.
     fn reap_every_child(&mut self) {
-        let pids: Vec<ProcessId> = self.children.values().map(|child| child.pid).collect();
+        let pids: Vec<ProcessId> = self.children.keys().map(|id| id.pid).collect();
         for pid in pids {
             self.reap(pid, ExitReport::ByPoll);
         }
@@ -627,6 +674,23 @@ fn kill_pid(pid: ProcessId) -> KillOutcome {
         0 => KillOutcome::Sent,
         _ => match io::Error::last_os_error().raw_os_error() {
             Some(libc::ESRCH) => KillOutcome::Sent,
+            Some(libc::EPERM) => KillOutcome::NotPermitted,
+            Some(errno) => KillOutcome::Failed { errno },
+            None => KillOutcome::Failed { errno: 0 },
+        },
+    }
+}
+
+/// `SIGKILL` to the session of a reaped child, whose pid no live child of
+/// this spawner holds. Only the session is signalled: the pid itself names
+/// no process of this child any more.
+fn kill_reaped_session(pid: ProcessId) -> KillOutcome {
+    // SAFETY: killpg sends a signal; it touches no memory of this process.
+    let result = unsafe { libc::killpg(pid.as_pid_t(), libc::SIGKILL) };
+    match result {
+        0 => KillOutcome::SentToReapedSession,
+        _ => match io::Error::last_os_error().raw_os_error() {
+            Some(libc::ESRCH) => KillOutcome::SessionGone,
             Some(libc::EPERM) => KillOutcome::NotPermitted,
             Some(errno) => KillOutcome::Failed { errno },
             None => KillOutcome::Failed { errno: 0 },

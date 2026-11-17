@@ -52,7 +52,7 @@ connections for the same rate: set
 Producers hold their own engine pools of `pool_size + max_overflow`
 connections each (default 5 + 10): one in the resource set of each event loop
 that makes broker calls, one in the set of the sync runner loop for sync
-calls, and the sync send pool for sync sends without an idempotency key. A
+calls, and the sync send pool for sync sends. A
 producer that sends only with `send()` can open `15 + 15 = 30` at the
 defaults. Each set adds 2 listener connections when it waits for a result,
 and one more pool of `pool_size + max_overflow` when `session_database_url`
@@ -174,8 +174,10 @@ statement instead of a transparent reconnect:
   runs it again on a new connection, and a statement whose reply was lost
   is classified on that run, so it is not applied twice.
 - The claim loop retries a pass that failed with a connection error.
-- A RUNNING update of a child ends as `OWNERSHIP_UNCONFIRMED`: the task
-  stays `CLAIMED` until its claim lease returns it to the queue. A failed
+- A RUNNING update of a child ends as `OWNERSHIP_UNCONFIRMED`: no task
+  code runs, and the worker releases the claim at once, fenced on its claim
+  generation, so the task goes back to the queue. If that release also
+  fails, the claim lease returns the task. A failed
   finalizing marker is logged; the runner heartbeats of the worker cover
   the row until the worker reads the end of the task.
 

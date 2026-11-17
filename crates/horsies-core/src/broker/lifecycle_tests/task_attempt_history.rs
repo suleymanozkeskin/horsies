@@ -11,13 +11,16 @@ use super::support::*;
 use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryRequest,
 };
+use crate::broker::claims::{start_attempt, StartAttempt, StartMiss, StartOutcome};
+use crate::broker::core_rows::StatementLog;
+use crate::broker::pools::core_pool_for_test_pool;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::{ClaimedTaskRow, SetRunningRow};
 use crate::core::config::payload::PayloadPolicy;
-use crate::core::lifecycle::FailedAttemptOutcome;
+use crate::core::lifecycle::{FailedAttemptOutcome, OwnedClaim};
 use crate::core::task::result::TaskResult;
 use crate::worker::execution::{persist_terminal_state, FinalizeOutcome};
-use crate::worker::recovery::mark_stale_running_as_failed;
+use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 use crate::worker::retry::read_stored_options;
 
 /// Stale-scan bound of these tests.
@@ -175,28 +178,36 @@ async fn replay_does_not_create_duplicate_attempt() {
     cleanup_tasks(&pool, &[task_id]).await;
 }
 
-/// Python `test_claim_lost_writes_no_attempt`: a start that finds its claim
-/// lost is refused, and the dispatch writes no attempt.
+/// Python `test_claim_lost_writes_no_attempt`: a start
+/// (`horsies_start_attempt`) that finds its claim lost is refused as
+/// `NOT_HELD`, and the dispatch writes no attempt.
 #[tokio::test]
 #[serial]
 async fn claim_lost_writes_no_attempt() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let core = core_pool_for_test_pool(&pool);
 
-    let started = broker
-        .set_running(
+    let started = start_attempt(
+        &core,
+        StatementLog::Off,
+        &StartAttempt {
             task_id,
-            WORKER,
-            4242,
-            "lifecycle-host",
-            "lifecycle-process",
-            generation() + Duration::seconds(1),
-        )
-        .await
-        .expect("start");
+            fence: OwnedClaim {
+                worker_id: WORKER.to_owned(),
+                claimed_at: generation() + Duration::seconds(1),
+            },
+            worker_pid: 4242,
+            worker_hostname: "lifecycle-host".to_owned(),
+            worker_process_name: "lifecycle-process".to_owned(),
+            beat_sender_id: WORKER.to_owned(),
+        },
+    )
+    .await
+    .expect("start");
+    core.close();
 
-    assert!(started.is_none(), "a lost claim must not start");
+    assert_eq!(started, StartOutcome::Missed(StartMiss::NotHeld));
     assert!(live_attempts(&pool, task_id).await.is_empty());
     assert_eq!(status_of(&pool, task_id).await, "CLAIMED");
     cleanup_tasks(&pool, &[task_id]).await;

@@ -27,6 +27,7 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.utils.db import register_idle_ping
 from tests.integration.autocommit_support import proxied_url, upstream_of
 from tests.integration.round_trip_proxy import RoundTripProxy, Turn
+from horsies.core.utils.url import sqlalchemy_url
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -52,7 +53,7 @@ def proxy(db_url: str) -> Generator[RoundTripProxy]:
 @pytest_asyncio.fixture(loop_scope='function')
 async def admin(db_url: str) -> AsyncGenerator[AsyncEngine]:
     """A direct engine that terminates backends."""
-    created = create_async_engine(db_url, pool_size=1, max_overflow=0)
+    created = create_async_engine(sqlalchemy_url(db_url), pool_size=1, max_overflow=0)
     yield created
     await created.dispose()
 
@@ -62,7 +63,7 @@ async def engine(db_url: str, proxy: RoundTripProxy) -> AsyncGenerator[AsyncEngi
     """The engine under test, through the proxy, with SQLAlchemy's own
     pre-ping off, as the broker builds its engines."""
     created = create_async_engine(
-        proxied_url(db_url, proxy),
+        sqlalchemy_url(proxied_url(db_url, proxy)),
         pool_size=POOL_SIZE,
         max_overflow=0,
     )

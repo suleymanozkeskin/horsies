@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::broker::is_retryable_sqlx_error;
+use crate::broker::{is_retryable_sqlx_error, BrokerError};
 use crate::core::history::errors::HistoryError;
 
 #[derive(
@@ -21,7 +21,7 @@ pub enum MonitoringQueryErrorCode {
     /// Stored history data does not decode: a status that is not a task
     /// status, an attempt snapshot or archive envelope that does not decode.
     /// Not retryable: a repeat gives the same result until the stored row
-    /// changes (Python `horsies/monitoring/errors.py:26-98`).
+    /// changes (Python `python/horsies/monitoring/errors.py:26-98`).
     HistoryContractViolation,
 }
 
@@ -31,6 +31,8 @@ pub enum MonitoringQueryErrorSource {
     Database(#[from] sqlx::Error),
     #[error(transparent)]
     History(#[from] HistoryError),
+    #[error(transparent)]
+    Broker(#[from] BrokerError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -44,15 +46,6 @@ pub struct MonitoringQueryError {
 }
 
 impl MonitoringQueryError {
-    pub(crate) fn database(operation: &str, error: sqlx::Error) -> Self {
-        Self {
-            code: MonitoringQueryErrorCode::DbOperationFailed,
-            message: format!("{operation} failed: {error}"),
-            retryable: is_retryable_sqlx_error(&error),
-            source: MonitoringQueryErrorSource::Database(error),
-        }
-    }
-
     /// A history read failure: a database error keeps its driver
     /// classification; every other history error is stored data that does
     /// not decode.
@@ -79,6 +72,31 @@ impl MonitoringQueryError {
     }
 }
 
+impl MonitoringQueryError {
+    /// A failure of a read on the statement layer: a stored history row that
+    /// breaks the read contract is `HISTORY_CONTRACT_VIOLATION`, not
+    /// retryable; every other failure is `DB_OPERATION_FAILED` with the
+    /// error's retryable flag (a statement failure by its transience; a
+    /// column that does not decode is not retryable).
+    pub(crate) fn broker(operation: &str, error: BrokerError) -> Self {
+        let (code, retryable) = match &error {
+            BrokerError::HistoryReadContract(_) => {
+                (MonitoringQueryErrorCode::HistoryContractViolation, false)
+            }
+            other => (
+                MonitoringQueryErrorCode::DbOperationFailed,
+                other.is_retryable(),
+            ),
+        };
+        Self {
+            code,
+            message: format!("{operation} failed: {error}"),
+            retryable,
+            source: MonitoringQueryErrorSource::Broker(error),
+        }
+    }
+}
+
 pub type MonitoringResult<T> = Result<T, MonitoringQueryError>;
 
 #[cfg(test)]
@@ -94,6 +112,32 @@ mod tests {
 
         assert_eq!(error.code, MonitoringQueryErrorCode::DbOperationFailed);
         assert!(error.retryable);
+    }
+
+    #[test]
+    fn a_statement_failure_keeps_its_transience_and_a_contract_break_is_a_violation() {
+        let timed_out = MonitoringQueryError::broker(
+            "read",
+            BrokerError::Statement(crate::db::StatementFailure::NotSent {
+                statement: "monitoring_task_list",
+                cause: crate::db::NotSentCause::Checkout(crate::db::CheckoutFailure::TimedOut {
+                    role: crate::db::PoolRole::Main,
+                    waited: std::time::Duration::from_secs(30),
+                }),
+            }),
+        );
+        assert_eq!(timed_out.code, MonitoringQueryErrorCode::DbOperationFailed);
+        assert!(timed_out.retryable);
+
+        let broken = MonitoringQueryError::broker(
+            "read",
+            BrokerError::HistoryReadContract("unknown location".to_owned()),
+        );
+        assert_eq!(
+            broken.code,
+            MonitoringQueryErrorCode::HistoryContractViolation
+        );
+        assert!(!broken.retryable);
     }
 
     /// Python `test_monitoring_queries.py::TestGetTaskDetail::

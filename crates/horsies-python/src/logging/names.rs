@@ -6,8 +6,14 @@
 //! that names the Python name of a logger of the set (for example
 //! `horsies.db`) goes to that logger. Otherwise the routes map each target
 //! prefix to the logger of the same component in Python
-//! (`horsies.<component>`, `horsies/core/logging.py`). An event whose target
+//! (`horsies.<component>`, `python/horsies/core/logging.py`). An event whose target
 //! is neither is not forwarded: it comes from another crate.
+//!
+//! `horsies.sql` holds the statement log of the broker (`echo=True`): one
+//! record per statement, with its name and SQL text, never its bound values.
+//! It is a logger of its own, so the statement log is turned on and off
+//! apart from the connection records of `horsies.db`, as Python's `echo`
+//! goes to SQLAlchemy's own `sqlalchemy.engine` logger.
 
 /// A Python logger of the `horsies` namespace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -23,6 +29,7 @@ pub enum LoggerName {
     Listener,
     Scheduler,
     SchedulerState,
+    Sql,
     Web,
     Worker,
     WorkflowEngine,
@@ -32,7 +39,7 @@ pub enum LoggerName {
 
 impl LoggerName {
     /// The number of loggers.
-    pub const COUNT: usize = 16;
+    pub const COUNT: usize = 17;
 
     /// Every logger, in declaration order.
     pub const ALL: [LoggerName; Self::COUNT] = [
@@ -47,6 +54,7 @@ impl LoggerName {
         Self::Listener,
         Self::Scheduler,
         Self::SchedulerState,
+        Self::Sql,
         Self::Web,
         Self::Worker,
         Self::WorkflowEngine,
@@ -68,6 +76,7 @@ impl LoggerName {
             Self::Listener => "horsies.listener",
             Self::Scheduler => "horsies.scheduler",
             Self::SchedulerState => "horsies.scheduler.state",
+            Self::Sql => "horsies.sql",
             Self::Web => "horsies.web",
             Self::Worker => "horsies.worker",
             Self::WorkflowEngine => "horsies.workflow.engine",
@@ -223,8 +232,58 @@ mod tests {
     }
 
     #[test]
+    fn the_statement_log_goes_to_its_own_logger() {
+        // The broker's statement log (`StatementLog::Debug`, `echo=True`)
+        // names the target `horsies.sql`.
+        assert_eq!(route("horsies.sql"), Some(LoggerName::Sql));
+        assert_eq!(LoggerName::Sql.python_name(), "horsies.sql");
+        assert_ne!(route("horsies.sql"), route("horsies.db"));
+    }
+
+    // The records of the switched lifecycle operations reach the logger
+    // that the Python caller of the same write used.
+
+    #[test]
+    fn the_stale_running_pass_logs_on_the_broker_logger() {
+        // Python `PostgresBroker.mark_stale_tasks_as_failed`.
+        assert_eq!(
+            route(horsies_core::log_targets::STALE_RUNNING_PASS),
+            Some(LoggerName::Broker)
+        );
+    }
+
+    #[test]
+    fn the_failed_attempt_writes_log_on_the_lifecycle_logger() {
+        // Python `horsies.core.worker.failed_attempt`.
+        assert_eq!(
+            route(horsies_core::log_targets::FAILED_ATTEMPT),
+            Some(LoggerName::Lifecycle)
+        );
+    }
+
+    #[test]
+    fn the_workflow_success_logs_on_the_lifecycle_logger() {
+        // Python `horsies.core.worker.workflow_success`.
+        assert_eq!(
+            route(horsies_core::log_targets::WORKFLOW_SUCCESS),
+            Some(LoggerName::Lifecycle)
+        );
+    }
+
+    #[test]
+    fn the_success_batch_outcomes_log_on_the_lifecycle_logger() {
+        // Python `horsies.core.lifecycle.persistence`; the batch logs each
+        // row through `log_terminalization_outcome`.
+        assert_eq!(
+            route(horsies_core::log_targets::TERMINALIZATION_OUTCOME),
+            Some(LoggerName::Lifecycle)
+        );
+    }
+
+    #[test]
     fn a_dotted_target_outside_the_set_is_not_forwarded() {
         assert_eq!(route("horsies.db.pool"), None);
+        assert_eq!(route("horsies.sql.statement"), None);
         assert_eq!(route("horsies.unknown"), None);
     }
 

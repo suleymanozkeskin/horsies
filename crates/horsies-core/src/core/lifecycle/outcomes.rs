@@ -20,6 +20,7 @@ use sqlx::{Column, Row};
 use uuid::Uuid;
 
 use crate::core::types::status::TaskStatus;
+use crate::db::{FromSql, Row as CoreRow};
 
 use super::operations::TerminalizationKind;
 
@@ -40,10 +41,16 @@ pub struct OutcomeDecodeError(pub String);
 pub enum GuardKind {
     Deadline,
     Staleness,
+    /// The stale RUNNING recovery of a retry: the row's retry count is not
+    /// the count the retry was computed from (`horsies_finish_stale_attempt`).
+    RetryCount,
     WorkflowStatus,
     WorkflowLinkAbsent,
     WorkflowLinkState,
     ForeignTerminalization,
+    /// The task belongs to a workflow, live or finished, and the operation
+    /// acts on plain tasks only (`horsies_cancel_task`).
+    WorkflowTask,
 }
 
 impl GuardKind {
@@ -51,10 +58,12 @@ impl GuardKind {
         match self {
             Self::Deadline => "DEADLINE",
             Self::Staleness => "STALENESS",
+            Self::RetryCount => "RETRY_COUNT",
             Self::WorkflowStatus => "WORKFLOW_STATUS",
             Self::WorkflowLinkAbsent => "WORKFLOW_LINK_ABSENT",
             Self::WorkflowLinkState => "WORKFLOW_LINK_STATE",
             Self::ForeignTerminalization => "FOREIGN_TERMINALIZATION",
+            Self::WorkflowTask => "WORKFLOW_TASK",
         }
     }
 
@@ -62,10 +71,12 @@ impl GuardKind {
         match raw {
             "DEADLINE" => Some(Self::Deadline),
             "STALENESS" => Some(Self::Staleness),
+            "RETRY_COUNT" => Some(Self::RetryCount),
             "WORKFLOW_STATUS" => Some(Self::WorkflowStatus),
             "WORKFLOW_LINK_ABSENT" => Some(Self::WorkflowLinkAbsent),
             "WORKFLOW_LINK_STATE" => Some(Self::WorkflowLinkState),
             "FOREIGN_TERMINALIZATION" => Some(Self::ForeignTerminalization),
+            "WORKFLOW_TASK" => Some(Self::WorkflowTask),
             _ => None,
         }
     }
@@ -116,6 +127,14 @@ pub struct ObservedStaleness {
     pub evaluated_at: DateTime<Utc>,
 }
 
+/// A retry-count guard's evidence: the count a retry request was computed
+/// from, and the count the locked row holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedRetryCount {
+    pub expected_retry_count: i64,
+    pub retry_count: i64,
+}
+
 /// A workflow-status guard's evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedWorkflowState {
@@ -141,15 +160,25 @@ pub struct ObservedForeignTerminalization {
     pub terminal_at: Option<DateTime<Utc>>,
 }
 
+/// The task belongs to a workflow, live or finished, and the operation acts
+/// on plain tasks only. `observed_status` is the task's status: the live
+/// status, or the history status of a finished task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedWorkflowTask {
+    pub observed_status: TaskStatus,
+}
+
 /// The typed diagnostic variant carried by a conflict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardEvidence {
     Claim(ObservedClaim),
     Deadline(ObservedDeadline),
     Staleness(ObservedStaleness),
+    RetryCount(ObservedRetryCount),
     WorkflowState(ObservedWorkflowState),
     WorkflowLink(ObservedWorkflowLink),
     ForeignTerminalization(ObservedForeignTerminalization),
+    WorkflowTask(ObservedWorkflowTask),
 }
 
 // ---------------------------------------------------------------------------
@@ -264,10 +293,32 @@ pub struct RawOutcomeRow {
     pub observed_guard: Option<serde_json::Value>,
 }
 
-/// Decode one returned row into its typed outcome. Fails closed on any
-/// deviation from the wire contract.
-pub fn decode_outcome_row(row: &PgRow) -> Result<TerminalizationOutcome, OutcomeDecodeError> {
-    require_exact_columns(row)?;
+/// Decode one row of a core statement into its typed outcome. Fails closed
+/// on any deviation from the wire contract.
+pub fn decode_outcome_row(row: &CoreRow) -> Result<TerminalizationOutcome, OutcomeDecodeError> {
+    let present: Vec<&str> = row.columns().iter().map(|column| column.name()).collect();
+    require_exact_columns(&present)?;
+    let raw = RawOutcomeRow {
+        task_id: core_column(row, "task_id")?,
+        ordinality: core_column(row, "ordinality")?,
+        outcome: core_column(row, "outcome")?,
+        terminal_at: core_column(row, "terminal_at")?,
+        terminalization_kind: core_column(row, "terminalization_kind")?,
+        observed_status: core_column(row, "observed_status")?,
+        observed_worker_id: core_column(row, "observed_worker_id")?,
+        observed_claimed_at: core_column(row, "observed_claimed_at")?,
+        guard_kind: core_column(row, "guard_kind")?,
+        observed_guard: core_column(row, "observed_guard")?,
+    };
+    decode_raw(raw)
+}
+
+/// Decode one row read in a sqlx transaction (`terminalize_in_tx`, whose
+/// callers still hold sqlx transactions) into its typed outcome. The same
+/// contract as [`decode_outcome_row`].
+pub fn decode_outcome_pg_row(row: &PgRow) -> Result<TerminalizationOutcome, OutcomeDecodeError> {
+    let present: Vec<&str> = row.columns().iter().map(|c| c.name()).collect();
+    require_exact_columns(&present)?;
     let raw = RawOutcomeRow {
         task_id: get(row, "task_id")?,
         ordinality: get(row, "ordinality")?,
@@ -283,6 +334,14 @@ pub fn decode_outcome_row(row: &PgRow) -> Result<TerminalizationOutcome, Outcome
     decode_raw(raw)
 }
 
+fn core_column<'r, T: FromSql<'r>>(
+    row: &'r CoreRow,
+    column: &str,
+) -> Result<T, OutcomeDecodeError> {
+    row.try_get(column)
+        .map_err(|error| OutcomeDecodeError(format!("column {column}: {error}")))
+}
+
 fn get<'r, T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>>(
     row: &'r PgRow,
     column: &str,
@@ -291,8 +350,8 @@ fn get<'r, T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>>(
         .map_err(|e| OutcomeDecodeError(format!("column {column}: {e}")))
 }
 
-fn require_exact_columns(row: &PgRow) -> Result<(), OutcomeDecodeError> {
-    let present: Vec<&str> = row.columns().iter().map(|c| c.name()).collect();
+/// The row has exactly the ten columns of the wire contract.
+fn require_exact_columns(present: &[&str]) -> Result<(), OutcomeDecodeError> {
     let missing: Vec<&str> = ROW_COLUMNS
         .iter()
         .copied()
@@ -415,6 +474,14 @@ fn decode_evidence(
                 evaluated_at: require_timestamp(&payload, "evaluated_at")?,
             }))
         }
+        GuardKind::RetryCount => {
+            let payload =
+                require_payload(raw, guard_kind, &["expected_retry_count", "retry_count"])?;
+            Ok(GuardEvidence::RetryCount(ObservedRetryCount {
+                expected_retry_count: require_integer(&payload, "expected_retry_count")?,
+                retry_count: require_integer(&payload, "retry_count")?,
+            }))
+        }
         GuardKind::WorkflowStatus => {
             let payload = require_payload(raw, guard_kind, &["workflow_id", "workflow_status"])?;
             let workflow_id = require_string(&payload, "workflow_id")?;
@@ -455,6 +522,19 @@ fn decode_evidence(
                     terminal_at: raw.terminal_at,
                 },
             ))
+        }
+        GuardKind::WorkflowTask => {
+            require_payload(raw, guard_kind, &[])?;
+            let Some(observed_status) = observed.status else {
+                return Err(OutcomeDecodeError(
+                    "a workflow-task refusal without an observed status. The \
+                     refusal names the status of the task it refused."
+                        .to_owned(),
+                ));
+            };
+            Ok(GuardEvidence::WorkflowTask(ObservedWorkflowTask {
+                observed_status,
+            }))
         }
     }
 }
@@ -751,6 +831,50 @@ mod tests {
         assert!(err.to_string().contains("must not send a payload"));
     }
 
+    /// Python `outcomes._decode_evidence`, `GuardKind.WORKFLOW_TASK`: the
+    /// refusal of a workflow task by `horsies_cancel_task`, live (no kind)
+    /// or finished (the history kind and time).
+    #[test]
+    fn a_workflow_task_refusal_decodes_the_status_of_the_task() {
+        let mut live = base_raw("SOURCE_STATE_CONFLICT");
+        live.observed_status = Some("PENDING".to_owned());
+        live.guard_kind = Some("WORKFLOW_TASK".to_owned());
+        let mut finished = live.clone();
+        finished.observed_status = Some("FAILED".to_owned());
+        finished.terminal_at = Some(Utc::now());
+        finished.terminalization_kind = Some("FAIL_RUNNING".to_owned());
+
+        for (raw, status) in [(live, TaskStatus::Pending), (finished, TaskStatus::Failed)] {
+            let TerminalizationOutcome::SourceStateConflict { evidence, .. } =
+                decode_raw(raw).unwrap()
+            else {
+                panic!("expected conflict");
+            };
+            assert_eq!(
+                evidence,
+                GuardEvidence::WorkflowTask(ObservedWorkflowTask {
+                    observed_status: status
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn a_workflow_task_refusal_without_a_status_or_with_a_payload_fails_closed() {
+        let mut raw = base_raw("SOURCE_STATE_CONFLICT");
+        raw.guard_kind = Some("WORKFLOW_TASK".to_owned());
+        let err = decode_raw(raw.clone()).unwrap_err();
+        assert!(
+            err.to_string().contains("without an observed status"),
+            "{err}"
+        );
+
+        raw.observed_status = Some("PENDING".to_owned());
+        raw.observed_guard = Some(serde_json::json!({"node_status": "READY"}));
+        let err = decode_raw(raw).unwrap_err();
+        assert!(err.to_string().contains("must not send a payload"), "{err}");
+    }
+
     #[test]
     fn foreign_terminalization_decodes_committed_kind() {
         let mut raw = base_raw("SOURCE_STATE_CONFLICT");
@@ -818,6 +942,36 @@ mod tests {
     }
 
     #[test]
+    fn retry_count_payload_decodes_and_fails_closed_on_its_keys() {
+        let mut raw = base_raw("SOURCE_STATE_CONFLICT");
+        raw.observed_status = Some("RUNNING".to_owned());
+        raw.guard_kind = Some("RETRY_COUNT".to_owned());
+        raw.observed_guard = Some(serde_json::json!({
+            "expected_retry_count": 0,
+            "retry_count": 1
+        }));
+        let decoded = decode_raw(raw.clone()).expect("a retry-count conflict");
+        let TerminalizationOutcome::SourceStateConflict {
+            evidence: GuardEvidence::RetryCount(observed),
+            ..
+        } = decoded
+        else {
+            panic!("expected a retry-count conflict, got {decoded:?}");
+        };
+        assert_eq!(
+            observed,
+            ObservedRetryCount {
+                expected_retry_count: 0,
+                retry_count: 1,
+            }
+        );
+
+        raw.observed_guard = Some(serde_json::json!({"retry_count": 1}));
+        let err = decode_raw(raw).expect_err("a payload without the expected count");
+        assert!(err.to_string().contains("documented keys"), "{err}");
+    }
+
+    #[test]
     fn malformed_jsonb_timestamp_fails_closed() {
         let mut raw = base_raw("SOURCE_STATE_CONFLICT");
         raw.guard_kind = Some("DEADLINE".to_owned());
@@ -834,5 +988,70 @@ mod tests {
         raw.observed_status = Some("LIMBO".to_owned());
         let err = decode_raw(raw).unwrap_err();
         assert!(err.to_string().contains("not a task status"));
+    }
+
+    /// An APPLIED row of a fused completion at `ordinality`.
+    fn applied_raw(ordinality: Option<i64>) -> RawOutcomeRow {
+        let mut raw = base_raw("APPLIED");
+        raw.ordinality = ordinality;
+        raw.terminal_at = Some(Utc::now());
+        raw.terminalization_kind = Some("COMPLETE_FUSED".to_owned());
+        raw.observed_status = Some("RUNNING".to_owned());
+        raw
+    }
+
+    /// Python `test_lifecycle_outcomes.py::TestBatchOrdinality::test_ordinality_travels_with_the_outcome`:
+    /// each outcome keeps the ordinality of its row, so a caller matches the
+    /// outcomes of a batch to its inputs by position, not by row order.
+    #[test]
+    fn the_ordinality_of_each_row_travels_with_its_outcome() {
+        let ordinalities: Vec<Option<i64>> = [2, 1, 3]
+            .into_iter()
+            .map(|ordinality| decode_raw(applied_raw(Some(ordinality))))
+            .map(|decoded| decoded.expect("an applied row decodes").ordinality())
+            .collect();
+        assert_eq!(ordinalities, vec![Some(2), Some(1), Some(3)]);
+    }
+
+    /// `TestBatchOrdinality::test_single_row_operations_carry_no_ordinal`.
+    #[test]
+    fn a_single_row_outcome_carries_no_ordinality() {
+        let decoded = decode_raw(applied_raw(None)).expect("an applied row decodes");
+        assert_eq!(decoded.ordinality(), None);
+    }
+
+    /// A row of the wire contract whose ordinality column is text.
+    static TEXT_ORDINALITY_ROW: crate::db::TypedStatement = crate::db::TypedStatement::new(
+        "test_text_ordinality_row",
+        "SELECT '00000000-0000-0000-0000-000000000001'::uuid AS task_id,
+                '1'::text AS ordinality,
+                'APPLIED'::text AS outcome,
+                now() AS terminal_at,
+                'COMPLETE_FUSED'::text AS terminalization_kind,
+                'RUNNING'::text AS observed_status,
+                'w1'::text AS observed_worker_id,
+                now() AS observed_claimed_at,
+                NULL::text AS guard_kind,
+                NULL::jsonb AS observed_guard",
+        &[],
+    );
+
+    /// `TestBatchOrdinality::test_non_integer_ordinality_is_refused`: a row
+    /// whose ordinality is not an integer fails closed and names the column.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_non_integer_ordinality_is_refused() {
+        let broker = crate::broker::PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+        );
+        let rows = broker
+            .query_main(&TEXT_ORDINALITY_ROW.bind().finish())
+            .await
+            .expect("the literal row is read");
+        let [row] = rows.as_slice() else {
+            panic!("one row, got {}", rows.len());
+        };
+        let refused = decode_outcome_row(row).expect_err("a text ordinality is refused");
+        assert!(refused.0.starts_with("column ordinality:"), "{refused}");
     }
 }

@@ -1,7 +1,7 @@
 //! Typed client for the phase-2 quarantine of one pending row.
 //!
 //! Calls the baseline function `horsies_phase2_quarantine_one(p_task_id uuid)`
-//! (`horsies/core/baseline/sql/0003_interim_functions.sql`). The function
+//! (`crates/horsies-core/baseline/0003_interim_functions.sql`). The function
 //! locks only the pending row, copies the recovery projection of the history
 //! row into the quarantine table, verifies the copy and repoints the pending
 //! row at it. A refusal keeps the history locator. The function stores no
@@ -15,7 +15,7 @@ use crate::core::history::errors::HistoryError;
 const QUARANTINE_ONE_SQL: &str = "SELECT verdict, detail FROM horsies_phase2_quarantine_one($1)";
 
 /// The verdicts of `horsies_phase2_quarantine_one`, as Python's vocabulary
-/// (`horsies/core/history/phase2/quarantine.py:174-185`).
+/// (`python/horsies/core/history/phase2/quarantine.py:174-185`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuarantineVerdict {
     Repointed,

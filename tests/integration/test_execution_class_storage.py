@@ -20,6 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerInvalidTaskOptions
@@ -33,7 +34,7 @@ from horsies.core.models.workflow import SubWorkflowNode, TaskNode, WorkflowDefi
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
 from horsies.core.utils.fingerprint import enqueue_fingerprint
-from tests.integration.conftest import complete_task
+from tests.integration.conftest import finish_task
 
 pytestmark = [pytest.mark.integration]
 
@@ -178,6 +179,7 @@ class TestSendPaths:
         outcome = await broker.enqueue_async(
             'exec_store_raw',
             task_id=task_id,
+            send_kind=SendKind.FIRST,
             enqueue_sha=sha,
             args_json='[]',
             kwargs_json='{}',
@@ -257,7 +259,7 @@ class TestWorkflowPaths:
         root_id = await _node_task_id(session, workflow_id, 0)
         assert await _stored_class(session, root_id) == 'SHARED_THREAD'
 
-        await complete_task(session, broker, workflow_id, 0, TaskResult(ok=1))
+        await finish_task(session, broker, workflow_id, 0, TaskResult(ok=1))
 
         next_id = await _node_task_id(session, workflow_id, 1)
         assert await _stored_class(session, next_id) == 'SHARED_ASYNC'

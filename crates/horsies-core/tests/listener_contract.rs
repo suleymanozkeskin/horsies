@@ -6,19 +6,17 @@
 //! subscription. The rows that pin Python's queue API (double unsubscribe,
 //! unknown queue, unlisten) and the measurement rows are not core.
 //!
-//! `DATABASE_URL` names the server; each test creates its own database
-//! `listener_<uuid>` and drops it at the end, so NOTIFY traffic of other
-//! tests cannot reach it.
+//! `DATABASE_URL` names the server; each test creates its own empty database
+//! through the core's test support (`src/test_support/database.rs`) and drops
+//! it at the end, so NOTIFY traffic of other tests cannot reach it.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::task::JoinHandle;
-use tokio_postgres::Client;
 use uuid::Uuid;
 
 use horsies_core::db::{
-    open_connection, parse_connection_url, ChannelName, CheckoutClass, ConnectPlan, ConnectionAge,
+    parse_connection_url, ChannelName, CheckoutClass, ConnectPlan, ConnectionAge,
     ConnectionEnvironment, CorePool, DatabasePassword, EnvironmentPassword, HomeDirectory,
     IdlePing, Listener, ListenerClose, ParameterType, PayloadEvent, PayloadSubscription, PoolPlan,
     PoolRole, PoolSizing, QueueCapacity, Reserve, StatementBound, StatementProtocol,
@@ -60,23 +58,24 @@ fn test_environment() -> ConnectionEnvironment {
     ConnectionEnvironment::new(password, Vec::new(), home)
 }
 
-fn server_url() -> String {
-    std::env::var("DATABASE_URL").expect("DATABASE_URL names the test server")
-}
+/// The test databases of the core (`src/test_support/database.rs`). This
+/// binary creates empty databases only.
+#[allow(dead_code)]
+#[path = "../src/test_support/database.rs"]
+mod test_database;
 
-/// The same URL with another database.
-fn with_database(url: &str, database: &str) -> String {
-    let (scheme, rest) = url.split_once("://").expect("URL has a scheme");
-    let authority_end = rest
-        .find(|character: char| character == '/' || character == '?')
-        .unwrap_or(rest.len());
-    let (authority, remainder) = rest.split_at(authority_end);
-    match remainder.split_once('?') {
-        Some((_, query)) if !query.is_empty() => {
-            format!("{scheme}://{authority}/{database}?{query}")
-        }
-        Some(_) | None => format!("{scheme}://{authority}/{database}"),
-    }
+/// Installs the schema into a test template through the public API. This
+/// binary creates empty databases only, so it never runs.
+#[allow(dead_code)]
+async fn install_template(url: &str) {
+    let broker = horsies_core::PostgresBroker::connect(url)
+        .await
+        .expect("connect the template broker");
+    broker
+        .migrate()
+        .await
+        .expect("install the schema into the test template");
+    broker.close().await;
 }
 
 fn load_plan(url: &str) -> Arc<ConnectPlan> {
@@ -88,34 +87,18 @@ fn load_plan(url: &str) -> Arc<ConnectPlan> {
     )
 }
 
-async fn connect_direct(url: &str) -> (Client, JoinHandle<()>) {
-    let plan = load_plan(url);
-    let (client, connection) = open_connection(&plan).await.expect("direct connection");
-    let driver = tokio::spawn(async move {
-        let _ended = connection.await;
-    });
-    (client, driver)
-}
-
 /// A database of its own for one test, with a listener and a one-connection
 /// pool that sends the notifications.
 struct ListenerDatabase {
-    name: String,
-    admin: Client,
-    admin_driver: JoinHandle<()>,
+    database: test_database::TestDatabase,
     listener: Listener,
     pool: CorePool,
 }
 
 impl ListenerDatabase {
     async fn create() -> ListenerDatabase {
-        let name = format!("listener_{}", Uuid::new_v4().simple());
-        let (admin, admin_driver) = connect_direct(&with_database(&server_url(), "postgres")).await;
-        admin
-            .batch_execute(&format!("CREATE DATABASE \"{name}\""))
-            .await
-            .expect("create test database");
-        let url = with_database(&server_url(), &name);
+        let database = test_database::TestDatabase::create_empty().await;
+        let url = database.url().to_owned();
         let listener = Listener::start(load_plan(&url));
         let pool = CorePool::new(
             PoolPlan {
@@ -129,9 +112,7 @@ impl ListenerDatabase {
             load_plan(&url),
         );
         ListenerDatabase {
-            name,
-            admin,
-            admin_driver,
+            database,
             listener,
             pool,
         }
@@ -164,11 +145,7 @@ impl ListenerDatabase {
     async fn remove(self) {
         assert_eq!(self.listener.close().await, ListenerClose::Closed);
         self.pool.close();
-        self.admin
-            .batch_execute(&format!("DROP DATABASE \"{}\" WITH (FORCE)", self.name))
-            .await
-            .expect("drop test database");
-        self.admin_driver.abort();
+        self.database.drop().await;
     }
 }
 

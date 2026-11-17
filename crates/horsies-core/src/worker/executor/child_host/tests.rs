@@ -163,7 +163,8 @@ fn a_blocked_poll_is_reported_once_with_its_run() {
         dispatch: DispatchNumber::new(3).unwrap(),
         task_id: Uuid::nil(),
     };
-    let poll_started = watch.register(run, "app.tasks.spin");
+    let polls = watch.register(run);
+    let poll_started = polls.start_of(0, "app.tasks.spin");
     assert!(watch.blocked_reports().is_empty(), "no poll in progress");
     // A poll that started 1 ms after the epoch, about 60 s ago.
     poll_started.store(1, Ordering::Release);
@@ -174,6 +175,45 @@ fn a_blocked_poll_is_reported_once_with_its_run() {
             assert_eq!(blocked.culprit, LoopCulprit::Run(run));
             assert!(blocked.blocked_ms >= 5_000);
             assert_eq!(blocked.location.as_str(), "app.tasks.spin");
+        }
+        other => panic!("expected a loop report, got {other:?}"),
+    }
+    assert!(watch.blocked_reports().is_empty(), "reported once");
+}
+
+/// #875 (Python: the loop watchdog names the run of the mark that the
+/// blocking code carries): a poll of work that a body started with
+/// `spawn_in_run` is timed under the body's run. Its block is reported with
+/// that run as the culprit and the work's name as the location, while the
+/// body waits; the run is reported once.
+#[test]
+fn a_blocked_poll_of_work_of_a_run_is_reported_with_its_run() {
+    let epoch = Instant::now()
+        .checked_sub(Duration::from_secs(60))
+        .unwrap_or_else(Instant::now);
+    let watch = PollWatch::without_thread(epoch);
+    let run = RunRef {
+        dispatch: DispatchNumber::new(4).unwrap(),
+        task_id: Uuid::from_u128(4),
+    };
+    let polls = watch.register(run);
+    let body_started = polls.start_of(0, "app.tasks.fetch");
+    let work_started = polls.start_of(1, "fetch.page");
+    let later_work_started = polls.start_of(2, "fetch.other_page");
+    assert!(watch.blocked_reports().is_empty(), "no poll in progress");
+    // The body waits for its work. The work's poll started 1 ms after the
+    // epoch, about 60 s ago; another piece of work polls on another thread
+    // and started 30 s after the epoch.
+    assert_eq!(body_started.load(Ordering::Acquire), 0);
+    work_started.store(1, Ordering::Release);
+    later_work_started.store(30_001, Ordering::Release);
+    let reports = watch.blocked_reports();
+    assert_eq!(reports.len(), 1);
+    match &reports[0] {
+        ChildFrame::LoopBlocked(blocked) => {
+            assert_eq!(blocked.culprit, LoopCulprit::Run(run));
+            assert!(blocked.blocked_ms >= 59_000);
+            assert_eq!(blocked.location.as_str(), "fetch.page");
         }
         other => panic!("expected a loop report, got {other:?}"),
     }

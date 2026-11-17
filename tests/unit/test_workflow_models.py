@@ -2267,7 +2267,7 @@ class TestWorkflowDefinition:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url='postgresql+psycopg://test:test@localhost/test'
+                    database_url='postgresql://test:test@localhost/test'
                 ),
             )
         )
@@ -2297,7 +2297,7 @@ class TestWorkflowDefinition:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url='postgresql+psycopg://test:test@localhost/test'
+                    database_url='postgresql://test:test@localhost/test'
                 ),
             )
         )
@@ -2325,7 +2325,7 @@ class TestWorkflowDefinition:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url='postgresql+psycopg://test:test@localhost/test'
+                    database_url='postgresql://test:test@localhost/test'
                 ),
             )
         )
@@ -2355,7 +2355,7 @@ class TestWorkflowDefinition:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url='postgresql+psycopg://test:test@localhost/test'
+                    database_url='postgresql://test:test@localhost/test'
                 ),
             )
         )
@@ -2384,7 +2384,7 @@ class TestWorkflowDefinition:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url='postgresql+psycopg://test:test@localhost/test'
+                    database_url='postgresql://test:test@localhost/test'
                 ),
             )
         )
@@ -2410,7 +2410,7 @@ class TestWorkflowDefinition:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url='postgresql+psycopg://test:test@localhost/test'
+                    database_url='postgresql://test:test@localhost/test'
                 ),
             )
         )
@@ -2434,7 +2434,7 @@ class TestWorkflowDefinition:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url='postgresql+psycopg://test:test@localhost/test'
+                    database_url='postgresql://test:test@localhost/test'
                 ),
             )
         )
@@ -2459,7 +2459,7 @@ class TestWorkflowDefinition:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url='postgresql+psycopg://test:test@localhost/test'
+                    database_url='postgresql://test:test@localhost/test'
                 ),
             )
         )
@@ -2487,7 +2487,7 @@ class TestWorkflowDefinition:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url='postgresql+psycopg://test:test@localhost/test'
+                    database_url='postgresql://test:test@localhost/test'
                 ),
             )
         )
@@ -2531,7 +2531,7 @@ class TestWorkflowDefinition:
         app = Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url='postgresql+psycopg://test:test@localhost/test'
+                    database_url='postgresql://test:test@localhost/test'
                 ),
             )
         )
@@ -2560,7 +2560,7 @@ class TestWorkflowOutputTypeMismatch:
         return Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url='postgresql+psycopg://test:test@localhost/test',
+                    database_url='postgresql://test:test@localhost/test',
                 ),
             ),
         )
@@ -2739,7 +2739,7 @@ class TestWorkflowDefinitionConfig:
         return Horsies(
             config=AppConfig(
                 broker=PostgresConfig(
-                    database_url=SecretStr('postgresql+psycopg://test:test@localhost/test'),
+                    database_url=SecretStr('postgresql://test:test@localhost/test'),
                 ),
             ),
         )
@@ -3774,7 +3774,7 @@ def _minimal_app() -> Any:
     return Horsies(
         config=AppConfig(
             broker=PostgresConfig(
-                database_url=SecretStr('postgresql+psycopg://test:test@localhost/test'),
+                database_url=SecretStr('postgresql://test:test@localhost/test'),
             ),
         )
     )
