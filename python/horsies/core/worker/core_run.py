@@ -7,8 +7,8 @@ loop, the children, the outcome writes, the heartbeats and the reaper on its
 own threads. This module:
 
 - builds the worker manifest of the app (`to_worker_manifest`,
-  `python_child_launch`); a value above its manifest bound is a startup
-  `ConfigurationError`;
+  `python_child_launch`); AppConfig validation already refused every value
+  above a manifest bound;
 - sets the panic rule of a worker process before the first core call;
 - calls `prepare_worker` with a `CoreWorkerHost`, then `PreparedWorker.run`
   on the main thread, with `SIGTERM` and `SIGINT` handlers that ask the run
@@ -37,7 +37,6 @@ from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.gc_policy import freeze_startup_objects
 from horsies.core.worker.row_class import registered_task_classes
 from horsies.core.worker_manifest import (
-    ValueAboveManifestBound,
     current_interpreter_flags,
     log_level_of,
     python_child_launch,
@@ -52,8 +51,8 @@ EXIT_STOPPED = 0
 """The run ended at an operator stop."""
 
 EXIT_FAILED = 1
-"""Any other end: a refused manifest or profile, a broker that does not
-build, a failed start, a failure after the start."""
+"""Any other end: a refused profile, a broker that does not build, a failed
+start, a failure after the start."""
 
 type ReportStartupErrors = Callable[[Sequence[HorsiesError]], None]
 """Prints the startup report of the given errors."""
@@ -102,15 +101,11 @@ class WorkerLaunch:
     loglevel: str
 
 
-def worker_manifest_json(
-    app: Horsies,
-    launch: WorkerLaunch,
-) -> Result[str, ValueAboveManifestBound]:
+def worker_manifest_json(app: Horsies, launch: WorkerLaunch) -> str:
     """The JSON text of the worker manifest of `app`. Reads `sys.executable`,
-    the interpreter flags, `sys.path` and `sys.argv`; no other I/O.
-
-    Errors: `ValueAboveManifestBound` for the first config value above its
-    manifest bound.
+    the interpreter flags, `sys.path` and `sys.argv`; no other I/O. The
+    config of `app` passed AppConfig validation, so every value is within
+    its manifest bound (`to_worker_manifest`).
     """
     child_launch = python_child_launch(
         executable=sys.executable,
@@ -125,36 +120,14 @@ def worker_manifest_json(
     tasks = registered_task_classes(
         (name, task.task_options_json) for name, task in app.tasks.items()
     )
-    match to_worker_manifest(
+    manifest = to_worker_manifest(
         app.config,
         profile=launch.profile,
         tasks=tasks,
         child_launch=child_launch,
         idempotency_reservation_window=_reservation_window(),
-    ):
-        case Ok(manifest):
-            return Ok(wire.dump_worker_manifest(manifest))
-        case Err(above):
-            return Err(above)
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-def manifest_bound_error(above: ValueAboveManifestBound) -> ConfigurationError:
-    """The startup error of a config value above its manifest bound. It
-    names the path, the value and the bound. No horsies error code covers
-    the bounds of the worker manifest, so the error has none."""
-    error = ConfigurationError(
-        message=f'{above.path} is above the bound that a worker takes',
-        notes=[
-            f'{above.path} = {above.value}',
-            f'the bound of {above.path} is {above.maximum}',
-        ],
-        help_text=f'set {above.path} to {above.maximum} or less',
     )
-    # The cause is a config value, not a line of this module.
-    error.location = None
-    return error
+    return wire.dump_worker_manifest(manifest)
 
 
 def profile_refused_error(refusal: str) -> ConfigurationError:
@@ -229,17 +202,10 @@ def run_core_worker(
     """Build the manifest, prepare the worker and run it on the main thread.
     Returns the exit code of `horsies worker`.
 
-    `report` prints the startup report of a value above its manifest bound,
-    a broker that does not build, or a profile that the core refuses.
+    `report` prints the startup report of a broker that does not build or
+    of a profile that the core refuses.
     """
-    match worker_manifest_json(app, launch):
-        case Ok(manifest_json):
-            pass
-        case Err(above):
-            report((manifest_bound_error(above),))
-            return EXIT_FAILED
-        case _ as unreachable:
-            assert_never(unreachable)
+    manifest_json = worker_manifest_json(app, launch)
     # A panic in a core background task aborts the worker process; its
     # supervisor restarts it. Set before the first core call.
     _core.set_panic_rule('ABORT_PROCESS')

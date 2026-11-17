@@ -15,7 +15,6 @@ import pytest
 from pydantic import SecretStr
 
 from horsies import _core
-from horsies._catalog import worker_manifest as wire
 from horsies.core.app import Horsies
 from horsies.core.errors import ConfigurationError, ErrorCode, HorsiesError
 from horsies.core.models.app import AppConfig
@@ -25,21 +24,18 @@ from horsies.core.worker.core_run import (
     EXIT_FAILED,
     CoreWorkerHost,
     WorkerLaunch,
-    manifest_bound_error,
     run_core_worker,
 )
-from horsies.core.worker_manifest import ValueAboveManifestBound
 
 LOGGER = logging.getLogger('tests.core_run')
 
 
-def _app(cluster_wide_cap: int | None = None) -> Horsies:
+def _app() -> Horsies:
     return Horsies(
         AppConfig(
             broker=PostgresConfig(
                 database_url=SecretStr('postgresql://user:secret@localhost:5432/db'),
             ),
-            cluster_wide_cap=cluster_wide_cap,
             worker_profiles={
                 'small': WorkerProfile(isolated=IsolatedChildren(count=1)),
             },
@@ -71,29 +67,6 @@ class _Reported:
 def _no_panic_rule() -> Generator[MagicMock, None, None]:
     with patch.object(_core, 'set_panic_rule') as set_panic_rule:
         yield set_panic_rule
-
-
-def test_a_value_above_its_bound_names_the_path_the_value_and_the_bound() -> None:
-    error = manifest_bound_error(
-        ValueAboveManifestBound(path='cluster_wide_cap', value=7, maximum=5),
-    )
-    assert isinstance(error, ConfigurationError)
-    assert error.message == 'cluster_wide_cap is above the bound that a worker takes'
-    assert error.notes == ['cluster_wide_cap = 7', 'the bound of cluster_wide_cap is 5']
-    assert error.help_text == 'set cluster_wide_cap to 5 or less'
-    assert error.location is None
-
-
-def test_a_value_above_its_bound_is_reported_before_any_core_call() -> None:
-    reported = _Reported()
-    app = _app(cluster_wide_cap=wire.TASK_LIMIT_MAX + 1)
-    with _no_panic_rule() as set_panic_rule:
-        exit_code = run_core_worker(app, _launch('small'), LOGGER, reported)
-    assert exit_code == EXIT_FAILED
-    [error] = reported.errors
-    assert isinstance(error, ConfigurationError)
-    assert error.message.startswith('cluster_wide_cap is above')
-    set_panic_rule.assert_not_called()
 
 
 def test_a_broker_that_does_not_build_is_a_startup_error() -> None:
