@@ -749,6 +749,12 @@ unless it starts with "Added".
   - Task options of a workflow node: the deadline `good_until` is written
     as Python's `isoformat()`, with 6 fraction digits when the microsecond
     is not 0 (`…12.500000+00:00`, not `…12.500+00:00`).
+  - Task options of a send with a deadline (`TaskSendOptions::good_until`):
+    the options text holds the deadline in `good_until`, in Python's
+    `isoformat()`; before, `null`. A task with no options and a send with a
+    deadline stores the options of an `ISOLATED` task with the deadline. The
+    command fingerprint of a send hashes this text, as Python's does.
+    `TaskOptions::stored_send_options_text` (added) writes it.
   - Task input and result: a date-time of type `StoredDateTime` (below) is
     written with Python's fraction (`…12.500000Z`). A plain chrono
     `DateTime` or `NaiveDateTime` keeps chrono's serde form (`…12.500Z`);
