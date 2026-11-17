@@ -26,6 +26,7 @@ use crate::core::lifecycle::{
     TerminalizationKind, TerminalizationOutcome, WorkerOwned, WorkflowSuccessOutcome,
 };
 use crate::monitoring::cancel_task;
+use crate::test_support::terminal_writes::{self, StaleFailure};
 
 const TASK_LOCK_SQL: &str = "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 731))";
 const RESULT: &str = r#"{"err": "boom"}"#;
@@ -99,9 +100,10 @@ fn success(task_id: Uuid) -> FinishWorkflowSuccess {
     }
 }
 
-fn fail_stale(task_id: Uuid) -> TerminalizationCommand {
-    TerminalizationCommand::FailStaleTask {
-        task_id,
+/// The failure of the stale recovery (`horsies_finish_stale_attempt`, no
+/// retry), as Python's `_STALE_FINISH_SQL`.
+fn stale_failure() -> StaleFailure {
+    StaleFailure {
         stale_after_ms: 60_000,
         finalizing_stale_after_ms: 30_000,
         result_json: RESULT.to_owned(),
@@ -111,16 +113,13 @@ fn fail_stale(task_id: Uuid) -> TerminalizationCommand {
 }
 
 /// The stale move of the holder, in the holder's transaction.
-async fn stale_move_in(connection: &mut sqlx::PgConnection, task_id: Uuid) -> String {
-    sqlx::query_scalar(
-        "SELECT outcome FROM horsies_fail_stale_task($1, 60000, 30000, $2,
-                'WORKER_CRASHED', 'went silent')",
-    )
-    .bind(task_id)
-    .bind(RESULT)
-    .fetch_one(connection)
-    .await
-    .expect("stale move")
+async fn stale_move_in(
+    connection: &mut sqlx::PgConnection,
+    task_id: Uuid,
+) -> Vec<TerminalizationOutcome> {
+    terminal_writes::fail_stale_task(connection, task_id, &stale_failure())
+        .await
+        .expect("stale move")
 }
 
 async fn history_kinds(pool: &PgPool, task_id: Uuid) -> Vec<(String, String)> {
@@ -180,7 +179,10 @@ async fn a_failure_finalize_waits_for_a_stale_recovery_that_holds_its_locks() {
         .expect("failure write");
 
     assert!(waited, "the finalize never waited on the recovery");
-    assert_eq!(moved, "APPLIED");
+    assert!(
+        matches!(moved.as_slice(), [TerminalizationOutcome::Applied { .. }]),
+        "{moved:?}"
+    );
     assert_eq!(
         foreign_kind_of_failure(&finalized),
         Some(TerminalizationKind::FailStale),
@@ -222,7 +224,10 @@ async fn a_workflow_success_waits_for_a_stale_recovery_that_holds_its_locks() {
         .expect("workflow success");
 
     assert!(waited, "the success never waited on the recovery");
-    assert_eq!(moved, "APPLIED");
+    assert!(
+        matches!(moved.as_slice(), [TerminalizationOutcome::Applied { .. }]),
+        "{moved:?}"
+    );
     assert!(
         matches!(
             &finalized,
@@ -261,8 +266,9 @@ async fn the_stale_move_waits_for_a_workflow_success_that_holds_its_locks() {
             .expect("workflow success in an open transaction");
 
     let stale_pool = pool.clone();
-    let stale_move =
-        tokio::spawn(async move { terminalize(&stale_pool, &fail_stale(task_id)).await });
+    let stale_move = tokio::spawn(async move {
+        terminal_writes::fail_stale_task(&stale_pool, task_id, &stale_failure()).await
+    });
     let waited = a_backend_waits_on(&pool, holder_pid).await;
     holder.commit().await.expect("commit the success");
     let moved = tokio::time::timeout(SIDE_WAIT, stale_move)
@@ -531,7 +537,7 @@ async fn a_free_race_of_finalize_and_stale_recovery_never_deadlocks() {
             });
             let stale_pool = pool.clone();
             let stale_move = tokio::spawn(async move {
-                terminalize(&stale_pool, &fail_stale(task_id))
+                terminal_writes::fail_stale_task(&stale_pool, task_id, &stale_failure())
                     .await
                     .map(|outcomes| {
                         matches!(
