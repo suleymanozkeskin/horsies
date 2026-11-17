@@ -40,7 +40,12 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Coroutine
+from pathlib import Path
 from typing import Any
+
+# The child runs as a script: its path holds this folder, not the repository
+# root, and the reference copy below is the package `tests.dualrun.reference`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from horsies.core.models.boot_failure import (
     AppLoadFailed,
