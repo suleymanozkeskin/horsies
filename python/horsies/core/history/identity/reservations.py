@@ -24,6 +24,7 @@ miss instead of updating another request's reservation.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
@@ -81,7 +82,7 @@ async def claim_key_reservation(
     *,
     key_digest: bytes,
     key_scope_version: int,
-    reservation_window_seconds: int,
+    reservation_window: timedelta,
     fingerprint_version: int,
     fingerprint: bytes,
     task_id: UUID,
@@ -93,14 +94,14 @@ async def claim_key_reservation(
                 f'SELECT outcome, task_id, observed_fingerprint_version '
                 f'FROM {KEY_RESERVATION_CLAIM_FUNCTION}('
                 f':key_digest, CAST(:key_scope_version AS smallint), '
-                f"make_interval(secs => :window_seconds), "
+                f"CAST(:reservation_window_us AS bigint) * interval '1 microsecond', "
                 f'CAST(:fingerprint_version AS smallint), :fingerprint, '
                 f'CAST(:task_id AS uuid))'
             ),
             {
                 'key_digest': key_digest,
                 'key_scope_version': key_scope_version,
-                'window_seconds': reservation_window_seconds,
+                'reservation_window_us': reservation_window // timedelta(microseconds=1),
                 'fingerprint_version': fingerprint_version,
                 'fingerprint': fingerprint,
                 'task_id': str(task_id),

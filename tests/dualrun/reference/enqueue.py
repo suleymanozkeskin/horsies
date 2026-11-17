@@ -170,7 +170,8 @@ def _send_keyed_in_transaction(connection: Connection, row: EnqueueRow, key: Key
         {
             'key_digest': key.digest,
             'key_scope_version': key.scope_version,
-            'window_seconds': key.window_s,
+            # The send before the switch bound the window in whole seconds.
+            'window_seconds': int(key.window.total_seconds()),
             'fingerprint_version': COMMAND_FINGERPRINT_VERSION,
             'fingerprint': row.command_fingerprint,
             'task_id': row.task_id,

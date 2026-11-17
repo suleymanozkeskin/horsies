@@ -242,7 +242,8 @@ $$;
 -- - p_start_kind NOW | AT (p_start_at) | AFTER_DELAY (p_start_delay_s, whole seconds >= 0): enqueued_at is NOW(),
 --   the given time, or NOW() plus the delay. A slot of another kind must be NULL.
 -- - p_lineage_kind FIRST_RUN | RERUN (p_rerun_of_task_id and p_rerun_root_task_id).
--- - p_key_kind UNKEYED | KEYED (p_key_digest, p_key_scope_version, p_key_window_s in whole seconds).
+-- - p_key_kind UNKEYED | KEYED (p_key_digest, p_key_scope_version, p_key_window: the reservation window, exact to the
+--   microsecond, more than 0 and at most 30 days; the key claim refuses another window with 22023).
 -- p_send_kind FIRST | REPEAT. The fingerprint version and the 32-byte fingerprint are required: a plain send always
 -- carries one. Column shapes (queue name length, retention class key, priority and retry ranges, execution class)
 -- are the table's CHECKs.
@@ -280,7 +281,7 @@ CREATE FUNCTION horsies_enqueue_task(
     p_key_kind text,
     p_key_digest bytea,
     p_key_scope_version smallint,
-    p_key_window_s integer,
+    p_key_window interval,
     p_send_kind text
 ) RETURNS TABLE(outcome text, task_id uuid)
     LANGUAGE plpgsql
@@ -346,13 +347,13 @@ BEGIN
     END CASE;
     CASE p_key_kind
         WHEN 'UNKEYED' THEN
-            IF num_nulls(p_key_digest, p_key_scope_version, p_key_window_s) <> 3 THEN
+            IF num_nulls(p_key_digest, p_key_scope_version, p_key_window) <> 3 THEN
                 RAISE EXCEPTION 'horsies_enqueue_task: an unkeyed send has no key values'
                     USING ERRCODE = 'invalid_parameter_value';
             END IF;
             v_keyed := FALSE;
         WHEN 'KEYED' THEN
-            IF num_nulls(p_key_digest, p_key_scope_version, p_key_window_s) <> 0 THEN
+            IF num_nulls(p_key_digest, p_key_scope_version, p_key_window) <> 0 THEN
                 RAISE EXCEPTION 'horsies_enqueue_task: a keyed send names its digest, scope version and window'
                     USING ERRCODE = 'invalid_parameter_value';
             END IF;
@@ -370,7 +371,7 @@ BEGIN
     IF v_keyed THEN
         SELECT * INTO STRICT v_claim
         FROM horsies_key_reservation_claim(
-            p_key_digest, p_key_scope_version, make_interval(secs => p_key_window_s),
+            p_key_digest, p_key_scope_version, p_key_window,
             p_fingerprint_version, p_fingerprint, p_task_id
         );
         CASE v_claim.outcome

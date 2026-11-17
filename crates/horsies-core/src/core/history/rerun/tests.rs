@@ -1054,7 +1054,7 @@ async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
         &mut connection,
         &scoped.digest(),
         IDEMPOTENCY_SCOPE_VERSION,
-        86_400,
+        86_400_000_000,
         1,
         &EnqueueCommandV1::new(
             "p8.rerun",

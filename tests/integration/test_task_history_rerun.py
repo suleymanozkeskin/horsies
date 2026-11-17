@@ -629,7 +629,7 @@ class TestKeyedRerun:
                 connection,
                 key_digest=scoped.digest,
                 key_scope_version=1,
-                reservation_window_seconds=86400,
+                reservation_window=timedelta(days=1),
                 fingerprint_version=1,
                 fingerprint=sha256(b'the original command').digest(),
                 task_id=UUID(source),

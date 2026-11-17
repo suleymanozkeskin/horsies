@@ -223,9 +223,17 @@ async fn a_move_with_no_history_leaf_keeps_the_task_and_its_reservation_live() {
         },
     )
     .await;
-    let claimed = claim_key_reservation(&mut transaction, &key, 1, 3_600, 1, &[13_u8; 32], task_id)
-        .await
-        .expect("reserve the key");
+    let claimed = claim_key_reservation(
+        &mut transaction,
+        &key,
+        1,
+        3_600_000_000,
+        1,
+        &[13_u8; 32],
+        task_id,
+    )
+    .await
+    .expect("reserve the key");
     assert_eq!(claimed, ReservationClaim::Applied { task_id });
     assert_eq!(
         refused_sqlstate(&mut transaction, &complete(task_id)).await,

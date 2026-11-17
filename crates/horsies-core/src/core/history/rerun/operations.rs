@@ -284,7 +284,7 @@ static KEY_RESERVATION_CLAIM_SQL: LazyLock<String> = LazyLock::new(key_reservati
 
 /// `horsies_key_reservation_claim`, with the SQL text of
 /// [`key_reservation_claim_sql`]. Parameters in order: key digest, key scope
-/// version, window in seconds, fingerprint version, fingerprint, task id.
+/// version, window in microseconds, fingerprint version, fingerprint, task id.
 static KEY_RESERVATION_CLAIM: LazyLock<TypedStatement> = LazyLock::new(|| {
     TypedStatement::new(
         "key_reservation_claim",
@@ -303,9 +303,9 @@ static KEY_RESERVATION_CLAIM: LazyLock<TypedStatement> = LazyLock::new(|| {
 /// The key of a keyed rerun, claimed for the new task.
 struct RerunKeyClaim<'a> {
     key_digest: &'a [u8],
-    /// The reservation window in whole seconds, as Python's rerun
-    /// (`int(policy.reservation_window.total_seconds())`).
-    window_seconds: i64,
+    /// The reservation window in microseconds, the unit of the `interval`
+    /// that the claim stores.
+    window_micros: i64,
     fingerprint_version: i16,
     fingerprint: &'a [u8],
     task_id: Uuid,
@@ -462,7 +462,12 @@ pub(crate) async fn rerun_task_in_transaction(
     if let Some(key_digest) = facts.idempotency_key_digest.as_ref() {
         let claim = RerunKeyClaim {
             key_digest: key_digest.as_slice(),
-            window_seconds: policy.reservation_window.num_seconds(),
+            // The policy was checked at construction (`validate_reservation_window`):
+            // at most 30 days, a whole number of microseconds.
+            window_micros: policy
+                .reservation_window
+                .num_microseconds()
+                .expect("a checked window of at most 30 days fits an i64 count of microseconds"),
             fingerprint_version: facts.command_fingerprint_version,
             fingerprint: facts.command_fingerprint.as_slice(),
             task_id: new_task_id,
@@ -651,7 +656,7 @@ async fn claim_rerun_key(
             .bind()
             .value(&claim.key_digest)
             .value(&IDEMPOTENCY_SCOPE_VERSION)
-            .value(&claim.window_seconds)
+            .value(&claim.window_micros)
             .value(&claim.fingerprint_version)
             .value(&claim.fingerprint)
             .value(&claim.task_id)

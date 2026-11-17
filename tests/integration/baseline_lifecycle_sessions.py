@@ -321,7 +321,7 @@ async def case_keyed_send_on_a_row_that_moves_is_unverifiable(dsn: str) -> None:
                     """SELECT outcome FROM horsies_enqueue_task(
                         %s, 'lc.task', 'q_sessions', 100, '{"x":1}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL,
                         %s, 'NOW', NULL, NULL, 1::smallint, sha256('lc'::bytea), 'FIRST_RUN', NULL, NULL,
-                        'KEYED', sha256('session-key'::bytea), 1::smallint, 3600, 'FIRST')""",
+                        'KEYED', sha256('session-key'::bytea), 1::smallint, interval '1 hour', 'FIRST')""",
                     (task_id, sent_at),
                 )
             )
