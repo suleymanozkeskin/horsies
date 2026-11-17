@@ -17,24 +17,43 @@ held the row RUNNING (``REFUSE``, ``finish_failed_attempt``); a child that
 ended without one may have ended before it started the task, so a row still
 CLAIMED by this claim goes back to the queue with no attempt row (``RELEASE``,
 ``finish_ended_attempt``). The statement runs alone in autocommit.
+
+The worker sends the statement through the core
+(``finish_failed_attempt_in_core``, ``finish_ended_attempt_in_core``): the
+command becomes a ``FinishFailedAttemptRequest`` of ``horsies._core``, and the
+core's record becomes the same outcome types. ``finish_failed_attempt`` and
+``finish_ended_attempt`` stay for the dual-run reference of the worker's
+callers.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Final, assert_never
+from typing import Any, Final, Literal, assert_never
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+import horsies._core as core
 from horsies.core.history.terminalization.move import FINISH_FAILED_ATTEMPT_FUNCTION
+from horsies.core.lifecycle.core_records import (
+    already_applied_of,
+    lost_claim_of,
+    observed_of,
+    phase_two_owed_of,
+    source_state_conflict_of,
+    task_absent_of,
+)
 from horsies.core.lifecycle.commands import FailLockedTask
 from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.lifecycle.outcomes import (
+    AfterFailure,
     AlreadyApplied,
+    CapacityWoken,
     ClaimReleased,
     FailedAttemptOutcome,
     FailureApplied,
@@ -50,6 +69,7 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import RetryPolicy
+from horsies.core.types.core_failure import CoreOperationFailed
 from horsies.core.types.status import TaskAttemptOutcome
 from horsies.core.utils.retry import (
     admitted_retry_policy,
@@ -400,3 +420,195 @@ def _log_retry_refusal(task_id: str, refusal: RetryRefusal) -> None:
             pass
         case _ as unreachable:
             assert_never(unreachable)
+
+
+# ---------------------------------------------------------------------------
+# The same statement through the core
+# ---------------------------------------------------------------------------
+
+FAILED_ATTEMPT_SUBJECT: Final = 'finish_failed_attempt'
+"""The subject of a ``CoreOperationFailed`` of a failed-attempt write."""
+
+type _FailedAttemptRecord = (
+    core.AttemptFailureApplied
+    | core.AttemptRetryScheduled
+    | core.AttemptAlreadyApplied
+    | core.AttemptLostClaim
+    | core.AttemptSourceStateConflict
+    | core.AttemptTaskAbsent
+    | core.AttemptWriteFailed
+)
+
+
+def _core_placement(placement: RetryPlacement) -> Literal['SAME_CLASS', 'ISOLATED']:
+    match placement:
+        case RetryPlacement.SAME_CLASS:
+            return 'SAME_CLASS'
+        case RetryPlacement.ISOLATED:
+            return 'ISOLATED'
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _core_retry(retry: RetryRequest) -> core.NoRetry | core.RetryAfter:
+    match retry:
+        case NoRetry():
+            return core.NoRetry()
+        case RetryAfter(retry_count=count, delay_s=delay_s, placement=placement):
+            return core.RetryAfter(
+                expected_retry_count=count,
+                delay_s=delay_s,
+                placement=_core_placement(placement),
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _core_attempt_outcome(kind: AttemptFailureKind) -> Literal['FAILED', 'WORKER_FAILURE']:
+    match kind:
+        case AttemptFailureKind.FAILED:
+            return 'FAILED'
+        case AttemptFailureKind.WORKER_FAILURE:
+            return 'WORKER_FAILURE'
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def core_failed_attempt_request(command: FinishFailedAttempt) -> core.FinishFailedAttemptRequest:
+    """The core request of ``command``. A task id that is not a UUID is a
+    defect of the claim that gave it: ``ValueError``. Pure."""
+    return core.FinishFailedAttemptRequest(
+        task_id=uuid.UUID(command.task_id),
+        worker_id=command.fence.worker_id,
+        claimed_at=command.fence.claimed_at,
+        retry=_core_retry(command.retry),
+        result_json=command.result_json,
+        error_code=command.error_code,
+        failed_reason=command.failed_reason,
+        attempt_outcome=_core_attempt_outcome(command.attempt.kind),
+        attempt_error_message=command.attempt.error_message,
+        attempt_failed_reason=command.attempt.failed_reason,
+    )
+
+
+def _retry_refusal_of(refusal: core.RetryNotRequested | core.RetryPastDeadline) -> RetryRefusal:
+    match refusal:
+        case core.RetryNotRequested():
+            return RetryNotRequested()
+        case core.RetryPastDeadline(next_retry_at=next_at, good_until=deadline):
+            return RetryPastDeadline(next_retry_at=next_at, good_until=deadline)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _after_failure_of(after: core.CapacityWoken | core.PhaseTwoOwedRecord) -> AfterFailure:
+    match after:
+        case core.CapacityWoken():
+            return CapacityWoken()
+        case core.PhaseTwoOwedRecord():
+            return phase_two_owed_of(after)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _failed_attempt_outcome_of(record: _FailedAttemptRecord) -> FailedAttemptOutcome:
+    """The outcome of a failed-attempt record. Pure.
+
+    Raises:
+        CoreOperationFailed: an ``AttemptWriteFailed`` record: the statement
+            wrote nothing, or it committed and its reply was lost.
+        OutcomeDecodeError: a text of the record outside the Python catalogs.
+    """
+    match record:
+        case core.AttemptFailureApplied():
+            return FailureApplied(
+                task_id=str(record.task_id),
+                terminal_at=record.terminal_at,
+                observed=observed_of(
+                    record.observed_status,
+                    record.observed_worker_id,
+                    record.observed_claimed_at,
+                ),
+                retry=_retry_refusal_of(record.retry),
+                after=_after_failure_of(record.after),
+            )
+        case core.AttemptRetryScheduled():
+            return RetryScheduled(
+                task_id=str(record.task_id),
+                retry_count=record.retry_count,
+                next_retry_at=record.next_retry_at,
+                queue_name=record.queue_name,
+                observed=observed_of(
+                    record.observed_status,
+                    record.observed_worker_id,
+                    record.observed_claimed_at,
+                ),
+            )
+        case core.AttemptAlreadyApplied():
+            return already_applied_of(record)
+        case core.AttemptLostClaim():
+            return lost_claim_of(record)
+        case core.AttemptSourceStateConflict():
+            return source_state_conflict_of(record)
+        case core.AttemptTaskAbsent():
+            return task_absent_of(record)
+        case core.AttemptWriteFailed(message=message, retryable=retryable):
+            raise CoreOperationFailed(FAILED_ATTEMPT_SUBJECT, message, retryable)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+async def finish_failed_attempt_in_core(
+    handle: core.CoreHandle,
+    command: FinishFailedAttempt,
+) -> FailedAttemptOutcome:
+    """``finish_failed_attempt`` through the core: rule ``REFUSE``, one
+    statement that commits alone, the same outcomes and the same log.
+
+    Raises:
+        CoreOperationFailed: the statement failed (``retryable`` is the
+            core's classification). A lost reply is an unknown outcome, as
+            for ``finish_failed_attempt``.
+        CoreError: the core of this process cannot run the call.
+        OutcomeDecodeError: a record outside the Python catalogs.
+    """
+    record = await handle.finish_failed_attempt_async(core_failed_attempt_request(command))
+    outcome = _failed_attempt_outcome_of(record)
+    _log_outcome(command, outcome)
+    return outcome
+
+
+async def finish_ended_attempt_in_core(
+    handle: core.CoreHandle,
+    command: FinishFailedAttempt,
+) -> FailedAttemptOutcome | ClaimReleased:
+    """``finish_ended_attempt`` through the core: rule ``RELEASE``, one
+    statement that commits alone, the same outcomes and the same log.
+
+    Raises:
+        CoreOperationFailed: the statement failed (``retryable`` is the
+            core's classification).
+        CoreError: the core of this process cannot run the call.
+        OutcomeDecodeError: a record outside the Python catalogs.
+    """
+    record = await handle.finish_ended_attempt_async(core_failed_attempt_request(command))
+    match record:
+        case core.AttemptClaimReleased():
+            logger.debug(
+                'failed attempt function=%s released task %s: the claim held it CLAIMED',
+                FINISH_FAILED_ATTEMPT_FUNCTION,
+                record.task_id,
+            )
+            return ClaimReleased(
+                task_id=str(record.task_id),
+                queue_name=record.queue_name,
+                observed=observed_of(
+                    record.observed_status,
+                    record.observed_worker_id,
+                    record.observed_claimed_at,
+                ),
+            )
+        case _:
+            outcome = _failed_attempt_outcome_of(record)
+            _log_outcome(command, outcome)
+            return outcome

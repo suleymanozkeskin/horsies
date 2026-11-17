@@ -117,7 +117,6 @@ from horsies.core.worker.slots import (
 )
 from horsies.core.utils.db import (
     StatementRunner,
-    autocommit_connection,
     is_retryable_connection_error,
 )
 from horsies.core.worker.runtime import (
@@ -148,7 +147,7 @@ from horsies.core.worker.failed_attempt import (
     AttemptFailureKind,
     NoRetry,
     RetryRequest,
-    finish_failed_attempt,
+    finish_failed_attempt_in_core,
     finish_for,
     retry_request_for,
 )
@@ -189,6 +188,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from horsies._core import CoreHandle
     from horsies.core.app import Horsies
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.worker.config import WorkerConfig
@@ -389,6 +389,9 @@ class FinalizeMixin:
         _stop: asyncio.Event
         _finalize_retry_attempts: dict[tuple[str, FinalizeStage], int]
         _finalize_batcher: FinalizeBatcher
+
+        @property
+        def core_handle(self) -> CoreHandle: ...
 
         # Cross-concern methods provided by sibling mixins / Worker.
         async def _handle_task_timeout(
@@ -1492,13 +1495,15 @@ class FinalizeMixin:
 
         For a task error the policy decides the retry from the retry facts of
         ``claim``; a worker-level failure and an undecodable result are never
-        retried. ``finish_failed_attempt`` writes the attempt row with the
-        retry or the terminal failure, in autocommit. The result routes phase
-        2: a workflow task's failure and a replay of a committed failure
-        return the phase 2 it owes; a plain task's failure (its capacity
-        wake is sent), a retry and a refusal return ``Ok(None)``. Database
-        errors become a phase-1 error, retryable when the connection failed;
-        its data keeps the child's report for the replay.
+        retried. ``finish_failed_attempt_in_core`` writes the attempt row
+        with the retry or the terminal failure, in one statement that the
+        core commits. The result routes phase 2: a workflow task's failure
+        and a replay of a committed failure return the phase 2 it owes; a
+        plain task's failure (its capacity wake is sent), a retry and a
+        refusal return ``Ok(None)``. A failed write (``CoreOperationFailed``,
+        or a ``CoreError`` of the core boundary) and a failed replay read
+        become a phase-1 error, retryable when the cause may clear; its data
+        keeps the child's report for the replay.
         """
         task_id = failure.task_id
         match report:
@@ -1513,17 +1518,16 @@ class FinalizeMixin:
             case _ as unreachable:
                 assert_never(unreachable)
         try:
-            async with self.sf() as s:
-                outcome = await finish_failed_attempt(
-                    await autocommit_connection(s),
-                    finish_for(
-                        failure,
-                        claimed_at=claim.claimed_at,
-                        retry=retry,
-                        attempt=_attempt_failure_of(report),
-                    ),
-                )
-                return await self._after_failed_attempt(s, outcome, retry)
+            outcome = await finish_failed_attempt_in_core(
+                self.core_handle,
+                finish_for(
+                    failure,
+                    claimed_at=claim.claimed_at,
+                    retry=retry,
+                    attempt=_attempt_failure_of(report),
+                ),
+            )
+            return await self._after_failed_attempt(outcome, retry)
         except Exception as exc:
             return Err(
                 self._phase1_error(
@@ -1536,12 +1540,12 @@ class FinalizeMixin:
 
     async def _after_failed_attempt(
         self,
-        s: AsyncSession,
         outcome: FailedAttemptOutcome,
         retry: RetryRequest,
     ) -> Result[_NodeFinishOwed | None, _FinalizeError]:
         """Route the outcome of a failed-attempt finish to phase 2 or to done.
 
+        The replay read of a committed failure opens its own session.
         Database errors of the replay read raise.
         """
         match outcome:
@@ -1558,7 +1562,7 @@ class FinalizeMixin:
                 return Ok(None)
             case AlreadyApplied(task_id=task_id):
                 return _phase2_of_a_replay(
-                    await self._load_persisted_terminal(task_id, session=s),
+                    await self._load_persisted_terminal(task_id),
                 )
             case LostClaim() | SourceStateConflict() | TaskAbsent():
                 return Ok(None)
