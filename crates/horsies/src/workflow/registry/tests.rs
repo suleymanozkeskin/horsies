@@ -1,5 +1,6 @@
 //! The registry: registration refusals, the check of a spec against the
-//! registered definitions, the core's view, and the nesting check.
+//! registered definitions, the child builds it answers, and the nesting
+//! check.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +18,34 @@ fn registry() -> WorkflowRegistry {
 
 fn codes(findings: &[HorsiesError]) -> Vec<Option<ErrorCode>> {
     findings.iter().map(|finding| finding.code).collect()
+}
+
+/// The request of the root sub-workflow node 0 of `definition_key`, with
+/// the node input `node_input`.
+fn child_request(definition_key: &str, node_input: &str) -> ChildSpecRequest {
+    ChildSpecRequest {
+        parent_workflow_id: uuid::Uuid::nil(),
+        parent_workflow_name: "parent".to_owned(),
+        task_index: 0,
+        child_depth: 1,
+        definition_key: Some(definition_key.to_owned()),
+        params: horsies_core::SubWorkflowParams::Given,
+        node_input: node_input.to_owned(),
+        args_from: None,
+        sources: Vec::new(),
+    }
+}
+
+/// The error that an answer stores on its node.
+fn node_error(answer: Result<ClientChildSpec, ChildSpecUnavailable>) -> TaskError {
+    let failure_result = match answer {
+        Ok(ClientChildSpec::NodeFails { failure_result, .. }) => failure_result,
+        other => panic!("expected the node to fail, got {other:?}"),
+    };
+    match serde_json::from_str::<horsies_core::TaskResult<serde_json::Value>>(&failure_result) {
+        Ok(horsies_core::TaskResult::Err(error)) => error,
+        other => panic!("expected an error envelope, got {other:?}"),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -255,8 +284,13 @@ fn params_for_a_definition_without_params_are_refused() {
     );
 }
 
+/// The child build of each definition: one with params builds from the
+/// node input; a member that does not decode fails the node with
+/// `WORKER_SERIALIZATION_ERROR`, and params that do not decode as a whole
+/// with `WORKFLOW_ENQUEUE_FAILED`; one without params gives its spec; an
+/// unregistered key fails the node with `SUBWORKFLOW_LOAD_FAILED`.
 #[test]
-fn the_core_view_builds_each_definition_from_its_params_text() {
+fn the_child_build_answers_each_definition_from_the_node_input() {
     let registry = registry();
     registry
         .register(Definition::with_params::<Countdown>())
@@ -264,25 +298,36 @@ fn the_core_view_builds_each_definition_from_its_params_text() {
     registry
         .register(Definition::without_params::<Plain>().unwrap())
         .unwrap();
-    let core = registry.core_registry();
-    let countdown = core
-        .get_definition_by_definition_key("tests.countdown.v1")
-        .unwrap();
-    let built = (countdown.spec_builder)(r#"{"n": 0}"#).unwrap();
-    assert_eq!(built.name, "countdown");
-    assert_eq!(built.tasks.len(), 1);
-    assert!(matches!(
-        (countdown.spec_builder)(r#"{"n": "zero"}"#),
-        Err(SpecBuildError::MemberRefused { ref key, .. }) if key == "n"
-    ));
-    assert!(matches!(
-        (countdown.spec_builder)("{}"),
-        Err(SpecBuildError::Failed(_))
-    ));
-    let plain = core
-        .get_definition_by_definition_key("tests.plain.v1")
-        .unwrap();
-    assert_eq!((plain.spec_builder)("{}").unwrap().tasks.len(), 1);
+
+    match registry.child_spec_answer(&child_request("tests.countdown.v1", r#"{"n": 0}"#)) {
+        Ok(ClientChildSpec::Built(client)) => {
+            assert_eq!(client.name(), "countdown");
+            assert_eq!(client.spec().tasks.len(), 1);
+        }
+        other => panic!("expected the countdown child, got {other:?}"),
+    }
+    let member = node_error(
+        registry.child_spec_answer(&child_request("tests.countdown.v1", r#"{"n": "zero"}"#)),
+    );
+    assert_eq!(member.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
+    assert!(
+        member.message.as_deref().is_some_and(
+            |text| text.starts_with("Typed decode of subworkflow kwargs failed for task 0: ")
+        ),
+        "{member}"
+    );
+    let whole = node_error(registry.child_spec_answer(&child_request("tests.countdown.v1", "{}")));
+    assert_eq!(whole.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
+    match registry.child_spec_answer(&child_request("tests.plain.v1", "{}")) {
+        Ok(ClientChildSpec::Built(client)) => assert_eq!(client.spec().tasks.len(), 1),
+        other => panic!("expected the plain child, got {other:?}"),
+    }
+    let absent = node_error(registry.child_spec_answer(&child_request("tests.absent.v1", "{}")));
+    assert_eq!(absent.error_code.to_string(), "SUBWORKFLOW_LOAD_FAILED");
+    assert_eq!(
+        absent.data,
+        Some(serde_json::json!({"definition_key": "tests.absent.v1"}))
+    );
 }
 
 #[test]
@@ -407,24 +452,24 @@ impl WorkflowDefinition for Panicking {
     }
 }
 
-/// A panic of build_with is a refusal of the build: the core stores
-/// WORKFLOW_ENQUEUE_FAILED on the node, as for a raised Python exception.
+/// A panic of build_with is a refusal of the build: the node stores
+/// WORKFLOW_ENQUEUE_FAILED, as for a raised Python exception.
 #[test]
 fn a_builder_panic_is_a_failed_build() {
     let registry = registry();
     registry
         .register(Definition::with_params::<Panicking>())
         .unwrap();
-    let core = registry.core_registry();
-    let panicking = core
-        .get_definition_by_definition_key("tests.panicking.v1")
-        .unwrap();
-    match (panicking.spec_builder)(r#"{"n": 4}"#) {
-        Err(SpecBuildError::Failed(error)) => {
-            assert!(error.message.contains("no spec for level 4"), "{error}");
-        }
-        other => panic!("expected a failed build, got {other:?}"),
-    }
+    let error =
+        node_error(registry.child_spec_answer(&child_request("tests.panicking.v1", r#"{"n": 4}"#)));
+    assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
+    assert!(
+        error
+            .message
+            .as_deref()
+            .is_some_and(|text| text.contains("no spec for level 4")),
+        "{error}"
+    );
 }
 
 #[test]

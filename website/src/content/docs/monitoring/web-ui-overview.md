@@ -20,7 +20,8 @@ Each client ships the monitoring app as an option of its package: the
 `horsies[web]` extra of the Python package, and the `web` feature of the Rust
 crate. The install is on the client pages:
 [Install the Extra](/horsies/monitoring/web-ui-mount/#install-the-extra)
-(Python). The Rust page is not written yet.
+(Python) and [Add the Feature](/horsies/rust/monitoring/web-ui-mount/#add-the-feature)
+(Rust).
 
 ## Surfaces
 

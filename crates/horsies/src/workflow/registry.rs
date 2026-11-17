@@ -1,6 +1,6 @@
 //! The workflow registry of an app: the definitions that sub-workflow nodes
-//! and starts name, by definition key, and the view of it that the core's
-//! workflow steps read.
+//! and starts name, by definition key, and the child builds that the core's
+//! workflow steps ask of it.
 //!
 //! A definition has params or has none. One without params has one spec,
 //! built and checked when it registers. One with params has a build: decode
@@ -9,21 +9,25 @@
 //! definition (with the node's params, its `args_from` members merged), and
 //! a start with params calls it.
 //!
-//! The core's view is a `WorkflowSpecRegistry` with every definition as a
-//! builder over its params text, so the core refuses no recursive
-//! definition: the depth limit of 32 stops a nesting at run time, and
-//! [`WorkflowRegistry::check_findings`] reports a nesting that reaches it for
-//! certain (Python's nesting check).
+//! The registry is the child spec source of the core's workflow steps
+//! ([`ChildSpecSource`]): for a sub-workflow node, it loads the definition
+//! by its key, takes the builder input that the core merges
+//! ([`merged_child_input`]), runs the build, and answers the child's spec
+//! data, or the node's failure with Python's error envelope. The core
+//! refuses no recursive definition: the depth limit of 32 stops a nesting at
+//! run time, and [`WorkflowRegistry::check_findings`] reports a nesting that
+//! reaches it for certain (Python's nesting check).
 
 use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use horsies_core::core::registry::RegisteredWorkflowDefinition;
 use horsies_core::{
-    BuilderHookName, ClientSpec, SpecBuildError, SpecBuilderFn, WorkflowSpec as CoreWorkflowSpec,
-    WorkflowSpecRegistry,
+    build_failed_error, merged_child_input, node_failure_result, params_refused_error,
+    subworkflow_load_failed_error, ChildSpecError, ChildSpecFuture, ChildSpecRequest,
+    ChildSpecSource, ChildSpecUnavailable, ClientChildSpec, ClientSpec, NodeInput, RefusedMember,
+    TaskError,
 };
 use serde::de::DeserializeOwned;
 
@@ -36,7 +40,7 @@ use crate::{AppConfig, ErrorCode, HorsiesError, ValidationReport};
 
 /// The hook that builds a child from params, as the error texts of a child
 /// start name it: the definition's `build_with`.
-const BUILD_WITH: BuilderHookName = BuilderHookName::new("build_with");
+const BUILD_WITH: &str = "build_with";
 
 /// The deepest child workflow (Python `MAX_SUBWORKFLOW_DEPTH`); the core
 /// fails a node whose child would be deeper.
@@ -121,12 +125,11 @@ pub(crate) struct CheckCase {
     pub(crate) build: CaseBuild,
 }
 
-/// The registered definitions and check cases, and the core's view.
+/// The registered definitions and check cases.
 struct Registered {
     /// The definitions by definition key.
     definitions: BTreeMap<String, Definition>,
     check_cases: Vec<CheckCase>,
-    core: Arc<WorkflowSpecRegistry>,
 }
 
 /// The workflow registry of one app. Shared by the app, its workflow
@@ -154,7 +157,6 @@ impl WorkflowRegistry {
             registered: RwLock::new(Registered {
                 definitions: BTreeMap::new(),
                 check_cases: Vec::new(),
-                core: Arc::new(WorkflowSpecRegistry::new(BUILD_WITH)),
             }),
         }
     }
@@ -184,7 +186,14 @@ impl WorkflowRegistry {
             ))
             .with_code(ErrorCode::WorkflowNoDefinitionKey));
         }
-        let builder = self.core_builder(&definition.kind)?;
+        // A spec without params converts now, so a task queue that the app
+        // does not admit is refused at its registration.
+        match &definition.kind {
+            DefinitionKind::WithoutParams(spec) => {
+                let _converted = client_spec(spec, &self.config)?;
+            }
+            DefinitionKind::WithParams(_) => {}
+        }
         let mut registered = self.write();
         if let Some(existing) = registered.definitions.get(&definition.definition_key) {
             return Err(duplicate(
@@ -205,14 +214,6 @@ impl WorkflowRegistry {
                 format!("workflow name '{}' is registered", definition.name),
             ));
         }
-        let mut core = (*registered.core).clone();
-        core.register_definition(RegisteredWorkflowDefinition {
-            name: definition.name.clone(),
-            definition_key: definition.definition_key.clone(),
-            spec_builder: builder,
-            declared_children: Vec::new(),
-        })?;
-        registered.core = Arc::new(core);
         let _previous = registered
             .definitions
             .insert(definition.definition_key.clone(), definition);
@@ -223,11 +224,6 @@ impl WorkflowRegistry {
     /// [`Self::check_findings`] builds and walks.
     pub(crate) fn add_check_cases(&self, cases: Vec<CheckCase>) {
         self.write().check_cases.extend(cases);
-    }
-
-    /// The core's view of the registered definitions, as of now.
-    pub(crate) fn core_registry(&self) -> Arc<WorkflowSpecRegistry> {
-        Arc::clone(&self.read().core)
     }
 
     /// The definition registered under `definition_key`.
@@ -382,39 +378,69 @@ impl WorkflowRegistry {
         }
     }
 
-    /// The builder of the core's view of a definition. A definition without
-    /// params is converted now; one with params converts each spec it
-    /// builds.
+    /// The answer of the child spec source for the sub-workflow node of
+    /// `request` (Python `build_child_workflow`), in this order:
     ///
-    /// Errors: the conversion of a spec without params (`HRS-014`).
-    fn core_builder(&self, kind: &DefinitionKind) -> Result<SpecBuilderFn, HorsiesError> {
-        match kind {
-            DefinitionKind::WithoutParams(spec) => {
-                let core_spec = client_spec(spec, &self.config)?.spec().clone();
-                Ok(Arc::new(
-                    move |_text: &str| -> Result<CoreWorkflowSpec, SpecBuildError> {
-                        Ok(core_spec.clone())
-                    },
-                ))
-            }
-            DefinitionKind::WithParams(build) => {
-                let build = Arc::clone(build);
-                let config = self.config.clone();
-                Ok(Arc::new(
-                    move |text: &str| -> Result<CoreWorkflowSpec, SpecBuildError> {
-                        let spec = build(text).map_err(|refused| match refused {
-                            ParamsBuildRefused::Member { key, cause } => {
-                                SpecBuildError::MemberRefused { key, cause }
-                            }
-                            ParamsBuildRefused::Failed(error) => SpecBuildError::Failed(error),
-                        })?;
-                        client_spec(&spec, &config)
-                            .map(|client| client.spec().clone())
-                            .map_err(SpecBuildError::Failed)
-                    },
-                ))
-            }
-        }
+    /// 1. The definition under the node's definition key; none fails the
+    ///    node with `SUBWORKFLOW_LOAD_FAILED`.
+    /// 2. The builder input that the core merges ([`merged_child_input`]):
+    ///    its node failures fail the node.
+    /// 3. A definition without params gives its spec; one with params
+    ///    decodes the input with its params type and runs `build_with`. A
+    ///    member that does not decode fails the node with
+    ///    `WORKER_SERIALIZATION_ERROR`; a failed build, or a spec that the
+    ///    conversion refuses, with `WORKFLOW_ENQUEUE_FAILED`.
+    /// 4. The spec, converted to the core's spec data with the classes of
+    ///    the app's queues.
+    ///
+    /// Errors: [`ChildSpecUnavailable::Raised`], not retryable, for a stored
+    /// node input that the core's merge refuses, and for a node error that
+    /// does not encode. Runs the user's `build_with`; no I/O.
+    pub(crate) fn child_spec_answer(
+        &self,
+        request: &ChildSpecRequest,
+    ) -> Result<ClientChildSpec, ChildSpecUnavailable> {
+        let Some(definition) = request
+            .definition_key
+            .as_deref()
+            .and_then(|key| self.definition(key))
+        else {
+            return node_fails(
+                request,
+                subworkflow_load_failed_error(
+                    &request.parent_workflow_name,
+                    request.task_index,
+                    request.definition_key.as_deref(),
+                ),
+            );
+        };
+        let input = match merged_child_input(request) {
+            Ok(NodeInput::Input(input)) => input,
+            Ok(NodeInput::NodeFails(error)) => return node_fails(request, error),
+            Err(refused) => return Err(build_raised(request, refused.to_string())),
+        };
+        let built = match &definition.kind {
+            DefinitionKind::WithoutParams(spec) => Ok((**spec).clone()),
+            DefinitionKind::WithParams(build) => build(input.text()),
+        };
+        let failure = match built {
+            Ok(spec) => match client_spec(&spec, &self.config) {
+                Ok(client) => return Ok(ClientChildSpec::Built(client)),
+                Err(refused) => built_failed(request, &refused),
+            },
+            Err(ParamsBuildRefused::Member { key, cause }) => params_refused_error(
+                request.parent_workflow_id,
+                request.task_index,
+                RefusedMember {
+                    key: &key,
+                    cause: &cause,
+                },
+                &input,
+                BUILD_WITH,
+            ),
+            Err(ParamsBuildRefused::Failed(error)) => built_failed(request, &error),
+        };
+        node_fails(request, failure)
     }
 
     fn read(&self) -> RwLockReadGuard<'_, Registered> {
@@ -429,6 +455,56 @@ impl WorkflowRegistry {
         self.registered
             .write()
             .expect("the workflow registry lock is never held across a panic")
+    }
+}
+
+/// The registry answers the core's child builds. The answer is ready when
+/// the future is made: the build runs on the step's task.
+impl ChildSpecSource for WorkflowRegistry {
+    fn child_spec(&self, request: ChildSpecRequest) -> ChildSpecFuture<'_> {
+        let answer = self.child_spec_answer(&request);
+        Box::pin(async move { answer })
+    }
+}
+
+/// The answer that fails the node of `request` with `error`, stored in its
+/// result envelope.
+///
+/// Errors: [`ChildSpecUnavailable::Raised`] when the envelope does not
+/// encode. Pure.
+fn node_fails(
+    request: &ChildSpecRequest,
+    error: TaskError,
+) -> Result<ClientChildSpec, ChildSpecUnavailable> {
+    let message = error.to_string();
+    match node_failure_result(error) {
+        Ok(failure_result) => Ok(ClientChildSpec::NodeFails {
+            message,
+            failure_result,
+        }),
+        Err(refused) => Err(build_raised(request, refused.to_string())),
+    }
+}
+
+/// `WORKFLOW_ENQUEUE_FAILED` of the node of `request` for a build that
+/// failed with `error`. Pure.
+fn built_failed(request: &ChildSpecRequest, error: &HorsiesError) -> TaskError {
+    build_failed_error(
+        request.parent_workflow_id,
+        &request.parent_workflow_name,
+        request.task_index,
+        &ChildSpecError::of_builder(error),
+    )
+}
+
+/// The refusal of the build of the child of `request` for `cause`. Pure.
+fn build_raised(request: &ChildSpecRequest, cause: String) -> ChildSpecUnavailable {
+    ChildSpecUnavailable::Raised {
+        subject: format!(
+            "build of the child of {}:{}",
+            request.parent_workflow_name, request.task_index
+        ),
+        cause,
     }
 }
 

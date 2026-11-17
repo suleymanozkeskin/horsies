@@ -130,6 +130,16 @@ mod tests {
 
     use super::*;
 
+    /// The text of an encode answer for an assertion message: `IsNull` has
+    /// no `Debug`.
+    fn encoded_text(encoded: &Result<IsNull, Box<dyn std::error::Error + Sync + Send>>) -> String {
+        match encoded {
+            Ok(IsNull::No) => "Ok(IsNull::No)".to_owned(),
+            Ok(IsNull::Yes) => "Ok(IsNull::Yes)".to_owned(),
+            Err(error) => format!("Err({error})"),
+        }
+    }
+
     /// Each value encodes as the type that its cast names; a null encodes
     /// as SQL `NULL`.
     #[test]
@@ -150,9 +160,17 @@ mod tests {
         for (value, sql_type) in values {
             let mut written = bytes::BytesMut::new();
             let encoded = sql_value(&value).to_sql_checked(&sql_type, &mut written);
-            assert!(matches!(encoded, Ok(IsNull::No)), "{value:?}: {encoded:?}");
+            assert!(
+                matches!(encoded, Ok(IsNull::No)),
+                "{value:?}: {}",
+                encoded_text(&encoded)
+            );
             let null = null_of(value.caller_type()).to_sql_checked(&sql_type, &mut written);
-            assert!(matches!(null, Ok(IsNull::Yes)), "{value:?}: {null:?}");
+            assert!(
+                matches!(null, Ok(IsNull::Yes)),
+                "{value:?}: {}",
+                encoded_text(&null)
+            );
         }
     }
 }
