@@ -1070,6 +1070,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "horsies-parity-tests"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "horsies",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "horsies-python"
 version = "0.1.0"
 dependencies = [
@@ -1089,8 +1098,8 @@ name = "horsies-queue-mismatch-tests"
 version = "0.1.0-alpha.1"
 dependencies = [
  "horsies",
+ "horsies-test-support",
  "serde",
- "serde_json",
  "tokio",
 ]
 

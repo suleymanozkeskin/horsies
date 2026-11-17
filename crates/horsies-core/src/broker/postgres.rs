@@ -3713,7 +3713,7 @@ mod prestart_expiry_tests {
 }
 
 #[cfg(test)]
-mod result_wait_tests {
+mod absent_result_wait_tests {
     //! C3: a result wait must never block forever. A wait with no limit on a
     //! task that does not exist (pruned by retention, or a bogus id) answers
     //! its absence from the first probe instead of hanging.
