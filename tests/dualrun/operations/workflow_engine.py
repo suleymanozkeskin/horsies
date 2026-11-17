@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from tests.dualrun.operations.table import DualRunOperation, PoolMode
+from tests.dualrun.operations.table import CoreOnlyTest, DualRunOperation, PoolMode
 
 WORKFLOW_ENGINE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
     DualRunOperation(
@@ -126,3 +126,26 @@ WORKFLOW_ENGINE_OPERATIONS: Final[tuple[DualRunOperation, ...]] = (
         core_methods=('workflow_nodes_async',),
     ),
 )
+
+
+WORKFLOW_ENGINE_CORE_ONLY_TESTS: Final[tuple[CoreOnlyTest, ...]] = (
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_worker_finalize_two_phase.py::test_a_failed_phase2_keeps_the_outbox_row'
+        ),
+        reason='injects the phase-2 fault on the core path; the reference phase 2 does not take it',
+    ),
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_worker_finalize_two_phase.py::test_finalize_phase2_failure_keeps_terminal_task_result_durable'
+        ),
+        reason='injects the phase-2 fault on the core path; the reference phase 2 does not take it',
+    ),
+    CoreOnlyTest(
+        node_id=(
+            'tests/integration/test_worker_finalize_workflow_phase.py::test_a_failed_phase_two_is_a_phase2_error'
+        ),
+        reason='injects the phase-2 fault on the core path; the reference phase 2 does not take it',
+    ),
+)
+"""The tests of this module that run once, on the core (``CoreOnlyTest``)."""
