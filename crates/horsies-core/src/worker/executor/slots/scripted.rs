@@ -426,6 +426,45 @@ pub(crate) fn idle_child_of_any_kind() -> ChildCommand {
     shell(&format!("{}{}exit 3", boot_any_kind(), read_frame()))
 }
 
+/// A child of any kind that writes its pid to `pid_file`, boots, then
+/// serves nothing: it exits at the stop frame.
+pub(crate) fn idle_child_recording_pid(pid_file: &Path) -> ChildCommand {
+    shell(&format!(
+        "echo $$ > '{}'; {}{}exit 3",
+        pid_file.display(),
+        boot_any_kind(),
+        read_frame()
+    ))
+}
+
+/// Children of any kind whose ready frame reports an RSS by boot order: the
+/// n-th child to boot reports `readings[n - 1]`, a later child the last
+/// reading. Each then serves nothing: it exits at the stop frame. The boot
+/// order is kept in the folder `dir`, as [`ticket`] keeps it.
+///
+/// Panics: `readings` is empty (a defect of the test).
+pub(crate) fn idle_children_reporting_rss(dir: &Path, readings: &[RssReading]) -> ChildCommand {
+    let ready = |rss: RssReading| {
+        send(&[ChildFrame::Ready(ReadyFrame {
+            pid: ProcessId::new(1).unwrap(),
+            rss,
+        })])
+    };
+    let last = *readings.last().expect("at least one RSS reading");
+    let cases: String = readings
+        .iter()
+        .zip(1_usize..)
+        .map(|(rss, boot)| format!("{boot}) {};; ", ready(*rss)))
+        .collect();
+    shell(&format!(
+        r#"n=1; while ! mkdir "{}/ticket-$n" 2>/dev/null; do n=$((n + 1)); done; {}case $n in {cases}*) {};; esac; {}exit 3"#,
+        dir.display(),
+        read_frame(),
+        ready(last),
+        read_frame(),
+    ))
+}
+
 /// A child of any kind whose start hook fails: it reads its init frame and
 /// exits with the hook failure code (173).
 pub(crate) fn hook_failing_child_of_any_kind() -> ChildCommand {
