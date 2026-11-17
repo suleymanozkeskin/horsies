@@ -14,10 +14,12 @@ pub(crate) const UNDEFINED_FUNCTION: &str = "42883";
 pub(crate) const FUNCTION_PUBLISHED_SQL: &str = "SELECT to_regprocedure($1) IS NOT NULL";
 
 /// The staged result read: one row per task id that the live table or the
-/// history holds, none otherwise. `$1` is the task id.
+/// history holds, none otherwise. `$1` is the task id. The columns are those
+/// of the RESULT reader that `horsies_render_history_reader` renders
+/// (`0008_history_maintenance_functions.sql`).
 pub(crate) fn task_result_sql() -> String {
     format!(
-        "SELECT location, status, live_result, failed_reason,
+        "SELECT location, status, failed_reason,
                 result_envelope_version, result_payload, result_digest, task_name
          FROM {TASK_RESULT_FUNCTION}($1)"
     )
@@ -28,13 +30,11 @@ pub(crate) fn task_result_function_signature() -> String {
     format!("{TASK_RESULT_FUNCTION}(uuid)")
 }
 
-/// Result columns of a live task row.
+/// The task is in the live table. A live row stores no result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveTaskResult {
     pub task_name: String,
     pub status: String,
-    pub result: Option<String>,
-    pub failed_reason: Option<String>,
 }
 
 /// Canonical result payload of a history row, still encoded.
@@ -75,7 +75,6 @@ pub enum TaskResultRead {
 pub struct ResultWireRow {
     pub location: String,
     pub status: Option<String>,
-    pub live_result: Option<String>,
     pub failed_reason: Option<String>,
     pub result_envelope_version: Option<i16>,
     pub result_payload: Option<Vec<u8>>,
@@ -91,8 +90,6 @@ pub fn decode_result_row(
         "LIVE" => Ok(TaskResultRead::Live(LiveTaskResult {
             task_name: required(row.task_name, "task_name", task_id)?,
             status: required(row.status, "status", task_id)?,
-            result: row.live_result,
-            failed_reason: row.failed_reason,
         })),
         "HISTORY" => Ok(TaskResultRead::History(HistoryTaskResult {
             task_name: required(row.task_name, "task_name", task_id)?,

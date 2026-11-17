@@ -3216,8 +3216,8 @@ impl PostgresBroker {
             TaskResultRead::Live(live) => Ok(ResultRowProbe::Row(TaskResultRow {
                 id: task_id,
                 status: live.status,
-                result: live.result,
-                failed_reason: live.failed_reason,
+                result: None,
+                failed_reason: None,
             })),
             TaskResultRead::History(history) => Ok(ResultRowProbe::Row(history_task_result_row(
                 task_id, history,

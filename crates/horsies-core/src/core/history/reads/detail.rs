@@ -9,9 +9,13 @@ use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC
 use crate::core::history::ddl::classes::PERIOD_CLASS_KIND;
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{LEAF_CATALOG, RETENTION_CLASSES, TASK_DETAIL_FUNCTION};
-use crate::core::history::reads::lookup_generation::CLOCK_BOUND_SECONDS;
 use crate::core::history::reads::result::FUNCTION_PUBLISHED_SQL;
 use crate::core::types::status::TaskStatus;
+
+/// The clock bound of a UUIDv7 birth, in seconds: the published readers
+/// probe from the birth minus this bound (`horsies_render_history_reader`,
+/// `0008_history_maintenance_functions.sql`).
+pub const CLOCK_BOUND_SECONDS: i64 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryTaskDetail {
