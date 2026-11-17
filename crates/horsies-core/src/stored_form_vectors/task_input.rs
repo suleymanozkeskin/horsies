@@ -29,6 +29,9 @@ struct RefusedText {
     name: String,
     text: String,
     core_refusal: String,
+    /// Python's text of the refusal, for a refusal that Python's reader
+    /// words itself.
+    refusal_text: Option<String>,
 }
 
 fn form() -> TaskInputForm {
@@ -77,12 +80,17 @@ fn the_send_refuses_each_refused_text_with_its_refusal() {
             Err(EnqueuePreparationError::StrictJson {
                 field: SendPart::Input,
                 source,
-            }) => assert_eq!(
-                refusal_name(&source),
-                refused.core_refusal,
-                "{}",
-                refused.name
-            ),
+            }) => {
+                assert_eq!(
+                    refusal_name(&source),
+                    refused.core_refusal,
+                    "{}",
+                    refused.name
+                );
+                if let Some(python_text) = &refused.refusal_text {
+                    assert_eq!(&source.to_string(), python_text, "{}", refused.name);
+                }
+            }
             other => panic!(
                 "{}: expected the strict read refusal {}, got {other:?}",
                 refused.name, refused.core_refusal

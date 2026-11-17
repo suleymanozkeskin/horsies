@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::core::{Execution, ExecutionClass, TaskInfo, TaskStatus};
 
 use crate::broker::error::BrokerError;
+use crate::broker::result_types::StoredEnvelopeText;
 
 /// Columns fetched for result retrieval.
 #[derive(Debug, FromRow)]
@@ -38,7 +39,6 @@ pub struct TaskInfoRow {
     pub worker_process_name: Option<String>,
     pub error_code: Option<String>,
     pub failed_reason: Option<String>,
-    pub result: Option<String>,
     /// The live row's `execution` column.
     pub execution: String,
 }
@@ -49,18 +49,13 @@ impl TaskInfoRow {
     /// The task is live, so its info reports the stored execution class. A
     /// stored class outside the three class names is refused with
     /// `BrokerError::InvalidExecutionClass`; the column's CHECK holds the
-    /// domain, so that refusal means the row was written past it.
-    pub fn into_task_info(self) -> Result<TaskInfo, BrokerError> {
+    /// domain, so that refusal means the row was written past it. The live
+    /// table stores no result (`0001_tables.sql`): the result of a terminal
+    /// task is in its history row, so the info has none.
+    pub fn into_task_info(self) -> Result<TaskInfo<StoredEnvelopeText>, BrokerError> {
         let status = parse_task_status(&self.status)?;
         let execution = Execution::from_stored(&self.execution)
             .ok_or_else(|| BrokerError::InvalidExecutionClass(self.execution.clone()))?;
-        // Propagate (not swallow) a present-but-unparseable stored result so it
-        // is not reported identically to a genuinely null result. Matches the
-        // retrieval path in `parse_task_result_row`.
-        let result = match self.result {
-            Some(raw) => Some(serde_json::from_str(&raw).map_err(BrokerError::Serialization)?),
-            None => None,
-        };
         Ok(TaskInfo {
             task_id: self.id,
             task_name: self.task_name,
@@ -81,7 +76,7 @@ impl TaskInfoRow {
             worker_process_name: self.worker_process_name,
             error_code: self.error_code,
             failed_reason: self.failed_reason,
-            result,
+            result: None,
             attempts: None,
             execution: ExecutionClass::Live(execution),
         })
@@ -212,7 +207,6 @@ mod tests {
             worker_process_name: None,
             error_code: None,
             failed_reason: None,
-            result: None,
             execution: execution.to_owned(),
         }
     }
