@@ -151,8 +151,8 @@ pub(crate) enum ArgsFromRead {
     Corrupt { cause: String },
     /// An object with a value that is not a JSON integer: the node fails
     /// with `args_from has non-int values for subworkflow task <index>`.
-    /// Python's `isinstance(value, int)` also takes `true` and `false`; this
-    /// read refuses them, as `horsies_workflow_task_node_refusal` does for a
+    /// `true` and `false` are refused, as Python's `_args_from_map` refuses a
+    /// `bool` and `horsies_workflow_task_node_refusal` refuses them for a
     /// task node.
     NotIndexes,
 }

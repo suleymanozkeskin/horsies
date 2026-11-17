@@ -16,9 +16,10 @@ The refusals that the database decides before it changes a row (the live
 status check, the batch bounds, the id-keyed batch arrays) are Rust database
 tests of the core crate, in
 ``crates/horsies-core/src/sql_tests/terminalization_functions.rs``. The tests
-that called the writers of COMPLETE_LOCKED, FAIL_RUNNING and FAIL_STALE with
-their own SQL and only decoded the outcome with ``decode_outcome_row`` are
-there too. The tests here read each outcome through the Python lifecycle.
+that called the writers of COMPLETE_LOCKED, FAIL_RUNNING, FAIL_STALE and
+CANCEL_ADMIN with their own SQL and only decoded the outcome with
+``decode_outcome_row`` are there too. The tests here read each outcome
+through the Python lifecycle.
 """
 
 from __future__ import annotations
@@ -293,12 +294,6 @@ _WORKFLOW_SUCCESS_SQL: Final = text(f"""
     SELECT {_OUTCOME_COLUMNS} FROM horsies_finish_workflow_success(
         CAST(:task_id AS uuid), :worker_id, CAST(:claimed_at AS TIMESTAMPTZ),
         :result
-    )
-""")
-
-_CANCEL_TASK_SQL: Final = text(f"""
-    SELECT {_OUTCOME_COLUMNS} FROM horsies_cancel_task(
-        CAST(:task_id AS uuid), CAST(:include_running AS BOOLEAN)
     )
 """)
 
@@ -901,21 +896,6 @@ class TestExpirePendingTasks:
         assert {o.task_id for o in outcomes} == {free}
 
 
-async def _cancel_task(
-    session: AsyncSession,
-    task_id: str,
-    *,
-    include_running: bool = False,
-) -> TerminalizationOutcome:
-    """The writer of CANCEL_ADMIN: the administrative cancel of a plain task
-    (``horsies_cancel_task``); a RUNNING row only with ``include_running``."""
-    return await _outcome_of(
-        session,
-        _CANCEL_TASK_SQL,
-        {'task_id': task_id, 'include_running': include_running},
-    )
-
-
 def _cancel_owned_orphan(
     task_id: str,
     claimed_at: datetime = GENERATION,
@@ -984,126 +964,6 @@ async def _link_workflow_task(
     )
     await session.commit()
     return workflow_id
-
-
-class TestCancelTask:
-    """The writer of CANCEL_ADMIN, ``horsies_cancel_task``."""
-
-    async def test_applies_with_the_operator_owned_literals_and_pre_image(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session, status='CLAIMED')
-
-        outcome = await _cancel_task(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, Applied)
-        assert outcome.kind is TerminalizationKind.CANCEL_ADMIN
-        assert outcome.observed.status is TaskStatus.CLAIMED
-        assert outcome.observed.worker_id == WORKER
-        assert outcome.observed.claimed_at == GENERATION
-        row = (
-            await session.execute(
-                text("""
-                    SELECT status, error_code, failed_reason, failed_at,
-                           terminal_at, claimed, claimed_by_worker_id,
-                           claimed_at, finalizing_at,
-                           finalizing_by_worker_id
-                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
-                """),
-                {'id': task_id},
-            )
-        ).one()
-        assert row.status == 'CANCELLED'
-        assert row.error_code == 'TASK_CANCELLED'
-        assert row.failed_reason == 'Cancelled via monitoring API'
-        assert row.failed_at is not None
-        assert row.terminal_at == outcome.terminal_at
-        # No claim state survives the move; the claim's timestamp is
-        # preserved on the history record as provenance.
-        assert row.claimed is False
-        assert row.claimed_by_worker_id is None
-        assert row.claimed_at == GENERATION
-        assert row.finalizing_at is None
-        assert row.finalizing_by_worker_id is None
-
-    async def test_running_requires_explicit_permission(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        refused_id = await _seed(session)
-        refused = await _cancel_task(session, refused_id)
-        await session.commit()
-        assert isinstance(refused, SourceStateConflict)
-        assert refused.observed.status is TaskStatus.RUNNING
-
-        allowed_id = await _seed(session)
-        allowed = await _cancel_task(session, allowed_id, include_running=True)
-        await session.commit()
-        assert isinstance(allowed, Applied)
-        assert allowed.observed.status is TaskStatus.RUNNING
-
-    async def test_a_workflow_backing_task_is_never_administratively_cancelled(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(
-            session,
-            status='CLAIMED',
-            is_workflow_task=True,
-        )
-
-        outcome = await _cancel_task(session, task_id)
-        await session.commit()
-
-        assert isinstance(outcome, SourceStateConflict)
-        status = (
-            await session.execute(
-                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
-                {'id': task_id},
-            )
-        ).scalar_one()
-        assert status == 'CLAIMED'
-
-    async def test_replay_is_already_applied(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session, status='CLAIMED')
-        await _cancel_task(session, task_id)
-        await session.commit()
-
-        replay = await _cancel_task(session, task_id)
-        await session.commit()
-        assert isinstance(replay, AlreadyApplied)
-        assert replay.kind is TerminalizationKind.CANCEL_ADMIN
-
-    async def test_a_finished_task_of_another_kind_is_never_overwritten(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        task_id = await _seed(session, status='CLAIMED')
-        await _force_terminal(
-            session,
-            task_id,
-            status='CANCELLED',
-            kind='CANCEL_ORPHAN',
-        )
-
-        outcome = await _cancel_task(session, task_id, include_running=True)
-        await session.commit()
-        assert isinstance(outcome, SourceStateConflict)
-        assert isinstance(outcome.evidence, ObservedForeignTerminalization)
-        assert outcome.evidence.committed_kind is TerminalizationKind.CANCEL_ORPHAN
-
-    async def test_absence_is_an_outcome(
-        self,
-        session: AsyncSession,
-    ) -> None:
-        outcome = await _cancel_task(session, str(uuid.uuid4()))
-        await session.commit()
-        assert isinstance(outcome, TaskAbsent)
 
 
 class TestCancelOwnedOrphan:

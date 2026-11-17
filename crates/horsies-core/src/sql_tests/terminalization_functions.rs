@@ -7,17 +7,17 @@
 //!   fails with its error, and the task row keeps its status.
 //! - The outcomes of the writers of COMPLETE_LOCKED
 //!   (`horsies_finish_workflow_success`), FAIL_RUNNING
-//!   (`horsies_finish_failed_attempt`) and FAIL_STALE
-//!   (`horsies_finish_stale_attempt`). Each test has a copy of the
-//!   installed schema with one coverage pass ([`covered`]) and seeds its
-//!   rows. It calls the writer with its own SQL and decodes the one outcome
-//!   row with the decoder of the core ([`decode_outcome_row`]).
+//!   (`horsies_finish_failed_attempt`), FAIL_STALE
+//!   (`horsies_finish_stale_attempt`) and CANCEL_ADMIN
+//!   (`horsies_cancel_task`). Each test has a copy of the installed schema
+//!   with one coverage pass ([`covered`]) and seeds its rows. It calls the
+//!   writer with its own SQL and decodes the one outcome row with the
+//!   decoder of the core ([`decode_outcome_row`]).
 //!
 //! The other tests of `tests/integration/test_terminalization_functions.py`
-//! stay in Python. They run a call through the Python lifecycle
+//! stay in Python. Each runs a call through the Python lifecycle
 //! (`apply_async`, `apply_batch_async`, `apply_sync`, `call_for`,
-//! `batch_call_for`), or they decode the outcome of a writer that is not
-//! in this module yet with `decode_outcome_row`.
+//! `batch_call_for`).
 
 use chrono::{DateTime, TimeZone, Utc};
 use tokio_postgres::error::SqlState;
@@ -33,6 +33,7 @@ use crate::test_support::TestDatabase;
 
 mod already_applied;
 mod applied_transitions;
+mod cancel_task;
 mod fail_locked;
 mod fail_stale;
 mod refusals;
@@ -60,6 +61,12 @@ const FAIL_STALE_ERROR_CODE: &str = "WORKER_CRASHED";
 /// The failed reason, attempt message and attempt reason that the writer of
 /// FAIL_STALE stores.
 const FAIL_STALE_REASON: &str = "Worker crashed";
+
+/// The error code that the writer of CANCEL_ADMIN stores.
+const CANCEL_ADMIN_ERROR_CODE: &str = "TASK_CANCELLED";
+
+/// The failed reason that the writer of CANCEL_ADMIN stores.
+const CANCEL_ADMIN_REASON: &str = "Cancelled via monitoring API";
 
 /// The time after which a silent runner is stale, in the stale cases.
 const STALE_AFTER_MS: i32 = 60_000;
@@ -212,6 +219,15 @@ const STALE_ATTEMPT_SQL: &str = "
         'NONE', NULL, NULL,
         $4, $5, $6, $6, $6
     )
+";
+
+/// The writer of CANCEL_ADMIN: the administrative cancel of a plain task.
+/// Parameters: `$1` task id, `$2` whether a RUNNING row may be cancelled.
+const CANCEL_TASK_SQL: &str = "
+    SELECT task_id, ordinality, outcome, terminal_at, terminalization_kind,
+           observed_status, observed_worker_id, observed_claimed_at,
+           guard_kind, observed_guard
+    FROM horsies_cancel_task(CAST($1 AS uuid), CAST($2 AS BOOLEAN))
 ";
 
 /// Sets the row's started_at `$2` seconds and finalizing_at `$3` seconds
@@ -562,6 +578,22 @@ async fn fail_stale_after(
             &FAIL_STALE_ERROR_CODE,
             &FAIL_STALE_REASON,
         ],
+    )
+    .await
+}
+
+/// The writer of CANCEL_ADMIN (`horsies_cancel_task`). It cancels a RUNNING
+/// row only with `include_running`.
+async fn cancel_admin(
+    session: &Session,
+    task_id: Uuid,
+    include_running: bool,
+) -> TerminalizationOutcome {
+    outcome_of(
+        session,
+        "horsies_cancel_task",
+        CANCEL_TASK_SQL,
+        &[&task_id, &include_running],
     )
     .await
 }
