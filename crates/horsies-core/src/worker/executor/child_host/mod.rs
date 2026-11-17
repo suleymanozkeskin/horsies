@@ -10,8 +10,9 @@
 //! The host speaks the same frames as the Python child and gives the same
 //! guarantees: the start write and the finalizing marker through the core,
 //! a result envelope only after the body stopped, the deadline reports of
-//! each seat kind, the reports of work a body left ([`spawn_in_run`]), and
-//! the protocol's exit codes.
+//! each seat kind, the cancel signal of a shared async run at its deadline
+//! ([`run_cancel_signal`]), the reports of work a body left
+//! ([`spawn_in_run`]), and the protocol's exit codes.
 
 mod args;
 mod host;
@@ -32,4 +33,7 @@ mod tests;
 
 pub use args::{child_mode, ChildArgs, ChildArgsError, ChildMode, CHILD_MODE_ARGUMENT};
 pub use host::{child_command, run_child_host, ChildApp, ChildHostExit};
-pub use run_work::{spawn_in_run, RunSpawnRefused, MAX_RUN_WORK};
+pub use run_work::{
+    run_cancel_signal, spawn_in_run, RunCancelSignal, RunSignalRefused, RunSpawnRefused,
+    MAX_RUN_WORK,
+};
