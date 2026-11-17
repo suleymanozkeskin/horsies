@@ -145,9 +145,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::arguments::StartNow>()?;
     module.add_class::<operations::arguments::StartAfterDelay>()?;
     module.add_class::<operations::arguments::StartAt>()?;
-    module.add_class::<operations::arguments::RetentionDefault>()?;
-    module.add_class::<operations::arguments::RetentionForever>()?;
-    module.add_class::<operations::arguments::RetentionPeriod>()?;
     module.add_class::<operations::cancel::TaskCancelledRecord>()?;
     module.add_class::<operations::cancel::CancelRefusedWorkflowTask>()?;
     module.add_class::<operations::cancel::CancelRefusedStatus>()?;

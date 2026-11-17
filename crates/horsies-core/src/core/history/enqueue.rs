@@ -39,21 +39,49 @@ pub struct WorkflowTaskFacts {
     pub execution: Execution,
 }
 
+/// The part of a send that a refusal names (Python's `INVALID_INPUT` and
+/// `INVALID_TASK_OPTIONS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendPart {
+    /// The input, and the facts of the call that the input carries: the
+    /// start, the sent instant, the idempotency key, the retention class
+    /// key and the command fingerprint.
+    Input,
+    /// The task options.
+    TaskOptions,
+}
+
+impl SendPart {
+    /// The field name in a refusal message: `input` or `task_options`.
+    pub const fn field_name(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::TaskOptions => "task_options",
+        }
+    }
+}
+
+impl std::fmt::Display for SendPart {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.field_name())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EnqueuePreparationError {
     /// The text breaks the core's strict JSON read rule (`check_json_text`).
     #[error("{field} JSON is refused: {source}")]
     StrictJson {
-        field: &'static str,
+        field: SendPart,
         source: StrictJsonError,
     },
     #[error("{field} JSON is corrupt: {source}")]
     Json {
-        field: &'static str,
+        field: SendPart,
         source: serde_json::Error,
     },
     #[error("{field} JSON carries a number outside the supported domain: {detail}")]
-    NumberDomain { field: &'static str, detail: String },
+    NumberDomain { field: SendPart, detail: String },
     #[error("task_options JSON must encode an object")]
     InvalidTaskOptions,
     #[error("task_options refused: {0}")]
@@ -169,7 +197,7 @@ pub fn prepare_workflow_task_facts(
 /// every digit.
 fn check_input(input_json: &str) -> Result<(), EnqueuePreparationError> {
     check_json_text(input_json).map_err(|source| EnqueuePreparationError::StrictJson {
-        field: "input",
+        field: SendPart::Input,
         source,
     })
 }
@@ -189,16 +217,16 @@ pub(crate) fn parse_optional_object(
     // decode 300 levels of room (Python `core/codec/json_value.py:54-75`).
     let parsed: Value = crate::core::codec::from_json_str(value).map_err(|error| match error {
         JsonReadError::Refused(source) => EnqueuePreparationError::StrictJson {
-            field: "task_options",
+            field: SendPart::TaskOptions,
             source,
         },
         JsonReadError::Decode(source) => EnqueuePreparationError::Json {
-            field: "task_options",
+            field: SendPart::TaskOptions,
             source,
         },
     })?;
     validate_integer_domain(value).map_err(|detail| EnqueuePreparationError::NumberDomain {
-        field: "task_options",
+        field: SendPart::TaskOptions,
         detail,
     })?;
     match parsed {
@@ -251,7 +279,7 @@ mod tests {
             matches!(
                 error,
                 EnqueuePreparationError::NumberDomain {
-                    field: "task_options",
+                    field: SendPart::TaskOptions,
                     ..
                 }
             ),
@@ -299,7 +327,10 @@ mod tests {
             assert!(
                 matches!(
                     error,
-                    EnqueuePreparationError::StrictJson { field: "input", .. }
+                    EnqueuePreparationError::StrictJson {
+                        field: SendPart::Input,
+                        ..
+                    }
                 ),
                 "{input:?}: {error}"
             );
@@ -324,7 +355,7 @@ mod tests {
         assert!(matches!(
             error,
             EnqueuePreparationError::StrictJson {
-                field: "task_options",
+                field: SendPart::TaskOptions,
                 ..
             }
         ));

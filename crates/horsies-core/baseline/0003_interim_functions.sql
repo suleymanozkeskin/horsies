@@ -14,7 +14,9 @@
 --   horsies_terminalization_miss(uuid, text, text, text, timestamptz) (0008_history_maintenance_functions.sql),
 --   which owns the equivalence classes of the kinds;
 -- - the owned-claim functions require the claim generation (22023 on NULL, or on a NULL element of a batch) and
---   fence on it with no NULL arm.
+--   fence on it with no NULL arm;
+-- - horsies_key_reservation_claim inserts with ON CONFLICT DO NOTHING and reads again, so concurrent first claims
+--   of one key answer REPLAY or CONFLICT, not 23505.
 -- The trigger functions are in 0001_tables.sql. The published history readers are rendered by
 -- horsies_publish_history_readers (0008_history_maintenance_functions.sql);
 -- horsies_task_history_duplicate_staged here is the first version that the first publication replaces.
@@ -1324,10 +1326,28 @@ BEGIN
 END
 $$;
 
+-- The claim of an idempotency key by one send.
+-- - A LIVE reservation of the key, or a TERMINAL one that expires after statement_timestamp(), answers REPLAY when
+--   its fingerprint version and fingerprint equal the sent ones, else CONFLICT; both name its task_id and fingerprint
+--   version. An expired TERMINAL reservation counts as absent: the claim deletes it. With no reservation the claim
+--   inserts a LIVE one for p_task_id: APPLIED.
+-- - Concurrent first claims of one key: the insert does nothing on a conflict. An insert that meets the uncommitted
+--   reservation of another transaction waits for it; after a commit the next round reads that reservation in a new
+--   statement (READ COMMITTED: a new snapshot) and answers REPLAY or CONFLICT, after a rollback the insert goes on.
+--   One claim applies; every other claim is classified against it.
+-- - A round is the read, the delete and the insert. A round ends with no answer only when the reservation that
+--   stopped its insert was deleted or expired before the next read. After c_claim_rounds rounds with no answer the
+--   claim raises 40001 (serialization_failure); a resend of the command claims again.
+-- - Under REPEATABLE READ or SERIALIZABLE, an insert that meets a reservation committed after the transaction
+--   snapshot raises 40001 (PostgreSQL's ON CONFLICT rule).
+-- Refuses with 22023, before any write: a digest or fingerprint that is not 32 bytes; a window outside (0, 30 days].
+-- Locks the read reservation FOR UPDATE and the deleted expired reservation until the caller's transaction ends.
+-- It does not commit.
 CREATE FUNCTION horsies_key_reservation_claim(p_key_digest bytea, p_key_scope_version smallint, p_reservation_window interval, p_fingerprint_version smallint, p_fingerprint bytea, p_task_id uuid) RETURNS horsies_key_reservation_outcome
     LANGUAGE plpgsql
     AS $$
 DECLARE
+    c_claim_rounds CONSTANT integer := 3;
     v_task_id uuid;
     v_fingerprint_version smallint;
     v_fingerprint bytea;
@@ -1346,38 +1366,48 @@ BEGIN
             MESSAGE = 'reservation window must be positive and at most 30 days';
     END IF;
 
-    SELECT task_id, fingerprint_version, command_fingerprint
-    INTO v_task_id, v_fingerprint_version, v_fingerprint
-    FROM horsies_key_reservations
-    WHERE idempotency_key_digest = p_key_digest
-      AND (disposition = 'LIVE' OR expires_at > statement_timestamp())
-    FOR UPDATE;
-    IF FOUND THEN
-        IF v_fingerprint = p_fingerprint
-           AND v_fingerprint_version = p_fingerprint_version THEN
-            RETURN ROW('REPLAY', v_task_id, v_fingerprint_version)
+    FOR v_round IN 1..c_claim_rounds LOOP
+        SELECT task_id, fingerprint_version, command_fingerprint
+        INTO v_task_id, v_fingerprint_version, v_fingerprint
+        FROM horsies_key_reservations
+        WHERE idempotency_key_digest = p_key_digest
+          AND (disposition = 'LIVE' OR expires_at > statement_timestamp())
+        FOR UPDATE;
+        IF FOUND THEN
+            IF v_fingerprint = p_fingerprint
+               AND v_fingerprint_version = p_fingerprint_version THEN
+                RETURN ROW('REPLAY', v_task_id, v_fingerprint_version)
+                    ::horsies_key_reservation_outcome;
+            END IF;
+            RETURN ROW('CONFLICT', v_task_id, v_fingerprint_version)
                 ::horsies_key_reservation_outcome;
         END IF;
-        RETURN ROW('CONFLICT', v_task_id, v_fingerprint_version)
-            ::horsies_key_reservation_outcome;
-    END IF;
 
-    DELETE FROM horsies_key_reservations
-    WHERE idempotency_key_digest = p_key_digest
-      AND disposition = 'TERMINAL'
-      AND expires_at <= statement_timestamp();
+        DELETE FROM horsies_key_reservations
+        WHERE idempotency_key_digest = p_key_digest
+          AND disposition = 'TERMINAL'
+          AND expires_at <= statement_timestamp();
 
-    INSERT INTO horsies_key_reservations (
-        idempotency_key_digest, key_scope_version,
-        fingerprint_version, command_fingerprint, task_id,
-        disposition, reservation_window, expires_at
-    ) VALUES (
-        p_key_digest, p_key_scope_version,
-        p_fingerprint_version, p_fingerprint, p_task_id,
-        'LIVE', p_reservation_window, NULL
-    );
-    RETURN ROW('APPLIED', p_task_id, NULL)
-        ::horsies_key_reservation_outcome;
+        INSERT INTO horsies_key_reservations (
+            idempotency_key_digest, key_scope_version,
+            fingerprint_version, command_fingerprint, task_id,
+            disposition, reservation_window, expires_at
+        ) VALUES (
+            p_key_digest, p_key_scope_version,
+            p_fingerprint_version, p_fingerprint, p_task_id,
+            'LIVE', p_reservation_window, NULL
+        )
+        ON CONFLICT (idempotency_key_digest) DO NOTHING;
+        IF FOUND THEN
+            RETURN ROW('APPLIED', p_task_id, NULL)
+                ::horsies_key_reservation_outcome;
+        END IF;
+    END LOOP;
+
+    RAISE EXCEPTION USING ERRCODE = 'serialization_failure',
+        MESSAGE = 'key reservation claim: the reservation of the key changed in every round',
+        DETAIL = format('key digest %s, %s rounds', encode(p_key_digest, 'hex'), c_claim_rounds),
+        HINT = 'Send again: the next claim reads the reservation that is committed then.';
 END
 $$;
 

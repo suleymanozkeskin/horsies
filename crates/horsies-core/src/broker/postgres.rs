@@ -9,7 +9,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::core::history::archive::results::decode_result_envelope;
-use crate::core::history::enqueue::prepare_enqueue_facts;
+use crate::core::history::enqueue::{parse_optional_object, prepare_enqueue_facts, SendPart};
 use crate::core::history::identity::keys::{
     validate_reservation_window, IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
 };
@@ -34,7 +34,7 @@ use crate::broker::enqueue_task::{
     decode_enqueue_outcome, enqueue_result, EnqueueKey, EnqueueStart, EnqueueTaskOutcome, SendKind,
     ENQUEUE_TASK,
 };
-use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
+use crate::broker::error::{is_retryable_sqlx_error, BrokerError, EnqueueRefusal};
 use crate::broker::health::{
     read_listed_worker_states, read_worker_snapshot, read_worker_snapshots, DatabasePing,
     ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
@@ -80,10 +80,13 @@ use crate::db::{
 /// `MAX_VALUE_JSON_DEPTH` levels. Any other input except `null` is one value under the same rules. A text that
 /// is not strict JSON is refused.
 fn check_sent_input(input: &str) -> Result<(), BrokerError> {
-    let refused =
-        |cause: String| BrokerError::EnqueueContract(format!("task input refused: {cause}"));
-    let value: serde_json::Value =
-        crate::core::codec::from_json_str(input).map_err(|e| refused(e.to_string()))?;
+    let value: serde_json::Value = crate::core::codec::from_json_str(input).map_err(|error| {
+        BrokerError::EnqueueContract(EnqueueRefusal::unreadable_json(
+            SendPart::Input,
+            format!("task input refused: {error}"),
+            &error,
+        ))
+    })?;
     let no_engine_members: std::collections::HashSet<String> = std::collections::HashSet::new();
     let checked = match &value {
         serde_json::Value::Object(members) => {
@@ -96,7 +99,12 @@ fn check_sent_input(input: &str) -> Result<(), BrokerError> {
             &no_engine_members,
         ),
     };
-    checked.map_err(|refusal| refused(refusal.to_string()))
+    checked.map_err(|refusal| {
+        BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
+            SendPart::Input,
+            format!("task input refused: {refusal}"),
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -1396,17 +1404,28 @@ impl PostgresBroker {
         if sent_at.is_some_and(|value| value > Utc::now() + chrono::Duration::seconds(5))
             && matches!(start, EnqueueStart::Now)
         {
-            return Err(BrokerError::EnqueueContract(
+            return Err(BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
+                SendPart::Input,
                 "sent_at is in the future without enqueued_at or enqueue_delay_seconds; sent_at is a call-site timestamp".to_owned(),
-            ));
+            )));
         }
         check_sent_input(input)?;
         let task_id = match predetermined_task_id {
             Some(task_id) => task_id,
+            // The task id is a fact of the send's input; a send with no id
+            // mints it here.
             None => crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
-                BrokerError::EnqueueContract(format!("task identity mint failed: {error}"))
+                BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
+                    SendPart::Input,
+                    format!("task identity mint failed: {error}"),
+                ))
             })?,
         };
+        // The options are read with the strict rule before the retry limit,
+        // so a text that does not read names its reader's error (Python
+        // `_parse_enqueue_task_options`).
+        let _options = parse_optional_object(task_options)
+            .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
         let max_retries = enqueue_max_retries(task_name, task_options)?;
         let effective_sent_at = sent_at_at_stored_precision(sent_at.unwrap_or_else(Utc::now))?;
         let retain_rerun_input = retain_rerun_input.unwrap_or(self.retain_rerun_input_default);
@@ -1423,7 +1442,7 @@ impl PostgresBroker {
             retain_rerun_input,
             idempotency_key,
         )
-        .map_err(|error| BrokerError::EnqueueContract(error.to_string()))?;
+        .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
         let key = EnqueueKey::of(
             facts.idempotency_key_digest,
             self.idempotency_reservation_window_seconds,
@@ -3245,7 +3264,10 @@ use crate::worker::retry::stored_max_retries;
 /// a send reports as `VALIDATION_FAILED`. Other keys are not judged here.
 fn enqueue_max_retries(task_name: &str, task_options: Option<&str>) -> Result<i32, BrokerError> {
     stored_max_retries(task_options).map_err(|refusal| {
-        BrokerError::EnqueueContract(format!("task_options refused for {task_name}: {refusal}"))
+        BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
+            SendPart::TaskOptions,
+            format!("task_options refused for {task_name}: {refusal}"),
+        ))
     })
 }
 
@@ -3815,7 +3837,10 @@ fn sent_at_at_stored_precision(sent_at: DateTime<Utc>) -> Result<DateTime<Utc>, 
     sent_at
         .with_nanosecond(nanos - nanos % 1_000)
         .ok_or_else(|| {
-            BrokerError::EnqueueContract(format!("sent_at {sent_at} has no whole-microsecond form"))
+            BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
+                SendPart::Input,
+                format!("sent_at {sent_at} has no whole-microsecond form"),
+            ))
         })
 }
 
