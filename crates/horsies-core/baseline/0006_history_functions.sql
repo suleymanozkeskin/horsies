@@ -727,8 +727,10 @@ $$;
 -- - CATALOG_CONFLICT with conflict_kind: RELATION_WITHOUT_CATALOG (a relation and no catalog row), OPEN_LOWER_BOUND
 --   (a finite leaf with an open lower bound), DROPPED_RELATION_EXISTS (the catalog recorded a drop and the relation
 --   exists), FOREIGN_PARENT (attached to another parent), DETACH_RECORDED_WHILE_ATTACHED (the catalog recorded a
---   detach and the leaf is attached), PHYSICAL_NONCONFORMANT (attached or pending, and its partition bound or task
---   index differs from the catalog).
+--   detach and the leaf is attached), PHYSICAL_NONCONFORMANT (attached or pending, and its partition bound differs
+--   from the catalog, or its id index, <leaf>_task_idx of a PERIOD leaf or <leaf>_probe_idx of a HEARTBEAT leaf, is
+--   missing or not conformant by horsies_history_leaf_indexes (0008_history_maintenance_functions.sql), the one rule
+--   of leaf index conformance).
 -- - ALREADY_DROPPED: the catalog recorded the drop and the relation is gone.
 -- - MISSING: cataloged, not dropped, and the relation is gone (removed out of band).
 -- - PENDING_BLOCKED with blocker_count and attachment: phase-2 pending locators point into the leaf's interval.
@@ -759,6 +761,7 @@ DECLARE
     v_attached_parent oid;
     v_detach_pending boolean;
     v_attachment text;
+    v_index_kind text;
     v_index_name text;
     v_conformant boolean;
     v_blockers bigint;
@@ -781,10 +784,12 @@ BEGIN
     CASE v_class.class_kind
         WHEN 'PERIOD' THEN
             v_parent_name := 'horsies_task_history_' || v_class.class_key;
+            v_index_kind := 'HISTORY';
             v_index_name := p_leaf_name || '_task_idx';
             v_expires_at := v_catalog.upper_anchor + make_interval(days => v_class.retention_days);
         WHEN 'HEARTBEAT' THEN
             v_parent_name := 'horsies_heartbeats';
+            v_index_kind := 'HEARTBEAT';
             v_index_name := p_leaf_name || '_probe_idx';
             v_expires_at := v_catalog.upper_anchor + make_interval(hours => v_class.heartbeat_horizon_hours);
         WHEN 'FOREVER' THEN
@@ -851,33 +856,8 @@ BEGIN
             )
             AND EXISTS (
                 SELECT 1
-                FROM pg_index AS x
-                JOIN pg_class AS index_relation ON index_relation.oid = x.indexrelid
-                JOIN pg_am AS access_method ON access_method.oid = index_relation.relam
-                WHERE x.indexrelid = to_regclass(quote_ident(v_index_name))
-                  AND x.indrelid = v_leaf_oid
-                  AND access_method.amname = 'btree'
-                  AND x.indisvalid AND x.indisready AND x.indislive
-                  AND NOT x.indisunique AND NOT x.indisprimary AND NOT x.indisexclusion
-                  AND x.indpred IS NULL AND x.indexprs IS NULL
-                  AND CASE v_class.class_kind
-                      WHEN 'PERIOD' THEN
-                          x.indnkeyatts = 1 AND x.indnatts = 1
-                          AND pg_get_indexdef(x.indexrelid, 1, false) = 'task_id'
-                          AND x.indoption[0] = 0
-                          AND pg_get_indexdef(x.indexrelid) LIKE '% USING btree (task_id)'
-                      ELSE
-                          x.indnkeyatts = 3 AND x.indnatts = 3
-                          AND pg_get_indexdef(x.indexrelid, 1, false) = 'task_id'
-                          AND pg_get_indexdef(x.indexrelid, 2, false) = 'role'
-                          AND pg_get_indexdef(x.indexrelid, 3, false) = 'sent_at'
-                          AND x.indoption[0] = 0 AND x.indoption[1] = 0 AND x.indoption[2] = 3
-                          AND pg_get_indexdef(x.indexrelid) LIKE '% USING btree (task_id, role, sent_at DESC)'
-                  END
-                  AND x.indcollation[0] = (
-                      SELECT a.attcollation FROM pg_attribute AS a
-                      WHERE a.attrelid = v_leaf_oid AND a.attname = 'task_id'
-                  )
+                FROM horsies_history_leaf_indexes(v_index_kind, p_leaf_name) AS i
+                WHERE i.index_name = v_index_name AND i.conformant
             )
         INTO v_conformant
         FROM pg_class AS leaf
