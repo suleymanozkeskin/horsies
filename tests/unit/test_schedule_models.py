@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import time as datetime_time
+from datetime import timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
 
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import (
+    ConfigurationError,
+    ErrorCode,
+    MultipleValidationErrors,
+)
 from horsies.core.models.schedule import (
     DailySchedule,
     HourlySchedule,
@@ -227,6 +233,109 @@ class TestMonthlySchedule:
         """day=32 violates le=31 constraint."""
         with pytest.raises(ValidationError):
             MonthlySchedule(day=32, time=datetime_time(0, 0, 0))
+
+
+# =============================================================================
+# Time of day of DailySchedule, WeeklySchedule and MonthlySchedule
+# =============================================================================
+
+
+type _TimePattern = DailySchedule | WeeklySchedule | MonthlySchedule
+
+
+def _daily(time_of_day: datetime_time) -> _TimePattern:
+    return DailySchedule(time=time_of_day)
+
+
+def _weekly(time_of_day: datetime_time) -> _TimePattern:
+    return WeeklySchedule(days=[Weekday.MONDAY], time=time_of_day)
+
+
+def _monthly(time_of_day: datetime_time) -> _TimePattern:
+    return MonthlySchedule(day=1, time=time_of_day)
+
+
+_TIME_PATTERNS = [
+    pytest.param(_daily, 'DailySchedule', id='daily'),
+    pytest.param(_weekly, 'WeeklySchedule', id='weekly'),
+    pytest.param(_monthly, 'MonthlySchedule', id='monthly'),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(('build', 'pattern_name'), _TIME_PATTERNS)
+class TestTimeOfDay:
+    """The zone of a schedule comes only from its `timezone`, and slots fire at whole seconds."""
+
+    def test_a_whole_second_time_without_tzinfo_is_accepted(
+        self, build: Callable[[datetime_time], _TimePattern], pattern_name: str,
+    ) -> None:
+        pattern = build(datetime_time(9, 30, 15))
+
+        assert pattern.time == datetime_time(9, 30, 15)
+        assert pattern_name == type(pattern).__name__
+
+    def test_a_time_with_tzinfo_is_refused_with_the_field_that_holds_the_zone(
+        self, build: Callable[[datetime_time], _TimePattern], pattern_name: str,
+    ) -> None:
+        offset = timezone(timedelta(hours=2))
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            build(datetime_time(9, 0, 0, tzinfo=offset))
+
+        exc = exc_info.value
+        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc.message == f'{pattern_name} time has a time zone'
+        assert exc.notes == ['time: 09:00:00+02:00']
+        assert exc.help_text == (
+            "give the time without tzinfo and set the zone in the schedule's "
+            "'timezone' field"
+        )
+
+    def test_a_time_with_microseconds_is_refused(
+        self, build: Callable[[datetime_time], _TimePattern], pattern_name: str,
+    ) -> None:
+        with pytest.raises(ConfigurationError) as exc_info:
+            build(datetime_time(9, 0, 0, 500))
+
+        exc = exc_info.value
+        assert exc.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert exc.message == f'{pattern_name} time has microseconds'
+        assert exc.notes == ['time: 09:00:00.000500']
+        assert exc.help_text == (
+            'schedules fire at whole seconds; give the time without microseconds'
+        )
+
+    def test_a_time_that_breaks_both_rules_reports_both(
+        self, build: Callable[[datetime_time], _TimePattern], pattern_name: str,
+    ) -> None:
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+            build(datetime_time(9, 0, 0, 500, tzinfo=timezone.utc))
+
+        messages = [error.message for error in exc_info.value.report.errors]
+        assert messages == [
+            f'{pattern_name} time has a time zone',
+            f'{pattern_name} time has microseconds',
+        ]
+
+
+@pytest.mark.unit
+class TestTimeOfDayFromText:
+    """A config read from text holds the same rules."""
+
+    def test_a_time_text_with_an_offset_is_refused(self) -> None:
+        with pytest.raises(ConfigurationError) as exc_info:
+            DailySchedule.model_validate({'time': '09:00:00+02:00'})
+
+        assert exc_info.value.message == 'DailySchedule time has a time zone'
+
+    def test_a_time_text_with_a_fraction_of_a_second_is_refused(self) -> None:
+        with pytest.raises(ConfigurationError) as exc_info:
+            WeeklySchedule.model_validate(
+                {'days': ['monday'], 'time': '09:00:00.000500'},
+            )
+
+        assert exc_info.value.message == 'WeeklySchedule time has microseconds'
 
 
 # =============================================================================
