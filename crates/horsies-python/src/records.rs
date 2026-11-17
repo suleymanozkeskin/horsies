@@ -48,6 +48,14 @@ pub struct DatabasePingRecord {
     pub latency_ms: f64,
 }
 
+/// The close of a handle ended: its core pools are closed, or the handle
+/// never connected. Writes in flight that did not end within the close bound
+/// are logged with their count; their outcome is unknown. The next operation
+/// on the handle opens new core pools.
+#[pyclass(module = "horsies._core", frozen)]
+#[derive(Clone, Debug)]
+pub struct HandleClosed {}
+
 /// The outcome of one operation: its record, or its failure.
 pub enum Outcome<T> {
     Done(T),

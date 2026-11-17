@@ -128,6 +128,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<handle::CoreHandle>()?;
     module.add_class::<records::BrokerFailure>()?;
     module.add_class::<records::DatabasePingRecord>()?;
+    module.add_class::<records::HandleClosed>()?;
     module.add_class::<IdMintRefused>()?;
     module.add_class::<operations::arguments::StartNow>()?;
     module.add_class::<operations::arguments::StartAfterDelay>()?;

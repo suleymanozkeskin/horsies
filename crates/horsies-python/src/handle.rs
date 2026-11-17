@@ -14,11 +14,12 @@ use horsies_core::{
     BrokerError, BrokerErrorCode, ClientFamily, PostgresBroker, SchemaInitializationMode,
 };
 use pyo3::prelude::*;
+use pyo3::IntoPyObjectExt;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use crate::bridge::blocking::call_blocking;
-use crate::bridge::completion_queue::call_async;
+use crate::bridge::completion_queue::{call_async, done_future};
 use crate::bridge::CallKind;
 use crate::errors::{refusal_error, ManifestRefused};
 use crate::operations::enqueue::{enqueue_operation, EnqueueRequest};
@@ -27,7 +28,7 @@ use crate::operations::schema::{install_operation, schema_status_operation};
 use crate::operations::stale_claims::requeue_stale_claimed_operation;
 use crate::operations::task_info::{task_info_operation, TaskInfoParts};
 use crate::process_core::{core_for_call, Core};
-use crate::records::{BrokerFailure, DatabasePingRecord, Outcome};
+use crate::records::{BrokerFailure, DatabasePingRecord, HandleClosed, Outcome};
 
 /// The manifest of a handle and its broker, connected at first use.
 #[derive(Clone)]
@@ -50,6 +51,23 @@ impl BrokerConnection {
     pub fn schema_mode(&self) -> SchemaMode {
         self.manifest.schema
     }
+
+    /// Whether a connect succeeded on this handle. Starts nothing and waits
+    /// for nothing: a connect still in flight is `NeverConnected`.
+    fn connect_state(&self) -> ConnectState {
+        match self.broker.get() {
+            Some(broker) => ConnectState::Connected(Arc::clone(broker)),
+            None => ConnectState::NeverConnected,
+        }
+    }
+}
+
+/// Whether a handle holds a connected broker.
+enum ConnectState {
+    /// No connect succeeded: the handle holds no pool, and the core of the
+    /// process may not have started.
+    NeverConnected,
+    Connected(Arc<PostgresBroker>),
 }
 
 async fn connect(manifest: &ProducerManifest) -> Result<Arc<PostgresBroker>, BrokerError> {
@@ -104,6 +122,44 @@ impl CoreHandle {
     #[getter]
     fn manifest_version(&self) -> u32 {
         self.connection.manifest.manifest_version.get()
+    }
+
+    /// Close the handle's core pools: `HandleClosed`. No new operation takes
+    /// the closed pools; writes in flight run to their end within the close
+    /// bound, and the ones that do not are logged with their count. A handle
+    /// that never connected returns at once and starts nothing (a preload
+    /// process must not start the core). The next operation on the handle
+    /// opens new core pools. Runs on to its end when the caller leaves.
+    fn close(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let broker = match self.connection.connect_state() {
+            ConnectState::NeverConnected => return HandleClosed {}.into_py_any(py),
+            ConnectState::Connected(broker) => broker,
+        };
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.close",
+            CallKind::Write,
+            close_operation(broker),
+        )
+    }
+
+    /// The awaitable form of `close`. A handle that never connected returns
+    /// a future that is already done, and starts nothing.
+    fn close_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let broker = match self.connection.connect_state() {
+            ConnectState::NeverConnected => return done_future(py, HandleClosed {}),
+            ConnectState::Connected(broker) => broker,
+        };
+        let core = checked_core(py)?;
+        call_async(
+            py,
+            core,
+            "CoreHandle.close_async",
+            CallKind::Write,
+            close_operation(broker),
+        )
     }
 
     /// Ping the database: `DatabasePingRecord` or `BrokerFailure` with
@@ -306,6 +362,14 @@ pub fn checked_core(py: Python<'_>) -> PyResult<&'static Core> {
     core_for_call(py).map_err(refusal_error)
 }
 
+/// Close the pools of a connected handle's broker. Writes in the sense of
+/// [`CallKind::Write`]: a caller that leaves does not stop the close. The
+/// broker logs the writes that did not end within the close bound.
+async fn close_operation(broker: Arc<PostgresBroker>) -> HandleClosed {
+    broker.close().await;
+    HandleClosed {}
+}
+
 fn ping_database_operation(
     connection: BrokerConnection,
 ) -> impl Future<Output = Outcome<DatabasePingRecord>> + Send + 'static {
@@ -325,5 +389,57 @@ fn ping_database_operation(
             }),
             Err(error) => Outcome::Failed(BrokerFailure::from(error)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MANIFEST: &str = r#"{
+        "manifest_version": 1,
+        "database": {
+            "database_url": "postgresql://user:secret@127.0.0.1:1/none",
+            "session_database": {"kind": "SAME_AS_DATABASE_URL"},
+            "pgbouncer_transaction_mode": false,
+            "pool_pre_ping": true,
+            "pool_size": 5,
+            "max_overflow": 0,
+            "pool_timeout": 30,
+            "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
+            "echo": false,
+            "tcp_keepalives": {
+                "kind": "ON",
+                "idle_seconds": 30,
+                "interval_seconds": 10,
+                "probes": 3
+            },
+            "tcp_user_timeout": {"kind": "AFTER", "milliseconds": 30000}
+        },
+        "schema": "MIGRATE_AND_VALIDATE",
+        "send": {
+            "retain_rerun_input_default": false,
+            "idempotency_reservation_window": 86400000000
+        }
+    }"#;
+
+    #[test]
+    fn a_handle_that_never_connected_closes_without_a_core_call() {
+        let handle = CoreHandle::new(MANIFEST).expect("the manifest is complete");
+        assert!(matches!(
+            handle.connection.connect_state(),
+            ConnectState::NeverConnected
+        ));
+        Python::initialize();
+        Python::attach(|py| {
+            let closed = handle
+                .close(py)
+                .expect("the close of a handle that never connected does not fail");
+            assert!(closed.bind(py).is_instance_of::<HandleClosed>());
+        });
+        assert!(matches!(
+            handle.connection.connect_state(),
+            ConnectState::NeverConnected
+        ));
     }
 }
