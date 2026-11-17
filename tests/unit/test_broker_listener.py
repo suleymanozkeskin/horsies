@@ -1519,7 +1519,9 @@ def _stub_startup_coverage(worker: Any, monkeypatch: pytest.MonkeyPatch) -> None
         republished=False,
         absent_leaves=(),
         heartbeat_covered_now=True,
-        history_covered_through=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        history_covered_through=coverage_module.CoveredUntil(
+            at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        ),
         heartbeats_covered_through=datetime(
                 2026, 1, 1, 1, tzinfo=timezone.utc
         ),

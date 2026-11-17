@@ -3907,8 +3907,8 @@ class TestStartupRegistersEveryClassItRuns:
                 republished=False,
                 absent_leaves=(),
                 heartbeat_covered_now=True,
-                history_covered_through=datetime(
-                    2026, 1, 2, tzinfo=timezone.utc
+                history_covered_through=coverage_module.CoveredUntil(
+                    at=datetime(2026, 1, 2, tzinfo=timezone.utc),
                 ),
                 heartbeats_covered_through=datetime(
                     2026, 1, 1, 1, tzinfo=timezone.utc
@@ -3961,7 +3961,9 @@ class TestStartGuardsKindsDownAtTheFirstStart:
                 republished=False,
                 absent_leaves=(),
                 heartbeat_covered_now=True,
-                history_covered_through=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                history_covered_through=coverage_module.CoveredUntil(
+                    at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                ),
                 heartbeats_covered_through=datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
             )
 
@@ -4105,8 +4107,8 @@ class TestWorkerStartConnectionOrdering:
                 republished=False,
                 absent_leaves=(),
                 heartbeat_covered_now=True,
-                history_covered_through=datetime(
-                    2026, 1, 2, tzinfo=timezone.utc
+                history_covered_through=coverage_module.CoveredUntil(
+                    at=datetime(2026, 1, 2, tzinfo=timezone.utc),
                 ),
                 heartbeats_covered_through=datetime(
                     2026, 1, 1, 1, tzinfo=timezone.utc
@@ -4167,7 +4169,9 @@ class TestWorkerStartConnectionOrdering:
                 republished=False,
                 absent_leaves=(),
                 heartbeat_covered_now=True,
-                history_covered_through=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                history_covered_through=coverage_module.CoveredUntil(
+                    at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                ),
                 heartbeats_covered_through=datetime(
                     2026, 1, 1, 1, tzinfo=timezone.utc
                 ),

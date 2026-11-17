@@ -162,6 +162,17 @@ SELECT fixture_check(
     AND NOT EXISTS (SELECT 1 FROM probe_fresh WHERE leaf_kind = 'heartbeat' AND conformant)
 );
 SELECT fixture_check(
+    'probe, fresh install: the forever leaf has OPEN lower and upper bounds and no anchors',
+    (SELECT lower_bound_kind = 'OPEN' AND lower_anchor IS NULL AND upper_bound_kind = 'OPEN' AND upper_anchor IS NULL
+     FROM probe_fresh WHERE leaf_name = 'horsies_task_history_forever_open')
+);
+SELECT fixture_check(
+    'probe, fresh install: every heartbeat row has AT bounds one hour apart',
+    (SELECT bool_and(lower_bound_kind = 'AT' AND upper_bound_kind = 'AT'
+                     AND upper_anchor = lower_anchor + interval '1 hour')
+     FROM probe_fresh WHERE leaf_kind = 'heartbeat')
+);
+SELECT fixture_check(
     'probe, fresh install: registration and publication are unhealthy, no leaf is absent',
     NOT bool_or(registration_healthy) AND NOT bool_or(publication_healthy) AND bool_and(absent_leaves = '{}')
 ) FROM probe_fresh;
@@ -663,7 +674,7 @@ SELECT fixture_check(
     = ARRAY(SELECT horsies_history_leaf_name('standard_7d', fixture_today() + d * interval '1 day')
             FROM generate_series(0, 7) AS d ORDER BY d)
     AND (SELECT bool_and(parent_name = 'horsies_task_history_standard_7d' AND lower_bound_kind = 'AT'
-                         AND upper_anchor = lower_anchor + interval '1 day')
+                         AND upper_bound_kind = 'AT' AND upper_anchor = lower_anchor + interval '1 day')
          FROM probe_healthy WHERE class_key = 'standard_7d')
 );
 SET TimeZone = 'Pacific/Chatham';

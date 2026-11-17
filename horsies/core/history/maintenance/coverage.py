@@ -97,8 +97,8 @@ _BUSY_RETRY_MAX_SECONDS = 0.08
 
 _COVERAGE_PROBE_SQL: Final = text(
     'SELECT checked_at, leaf_kind, class_key, parent_name, leaf_name, lower_bound_kind, '
-    'lower_anchor, upper_anchor, conformant, registration_healthy, publication_healthy, '
-    'absent_leaves '
+    'lower_anchor, upper_bound_kind, upper_anchor, conformant, registration_healthy, '
+    'publication_healthy, absent_leaves '
     'FROM horsies_coverage_probe(CAST(:declared_days AS smallint[]), '
     'CAST(:history_horizon AS smallint), CAST(:heartbeat_horizon AS smallint))'
 )
@@ -124,6 +124,42 @@ _CREATE_HEARTBEAT_LEAF_SQL: Final = text(
 
 
 @dataclass(frozen=True, slots=True)
+class CoveredForever:
+    """No history class has an end of coverage.
+
+    Only the forever class has leaves, and its leaf has an open upper bound.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class CoveredUntil:
+    """The first instant (UTC) at which a history class has no leaf.
+
+    The earliest, over the history classes with daily leaves, of the upper
+    bound of each class's newest leaf. A write of that class at or after
+    `at` finds no leaf.
+    """
+
+    at: datetime
+
+
+type HistoryCoverage = CoveredForever | CoveredUntil
+"""How far the history leaves reach: until an instant, or forever."""
+
+
+def history_coverage_payload(coverage: HistoryCoverage) -> dict[str, str]:
+    """The form of a `HistoryCoverage` in the worker health payload.
+
+    `{'kind': 'FOREVER'}` or `{'kind': 'UNTIL', 'at': <ISO 8601 instant>}`.
+    """
+    match coverage:
+        case CoveredForever():
+            return {'kind': 'FOREVER'}
+        case CoveredUntil(at=at):
+            return {'kind': 'UNTIL', 'at': at.isoformat()}
+
+
+@dataclass(frozen=True, slots=True)
 class CoverageEnsured:
     """One completed ensure pass, what it changed, and how far
     coverage now reaches — the operator's answer to "how long do
@@ -140,7 +176,7 @@ class CoverageEnsured:
     created_heartbeat_leaves: int
     republished: bool
     heartbeat_covered_now: bool
-    history_covered_through: datetime
+    history_covered_through: HistoryCoverage
     heartbeats_covered_through: datetime
     absent_leaves: tuple[str, ...]
 
@@ -173,7 +209,7 @@ class _CoverageProbe:
     registration_healthy: bool
     publication_healthy: bool
     heartbeat_covered_now: bool
-    history_covered_through: datetime
+    history_covered_through: HistoryCoverage
     heartbeats_covered_through: datetime
     absent_leaves: tuple[str, ...]
 
@@ -258,79 +294,108 @@ async def _probe_complete_coverage(
     return _coverage_probe_of(rows)
 
 
+def _probe_leaf_of(row: Row[Any]) -> LeafRef | ForeverLeafRef:
+    """The leaf of one probe row.
+
+    OPEN lower and upper bounds are the forever leaf, which has no anchors;
+    AT bounds carry both anchors. Another pair breaks the probe's contract.
+    """
+    match str(row.lower_bound_kind), str(row.upper_bound_kind):
+        case 'OPEN', 'OPEN':
+            return ForeverLeafRef(
+                leaf_name=str(row.leaf_name),
+                class_key=str(row.class_key),
+            )
+        case 'AT', 'AT':
+            # The driver decodes timestamptz in the session time zone; the
+            # bounds are UTC instants.
+            return LeafRef(
+                leaf_name=str(row.leaf_name),
+                class_key=str(row.class_key),
+                bounds=LeafBounds(
+                    lower=required_utc_timestamp(row.lower_anchor, 'lower_anchor'),
+                    upper=required_utc_timestamp(row.upper_anchor, 'upper_anchor'),
+                ),
+            )
+        case lower_kind, upper_kind:
+            raise AssertionError(
+                f'probe row {row.leaf_name}: bound kinds {lower_kind!r} and '
+                f'{upper_kind!r} are not a pair of the probe'
+            )
+
+
+def _history_coverage_of(
+    leaves: Sequence[LeafRef | ForeverLeafRef],
+) -> HistoryCoverage:
+    """How far the expected history leaves reach.
+
+    A class's coverage ends at the upper bound of its newest leaf; the
+    forever leaf has an open upper bound, so the forever class has no end.
+    The answer is the earliest end over the classes, or `CoveredForever`
+    when no class has an end. Pure.
+    """
+    newest_ends: dict[str, datetime] = {}
+    for leaf in leaves:
+        match leaf:
+            case ForeverLeafRef():
+                pass
+            case LeafRef(class_key=class_key, bounds=bounds):
+                newest_ends[class_key] = max(
+                    newest_ends.get(class_key, bounds.upper),
+                    bounds.upper,
+                )
+    if not newest_ends:
+        return CoveredForever()
+    return CoveredUntil(at=min(newest_ends.values()))
+
+
 def _coverage_probe_of(rows: Sequence[Row[Any]]) -> _CoverageProbe:
     """The probe of the rows of one coverage probe statement, in probe order."""
     if not rows:
         raise AssertionError('coverage probe returned no expected leaves')
+    first = rows[0]
+    checked_at = required_utc_timestamp(first.checked_at, 'checked_at')
     damaged_history: list[LeafRef | ForeverLeafRef] = []
     damaged_heartbeats: list[LeafRef] = []
+    history_leaves: list[LeafRef | ForeverLeafRef] = []
     heartbeat_covered_now = False
-    history_covered_through: datetime | None = None
     heartbeats_covered_through: datetime | None = None
     for row in rows:
-        # The driver decodes timestamptz in the session time zone; the
-        # bounds and the reported coverage are UTC instants.
-        upper = required_utc_timestamp(row.upper_anchor, 'upper_anchor')
-        match str(row.lower_bound_kind):
-            case 'OPEN':
-                leaf: LeafRef | ForeverLeafRef = ForeverLeafRef(
-                    leaf_name=str(row.leaf_name),
-                    class_key=str(row.class_key),
-                )
-            case 'AT':
-                leaf = LeafRef(
-                    leaf_name=str(row.leaf_name),
-                    class_key=str(row.class_key),
-                    bounds=LeafBounds(
-                        lower=required_utc_timestamp(row.lower_anchor, 'lower_anchor'),
-                        upper=upper,
-                    ),
-                )
-            case unknown:
-                raise AssertionError(f'unknown lower bound kind {unknown!r}')
-        match str(row.leaf_kind), bool(row.conformant):
-            case 'history', False:
+        leaf = _probe_leaf_of(row)
+        match str(row.leaf_kind), bool(row.conformant), leaf:
+            case 'history', False, _:
                 damaged_history.append(leaf)
-                history_covered_through = max(
-                    history_covered_through or upper,
-                    upper,
-                )
-            case 'heartbeat', False:
-                match leaf:
-                    case LeafRef():
-                        damaged_heartbeats.append(leaf)
-                    case ForeverLeafRef():
-                        raise AssertionError('a heartbeat leaf has an open bound')
+                history_leaves.append(leaf)
+            case 'history', True, _:
+                history_leaves.append(leaf)
+            case 'heartbeat', _, ForeverLeafRef():
+                raise AssertionError('a heartbeat leaf has an open bound')
+            case 'heartbeat', False, LeafRef() as hourly:
+                damaged_heartbeats.append(hourly)
                 heartbeats_covered_through = max(
-                    heartbeats_covered_through or upper,
-                    upper,
+                    heartbeats_covered_through or hourly.bounds.upper,
+                    hourly.bounds.upper,
                 )
-            case 'heartbeat', True:
+            case 'heartbeat', True, LeafRef() as hourly:
                 heartbeats_covered_through = max(
-                    heartbeats_covered_through or upper,
-                    upper,
+                    heartbeats_covered_through or hourly.bounds.upper,
+                    hourly.bounds.upper,
                 )
-                if row.lower_anchor <= row.checked_at < row.upper_anchor:
+                if hourly.bounds.lower <= checked_at < hourly.bounds.upper:
                     heartbeat_covered_now = True
-            case 'history', True:
-                history_covered_through = max(
-                    history_covered_through or upper,
-                    upper,
-                )
-            case unknown, _:
+            case unknown, _, _:
                 raise AssertionError(f'unknown coverage leaf kind {unknown!r}')
-    first = rows[0]
-    if history_covered_through is None or heartbeats_covered_through is None:
+    if not history_leaves or heartbeats_covered_through is None:
         raise AssertionError('coverage probe did not return both leaf types')
     absent = tuple(str(name) for name in first.absent_leaves)
     return _CoverageProbe(
-        checked_at=required_utc_timestamp(first.checked_at, 'checked_at'),
+        checked_at=checked_at,
         damaged_history=tuple(damaged_history),
         damaged_heartbeats=tuple(damaged_heartbeats),
         registration_healthy=bool(first.registration_healthy),
         publication_healthy=bool(first.publication_healthy),
         heartbeat_covered_now=heartbeat_covered_now,
-        history_covered_through=history_covered_through,
+        history_covered_through=_history_coverage_of(history_leaves),
         heartbeats_covered_through=heartbeats_covered_through,
         absent_leaves=absent,
     )
@@ -586,7 +651,9 @@ async def ensure_partition_coverage(
         created_heartbeat_leaves=created_heartbeats,
         republished=republished,
         heartbeat_covered_now=await heartbeat_coverage_present(connection),
-        history_covered_through=(day_lower + timedelta(days=history_horizon_days + 1)),
+        history_covered_through=CoveredUntil(
+            at=day_lower + timedelta(days=history_horizon_days + 1),
+        ),
         heartbeats_covered_through=(
             hour_lower + timedelta(hours=heartbeat_horizon_hours + 1)
         ),

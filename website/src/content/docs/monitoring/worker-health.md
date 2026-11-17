@@ -298,8 +298,13 @@ The fleet check. **Returns:** `Ok(ClassCoverage)` with `checked_at` (database ti
 configuration snapshot, refreshed with each snapshot:
 
 - `partition_coverage` — the last coverage-ensure outcome: `state`
-  (`ensured` / `failed`), covered-through markers, and on failure the
-  stage, class, and typed refusal verbatim. Coverage health fails
+  (`ensured` / `failed`); when ensured, `history_covered_through` and
+  `heartbeats_covered_through`; on failure the stage, class, and typed
+  refusal verbatim. `history_covered_through` is
+  `{"kind": "UNTIL", "at": <instant>}`, the first instant at which a
+  history retention class has no partition, or `{"kind": "FOREVER"}` when
+  only the `forever` class has partitions. `heartbeats_covered_through` is
+  the end of the last heartbeat partition. Coverage health fails
   **before** fewer than two future partitions remain, so the alarm
   precedes the lapse.
 - `partition_pruning` — the last pruning pass:

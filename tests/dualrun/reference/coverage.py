@@ -389,7 +389,11 @@ SELECT
     leaves.leaf_name,
     leaves.lower_bound_kind,
     leaves.lower_anchor,
-    leaves.upper_anchor,
+    -- The probe decoder reads the upper bound as the 0008 probe reports it:
+    -- the forever leaf, the only OPEN lower bound, has an OPEN upper bound
+    -- and no upper anchor.
+    leaves.lower_bound_kind AS upper_bound_kind,
+    CASE leaves.lower_bound_kind WHEN 'AT' THEN leaves.upper_anchor END AS upper_anchor,
     leaves.conformant,
     registration_health.healthy AS registration_healthy,
     publication_health.healthy AS publication_healthy,
