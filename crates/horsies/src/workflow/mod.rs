@@ -10,21 +10,45 @@
 mod context;
 mod definition;
 mod dependency;
+mod function;
+mod handle;
 mod input;
 mod node;
 mod registry;
 mod spec;
 mod spec_data;
+mod start;
 mod sub_workflow;
 
 pub use context::{WorkflowContext, WorkflowContextError};
 pub use definition::{WorkflowDefConfig, WorkflowDefinition};
 pub use dependency::OutputlessResults;
+pub use function::{
+    start_workflow, start_workflow_with, WorkflowCheckBuilderRegistration, WorkflowFunction,
+    WorkflowTemplate,
+};
+pub use handle::{NodeResult, WorkflowHandle, WorkflowNodeInfo, WorkflowReadError};
 pub use node::{InputField, JoinType, NodeKey, NodeRef, TaskNode, TypedNodeRef};
 pub use spec::{SuccessCase, SuccessPolicy, WorkflowSpec, WorkflowSpecBuilder};
 pub use sub_workflow::{SubWorkflowNode, SubWorkflowParams};
 
 pub(crate) use registry::WorkflowRegistry;
+
+/// Nodes for the tests of other modules of the crate.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    /// A task node of `task_name` with no parameters and the output `u32`.
+    pub(crate) fn unit_task_node(task_name: &str) -> crate::TaskNode<u32, ()> {
+        super::node::tests::task_node::<u32, ()>(task_name)
+    }
+}
+pub(crate) use start::{new_workflow_id, WorkflowStarter};
+
+/// The start errors and the handle errors of the core's catalogs, with
+/// Python's codes.
+pub use horsies_core::{
+    HandleErrorCode, HandleOperationError, HandleResult, WorkflowStartError, WorkflowStartErrorCode,
+};
 
 /// The workflow types of the core: the error policy, the statuses, the
 /// summary of a child workflow and the workflow meta of a task.
