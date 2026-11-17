@@ -83,7 +83,7 @@ def fetch_api_data(*, url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
     ...
 ```
 
-See [retry-policy](../retry-policy) for configuration details.
+The `RetryPolicy` API is in [Configure Retries](/horsies/tasks/defining-tasks/#configure-retries). The retry rules are on [Retry Policy](/horsies/tasks/retry-policy/).
 
 ### Handling Upstream Failures in Chained Tasks
 
