@@ -15,7 +15,8 @@ horsies never owns identity. Every deployment supplies an authorization policy,
 and the library enforces the verdict it returns.
 
 The API is on the client pages: [Web UI Mount](/horsies/monitoring/web-ui-mount/)
-(Python). The Rust page is not written yet.
+and [`horsies web`](/horsies/cli/#horsies-web) (Python). The Rust mount page is
+not written yet. The [Rust CLI runner](/horsies/rust/cli/) has no `web` command.
 
 ## Mounted mode
 
@@ -62,28 +63,22 @@ no build-time theming and no theme JSON.
 
 ## Standalone CLI
 
-```bash
-horsies web myapp.tasks:app
-```
+The standalone server takes either an app locator or a database URL. The
+commands and the flags are in the [CLI Reference](/horsies/cli/#horsies-web)
+(Python).
 
-```bash
-horsies web --database-url "postgresql://user:pass@localhost:5432/mydb"
-```
+With an app locator, the server imports the application module and gets the
+full feature set. It runs the same startup validation as the worker and the
+scheduler, so a configuration error refuses to serve rather than surfacing
+later as a failed action.
 
-The first form imports the application module and gets the full feature set. It
-runs the same startup validation as `horsies worker` and `horsies scheduler`,
-so a configuration error refuses to serve rather than surfacing later as a
-failed action.
-
-The second form is registry-less: it constructs a minimal `Horsies` app from the
-URL alone. Task rows carry their own encoded arguments, queue, priority, and
+With a database URL alone, the server is registry-less: it constructs a minimal
+`Horsies` app from the URL. Task rows carry their own encoded arguments, queue, priority, and
 options, so this form supports every read, every task action, and workflow pause
 and cancel. It does not support resuming a run whose next nodes carry
 `args_from`: the resume re-enqueues those nodes, and encoding an upstream result
-into a fresh task row requires the source task's registered return type. Use the
-app-path form where that matters.
-
-The flags are in the [CLI Reference](/horsies/cli/#horsies-web).
+into a fresh task row requires the source task's registered return type. Use an
+app locator where that matters.
 
 ### Bind rules
 
@@ -102,13 +97,6 @@ non-loopback address without a proxy-enforced identity is not a reachable
 configuration.
 
 ### Trusted-header mode
-
-```bash
-horsies web myapp.tasks:app \
-  --host 0.0.0.0 --port 8600 \
-  --auth trusted-header --trusted-header X-Forwarded-User \
-  --enable-actions
-```
 
 A request is authorized if and only if the named header is present and
 non-empty. The reverse proxy is the identity boundary; horsies performs no
@@ -146,14 +134,10 @@ monitoring app at a transaction-pooled URL.
 ### PgBouncer
 
 LISTEN/NOTIFY requires a session-mode connection. When the main URL points at a
-transaction-pooled PgBouncer, give the listener a direct URL:
-
-```bash
-horsies web \
-  --database-url "$DATABASE_URL_POOLED" \
-  --session-database-url "$DATABASE_URL_DIRECT" \
-  --pgbouncer-transaction-mode
-```
+transaction-pooled PgBouncer, give the listener a direct URL. In standalone
+mode, pass it with `--session-database-url`, together with
+`--pgbouncer-transaction-mode`: see the example in the
+[CLI Reference](/horsies/cli/#horsies-web) (Python).
 
 In mounted mode this is already the broker config of the host app: the
 process listener uses `session_database_url` when set, and falls back to
@@ -214,16 +198,9 @@ point the fleet and the monitoring app at a new one.
 
 **Don't expose the CLI on a non-loopback address with `--auth none`.** The CLI
 refuses this combination, and the refusal is the point: the dashboard exposes
-every task payload, error message, and worker hostname in the deployment.
-
-```bash
-# Wrong — refused with exit 2
-horsies web myapp.tasks:app --host 0.0.0.0 --auth none
-
-# Correct — a proxy owns identity, and it strips the header on ingress
-horsies web myapp.tasks:app --host 0.0.0.0 \
-  --auth trusted-header --trusted-header X-Forwarded-User
-```
+every task payload, error message, and worker hostname in the deployment. The
+wrong and the correct command are in
+[Things to Avoid](/horsies/cli/#things-to-avoid) of the CLI Reference (Python).
 
 **Don't use the `AllowAll` policy to reach a dashboard you have not otherwise
 guarded.** `AllowAll` asserts that the mount is already authenticated. It is

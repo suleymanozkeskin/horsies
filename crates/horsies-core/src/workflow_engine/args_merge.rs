@@ -416,7 +416,8 @@ pub(crate) fn child_build_input(
         })?;
     let args_from_members: Vec<(String, serde_json::Value)> = args_from_keys
         .iter()
-        .filter_map(|key| object.remove(key).map(|value| (key.clone(), value)))
+        // `shift_remove` keeps the order of the members that stay.
+        .filter_map(|key| object.shift_remove(key).map(|value| (key.clone(), value)))
         .collect();
     let mut members: Vec<(&String, &serde_json::Value)> = object.iter().collect();
     members.extend(args_from_members.iter().map(|(key, value)| (key, value)));

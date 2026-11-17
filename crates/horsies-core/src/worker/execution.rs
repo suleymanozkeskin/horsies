@@ -206,8 +206,10 @@ pub(crate) fn build_task_input(
         }
     };
 
-    let workflow_ctx = object.remove(WORKFLOW_CTX_KWARG);
-    let workflow_meta = object.remove(WORKFLOW_META_KWARG);
+    // `shift_remove` keeps the order of the other members, as Python's
+    // `dict.pop` does; the input is re-encoded below.
+    let workflow_ctx = object.shift_remove(WORKFLOW_CTX_KWARG);
+    let workflow_meta = object.shift_remove(WORKFLOW_META_KWARG);
     let args_from_members = unwrap_args_from_entries(&mut object)
         .map_err(|refusal| serialization_error(refusal.to_string()))?;
     check_task_input(&[], &object, &args_from_members).map_err(|refusal| {
