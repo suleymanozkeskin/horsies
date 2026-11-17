@@ -134,10 +134,10 @@ pub use crate::worker::finalize_batch::{
 // `process_role` first: a process that runs task bodies refuses it.
 pub use crate::worker::executor::child_host::{
     child_command, child_mode, child_producer, process_role, run_cancel_signal, run_child_host,
-    spawn_in_run, wait_inside_task_message, ChildApp, ChildArgs, ChildArgsError, ChildHookFailure,
-    ChildHostExit, ChildLogSetup, ChildMode, ChildProducer, ChildStartFuture, ChildStartHook,
-    ProcessRole, RunCancelSignal, RunSignalRefused, RunSpawnRefused, CHILD_MODE_ARGUMENT,
-    CHILD_START_HOOK_BOUND, MAX_RUN_WORK,
+    spawn_in_run, thread_role, wait_inside_task_message, ChildApp, ChildArgs, ChildArgsError,
+    ChildHookFailure, ChildHostExit, ChildLogSetup, ChildMode, ChildProducer, ChildStartFuture,
+    ChildStartHook, ProcessRole, RunCancelSignal, RunSignalRefused, RunSpawnRefused, ThreadRole,
+    CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, MAX_RUN_WORK,
 };
 
 // The parent-child frame codec, for the Python child program and the
@@ -219,11 +219,15 @@ pub use crate::workflow_engine::engine::{
 pub use crate::workflow_engine::error::WorkflowError;
 pub use crate::workflow_engine::info::WorkflowTaskInfo;
 pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_workflow};
+pub use crate::workflow_engine::phase2_recovery::Phase2RecoverySummary;
 pub use crate::workflow_engine::query::{
     get_workflow_result, NodeResultsRead, NodesRead, StoredNode, StoredNodeResult,
     TerminalErrorStatus, WorkflowEnd, WorkflowWait,
 };
 pub use crate::workflow_engine::recovery::recover_stuck_workflows;
+pub use crate::workflow_engine::recovery::{
+    RecoveryCaseMetrics, RecoveryMetrics, RecoveryPassFailure, RecoveryReport,
+};
 pub use crate::workflow_engine::spec_data::{
     parse_workflow_spec_data, SpecDataRefused, WorkflowSpecData, WORKFLOW_SPEC_DATA_VERSION,
 };

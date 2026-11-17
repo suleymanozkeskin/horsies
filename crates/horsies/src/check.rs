@@ -5,16 +5,21 @@
 //! Python's does. The config and each registration were checked when the
 //! app was built; the check adds what needs the whole app:
 //!
-//! 1. Task options: the rules of each registered task's options that the
+//! 1. Workflows: each workflow definition without params and each check
+//!    case of a workflow builder, built and checked against the registered
+//!    definitions and the app's queues, and walked into its sub-workflows;
+//!    a nesting is refused only when it reaches the depth limit for certain
+//!    (Python's phases 3.1 and 3.2).
+//! 2. Task options: the rules of each registered task's options that the
 //!    task attribute checks at compile time, for a task registered by hand.
-//! 2. Schedules (not for a worker, which never sends a scheduled task): per
+//! 3. Schedules (not for a worker, which never sends a scheduled task): per
 //!    enabled schedule, its task, its queue, its input read back with the
 //!    task's input type, and the input size.
 //!
 //! The live check adds, after a passing static check:
 //!
-//! 3. Connectivity: a connect of the app's handle and one `SELECT 1`.
-//! 4. Worker connections: each worker profile against the server's
+//! 4. Connectivity: a connect of the app's handle and one `SELECT 1`.
+//! 5. Worker connections: each worker profile against the server's
 //!    connection limit (none through a transaction pooler).
 
 use horsies_core::{check_worker_connections, Execution, RegisteredTask, TaskOptions};
@@ -149,6 +154,10 @@ impl Horsies {
         scope: CheckScope,
         phase: &'static str,
     ) -> Result<CheckPassed, CheckReport> {
+        let workflow_errors = self.workflow_check_findings();
+        if !workflow_errors.is_empty() {
+            return Err(CheckReport::of(phase, workflow_errors));
+        }
         let option_errors = task_option_refusals(self.tasks().iter());
         if !option_errors.is_empty() {
             return Err(CheckReport::of(phase, option_errors));
@@ -168,7 +177,7 @@ impl Horsies {
 
 /// The report of a failed connect or ping (Python
 /// `_check_broker_connectivity`). Pure.
-fn connectivity_report(cause: &str) -> CheckReport {
+pub(crate) fn connectivity_report(cause: &str) -> CheckReport {
     CheckReport::of(
         CHECK,
         vec![HorsiesError::new("broker connectivity check failed")

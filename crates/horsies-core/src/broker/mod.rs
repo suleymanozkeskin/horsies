@@ -55,7 +55,7 @@ pub mod wait_limit;
 mod worker_state_read_tests;
 mod workflow_claim_settle;
 mod workflow_operations;
-mod workflow_phase2;
+pub mod workflow_phase2;
 mod workflow_reads;
 pub mod workflow_start;
 

@@ -176,13 +176,14 @@ written in Rust, on a new baseline schema.
   `timeout_seconds` still waits with no deadline.
 
 - **The `TASK_TIMEOUT` error of a `SHARED_ASYNC` task tells how the task
-  ended.** Its `data` gets the key `cancel_end`: `RETURNED_AFTER_SIGNAL`
-  when the task and its work ended within `cancel_grace_ms` after the
-  cancel at the deadline, `DROPPED_AFTER_GRACE` when the child sent the
-  second cancel. The Python worker and the core worker write the same key.
-  An isolated or `SHARED_THREAD` timeout, and a task whose child the
-  worker killed, have no `cancel_end`. The `data` keeps `task_id` and
-  `timeout_ms`.
+  ended.** When the task ran on a shared async child, its `data` gets the
+  key `cancel_end`: `RETURNED_AFTER_SIGNAL` when the task and its work
+  ended within `cancel_grace_ms` after the cancel at the deadline,
+  `DROPPED_AFTER_GRACE` when the child sent the second cancel, and
+  `KILLED_WITH_CHILD` when the task ended at a kill of its child by the
+  worker, before the child reported its end. The Python worker and the
+  core worker write the same key. An isolated or `SHARED_THREAD` timeout
+  has no `cancel_end`. The `data` keeps `task_id` and `timeout_ms`.
 
 - **`paused_workflow_auto_cancel_after` is at most 365,000 days.** A
   longer age is refused when the config is built: Python raises
@@ -491,6 +492,18 @@ unless it starts with "Added".
   `stop_handle()`. `run_scheduler()` runs it until `SIGTERM` or `SIGINT`.
   Both return `SchedulerStopped` or a closed `SchedulerRunError`. A schedule
   section that is missing or switched off is refused.
+- **Added: the blocking API, `horsies::blocking`.** `TaskFunction::blocking()`,
+  `TaskHandle::blocking()` and `Horsies::blocking()` give views whose
+  methods have the names, arguments and result types of the async
+  methods: the sends, the schedules and their retries, `get` and `info`,
+  the app's reads by task id, the health reads that Python's app offers in
+  sync form, and `check_live`. Each call runs on the core's process
+  runtime and blocks its thread. On a thread that runs a tokio runtime it
+  runs nothing and answers `ASYNC_CONTEXT`: `TaskSendError::AsyncContext`
+  with the prepared task id and payload (an async retry sends them),
+  `ReadError::AsyncContext` (added; not kept by the handle),
+  `BrokerErrorCode::AsyncContext`, or `HRS-217` in the check report. The
+  body of a `fn` task in a worker child may call them.
 - **`check` and `check_live` return `Result<CheckPassed, CheckReport>`.**
   The report holds the refusals of the first phase that refused: the task
   options of a task registered by hand, then the schedules (not for a

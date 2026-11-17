@@ -66,6 +66,10 @@ pub struct RecoveryReport {
     /// RUNNING workflows whose stored recovery failure count is at or over the limit. Counted once per
     /// global pass; 0 in a pass that does not count failures.
     pub over_failure_limit: i64,
+    /// The failures of the pass that no case counted (the count of workflows over the limit). Every
+    /// other failure is in the errors of its case or cases; `errors` counts each failure once.
+    #[serde(skip)]
+    pub pass_errors: u32,
 }
 
 #[derive(Debug, Default, serde::Serialize)]
@@ -118,10 +122,11 @@ impl RecoveryReport {
     }
 }
 
+/// A global pass that failed, with its partial report.
 #[derive(Debug)]
-pub(crate) struct RecoveryPassFailure {
-    pub(crate) report: RecoveryReport,
-    pub(crate) error: WorkflowError,
+pub struct RecoveryPassFailure {
+    pub report: RecoveryReport,
+    pub error: WorkflowError,
 }
 
 impl RecoveryPassFailure {
@@ -654,6 +659,24 @@ pub(crate) async fn recover_stuck_workflows_observed(
     .await
 }
 
+/// The reaper's global pass with the children of its cases built by `build`. Outcomes and errors as
+/// [`recover_stuck_workflows_observed`].
+pub(crate) async fn recover_stuck_workflows_observed_with(
+    broker: &PostgresBroker,
+    build: ChildBuild<'_>,
+    failure_limit: u32,
+) -> Result<RecoveryReport, RecoveryPassFailure> {
+    recover_stuck_workflows_in_scope(
+        broker,
+        build,
+        RecoveryScope::Global {
+            max_rows: GLOBAL_SCAN_ROW_CAP,
+        },
+        RecoveryFailurePolicy::Count(CountFailures::new_pass(failure_limit)),
+    )
+    .await
+}
+
 /// A global pass with `max_rows` per case query and per audit page (the audit function refuses a page size
 /// outside 1 to 1000 with 22023, an error of the pass).
 pub(crate) async fn recover_stuck_workflows_with_cap(
@@ -786,6 +809,7 @@ async fn recover_stuck_workflows_in_scope(
                 Ok(count) => report.over_failure_limit = count,
                 Err(error) => {
                     report.errors += 1;
+                    report.pass_errors += 1;
                     return Err(RecoveryPassFailure { report, error });
                 }
             }

@@ -538,10 +538,9 @@ fn stored_error_data(result_json: &str) -> serde_json::Value {
 }
 
 /// Python `_settle_timed_out_row`: the data of a `TASK_TIMEOUT` error names
-/// the task and its `timeout_ms`; a shared async run that its child ended
-/// also names how it ended after its cancel signal (`cancel_end`). An
-/// isolated or a shared thread run, and an async run that ended at a kill of
-/// its child, have no `cancel_end`.
+/// the task and its `timeout_ms`; a shared async run also names how it ended
+/// after its cancel signal (`cancel_end`), also at a kill of its child. An
+/// isolated or a shared thread run has no `cancel_end`.
 #[test]
 fn the_timeout_data_names_how_a_shared_async_run_ended() {
     let claimed = task(ExecutionClass::SharedAsync, RETRY_ON_TIMEOUT);
@@ -556,8 +555,11 @@ fn the_timeout_data_names_how_a_shared_async_run_ended() {
             TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
             Some("DROPPED_AFTER_GRACE"),
         ),
+        (
+            TimeoutCancel::Ended(CancelEnd::KilledWithChild),
+            Some("KILLED_WITH_CHILD"),
+        ),
         (TimeoutCancel::NoSignal, None),
-        (TimeoutCancel::EndedByKill, None),
     ] {
         let write = timeout_write(
             &claimed,

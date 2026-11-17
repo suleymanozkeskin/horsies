@@ -178,6 +178,21 @@ class CoreHandle:
         that raised KeyboardInterrupt or SystemExit raises it again. With no child spec source
         it raises RuntimeError.
         """
+    def recover_workflow_phase2_async(self, *, grace_ms: int, max_rows: int, quarantine_after_attempts: int) -> asyncio.Future[Phase2RecoveryRecord | Phase2RecoveryFailed]:
+        """One phase-2 recovery pass of the reaper: the phase-2 records older than grace_ms and
+        under quarantine_after_attempts, oldest first, at most max_rows, each in its own
+        transaction. Writes; owed child starts build their children through the child spec
+        source. A build that raised KeyboardInterrupt or SystemExit raises it again after the
+        pass. A negative value raises OverflowError; with no child spec source it raises
+        RuntimeError.
+        """
+    def recover_workflows_async(self, *, failure_limit: int) -> asyncio.Future[RecoveryPassRecord | RecoveryPassFailed]:
+        """One global workflow recovery pass of the reaper, with failure_limit passes per workflow
+        before it fails closed. Writes; each candidate commits alone, and owed child starts build
+        their children through the child spec source. A build that raised KeyboardInterrupt or
+        SystemExit raises it again after the pass. A negative value raises OverflowError; with
+        no child spec source it raises RuntimeError.
+        """
     def pause_workflow_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed]:
         """Pause one workflow tree. Writes, in one statement. A row outside the function's contract
         raises PanicException.
@@ -2022,6 +2037,107 @@ class ParentAdvanceStopped:
     def failed_child_workflow_id(self) -> uuid.UUID: ...
     @property
     def still_owed(self) -> list[uuid.UUID]: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class Phase2RecoveryRecord:
+    """What one pass did. pending_absent counts the records that were gone while their node is
+    not terminal (nothing written).
+    """
+    @property
+    def considered(self) -> int: ...
+    @property
+    def applied(self) -> int: ...
+    @property
+    def already_applied(self) -> int: ...
+    @property
+    def superseded(self) -> int: ...
+    @property
+    def pending_absent(self) -> int: ...
+    @property
+    def retained(self) -> int: ...
+    @property
+    def failed(self) -> int: ...
+    @property
+    def quarantined(self) -> int: ...
+    @property
+    def raised_counted(self) -> int: ...
+    @property
+    def over_attempt_bound(self) -> int: ...
+    @property
+    def retained_details(self) -> list[str]: ...
+    @property
+    def quarantine_refusals(self) -> list[str]: ...
+
+
+@final
+class Phase2RecoveryFailed:
+    """The pass failed before it recovered a record: the client family check, the discovery or
+    the count. Nothing was recovered.
+    """
+    @property
+    def message(self) -> str: ...
+    @property
+    def retryable(self) -> bool: ...
+
+
+@final
+class RecoveryCaseRecord:
+    """Bounded work and outcome counts of one recovery case."""
+    @property
+    def rows_selected(self) -> int: ...
+    @property
+    def candidates_returned(self) -> int: ...
+    @property
+    def duration_ms(self) -> int: ...
+    @property
+    def refusals(self) -> int: ...
+    @property
+    def errors(self) -> int: ...
+    @property
+    def failures_counted(self) -> int: ...
+    @property
+    def limit_reached(self) -> int: ...
+
+
+@final
+class RecoveryPassRecord:
+    """What one pass did: the candidates recovered over every case, the failures that no case
+    counted, the workflows over the failure limit, and the counts of each case. The audit
+    page of cases 2/3 and 4 scanned case_2_3.rows_selected workflows and returned
+    case_2_3.candidates_returned completion candidates.
+    """
+    @property
+    def recovered(self) -> int: ...
+    @property
+    def pass_errors(self) -> int: ...
+    @property
+    def over_failure_limit(self) -> int: ...
+    @property
+    def case_0(self) -> RecoveryCaseRecord: ...
+    @property
+    def case_1(self) -> RecoveryCaseRecord: ...
+    @property
+    def case_1_5(self) -> RecoveryCaseRecord: ...
+    @property
+    def case_1_6(self) -> RecoveryCaseRecord: ...
+    @property
+    def case_2_3(self) -> RecoveryCaseRecord: ...
+    @property
+    def case_4(self) -> RecoveryCaseRecord: ...
+
+
+@final
+class RecoveryPassFailed:
+    """The pass failed: the client family check, a discovery statement, the audit page or the
+    count of workflows over the limit. report holds the counts of the cases before it.
+    """
+    @property
+    def report(self) -> RecoveryPassRecord: ...
     @property
     def message(self) -> str: ...
     @property
