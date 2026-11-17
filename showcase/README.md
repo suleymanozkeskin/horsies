@@ -34,13 +34,6 @@ uv run python -m showcase.acme.scenarios steady
 
 Then open <http://127.0.0.1:8600>.
 
-Working from a clone, build the dashboard's assets once before terminal 3
-(`horsies` installed from PyPI already ships them):
-
-```bash
-cd webui && bun install && bun run build
-```
-
 Validate the app without a database or a worker at any time:
 
 ```bash
