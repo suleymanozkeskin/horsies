@@ -9,7 +9,7 @@
 
 use super::*;
 use crate::broker::core_rows::StatementLog;
-use crate::broker::history_reads::read_task_result;
+use crate::broker::history_reads::{read_task_result, ResultReaderSeen};
 use crate::broker::pools::unpinged_single_connection_core_pool;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::reads::result::TaskResultRead;
@@ -52,19 +52,21 @@ async fn seed_task(pool: &PgPool, task_id: Uuid, status: &str) {
     .expect("insert task");
 }
 
-/// The result of `task_id`, read twice on `reader`: the first read opens the
-/// connection, so its session setup is not counted; the proxy counts only
-/// the second read.
+/// The result of `task_id`, read twice on `reader` with one reader state:
+/// the first read opens the connection and sees the published reader, so
+/// its session setup and publication probe are not counted; the proxy
+/// counts only the second read.
 async fn counted_result_read(
     proxy: &SqlStatementProxy,
     reader: &crate::db::CorePool,
     task_id: Uuid,
 ) -> TaskResultRead {
-    let _opened = read_task_result(reader, StatementLog::Off, task_id)
+    let reader_state = ResultReaderSeen::default();
+    let _opened = read_task_result(reader, StatementLog::Off, &reader_state, task_id)
         .await
         .expect("open the reader connection with a first read");
     proxy.reset();
-    read_task_result(reader, StatementLog::Off, task_id)
+    read_task_result(reader, StatementLog::Off, &reader_state, task_id)
         .await
         .expect("read the result")
 }

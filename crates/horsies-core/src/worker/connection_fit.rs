@@ -41,13 +41,15 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::broker::PostgresBroker;
+use crate::broker::core_rows::{column, one_row, StatementLog};
+use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::config::worker_profile::{
     profile_path, quoted_profile_name, IsolatedSetting, SharedAsyncSetting, SharedThreadSetting,
     WorkerProfile,
 };
 use crate::core::config::{AppConfig, PostgresConfig};
 use crate::core::error::{ErrorCode, HorsiesError};
+use crate::db::{CheckoutClass, CorePool, StatementBound, TypedStatement};
 
 /// Connections of the process listener of a worker: one connection carries
 /// every LISTEN of the process.
@@ -68,6 +70,10 @@ const CONNECTION_LIMIT_SQL: &str = "\
 SELECT current_setting('max_connections')::int AS max_connections,
        current_setting('superuser_reserved_connections')::int AS superuser_reserved,
        COALESCE(current_setting('reserved_connections', true), '0')::int AS reserved";
+
+/// [`CONNECTION_LIMIT_SQL`]; it takes no parameter.
+static CONNECTION_LIMIT: TypedStatement =
+    TypedStatement::new("server_connection_limit", CONNECTION_LIMIT_SQL, &[]);
 
 /// What to change when a profile needs more connections than the server
 /// has (Python `CONNECTIONS_HELP`).
@@ -109,9 +115,10 @@ impl ServerConnectionLimit {
 /// compared; nothing is guessed.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectionLimitUnreadable {
-    /// The statement failed, or no connection could be checked out.
+    /// The pools could not open, no connection could be checked out, the
+    /// statement failed, or its row did not read.
     #[error("reading the server connection limit failed: {0}")]
-    Database(sqlx::Error),
+    Database(BrokerError),
     /// The server did not answer within the bound.
     #[error("the server did not answer the connection limit read within {bound:?}")]
     TimedOut { bound: Duration },
@@ -142,24 +149,65 @@ pub fn server_connection_limit(
     })
 }
 
-/// Reads the connection limit with one statement on one pooled connection
-/// of the broker, in autocommit, waiting at most
-/// [`CONNECTION_LIMIT_READ_TIMEOUT`]. Writes nothing.
+/// Reads the connection limit with one statement in autocommit on the main
+/// core pool of the broker ([`read_connection_limit_on`]). Writes nothing.
 ///
 /// Errors: [`ConnectionLimitUnreadable`]. A caller reports it; it does not
 /// retry here.
 pub async fn read_server_connection_limit(
     broker: &PostgresBroker,
 ) -> Result<ServerConnectionLimit, ConnectionLimitUnreadable> {
-    let read = sqlx::query_as::<_, (i32, i32, i32)>(CONNECTION_LIMIT_SQL).fetch_one(broker.pool());
-    match tokio::time::timeout(CONNECTION_LIMIT_READ_TIMEOUT, read).await {
-        Err(_elapsed) => Err(ConnectionLimitUnreadable::TimedOut {
-            bound: CONNECTION_LIMIT_READ_TIMEOUT,
-        }),
-        Ok(Err(error)) => Err(ConnectionLimitUnreadable::Database(error)),
-        Ok(Ok((max_connections, superuser_reserved, reserved))) => {
+    let (open, _read) = broker
+        .core_pools_for_write()
+        .map_err(ConnectionLimitUnreadable::Database)?;
+    read_connection_limit_on(open.main(), broker.statement_log()).await
+}
+
+/// Reads the connection limit with one statement on one connection of
+/// `pool` that passes the reserve gate ([`CheckoutClass::Batch`]), in
+/// autocommit, waiting at most [`CONNECTION_LIMIT_READ_TIMEOUT`] for the
+/// checkout and the answer together. Writes nothing.
+///
+/// Errors: [`ConnectionLimitUnreadable`].
+pub(crate) async fn read_connection_limit_on(
+    pool: &CorePool,
+    log: StatementLog,
+) -> Result<ServerConnectionLimit, ConnectionLimitUnreadable> {
+    let statement = &CONNECTION_LIMIT;
+    let bound = statement.bind().finish();
+    log.log(statement);
+    let read = pool.query(
+        CheckoutClass::Batch,
+        &bound,
+        StatementBound::ConnectionTimeouts,
+    );
+    let rows = match tokio::time::timeout(CONNECTION_LIMIT_READ_TIMEOUT, read).await {
+        Err(_elapsed) => {
+            return Err(ConnectionLimitUnreadable::TimedOut {
+                bound: CONNECTION_LIMIT_READ_TIMEOUT,
+            })
+        }
+        Ok(Err(failure)) => {
+            return Err(ConnectionLimitUnreadable::Database(BrokerError::Statement(
+                failure,
+            )))
+        }
+        Ok(Ok(rows)) => rows,
+    };
+    let settings = one_row(rows, statement).and_then(|row| {
+        Ok((
+            column::<i32>(&row, statement, "max_connections")?,
+            column::<i32>(&row, statement, "superuser_reserved")?,
+            column::<i32>(&row, statement, "reserved")?,
+        ))
+    });
+    match settings {
+        Ok((max_connections, superuser_reserved, reserved)) => {
             server_connection_limit(max_connections, superuser_reserved, reserved)
         }
+        Err(decode) => Err(ConnectionLimitUnreadable::Database(BrokerError::RowDecode(
+            decode,
+        ))),
     }
 }
 

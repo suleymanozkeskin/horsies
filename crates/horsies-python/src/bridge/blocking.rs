@@ -3,7 +3,8 @@
 //! The operation runs on the calling thread with the GIL released, in slices
 //! of [`SIGNAL_CHECK_SLICE`]. Between slices the thread attaches and calls
 //! `Python::check_signals`, so Ctrl+C works on the main thread. A raised
-//! signal or the end of [`BLOCKING_CALL_BOUND`] ends the call:
+//! signal or the end of the call's [`BlockingBound`] ends the call
+//! ([`BLOCKING_CALL_BOUND`] unless the operation names another):
 //! - a read is dropped inside the runtime context;
 //! - a write moves to the runtime and runs on to its end; its end is logged
 //!   at DEBUG level.
@@ -32,13 +33,36 @@ pub const SIGNAL_CHECK_SLICE: Duration = Duration::from_millis(100);
 /// connection without a TCP user timeout (about 924 s).
 pub const BLOCKING_CALL_BOUND: Duration = Duration::from_secs(30 * 60);
 
-/// Slices of one blocking call: [`BLOCKING_CALL_BOUND`] in steps of
-/// [`SIGNAL_CHECK_SLICE`].
-const MAX_BLOCKING_SLICES: u128 = BLOCKING_CALL_BOUND.as_millis() / SIGNAL_CHECK_SLICE.as_millis();
+/// How long a blocking call waits for its operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockingBound {
+    /// The call ends with `CoreCallTimedOut` once this time has passed, in
+    /// steps of [`SIGNAL_CHECK_SLICE`].
+    Within(Duration),
+    /// The call waits until the operation ends, a signal handler raises, or
+    /// the core stops. Only for an operation that the caller asked to wait
+    /// with no limit (a result wait with no timeout, as Python's).
+    UntilTheOperationEnds,
+}
+
+impl BlockingBound {
+    /// Whether a call that waited `waited` slices of [`SIGNAL_CHECK_SLICE`]
+    /// has reached its bound: the bound's limit when it has one. Pure.
+    fn reached(self, waited: u128) -> Option<Duration> {
+        match self {
+            Self::Within(limit) => {
+                let slices = limit.as_millis().div_ceil(SIGNAL_CHECK_SLICE.as_millis());
+                (waited >= slices).then_some(limit)
+            }
+            Self::UntilTheOperationEnds => None,
+        }
+    }
+}
 
 type GuardedFuture<T> = Pin<Box<dyn Future<Output = Guarded<T>> + Send + 'static>>;
 
-/// Run `op` and return its outcome as a Python object.
+/// Run `op` and return its outcome as a Python object, within
+/// [`BLOCKING_CALL_BOUND`].
 ///
 /// Failure exits: `PanicException` (the operation panicked), `CoreStopped`,
 /// the exception of a signal handler (for example `KeyboardInterrupt`),
@@ -54,9 +78,49 @@ where
     T: for<'py> IntoPyObject<'py> + Send + 'static,
     F: Future<Output = T> + Send + 'static,
 {
+    call_blocking_within(
+        py,
+        core,
+        subject,
+        kind,
+        BlockingBound::Within(BLOCKING_CALL_BOUND),
+        op,
+    )
+}
+
+/// Run `op` within `bound` and return its outcome as a Python object.
+///
+/// Failure exits: as [`call_blocking`]; `CoreCallTimedOut` names the bound
+/// in whole seconds, and never ends a call with
+/// [`BlockingBound::UntilTheOperationEnds`].
+pub fn call_blocking_within<T, F>(
+    py: Python<'_>,
+    core: &'static Core,
+    subject: &'static str,
+    kind: CallKind,
+    bound: BlockingBound,
+    op: F,
+) -> PyResult<Py<PyAny>>
+where
+    T: for<'py> IntoPyObject<'py> + Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
     let mut guarded: GuardedFuture<T> = Box::pin(guard(core, subject, op));
     let handle = core.runtime_handle();
-    for _slice in 0..MAX_BLOCKING_SLICES {
+    let mut waited: u128 = 0;
+    // Each turn waits one slice. A call with a bound ends at its slice
+    // count; every call ends at the end of the operation, a raised signal,
+    // or the stop of the core (`guard`).
+    loop {
+        if let Some(limit) = bound.reached(waited) {
+            leave(core, subject, kind, guarded);
+            return Err(CoreCallTimedOut::new_err((
+                subject,
+                limit.as_secs(),
+                kind.state_after_leave(),
+            )));
+        }
+        waited += 1;
         let slice = py.detach(|| {
             // The timer is built inside `block_on`, where the runtime's
             // time driver is the current one.
@@ -73,12 +137,6 @@ where
             return Err(signal_error);
         }
     }
-    leave(core, subject, kind, guarded);
-    Err(CoreCallTimedOut::new_err((
-        subject,
-        BLOCKING_CALL_BOUND.as_secs(),
-        kind.state_after_leave(),
-    )))
 }
 
 /// End the caller's wait on an operation that has not ended.
@@ -102,5 +160,33 @@ where
                 );
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_bound_ends_after_its_slices() {
+        let bound = BlockingBound::Within(BLOCKING_CALL_BOUND);
+        let slices = BLOCKING_CALL_BOUND.as_millis() / SIGNAL_CHECK_SLICE.as_millis();
+        assert_eq!(bound.reached(slices - 1), None);
+        assert_eq!(bound.reached(slices), Some(BLOCKING_CALL_BOUND));
+    }
+
+    #[test]
+    fn a_bound_that_is_not_whole_slices_waits_one_slice_more() {
+        let bound = BlockingBound::Within(Duration::from_millis(250));
+        assert_eq!(bound.reached(2), None);
+        assert_eq!(bound.reached(3), Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn a_call_with_no_bound_never_reaches_one() {
+        assert_eq!(
+            BlockingBound::UntilTheOperationEnds.reached(u128::MAX),
+            None
+        );
     }
 }
