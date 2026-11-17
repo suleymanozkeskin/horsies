@@ -1,7 +1,7 @@
 //! The Rust side of the parity runs (`tests/parity/runner.py`).
 //!
 //! The app has the task names, input field names, codes, messages, options,
-//! profiles and workflow of the Python parity app (`tests/parity/app.py`),
+//! profiles and workflows of the Python parity app (`tests/parity/app.py`),
 //! and [`SCENARIOS`] holds the scenarios of `tests/parity/scenarios.py`.
 //! The runner sets [`DATABASE_URL_ENV`] for the worker, its children and the
 //! send process.
@@ -14,9 +14,9 @@ use horsies::{
     blocking_task, task, AppConfig, ChildPreload, DrainTimeout, Horsies, HorsiesError,
     IsolatedChildCount, IsolatedChildren, IsolatedSetting, RetryPolicy, SharedAsyncChildCount,
     SharedAsyncChildren, SharedAsyncSeats, SharedAsyncSetting, SharedThreadChildCount,
-    SharedThreadChildren, SharedThreadSeats, SharedThreadSetting, TaskError, TaskOutcome,
-    TaskRuntime, TaskSendOptions, UserErrorCode, WorkerProfile, WorkflowDefConfig,
-    WorkflowDefinition, WorkflowFunction, WorkflowSpecBuilder,
+    SharedThreadChildren, SharedThreadSeats, SharedThreadSetting, SubWorkflowParams, TaskError,
+    TaskOutcome, TaskRuntime, TaskSendError, TaskSendOptions, UserErrorCode, WorkerProfile,
+    WorkflowDefConfig, WorkflowDefinition, WorkflowFunction, WorkflowHandle, WorkflowSpecBuilder,
 };
 
 /// The database of this side of the run.
@@ -34,6 +34,13 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub const CHAIN_NAME: &str = "parity_chain";
 pub const CHAIN_DEFINITION_KEY: &str = "tests.parity.chain.v1";
+pub const CHILD_NAME: &str = "parity_child";
+pub const CHILD_DEFINITION_KEY: &str = "tests.parity.child.v1";
+pub const PARENT_NAME: &str = "parity_parent";
+pub const PARENT_DEFINITION_KEY: &str = "tests.parity.parent.v1";
+
+/// The retries of a send of the form [`SendForm::RetryOfAsyncContext`].
+const SEND_RETRIES: usize = 2;
 
 /// The codes of the parity tasks' own errors.
 #[derive(Debug, Clone, PartialEq, UserErrorCode)]
@@ -204,13 +211,75 @@ impl WorkflowDefinition for ParityChain {
     }
 }
 
+/// The child of `parity_parent`: one node, its output (Python
+/// `ParityChild`).
+pub struct ParityChild;
+
+impl WorkflowDefinition for ParityChild {
+    type Output = i64;
+    type Params = ();
+
+    fn name() -> &'static str {
+        CHILD_NAME
+    }
+
+    fn definition_key() -> &'static str {
+        CHILD_DEFINITION_KEY
+    }
+
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        let added = builder.task(
+            add::node()?
+                .node_id("add")
+                .set(add::params::a(), 2)?
+                .set(add::params::b(), 3)?,
+        );
+        Ok(WorkflowDefConfig::new().output(added))
+    }
+}
+
+/// A sub-workflow node of [`ParityChild`], then a node that takes the
+/// child's output (Python `parity_parent`).
+pub struct ParityParent;
+
+impl WorkflowDefinition for ParityParent {
+    type Output = i64;
+    type Params = ();
+
+    fn name() -> &'static str {
+        PARENT_NAME
+    }
+
+    fn definition_key() -> &'static str {
+        PARENT_DEFINITION_KEY
+    }
+
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        let child =
+            builder.sub_workflow(ParityChild::node(SubWorkflowParams::NotGiven)?.node_id("child"));
+        let doubled = builder.task(
+            double::node()?
+                .node_id("double")
+                .arg_from(double::params::upstream(), child),
+        );
+        Ok(WorkflowDefConfig::new().output(doubled))
+    }
+}
+
 // ---- The app ----
 
-/// The app of this side on `database_url`, with every parity task and the
+/// The app of this side and its started workflows.
+pub struct ParityApp {
+    pub app: Horsies,
+    pub chain: WorkflowFunction<i64>,
+    pub parent: WorkflowFunction<i64>,
+}
+
+/// The app of this side on `database_url`, with every parity task and
 /// workflow. No I/O.
 ///
 /// Errors: the config refusal, or the first registration refusal.
-pub fn build_app(database_url: &str) -> Result<(Horsies, WorkflowFunction<i64>), HorsiesError> {
+pub fn build_app(database_url: &str) -> Result<ParityApp, HorsiesError> {
     let mut config = AppConfig::for_database_url(database_url);
     config.broker.pool_size = 5;
     config.broker.max_overflow = 5;
@@ -230,7 +299,9 @@ pub fn build_app(database_url: &str) -> Result<(Horsies, WorkflowFunction<i64>),
     let _transient_thread = transient_thread::register(&mut app)?;
     let _thread_past_deadline = thread_past_deadline::register(&mut app)?;
     let chain = app.register_workflow_definition::<ParityChain>()?;
-    Ok((app, chain))
+    let _child = app.register_workflow_definition::<ParityChild>()?;
+    let parent = app.register_workflow_definition::<ParityParent>()?;
+    Ok(ParityApp { app, chain, parent })
 }
 
 fn profiles() -> BTreeMap<String, WorkerProfile> {
@@ -280,21 +351,63 @@ fn profiles() -> BTreeMap<String, WorkerProfile> {
 
 // ---- The scenarios ----
 
-/// One send: the task name, its input members, and its idempotency key.
+/// How a send is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendForm {
+    /// One send.
+    Direct,
+    /// A blocking send on a thread of the running tokio runtime, refused
+    /// with `ASYNC_CONTEXT` before any statement; then two `retry_send`
+    /// calls with its error, which write one task under the prepared id.
+    RetryOfAsyncContext,
+}
+
+/// One send: the task name, its input members, its idempotency key and its
+/// form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Send {
     pub task_name: &'static str,
     pub kwargs: &'static [(&'static str, i64)],
     pub idempotency_key: Option<&'static str>,
+    pub form: SendForm,
 }
 
-/// The profile of the worker, the sends in order, then the workflow starts.
+/// What an action does to a started workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionKind {
+    Pause,
+    Resume,
+    Cancel,
+}
+
+/// An action on the started workflow at `index`. A pause and a resume must
+/// answer true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkflowAction {
+    pub kind: ActionKind,
+    pub index: usize,
+}
+
+/// When the workers of a scenario start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerStart {
+    BeforeSends,
+    /// The steps run on a database with no worker: no claim can race a
+    /// pause, a resume or a cancel.
+    AfterActions,
+}
+
+/// One worker per profile, the sends in order, the workflow starts in
+/// order, then the actions in order. The runner of `tests/parity` reads the
+/// profiles and the worker start of the Python copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Scenario {
     pub name: &'static str,
-    pub profile: &'static str,
+    pub profiles: &'static [&'static str],
     pub sends: &'static [Send],
     pub workflows: &'static [&'static str],
+    pub actions: &'static [WorkflowAction],
+    pub worker_start: WorkerStart,
 }
 
 const fn send(task_name: &'static str, kwargs: &'static [(&'static str, i64)]) -> Send {
@@ -302,6 +415,7 @@ const fn send(task_name: &'static str, kwargs: &'static [(&'static str, i64)]) -
         task_name,
         kwargs,
         idempotency_key: None,
+        form: SendForm::Direct,
     }
 }
 
@@ -309,74 +423,153 @@ const fn send(task_name: &'static str, kwargs: &'static [(&'static str, i64)]) -
 pub const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "isolated_outcomes",
-        profile: ISOLATED,
+        profiles: &[ISOLATED],
         sends: &[
             send("parity.add", &[("a", 2), ("b", 3)]),
             send("parity.refuse", &[("value", 7)]),
             send("parity.transient", &[("value", 1)]),
         ],
         workflows: &[],
+        actions: &[],
+        worker_start: WorkerStart::BeforeSends,
     },
     Scenario {
         name: "shared_async_outcomes",
-        profile: SHARED_ASYNC,
+        profiles: &[SHARED_ASYNC],
         sends: &[
             send("parity.add_async", &[("a", 2), ("b", 3)]),
             send("parity.refuse_async", &[("value", 7)]),
             send("parity.transient_async", &[("value", 1)]),
         ],
         workflows: &[],
+        actions: &[],
+        worker_start: WorkerStart::BeforeSends,
     },
     Scenario {
         name: "shared_thread_outcomes",
-        profile: SHARED_THREAD,
+        profiles: &[SHARED_THREAD],
         sends: &[
             send("parity.add_thread", &[("a", 2), ("b", 3)]),
             send("parity.refuse_thread", &[("value", 7)]),
             send("parity.transient_thread", &[("value", 1)]),
         ],
         workflows: &[],
+        actions: &[],
+        worker_start: WorkerStart::BeforeSends,
     },
     Scenario {
         name: "isolated_timeout",
-        profile: ISOLATED,
+        profiles: &[ISOLATED],
         sends: &[send("parity.sleep_past_deadline", &[])],
         workflows: &[],
+        actions: &[],
+        worker_start: WorkerStart::BeforeSends,
     },
     Scenario {
         name: "shared_async_timeout_cancel_grace",
-        profile: SHARED_ASYNC,
+        profiles: &[SHARED_ASYNC],
         sends: &[send("parity.async_past_deadline", &[])],
         workflows: &[],
+        actions: &[],
+        worker_start: WorkerStart::BeforeSends,
     },
     Scenario {
         name: "shared_thread_timeout",
-        profile: SHARED_THREAD,
+        profiles: &[SHARED_THREAD],
         sends: &[send("parity.thread_past_deadline", &[])],
         workflows: &[],
+        actions: &[],
+        worker_start: WorkerStart::BeforeSends,
     },
     Scenario {
         name: "idempotency_key",
-        profile: ISOLATED,
+        profiles: &[ISOLATED],
         sends: &[
             Send {
                 task_name: "parity.add",
                 kwargs: &[("a", 1), ("b", 1)],
                 idempotency_key: Some("parity-key"),
+                form: SendForm::Direct,
             },
             Send {
                 task_name: "parity.add",
                 kwargs: &[("a", 1), ("b", 1)],
                 idempotency_key: Some("parity-key"),
+                form: SendForm::Direct,
             },
         ],
         workflows: &[],
+        actions: &[],
+        worker_start: WorkerStart::BeforeSends,
     },
     Scenario {
         name: "workflow_chain",
-        profile: ISOLATED,
+        profiles: &[ISOLATED],
         sends: &[],
         workflows: &[CHAIN_NAME],
+        actions: &[],
+        worker_start: WorkerStart::BeforeSends,
+    },
+    // Layer 2: two workers. A worker claims only the classes that its
+    // profile has children for, so each task has one possible worker.
+    Scenario {
+        name: "several_workers",
+        profiles: &[ISOLATED, SHARED_ASYNC],
+        sends: &[
+            send("parity.add", &[("a", 2), ("b", 3)]),
+            send("parity.add_async", &[("a", 2), ("b", 3)]),
+            send("parity.refuse", &[("value", 7)]),
+            send("parity.refuse_async", &[("value", 7)]),
+        ],
+        workflows: &[],
+        actions: &[],
+        worker_start: WorkerStart::BeforeSends,
+    },
+    Scenario {
+        name: "send_retry",
+        profiles: &[ISOLATED],
+        sends: &[Send {
+            task_name: "parity.add",
+            kwargs: &[("a", 4), ("b", 5)],
+            idempotency_key: None,
+            form: SendForm::RetryOfAsyncContext,
+        }],
+        workflows: &[],
+        actions: &[],
+        worker_start: WorkerStart::BeforeSends,
+    },
+    // Layer 6: the first chain is paused and resumed, the second cancelled,
+    // before any worker runs.
+    Scenario {
+        name: "workflow_pause_resume_cancel",
+        profiles: &[ISOLATED],
+        sends: &[],
+        workflows: &[CHAIN_NAME, CHAIN_NAME],
+        actions: &[
+            WorkflowAction {
+                kind: ActionKind::Pause,
+                index: 0,
+            },
+            WorkflowAction {
+                kind: ActionKind::Resume,
+                index: 0,
+            },
+            WorkflowAction {
+                kind: ActionKind::Cancel,
+                index: 1,
+            },
+        ],
+        worker_start: WorkerStart::AfterActions,
+    },
+    // Layer 7: a child workflow whose output a later node of the parent
+    // takes.
+    Scenario {
+        name: "sub_workflow",
+        profiles: &[ISOLATED],
+        sends: &[],
+        workflows: &[PARENT_NAME],
+        actions: &[],
+        worker_start: WorkerStart::BeforeSends,
     },
 ];
 
@@ -398,7 +591,63 @@ fn member(send: &Send, name: &str) -> Result<i64, SendRefused> {
 }
 
 /// The id of the task of `send`, sent through the typed function of `app`.
+/// The id of the task that two retries of a refused blocking send wrote.
+/// Only `parity.add` has this form.
+async fn send_retry(app: &Horsies, send: &Send) -> Result<String, SendRefused> {
+    let runtime = app.task_runtime();
+    let function = match send.task_name {
+        "parity.add" => {
+            add::handle(&runtime).map_err(|missing| SendRefused(missing.to_string()))?
+        }
+        other => return Err(SendRefused(format!("the retry form has no task {other}"))),
+    };
+    let input = add::Input {
+        a: member(send, "a")?,
+        b: member(send, "b")?,
+    };
+    // The send process runs its sends inside a tokio runtime: the blocking
+    // view refuses before any statement and keeps the prepared payload.
+    let refused = match function.blocking().send(input) {
+        Err(error @ TaskSendError::AsyncContext { .. }) => error,
+        Err(other) => {
+            return Err(SendRefused(format!(
+                "the blocking send of {} answered {other}",
+                send.task_name
+            )))
+        }
+        Ok(handle) => {
+            return Err(SendRefused(format!(
+                "the blocking send of {} wrote task {}",
+                send.task_name,
+                handle.task_id()
+            )))
+        }
+    };
+    let mut ids = Vec::with_capacity(SEND_RETRIES);
+    for _attempt in 0..SEND_RETRIES {
+        let handle = function.retry_send(&refused).await.map_err(|error| {
+            SendRefused(format!(
+                "the retry of {} was refused: {error}",
+                send.task_name
+            ))
+        })?;
+        ids.push(handle.task_id());
+    }
+    match ids.as_slice() {
+        [first, second] if first == second => Ok(first.to_string()),
+        _ => Err(SendRefused(format!(
+            "the retries of {} wrote other tasks: {ids:?}",
+            send.task_name
+        ))),
+    }
+}
+
+/// The id of the task of `send`, sent through the typed function of `app`.
 async fn send_one(app: &Horsies, send: &Send) -> Result<String, SendRefused> {
+    match send.form {
+        SendForm::Direct => {}
+        SendForm::RetryOfAsyncContext => return send_retry(app, send).await,
+    }
     let runtime = app.task_runtime();
     let options = match send.idempotency_key {
         Some(key) => TaskSendOptions::new().idempotency_key(key),
@@ -527,40 +776,65 @@ async fn send_one(app: &Horsies, send: &Send) -> Result<String, SendRefused> {
         .map_err(|error| refused(&error))
 }
 
-/// Send the tasks of `scenario`, then start its workflows, in order. The
-/// result is one JSON line per send and start, as `tests/parity/send.py`
-/// prints them.
+/// Run the action `action` on its started workflow. A pause and a resume
+/// must answer true.
+async fn act(action: &WorkflowAction, handles: &[WorkflowHandle<i64>]) -> Result<(), SendRefused> {
+    let handle = handles
+        .get(action.index)
+        .ok_or_else(|| SendRefused(format!("{action:?} names no started workflow")))?;
+    let answered = match action.kind {
+        ActionKind::Pause => handle.pause().await,
+        ActionKind::Resume => handle.resume().await,
+        ActionKind::Cancel => {
+            return handle
+                .cancel()
+                .await
+                .map_err(|refused| SendRefused(format!("{action:?} was refused: {refused:?}")))
+        }
+    };
+    match answered {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(SendRefused(format!("{action:?} answered false"))),
+        Err(refused) => Err(SendRefused(format!("{action:?} was refused: {refused:?}"))),
+    }
+}
+
+/// Send the tasks of `scenario`, start its workflows, then run its actions
+/// on the started workflows, in order. The result is one JSON line per send
+/// and start, as `tests/parity/send.py` prints them.
 ///
-/// Errors: the first refused send or start.
+/// Errors: the first refused send, start or action.
 pub async fn run_sends(
-    app: &Horsies,
-    chain: &WorkflowFunction<i64>,
+    parity: &ParityApp,
     scenario: &Scenario,
 ) -> Result<Vec<String>, SendRefused> {
     let mut lines = Vec::with_capacity(scenario.sends.len() + scenario.workflows.len());
     for (index, send) in scenario.sends.iter().enumerate() {
-        let task_id = send_one(app, send).await?;
+        let task_id = send_one(&parity.app, send).await?;
         lines.push(serde_json::json!({"kind": "task", "index": index, "id": task_id}).to_string());
     }
+    let mut handles: Vec<WorkflowHandle<i64>> = Vec::with_capacity(scenario.workflows.len());
     for (index, workflow) in scenario.workflows.iter().enumerate() {
-        let workflow_id = match *workflow {
-            CHAIN_NAME => chain
-                .start()
-                .await
-                .map(|handle| handle.workflow_id())
-                .map_err(|error| {
-                    SendRefused(format!("the start of {workflow} was refused: {error}"))
-                })?,
+        let function = match *workflow {
+            CHAIN_NAME => &parity.chain,
+            PARENT_NAME => &parity.parent,
             other => {
                 return Err(SendRefused(format!(
                     "the parity app has no workflow {other}"
                 )))
             }
         };
+        let handle = function.start().await.map_err(|error| {
+            SendRefused(format!("the start of {workflow} was refused: {error}"))
+        })?;
         lines.push(
-            serde_json::json!({"kind": "workflow", "index": index, "id": workflow_id.to_string()})
+            serde_json::json!({"kind": "workflow", "index": index, "id": handle.workflow_id().to_string()})
                 .to_string(),
         );
+        handles.push(handle);
+    }
+    for action in scenario.actions {
+        act(action, &handles).await?;
     }
     Ok(lines)
 }

@@ -573,7 +573,9 @@ pub struct RefusedMember<'a> {
 
 /// The error of the sub-workflow node `task_index` of the workflow
 /// `workflow_id` whose input member `refused` does not decode to the builder
-/// parameter of that name: `WORKER_SERIALIZATION_ERROR` with the workflow id
+/// parameter of that name, or that no builder parameter takes (Python
+/// `decode_subworkflow_kwargs`, `core/codec/kwargs.py`):
+/// `WORKER_SERIALIZATION_ERROR` with the workflow id
 /// and the node in `data` (Python `_fail_enqueued_task`,
 /// `core/workflows/engine.py:474-512`). The message:
 /// - an `args_from` member of `input`:

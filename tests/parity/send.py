@@ -1,9 +1,9 @@
 """The send process of the Python side of a parity run.
 
-`python -m tests.parity.send <scenario>` sends the scenario's tasks, then
-starts its workflows, through the parity app on the database of
-`HORSIES_PARITY_DATABASE_URL`. It prints one JSON line per send and per
-start, in order: `{"kind": "task", "index": 0, "id": "<uuid>"}` and
+`python -m tests.parity.send <scenario>` sends the scenario's tasks, starts
+its workflows, then runs its actions on the started workflows, through the
+parity app on the database of `HORSIES_PARITY_DATABASE_URL`. It prints one
+JSON line per send and per start, in order: `{"kind": "task", "index": 0, "id": "<uuid>"}` and
 `{"kind": "workflow", "index": 0, "id": "<uuid>"}`. Exit status 0 when
 every send and start was written; 1 with the refusal on stderr.
 
@@ -17,10 +17,13 @@ import asyncio
 import json
 import sys
 from collections.abc import Mapping
+from typing import Any
 
+from horsies import TaskSendAsyncContext
+from horsies.core.models.workflow import WorkflowHandle
 from horsies.core.types.result import Err, Ok
 from tests.parity import app as parity
-from tests.parity.scenarios import Send, scenario_named
+from tests.parity.scenarios import ActionKind, Send, SendForm, WorkflowAction, scenario_named
 
 
 class SendRefused(Exception):
@@ -34,8 +37,39 @@ def _int(kwargs: Mapping[str, int], name: str) -> int:
     return value
 
 
+async def _send_retry(send: Send) -> str:
+    """The id of the task that two retries of a refused blocking send wrote.
+    Only `parity.add` has this form."""
+    kwargs = dict(send.kwargs)
+    match send.task_name:
+        case 'parity.add':
+            pass
+        case other:
+            raise SendRefused(f'the retry form has no task {other!r}')
+    match parity.add.send(a=_int(kwargs, 'a'), b=_int(kwargs, 'b')):
+        case Err(TaskSendAsyncContext() as refused):
+            pass
+        case other:
+            raise SendRefused(f'the blocking send of {send.task_name} answered {other}')
+    ids: list[str] = []
+    for _attempt in range(2):
+        match await parity.add.retry_send_async(refused):
+            case Ok(handle):
+                ids.append(str(handle.task_id))
+            case Err(error):
+                raise SendRefused(f'the retry of {send.task_name} was refused: {error}')
+    if ids[0] != ids[1]:
+        raise SendRefused(f'the two retries of {send.task_name} wrote two tasks: {ids}')
+    return ids[0]
+
+
 async def _send_one(send: Send) -> str:
     """The id of the task of `send`."""
+    match send.form:
+        case SendForm.RETRY_OF_ASYNC_CONTEXT:
+            return await _send_retry(send)
+        case SendForm.DIRECT:
+            pass
     kwargs = dict(send.kwargs)
     key = send.idempotency_key
     match send.task_name:
@@ -96,18 +130,48 @@ async def _send_one(send: Send) -> str:
             raise SendRefused(f'the send of {send.task_name} was refused: {refused}')
 
 
-async def _start_one(workflow_name: str) -> str:
-    """The id of the started workflow `workflow_name`."""
+async def _start_one(workflow_name: str) -> WorkflowHandle[Any]:
+    """The handle of the started workflow `workflow_name`."""
     match workflow_name:
         case parity.CHAIN_NAME:
             started = await parity.parity_chain.start_async()
+        case parity.PARENT_NAME:
+            started = await parity.parity_parent.start_async()
         case other:
             raise SendRefused(f'the parity app has no workflow {other!r}')
     match started:
         case Ok(handle):
-            return str(handle.workflow_id)
+            return handle
         case Err(refused):
             raise SendRefused(f'the start of {workflow_name} was refused: {refused}')
+
+
+async def _act(action: WorkflowAction, handles: list[WorkflowHandle[Any]]) -> None:
+    """Run `action` on its started workflow. A pause and a resume must
+    answer true."""
+    if not 0 <= action.index < len(handles):
+        raise SendRefused(f'{action} names no started workflow')
+    handle = handles[action.index]
+    match action.kind:
+        case ActionKind.PAUSE:
+            answered = await handle.pause_async()
+        case ActionKind.RESUME:
+            answered = await handle.resume_async()
+        case ActionKind.CANCEL:
+            match await handle.cancel_async():
+                case Ok(_):
+                    return
+                case Err(refused):
+                    raise SendRefused(f'{action} was refused: {refused}')
+    match answered:
+        case Ok(ok_value=answer):
+            match answer:
+                case True:
+                    return
+                case False:
+                    raise SendRefused(f'{action} answered false')
+        case Err(refused):
+            raise SendRefused(f'{action} was refused: {refused}')
 
 
 async def _run(scenario_name: str) -> list[str]:
@@ -116,9 +180,15 @@ async def _run(scenario_name: str) -> list[str]:
     for index, send in enumerate(scenario.sends):
         task_id = await _send_one(send)
         lines.append(json.dumps({'kind': 'task', 'index': index, 'id': task_id}))
+    handles: list[WorkflowHandle[Any]] = []
     for index, workflow_name in enumerate(scenario.workflows):
-        workflow_id = await _start_one(workflow_name)
-        lines.append(json.dumps({'kind': 'workflow', 'index': index, 'id': workflow_id}))
+        handle = await _start_one(workflow_name)
+        handles.append(handle)
+        lines.append(
+            json.dumps({'kind': 'workflow', 'index': index, 'id': str(handle.workflow_id)})
+        )
+    for action in scenario.actions:
+        await _act(action, handles)
     return lines
 
 
